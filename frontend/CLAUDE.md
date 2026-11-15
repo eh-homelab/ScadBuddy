@@ -147,8 +147,10 @@ same way, `vite.config.ts`).
   /storefront/listings/{id}/media`; a published listing is published again at once.
   Prepared colours (#6237): `components/storefront/PrepareColours.tsx`, under a published
   listing's actions, shows the count (`GET …/prepare`), confirms, starts (`POST …/prepare`)
-  and shows "n of N ready", read again while renders are in the queue; over the cap it says
-  the count and the cap. Mocks in `src/mocks/features/storefront.ts` (`setPrepareCap`).
+  and shows "n of N ready", read again while the run is open (`running`) or renders are in
+  the queue; renders that could not be started (`failed_to_start`) are named, with "Prepare
+  again"; over the cap it says the count and the cap. Mocks in
+  `src/mocks/features/storefront.ts` (`setPrepareCap`, `failNextPrepareStarts`).
 
 - Customer messages (#5660): Settings → Orders' `components/settings/CustomerMessaging.tsx`
   (bind, check, test send, unbind) and the order page's `components/orders/OrderMessages.tsx`

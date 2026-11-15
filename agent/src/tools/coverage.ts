@@ -36,7 +36,7 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   },
   {
     operation: 'POST /api/v1/storefront/listings/{listing_id}/prepare',
-    reason: "The Storefront editor's \"Prepare every colour combination\" (#6237): a person starts a run of up to storefront_prepare_cap low-priority renders from the page.",
+    reason: "The Storefront editor's \"Prepare every colour combination\" (#6237): a person starts a run of up to storefront_prepare_cap renders, a few at a time, from the page.",
   },
   {
     operation: 'POST /api/v1/storefront/listings/{listing_id}/unpublish',

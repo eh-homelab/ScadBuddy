@@ -37,7 +37,6 @@ from temporalio.client import (
     WorkflowUpdateRPCTimeoutOrCancelledError,
 )
 from temporalio.common import (
-    Priority,
     TypedSearchAttributes,
     WorkflowIDConflictPolicy,
     WorkflowIDReusePolicy,
@@ -351,12 +350,10 @@ async def start_command[T](
     deadline: timedelta = COMMAND_ANSWER_DEADLINE,
     update_id: str | None = None,
     execution_timeout: timedelta | None = None,
-    priority: Priority = Priority.default,
 ) -> T:
     """Start ``workflow`` as ``id`` (or attach to its running execution) and return its
     ``update``'s answer. ``update_id`` names the Update: Temporal answers a second one
-    with the same id on the same execution with the first's outcome. ``priority`` is the
-    started execution's (#6237); an execution that runs already keeps its own."""
+    with the same id on the same execution with the first's outcome."""
     operation: WithStartWorkflowOperation[object, object] = WithStartWorkflowOperation(
         workflow,
         arg,
@@ -367,7 +364,6 @@ async def start_command[T](
         search_attributes=search_attributes,
         memo=memo,
         execution_timeout=execution_timeout,
-        priority=priority,
     )
     # `rpc_timeout` bounds each RPC, not the Update: the server may answer a poll
     # with no outcome just before it, and the SDK then polls again. So the outer bound

@@ -10,7 +10,6 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from scadbuddy.render.submit import PREPARE_PRIORITY
 from scadbuddy.storefront.wire import STOREFRONT_PROBLEMS
 from tests.api.test_storefront_listings import (  # noqa: F401  (fixtures)
     BOOK,
@@ -79,7 +78,7 @@ def wait_ready(client: TestClient, listing: dict[str, Any], count: int) -> dict[
         r = client.get(prepare_path(listing))
         assert r.status_code == 200, r.text
         body: dict[str, Any] = r.json()
-        if body["ready"] + body["failed"] == count:
+        if body["ready"] + body["failed"] == count and not body["running"]:
             return body
         assert time.monotonic() < deadline, f"the prepared renders never settled: {body}"
         time.sleep(0.2)
@@ -100,7 +99,15 @@ def test_the_count_is_shown_before_the_run(
     r = client.get(prepare_path(two_colours))
     assert r.status_code == 200, r.text
     # Red twice in two cases is one colour.
-    assert r.json() == {"count": 2, "cap": 256, "ready": 0, "running": 0, "failed": 0}
+    assert r.json() == {
+        "count": 2,
+        "cap": 256,
+        "ready": 0,
+        "rendering": 0,
+        "failed": 0,
+        "running": False,
+        "failed_to_start": 0,
+    }
 
 
 def test_a_visitors_render_reuses_the_prepared_job(
@@ -110,8 +117,9 @@ def test_a_visitors_render_reuses_the_prepared_job(
 ) -> None:
     r = client.post(prepare_path(two_colours))
     assert r.status_code == 200, r.text
-    assert r.json() == {"count": 2, "queued": 2}
-    assert wait_ready(client, two_colours, 2)["ready"] == 2
+    assert r.json() == {"count": 2, "started": True}
+    settled = wait_ready(client, two_colours, 2)
+    assert (settled["ready"], settled["failed_to_start"]) == (2, 0)
     prepared = job_ids(client, two_colours["slug"])
     assert len(prepared) == 2
     # The page's first load sends nothing; a pick sends the colour the page shows.
@@ -121,30 +129,36 @@ def test_a_visitors_render_reuses_the_prepared_job(
     assert first["status"] == picked["status"] == "done"
     # A shared render costs the visitor nothing.
     assert counted_rows(crud, TOKEN_A) == counted_rows(crud, TOKEN_B) == 0
-    # A second prepare reuses both and starts nothing.
+    # A second prepare, after the first run ended, reuses both and renders nothing.
     again = client.post(prepare_path(two_colours))
-    assert again.json() == {"count": 2, "queued": 2}
+    assert again.json() == {"count": 2, "started": True}
+    wait_ready(client, two_colours, 2)
     assert job_ids(client, two_colours["slug"]) == prepared
 
 
-def test_a_prepared_render_waits_behind_other_renders(
+def test_a_visitors_render_during_the_run_has_the_default_priority(
     client: TestClient,  # noqa: F811
+    crud: CrudCaller,  # noqa: F811
     two_colours: dict[str, Any],
 ) -> None:
+    """#6299 review: a visitor's render of a prepared combination joins its execution, so
+    the prepared run must not be below the default priority, or the visitor waits behind
+    the batch."""
     assert client.post(prepare_path(two_colours)).status_code == 200
-    wait_ready(client, two_colours, 2)
+    picked = a_render(crud, TOKEN_A, two_colours, {"colour": "#0000FF"})
     state = _state(client)
     with state.projection.pool.connection() as conn:
         row = conn.execute(
-            "SELECT workflow_id FROM render_jobs WHERE slug = %s LIMIT 1",
-            (two_colours["slug"],),
+            "SELECT workflow_id FROM render_jobs WHERE id = %s", (picked["id"],)
         ).fetchone()
     assert row is not None
     handle = state.render.client.get_workflow_handle(row["workflow_id"])
     assert client.portal is not None
     described = client.portal.call(handle.describe)
     info = described.raw_description.workflow_execution_info
-    assert info.priority.priority_key == PREPARE_PRIORITY
+    # 0 is Temporal's default key: the run set none.
+    assert info.priority.priority_key == 0
+    wait_ready(client, two_colours, 2)
 
 
 def test_over_the_cap_is_refused_with_the_count(
@@ -153,7 +167,15 @@ def test_over_the_cap_is_refused_with_the_count(
 ) -> None:
     assert client.put("/api/v1/settings", json={"storefront_prepare_cap": 1}).status_code == 200
     shown = client.get(prepare_path(two_colours)).json()
-    assert shown == {"count": 2, "cap": 1, "ready": 0, "running": 0, "failed": 0}
+    assert shown == {
+        "count": 2,
+        "cap": 1,
+        "ready": 0,
+        "rendering": 0,
+        "failed": 0,
+        "running": False,
+        "failed_to_start": 0,
+    }
     r = client.post(prepare_path(two_colours))
     assert r.status_code == 422, r.text
     problem = r.json()

@@ -426,9 +426,6 @@ class RenderPiece:
             start_to_close_timeout=_prepare_timeout(),
             heartbeat_timeout=HEARTBEAT,
             retry_policy=RETRY,
-            # The run's own priority, given outright as `RenderPreview` does (#603): a
-            # prepared storefront combination's is `PREPARE_PRIORITY` (#6237).
-            priority=workflow.info().priority,
         )
         # Geometry first, colours second: a piece whose geometry an earlier piece in
         # other colours already has is that piece's meshes recoloured, then finished.
@@ -443,7 +440,6 @@ class RenderPiece:
                     start_to_close_timeout=REUSE_TIMEOUT,
                     heartbeat_timeout=HEARTBEAT,
                     retry_policy=REUSE_RETRY,
-                    priority=workflow.info().priority,
                 )
             except ActivityError as error:
                 if is_cancelled_exception(error):
@@ -461,7 +457,6 @@ class RenderPiece:
             start_to_close_timeout=_main_timeout(),
             heartbeat_timeout=HEARTBEAT,
             retry_policy=RETRY,
-            priority=workflow.info().priority,
         )
         await workflow.execute_activity(
             "render_solids",
@@ -469,7 +464,6 @@ class RenderPiece:
             start_to_close_timeout=_solids_timeout(_pieces(main)),
             heartbeat_timeout=HEARTBEAT,
             retry_policy=RETRY,
-            priority=workflow.info().priority,
         )
         return await self._finish(req, prepared, main)
 
@@ -483,7 +477,6 @@ class RenderPiece:
             start_to_close_timeout=FINISH_TIMEOUT,
             heartbeat_timeout=HEARTBEAT,
             retry_policy=RETRY,
-            priority=workflow.info().priority,
         )
         return result
 
@@ -593,8 +586,6 @@ class TemplatePipeline:
                 start_to_close_timeout=_output_timeout(arg),
                 heartbeat_timeout=HEARTBEAT,
                 retry_policy=RETRY,
-                # The job's priority (#6237), as `RenderPiece`'s activities take it.
-                priority=workflow.info().priority,
             )
         return await workflow.execute_activity(
             name, arg, result_type=result_type, start_to_close_timeout=SHORT, retry_policy=RETRY
@@ -1160,9 +1151,6 @@ class TemplatePipeline:
                     cancellation_type=workflow.ChildWorkflowCancellationType.ABANDON,
                     parent_close_policy=workflow.ParentClosePolicy.ABANDON,
                     execution_timeout=_piece_timeout(),
-                    # The job's priority (#6237): a prepared combination's piece waits
-                    # behind a visitor's.
-                    priority=workflow.info().priority,
                 )
             except WorkflowAlreadyStartedError:
                 piece: workflow.ExternalWorkflowHandle[RenderPiece] = (

@@ -35,9 +35,18 @@ let ticks = 0
 let prepareCap = 256
 /** #6237 — each prepared listing's combinations made ready so far, by id. */
 let prepared = new Map<string, number>()
+/** #6299 review — renders the next prepare run cannot start; see `failNextPrepareStarts`. */
+let prepareFailures = 0
+/** #6299 review — each listing's run's renders that could not be started, by id. */
+let notStarted = new Map<string, number>()
 
 export function setPrepareCap(cap: number): void {
   prepareCap = cap
+}
+
+/** #6299 review — the next prepare run cannot start `n` of its renders. */
+export function failNextPrepareStarts(n: number): void {
+  prepareFailures = n
 }
 
 const HEX = /^#[0-9a-f]{6}$/i
@@ -306,7 +315,8 @@ export const handlers = [
     return HttpResponse.json(published)
   }),
 
-  // #6237 — each read moves a started run on by two combinations, until all are ready.
+  // #6237 — each read moves a started run on by two combinations (a few at a time, #6299
+  // review), until each is ready or could not be started.
   http.get(`${base}/:id/prepare`, ({ params }) => {
     const id = String(params['id'])
     const found = listings.find((l) => l.id === id)
@@ -314,10 +324,14 @@ export const handlers = [
     if (!found.published) return refused(409, 'listing_not_published', 'Publish this listing before you prepare its colours.')
     const count = combinationCount(found)
     const before = prepared.get(id)
-    if (count > prepareCap || before === undefined) return HttpResponse.json({ count, cap: prepareCap, ready: 0, running: 0, failed: 0 })
-    const ready = Math.min(count, before + 2)
+    const failedToStart = notStarted.get(id) ?? 0
+    if (count > prepareCap || before === undefined) {
+      return HttpResponse.json({ count, cap: prepareCap, ready: 0, rendering: 0, failed: 0, running: false, failed_to_start: failedToStart })
+    }
+    const ready = Math.min(count - failedToStart, before + 2)
     prepared.set(id, ready)
-    return HttpResponse.json({ count, cap: prepareCap, ready, running: count - ready, failed: 0 })
+    const rendering = Math.min(2, count - failedToStart - ready)
+    return HttpResponse.json({ count, cap: prepareCap, ready, rendering, failed: 0, running: ready + failedToStart < count, failed_to_start: failedToStart })
   }),
 
   http.post(`${base}/:id/prepare`, ({ params }) => {
@@ -330,8 +344,14 @@ export const handlers = [
     if (count > prepareCap) {
       return refused(422, 'listing_combinations_over_cap', `This listing has ${count} colour combinations. The shop prepares at most ${prepareCap} at a time.`, { count, cap: prepareCap })
     }
-    if (!prepared.has(id)) prepared.set(id, 0)
-    return HttpResponse.json({ count, queued: count })
+    const before = prepared.get(id)
+    const open = before !== undefined && before + (notStarted.get(id) ?? 0) < count
+    if (!open) {
+      prepared.set(id, before ?? 0)
+      notStarted.set(id, Math.min(prepareFailures, count - (before ?? 0)))
+      prepareFailures = 0
+    }
+    return HttpResponse.json({ count, started: !open })
   }),
 
   http.post(`${base}/:id/unpublish`, ({ params }) => {
@@ -360,6 +380,8 @@ export function reset(): void {
   republishRefusal = null
   prepareCap = 256
   prepared = new Map()
+  prepareFailures = 0
+  notStarted = new Map()
   try {
     sessionStorage.removeItem(STORAGE_KEY)
   } catch {

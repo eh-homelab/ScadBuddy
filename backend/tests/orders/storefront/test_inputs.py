@@ -227,6 +227,18 @@ def test_every_colour_archived_offers_none(listing: Listing) -> None:
     assert isinstance(colour, PublicChoice) and colour.choices == []
 
 
+def test_each_colour_choice_is_offered_once_whatever_its_case(listing: Listing) -> None:
+    """#6299 review: two spellings of one colour are two render keys, and a prepare
+    (#6237) renders only the first. So the page offers only the first spelling."""
+    params = {
+        **listing.params,
+        "colour": {"kind": "choice", "choices": ["#ff0000", "#0000FF", "#FF0000", "#0000ff"]},
+    }
+    twice = Listing.model_validate({**listing.model_dump(by_alias=True), "params": params})
+    colour = _public(twice, FILAMENTS).params["colour"]
+    assert isinstance(colour, PublicChoice) and colour.choices == ["#ff0000", "#0000FF"]
+
+
 def test_a_public_param_has_no_help(listing: Listing) -> None:
     """The schema has no help text (`Parameter` has none), so the view shows none."""
     assert "help" not in _public(listing, FILAMENTS).params["width"].model_dump()

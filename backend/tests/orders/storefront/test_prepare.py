@@ -12,6 +12,7 @@ import pytest
 from scadbuddy.orders.storefront.inputs import listing_reference, listing_values
 from scadbuddy.orders.storefront.prepare import (
     colour_choices,
+    combination_at,
     combination_count,
     combinations,
 )
@@ -136,3 +137,13 @@ def test_a_picked_colour_has_the_render_key_of_a_visitors_pick() -> None:
     assert len({c.reference.render_key for c in every}) == 4
     # Every other parameter stays at its default.
     assert all(c.reference.inputs["params"]["width"] == 50 for c in every)
+
+
+def test_the_combination_at_an_index_is_the_one_in_the_run_order() -> None:
+    """The prepare run asks for each combination by its index (#6299 review)."""
+    three = {"kind": "choice", "choices": ["#ff0000", "#0000FF", "#00FF00"]}
+    listing = a_listing({"body": three, "trim": BOTH}, colours=[PLA_RED, PLA_BLUE, PETG_GREEN])
+    choices = colour_choices(listing, FILAMENTS)
+    every = list(combinations(listing, FILAMENTS, choices))
+    assert len(every) == combination_count(choices) == 6
+    assert [combination_at(listing, FILAMENTS, choices, i) for i in range(6)] == every

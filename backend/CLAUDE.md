@@ -1394,13 +1394,22 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   person's density clears it. An estimate reads only the record's own density.
 - Prepared colour combinations (#6237): `orders/storefront/prepare.py`, routes `GET`/`POST
   /storefront/listings/{id}/prepare` (`api/storefront.py`). A combination is one colour per
-  offered colour parameter (the public listing's colours, each once whatever its case); each
-  is built by the visitor path's `listing_values` and `listing_reference`, a colour at its
-  effective default left out as the page leaves it out, so a visitor's render reuses the
-  prepared job. No table: progress reads the newest `render_jobs` row of each render key.
-  The run is `RenderService.submit_answer(..., priority=PREPARE_PRIORITY)` (5, below
-  previews); `RenderPiece`'s activities, its child start and `write_output` pass
-  `workflow.info().priority` on. Capped by `storefront_prepare_cap` (default 256; 422
+  offered colour parameter (the public listing's colours, each once whatever its case, and
+  the public listing offers each colour once too, the first spelling kept: `listings.py`
+  `_public_param`); each is built by the visitor path's `listing_values` and
+  `listing_reference`, a colour at its effective default left out as the page leaves it
+  out, so a visitor's render reuses the prepared job. The POST starts the workflow
+  `PrepareListing` (`workflows/prepare_listing.py`, `library` queue, id
+  `prepare-listing:<listing id>`, `USE_EXISTING`: a second POST joins it; AUTO_UPGRADE as
+  `VersionedPrepareListing`) and answers at once (`{count, started}`). The run submits by
+  index (activity `prepare_listing_submit`, `RenderService.submit_answer(...,
+  reuse_finished=True)` at the default priority, #6299 review: a visitor's render of the same
+  key joins the prepared execution, so a lower priority would hold the visitor up) and keeps
+  at most `PREPARE_IN_FLIGHT` (2) open, reading them with a backoff
+  (`prepare_listing_settled`). A done job is skipped, a full queue waited out, a failed
+  submit counted in the memo `failed_to_start`; it continues as new every 50 submits. No
+  table: the GET reads the newest `render_jobs` row of each render key, and the run's state
+  (`running`, `failed_to_start`). Capped by `storefront_prepare_cap` (default 256; 422
   `listing_combinations_over_cap` with `count` and `cap`, `listing_no_colours`, 409
   `listing_not_published`). Prepared renders follow `job_ttl`; there is no keep mark.
 - A customer's own models (#6133, spec 2026-11-13; migration

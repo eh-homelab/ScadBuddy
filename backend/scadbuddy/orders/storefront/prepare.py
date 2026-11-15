@@ -12,10 +12,14 @@ page leaves it out on its first load.
 `listing_reference`, so its render key is the key a visitor's render of the same choice
 has, and that render reuses the prepared job (`reuse_finished`).
 
-`prepare` queues each combination through `RenderService` at `PREPARE_PRIORITY`, below
-every other render. `progress` reads the newest job of each combination's render key
-(no table of its own: the key is deterministic). Neither route enumerates a listing
-whose count is over the cap: the count is a product, computed first.
+`start_run` starts the listing's ``PrepareListing`` run (`workflows/prepare_listing.py`) on
+the ``library`` queue. The run submits the combinations a few at a time
+(`PREPARE_IN_FLIGHT`), at the default priority (#6299 review): a visitor's render of a
+combination joins the prepared execution, so a lower priority would hold the visitor up.
+Its activities are `submit` and `still_open`. `progress` reads the newest job of each
+combination's render key (no table of its own: the key is deterministic) and the run's
+state. Neither route enumerates a listing whose count is over the cap: the count is a
+product, computed first.
 """
 
 from __future__ import annotations
@@ -24,12 +28,16 @@ import asyncio
 import itertools
 import logging
 import math
-from collections.abc import Collection, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from fastapi import status
 from pydantic import BaseModel
+from temporalio import activity
+from temporalio.client import Client, WorkflowExecutionStatus
+from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
+from temporalio.service import RPCError
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.orders.models import Filament, Reference
@@ -42,7 +50,18 @@ from scadbuddy.orders.storefront.listings import listing_not_found, problem
 from scadbuddy.orders.storefront.wire import ChoiceBound, Listing, is_support
 from scadbuddy.render.job_models import QueueFullError
 from scadbuddy.render.schema import ParamValue
-from scadbuddy.render.submit import PREPARE_PRIORITY
+from scadbuddy.workflows.commands import execution_gone
+from scadbuddy.workflows.prepare_listing import (
+    FAILED_MEMO,
+    PREPARE_LISTING_WORKFLOW,
+    SETTLED_ACTIVITY,
+    SUBMIT_ACTIVITY,
+    OpenJob,
+    PrepareListingStart,
+    SubmitAsk,
+    Submitted,
+    workflow_id,
+)
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
@@ -50,33 +69,33 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-#: How many submits one prepare has in flight at once.
-PREPARE_CONCURRENCY: Final = 8
-#: How long one prepare starts submits (seconds). A combination it did not reach in that
-#: time is not queued (``queued`` is less than ``count``); the next prepare queues it.
-#: This keeps the request well below the proxy's 15 s.
-PREPARE_BUDGET: Final = 8.0
+#: A job state that is not settled yet.
+OPEN_STATES: Final = ("pending", "running")
 
 
 class PrepareProgress(BaseModel):
     """``GET …/listings/{id}/prepare``: the listing's colour combinations (``count``), the
     cap, and of the combinations, how many have a done render (``ready``), a render in the
-    queue or running (``running``) and a failed render (``failed``). Over the cap the three
-    are 0: the combinations are not enumerated."""
+    queue or running (``rendering``) and a failed render (``failed``). Over the cap the
+    three are 0: the combinations are not enumerated. ``running`` is whether the listing's
+    prepare run is open, and ``failed_to_start`` how many of its submits failed (the last
+    run's, #6299 review)."""
 
     count: int
     cap: int
     ready: int
-    running: int
+    rendering: int
     failed: int
+    running: bool
+    failed_to_start: int
 
 
 class PrepareStarted(BaseModel):
-    """``POST …/listings/{id}/prepare``: the listing's colour combinations, and how many
-    now have a render queued, running or done."""
+    """``POST …/listings/{id}/prepare``: the listing's colour combinations, and whether this
+    POST started the run (false: a run was open already, and the POST joined it)."""
 
     count: int
-    queued: int
+    started: bool
 
 
 @dataclass(frozen=True)
@@ -85,6 +104,14 @@ class Combination:
 
     asked: dict[str, ParamValue]
     reference: Reference
+
+
+@dataclass(frozen=True)
+class RunState:
+    """The listing's prepare run: whether it is open, and its failed submits."""
+
+    running: bool
+    failed_to_start: int
 
 
 def colour_choices(listing: Listing, filaments: Mapping[str, Filament]) -> dict[str, list[str]]:
@@ -120,19 +147,19 @@ def combination_count(choices: Mapping[str, Collection[str]]) -> int:
     return math.prod(len(c) for c in choices.values()) if choices else 0
 
 
-def combinations(
-    listing: Listing, filaments: Mapping[str, Filament], choices: Mapping[str, list[str]]
-) -> Iterator[Combination]:
-    """Each combination of ``choices`` (`colour_choices`), as a visitor's page asks for
+def _asker(
+    listing: Listing, filaments: Mapping[str, Filament], names: Sequence[str]
+) -> Callable[[Sequence[str]], Combination]:
+    """The combination of one colour per name in ``names``, as a visitor's page asks for
     it: a colour equal (casefolded) to its effective default is left out."""
     assert listing.snapshot is not None
     by_name = {p.name: p for p in listing.snapshot.schema_.parameters}
-    names = list(choices)
     defaults: dict[str, str | None] = {}
     for name in names:
         start = effective_default(by_name[name], listing.params[name])
         defaults[name] = start.casefold() if isinstance(start, str) else None
-    for picked in itertools.product(*(choices[name] for name in names)):
+
+    def ask(picked: Sequence[str]) -> Combination:
         asked: dict[str, ParamValue] = {
             name: value
             for name, value in zip(names, picked, strict=True)
@@ -140,7 +167,37 @@ def combinations(
         }
         values = listing_values(listing, asked, filaments)
         resolved = listing_reference(listing, values, {}, filaments=filaments)
-        yield Combination(asked=asked, reference=resolved.reference)
+        return Combination(asked=asked, reference=resolved.reference)
+
+    return ask
+
+
+def combinations(
+    listing: Listing, filaments: Mapping[str, Filament], choices: Mapping[str, list[str]]
+) -> Iterator[Combination]:
+    """Each combination of ``choices`` (`colour_choices`), in `itertools.product` order."""
+    names = list(choices)
+    ask = _asker(listing, filaments, names)
+    for picked in itertools.product(*(choices[name] for name in names)):
+        yield ask(picked)
+
+
+def combination_at(
+    listing: Listing,
+    filaments: Mapping[str, Filament],
+    choices: Mapping[str, list[str]],
+    index: int,
+) -> Combination:
+    """The combination at ``index`` of `combinations`, built alone (the last name varies
+    fastest, as in `itertools.product`). ``index`` is below `combination_count`."""
+    names = list(choices)
+    picked: list[str] = []
+    rest = index
+    for name in reversed(names):
+        rest, at = divmod(rest, len(choices[name]))
+        picked.append(choices[name][at])
+    picked.reverse()
+    return _asker(listing, filaments, names)(picked)
 
 
 def _runtime_cap(state: AppState) -> int:
@@ -202,14 +259,81 @@ def _over_cap(count: int, cap: int) -> ApiError:
     )
 
 
+def _unavailable() -> ApiError:
+    return problem(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        "render_unavailable",
+        "The shop could not start these renders. Try again in a moment.",
+    )
+
+
+class TemporalPreparer:
+    """Starts and reads a listing's ``PrepareListing`` run."""
+
+    def __init__(self, client: Client, task_queue: str) -> None:
+        self.client = client
+        self.task_queue = task_queue
+
+    async def run_state(self, listing_id: str) -> RunState:
+        """Whether the listing's run is open, and the failed submits of its last run (0
+        with no run). Raises `RPCError` when Temporal does not answer."""
+        try:
+            described = await self.client.get_workflow_handle(workflow_id(listing_id)).describe()
+        except RPCError as error:
+            if execution_gone(error):
+                return RunState(running=False, failed_to_start=0)
+            raise
+        memo = await described.memo()
+        failed = memo.get(FAILED_MEMO, 0)
+        return RunState(
+            running=described.status == WorkflowExecutionStatus.RUNNING,
+            failed_to_start=failed if isinstance(failed, int) else 0,
+        )
+
+    async def start(self, listing_id: str) -> bool:
+        """Start the listing's run, or join the open one; True when this call started it.
+        A run that ended is started again: its submits reuse every done job."""
+        joined = (await self.run_state(listing_id)).running
+        await self.client.start_workflow(
+            PREPARE_LISTING_WORKFLOW,
+            PrepareListingStart(listing_id=listing_id),
+            id=workflow_id(listing_id),
+            task_queue=self.task_queue,
+            id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
+            id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
+        )
+        return not joined
+
+
+def preparer(state: AppState) -> TemporalPreparer:
+    """The app's preparer: the operations' client, on the ``library`` queue."""
+    from scadbuddy.operations.component import OPERATIONS
+
+    ops = state.components.get(OPERATIONS)
+    return TemporalPreparer(ops.client, state.settings.temporal_task_queue_library)
+
+
 async def progress(state: AppState, orders: OrdersComponent, listing_id: str) -> PrepareProgress:
-    """The listing's combinations and how far their renders are. 404
-    ``listing_not_found``, 409 ``listing_not_published``. A listing with no colour
-    parameter answers a ``count`` of 0."""
+    """The listing's combinations, how far their renders are, and its run's state. 404
+    ``listing_not_found``, 409 ``listing_not_published``, 503 ``render_unavailable`` when
+    Temporal does not answer. A listing with no colour parameter answers a ``count`` of 0."""
     listing, filaments, choices, cap = await asyncio.to_thread(_facts, state, orders, listing_id)
+    try:
+        run = await preparer(state).run_state(listing_id)
+    except RPCError:
+        logger.warning("could not read the prepare run of listing %s", listing_id)
+        raise _unavailable() from None
     count = combination_count(choices)
     if count == 0 or count > cap:
-        return PrepareProgress(count=count, cap=cap, ready=0, running=0, failed=0)
+        return PrepareProgress(
+            count=count,
+            cap=cap,
+            ready=0,
+            rendering=0,
+            failed=0,
+            running=run.running,
+            failed_to_start=run.failed_to_start,
+        )
     keys = [c.reference.render_key for c in combinations(listing, filaments, choices)]
     states = await asyncio.to_thread(job_states, state, listing.slug, keys)
     seen = [states.get(key) for key in keys]
@@ -217,26 +341,20 @@ async def progress(state: AppState, orders: OrdersComponent, listing_id: str) ->
         count=count,
         cap=cap,
         ready=seen.count("done"),
-        running=seen.count("pending") + seen.count("running"),
+        rendering=seen.count("pending") + seen.count("running"),
         failed=seen.count("failed"),
+        running=run.running,
+        failed_to_start=run.failed_to_start,
     )
 
 
-async def prepare(state: AppState, orders: OrdersComponent, listing_id: str) -> PrepareStarted:
-    """Queue a render of each colour combination of the published listing at
-    `PREPARE_PRIORITY`, with ``reuse_finished``: a combination with an open job is left
-    as it is, a done one is reused, and any other is rendered. Refusals: 404
+async def start_run(state: AppState, orders: OrdersComponent, listing_id: str) -> PrepareStarted:
+    """Start the listing's prepare run, or join the open one. Refusals: 404
     ``listing_not_found``, 409 ``listing_not_published``, 422 ``listing_no_colours`` (no
     offered colour parameter, or one with no colour left), 422
     ``listing_combinations_over_cap`` (with ``count`` and ``cap``), 503
-    ``render_unavailable`` when no combination could be queued. A full queue or the end
-    of `PREPARE_BUDGET` stops the run: ``queued`` is then less than ``count``, and the next
-    prepare queues the rest.
-
-    A prepared render is kept as any other render is: the prune follows ``job_ttl`` (with
-    ``job_ttl`` 0, #6244, it is kept), and a visitor's reuse keeps it a ``job_ttl`` more.
-    There is no keep mark of its own."""
-    listing, filaments, choices, cap = await asyncio.to_thread(_facts, state, orders, listing_id)
+    ``render_unavailable`` when Temporal does not start the run."""
+    _, _, choices, cap = await asyncio.to_thread(_facts, state, orders, listing_id)
     count = combination_count(choices)
     if count == 0:
         raise problem(
@@ -246,62 +364,84 @@ async def prepare(state: AppState, orders: OrdersComponent, listing_id: str) -> 
         )
     if count > cap:
         raise _over_cap(count, cap)
-    assert listing.snapshot is not None
-    pipeline = listing.snapshot.pipeline
-    every = list(combinations(listing, filaments, choices))
-    states = await asyncio.to_thread(
-        job_states, state, listing.slug, [c.reference.render_key for c in every]
-    )
-    queued = 0
-    todo: list[Combination] = []
-    for combination in every:
-        if states.get(combination.reference.render_key) in ("pending", "running"):
-            queued += 1
-        else:
-            todo.append(combination)
-    loop = asyncio.get_running_loop()
-    ends = loop.time() + PREPARE_BUDGET
-    stopped = False
-    failures = 0
+    try:
+        started = await preparer(state).start(listing_id)
+    except Exception:
+        logger.warning("could not start the prepare run of listing %s", listing_id)
+        raise _unavailable() from None
+    return PrepareStarted(count=count, started=started)
 
-    async def submit(combination: Combination) -> bool:
-        reference = combination.reference
-        params = reference.inputs.get("params", {})
-        await state.render.submit_answer(
+
+async def submit(state: AppState, orders: OrdersComponent, ask: SubmitAsk) -> Submitted:
+    """One step of the run: submit the combination at ``ask.index`` with
+    ``reuse_finished``. A combination with an open job is left as it is (``open``), a done
+    one answers ``settled``, and any other is rendered. ``end`` once the index is past the
+    last combination, or the listing is not published (or is over the cap) any more."""
+    try:
+        listing, filaments, choices, cap = await asyncio.to_thread(
+            _facts, state, orders, ask.listing_id
+        )
+    except ApiError:
+        return Submitted(outcome="end")
+    count = combination_count(choices)
+    if ask.index >= count or count > cap:
+        return Submitted(outcome="end")
+    assert listing.snapshot is not None
+    reference = combination_at(listing, filaments, choices, ask.index).reference
+    job = OpenJob(slug=listing.slug, render_key=reference.render_key)
+    found = (await asyncio.to_thread(job_states, state, job.slug, [job.render_key])).get(
+        job.render_key
+    )
+    if found in OPEN_STATES:
+        return Submitted(outcome="open", job=job)
+    if found == "done":
+        return Submitted(outcome="settled")
+    params = reference.inputs.get("params", {})
+    try:
+        answered, _ = await state.render.submit_answer(
             reference.slug,
             params if isinstance(params, dict) else {},
             model_version=reference.commit,
             inputs=reference.inputs,
-            whole_inputs=pipeline,
-            # One claim per listing and key: a prepare sent again joins the same claim.
+            whole_inputs=listing.snapshot.pipeline,
+            # One claim per listing and key: a run started again joins the same claim.
             request_id=f"prepare:{listing.id}:{reference.render_key}",
             reuse_finished=True,
-            priority=PREPARE_PRIORITY,
         )
-        return True
+    except QueueFullError:
+        return Submitted(outcome="busy")
+    except Exception:
+        logger.warning(
+            "a listing's colour combination was not queued",
+            exc_info=True,
+            extra={"listing_id": listing.id},
+        )
+        return Submitted(outcome="failed")
+    if answered.state in OPEN_STATES:
+        return Submitted(outcome="open", job=job)
+    return Submitted(outcome="settled")
 
-    for start in range(0, len(todo), PREPARE_CONCURRENCY):
-        if stopped or loop.time() >= ends:
-            break
-        batch = todo[start : start + PREPARE_CONCURRENCY]
-        answers = await asyncio.gather(*(submit(c) for c in batch), return_exceptions=True)
-        for answer in answers:
-            if answer is True:
-                queued += 1
-            elif isinstance(answer, QueueFullError):
-                stopped = True
-            elif isinstance(answer, BaseException):
-                failures += 1
-                stopped = True
-                logger.warning(
-                    "a listing's colour combination was not queued",
-                    exc_info=answer,
-                    extra={"listing_id": listing.id},
-                )
-    if queued == 0 and failures:
-        raise problem(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "render_unavailable",
-            "The shop could not start these renders. Try again in a moment.",
-        )
-    return PrepareStarted(count=count, queued=queued)
+
+async def still_open(state: AppState, jobs: Sequence[OpenJob]) -> list[OpenJob]:
+    """Of ``jobs``, those whose newest job is still in the queue or running. A job with no
+    row (cancelled, or pruned) counts as settled."""
+    open_jobs: list[OpenJob] = []
+    for slug in dict.fromkeys(j.slug for j in jobs):
+        keys = [j.render_key for j in jobs if j.slug == slug]
+        states = await asyncio.to_thread(job_states, state, slug, keys)
+        open_jobs += [j for j in jobs if j.slug == slug and states.get(j.render_key) in OPEN_STATES]
+    return open_jobs
+
+
+def prepare_activities(state: AppState, orders: Callable[[], OrdersComponent]) -> list[Any]:
+    """The prepare run's activities, for the ``library`` worker."""
+
+    @activity.defn(name=SUBMIT_ACTIVITY)
+    async def prepare_listing_submit(ask: SubmitAsk) -> Submitted:
+        return await submit(state, orders(), ask)
+
+    @activity.defn(name=SETTLED_ACTIVITY)
+    async def prepare_listing_settled(jobs: list[OpenJob]) -> list[OpenJob]:
+        return await still_open(state, jobs)
+
+    return [prepare_listing_submit, prepare_listing_settled]
