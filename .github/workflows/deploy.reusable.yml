@@ -52,7 +52,8 @@ name: Deploy (reusable)
 #      what it runs cannot be checked.
 #   3. Open ONE PR, "deploy(scadbuddy): <version>", on the fixed branch
 #      `deploy/scadbuddy`, and arm `gh pr merge --auto --squash`. A newer deploy
-#      first waits up to 45 minutes for an older open one to land (#5168); it
+#      first waits up to 90 minutes, in two 45 minute rounds, for an older open
+#      one to land (#5168, #6368); it
 #      closes that PR and replaces the branch only when it cannot land (checks
 #      failed, a conflict, auto-merge off) or is still open after the wait.
 #      The clusters ruleset (CI Summary + claude-review) is the safety net; the
