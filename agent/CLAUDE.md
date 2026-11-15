@@ -239,11 +239,20 @@ opens every one and seals it again byte for byte).
   auth in `src/auth/`); every `/api/v1` operation needs a tool or a
   `src/tools/coverage.ts` entry, or `test/coverage.test.ts` fails.
   - Database: the agent owns the `ai_*` tables (today's state; #5295 moves them behind
-    CRUD routes and takes the agent's database secret away, #5299). Schema changes are new files in
-    `src/db/migrations/` (see "Migrations" below; `src/db/migrations.ts` applies them at
-    start under advisory lock "SCADAGNT" with `lock_timeout`/`statement_timeout`,
-    ledger `ai_migrations` with a sha256 per file: an edited merged file stops the
-    service at start; separate from the backend's `scadbuddy_migrations`). Secrets are
+    CRUD routes and takes the agent's database secret away, #5299). The agent does not
+    migrate them: the API applies their files at its start (root CLAUDE.md "Migrations
+    (#491)", #5299 D6), and `ready()` (`src/db.ts`) is true once `ai_migrations` holds
+    every file in `src/db/expected-migrations.json` (`src/db/schema.ts` `awaitMigrations`;
+    one read a call, so a route that asks fails fast; a row with other SQL than listed is
+    `MigrationChecksumError`, and `main.ts` exits on it). Work a process does once at start
+    waits for `untilReady()`, which calls `ready()` again 1 s apart, doubling to 30 s,
+    until it is true, so an API that migrates late drops none of it; the agent logs
+    `waiting for the API to apply the agent's database migrations` once a wait; meanwhile
+    `/healthz` says `unavailable (waiting for the API to apply the database migrations)`
+    (`waitingForMigrations`). The
+    tests make their schemas with the agent's old runner, `test/support/migrations.ts`
+    (`test/support/postgres.ts` `migrateSchema`, the `schema` option of
+    `connectDatabase`), and `test/schema.test.ts` checks the list against both runners. Secrets are
     envelope-encrypted with `src/secrets.ts` under the KEK in
     `SCADBUDDY_SECRET_KEY_FILE` (32 random bytes, base64; spec §9); the AAD binds each
     value to its row and to the columns that say where it is sent (for the credential:
@@ -305,7 +314,7 @@ opens every one and seals it again byte for byte).
     fork of a closed DurableSession takes none). Every read through the fork chain stops at
     the least cut below each ancestor (`LEAST(bound, cut)`: `eventLog.ts` `forkChain`,
     `store.ts` `chainRows`, `blobs.ts` `getThroughChain`); a new chain read must do the same.
-    A fork never copies its parent's transcript, event or image rows; its workspace file rows
+    When it is made, a fork copies none of its parent's transcript, event or image rows; its workspace file rows
     are copied, naming the same bytes (`SessionFiles.copy`). A gated tool's activity runs only
     with an `approved` `ai_input_responses` row for its own request id.
   - DurableSession, the retired Python turn (plan 2026-10-13 Steps 7.2 and 8.1, #4772): its

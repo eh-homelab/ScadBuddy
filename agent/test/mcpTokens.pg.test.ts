@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { hashToken, PostgresTokenStore } from '../src/auth/tokens.js'
 import type { Database } from '../src/db.js'
-import { migrate } from '../src/db/migrations.js'
+import { migrate } from './support/migrations.js'
 import type { McpTokenList, MintedMcpToken } from '../src/routes/mcpTokens.js'
 import { appFetch, connect, INGRESS, testApp } from './helpers/mcp.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'

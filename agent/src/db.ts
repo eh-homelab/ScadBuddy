@@ -1,12 +1,13 @@
 import postgres, { type ReservedSql, type Sql } from 'postgres'
 import { grantBackendRoles } from './db/grants.js'
-import { type MigrateOptions, migrate, MIGRATIONS } from './db/migrations.js'
+import { type AwaitMigrationsOptions, awaitMigrations } from './db/schema.js'
 
 // The database is optional. With SCADBUDDY_DATABASE_URL unset the service still
 // starts and answers /healthz, but reports AI as disabled (spec §9, "No
-// database"). The `ai_*` tables are created by db/migrations.ts, applied by
-// `ready()` rather than before listening, so a database that is down at
-// start-up is reported by /healthz instead of crashing the pod.
+// database"). The `ai_*` tables are created by the API, which applies the agent's
+// migrations at its start (#5299 D6); `ready()` waits for them (db/schema.ts) rather
+// than before listening, so a database that is down at start-up is reported by
+// /healthz instead of crashing the pod.
 
 export type Database = {
   /** The pool, for the stores that own `ai_*` tables. Query only after `ready()` resolved true. */
@@ -14,11 +15,22 @@ export type Database = {
   /** Resolves true when `select 1` answers within the timeout. Never throws. */
   ping(timeoutMs?: number): Promise<boolean>
   /**
-   * Applies pending migrations once; resolves true when the schema is current.
+   * Reads `ai_migrations` once (db/schema.ts `awaitMigrations`), so it fails fast while the
+   * API has not applied every migration this build expects; resolves true when the schema
+   * is current.
    * Single-flight and memoised on success; a failure is retried by the next
    * call. Never throws.
    */
   ready(): Promise<boolean>
+  /**
+   * Resolves at the first `ready()` that is true, calling it again with back-off until then
+   * (`makeUntilReady`). For work a process does once at start: the API may take longer than one
+   * `ready()` to apply the agent's migrations (#5299), and such work must not be dropped on that
+   * first false. Never rejects.
+   */
+  untilReady(): Promise<void>
+  /** Whether the last read of `ai_migrations` found files this build expects missing: the API has not migrated yet (#5299). */
+  waitingForMigrations(): boolean
   /**
    * Connections of their own for session advisory locks held across slow work (a plugin's
    * connection test, #4994), so a held lock never takes one of `sql`'s connections. `close` ends them.
@@ -147,12 +159,18 @@ export type ConnectOptions = {
   searchPath?: string
   /** `IDLE_TIMEOUT_SECONDS` unless set; tests shorten it. */
   idleTimeoutSeconds?: number
-  /** Where to report a failed migration (the error, never the URL). */
+  /** Where to report a failed `ready()` attempt (the error, never the URL). */
   onMigrationError?: (err: unknown) => void
-  /** lock_timeout / statement_timeout for migrations (db/migrations.ts). */
-  migrate?: MigrateOptions
+  /** How `ready()` reads `ai_migrations` (db/schema.ts): once an attempt unless `attempts` says otherwise. */
+  awaitMigrations?: AwaitMigrationsOptions
   /**
-   * Runs after migrations succeed, as part of the same `ready()` attempt: key
+   * Brings the schema in place of waiting for the API's migrations. Only the tests pass
+   * it, to migrate a schema of their own (test/support/migrations.ts): the agent never
+   * migrates (#5299 D6).
+   */
+  schema?: (sql: Sql) => Promise<void>
+  /**
+   * Runs once the schema is current, as part of the same `ready()` attempt: key
    * rotation (main.ts). A throw fails the attempt and the next `ready()` retries.
    */
   afterMigrate?: (sql: Sql) => Promise<void>
@@ -175,6 +193,23 @@ export function makeReady(attempt: () => Promise<unknown>, onError?: (err: unkno
       })
     return inflight
   }
+}
+
+/** `ready()` again, `firstDelayMs` after a false and doubling to `maxDelayMs`, until it is true; one wait shared by every caller. */
+export function makeUntilReady(
+  ready: () => Promise<boolean>,
+  { firstDelayMs = 1_000, maxDelayMs = 30_000 }: { firstDelayMs?: number; maxDelayMs?: number } = {},
+): () => Promise<void> {
+  let waiting: Promise<void> | undefined
+  return () =>
+    (waiting ??= (async () => {
+      let delay = firstDelayMs
+      while (!(await ready())) {
+        // Unref'd: a process stopping does not wait for its database to come up.
+        await new Promise((resolve) => setTimeout(resolve, delay).unref())
+        delay = Math.min(delay * 2, maxDelayMs)
+      }
+    })())
 }
 
 /** The stores' pool. Small on purpose: health pings hold at most one connection (makePing), and the credential and settings stores issue short single queries. */
@@ -221,18 +256,40 @@ export function connectDatabase(url: string, options: ConnectOptions = {}): Data
     query.catch(() => {})
     return query
   })
+  // One read of the ledger an attempt, so a route that asks `ready()` fails fast while the
+  // API is behind; `untilReady()` is what waits. "Waiting" is said once until it ends.
+  let waiting = false
+  let said = false
+  const log = options.awaitMigrations?.log ?? ((line: string) => console.log(line))
+  const ready = makeReady(async () => {
+    waiting = false
+    await (options.schema
+      ? options.schema(sql)
+      : awaitMigrations(sql, undefined, {
+          attempts: 1,
+          ...options.awaitMigrations,
+          log: (line) => {
+            if (!said) log(line)
+            said = true
+          },
+          onWaiting: (now) => {
+            waiting = now
+            if (!now) said = false
+          },
+        }))
+    // #5210: the backend's roles their `ai_*` tables. Never fatal: a role left ungranted
+    // waits or fails its own calls, and says which.
+    await grantBackendRoles(sql).catch((error: unknown) => {
+      console.error(`could not grant the backend's roles the ai_* tables: ${error instanceof Error ? error.message : String(error)}`)
+    })
+    await options.afterMigrate?.(sql)
+  }, options.onMigrationError)
   return {
     sql,
     ping,
-    ready: makeReady(async () => {
-      await migrate(sql, MIGRATIONS, options.migrate)
-      // #5210: the backend's roles their `ai_*` tables. Never fatal: a role left ungranted
-      // waits or fails its own calls, and says which.
-      await grantBackendRoles(sql).catch((error: unknown) => {
-        console.error(`could not grant the backend's roles the ai_* tables: ${error instanceof Error ? error.message : String(error)}`)
-      })
-      await options.afterMigrate?.(sql)
-    }, options.onMigrationError),
+    ready,
+    untilReady: makeUntilReady(ready),
+    waitingForMigrations: () => waiting,
     locks,
     async close() {
       await Promise.all([sql.end({ timeout: 5 }), locks.end()])

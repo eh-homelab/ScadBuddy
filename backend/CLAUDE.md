@@ -178,7 +178,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `piece-<key>` execution keeps that run's Temporal priority, not its own, so never start a
   render at a low priority that another caller may join by key, #6299), `projection.py` (`render_jobs` as a projection
   the workflow writes in place through the `project` activity), `pg_store.py` (the
-  backend's migrations); the render worker holds no database (#5298,
+  backend's migrations), `agent_migrations.py` (the agent's, which the API applies at
+  start after the backend's, `main._migrate_agent_at_start`; root CLAUDE.md "Migrations
+  (#491)"; a test's app skips them unless the test is marked `agent_migrations`,
+  `tests/conftest.py`); the render worker holds no database (#5298,
   `tests/test_render_worker_nodb.py`; the API revokes its old role `scadbuddy_render` at
   every start, `auth/revoke.py`, and every caller's grant list goes through
   `auth/caller_grants.py` `grant_role`): it reads the store settings and
