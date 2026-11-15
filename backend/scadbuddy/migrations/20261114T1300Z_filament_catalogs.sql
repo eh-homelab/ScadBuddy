@@ -141,7 +141,8 @@ CREATE UNIQUE INDEX filament_location_kinds_name ON filament_location_kinds (upp
     WHERE archived_at IS NULL;
 
 -- Places form a tree (room, shelf, bin). An AMS tray is a place too: it names its printer,
--- AMS unit and tray, once. Deleting a printer deletes its trays.
+-- AMS unit and tray, once, and its name is only a label: names are unique among the places
+-- with no printer. Deleting a printer deletes its trays.
 CREATE TABLE filament_locations (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     name text NOT NULL,
@@ -159,7 +160,7 @@ CREATE TABLE filament_locations (
     updated_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX filament_locations_name ON filament_locations (coalesce(parent_id, '00000000-0000-0000-0000-000000000000'::uuid), upper(name))
-    WHERE archived_at IS NULL;
+    WHERE archived_at IS NULL AND printer_id IS NULL;
 
 CREATE UNIQUE INDEX filament_locations_tray ON filament_locations (printer_id, ams_id, tray_id)
     WHERE printer_id IS NOT NULL AND archived_at IS NULL;

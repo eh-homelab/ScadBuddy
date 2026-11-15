@@ -203,3 +203,13 @@ def test_ensure_ams_makes_a_fresh_row_after_the_old_one_is_archived(pg_pool: PgP
     first = store.ensure_ams(printer, 0, 0, label="T")
     store.update(first.id, LocationPatch(archived=True))
     assert store.ensure_ams(printer, 0, 0, label="T").id != first.id
+
+
+def test_a_tray_label_never_clashes_with_a_name(pg_pool: PgPool) -> None:
+    store = LocationStore(pg_pool)
+    _place(store, pg_pool, "AMS 0 tray 0")
+    one, two = _printer(pg_pool), _printer(pg_pool)
+    first = store.ensure_ams(one, 0, 0, label="AMS 0 tray 0")
+    second = store.ensure_ams(two, 0, 0, label="AMS 0 tray 0")
+    assert first.id != second.id
+    assert first.name == second.name == "AMS 0 tray 0"

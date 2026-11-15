@@ -148,15 +148,12 @@ class LocationStore:
             raise CatalogRefError() from None
         return None if row is None else m.Location.model_validate(row)
 
-    def archive(self, location_id: UUID, archived: bool) -> m.Location | None:
-        """Take a place off the tree (``True``) or put it back; ``None`` for no such place."""
-        return self.update(location_id, m.LocationPatch(archived=archived))
-
     def ensure_ams(self, printer_id: UUID, ams_id: int, tray_id: int, *, label: str) -> m.Location:
         """The unarchived place of that printer's tray, made with ``label`` as its name
         if there is none. Its kind is the first (by sort order) unarchived kind flagged
         ``ams``; `NoAmsKindError` when there is none. Idempotent, and safe when two calls
-        race: the loser of the insert reads the winner's row. An unknown printer is
+        race: the loser of the insert reads the winner's row. A tray is found by its printer,
+        AMS unit and tray alone; its ``label`` is only a name and may repeat. An unknown printer is
         `CatalogRefError`."""
         select = (
             f"SELECT {_COLUMNS} FROM filament_locations WHERE printer_id = %s AND ams_id = %s"

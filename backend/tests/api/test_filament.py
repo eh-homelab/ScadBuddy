@@ -234,6 +234,17 @@ def test_locations_nest_and_a_move_is_answered_with_the_spool(client: TestClient
     assert events[1]["data"] == {"from": None, "to": shelf["id"]}
 
 
+def test_a_spool_moves_only_through_move(client: TestClient) -> None:
+    place = _location(client, "A")
+    spool = _spool(client)
+    patched = client.patch(f"{SPOOLS}/{spool['id']}", json={"location_id": place["id"]})
+    assert patched.status_code == 422, patched.text
+    made = client.post(
+        SPOOLS, json={"material_id": _material_id(client), "location_id": place["id"]}
+    )
+    assert made.status_code == 422, made.text
+
+
 def test_a_location_cycle_or_clash_is_409_and_a_bad_move_is_422(client: TestClient) -> None:
     a = _location(client, "A")
     b = _location(client, "B", parent_id=a["id"])

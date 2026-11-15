@@ -585,7 +585,6 @@ class SpoolCreate(_In):
     insert_type_id: UUID | None = None
     low_stock_pct: Percent | None = None
     cost_per_kg: Cost | None = None
-    location_id: UUID | None = None
     weight_locked: bool = False
     note: Note | None = None
     grams_left: Grams | None = None
@@ -620,7 +619,6 @@ class SpoolPatch(_Patch):
     insert_type_id: UUID | None = None
     low_stock_pct: Percent | None = None
     cost_per_kg: Cost | None = None
-    location_id: UUID | None = None
     weight_locked: bool | None = None
     note: Note | None = None
     archived: bool | None = None
