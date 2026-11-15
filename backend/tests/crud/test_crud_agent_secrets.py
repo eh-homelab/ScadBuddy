@@ -26,8 +26,8 @@ import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
+from scadbuddy.agent_data import audit, payload_keys, rotation
 from scadbuddy.agent_data import credentials as store
-from scadbuddy.agent_data import payload_keys
 from scadbuddy.agent_data.rotation import rotate
 from scadbuddy.api import crud_agent_secrets, crud_areas
 from scadbuddy.auth.check import auth_check
@@ -540,6 +540,33 @@ def test_without_a_kek_nothing_is_sealed_or_opened(tables: PgPool, tmp_path: Pat
 
 def test_the_key_route_names_the_apis_key(agent: Agent) -> None:
     assert agent.get("/credentials/key").json() == {"ok": True, "kek_id": KEK.id, "reason": None}
+
+
+def test_a_key_file_that_failed_to_read_is_read_again(tmp_path: Path) -> None:
+    path = tmp_path / f"kek-{uuid.uuid4().hex}"
+    assert rotation.kek_at(path) is None
+    path.write_text(KEK_B64)
+    assert rotation.kek_at(path) == KEK
+    path.unlink()
+    # Kept once read: no request reads it again.
+    assert rotation.kek_at(path) == KEK
+
+
+def test_a_window_row_never_waits_on_another_writer(tables: PgPool) -> None:
+    args: tuple[audit.Kind, tuple[str, ...], str] = ("credential", ("reveal.redact",), "10 minutes")
+    with tables.connection() as holder, tables.connection() as other:
+        holder.autocommit = False
+        assert audit.recorded_lately(holder, *args) is False
+        # The holder writes its row in its open transaction; the other caller, with no row
+        # it can see and the lock taken, writes none and does not wait for the lock.
+        other.execute("SET lock_timeout = '1s'")
+        started = time.monotonic()
+        assert audit.recorded_lately(other, *args) is True
+        assert time.monotonic() - started < 1
+        holder.rollback()
+        holder.autocommit = True
+    with tables.connection() as conn:
+        assert audit.recorded_lately(conn, *args) is False
 
 
 def test_the_key_files_are_read_once_not_per_request(

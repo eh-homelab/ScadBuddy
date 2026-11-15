@@ -12,7 +12,6 @@ steps of #5299 that move those tables (5 and 7).
 
 from __future__ import annotations
 
-import functools
 import logging
 from pathlib import Path
 from typing import Any
@@ -26,16 +25,28 @@ from scadbuddy.library.settings_store import settings_kek
 logger = logging.getLogger(__name__)
 
 
-@functools.cache
+#: Each key read, by path. A failed read is not kept, so a file that could not be read for
+#: a moment (a Secret volume's swap) is read again at the next ask.
+_KEYS: dict[Path, Kek] = {}
+
+
 def kek_at(path: Path | None) -> Kek | None:
     """The key in ``path``, read once per process and kept (by path): the routes ask at
-    every request, so no request reads a file, and the API's start (``main``
-    ``_rotate_agent_secrets``) makes the first read. None without one, or when it cannot be
-    read (the settings store's own start refuses a bad current key first)."""
+    every request, so no request reads a key file once it was read, and the API's start
+    (``main`` ``_rotate_agent_secrets``) makes the first read. None without one, or when it
+    cannot be read (the settings store's own start refuses a bad current key first); that
+    None is not kept."""
+    if path is None:
+        return None
+    if path in _KEYS:
+        return _KEYS[path]
     try:
-        return settings_kek(path)
+        key = settings_kek(path)
     except SecretKeyError:
         return None
+    if key is not None:
+        _KEYS[path] = key
+    return key
 
 
 def _tables(conn: Connection[Any]) -> tuple[bool, bool]:
