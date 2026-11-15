@@ -118,6 +118,12 @@ def _ms(ms: int) -> str:
     return f"{ms} milliseconds"
 
 
+class Ok(BaseModel):
+    """A write that answers nothing more than that it ran."""
+
+    ok: bool = True
+
+
 # -- activity kinds ------------------------------------------------------------------------
 
 
@@ -137,10 +143,8 @@ class ActivityKinds(_Body):
     kinds: list[ActivityKind] = Field(max_length=ACTIVITY_KINDS_MAX)
 
 
-@router.post(
-    "/activity-kinds", status_code=status.HTTP_204_NO_CONTENT, name="crud_agent_activity_kinds"
-)
-async def activity_kinds(body: ActivityKinds, state: StateDep) -> None:
+@router.post("/activity-kinds", name="crud_agent_activity_kinds")
+async def activity_kinds(body: ActivityKinds, state: StateDep) -> Ok:
     def run(conn: psycopg.Connection[Any]) -> None:
         for k in body.kinds:
             conn.execute(
@@ -156,6 +160,7 @@ async def activity_kinds(body: ActivityKinds, state: StateDep) -> None:
         )
 
     await _in_tx(state, run)
+    return Ok()
 
 
 # -- browser origins ----------------------------------------------------------------------
@@ -339,10 +344,8 @@ class QueueOnly(_Body):
     queue: Queue
 
 
-@router.post(
-    "/tab-owners/claim", status_code=status.HTTP_204_NO_CONTENT, name="crud_agent_tab_claim"
-)
-async def tab_claim(body: TabClaim, state: StateDep) -> None:
+@router.post("/tab-owners/claim", name="crud_agent_tab_claim")
+async def tab_claim(body: TabClaim, state: StateDep) -> Ok:
     await _in_tx(
         state,
         lambda conn: conn.execute(
@@ -351,14 +354,13 @@ async def tab_claim(body: TabClaim, state: StateDep) -> None:
             (body.tab_id, body.queue),
         ),
     )
+    return Ok()
 
 
-@router.post(
-    "/tab-owners/refresh", status_code=status.HTTP_204_NO_CONTENT, name="crud_agent_tab_refresh"
-)
-async def tab_refresh(body: TabRefresh, state: StateDep) -> None:
+@router.post("/tab-owners/refresh", name="crud_agent_tab_refresh")
+async def tab_refresh(body: TabRefresh, state: StateDep) -> Ok:
     if not body.tab_ids:
-        return
+        return Ok()
     await _in_tx(
         state,
         lambda conn: conn.execute(
@@ -369,12 +371,11 @@ async def tab_refresh(body: TabRefresh, state: StateDep) -> None:
             (body.queue, body.tab_ids),
         ),
     )
+    return Ok()
 
 
-@router.post(
-    "/tab-owners/release", status_code=status.HTTP_204_NO_CONTENT, name="crud_agent_tab_release"
-)
-async def tab_release(body: TabRelease, state: StateDep) -> None:
+@router.post("/tab-owners/release", name="crud_agent_tab_release")
+async def tab_release(body: TabRelease, state: StateDep) -> Ok:
     def run(conn: psycopg.Connection[Any]) -> None:
         if body.claimed_before is None:
             conn.execute(
@@ -392,18 +393,16 @@ async def tab_release(body: TabRelease, state: StateDep) -> None:
         await _in_tx(state, run)
     except psycopg.errors.DataError:
         raise ApiError(422, "claimed_before is not a timestamp") from None
+    return Ok()
 
 
-@router.post(
-    "/tab-owners/release-all",
-    status_code=status.HTTP_204_NO_CONTENT,
-    name="crud_agent_tab_release_all",
-)
-async def tab_release_all(body: QueueOnly, state: StateDep) -> None:
+@router.post("/tab-owners/release-all", name="crud_agent_tab_release_all")
+async def tab_release_all(body: QueueOnly, state: StateDep) -> Ok:
     await _in_tx(
         state,
         lambda conn: conn.execute("DELETE FROM ai_tab_owners WHERE queue = %s", (body.queue,)),
     )
+    return Ok()
 
 
 class TabOwner(BaseModel):

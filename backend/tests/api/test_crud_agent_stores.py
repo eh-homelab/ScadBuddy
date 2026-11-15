@@ -74,12 +74,12 @@ def test_activity_kinds_upsert_and_retire_in_one_call(
     ]
     assert (
         client.post(f"{BASE}/activity-kinds", json={"kinds": first}, headers=agent).status_code
-        == 204
+        == 200
     )
     again = [{"key": "agent.a", "label": "A2", "facets": []}]
     assert (
         client.post(f"{BASE}/activity-kinds", json={"kinds": again}, headers=agent).status_code
-        == 204
+        == 200
     )
     rows = db.execute(
         "SELECT key, label, retired_at IS NOT NULL FROM ai_activity_kinds ORDER BY key"
@@ -88,7 +88,7 @@ def test_activity_kinds_upsert_and_retire_in_one_call(
     # Declared again, a retired kind comes back.
     assert (
         client.post(f"{BASE}/activity-kinds", json={"kinds": first}, headers=agent).status_code
-        == 204
+        == 200
     )
     assert db.execute(
         "SELECT retired_at FROM ai_activity_kinds WHERE key = 'agent.b'"
@@ -194,7 +194,7 @@ def test_tab_owners_keep_the_latest_claim(client: TestClient, agent: dict[str, s
 
     def post(path: str, body: dict[str, Any]) -> None:
         answer = client.post(f"{BASE}/tab-owners/{path}", json=body, headers=agent)
-        assert answer.status_code == 204, answer.text
+        assert answer.status_code == 200, answer.text
 
     post("claim", {"tab_id": "t1", "queue": "agent-tools.a"})
     post("claim", {"tab_id": "t1", "queue": "agent-tools.b"})
