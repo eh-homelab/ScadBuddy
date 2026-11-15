@@ -12,6 +12,7 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
+from scadbuddy.agent_data import packages
 from tests.api.test_crud_agent_cost import token
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.agent_migrations]
@@ -98,12 +99,14 @@ def _list(db: Any, source: str) -> None:
 
 
 def _access(db: Any) -> list[str]:
-    rows = db.execute("SELECT source, item, access FROM ai_access ORDER BY source, item")
-    return [f"{s} {i}={a}" for s, i, a in rows.fetchall()]
+    # Sorted here, by code point: ORDER BY follows the database's collation, which differs
+    # between machines (C locally, en_US in CI).
+    rows = db.execute("SELECT source, item, access FROM ai_access").fetchall()
+    return [f"{s} {i}={a}" for s, i, a in sorted(rows)]
 
 
 def _listings(db: Any) -> list[str]:
-    return [r[0] for r in db.execute("SELECT source FROM ai_tool_listings ORDER BY source")]
+    return sorted(r[0] for r in db.execute("SELECT source FROM ai_tool_listings"))
 
 
 def test_only_the_agent_credential_reaches_the_routes(client: TestClient) -> None:
@@ -294,6 +297,18 @@ def test_a_review_that_cannot_tell_keeps_the_rows(
         "package:greeter/mcp:box *=off",
     ]
     assert _listings(db) == ["package:greeter/mcp:box"]
+
+
+def test_a_null_builtin_tools_prunes_the_builtins_as_the_agent_does(
+    client: TestClient, db: Any
+) -> None:
+    # `store.ts` `pruneStaleRows` keeps the built-ins only when the key is absent; a stored
+    # null reads as an empty list there, so it prunes them.
+    _seed(db, "package:greeter", {"skill:hello": "off", "builtin:Bash": "off"})
+    review = _review(builtin_tools=None)
+    with db.transaction():
+        assert packages.prune_stale_rows(db, "greeter", review) is True
+    assert _access(db) == ["package:greeter skill:hello=off"]
 
 
 def test_a_delete_forgets_by_prefix_never_by_like(

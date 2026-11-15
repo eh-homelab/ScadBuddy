@@ -105,7 +105,7 @@ def prune_stale_rows(conn: Connection[Any], name: str, review: Mapping[str, Any]
                 return False
             if kind == "hook":
                 return item[item.rfind(":") + 1 :] not in hook_ids
-            if kind == "builtin" and builtins is None:
+            if kind == "builtin" and "builtin_tools" not in review:
                 return False
             return item not in kept
 

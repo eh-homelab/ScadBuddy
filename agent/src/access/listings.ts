@@ -1,6 +1,7 @@
 import type { Sql, TransactionSql } from 'postgres'
 import type { LockClient, LockLease } from '../db.js'
-import { type CrudTarget, crudOf, CrudLeases, type HeldLease, LEASE_RENEW_MS } from '../api/crudStores.js'
+import { type CrudTarget, crudOf, CrudLeases, type HeldLease } from '../api/crudStores.js'
+import { CrudReadError } from '../api/crudRead.js'
 import { z } from 'zod'
 import { packageServerSource, remoteSource } from './model.js'
 
@@ -251,8 +252,8 @@ export class ToolListings {
    * reach Postgres, and `fn` did not run. An error of `fn`'s own is thrown as it is. The lock is held on the lock client
    * (db.ts `createLockClient`), never on the shared pool, which a test therefore never waits on.
    * Through the API (`RemoteListings`), the lock is the lease `tool-listing:remote:<name>`,
-   * renewed while `fn` runs; `unreachable` then says the API did not answer the acquire, and
-   * `full` never comes back.
+   * renewed while `fn` runs; `unreachable` then says the API did not answer the acquire (a
+   * 4xx its route answered is thrown), and `full` never comes back.
    */
   async exclusive<T>(name: string, fn: (put: PluginListingPut) => Promise<T>): Promise<{ value: T } | 'busy' | 'full' | 'unreachable'> {
     const crud = this.#crud()
@@ -401,32 +402,22 @@ export class CrudToolListings {
     return out
   }
 
-  /** `fn` under `key`'s lease; `unreachable` when the acquire got no answer, and `fn` did not run. */
+  /**
+   * `fn` under `key`'s lease (`CrudLeases.hold`); `unreachable` when the acquire got no
+   * answer of the route's own, and `fn` did not run. A 4xx the route answered (a key it
+   * refuses) is thrown as it is.
+   */
   async leased<T>(key: string, fn: (lease: HeldLease) => Promise<T>): Promise<{ value: T } | 'busy' | 'unreachable'> {
     let lease: HeldLease | 'busy'
     try {
       lease = await this.#leases.acquire(key)
     } catch (err) {
+      if (err instanceof CrudReadError && err.fromRoute && err.status !== undefined && err.status >= 400 && err.status < 500) throw err
       console.error(`plugin test lease: ${message(err)}`)
       return 'unreachable'
     }
     if (lease === 'busy') return 'busy'
-    const held = lease
-    const timer = setInterval(() => {
-      void this.#leases.renew(held).then(
-        (ok) => {
-          if (!ok) console.error(`plugin test lease ${key} was lost before its test ended`)
-        },
-        (err: unknown) => console.error(`plugin test lease ${key}: the renew failed: ${message(err)}`),
-      )
-    }, LEASE_RENEW_MS)
-    timer.unref()
-    try {
-      return { value: await fn(held) }
-    } finally {
-      clearInterval(timer)
-      await this.#leases.release(held).catch((err: unknown) => console.error(`plugin test lease ${key}: the release failed: ${message(err)}`))
-    }
+    return { value: await this.#leases.hold(lease, fn) }
   }
 
   async putPlugin(lease: HeldLease, name: string, url: string, tools: readonly StoredTool[], truncated: boolean): Promise<boolean> {

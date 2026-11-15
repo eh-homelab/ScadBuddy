@@ -17,7 +17,8 @@ Two kinds of key:
 - ``plugin-oauth:<plugin>``: a sign-in's token refresh (``plugins/oauthStore.ts``), which
   over SQL holds the grant row's ``FOR UPDATE`` across the token endpoint's answer so two
   replicas never spend one refresh token. An acquire also takes that row lock in its
-  transaction (``FOR UPDATE``), so it waits while an SQL pod refreshes. An SQL pod that
+  transaction (``FOR UPDATE``), so it waits while an SQL pod refreshes, for at most the
+  caller's ``wait_s`` (a ``lock_timeout``), then answers ``busy``. An SQL pod that
   starts a refresh while a lease holds is not refused: during a rolling deploy two
   replicas could spend one refresh token, and the loser marks the grant for a new
   sign-in.
@@ -34,6 +35,7 @@ from datetime import datetime
 from typing import Any
 
 from psycopg import Connection
+from psycopg.errors import LockNotAvailable
 
 #: How long a lease holds without a renew, and the longest one, in seconds.
 LEASE_TTL = 120.0
@@ -61,9 +63,12 @@ def advisory_name(key: str) -> str | None:
     return source[len("remote:") :] if source.startswith("remote:") else source
 
 
-def acquire(conn: Connection[Any], key: str, token: str, ttl: float) -> datetime | None:
+def acquire(
+    conn: Connection[Any], key: str, token: str, ttl: float, wait: float = 0.0
+) -> datetime | None:
     """The new expiry, or None when another holder keeps ``key``. Runs in the caller's
-    transaction."""
+    transaction. ``wait`` (seconds) bounds the wait for an SQL pod's grant row lock; past
+    it the lease is busy."""
     name = advisory_name(key)
     if name is not None:
         row = conn.execute(
@@ -73,11 +78,21 @@ def acquire(conn: Connection[Any], key: str, token: str, ttl: float) -> datetime
         if row is None or not _first(row):
             return None
     if key.startswith("plugin-oauth:"):
-        # Waits while an SQL pod holds the grant's row across a refresh.
-        conn.execute(
-            "SELECT 1 FROM ai_plugin_oauth WHERE plugin = %s FOR UPDATE",
-            (key[len("plugin-oauth:") :],),
-        )
+        # Waits while an SQL pod holds the grant's row across a refresh, but no longer than
+        # the caller asked: a lock_timeout of 0 would wait for ever, so at least 1 ms.
+        try:
+            with conn.transaction():
+                conn.execute(
+                    "SELECT set_config('lock_timeout', %s, true)",
+                    (f"{max(1, round(wait * 1000))}ms",),
+                )
+                conn.execute(
+                    "SELECT 1 FROM ai_plugin_oauth WHERE plugin = %s FOR UPDATE",
+                    (key[len("plugin-oauth:") :],),
+                )
+                conn.execute("SELECT set_config('lock_timeout', '0', true)")
+        except LockNotAvailable:
+            return None
     row = conn.execute(
         "INSERT INTO agent_leases (key, token, expires_at)"
         " VALUES (%s, %s, now() + make_interval(secs => %s))"

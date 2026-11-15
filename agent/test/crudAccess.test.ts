@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { CrudToolListings, listingLeaseKey, ToolListings } from '../src/access/listings.js'
 import { AccessStore, CrudAccessRows } from '../src/access/store.js'
+import { CrudReadError } from '../src/api/crudRead.js'
 import type { AccessRow } from '../src/access/model.js'
 import type { AuditEntry } from '../src/audit/log.js'
 import type { LockClient } from '../src/db.js'
@@ -187,6 +188,26 @@ describe('the plugin stores through CRUD routes (#5299 step 5)', () => {
     const listings = new ToolListings(noSql, noLocks, { crud: new CrudToolListings({ baseUrl: BASE, fetch: down }), use: () => true })
     let ran = false
     expect(await listings.exclusive('files', async () => (ran = true))).toBe('unreachable')
+    expect(ran).toBe(false)
+  })
+
+  it("passes on a 4xx the acquire's route answered as it is, and a 5xx as unreachable", async () => {
+    const answering =
+      (status: number): typeof fetch =>
+      async (_input, init) =>
+        (init?.method ?? 'GET') === 'DELETE'
+          ? new Response(null, { status: 204, headers: { 'x-scadbuddy-crud': '1' } })
+          : new Response(JSON.stringify({ detail: 'That is not a lease key.' }), {
+              status,
+              headers: { 'content-type': 'application/json', 'x-scadbuddy-crud': '1' },
+            })
+    let ran = false
+    const refused = new ToolListings(noSql, noLocks, { crud: new CrudToolListings({ baseUrl: BASE, fetch: answering(422) }), use: () => true })
+    const err = await refused.exclusive('files', async () => (ran = true)).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(CrudReadError)
+    expect((err as CrudReadError).status).toBe(422)
+    const failing = new ToolListings(noSql, noLocks, { crud: new CrudToolListings({ baseUrl: BASE, fetch: answering(503) }), use: () => true })
+    expect(await failing.exclusive('files', async () => (ran = true))).toBe('unreachable')
     expect(ran).toBe(false)
   })
 

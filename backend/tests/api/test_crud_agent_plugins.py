@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -365,6 +366,25 @@ def test_a_refresh_is_kept_only_under_its_lease(
     ).json()
     assert again["grant"]["secret"]["access_token"] == "at-2"
     assert again["grant"]["access_expires_at"].startswith("2030-01-01")
+
+
+def test_a_refresh_lease_waits_for_an_sql_pods_row_lock_only_as_long_as_asked(
+    client: TestClient, agent: dict[str, str], db: Any, pg_conninfo: str
+) -> None:
+    """The rollout: an SQL-path pod holds the grant's row across a refresh. The acquire
+    waits for it no longer than ``wait_s``, then answers busy."""
+    _signed_in(client, agent, db)
+    ask = {"token": str(uuid.uuid4()), "ttl_s": 60, "wait_s": 0.5}
+    with psycopg.connect(pg_conninfo) as old_pod:
+        old_pod.execute("SELECT 1 FROM ai_plugin_oauth WHERE plugin = 'docs' FOR UPDATE")
+        started = time.monotonic()
+        busy = client.post(f"{BASE}/leases/plugin-oauth:docs", json=ask, headers=agent)
+        assert time.monotonic() - started < 5
+        assert (busy.status_code, busy.json()["reason"]) == (409, "busy")
+        old_pod.rollback()
+        assert db.execute("SELECT count(*) FROM agent_leases").fetchone()[0] == 0
+    held = client.post(f"{BASE}/leases/plugin-oauth:docs", json=ask, headers=agent)
+    assert held.status_code == 200
 
 
 def test_a_mark_and_a_sign_out_tell_the_warm_caches(

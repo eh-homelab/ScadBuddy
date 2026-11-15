@@ -31,6 +31,7 @@ import json
 import time
 from collections.abc import Callable
 from datetime import datetime
+from functools import partial
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
@@ -472,7 +473,10 @@ async def acquire_lease(key: LeaseKey, body: LeaseAsk, state: StateDep) -> Lease
     token = str(body.token)
     deadline = time.monotonic() + body.wait_s
     while True:
-        expires = await _in_tx(state, lambda conn: leases.acquire(conn, key, token, body.ttl_s))
+        wait = max(0.0, deadline - time.monotonic())
+        expires = await _in_tx(
+            state, partial(leases.acquire, key=key, token=token, ttl=body.ttl_s, wait=wait)
+        )
         left = deadline - time.monotonic()
         if expires is not None:
             return LeaseHeld(token=body.token, expires_at=expires)

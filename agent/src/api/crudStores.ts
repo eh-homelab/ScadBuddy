@@ -223,6 +223,12 @@ export class CrudLeases {
   async holding<T>(key: string, fn: (lease: HeldLease) => Promise<T>, options: { waitS?: number } = {}): Promise<{ value: T } | 'busy'> {
     const lease = await this.acquire(key, options)
     if (lease === 'busy') return 'busy'
+    return { value: await this.hold(lease, fn) }
+  }
+
+  /** Runs `fn` under `lease`, taken by `acquire`, as `holding` does. */
+  async hold<T>(lease: HeldLease, fn: (lease: HeldLease) => Promise<T>): Promise<T> {
+    const { key } = lease
     const timer = setInterval(() => {
       void this.renew(lease).then(
         (held) => {
@@ -233,7 +239,7 @@ export class CrudLeases {
     }, LEASE_RENEW_MS)
     timer.unref()
     try {
-      return { value: await fn(lease) }
+      return await fn(lease)
     } finally {
       clearInterval(timer)
       await this.release(lease).catch((err: unknown) =>
