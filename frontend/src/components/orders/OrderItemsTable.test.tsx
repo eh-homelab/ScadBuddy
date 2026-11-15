@@ -999,6 +999,12 @@ describe('OrderItemsTable · groups (#6334)', () => {
     await user.click(within(screen.getByTestId('row-group-cancelled')).getByRole('button'))
     expect(within(row('it-hidden')).getByRole('checkbox', { name: 'Select Rainbow' })).not.toBeChecked()
     expect(screen.getByRole('checkbox', { name: 'Select all items' })).toHaveAttribute('aria-checked', 'mixed')
+    // Picked inside the open group, then the group closed and opened: unpicked again.
+    await user.click(within(row('it-hidden')).getByRole('checkbox', { name: 'Select Rainbow' }))
+    const toggle = within(screen.getByTestId('row-group-cancelled')).getByRole('button')
+    await user.click(toggle)
+    await user.click(toggle)
+    expect(within(row('it-hidden')).getByRole('checkbox', { name: 'Select Rainbow' })).not.toBeChecked()
   })
 
   it('keeps a long title in its own column', async () => {

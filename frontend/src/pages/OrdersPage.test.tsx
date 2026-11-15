@@ -349,6 +349,13 @@ describe('OrdersPage views and memory (#6334)', () => {
     expect(screen.queryByTestId('orders-hidden-note')).toBeNull()
   })
 
+  it('keeps the remembered view while a profit report row is open', async () => {
+    window.localStorage.setItem(ORDERS_MEMORY_KEY, JSON.stringify({ hideDays: 30, remember: true, query: 'status=ready' }))
+    renderPage(<OrdersPage />, { route: '/orders?currency=USD' })
+    await screen.findByRole('table', { name: 'Orders' })
+    expect(JSON.parse(window.localStorage.getItem(ORDERS_MEMORY_KEY) ?? '{}')).toMatchObject({ query: 'status=ready' })
+  })
+
   it('opens the remembered view, and forgets it once remembering is off', async () => {
     window.localStorage.setItem(ORDERS_MEMORY_KEY, JSON.stringify({ hideDays: 30, remember: true, query: 'status=ready' }))
     const first = page()

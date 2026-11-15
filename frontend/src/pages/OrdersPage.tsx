@@ -183,7 +183,8 @@ export function OrdersPage() {
   // ago: its link lists them all, so the N-day rule does not apply to it.
   const query: OrdersQuery = { ...urlQuery, ended_since: urlQuery.old || isReportFiltered(urlQuery) ? '' : endedSince(memory.hideDays) }
   const key = `${toOrdersParams(query).toString()}#${query.ended_since}`
-  const keep = memory.remember ? remembered(query) : null
+  // A profit report row's link is a visit of its own: it never replaces the remembered view.
+  const keep = memory.remember && !isReportFiltered(urlQuery) ? remembered(query) : null
   useEffect(() => {
     if (keep !== null && restore === null) setMemory(storeOrdersMemory({ query: keep }))
   }, [keep, restore])
@@ -328,7 +329,7 @@ export function OrdersPage() {
         />
         <div className="flex flex-wrap items-center gap-2">
           <SearchField value={query.q} onChange={(q) => onChange({ ...query, q }, { typing: true })} placeholder="Search orders" />
-          <Button variant="outline" size="sm" aria-expanded={filtersOpen} aria-controls="order-filters" onClick={() => setFiltersOpen(!filtersOpen)}>
+          <Button variant="outline" size="sm" aria-expanded={filtersOpen} aria-controls={filtersOpen ? 'order-filters' : undefined} onClick={() => setFiltersOpen(!filtersOpen)}>
             <SlidersHorizontalIcon aria-hidden />
             Filters
             {moreFiltersOn(query) > 0 && <span className="sb-num rounded-full bg-primary/15 px-1.5 text-[11px]" aria-label={`${moreFiltersOn(query)} on`}>{moreFiltersOn(query)}</span>}

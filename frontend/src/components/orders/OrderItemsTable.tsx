@@ -125,7 +125,14 @@ export function OrderItemsTable({
   const grouped = groupItems(items)
   const [openGroups, setOpenGroups] = useState(() => readOrdersMemory().itemGroups)
   const isOpen = (key: ItemGroupKey) => openGroups[key] ?? key === 'fulfilled'
-  const toggleGroup = (key: ItemGroupKey, open: boolean) => setOpenGroups(storeOrdersMemory({ itemGroups: { ...openGroups, [key]: open } }).itemGroups)
+  const toggleGroup = (key: ItemGroupKey, open: boolean) => {
+    setOpenGroups(storeOrdersMemory({ itemGroups: { ...openGroups, [key]: open } }).itemGroups)
+    // A closed group's lines leave the selection, so they come back unpicked.
+    if (!open) {
+      const leaving = new Set(grouped.groups.find((group) => group.key === key)?.items.map((item) => item.id))
+      setPicked(new Set([...picked].filter((id) => !leaving.has(id))))
+    }
+  }
   // #6334: a selection, and "Select all", take only the lines in view: a bulk action never
   // reaches a line inside a closed group.
   const shown = [...grouped.main, ...grouped.groups.filter((group) => isOpen(group.key)).flatMap((group) => group.items)]
