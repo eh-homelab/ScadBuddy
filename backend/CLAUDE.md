@@ -395,6 +395,12 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   is the browser user's; at most `DONE_POSTS_PER_TURN`, a refusal audited `rate_limited`; the
   summaries it replaces, the events and their audit rows in the same transaction). Tests
   `tests/crud/test_crud_agent_questions.py`.
+  `api/crud_agent_escalations.py` (area `escalations`) over `agent_data/escalations.py` is the
+  agent's `flows/escalations.ts` `Escalations` SQL and `flows/queue.ts`'s read of a run's child
+  entries: a parent's pass up and a deny's claim and release (each only while the entry is at hop
+  `parent` for the session named), the hop's timeout sweep, and a delivery's claim, hand back and
+  skip, with the record of a run's own calls sent. Who may answer stays the agent's check. Tests
+  `tests/crud/test_crud_agent_escalations.py`.
 - `backend/scadbuddy/flow_triggers/` — runs started on a schedule or an event (#2484,
   spec 2026-10-11 §12): `store.py` (`flow_triggers`, their standing grants and fires),
   `fire.py` (the `flow_trigger_fire` activity on the `library` queue), `events.py` (the

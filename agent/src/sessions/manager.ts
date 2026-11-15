@@ -69,6 +69,7 @@ import { PendingProjection, type PendingReads } from '../gate/projection.js'
 import { gated } from '../api/crudStores.js'
 import type { ApprovalRoutes } from '../approvals/crudApprovals.js'
 import type { QuestionRoutes } from '../gate/crudQuestions.js'
+import type { EscalationRoutes } from '../flows/crudEscalations.js'
 import type { FlowRunReads } from '../flows/backendReads.js'
 import { Escalations } from '../flows/escalations.js'
 import { TurnRunner } from './turnRunner.js'
@@ -705,6 +706,8 @@ export type SessionManagerDeps = {
   approvalRoutes?: { crud: ApprovalRoutes; use: () => boolean } | undefined
   /** The API's `questions` routes (gate/crudQuestions.ts), which the questions take while `use()` holds. */
   questionRoutes?: { crud: QuestionRoutes; use: () => boolean } | undefined
+  /** The API's `escalations` routes (flows/crudEscalations.ts), which the escalations and the run queue take while `use()` holds. */
+  escalationRoutes?: { crud: EscalationRoutes; use: () => boolean } | undefined
   sql: Sql
   /** The backend's flow tables, through its CRUD routes (flows/backendReads.ts, #5299 D7). */
   flowReads: FlowRunReads
@@ -1118,10 +1121,11 @@ export class SessionManager {
       ...(deps.run ? { start: startedQuery(deps.run) } : {}),
       ...(deps.warm?.log ? { log: deps.warm.log } : {}),
     })
-    this.queue = new FlowQueue(deps.sql, deps.flowReads)
+    this.queue = new FlowQueue(deps.sql, deps.flowReads, deps.escalationRoutes)
     this.escalations = new Escalations({
       sql: deps.sql,
       reads: deps.flowReads,
+      routes: deps.escalationRoutes,
       durable: () => this.durable,
       ...(deps.currentTiers ? { currentTiers: deps.currentTiers } : {}),
       // A delivery turn (#2482): as the owner, with the tiers its owner holds now.

@@ -1,6 +1,7 @@
 import type { Sql } from 'postgres'
 import { flowRequestId, parseRequestId } from '../gate/ids.js'
 import type { FlowRunReads, QueueHop, StepRow, WaitingOn } from './backendReads.js'
+import type { EscalationRoutes } from './crudEscalations.js'
 
 // A flow run's one queue (#2482, spec 2026-10-11 §4.5): everything of the run that waits
 // for a decision, from the three places it is recorded, in one read.
@@ -149,6 +150,23 @@ export async function childReasoning(sql: Sql, requestId: string, scan = REASONI
 
 type OwnEntry = Extract<QueueEntry, { source: 'flow' }>
 
+/** A run's child entry (`ai_pending_input`), as `forRun` reads it. */
+type ChildRow = {
+  request_id: string
+  kind: 'approval' | 'answer'
+  session_id: string
+  tool: string
+  summary: string
+  input_hash: string | null
+  hop: 'parent' | 'person' | null
+  hop_until: Date | string | null
+  outside_reason: string | null
+  hops: QueueHop[] | null
+  created_at: Date
+  expires_at: Date
+  expiring: boolean
+}
+
 function ownEntry(run: { id: string; workflow_run_id: string }, steps: readonly StepRow[], w: WaitingOn): OwnEntry {
   return {
     source: 'flow',
@@ -173,10 +191,29 @@ export class FlowQueue {
   readonly #sql: Sql
   readonly #reads: FlowRunReads
 
-  /** `reads`: the backend's flow tables, through its CRUD routes (backendReads.ts). */
-  constructor(sql: Sql, reads: FlowRunReads) {
+  readonly #routes: { crud: Pick<EscalationRoutes, 'runEntries'>; use: () => boolean } | undefined
+
+  /**
+   * `reads`: the backend's flow tables, through its CRUD routes (backendReads.ts). `routes`: a
+   * run's child entries through the API once it lists area `escalations` (#5299 step 10).
+   */
+  constructor(sql: Sql, reads: FlowRunReads, routes?: { crud: Pick<EscalationRoutes, 'runEntries'>; use: () => boolean }) {
     this.#sql = sql
     this.#reads = reads
+    this.#routes = routes
+  }
+
+  async #children(runId: string): Promise<ChildRow[]> {
+    if (this.#routes?.use()) {
+      const rows = await this.#routes.crud.runEntries(runId)
+      // An ISO time as the SQL's Date gave it; `infinity` (a deny's claim) as it is.
+      const at = (s: string | null) => (s === null || Number.isNaN(Date.parse(s)) ? s : new Date(s).toISOString())
+      return rows.map((r) => ({ ...r, hop_until: at(r.hop_until), hops: (r.hops as QueueHop[] | null) ?? null }))
+    }
+    return await this.#sql<ChildRow[]>`
+      SELECT request_id, kind, session_id::text, tool, summary, input_hash, hop, hop_until, outside_reason, hops,
+             created_at, expires_at, (expires_at <= now()) AS expiring
+        FROM ai_pending_input WHERE flow_run_id = ${runId} ORDER BY created_at, request_id`
   }
 
   /** The run's one queue, or undefined when there is no such run (or no flows on this deployment). */
@@ -186,26 +223,7 @@ export class FlowQueue {
     const steps = run.steps
     const entries: QueueEntry[] = []
     for (const w of run.waiting_on) entries.push(ownEntry(run, steps, w))
-    const children = await this.#sql<
-      {
-        request_id: string
-        kind: 'approval' | 'answer'
-        session_id: string
-        tool: string
-        summary: string
-        input_hash: string | null
-        hop: 'parent' | 'person' | null
-        hop_until: Date | null
-        outside_reason: string | null
-        hops: QueueHop[] | null
-        created_at: Date
-        expires_at: Date
-        expiring: boolean
-      }[]
-    >`
-      SELECT request_id, kind, session_id::text, tool, summary, input_hash, hop, hop_until, outside_reason, hops,
-             created_at, expires_at, (expires_at <= now()) AS expiring
-        FROM ai_pending_input WHERE flow_run_id = ${run.id} ORDER BY created_at, request_id`
+    const children = await this.#children(run.id)
     // Side by side: the run page and the starter's panel both poll this.
     const reasonings = await Promise.all(children.map((c) => childReasoning(this.#sql, c.request_id)))
     for (const [i, c] of children.entries()) {

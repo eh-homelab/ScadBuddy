@@ -102,7 +102,9 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: transaction) and used once (`api/crud_agent_approvals.py`). Its ``questions`` area is
 #: ``…/agent/questions/*``: the `done` summaries read, dismissed and posted (the post only while
 #: the turn's placement holds the session), and the attention limit's count under its lease
-#: (`api/crud_agent_questions.py`).
+#: (`api/crud_agent_questions.py`). Its ``escalations`` area is ``…/agent/escalations/*``: a flow
+#: run's calls at the starting session's hop, passed up, denied, moved on its timeout and
+#: delivered, and a run's child entries for its queue (`api/crud_agent_escalations.py`).
 CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "projects": ["flows", "operations", "payload-keys"],
     "render": ["settings", "jobs", "refs", "blob-index", "store-folders", "assets", "libraries"],
@@ -165,6 +167,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "audit",
         "approvals",
         "questions",
+        "escalations",
     ],
     "intake": ["sources"],
 }
