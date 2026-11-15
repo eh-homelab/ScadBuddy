@@ -735,8 +735,9 @@ async def read_and_pull(
 
     The usage rows are read right after the spools, so a deduction BB writes between the
     two reads shows in the usage rows, never only in a spool's value. The archives are
-    read only when a usage row is not booked yet. The usage and archive reads, and the
-    booking, each fail alone: logged, and the spool pull's report stands."""
+    read only when a usage row that would book is not booked yet. The usage read, the
+    query for unbooked rows, the archive read and the booking each fail alone: logged,
+    and the spool pull's report stands."""
     usage: list[SpoolUsage] = []
     archives: list[Archive] = []
     async with client_for(settings) as client:
@@ -745,8 +746,11 @@ async def read_and_pull(
             usage = await client.spool_usage()
         except Exception as error:
             _failed("could not read Bambuddy's usage rows", error)
-        ids = [row.id for row in usage if row.weight_used > 0]
-        pending = await asyncio.to_thread(_unbooked, store, ids) if ids else set()
+        pending: set[int] = set()
+        try:
+            pending = await asyncio.to_thread(_unbooked, store, usage) if usage else set()
+        except Exception as error:
+            _failed("could not find Bambuddy's unbooked usage rows", error)
         if pending:
             try:
                 archives = await client.archives(limit=50)
@@ -774,9 +778,9 @@ def _failed(message: str, error: Exception) -> None:
     logger.warning(message, extra={"error": type(error).__name__}, exc_info=True)
 
 
-def _unbooked(store: Filament, ids: Sequence[int]) -> set[int]:
+def _unbooked(store: Filament, usage: Sequence[SpoolUsage]) -> set[int]:
     with store.spools.transaction() as conn:
-        return bambuddy_usage.unbooked(conn, ids)
+        return bambuddy_usage.unbooked(conn, usage)
 
 
 def _book_usage(

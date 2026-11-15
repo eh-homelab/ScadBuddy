@@ -13,7 +13,7 @@ import respx
 
 from scadbuddy.bambuddy.models import Archive, SpoolUsage
 from scadbuddy.bambuddy.models import Spool as BbSpool
-from scadbuddy.filament import ledger
+from scadbuddy.filament import bambuddy_usage, ledger
 from scadbuddy.filament.bambuddy_pull import pull, read_and_pull
 from scadbuddy.filament.bambuddy_usage import book_usage
 from scadbuddy.filament.catalog import CatalogStore
@@ -225,9 +225,76 @@ async def test_a_pull_books_bambuddys_usage_rows(pg_pool: PgPool) -> None:
             json=[{"id": 248, "printer_id": 1, "completed_at": ended}]
         )
         report = await read_and_pull(f, settings)
+        paths = [call.request.url.path for call in router.calls]
+    assert paths[:2] == ["/api/v1/inventory/spools", "/api/v1/inventory/usage"]
     assert (report.usage_booked, report.usage_unlinked) == (1, 1)
     (event,) = _usage_events(f, spool)
     assert event.data["bb_archive_id"] == 248
+
+
+async def test_rows_that_would_not_book_read_no_archives(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    _linked(f)
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    rows = [
+        usage(id=1, created_at=_naive(T0)).model_dump(mode="json"),
+        usage(id=2, spool_id=99).model_dump(mode="json"),
+        usage(id=3, weight_used=0).model_dump(mode="json"),
+    ]
+    with respx.mock(assert_all_called=False) as router:
+        router.get(f"{BB}/api/v1/inventory/spools").respond(json=[bb().model_dump(mode="json")])
+        router.get(f"{BB}/api/v1/inventory/usage").respond(json=rows)
+        archives = router.get(f"{BB}/api/v1/archives/").respond(json=[])
+        report = await read_and_pull(f, settings)
+    assert not archives.called
+    assert (report.usage_booked, report.usage_unlinked) == (0, 1)
+
+
+async def test_a_failed_unbooked_query_leaves_the_pull_standing(
+    pg_pool: PgPool, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*_: Any) -> set[int]:
+        raise RuntimeError("database gone")
+
+    monkeypatch.setattr(bambuddy_usage, "unbooked", broken)
+    f = _filament(pg_pool)
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    with respx.mock(assert_all_called=False) as router:
+        router.get(f"{BB}/api/v1/inventory/spools").respond(json=[bb().model_dump(mode="json")])
+        router.get(f"{BB}/api/v1/inventory/usage").respond(json=[usage().model_dump(mode="json")])
+        report = await read_and_pull(f, settings)
+    assert report.created == 1
+    assert "could not find Bambuddy's unbooked usage rows" in caplog.text
+
+
+def test_a_failing_row_does_not_stall_the_rest(
+    pg_pool: PgPool, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    f = _filament(pg_pool)
+    spool = _linked(f)
+    record = ledger.record
+
+    def flaky(conn: Any, spool_id: UUID, kind: Any, **kw: Any) -> Any:
+        if kw.get("ref_id") == "13":
+            conn.execute("SELECT 1/0")
+        return record(conn, spool_id, kind, **kw)
+
+    monkeypatch.setattr(ledger, "record", flaky)
+    report = _book(f, [usage(id=13), usage(id=14)])
+    assert report.booked == 1
+    assert [e.ref_id for e in _usage_events(f, spool)] == ["14"]
+    assert "could not book a Bambuddy usage row" in caplog.text
+
+
+def test_a_usage_row_of_an_archived_sb_spool_is_skipped(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    spool = _linked(f)
+    f.spools.archive(spool, True, actor="ann")
+    report = _book(f, [usage()])
+    assert (report.booked, report.unlinked) == (0, 0)
+    assert _usage_events(f, spool) == []
+    with f.spools.transaction() as conn:
+        assert bambuddy_usage.unbooked(conn, [usage()]) == set()
 
 
 async def test_a_failed_usage_read_leaves_the_pull_standing(

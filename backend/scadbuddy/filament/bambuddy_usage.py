@@ -11,7 +11,7 @@ id, at the row's ``created_at``: booked once, whatever the pull that sees it. It
 plate once (`ledger.py`, rule 3). A row with no name is booked with ``job`` null: SB's
 plates always carry a subtask name, so it is never an SB plate. A row that is not later
 than the spool's first `ledger.BB_SPOOL` event lies inside the reading the link made,
-and is not booked.
+and is not booked. Nor is a row of an archived SB spool: the pull never writes to one.
 
 The archive of the row's print is the one of the same BB printer that ended in
 ``[created_at - ARCHIVE_BEFORE, created_at + ARCHIVE_AFTER]``, the nearest. Measured on
@@ -25,14 +25,17 @@ The archive of the row's print is the one of the same BB printer that ended in
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from uuid import UUID
 
 from scadbuddy.bambuddy.models import Archive, SpoolUsage, as_utc
 from scadbuddy.filament import ledger
 from scadbuddy.filament.ledger import Conn
+
+logger = logging.getLogger(__name__)
 
 #: How long before a usage row an archive may end: none was seen (spec §8.2).
 ARCHIVE_BEFORE = timedelta(0)
@@ -49,14 +52,49 @@ class UsageReport:
     unlinked: int = 0
 
 
-def unbooked(conn: Conn, ids: Sequence[int]) -> set[int]:
-    """The usage ids among ``ids`` that no `ledger.BB_USAGE` event names."""
-    rows = conn.execute(
+@dataclass(frozen=True)
+class _Link:
+    spool_id: UUID
+    archived: bool
+    linked_at: datetime | None
+
+
+def _links(conn: Conn, rows: Sequence[SpoolUsage]) -> dict[int, _Link]:
+    """The SB spool linked to each BB spool ``rows`` name, by BB spool id: whether it is
+    archived, and the time of its first `ledger.BB_SPOOL` event."""
+    found = conn.execute(
+        "SELECT l.bb_spool_id, l.spool_id, s.archived_at IS NOT NULL AS archived,"
+        " (SELECT min(e.at) FROM filament_spool_events e"
+        " WHERE e.spool_id = l.spool_id AND e.ref_kind = %s) AS linked_at"
+        " FROM filament_bb_links l JOIN filament_spools s ON s.id = l.spool_id"
+        " WHERE l.bb_spool_id = ANY(%s)",
+        (ledger.BB_SPOOL, sorted({row.spool_id for row in rows})),
+    ).fetchall()
+    return {r["bb_spool_id"]: _Link(r["spool_id"], r["archived"], r["linked_at"]) for r in found}
+
+
+def _books(row: SpoolUsage, link: _Link | None) -> bool:
+    """Whether ``row`` is one to book: it took grams, its BB spool is linked to an SB
+    spool that is not archived (the pull never writes to one), and it is later than the
+    link's reading."""
+    if row.weight_used <= 0 or link is None or link.archived:
+        return False
+    return link.linked_at is None or row.created_at > link.linked_at
+
+
+def unbooked(conn: Conn, rows: Sequence[SpoolUsage]) -> set[int]:
+    """The ids of the ``rows`` that `book_usage` would book and no `ledger.BB_USAGE`
+    event names yet."""
+    links = _links(conn, rows)
+    ids = {row.id for row in rows if _books(row, links.get(row.spool_id))}
+    if not ids:
+        return set()
+    booked = conn.execute(
         "SELECT DISTINCT ref_id FROM filament_spool_events"
         " WHERE ref_kind = %s AND ref_id = ANY(%s)",
         (ledger.BB_USAGE, [str(i) for i in ids]),
     ).fetchall()
-    return set(ids) - {int(row["ref_id"]) for row in rows}
+    return ids - {int(row["ref_id"]) for row in booked}
 
 
 def match_archive(row: SpoolUsage, archives: Sequence[Archive]) -> int | None:
@@ -80,46 +118,58 @@ def match_archive(row: SpoolUsage, archives: Sequence[Archive]) -> int | None:
 def book_usage(
     conn: Conn, rows: Sequence[SpoolUsage], archives: Sequence[Archive], *, actor: str
 ) -> UsageReport:
-    """Book ``rows`` on ``conn``'s transaction, as the module says. A row that took no
-    grams is skipped."""
+    """Book ``rows`` on ``conn``'s transaction, as the module says (`_books`). A row of
+    a BB spool with no link is counted ``unlinked``; a row of an archived SB spool is
+    counted neither way. Each row is booked in its own savepoint: one that fails is
+    logged and skipped, and the rest are booked."""
     report = UsageReport()
+    links = _links(conn, rows)
     for row in rows:
-        if row.weight_used <= 0:
-            continue
-        link = conn.execute(
-            "SELECT l.spool_id, (SELECT min(e.at) FROM filament_spool_events e"
-            " WHERE e.spool_id = l.spool_id AND e.ref_kind = %s) AS linked_at"
-            " FROM filament_bb_links l WHERE l.bb_spool_id = %s",
-            (ledger.BB_SPOOL, row.spool_id),
-        ).fetchone()
-        if link is None:
+        link = links.get(row.spool_id)
+        if row.weight_used > 0 and link is None:
             report.unlinked += 1
+        if link is None or not _books(row, link):
             continue
-        if link["linked_at"] is not None and row.created_at <= link["linked_at"]:
+        try:
+            with conn.transaction():
+                booked = _book(conn, row, link.spool_id, archives, actor)
+        except Exception as error:
+            logger.warning(
+                "could not book a Bambuddy usage row; skipped",
+                extra={"bb_usage_id": row.id, "error": type(error).__name__},
+                exc_info=True,
+            )
             continue
-        booked = ledger.record(
-            conn,
-            link["spool_id"],
-            "print_ended",
-            source="print_actual",
-            delta_g=-row.weight_used,
-            ref_kind=ledger.BB_USAGE,
-            ref_id=str(row.id),
-            at=row.created_at,
-            printer=_printer(conn, row.printer_id),
-            actor=actor,
-            data={
-                "job": row.print_name,
-                "basis": "bb_usage",
-                "bb_usage_id": row.id,
-                "bb_spool_id": row.spool_id,
-                "bb_status": row.status,
-                "bb_archive_id": match_archive(row, archives),
-            },
-        )
-        if booked is not None:
+        if booked:
             report.booked += 1
     return report
+
+
+def _book(
+    conn: Conn, row: SpoolUsage, spool_id: UUID, archives: Sequence[Archive], actor: str
+) -> bool:
+    """One row's ``print_ended`` event; ``False`` when it is booked already."""
+    event = ledger.record(
+        conn,
+        spool_id,
+        "print_ended",
+        source="print_actual",
+        delta_g=-row.weight_used,
+        ref_kind=ledger.BB_USAGE,
+        ref_id=str(row.id),
+        at=row.created_at,
+        printer=_printer(conn, row.printer_id),
+        actor=actor,
+        data={
+            "job": row.print_name,
+            "basis": "bb_usage",
+            "bb_usage_id": row.id,
+            "bb_spool_id": row.spool_id,
+            "bb_status": row.status,
+            "bb_archive_id": match_archive(row, archives),
+        },
+    )
+    return event is not None
 
 
 def _printer(conn: Conn, bb_printer_id: int | None) -> UUID | None:
