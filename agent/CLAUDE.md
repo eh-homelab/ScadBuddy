@@ -6,12 +6,12 @@ These notes cover `agent/`; paths are repo-relative; the root CLAUDE.md has the 
 
 The rule is in the root CLAUDE.md, "Database access (#5295)". Today the agent sidecar and
 the agent workers connect as the database owner (`SCADBUDDY_DATABASE_URL`), keep the
-`ai_*` tables, and run SQL on two backend tables in the gate's transaction (`flow_grants`,
-`flow_grant_uses`: `src/gate/store.ts` `grantInput`, under the grant row's share lock, until
-the gate moves to the CRUD service, #5299 step 10; `backend/scadbuddy/auth/caller_grants.py`
-`AGENT_GRANTS`). The agent's other reads of backend tables (the event log, flow runs, their
+`ai_*` tables, and run no SQL on a backend table: the gate's run grant check reads
+`flow_grants` and `flow_grant_uses` on the API (`src/gate/crudStore.ts`, area `gate`, #5299
+step 10), and the agent's other reads of backend tables (the event log, flow runs, their
 decisions and grants) go only through CRUD routes (#5299 D7, below); the API revokes its
-role's grants on `events`, `workflow_runs` and `workflow_run_decisions` at every start
+role's grants on `events`, `workflow_runs`, `workflow_run_decisions`, `flow_grants` and
+`flow_grant_uses` at every start
 (`backend/scadbuddy/auth/revoke.py` `RETIRED_GRANTS`), which binds nothing while the agent
 connects as the owner (until #5299 step 12); `test/retiredTables.test.ts` is the guard. The workspace files' `blob_refs` holds go through CRUD routes
 (#5299, below), no longer a trigger. `src/db/grants.ts`
@@ -119,7 +119,19 @@ the tests are `test/crudAccess.test.ts`, `test/crudPlugins.test.ts` and
 `test/crudPackages.test.ts`. During a roll an agent pod on SQL still takes the old advisory
 lock, and the API's lease acquire tries that lock too, so a lease is `busy` while such a pod
 tests the plugin; such a pod does not read the lease, so it can start a test while a lease
-holds (two tests of one plugin at once, the last listing kept; backend `agent_data/leases.py`). A route's
+holds (two tests of one plugin at once, the last listing kept; backend `agent_data/leases.py`). The tool-call gate's writes (#5299 step 10, `GATE_AREAS`,
+backend `api/crud_agent_gate.py`) take the same fallback: `src/gate/store.ts`'s `openInput`,
+`resolveInput`, `denyInput`, `decideInput` and `readInput` call `src/gate/crudStore.ts`
+`CrudGate` once the API lists area `gate` (`GateDb.useCrud`), and their SQL until then; the API
+builds the session events, writes them with the rows, the status, the audit row and the
+`scadbuddy_input` NOTIFY in one transaction, and answers them (`logged`), which the store hands
+to `EventLog.committed`. `decideInput` runs the validator on the API; with `live` the API first
+answers the row's run (`live_check`), writing nothing, and the store asks Temporal, then asks
+again naming the run it found. `grantInput` always calls the API (no SQL fallback: it reads the
+backend's `flow_grants`). A request id goes in the body or the query, never the path, and one
+over `REQUEST_ID_MAX` is answered as never asked with no call. Tests `test/crudGate.test.ts` and
+`test/gateBackend.pg.test.ts` (the API's port writes the same rows and events as the SQL; it
+runs `backend/` with `uv`, as the agent-durable parity test does). A route's
 answer counts only with `X-ScadBuddy-Crud: 1`; any other failure takes the read's existing
 error path (a lookup failure the activity retries, a 500, a resync). A session's successful `order_item_revision_add` (or
 `_after_acceptance`) is an `ai_session_order_costs` row (`src/sessions/orderCosts.ts`

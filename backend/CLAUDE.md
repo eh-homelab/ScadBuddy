@@ -11,7 +11,8 @@ These notes cover `backend/`; paths are repo-relative; the root CLAUDE.md has th
 
 The rule is in the root CLAUDE.md, "Database access (#5295)". Today the API connects as the
 database owner and runs SQL on the agent's `ai_*` tables. The agent's grant list is
-`auth/caller_grants.py` `AGENT_GRANTS`. The print worker holds no Postgres pool (#5298
+`auth/caller_grants.py` `AGENT_GRANTS`, empty since its gate's grant check runs here (#5299
+step 10); the API revokes what it held at every start (`auth/revoke.py` `RETIRED_GRANTS`). The print worker holds no Postgres pool (#5298
 Task 31): every store it uses goes through CRUD routes, it has no grant list, and the API
 revokes what its old role `scadbuddy_print` held at every start (`auth/revoke.py`, #5298
 Task 35). It holds no KEK either (#5298 Task 33): it exchanges its proof only (`exchange_source`, no
@@ -354,6 +355,18 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   agent's `pruneStaleRows`). `agent_data/access.py` holds the access writes they share.
   Tests `tests/api/test_crud_agent_access.py`, `test_crud_agent_plugins.py`,
   `test_crud_agent_packages.py`.
+- The agent's tool-call gate (#5299 step 10): `api/crud_agent_gate.py` (area `gate`) over
+  `agent_data/gate.py`, the agent's `gate/store.ts` writers statement for statement, each one
+  transaction: an entry opened (the Reset's cancels first, in their own), resolved, or decided
+  against its row's record by the gate's validator under the row's lock (`gate_validate.py` and
+  `gate_canonical.py`, byte copies of agent-durable's, kept so by `lint-codec-copies.sh`, with the
+  shared vectors in `tests/fixtures/`), a flow's refusal, and a run grant's approval checked
+  against `flow_grants` and `flow_grant_uses` under the grant row's share lock. The API builds the
+  session events as the agent did, appends them in the write's transaction, and answers them
+  (`logged`), which the agent hands to its event log. A decide that must know the row's run is
+  live answers `live_check` and writes nothing, and the agent asks again naming the run it found
+  running. Tests `tests/crud/test_crud_agent_gate.py`, `test_gate_vectors.py`; the agent's
+  `test/gateBackend.pg.test.ts` checks the port writes what the agent's SQL writes.
 - `backend/scadbuddy/flow_triggers/` — runs started on a schedule or an event (#2484,
   spec 2026-10-11 §12): `store.py` (`flow_triggers`, their standing grants and fires),
   `fire.py` (the `flow_trigger_fire` activity on the `library` queue), `events.py` (the

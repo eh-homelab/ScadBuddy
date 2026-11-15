@@ -4,7 +4,7 @@ import type { Sql } from 'postgres'
 // agent's. Its role created them, so it owns them, and only the owner can grant them. So
 // the agent grants, at every start once its schema is current, what the backend's roles
 // read and write of them; the backend grants the agent what it touches of the backend's
-// (`backend/scadbuddy/auth/caller_grants.py` `AGENT_GRANTS`). On one shared role (the
+// (`backend/scadbuddy/auth/caller_grants.py` `AGENT_GRANTS`, empty since #5299 step 10). On one shared role (the
 // deployment before it makes the roles, and production) there is nobody else to grant,
 // and nothing is done. Since #5299 D6 the API applies the agent's migrations, so a table a
 // later file makes is the API's role's: per-caller roles need the API and the agent on

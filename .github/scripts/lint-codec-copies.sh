@@ -9,7 +9,10 @@
 #    live in backend/scadbuddy/migrations_agent/ itself, #5299);
 #  - the two Python codecs must be the same code apart from their imports,
 #    docstrings (module, class and function ones) and converter function (the key lock and tombstone logic that no
-#    vector covers).
+#    vector covers);
+#  - the gate's validator and response hash (agent-durable's gate/validate.py and
+#    gate/canonical.py), which the API runs behind its CRUD routes (#5299 step 10), are
+#    copied into backend/ byte for byte.
 set -euo pipefail
 root="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 fail=0
@@ -22,6 +25,12 @@ same agent/test/fixtures/payload-vectors.json backend/tests/fixtures/payload-vec
 same agent/test/fixtures/subject-vectors.json backend/tests/fixtures/subject-vectors.json
 # The agent's credential vectors, which the API opens behind its CRUD routes (#5299 step 4).
 same agent/test/fixtures/secret-vectors.json backend/tests/fixtures/secret-vectors.json
+# The gate's validator and response hash, which the API runs behind its CRUD routes (#5299
+# step 10): agent-durable's, copied whole, and the vectors that pin them to the agent's.
+same agent/test/fixtures/pending-input-vectors.json backend/tests/fixtures/pending-input-vectors.json
+same agent/test/fixtures/response-hash-vectors.json backend/tests/fixtures/response-hash-vectors.json
+same agent-durable/src/scadbuddy_durable/gate/validate.py backend/scadbuddy/agent_data/gate_validate.py
+same agent-durable/src/scadbuddy_durable/gate/canonical.py backend/scadbuddy/agent_data/gate_canonical.py
 
 if ! python3 - "$root" <<'PY'
 import ast

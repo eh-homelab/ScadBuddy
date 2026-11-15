@@ -70,7 +70,8 @@ import {
   withServiceCredential,
 } from './api/serviceCredential.js'
 import { untilBackendAnswers } from './api/backendUp.js'
-import { BLOB_AREAS, CrudAreas, FORGET_AREAS, SECRET_AREAS, TASK_AREAS, WORKSPACE_AREAS } from './api/crudAreas.js'
+import { BLOB_AREAS, CrudAreas, FORGET_AREAS, GATE_AREAS, SECRET_AREAS, TASK_AREAS, WORKSPACE_AREAS } from './api/crudAreas.js'
+import { CrudGate } from './gate/crudStore.js'
 import { gated, STORE_AREAS, type StoreArea } from './api/crudStores.js'
 import { CrudFlowRunReads } from './flows/backendReads.js'
 import { BrowserSessions } from './auth/browserSession.js'
@@ -247,14 +248,17 @@ const serviceCredential: CredentialSource | undefined =
 // than the routes needs during a rolling deploy. The API seals and opens them with the KEK, so
 // with those areas listed this process needs no KEK for them. So do the key deletes and a flow
 // run's images (#5299 step 6, area `forget`). A session's background tasks and the agent's
-// command record (#5299 step 8, `TASK_AREAS`) follow the same rule.
+// command record (#5299 step 8, `TASK_AREAS`) follow the same rule, and so do the tool-call
+// gate's writes (#5299 step 10, `GATE_AREAS`), but for a run grant's check, which only the API runs.
 const crudFetch = serviceCredential ? withServiceCredential(globalThis.fetch, serviceCredential, config.backendUrl) : globalThis.fetch
-const crudAreas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: [...SECRET_AREAS, ...FORGET_AREAS, ...STORE_AREAS, ...WORKSPACE_AREAS, ...BLOB_AREAS, ...TASK_AREAS] })
+const crudAreas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: [...SECRET_AREAS, ...FORGET_AREAS, ...STORE_AREAS, ...WORKSPACE_AREAS, ...BLOB_AREAS, ...TASK_AREAS, ...GATE_AREAS] })
 crudAreas.start()
 // The small stores (#5299 step 5, api/crudStores.ts): each through its CRUD routes once the API
 // lists its area, over SQL until then.
 const crudTarget = { baseUrl: config.backendUrl, fetch: crudFetch }
 const storeArea = (area: StoreArea) => () => crudAreas.has(area)
+// The tool-call gate's routes (#5299 step 10, backend api/crud_agent_gate.py).
+const gateRoutes = { crud: new CrudGate(crudTarget), use: () => crudAreas.has('gate') }
 // A session's images, the staged attachments and the saved http_request bodies (#5299 step 7,
 // backend api/crud_agent_blobs.py): over SQL on `sql` until the API lists their areas.
 const crudBlobs = new CrudSessionBlobs(config.backendUrl, { fetch: crudFetch })
@@ -1095,7 +1099,7 @@ const temporalWorker =
           // AgentSession's gate (its writers and timers) and its turn end (unified runtime §5.1, flagged off until phase 6).
           // Its events through this replica's event log, so they wake its followers at once and
           // go on the bus under its id (#3365); with no session manager, a log that only publishes.
-          ...sessionGateActivities(gateDb(temporal.sql, sessions?.events, sessionEvents?.onAppend), settings),
+          ...sessionGateActivities(gateDb(temporal.sql, sessions?.events, sessionEvents?.onAppend, gateRoutes), settings),
           ...(sessions ? sessionFinishActivities(temporal.sql, sessions.events, orderCosts) : {}),
           ...(sessionAcquire ?? {}),
           // A durable turn's plugin and http_request tools (#2320): listed per turn, and
@@ -1185,7 +1189,7 @@ const hostWorkers =
     : undefined
 // A durable session's pending_input Query, respond and cancel_input Updates (spec §6.6), and
 // a recorded entry's decision in its row (R5, plan Step 9.7).
-if (sessions && temporalClient) sessions.durable = new DurableGate(temporalClient, database ? { db: { sql: database.sql, events: sessions.events } } : {})
+if (sessions && temporalClient) sessions.durable = new DurableGate(temporalClient, database ? { db: gateDb(database.sql, sessions.events, undefined, gateRoutes) } : {})
 // The browser relay's calls go through Temporal only sealed, each under a key of its own
 // that is deleted once the caller has the answer (#4780): so only with the codec. This replica
 // claims its tabs in ai_tab_owners only once its host worker polls HOST_QUEUE with bridge.tab: a

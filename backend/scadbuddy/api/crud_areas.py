@@ -87,7 +87,11 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: remote plugins and their sign-ins, sealed and opened with the API's KEK
 #: (`api/crud_agent_plugins.py`); its ``plugin-packages`` area is
 #: ``…/agent/plugin-packages`` and every route under it, the installed packages' pins
-#: (`api/crud_agent_packages.py`).
+#: (`api/crud_agent_packages.py`). Its ``gate`` area is ``…/agent/gate/*``: the tool-call
+#: gate's writes, an entry opened, a run grant's approval checked against ``flow_grants``, a
+#: flow's refusal, an entry resolved, a response decided against the row's record by the
+#: gate's validator, and the record read, each with its session events, status, audit row and
+#: ``scadbuddy_input`` NOTIFY in its transaction (#5299 step 10, `api/crud_agent_gate.py`).
 CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "projects": ["flows", "operations", "payload-keys"],
     "render": ["settings", "jobs", "refs", "blob-index", "store-folders", "assets", "libraries"],
@@ -145,6 +149,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "plugin-packages",
         "background-tasks",
         "operations",
+        "gate",
     ],
     "intake": ["sources"],
 }

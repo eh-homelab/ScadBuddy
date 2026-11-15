@@ -39,6 +39,13 @@ export const BLOB_AREAS = ['session-blobs', 'attachments', 'http-bodies'] as con
  */
 export const TASK_AREAS = ['background-tasks', 'operations'] as const
 
+/**
+ * The area of the tool-call gate's writes: an entry opened, resolved or decided, a flow's
+ * refusal and a request's response read (#5299 step 10; backend api/crud_agent_gate.py;
+ * gate/crudStore.ts). A run grant's check goes through its route whether or not it is listed.
+ */
+export const GATE_AREAS = ['gate'] as const
+
 export type CrudAreasOptions = {
   fetch?: typeof fetch
   /** The areas the agent waits for. */
