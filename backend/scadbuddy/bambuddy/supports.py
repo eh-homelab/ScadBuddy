@@ -59,9 +59,13 @@ class SupportsChoice(BaseModel):
     on_build_plate_only: bool | None = None
 
 
-def wanted_settings(template: Mapping[str, str], choice: SupportsChoice | None) -> dict[str, str]:
+def wanted_settings(
+    template: Mapping[str, ProcessValue], choice: SupportsChoice | None
+) -> dict[str, str]:
     """The support settings a print asks for: the template's, then the print's own."""
-    wanted = {key: template[key] for key in SUPPORT_KEYS if key in template}
+    # A support key is one value; a template's list (#2998) is not shaped here, and
+    # `print_run.plan_run` sends it as the template wrote it, under any choice made here.
+    wanted = {key: value for key in SUPPORT_KEYS if isinstance(value := template.get(key), str)}
     if choice is None:
         return wanted
     if not choice.enabled:
@@ -76,6 +80,18 @@ def wanted_settings(template: Mapping[str, str], choice: SupportsChoice | None) 
     if choice.threshold_angle is not None:
         wanted["support_threshold_angle"] = str(choice.threshold_angle)
     return {key: wanted[key] for key in SUPPORT_KEYS if key in wanted}
+
+
+def without_overridden(
+    wanted: Mapping[str, str], overrides: Mapping[str, ProcessValue]
+) -> dict[str, str]:
+    """``wanted`` less the support keys the request's ``process_overrides`` set (#2998):
+    an explicit override wins at the slice, and ``override_warnings`` judges it, so it
+    is neither shaped nor warned about as a support choice. With ``enable_support``
+    overridden to ``"0"``, no support setting is wanted at all."""
+    if overrides.get("enable_support") == "0":
+        return {}
+    return {key: value for key, value in wanted.items() if key not in overrides}
 
 
 def _not_applied(message: str) -> FilamentWarning:

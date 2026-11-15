@@ -1,9 +1,10 @@
 import type { Client } from '@temporalio/client'
 import type { Sql } from 'postgres'
+import { CrudReadError, crudRead } from '../api/crudRead.js'
 import { backgroundWorkflowId } from '../background/service.js'
 import { unscheduleTask } from '../background/temporal.js'
 import { terminateOpenToolCalls, workflowNotFound as notFound } from '../tools/activityProjection.js'
-import { type PayloadKeys, payloadKeyLock, subjectOf } from '../temporal/payloadCodec.js'
+import { dropPayloadKey, type PayloadKeys, payloadKeyLock, subjectOf, sweepBridgeKeys } from '../temporal/payloadCodec.js'
 import { dropUnnamedBytes } from '../workspace/store.js'
 import { copyForkRanges, ForksNeedKeys, hasForks } from './store.js'
 import { notifyWarmEvict } from './warmEvict.js'
@@ -35,6 +36,13 @@ import { notifyWarmEvict } from './warmEvict.js'
 //      which is not keyed to it; then its files' bytes kept in Postgres
 //      (`ai_session_file_bytes`) that no other workspace, a fork's among them, names. The
 //      audit log keeps its rows, as it does for every session.
+// Step 1's transaction is the API's once it lists area `forget` (#5299 step 6, backend
+// api/crud_agent_forget.py): `CrudSubjectKeys.forget` asks `POST …/crud/agent/forgotten-subjects/
+// {subject}`, which takes the lock, writes the tombstone and deletes a flow run's images and the
+// key in one transaction. A session with forks is refused there (`forks`): its forks' copies
+// open and seal its transcript, which stays here, so its forget runs the transaction below until
+// the sessions move to the API (#5299 step 9). Under the same lock, so either way a fork made later
+// sees the tombstone.
 // Its callers: an operator (`node dist/forget-subject.js <subject>`) and any delete
 // route added later. `SessionStore.delete` is never reached for a durable session,
 // whose conversation is in its workflow, not in ai_session_entries.
@@ -58,6 +66,8 @@ export type ForgetDeps = {
    * plaintext copy, on this pod; another worker's copy goes with its sweep once the row is gone.
    */
   sessionDirs?: ((sessionId: string) => Promise<void>) | undefined
+  /** Step 1 through the API (`CrudSubjectKeys`, above), when it lists area `forget`; the SQL below otherwise. */
+  crud?: Pick<CrudSubjectKeys, 'forget'> | undefined
 }
 
 export type Forgotten = {
@@ -91,17 +101,22 @@ export async function forgetSubject(deps: ForgetDeps, subject: string): Promise<
   if (sessionId !== undefined && deps.client) await terminateOpenToolCalls({ sql: deps.sql, client: deps.client }, sessionId, 'forgotten (forgetSubject)')
   // The tombstone with the deletion: no encoder still running for the subject (a
   // workflow task or an activity before the termination below) can make it a new key.
-  const keys = await deps.sql.begin(async (tx) => {
-    // The lock key creation takes (payloadCodec.ts), so no encoder's tombstone check
-    // reads from before this commits.
-    await tx`SELECT pg_advisory_xact_lock(hashtext(${payloadKeyLock(subject)}))`
-    // While the key still opens its transcript; a fork made later sees the tombstone (manager.ts insert).
-    if (sessionId !== undefined) await copyForkRanges(tx, deps.keys, sessionId)
-    await tx`INSERT INTO ai_forgotten_subjects (subject) VALUES (${subject}) ON CONFLICT (subject) DO NOTHING`
-    // A flow run's images go with its key (#2477, temporal/flowBlobs.ts).
-    if (subject.startsWith('flow-')) await tx`DELETE FROM ai_flow_blobs WHERE subject = ${subject}`
-    return tx`DELETE FROM ai_payload_keys WHERE subject = ${subject}`
-  })
+  const answered = deps.crud ? await deps.crud.forget(subject) : 'forks'
+  const key =
+    answered !== 'forks'
+      ? answered
+      : await deps.sql.begin(async (tx) => {
+          // The lock key creation takes (payloadCodec.ts), so no encoder's tombstone check
+          // reads from before this commits.
+          await tx`SELECT pg_advisory_xact_lock(hashtext(${payloadKeyLock(subject)}))`
+          // While the key still opens its transcript; a fork made later sees the tombstone (manager.ts insert).
+          if (sessionId !== undefined) await copyForkRanges(tx, deps.keys, sessionId)
+          await tx`INSERT INTO ai_forgotten_subjects (subject) VALUES (${subject}) ON CONFLICT (subject) DO NOTHING`
+          // A flow run's images go with its key (#2477, temporal/flowBlobs.ts).
+          if (subject.startsWith('flow-')) await tx`DELETE FROM ai_flow_blobs WHERE subject = ${subject}`
+          const deleted = await tx`DELETE FROM ai_payload_keys WHERE subject = ${subject}`
+          return deleted.count > 0
+        })
   // Again: copyForkRanges read the key to open the transcript, which cached it in this process.
   deps.keys?.forget(subject)
   let workflow: Forgotten['workflow'] = 'not_reached'
@@ -142,7 +157,7 @@ export async function forgetSubject(deps: ForgetDeps, subject: string): Promise<
     // A classic session's warm process, on whichever replica holds it (spec 2026-10-13 §5.3, warmEvict.ts).
     await notifyWarmEvict(deps.sql, id)
   }
-  return { key: keys.count > 0, workflow, rows }
+  return { key, workflow, rows }
 }
 
 /** How old a session's payload key is before sweepOrphanedSessionKeys looks at it: well past any insert it could race. */
@@ -174,4 +189,83 @@ export async function sweepOrphanedSessionKeys(sql: Sql, minAgeS = ORPHAN_KEY_MI
     })
   }
   return deleted
+}
+
+/** The deletes of payload keys no forget makes: a browser call's once it has its answer, and the hourly sweep. */
+export interface KeyDeletes {
+  /** A browser call's key (`bridge-<uuid>`); no tombstone. */
+  dropBridgeKey(subject: string): Promise<void>
+  /** The keys of sessions whose row is gone and of browser calls long over; how many went. */
+  sweep(): Promise<number>
+}
+
+/** The SQL the agent runs itself (`dropPayloadKey`, `sweepOrphanedSessionKeys`, `sweepBridgeKeys`) until the API lists area `forget`. */
+export class PgKeyDeletes implements KeyDeletes {
+  readonly #sql: Sql
+
+  constructor(sql: Sql) {
+    this.#sql = sql
+  }
+
+  dropBridgeKey(subject: string): Promise<void> {
+    return dropPayloadKey(this.#sql, undefined, subject)
+  }
+
+  async sweep(): Promise<number> {
+    return (await sweepOrphanedSessionKeys(this.#sql)) + (await sweepBridgeKeys(this.#sql))
+  }
+}
+
+/**
+ * Forgetting a subject, and deleting the keys nothing forgets, through the API's CRUD routes
+ * (#5299 step 6, area `forget`, backend api/crud_agent_forget.py): each one transaction there,
+ * under the subject's lock, as the SQL here runs it.
+ */
+export class CrudSubjectKeys implements KeyDeletes {
+  readonly #base: string
+  readonly #fetch: typeof fetch
+
+  constructor(baseUrl: string, options: { fetch?: typeof fetch } = {}) {
+    this.#base = baseUrl
+    this.#fetch = options.fetch ?? globalThis.fetch
+  }
+
+  /**
+   * forgetSubject's step 1: whether the subject had a key; `forks` for a session whose forks take
+   * their ranges first, which forgetSubject's own transaction does.
+   */
+  async forget(subject: string): Promise<boolean | 'forks'> {
+    try {
+      const { key } = await crudRead<{ key: boolean }>(this.#fetch, this.#base, `the forget of ${subject}`, `/forgotten-subjects/${subject}`, {
+        method: 'POST',
+        body: {},
+      })
+      return key
+    } catch (err) {
+      if (err instanceof CrudReadError && err.fromRoute && err.status === 409 && err.reason === 'forks-take-ranges') return 'forks'
+      throw err
+    }
+  }
+
+  async dropBridgeKey(subject: string): Promise<void> {
+    await crudRead(this.#fetch, this.#base, `the key of ${subject}`, `/payload-keys/${subject}/drop`, { method: 'POST', body: {} })
+  }
+
+  async sweep(): Promise<number> {
+    const { orphaned, bridge } = await crudRead<{ orphaned: number; bridge: number }>(this.#fetch, this.#base, 'the payload key sweep', '/payload-key-sweeps', {
+      method: 'POST',
+      body: {},
+      // One transaction per orphaned key, at most 100 of them.
+      timeoutMs: 60_000,
+    })
+    return orphaned + bridge
+  }
+}
+
+/** `crud` once `useCrud()` holds (the API lists area `forget`), `pg` until then, chosen per call (#5299 D9). */
+export function gatedKeyDeletes(pg: KeyDeletes, crud: KeyDeletes, useCrud: () => boolean): KeyDeletes {
+  return {
+    dropBridgeKey: (subject) => (useCrud() ? crud : pg).dropBridgeKey(subject),
+    sweep: () => (useCrud() ? crud : pg).sweep(),
+  }
 }

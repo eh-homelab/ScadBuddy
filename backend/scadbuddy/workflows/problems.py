@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import Mapping
 from typing import Any
 
 from temporalio.exceptions import ActivityError, ApplicationError
 
+from scadbuddy.bambuddy.process_overrides import named_key
 from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRunError
 from scadbuddy.workflows.print_models import FAILED, LAN_UNSURE, REFUSED, SLICE_LOST
 
@@ -84,6 +87,35 @@ def operation_lost(where: str) -> PrintRunError:
             "ScadBuddy stopped running this before it recorded how it ended, so it may "
             f"have been done. Check {where} before trying again."
         ),
+    )
+
+
+#: A slice the slicer refused over a process setting the print set (#2998).
+SETTING_REFUSED_PROBLEM = "https://scadbuddy.dev/problems/slicer-setting-refused"
+
+
+def setting_refused(
+    problem: PrintRunError, overrides: Mapping[str, Any] | None
+) -> PrintRunError | None:
+    """``problem``, a failed slice, as a 422 naming the process override its text names
+    (``process_overrides.named_key``), with that key as the extension ``key``. ``None``
+    when it names none: the failure then stays as it was. No setting is refused before
+    the slice (#2998); this is how the slicer's refusal of one comes back. Only a failure
+    of the slice itself is read (its text names the slicer or the slice, as
+    ``workflows/slicing.py`` ``slice_failure`` and Bambuddy's slice errors do), so an
+    upload or a queue failure whose text holds a common key such as ``timeout`` stays as
+    it was."""
+    if problem.status < 400 or not re.search(r"\bslic(e|er|ing)\b", problem.detail, re.I):
+        return None
+    key = named_key(problem.detail, overrides)
+    if key is None:
+        return None
+    return PrintRunError(
+        type=SETTING_REFUSED_PROBLEM,
+        status=422,
+        title="Unprocessable Content",
+        detail=f"The slicer refused the setting {key}: {problem.detail}",
+        extensions={**problem.extensions, "key": key},
     )
 
 

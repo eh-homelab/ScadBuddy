@@ -7,7 +7,8 @@ import { NOT_UP, transportKind } from './backendUp.js'
 // (backend auth/revoke.py `RETIRED_GRANTS`), but the agent still connects as the database
 // owner, so nothing in Postgres stops such SQL until #5299 step 12 removes its database URL;
 // until then test/retiredTables.test.ts fails on agent SQL that names one.
-// Its settings, credentials and payload keys (#5299 step 4) wait for their areas
+// Its settings, credentials and payload keys (#5299 step 4), and its forget, key deletes and flow
+// images (#5299 step 6), wait for their areas
 // (api/crudAreas.ts).
 
 export const AGENT_CRUD = '/api/v1/internal/crud/agent'
@@ -55,11 +56,32 @@ export async function crudRead<T>(
   path: string,
   init: { method?: 'GET' | 'POST'; body?: unknown; timeoutMs?: number } = {},
 ): Promise<T> {
+  const response = await crudResponse(fetchImpl, baseUrl, step, path, {
+    ...(init.method === undefined ? {} : { method: init.method }),
+    ...(init.timeoutMs === undefined ? {} : { timeoutMs: init.timeoutMs }),
+    ...(init.body === undefined ? {} : { body: JSON.stringify(init.body), contentType: 'application/json' }),
+  })
+  return (await response.json()) as T
+}
+
+/**
+ * The route's own 2xx answer to `path`, unread, or CrudReadError, as `crudRead` judges it: for a
+ * body that is not JSON (a flow run's images as multipart, #5299 D8), or an answer that is bytes.
+ * Without `contentType`, a `FormData` body sets its own.
+ */
+export async function crudResponse(
+  fetchImpl: typeof fetch,
+  baseUrl: string,
+  step: string,
+  path: string,
+  init: { method?: 'GET' | 'POST'; body?: RequestInit['body']; contentType?: string; timeoutMs?: number } = {},
+): Promise<Response> {
   let response: Response
   try {
     response = await fetchImpl(`${baseUrl.replace(/\/+$/, '')}${AGENT_CRUD}${path}`, {
       method: init.method ?? 'GET',
-      ...(init.body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(init.body) }),
+      ...(init.body === undefined ? {} : { body: init.body }),
+      ...(init.contentType === undefined ? {} : { headers: { 'content-type': init.contentType } }),
       signal: AbortSignal.timeout(init.timeoutMs ?? CRUD_READ_TIMEOUT_MS),
     })
   } catch (error) {
@@ -67,7 +89,7 @@ export async function crudRead<T>(
     throw new CrudReadError(`${kind === NOT_UP ? 'the backend is not up yet' : 'the backend could not be reached'} (${step}: ${kind})`)
   }
   const crud = response.headers.get('x-scadbuddy-crud') === '1'
-  if (response.ok && crud) return (await response.json()) as T
+  if (response.ok && crud) return response
   const problem = crud ? await problemOf(response) : { detail: '' }
   if (!crud) await response.body?.cancel()
   const who = crud ? 'the backend refused' : 'no CRUD route answered'

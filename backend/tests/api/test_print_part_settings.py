@@ -1,5 +1,5 @@
 """#5571: a print's settings per filament slot reach the copy the run uploads, and a
-slot the file lacks or a setting out of range is refused before anything goes. #5628:
+slot the file lacks is refused before anything goes (any key and value is taken, #2998). #5628:
 a library file takes them as an output does."""
 
 from __future__ import annotations
@@ -92,13 +92,14 @@ def test_the_check_gives_the_process_values_the_controls_open_on(
     check = client.post(f"/api/v1/print/outputs/{output_id}/check{WITH_VALUES}", json=body())
 
     assert check.status_code == 200, check.text
-    # A value out of the bounds (`ironing_type` here) is left out.
+    # #2998: a value Bambu Studio may not take (`ironing_type` here) is read as it is.
     assert check.json()["process_part_settings"] == {
         "top_shell_layers": 5,
         "bottom_shell_layers": 3,
         "wall_loops": 2,
         "sparse_infill_density": 15,
         "sparse_infill_pattern": "grid",
+        "ironing_type": "sideways",
     }
 
 
@@ -199,9 +200,11 @@ def test_an_output_that_prints_as_it_is_refuses_part_settings(
     assert not upload.called
 
 
-def test_a_setting_out_of_range_is_refused(client: TestClient, model: str) -> None:
+def test_a_value_that_is_no_setting_at_all_is_refused(client: TestClient, model: str) -> None:
+    """#2998: no key, value or range is refused (a density of 150 goes to the slicer);
+    only a value no Bambu config can hold, an object, fails the request."""
     output_id = prepared(client, model)
-    request = {**body(), "part_settings": {"1": {"sparse_infill_density": 150}}}
+    request = {**body(), "part_settings": {"1": {"sparse_infill_density": {"a": 1}}}}
 
     response = client.post(f"/api/v1/print/outputs/{output_id}/run", json=request)
 

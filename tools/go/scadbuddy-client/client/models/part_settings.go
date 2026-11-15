@@ -7,8 +7,10 @@ import (
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91 "github.com/microsoft/kiota-abstractions-go/serialization"
 )
 
-// PartSettings the process settings for the parts of one slot; each omitted one is the process's.
+// PartSettings the process settings for the parts of one slot; each omitted one is the process's. Any Bambu Studio key (#2998): the named fields are the dialog's first six, and every other key is kept as sent, but a host-side key (“process_overrides.HOST_SIDE_KEYS“), which is dropped.
 type PartSettings struct {
+	// Stores additional data not described in the OpenAPI description found when deserializing. Can be used for serialization as well.
+	additionalData map[string]any
 	// The bottom_shell_layers property
 	bottom_shell_layers PartSettings_PartSettings_bottom_shell_layersable
 	// The ironing_type property
@@ -23,12 +25,18 @@ type PartSettings struct {
 	wall_loops PartSettings_PartSettings_wall_loopsable
 }
 
-// PartSettings_PartSettings_bottom_shell_layers composed type wrapper for classes int32, PartSettings_bottom_shell_layersMember1able
+// PartSettings_PartSettings_bottom_shell_layers composed type wrapper for classes bool, float64, int32, PartSettings_bottom_shell_layersMember1able, string
 type PartSettings_PartSettings_bottom_shell_layers struct {
+	// Composed type representation for type bool
+	boolean *bool
+	// Composed type representation for type float64
+	double *float64
 	// Composed type representation for type int32
 	integer *int32
 	// Composed type representation for type PartSettings_bottom_shell_layersMember1able
 	partSettings_bottom_shell_layersMember1 PartSettings_bottom_shell_layersMember1able
+	// Composed type representation for type string
+	string *string
 }
 
 // NewPartSettings_PartSettings_bottom_shell_layers instantiates a new PartSettings_PartSettings_bottom_shell_layers and sets the default values.
@@ -42,11 +50,26 @@ func NewPartSettings_PartSettings_bottom_shell_layers() *PartSettings_PartSettin
 func CreatePartSettings_PartSettings_bottom_shell_layersFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
 	result := NewPartSettings_PartSettings_bottom_shell_layers()
 	if parseNode != nil {
-		if val, err := parseNode.GetInt32Value(); val != nil {
+		if val, err := parseNode.GetBoolValue(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetBoolean(val)
+		} else if val, err := parseNode.GetFloat64Value(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetDouble(val)
+		} else if val, err := parseNode.GetInt32Value(); val != nil {
 			if err != nil {
 				return nil, err
 			}
 			result.SetInteger(val)
+		} else if val, err := parseNode.GetStringValue(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetString(val)
 		} else if val, err := parseNode.GetObjectValue(CreatePartSettings_bottom_shell_layersMember1FromDiscriminatorValue); val != nil {
 			if err != nil {
 				return nil, err
@@ -57,6 +80,18 @@ func CreatePartSettings_PartSettings_bottom_shell_layersFromDiscriminatorValue(p
 		}
 	}
 	return result, nil
+}
+
+// GetBoolean gets the boolean property value. Composed type representation for type bool
+// returns a *bool when successful
+func (m *PartSettings_PartSettings_bottom_shell_layers) GetBoolean() *bool {
+	return m.boolean
+}
+
+// GetDouble gets the double property value. Composed type representation for type float64
+// returns a *float64 when successful
+func (m *PartSettings_PartSettings_bottom_shell_layers) GetDouble() *float64 {
+	return m.double
 }
 
 // GetFieldDeserializers the deserialization information for the current model
@@ -83,10 +118,31 @@ func (m *PartSettings_PartSettings_bottom_shell_layers) GetPartSettingsBottomShe
 	return m.partSettings_bottom_shell_layersMember1
 }
 
+// GetString gets the string property value. Composed type representation for type string
+// returns a *string when successful
+func (m *PartSettings_PartSettings_bottom_shell_layers) GetString() *string {
+	return m.string
+}
+
 // Serialize serializes information the current object
 func (m *PartSettings_PartSettings_bottom_shell_layers) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
-	if m.GetInteger() != nil {
+	if m.GetBoolean() != nil {
+		err := writer.WriteBoolValue("", m.GetBoolean())
+		if err != nil {
+			return err
+		}
+	} else if m.GetDouble() != nil {
+		err := writer.WriteFloat64Value("", m.GetDouble())
+		if err != nil {
+			return err
+		}
+	} else if m.GetInteger() != nil {
 		err := writer.WriteInt32Value("", m.GetInteger())
+		if err != nil {
+			return err
+		}
+	} else if m.GetString() != nil {
+		err := writer.WriteStringValue("", m.GetString())
 		if err != nil {
 			return err
 		}
@@ -99,6 +155,16 @@ func (m *PartSettings_PartSettings_bottom_shell_layers) Serialize(writer i878a80
 	return nil
 }
 
+// SetBoolean sets the boolean property value. Composed type representation for type bool
+func (m *PartSettings_PartSettings_bottom_shell_layers) SetBoolean(value *bool) {
+	m.boolean = value
+}
+
+// SetDouble sets the double property value. Composed type representation for type float64
+func (m *PartSettings_PartSettings_bottom_shell_layers) SetDouble(value *float64) {
+	m.double = value
+}
+
 // SetInteger sets the integer property value. Composed type representation for type int32
 func (m *PartSettings_PartSettings_bottom_shell_layers) SetInteger(value *int32) {
 	m.integer = value
@@ -109,8 +175,19 @@ func (m *PartSettings_PartSettings_bottom_shell_layers) SetPartSettingsBottomShe
 	m.partSettings_bottom_shell_layersMember1 = value
 }
 
-// PartSettings_PartSettings_ironing_type composed type wrapper for classes PartSettings_ironing_typeMember1able, string
+// SetString sets the string property value. Composed type representation for type string
+func (m *PartSettings_PartSettings_bottom_shell_layers) SetString(value *string) {
+	m.string = value
+}
+
+// PartSettings_PartSettings_ironing_type composed type wrapper for classes bool, float64, int32, PartSettings_ironing_typeMember1able, string
 type PartSettings_PartSettings_ironing_type struct {
+	// Composed type representation for type bool
+	boolean *bool
+	// Composed type representation for type float64
+	double *float64
+	// Composed type representation for type int32
+	integer *int32
 	// Composed type representation for type PartSettings_ironing_typeMember1able
 	partSettings_ironing_typeMember1 PartSettings_ironing_typeMember1able
 	// Composed type representation for type string
@@ -128,7 +205,22 @@ func NewPartSettings_PartSettings_ironing_type() *PartSettings_PartSettings_iron
 func CreatePartSettings_PartSettings_ironing_typeFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
 	result := NewPartSettings_PartSettings_ironing_type()
 	if parseNode != nil {
-		if val, err := parseNode.GetStringValue(); val != nil {
+		if val, err := parseNode.GetBoolValue(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetBoolean(val)
+		} else if val, err := parseNode.GetFloat64Value(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetDouble(val)
+		} else if val, err := parseNode.GetInt32Value(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetInteger(val)
+		} else if val, err := parseNode.GetStringValue(); val != nil {
 			if err != nil {
 				return nil, err
 			}
@@ -145,10 +237,28 @@ func CreatePartSettings_PartSettings_ironing_typeFromDiscriminatorValue(parseNod
 	return result, nil
 }
 
+// GetBoolean gets the boolean property value. Composed type representation for type bool
+// returns a *bool when successful
+func (m *PartSettings_PartSettings_ironing_type) GetBoolean() *bool {
+	return m.boolean
+}
+
+// GetDouble gets the double property value. Composed type representation for type float64
+// returns a *float64 when successful
+func (m *PartSettings_PartSettings_ironing_type) GetDouble() *float64 {
+	return m.double
+}
+
 // GetFieldDeserializers the deserialization information for the current model
 // returns a map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error when successful
 func (m *PartSettings_PartSettings_ironing_type) GetFieldDeserializers() map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 	return make(map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error)
+}
+
+// GetInteger gets the integer property value. Composed type representation for type int32
+// returns a *int32 when successful
+func (m *PartSettings_PartSettings_ironing_type) GetInteger() *int32 {
+	return m.integer
 }
 
 // GetIsComposedType determines if the current object is a wrapper around a composed type
@@ -171,7 +281,22 @@ func (m *PartSettings_PartSettings_ironing_type) GetString() *string {
 
 // Serialize serializes information the current object
 func (m *PartSettings_PartSettings_ironing_type) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
-	if m.GetString() != nil {
+	if m.GetBoolean() != nil {
+		err := writer.WriteBoolValue("", m.GetBoolean())
+		if err != nil {
+			return err
+		}
+	} else if m.GetDouble() != nil {
+		err := writer.WriteFloat64Value("", m.GetDouble())
+		if err != nil {
+			return err
+		}
+	} else if m.GetInteger() != nil {
+		err := writer.WriteInt32Value("", m.GetInteger())
+		if err != nil {
+			return err
+		}
+	} else if m.GetString() != nil {
 		err := writer.WriteStringValue("", m.GetString())
 		if err != nil {
 			return err
@@ -185,6 +310,21 @@ func (m *PartSettings_PartSettings_ironing_type) Serialize(writer i878a80d2330e8
 	return nil
 }
 
+// SetBoolean sets the boolean property value. Composed type representation for type bool
+func (m *PartSettings_PartSettings_ironing_type) SetBoolean(value *bool) {
+	m.boolean = value
+}
+
+// SetDouble sets the double property value. Composed type representation for type float64
+func (m *PartSettings_PartSettings_ironing_type) SetDouble(value *float64) {
+	m.double = value
+}
+
+// SetInteger sets the integer property value. Composed type representation for type int32
+func (m *PartSettings_PartSettings_ironing_type) SetInteger(value *int32) {
+	m.integer = value
+}
+
 // SetPartSettingsIroningTypeMember1 sets the PartSettings_ironing_typeMember1 property value. Composed type representation for type PartSettings_ironing_typeMember1able
 func (m *PartSettings_PartSettings_ironing_type) SetPartSettingsIroningTypeMember1(value PartSettings_ironing_typeMember1able) {
 	m.partSettings_ironing_typeMember1 = value
@@ -195,12 +335,18 @@ func (m *PartSettings_PartSettings_ironing_type) SetString(value *string) {
 	m.string = value
 }
 
-// PartSettings_PartSettings_sparse_infill_density composed type wrapper for classes int32, PartSettings_sparse_infill_densityMember1able
+// PartSettings_PartSettings_sparse_infill_density composed type wrapper for classes bool, float64, int32, PartSettings_sparse_infill_densityMember1able, string
 type PartSettings_PartSettings_sparse_infill_density struct {
+	// Composed type representation for type bool
+	boolean *bool
+	// Composed type representation for type float64
+	double *float64
 	// Composed type representation for type int32
 	integer *int32
 	// Composed type representation for type PartSettings_sparse_infill_densityMember1able
 	partSettings_sparse_infill_densityMember1 PartSettings_sparse_infill_densityMember1able
+	// Composed type representation for type string
+	string *string
 }
 
 // NewPartSettings_PartSettings_sparse_infill_density instantiates a new PartSettings_PartSettings_sparse_infill_density and sets the default values.
@@ -214,11 +360,26 @@ func NewPartSettings_PartSettings_sparse_infill_density() *PartSettings_PartSett
 func CreatePartSettings_PartSettings_sparse_infill_densityFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
 	result := NewPartSettings_PartSettings_sparse_infill_density()
 	if parseNode != nil {
-		if val, err := parseNode.GetInt32Value(); val != nil {
+		if val, err := parseNode.GetBoolValue(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetBoolean(val)
+		} else if val, err := parseNode.GetFloat64Value(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetDouble(val)
+		} else if val, err := parseNode.GetInt32Value(); val != nil {
 			if err != nil {
 				return nil, err
 			}
 			result.SetInteger(val)
+		} else if val, err := parseNode.GetStringValue(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetString(val)
 		} else if val, err := parseNode.GetObjectValue(CreatePartSettings_sparse_infill_densityMember1FromDiscriminatorValue); val != nil {
 			if err != nil {
 				return nil, err
@@ -229,6 +390,18 @@ func CreatePartSettings_PartSettings_sparse_infill_densityFromDiscriminatorValue
 		}
 	}
 	return result, nil
+}
+
+// GetBoolean gets the boolean property value. Composed type representation for type bool
+// returns a *bool when successful
+func (m *PartSettings_PartSettings_sparse_infill_density) GetBoolean() *bool {
+	return m.boolean
+}
+
+// GetDouble gets the double property value. Composed type representation for type float64
+// returns a *float64 when successful
+func (m *PartSettings_PartSettings_sparse_infill_density) GetDouble() *float64 {
+	return m.double
 }
 
 // GetFieldDeserializers the deserialization information for the current model
@@ -255,10 +428,31 @@ func (m *PartSettings_PartSettings_sparse_infill_density) GetPartSettingsSparseI
 	return m.partSettings_sparse_infill_densityMember1
 }
 
+// GetString gets the string property value. Composed type representation for type string
+// returns a *string when successful
+func (m *PartSettings_PartSettings_sparse_infill_density) GetString() *string {
+	return m.string
+}
+
 // Serialize serializes information the current object
 func (m *PartSettings_PartSettings_sparse_infill_density) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
-	if m.GetInteger() != nil {
+	if m.GetBoolean() != nil {
+		err := writer.WriteBoolValue("", m.GetBoolean())
+		if err != nil {
+			return err
+		}
+	} else if m.GetDouble() != nil {
+		err := writer.WriteFloat64Value("", m.GetDouble())
+		if err != nil {
+			return err
+		}
+	} else if m.GetInteger() != nil {
 		err := writer.WriteInt32Value("", m.GetInteger())
+		if err != nil {
+			return err
+		}
+	} else if m.GetString() != nil {
+		err := writer.WriteStringValue("", m.GetString())
 		if err != nil {
 			return err
 		}
@@ -271,6 +465,16 @@ func (m *PartSettings_PartSettings_sparse_infill_density) Serialize(writer i878a
 	return nil
 }
 
+// SetBoolean sets the boolean property value. Composed type representation for type bool
+func (m *PartSettings_PartSettings_sparse_infill_density) SetBoolean(value *bool) {
+	m.boolean = value
+}
+
+// SetDouble sets the double property value. Composed type representation for type float64
+func (m *PartSettings_PartSettings_sparse_infill_density) SetDouble(value *float64) {
+	m.double = value
+}
+
 // SetInteger sets the integer property value. Composed type representation for type int32
 func (m *PartSettings_PartSettings_sparse_infill_density) SetInteger(value *int32) {
 	m.integer = value
@@ -281,8 +485,19 @@ func (m *PartSettings_PartSettings_sparse_infill_density) SetPartSettingsSparseI
 	m.partSettings_sparse_infill_densityMember1 = value
 }
 
-// PartSettings_PartSettings_sparse_infill_pattern composed type wrapper for classes PartSettings_sparse_infill_patternMember1able, string
+// SetString sets the string property value. Composed type representation for type string
+func (m *PartSettings_PartSettings_sparse_infill_density) SetString(value *string) {
+	m.string = value
+}
+
+// PartSettings_PartSettings_sparse_infill_pattern composed type wrapper for classes bool, float64, int32, PartSettings_sparse_infill_patternMember1able, string
 type PartSettings_PartSettings_sparse_infill_pattern struct {
+	// Composed type representation for type bool
+	boolean *bool
+	// Composed type representation for type float64
+	double *float64
+	// Composed type representation for type int32
+	integer *int32
 	// Composed type representation for type PartSettings_sparse_infill_patternMember1able
 	partSettings_sparse_infill_patternMember1 PartSettings_sparse_infill_patternMember1able
 	// Composed type representation for type string
@@ -300,7 +515,22 @@ func NewPartSettings_PartSettings_sparse_infill_pattern() *PartSettings_PartSett
 func CreatePartSettings_PartSettings_sparse_infill_patternFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
 	result := NewPartSettings_PartSettings_sparse_infill_pattern()
 	if parseNode != nil {
-		if val, err := parseNode.GetStringValue(); val != nil {
+		if val, err := parseNode.GetBoolValue(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetBoolean(val)
+		} else if val, err := parseNode.GetFloat64Value(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetDouble(val)
+		} else if val, err := parseNode.GetInt32Value(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetInteger(val)
+		} else if val, err := parseNode.GetStringValue(); val != nil {
 			if err != nil {
 				return nil, err
 			}
@@ -317,10 +547,28 @@ func CreatePartSettings_PartSettings_sparse_infill_patternFromDiscriminatorValue
 	return result, nil
 }
 
+// GetBoolean gets the boolean property value. Composed type representation for type bool
+// returns a *bool when successful
+func (m *PartSettings_PartSettings_sparse_infill_pattern) GetBoolean() *bool {
+	return m.boolean
+}
+
+// GetDouble gets the double property value. Composed type representation for type float64
+// returns a *float64 when successful
+func (m *PartSettings_PartSettings_sparse_infill_pattern) GetDouble() *float64 {
+	return m.double
+}
+
 // GetFieldDeserializers the deserialization information for the current model
 // returns a map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error when successful
 func (m *PartSettings_PartSettings_sparse_infill_pattern) GetFieldDeserializers() map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 	return make(map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error)
+}
+
+// GetInteger gets the integer property value. Composed type representation for type int32
+// returns a *int32 when successful
+func (m *PartSettings_PartSettings_sparse_infill_pattern) GetInteger() *int32 {
+	return m.integer
 }
 
 // GetIsComposedType determines if the current object is a wrapper around a composed type
@@ -343,7 +591,22 @@ func (m *PartSettings_PartSettings_sparse_infill_pattern) GetString() *string {
 
 // Serialize serializes information the current object
 func (m *PartSettings_PartSettings_sparse_infill_pattern) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
-	if m.GetString() != nil {
+	if m.GetBoolean() != nil {
+		err := writer.WriteBoolValue("", m.GetBoolean())
+		if err != nil {
+			return err
+		}
+	} else if m.GetDouble() != nil {
+		err := writer.WriteFloat64Value("", m.GetDouble())
+		if err != nil {
+			return err
+		}
+	} else if m.GetInteger() != nil {
+		err := writer.WriteInt32Value("", m.GetInteger())
+		if err != nil {
+			return err
+		}
+	} else if m.GetString() != nil {
 		err := writer.WriteStringValue("", m.GetString())
 		if err != nil {
 			return err
@@ -357,6 +620,21 @@ func (m *PartSettings_PartSettings_sparse_infill_pattern) Serialize(writer i878a
 	return nil
 }
 
+// SetBoolean sets the boolean property value. Composed type representation for type bool
+func (m *PartSettings_PartSettings_sparse_infill_pattern) SetBoolean(value *bool) {
+	m.boolean = value
+}
+
+// SetDouble sets the double property value. Composed type representation for type float64
+func (m *PartSettings_PartSettings_sparse_infill_pattern) SetDouble(value *float64) {
+	m.double = value
+}
+
+// SetInteger sets the integer property value. Composed type representation for type int32
+func (m *PartSettings_PartSettings_sparse_infill_pattern) SetInteger(value *int32) {
+	m.integer = value
+}
+
 // SetPartSettingsSparseInfillPatternMember1 sets the PartSettings_sparse_infill_patternMember1 property value. Composed type representation for type PartSettings_sparse_infill_patternMember1able
 func (m *PartSettings_PartSettings_sparse_infill_pattern) SetPartSettingsSparseInfillPatternMember1(value PartSettings_sparse_infill_patternMember1able) {
 	m.partSettings_sparse_infill_patternMember1 = value
@@ -367,12 +645,18 @@ func (m *PartSettings_PartSettings_sparse_infill_pattern) SetString(value *strin
 	m.string = value
 }
 
-// PartSettings_PartSettings_top_shell_layers composed type wrapper for classes int32, PartSettings_top_shell_layersMember1able
+// PartSettings_PartSettings_top_shell_layers composed type wrapper for classes bool, float64, int32, PartSettings_top_shell_layersMember1able, string
 type PartSettings_PartSettings_top_shell_layers struct {
+	// Composed type representation for type bool
+	boolean *bool
+	// Composed type representation for type float64
+	double *float64
 	// Composed type representation for type int32
 	integer *int32
 	// Composed type representation for type PartSettings_top_shell_layersMember1able
 	partSettings_top_shell_layersMember1 PartSettings_top_shell_layersMember1able
+	// Composed type representation for type string
+	string *string
 }
 
 // NewPartSettings_PartSettings_top_shell_layers instantiates a new PartSettings_PartSettings_top_shell_layers and sets the default values.
@@ -386,11 +670,26 @@ func NewPartSettings_PartSettings_top_shell_layers() *PartSettings_PartSettings_
 func CreatePartSettings_PartSettings_top_shell_layersFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
 	result := NewPartSettings_PartSettings_top_shell_layers()
 	if parseNode != nil {
-		if val, err := parseNode.GetInt32Value(); val != nil {
+		if val, err := parseNode.GetBoolValue(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetBoolean(val)
+		} else if val, err := parseNode.GetFloat64Value(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetDouble(val)
+		} else if val, err := parseNode.GetInt32Value(); val != nil {
 			if err != nil {
 				return nil, err
 			}
 			result.SetInteger(val)
+		} else if val, err := parseNode.GetStringValue(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetString(val)
 		} else if val, err := parseNode.GetObjectValue(CreatePartSettings_top_shell_layersMember1FromDiscriminatorValue); val != nil {
 			if err != nil {
 				return nil, err
@@ -401,6 +700,18 @@ func CreatePartSettings_PartSettings_top_shell_layersFromDiscriminatorValue(pars
 		}
 	}
 	return result, nil
+}
+
+// GetBoolean gets the boolean property value. Composed type representation for type bool
+// returns a *bool when successful
+func (m *PartSettings_PartSettings_top_shell_layers) GetBoolean() *bool {
+	return m.boolean
+}
+
+// GetDouble gets the double property value. Composed type representation for type float64
+// returns a *float64 when successful
+func (m *PartSettings_PartSettings_top_shell_layers) GetDouble() *float64 {
+	return m.double
 }
 
 // GetFieldDeserializers the deserialization information for the current model
@@ -427,10 +738,31 @@ func (m *PartSettings_PartSettings_top_shell_layers) GetPartSettingsTopShellLaye
 	return m.partSettings_top_shell_layersMember1
 }
 
+// GetString gets the string property value. Composed type representation for type string
+// returns a *string when successful
+func (m *PartSettings_PartSettings_top_shell_layers) GetString() *string {
+	return m.string
+}
+
 // Serialize serializes information the current object
 func (m *PartSettings_PartSettings_top_shell_layers) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
-	if m.GetInteger() != nil {
+	if m.GetBoolean() != nil {
+		err := writer.WriteBoolValue("", m.GetBoolean())
+		if err != nil {
+			return err
+		}
+	} else if m.GetDouble() != nil {
+		err := writer.WriteFloat64Value("", m.GetDouble())
+		if err != nil {
+			return err
+		}
+	} else if m.GetInteger() != nil {
 		err := writer.WriteInt32Value("", m.GetInteger())
+		if err != nil {
+			return err
+		}
+	} else if m.GetString() != nil {
+		err := writer.WriteStringValue("", m.GetString())
 		if err != nil {
 			return err
 		}
@@ -443,6 +775,16 @@ func (m *PartSettings_PartSettings_top_shell_layers) Serialize(writer i878a80d23
 	return nil
 }
 
+// SetBoolean sets the boolean property value. Composed type representation for type bool
+func (m *PartSettings_PartSettings_top_shell_layers) SetBoolean(value *bool) {
+	m.boolean = value
+}
+
+// SetDouble sets the double property value. Composed type representation for type float64
+func (m *PartSettings_PartSettings_top_shell_layers) SetDouble(value *float64) {
+	m.double = value
+}
+
 // SetInteger sets the integer property value. Composed type representation for type int32
 func (m *PartSettings_PartSettings_top_shell_layers) SetInteger(value *int32) {
 	m.integer = value
@@ -453,12 +795,23 @@ func (m *PartSettings_PartSettings_top_shell_layers) SetPartSettingsTopShellLaye
 	m.partSettings_top_shell_layersMember1 = value
 }
 
-// PartSettings_PartSettings_wall_loops composed type wrapper for classes int32, PartSettings_wall_loopsMember1able
+// SetString sets the string property value. Composed type representation for type string
+func (m *PartSettings_PartSettings_top_shell_layers) SetString(value *string) {
+	m.string = value
+}
+
+// PartSettings_PartSettings_wall_loops composed type wrapper for classes bool, float64, int32, PartSettings_wall_loopsMember1able, string
 type PartSettings_PartSettings_wall_loops struct {
+	// Composed type representation for type bool
+	boolean *bool
+	// Composed type representation for type float64
+	double *float64
 	// Composed type representation for type int32
 	integer *int32
 	// Composed type representation for type PartSettings_wall_loopsMember1able
 	partSettings_wall_loopsMember1 PartSettings_wall_loopsMember1able
+	// Composed type representation for type string
+	string *string
 }
 
 // NewPartSettings_PartSettings_wall_loops instantiates a new PartSettings_PartSettings_wall_loops and sets the default values.
@@ -472,11 +825,26 @@ func NewPartSettings_PartSettings_wall_loops() *PartSettings_PartSettings_wall_l
 func CreatePartSettings_PartSettings_wall_loopsFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
 	result := NewPartSettings_PartSettings_wall_loops()
 	if parseNode != nil {
-		if val, err := parseNode.GetInt32Value(); val != nil {
+		if val, err := parseNode.GetBoolValue(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetBoolean(val)
+		} else if val, err := parseNode.GetFloat64Value(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetDouble(val)
+		} else if val, err := parseNode.GetInt32Value(); val != nil {
 			if err != nil {
 				return nil, err
 			}
 			result.SetInteger(val)
+		} else if val, err := parseNode.GetStringValue(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetString(val)
 		} else if val, err := parseNode.GetObjectValue(CreatePartSettings_wall_loopsMember1FromDiscriminatorValue); val != nil {
 			if err != nil {
 				return nil, err
@@ -487,6 +855,18 @@ func CreatePartSettings_PartSettings_wall_loopsFromDiscriminatorValue(parseNode 
 		}
 	}
 	return result, nil
+}
+
+// GetBoolean gets the boolean property value. Composed type representation for type bool
+// returns a *bool when successful
+func (m *PartSettings_PartSettings_wall_loops) GetBoolean() *bool {
+	return m.boolean
+}
+
+// GetDouble gets the double property value. Composed type representation for type float64
+// returns a *float64 when successful
+func (m *PartSettings_PartSettings_wall_loops) GetDouble() *float64 {
+	return m.double
 }
 
 // GetFieldDeserializers the deserialization information for the current model
@@ -513,10 +893,31 @@ func (m *PartSettings_PartSettings_wall_loops) GetPartSettingsWallLoopsMember1()
 	return m.partSettings_wall_loopsMember1
 }
 
+// GetString gets the string property value. Composed type representation for type string
+// returns a *string when successful
+func (m *PartSettings_PartSettings_wall_loops) GetString() *string {
+	return m.string
+}
+
 // Serialize serializes information the current object
 func (m *PartSettings_PartSettings_wall_loops) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
-	if m.GetInteger() != nil {
+	if m.GetBoolean() != nil {
+		err := writer.WriteBoolValue("", m.GetBoolean())
+		if err != nil {
+			return err
+		}
+	} else if m.GetDouble() != nil {
+		err := writer.WriteFloat64Value("", m.GetDouble())
+		if err != nil {
+			return err
+		}
+	} else if m.GetInteger() != nil {
 		err := writer.WriteInt32Value("", m.GetInteger())
+		if err != nil {
+			return err
+		}
+	} else if m.GetString() != nil {
+		err := writer.WriteStringValue("", m.GetString())
 		if err != nil {
 			return err
 		}
@@ -529,6 +930,16 @@ func (m *PartSettings_PartSettings_wall_loops) Serialize(writer i878a80d2330e89d
 	return nil
 }
 
+// SetBoolean sets the boolean property value. Composed type representation for type bool
+func (m *PartSettings_PartSettings_wall_loops) SetBoolean(value *bool) {
+	m.boolean = value
+}
+
+// SetDouble sets the double property value. Composed type representation for type float64
+func (m *PartSettings_PartSettings_wall_loops) SetDouble(value *float64) {
+	m.double = value
+}
+
 // SetInteger sets the integer property value. Composed type representation for type int32
 func (m *PartSettings_PartSettings_wall_loops) SetInteger(value *int32) {
 	m.integer = value
@@ -539,57 +950,99 @@ func (m *PartSettings_PartSettings_wall_loops) SetPartSettingsWallLoopsMember1(v
 	m.partSettings_wall_loopsMember1 = value
 }
 
+// SetString sets the string property value. Composed type representation for type string
+func (m *PartSettings_PartSettings_wall_loops) SetString(value *string) {
+	m.string = value
+}
+
 type PartSettings_PartSettings_bottom_shell_layersable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
+	GetBoolean() *bool
+	GetDouble() *float64
 	GetInteger() *int32
 	GetPartSettingsBottomShellLayersMember1() PartSettings_bottom_shell_layersMember1able
+	GetString() *string
+	SetBoolean(value *bool)
+	SetDouble(value *float64)
 	SetInteger(value *int32)
 	SetPartSettingsBottomShellLayersMember1(value PartSettings_bottom_shell_layersMember1able)
+	SetString(value *string)
 }
 
 type PartSettings_PartSettings_ironing_typeable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
+	GetBoolean() *bool
+	GetDouble() *float64
+	GetInteger() *int32
 	GetPartSettingsIroningTypeMember1() PartSettings_ironing_typeMember1able
 	GetString() *string
+	SetBoolean(value *bool)
+	SetDouble(value *float64)
+	SetInteger(value *int32)
 	SetPartSettingsIroningTypeMember1(value PartSettings_ironing_typeMember1able)
 	SetString(value *string)
 }
 
 type PartSettings_PartSettings_sparse_infill_densityable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
+	GetBoolean() *bool
+	GetDouble() *float64
 	GetInteger() *int32
 	GetPartSettingsSparseInfillDensityMember1() PartSettings_sparse_infill_densityMember1able
+	GetString() *string
+	SetBoolean(value *bool)
+	SetDouble(value *float64)
 	SetInteger(value *int32)
 	SetPartSettingsSparseInfillDensityMember1(value PartSettings_sparse_infill_densityMember1able)
+	SetString(value *string)
 }
 
 type PartSettings_PartSettings_sparse_infill_patternable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
+	GetBoolean() *bool
+	GetDouble() *float64
+	GetInteger() *int32
 	GetPartSettingsSparseInfillPatternMember1() PartSettings_sparse_infill_patternMember1able
 	GetString() *string
+	SetBoolean(value *bool)
+	SetDouble(value *float64)
+	SetInteger(value *int32)
 	SetPartSettingsSparseInfillPatternMember1(value PartSettings_sparse_infill_patternMember1able)
 	SetString(value *string)
 }
 
 type PartSettings_PartSettings_top_shell_layersable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
+	GetBoolean() *bool
+	GetDouble() *float64
 	GetInteger() *int32
 	GetPartSettingsTopShellLayersMember1() PartSettings_top_shell_layersMember1able
+	GetString() *string
+	SetBoolean(value *bool)
+	SetDouble(value *float64)
 	SetInteger(value *int32)
 	SetPartSettingsTopShellLayersMember1(value PartSettings_top_shell_layersMember1able)
+	SetString(value *string)
 }
 
 type PartSettings_PartSettings_wall_loopsable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
+	GetBoolean() *bool
+	GetDouble() *float64
 	GetInteger() *int32
 	GetPartSettingsWallLoopsMember1() PartSettings_wall_loopsMember1able
+	GetString() *string
+	SetBoolean(value *bool)
+	SetDouble(value *float64)
 	SetInteger(value *int32)
 	SetPartSettingsWallLoopsMember1(value PartSettings_wall_loopsMember1able)
+	SetString(value *string)
 }
 
 // NewPartSettings instantiates a new PartSettings and sets the default values.
 func NewPartSettings() *PartSettings {
 	m := &PartSettings{}
+	m.SetAdditionalData(make(map[string]any))
 	return m
 }
 
@@ -597,6 +1050,12 @@ func NewPartSettings() *PartSettings {
 // returns a Parsable when successful
 func CreatePartSettingsFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
 	return NewPartSettings(), nil
+}
+
+// GetAdditionalData gets the AdditionalData property value. Stores additional data not described in the OpenAPI description found when deserializing. Can be used for serialization as well.
+// returns a map[string]any when successful
+func (m *PartSettings) GetAdditionalData() map[string]any {
+	return m.additionalData
 }
 
 // GetBottomShellLayers gets the bottom_shell_layers property value. The bottom_shell_layers property
@@ -740,7 +1199,18 @@ func (m *PartSettings) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e
 			return err
 		}
 	}
+	{
+		err := writer.WriteAdditionalData(m.GetAdditionalData())
+		if err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// SetAdditionalData sets the AdditionalData property value. Stores additional data not described in the OpenAPI description found when deserializing. Can be used for serialization as well.
+func (m *PartSettings) SetAdditionalData(value map[string]any) {
+	m.additionalData = value
 }
 
 // SetBottomShellLayers sets the bottom_shell_layers property value. The bottom_shell_layers property
@@ -774,6 +1244,7 @@ func (m *PartSettings) SetWallLoops(value PartSettings_PartSettings_wall_loopsab
 }
 
 type PartSettingsable interface {
+	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.AdditionalDataHolder
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetBottomShellLayers() PartSettings_PartSettings_bottom_shell_layersable
 	GetIroningType() PartSettings_PartSettings_ironing_typeable

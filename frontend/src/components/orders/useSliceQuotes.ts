@@ -412,7 +412,10 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
 
   // A detached run ends when its quote shows on the item: a slice quote it did not have
   // (one typed by hand meanwhile is not it). A landed render's run ends too when its item
-  // is gone (deleted meanwhile); its wait settles false.
+  // is gone (deleted meanwhile); its wait settles false. This effect must stay after the
+  // `rendered` one above: a landed run whose output shows is settled true there first, so
+  // the `dismiss` here finds no wait to settle false (pinned by "keeps the rendering run
+  // until the reloaded item has its output, then settles true").
   useEffect(() => {
     if (!items) return
     for (const [itemId, run] of runs) {

@@ -61,7 +61,7 @@ import {
   withServiceCredential,
 } from './api/serviceCredential.js'
 import { untilBackendAnswers } from './api/backendUp.js'
-import { CrudAreas, SECRET_AREAS } from './api/crudAreas.js'
+import { CrudAreas, FORGET_AREAS, SECRET_AREAS } from './api/crudAreas.js'
 import { CrudFlowRunReads } from './flows/backendReads.js'
 import { BrowserSessions } from './auth/browserSession.js'
 import { sealBackfill } from './sessions/sealBackfill.js'
@@ -89,7 +89,7 @@ import { harnessTools } from './tools/harness.js'
 import { SessionResources } from './sessions/touched.js'
 import { crudCostPoster, OrderCosts, touchedSinks } from './sessions/orderCosts.js'
 import { ALL_TOOLS } from './tools/index.js'
-import { PgFlowBlobs } from './temporal/flowBlobs.js'
+import { CrudFlowBlobs, gatedFlowBlobs, PgFlowBlobs } from './temporal/flowBlobs.js'
 import { PgFlowRuns } from './temporal/flowRuns.js'
 import { flowSessionActivities } from './temporal/flowSessions.js'
 import { decidedCalls, gateActivities, PgApprovalRecords, PgSessionOwners, type ToolActivityDeps, toolActivities, toolCallActivities } from './temporal/toolActivities.js'
@@ -112,19 +112,17 @@ import { SessionClients } from './temporal/sessionClients.js'
 import { type ListedTools, listTurnTools, turnToolActivities, turnToolActivity } from './temporal/turnTools.js'
 import { AgentWorker, workerIdentity } from './temporal/worker.js'
 import {
-  dropPayloadKey,
   FilePayloadStore,
   CrudPayloadKeys,
   gatedPayloadKeys,
   PgPayloadKeys,
   subjectDataConverter,
-  sweepBridgeKeys,
 } from './temporal/payloadCodec.js'
 import { DurableGate } from './gate/durable.js'
 import { SessionBlobs } from './sessions/blobs.js'
 import { DurableTurns } from './sessions/durable.js'
 import { DurableRunningSweep, durableDescriber } from './sessions/durableSweep.js'
-import { sweepOrphanedSessionKeys } from './sessions/forget.js'
+import { CrudSubjectKeys, gatedKeyDeletes, PgKeyDeletes } from './sessions/forget.js'
 import { PendingInputSweep, temporalDescriber } from './gate/sweep.js'
 import { type NativeConnection, Runtime } from '@temporalio/worker'
 import { Client, Connection } from '@temporalio/client'
@@ -273,9 +271,10 @@ const serviceCredential: CredentialSource | undefined =
 // through the backend's CRUD routes once the API lists their areas, read from the start and
 // again with back-off until it does (api/crudAreas.ts); over SQL until then, as an API pod older
 // than the routes needs during a rolling deploy. The API seals and opens them with the KEK, so
-// with those areas listed this process needs no KEK for them.
+// with those areas listed this process needs no KEK for them. So do the key deletes and a flow
+// run's images (#5299 step 6, area `forget`).
 const crudFetch = serviceCredential ? withServiceCredential(globalThis.fetch, serviceCredential, config.backendUrl) : globalThis.fetch
-const crudAreas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: SECRET_AREAS })
+const crudAreas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: [...SECRET_AREAS, ...FORGET_AREAS] })
 crudAreas.start()
 const credentials = database
   ? gatedCredentials(new CredentialStore(database.sql), new CrudCredentials(config.backendUrl, { fetch: crudFetch }), () => crudAreas.has('credentials'), kek)
@@ -738,6 +737,14 @@ if (role.http && database && commandKinds.length > 0) {
 // payload is never sent unsealed (5c Ruling 13). Without a database there is no codec, so no
 // durable session is started.
 const payloadKeys = temporal ? dataKeys : undefined
+// A flow call's images (#2477), sealed under its run's key: kept by the API once it lists area
+// `forget` (#5299 step 6), and in this process's own SQL until then.
+const flowBlobs =
+  temporal && payloadKeys
+    ? gatedFlowBlobs(new PgFlowBlobs(temporal.sql, payloadKeys), new CrudFlowBlobs(config.backendUrl, payloadKeys, { fetch: crudFetch }), () =>
+        crudAreas.has('forget'),
+      )
+    : undefined
 // A session's large payloads are files on the data share, by reference (#2243).
 const payloadStore = config.payloadDir ? new FilePayloadStore(config.payloadDir) : undefined
 const dataConverter = payloadKeys ? subjectDataConverter(payloadKeys, payloadStore) : undefined
@@ -771,11 +778,15 @@ if (database) {
 }
 // The payload keys of sessions whose row is gone (#3317): a durable fork whose workflow could not
 // start; and of browser calls a cancel or a lost caller left (#4780). Every hour, once the database is ready.
-if (role.http && database) {
+// Deleted by the API once it lists area `forget` (#5299 step 6), and over SQL until then.
+const keyDeletes = database
+  ? gatedKeyDeletes(new PgKeyDeletes(database.sql), new CrudSubjectKeys(config.backendUrl, { fetch: crudFetch }), () => crudAreas.has('forget'))
+  : undefined
+if (role.http && database && keyDeletes) {
   const sweep = () =>
     void database
       .ready()
-      .then(async (ok) => (ok ? (await sweepOrphanedSessionKeys(database.sql)) + (await sweepBridgeKeys(database.sql)) : 0))
+      .then(async (ok) => (ok ? await keyDeletes.sweep() : 0))
       .catch((err: unknown) => console.error('orphaned payload key sweep failed:', (err as Error).message))
   sweep()
   setInterval(sweep, 3600_000).unref()
@@ -801,7 +812,7 @@ const durableToolDeps: ToolActivityDeps | undefined = temporal
       // A result's images, for the durable segment's view_tool_images (#2320).
       blobs: new SessionBlobs(temporal.sql),
       // A flow call's images, sealed under its run's payload key (#2477).
-      ...(payloadKeys ? { flowBlobs: new PgFlowBlobs(temporal.sql, payloadKeys) } : {}),
+      ...(flowBlobs ? { flowBlobs } : {}),
       // A package built-in's access per call, `builtin_tier` (#4757).
       access: accessResolver,
     }
@@ -923,7 +934,7 @@ const turnToolDeps = temporal
       currentTiers: liveTokenTiers(tokens),
       blobs: new SessionBlobs(temporal.sql),
       // A flow's plugin and http_request calls keep their images as its own tools' do (#2578).
-      ...(payloadKeys ? { flowBlobs: new PgFlowBlobs(temporal.sql, payloadKeys) } : {}),
+      ...(flowBlobs ? { flowBlobs } : {}),
       ...(sessions
         ? {
             report: async (session: string, problems: readonly string[]) => {
@@ -1142,10 +1153,20 @@ if (sessions && temporalClient) sessions.durable = new DurableGate(temporalClien
 // a worker that never polled does not start hosting while the process closes (#5432).
 let stopTabHosting: (() => void) | undefined
 if (tabRelay) {
-  const sql = database?.sql
   const keys = payloadKeys
+  const deletes = keyDeletes
   stopTabHosting = hostTabs(tabRelay, {
-    sealing: temporalClient && dataConverter && keys && sql ? { client: temporalClient, dropKey: (subject) => dropPayloadKey(sql, keys, subject) } : undefined,
+    // A browser call's key, gone once its caller has the answer: this process's cached copy first.
+    sealing:
+      temporalClient && dataConverter && keys && deletes
+        ? {
+            client: temporalClient,
+            dropKey: (subject) => {
+              keys.forget(subject)
+              return deletes.dropBridgeKey(subject)
+            },
+          }
+        : undefined,
     worker: hostWorkers?.pinned,
   })
 }

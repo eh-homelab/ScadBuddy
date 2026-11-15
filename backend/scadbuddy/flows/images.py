@@ -1,21 +1,22 @@
-"""A flow run's images (#2477): what its tool calls returned, kept by the agent in
+"""A flow run's images (#2477): what its tool calls returned, kept for the agent in
 `ai_flow_blobs` under the run's subject `flow-<run id>`, sealed under the subject's payload
-key (`agent/src/temporal/flowBlobs.ts`). The run page lists them and fetches each through
-`GET /workflow-runs/{id}/images/{name}`; forgetting the run deletes them with its key
-(`forget.py`)."""
+key (`agent/src/temporal/flowBlobs.ts`; through the agent's CRUD route,
+`api/crud_agent_forget.py`, #5299 step 6). The table is the API's own: it applies the
+agent's migrations before it serves (#5299 D6). The run page lists them and fetches each
+through `GET /workflow-runs/{id}/images/{name}`; forgetting the run deletes them with its
+key (`forget.py`)."""
 
 from __future__ import annotations
 
-import re
 from typing import Literal
 
-import psycopg
 from pydantic import BaseModel
 
+from scadbuddy.agent_data.flow_blobs import BLOB_NAME, GET, LIST
 from scadbuddy.core.secrets import open_bytes
 from scadbuddy.workflows.payload_codec import Connect, PayloadKeys
 
-BLOB_NAME = re.compile(r"^[0-9a-f]{64}\.(png|jpg|gif|webp)$")
+__all__ = ["BLOB_NAME", "MediaType", "RunImage", "blob_context", "open_image", "run_images"]
 
 MediaType = Literal["image/png", "image/jpeg", "image/gif", "image/webp"]
 
@@ -35,17 +36,9 @@ class RunImage(BaseModel):
 
 async def run_images(connect: Connect, run_id: str) -> list[RunImage]:
     """The run's images, oldest first, without opening any."""
-    try:
-        async with connect() as conn:
-            cur = await conn.execute(
-                "SELECT name, media_type, size FROM ai_flow_blobs WHERE subject = %s"
-                " ORDER BY created_at, name",
-                (f"flow-{run_id}",),
-            )
-            rows = await cur.fetchall()
-    except psycopg.errors.UndefinedTable:
-        # The agent, whose migration makes the table, has not started on this database.
-        return []
+    async with connect() as conn:
+        cur = await conn.execute(LIST, (f"flow-{run_id}",))
+        rows = await cur.fetchall()
     return [RunImage(name=r[0], mediaType=r[1], bytes=r[2]) for r in rows]
 
 
@@ -57,15 +50,9 @@ async def open_image(
     if not BLOB_NAME.match(name):
         return None
     subject = f"flow-{run_id}"
-    try:
-        async with connect() as conn:
-            cur = await conn.execute(
-                "SELECT media_type, data FROM ai_flow_blobs WHERE subject = %s AND name = %s",
-                (subject, name),
-            )
-            row = await cur.fetchone()
-    except psycopg.errors.UndefinedTable:
-        return None
+    async with connect() as conn:
+        cur = await conn.execute(GET, (subject, name))
+        row = await cur.fetchone()
     if row is None:
         return None
     key = await keys.key_for(subject, False)
