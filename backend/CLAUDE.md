@@ -181,7 +181,12 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   backend's migrations), `agent_migrations.py` (the agent's, which the API applies at
   start after the backend's, `main._migrate_agent_at_start`; root CLAUDE.md "Migrations
   (#491)"; a test's app skips them unless the test is marked `agent_migrations`,
-  `tests/conftest.py`); the render worker holds no database (#5298,
+  `tests/conftest.py`; a table or other object an agent migration creates belongs to the
+  role the API connects as, not the agent's. Prod's API and agent connect as one role, so
+  nothing changes there; with a role per caller, the agent could not use what a later file
+  makes (nothing grants it: `agent/src/db/grants.ts` grants only from the agent's own
+  tables to the API's role), so such a deployment keeps the API and the agent on one role
+  until the agent's data moves behind CRUD routes (#5299)); the render worker holds no database (#5298,
   `tests/test_render_worker_nodb.py`; the API revokes its old role `scadbuddy_render` at
   every start, `auth/revoke.py`, and every caller's grant list goes through
   `auth/caller_grants.py` `grant_role`): it reads the store settings and
