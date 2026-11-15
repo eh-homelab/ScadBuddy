@@ -1096,6 +1096,9 @@ class Filament(BaseModel):
     effect: FilamentEffect | None = None
     #: Who set the colour, alpha, stops and effect: the spool ``import`` or a person.
     colour_source: ColourSource = "manual"
+    #: Whether an import linked the record to spools (``spool_colour`` or ``spool_ids``
+    #: set): only then can "Use spool colour" give it a colour from its spools.
+    spool_linked: bool = False
     archived_at: datetime | None
     created_at: datetime
     updated_at: datetime
@@ -1152,8 +1155,11 @@ class SpoolImportRow(BaseModel):
     subtype: str | None = None
     brand: str | None = None
     colour_name: str | None = None
-    #: The record's colour after the import: the spools' unless a person set it
-    #: (``colour_source`` ``manual``, #6209); the spools' for a skipped group.
+    #: The record's colour after the import (#6209). A new record's, or a matched
+    #: ``import`` record's, is the spools' RGB. A matched record keeps its own colour when
+    #: a person set it (``colour_source`` ``manual``) or when ``_movers`` held it back
+    #: because another record of its names holds the spools' RGB (``reason``
+    #: ``colour_taken``). A skipped group's is the spools' RGB (``None`` with no ``rgba``).
     colour: str | None = None
     alpha: int | None = None
     extra_colours: list[str] = Field(default_factory=list)

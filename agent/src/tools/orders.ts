@@ -2838,7 +2838,9 @@ export const orderTools: Tool[] = [
       'differ. A record keeps its link to its spools, so a colour set by hand makes no second record; the import sets ' +
       "a record's colour, alpha, stops and effect only while its `colour_source` is `import`. " +
       'A filament known only by its colour name, with no priced spool, or whose colour another record of its ' +
-      'material, subtype and brand already has (`colour_taken`), is `skipped` with its `reason`. ' +
+      'material, subtype and brand already has (`colour_taken`), is `skipped` with its `reason`. A matched record ' +
+      "whose spools' colour another record of its names holds keeps its own colour, alpha, stops and effect, and " +
+      'comes back `updated` or `unchanged` with `reason` `colour_taken`. ' +
       "Only when Bambuddy is linked (price_book_get's `spool_import`); else `not_linked`. Quotes never read spools.",
     input: z.object({}),
     risk: 'write',

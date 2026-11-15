@@ -147,7 +147,7 @@ _CUSTOMER = "id, display_name, company, notes, tags, created_at, updated_at, arc
 _FILAMENT = (
     "id, material, subtype, brand, colour_name, colour, cost_per_kg, density_g_cm3,"
     " density_profile, alpha, extra_colours, effect, colour_source, archived_at, created_at,"
-    " updated_at"
+    " updated_at, (spool_colour IS NOT NULL OR cardinality(spool_ids) > 0) AS spool_linked"
 )
 #: What a filament's colour is, as a person or the spool import sets it (#6209).
 _LOOK = ("colour", "alpha", "extra_colours", "effect")

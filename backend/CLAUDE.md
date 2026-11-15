@@ -1417,7 +1417,9 @@ each row by its id and the values it must still have, so the file is a no-op els
   `effect_type` set), all on `Filament` and the storefront's `PublicFilament`.
   `colour_source` is `import` or `manual`: a look sent by a person that differs from the
   record's makes it `manual`, and the import never sets a `manual` record's look;
-  `colour_source: "import"` in a PATCH hands it back. The import matches only a record of
+  `colour_source: "import"` in a PATCH hands it back; the editor's "Use spool colour"
+  sends it only for a record an import linked to spools (`Filament.spool_linked`:
+  `spool_colour` or `spool_ids` set). The import matches only a record of
   the group's material, subtype and brand: by its link to the group's spools (`spool_ids`),
   else by the spools' RGB (`spool_colour`, then `colour`), never by a colour a person set, so
   it makes no duplicate, and a spool whose material was corrected is another filament's

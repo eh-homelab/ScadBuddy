@@ -76,7 +76,8 @@ function importLine(row: SpoolImportRow): string {
   const price = row.action === 'updated' ? `${row.previous_cost_per_kg} → ${row.cost_per_kg}` : row.cost_per_kg
   const spread = row.min_cost_per_kg && row.max_cost_per_kg ? ` (spools priced ${row.min_cost_per_kg} to ${row.max_cost_per_kg}; the newest spool's price)` : ''
   const density = row.density_profile ? `; density ${row.density_g_cm3} g/cm³ from ${row.density_profile}` : ''
-  return `${name}: ${ACTIONS[row.action]} at ${price} per kg${spread}${density}`
+  const kept = row.reason === 'colour_taken' ? `; colour kept at ${row.colour}, as another filament of it already has its spools' colour` : ''
+  return `${name}: ${ACTIONS[row.action]} at ${price} per kg${spread}${density}${kept}`
 }
 
 /**
@@ -239,7 +240,7 @@ export function FilamentsEditor() {
             >
               Edit
             </Button>
-            {f.colour_source === 'manual' && book.data?.spool_import && (
+            {f.colour_source === 'manual' && f.spool_linked && book.data?.spool_import && (
               <Button
                 size="xs"
                 variant="ghost"

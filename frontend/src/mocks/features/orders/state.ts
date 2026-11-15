@@ -198,6 +198,7 @@ function filament(id: string, material: string, colour: string, colourName: stri
     extra_colours: [],
     effect: null,
     colour_source: 'manual',
+    spool_linked: false,
     cost_per_kg: cost,
     density_g_cm3: '1.24',
     density_profile: null,

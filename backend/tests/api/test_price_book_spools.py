@@ -212,6 +212,15 @@ def test_a_persons_colour_is_kept_and_never_duplicated(client: TestClient) -> No
     assert [(f["id"], f["colour"], f["alpha"], f["cost_per_kg"]) for f in book] == [
         (made["filament_id"], "#EEF3F4", 255, "23")
     ]
+    # Linked to its spools, so "Use spool colour" is offered; a record added by hand
+    # that no import has linked is not.
+    assert book[0]["spool_linked"] is True
+    by_hand = client.post(
+        f"{BOOK}/filaments",
+        json={"material": "ABS", "colour": "#123456", "cost_per_kg": "20"},
+    ).json()
+    assert (by_hand["colour_source"], by_hand["spool_linked"]) == ("manual", False)
+    client.post(f"{BOOK}/filaments/{by_hand['id']}/archive")
 
     # Another filament whose RGB is the colour the person set: skipped, not a duplicate.
     other = {**CLEAR, "rgba": "EEF3F4FF"}

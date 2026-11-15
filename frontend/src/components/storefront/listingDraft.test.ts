@@ -16,6 +16,7 @@ function filament(id: string, colour: string, colour_name: string): Filament {
     extra_colours: [],
     effect: null,
     colour_source: 'manual',
+    spool_linked: false,
     cost_per_kg: '20',
     density_g_cm3: '1.24',
     density_profile: null,

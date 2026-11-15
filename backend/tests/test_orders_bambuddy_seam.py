@@ -142,6 +142,22 @@ def test_a_group_carries_the_newest_spools_alpha_stops_and_effect() -> None:
     assert by_ids[(8,)].extra_colours == ["#ABCDEF"] * 8
 
 
+def test_a_clear_and_an_opaque_spool_of_one_rgb_are_one_group() -> None:
+    """#6209: a record's identity has no alpha, so a clear ``00000000`` spool and an
+    opaque ``000000FF`` spool of one material, subtype and brand price one record, and
+    the group's alpha is the newest spool's. Two filaments that differ only in alpha
+    need distinct names (a subtype such as "Translucent") to be two records."""
+    groups = spool_groups(
+        [
+            _spool(3, rgba="00000000", color_name="Clear"),
+            _spool(4, rgba="000000FF", color_name="Black"),
+        ]
+    )
+    assert [(g.spools, g.colour, g.alpha, g.colour_name) for g in groups] == [
+        ([(3, None), (4, None)], "#000000", 255, "Black")
+    ]
+
+
 def _entry(entry_id: int, kind: str, brand: str, colour: str, density: float) -> CatalogFilament:
     return CatalogFilament(
         id=entry_id,

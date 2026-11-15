@@ -121,6 +121,7 @@ function importSpools(): SpoolImportRow[] {
         extra_colours: [],
         effect: null,
         colour_source: 'import',
+        spool_linked: true,
         cost_per_kg: cost,
         density_g_cm3: profile?.density_g_cm3 ?? null,
         density_profile: profile?.profile ?? null,
@@ -137,6 +138,8 @@ function importSpools(): SpoolImportRow[] {
     const action = Number(previous) === Number(cost) && !fill && !('alpha' in look) ? 'unchanged' : 'updated'
     if (action === 'updated') Object.assign(found, { cost_per_kg: cost, ...look, updated_at: now() })
     if (fill) Object.assign(found, { density_g_cm3: fill.density_g_cm3, density_profile: fill.profile })
+    // A matched record is linked to its spools, so "Use spool colour" can recolour it.
+    found.spool_linked = true
     return [{ ...row, action, filament_id: found.id, colour: found.colour, alpha: found.alpha, colour_source: found.colour_source, cost_per_kg: cost, previous_cost_per_kg: previous, density_g_cm3: found.density_g_cm3, density_profile: found.density_profile ?? null }]
   })
 }
@@ -305,6 +308,7 @@ export const handlers = [
       extra_colours: body.extra_colours ?? [],
       effect: body.effect ?? null,
       colour_source: 'manual',
+      spool_linked: false,
       cost_per_kg: body.cost_per_kg,
       // #6136: added with no density while Bambuddy is linked, it takes its spools'.
       ...(body.density_g_cm3 ? { density_g_cm3: body.density_g_cm3, density_profile: null } : added(body)),
