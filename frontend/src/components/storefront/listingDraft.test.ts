@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import type { CustomizerSchema, Filament, MediaView } from '../../api/types'
 import { keychainSchema } from '../../mocks/fixtures'
-import { colourProblems, defaultFits, defaultsFor, emptyDraft, fittedDefault, fixColour, isSupport, listingInput, listingRefusal, nearestFilaments, previewListing, sellMedia, titleColours, withoutWords, type ListingDraft } from './listingDraft'
+import { colourProblems, defaultFits, defaultsFor, emptyDraft, fittedDefault, fixColour, isSupport, listingInput, listingRefusal, nearestFilaments, previewListing, savedKey, sellMedia, titleColours, withoutWords, type ListingDraft } from './listingDraft'
 
 function filament(id: string, colour: string, colour_name: string): Filament {
   return {
@@ -325,5 +325,20 @@ describe('sellMedia (#6131)', () => {
   it('takes the images a customer can see, never a video, a missing file or another type', () => {
     const items = [media('a', 'image', 'image/png'), media('b', 'video', 'video/mp4'), media('c', 'image', 'image/png', true), media('d', 'image', 'application/octet-stream')]
     expect(sellMedia(items)).toEqual(['a'])
+  })
+})
+
+describe('savedKey (#6290): a null field is an absent one, and nothing else is', () => {
+  const body = (params: Record<string, unknown>, fixed: Record<string, unknown> = {}) =>
+    savedKey({ slug: 'name-keychain', commit: 'c'.repeat(40), title: 'Tag', params, fixed } as Parameters<typeof savedKey>[0])
+
+  it('reads a bound’s unset label, default and step as null or absent alike', () => {
+    expect(body({ size: { kind: 'number', min: 6, max: 28, label: null, default: null, step: null } })).toBe(body({ size: { kind: 'number', min: 6, max: 28 } }))
+  })
+
+  it('still sees a default that went from a value to unset, and a fixed value taken away', () => {
+    expect(body({ size: { kind: 'number', min: 6, max: 28, default: 14 } })).not.toBe(body({ size: { kind: 'number', min: 6, max: 28, default: null } }))
+    expect(body({}, { thickness: 5.2 })).not.toBe(body({}, {}))
+    expect(body({}, { thickness: 0 })).not.toBe(body({}, {}))
   })
 })

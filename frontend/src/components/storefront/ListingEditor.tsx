@@ -1,4 +1,4 @@
-import { useId, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import type { CustomizerSchema, Filament, ListingBound, MediaView, ModelSummary, ModelVersion, Param, ParamValue } from '../../api/types'
 import { Button } from '@/components/ui/button'
@@ -681,7 +681,10 @@ function ColoursOnOffer({
   const [chosen, setChosen] = useState<boolean | null>(null)
   const open = chosen ?? ticked.length === 0
   // The decision on load, made once: later ticks never change it.
-  if (settled && chosen === null) setChosen(ticked.length === 0)
+  const none = ticked.length === 0
+  useEffect(() => {
+    if (settled) setChosen((cur) => cur ?? none)
+  }, [settled, none])
 
   const customer = customerFilaments(filaments)
   const support = filaments.filter((filament) => !customer.includes(filament))
