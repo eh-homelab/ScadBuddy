@@ -406,8 +406,10 @@ describe('a new start under the session`s own id (#6387)', () => {
   /** Kept as each is made, so a setup that throws half way still leaves none behind. */
   const dirs: string[] = []
   afterEach(async () => {
-    for (const warm of caches.splice(0)) await warm.close()
+    // Every cache closed and every directory removed, even when one close fails; that failure still fails the test.
+    const closed = await Promise.allSettled(caches.splice(0).map((warm) => warm.close()))
     await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })))
+    for (const result of closed) if (result.status === 'rejected') throw result.reason
   })
   const tempDir = async (prefix: string) => {
     const dir = await mkdtemp(path.join(tmpdir(), prefix))
