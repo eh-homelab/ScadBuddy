@@ -416,7 +416,8 @@ describe('PresetPicker', () => {
     const row = screen.getByTestId('preset-bar')
     expect(row.contains(select)).toBe(true)
     expect(row.contains(saveAs)).toBe(true)
-    // Picked and changed, the preset's actions join the same row.
+    // Picked and changed, the preset's actions join the same bar (in a narrow panel they
+    // wrap to its second line, together: e2e/presets.spec.ts).
     await selectOption(user, select, 'Mum')
     await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'my')
     expect(row.contains(screen.getByRole('button', { name: /^Update preset / }))).toBe(true)

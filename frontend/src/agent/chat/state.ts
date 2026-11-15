@@ -390,11 +390,13 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
       return patchSession(state, event.sessionId, (s) => ({ ...s, owner: event.owner }))
 
     case 'session.queue':
-      return patchSession(state, event.sessionId, (s) => ({
-        ...s,
+      return patchSession(state, event.sessionId, (s) => {
         // One the transcript already shows has started; its own queue event follows.
-        queued: event.queue.filter((q) => !s.items.some((i) => i.kind === 'user' && i.id === q.id)),
-      }))
+        const queued = event.queue.filter((q) => !s.items.some((i) => i.kind === 'user' && i.id === q.id))
+        // The refusals of entries that left the queue go with them.
+        const refusals = s.queueRefusals && Object.entries(s.queueRefusals).filter(([id]) => queued.some((q) => q.id === id))
+        return { ...s, queued, ...(refusals ? { queueRefusals: Object.fromEntries(refusals) } : {}) }
+      })
 
     case 'user.turn':
       return patchSession(state, event.sessionId, (s) =>
