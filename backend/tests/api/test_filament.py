@@ -172,6 +172,21 @@ def test_a_spool_that_is_typeless_or_backwards_is_422(client: TestClient) -> Non
     assert backwards.status_code == 422, backwards.text
 
 
+def test_a_bambuddy_linked_spool_is_not_deleted(client: TestClient, pg_conninfo: str) -> None:
+    made = _spool(client)
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO filament_bb_links (spool_id, bb_spool_id, bb_updated_at, linked_at)"
+            " VALUES (%s, 7, now(), now())",
+            (made["id"],),
+        )
+    one = f"{SPOOLS}/{made['id']}"
+    refused = client.delete(one)
+    assert refused.status_code == 409, refused.text
+    assert "Bambuddy" in refused.json()["detail"]
+    assert client.get(one).status_code == 200
+
+
 def test_a_spool_with_prints_is_not_deleted(client: TestClient, pg_conninfo: str) -> None:
     made = _spool(client)
     with psycopg.connect(pg_conninfo, autocommit=True) as conn:

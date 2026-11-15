@@ -349,6 +349,30 @@ describe('OrdersPage views and memory (#6334)', () => {
     expect(screen.queryByTestId('orders-hidden-note')).toBeNull()
   })
 
+  it('keeps the remembered view while a profit report row is open', async () => {
+    window.localStorage.setItem(ORDERS_MEMORY_KEY, JSON.stringify({ hideDays: 30, remember: true, query: 'status=ready' }))
+    renderPage(<OrdersPage />, { route: '/orders?currency=USD' })
+    await screen.findByRole('table', { name: 'Orders' })
+    expect(JSON.parse(window.localStorage.getItem(ORDERS_MEMORY_KEY) ?? '{}')).toMatchObject({ query: 'status=ready' })
+  })
+
+  it("turned on from a profit report row's link, remembers no report filter, then the view once the report is left", async () => {
+    window.localStorage.setItem(ORDERS_MEMORY_KEY, JSON.stringify({ hideDays: 30, remember: false, query: '' }))
+    const { user } = renderPage(
+      <>
+        <OrdersPage />
+        <Location />
+      </>,
+      { route: '/orders?currency=USD&status=ready' },
+    )
+    await screen.findByText('No orders match.')
+    await user.click(screen.getByRole('switch', { name: 'Remember my view' }))
+    expect(JSON.parse(window.localStorage.getItem(ORDERS_MEMORY_KEY) ?? '{}')).toMatchObject({ remember: true, query: '' })
+    await user.click(screen.getByRole('button', { name: 'Show every order' }))
+    expect(screen.getByTestId('location')).toHaveTextContent('/orders?status=ready')
+    await waitFor(() => expect(JSON.parse(window.localStorage.getItem(ORDERS_MEMORY_KEY) ?? '{}')).toMatchObject({ query: 'status=ready' }))
+  })
+
   it('opens the remembered view, and forgets it once remembering is off', async () => {
     window.localStorage.setItem(ORDERS_MEMORY_KEY, JSON.stringify({ hideDays: 30, remember: true, query: 'status=ready' }))
     const first = page()

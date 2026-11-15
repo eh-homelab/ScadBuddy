@@ -94,11 +94,14 @@ function LowStock({ parts }: { parts: InventoryPart[] }) {
   )
 }
 
-/** The query this browser remembers: the URL's, less the search and a profit report row's filters. */
-function remembered(query: OrdersQuery): string {
+/**
+ * The query this browser remembers: the URL's, less the search; null for a profit report
+ * row's query, which is a visit of its own and never replaces the remembered view.
+ */
+function remembered(query: OrdersQuery): string | null {
+  if (isReportFiltered(query)) return null
   const params = toOrdersParams(query)
   params.delete('q')
-  for (const key of REPORT_KEYS) params.delete(key)
   return params.toString()
 }
 
@@ -183,6 +186,7 @@ export function OrdersPage() {
   // ago: its link lists them all, so the N-day rule does not apply to it.
   const query: OrdersQuery = { ...urlQuery, ended_since: urlQuery.old || isReportFiltered(urlQuery) ? '' : endedSince(memory.hideDays) }
   const key = `${toOrdersParams(query).toString()}#${query.ended_since}`
+  // Null on a profit report row's link (`remembered`), so the effect stores nothing.
   const keep = memory.remember ? remembered(query) : null
   useEffect(() => {
     if (keep !== null && restore === null) setMemory(storeOrdersMemory({ query: keep }))
@@ -328,7 +332,7 @@ export function OrdersPage() {
         />
         <div className="flex flex-wrap items-center gap-2">
           <SearchField value={query.q} onChange={(q) => onChange({ ...query, q }, { typing: true })} placeholder="Search orders" />
-          <Button variant="outline" size="sm" aria-expanded={filtersOpen} aria-controls="order-filters" onClick={() => setFiltersOpen(!filtersOpen)}>
+          <Button variant="outline" size="sm" aria-expanded={filtersOpen} aria-controls={filtersOpen ? 'order-filters' : undefined} onClick={() => setFiltersOpen(!filtersOpen)}>
             <SlidersHorizontalIcon aria-hidden />
             Filters
             {moreFiltersOn(query) > 0 && <span className="sb-num rounded-full bg-primary/15 px-1.5 text-[11px]" aria-label={`${moreFiltersOn(query)} on`}>{moreFiltersOn(query)}</span>}
@@ -342,7 +346,7 @@ export function OrdersPage() {
             <Switch
               size="sm"
               checked={memory.remember}
-              onCheckedChange={(remember) => setMemory(storeOrdersMemory({ remember, query: remember ? remembered(query) : '' }))}
+              onCheckedChange={(remember) => setMemory(storeOrdersMemory({ remember, query: remember ? (remembered(query) ?? memory.query) : '' }))}
             />
             Remember my view
           </label>

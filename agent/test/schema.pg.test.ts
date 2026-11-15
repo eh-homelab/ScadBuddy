@@ -52,7 +52,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       )
     })
 
-    it('waits on a ledger still keyed by position (before #491), which the API rewrites at its next start', async () => {
+    it('waits on a ledger still keyed by position (before #491), and points at the API log, where its start rewrites it or stops', async () => {
       await db.sql`CREATE TABLE ai_migrations (version integer PRIMARY KEY, story text)`
       await db.sql`INSERT INTO ai_migrations (version, story) VALUES (1, 'the first')`
       await expect(awaitMigrations(db.sql, EXPECTED_MIGRATIONS, { attempts: 1, log })).rejects.toThrow(
@@ -60,8 +60,17 @@ describe.skipIf(!TEST_DATABASE_URL)(
       )
       expect(lines).toEqual([
         `waiting for the API to apply the agent's database migrations: ai_migrations is still keyed by ` +
-          `position (before #491), and the API's next start rewrites it`,
+          `position (before #491); the API's next start rewrites it, or stops if it holds a row main never had ` +
+          `(see the API's log)`,
       ])
+    })
+
+    it('names a ledger still keyed by position in the error after more than one read', async () => {
+      await db.sql`CREATE TABLE ai_migrations (version integer PRIMARY KEY, story text)`
+      await expect(awaitMigrations(db.sql, EXPECTED_MIGRATIONS, { attempts: 2, intervalMs: 1, log })).rejects.toThrow(
+        /after 2 reads of ai_migrations \(still keyed by position, before #491\); is the API/,
+      )
+      expect(lines).toHaveLength(1)
     })
 
     it('goes on once the API has applied the last file it expects', async () => {
@@ -104,7 +113,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         expect(errors).toEqual([])
         expect(lines).toHaveLength(1)
         expect(fast.waitingForMigrations()).toBe(true)
-        // A ledger still keyed by position (before #491) is waiting too: the API rewrites it.
+        // A ledger still keyed by position (before #491) is waiting too: the API rewrites it, or stops.
         await db.sql`CREATE TABLE ai_migrations (version integer PRIMARY KEY)`
         expect(await fast.ready()).toBe(false)
         expect(errors).toEqual([])

@@ -74,11 +74,20 @@ queue, template media's `template_media`) skip unless `SCADBUDDY_TEST_DATABASE_U
 points at a Postgres they can create schemas in, e.g.
 `docker run -d -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=scadbuddy_test -p 5432:5432
 postgres:18` and `SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test`.
-Without Docker, a native Postgres 18 works (`initdb`, then `pg_ctl -o "-p 55432"`). It needs
-`timezone='UTC'` in `postgresql.conf`, or a timezone test fails. A data directory on a long
-path also needs `unix_socket_directories=''`, with TCP only (measured 2026-11-14 on WSL2,
-Homebrew `postgresql@18`, #6322).
-Without it most of `tests/api` skips. CI runs them against a `postgres:18` service
+Without Docker, a native Postgres 18 works:
+
+```bash
+initdb -D "$PGDATA" -U postgres --auth=trust
+pg_ctl -D "$PGDATA" -o "-p 55432 -c timezone=UTC -c unix_socket_directories=''" start
+createdb -h 127.0.0.1 -p 55432 -U postgres scadbuddy_test
+# SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:55432/scadbuddy_test
+```
+
+`timezone='UTC'` is required, or a timezone test fails. TCP only
+(`unix_socket_directories=''`) is needed when the data directory is on a long path.
+Measured on 2026-11-14 on WSL2 with Homebrew `postgresql@18` (#6322): the `timezone` and
+long-path findings. The commands above are that recipe written out in full, not re-run as one script.
+Without `SCADBUDDY_TEST_DATABASE_URL` most of `tests/api` skips. CI runs them against a `postgres:18` service
 container. A `Settings` for an app that never starts uses `tests.conftest.UNUSED_DATABASE_URL`.
 Tests marked `requires_fixtures` (#2146) use the real MakerWorld 3MFs in
 `test-fixtures/makerworld/` (Git LFS, ~290 MB; `git lfs pull --include "test-fixtures/**"`;
@@ -576,9 +585,18 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`BambuddyClient.makerworld_*`; Bambuddy's 400 for a link it refuses is a 422). The
   assistant imports only through these routes (agent `get_makerworld_status`,
   `resolve_makerworld_url`, `import_makerworld_model`): the agent worker has no route to
-  Bambuddy and never holds its key. The `makerworld-import` flow (stored in the
-  database, not in this repo) still posts to Bambuddy's `/api/v1/makerworld/import`
-  directly until its `import_one` is changed to call `import_makerworld_model`. The import is the `makerworld_import` operation on the
+  Bambuddy and never holds its key. The `makerworld-import` flow is not in this repo:
+  its versions are prod's `data/flows/makerworld-import/flow.py`, written only through
+  the API's `/workflows` routes (`POST /workflows` registers a version; restore and
+  delete commit too), never from this repo. Since version 2 its `import_one` calls `resolve_makerworld_url`,
+  `create_print_project` and `import_makerworld_model` (#6340). A command tool
+  (`agent/src/tools/command.ts`: `create_print_project`, `import_makerworld_model`)
+  answers `{status: "running", operation_id, next}` once its follow window ends, which a
+  script follows with `get_operation`; version 2 read `folder_id` straight off
+  `create_print_project` and failed `'folder_id'`. A flow run's call carries no `callKey`
+  (`agent/src/temporal/toolActivities.ts` `runCall`), so each call of a write sends a
+  fresh `Idempotency-Key`: after `may have run` or `StartToClose` the script checks
+  state (`list_print_projects`) before it sends the write again. The import is the `makerworld_import` operation on the
   `library` queue (`makerworld/operations.py`): Bambuddy downloads the 3MF (up to
   `MAKERWORLD_IMPORT_TIMEOUT`), then on `library_backend` native `makerworld/imports.py`
   copies it into the native library as a `bb_to_sb` copy does
@@ -963,7 +981,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `QUOTE_TIMEOUT`), its steps `quote.py`: the check writes nothing; the run writes the
   body's filaments onto the item (`update_item`'s `filaments`, a repin only when a slot
   changes), renders and saves an output through `output_create`'s run when the item has
-  none matching, slices every plate through `bambuddy/preview.py` `start_preview_plates`
+  none matching (`ensure_output` over `rendering.py` `output_for_reference`, #6324: a
+  `Reference` to its output, no item needed; given one, `AttachTo` sets it on the item with
+  no new revision and no quote dropped), slices every plate through `bambuddy/preview.py` `start_preview_plates`
   (the dialog's background slice, either slicer), keeps each plate's sliced file as the
   directory blob `quote-<sha256>` held by `blob_refs (order_item_quote, <quote id>)`
   before the quote's row exists, reads each plate with `read_sliced`, prices and records
@@ -1002,6 +1022,13 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`components/orders/FilamentsEditor.tsx`), `PrintPicker`'s `quote` mode with
   `QuoteFilaments` ("Slice…" in `QuoteEditor`), and the estimate in
   `AddToOrderDialog`; mocks `src/mocks/features/orders/priceBook.ts`.
+  An item's render (#6324, order operations spec §5 "#6324, as built"): the
+  `order_item_render` kind of `operations.py` on the `library` queue (`POST
+  /orders/{id}/items/{item}/render`, subject `order_item:<id>`, check `render_check`, the
+  quote's refusals; the output saved under `render_output_id`, one per operation), which
+  renders the item's reference and sets the output on it. "Slice…" on an item with a design
+  and no output starts it, then opens the print dialog on the new output (`useSliceQuotes`
+  `render`, the run's `stage` `rendering`); the agent's `order_item_quote` needs none.
   Attachments (#4251, spec §6.2 "As built"): any file on an order, a line item or a print attempt,
   `order_attachments` (subject `order:<id>` / `order_item:<id>` / `order_item_fulfilment:<id>`, an attempt's file listed
   under its item through `attempt_item_id`; `POST …/fulfilments/{f}/attachments`; typed by its bytes in

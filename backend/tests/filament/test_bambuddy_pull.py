@@ -387,6 +387,28 @@ def test_a_bb_drying_is_a_dried_event_once(pg_pool: PgPool) -> None:
     assert spool.last_dried_at == events[0].at
 
 
+def test_an_unchanged_bb_row_pulled_twice_books_one_weighing_and_one_drying(
+    pg_pool: PgPool,
+) -> None:
+    f = _filament(pg_pool)
+    row = bb(
+        core_weight=250,
+        last_scale_weight=1200,
+        last_weighed_at=_bb_time(-5),
+        last_dried_at=_bb_time(-4),
+        updated_at=_bb_time(-3),
+    )
+    (made,) = pull(f, [row], now=NOW).created_ids
+    left = f.spools.get(made)
+    assert left is not None
+    pull(f, [row], now=NOW)
+    events = f.spools.events(made)
+    assert [e.kind for e in events].count("weighed") == 1
+    assert [e.kind for e in events].count("dried") == 1
+    again = f.spools.get(made)
+    assert again is not None and again.grams_left == left.grams_left
+
+
 def test_a_re_used_tag_of_an_archived_spool_makes_a_new_spool(pg_pool: PgPool) -> None:
     f = _filament(pg_pool)
     old = f.spools.create(SpoolCreate(material_id=_pla(pg_pool)), actor="ann")

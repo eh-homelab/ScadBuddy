@@ -374,7 +374,12 @@ class FlowGrants:
         if parked is None:
             # Not parked yet (the workflow starts the call as it schedules this), or
             # decided already: retried, and the workflow asks once the retries are spent.
-            raise ApplicationError("the call is not parked")
+            # Decided by this grant's own Update, which an earlier attempt sent and then
+            # failed (#6347): the same Update again answers that one's result.
+            held = await self._store.get_decision(request_id)
+            if held is None or not held.responder.startswith("grant:"):
+                raise ApplicationError("the call is not parked")
+            return await self._send_approval(client, req.call_id, request_id)
         call = parked_call(parked.tool_name, parked.tool_input)
         use = await self._store.grant_use(request_id)
         if call is None or use is None or (call[0], call[1]) != (use.fn, use.tool):
@@ -394,8 +399,27 @@ class FlowGrants:
         )
         if not recorded:
             return "ask"
+        return await self._send_approval(client, req.call_id, request_id)
+
+    async def _send_approval(
+        self, client: AgentClient, call_id: str, request_id: str
+    ) -> GrantApproval:
+        """The grant's approval of the call, under one Update id per call (`grant-<call>`),
+        so a retry's Update is the first one's: the server deduplicates Updates by their
+        id within a workflow run (https://docs.temporal.io/handling-messages, "Message IDs
+        and handling Continue-As-New"), which is what the harness's `update_id` is for
+        (`AgentClient.approve_tool`); a repeat of a completed one answers its result
+        (`test_an_approval_whose_answer_was_lost_is_kept_and_its_retry_lets_the_call_run`).
+
+        Any failure but the harness's refusal (a timeout, a lost answer, the attempt
+        cancelled) keeps the row and raises: the Update may have arrived, and the agent
+        runs the call only with the row. The retry sends the same Update; once the retries
+        are spent the workflow's `withdraw` removes the row and lists the call for a
+        person, who must be able to decide it (flow_decide answers stale to a `grant:`
+        row). #6347: run faca071f's attempt hit its StartToClose timeout after its Update
+        was accepted, withdrew the row, and the import was refused "none is recorded"."""
         try:
-            await client.approve_tool(req.call_id, approved=True, update_id=f"grant-{req.call_id}")
+            await client.approve_tool(call_id, approved=True, update_id=f"grant-{call_id}")
         except ToolApprovalError as err:
             # Decided otherwise: no row says the grant approved a call it did not.
             await self._store.withdraw_grant_decision(request_id)
@@ -406,13 +430,6 @@ class FlowGrants:
                 type=GRANT_REFUSED,
                 non_retryable=True,
             ) from None
-        except BaseException:
-            # The Update may not have arrived: a retry records the row again, and once
-            # the retries are spent the call is listed for a person, who must be able to
-            # decide it (flow_decide answers stale to a `grant:` row). Had it arrived,
-            # the agent finds no approval and refuses the call: closed, not open.
-            await self._store.withdraw_grant_decision(request_id)
-            raise
         return "approved"
 
     @activity.defn(name=FLOW_GRANT_WITHDRAW)

@@ -8,7 +8,7 @@ import { machineRateFor } from './machineRates'
 import { pushRevision } from './revisions'
 import { pastPrint } from './pastPrints'
 import { retax } from './money'
-import { BROWSER, fieldProblem, minorExponent, newId, now, problem, PROBLEMS, Refused, state } from './state'
+import { BROWSER, fieldProblem, minorExponent, newId, now, OUTPUT_REAGAN, problem, PROBLEMS, Refused, state } from './state'
 
 /**
  * Orders phase 2 (#4250, spec 2026-10-18 §5; backend `api/orders.py`): the price book (the
@@ -438,6 +438,35 @@ export const handlers = [
       retax(order.id)
       rederive(order)
       return acceptOperation('order_item_quote', `order_item:${found.id}`, made as unknown as Record<string, unknown>)
+    } catch (error) {
+      return refused(request, error)
+    }
+  }),
+
+  // #6324 — an item's render (`orders/operations.py` `render_check`, then the run): the
+  // mock's render of any design is its seeded keychain output, set on the item with no
+  // revision and no quote dropped. A design whose `name` is `fail` fails as a render does.
+  http.post(`${base}/:id/items/:item/render`, ({ request, params }) => {
+    if (!request.headers.get('Idempotency-Key')) {
+      return problem(request, 428, 'This request needs an Idempotency-Key header', 'https://scadbuddy.dev/problems/idempotency-key-required')
+    }
+    try {
+      const order = lock(String(params.id))
+      const found = itemOf(order, String(params.item))
+      if (found.library_file) throw new Refused('item_library_file', `item ${found.id} is a library file item: it slices its file, and has no design to render`, [found.id])
+      // `quote.py` `reference_of`: a request has no design until its first revision.
+      if (found.reference === null && found.kind === 'request') throw new Refused('item_has_no_design', `item ${found.id} is a request with no design yet: add a revision first`, [found.id])
+      if (found.reference === null) throw new Refused('item_custom', `item ${found.id} is a custom item: it has no model to render or slice`, [found.id])
+      if (!requoteOpen(order, found)) throw new Refused('order_not_open', `order ${order.number} is ${order.status}: an item is rendered for a quote while it is draft or quoted`)
+      if (SETTLED.has(found.status)) throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)
+      const design = (found.reference.inputs as { params?: Record<string, unknown> }).params ?? {}
+      if (design.name === 'fail') {
+        return acceptOperation('order_item_render', `order_item:${found.id}`, {}, 'the render of name-keychain, job j-fail, is failed: openscad exited 1')
+      }
+      found.output_id = OUTPUT_REAGAN
+      found.updated_at = now()
+      event(order, 'item.updated', { item_id: found.id })
+      return acceptOperation('order_item_render', `order_item:${found.id}`, found as unknown as Record<string, unknown>)
     } catch (error) {
       return refused(request, error)
     }

@@ -405,6 +405,59 @@ describe('OrderPage (#4249)', () => {
       await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent(new RegExp(`^/orders/${ORDER_DRAFT}$`)))
     })
   })
+
+  // #6324 — an item with a design and no render (a storefront item): one Slice… press renders
+  // it, then the print dialog opens by itself on the new output.
+  describe('Slice… of an item with a design and no output (#6324)', () => {
+    afterEach(() => vi.restoreAllMocks())
+    const unrendered = (name = 'Reagan') => {
+      const draft = state.items.find((i) => i.id === ITEM_DRAFT)!
+      draft.output_id = null
+      draft.reference = { ...draft.reference!, inputs: { params: { name }, v: 1 } }
+    }
+
+    it('renders the design, then opens the dialog on its output', async () => {
+      unrendered()
+      const renderItem = vi.spyOn(api, 'renderItem')
+      const { user } = render(ORDER_DRAFT, `?item=${ITEM_DRAFT}`)
+      const drawer = await screen.findByRole('dialog', { name: 'Name Keychain' })
+      const button = await within(drawer).findByTestId('quote-from-slice')
+      expect(button).toBeEnabled()
+      expect(within(drawer).queryByText(/add a design/)).toBeNull()
+      await user.click(button)
+      expect(await screen.findByRole('dialog', { name: 'Quote from a slice' })).toBeInTheDocument()
+      expect(renderItem).toHaveBeenCalledTimes(1)
+      expect(state.items.find((i) => i.id === ITEM_DRAFT)?.output_id).not.toBeNull()
+    })
+
+    it('starts one render when the row’s Slice… is pressed twice while it renders', async () => {
+      unrendered()
+      // A render that is still running: accepted, never answered.
+      const renderItem = vi.spyOn(api, 'renderItem').mockImplementation(() => new Promise(() => undefined))
+      render(ORDER_DRAFT)
+      await screen.findByRole('heading', { name: 'ORD-2026-3' })
+      const row = () => screen.getByTestId(`order-item-${ITEM_DRAFT}`)
+      const slice = async () => {
+        fireEvent.keyDown(within(row()).getByRole('button', { name: 'Row actions', hidden: true }), { key: 'Enter' })
+        fireEvent.click(await screen.findByRole('menuitem', { name: 'Slice…', hidden: true }))
+      }
+      await slice()
+      expect(await within(row()).findByText('Rendering…')).toBeInTheDocument()
+      await slice()
+      await waitFor(() => expect(screen.getByRole('dialog', { name: 'Name Keychain', hidden: true })).toBeInTheDocument())
+      expect(renderItem).toHaveBeenCalledTimes(1)
+    })
+
+    it('shows a failed render where a failed slice quote shows, and opens no dialog', async () => {
+      unrendered('fail')
+      const { user } = render(ORDER_DRAFT, `?item=${ITEM_DRAFT}`)
+      const drawer = await screen.findByRole('dialog', { name: 'Name Keychain' })
+      await user.click(await within(drawer).findByTestId('quote-from-slice'))
+      expect(await within(drawer).findByTestId('quote-error')).toHaveTextContent(/The render of the design failed: .*openscad exited 1/)
+      expect(within(screen.getByTestId(`order-item-${ITEM_DRAFT}`)).getByTestId(`item-quote-failed-${ITEM_DRAFT}`)).toHaveTextContent(/Render failed/)
+      expect(screen.queryByRole('dialog', { name: 'Quote from a slice' })).toBeNull()
+    })
+  })
 })
 
 describe('OrderPage payment requests (#4957)', () => {

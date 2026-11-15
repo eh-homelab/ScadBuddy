@@ -137,6 +137,7 @@ from scadbuddy.orders.operations import (
     ORDER_ATTEMPT_COPY,
     ORDER_ITEM_PRINT,
     ORDER_ITEM_QUOTE,
+    ORDER_ITEM_RENDER,
 )
 from scadbuddy.orders.past_prints import NativeArchiveCopies, copied_file, quote_from_archive
 from scadbuddy.orders.printing import ItemPrintRequest, print_request_id
@@ -2600,6 +2601,46 @@ async def quote_item_from_archive(
     )
     await service.service.link_opened(order_id, before)
     return quote
+
+
+@router.post(
+    "/{order_id}/items/{item_id}/render",
+    response_model=OrderItem,
+    summary="Render an item's design",
+    responses=OPERATION_RESPONSES,
+)
+async def render_item(
+    order_id: str,
+    item_id: str,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> OrderItem | JSONResponse:
+    """The ``order_item_render`` operation (#6324): render the item's design (its
+    reference's commit, inputs, libraries and colours) on the normal pipeline, reusing a
+    finished render of its render key, save the output and set it on the item, so the
+    print dialog has an output to slice. The item's own output is kept while it still
+    matches. Not a design change: the item keeps its revision and its quotes. Answered
+    202 once recorded; follow ``GET /operations/{id}`` to the item. A failed render is
+    the operation's error. Refused before anything runs: 404 for an unknown order or
+    item, 409 ``order_not_submitted`` (a storefront cart), ``item_library_file``,
+    ``item_custom``, ``item_has_no_design``, ``order_not_open`` and ``item_not_open``,
+    as the slice quote refuses them."""
+    check_path(order_id, item_id)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds[ORDER_ITEM_RENDER],
+        subject=subject_of(item_id),
+        request={
+            "order_id": order_id,
+            "item_id": item_id,
+            # Who it is for comes from the author header, never a body (Ruling 12).
+            "by": current_actor().model_dump(mode="json"),
+        },
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, OrderItem)
 
 
 @router.post(
