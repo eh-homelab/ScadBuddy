@@ -11,6 +11,8 @@ import { OrderPage } from '../../pages/OrderPage'
 import { renderPage } from '../../test/utils'
 import { LOCKED_TEXT, REVISED_TEXT } from './itemActions'
 import { QUANTITY_HINT } from './quantity'
+import type { OrderItemDetail } from '../../api/types'
+import { ORDERS_MEMORY_KEY, resetOrdersMemory } from '../../lib/orderViews'
 
 function render(id: string) {
   return renderPage(
@@ -942,5 +944,83 @@ describe('OrderItemsTable · a storefront order (#5283)', () => {
     await waitFor(() => expect(quotesOfDraft().some((q) => q.unit_price_minor === 1250)).toBe(true))
     expect(quotesOfDraft().some((q) => q.accepted)).toBe(false)
     expect(accepted).not.toHaveBeenCalled()
+  })
+})
+
+// #6334 — the live lines first; the fulfilled and the cancelled ones in groups after them.
+describe('OrderItemsTable · groups (#6334)', () => {
+  beforeEach(() => {
+    resetMockState()
+    window.localStorage.clear()
+    resetOrdersMemory()
+  })
+
+  /** Copies of the accepted order's approved line, at $15.00 a unit, in `status`. */
+  function addLine(id: string, status: OrderItemDetail['status'], title: string) {
+    const base = state.items.find((i) => i.id === ITEM_APPROVED)!
+    state.items.unshift({ ...base, id, status, title })
+    const quote = state.quotes.find((q) => q.order_item_id === ITEM_APPROVED)!
+    state.quotes.push({ ...quote, id: `q-${id}`, order_item_id: id })
+  }
+  const order = () => within(screen.getByRole('table', { name: 'Line items' })).getAllByRole('row').map((r) => r.getAttribute('data-testid')).filter((id) => id && id !== 'custom-item-row')
+
+  it('lists live lines first, fulfilled open after them, cancelled closed with the sum it leaves out', async () => {
+    addLine('it-cancel-1', 'cancelled', 'Unicorn pencil cup holder – pink multicolour with a long name')
+    addLine('it-done', 'fulfilled', 'Owl')
+    addLine('it-cancel-2', 'cancelled', 'Rainbow')
+    const { user } = render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    expect(order()).toEqual([`order-item-${ITEM_APPROVED}`, 'row-group-fulfilled', 'order-item-it-done', 'row-group-cancelled'])
+    const cancelled = screen.getByTestId('row-group-cancelled')
+    expect(cancelled).toHaveTextContent('2 cancelled lines, not counted in the total ($60.00)')
+    expect(screen.getByTestId('row-group-fulfilled')).toHaveTextContent('1 fulfilled line')
+
+    await user.click(within(cancelled).getByRole('button', { expanded: false }))
+    expect(order().slice(-2)).toEqual(['order-item-it-cancel-2', 'order-item-it-cancel-1'])
+    // The header says "not counted"; each line shows its struck total only.
+    expect(within(row('it-cancel-1')).queryByText('not counted')).toBeNull()
+    expect(within(row('it-cancel-1')).getByLabelText('$30.00, not counted')).toBeInTheDocument()
+    expect(row('it-cancel-1').className).toContain('opacity-60')
+    // The open group is remembered.
+    expect(JSON.parse(window.localStorage.getItem(ORDERS_MEMORY_KEY) ?? '{}').itemGroups).toEqual({ fulfilled: true, cancelled: true })
+
+    await user.click(within(screen.getByTestId('row-group-fulfilled')).getByRole('button', { expanded: true }))
+    expect(screen.queryByTestId('order-item-it-done')).toBeNull()
+  })
+
+  it('selects only the lines in view: never one inside a closed group', async () => {
+    addLine('it-hidden', 'cancelled', 'Rainbow')
+    addLine('it-live', 'approved', 'Owl')
+    const { user } = render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    await user.click(screen.getByRole('checkbox', { name: 'Select all items' }))
+    expect(screen.getByTestId('bulk-actions')).toHaveTextContent('2 selected')
+    // Opening the group shows its line unpicked, and Select all is no longer all.
+    await user.click(within(screen.getByTestId('row-group-cancelled')).getByRole('button'))
+    expect(within(row('it-hidden')).getByRole('checkbox', { name: 'Select Rainbow' })).not.toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Select all items' })).toHaveAttribute('aria-checked', 'mixed')
+  })
+
+  it('keeps a long title in its own column', async () => {
+    addLine('it-long', 'approved', 'Unicorn pencil cup holder – pink multicolour')
+    render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    const cells = within(row('it-long')).getAllByRole('cell')
+    const title = cells.find((cell) => cell.textContent?.includes('Unicorn'))!
+    expect(title.className).toContain('min-w-48')
+    const button = within(title).getByRole('button', { name: 'Unicorn pencil cup holder – pink multicolour' })
+    // The base button's shrink-0 kept the title one line wide and ran it under the status.
+    expect(button.className).toMatch(/(^| )shrink( |$)/)
+    expect(button.className).not.toMatch(/(^| )shrink-0( |$)/)
+    expect(button.className).toContain('[overflow-wrap:anywhere]')
+  })
+
+  it('lists every line plainly when none is live', async () => {
+    const approved = state.items.find((i) => i.id === ITEM_APPROVED)!
+    approved.status = 'cancelled'
+    render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    expect(screen.queryByTestId('row-group-cancelled')).toBeNull()
+    expect(within(row(ITEM_APPROVED)).getByText('not counted')).toBeInTheDocument()
   })
 })

@@ -101,8 +101,15 @@ async def test_a_record_under_a_lease_another_took_is_refused(
 ) -> None:
     leases = CopyLeases(store.pool)
     stale = CopyLease(key=KEY, token=str(uuid.uuid4()))
-    assert await leases.acquire(KEY, stale.token, 0.2, 0) is not None
-    await asyncio.sleep(0.5)
+    assert await leases.acquire(KEY, stale.token, 60, 0) is not None
+    # Expire it in the database, not by sleeping past a short TTL: `now()` is the server's
+    # wall clock, which can step back between two statements (WSL's clock jumps by
+    # seconds), and then the lease is still held (#6313). `-infinity` is before any `now()`.
+    with store.pool.connection() as conn:
+        expired = conn.execute(
+            "UPDATE copy_leases SET expires_at = '-infinity' WHERE key = %s", (KEY,)
+        )
+        assert expired.rowcount == 1
     assert await leases.acquire(KEY, str(uuid.uuid4()), 60, 0) is not None
 
     with pytest.raises(LeaseLostError):

@@ -262,6 +262,68 @@ def test_order_list_pages_newest_first_by_cursor(rows: OrderStore) -> None:
         rows.orders(OrderFilter(), "nonsense", 2)
 
 
+def test_order_list_hides_orders_ended_before_ended_since(rows: OrderStore, pool: PgPool) -> None:
+    """#6334: `ended_since` leaves out a closed or cancelled order that ended before it,
+    timed by `closed_at`, else `cancelled_at`, else `updated_at`; an open order of any age
+    stays."""
+    customer = rows.insert_customer(
+        display_name="Ada", company=None, notes="", tags=[], contacts=[], addresses=[]
+    )
+    now = datetime.now(UTC)
+    old = now - timedelta(days=40)
+    open_old, closed_old, closed_new, cancelled_old, cancelled_new = (
+        make_order(rows, customer.id) for _ in range(5)
+    )
+    with pool.connection() as conn:
+        conn.execute("UPDATE orders SET created_at = %s WHERE id = %s", (old, open_old.id))
+        for order, column, at in (
+            (closed_old, "closed", old),
+            (closed_new, "closed", now),
+            (cancelled_old, "cancelled", old),
+            (cancelled_new, "cancelled", now),
+        ):
+            conn.execute(
+                f"UPDATE orders SET status = %s, {column}_at = %s WHERE id = %s",
+                (column, at, order.id),
+            )
+
+    since = now - timedelta(days=30)
+    kept, _ = rows.orders(OrderFilter(ended_since=since), None, 50)
+    assert {o.id for o in kept} == {open_old.id, closed_new.id, cancelled_new.id}
+    every, _ = rows.orders(OrderFilter(), None, 50)
+    assert len(every) == 5
+    # With a status filter the rule still holds: "Recently closed" is closed or cancelled
+    # within the window.
+    recent, _ = rows.orders(
+        OrderFilter(status=["closed", "cancelled"], ended_since=since), None, 50
+    )
+    assert {o.id for o in recent} == {closed_new.id, cancelled_new.id}
+
+
+def test_order_list_owing_lists_orders_with_an_unpaid_request(
+    rows: OrderStore, pool: PgPool
+) -> None:
+    """#6334: `owing` is an `open`, `pending` or `failed` payment request; a paid or
+    cancelled one owes nothing."""
+    customer = rows.insert_customer(
+        display_name="Ada", company=None, notes="", tags=[], contacts=[], addresses=[]
+    )
+    statuses = ("open", "pending", "failed", "paid", "cancelled")
+    orders = {s: make_order(rows, customer.id) for s in statuses}
+    plain = make_order(rows, customer.id)
+    with pool.connection() as conn:
+        for status, order in orders.items():
+            conn.execute(
+                "INSERT INTO payment_requests"
+                " (order_id, kind, amount_minor, currency, status, paid_at, created_by)"
+                " VALUES (%s, 'balance', 500, 'USD', %s, %s, '{\"kind\": \"browser\"}')",
+                (order.id, status, datetime.now(UTC) if status == "paid" else None),
+            )
+    owing, _ = rows.orders(OrderFilter(owing=True), None, 50)
+    assert {o.id for o in owing} == {orders[s].id for s in ("open", "pending", "failed")}
+    assert plain.id in {o.id for o in rows.orders(OrderFilter(), None, 50)[0]}
+
+
 def test_items_are_positioned_and_a_draft_one_deletes(rows: OrderStore) -> None:
     customer = rows.insert_customer(
         display_name="Ada", company=None, notes="", tags=[], contacts=[], addresses=[]

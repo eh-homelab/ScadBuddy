@@ -8,7 +8,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && node -e \"require('node:fs').cpSync('src/db/migrations', 'dist/db/migrations', { recursive: true }); require('node:fs').cpSync('../plugins/scadbuddy/skills/authoring/SKILL.md', 'dist/docs/authoring.md')\" && node scripts/bundle-workflows.mjs",
+    "build": "tsc -p tsconfig.build.json && node -e \"require('node:fs').cpSync('../plugins/scadbuddy/skills/authoring/SKILL.md', 'dist/docs/authoring.md')\" && node scripts/bundle-workflows.mjs",
     "prebuild": "pnpm gen:api && node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "start": "node --import ./dist/telemetry.js dist/main.js",
     "lint": "eslint .",
@@ -27,10 +27,10 @@
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@opentelemetry/api": "1.10.0",
     "@opentelemetry/core": "3.0.0",
-    "@opentelemetry/exporter-trace-otlp-proto": "0.300.0",
+    "@opentelemetry/exporter-trace-otlp-proto": "0.301.0",
     "@opentelemetry/instrumentation": "0.300.0",
     "@opentelemetry/instrumentation-http": "0.300.0",
-    "@opentelemetry/resources": "3.0.0",
+    "@opentelemetry/resources": "3.1.0",
     "@opentelemetry/sdk-node": "0.300.0",
     "@opentelemetry/sdk-trace": "3.0.0",
     "@temporalio/activity": "1.25.0",
@@ -45,7 +45,7 @@
     "postgres": "^3.4.9",
     "quickjs-emscripten": "0.32.0",
     "turndown": "7.2.4",
-    "undici": "7.29.1",
+    "undici": "7.30.1",
     "ws": "^8.22.0",
     "yaml": "^2.9.1",
     "zod": "^4.6.7"

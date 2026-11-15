@@ -42,7 +42,7 @@ import { balanceUnpaid, closeDeposit, noOptionShips, openBalance, replaceCharges
  * way, and on hold every step that advances the order is refused.
  */
 
-const LIST_PARAMS = new Set(['status', 'customer_id', 'q', 'from', 'to', 'accepted_from', 'accepted_to', 'currency', 'product', 'margin_state', 'source', 'unsubmitted', 'own_model', 'purchase_pending', 'import_stuck', 'cursor', 'limit'])
+const LIST_PARAMS = new Set(['status', 'customer_id', 'q', 'from', 'to', 'accepted_from', 'accepted_to', 'currency', 'product', 'margin_state', 'source', 'unsubmitted', 'own_model', 'purchase_pending', 'import_stuck', 'ended_since', 'owing', 'cursor', 'limit'])
 const MARGIN_STATES = new Set(['ok', 'thin', 'loss', 'unknown'])
 /** `SCAN_PAGE_SIZE` and `MAX_SCAN_PAGES` in backend/scadbuddy/api/orders.py (#5515). */
 export const SCAN_PAGE_SIZE = 100
@@ -947,6 +947,11 @@ export const handlers = [
     const purchasePending = sp.get('purchase_pending') === 'true'
     const importStuck = sp.get('import_stuck') === 'true'
     const sourcesOf = (orderId: string) => state.sources.filter((s) => s.order_id === orderId)
+    // #6334: `OrderStore.orders`' `ended_since` and `owing`.
+    const endedSince = sp.get('ended_since')
+    if (endedSince !== null && Number.isNaN(Date.parse(endedSince))) return fieldProblem(request, 'ended_since', 'Input should be a valid datetime')
+    const owing = sp.get('owing') === 'true'
+    const ended = (o: Order) => (o.status === 'closed' || o.status === 'cancelled') && Date.parse(o.closed_at ?? o.cancelled_at ?? o.updated_at) < Date.parse(endedSince ?? '')
     const product = sp.get('product')
     if (product !== null && product !== 'custom' && !/^(model|sku):.+$/.test(product)) return fieldProblem(request, 'product', 'product is model:<slug>, sku:<sku> or custom')
     const rows = [...state.orders]
@@ -956,6 +961,8 @@ export const handlers = [
       .filter((o) => !ownModel || state.modelRequests.some((m) => state.items.some((i) => i.id === m.item_id && i.order_id === o.id)))
       .filter((o) => !purchasePending || sourcesOf(o.id).some((s) => s.purpose === 'purchase' && s.status === 'pending'))
       .filter((o) => !importStuck || sourcesOf(o.id).some((s) => s.import_stuck))
+      .filter((o) => !endedSince || !ended(o))
+      .filter((o) => !owing || state.paymentRequests.some((r) => r.order_id === o.id && ['open', 'pending', 'failed'].includes(r.status)))
       .filter((o) => statuses.length === 0 || statuses.includes(o.status))
       .filter((o) => !customer || o.customer_id === customer)
       .filter((o) => !from || Date.parse(o.created_at) >= Date.parse(from))

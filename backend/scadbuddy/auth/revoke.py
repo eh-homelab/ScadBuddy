@@ -44,8 +44,12 @@ def revoke_retired(conn: Connection[Any]) -> list[str]:
 #: The tables a caller's role no longer touches, taken back at every start: `grant_role`
 #: never revokes, so a table dropped from a caller's list (`auth/caller_grants.py`) is
 #: listed here. The agent's `blob_refs`: its workspace files are held through the CRUD
-#: routes (`api/crud_agent.py`, #5299), no longer by its trigger.
-RETIRED_GRANTS: Mapping[str, tuple[str, ...]] = {"scadbuddy_agent": ("blob_refs",)}
+#: routes (`api/crud_agent.py`, #5299), no longer by its trigger. Its `events`,
+#: `workflow_runs` and `workflow_run_decisions`: it reads the event log, flow runs and their
+#: decisions through the CRUD routes of areas ``events`` and ``flows`` (#5299 D7).
+RETIRED_GRANTS: Mapping[str, tuple[str, ...]] = {
+    "scadbuddy_agent": ("blob_refs", "events", "workflow_runs", "workflow_run_decisions")
+}
 
 
 def revoke_tables(conn: Connection[Any], role: str, tables: tuple[str, ...]) -> list[str]:

@@ -4,6 +4,7 @@ import { ArrowLeftIcon } from 'lucide-react'
 import { api, ApiError } from '../api/client'
 import type { ModelSummary, StorefrontListing, StorefrontListingInput } from '../api/types'
 import { ListingEditor } from '../components/storefront/ListingEditor'
+import { PrepareColours } from '../components/storefront/PrepareColours'
 import type { LivePictures } from '../components/storefront/ListingPictures'
 import { defaultsFor, draftOf, emptyDraft, listingInput, previewListing, savedKey, sellMedia, storedKey, unsaveable, type ListingDraft } from '../components/storefront/listingDraft'
 import { sellListing, type SellListing } from '../components/storefront/sellSource'
@@ -487,6 +488,7 @@ export function StorefrontListingPage() {
                   </Button>
                 )}
               </div>
+              {open.published && open.id !== null && open.updatedAt !== null && <PrepareColours listingId={open.id} version={open.updatedAt} />}
               <ListingEditor
                 key={open.key.description}
                 draft={draft}

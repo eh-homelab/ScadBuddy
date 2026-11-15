@@ -136,6 +136,35 @@ def test_the_list_pages_newest_first_and_filters(client: TestClient, pg_conninfo
     assert unknown.json()["type"] == "https://scadbuddy.dev/problems/unknown-parameter"
 
 
+def test_the_list_hides_long_ended_orders_and_lists_the_owing(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    """#6334: `ended_since` and `owing` reach the store; an ended order older than the
+    bound is left out, and `owing` lists an order with an unpaid request."""
+    ada = create_customer(client)
+    live, gone, owes = (create_order(client, ada["id"]) for _ in range(3))
+    assert client.post(f"/api/v1/orders/{gone['id']}/cancel").status_code == 200
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE orders SET cancelled_at = %s WHERE id = %s",
+            (datetime(2026, 1, 1, tzinfo=UTC), gone["id"]),
+        )
+        conn.execute(
+            "INSERT INTO payment_requests (order_id, kind, amount_minor, currency, created_by)"
+            " VALUES (%s, 'deposit', 500, 'USD', '{\"kind\": \"browser\"}')",
+            (owes["id"],),
+        )
+    kept = client.get("/api/v1/orders", params={"ended_since": "2026-02-01T00:00:00Z"})
+    assert kept.status_code == 200
+    assert {o["id"] for o in kept.json()["items"]} == {live["id"], owes["id"]}
+    owing = client.get("/api/v1/orders", params={"owing": "true"}).json()["items"]
+    assert [o["id"] for o in owing] == [owes["id"]]
+    assert client.get("/api/v1/orders", params={"ended_since": "soon"}).status_code == 422
+    # A bound with no offset would be read in the session's time zone: refused.
+    naive = client.get("/api/v1/orders", params={"ended_since": "2026-02-01T00:00:00"})
+    assert naive.status_code == 422
+
+
 def test_patch_edits_notes_due_addresses_and_charges(client: TestClient) -> None:
     customer = create_customer(client)
     order = create_order(client, customer["id"])

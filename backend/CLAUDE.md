@@ -178,7 +178,15 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `piece-<key>` execution keeps that run's Temporal priority, not its own, so never start a
   render at a low priority that another caller may join by key, #6299), `projection.py` (`render_jobs` as a projection
   the workflow writes in place through the `project` activity), `pg_store.py` (the
-  backend's migrations); the render worker holds no database (#5298,
+  backend's migrations), `agent_migrations.py` (the agent's, which the API applies at
+  start after the backend's, `main._migrate_agent_at_start`; root CLAUDE.md "Migrations
+  (#491)"; a test's app skips them unless the test is marked `agent_migrations`,
+  `tests/conftest.py`; a table or other object an agent migration creates belongs to the
+  role the API connects as, not the agent's. Prod's API and agent connect as one role, so
+  nothing changes there; with a role per caller, the agent could not use what a later file
+  makes (nothing grants it: `agent/src/db/grants.ts` grants only from the agent's own
+  tables to the API's role), so such a deployment keeps the API and the agent on one role
+  until the agent's data moves behind CRUD routes (#5299)); the render worker holds no database (#5298,
   `tests/test_render_worker_nodb.py`; the API revokes its old role `scadbuddy_render` at
   every start, `auth/revoke.py`, and every caller's grant list goes through
   `auth/caller_grants.py` `grant_role`): it reads the store settings and
@@ -261,8 +269,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
 - `backend/scadbuddy/flows/` — flow versions and runs (`store.py`: `workflow_definitions`,
   `workflow_runs`, the latter written only by the run's workflow), `agent_reads.py` (the
   agent's questions about the flow tables, read only, for `api/crud_agent.py` area `flows`,
-  #5299 D7: the queries the agent ran over SQL, which `agent/src/flows/backendReads.ts`
-  `SqlFlowRunReads` keeps a copy of until every API pod serves the routes), `typecheck.py` (a
+  #5299 D7: the queries the agent ran over SQL, of which the agent's tests keep a copy,
+  `agent/test/support/sqlFlowRunReads.ts`; the API revokes the agent's grants on
+  `workflow_runs` and `workflow_run_decisions`, `auth/revoke.py`), `typecheck.py` (a
   script's check at registration and at each start), `history.py` (a Reset's preview: the
   outward sends past a point, by activity id), `component.py` (`FLOWS`; runs the
   `projects` worker in-process with `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` or
@@ -571,9 +580,18 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`BambuddyClient.makerworld_*`; Bambuddy's 400 for a link it refuses is a 422). The
   assistant imports only through these routes (agent `get_makerworld_status`,
   `resolve_makerworld_url`, `import_makerworld_model`): the agent worker has no route to
-  Bambuddy and never holds its key. The `makerworld-import` flow (stored in the
-  database, not in this repo) still posts to Bambuddy's `/api/v1/makerworld/import`
-  directly until its `import_one` is changed to call `import_makerworld_model`. The import is the `makerworld_import` operation on the
+  Bambuddy and never holds its key. The `makerworld-import` flow is not in this repo:
+  its versions are prod's `data/flows/makerworld-import/flow.py`, written only through
+  the API's `/workflows` routes (`POST /workflows` registers a version; restore and
+  delete commit too), never from this repo. Since version 2 its `import_one` calls `resolve_makerworld_url`,
+  `create_print_project` and `import_makerworld_model` (#6340). A command tool
+  (`agent/src/tools/command.ts`: `create_print_project`, `import_makerworld_model`)
+  answers `{status: "running", operation_id, next}` once its follow window ends, which a
+  script follows with `get_operation`; version 2 read `folder_id` straight off
+  `create_print_project` and failed `'folder_id'`. A flow run's call carries no `callKey`
+  (`agent/src/temporal/toolActivities.ts` `runCall`), so each call of a write sends a
+  fresh `Idempotency-Key`: after `may have run` or `StartToClose` the script checks
+  state (`list_print_projects`) before it sends the write again. The import is the `makerworld_import` operation on the
   `library` queue (`makerworld/operations.py`): Bambuddy downloads the 3MF (up to
   `MAKERWORLD_IMPORT_TIMEOUT`), then on `library_backend` native `makerworld/imports.py`
   copies it into the native library as a `bb_to_sb` copy does
@@ -1483,6 +1501,34 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   edit (#6211 review). An item
   print's spools are matched the same way (`orders/spools.py` `_of`, the store's
   `spool_links`), so a hand-set colour still finds its spools.
+- Prepared colour combinations (#6237): `orders/storefront/prepare.py`, routes `GET`/`POST
+  /storefront/listings/{id}/prepare` (`api/storefront.py`). A combination is one colour per
+  offered colour parameter (the public listing's colours, in each spelling the page can
+  send: each offered filament's own `colour`, as `ParamField.tsx` sends it, and the effective
+  default when no filament spells it so, #6299 review); each is built by the visitor path's
+  `listing_values` and `listing_reference`, a colour at its effective default (same
+  spelling) left out as the page leaves it out, so a visitor's render reuses the prepared
+  job. The POST starts the workflow
+  `PrepareListing` (`workflows/prepare_listing.py`, `library` queue, id
+  `prepare-listing:<listing id>`, `USE_EXISTING`: a second POST joins it; AUTO_UPGRADE as
+  `VersionedPrepareListing`) and answers at once (`{count, started}`). The run submits by
+  index (activity `prepare_listing_submit`, `RenderService.submit_answer(...,
+  reuse_finished=True)` at the default priority, #6299 review: a visitor's render of the same
+  key joins the prepared execution, so a lower priority would hold the visitor up) and keeps
+  at most `PREPARE_IN_FLIGHT` (2) open, reading them with a backoff
+  (`prepare_listing_settled`). A done job is skipped, a full queue waited out, a failed
+  submit's index kept in the memo `failed_to_start` (a list; a run from before the patch
+  `prepare-failed-indices` keeps a count); it continues as new every 50 submits, carrying
+  the memo. Each render's claim (`request_id`) is `prepare:<listing>:<run id>:<key>`: a
+  retry of one submit joins it, a new run makes a new one, so "Prepare again" renders a
+  failed combination again (#6299 review). The POST's `started` comes from the start's own
+  answer (its run id against the open run's, or its chain's first run id). No
+  table: the GET reads the newest `render_jobs` row of each render key, and the run's state
+  (`running`, and `failed_to_start`: how many of the memo's indices have no done job) only
+  when `0 < count <= cap`; a failed Temporal read gives
+  `running: false`, not an error. Capped by `storefront_prepare_cap` (default 256; 422
+  `listing_combinations_over_cap` with `count` and `cap`, `listing_no_colours`, 409
+  `listing_not_published`). Prepared renders follow `job_ttl`; there is no keep mark.
 - A customer's own models (#6133, spec 2026-11-13; migration
   `20261113T1547Z_storefront_customer_models.sql`): `orders/storefront/model_requests.py`,
   CRUD area `models`, the edge's `POST /api/store/v1/uploads` and `…/draft/models`. The files

@@ -205,8 +205,8 @@ all (`createApp()`, [`agent/src/app.ts`](../../agent/src/app.ts)).
   [`pg_events.py`](../../backend/scadbuddy/core/pg_events.py); pruned by
   `SCADBUDDY_EVENT_LOG_RETENTION_*`), skipping ids it already delivered. It reads the log
   through the backend's CRUD routes (`…/crud/agent/events/head` and `…/crud/agent/events`,
-  #5299) once the API lists area `events`, and over SQL on its listening connection
-  until then ([`eventLogReads.ts`](../../agent/src/events/eventLogReads.ts)). More than 1000
+  #5299, [`eventLogReads.ts`](../../agent/src/events/eventLogReads.ts)); its listening
+  connection only listens. More than 1000
   missed events, or a log it cannot read, makes it log
   `event bus: resyncing followers: …` and send every subscription an update plus one
   `list_changed`, so clients re-read.
