@@ -262,3 +262,65 @@ async def test_a_pull_reads_bambuddy_and_imports(pg_pool: PgPool) -> None:
         report = await read_and_pull(f, settings)
         assert report.created == 1
         assert await scheduled_pull(f, lambda: settings) == "pulled"
+
+
+def test_a_bb_unlock_never_clears_an_sb_lock(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb(weight_locked=True, updated_at=_bb_time(-3))], now=NOW).created_ids
+    f.spools.update(made, SpoolPatch(weight_locked=False), actor="ann")
+    f.spools.update(made, SpoolPatch(weight_locked=True), actor="ann")
+    # BB's unlock is newer than SB's lock, but the lock is SB's own.
+    pull(f, [bb(weight_locked=False, updated_at=_bb_time(1))], now=NOW)
+    spool = f.spools.get(made)
+    assert spool is not None
+    assert spool.weight_locked
+
+
+def test_a_bb_lock_is_cleared_by_a_bb_unlock(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb(updated_at=_bb_time(-3))], now=NOW).created_ids
+    pull(f, [bb(weight_locked=True, updated_at=_bb_time(-2))], now=NOW)
+    locked = f.spools.get(made)
+    assert locked is not None
+    assert locked.weight_locked
+    pull(f, [bb(weight_locked=False, updated_at=_bb_time(-1))], now=NOW)
+    unlocked = f.spools.get(made)
+    assert unlocked is not None
+    assert not unlocked.weight_locked
+
+
+def test_a_bb_scale_reading_is_the_anchor_when_newer(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    old = bb(last_scale_weight=950, last_weighed_at=_bb_time(-5), updated_at=_bb_time(-5))
+    (made,) = pull(f, [old], now=NOW).created_ids
+    first = f.spools.get(made)
+    assert first is not None
+    # The weighing is older than the pull's own reading of what is left.
+    assert first.grams_left == 900
+    assert first.last_weighed_g == 950
+    newer = bb(last_scale_weight=650, last_weighed_at=_bb_time(1), updated_at=_bb_time(1))
+    assert pull(f, [newer], now=NOW).updated_ids == [made]
+    spool = f.spools.get(made)
+    assert spool is not None
+    assert (spool.grams_left, spool.last_weighed_g) == (650, 650)
+    count = len(f.spools.events(made))
+    again = pull(f, [newer], now=NOW)
+    assert (again.created, again.linked, again.updated) == (0, 0, 0)
+    assert len(f.spools.events(made)) == count
+    weighed = [e for e in f.spools.events(made) if e.kind == "weighed"]
+    assert [(e.source, e.ref_kind, e.grams_after) for e in weighed] == [
+        ("bb", "bb_scale", 950),
+        ("bb", "bb_scale", 650),
+    ]
+
+
+def test_a_bb_drying_is_a_dried_event_once(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    dried = bb(last_dried_at=_bb_time(-1))
+    (made,) = pull(f, [dried], now=NOW).created_ids
+    pull(f, [dried], now=NOW)
+    events = [e for e in f.spools.events(made) if e.kind == "dried"]
+    assert [(e.source, e.ref_kind) for e in events] == [("bb", "bb_dried")]
+    spool = f.spools.get(made)
+    assert spool is not None
+    assert spool.last_dried_at == events[0].at

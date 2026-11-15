@@ -199,14 +199,19 @@ def _one(conn: Conn, store: Filament, bb: BbSpool, now: datetime) -> tuple[str, 
     ).fetchone()
     if link is not None:
         spool_id: UUID = link["spool_id"]
-        if _update(conn, store, bb, spool_id, link["bb_updated_at"], now):
-            return "updated", spool_id, False
-        return None
+        changed = _update(conn, store, bb, spool_id, link["bb_updated_at"], now)
+        # BB may not move ``updated_at`` for a weighing: its events are booked anyway,
+        # once each.
+        booked = _book(conn, spool_id, bb)
+        return ("updated", spool_id, False) if changed or booked else None
     after = snapshot(bb)
     held = _holder(conn, after, bb.id)
     if held is not None:
-        return "linked", held, _link(conn, store, bb, held, after, now)
+        typeless = _link(conn, store, bb, held, after, now)
+        _book(conn, held, bb)
+        return "linked", held, typeless
     made, typeless = _create(conn, store, bb, after, now)
+    _book(conn, made, bb)
     return "created", made, typeless
 
 
@@ -309,7 +314,9 @@ def _create(
     )
     _bind(conn, spool_id, after)
     _insert_link(conn, spool_id, bb, now)
-    _synced(conn, spool_id, bb, after, {}, None)
+    # A lock BB set is BB's to clear (`_lock_from_bb`).
+    locked = {"weight_locked": [False, True]} if values.get("weight_locked") else {}
+    _synced(conn, spool_id, bb, after, locked, None)
     FilamentSpoolStore.read(conn, spool_id, check=True)
     return spool_id, kind is None
 
@@ -395,6 +402,9 @@ def _update(
     values = _values(conn, after, wanted, material=material)
     current = spool.effective.model_dump() | {"weight_locked": spool.weight_locked}
     changes = {c: [current.get(c), v] for c, v in values.items() if current.get(c) != v}
+    if changes.get("weight_locked") == [True, False] and not _lock_from_bb(conn, spool_id):
+        # A BB unlock never clears a lock SB set.
+        del changes["weight_locked"]
     if spool.type_id is None:
         kind = _match(conn, store, after)
         if kind is not None:
@@ -418,6 +428,65 @@ def _update(
     _synced(conn, spool_id, bb, after, changes, reading, weight=weight)
     FilamentSpoolStore.read(conn, spool_id, check=True)
     return True
+
+
+def _lock_from_bb(conn: Conn, spool_id: UUID) -> bool:
+    """True when the spool's lock was last set by a pull: the newest event that changed
+    ``weight_locked`` is a ``synced_from_bb`` one. A lock with no such event (set at a
+    spool's creation by SB, or never recorded) is SB's."""
+    row = conn.execute(
+        "SELECT kind FROM filament_spool_events WHERE spool_id = %s"
+        " AND kind IN ('edited', 'synced_from_bb')"
+        " AND jsonb_typeof(data -> 'changes') = 'object' AND data -> 'changes' ? 'weight_locked'"
+        " ORDER BY at DESC, id DESC LIMIT 1",
+        (spool_id,),
+    ).fetchone()
+    return row is not None and row["kind"] == "synced_from_bb"
+
+
+def _book(conn: Conn, spool_id: UUID, bb: BbSpool) -> bool:
+    """BB's last weighing as a ``weighed`` event (source ``bb``, its scale weight as the
+    reading, at its time) and its last drying as a ``dried`` one, each once: ref
+    ``bb_scale``/``bb_dried`` and ``<bb id>/<time>``. The ledger's rule picks the anchor:
+    the weighing wins when it is the newest reading. On a locked spool the weighing keeps
+    its grams in ``data`` only, as any ``bb`` reading does. True when either is new."""
+    booked = False
+    if bb.last_weighed_at is not None and bb.last_scale_weight is not None:
+        row = conn.execute(
+            "SELECT weight_locked FROM filament_spools WHERE id = %s", (spool_id,)
+        ).fetchone()
+        locked = row is not None and row["weight_locked"]
+        grams = float(bb.last_scale_weight)
+        booked |= (
+            ledger.record(
+                conn,
+                spool_id,
+                "weighed",
+                source="bb",
+                absolute_g=None if locked else grams,
+                at=bb.last_weighed_at,
+                ref_kind="bb_scale",
+                ref_id=f"{bb.id}/{bb.last_weighed_at.isoformat()}",
+                actor=ACTOR,
+                data={"bb_scale_g": grams, "skipped": "locked"} if locked else {},
+            )
+            is not None
+        )
+    if bb.last_dried_at is not None:
+        booked |= (
+            ledger.record(
+                conn,
+                spool_id,
+                "dried",
+                source="bb",
+                at=bb.last_dried_at,
+                ref_kind="bb_dried",
+                ref_id=f"{bb.id}/{bb.last_dried_at.isoformat()}",
+                actor=ACTOR,
+            )
+            is not None
+        )
+    return booked
 
 
 # -- shared ----------------------------------------------------------------------------
