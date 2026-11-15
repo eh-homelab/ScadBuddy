@@ -350,7 +350,8 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session rou
       .toEqual(['wait', 'second, edited'])
     await waitIdle(session.id)
     await expect.poll(texts, { timeout: 20_000 }).toEqual([])
-  })
+    // Two turns on the Temporal test server, with a continue-as-new between them.
+  }, 90_000)
 
   it('takes over a session another principal controls', async () => {
     const { session } = await m.start(agentA, { origin: 'mcp', title: 'theirs' })
