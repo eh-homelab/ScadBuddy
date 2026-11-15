@@ -74,6 +74,9 @@ writes the result into the spec. The design below rests on these facts:
   replay history, compare `time.time()` with `time.monotonic()` for 20 s. Tests take
   times as arguments (`at=`, `seen_at=`), never the wall clock. The ledger's
   clock-step guard (`ledger.record`, an event with no `at`) stays.
+- No task prints a secret. A secret goes into a shell variable or an environment
+  variable only. No command, log, test output, commit or PR shows its value; print its
+  length at most.
 - Capture never fails a report write. Every capture call in `advance_in` runs in a
   savepoint (`with conn.transaction():`). A failure is logged with
   `FILAMENT_CAPTURE_FAILED` and the error's type, never its message, and the write goes on.
@@ -102,9 +105,13 @@ writes the result into the spec. The design below rests on these facts:
   archive has only total grams. The print watcher imports an archive while the print
   still runs, before any actual exists. BB's usage rows are per spool and are what BB
   deducted. Each row gets the BB archive id that matches by printer and time (§8.2).
+- **Prints sent through BB's queue get no SB `print_started` estimate** (owner's ruling,
+  2026-11-15). Their grams come only from BB's usage rows (Task 7). Only SB's native LAN
+  runs write `print_started`.
 - **One plate, two records, counted once.** SB's `print_run` events and BB's `bb_usage`
   event are paired when they have the same spool and job (`subtask_name` =
-  `print_name`). BB's grams count, because they keep the partial grams of a failed plate.
+  `print_name`). BB's grams count (owner's ruling, 2026-11-15), because BB keeps a failed
+  plate's partial grams, and SB books 0 g for one.
   To decide whether a pair lies after the anchor, the ledger compares a BB-clock anchor
   with BB's time and every other anchor with SB's time. So clock skew between BB and SB
   never counts a plate twice.
@@ -179,10 +186,11 @@ Strictly read-only: only `GET` requests to Bambuddy, no print, no write.
   `SCADBUDDY_BAMBUDDY_API_KEY` field of item `nxnqxhmmnzeyg2r23mxqhdmanq` in vault
   `fke5nrl36m3y5luczv3wy5vb4q` ("homelab - prod", `scadbuddy-bambuddy-api-key`; named in
   eh-homelab/clusters `clusters/prod/scadbuddy/onepassworditem-bambuddy-api-key.yaml`).
-  Under WSL, `op.exe read` writes the value to **stderr**, so
-  `KEY=$(op.exe read "op://fke5nrl36m3y5luczv3wy5vb4q/nxnqxhmmnzeyg2r23mxqhdmanq/SCADBUDDY_BAMBUDDY_API_KEY" 2>&1 | tr -d '\r\n')`,
-  then check `${#KEY}` only (46 on 2026-11-15). Never redirect it to the terminal, a
-  file or a log.
+  Under WSL, `op.exe read` writes the value to **stderr**. This is the only allowed
+  form:
+  `KEY=$(op.exe read "op://homelab - prod/scadbuddy-bambuddy-api-key/SCADBUDDY_BAMBUDDY_API_KEY" 2>&1)`.
+  Then print only `${#KEY}`. Never echo `$KEY`, and never send it to the terminal, a
+  file or a log. Pass it only as the `X-API-Key` header.
 - [ ] **Step 2: Read the usage, archives and spools.** Save
   `GET /api/v1/inventory/usage?limit=500`, `GET /api/v1/archives/?limit=200` and
   `GET /api/v1/inventory/spools?include_archived=true` with the header `X-API-Key`.
@@ -489,7 +497,10 @@ The rules that `grams_left` adds to #6261's (spec §5.5):
   Delete the four #6261 limits. #6263 fixes three of them, and Task 1 measured the fourth.
 - [ ] **Step 2: Spec §6 and §8.2.** In §6 "Prints", say that the pull books BB's usage
   rows, per spool, with the matched archive id. It does not book the print watcher's
-  archive import, and the reasons are those under "Decisions this plan makes". In §6
+  archive import, and the reasons are those under "Decisions this plan makes". Also say
+  that only SB's native LAN runs write `print_started`: a print sent through BB's queue
+  gets its grams only from BB's usage rows. When SB and BB both record one plate, BB's
+  grams count (owner's rulings, 2026-11-15). In §6
   "Tray changes", name the report write (`printers/reports.py` `advance_in`) and the
   backstop. In §8.2, rewrite the "As built in #6261" paragraph: count once by pairing a
   job's SB and BB records, each anchor compared in its own clock.
