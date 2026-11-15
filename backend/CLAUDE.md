@@ -567,9 +567,17 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`BambuddyClient.makerworld_*`; Bambuddy's 400 for a link it refuses is a 422). The
   assistant imports only through these routes (agent `get_makerworld_status`,
   `resolve_makerworld_url`, `import_makerworld_model`): the agent worker has no route to
-  Bambuddy and never holds its key. The `makerworld-import` flow (stored in the
-  database, not in this repo) still posts to Bambuddy's `/api/v1/makerworld/import`
-  directly until its `import_one` is changed to call `import_makerworld_model`. The import is the `makerworld_import` operation on the
+  Bambuddy and never holds its key. The `makerworld-import` flow is not in this repo:
+  its versions are prod's `data/flows/makerworld-import/flow.py` (written only through
+  `POST /workflows`). Since version 2 its `import_one` calls `resolve_makerworld_url`,
+  `create_print_project` and `import_makerworld_model` (#6340). A command tool
+  (`agent/src/tools/command.ts`: `create_print_project`, `import_makerworld_model`)
+  answers `{status: "running", operation_id, next}` once its follow window ends, which a
+  script follows with `get_operation`; version 2 read `folder_id` straight off
+  `create_print_project` and failed `'folder_id'`. A flow run's call carries no `callKey`
+  (`agent/src/temporal/toolActivities.ts` `runCall`), so each call of a write sends a
+  fresh `Idempotency-Key`: after `may have run` or `StartToClose` the script checks
+  state (`list_print_projects`) before it sends the write again. The import is the `makerworld_import` operation on the
   `library` queue (`makerworld/operations.py`): Bambuddy downloads the 3MF (up to
   `MAKERWORLD_IMPORT_TIMEOUT`), then on `library_backend` native `makerworld/imports.py`
   copies it into the native library as a `bb_to_sb` copy does
