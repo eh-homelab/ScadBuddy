@@ -35,10 +35,15 @@ from scadbuddy.core.events import Event, PreviewSliceEvent
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.preview_follow.component import PREVIEW_FOLLOWS
 from tests.api.conftest import follow_operation
+from tests.api.test_customers import create as create_customer
+from tests.api.test_orders import create_order
+from tests.api.test_orders_lifecycle import add_item
 from tests.api.test_print_filaments import prepared, queue_route
 from tests.api.test_print_run_choices import body, run_print, run_routes, two_plate_output
+from tests.api.test_recent_outputs import saved
 from tests.api.test_send import BASE, configure, upload_route
 from tests.api.test_settings_runtime import _state
+from tests.api.test_versions import SLUG, upload
 from tests.bambuddy.conftest import recording
 from tests.support.operations import press
 
@@ -316,6 +321,41 @@ def test_a_background_slice_with_a_project_chosen_files_nothing_in_the_project(
     assert upload.call_count == 1
     assert upload.calls.last.request.url.params.get("folder_id") != "9"
     assert not folder.called
+
+
+@pytest.mark.requires_git
+@respx.mock
+def test_a_storefront_output_on_an_order_item_opens_in_the_dialog_and_slices(
+    client: TestClient,
+) -> None:
+    """#6371: only lists leave the storefront slice run's outputs out. Read by its id (an
+    order item's ``output_id``, the print dialog's routes, the slice) it is found as any
+    other output."""
+    configure(client)
+    upload(client)
+    output_id = saved(client, SLUG, {"width": 12}, "Storefront: Keychain")
+    outputs = _state(client).outputs
+    meta = outputs.mark_storefront(output_id)
+    assert outputs.index is not None
+    outputs.index.record(meta, outputs.params(output_id))
+    assert client.get("/api/v1/outputs").json() == []
+    order = create_order(client, create_customer(client)["id"])
+    item = add_item(client, order["id"], output_id=output_id, quantity=1)
+    assert item["output_id"] == output_id
+    detail = client.get(f"/api/v1/outputs/{output_id}")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["source"] == "storefront"
+    upload_route()
+    run_routes()
+    sliced = Job().routes()
+    sliced_routes()
+
+    started = start_slice(client, output_id, body())
+
+    assert sliced.call_count == 1
+    preview = client.get(f"/api/v1/print/outputs/{output_id}/preview-slices/{started['job_id']}")
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["status"] == "completed"
 
 
 @respx.mock

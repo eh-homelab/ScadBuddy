@@ -225,6 +225,23 @@ same way, `vite.config.ts`).
   its answer says the print is in Activity (`prints.ts` `lanPrintsActivityPath`), as a
   model's Prints tab does when the model has such a print (`PrintsPage.tsx`
   `LanPrintsNote`).
+- "Needs you" (#6399): `lib/needsYou.ts` is every request that waits on the person in one list
+  (the agent's pending input, `attention.ts` `WaitingEntry`; the flow grants of
+  `GET /api/v1/flow-grant-requests`; the tab's pairing requests, from `AgentLink`'s
+  `onPairings`), which `AppShell` provides as `NeedsYouContext`. The bell
+  (`components/activity/ActivityBell.tsx`) lists it first, counts it until it is answered
+  (opening the bell clears only the finished rows) and turns `bg-needs` (the `--sb-needs`
+  tokens, AA in `theme.contrast.test.ts`) while anything waits; the Activity page's
+  `#needs-you` (`components/activity/NeedsYou.tsx`) lists it in full. Each new item is
+  toasted and, while the page is hidden, notified (`needsYouNotices`). With every tab closed
+  the agent pushes the grants and pairing requests too (`agent/src/notify/waiting.ts`, read
+  every 30 s, and pushed only in its first 24 h, so a swept claim never pushes it again), under the same notice ids (`run-grant:<grant id>`, `trigger-grant:<grant id>:<requested_at, epoch s>`,
+  `pairing:<id>`), so a push and the page's notification share one tag; a click opens
+  `#needs-you` (`public/push-sw.js`). Tests build the same
+  context with `src/test/needsYou.tsx` `NeedsYouHarness`; a Playwright test parks agent
+  requests with the `sessionStorage` key `scadbuddy.mock.pending-input`
+  (`mocks/features/pendingInput.ts`). The mocks hold two requested grants by default
+  (`run-ask`, `trig-render`), so the tab title of the mocked app starts with `(2)`.
 - `frontend/src/lib/appLinks.ts` (`appUrl`, `useAppUrl`, `components/AppLink.tsx`) — links
   to ScadBuddy's own pages use the host the user is on: a path, or a URL on a known origin
   (`public_url` plus `SCADBUDDY_ALLOWED_ORIGINS`), is put on `window.location.origin`

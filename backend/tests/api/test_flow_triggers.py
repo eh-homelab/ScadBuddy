@@ -30,6 +30,7 @@ from scadbuddy.flow_triggers.component import FLOW_TRIGGERS
 from scadbuddy.flow_triggers.fire import ensure_trigger_schedules
 from scadbuddy.workflows.flow_triggers import schedule_id
 from tests.api.conftest import FakeAgentTools
+from tests.api.test_crud_agent_cost import token
 from tests.api.test_customers import create as create_customer
 from tests.api.test_flows import AGENT, register, script, settings, until
 from tests.api.test_orders import create_order
@@ -38,6 +39,8 @@ from tests.support.temporal import WorkflowReaper
 __all__ = ["settings"]
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
+
+CRUD_AGENT = "/api/v1/internal/crud/agent"
 
 OTHER = {"X-ScadBuddy-Agent-Author": "token:p2", "X-ScadBuddy-Agent-Author-Session": "s2"}
 WAITS = script("await wait_for_human('Go on?', 600)")
@@ -289,6 +292,87 @@ def test_an_agents_standing_grant_is_requested_and_only_the_browser_decides_it(
     assert approved.json()["spec"]["rules"][0]["max_prints"] == 1
     again = fire(workflow_reaper, client, trigger["id"])
     assert run_view(client, again["run_id"])["grant"]["status"] == "approved"
+
+
+@pytest.mark.usefixtures("triggers")
+def test_the_grant_requests_list_a_requested_standing_grant_until_it_is_decided(
+    client: TestClient,
+) -> None:
+    """#6399: a trigger whose standing grant waits for a person is listed as its view, with
+    the `seen` an approval sends back; an approved one is not; a decision takes it off."""
+    definition = register(client, WAITS)
+    asked = create(client, definition["id"], AGENT)
+    approved = create(client, definition["id"])
+    assert attach(client, asked["id"], grant({"fn": "queue_print"}), AGENT).status_code == 200
+    assert attach(client, approved["id"], grant({"fn": "queue_print"})).status_code == 200
+    body = client.get("/api/v1/flow-grant-requests").json()
+    assert [t["id"] for t in body["triggers"]] == [asked["id"]]
+    assert body["triggers_total"] == 1
+    listed = body["triggers"][0]
+    assert listed["grant"]["status"] == "requested"
+    assert listed["seen"] == view(client, asked["id"])["seen"]
+    # The agent's Web Push reads the same requests by id, with its service credential only.
+    waiting = f"{CRUD_AGENT}/push/waiting"
+    assert client.get(waiting).status_code in (401, 403)
+    assert client.get(waiting, headers=token(client)).json() == {
+        "requests": [
+            {
+                "id": "trigger-grant:"
+                f"{listed['grant']['id']}:{epoch_s(listed['grant']['requested_at'])}",
+                "reason": "grant",
+                "since": listed["grant"]["requested_at"],
+            }
+        ]
+    }
+    assert approve(client, asked["id"]).status_code == 200
+    assert client.get("/api/v1/flow-grant-requests").json()["triggers"] == []
+    assert client.get(waiting, headers=token(client)).json() == {"requests": []}
+
+
+def epoch_s(at: str) -> int:
+    """The notice id's seconds, as the page reads them (`Math.floor(Date.parse(at) / 1000)`)."""
+    return int(datetime.fromisoformat(at).timestamp() // 1)
+
+
+@pytest.mark.usefixtures("triggers")
+def test_an_edit_that_returns_an_approved_grant_to_requested_is_a_new_push(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    """#6399 review: an edit returns an approved standing grant to `requested` in place. It
+    is a new request: listed for Web Push with a time and an id of its own, even when the
+    grant was made more than a day ago, and dated by that time in the UI's list."""
+    definition = register(client, WAITS)
+    trigger = create(client, definition["id"])
+    assert attach(client, trigger["id"], grant({"fn": "queue_print"})).status_code == 200
+    first = view(client, trigger["id"])["grant"]
+    assert first["status"] == "approved"
+    # Made, and first asked for, two days ago: far outside the push window.
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute(
+            "UPDATE flow_trigger_grants SET created_at = now() - interval '2 days',"
+            " requested_at = now() - interval '2 days' WHERE id = %s",
+            (first["id"],),
+        )
+    waiting = f"{CRUD_AGENT}/push/waiting"
+    assert client.get(waiting, headers=token(client)).json() == {"requests": []}
+    edited = client.patch(f"/api/v1/flow-triggers/{trigger['id']}", json={"overlap": "allow_all"})
+    assert edited.status_code == 200, edited.text
+    again = view(client, trigger["id"])["grant"]
+    assert (again["id"], again["status"]) == (first["id"], "requested")
+    assert datetime.fromisoformat(again["requested_at"]) > datetime.fromisoformat(
+        again["created_at"]
+    ) + timedelta(days=1)
+    assert client.get(waiting, headers=token(client)).json() == {
+        "requests": [
+            {
+                "id": f"trigger-grant:{first['id']}:{epoch_s(again['requested_at'])}",
+                "reason": "grant",
+                "since": again["requested_at"],
+            }
+        ]
+    }
+    listed = client.get("/api/v1/flow-grant-requests").json()["triggers"]
+    assert [t["grant"]["requested_at"] for t in listed] == [again["requested_at"]]
 
 
 @pytest.mark.usefixtures("triggers")

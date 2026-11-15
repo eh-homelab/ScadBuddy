@@ -87,6 +87,23 @@ _LAST_PRINT_FIELDS = frozenset(
 )
 
 
+#: Who saved an output (#6371): the back office (a person, the assistant, an order or a
+#: quote), or the storefront's slice run, which prices a visitor's variant. The back
+#: office's lists of renders leave out the storefront's outputs unless asked for them.
+#: A read of one output by its id finds it whatever saved it.
+OutputSource = Literal["back_office", "storefront"]
+BACK_OFFICE: OutputSource = "back_office"
+STOREFRONT: OutputSource = "storefront"
+#: The name the storefront slice run gives each output starts with this.
+STOREFRONT_NAME_PREFIX = "Storefront: "
+
+
+def storefront_output_id(render_key: str) -> str:
+    """The id the storefront slice run saves a variant's render under: one per render
+    key, so every variant of one render shares one output."""
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"scadbuddy:storefront_output:{render_key}").hex
+
+
 class OutputNotFoundError(KeyError):
     pass
 
@@ -210,6 +227,9 @@ class OutputMeta(BaseModel):
     #: commit, so an output names what it was built from beyond ``model_version``.
     #: Empty for a model with none, and on records written before the field existed.
     libraries: list[ModelLibrary] = Field(default_factory=list)
+    #: Who saved it (#6371). A record from before the field is the back office's, until
+    #: the API's start marks one the storefront slice run saved (`OutputIndex.sync`).
+    source: OutputSource = BACK_OFFICE
 
     @model_validator(mode="before")
     @classmethod
@@ -463,6 +483,7 @@ class OutputStore:
         arranged_from: Sequence[str] = (),
         output_id: str | None = None,
         print_settings: Mapping[str, ProcessValue] | None = None,
+        source: OutputSource = BACK_OFFICE,
     ) -> OutputMeta:
         """Save the job's output ``index`` (a pipeline job's `ctx.output`, §5.2), or its
         one result for a job without outputs. ``files_dir`` holds that output's extra
@@ -470,7 +491,8 @@ class OutputStore:
         that holds the output's Parts first name the output before it exists: a fresh id,
         or one the caller holds the :meth:`claim` of, since a failed write removes the
         directory.
-        ``print_settings`` are the template's (#770), written into the saved 3MF."""
+        ``print_settings`` are the template's (#770), written into the saved 3MF.
+        ``source`` says who saved it (#6371)."""
         if job.outputs and not 0 <= index < len(job.outputs):
             raise IndexError(index)
         chosen = job.outputs[index] if job.outputs else None
@@ -558,6 +580,7 @@ class OutputStore:
             warnings=list(result.warnings),
             layout_plates=list(result.plates),
             libraries=list(result.libraries),
+            source=source,
         )
         self._write_meta(directory, meta)
         if self.index is not None:
@@ -689,7 +712,8 @@ class OutputStore:
         3MF's provenance names the output by id, and a download is named at download.
 
         A read-modify-write with no lock: nothing else rewrites ``meta.json`` once the
-        output is saved. A second writer of it needs a lock here, or one rename loses."""
+        output is saved, except `mark_storefront` once at the API's start, for an output
+        saved before #6371. A second writer of it needs a lock here, or one rename loses."""
         directory = self._find_dir(output_id)
         meta = OutputMeta.model_validate_json((directory / META_NAME).read_text(encoding="utf-8"))
         renamed = meta.model_copy(update={"name": name or None})
@@ -700,6 +724,15 @@ class OutputStore:
             # After the file: a failure fails the rename, which a retry writes again.
             self.index.rename(output_id, renamed.name)
         return self.get(output_id)
+
+    def mark_storefront(self, output_id: str) -> OutputMeta:
+        """Mark an output saved before #6371 as the storefront slice run's: only its
+        ``meta.json`` changes. `OutputIndex.sync` calls it before it writes the row."""
+        directory = self._find_dir(output_id)
+        meta = OutputMeta.model_validate_json((directory / META_NAME).read_text(encoding="utf-8"))
+        marked = meta.model_copy(update={"source": STOREFRONT})
+        _replace(directory / META_NAME, json.dumps(marked.model_dump(mode="json"), indent=2) + "\n")
+        return marked
 
     def delete(self, output_id: str) -> None:
         directory = self._find_dir(output_id)

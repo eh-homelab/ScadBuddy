@@ -96,6 +96,10 @@
   --sb-accent-ink: #1a1204;
   --sb-ok: #4ade80;
   --sb-warn: #f87171;
+  /* #6399 — what waits on the person (the bell, "Needs you"): its own hue, apart from the
+     brand amber, the error red and the ok green; ink on it, and it on every surface, AA. */
+  --sb-needs: #f0abfc;
+  --sb-needs-ink: #3b0764;
   --sb-focus: #9ec5ff;
   /* Bambuddy's own nozzle-side badge (#469). */
   --sb-side-bg: #1a4d2e;
@@ -161,6 +165,8 @@
     --sb-accent-ink: #fff8ec;
     --sb-ok: #147c3b;
     --sb-warn: #b91c1c;
+    --sb-needs: #a21caf;
+    --sb-needs-ink: #ffffff;
     --sb-focus: #1d4ed8;
     --sb-side-bg: #e7f5e9;
     --sb-side-ink: #00ae42;
@@ -228,6 +234,8 @@
   --color-faint: var(--sb-faint);
   --color-ok: var(--sb-ok);
   --color-warn: var(--sb-warn);
+  --color-needs: var(--sb-needs);
+  --color-needs-ink: var(--sb-needs-ink);
 
   --font-sans:
     'Geist Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
