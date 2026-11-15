@@ -303,7 +303,7 @@ export class TurnRunner {
   async assemble(
     session: ClaimedSession,
     principal: TurnPrincipal,
-    options: { includeCooling?: boolean; parent?: Context } = {},
+    options: { includeCooling?: boolean; parent?: Context; turnId?: string } = {},
   ): Promise<AssembledTurn> {
     const id = session.id
     const slot = createTurnSlot()
@@ -346,7 +346,11 @@ export class TurnRunner {
       // after this point is redacted before it reaches the event log. Every
       // candidate's, since the turn may fall back to any of them.
       const candidates = await phase('credentials', () =>
-        this.deps.credentials.candidates(options.includeCooling ? { includeCooling: true } : undefined),
+        this.deps.credentials.candidates({
+          ...(options.includeCooling ? { includeCooling: true } : {}),
+          sessionId: id,
+          ...(options.turnId ? { turnId: options.turnId } : {}),
+        }),
       )
       secrets = candidates.map((c) => c.credential.secret)
       const builtInTools = this.deps.builtInTools

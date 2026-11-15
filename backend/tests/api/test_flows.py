@@ -26,6 +26,7 @@ from scadbuddy.flows.images import blob_context
 from scadbuddy.flows.keys import payload_keys
 from scadbuddy.main import create_app
 from scadbuddy.workflows import payload_codec
+from tests.api.conftest import FakeAgentTools
 from tests.support.agent_tables import AGENT_KEY_MIGRATIONS
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
@@ -82,6 +83,24 @@ def test_a_bad_script_is_refused_by_line_and_nothing_is_written(client: TestClie
     )
     assert response.status_code == 422
     assert [p["line"] for p in response.json()["problems"]] == [3]
+    assert client.get("/api/v1/workflows").json() == []
+
+
+def test_a_script_naming_a_tool_the_agent_lacks_is_refused_and_nothing_is_written(
+    client: TestClient, agent_tools: FakeAgentTools
+) -> None:
+    """#6365: makerworld-import version 2 named `resolve_makerworld_url` a day before
+    any agent had it, and its run failed on that call; the registration refuses it."""
+    agent_tools.names = {"list_models"}
+    response = client.post(
+        "/api/v1/workflows",
+        json={
+            "name": "early",
+            "script": script("await tool('list_models', {})", "await tool('not_yet', {})"),
+        },
+    )
+    assert response.status_code == 422, response.text
+    assert [p["line"] for p in response.json()["problems"]] == [4]
     assert client.get("/api/v1/workflows").json() == []
 
 

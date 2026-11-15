@@ -1,5 +1,5 @@
 import type { AppDeps } from './app.js'
-import { opensWith, soonestRecovery } from './credentials.js'
+import { type OpenerStatus, openerOf, opensWith, soonestRecovery } from './credentials.js'
 
 /** Upper bound on each database step of the status (migrations, credential read). */
 export const DEFAULT_HEALTH_TIMEOUT_MS = 2000
@@ -18,6 +18,8 @@ export type AiStatus =
   | 'unavailable (database migrations failed)'
   | 'unavailable (database timed out)'
   | 'unavailable (waiting for the API to apply the database migrations)'
+  | 'unavailable (the API did not answer for its key-encryption key)'
+  | 'unavailable (the API timed out answering for its key-encryption key)'
   | `disabled (no key-encryption key: ${string})`
   | 'disabled (no Claude credential)'
   | 'unavailable (stored credential was sealed with a different key-encryption key)'
@@ -76,10 +78,19 @@ export async function aiStatus(
   }
   if (list === TIMED_OUT) return { ai: 'unavailable (database timed out)', credential: 'unknown' }
   const credential = list.length ? 'configured' : 'not configured'
-  if (!deps.kek.ok) return { ai: `disabled (no key-encryption key: ${deps.kek.reason})`, credential }
-  const kekId = deps.kek.kek.id
+  // The key that opens them: this process's, or the API's through its CRUD routes (#5299 D5).
+  let opener: OpenerStatus | typeof TIMED_OUT
+  try {
+    opener = await within(openerOf(deps.credentials, deps.kek), timeoutMs)
+  } catch {
+    return { ai: 'unavailable (the API did not answer for its key-encryption key)', credential }
+  }
+  if (opener === TIMED_OUT) return { ai: 'unavailable (the API timed out answering for its key-encryption key)', credential }
+  const kek: OpenerStatus = opener
+  if (!kek.ok) return { ai: `disabled (no key-encryption key: ${kek.reason})`, credential }
+  const kekId = kek.kek.id
   if (!list.length) return { ai: 'disabled (no Claude credential)', credential }
-  const opening = list.filter((c) => opensWith(c, deps.kek))
+  const opening = list.filter((c) => opensWith(c, kek))
   if (!opening.length) {
     return list.some((c) => c.kekId !== kekId)
       ? { ai: 'unavailable (stored credential was sealed with a different key-encryption key)', credential }
@@ -89,16 +100,16 @@ export async function aiStatus(
   // only when that is all of them; a mix (some disabled, or some the key
   // cannot open) is "not usable now", with the time one recovers if any will.
   if (opening.some((c) => c.status === 'active')) return { ai: 'enabled', credential }
-  const soonest = soonestRecovery(list, deps.kek)
+  const soonest = soonestRecovery(list, kek)
   // "Disabled" only when a reset would fix every one: none sealed under another
   // key or in the old format, which a reset does not open.
   if (!soonest) {
-    return list.every((c) => c.status === 'disabled' && opensWith(c, deps.kek))
+    return list.every((c) => c.status === 'disabled' && opensWith(c, kek))
       ? { ai: 'unavailable (every Claude credential is disabled)', credential }
       : { ai: 'unavailable (no Claude credential is usable now)', credential }
   }
   const recoversAt = soonest.toISOString()
-  return list.every((c) => c.status === 'cooling_down' && opensWith(c, deps.kek))
+  return list.every((c) => c.status === 'cooling_down' && opensWith(c, kek))
     ? { ai: 'unavailable (every Claude credential is rate limited)', credential, recoversAt }
     : { ai: 'unavailable (no Claude credential is usable now)', credential, recoversAt }
 }

@@ -26,7 +26,13 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: ``/release`` (#5299), the holds of its workspace files' blobs. Its ``events`` area is
 #: ``…/agent/events`` and ``…/events/head``, the event log's gap and head; its ``flows``
 #: area is ``…/agent/flow-runs/*``, ``…/flow-decisions`` and ``…/flow-grants/in-force``,
-#: its reads of flow runs, their decisions and grants (#5299 D7). The print ``uploads``
+#: its reads of flow runs, their decisions and grants (#5299 D7). Its ``settings`` area is
+#: ``…/agent/settings``, ``ai_settings`` (#5299 step 4); its ``credentials`` area is
+#: ``…/agent/credentials`` and every route under it, the Claude credentials sealed and
+#: opened on the API, a reveal audited; its ``payload-keys`` area is
+#: ``…/agent/payload-keys/{subject}``, a subject's data key released (made first under the
+#: subject's lock, never for a forgotten one) and audited, never the KEK (#5299 D5,
+#: #5342; `api/crud_agent_secrets.py`). The print ``uploads``
 #: area also covers ``…/print/slices`` and ``…/print/slice-starts`` (#5298 Task 25). Its
 #: ``previews`` area also covers ``…/print/project-targets``, ``…/print/folderless`` and
 #: ``…/print/destination-touches`` (#5298 Task 26). Its ``copy-leases`` area is
@@ -76,7 +82,15 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "order",
         "models",
     ],
-    "agent": ["order-costs", "workspace-blob-refs", "events", "flows"],
+    "agent": [
+        "order-costs",
+        "workspace-blob-refs",
+        "events",
+        "flows",
+        "settings",
+        "credentials",
+        "payload-keys",
+    ],
     "intake": ["sources"],
 }
 

@@ -215,6 +215,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
 - `backend/scadbuddy/workflows/arrange.py` — Arrange's packer (spec 2026-09-27 §7): goals,
   quarter turns, filament signatures, every plate checked with `plate.fit_problem`;
   `Arrange` in `workflows/pipelines.py` runs a `kind='arrange'` row (`POST /outputs/arrange`).
+  It packs with `packing.py` `GAP_MM` (5 mm) and ignores Bambu's by-object clearance, so a
+  by-object plate fails "too close to others" (#6246). A template plate is one object with
+  colour parts (#6245), so by-object slicing does nothing useful on it: render each piece
+  alone and arrange the pieces, which makes each one its own object (#956).
 - `backend/scadbuddy/workflows/` — renders on Temporal (#424): `pipelines.py`
   (`TemplatePipeline`, its `RenderPiece` children, `RenderPreview`), `activities.py`
   (the render stages as activities, `WorkerDeps`), `client.py` (`connect`,
@@ -285,6 +289,21 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   sweep for runs whose execution closed). Routes `api/flows.py`. An outward call's
   approval timeout resolves from the run, its flow, then `flow_approval_timeout_seconds`
   (0 is never).
+- `backend/scadbuddy/agent_data/` — the agent's settings, Claude credentials and payload data
+  keys behind the CRUD service (#5299 step 4, D5; #5342), for `api/crud_agent_secrets.py`
+  (class `crud.agent`, areas `settings`, `credentials`, `payload-keys`): `credentials.py` is
+  `agent/src/credentials.ts` `CredentialStore` statement for statement (the AAD, the table
+  lock, the `FOR UPDATE` health write, the warm-evict NOTIFY), sealed and opened here with the
+  KEK; `settings.py` a write with the NOTIFYs in its transaction and, with `expect`, a
+  compare-and-set under the table's lock; `payload_keys.py` a subject's data key released
+  (made first under the subject's advisory lock, never for a subject in
+  `ai_forgotten_subjects`), never the KEK; `audit.py` the `ai_audit` row each reveal
+  (kind `credential`; a redaction's once per `REDACT_AUDIT_WINDOW`) and release (kind `payload_key`, once per subject and
+  `RELEASE_AUDIT_WINDOW`) writes in its transaction; `rotation.py` the re-wrap of the credentials and payload
+  keys at the API's start (`main._rotate_agent_secrets`). Its tests make the agent's tables
+  with the agent's own migration files (`render/agent_migrations.py` `migrate_agent`) and open
+  the credential vectors `tests/fixtures/secret-vectors.json`, a copy that
+  `lint-codec-copies.sh` keeps equal to the agent's.
 - `backend/scadbuddy/flow_triggers/` — runs started on a schedule or an event (#2484,
   spec 2026-10-11 §12): `store.py` (`flow_triggers`, their standing grants and fires),
   `fire.py` (the `flow_trigger_fire` activity on the `library` queue), `events.py` (the

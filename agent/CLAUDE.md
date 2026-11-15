@@ -47,7 +47,20 @@ wait: `src/flows/backendReads.ts` `CrudFlowRunReads`, used by `temporal/flowRuns
 `PgApprovalRecords`), all over `src/api/crudRead.ts` `crudRead`. There is no SQL fallback:
 `test/retiredTables.test.ts` fails on agent SQL that names `events`, `workflow_runs` or
 `workflow_run_decisions`, and the Postgres tests answer the flow reads with
-`test/support/sqlFlowRunReads.ts` (the backend's queries on the test database). A route's
+`test/support/sqlFlowRunReads.ts` (the backend's queries on the test database). Its settings, Claude credentials and payload data keys (#5299 step 4, D5;
+#5342; `SECRET_AREAS`): area `settings` (`src/credentials.ts` `SettingsStore`'s `remote`,
+`CrudSettings`: a compare-and-set sends what its check read as `expect`, and the API sends the
+warm-evict and runtime NOTIFYs in the write's transaction, so the LISTEN side is unchanged),
+area `credentials` (`CrudCredentials`, `gatedCredentials`: the API seals and opens with the
+KEK, the routes and the turn's pool read the API's key through the repo's `opener`, and a turn's
+credentials come from `…/credentials/reveal`, audited per call) and area `payload-keys`
+(`src/temporal/payloadCodec.ts` `CrudPayloadKeys`, `gatedPayloadKeys`: a subject's data key,
+made under the subject's lock and never for a forgotten subject, audited as kind `payload_key`
+(a release once per subject in 10 minutes), cached 30 s here).
+None needs a KEK in this process once listed. These three have a rolling-deploy fallback:
+`src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` from the start with back-off
+(1 s doubling to 30 s) until every one is listed, and until then each stays on SQL, for an API
+pod older than the routes. A route's
 answer counts only with `X-ScadBuddy-Crud: 1`; any other failure takes the read's existing
 error path (a lookup failure the activity retries, a 500, a resync). A session's successful `order_item_revision_add` (or
 `_after_acceptance`) is an `ai_session_order_costs` row (`src/sessions/orderCosts.ts`
@@ -301,9 +314,11 @@ opens every one and seals it again byte for byte).
     sent on the chat socket (`routes/chat.ts` `sentToPanel`).
   - Durable payloads (#1056 phase 5c, spec §6.5): `src/temporal/payloadCodec.ts` seals
     every payload of a `session-<uuid>` / `flow-<uuid>` workflow under that subject's
-    data key (`ai_payload_keys`, sealed under the KEK, re-wrapped at start on rotation);
-    the agent-tools worker and the service's Temporal client carry it when the KEK is
-    mounted. `src/sessions/forget.ts` `forgetSubject` (key row, then the workflow, then
+    data key (`ai_payload_keys`, sealed under the KEK; the API re-wraps them at its start on
+    rotation). The agent-tools worker and the service's Temporal client carry it; once the
+    API lists area `payload-keys` the API releases each key (`CrudPayloadKeys`, #5299 step 4,
+    #5342), so no KEK is needed here, and until then it opens them with its own
+    (`gatedPayloadKeys`; with neither, a call that needs one is `PayloadKeyUnavailable`). `src/sessions/forget.ts` `forgetSubject` (key row, then the workflow, then
     the rows) is the one way a durable subject is deleted; operators run
     `node dist/forget-subject.js session-<uuid>`. A fork reads its parent's transcript
     through the cut (`ai_sessions.fork_parent_id`, `fork_cut`; `src/sessions/store.ts`,

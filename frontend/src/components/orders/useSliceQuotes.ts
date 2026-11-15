@@ -26,6 +26,12 @@ export interface SliceQuoteRun {
    * render keeps it, so its error reads as the render's.
    */
   stage?: 'rendering'
+  /**
+   * Set once the render answered and its output is the item's, while the page waits for the
+   * order's read to show it. The person can always stop waiting: a read that never comes
+   * (failed, or superseded by one that failed) holds nothing.
+   */
+  landed?: boolean
 }
 
 export type SliceQuoteRuns = ReadonlyMap<string, SliceQuoteRun>
@@ -71,7 +77,7 @@ function idsOf(row: ActivityPage['items'][number]): { operationId: string; itemI
  * order) is found through the activity index and followed by its operation id, so it shows
  * as running and a second press cannot start a second one (#4736).
  */
-export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[] | undefined, onQuoted: () => void) {
+export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[] | undefined, onQuoted: (failed?: () => void) => void) {
   const [runs, setRuns] = useState<Map<string, SliceQuoteRun>>(() => new Map())
   const current = useRef(orderId)
   // The follows of this order's quotes, ended with the page: their polls of
@@ -91,8 +97,10 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
   // does not come back on the next reload, as `followed` keeps a failed row's from coming back.
   const shownFailures = useRef(new Set<string>())
   // #6324 — the renders that landed, by item, each settled once the order's reload shows the
-  // item's output: a reload that fails settles nothing, so no dialog opens later unasked.
-  const rendered = useRef(new Map<string, () => void>())
+  // item's output. A reload that fails settles it false and leaves the run detached, so
+  // "Stop waiting" shows and the run ends once a later read shows the output; no dialog
+  // opens later unasked.
+  const rendered = useRef(new Map<string, (ok: boolean) => void>())
   useEffect(() => {
     quoted.current = onQuoted
     seen.current = { items, runs }
@@ -171,7 +179,14 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
     [orderId, update],
   )
 
-  const dismiss = useCallback((itemId: string) => update(orderId, itemId, null), [orderId, update])
+  const dismiss = useCallback(
+    (itemId: string) => {
+      // A landed render's wait ends too: its promise settles false, so no dialog opens later.
+      rendered.current.get(itemId)?.(false)
+      update(orderId, itemId, null)
+    },
+    [orderId, update],
+  )
 
   /**
    * #6324 — "Slice…" on an item with a design and no output: its render first, shown as this
@@ -189,10 +204,22 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
           .renderItem(orderId, itemId, (operation) => followedSet.add(operation.id), follows.current.signal)
           .then(
             () => {
-              update(orderId, itemId, null)
               if (current.current !== orderId) return done(false)
-              rendered.current.set(itemId, () => done(true))
-              quoted.current()
+              // The run stays `rendering` until the reload shows the output, so Slice… stays
+              // held and no second render starts in between; `landed` lets the person stop
+              // waiting whatever becomes of the read.
+              const landed: SliceQuoteRun = { ...run, landed: true }
+              const settle = (ok: boolean) => {
+                if (rendered.current.get(itemId) !== settle) return
+                rendered.current.delete(itemId)
+                update(orderId, itemId, ok ? null : { ...landed, detached: true })
+                done(ok)
+              }
+              rendered.current.set(itemId, settle)
+              update(orderId, itemId, landed)
+              // A realtime frame may have read the output in before this answer landed.
+              if (seen.current.items?.find((i) => i.id === itemId)?.output_id) return settle(true)
+              quoted.current(() => settle(false))
             },
             (cause: unknown) => {
               if (mayHaveRun(cause)) update(orderId, itemId, { ...run, detached: true })
@@ -379,18 +406,17 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
   useEffect(() => {
     if (!items) return
     for (const [itemId, settle] of rendered.current) {
-      if (!items.find((i) => i.id === itemId)?.output_id) continue
-      rendered.current.delete(itemId)
-      settle()
+      if (items.find((i) => i.id === itemId)?.output_id) settle(true)
     }
   }, [items])
 
   // A detached run ends when its quote shows on the item: a slice quote it did not have
-  // (one typed by hand meanwhile is not it).
+  // (one typed by hand meanwhile is not it). A landed render's run ends too when its item
+  // is gone (deleted meanwhile); its wait settles false.
   useEffect(() => {
     if (!items) return
     for (const [itemId, run] of runs) {
-      if (!run.detached) continue
+      if (!run.detached && !run.landed) continue
       const item = items.find((i) => i.id === itemId)
       const landed = run.stage === 'rendering' ? item?.output_id : item?.quotes.some((q) => q.source === 'slice' && !run.known.includes(q.id))
       if (!item || landed) dismiss(itemId)

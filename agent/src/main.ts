@@ -23,7 +23,7 @@ import { type PolledQueue, queuesPolled, workerHealthApp } from './runtime/healt
 import { roleParts } from './runtime/role.js'
 import { inClusterApi, KubernetesSandboxes } from './sandbox/pods.js'
 import { BrowserOrigins } from './browser/store.js'
-import { CredentialStore, SettingsStore } from './credentials.js'
+import { CredentialStore, CrudCredentials, CrudSettings, gatedCredentials, SettingsStore } from './credentials.js'
 import { CredentialPool } from './harness/fallback.js'
 import { managerAgents } from './background/workflowAgents.js'
 import { backgroundActivities, managerSender } from './background/activities.js'
@@ -61,6 +61,7 @@ import {
   withServiceCredential,
 } from './api/serviceCredential.js'
 import { untilBackendAnswers } from './api/backendUp.js'
+import { CrudAreas, SECRET_AREAS } from './api/crudAreas.js'
 import { CrudFlowRunReads } from './flows/backendReads.js'
 import { BrowserSessions } from './auth/browserSession.js'
 import { sealBackfill } from './sessions/sealBackfill.js'
@@ -113,8 +114,9 @@ import { AgentWorker, workerIdentity } from './temporal/worker.js'
 import {
   dropPayloadKey,
   FilePayloadStore,
+  CrudPayloadKeys,
+  gatedPayloadKeys,
   PgPayloadKeys,
-  rewrapPayloadKeys,
   subjectDataConverter,
   sweepBridgeKeys,
 } from './temporal/payloadCodec.js'
@@ -190,7 +192,9 @@ if (!kek.ok) console.error(`secret key: ${kek.detail ?? kek.reason}; saving Clau
 // Rotation (spec §9, "Rotating it re-wraps the data keys only"): mount the new
 // key as SCADBUDDY_SECRET_KEY_FILE and the old one as
 // SCADBUDDY_SECRET_KEY_PREVIOUS_FILE; once migrations have applied, every row
-// sealed under the old key is re-wrapped under the new one. Then drop the old.
+// sealed under the old key is re-wrapped under the new one: the Claude credentials
+// and payload keys by the API, which needs both keys mounted too (#5299 D5), the
+// rest here. Then drop the old.
 const previousKek = config.previousSecretKeyFile
   ? await loadKek(config.previousSecretKeyFile, 'SCADBUDDY_SECRET_KEY_PREVIOUS_FILE')
   : undefined
@@ -207,20 +211,9 @@ const database = config.databaseUrl
       },
       afterMigrate: async (sql) => {
         if (!previousKek?.ok || !kek.ok) return
-        const { rewrapped, failed } = await new CredentialStore(sql).rewrapFrom(previousKek.kek, kek.kek)
-        if (rewrapped || failed) {
-          console.log(
-            `secret key rotation: re-wrapped ${rewrapped} credential(s) from key ${previousKek.kek.id} to ${kek.kek.id}` +
-              (failed ? `; ${failed} could not be opened with the previous key and were left as they are` : ''),
-          )
-        }
-        const payloadKeys = await rewrapPayloadKeys(sql, previousKek.kek, kek.kek)
-        if (payloadKeys.rewrapped || payloadKeys.failed) {
-          console.log(
-            `secret key rotation: re-wrapped ${payloadKeys.rewrapped} payload key(s)` +
-              (payloadKeys.failed ? `; ${payloadKeys.failed} could not be opened with the previous key` : ''),
-          )
-        }
+        // The Claude credentials and the payload keys are re-wrapped by the API at its start
+        // (#5299 D5, backend agent_data/rotation.py), which holds the KEK they are opened with. The
+        // rest is re-wrapped here until the steps of #5299 that move those tables.
         const files = await rewrapWorkspaceKeys(sql, previousKek.kek, kek.kek)
         if (files.rewrapped || files.failed) {
           console.log(
@@ -262,7 +255,31 @@ const database = config.databaseUrl
 // Migrate in the background: a database that is down at start-up is retried
 // by the next /healthz or API call instead of stopping the pod.
 void database?.ready()
-const credentials = database ? new CredentialStore(database.sql) : undefined
+// #4975 phase 4: the agent's service credential, on the client and the workspace blob routes.
+// #5494: exchanged for its proof when one is configured, falling back to the view while the
+// agent has a database (an old backend answers the exchange 404); otherwise read from the view.
+const credentialView = database ? new ServiceCredential(database.sql, kek.ok ? kek.kek : undefined) : undefined
+const proofFile = config.serviceTokenFile ?? config.serviceBootstrapFile
+const serviceCredential: CredentialSource | undefined =
+  proofFile !== undefined
+    ? new ExchangeCredential({
+        backendUrl: config.backendUrl,
+        proofFile,
+        proof: config.serviceTokenFile !== undefined ? 'k8s' : 'bootstrap',
+        ...(credentialView ? { fallback: credentialView } : {}),
+      })
+    : credentialView
+// The agent's settings, its Claude credentials and its payload data keys (#5299 step 4, D5) go
+// through the backend's CRUD routes once the API lists their areas, read from the start and
+// again with back-off until it does (api/crudAreas.ts); over SQL until then, as an API pod older
+// than the routes needs during a rolling deploy. The API seals and opens them with the KEK, so
+// with those areas listed this process needs no KEK for them.
+const crudFetch = serviceCredential ? withServiceCredential(globalThis.fetch, serviceCredential, config.backendUrl) : globalThis.fetch
+const crudAreas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: SECRET_AREAS })
+crudAreas.start()
+const credentials = database
+  ? gatedCredentials(new CredentialStore(database.sql), new CrudCredentials(config.backendUrl, { fetch: crudFetch }), () => crudAreas.has('credentials'), kek)
+  : undefined
 // The audit log of AI actions (#258, audit/log.ts). Its input hashes use the
 // approvals' key, so a tool call's row carries the same hash as its approval.
 // The settings store audits its own writes into it, so it comes second; the
@@ -277,7 +294,9 @@ const audit = database
         console.error(`audit log: could not record ${entry.kind} ${entry.action}:`, (err as Error).message),
     })
   : undefined
-const settings: SettingsStore | undefined = database ? new SettingsStore(database.sql, audit) : undefined
+const settings: SettingsStore | undefined = database
+  ? new SettingsStore(database.sql, audit, { crud: new CrudSettings(config.backendUrl, { fetch: crudFetch }), use: () => crudAreas.has('settings') })
+  : undefined
 // OIDC for /mcp (#262): the configuration in `ai_settings`, one verifier with
 // its metadata and JWKS caches for the process.
 const oidcRepo = settings
@@ -306,20 +325,6 @@ await startCredentialGateway()
 // The database's clock the moment it is ready, before a turn can record a session: the pass at
 // start ends only this replica's rows older than it (plugins/pluginSessions.ts `endOwnSessions`).
 const pluginSessionMark = database ? database.untilReady().then(() => startMark(database.sql)) : undefined
-// #4975 phase 4: the agent's service credential, on the client and the workspace blob routes.
-// #5494: exchanged for its proof when one is configured, falling back to the view while the
-// agent has a database (an old backend answers the exchange 404); otherwise read from the view.
-const credentialView = database ? new ServiceCredential(database.sql, kek.ok ? kek.kek : undefined) : undefined
-const proofFile = config.serviceTokenFile ?? config.serviceBootstrapFile
-const serviceCredential: CredentialSource | undefined =
-  proofFile !== undefined
-    ? new ExchangeCredential({
-        backendUrl: config.backendUrl,
-        proofFile,
-        proof: config.serviceTokenFile !== undefined ? 'k8s' : 'bootstrap',
-        ...(credentialView ? { fallback: credentialView } : {}),
-      })
-    : credentialView
 const backend = createBackendClient(
   config.backendUrl,
   globalThis.fetch,
@@ -328,8 +333,8 @@ const backend = createBackendClient(
 
 // #5299 D7: the agent's reads of the backend's tables (the event log, flow runs, their
 // decisions and grants) go only through the backend's CRUD routes (areas `events` and
-// `flows`), with no SQL fallback (test/retiredTables.test.ts).
-const crudFetch = serviceCredential ? withServiceCredential(globalThis.fetch, serviceCredential, config.backendUrl) : globalThis.fetch
+// `flows`), with no SQL fallback (test/retiredTables.test.ts). `crudFetch` is made above,
+// with the step 4 areas.
 const flowReads = new CrudFlowRunReads(config.backendUrl, { fetch: crudFetch })
 
 // The event bus (spec §7, #264): LISTEN on `scadbuddy_events` on a connection
@@ -434,7 +439,16 @@ if (database && orderCosts) {
 // 24 h after their last write.
 // The data keys that seal a session's transcript (D7), its workspace files' keys and, below,
 // its durable payloads: one instance, so forgetting a subject drops its key from the one cache.
-const dataKeys = database && kek.ok ? new PgPayloadKeys(database.sql, kek.kek, { previous: previousKek?.ok ? previousKek.kek : undefined }) : undefined
+// Released by the API once it lists area `payload-keys` (#5299 D5, #5342), which opens them with the
+// KEK; until then opened here with this process's KEK, and without one not at all (a call that needs
+// one is retried, never sent unsealed).
+const dataKeys = database
+  ? gatedPayloadKeys(
+      kek.ok ? new PgPayloadKeys(database.sql, kek.kek, { previous: previousKek?.ok ? previousKek.kek : undefined }) : undefined,
+      new CrudPayloadKeys(config.backendUrl, { fetch: crudFetch }),
+      () => crudAreas.has('payload-keys'),
+    )
+  : undefined
 // The files' bytes are sealed blobs of the backend's store (#4789, workspace/blobs.ts). Only on a
 // backend with store_backend local do they stay in Postgres; on any other, a write this agent
 // cannot seal (no KEK) or store (the backend cannot mint the URLs, is too old, or is down) is
@@ -718,14 +732,17 @@ if (role.http && database && commandKinds.length > 0) {
     .catch((err: unknown) => console.error('activity kinds: could not record them:', (err as Error).message))
 }
 // Durable subjects' payloads are sealed per subject (spec §6.5): every client and worker
-// that encodes or decodes them carries the codec, which needs the KEK. Without one, a
-// session or flow payload is never sealed here, so no durable session is started (5c Ruling 13).
+// that encodes or decodes them carries the codec, with each subject's key from the API (#5299
+// step 4) or, until it lists area `payload-keys`, opened with this process's KEK. With neither, a
+// call that needs a key fails and is retried (`PayloadKeyUnavailable`): a session or flow
+// payload is never sent unsealed (5c Ruling 13). Without a database there is no codec, so no
+// durable session is started.
 const payloadKeys = temporal ? dataKeys : undefined
 // A session's large payloads are files on the data share, by reference (#2243).
 const payloadStore = config.payloadDir ? new FilePayloadStore(config.payloadDir) : undefined
 const dataConverter = payloadKeys ? subjectDataConverter(payloadKeys, payloadStore) : undefined
 if (temporal && !payloadKeys) {
-  console.warn('agent-tools worker: no secret key, so durable payloads cannot be sealed; no durable session is started')
+  console.warn('agent-tools worker: no database, so durable payloads cannot be sealed; no durable session is started')
 }
 // The worker also moves failures' messages into payloads, so the codec seals them (5c Ruling 11).
 const workerDataConverter = dataConverter
@@ -1025,7 +1042,7 @@ const temporalWorker =
           // AgentSession's gate (its writers and timers) and its turn end (unified runtime §5.1, flagged off until phase 6).
           // Its events through this replica's event log, so they wake its followers at once and
           // go on the bus under its id (#3365); with no session manager, a log that only publishes.
-          ...sessionGateActivities(gateDb(temporal.sql, sessions?.events, sessionEvents?.onAppend)),
+          ...sessionGateActivities(gateDb(temporal.sql, sessions?.events, sessionEvents?.onAppend), settings),
           ...(sessions ? sessionFinishActivities(temporal.sql, sessions.events, orderCosts) : {}),
           ...(sessionAcquire ?? {}),
           // A durable turn's plugin and http_request tools (#2320): listed per turn, and

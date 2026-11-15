@@ -99,6 +99,7 @@ from scadbuddy.flows.operations import (
 )
 from scadbuddy.flows.print_binding import NativeCheck, PrinterLookup, bind_call
 from scadbuddy.flows.store import GrantStateError, author_principal
+from scadbuddy.flows.tool_names import unknown_tools
 from scadbuddy.flows.typecheck import (
     MAX_SCRIPT_BYTES,
     CheckerUnavailableError,
@@ -461,6 +462,8 @@ async def register_flow(body: DefinitionCreate, flows: FlowsDep) -> Definition:
         raise ApiError(status.HTTP_413_CONTENT_TOO_LARGE, "The script is over 64 KiB.")
     if problems := await _checked(body.script, body.inputs_schema):
         raise _script_problems(problems, "The script does not type-check.")
+    if problems := unknown_tools(body.script, await agent_tool_names(flows)):
+        raise _script_problems(problems, "The script names a tool the assistant does not have.")
     with _versioned():
         return await flows.definitions.register(
             body.name,
@@ -1361,6 +1364,21 @@ async def agent_tool_tiers(flows: Flows) -> dict[str, str]:
     agent does not answer; nothing else says what its tools are."""
     try:
         return await flows.agent_tools.tool_tiers()
+    except AgentToolsUnavailableError as err:
+        logger.warning("the agent did not list its tools: %s", err)
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "ScadBuddy's assistant service did not say what its tools are. Try again shortly.",
+            headers={"Retry-After": "5"},
+        ) from None
+
+
+async def agent_tool_names(flows: Flows) -> set[str]:
+    """Every tool the agent has for flows, disabled ones too (#6365): what a script's
+    literal tool names are checked against. Refused as `agent_tool_tiers` is when the
+    agent does not answer."""
+    try:
+        return await flows.agent_tools.tool_names()
     except AgentToolsUnavailableError as err:
         logger.warning("the agent did not list its tools: %s", err)
         raise ApiError(

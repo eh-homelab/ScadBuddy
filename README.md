@@ -1910,12 +1910,14 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   entered again (`/healthz` then says it was sealed with a different key).
 - **Rotating the key** (spec §9, "re-wraps the data keys only"): create a new
   key file, mount it as `SCADBUDDY_SECRET_KEY_FILE`, mount the old one as
-  **`SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`**, and restart. Once migrations have
-  applied, every credential sealed under the old key has its data key
-  re-sealed under the new one (the secret itself is not decrypted into a
-  route or re-entered); the log says how many. Then remove the previous file
-  and restart again. A row the old key cannot open is left as it is and
-  counted in that log line.
+  **`SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`** on the API container as well as the
+  agent's containers, and restart them. At its start the API re-seals the data
+  key of every Claude credential and payload key sealed under the old key, and
+  the agent does the same for the rest of its secrets (the secret itself is not
+  decrypted into a route or re-entered); each log says how many. Then remove
+  the previous file from every container and restart again. A row the old key
+  cannot open is left as it is and counted in that log line. Which tables each
+  one re-wraps: `docs/ai/operating.md` §3.3.
 - `/healthz` reports `"ai": "enabled"` only when the database answers, its
   `ai_*` migrations have applied (`backend/scadbuddy/migrations_agent/`, which
   the API applies at its start; the agent waits for them, #5299), the key is loaded and a Claude credential is
