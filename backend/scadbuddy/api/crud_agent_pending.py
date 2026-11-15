@@ -25,8 +25,10 @@ Area ``pending-input``:
 - ``GET …/pending-input/approval?request_id=…&input_hash=…``: the responder of the request's
   approval given for this very call (#2088), or null.
 
-A request id travels in the body or the query, never the path; a malformed session or turn id
-names nothing (not found, never a 500).
+A request id travels in the body or the query, never the path. A malformed session or turn id
+given to ``…/session`` or ``…/trace`` names nothing (``null`` or ``false``, never a 500); the
+routes that take a session id as ``UUID_PATTERN`` (``tab-wait``, ``entries``' filter and
+``orphans/cancel``) refuse a malformed one with 422, and the agent sends none of them one.
 """
 
 from __future__ import annotations
