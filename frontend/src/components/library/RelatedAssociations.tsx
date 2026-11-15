@@ -92,7 +92,7 @@ export function RelatedAssociations({ subject }: { subject: AssociationSubject }
         <ul className="divide-y rounded-md border text-sm">
           {items.map((item) => {
             const { words, other } = seenFrom(subject, item)
-            const why = impliedWhy(item)
+            const why = impliedWhy(subject, item)
             const rowKey = item.id ?? `${item.implied_by}:${item.library_file_id}:${item.target}`
             return (
               <li key={rowKey} className="flex items-start gap-2 px-3 py-2">

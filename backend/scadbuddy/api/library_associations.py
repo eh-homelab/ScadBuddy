@@ -66,6 +66,10 @@ class AssociationRequest(BaseModel):
         subject = PrintSubject.parse(value)
         if subject.kind == "output":
             raise ValueError("a target is `model:<slug>` or `library:<file id>`")
+        # `isdecimal` passes `01000000005` and non-ASCII digits; the row keeps the id as
+        # `int` writes it, so only that spelling is one.
+        if subject.kind == "library" and subject.id != str(int(subject.id)):
+            raise ValueError(f"write the file id as {int(subject.id)}")
         return value
 
 
@@ -222,7 +226,8 @@ async def get_file_associations(
     null, ``implied_by`` set): a model made from it is listed as the file being the
     ``source_of`` it, and the model of the output the file is a copy of as ``output_of``.
     A file in the trash, or one the library does not have, is a 404; an association with
-    a file in the trash is left out. On Bambuddy's library the list is empty."""
+    a file in the trash is left out. On Bambuddy's library the list is empty for a Bambuddy
+    file's id; an id in ScadBuddy's own range is a 404 there, as every file route's is."""
     native = await _native(library)
     if native is None:
         return Associations(associations=[])
@@ -252,7 +257,8 @@ async def post_file_association(
     (``library:<id>``). 201 with the new association; the same file, target and relation
     again is 200 with the one already there, its ``note`` replaced. A file in the trash,
     or one the library does not have, is a 404; a target that is not there, or the file
-    itself, a 422. On Bambuddy's library, a 409."""
+    itself, a 422. On Bambuddy's library, a 409 for a Bambuddy file's id; an id in
+    ScadBuddy's own range is a 404 there, as every file route's is."""
     native = _require_native(await _native(library))
     await _live_file(native, file_id)
     target = PrintSubject.parse(body.target)

@@ -76,6 +76,7 @@ describe('library file associations (#6395)', () => {
     const t = tool('associate_library_file')
     expect(() => t.parse({ file_id: FILE, target: 'output:abc', relation: 'output_of' })).toThrow()
     expect(() => t.parse({ file_id: FILE, target: 'library:5', relation: 'copy_of' })).toThrow()
+    expect(() => t.parse({ file_id: FILE, target: 'library:01000000001', relation: 'variant_of' })).toThrow()
     expect(t.parse({ file_id: FILE, target: 'library:1000000001', relation: 'variant_of' })).toMatchObject({
       target: 'library:1000000001',
     })

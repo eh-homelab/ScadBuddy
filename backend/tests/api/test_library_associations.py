@@ -128,6 +128,17 @@ def test_a_target_that_is_not_there_is_refused(
     assert response.status_code == 422, response.text
 
 
+def test_a_file_id_is_written_one_way(
+    native_client: TestClient, files: tuple[NativeFile, NativeFile]
+) -> None:
+    fixed, petg = files
+    for spelling in (f"0{fixed.id}", "".join(chr(0x0660 + int(d)) for d in str(fixed.id))):
+        response = _associate(
+            native_client, petg.id, target=f"library:{spelling}", relation="variant_of"
+        )
+        assert response.status_code == 422, response.text
+
+
 def test_a_file_is_not_associated_with_itself(
     native_client: TestClient, files: tuple[NativeFile, NativeFile]
 ) -> None:

@@ -1329,7 +1329,7 @@ export const printTools: Tool[] = [
       file_id: libraryFileId.describe("A native library file's `id` (list_library)"),
       target: z
         .string()
-        .regex(/^(model:(builtin:)?[a-z0-9][a-z0-9-]*|library:[0-9]+)$/, 'must be model:<slug> or library:<file id>')
+        .regex(/^(model:(builtin:)?[a-z0-9][a-z0-9-]*|library:[1-9][0-9]*)$/, 'must be model:<slug> or library:<file id>')
         .max(200)
         .describe('`model:<slug>` or `library:<file id>`'),
       relation: z.enum(ASSOCIATION_RELATIONS),

@@ -69,7 +69,7 @@ describe('RelatedAssociations', () => {
     renderRelated({ kind: 'model', slug: 'unicorn-pencil-holder' })
     const item = await screen.findByRole('listitem')
     expect(item).toHaveTextContent('Made from fixed.3mf')
-    expect(item).toHaveTextContent('The model was made from this file')
+    expect(item).toHaveTextContent('This model was made from the file')
     expect(within(item).queryByRole('button')).not.toBeInTheDocument()
   })
 

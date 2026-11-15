@@ -55,9 +55,10 @@ function splitTarget(target: string): ['library' | 'model', string] {
   return [target.slice(0, at) === 'model' ? 'model' : 'library', target.slice(at + 1)]
 }
 
-/** Why an implied association is listed, in words. */
-export function impliedWhy(item: Association): string | null {
-  if (item.implied_by === 'mesh_source') return 'The model was made from this file'
-  if (item.implied_by === 'output') return "A copy of one of the model's outputs"
+/** Why an implied association is listed, in words, said from the subject's page. */
+export function impliedWhy(subject: AssociationSubject, item: Association): string | null {
+  const onModel = subject.kind === 'model'
+  if (item.implied_by === 'mesh_source') return onModel ? 'This model was made from the file' : 'The model was made from this file'
+  if (item.implied_by === 'output') return onModel ? "A copy of one of this model's outputs" : "A copy of one of the model's outputs"
   return null
 }

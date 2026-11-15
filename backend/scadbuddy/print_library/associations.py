@@ -117,7 +117,7 @@ class AssociationStore:
                 " RETURNING id, (xmax = 0) AS created",
                 (
                     file_id,
-                    target.key,
+                    target.key if target_file is None else PrintSubject.library(target_file).key,
                     target_file,
                     relation,
                     note,
