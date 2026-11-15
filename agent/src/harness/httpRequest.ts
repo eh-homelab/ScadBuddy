@@ -183,7 +183,14 @@ export const HttpReadInput = {
     .string()
     .regex(SAVED_ID, 'a saved response id')
     .describe('The `saved.id` an http_request result gave'),
-  offset: z.number().int().min(0).optional().describe('Byte offset to start at (the previous page\'s next_offset)'),
+  // At most what Postgres's `substring` takes (an int4), where a session's saved body is read.
+  offset: z
+    .number()
+    .int()
+    .min(0)
+    .max(2 ** 31 - 2)
+    .optional()
+    .describe('Byte offset to start at (the previous page\'s next_offset)'),
   length: z
     .number()
     .int()
