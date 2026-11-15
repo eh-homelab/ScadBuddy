@@ -135,6 +135,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
 (`<yyyymmdd>T<hhmm>Z_<slug>.sql`, UTC; never edit a merged one); the settings tables are
 `20260928T0840Z_settings.sql`. The only place a real `openscad` exists is the image:
 `docker build --target test -t scadbuddy:test . && docker run --rm scadbuddy:test`.
+A retry or deadline test drives `CrudClient(clock=..., sleep=...)` with a fake clock that
+only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
 
 
 ## Layout

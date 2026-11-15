@@ -22,6 +22,13 @@ that each shard ran what it selected, as `backend-pytest-split` does.
 `/api/v1/ai/*` to a real agent with a credential pointed at a fake Anthropic endpoint
 (its header lists the script `E2E_AGENT_SCRIPTED=1` expects; `pnpm preview` routes the
 same way, `vite.config.ts`).
+- `pnpm exec tsc -p tsconfig.app.json --noEmit` - the quick typecheck. Playwright's web
+  server runs `pnpm build`, which typechecks first, so one type error in a test also
+  fails all three `frontend-e2e` shards (#6238).
+- No prettier here; eslint is the only lint and format check.
+- Shared test helpers go in `src/test/` (e.g. `src/test/appLinks.ts`), not copied per file.
+- The pending-input stream (`lib/pendingChanges.ts`) opens in a passive effect after the
+  first paint: a test that ticks a fake `EventSource` waits for `stream.open()` first (#6287).
 
 
 ## Layout
@@ -178,6 +185,11 @@ same way, `vite.config.ts`).
   its answer says the print is in Activity (`prints.ts` `lanPrintsActivityPath`), as a
   model's Prints tab does when the model has such a print (`PrintsPage.tsx`
   `LanPrintsNote`).
+- `frontend/src/lib/appLinks.ts` (`appUrl`, `useAppUrl`, `components/AppLink.tsx`) — links
+  to ScadBuddy's own pages use the host the user is on: a path, or a URL on a known origin
+  (`public_url` plus `SCADBUDDY_ALLOWED_ORIGINS`), is put on `window.location.origin`
+  (#6232). `public_url` is only for links that leave the browser. Bambuddy links:
+  `lib/bambuddyLinks.ts`.
 
 ## See also
 
