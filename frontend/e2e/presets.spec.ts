@@ -111,6 +111,11 @@ test.describe('the "Changed from" note (#352)', () => {
   }
 })
 
+/** A box's vertical centre: buttons of different heights on one row share it. */
+function centre(box: { y: number; height: number }): number {
+  return box.y + box.height / 2
+}
+
 test.describe('the preset bar (#1023)', () => {
   test.skip(
     !!process.env.E2E_BASE_URL,
@@ -147,7 +152,7 @@ test.describe('the preset bar (#1023)', () => {
       // for the select, Save as and the preset's menu side by side, so the buttons wrap
       // to one row under it, together.
       expect(chosen.y).toBe(unchosen.y)
-      expect(more.y).toBe(before.y)
+      expect(Math.abs(centre(more) - centre(before))).toBeLessThanOrEqual(1)
 
       await page.getByRole('textbox', { name: 'Name on the tag' }).fill('Someone else')
       await expect(page.getByRole('button', { name: 'Update' })).toBeVisible()
@@ -155,8 +160,8 @@ test.describe('the preset bar (#1023)', () => {
       const update = await page.getByRole('button', { name: 'Update' }).boundingBox()
       if (!after || !update) throw new Error('not laid out')
       // Update appearing joins that row: nothing moves to another one.
-      expect(after.y).toBe(before.y)
-      expect(update.y).toBe(before.y)
+      expect(Math.abs(centre(after) - centre(before))).toBeLessThanOrEqual(1)
+      expect(Math.abs(centre(update) - centre(before))).toBeLessThanOrEqual(1)
     })
   }
 })
