@@ -17,8 +17,8 @@ describe('settings field docs (#887)', () => {
       for (const name of fieldsOf(section, fixture)) {
         const doc = settingDocs[name]
         expect(doc, `${section}: ${name} has no doc in core/setting_docs.py`).toBeDefined()
-        expect(doc.title.trim(), name).not.toBe('')
-        expect(doc.description.trim(), name).not.toBe('')
+        expect(doc?.title.trim(), name).toBeTruthy()
+        expect(doc?.description.trim(), name).toBeTruthy()
       }
     }
   })
@@ -31,8 +31,8 @@ describe('settings field docs (#887)', () => {
   })
 
   it('spells the words the form takes as the help does', () => {
-    expect(settingDocs.activity_follow.description).toContain(`"${FOLLOW_NOBODY}"`)
-    expect(settingDocs.asset_fetch_domains.description).toContain(`"${FETCH_NOWHERE}"`)
+    expect(settingDocs.activity_follow?.description).toContain(`"${FOLLOW_NOBODY}"`)
+    expect(settingDocs.asset_fetch_domains?.description).toContain(`"${FETCH_NOWHERE}"`)
   })
 
   it('shows no field without a label and help, and the env var under each env-backed one', async () => {
