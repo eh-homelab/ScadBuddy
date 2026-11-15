@@ -1,13 +1,13 @@
 import { http, HttpResponse } from 'msw'
 import type { CustomizerSchema, ListingBound, StorefrontListing, StorefrontListingInput, StorefrontListingPage } from '../../api/types'
-import { mockModels, problem } from '../handlers'
+import { mockModels, mockSettings, problem } from '../handlers'
 import * as orders from './orders/state'
 
 /**
  * #5282 (spec 2026-11-02 §5.3; backend `api/storefront.py`): the back office's storefront
  * listings. An edit names the `updated_at` it read and unpublishes the listing; a delete
  * is refused while it is published. Publish here checks nothing against the template: the
- * backend's tests do that.
+ * backend's tests do that. It checks only each filament's material (`materialRefusal`, #6258).
  *
  * The listings are kept in `sessionStorage` too, so a reload shows the order a test set,
  * as the backend's rows would. Each Playwright test has its own context; `reset` clears it.
@@ -95,6 +95,27 @@ function emptyChoice(body: StorefrontListingInput) {
   const name = Object.entries(body.params ?? {}).find(([, bound]) => bound.kind === 'choice' && bound.choices.length === 0)?.[0]
   if (name === undefined) return null
   return refused(422, 'listing_choice_empty', `'${name}' is offered with nothing to choose; for a colour parameter, choose at least one filament, or lock it`)
+}
+
+/** A support material, as the backend's `wire.py` `SUPPORT_MATERIAL` reads it. */
+const SUPPORT_MATERIAL = /support|pva|bvoh|hips/i
+
+/**
+ * #6258 — the backend's 422 `listing_material_not_allowed` (`orders/storefront/listings.py`
+ * `check_materials`), or null: a listing filament of a material neither the listing's
+ * `materials` nor, when it names none, the shop's `storefront_materials` allows. The mock
+ * does not check the locked colours (`check_locked_colours`): it has no schema. A row a
+ * test seeded without `materials` (or one kept in `sessionStorage` from before #6258) has none.
+ */
+function materialRefusal(listing: StorefrontListing) {
+  const own = (listing as Partial<StorefrontListing>).materials ?? []
+  const allowed = new Set((own.length > 0 ? own : (mockSettings().storefront_materials ?? [])).map((m) => m.trim().toLowerCase()))
+  for (const id of listing.colours) {
+    const material = orders.state.filaments.find((f) => f.id === id)?.material
+    if (material === undefined || SUPPORT_MATERIAL.test(material) || allowed.has(material.trim().toLowerCase())) continue
+    return refused(422, 'listing_material_not_allowed', `'${id}' is ${material}, which this listing does not allow; allow ${material} or take the filament out`, { name: id })
+  }
+  return null
 }
 
 /** #6213 — what a publish copies: one entry per picture, keyed by its media id. */
@@ -306,6 +327,8 @@ export const handlers = [
     const id = String(params['id'])
     const found = listings.find((l) => l.id === id)
     if (!found) return refused(404, 'listing_not_found', `no listing '${id}'`)
+    const notAllowed = materialRefusal(found)
+    if (notAllowed) return notAllowed
     const at = stamp()
     const published: StorefrontListing = {
       ...found,

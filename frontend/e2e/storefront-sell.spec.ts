@@ -35,6 +35,26 @@ test.describe('sell on storefront', () => {
     await page.getByRole('option', { name: 'PLA Sunflower Yellow' }).click()
     await expect(problems).toHaveCount(0)
 
+    // #6258 — the materials allowed start as the shop's default; the listing chooses its own.
+    const allowed = page.getByRole('group', { name: 'Materials allowed' })
+    await expect(allowed).toContainText('Shop default (PETG, PLA)')
+    await allowed.getByRole('button', { name: 'Choose for this listing' }).click()
+    await allowed.getByRole('button', { name: 'Move PLA up' }).click()
+    await expect(allowed.getByTestId('material-row')).toHaveText([/^1PLA/, /^2PETG/])
+    // The colours on offer are grouped by material, in the list's order.
+    const colours = page.getByRole('group', { name: 'Colours on offer' })
+    const showAll = colours.getByRole('button', { name: /^Show all/ })
+    if (await showAll.isVisible()) await showAll.click()
+    await expect(colours.getByTestId('material-colours').first()).toHaveAttribute('aria-label', 'PLA colours')
+    await expect(colours.getByTestId('material-colours').nth(1)).toHaveAttribute('aria-label', 'PETG colours')
+    // Without PETG, its ticked filament is named apart, and publish refuses it beside the list.
+    await allowed.getByRole('button', { name: 'Remove PETG' }).click()
+    await expect(page.getByTestId('materials-not-allowed')).toContainText('PETG Black')
+    await page.getByTestId('listing-actions').getByRole('button', { name: 'Publish' }).click()
+    await expect(allowed.getByRole('alert')).toContainText('PETG Black is PETG, which this listing does not allow')
+    await page.getByTestId('materials-not-allowed').getByRole('button', { name: 'Allow PETG' }).click()
+    await expect(allowed.getByRole('alert')).toHaveCount(0)
+
     await page.getByTestId('listing-actions').getByRole('button', { name: 'Publish' }).click()
     await expect(page.getByTestId('storefront-listing-page').getByText('Published', { exact: true })).toBeVisible()
     // #6213 — the picture the public site now shows is marked live.

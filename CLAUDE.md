@@ -74,7 +74,9 @@ the export. That's how the Dockerfile's `frontend` and `agent-build` stages use 
 from its `api-spec` stage. The frontend's `gen:api` also writes
 `src/storefront/api/schema.d.ts` (gitignored) from the storefront edge's spec
 (`export_openapi --storefront`, `backend/storefront-openapi.json`, gitignored), or from
-`SCADBUDDY_STOREFRONT_OPENAPI_JSON` when it is set (#5282). A frontend vitest run outside `pnpm test` (`pnpm exec vitest
+`SCADBUDDY_STOREFRONT_OPENAPI_JSON` when it is set (#5282). It also writes `src/api/settingDocs.json`
+(gitignored), every setting's label and help from the spec's `SettingsView.docs` default, which the
+mocks serve (#887; the text lives only in `backend/scadbuddy/core/setting_docs.py`). A frontend vitest run outside `pnpm test` (`pnpm exec vitest
 <file>`) needs `pnpm gen:api` first, or `SCADBUDDY_OPENAPI_JSON` set, because some unit
 tests read bounds from the exported spec (`components/settings/Printers.test.tsx`
 `specAccessCodeMax`, #4502). The `freshness` job no longer commits anything. It checks

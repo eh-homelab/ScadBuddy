@@ -1,7 +1,8 @@
 import { useId, useState } from 'react'
 import { ToggleGroup, ToggleGroupItem } from '../../components/ui/toggle-group'
 import type { Filament, ParamValue, PublicParam } from '../api/client'
-import { colourGone, filamentOf, paramFilaments, parseNumber, startColour, textLength, valueProblem, valueText } from '../params'
+import { colourSwatches } from '../colours'
+import { colourGone, parseNumber, startColour, textLength, valueProblem, valueText } from '../params'
 import { ColourPicker } from './ColourPicker'
 
 interface Props {
@@ -9,11 +10,12 @@ interface Props {
   /** The visitor's value; undefined while the shop's own stands. */
   value: ParamValue | undefined
   /**
-   * The colour the latest render took for this part while the visitor sets none, as the
-   * shop settled it (`StoreRender.values`): it can be the closest colour of the material
-   * the print is made of (#6258, #6302 review). Undefined until a render answers.
+   * The colour a colour part shows while the visitor sets none (#6258): the colour the shop
+   * settled (`StoreRender.values`), else the page's prediction (`colours.ts` `colourPlan`).
+   * It can be the closest colour of the material another part's pick fixes. Undefined:
+   * the shop's default.
    */
-  settled?: ParamValue
+  shown?: ParamValue
   filaments: readonly Filament[]
   onChange: (next: ParamValue | undefined) => void
 }
@@ -34,28 +36,25 @@ const INPUT =
  * with the theme's tokens only, so the back office's preview (StorefrontPage) shows the
  * same form in its own colours.
  */
-export function ParamField({ param, value, settled, filaments, onChange }: Props) {
+export function ParamField({ param, value, shown, filaments, onChange }: Props) {
   const id = useId()
   const problem = valueProblem(param, value)
   const hintId = `${id}-hint`
 
   if (param.kind === 'choice' && param.colour) {
-    // #6152: a colour is a filament, picked in a grid of swatches; the value is its colour.
+    // #6152, #6258: a colour is picked in a grid of swatches, one per colour; the value is
+    // the colour, and the shop finds its filament in the one material of the print.
     const gone = colourGone(param)
-    const offered = paramFilaments(param, filaments)
-    // #6258: a pick is the colour in the values; the shop finds its filament.
-    const current = typeof value === 'string' ? filamentOf(offered, value) : undefined
-    // While no colour is set the row shows the colour the latest render took (#6302 review),
-    // else the shop's colour, the default an unpicked render takes (#6144).
-    const start = typeof settled === 'string' ? settled : startColour(param)
-    const fallback = start === undefined ? undefined : filamentOf(offered, start)
+    // While no colour is set the row shows `shown` (#6258), else the shop's colour, the
+    // default an unpicked render takes (#6144).
+    const row = typeof value === 'string' ? value : typeof shown === 'string' ? shown : startColour(param)
     return (
       <div className="min-w-0" aria-describedby={hintId}>
         <ColourPicker
           label={param.label}
-          filaments={offered}
-          fallback={fallback}
-          value={current?.id}
+          swatches={colourSwatches(param, filaments)}
+          picked={value !== undefined}
+          shown={row}
           onChange={(next) => onChange(next?.colour)}
         />
         <p id={hintId} className={gone ? BAD : HINT}>

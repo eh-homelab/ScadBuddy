@@ -602,8 +602,10 @@ async function runGated(
   // `printer_id`, or null for a row only the LAN reaches), which the backend binds a person's
   // approval to (flows/print_binding.py, #4445): a printer re-linked since hashes otherwise.
   //
-  // Its activity runs once (a gated call is never retried), so a backend away or rate-limiting
-  // is tried again here, within the one approval: safe, since nothing is checked or sent before
+  // Its activity runs once (Temporal never retries a gated call; only a flow's keyed call whose
+  // one attempt lost its heartbeat is asked once more, by the flow's workflow, with its commands
+  // keyed on the request id: backend workflows/flow_tools.py FLOW_KEYED_RETRY_PATCH, #6345), so a
+  // backend away or rate-limiting is tried again here, within the one approval: safe, since nothing is checked or sent before
   // the read succeeds, and the approval is then checked against what that read resolved. Still
   // away after the last try, the call fails closed and is audited, and the model is told the
   // approval was spent, so it asks again and a person approves again.

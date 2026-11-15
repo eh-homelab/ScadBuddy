@@ -26,8 +26,8 @@ import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
+from scadbuddy.agent_data import audit, payload_keys, rotation
 from scadbuddy.agent_data import credentials as store
-from scadbuddy.agent_data import payload_keys
 from scadbuddy.agent_data.rotation import rotate
 from scadbuddy.api import crud_agent_secrets, crud_areas
 from scadbuddy.auth.check import auth_check
@@ -540,6 +540,85 @@ def test_without_a_kek_nothing_is_sealed_or_opened(tables: PgPool, tmp_path: Pat
 
 def test_the_key_route_names_the_apis_key(agent: Agent) -> None:
     assert agent.get("/credentials/key").json() == {"ok": True, "kek_id": KEK.id, "reason": None}
+
+
+def test_a_key_file_that_failed_to_read_is_read_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    now = [1000.0]
+    monkeypatch.setattr(rotation, "_clock", lambda: now[0])
+    reads: list[Path | None] = []
+
+    def counted(path: Path | None) -> Kek | None:
+        reads.append(path)
+        return settings_kek(path)
+
+    monkeypatch.setattr("scadbuddy.agent_data.rotation.settings_kek", counted)
+    path = tmp_path / f"kek-{uuid.uuid4().hex}"
+    with caplog.at_level("WARNING", logger="scadbuddy.agent_data.rotation"):
+        assert rotation.kek_at(path) is None
+        # Inside RETRY_AFTER_S a failed read stands: no request reads the file again.
+        now[0] += 1
+        assert rotation.kek_at(path) is None
+        assert len(reads) == 1
+        # Past it the file is read again, but the warning is not logged again so soon.
+        now[0] += rotation.RETRY_AFTER_S
+        assert rotation.kek_at(path) is None
+        assert len(reads) == 2
+    assert sum("cannot be read" in r.getMessage() for r in caplog.records) == 1
+    path.write_text(KEK_B64)
+    now[0] += rotation.RETRY_AFTER_S
+    assert rotation.kek_at(path) == KEK
+    path.unlink()
+    # Kept once read: no request reads it again.
+    assert rotation.kek_at(path) == KEK
+    assert len(reads) == 3
+
+
+def test_a_window_row_never_waits_and_never_stands_for_an_uncommitted_one(
+    tables: PgPool,
+) -> None:
+    args: tuple[audit.Kind, tuple[str, ...], str] = ("credential", ("reveal.redact",), "10 minutes")
+    with tables.connection() as holder, tables.connection() as other:
+        holder.autocommit = False
+        assert audit.recorded_lately(holder, *args) is False
+        audit.record(holder, "credential", "reveal.redact", "ok", "opened 1 of 1 credential(s)")
+        # The holder's row is not committed and its lock is taken: the other caller does not
+        # wait for the lock, and writes its own row.
+        other.execute("SET lock_timeout = '1s'")
+        started = time.monotonic()
+        assert audit.recorded_lately(other, *args) is False
+        assert time.monotonic() - started < 1
+        audit.record(other, "credential", "reveal.redact", "ok", "opened 1 of 1 credential(s)")
+        # The holder rolls back: the reveal is still audited, by the other caller's row.
+        holder.rollback()
+        holder.autocommit = True
+    assert [a["action"] for a in _audit(tables)] == ["reveal.redact"]
+    with tables.connection() as conn:
+        assert audit.recorded_lately(conn, *args) is True
+
+
+def test_a_window_lock_held_by_a_caller_in_a_transaction(tables: PgPool) -> None:
+    """As the reveal route calls it: both callers inside ``conn.transaction()``, so the
+    other's try-lock, when it gets one, holds to its commit."""
+    args: tuple[audit.Kind, tuple[str, ...], str] = ("credential", ("reveal.redact",), "10 minutes")
+    with (
+        tables.connection() as holder,
+        tables.connection() as other,
+        holder.transaction(force_rollback=True),
+    ):
+        assert audit.recorded_lately(holder, *args) is False
+        audit.record(holder, "credential", "reveal.redact", "ok", "opened 1 of 1 credential(s)")
+        other.execute("SET lock_timeout = '1s'")
+        with other.transaction():
+            started = time.monotonic()
+            assert audit.recorded_lately(other, *args) is False
+            assert time.monotonic() - started < 1
+            audit.record(other, "credential", "reveal.redact", "ok", "opened 1 of 1 credential(s)")
+    assert [a["action"] for a in _audit(tables)] == ["reveal.redact"]
+    # Once one is committed, a caller in a transaction reads it with no lock.
+    with tables.connection() as conn, conn.transaction():
+        assert audit.recorded_lately(conn, *args) is True
 
 
 def test_the_key_files_are_read_once_not_per_request(

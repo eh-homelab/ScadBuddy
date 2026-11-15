@@ -227,15 +227,26 @@ def _agent_heartbeat() -> timedelta:
 FLOW_BEATLESS_TIER_PATCH = "flow-beatless-tier-4262"
 
 #: The same for a call's own activity (#4281). A read whose last attempt missed its
-#: beats is asked once more with no heartbeat timeout, as the tier is. A write is never
-#: sent again: one that missed its beats may still have run on a replica that does not
-#: beat, so it fails saying so, and the script checks before calling it again. Runs
+#: beats is asked once more with no heartbeat timeout, as the tier is. A write is not
+#: sent again (unless its tool is keyed, FLOW_KEYED_RETRY_PATCH below): one that missed
+#: its beats may still have run on a replica that does not beat, so it fails saying so,
+#: and the script checks before calling it again. Runs
 #: recorded before raised that heartbeat timeout to the script.
 #: The cost, as for the tier: a read whose attempts are all lost (recorded as started but
 #: never delivered, or taken by a replica that died) is asked again with its three
 #: attempts, so it reaches the script after 3 x `agent_heartbeat_s` of missed beats plus
 #: up to 3 x `_TOOL_TIMEOUT` (120 s) of start-to-close: about 6 min more than before.
 FLOW_BEATLESS_CALL_PATCH = "flow-beatless-call-4281"
+
+#: An agent tool whose every write is one command keyed by the call (`keyed` in
+#: `flow_tool_tier`'s answer, agent/src/tools/registry.ts `ToolSpec.keyed`), whose only
+#: attempt missed its beats, is asked once more under the same activity id (#6345): the same
+#: approval, and the same Idempotency-Key (the agent keys a flow call's commands on its gate
+#: request id, the same on every attempt), so the backend answers it from the first
+#: attempt's operation (`op-<kind>-<key>`, api/operations.py) and nothing runs twice. Before,
+#: it failed as "may have run" even where a second send was provably the same operation.
+#: An agent that does not say `keyed` (any build before #6350) gets no second try.
+FLOW_KEYED_RETRY_PATCH = "flow-keyed-retry-6345"
 
 
 #: Sends re-send with their key while ScadBuddy has not answered, past a print's worst
@@ -827,6 +838,11 @@ async def _call_tool(
     heartbeat: timedelta | None = _agent_heartbeat()
     # Only on the shared queue: a replica's own queue is that one build's.
     unregistered_waits = [] if pinned else list(UNREGISTERED_WAITS)
+    # An agent tool's own call (not a turn tool's) may be asked once more when keyed (#6345).
+    keyed_retry = activity is None
+    #: Set once a keyed call is asked again after its first attempt lost its beats: that
+    #: attempt may have run, so no later failure may say the call was not run.
+    beatless_first = ""
     while True:
         tries -= 1
         try:
@@ -857,7 +873,7 @@ async def _call_tool(
                     await workflow.sleep(unregistered_waits.pop(0))
                     tries += 1
                     continue
-                raise ToolFailedError(err.cause.message) from None
+                raise ToolFailedError(beatless_first + err.cause.message) from None
             # Only the last attempt's failure is known, as for the tier.
             if (
                 heartbeat is not None
@@ -869,6 +885,20 @@ async def _call_tool(
                 # write tiers, sessions_start and sessions_send. A read made with one
                 # attempt would lose the fallback below.
                 if attempts == 1:
+                    if (
+                        keyed_retry
+                        and workflow.patched(FLOW_KEYED_RETRY_PATCH)
+                        and await _keyed(name)
+                    ):
+                        keyed_retry = False
+                        beatless_first = (
+                            f"{name} may have run: its first attempt sent no heartbeat for "
+                            f"{heartbeat.seconds}s, and it was asked again under the same "
+                            "key. Check whether it did before calling it again. The second "
+                            "attempt: "
+                        )
+                        tries += 1
+                        continue
                     raise ToolFailedError(
                         f"{name} may have run: the agent replica that took it sent no "
                         f"heartbeat for {heartbeat.seconds}s (one from before the agent "
@@ -898,10 +928,13 @@ async def _call_tool(
         again = (
             "Call it again; the new call needs approving again." if approved else "Call it again."
         )
-        raise ToolFailedError(
-            f"{name} was not run: no worker on the agent replica that holds its state "
-            f"picked it up in {start_s}s (the replica may be gone or busy). {again}"
-        ) from None
+        not_picked = (
+            f"no worker on the agent replica that holds its state picked it up in {start_s}s"
+            " (the replica may be gone or busy)."
+        )
+        if beatless_first:
+            raise ToolFailedError(beatless_first + not_picked) from None
+        raise ToolFailedError(f"{name} was not run: {not_picked} {again}") from None
 
 
 @agent.tool_defn()
@@ -1035,6 +1068,24 @@ async def _turn_tool(name: str, args: dict[str, Any], runner: AgentWorkflowRunne
             activity=f"{TURN_TOOL_PREFIX}{name}",
             queue=queue,
         )
+
+
+async def _keyed(name: str) -> bool:
+    """Whether the agent says every write `name` makes is keyed to the call (#6345). Any
+    failure to say so is a no: the call then fails as it did before."""
+    owner: StepOwner = workflow.instance()
+    try:
+        tiered: dict[str, Any] = await workflow.execute_activity(
+            FLOW_TOOL_TIER,
+            {"tool": name},
+            task_queue=owner.tools_queue,
+            result_type=dict,
+            start_to_close_timeout=_TIER_TIMEOUT,
+            retry_policy=RetryPolicy(maximum_attempts=3, non_retryable_error_types=_TOOL_REFUSALS),
+        )
+    except ActivityError:
+        return False
+    return tiered.get("keyed") is True
 
 
 async def _live_tier(name: str, own: str | None) -> tuple[str, bool]:

@@ -45,6 +45,7 @@ from scadbuddy.bambuddy.uploads import ProjectTarget
 from scadbuddy.core.authorship import by_a_person
 from scadbuddy.core.config import LibraryBackend, Slicer, StoreBackend
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.setting_docs import SETTING_DOCS
 from scadbuddy.core.settings import (
     APPLIES,
     BOOTSTRAP_FIELDS,
@@ -87,11 +88,33 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["settings"])
 
 
+class SettingFieldDoc(BaseModel):
+    """A setting's label and help (#887), from `core/setting_docs.py`."""
+
+    title: str
+    description: str
+    #: The variable that seeds it, or ``None`` for a setting only Settings stores.
+    env_var: str | None = None
+
+
+#: Every setting's doc, as `GET /settings` answers it and the spec's default shows it.
+FIELD_DOCS: dict[str, SettingFieldDoc] = {
+    name: SettingFieldDoc(
+        title=doc.title,
+        description=doc.description,
+        env_var=env_var(name) if name in Settings.model_fields else None,
+    )
+    for name, doc in SETTING_DOCS.items()
+}
+
+
 class BootstrapValue(BaseModel):
     """A setting the UI shows but cannot change (#322), and why."""
 
     name: str
     env_var: str
+    title: str
+    description: str
     #: As the process runs with it. The database URL is shown without its credentials.
     value: str | None
     source: Literal["env", "default"]
@@ -279,6 +302,9 @@ class SettingsView(BaseModel):
     #: The settings the UI cannot change, with their values.
     bootstrap: list[BootstrapValue] = Field(default_factory=list)
     about: AboutView | None = None
+    #: Every setting's label and help (#887), keyed by field name. The default carries
+    #: them all, so the exported spec holds them too (the frontend's mocks read them there).
+    docs: dict[str, SettingFieldDoc] = Field(default=FIELD_DOCS)
 
 
 class PrintOptionsView(BaseModel):
@@ -437,6 +463,8 @@ def _bootstrap(settings: Settings) -> list[BootstrapValue]:
             BootstrapValue(
                 name=name,
                 env_var=env_var(name),
+                title=SETTING_DOCS[name].title,
+                description=SETTING_DOCS[name].description,
                 value=None if value is None else str(value),
                 source="env" if name in settings.model_fields_set else "default",
                 reason=reason,
