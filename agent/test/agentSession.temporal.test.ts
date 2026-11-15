@@ -936,6 +936,8 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       await poll(() => turns.length, 1)
       // One message larger than the queue may hold.
       expect(await refusal(enqueue(id, queued('big', 'x'.repeat(600 * 1024))))).toBe('queue_full')
+      // Its size is UTF-8 bytes: 300 Ki two-byte characters are 600 KiB.
+      expect(await refusal(enqueue(id, queued('wide', 'é'.repeat(300 * 1024))))).toBe('queue_full')
       for (let i = 1; i <= 20; i++) await enqueue(id, queued(`q${i}`))
       expect(await refusal(enqueue(id, queued('q21')))).toBe('queue_full')
       expect(await queueOf(id)).toHaveLength(20)

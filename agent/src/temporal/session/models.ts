@@ -193,9 +193,9 @@ export const BUDGET_EXHAUSTED = 'BudgetExhausted'
 export const MESSAGE_MAX = 500
 /** How many messages may wait for their turns (#6386). */
 export const QUEUE_MAX = 20
-/** How many characters of JSON the queue may hold (#6386): it is carried in the workflow's state and over each continue-as-new, under Temporal's 2 MB payload limit. */
-export const QUEUE_CHARS_MAX = 512 * 1024
-/** The refusal of a send past QUEUE_MAX or QUEUE_CHARS_MAX. */
+/** How many bytes of JSON (UTF-8) the queue may hold (#6386): it is carried in the workflow's state and over each continue-as-new, under Temporal's 2 MB payload limit. */
+export const QUEUE_BYTES_MAX = 512 * 1024
+/** The refusal of a send past QUEUE_MAX or QUEUE_BYTES_MAX. */
 export const QUEUE_FULL = 'queue_full'
 /** The refusal of a remove or an edit of an entry that is not queued (it started, or was removed). */
 export const NOT_QUEUED = 'not_queued'
