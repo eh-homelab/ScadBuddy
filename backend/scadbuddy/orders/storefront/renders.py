@@ -61,6 +61,7 @@ from scadbuddy.orders.reference import ResolvedReference
 from scadbuddy.orders.storefront.inputs import (
     ColoursClashError,
     InputOutsideListingError,
+    LockedColoursClashError,
     ResolvedChoice,
     check_one_material,
     customer_filaments,
@@ -351,7 +352,10 @@ async def checked_choice(
     ``listing_changed`` (the listing moved since the page read it), 422
     ``input_outside_listing`` (with ``name`` and ``reason``), 422
     ``listing_colours_clash`` (colours no one allowed material offers together, with
-    ``parts``, `ColoursClashError`), 409 ``render_pending`` (with ``render_colours``,
+    ``parts``, `ColoursClashError`; only the visitor's colours and slots, never a locked
+    one), 409 ``listing_unavailable`` (the shop's locked colours alone share no allowed
+    material, `LockedColoursClashError`: a listing published before publish refused
+    that), 409 ``render_pending`` (with ``render_colours``,
     colours given but no done render of the visitor's to take the slots from)."""
     listing = await asyncio.to_thread(published_listing, orders.listings, body.listing_id)
     if listing.updated_at != body.listing_updated_at:
@@ -384,6 +388,14 @@ async def checked_choice(
                 resolved = listing_reference(listing, choice.values, chosen, filaments=filaments)
         # A print never mixes materials (#6152, always on since #6258).
         check_one_material(resolved.colours, choice, filaments)
+    except LockedColoursClashError:
+        # Published before publish checked its locks: no visitor's colour can fix it,
+        # so the refusal names none (#6302 review).
+        raise problem(
+            status.HTTP_409_CONFLICT,
+            "listing_unavailable",
+            "This design can't be made right now. Please try again later.",
+        ) from None
     except ColoursClashError as error:
         raise problem(
             status.HTTP_422_UNPROCESSABLE_CONTENT,

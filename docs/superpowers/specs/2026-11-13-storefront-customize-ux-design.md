@@ -92,10 +92,16 @@ customize page "horrible". A Playwright walk on 2026-11-13 confirmed each point:
   `test-fixtures/storefront/closest-colour.json`). A default the request does not give is
   never refused for its material: it moves. The start of a render answers the colour
   values it settled (`StoreRender.values`, never the material), and the page shows them
-  for the parts the visitor did not set. Colours of no one material are 422
-  `listing_colours_clash` with `parts`. Each slot takes that material's filament of its
+  for the parts the visitor did not set, and only while the visitor's choices are the ones
+  that start answered. Colours of no one material are 422
+  `listing_colours_clash` with `parts` (the visitor's colours and slots only). Each
+  colour the shop locked that is not support fixes the material too (#6302 review): a
+  material that lacks one is never chosen. Each slot takes that material's filament of its
   colour. Publish refuses a listing filament of a material it does not allow (422
-  `listing_material_not_allowed`; support filaments are not checked). The render row
+  `listing_material_not_allowed`; support filaments are not checked), and locked colours
+  that no one allowed material offers together (422 `listing_locked_colours_unprintable`
+  with `names`); a listing published before that check renders as 409
+  `listing_unavailable`. Materials compare trimmed and casefolded. The render row
   keeps the resolved `material`, which the estimate prices by.
 
 ### 5.2 Colour picker (frontend, `storefront/components/ColourPicker.tsx`)

@@ -19,6 +19,7 @@ from scadbuddy.orders.storefront.drafts import _captions
 from scadbuddy.orders.storefront.inputs import (
     ColoursClashError,
     InputOutsideListingError,
+    LockedColoursClashError,
     ResolvedChoice,
     check_one_material,
     customer_filaments,
@@ -28,7 +29,11 @@ from scadbuddy.orders.storefront.inputs import (
     resolve_choice,
     slot_filaments,
 )
-from scadbuddy.orders.storefront.listings import check_materials, public_listing
+from scadbuddy.orders.storefront.listings import (
+    check_locked_colours,
+    check_materials,
+    public_listing,
+)
 from scadbuddy.orders.storefront.renders import _filament_for
 from scadbuddy.orders.storefront.wire import (
     Listing,
@@ -752,3 +757,144 @@ def test_a_choice_default_is_matched_as_publish_matches_it(listing: Listing) -> 
     bounds["shape"] = bounds["shape"].model_copy(update={"choices": [1], "default": True})
     shown = _public(listing.model_copy(update={"params": bounds}), FILAMENTS).params
     assert shown["shape"].default is None
+
+
+# -- the shop's locked colours fix the material too (#6302 review) ----------------------
+
+PLA_BLACK = "pla-black"
+PLA_WHITE = "pla-white"
+PETG_WHITE = "petg-white"
+LOCKED = {
+    **WITH_RED_TOO,
+    PLA_BLACK: filament(PLA_BLACK, "#000000"),
+    PLA_WHITE: filament(PLA_WHITE, "#FFFFFF"),
+    PETG_WHITE: filament(PETG_WHITE, "#FFFFFF", "PETG"),
+}
+BASE_AND_TEXT = CustomizerSchema(
+    parameters=[
+        Parameter(name="base", type="color", initial="#000000"),
+        Parameter(name="text", type="color", initial="#FFFFFF"),
+    ]
+)
+
+
+def _locked(
+    listing: Listing,
+    ids: list[str],
+    fixed: dict[str, Any],
+    schema: CustomizerSchema = BASE_AND_TEXT,
+    **params: Any,
+) -> Listing:
+    """A listing of ``schema`` whose ``fixed`` colours are locked, offering ``params``."""
+    assert listing.snapshot is not None
+    snapshot = listing.snapshot.model_copy(update={"schema_": schema, "fixed": fixed})
+    return Listing.model_validate(
+        {
+            **listing.model_dump(),
+            "params": params,
+            "fixed": fixed,
+            "colours": ids,
+            "snapshot": snapshot.model_dump(by_alias=True),
+        }
+    )
+
+
+def test_a_locked_colour_fixes_the_material(listing: Listing) -> None:
+    """The review's case: the base is locked to black, which only PLA has; the text is
+    offered white, in PETG and PLA. The untouched page prints in PLA, not PETG (the first
+    material that keeps white), and every slot holds a PLA filament."""
+    shown = _locked(
+        listing,
+        [PLA_BLACK, PETG_WHITE, PLA_WHITE],
+        {"base": "#000000"},
+        text={"kind": "choice", "choices": ["#FFFFFF"]},
+    )
+    values = listing_values(shown, {}, LOCKED, PETG_FIRST)
+    resolved = resolve_choice(shown, values, (), LOCKED, PETG_FIRST)
+    assert resolved.material == "PLA"
+    slots = slot_filaments({}, resolved, ["#000000", "#FFFFFF"])
+    assert slots == {0: PLA_BLACK, 1: PLA_WHITE}
+    assert {LOCKED[f].material for f in slots.values()} == {"PLA"}
+
+
+def test_a_clash_with_a_lock_names_only_the_visitors_colours(listing: Listing) -> None:
+    """Green is only PETG's and the locked black only PLA's: the refusal names the
+    visitor's text, or the visitor's slot, never the shop's base."""
+    shown = _locked(
+        listing,
+        [PLA_BLACK, PETG_WHITE, PLA_WHITE, PETG_GREEN],
+        {"base": "#000000"},
+        text={"kind": "choice", "choices": ["#FFFFFF", "#00FF00"]},
+    )
+    values = listing_values(shown, {"text": "#00FF00"}, LOCKED, PETG_FIRST)
+    with pytest.raises(ColoursClashError) as refused:
+        resolve_choice(shown, values, ["text"], LOCKED, PETG_FIRST)
+    assert refused.value.parts == ["text"]
+    untouched = listing_values(shown, {}, LOCKED, PETG_FIRST)
+    with pytest.raises(ColoursClashError) as slot:
+        resolve_choice(shown, untouched, [], LOCKED, PETG_FIRST, slots={0: PETG_WHITE})
+    assert slot.value.parts == ["colours.0"]
+
+
+def test_locks_of_no_one_material_make_the_listing_unavailable(listing: Listing) -> None:
+    """Published before publish checked its locks: black is only PLA's, green only
+    PETG's. Whatever the visitor gives, `LockedColoursClashError` names the locks."""
+    shown = _locked(listing, [PLA_BLACK, PETG_GREEN], {"base": "#000000", "text": "#00FF00"})
+    values = listing_values(shown, {}, LOCKED, PETG_FIRST)
+    with pytest.raises(LockedColoursClashError) as refused:
+        resolve_choice(shown, values, (), LOCKED, PETG_FIRST)
+    assert refused.value.names == ["base", "text"]
+
+
+def test_a_locked_support_colour_does_not_fix_the_material(listing: Listing) -> None:
+    """#6152: a support colour is the shop's choice, of its own material."""
+    support = CustomizerSchema(
+        parameters=[
+            Parameter(name="support", type="color", initial="#FF0000"),
+            Parameter(name="text", type="color", initial="#FFFFFF"),
+        ]
+    )
+    shown = _locked(
+        listing,
+        [PVA_RED, PETG_WHITE],
+        {"support": "#FF0000"},
+        support,
+        text={"kind": "choice", "choices": ["#FFFFFF"]},
+    )
+    values = listing_values(shown, {}, LOCKED, PETG_FIRST)
+    assert resolve_choice(shown, values, (), LOCKED, PETG_FIRST).material == "PETG"
+
+
+def test_publish_refuses_locks_of_no_one_material(listing: Listing) -> None:
+    colours = {f.id: f.colour for f in LOCKED.values()}
+    materials = {f.id: f.material for f in LOCKED.values()}
+    # Black is only PLA's, green only PETG's.
+    body = _locked(listing, [PLA_BLACK, PETG_GREEN, PETG_WHITE], {})
+    fixed = {"base": "#000000", "text": "#00FF00"}
+    with pytest.raises(ApiError) as refused:
+        check_locked_colours(BASE_AND_TEXT, fixed, body, colours, materials, PETG_FIRST)
+    assert refused.value.status == 422
+    assert refused.value.type.endswith("listing_locked_colours_unprintable")
+    assert refused.value.extensions["names"] == ["base", "text"]
+    # PLA has black and white: one material offers both locks.
+    both = _locked(listing, [PLA_BLACK, PLA_WHITE, PETG_WHITE], {})
+    fixed = {"base": "#000000", "text": "#FFFFFF"}
+    check_locked_colours(BASE_AND_TEXT, fixed, both, colours, materials, PETG_FIRST)
+
+
+def test_two_slots_of_two_materials_clash_and_name_only_the_slots(listing: Listing) -> None:
+    """The visitor gives no colour; its two slots are of two materials. The slots alone
+    cause the clash, so the refusal names them, not the shop's colours (#6302 review)."""
+    two = _two_colours(listing, PLA_RED, PETG_RED, PLA_BLUE)
+    with pytest.raises(ColoursClashError) as refused:
+        _resolve(two, {}, PETG_FIRST, slots={0: PLA_RED, 1: PETG_RED})
+    assert refused.value.parts == ["colours.0", "colours.1"]
+
+
+def test_a_material_with_stray_whitespace_is_still_its_material(listing: Listing) -> None:
+    """#6302 review: materials compare trimmed, as `unique_materials` keeps them."""
+    book = {**FILAMENTS, PETG_RED: filament(PETG_RED, "#FF0000", " PETG \t")}
+    shown = _with_colours(listing, PETG_RED, PLA_BLUE)
+    assert [f.id for f in customer_filaments(shown, book, ["petg"])] == [PETG_RED]
+    values = listing_values(shown, {"colour": "#FF0000"}, book, PETG_FIRST)
+    assert resolve_choice(shown, values, ["colour"], book, PETG_FIRST).material == "PETG"

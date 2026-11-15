@@ -39,6 +39,7 @@ from scadbuddy.workflows.commands import (
 from tests.api.conftest import set_fake_env
 from tests.api.test_storefront_listings import (  # noqa: F401  (fixtures)
     BOOK,
+    LISTINGS,
     SOURCE,
     _state,
     client,
@@ -1175,6 +1176,19 @@ def _two_colour_listing(
 ) -> dict[str, Any]:
     """A published listing of a template with two colour parameters, ``colour`` and
     ``trim`` (default red), each offered red or blue."""
+    choices = {"kind": "choice", "choices": ["#FF0000", "#0000FF"]}
+    body = _two_colour_body(client, template, colours, params={"colour": choices, "trim": choices})
+    return publish(client, create(client, body)["id"])
+
+
+def _two_colour_body(
+    client: TestClient,  # noqa: F811
+    template: dict[str, Any],  # noqa: F811
+    colours: list[str],
+    **fields: Any,
+) -> dict[str, Any]:
+    """The body of a listing of a template with two colour parameters, ``colour`` and
+    ``trim`` (default red)."""
     source = SOURCE.replace(
         "// %%LISTING%%\n", '// %%LISTING%% %%TWO_COLOURS%%\ntrim = "#FF0000"; // color\n'
     )
@@ -1182,15 +1196,13 @@ def _two_colour_listing(
     assert made.status_code == 201, made.text
     slug = made.json()["slug"]
     commit = client.get(f"/api/v1/models/{slug}").json()["version"]
-    choices = {"kind": "choice", "choices": ["#FF0000", "#0000FF"]}
-    body = listing_body(
+    return listing_body(
         {"slug": slug, "commit": commit, "media_id": template["media_id"]},
         colours[0],
-        params={"colour": choices, "trim": choices},
         colours=colours,
         media_ids=[],
+        **fields,
     )
-    return publish(client, create(client, body)["id"])
 
 
 def test_each_visitor_is_priced_at_its_listings_material(
@@ -1339,6 +1351,51 @@ def test_a_default_whose_material_the_shop_drops_still_renders(
     r = crud.post("/renders", json=render_body(listing, {}), key=uuid.uuid4().hex)
     assert r.status_code == 202, r.text
     assert r.json()["values"] == {"colour": "#0000FF", "trim": "#0000FF"}
+
+
+def test_publish_refuses_locked_colours_of_no_one_material(
+    client: TestClient,  # noqa: F811
+    template: dict[str, Any],  # noqa: F811
+    dense_red: str,
+) -> None:
+    """#6302 review: the shop locks the colour red (PLA only) and the trim blue (PETG
+    only). No print of one material has both, so publish refuses it and names both."""
+    petg_blue = _filament(client, "#0000FF", "30", "PETG")
+    body = _two_colour_body(
+        client,
+        template,
+        [dense_red, petg_blue],
+        params={"width": {"kind": "number", "min": 20, "max": 80, "step": 1}},
+        fixed={"trim": "#0000FF"},
+    )
+    listing = create(client, body)
+    refused = client.post(f"{LISTINGS}/{listing['id']}/publish")
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["type"] == STOREFRONT_PROBLEMS + "listing_locked_colours_unprintable"
+    assert refused.json()["names"] == ["colour", "trim"]
+
+
+def test_a_listing_whose_locks_clash_since_is_unavailable(
+    client: TestClient,  # noqa: F811
+    crud: CrudCaller,
+    template: dict[str, Any],  # noqa: F811
+    dense_red: str,
+) -> None:
+    """#6302 review: the colour is locked to a PLA red, and ``storefront_materials`` then
+    drops PLA (as a listing published before publish checked its locks). No visitor's
+    colour can make it printable, so a render is 409 ``listing_unavailable`` and names
+    no colour."""
+    petg_blue = _filament(client, "#0000FF", "30", "PETG")
+    listing = publish(
+        client,
+        create(client, listing_body(template, dense_red, colours=[dense_red, petg_blue]))["id"],
+    )
+    settings = client.put("/api/v1/settings", json={"storefront_materials": ["PETG"]})
+    assert settings.status_code == 200, settings.text
+    r = crud.post("/renders", json=render_body(listing, {}), key=uuid.uuid4().hex)
+    assert r.status_code == 409, r.text
+    assert r.json()["type"] == STOREFRONT_PROBLEMS + "listing_unavailable"
+    assert "parts" not in r.json()
 
 
 def test_add_to_order_refuses_a_slot_of_another_material(

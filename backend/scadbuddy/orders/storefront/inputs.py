@@ -25,6 +25,7 @@ from scadbuddy.orders.models import ColourSlot, Filament, Reference
 from scadbuddy.orders.reference import ResolvedReference, render_key_of
 from scadbuddy.orders.storefront.closest_colour import Swatch, closest_colour
 from scadbuddy.orders.storefront.wire import (
+    SUPPORT_PARAM,
     ChoiceBound,
     Listing,
     ListingSnapshot,
@@ -32,9 +33,10 @@ from scadbuddy.orders.storefront.wire import (
     ParamBound,
     TextBound,
     is_support,
+    shown_label,
 )
 from scadbuddy.render.runner import format_scad_value, with_defaults
-from scadbuddy.render.schema import Parameter, ParamValue
+from scadbuddy.render.schema import CustomizerSchema, Parameter, ParamValue
 
 InputReason = Literal["unknown", "locked", "range", "step", "choice", "length", "colour"]
 
@@ -73,25 +75,67 @@ class ColoursClashError(ValueError):
         self.parts = parts
 
 
+class LockedColoursClashError(ValueError):
+    """The shop's locked colours alone share no allowed material (#6302 review): the
+    listing cannot be printed in one material. Publish refuses such a listing
+    (``listing_locked_colours_unprintable``); one published before that check is
+    unavailable. ``names`` are the locked colour parameters."""
+
+    def __init__(self, names: list[str]) -> None:
+        super().__init__(f"{', '.join(names)} share no allowed material")
+        self.names = names
+
+
+def sets_support(parameter: Parameter, label: str) -> bool:
+    """Whether ``parameter`` sets support: its name, caption, group or shown ``label`` says
+    so, as the page's and the agent's ``isSupport`` read it (#6152)."""
+    texts = (parameter.name, parameter.caption, parameter.group, label)
+    return any(t is not None and SUPPORT_PARAM.search(t) is not None for t in texts)
+
+
+def locked_colours(
+    schema: CustomizerSchema, fixed: Mapping[str, ParamValue], offered: Collection[str]
+) -> dict[str, str]:
+    """The colours the shop locked that a print takes from its one material (#6302
+    review): each ``// color`` parameter of ``schema`` in ``fixed`` that is not offered
+    (``offered``, the listing's ``params``) and does not set support (`sets_support`), by
+    name, in the schema's order."""
+    return {
+        p.name: value
+        for p in schema.parameters
+        if p.type == "color"
+        and p.name not in offered
+        and isinstance(value := fixed.get(p.name), str)
+        and not sets_support(p, shown_label(p.name, None, p.caption))
+    }
+
+
 def effective_materials(listing: Listing, shop: Sequence[str]) -> list[str]:
     """The materials a print of ``listing`` may be made of, in order (#6258): its own,
     else the shop's default (``storefront_materials``)."""
     return list(listing.materials) or list(shop)
 
 
+def material_key(material: str) -> str:
+    """A material as it is compared: trimmed and casefolded, as `unique_materials` and
+    the materials backfill keep it (#6302 review), so stray whitespace in the price book
+    never drops a filament."""
+    return material.strip().casefold()
+
+
 def customer_filaments(
     listing: Listing, filaments: Mapping[str, Filament], materials: Collection[str]
 ) -> list[Filament]:
     """The listing's filaments that the price book still has and a customer may pick:
-    never a support material (#6152), and only of one of ``materials`` (casefolded,
+    never a support material (#6152), and only of one of ``materials`` (`material_key`,
     `effective_materials`, #6258). In the listing's order."""
-    allowed = {m.casefold() for m in materials}
+    allowed = {material_key(m) for m in materials}
     return [
         filaments[f]
         for f in listing.colours
         if f in filaments
         and not is_support(filaments[f].material)
-        and filaments[f].material.casefold() in allowed
+        and material_key(filaments[f].material) in allowed
     ]
 
 
@@ -296,7 +340,9 @@ def resolve_choice(
       material: the first of ``materials`` (in order) that offers each given colour on
       this listing. A slot of ``slots`` (slot to filament id) fixes it to its filament's.
     - A print never mixes materials, so the material must also offer one of the choices
-      of each colour parameter the visitor does not give.
+      of each colour parameter the visitor does not give, and each colour the shop
+      locked that is not support (`locked_colours`, #6302 review). No allowed material
+      offers every locked colour: `LockedColoursClashError`, whatever the visitor gives.
     - Of the materials that fit, the first that also offers the value (the listing's
       default) of each colour parameter the visitor does not give wins. Only when none
       does is it the first that fits (#6258 "otherwise use default", #6302 review). So a
@@ -308,15 +354,24 @@ def resolve_choice(
     No material fits: `ColoursClashError`. Its ``parts`` are a smallest set of those
     parts that still clashes: each part in turn is left out while the rest still clash,
     the shop's parts first, then the slots, then the visitor's, so the refusal names the
-    visitor's own colours whenever they alone clash. A slot filament that is not a
+    visitor's own colours whenever they alone clash. A locked colour is never named: the
+    materials that lack one are left out first. A slot filament that is not a
     customer filament of ``materials``: `InputOutsideListingError` (``colours.<slot>``)."""
-    by_name = {p.name: p for p in _snapshot(listing).schema_.parameters}
+    snapshot = _snapshot(listing)
+    by_name = {p.name: p for p in snapshot.schema_.parameters}
     offered = customer_filaments(listing, filaments, materials)
     of: dict[str, list[Filament]] = {}
     for filament in offered:
-        of.setdefault(filament.material.casefold(), []).append(filament)
-    order = [m for m in dict.fromkeys(m.casefold() for m in materials) if m in of]
+        of.setdefault(material_key(filament.material), []).append(filament)
+    order = [m for m in dict.fromkeys(material_key(m) for m in materials) if m in of]
     colours = {m: {f.colour.casefold() for f in each} for m, each in of.items()}
+    # The shop's locked colours fix the material too (#6302 review): a material that
+    # lacks one is never chosen, so the locked slots take that material's filaments.
+    locks = locked_colours(snapshot.schema_, snapshot.fixed, listing.params)
+    if locks:
+        order = [m for m in order if all(v.casefold() in colours[m] for v in locks.values())]
+        if not order:
+            raise LockedColoursClashError(list(locks))
     given_parts: list[tuple[str, set[str]]] = []
     shop_parts: list[tuple[str, set[str]]] = []
     #: The materials that offer each shop part's value as it is.
@@ -340,7 +395,7 @@ def resolve_choice(
         slot_filament = by_id.get(filament_id)
         if slot_filament is None:
             raise InputOutsideListingError(f"colours.{slot}", "colour")
-        slot_parts.append((f"colours.{slot}", {slot_filament.material.casefold()}))
+        slot_parts.append((f"colours.{slot}", {material_key(slot_filament.material)}))
     parts = dict(given_parts + slot_parts + shop_parts)
 
     def fits(names: Collection[str]) -> str | None:
@@ -365,7 +420,7 @@ def resolve_choice(
     if chosen is None:
         # No colour to choose and no filament: the shop picks the slots.
         return ResolvedChoice(material=None, values=dict(values), filaments=[])
-    spelling = next(m for m in materials if m.casefold() == chosen)
+    spelling = next(m for m in materials if material_key(m) == chosen)
     settled = dict(values)
     for name, _ in shop_parts:
         value = values.get(name)
@@ -410,8 +465,10 @@ def slot_filaments(
 ) -> dict[int, str]:
     """``chosen`` (slot to filament id), with each slot it lacks filled with the
     resolved material's filament of the slot's colour in the render
-    (``job.result.colors``), casefolded (#6258). A slot that material has no filament of
-    (a locked support colour, say) stays out, and the shop picks it."""
+    (``job.result.colors``), casefolded (#6258). A locked colour that is not support
+    always has one: `resolve_choice` chooses only a material that offers each locked
+    colour (#6302 review). A slot that material has no filament of (a locked support
+    colour) stays out, and the shop picks it."""
     filled = dict(chosen)
     for slot, colour in enumerate(render_colours):
         filament = resolved.filament_of(colour)
@@ -430,6 +487,6 @@ def check_one_material(
         if filament is None or is_support(filament.material):
             continue
         if resolved.material is None or (
-            filament.material.casefold() != resolved.material.casefold()
+            material_key(filament.material) != material_key(resolved.material)
         ):
             raise ColoursClashError([f"colours.{slot.slot}"])

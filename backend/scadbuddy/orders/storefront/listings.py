@@ -55,12 +55,14 @@ from scadbuddy.orders.storefront.inputs import (
     customer_filaments,
     effective_default,
     effective_materials,
+    locked_colours,
+    material_key,
     same_value,
     value_reason,
 )
+from scadbuddy.orders.storefront.inputs import sets_support as _sets_support
 from scadbuddy.orders.storefront.slice_profile import StorefrontSliceProfile, missing_materials
 from scadbuddy.orders.storefront.wire import (
-    SUPPORT_PARAM,
     ChoiceBound,
     Listing,
     ListingInput,
@@ -752,13 +754,6 @@ def _check_bound(parameter: Parameter, bound: ParamBound, colours: Collection[st
         raise outside
 
 
-def _sets_support(parameter: Parameter, label: str) -> bool:
-    """Whether ``parameter`` sets support: its name, caption, group or shown ``label`` says
-    so, as the page's and the agent's ``isSupport`` read it (#6152)."""
-    texts = (parameter.name, parameter.caption, parameter.group, label)
-    return any(t is not None and SUPPORT_PARAM.search(t) is not None for t in texts)
-
-
 def checked_fixed(
     schema: CustomizerSchema,
     body: ListingInput,
@@ -834,18 +829,53 @@ def check_materials(
     casefolded (#6258: the listing's materials, else the shop's default). A support
     material is the shop's choice and never offered (#6152), so it is not checked: a
     locked support colour still needs its filament."""
-    wanted = {m.casefold() for m in allowed}
+    wanted = {material_key(m) for m in allowed}
     for filament_id in body.colours:
         material = materials.get(filament_id)
         if material is None or is_support(material):
             continue  # `checked_fixed` refuses a filament the price book lacks.
-        if material.casefold() not in wanted:
+        if material_key(material) not in wanted:
             raise _unprocessable(
                 "listing_material_not_allowed",
                 f"{filament_id!r} is {material}, which this listing does not allow; allow"
                 f" {material} or take the filament out",
                 filament_id,
             )
+
+
+def check_locked_colours(
+    schema: CustomizerSchema,
+    fixed: Mapping[str, ParamValue],
+    body: ListingInput,
+    colours: Mapping[str, str],
+    materials: Mapping[str, str],
+    allowed: Sequence[str],
+) -> None:
+    """422 ``listing_locked_colours_unprintable`` (with ``names``, the locked colour
+    parameters) when no one of ``allowed`` offers every colour the shop locked
+    (`locked_colours`, ``fixed`` as `checked_fixed` answers it) among the listing's
+    customer filaments (``colours`` and ``materials``, by id): a print is made of one
+    material (#6258), and a render would refuse every visitor (#6302 review)."""
+    locks = locked_colours(schema, fixed, body.params)
+    if not locks:
+        return
+    offered: dict[str, set[str]] = {}
+    for filament_id in body.colours:
+        material = materials.get(filament_id)
+        if material is None or is_support(material) or filament_id not in colours:
+            continue
+        offered.setdefault(material_key(material), set()).add(colours[filament_id].casefold())
+    wanted = {v.casefold() for v in locks.values()}
+    if any(wanted <= offered.get(material_key(m), set()) for m in allowed):
+        return
+    names = list(locks)
+    raise problem(
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        "listing_locked_colours_unprintable",
+        f"no allowed material offers every locked colour ({', '.join(names)}); add those"
+        " colours in one material, or unlock one",
+        names=names,
+    )
 
 
 async def _commit_facts(core: Core, slug: str, commit: str) -> ListingSnapshot:
@@ -973,6 +1003,7 @@ async def publish(core: Core, store: ListingStore, listing_id: str) -> Listing:
     ``listing_bounds_outside_schema``, ``listing_fixed_invalid``,
     ``listing_default_invalid``, ``listing_colour_unknown``, ``listing_media_unknown``,
     ``listing_material_not_allowed`` (`check_materials`, #6258),
+    ``listing_locked_colours_unprintable`` (`check_locked_colours`, #6302 review),
     ``listing_reference`` or ``listing_pipeline_unsupported`` for a listing its commit or
     the price book does not back, ``listing_material_unsliceable`` for a material the shop
     slice profile has no spool for (#6153); 409 ``listing_changed`` when it was edited while it was
@@ -1003,7 +1034,9 @@ async def _publish(
     fixed = checked_fixed(facts.schema_, listing, colours, supports)
     materials = await asyncio.to_thread(store.filament_materials)
     shop = (await asyncio.to_thread(core.settings_store.snapshot)).runtime.storefront_materials
-    check_materials(listing, materials, effective_materials(listing, shop))
+    allowed = effective_materials(listing, shop)
+    check_materials(listing, materials, allowed)
+    check_locked_colours(facts.schema_, fixed, listing, colours, materials, allowed)
     profile = (await asyncio.to_thread(core.settings_store.load)).storefront_slice_profile
     check_sliceable(profile, listing, materials)
     refs = BlobRefs(core.projection.pool)

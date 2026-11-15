@@ -154,6 +154,33 @@ describe('CustomizePage', () => {
     expect(await screen.findByRole('button', { name: /Rim colour Teal/ })).toBeInTheDocument()
   })
 
+  it('shows the listing default while the start of changed choices has not answered (#6302 review)', async () => {
+    // The first pick settles the rim to teal. The next pick's start does not answer yet, so
+    // the rim shows the listing's default, not the last reply's teal.
+    let hold: (() => void) | undefined
+    server.use(
+      http.post('/api/store/v1/renders', async ({ request }) => {
+        const body = (await request.json()) as { values: Record<string, string> }
+        if (body.values.body_colour === '#C0502A') return HttpResponse.json({ ...RUNNING, values: { body_colour: '#C0502A', rim_colour: '#1C8C8C' } }, { status: 202 })
+        if (body.values.body_colour === undefined) return HttpResponse.json({ ...RUNNING, values: { body_colour: '#1B6CA8', rim_colour: '#1B6CA8' } }, { status: 202 })
+        await new Promise<void>((resolve) => { hold = resolve })
+        return HttpResponse.json({ ...RUNNING, values: { body_colour: body.values.body_colour, rim_colour: '#1C8C8C' } }, { status: 202 })
+      }),
+      http.get('/api/store/v1/renders/:id', () => HttpResponse.json(RUNNING)),
+    )
+    const { user } = show(CHARM_ID)
+    await user.click(await screen.findByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Rust PETG' }))
+    expect(await screen.findByRole('button', { name: /Rim colour Teal/ })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Teal PETG' }))
+    expect(await screen.findByRole('button', { name: /Rim colour Ocean blue/ })).toBeInTheDocument()
+    await waitFor(() => expect(hold).toBeDefined())
+    expect(screen.getByRole('button', { name: /Rim colour Ocean blue/ })).toBeInTheDocument()
+    hold?.()
+    expect(await screen.findByRole('button', { name: /Rim colour Teal/ })).toBeInTheDocument()
+  })
+
   it('shows the listing default again once a render start is refused (#6302 review)', async () => {
     server.use(
       http.post('/api/store/v1/renders', async ({ request }) => {

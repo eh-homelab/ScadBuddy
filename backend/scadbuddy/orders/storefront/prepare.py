@@ -50,6 +50,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.orders.models import Filament, Reference
 from scadbuddy.orders.storefront.inputs import (
     ColoursClashError,
+    LockedColoursClashError,
     customer_filaments,
     effective_default,
     effective_materials,
@@ -239,6 +240,9 @@ def _build(
                 choice = resolve_choice(listing, values, asked.keys(), filaments, materials)
             except ColoursClashError:
                 continue
+            except LockedColoursClashError:
+                # The shop's locks alone clash: no combination renders (#6302 review).
+                return []
             reference = listing_reference(listing, choice.values, {}, filaments=filaments).reference
             built.setdefault(reference.render_key, Combination(asked=asked, reference=reference))
     return list(built.values())

@@ -143,9 +143,11 @@ export function CustomizePage({
    * #6302 review: the colour values the latest render reply says the print takes. A part the
    * visitor did not set shows its colour from here (the shop may move it to the closest colour
    * of the material), else the listing's default while no reply has come back or after a
-   * start the shop refused.
+   * start the shop refused. It is kept with the choices it answered (`key`), and shown only
+   * while they are the choices on screen: after the visitor changes a value, the untouched
+   * parts show the listing's default until the next start answers.
    */
-  const [settled, setSettled] = useState<Record<string, ParamValue>>()
+  const [settled, setSettled] = useState<{ key: string; values: Record<string, ParamValue> }>()
   const [renderError, setRenderError] = useState<string | null>(null)
   /**
    * The rough price of the render `job` names, for the choices `key` (`choicesKey`): two
@@ -318,9 +320,9 @@ export function CustomizePage({
       begun = true
       renderKey.current.done()
       if (!live()) return
-      // While it runs the preview still shows the last render, so the colours stay that
-      // render's until this one answers its own (#6302 review).
-      if (first.values) setSettled(first.values)
+      // The colours this start settled, kept with its choices: until it answered, the parts
+      // the visitor did not set showed the listing's default (#6302 review).
+      if (first.values) setSettled({ key, values: first.values })
       setJob(onScreen(first))
       const done = await follow(first, live)
       if (!live() || done === null) return
@@ -425,7 +427,7 @@ export function CustomizePage({
         <Link className="sf-back" to="/">
           All designs
         </Link>
-        <ListingView listing={listing} values={values} settled={settled} onChange={setValue} />
+        <ListingView listing={listing} values={values} settled={settled?.key === current ? settled.values : undefined} onChange={setValue} />
         {stale && (
           <div className="sf-panel sf-stale" role="status">
             <p>The shop has changed this design since you opened it.</p>
