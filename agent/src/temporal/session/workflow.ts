@@ -37,7 +37,7 @@ import {
   MESSAGE_MAX,
   type Message,
   NOT_QUEUED,
-  QUEUE_CHARS_MAX,
+  QUEUE_BYTES_MAX,
   QUEUE_FULL,
   QUEUE_MAX,
   type QueueAnswer,
@@ -124,7 +124,7 @@ import {
 // moves it. On `end` the workflow releases its place on `home`.
 //
 // The queue (#6386): a send while a turn runs is `queue_message`, appended here (FIFO, at most
-// QUEUE_MAX entries and QUEUE_CHARS_MAX of JSON) and answered with its place; `remove_queued` and
+// QUEUE_MAX entries and QUEUE_BYTES_MAX of JSON as UTF-8) and answered with its place; `remove_queued` and
 // `edit_queued` change an entry until it starts, and `queue` reads it. The turn's end starts the
 // head in its own transaction (`session.finish_turn`'s `next`), so the row never goes idle for a
 // later send to take first, and the run continues as new with that turn's message; a head queued
@@ -201,6 +201,12 @@ const GATE_RECORD_PATCH = 'gate-record-r5'
 const WAKE_REREAD_PATCH = 'gate-record-wake-reread'
 /** The queue's commands (#6386): asked only for a non-empty queue, which no earlier history held. */
 const QUEUE_PATCH = 'agent-session-queue'
+/**
+ * A queue change made after the write loop's last check but before it cleared `publishing`
+ * (in the same activation) starts a write of its own; without it, that version was never
+ * written until the next change (#6386, PR #6411's CI).
+ */
+const QUEUE_PUBLISH_PATCH = 'agent-session-queue-publish'
 /**
  * How long a head the row is not free for waits before `session.begin_turn` is asked again (a lost
  * turn the sweep ends): BEGIN_RETRY_MS, doubling to BEGIN_RETRY_MAX_MS, so a row that stays taken
@@ -330,6 +336,8 @@ export async function AgentSession(started: SessionStart): Promise<void> {
   /** The last version `session.queue_changed` wrote, and the write in flight. */
   let published = queueVersion
   let publishing: Promise<void> | undefined
+  /** Whether the write loop still checks for a newer version: false once it ended, before `publishing` is cleared. */
+  let looping = false
   /** The head being started (its claim in flight): no longer removable or editable. */
   let starting: string | undefined
   /** How many times in a row `session.begin_turn` found the row taken. */
@@ -390,27 +398,33 @@ export async function AgentSession(started: SessionStart): Promise<void> {
   function changed(): void {
     patched(QUEUE_PATCH)
     queueVersion++
-    if (publishing) return
-    publishing = (async () => {
-      while (published < queueVersion) {
-        const version = queueVersion
-        await finish[SESSION_QUEUE_CHANGED_ACTIVITY]!({ sessionId: start.session_id, version, queue: queue.map(queuedView) } satisfies QueueChangedInput)
-        published = version
+    if (publishing && (looping || !patched(QUEUE_PUBLISH_PATCH))) return
+    looping = true
+    const run: Promise<void> = (async () => {
+      try {
+        while (published < queueVersion) {
+          const version = queueVersion
+          await finish[SESSION_QUEUE_CHANGED_ACTIVITY]!({ sessionId: start.session_id, version, queue: queue.map(queuedView) } satisfies QueueChangedInput)
+          published = version
+        }
+      } finally {
+        looping = false
       }
     })()
       // A write that never lands leaves the version unwritten; the next change writes it.
       .catch(() => undefined)
       .finally(() => {
-        publishing = undefined
+        if (publishing === run) publishing = undefined
       })
+    publishing = run
   }
   const queueState = (): QueueState => ({ version: queueVersion, queue: queue.map(queuedView) })
   /** The index of a queued entry that may still change (not the head being started). */
   const waiting = (id: string): number => (id === starting ? -1 : queue.findIndex((q) => q.turn_id === id))
-  const tooLarge = (entries: readonly QueuedMessage[]): boolean => JSON.stringify(entries).length > QUEUE_CHARS_MAX
+  const tooLarge = (entries: readonly QueuedMessage[]): boolean => new TextEncoder().encode(JSON.stringify(entries)).length > QUEUE_BYTES_MAX
   const full = () =>
     ApplicationFailure.nonRetryable(
-      `the session's queue is full (${QUEUE_MAX} messages, or ${QUEUE_CHARS_MAX / 1024} KiB); wait for one to start, or remove one`,
+      `the session's queue is full (${QUEUE_MAX} messages, or ${QUEUE_BYTES_MAX / 1024} KiB); wait for one to start, or remove one`,
       QUEUE_FULL,
     )
 

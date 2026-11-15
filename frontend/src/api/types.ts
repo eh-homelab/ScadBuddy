@@ -615,6 +615,7 @@ export type ActivityDetail = Schemas['ActivityDetail']
 export type PrintDetail = Schemas['PrintDetail']
 /** #4698 — where an unlinked print's 3MF can be, and the models it may be a print of. */
 export type PrintSources = Schemas['PrintSources']
+export type LibraryFileSuggestion = Schemas['LibraryFileSuggestion']
 export type FoundSource = Schemas['FoundSource']
 export type PrintImportRequest = Schemas['ImportRequest']
 export type ImportedPrint = Schemas['ImportedPrint']

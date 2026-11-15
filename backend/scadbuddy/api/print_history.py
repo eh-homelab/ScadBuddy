@@ -1,9 +1,10 @@
 """The prints API (#308, epic #305; print-history plan §2.4).
 
 A print is one Bambuddy archive linked to one of ScadBuddy's outputs (#306), to a
-Bambuddy library file ScadBuddy printed (#976), or to a model a person imported it onto
-(#4698, `api/print_imports.py`), keyed by the archive's id. The list is
-driven by those links (``print_links``, keyed by print subject since #1750), so an
+Bambuddy library file ScadBuddy printed (#976), or to a model or (#6394) a native library
+file a person imported it onto (#4698, `api/print_imports.py`), keyed by the archive's id.
+The list is driven by those links (``print_links``, keyed by print subject since
+#1750), so an
 archive printed from anywhere else is never listed: this is ScadBuddy's print history,
 not a copy of Bambuddy's. A library file's print has no
 template, parameters or files of ScadBuddy's: only the archive's. Bambuddy stays the source of
@@ -100,6 +101,9 @@ from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.operations.store import OperationAccepted
+from scadbuddy.print_library.component import PrintLibraryDep
+from scadbuddy.print_library.ids import is_native_id
+from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.runner import OpenSCADError
 from scadbuddy.render.schema import ParamValue
@@ -484,8 +488,9 @@ class PrintDetail(PrintSummary):
     #: The output the print came from; None for a library file's print and for an
     #: imported one.
     provenance: PrintProvenance | None
-    #: For a print a person imported onto a model (#4698): the source its 3MF was read
-    #: from, the file's name, size and hash. None for every other print.
+    #: For a print a person imported onto a model (#4698) or a library file (#6394): the
+    #: source its 3MF was read from, the file's name, size and hash. None for every other
+    #: print.
     imported: PrintImport | None = None
     files: list[PrintFile]
     media: PrintMedia
@@ -983,12 +988,16 @@ def _window(batch: Sequence[LinkedPrint]) -> tuple[date | None, date | None]:
 class _LibraryFiles:
     """The library files prints were made of, once per file per request (#1755). The
     file names a print and lists its files, but the print is Bambuddy's archive: a
-    file Bambuddy no longer has, or a read that fails, is None, and the print is shown
-    without it."""
+    file its library no longer has, or a read that fails, is None, and the print is
+    shown without it. A native id is read from ScadBuddy's own library (``native``,
+    #6394: a print imported onto one of its files), never from Bambuddy."""
 
-    def __init__(self, cache: ArchiveCache, client: BambuddyClient) -> None:
+    def __init__(
+        self, cache: ArchiveCache, client: BambuddyClient, native: NativeLibrary | None
+    ) -> None:
         self._cache = cache
         self._client = client
+        self._native = native
         self._known: dict[int, LibraryFile | None] = {}
 
     async def read(self, file_ids: Sequence[int | None]) -> None:
@@ -1001,7 +1010,11 @@ class _LibraryFiles:
             return None
         if file_id not in self._known:
             try:
-                found = await self._cache.library_file(self._client, file_id)
+                found = (
+                    await self._native_file(file_id)
+                    if is_native_id(file_id)
+                    else await self._cache.library_file(self._client, file_id)
+                )
             except ApiError as error:
                 logger.warning(
                     "could not read a printed library file",
@@ -1014,6 +1027,16 @@ class _LibraryFiles:
     async def name(self, file_id: int | None) -> str | None:
         file = await self.file(file_id)
         return file.filename if file is not None else None
+
+    async def _native_file(self, file_id: int) -> LibraryFile | None:
+        if self._native is None:
+            return None
+        try:
+            return await self._native.library_file(file_id)
+        except ApiError as error:
+            if error.status == status.HTTP_404_NOT_FOUND:
+                return None
+            raise
 
 
 async def _bounded[T](calls: Sequence[Awaitable[T]], limit: int) -> list[T]:
@@ -1057,6 +1080,7 @@ async def list_prints(
     config: ConfigDep,
     fetcher: FetcherDep,
     print_runs: PrintRunsDep,
+    library: PrintLibraryDep,
     slug: Annotated[
         str | None, Query(pattern=MODEL_ID_PATTERN, max_length=MAX_MODEL_ID_LENGTH)
     ] = None,
@@ -1108,7 +1132,7 @@ async def list_prints(
         return PrintPage(items=await _counted(attachments, named), next_cursor=next_cursor)
 
     async with client_for(store.load()) as client:
-        files = _LibraryFiles(cache, client)
+        files = _LibraryFiles(cache, client, await library.serving_native())
         if cursor is None:
             # Only the first page can show a print linked now. Any filter can show a
             # LAN print, of an output or of a library file (#5724).
@@ -1345,7 +1369,7 @@ def _output_plate_names(outputs: OutputStore, output_id: str) -> dict[int, str]:
 
 
 async def _plate_names(
-    link: LinkedPrint, outputs: OutputStore, client: BambuddyClient
+    link: LinkedPrint, outputs: OutputStore, client: BambuddyClient, native: NativeLibrary | None
 ) -> dict[int, str]:
     """#2055 — each plate's name, from what this print was of. Advisory: an unreadable
     source names nothing, and the caption keeps the plate's number."""
@@ -1353,8 +1377,9 @@ async def _plate_names(
         return await asyncio.to_thread(_output_plate_names, outputs, link.output_id)
     if link.library_file_id is None:
         return {}
+    reads = native if native is not None and is_native_id(link.library_file_id) else client
     try:
-        plates = await client.library_plates(link.library_file_id)
+        plates = await reads.library_plates(link.library_file_id)
     # The client maps transport failures to ApiError; a body that is not the expected
     # shape is a ValueError (pydantic's ValidationError, or undecodable JSON).
     except (ApiError, ValueError) as error:
@@ -1422,6 +1447,7 @@ async def get_print(
     config: ConfigDep,
     fetcher: FetcherDep,
     print_runs: PrintRunsDep,
+    library: PrintLibraryDep,
     printer_media: bool = False,
 ) -> PrintDetail:
     link = await _require_print(links, archive_id)
@@ -1442,7 +1468,8 @@ async def get_print(
             cache, client, links, print_runs.store, link
         )
         diff = await defaults.diff(output) if output is not None else None
-        file = await _LibraryFiles(cache, client).file(link.library_file_id)
+        native = await library.serving_native()
+        file = await _LibraryFiles(cache, client, native).file(link.library_file_id)
         summary = _summary(link, meta, archive, diff, file.filename if file else None)
         media = PrintMedia()
         runs: list[ArchiveRun] = []
@@ -1453,7 +1480,7 @@ async def get_print(
             media = _media(link, archive, added)
             runs = (await cache.runs(client, archive_id)).items
             if media.plate_thumbnails:
-                names = await _plate_names(link, outputs, client)
+                names = await _plate_names(link, outputs, client, native)
                 media.plate_thumbnails = [
                     thumbnail.model_copy(update={"name": names.get(thumbnail.index)})
                     for thumbnail in media.plate_thumbnails
@@ -1465,8 +1492,8 @@ async def get_print(
         printers = await _printer_names(cache, client)
         printer_name = printers.get(summary.printer_id) if summary.printer_id is not None else None
         summary = summary.model_copy(update={"printer_name": printer_name or _printer_name(runs)})
-        library = _library_files(link, archive, file) if meta is None else []
-        files = await asyncio.to_thread(_files, outputs, meta, archive, library)
+        own_files = _library_files(link, archive, file) if meta is None else []
+        files = await asyncio.to_thread(_files, outputs, meta, archive, own_files)
         bambuddy_url = client.config.web_url(ARCHIVES_PAGE) if archive is not None else None
 
     return PrintDetail(

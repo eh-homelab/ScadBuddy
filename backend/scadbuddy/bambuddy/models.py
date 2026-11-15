@@ -872,6 +872,9 @@ class LibraryListRow(BambuddyModel):
     created_at: datetime | None = None
     #: Indexed from an external folder: a delete cannot be undone (#2167).
     is_external: bool = False
+    #: ScadBuddy's own library only (#6394): a print run's per-print copy or slice
+    #: (``library_files.print_subject``), which its sweep trashes. Never Bambuddy's.
+    per_print: bool = False
 
 
 class LibraryPlate(BambuddyModel):

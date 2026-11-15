@@ -161,6 +161,23 @@ def test_a_run_s_link_found_after_an_import_owns_the_archive(
     assert rows.archive_run_plates(81) == [(1, 81), (2, 82)]
 
 
+def test_an_import_onto_a_library_file_is_not_its_origin(rows: OrderStore, pool: PgPool) -> None:
+    """#6394: ScadBuddy did not print an archive imported onto a library file, and a run's
+    link of another file found after the import owns it."""
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_links (subject, archive_id, matched_by, first_seen) VALUES"
+            " ('library:1000000042', 81, 'import', now() - interval '1 hour'),"
+            " ('library:1000000042', 82, 'import', now() - interval '1 hour')"
+        )
+    send(pool, "library:89", "run-1", 51, 1, 81)
+
+    assert rows.archive_origin(82) is None
+    lib = rows.archive_origin(81)
+    assert lib is not None and lib.library_file_id == 89
+    assert rows.archive_run_plates(81) == [(1, 81)]
+
+
 def test_an_item_keeps_the_archives_it_was_taken_from(shop: QuoteShop) -> None:
     order = shop.order
     model, library = shop.lifecycle.add_items(

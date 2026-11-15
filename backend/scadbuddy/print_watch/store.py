@@ -136,7 +136,8 @@ class AutoImportStore:
 
     async def slugs_by_hash(self, sha256: str) -> set[str]:
         """The models earlier imports of the printed file with this SHA-256 (an archive's
-        ``content_hash``) were linked to, whatever source each import read."""
+        ``content_hash``) were linked to, whatever source each import read. An import onto
+        a library file (#6394) names no model, and the watcher links to models only."""
         return await asyncio.to_thread(self._slugs_by_hash, sha256)
 
     async def record(self, row: AutoImport, *, plate_id: int | None = None) -> bool:
@@ -258,7 +259,8 @@ class AutoImportStore:
                 # has its source's, which is the printed file's for an archive or a
                 # library file matched by hash.
                 "SELECT DISTINCT slug FROM print_imports"
-                " WHERE content_hash = %(hash)s OR (content_hash IS NULL AND sha256 = %(hash)s)",
+                " WHERE slug IS NOT NULL AND (content_hash = %(hash)s"
+                " OR (content_hash IS NULL AND sha256 = %(hash)s))",
                 {"hash": sha256},
             ).fetchall()
         return {row["slug"] for row in rows}

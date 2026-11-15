@@ -139,6 +139,20 @@ def test_a_file_id_is_written_one_way(
         assert response.status_code == 422, response.text
 
 
+def test_a_target_file_in_the_trash_is_refused(
+    native_client: TestClient, files: tuple[NativeFile, NativeFile]
+) -> None:
+    """The route reads only the source file; the store finds the target in the trash
+    (`TargetGoneError`), which is a 422 naming the target, not the source file's 404."""
+    fixed, petg = files
+    _native(native_client).rows.trash([fixed.id])
+    response = _associate(
+        native_client, petg.id, target=f"library:{fixed.id}", relation="variant_of"
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == f"no library file {fixed.id}"
+
+
 def test_a_file_is_not_associated_with_itself(
     native_client: TestClient, files: tuple[NativeFile, NativeFile]
 ) -> None:

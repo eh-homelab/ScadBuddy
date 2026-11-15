@@ -433,7 +433,8 @@ export class DurableTurns {
     }
     return {
       turnId,
-      queued: { position: answer.position },
+      // Position 0: an Update sent again after its entry left the queue (it started, or was removed).
+      ...(answer.position > 0 ? { queued: { position: answer.position } } : {}),
       get done() {
         done ??= outcome()
         return done

@@ -268,11 +268,12 @@ export type ServerEvent = V &
       }
     /**
      * `questionId`: the error refused the panel's answer to that question (#940), so its card is answerable again.
+     * `queuedId`: the error refused the panel's remove or edit of that queued message (#6386), which stays queued.
      * `shown`: `message` with the credential named by its name (#3710, credentials.ts `credentialDisplayLabel`),
      * which the panel shows in its place. Only the panel reads it: logs, a flow's failure and the turn's
      * outcome read `message`.
      */
-    | { type: 'error'; sessionId?: string; code?: string; message: string; questionId?: string; shown?: string }
+    | { type: 'error'; sessionId?: string; code?: string; message: string; questionId?: string; queuedId?: string; shown?: string }
     /**
      * #3710: a model request failed on one Claude credential, and the turn continues on the
      * next (harness/fallback.ts `onFallback`). Both are named for the person, with their names

@@ -456,6 +456,26 @@ def suggested_slugs(slugs: Sequence[str], job: str | None, *, limit: int = 5) ->
     return [slug for _, slug in scored[:limit]]
 
 
+def suggested_files(
+    files: Sequence[tuple[int, str]], job: str | None, *, limit: int = 5
+) -> list[int]:
+    """The library files (id, name) a job's name suggests (#6394), by the match
+    `suggested_slugs` makes, on each file's name without its extension: most shared
+    words first, then the newest file."""
+    if not job:
+        return []
+    words = _tokens(_stem(job))
+    if not words:
+        return []
+    scored: list[tuple[int, int]] = []
+    for file_id, name in files:
+        own = _tokens(_stem(name))
+        if own and (own <= words or words <= own):
+            scored.append((len(own & words), file_id))
+    scored.sort(key=lambda item: (-item[0], -item[1]))
+    return [file_id for _, file_id in scored[:limit]]
+
+
 def exact_slugs(slugs: Sequence[str], job: str | None) -> list[str]:
     """The models whose slug has exactly the words of the job's name (``demo_plate``
     names ``demo-plate``, not ``demo``): the only name match the print watcher (#4699)

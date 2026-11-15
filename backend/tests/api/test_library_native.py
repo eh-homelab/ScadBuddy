@@ -160,6 +160,7 @@ def test_listing_on_native(native_client: TestClient, uploaded: NativeFile) -> N
         "created_at": None,
         "output_id": None,
         "is_external": False,
+        "per_print": False,
     }
 
 
@@ -312,6 +313,7 @@ def test_one_native_file_is_read_with_where_it_is(
         "created_at": None,
         "output_id": None,
         "is_external": False,
+        "per_print": False,
         "folder_path": ["Dinos"],
     }
     # #5333 review: an id in the native range, so the router's `check_served` lets it
