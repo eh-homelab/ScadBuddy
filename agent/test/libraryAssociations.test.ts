@@ -1,9 +1,11 @@
+import { readFileSync } from 'node:fs'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { pinnedOutward } from '../src/tools/pinnedOutward.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
+import { ASSOCIATION_RELATIONS } from '../src/tools/print.js'
 import type { Tool, ToolContext } from '../src/tools/registry.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
 
@@ -46,6 +48,13 @@ const ROW = {
 }
 
 describe('library file associations (#6395)', () => {
+  it("takes the relations the API's spec lists", () => {
+    const spec = JSON.parse(readFileSync(new URL('../../backend/openapi.json', import.meta.url), 'utf8')) as {
+      components: { schemas: { AssociationRequest: { properties: { relation: { enum: string[] } } } } }
+    }
+    expect([...ASSOCIATION_RELATIONS]).toEqual(spec.components.schemas.AssociationRequest.properties.relation.enum)
+  })
+
   it('associates a file with a model, its relation said from the file', async () => {
     let sent: unknown
     server.use(

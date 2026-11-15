@@ -262,7 +262,9 @@ async def post_file_association(
         except ApiError as error:
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, error.detail) from None
     elif target.file_id == file_id:
-        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "a file is not associated with itself")
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "a file is not associated with itself"
+        )
     elif target.file_id is not None and not is_native_id(target.file_id):
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, f"no library file {target.file_id}")
     try:

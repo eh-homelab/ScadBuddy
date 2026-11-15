@@ -59,6 +59,12 @@ export const libraryFileId = z
 /** The two sources a print tool takes, exactly one of them per call. */
 export const sourceShape = { output_id: outputId.optional(), library_file_id: libraryFileId.optional() }
 
+/**
+ * #6395 — the backend's `print_library/associations.py` `RELATIONS`, which is the one list;
+ * `test/libraryAssociations.test.ts` fails when this copy differs from the API's spec.
+ */
+export const ASSOCIATION_RELATIONS = ['output_of', 'variant_of', 'source_of', 'related_to'] as const
+
 export const ONE_SOURCE = 'name one source: output_id or library_file_id'
 
 /** A print tool's input: `shape` plus its source, refused at parse time unless it names exactly one. */
@@ -1326,7 +1332,7 @@ export const printTools: Tool[] = [
         .regex(/^(model:(builtin:)?[a-z0-9][a-z0-9-]*|library:[0-9]+)$/, 'must be model:<slug> or library:<file id>')
         .max(200)
         .describe('`model:<slug>` or `library:<file id>`'),
-      relation: z.enum(['output_of', 'variant_of', 'source_of', 'related_to']),
+      relation: z.enum(ASSOCIATION_RELATIONS),
       note: z.string().max(500).optional(),
     }),
     risk: 'write',
