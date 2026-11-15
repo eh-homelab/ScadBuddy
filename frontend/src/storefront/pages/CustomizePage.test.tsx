@@ -2,7 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PreviewJob } from '../../components/Preview'
-import { CHARM_ID, ESTIMATE, KEYCHAIN, TAG_ID } from '../../mocks/features/storefrontPublic'
+import { CHARM_ID, ESTIMATE, KEYCHAIN, NO_PRICE, PENDING_PRICE, TAG_ID } from '../../mocks/features/storefrontPublic'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import type { PollTiming } from '../poll'
@@ -61,10 +61,10 @@ describe('CustomizePage', () => {
     return () => server.events.removeAllListeners()
   })
 
-  it('renders on load, and shows the rough price as an estimate', async () => {
+  it('renders on load, and shows the slice price as firm (#6153)', async () => {
     const sent = renders()
     show()
-    expect(await screen.findByText('about $12.40, confirmed after we check it')).toBeInTheDocument()
+    expect(await screen.findByText('$12.40 for one')).toBeInTheDocument()
     expect(screen.getByTestId('preview')).toHaveAttribute('data-status', 'done')
     expect(sent).toEqual([{ listing_id: 'l1', listing_updated_at: '2026-11-07T12:00:00Z', values: {}, picks: {}, colours: {} }])
     expect(screen.queryByRole('button', { name: 'Render' })).toBeNull()
@@ -84,10 +84,10 @@ describe('CustomizePage', () => {
       }
     })
     const { user } = show('l1', FAST, 300)
-    await screen.findByText('about $12.40, confirmed after we check it')
+    await screen.findByText('$12.40 for one')
     await user.type(screen.getByLabelText('Name'), 'Ada')
     await waitFor(() => expect(sent).toHaveLength(2))
-    await screen.findByText('about $12.40, confirmed after we check it')
+    await screen.findByText('$12.40 for one')
     expect(sent).toHaveLength(2)
     expect(sent[1]!.body).toEqual({
       listing_id: 'l1',
@@ -185,15 +185,15 @@ describe('CustomizePage', () => {
       }),
     )
     const { user } = show('l9')
-    await screen.findByText('about $12.40, confirmed after we check it')
+    await screen.findByText('$12.40 for one')
     await user.click(screen.getByRole('button', { name: /Base colour/ }))
     await user.click(await screen.findByRole('radio', { name: 'Cheap red PLA' }))
-    await screen.findByText('about $5.00, confirmed after we check it')
+    await screen.findByText('$5.00 for one')
     await user.click(screen.getByRole('button', { name: /Base colour/ }))
     await user.click(await screen.findByRole('radio', { name: 'Dear red PLA' }))
     await waitFor(() => expect(reads).toBe(3))
     expect(await screen.findByRole('alert')).toBeInTheDocument()
-    expect(screen.queryByText(/about \$5\.00/)).toBeNull()
+    expect(screen.queryByText(/\$5\.00/)).toBeNull()
   })
 
   it('moves a one-material colour to the shop’s, in the shown material, when its pick is cleared (#6152)', async () => {
@@ -296,7 +296,7 @@ describe('CustomizePage', () => {
       JSON.stringify({ v: 1, values: { base_colour: '#E8532F' }, quantity: 1, picks: { base_colour: 'f-orange', gone: 'f-blue' } }),
     )
     show()
-    await screen.findByText('about $12.40, confirmed after we check it')
+    await screen.findByText('$12.40 for one')
     server.events.removeAllListeners()
     expect(sent[0]).toMatchObject({ values: { base_colour: '#E8532F' }, picks: { base_colour: 'f-orange' } })
     expect((sent[0] as { picks: object }).picks).toEqual({ base_colour: 'f-orange' })
@@ -310,7 +310,7 @@ describe('CustomizePage', () => {
       }
     })
     const { user } = show()
-    await screen.findByText('about $12.40, confirmed after we check it')
+    await screen.findByText('$12.40 for one')
     await user.click(screen.getByRole('button', { name: 'Add to order' }))
     expect(await screen.findByText('Added to your order.')).toBeInTheDocument()
     server.events.removeAllListeners()
@@ -369,7 +369,7 @@ describe('CustomizePage', () => {
       http.get('/api/store/v1/renders/:id/estimate', () => HttpResponse.json(ESTIMATE)),
     )
     void show()
-    expect(await screen.findByText('about $12.40, confirmed after we check it')).toBeInTheDocument()
+    expect(await screen.findByText('$12.40 for one')).toBeInTheDocument()
     expect(polls).toBe(5)
     expect(screen.queryByText(/a lot of/)).toBeNull()
     expect(screen.queryByRole('alert')).toBeNull()
@@ -536,9 +536,9 @@ describe('CustomizePage', () => {
       http.get('/api/store/v1/renders/:id/estimate', () => HttpResponse.json(ESTIMATE)),
     )
     const { user } = show('l1', { firstMs: 5, maxMs: 20, limitMs: 60_000 })
-    await screen.findByText('about $12.40, confirmed after we check it')
+    await screen.findByText('$12.40 for one')
     await user.type(screen.getByLabelText('Name'), 'Bo')
-    expect(screen.queryByText('about $12.40, confirmed after we check it')).toBeNull()
+    expect(screen.queryByText('$12.40 for one')).toBeNull()
     expect(await screen.findByText('Updating your preview and price…')).toBeInTheDocument()
     expect(screen.getByTestId('preview')).toHaveAttribute('data-status', 'done')
   })
@@ -553,7 +553,7 @@ describe('CustomizePage', () => {
       }),
     )
     show()
-    expect(await screen.findByText('about $12.40, confirmed after we check it')).toBeInTheDocument()
+    expect(await screen.findByText('$12.40 for one')).toBeInTheDocument()
     expect(reads).toBe(3)
     expect(screen.queryByRole('alert')).toBeNull()
   })
@@ -569,30 +569,57 @@ describe('CustomizePage', () => {
       }),
       http.get('/api/store/v1/renders/:id/estimate', () => {
         reads += 1
-        return reads < 2
-          ? HttpResponse.json({ type: `${PROBLEMS}estimate_pending`, status: 429, detail: 'Not ready.' }, { status: 429, headers: { 'Retry-After': '0' } })
-          : HttpResponse.json(ESTIMATE)
+        return HttpResponse.json(reads < 2 ? { ...PENDING_PRICE, retry_after: 0 } : ESTIMATE)
       }),
     )
     show()
-    expect(await screen.findByText('about $12.40, confirmed after we check it')).toBeInTheDocument()
+    expect(await screen.findByText('$12.40 for one')).toBeInTheDocument()
     expect(polls).toBe(2)
     expect(reads).toBe(2)
     expect(screen.getByTestId('preview')).toHaveAttribute('data-status', 'done')
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
-  it.each([
-    ['a part it could not measure', { unknown_parts: 1 }],
-    ['no filament', { grams: '0.00' }],
-  ])('never shows a floor price for a render with %s', async (_what, change) => {
+  it('says the price is being worked out while the slice runs, then shows it (#6153)', async () => {
+    let reads = 0
+    let release = () => {}
+    const sliced = new Promise<void>((resolve) => {
+      release = resolve
+    })
     server.use(
       http.post('/api/store/v1/renders', () => HttpResponse.json(DONE)),
-      http.get('/api/store/v1/renders/:id/estimate', () => HttpResponse.json({ ...ESTIMATE, ...change })),
+      http.get('/api/store/v1/renders/:id/estimate', async () => {
+        reads += 1
+        if (reads > 1) await sliced
+        return HttpResponse.json(reads < 3 ? { ...PENDING_PRICE, retry_after: 0 } : ESTIMATE)
+      }),
+    )
+    show()
+    expect(await screen.findByText('Working out the price…')).toBeInTheDocument()
+    expect(screen.queryByText(/\$/)).toBeNull()
+    release()
+    expect(await screen.findByText('$12.40 for one')).toBeInTheDocument()
+    expect(screen.queryByText('Working out the price…')).toBeNull()
+  })
+
+  it('shows no number when there is no firm price (#6153)', async () => {
+    server.use(
+      http.post('/api/store/v1/renders', () => HttpResponse.json(DONE)),
+      http.get('/api/store/v1/renders/:id/estimate', () => HttpResponse.json(NO_PRICE)),
     )
     show()
     expect(await screen.findByText('We price this design by hand')).toBeInTheDocument()
-    expect(screen.queryByText(/about \$/)).toBeNull()
+    expect(screen.queryByText(/\$/)).toBeNull()
+  })
+
+  it('shows no number for a price still pending at the time limit', async () => {
+    server.use(
+      http.post('/api/store/v1/renders', () => HttpResponse.json(DONE)),
+      http.get('/api/store/v1/renders/:id/estimate', () => HttpResponse.json({ ...PENDING_PRICE, retry_after: 0 })),
+    )
+    show('l1', { firstMs: 5, maxMs: 10, limitMs: 60 })
+    expect(await screen.findByText('We price this design by hand')).toBeInTheDocument()
+    expect(screen.queryByText(/\$/)).toBeNull()
   })
 
   it('tries a limited render once more after Retry-After', async () => {
@@ -605,7 +632,7 @@ describe('CustomizePage', () => {
       http.get('/api/store/v1/renders/:id/estimate', () => HttpResponse.json(ESTIMATE)),
     )
     show()
-    expect(await screen.findByText('about $12.40, confirmed after we check it')).toBeInTheDocument()
+    expect(await screen.findByText('$12.40 for one')).toBeInTheDocument()
     expect(posts).toBe(2)
   })
 
@@ -625,7 +652,7 @@ describe('CustomizePage', () => {
     expect(screen.getByText('No preview yet.')).toBeInTheDocument()
     expect(screen.queryByText('Making your preview…')).toBeNull()
     await user.click(screen.getByRole('button', { name: 'Try again' }))
-    expect(await screen.findByText('about $12.40, confirmed after we check it')).toBeInTheDocument()
+    expect(await screen.findByText('$12.40 for one')).toBeInTheDocument()
     expect(posts).toBe(2)
   })
 

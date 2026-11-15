@@ -336,16 +336,29 @@ export function CustomizePage({
   }
 
   /**
-   * The rough price of a done render. While the shop works it out it answers 429
-   * `estimate_pending` with a `Retry-After` (#6120); that, and any other passing failure (a
-   * 5xx, the network), waits and reads again, backing off, until the time limit.
+   * The price of a done render (#6153). While the shop's slice works it out, the answer is
+   * `pending`: the page shows that (`onPending`) and reads again after its `retry_after`. A
+   * passing failure (a 5xx, the network) waits and reads again too, backing off. Past the
+   * time limit a price still pending is shown as none: the shop prices it by hand.
    */
-  const estimateOf = async (job: string, live: () => boolean): Promise<StoreEstimate | null> => {
+  const estimateOf = async (
+    job: string,
+    live: () => boolean,
+    onPending: (pending: StoreEstimate) => void,
+  ): Promise<StoreEstimate | null> => {
     const began = now()
     let delay = timing.firstMs
     for (;;) {
       try {
-        return await store.estimate(job)
+        const read = await store.estimate(job)
+        if (read.source !== 'pending') return read
+        if (!live()) return null
+        onPending(read)
+        const left = began + timing.limitMs - now()
+        if (left <= 0) return { ...read, source: 'none', retry_after: null }
+        await wait(Math.min(Math.max(delay, Math.min((read.retry_after ?? 0) * 1000, RETRY_CAP_MS)), left))
+        if (!live()) return null
+        delay = Math.min(delay * 2, timing.maxMs)
       } catch (caught) {
         if (!passing(caught)) throw caught
         const left = began + timing.limitMs - now()
@@ -379,8 +392,8 @@ export function CustomizePage({
         return
       }
       setShown({ job: done, key })
-      const rough = await estimateOf(done.id, live)
-      if (rough && live()) setEstimate({ job: done.id, key, estimate: rough })
+      const price = await estimateOf(done.id, live, (pending) => setEstimate({ job: done.id, key, estimate: pending }))
+      if (price && live()) setEstimate({ job: done.id, key, estimate: price })
     } catch (caught) {
       if (!live()) return
       if (changedListing(caught)) setStale(true)
