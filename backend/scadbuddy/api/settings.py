@@ -627,8 +627,10 @@ async def put_settings(
         # itself, under the lock a pass takes (#6011).
         await state.components.get(AUTO_IMPORTS).floor()
     apply_runtime(state, snapshot.runtime)
-    # This process sees its own write at once; workers within the source's TTL.
+    # This process sees its own write at once, `/healthz` too, which only reads what the
+    # source last read (#6354); workers within the source's TTL.
     state.store.source.invalidate()
+    await state.store.source.current()
     return _view(snapshot, state)
 
 
