@@ -249,3 +249,61 @@ class LocationStore:
         ).fetchone()
         if hit is not None:
             raise LocationCycleError()
+
+
+#: Who a merge's ``moved`` events name: no person moved the spools.
+MERGE_ACTOR = "system:printer-merge"
+
+
+def repoint_printer_locations(conn: Conn, merged: UUID, into: UUID) -> None:
+    """Make printer ``merged``'s AMS tray places printer ``into``'s, on ``conn`` and in
+    the printer merge's transaction (`printers/store.py` `_merge`). A tray only
+    ``merged`` has moves as it is. Where both printers have an unarchived place for one
+    tray, ``into``'s stands: each spool in ``merged``'s moves there with a ``moved``
+    event, its places move under it, and ``merged``'s is archived (not deleted: the
+    ledger's ``moved`` events name it). Archived places move as they are.
+
+    Locks the spools before the places, as `LocationStore.move` does."""
+    gone = conn.execute(
+        "SELECT m.id, k.id AS kept FROM filament_locations m LEFT JOIN filament_locations k"
+        " ON k.printer_id = %s AND k.ams_id = m.ams_id AND k.tray_id = m.tray_id"
+        " AND k.archived_at IS NULL"
+        " WHERE m.printer_id = %s AND m.archived_at IS NULL AND k.id IS NOT NULL",
+        (into, merged),
+    ).fetchall()
+    clash = {row["id"]: row["kept"] for row in gone}
+    spools = conn.execute(
+        "SELECT id, location_id FROM filament_spools WHERE location_id = ANY(%s)"
+        " ORDER BY id FOR UPDATE",
+        (list(clash),),
+    ).fetchall()
+    conn.execute(
+        "SELECT id FROM filament_locations WHERE printer_id = ANY(%s) ORDER BY id FOR UPDATE",
+        ([merged, into],),
+    )
+    for spool in spools:
+        to = clash[spool["location_id"]]
+        conn.execute(
+            "UPDATE filament_spools SET location_id = %s, updated_at = now() WHERE id = %s",
+            (to, spool["id"]),
+        )
+        ledger.record(
+            conn,
+            spool["id"],
+            "moved",
+            actor=MERGE_ACTOR,
+            data={"from": spool["location_id"], "to": to, "reason": "printer_merged"},
+        )
+    for old, kept in clash.items():
+        conn.execute(
+            "UPDATE filament_locations SET parent_id = %s, updated_at = now() WHERE parent_id = %s",
+            (kept, old),
+        )
+        conn.execute(
+            "UPDATE filament_locations SET archived_at = now(), updated_at = now() WHERE id = %s",
+            (old,),
+        )
+    conn.execute(
+        "UPDATE filament_locations SET printer_id = %s, updated_at = now() WHERE printer_id = %s",
+        (into, merged),
+    )

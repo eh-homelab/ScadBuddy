@@ -341,3 +341,22 @@ class SpoolTypeStore:
         ).fetchone()
         assert linked is not None
         return linked
+
+
+#: The K value tables and the column of what each value belongs to.
+K_VALUE_TABLES = {"filament_spool_type_k_values": "type_id", "filament_spool_k_values": "spool_id"}
+
+
+def repoint_k_values(conn: Conn, table: str, merged: UUID, into: UUID) -> None:
+    """Make printer ``merged``'s K values in ``table`` printer ``into``'s, on ``conn`` and
+    in the printer merge's transaction (`printers/store.py` `_merge`). Where both
+    printers have a value for one key (owner, extruder, nozzle), ``into``'s stands and
+    ``merged``'s is dropped."""
+    owner = K_VALUE_TABLES[table]
+    conn.execute(
+        f"DELETE FROM {table} m USING {table} k WHERE m.printer_id = %s AND k.printer_id = %s"
+        f" AND k.{owner} = m.{owner} AND k.extruder = m.extruder"
+        " AND k.nozzle_diameter = m.nozzle_diameter",
+        (merged, into),
+    )
+    conn.execute(f"UPDATE {table} SET printer_id = %s WHERE printer_id = %s", (into, merged))
