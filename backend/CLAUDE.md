@@ -380,6 +380,14 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   and presets, which the dialog and the run share; the dialog's Reslice gives a
   completed slice a new row of its own, `reslice_of`, #4433; the lost-row repair), `preview.py` (the
   dialog's reads under `?slicer=native`) and `component.py` (`SLICING`).
+  What a native slice keeps of a file: `--load-settings` (ScadBuddy's process preset)
+  replaces the file's own process keys, `enable_support`, `support_filament` and
+  `support_interface_filament` among them; the supports option passes only enable, type and
+  build-plate-only (`supports.py` `SCALAR_KEYS`). An author layout (`print_settings_id`
+  names the H2C) keeps its placement, scale and tower (`bambuddy/send.py` `_laid_out_for`);
+  only a file that already holds G-code prints as it is. The headless CLI draws no plate
+  covers (its GLFW is Wayland-only) and copies the input's; `render/recolour.py` redraws
+  them in the spools' colours (#6170).
   `workflows/slicing.py` is `SliceWorkflow` on the `library` queue (activities in
   `workflows/slicing_activities.py`, the run's `slice_run` and `print_sliced_upload`
   among them); the print worker only starts it. `api/internal_blobs.py` is the hidden
@@ -874,7 +882,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `mocks/features/activity.ts`.
 - `backend/scadbuddy/orders/` — orders phase 1 (#4249, epic #4248, spec
   `2026-10-18-orders-design.md`, plan `2026-10-19-orders-phase-1-customers-and-orders.md`):
-  customers, orders and line items as ScadBuddy's own records. `component.py` `ORDERS`
+  customers, orders and line items as ScadBuddy's own records. A library-file item has no
+  design revisions (409 "it has no design revisions"): to change one after acceptance, add
+  a new item (`order_item_add_after_acceptance`) and cancel the old one. An item made with
+  `archive_id` is a library-file item from a copy of the archive's file
+  (`origin_archive_ids`); its archive quote needs the archive `completed`. `component.py` `ORDERS`
   (`OrdersComponent`: `store` over the shared `scadbuddy-rows` pool (`rows/component.py`),
   opened on first use, `lifecycle` over the core's bus; `OrdersDep`), `models.py` (the wire and row shapes; money is integer minor
   units, `*_minor`), `store.py` (`OrderStore`, plain CRUD per table; `transaction()` and
