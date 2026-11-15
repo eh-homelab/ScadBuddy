@@ -385,6 +385,29 @@ describe('flow runs in tool activities', () => {
     expect(h.touched).toEqual([])
   })
 
+  // #6345: every attempt of one flow call sends one Idempotency-Key, so a retry after a lost
+  // heartbeat re-attaches to the first attempt's operation instead of starting a second one.
+  it('keys every attempt of a flow call on its request id, and each call on its own', async () => {
+    const keys: (string | undefined)[] = []
+    const keyed = defineTool({
+      name: 'keyed',
+      label: 'keyed',
+      description: 'records its key',
+      input: z.object({}),
+      risk: 'read',
+      routes: [],
+      handler: async (_args, ctx) => {
+        keys.push(ctx.callKey)
+        return json({ ok: true })
+      },
+    })
+    const h = harness({ flows: flowRuns() }, [keyed])
+    await env(FLOW, 'tool-call_1').run(h.activities.keyed!, {})
+    await env(FLOW, 'tool-call_1').run(h.activities.keyed!, {})
+    await env(FLOW, 'tool-call_2').run(h.activities.keyed!, {})
+    expect(keys).toEqual([`flow:${RUN}:run-1:call_1`, `flow:${RUN}:run-1:call_1`, `flow:${RUN}:run-1:call_2`])
+  })
+
   // #6123 item 3: a flow's call is no session's ToolCall, yet it is traced as one is.
   it("traces each call as agent.tool/<name>, naming the run, its tier and outcome, its error scrubbed", async () => {
     const spans = testTracing()

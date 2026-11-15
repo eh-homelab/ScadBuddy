@@ -447,15 +447,50 @@ async def test_an_approval_the_harness_never_took_leaves_the_call_to_a_person(
     outward: Outward, api: FakeApi, tools: tuple[Tools, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Review of #2645: a `grant:` row left behind by an Update that failed made the call,
-    listed for a person once the retries were spent, answer stale to every decision."""
+    listed for a person once the retries were spent, answer stale to every decision. The
+    attempt keeps the row (#6347: the Update may have arrived); the workflow's `withdraw`,
+    once the retries are spent, removes it before the call is listed."""
     _, queue = tools
     [p] = await parked_send(outward, api, queue)
     assert (await check(p)).verdict == "inside"
     harness_down(monkeypatch)
     with pytest.raises(RuntimeError):
         await approve(p)
+    assert await outward.store.get_decision(p.request_id) is not None
+    await p.env.run(p.grants.withdraw, GrantApprove(call_id=p.call_id))
     assert await outward.store.get_decision(p.request_id) is None
     await person_can_decide(outward, p)
+
+
+async def test_an_approval_whose_answer_was_lost_is_kept_and_its_retry_lets_the_call_run(
+    outward: Outward, api: FakeApi, tools: tuple[Tools, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6347 (run faca071f): the grant's Update reached the harness, but the attempt failed
+    after it (there, its StartToClose timeout). The row stays, so the agent runs the call;
+    the retry, which finds the call no longer parked, sends the same Update again and
+    answers its result rather than failing until the call is listed for a person."""
+    served, queue = tools
+    [p] = await parked_send(outward, api, queue)
+    assert (await check(p)).verdict == "inside"
+    real = AgentClient.approve_tool
+    sent: list[Any] = []
+
+    async def answer_lost(self: AgentClient, call_id: str, *args: Any, **kwargs: Any) -> Any:
+        sent.append(kwargs.get("update_id"))
+        result = await real(self, call_id, *args, **kwargs)
+        if len(sent) == 1:
+            raise RuntimeError("the answer never came back")
+        return result
+
+    monkeypatch.setattr(AgentClient, "approve_tool", answer_lost)
+    with pytest.raises(RuntimeError):
+        await approve(p)
+    decision = await outward.store.get_decision(p.request_id)
+    assert decision is not None and decision.responder.startswith("grant:")
+    assert await approve(p) == "approved"
+    assert sent == [f"grant-{p.call_id}", f"grant-{p.call_id}"]
+    await outward.row(p.run_id, lambda r: r.status == "succeeded")
+    assert served.calls == [SEND]
 
 
 async def test_a_release_the_harness_never_took_leaves_the_call_to_a_person(

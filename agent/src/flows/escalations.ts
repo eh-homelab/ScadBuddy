@@ -6,7 +6,7 @@ import { DurableUnavailable, type RespondArgs, type RespondOutcome } from '../ga
 import { parseRequestId } from '../gate/ids.js'
 import { isUuid } from '../harness/stateDirs.js'
 import { wrapUntrustedText } from '../safety/untrusted.js'
-import { type FlowRunReads, type ParentHopCursor, SqlFlowRunReads, STILL_WAITING_BATCH } from './backendReads.js'
+import { type FlowRunReads, type ParentHopCursor, STILL_WAITING_BATCH } from './backendReads.js'
 import { childReasoning, childStep, FlowQueue, ownStep, type QueueStep } from './queue.js'
 import { SessionError } from '../sessions/manager.js'
 import type { Owner } from '../sessions/protocol.js'
@@ -39,8 +39,8 @@ export type EscalationSend = (sessionId: string, owner: Owner, text: string, tie
 
 export type EscalationDeps = {
   sql: Sql
-  /** The backend's flow tables (backendReads.ts, #5299 D7); its SQL on `sql` by default. */
-  reads?: FlowRunReads | undefined
+  /** The backend's flow tables, through its CRUD routes (backendReads.ts, #5299 D7). */
+  reads: FlowRunReads
   /** The durable gate, when Temporal is configured. */
   durable: () => EscalationDurable | undefined
   /** How a delivery turn starts; without it nothing is delivered. */
@@ -163,7 +163,7 @@ export class Escalations {
 
   constructor(deps: EscalationDeps) {
     this.#deps = deps
-    this.#reads = deps.reads ?? new SqlFlowRunReads(deps.sql)
+    this.#reads = deps.reads
     this.#queue = new FlowQueue(deps.sql, this.#reads)
     this.#currentTiers = deps.currentTiers ?? liveTokenTiers(new PostgresTokenStore(deps.sql))
   }

@@ -27,7 +27,7 @@ import { durableRequestId, flowRequestId, parseRequestId } from '../gate/ids.js'
 import { type ToolCallArgs, type ToolCallBlock, type ToolCallResult, toolCallActivity } from './toolCall.js'
 import { turnPrincipal } from '../tools/harness.js'
 import { FLOW_IMAGES_MAX, type FlowBlobStore, type FlowImage, flowImageOf } from './flowBlobs.js'
-import { type FlowRunReads, SqlFlowRunReads } from '../flows/backendReads.js'
+import type { FlowRunReads } from '../flows/backendReads.js'
 import { flowOf, type FlowRuns } from './flowRuns.js'
 import { FLOW_TOOL_TIER_ACTIVITY, flowToolTierActivity } from './flowTools.js'
 import { BUILTIN_TIER_ACTIVITY, builtinTier, TOOL_TIER_ACTIVITY, toolTierActivity } from './toolTier.js'
@@ -119,10 +119,10 @@ export class PgApprovalRecords implements ApprovalRecords {
   readonly #sql: Sql
   readonly #grants: Pick<FlowRunReads, 'grantInForce'>
 
-  /** `grants`: the backend's `flow_grants` (flows/backendReads.ts, #5299 D7); its SQL on `sql` by default. */
-  constructor(sql: Sql, grants?: Pick<FlowRunReads, 'grantInForce'>) {
+  /** `grants`: the backend's `flow_grants`, through its CRUD routes (flows/backendReads.ts, #5299 D7). */
+  constructor(sql: Sql, grants: Pick<FlowRunReads, 'grantInForce'>) {
     this.#sql = sql
-    this.#grants = grants ?? new SqlFlowRunReads(sql)
+    this.#grants = grants
   }
 
   async approved(requestId: string, call?: ApprovalBinding): Promise<boolean> {
@@ -506,6 +506,10 @@ async function runCall(
     flow,
     signal: context.cancellationSignal,
     heartbeat: (details) => context.heartbeat(details),
+    // The gate's request id is the same on every attempt of this activity, so each attempt keys
+    // its commands alike and a retry is answered from the first's operation (#6345); a fresh key
+    // per attempt made a second attempt a second operation.
+    callKey: caller.requestId,
     span,
   })
   if (context.cancellationSignal.aborted || run.outcome !== 'ok') span?.setAttribute('scadbuddy.outcome', run.outcome)

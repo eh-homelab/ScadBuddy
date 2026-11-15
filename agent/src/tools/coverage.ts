@@ -35,6 +35,14 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: "The Storefront page's pictures and a model media's \"Storefront…\" dialog (#6213); an agent tool follows with #5283.",
   },
   {
+    operation: 'GET /api/v1/storefront/listings/{listing_id}/prepare',
+    reason: "The Storefront editor's \"Prepare every colour combination\" shows the count and the progress (#6237); a back-office action, as publish is on the page.",
+  },
+  {
+    operation: 'POST /api/v1/storefront/listings/{listing_id}/prepare',
+    reason: "The Storefront editor's \"Prepare every colour combination\" (#6237): a person starts a run of up to storefront_prepare_cap renders, a few at a time, from the page.",
+  },
+  {
     operation: 'POST /api/v1/storefront/listings/{listing_id}/unpublish',
     reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); the assistant drafts and publishes through storefront_listing_draft and storefront_listing_publish (#6131).",
   },

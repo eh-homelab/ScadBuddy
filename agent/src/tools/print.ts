@@ -1671,6 +1671,7 @@ export const printTools: Tool[] = [
     risk: 'outward',
     bambuddyScope: ['Manage Projects', 'Manage Library'],
     routes: ['POST /api/v1/print/projects'],
+    keyed: true,
     summarize: ({ name, project_id }) =>
       project_id !== undefined ? `Link Bambuddy project ${project_id}` : `Create the Bambuddy project "${name ?? ''}"`,
     handler: async (args, ctx) =>

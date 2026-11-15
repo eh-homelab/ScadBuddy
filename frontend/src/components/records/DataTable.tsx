@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import { ChevronRightIcon } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 
 /**
@@ -23,6 +24,19 @@ export interface Column<Row> {
   sort?: 'ascending' | 'descending' | 'none'
 }
 
+/** #6334 — rows under a header row of their own, after the table's `rows`, that the
+ * header shows or hides. */
+export interface RowGroup<Row> {
+  key: string
+  /** The header row's text. */
+  label: ReactNode
+  rows: Row[]
+  open: boolean
+  onToggle: (open: boolean) => void
+  /** Classes on each of its rows, such as a quieter tone. */
+  rowClassName?: string
+}
+
 export interface DataTableProps<Row> {
   columns: Column<Row>[]
   rows: Row[]
@@ -45,12 +59,39 @@ export interface DataTableProps<Row> {
    * region named by `heading`, shown with its empty text even when there are no rows. */
   heading?: string
   toolbar?: ReactNode
+  /** #6334 — groups of rows after `rows`, each under a header that opens and closes it. */
+  groups?: RowGroup<Row>[]
 }
 
-export function DataTable<Row>({ columns, rows, rowKey, label, rowTestId, onOpen, rowId, selected, empty, footer, rowClassName, heading, toolbar }: DataTableProps<Row>) {
-  if (rows.length === 0 && empty !== undefined && !footer && heading === undefined) {
+export function DataTable<Row>({ columns, rows, rowKey, label, rowTestId, onOpen, rowId, selected, empty, footer, rowClassName, heading, toolbar, groups = [] }: DataTableProps<Row>) {
+  const shownGroups = groups.filter((group) => group.rows.length > 0)
+  const none = rows.length === 0 && shownGroups.length === 0
+  if (none && empty !== undefined && !footer && heading === undefined) {
     return (
       <p className="rounded-xl border border-dashed px-4 py-8 text-center text-sm text-muted-foreground">{empty}</p>
+    )
+  }
+  function renderRow(row: Row, groupClass?: string) {
+    const open = onOpen ? () => onOpen(row) : undefined
+    const key = rowKey(row)
+    const current = selected != null && key === selected
+    return (
+      <tr
+        key={key}
+        id={rowId?.(row)}
+        data-testid={rowTestId?.(row)}
+        aria-current={current ? 'true' : undefined}
+        className={`${current ? `${ROW} bg-muted/60` : ROW} ${rowClassName?.(row) ?? ''} ${groupClass ?? ''}`.trim()}
+      >
+        {columns.map((column) => {
+          const extra = typeof column.className === 'function' ? column.className(row) : column.className
+          return (
+            <td key={column.key} className={`${CELL} ${extra ?? ''}`.trim()}>
+              {column.cell(row, open)}
+            </td>
+          )
+        })}
+      </tr>
     )
   }
   return (
@@ -75,30 +116,13 @@ export function DataTable<Row>({ columns, rows, rowKey, label, rowTestId, onOpen
             </tr>
           </thead>
           <tbody>
-            {rows.map((row) => {
-              const open = onOpen ? () => onOpen(row) : undefined
-              const key = rowKey(row)
-              const current = selected != null && key === selected
-              return (
-                <tr
-                  key={key}
-                  id={rowId?.(row)}
-                  data-testid={rowTestId?.(row)}
-                  aria-current={current ? 'true' : undefined}
-                  className={`${current ? `${ROW} bg-muted/60` : ROW} ${rowClassName?.(row) ?? ''}`.trim()}
-                >
-                  {columns.map((column) => {
-                    const extra = typeof column.className === 'function' ? column.className(row) : column.className
-                    return (
-                      <td key={column.key} className={`${CELL} ${extra ?? ''}`.trim()}>
-                        {column.cell(row, open)}
-                      </td>
-                    )
-                  })}
-                </tr>
-              )
-            })}
-            {rows.length === 0 && empty !== undefined && (
+            {rows.map((row) => renderRow(row))}
+            {shownGroups.map((group) => (
+              <GroupRows key={group.key} group={group} span={columns.length}>
+                {group.rows.map((row) => renderRow(row, group.rowClassName))}
+              </GroupRows>
+            ))}
+            {none && empty !== undefined && (
               <tr className={ROW}>
                 <td colSpan={columns.length} className={`${CELL} text-center text-muted-foreground`}>
                   {empty}
@@ -110,5 +134,27 @@ export function DataTable<Row>({ columns, rows, rowKey, label, rowTestId, onOpen
         </table>
       </div>
     </Card>
+  )
+}
+
+/** A group's header row, a button that opens and closes it, then its rows while open. */
+function GroupRows<Row>({ group, span, children }: { group: RowGroup<Row>; span: number; children: ReactNode }) {
+  return (
+    <>
+      <tr className="border-t border-border bg-muted/30" data-testid={`row-group-${group.key}`}>
+        <td colSpan={span} className="px-3 py-1.5">
+          <button
+            type="button"
+            aria-expanded={group.open}
+            onClick={() => group.onToggle(!group.open)}
+            className="flex w-full items-center gap-1.5 rounded-sm text-left text-xs text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
+          >
+            <ChevronRightIcon aria-hidden className={`size-3.5 shrink-0 transition-transform motion-reduce:transition-none ${group.open ? 'rotate-90' : ''}`} />
+            {group.label}
+          </button>
+        </td>
+      </tr>
+      {group.open && children}
+    </>
   )
 }

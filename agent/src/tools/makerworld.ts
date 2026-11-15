@@ -81,6 +81,7 @@ export const makerworldTools: Tool[] = [
     source: BAMBUDDY_DATA,
     bambuddyScope: ['Manage Library'],
     routes: ['POST /api/v1/makerworld/import'],
+    keyed: true,
     summarize: ({ model_id, profile_id, folder_id, bambuddy_folder_id }) =>
       `Import MakerWorld model ${model_id}${profile_id === undefined ? '' : ` (profile ${profile_id})`} into the library` +
       (folder_id === undefined ? '' : `, folder ${folder_id}`) +

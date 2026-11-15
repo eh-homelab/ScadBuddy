@@ -61,8 +61,7 @@ import {
   withServiceCredential,
 } from './api/serviceCredential.js'
 import { untilBackendAnswers } from './api/backendUp.js'
-import { CrudAreas, READ_AREAS } from './api/crudAreas.js'
-import { CrudFlowRunReads, gatedFlowRunReads, SqlFlowRunReads } from './flows/backendReads.js'
+import { CrudFlowRunReads } from './flows/backendReads.js'
 import { BrowserSessions } from './auth/browserSession.js'
 import { sealBackfill } from './sessions/sealBackfill.js'
 import { ApprovalActions } from './approvals/mcp.js'
@@ -328,21 +327,15 @@ const backend = createBackendClient(
 )
 
 // #5299 D7: the agent's reads of the backend's tables (the event log, flow runs, their
-// decisions and grants) go through the backend's CRUD routes once the API lists their areas,
-// read from the start and again with back-off until it does (api/crudAreas.ts); over SQL until
-// then, as an API pod older than the routes needs during a rolling deploy.
+// decisions and grants) go through the backend's CRUD routes (areas `events` and `flows`);
+// the API takes back the agent's grants on the event log, flow runs and decisions.
 const crudFetch = serviceCredential ? withServiceCredential(globalThis.fetch, serviceCredential, config.backendUrl) : globalThis.fetch
-const crudAreas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: READ_AREAS })
-crudAreas.start()
-const crudEventLog = new CrudEventLogReads(config.backendUrl, { fetch: crudFetch })
-const flowReads = database
-  ? gatedFlowRunReads(new SqlFlowRunReads(database.sql), new CrudFlowRunReads(config.backendUrl, { fetch: crudFetch }), () => crudAreas.has('flows'))
-  : undefined
+const flowReads = new CrudFlowRunReads(config.backendUrl, { fetch: crudFetch })
 
 // The event bus (spec §7, #264): LISTEN on `scadbuddy_events` on a connection
 // of its own, retried in the background, feeding MCP resource subscriptions.
 const events = config.databaseUrl
-  ? new PgEventListener(config.databaseUrl, { eventLog: () => (crudAreas.has('events') ? crudEventLog : undefined) })
+  ? new PgEventListener(config.databaseUrl, { eventLog: new CrudEventLogReads(config.backendUrl, { fetch: crudFetch }) })
   : undefined
 // The pending-input tables' change ticks (#815, gate/changes.ts), for the badge's stream.
 const pendingChanges = events ? new PendingChanges(events) : undefined
@@ -1375,7 +1368,6 @@ async function stop(): Promise<void> {
   stopTabHosting?.()
   stopSweeper?.()
   stopEscalationSweeper?.()
-  crudAreas.stop()
   stopOrphanSweep?.()
   stopPluginSessionSweep?.()
   stopDurableSweep?.()

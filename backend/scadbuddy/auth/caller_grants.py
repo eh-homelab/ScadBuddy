@@ -39,19 +39,14 @@ Grants = Mapping[str, tuple[str, ...]]
 
 _READ = ("SELECT",)
 
-#: What the agent (`agent/`) touches of the backend's. Its gate reads ``flow_grants`` and
-#: ``flow_grant_uses`` under the grant row's share lock (``agent/src/gate/store.ts``
-#: `grantInput`, until the gate moves here, #5299 step 10). Its other reads (the event log,
-#: flow runs, their decisions and grants) go through the CRUD routes of areas ``events``
-#: and ``flows`` (`api/crud_agent.py`, #5299 D7), over SQL only while an older API pod
-#: lacks them; once that deploy is done, ``events``, ``workflow_runs`` and
-#: ``workflow_run_decisions`` are unused here and their revoke follows in its own PR. Its
-#: workspace files' `blob_refs` holds go through the CRUD routes too; `auth/revoke.py`
-#: `RETIRED_GRANTS` takes back the table it once held.
+#: What the agent (`agent/`) touches of the backend's: only what its gate reads under the
+#: grant row's share lock, ``flow_grants`` and ``flow_grant_uses`` (``agent/src/gate/store.ts``
+#: `grantInput`; ``FOR SHARE OF g`` needs UPDATE on ``flow_grants``), until the gate moves
+#: here (#5299 step 10). Its other reads (the event log, flow runs, their decisions and
+#: grants) go through the CRUD routes of areas ``events`` and ``flows`` (`api/crud_agent.py`,
+#: #5299 D7), and its workspace files' `blob_refs` holds through the CRUD routes too;
+#: `auth/revoke.py` `RETIRED_GRANTS` takes back the tables it once held.
 AGENT_GRANTS: Grants = {
-    "events": _READ,
-    "workflow_runs": _READ,
-    "workflow_run_decisions": _READ,
     "flow_grants": ("SELECT", "UPDATE"),
     "flow_grant_uses": _READ,
 }

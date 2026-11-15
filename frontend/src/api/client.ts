@@ -281,6 +281,8 @@ import type {
   StorefrontListing,
   StorefrontListingInput,
   StorefrontListingPage,
+  ListingPrepareProgress,
+  ListingPrepareStarted,
   ProviderConnect,
   ProviderStatus,
   Quote,
@@ -2857,6 +2859,11 @@ export const api = {
     request<StorefrontListing>(`/storefront/listings/${seg(id)}/publish`, { method: 'POST' }),
   unpublishStorefrontListing: (id: string) =>
     request<StorefrontListing>(`/storefront/listings/${seg(id)}/unpublish`, { method: 'POST' }),
+  /** #6237 — the listing's colour combinations, the cap, and how many are ready. */
+  storefrontListingPrepare: (id: string) => request<ListingPrepareProgress>(`/storefront/listings/${seg(id)}/prepare`),
+  /** #6237 — queue a render of every colour combination; 422 over the cap or with no colour. */
+  prepareStorefrontListing: (id: string) =>
+    request<ListingPrepareStarted>(`/storefront/listings/${seg(id)}/prepare`, { method: 'POST' }),
   /** Every listing's id, in the order the public site shows them. */
   orderStorefrontListings: (ids: string[]) =>
     request<StorefrontListing[]>('/storefront/listings/order', { method: 'PUT', body: JSON.stringify({ ids }) }),

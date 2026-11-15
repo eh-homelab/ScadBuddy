@@ -8,6 +8,7 @@ import { childReasoning, FlowQueue, REASONING_MAX } from '../src/flows/queue.js'
 import { originPolicy } from '../src/http/origins.js'
 import { durableRequestId, flowRequestId } from '../src/gate/ids.js'
 import { pendingInput, registerPendingInputRoutes } from '../src/routes/pendingInput.js'
+import { SqlFlowRunReads } from './support/sqlFlowRunReads.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { manager, tempPaths } from './support/sessions.js'
 
@@ -31,7 +32,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow run queue${TEST_DATABASE_URL ? '' : ` 
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     for (const file of readdirSync(MIGRATIONS).sort()) await db.sql.unsafe(readFileSync(`${MIGRATIONS}${file}`, 'utf8'))
-    queue = new FlowQueue(db.sql)
+    queue = new FlowQueue(db.sql, new SqlFlowRunReads(db.sql))
     parent = await session('bearer', TOKEN)
     child = await session('flow', `flow:${RUN}`)
   })

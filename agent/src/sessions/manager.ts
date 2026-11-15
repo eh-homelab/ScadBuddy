@@ -682,8 +682,8 @@ function startedQuery(run: QueryRunner): (spawn: HarnessRun) => WarmQuery {
 
 export type SessionManagerDeps = {
   sql: Sql
-  /** The backend's flow tables (flows/backendReads.ts, #5299 D7); their SQL on `sql` by default. */
-  flowReads?: FlowRunReads | undefined
+  /** The backend's flow tables, through its CRUD routes (flows/backendReads.ts, #5299 D7). */
+  flowReads: FlowRunReads
   paths: HarnessPaths
   /**
    * The Claude credentials a turn may use, in priority order, and where what

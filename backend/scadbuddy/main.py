@@ -116,6 +116,7 @@ from scadbuddy.operations.kinds import OperationKind, Queue
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import reap_quote_holds as reap_orphan_quote_holds
+from scadbuddy.orders.storefront.prepare import prepare_activities
 from scadbuddy.orders.storefront.staged_files import staged_file_activities, sweep_staged
 from scadbuddy.orders.storefront.visitors import VisitorStore
 from scadbuddy.payments.component import PAYMENTS
@@ -217,6 +218,7 @@ from scadbuddy.workflows.housekeeping import (
 from scadbuddy.workflows.library_copy import VersionedLibraryCopy
 from scadbuddy.workflows.operation import VersionedOperationWorkflow
 from scadbuddy.workflows.operation_activities import operation_activities
+from scadbuddy.workflows.prepare_listing import VersionedPrepareListing
 from scadbuddy.workflows.previews import (
     DUE_ACTIVITY,
     REFRESH_ACTIVITY,
@@ -1713,6 +1715,7 @@ LIBRARY_WORKFLOWS: tuple[type, ...] = (
     VersionedSliceWorkflow,
     VersionedSpoolRefresh,
     VersionedStagedFile,
+    VersionedPrepareListing,
 )
 
 
@@ -1840,6 +1843,8 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
             lambda: state.uploads,
         ),  # Each staged customer file's watcher (#6133).
         *staged_file_activities(state),
+        # A listing's prepared colour combinations (#6237, #6299 review).
+        *prepare_activities(state, lambda: state.components.get(ORDERS)),
     ]
     try:
         while not stop.is_set():

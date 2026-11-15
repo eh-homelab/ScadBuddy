@@ -529,6 +529,15 @@ if out is not None and out.endswith(".3mf"):
         print("WARNING: The file 'pic.svg' couldn't be opened", file=sys.stderr)
         print("ERROR: something broke", file=sys.stderr)
         raise SystemExit(1)
+    fail_while = settings.get("FAKE_FAIL_WHILE")
+    if (
+        fail_while
+        and pathlib.Path(fail_while["file"]).exists()
+        and any(fail_while["arg"] in arg for arg in args)
+    ):
+        # A render of the arg that fails while the file is there (#6299 review).
+        print("ERROR: something broke", file=sys.stderr)
+        raise SystemExit(1)
     for line in settings.get("FAKE_STDERR", []):
         print(line, file=sys.stderr)
     hold = settings.get("FAKE_HOLD")

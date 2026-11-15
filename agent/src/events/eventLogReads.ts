@@ -1,10 +1,9 @@
-import { crudRead } from '../api/crudAreas.js'
+import { crudRead } from '../api/crudRead.js'
 
 // The backend's event log (`events`), as the LISTEN gap replay reads it (pgListener.ts): its
 // last `seq` with the database clock, and the rows after a `seq`, newest first. The backend
-// answers over its CRUD routes of area `events` (backend api/crud_agent.py, #5299 D7) with the
-// queries the listener ran over SQL; the listener keeps that SQL for an API pod older than the
-// routes, until `GET …/crud/agent/areas` lists `events` (api/crudAreas.ts).
+// answers over its CRUD routes of area `events` (backend api/crud_agent.py, #5299 D7); the
+// agent runs no SQL on `events` (the API takes back its grant, backend auth/revoke.py).
 
 /** max(seq) of the log and the database clock when it was read. */
 export type EventLogHead = { seq: bigint; at: Date }
