@@ -19,7 +19,7 @@ import type { Continuation, OpenInputAnswer, OpenInputArgs, SessionTurnInput, Se
 import type { DecidedCall, DecidedRun } from '../temporal/toolActivities.js'
 import { NO_CAPACITY, PLACEMENT_MOVED, SESSION_GONE, SHUTTING_DOWN_FAILURE } from '../temporal/session/names.js'
 import { attentionGate, type HeldRow, replyOf, TAB_WAIT_CALL } from './attentionGate.js'
-import type { SessionBlobs } from './blobs.js'
+import type { SessionImages } from './blobs.js'
 import { userPrompt } from './images.js'
 import { type ClaimedSession, runningDurableTurn, TAB_WAIT_S, type TurnOutcome, waitForTab } from './manager.js'
 import { scrubForLog } from './sdkEvents.js'
@@ -181,7 +181,7 @@ export type TurnHostDeps = {
   core: TurnCoreDeps
   sql: Sql
   /** The message's images, by the names DurableTurns.send stored them under; and a tool result's, stored under the fence. */
-  images: Pick<SessionBlobs, 'get' | 'putIf'>
+  images: Pick<SessionImages, 'get' | 'putIf'>
   /** This replica's session host queue (`agent-sessions.<identity>`), what each result names. */
   hostQueue: string
   /** Tests only: the fence's period (FENCE_MS). */
@@ -543,7 +543,8 @@ export class TurnHost {
       },
       mayWrite: () => !fenced(),
       // A tool result's images, and its events, only while this placement holds the turn, checked with the write.
-      storeImages: (images) => this.#deps.images.putIf(id, images, (tx) => holds(tx, 'share')),
+      // `holds(tx, 'share')`'s check, run on whichever side stores the images.
+      storeImages: (images) => this.#deps.images.putIf(id, images, { attempt, turnId }),
       appendEvents: async (batch) => {
         const written = await sql.begin(async (tx) => ((await holds(tx, 'update')) ? await events.append(id, batch, tx) : undefined))
         if (written) events.committed(id, batch, written)

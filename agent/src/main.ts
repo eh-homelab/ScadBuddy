@@ -5,7 +5,8 @@ import { CrudPushStore, type PushRepo, PushStore } from './notify/pushStore.js'
 import { ChannelStore, CrudChannelRows } from './notify/channels.js'
 import type { Sql } from 'postgres'
 import { PendingChanges } from './gate/changes.js'
-import { ATTACHMENT_SWEEP_MS, AttachmentStore } from './attachments/store.js'
+import { CrudAttachmentStore } from './attachments/crudStore.js'
+import { ATTACHMENT_SWEEP_MS, type Attachments, AttachmentStore } from './attachments/store.js'
 import { serve, upgradeWebSocket } from '@hono/node-server'
 import { WebSocketServer } from 'ws'
 import path from 'node:path'
@@ -62,7 +63,7 @@ import {
   withServiceCredential,
 } from './api/serviceCredential.js'
 import { untilBackendAnswers } from './api/backendUp.js'
-import { CrudAreas, FORGET_AREAS, SECRET_AREAS, WORKSPACE_AREAS } from './api/crudAreas.js'
+import { BLOB_AREAS, CrudAreas, FORGET_AREAS, SECRET_AREAS, WORKSPACE_AREAS } from './api/crudAreas.js'
 import { gated, STORE_AREAS, type StoreArea } from './api/crudStores.js'
 import { CrudFlowRunReads } from './flows/backendReads.js'
 import { BrowserSessions } from './auth/browserSession.js'
@@ -121,7 +122,10 @@ import {
   subjectDataConverter,
 } from './temporal/payloadCodec.js'
 import { DurableGate } from './gate/durable.js'
-import { SessionBlobs } from './sessions/blobs.js'
+import { SessionBlobs, type SessionImages } from './sessions/blobs.js'
+import { CrudHttpBodies, CrudSessionBlobs } from './sessions/crudBlobs.js'
+import type { SavedBodies } from './harness/httpRequest.js'
+import { type HttpBodiesFor, PgHttpBodies } from './sessions/httpBodies.js'
 import { DurableTurns } from './sessions/durable.js'
 import { DurableRunningSweep, durableDescriber } from './sessions/durableSweep.js'
 import { CrudSubjectKeys, gatedKeyDeletes, PgKeyDeletes } from './sessions/forget.js'
@@ -259,12 +263,20 @@ const serviceCredential: CredentialSource | undefined =
 // with those areas listed this process needs no KEK for them. So do the key deletes and a flow
 // run's images (#5299 step 6, area `forget`).
 const crudFetch = serviceCredential ? withServiceCredential(globalThis.fetch, serviceCredential, config.backendUrl) : globalThis.fetch
-const crudAreas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: [...SECRET_AREAS, ...FORGET_AREAS, ...STORE_AREAS, ...WORKSPACE_AREAS] })
+const crudAreas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: [...SECRET_AREAS, ...FORGET_AREAS, ...STORE_AREAS, ...WORKSPACE_AREAS, ...BLOB_AREAS] })
 crudAreas.start()
 // The small stores (#5299 step 5, api/crudStores.ts): each through its CRUD routes once the API
 // lists its area, over SQL until then.
 const crudTarget = { baseUrl: config.backendUrl, fetch: crudFetch }
 const storeArea = (area: StoreArea) => () => crudAreas.has(area)
+// A session's images, the staged attachments and the saved http_request bodies (#5299 step 7,
+// backend api/crud_agent_blobs.py): over SQL on `sql` until the API lists their areas.
+const crudBlobs = new CrudSessionBlobs(config.backendUrl, { fetch: crudFetch })
+const sessionImages = (sql: Sql): SessionImages => gated<SessionImages>(new SessionBlobs(sql), crudBlobs, () => crudAreas.has('session-blobs'))
+const httpBodies =
+  (sql: Sql): HttpBodiesFor =>
+  (sessionId) =>
+    gated<SavedBodies>(new PgHttpBodies(sql, sessionId), new CrudHttpBodies(config.backendUrl, sessionId, { fetch: crudFetch }), () => crudAreas.has('http-bodies'))
 // The headless browser's approved origins (#982), over `sql` or through area `browser-origins`.
 const browserOriginsOn = (sql: Sql) =>
   new BrowserOrigins(sql, settings, { crud: new CrudSessionOrigins(crudTarget), use: storeArea('browser-origins') })
@@ -615,6 +627,8 @@ const sessions =
     ? new SessionManager({
         memory,
         sql: database.sql,
+        blobs: sessionImages(database.sql),
+        httpBodies: httpBodies(database.sql),
         browserOrigins: browserOriginsOn(database.sql),
         flowReads,
         paths,
@@ -690,7 +704,14 @@ if (sessions) resolveTabWaits(tabs, sessions)
 if (sessions) toolServices.sessions = sessions
 // The panel's image uploads (#1941, attachments/store.ts): the upload route, the
 // chat socket and sessions_send read them; unsent ones expire and are swept.
-const attachments = sessions && database ? new AttachmentStore(database.sql) : undefined
+const attachments =
+  sessions && database
+    ? gated<Attachments>(
+        new AttachmentStore(database.sql, { blobs: sessionImages(database.sql) }),
+        new CrudAttachmentStore(config.backendUrl, sessionImages(database.sql), { fetch: crudFetch }),
+        () => crudAreas.has('attachments'),
+      )
+    : undefined
 if (attachments) toolServices.attachments = attachments
 const stopAttachmentSweep = !role.http ? undefined : attachments?.startSweeper(ATTACHMENT_SWEEP_MS, {
   log: (message) => console.error(message),
@@ -817,7 +838,7 @@ const durableToolDeps: ToolActivityDeps | undefined = temporal
       audit,
       currentTiers: liveTokenTiers(tokens),
       // A result's images, for the durable segment's view_tool_images (#2320).
-      blobs: new SessionBlobs(temporal.sql),
+      blobs: sessionImages(temporal.sql),
       // A flow call's images, sealed under its run's payload key (#2477).
       ...(flowBlobs ? { flowBlobs } : {}),
       // A package built-in's access per call, `builtin_tier` (#4757).
@@ -852,7 +873,7 @@ const turnHost =
     ? new TurnHost({
         core: sessions.turnCore,
         sql: temporal.sql,
-        images: new SessionBlobs(temporal.sql),
+        images: sessionImages(temporal.sql),
         hostQueue: SESSION_HOST_QUEUE,
         ...(events ? { listen: (channel: string, onNotify: (payload: string) => void) => events.listenAlso(channel, onNotify) } : {}),
         ...(durableToolDeps ? { runCall: decidedCalls(ALL_TOOLS, durableToolDeps) } : {}),
@@ -924,7 +945,7 @@ const turnToolDeps = temporal
         browserOrigins: browserOriginsOn(temporal.sql),
         credentialSecrets: durableCredentialSecrets,
         // This pod's own disk, as a classic turn's: the calls are pinned here (hostQueue).
-        httpRequest: { saveRoot: path.join(paths.stateDir, DURABLE_TURNS_DIR), sql: temporal.sql, audit, ...(workspace ? { files: workspace } : {}) },
+        httpRequest: { saveRoot: path.join(paths.stateDir, DURABLE_TURNS_DIR), sql: temporal.sql, bodies: httpBodies(temporal.sql), audit, ...(workspace ? { files: workspace } : {}) },
         ...(pluginPackages
           ? {
               packages: {
@@ -939,7 +960,7 @@ const turnToolDeps = temporal
       approvals: new PgApprovalRecords(temporal.sql, flowReads),
       audit,
       currentTiers: liveTokenTiers(tokens),
-      blobs: new SessionBlobs(temporal.sql),
+      blobs: sessionImages(temporal.sql),
       // A flow's plugin and http_request calls keep their images as its own tools' do (#2578).
       ...(flowBlobs ? { flowBlobs } : {}),
       ...(sessions
@@ -992,7 +1013,7 @@ const eagerClient = (): Client | undefined => {
   return client
 }
 if (temporalClient && temporal) {
-  const results = { client: temporalClient, blobs: new SessionBlobs(temporal.sql) }
+  const results = { client: temporalClient, blobs: sessionImages(temporal.sql) }
   toolCallStart = toolCallStarter({ ...results, eager: eagerClient })
   // `tool_call_result`: what a finished call returned, which a restarted turn's message names (Step 9.2).
   toolServices.toolCallResults = (session, toolUseId) => toolCallResult(results, session, toolUseId)
@@ -1183,6 +1204,7 @@ if (sessions && temporalClient && payloadKeys && database) {
   sessions.durableTurns = new DurableTurns({
     client: temporalClient,
     sql: database.sql,
+    blobs: sessionImages(database.sql),
     events: sessions.events,
     audit,
     // A unified session is ready while some replica hosts its turns (§5.2), this one or a worker's (§14.3).

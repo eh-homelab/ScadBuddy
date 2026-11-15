@@ -23,8 +23,9 @@ that each shard ran what it selected, as `backend-pytest-split` does.
 (its header lists the script `E2E_AGENT_SCRIPTED=1` expects; `pnpm preview` routes the
 same way, `vite.config.ts`).
 - `pnpm exec tsc -p tsconfig.app.json --noEmit` - the quick typecheck. It skips
-  `pretypecheck`, so run `pnpm gen:api` once first, or the generated `src/api/schema.d.ts` and
-  `src/storefront/api/schema.d.ts` are missing.
+  `pretypecheck`, so run `pnpm gen:api` once first, or the generated `src/api/schema.d.ts`,
+  `src/storefront/api/schema.d.ts` and `src/api/settingDocs.json` (the Settings field docs
+  `mocks/fixtures.ts` imports) are missing.
   Run it again after a merge or rebase onto main: a stale `schema.d.ts` gives type errors
   about fields the merge added or removed.
   Playwright's web server runs `pnpm build`, which typechecks first, so one type error in

@@ -604,7 +604,9 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
         "secret_key_file": SettingDoc(
             "Secret key file",
             "A file with 32 random bytes in base64, which seals the stored API keys and"
-            " tokens. Unset, they are stored in plain text, with a warning at start.",
+            " tokens. Unset, most of them are stored in plain text, with a warning at start,"
+            " and a secret that is only ever stored sealed (such as the Git remote token or"
+            " the bot check secret) cannot be saved.",
         ),
         "secret_key_previous_file": SettingDoc(
             "Previous secret key file",

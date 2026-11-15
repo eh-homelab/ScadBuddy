@@ -53,8 +53,8 @@ import {
   type SessionMode,
   type SessionStatus,
 } from './protocol.js'
-import { SessionBlobs, type StoredBlob } from './blobs.js'
-import { PgHttpBodies } from './httpBodies.js'
+import { SessionBlobs, type SessionImages, type StoredBlob } from './blobs.js'
+import { type HttpBodiesFor, pgHttpBodies } from './httpBodies.js'
 import { SessionFiles, type WorkspaceFiles } from '../workspace/store.js'
 import { SessionEdits } from './edits.js'
 import { forkEventCut, transcriptCut } from './forkPoint.js'
@@ -793,6 +793,10 @@ export type SessionManagerDeps = {
    * `settings`) when omitted.
    */
   workspace?: WorkspaceFiles
+  /** A session's images (`SessionBlobs` on `sql` when omitted; gated to the API's routes in main.ts). */
+  blobs?: SessionImages
+  /** A session's saved http_request bodies (`PgHttpBodies` on `sql` when omitted). */
+  httpBodies?: HttpBodiesFor
   /**
    * A session's background tasks (src/background/): every turn gets the session's CronCreate
    * and the rest (each not off under `builtin:claude-code`) in place of Claude Code's own,
@@ -1049,7 +1053,7 @@ export class SessionManager {
   /** What sessions touched (#931), read by `resources`. */
   private readonly touched: SessionResources
   /** The images tool results carried (#782), read by `blob`. */
-  private readonly blobs: SessionBlobs
+  private readonly blobs: SessionImages
   private readonly files: WorkspaceFiles
   /** Assembles each turn's query options (turnRunner.ts). */
   private readonly runner: TurnRunner
@@ -1063,7 +1067,7 @@ export class SessionManager {
     this.deps = deps
     this.store = new PostgresSessionStore(deps.sql, deps.payloadKeys ? { keys: deps.payloadKeys } : {})
     this.touched = new SessionResources(deps.sql)
-    this.blobs = new SessionBlobs(deps.sql)
+    this.blobs = deps.blobs ?? new SessionBlobs(deps.sql)
     this.files = deps.workspace ?? new SessionFiles(deps.sql, { settings: deps.settings })
     this.events = new EventLog(deps.sql, {
       ...(deps.pollMs === undefined ? {} : { pollMs: deps.pollMs }),
@@ -1196,7 +1200,7 @@ export class SessionManager {
   /** `id` is the saved response's id as `savedBody` checked it: a UUID, safe in a header or a path. */
   async httpBody(id: string, saved: string, principal: Owner): Promise<{ id: string; meta: SavedMeta; bytes: Buffer }> {
     await this.get(id, principal)
-    const body = await savedBody(new PgHttpBodies(this.deps.sql, id), saved)
+    const body = await savedBody((this.deps.httpBodies ?? pgHttpBodies(this.deps.sql))(id), saved)
     if (!body) throw new SessionError('not_found', `no saved response ${saved} in session ${id}`)
     return { id: saved, ...body }
   }
