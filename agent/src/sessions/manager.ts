@@ -63,7 +63,7 @@ import type { TitleResolver } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
 import type { UserImage } from './images.js'
 import { PgResourceRows, type ResourceRows, SessionResources, type TouchedRecord } from './touched.js'
-import { type ListFilter, PgSessionRows, type SessionRow, type SessionRows, type TurnRow } from './rows.js'
+import { type ListFilter, PgSessionRows, ROW_TITLE_MAX, type SessionRow, type SessionRows, type TurnRow } from './rows.js'
 import { type DurableGate, DurableUnavailable } from '../gate/durable.js'
 import type { DurableTurns, SessionRuntime } from './durable.js'
 import { PendingProjection } from '../gate/projection.js'
@@ -1613,7 +1613,7 @@ export class SessionManager {
         { costUsd: parent.costUsd, budgetUsd: parent.budgetUsd },
       )
     }
-    const title = options.title?.trim() || `${parent.title || 'session'} (fork)`
+    const title = (options.title?.trim() || `${parent.title || 'session'} (fork)`).slice(0, ROW_TITLE_MAX)
     // A fork is a new session and counts against the same limit as a start (PR #715
     // review). Checked first too, so a refused fork leaves nothing behind; the
     // insert's check under the lock is the one that holds.

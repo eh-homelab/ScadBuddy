@@ -225,6 +225,29 @@ describe("a session's row through the CRUD routes", () => {
     await expect(store.insert(row)).rejects.toThrow('no CRUD route answered')
   })
 
+  it('sends every string well-formed: a lone surrogate goes as U+FFFD, as postgres.js wrote it', async () => {
+    const api = new FakeApi().answer('POST /sessions', { session: WIRE_TURN_ROW }).answer('POST /sessions/list', { sessions: [] })
+    const store = rows(api)
+    await store.insert({
+      id: SESSION,
+      origin: 'chat',
+      owner: TOKEN,
+      title: 'café \ud800 🙂',
+      tags: ['t\udc00'],
+      scope: {},
+      parentId: null,
+      runtime: 'unified',
+      maxTurns: 20,
+      budgetUsd: 5,
+      limit: { max: 10, windowMs: 60_000 },
+    })
+    await store.list(TOKEN, { search: 'a\ud800' })
+    const [insert, list] = api.seen.map((s) => s.body as Record<string, unknown>)
+    expect(insert?.title).toBe('café \ufffd 🙂')
+    expect(insert?.tags).toEqual(['t\ufffd'])
+    expect(list?.search).toBe('a\ufffd')
+  })
+
   it('hands off only while the row is as it was read', async () => {
     const api = new FakeApi()
       .answer(`POST /sessions/${SESSION}/offer`, { changed: true })

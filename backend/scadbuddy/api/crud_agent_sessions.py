@@ -68,7 +68,9 @@ BODY_BYTES_MAX = 160 * 1024
 #: A list's filters (``ListFilter``): a search, the kinds a file input takes (a picker's
 #: ``accept``, ``routes/workspacePicker.ts``), a resource's id.
 SEARCH_MAX = 500
-ACCEPT_MAX = 64
+#: A picker's ``accept`` is at most 1000 characters (``ACCEPT_MAX`` there), so at most 334
+#: entries of ``.a`` and a comma; an entry is at most 192 characters (its ``ACCEPT_ENTRY``).
+ACCEPT_MAX = 500
 ACCEPT_ENTRY_MAX = 200
 #: The most rows one call records (``touched.ts`` ``MAX_TOUCHES_PER_CALL``), each id cut to
 #: ``ID_MAX`` (300) UTF-16 units there, which is never more than 300 characters here.
