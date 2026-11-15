@@ -190,9 +190,11 @@ function errorEvent(
   sessionId: string | undefined,
   log: (m: string) => void,
   questionId?: string,
+  queuedId?: string,
 ): ServerEvent {
-  // A failed answer names its question (#940), so the panel re-opens that card only.
-  const where = { ...(sessionId ? { sessionId } : {}), ...(questionId ? { questionId } : {}) }
+  // A failed answer names its question (#940), so the panel re-opens that card only; a
+  // refused change to a queued message names it (#6386), so its buttons work again.
+  const where = { ...(sessionId ? { sessionId } : {}), ...(questionId ? { questionId } : {}), ...(queuedId ? { queuedId } : {}) }
   if (err instanceof SessionError || err instanceof ApprovalError || err instanceof QuestionError) {
     return event({ type: 'error', ...where, code: err.code, message: err.message })
   }
@@ -537,7 +539,15 @@ export class ChatConnection {
       if (sessionId && err instanceof SessionError && err.budget) {
         this.emit(event({ type: 'session.budget', sessionId, ...err.budget }))
       }
-      this.emit(errorEvent(err, sessionId, this.log, message.type === 'question.answer' ? message.id : undefined))
+      this.emit(
+        errorEvent(
+          err,
+          sessionId,
+          this.log,
+          message.type === 'question.answer' ? message.id : undefined,
+          message.type === 'queue.remove' || message.type === 'queue.edit' ? message.id : undefined,
+        ),
+      )
     }
   }
 

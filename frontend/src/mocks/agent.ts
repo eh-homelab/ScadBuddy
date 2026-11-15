@@ -530,6 +530,16 @@ export function createMockAgentTransport({
           emit({ type: 'error', code: 'not_found', message: 'That session no longer exists.' })
           return
         }
+        // Read-only before anything else, a busy one too, as the agent refuses it.
+        if (s?.archivedAt) {
+          emit({
+            type: 'error',
+            sessionId: s.sessionId,
+            code: 'archived',
+            message: `session ${s.sessionId} is archived, so it is read-only; unarchive it to continue it, or fork it`,
+          })
+          return
+        }
         if (s && (s.status === 'running' || s.status === 'waiting_approval' || s.status === 'waiting_input') && s.owner.kind === 'browser') {
           // #6386 — sent while a turn runs: it waits in the session's queue.
           const queue = (s.queue ??= [])
@@ -545,15 +555,6 @@ export function createMockAgentTransport({
             queuedAt: new Date().toISOString(),
           })
           emitQueue(s)
-          return
-        }
-        if (s?.archivedAt) {
-          emit({
-            type: 'error',
-            sessionId: s.sessionId,
-            code: 'archived',
-            message: `session ${s.sessionId} is archived, so it is read-only; unarchive it to continue it, or fork it`,
-          })
           return
         }
         if (s && s.owner.kind !== 'browser') {
@@ -669,6 +670,7 @@ export function createMockAgentTransport({
             v: PROTOCOL_VERSION,
             type: 'error',
             ...(s ? { sessionId: s.sessionId } : {}),
+            queuedId: msg.id,
             code: 'not_queued',
             message: `message ${msg.id} is not waiting in the queue: it started, or was removed`,
           })

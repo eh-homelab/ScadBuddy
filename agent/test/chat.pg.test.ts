@@ -158,9 +158,9 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`ChatConnect
     await expect.poll(lastQueue, { timeout: 20_000 }).toEqual(['and a lid', 'and two hinges'])
     await connection.receive(JSON.stringify(clientMessage({ type: 'queue.remove', sessionId: session.id, id: lid! })))
     await expect.poll(lastQueue, { timeout: 20_000 }).toEqual(['and two hinges'])
-    // Removed already: refused in the session, as any refusal is.
+    // Removed already: refused in the session, as any refusal is, naming the entry.
     await connection.receive(JSON.stringify(clientMessage({ type: 'queue.remove', sessionId: session.id, id: lid! })))
-    expect(out.filter((e) => e.type === 'error').map((e) => e.code)).toEqual(['not_queued'])
+    expect(out.filter((e) => e.type === 'error')).toEqual([expect.objectContaining({ sessionId: session.id, code: 'not_queued', queuedId: lid })])
     // A Stop ends the running turn only: the queued one runs next, and moves into the transcript.
     await m.interrupt(session.id, browser)
     await expect.poll(() => out.filter((e) => e.type === 'user.turn').map((e) => e.text), { timeout: 20_000 }).toEqual(['make a box', 'and two hinges'])

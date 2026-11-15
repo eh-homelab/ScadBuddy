@@ -155,6 +155,8 @@ export interface SessionState {
    * any that a `user.turn` has started since.
    */
   queued?: QueuedEntry[]
+  /** #6386 — per queued message, how many of the panel's removes or edits of it the agent refused. */
+  queueRefusals?: Record<string, number>
 }
 
 export type HandoffOffer = { to: Pick<Owner, 'kind' | 'label'> & { id?: string }; until: string }
@@ -590,9 +592,14 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
       // other error touches a sent answer, which may already have been accepted.
       const reopen = (s: SessionState, id: string): SessionState =>
         mapItems(s, (i) => (i.kind === 'question' && i.id === id && i.state === 'sent' ? { ...i, state: 'pending' } : i))
+      // #6386: a refused remove or edit of a queued message: that entry's buttons work again.
+      const refused = (s: SessionState, id: string): SessionState => ({
+        ...s,
+        queueRefusals: { ...s.queueRefusals, [id]: (s.queueRefusals?.[id] ?? 0) + 1 },
+      })
       if (event.sessionId && state.sessions[event.sessionId]) {
         return patchSession(state, event.sessionId, (s) =>
-          push(event.questionId ? reopen(s, event.questionId) : s, {
+          push(event.questionId ? reopen(s, event.questionId) : event.queuedId ? refused(s, event.queuedId) : s, {
             kind: 'error',
             id: errorId(s),
             message,

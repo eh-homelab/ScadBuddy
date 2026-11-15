@@ -63,8 +63,8 @@ export interface AgentChat {
   interrupt: (sessionId: string) => void
   /** #6386 — removes a queued message before it starts; false when it was not sent. */
   removeQueued: (sessionId: string, id: string) => boolean
-  /** #6386 — gives a queued message new words before it starts. */
-  editQueued: (sessionId: string, id: string, text: string) => void
+  /** #6386 — gives a queued message new words before it starts; false when they were not sent. */
+  editQueued: (sessionId: string, id: string, text: string) => boolean
   /** Take over a session another principal controls (§6 handoff). */
   takeOver: (sessionId: string) => void
   /** Open a session to watch it live; null starts a fresh chat on the next send. */
@@ -223,8 +223,8 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
   const editQueued = useCallback(
     (sessionId: string, id: string, text: string) => {
       const trimmed = text.trim()
-      if (!trimmed) return
-      control(clientMessage({ type: 'queue.edit', sessionId, id, text: trimmed }), QUEUED_QUEUE_CHANGE)
+      if (!trimmed) return false
+      return control(clientMessage({ type: 'queue.edit', sessionId, id, text: trimmed }), QUEUED_QUEUE_CHANGE)
     },
     [control],
   )

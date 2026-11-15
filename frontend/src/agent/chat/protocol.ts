@@ -511,6 +511,8 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     message: z.string().min(1),
     /** #940 — the error refused the panel's answer to this question: its card is answerable again. */
     questionId: z.string().min(1).optional(),
+    /** #6386 — the error refused the panel's remove or edit of this queued message, which stays queued. */
+    queuedId: z.string().min(1).optional(),
     /** #3710 — `message` with the credential named by its name: shown in its place. */
     shown: z.string().min(1).optional(),
   }),

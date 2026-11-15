@@ -933,7 +933,7 @@ export function AssistantChat({
             entries={queued}
             sessionId={active.id}
             canChange={canSend}
-            errors={active.items.reduce((n, i) => (i.kind === 'error' ? n + 1 : n), 0)}
+            refusals={active.queueRefusals ?? {}}
             onRemove={(id) => chat.removeQueued(active.id, id)}
             onEdit={(id, text) => chat.editQueued(active.id, id, text)}
           />

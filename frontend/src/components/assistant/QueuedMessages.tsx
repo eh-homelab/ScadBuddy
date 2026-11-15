@@ -17,7 +17,7 @@ export function QueuedMessages({
   entries,
   sessionId,
   canChange,
-  errors,
+  refusals,
   onRemove,
   onEdit,
 }: {
@@ -25,11 +25,11 @@ export function QueuedMessages({
   sessionId: string
   /** The viewer may send to the session, so may change its queue. */
   canChange: boolean
-  /** How many errors the session's transcript shows: a new one may be a refused remove. */
-  errors: number
-  /** False when the remove was not sent (the agent is unreachable and too much waits). */
+  /** Per entry, how many removes or edits of it the agent refused (`error` events naming it). */
+  refusals: Record<string, number>
+  /** False when the change was not sent (the agent is unreachable and too much waits). */
   onRemove: (id: string) => boolean
-  onEdit: (id: string, text: string) => void
+  onEdit: (id: string, text: string) => boolean
 }) {
   if (entries.length === 0) return null
   return (
@@ -41,7 +41,7 @@ export function QueuedMessages({
           next={index === 0}
           sessionId={sessionId}
           canChange={canChange}
-          errors={errors}
+          refused={refusals[entry.id] ?? 0}
           onRemove={() => onRemove(entry.id)}
           onEdit={(text) => onEdit(entry.id, text)}
         />
@@ -55,7 +55,7 @@ function QueuedMessage({
   next,
   sessionId,
   canChange,
-  errors,
+  refused,
   onRemove,
   onEdit,
 }: {
@@ -63,23 +63,30 @@ function QueuedMessage({
   next: boolean
   sessionId: string
   canChange: boolean
-  errors: number
+  refused: number
   onRemove: () => boolean
-  onEdit: (text: string) => void
+  onEdit: (text: string) => boolean
 }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(entry.text)
   /**
-   * The session's error count when Remove was sent. The buttons wait until the next
-   * `session.queue` drops the entry, or until an error arrives: the agent refused the
-   * remove (the entry stays), so they work again.
+   * The entry's refusal count when Remove was sent. The buttons wait until the next
+   * `session.queue` drops the entry, or until the agent refuses this remove (the entry
+   * stays), so they work again.
    */
   const [removingAt, setRemovingAt] = useState<number | undefined>(undefined)
-  const removing = removingAt === errors
+  const removing = removingAt === refused
+  /**
+   * New words sent, shown dimmed until a `session.queue` carries them, or until the agent
+   * refuses the edit (the old words stay).
+   */
+  const [saved, setSaved] = useState<{ text: string; at: number } | undefined>(undefined)
+  const saving = saved !== undefined && saved.at === refused && saved.text !== entry.text
+  const shown = saving ? saved.text : entry.text
   const label = next ? 'Queued, runs next' : 'Queued'
 
   const startEditing = () => {
-    setDraft(entry.text)
+    setDraft(shown)
     setEditing(true)
   }
   const save = (event?: FormEvent) => {
@@ -87,7 +94,7 @@ function QueuedMessage({
     const text = draft.trim()
     if (!text) return
     // The agent trims the words too: a change of surrounding white space only sends nothing.
-    if (text !== entry.text) onEdit(text)
+    if (text !== entry.text && onEdit(text)) setSaved({ text, at: refused })
     setEditing(false)
   }
   const onKey = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -102,7 +109,8 @@ function QueuedMessage({
   return (
     <li
       data-feed-item="queued"
-      aria-label={`${label}: ${entry.text}`}
+      aria-label={`${label}: ${shown}`}
+      aria-busy={removing || saving}
       className={`ml-8 rounded-lg border border-dashed border-border px-2.5 py-1.5 text-[13px] ${removing ? 'opacity-50' : ''}`}
     >
       <div className="mb-0.5 flex items-center gap-1 text-[11px] text-muted-foreground">
@@ -113,7 +121,7 @@ function QueuedMessage({
         {canChange && !editing && (
           <>
             <Tip content="Edit before it runs">
-              <Button variant="ghost" size="icon-xs" aria-label="Edit queued message" disabled={removing} onClick={startEditing}>
+              <Button variant="ghost" size="icon-xs" aria-label="Edit queued message" disabled={removing || saving} onClick={startEditing}>
                 <PencilIcon />
               </Button>
             </Tip>
@@ -124,7 +132,7 @@ function QueuedMessage({
                 aria-label="Remove queued message"
                 disabled={removing}
                 onClick={() => {
-                  if (onRemove()) setRemovingAt(errors)
+                  if (onRemove()) setRemovingAt(refused)
                 }}
               >
                 <XIcon />
@@ -156,7 +164,10 @@ function QueuedMessage({
           </div>
         </form>
       ) : (
-        <p className="whitespace-pre-wrap text-foreground/80">{entry.text}</p>
+        <p className={`whitespace-pre-wrap ${saving ? 'text-muted-foreground' : 'text-foreground/80'}`}>
+          {shown}
+          {saving && <span className="ml-1.5 text-[11px] text-muted-foreground">Saving…</span>}
+        </p>
       )}
     </li>
   )
