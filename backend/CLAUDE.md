@@ -116,6 +116,12 @@ but an api module after a non-api module that itself follows an api module loses
 `tests/api/conftest.py`: `uv run --frozen pytest tests/api/test_health.py
 tests/test_config.py tests/api/test_jobs.py` errors at setup of `test_jobs.py`'s tests
 with `fixture 'client' not found`. Put the `tests/api/` paths together.
+A test's result must not depend on runner speed or the date. A retry budget gets an
+injected clock (`CrudClient(clock=..., sleep=...)`, a fake `sleep` that advances it):
+on the real clock a slow runner spent a 0.5 s budget in one try (#6252, #6296). A
+"today" is read at each call, never at import: a shard that loads before midnight UTC
+and makes orders after it dated every fake deposit a day early (#6307). A shard builds
+in about 4 minutes and tests in 25 to 36; `backend-pytest`'s limit is 55 (#6288).
 Renders run on Temporal, and `SCADBUDDY_TEMPORAL_ADDRESS` is required (#546), like
 `SCADBUDDY_DATABASE_URL`; `python -m scadbuddy.worker` is the worker (or
 `SCADBUDDY_TEMPORAL_WORKER_INPROCESS=true` for a one-process dev run). A `Settings` for
