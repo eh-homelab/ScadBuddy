@@ -402,6 +402,9 @@ def test_a_saved_body_is_read_by_range_and_the_newest_ten_are_kept(
         agent.get("/http-bodies/bytes", session_id=sid, id=first, offset=20, length=1).content
         == b""
     )
+    # Far past any body, as http_response_read may ask: nothing, never a refusal.
+    far = agent.get("/http-bodies/bytes", session_id=sid, id=first, offset=2**31 - 2, length=4)
+    assert (far.status_code, far.content) == (200, b"")
     assert agent.get("/http-bodies/bytes", session_id=sid, id=first).content == b"0123456789"
     assert agent.save_body(sid, first, b"again").status_code == 409
     for _ in range(10):

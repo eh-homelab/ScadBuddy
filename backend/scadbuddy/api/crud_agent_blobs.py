@@ -82,6 +82,8 @@ CONTENT_TYPE_MAX = 16 * 1024
 #: The largest ``meta`` part (a saved body's holds its URL and content type), and what
 #: multipart framing may add.
 META_BYTES_MAX = 48 * 1024
+#: The largest offset a ranged read takes: Postgres's ``substring`` takes an ``int4``.
+OFFSET_MAX = 2**31 - 2
 FRAMING_BYTES_MAX = 16 * 1024
 
 OwnerKind = Literal["browser", "bearer", "oidc", "anonymous", "flow"]
@@ -588,7 +590,8 @@ async def http_body_bytes(
     session_id: UUID,
     id: UUID,
     state: StateDep,
-    offset: Annotated[int, Query(ge=0, le=HTTP_BODY_BYTES_MAX)] = 0,
+    # Any offset `http_response_read` asks: past the end reads nothing, as over SQL.
+    offset: Annotated[int, Query(ge=0, le=OFFSET_MAX)] = 0,
     length: Annotated[int, Query(ge=0, le=HTTP_BODY_BYTES_MAX)] = HTTP_BODY_BYTES_MAX,
 ) -> Response:
     """Up to ``length`` bytes from ``offset``, fewer at the end, none past it; 404 for no
