@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { Sql } from 'postgres'
 import { CrudReadError } from '../api/crudRead.js'
 import { type CrudTarget, crudOf } from '../api/crudStores.js'
-import { type Envelope, type Kek, openSecret, rewrap, SealError, sealSecret } from '../secrets.js'
+import { type Envelope, type Kek, openSecret, SealError, sealSecret } from '../secrets.js'
 import type { Owner } from '../sessions/protocol.js'
 import { type EcKeys, generateEcKeys, type Subscriber } from './webPush.js'
 
@@ -150,38 +150,6 @@ export class PushStore {
     return rows.length > 0
   }
 
-  /** Key rotation (spec §9): the VAPID key's and every subscription's data key, re-sealed under `current`. */
-  async rewrapFrom(previous: Kek, current: Kek): Promise<{ rewrapped: number; failed: number }> {
-    const result = { rewrapped: 0, failed: 0 }
-    if (previous.id === current.id) return result
-    const vapid = await this.#sql<Sealed[]>`SELECT secret_sealed, dek_sealed, kek_id FROM ai_push_vapid WHERE kek_id = ${previous.id}`
-    const subs = await this.#sql<(Sealed & { id: string; endpoint: string })[]>`
-      SELECT id, endpoint, secret_sealed, dek_sealed, kek_id FROM ai_push_subscriptions WHERE kek_id = ${previous.id}`
-    const next = (row: Sealed, aad: string): Envelope | undefined => {
-      try {
-        return rewrap(previous, current, envelope(row), aad)
-      } catch (err) {
-        if (!(err instanceof SealError)) throw err
-        result.failed++
-        return undefined
-      }
-    }
-    for (const row of vapid) {
-      const e = next(row, VAPID_AAD)
-      if (!e) continue
-      const updated = await this.#sql`
-        UPDATE ai_push_vapid SET dek_sealed = ${e.dekSealed}, kek_id = ${e.kekId} WHERE id = 1 AND kek_id = ${previous.id}`
-      result.rewrapped += updated.count
-    }
-    for (const row of subs) {
-      const e = next(row, subscriptionAad(row.id, row.endpoint))
-      if (!e) continue
-      const updated = await this.#sql`
-        UPDATE ai_push_subscriptions SET dek_sealed = ${e.dekSealed}, kek_id = ${e.kekId} WHERE id = ${row.id} AND kek_id = ${previous.id}`
-      result.rewrapped += updated.count
-    }
-    return result
-  }
 }
 
 /** The route's reason for an endpoint another person subscribed (backend api/crud_agent_notify.py). */

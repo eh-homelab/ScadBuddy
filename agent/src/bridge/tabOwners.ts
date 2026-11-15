@@ -1,5 +1,5 @@
 import type { Sql } from 'postgres'
-import { type CrudTarget, crudOf, qs } from '../api/crudStores.js'
+import { chunks, type CrudTarget, crudOf, qs, TABS_PER_CALL } from '../api/crudStores.js'
 
 // Which replica holds each tab's bridge socket (#4780,
 // backend/scadbuddy/migrations_agent/20261027T0103Z_tab_owners.sql), named by that replica's own queue
@@ -91,8 +91,10 @@ export class CrudTabOwnerStore implements TabOwnerStore {
   }
 
   async refresh(tabIds: string[], queue: string): Promise<void> {
-    if (tabIds.length === 0) return
-    await this.#call("a replica's tabs refreshed", '/tab-owners/refresh', { body: { tab_ids: tabIds, queue } })
+    // In runs the route takes: a replica may hold more tabs than one call names.
+    for (const run of chunks(tabIds, TABS_PER_CALL)) {
+      await this.#call("a replica's tabs refreshed", '/tab-owners/refresh', { body: { tab_ids: run, queue } })
+    }
   }
 
   async release(tabId: string, queue: string, claimedBefore?: string): Promise<void> {

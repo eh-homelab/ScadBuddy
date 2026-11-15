@@ -741,6 +741,8 @@ const commandKinds = pluginPackages ? packageKinds({ packages: pluginPackages, i
 if (role.http && database && commandKinds.length > 0) {
   void database
     .untilReady()
+    // One fresh read of the areas first: the background listing may not have landed yet.
+    .then(() => crudAreas.refresh())
     .then(() =>
       crudAreas.has('activity-kinds')
         ? crudUpsertActivityKinds(crudTarget, activityKindsOf(commandKinds))

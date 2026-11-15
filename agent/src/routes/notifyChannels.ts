@@ -6,6 +6,7 @@ import { CHANNEL_KINDS, ChannelError, type ChannelStore } from '../notify/channe
 import { sessionLink } from '../notify/dispatcher.js'
 import { jsonBodyLimit, type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
+import { UUID_SEGMENT } from '../api/crudStores.js'
 
 // The out-of-browser notification channels (#815 §3, notify/channels.ts), Settings →
 // Assistant → Notifications. Only the person sets them: these routes take the UI's own
@@ -122,6 +123,7 @@ export function registerNotifyChannelRoutes(app: Hono, deps: NotifyChannelRouteD
       return c.json({ detail: problemOf(err) }, 400)
     }
     const id = c.req.param('id')
+    if (!UUID_SEGMENT.test(id)) return c.json({ detail: `no channel ${id}` }, 404)
     try {
       await s.update(id, present(body))
       return c.json((await s.list()).find((v) => v.id === id))
@@ -136,7 +138,9 @@ export function registerNotifyChannelRoutes(app: Hono, deps: NotifyChannelRouteD
     if (problem) return c.json({ detail: problem }, 403)
     const s = await store()
     if (typeof s === 'string') return c.json({ detail: s }, 503)
-    return (await s.delete(c.req.param('id'))) ? c.body(null, 204) : c.json({ detail: `no channel ${c.req.param('id')}` }, 404)
+    const id = c.req.param('id')
+    if (!UUID_SEGMENT.test(id)) return c.json({ detail: `no channel ${id}` }, 404)
+    return (await s.delete(id)) ? c.body(null, 204) : c.json({ detail: `no channel ${id}` }, 404)
   })
 
   app.post(`${NOTIFY_CHANNELS_PATH}/:id/test`, async (c) => {
@@ -145,6 +149,7 @@ export function registerNotifyChannelRoutes(app: Hono, deps: NotifyChannelRouteD
     const s = await store()
     if (typeof s === 'string') return c.json({ detail: s }, 503)
     const id = c.req.param('id')
+    if (!UUID_SEGMENT.test(id)) return c.json({ detail: `no channel ${id}` }, 404)
     let channel
     try {
       channel = await s.open(id)

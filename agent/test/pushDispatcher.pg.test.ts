@@ -15,7 +15,6 @@ import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './s
 // address, with nothing secret in it.
 
 const KEK = kekFromBase64(Buffer.alloc(32, 7).toString('base64'))
-const OTHER_KEK = kekFromBase64(Buffer.alloc(32, 9).toString('base64'))
 const YOU: Owner = { kind: 'browser', id: 'browser', label: 'You' }
 
 /** A browser's side of a subscription: its keys, and how it opens what is pushed to it. */
@@ -232,13 +231,4 @@ describe.skipIf(!TEST_DATABASE_URL)(`web push${TEST_DATABASE_URL ? '' : ` (skipp
     expect(kept).toContain('https://fcm.googleapis.com/fcm/send/5')
   })
 
-  it("re-wraps the VAPID key and the subscriptions' keys on rotation", async () => {
-    const before = new PushStore(db.sql, OTHER_KEK)
-    const vapid = await before.vapidKeys()
-    await before.subscribe(YOU, `${base}/push/one`, browserKeys().keys)
-    expect(await before.rewrapFrom(OTHER_KEK, KEK)).toEqual({ rewrapped: 2, failed: 0 })
-    const after = new PushStore(db.sql, KEK)
-    expect((await after.vapidKeys()).privateKey.equals(vapid.privateKey)).toBe(true)
-    expect(await after.subscriptions()).toHaveLength(1)
-  })
 })
