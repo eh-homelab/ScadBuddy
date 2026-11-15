@@ -182,7 +182,8 @@ export function QuoteEditor({
   /** Slice…: the dialog on the item's output, or the design's render first and then the dialog. */
   function beginSlice() {
     if (sliceSource) setSlicing(true)
-    else if (renders) {
+    // One render at a time: the row's Slice… is offered while one runs, the drawer's is not.
+    else if (renders && !(slice?.run && !slice.run.error)) {
       void slice?.render?.().then(
         (rendered) => setSlicing(rendered),
         () => setSlicing(false),
@@ -365,7 +366,7 @@ export function QuoteEditor({
       {slice?.run?.error && (
         <p role="alert" className="flex flex-wrap items-center gap-2 text-[13px] text-warn" data-testid="quote-error">
           <span>
-            The slice quote failed: {slice.run.error}
+            {slice.run.stage === 'rendering' ? 'The render of the design failed' : 'The slice quote failed'}: {slice.run.error}
           </span>
           <span className="text-xs text-muted-foreground" data-testid="quote-error-times">
             Started <When at={slice.run.startedAt} />

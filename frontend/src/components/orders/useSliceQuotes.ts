@@ -22,7 +22,8 @@ export interface SliceQuoteRun {
   /**
    * #6324 — `rendering` while "Slice…" renders an item that has a design and no output (the
    * `order_item_render` operation), before the print dialog opens on the new output; left out
-   * while the quote slices. A detached render ends once the item shows an output.
+   * while the quote slices. A detached render ends once the item shows an output. A failed
+   * render keeps it, so its error reads as the render's.
    */
   stage?: 'rendering'
 }
@@ -89,6 +90,9 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
   // #5585 — the operations whose failure, carried by a probe, was shown: a dismissed one
   // does not come back on the next reload, as `followed` keeps a failed row's from coming back.
   const shownFailures = useRef(new Set<string>())
+  // #6324 — the renders that landed, by item, each settled once the order's reload shows the
+  // item's output: a reload that fails settles nothing, so no dialog opens later unasked.
+  const rendered = useRef(new Map<string, () => void>())
   useEffect(() => {
     quoted.current = onQuoted
     seen.current = { items, runs }
@@ -102,6 +106,7 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
     followed.current = new Set()
     probes.current = new Map()
     shownFailures.current = new Set()
+    rendered.current = new Map()
     return () => {
       current.current = ''
       controller.abort()
@@ -185,8 +190,9 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
           .then(
             () => {
               update(orderId, itemId, null)
-              if (current.current === orderId) quoted.current()
-              done(true)
+              if (current.current !== orderId) return done(false)
+              rendered.current.set(itemId, () => done(true))
+              quoted.current()
             },
             (cause: unknown) => {
               if (mayHaveRun(cause)) update(orderId, itemId, { ...run, detached: true })
@@ -308,7 +314,13 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
       if (stale && (!operationId || Number.isNaN(started) || stale.startedAt >= started)) {
         if (shownSet.has(stale.operationId) || answered(stale.startedAt, stale.render)) return
         shownSet.add(stale.operationId)
-        update(forOrder, itemId, { startedAt: stale.startedAt, finishedAt: stale.finishedAt, error: stale.error, known: item.quotes.map((q) => q.id) })
+        update(forOrder, itemId, {
+          startedAt: stale.startedAt,
+          finishedAt: stale.finishedAt,
+          error: stale.error,
+          known: item.quotes.map((q) => q.id),
+          ...(stale.render ? { stage: 'rendering' as const } : {}),
+        })
         return
       }
       if (!row || !operationId || Number.isNaN(started)) return
@@ -326,7 +338,13 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
           // #5585 — its operation was pruned (`operation_retention_seconds` is shorter than
           // the activity's TTL): no error is left to show, and "not found" is not one.
           if (cause instanceof ApiError && cause.status === 404) return
-          update(forOrder, itemId, { startedAt: started, finishedAt: finished, error: refusalText(cause), known: item.quotes.map((q) => q.id) })
+          update(forOrder, itemId, {
+            startedAt: started,
+            finishedAt: finished,
+            error: refusalText(cause),
+            known: item.quotes.map((q) => q.id),
+            ...(row.kind === RENDER_KIND ? { stage: 'rendering' as const } : {}),
+          })
         },
       )
     }
@@ -357,6 +375,15 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
       })()
     }
   }, [itemsOf, items, update])
+
+  useEffect(() => {
+    if (!items) return
+    for (const [itemId, settle] of rendered.current) {
+      if (!items.find((i) => i.id === itemId)?.output_id) continue
+      rendered.current.delete(itemId)
+      settle()
+    }
+  }, [items])
 
   // A detached run ends when its quote shows on the item: a slice quote it did not have
   // (one typed by hand meanwhile is not it).

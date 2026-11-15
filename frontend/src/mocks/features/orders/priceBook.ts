@@ -454,6 +454,8 @@ export const handlers = [
       const order = lock(String(params.id))
       const found = itemOf(order, String(params.item))
       if (found.library_file) throw new Refused('item_library_file', `item ${found.id} is a library file item: it slices its file, and has no design to render`, [found.id])
+      // `quote.py` `reference_of`: a request has no design until its first revision.
+      if (found.reference === null && found.kind === 'request') throw new Refused('item_has_no_design', `item ${found.id} is a request with no design yet: add a revision first`, [found.id])
       if (found.reference === null) throw new Refused('item_custom', `item ${found.id} is a custom item: it has no model to render or slice`, [found.id])
       if (!requoteOpen(order, found)) throw new Refused('order_not_open', `order ${order.number} is ${order.status}: an item is rendered for a quote while it is draft or quoted`)
       if (SETTLED.has(found.status)) throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)

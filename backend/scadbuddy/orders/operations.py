@@ -671,7 +671,9 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 item=item,
                 by=by,
                 revision_id=item.current_revision_id,
-                # The order or the item may have moved on while it rendered.
+                # The order or the item may have moved on while it rendered. A refusal
+                # here leaves the output saved: a render of the template like any other
+                # (the model's outputs and Recent renders list it), set on no item.
                 check=lambda: render_check(orders.store, order_id, item_id),
             ),
         )

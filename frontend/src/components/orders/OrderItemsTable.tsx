@@ -355,7 +355,7 @@ function ItemStatus({ item, run }: { item: OrderItemDetail; run: SliceQuoteRun |
       )}
       {run?.error && (
         <span className="text-[11px] text-warn" data-testid={`item-quote-failed-${item.id}`} title={run.error}>
-          <span>Quote failed</span> <When at={run.finishedAt ?? run.startedAt} />
+          <span>{run.stage === 'rendering' ? 'Render failed' : 'Quote failed'}</span> <When at={run.finishedAt ?? run.startedAt} />
         </span>
       )}
     </span>
