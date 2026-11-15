@@ -331,7 +331,7 @@ async def _imported_onto(links: PrintLinkStore, owner: LinkedPrint, target: Prin
 async def _require_native_file(library: PrintLibrary, file_id: int) -> None:
     """The 404 unless ``file_id`` is a file of ScadBuddy's own library that stands (#6394):
     a trashed file, or any file while that library does not serve, is not one. A run's
-    per-print copy (``print_subject``) is a 422: the sweep trashes it, and its trash would
+    per-print copy (``print_subject``) is a 422: the sweep trashes it, and its purge would
     forget the import with the print's attachments (#6394 review). `import_in` checks
     both again in the import's transaction."""
     native = await library.serving_native()
@@ -541,7 +541,7 @@ async def link_lan_auto_import(
         "answers 202 while the model is still being made: send the same request again); "
         "or `library_file_id` (#6394), a file of ScadBuddy's own library that stands "
         "(404 for a trashed or missing file, or while that library does not serve; a "
-        "trashed file forgets its imports). "
+        "file purged from the trash forgets its imports; a restore keeps them). "
         "`source` must be one `GET …/sources` lists as available (422 when it is not "
         "listed, 409 when it cannot be used now, or while another import of the archive "
         "runs past 30 s: send it again). For the archive's and the library's "

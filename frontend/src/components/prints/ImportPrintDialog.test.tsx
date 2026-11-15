@@ -252,7 +252,7 @@ describe('ImportPrintDialog', () => {
       expect(onImported).toHaveBeenCalledWith(expect.objectContaining({ subject: 'library:1000000501', slug: null }))
     })
 
-    it('finds another file by name, and offers only ScadBuddy\'s own files', async () => {
+    it('finds another file by name, and offers only ScadBuddy\'s own files, never a per-print copy', async () => {
       nativeLibrary()
       server.use(
         http.get('/api/v1/print/library/search', () =>
@@ -264,6 +264,7 @@ describe('ImportPrintDialog', () => {
             files: [
               { id: 77, filename: 'vase_bambuddy.3mf', file_type: '3mf', has_thumbnail: false, is_external: false, print_count: 0 },
               { id: 1_000_000_502, filename: 'vase_spiral.3mf', file_type: '3mf', has_thumbnail: false, is_external: false, print_count: 0 },
+              { id: 1_000_000_503, filename: 'vase_spiral_copy.3mf', file_type: '3mf', has_thumbnail: false, is_external: false, print_count: 0, per_print: true },
             ],
           }),
         ),
@@ -277,6 +278,7 @@ describe('ImportPrintDialog', () => {
       await user.type(within(dialog).getByLabelText('Find a file by name'), 'vase')
       const found = await within(dialog).findByRole('group', { name: 'Library files found' })
       expect(within(found).queryByRole('button', { name: 'vase_bambuddy.3mf' })).not.toBeInTheDocument()
+      expect(within(found).queryByRole('button', { name: 'vase_spiral_copy.3mf' })).not.toBeInTheDocument()
       await user.click(within(found).getByRole('button', { name: 'vase_spiral.3mf' }))
       await user.click(within(dialog).getByRole('button', { name: 'Import' }))
       expect(await within(dialog).findByTestId('import-done')).toHaveTextContent('library file 1000000502')

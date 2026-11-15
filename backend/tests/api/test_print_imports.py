@@ -22,7 +22,7 @@ import respx
 from fastapi.testclient import TestClient
 
 from scadbuddy.bambuddy import print_links
-from scadbuddy.bambuddy.print_links import PrintLink
+from scadbuddy.bambuddy.print_links import PrintLink, PrintSend
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import LibraryCopy, SlicedCopy
 from scadbuddy.core.settings import Settings
@@ -891,7 +891,7 @@ def test_a_library_target_is_a_native_file_that_stands(
 
 @respx.mock
 def test_a_run_s_per_print_copy_is_never_a_target(native_api: TestClient, tmp_path: Path) -> None:
-    """#6394 review: the sweep trashes a per-print copy, and its trash would forget the
+    """#6394 review: the sweep trashes a per-print copy, and its purge would forget the
     import and the print's attachments, so the import is refused up front."""
     client = native_api
     configure(client)
@@ -909,6 +909,9 @@ def test_a_run_s_per_print_copy_is_never_a_target(native_api: TestClient, tmp_pa
     assert "per-print copy" in response.json()["detail"]
     assert sources(client)["suggested_library_files"] == []
     assert client.get(f"/api/v1/prints/{ARCHIVE}").status_code == 404
+    # A search marks it, so the dialog's file search leaves it out.
+    found = client.get("/api/v1/print/library/search", params={"q": "demo", "all": "true"})
+    assert [(hit["id"], hit["per_print"]) for hit in found.json()["files"]] == [(copy.id, True)]
 
 
 @respx.mock
@@ -925,29 +928,64 @@ def test_a_library_target_needs_the_native_library(client: TestClient) -> None:
 
 
 @respx.mock
-def test_trashing_the_file_forgets_the_prints_imported_onto_it(
+def test_a_restore_keeps_the_imports_and_a_purge_forgets_them(
     native_api: TestClient, tmp_path: Path
 ) -> None:
+    """#6394 review: a trash can be undone, so only a purge forgets the imports onto a
+    file, with the print's link and its import record."""
     client = native_api
     configure(client)
     bambuddy()
     file = native_file(client, tmp_path)
-    assert (
-        import_print(
-            client, {"source": {"kind": "archive"}, "library_file_id": file.id}
-        ).status_code
-        == 201
-    )
+    body = {"source": {"kind": "archive"}, "library_file_id": file.id}
+    assert import_print(client, body).status_code == 201
+    native = _native(client)
     assert client.portal is not None
 
-    client.portal.call(_native(client).trash, [file.id])
+    client.portal.call(native.trash, [file.id])
+    assert client.get(f"/api/v1/prints/{ARCHIVE}").status_code == 200
+    client.portal.call(native.restore, [file.id])
+    assert client.get(f"/api/v1/prints/{ARCHIVE}").json()["library_file_name"] == "demo_elan.3mf"
+    assert asyncio.run(state(client).print_links.import_of(ARCHIVE)) is not None
+
+    client.portal.call(native.trash, [file.id])
+    # Not past the cutoff: the purge keeps the row, and the imports with it.
+    assert not client.portal.call(native.purge, file.id, datetime(2000, 1, 1, tzinfo=UTC))
+    assert client.get(f"/api/v1/prints/{ARCHIVE}").status_code == 200
+    assert client.portal.call(native.purge, file.id, datetime(2999, 1, 1, tzinfo=UTC))
 
     assert client.get(f"/api/v1/prints/{ARCHIVE}").status_code == 404
     assert asyncio.run(state(client).print_links.import_of(ARCHIVE)) is None
     # The print can be imported again, elsewhere.
-    restored = native_file(client, tmp_path, "demo_elan_v2.3mf")
-    response = import_print(client, {"source": {"kind": "archive"}, "library_file_id": restored.id})
+    other = native_file(client, tmp_path, "demo_elan_v2.3mf")
+    response = import_print(client, {"source": {"kind": "archive"}, "library_file_id": other.id})
     assert response.status_code == 201, response.text
+
+
+@respx.mock
+def test_a_repeat_import_names_the_send_that_took_the_import_over(
+    native_api: TestClient, tmp_path: Path
+) -> None:
+    """#6394 review: ScadBuddy's own send of the file names the archive after the import:
+    its link takes the import's over, and a repeat import is a 409 naming that print."""
+    client = native_api
+    configure(client)
+    bambuddy()
+    file = native_file(client, tmp_path)
+    body = {"source": {"kind": "archive"}, "library_file_id": file.id}
+    assert import_print(client, body).status_code == 201
+    links = state(client).print_links
+    subject = PrintSubject.library(file.id)
+    asyncio.run(links.record_sends(subject, [PrintSend(queue_item_id=51, plate_id=1)]))
+    asyncio.run(links.link_library(51, ARCHIVE, "demo_elan.3mf"))
+
+    again = import_print(client, body)
+
+    assert again.status_code == 409, again.text
+    assert again.json()["owner"]["subject"] == subject.key
+    assert asyncio.run(links.import_of(ARCHIVE)) is None
+    detail = client.get(f"/api/v1/prints/{ARCHIVE}").json()
+    assert detail["imported"] is None
 
 
 @respx.mock

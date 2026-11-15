@@ -36,7 +36,8 @@ import's ``subject``) and ``matched_by`` ``import``, and both rows are written i
 transaction (`PrintLinkStore.record_import`), only while no link names the archive. An
 import's link owns its archive last, whatever its subject (`_OWNER_ORDER`), and a link of
 ScadBuddy's own print of the same library file takes its row over (`_TAKE_OVER_IMPORT`).
-A trashed library file forgets its imports (`forget_library_imports`).
+A purged library file forgets its imports (`forget_library_imports`); a file only in the
+trash keeps them, so a restore loses nothing.
 
 ``lan_print_archives`` holds the LAN start each archive became (#5661). It is keyed by
 the archive, has no subject column, and is created by
@@ -356,7 +357,8 @@ def _take_over(conn: Connection[DictRow], insert: str, params: Any) -> None:
 
 class ImportTargetGoneError(LookupError):
     """The library file an import names is not a file it can link to (#6394): trashed,
-    gone, or a run's per-print copy, whose sweep would trash it and forget the import."""
+    gone, or a run's per-print copy, which its sweep trashes and whose purge would forget
+    the import."""
 
     def __init__(self, file_id: int, reason: str) -> None:
         super().__init__(f"library file {file_id} {reason}")
@@ -520,7 +522,8 @@ def _forget_unlinked(conn: Connection[DictRow], archive_ids: Iterable[int]) -> N
 
 def forget_library_imports(conn: Connection[DictRow], file_ids: Iterable[int]) -> None:
     """Forget the imports onto these library files (#6394), in the caller's transaction:
-    the native library's trash calls it, as a model's delete forgets the imports onto
+    the native library's purge calls it (`NativeLibraryStore.purge_trashed`; never its
+    trash, which a restore undoes), as a model's delete forgets the imports onto
     that model (`PrintLinkStore.delete_models`). ScadBuddy's own prints of the files
     stay linked."""
     keys = [PrintSubject.library(file_id).key for file_id in file_ids]

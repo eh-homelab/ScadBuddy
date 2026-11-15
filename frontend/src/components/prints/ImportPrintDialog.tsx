@@ -438,7 +438,8 @@ function ImportForm({
 /**
  * #6394 — the library file a print is imported onto: the files whose name matches the job
  * (`suggested_library_files`) first, then any file of ScadBuddy's own library found by name.
- * Bambuddy's files are not targets, so a search keeps only native ids.
+ * Bambuddy's files and a run's per-print copies are not targets, so a search keeps only native
+ * ids, and not `per_print` ones.
  */
 function LibraryFileChoice({
   suggested,
@@ -456,7 +457,8 @@ function LibraryFileChoice({
     [q],
   )
   const hits = (found.data?.files ?? [])
-    .filter((hit) => hit.id >= NATIVE_ID_BASE)
+    // A run's per-print copy is never a target: its sweep trashes it (#6394 review).
+    .filter((hit) => hit.id >= NATIVE_ID_BASE && !hit.per_print)
     .slice(0, SEARCH_SHOWN)
     .map((hit): LibraryFileSuggestion => ({ id: hit.id, filename: hit.filename, folder_id: hit.folder_id ?? null }))
   const choice = (file: LibraryFileSuggestion) => (
