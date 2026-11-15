@@ -432,7 +432,7 @@ lack them (§2.3).
     It also checks the row every second and is cut off once another placement holds it or
     the turn is no longer the row's: its process is closed. A placement cut off because
     another holds the row fails the retryable `PlacementMoved`: when the workflow still waits
-    on it, the workflow places the turn again, `restarted`, within the same 3 cycles, and that
+    on it, the workflow places the turn again, `restarted`, within the same cycles (not steered away from its live home), and that
     placement's claim fences the other out (#6387). Its spend is never fenced: its
     requests are its own, so writing them cannot count anything twice, and the budget holds
     whichever replicas ran the turn. A new placement on the same replica cuts an older one

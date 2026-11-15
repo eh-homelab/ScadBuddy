@@ -74,10 +74,15 @@ export class CrudAttachmentStore implements Attachments {
     })
     const byId = new Map(attachments.map((a) => [a.id, a]))
     const out: ResolvedAttachment[] = []
+    // Every image and preview at once: a send names at most IMAGES_MAX of them.
+    const bytes = await Promise.all(
+      refs.map((ref) =>
+        byId.has(ref.id) ? Promise.all([this.#bytes(owner, ref.id, 'image'), this.#bytes(owner, ref.id, 'preview')]) : Promise.resolve([undefined, undefined]),
+      ),
+    )
     for (const [index, ref] of refs.entries()) {
       const row = byId.get(ref.id)
-      const image = row && (await this.#bytes(owner, ref.id, 'image'))
-      const preview = image && (await this.#bytes(owner, ref.id, 'preview'))
+      const [image, preview] = bytes[index] ?? [undefined, undefined]
       // One that expired between the reads reads as unknown, as one that had expired before.
       if (!row || !image || !preview) throw new AttachmentError('not_found', unknownAttachment(index, ref.id))
       out.push({

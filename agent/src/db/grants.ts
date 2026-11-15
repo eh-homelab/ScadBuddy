@@ -32,7 +32,10 @@ type Grants = Readonly<Record<string, readonly string[]>>
  * events with the session's `event_seq` bump and its row lock (UPDATE on `ai_sessions`). And a
  * session's images, read through its fork chain, a durable tool call's images, the staged
  * attachments and the saved http_request bodies (#5299 step 7, `api/crud_agent_blobs.py`; a
- * fenced write locks the session's row FOR SHARE). */
+ * fenced write locks the session's row FOR SHARE). And a
+ * session's background tasks, a Monitor's events, a Workflow's journal and child chats, and the
+ * agent's command record with its activity row (#5299 step 8,
+ * `api/crud_agent_tasks.py`; `ai_sessions` is read for a Workflow's open child chats). */
 export const API_AI_GRANTS: Grants = {
   ai_payload_keys: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   ai_forgotten_subjects: ['SELECT', 'INSERT'],
@@ -43,7 +46,7 @@ export const API_AI_GRANTS: Grants = {
   ai_audit: ['INSERT'],
   ai_flow_blobs: ['SELECT', 'INSERT', 'DELETE'],
   ai_session_entries: ['SELECT'],
-  ai_operations: ['SELECT'],
+  ai_operations: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   ai_activity_kinds: ['SELECT', 'INSERT', 'UPDATE'],
   ai_browser_session_origins: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   ai_session_tabs: ['SELECT', 'INSERT', 'UPDATE'],
@@ -61,6 +64,16 @@ export const API_AI_GRANTS: Grants = {
   ai_session_tool_images: ['SELECT', 'INSERT', 'DELETE'],
   ai_attachments: ['SELECT', 'INSERT', 'DELETE'],
   ai_session_http_bodies: ['SELECT', 'INSERT', 'DELETE'],
+  ai_background_tasks: ['SELECT', 'INSERT', 'UPDATE'],
+  ai_background_events: ['SELECT', 'INSERT', 'UPDATE'],
+  ai_workflow_calls: ['SELECT', 'INSERT'],
+  ai_workflow_children: ['SELECT', 'INSERT'],
+}
+
+/** The sequences behind the API's inserts: `ai_background_events.seq` is a `bigserial`, whose
+ * `nextval` needs USAGE (the other tables' ids are given or `GENERATED … AS IDENTITY`). */
+export const API_AI_SEQUENCE_GRANTS: Grants = {
+  ai_background_events_seq_seq: ['USAGE'],
 }
 
 /** The projects worker's role: it holds no database (ScadBuddy#5298), so the agent takes back
@@ -71,12 +84,12 @@ export const PROJECTS_ROLE = 'scadbuddy_projects'
 /** Postgres folds an unquoted name; these are quoted, so only the plain ones are allowed. */
 const NAME = /^[a-z_][a-z0-9_]*$/
 
-async function grant(sql: Sql, role: string, grants: Grants): Promise<void> {
+async function grant(sql: Sql, role: string, grants: Grants, kind: 'TABLE' | 'SEQUENCE' = 'TABLE'): Promise<void> {
   // USAGE on the schema is the API's to grant (`grant_role`); the agent need not own it.
   if (!NAME.test(role)) throw new Error(`refusing to grant a role named ${JSON.stringify(role)}`)
   for (const [table, privileges] of Object.entries(grants)) {
-    if (!NAME.test(table)) throw new Error(`refusing to grant a table named ${JSON.stringify(table)}`)
-    await sql.unsafe(`GRANT ${privileges.join(', ')} ON "${table}" TO "${role}"`)
+    if (!NAME.test(table)) throw new Error(`refusing to grant a ${kind.toLowerCase()} named ${JSON.stringify(table)}`)
+    await sql.unsafe(`GRANT ${privileges.join(', ')} ON ${kind} "${table}" TO "${role}"`)
   }
 }
 
@@ -92,6 +105,7 @@ export async function grantBackendRoles(sql: Sql, projectsRole: string = PROJECT
     FROM pg_tables WHERE schemaname = current_schema() AND tablename = 'scadbuddy_migrations'`
   if (api?.owner && api.mine === false) {
     await grant(sql, api.owner, API_AI_GRANTS)
+    await grant(sql, api.owner, API_AI_SEQUENCE_GRANTS, 'SEQUENCE')
     granted.push(api.owner)
   }
   await revokeRole(sql, projectsRole)

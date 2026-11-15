@@ -124,15 +124,18 @@ export function listingsPage(listings: readonly Listing[], url: URL, requestsEna
   }
 }
 
+/** A slice price (#6153): firm, and only the price. */
 export const ESTIMATE: StoreEstimate = {
-  estimate: true,
+  source: 'slice',
   price_minor: 1240,
   currency: 'USD',
   minor_exponent: 2,
-  grams: '9.40',
-  parts: [],
-  unknown_parts: 0,
+  retry_after: null,
 }
+/** The price while the shop's slice runs: read again after `retry_after` seconds. */
+export const PENDING_PRICE: StoreEstimate = { source: 'pending', price_minor: null, currency: null, minor_exponent: null, retry_after: 2 }
+/** No firm price: the shop prices the design by hand. */
+export const NO_PRICE: StoreEstimate = { source: 'none', price_minor: null, currency: null, minor_exponent: null, retry_after: null }
 
 /** The shop's shipping options (backend `storefront_shipping_options`): one ships, one does not. */
 const SHIPPING = [

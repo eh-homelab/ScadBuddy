@@ -513,6 +513,11 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
     case 'session.budget':
       return patchSession(state, event.sessionId, (s) => withBudget(s, event.costUsd, event.budgetUsd))
 
+    case 'session.queue':
+      // The panel does not show the queue yet (#6386); each queued message shows
+      // in the transcript when its turn starts, as a `user.turn`.
+      return state
+
     case 'memory':
       // Appended where it arrives: a retain that finished after its turn lands after
       // the turn's replies, in the same place on a replay (the event log's order).

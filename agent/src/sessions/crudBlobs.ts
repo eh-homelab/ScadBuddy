@@ -61,9 +61,19 @@ export class CrudSessionBlobs implements SessionImages {
     }
   }
 
+  /**
+   * One SDK message may carry several tool results' images, more than one write takes: each batch
+   * is checked against the fence in its own transaction, and the first one refused stops the rest
+   * and answers false (a batch stored before it stays: named by its bytes, and only the session
+   * reads it).
+   */
   async putIf(sessionId: string, images: readonly SessionImage[], fence: TurnFence): Promise<boolean> {
-    if (images.length > IMAGES_PER_WRITE) throw new Error(`a fenced write keeps at most ${IMAGES_PER_WRITE} images`)
-    return this.#write(sessionId, images, { fence: { attempt: fence.attempt, turn_id: fence.turnId } })
+    const extra = { fence: { attempt: fence.attempt, turn_id: fence.turnId } }
+    if (images.length === 0) return this.#write(sessionId, images, extra)
+    for (let i = 0; i < images.length; i += IMAGES_PER_WRITE) {
+      if (!(await this.#write(sessionId, images.slice(i, i + IMAGES_PER_WRITE), extra))) return false
+    }
+    return true
   }
 
   async get(sessionId: string, name: string): Promise<StoredBlob | undefined> {

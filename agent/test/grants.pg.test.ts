@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import postgres from 'postgres'
 import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { API_AI_GRANTS, GRANT_LOCK, grantBackendRoles, revokeRole } from '../src/db/grants.js'
+import { API_AI_GRANTS, API_AI_SEQUENCE_GRANTS, GRANT_LOCK, grantBackendRoles, revokeRole } from '../src/db/grants.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase, type Throwaway } from './support/postgres.js'
 
 // #5210: the agent owns its ai_* tables and grants the backend's roles what they use of them.
@@ -64,6 +64,12 @@ describe.skipIf(skip !== '')(`the backend roles' ai_* grants${skip}`, () => {
     expect(await asAgent(sql => grantBackendRoles(sql, roles.projects))).toEqual([roles.api])
     for (const [table, privileges] of Object.entries(API_AI_GRANTS)) {
       for (const p of privileges) expect(await can(roles.api, table, p), `${roles.api} ${p} ${table}`).toBe(true)
+    }
+    for (const [sequence, privileges] of Object.entries(API_AI_SEQUENCE_GRANTS)) {
+      for (const p of privileges) {
+        const [row] = await t.db.sql<{ ok: boolean }[]>`SELECT has_sequence_privilege(${roles.api}, ${sequence}, ${p}) AS ok`
+        expect(row!.ok, `${roles.api} ${p} ${sequence}`).toBe(true)
+      }
     }
     for (const table of Object.keys(API_AI_GRANTS)) {
       for (const p of ['SELECT', 'INSERT', 'UPDATE', 'DELETE']) {

@@ -13,6 +13,7 @@ import pytest
 import trimesh
 
 from scadbuddy.orders.estimate import (
+    SHOP_ONLY_FIELDS,
     EstimatedPart,
     StoreEstimate,
     filament_estimate,
@@ -138,8 +139,6 @@ def test_the_estimate_says_which_density_it_used() -> None:
     ]
     alone = filament_estimate([part(1, 1, "#FF0000", 10000.0)], filled, currency="USD", factor="1")
     assert (alone.grams, alone.densities[0].density_g_cm3) == ("13.20", "1.32")
-    # A visitor never reads which density, as before.
-    assert "densities" not in est.public().model_dump()
 
 
 def test_part_volumes_reads_every_plate(tmp_path: Path) -> None:
@@ -164,5 +163,8 @@ def test_part_volumes_reads_every_plate(tmp_path: Path) -> None:
 
 
 def test_the_edge_sends_on_every_public_estimate_field() -> None:
-    """The edge's allowlist (`storefront/routes.py`) is the public shape, field for field."""
-    assert set(StoreEstimate.model_fields) == ESTIMATE_FIELDS
+    """The edge's allowlist (`storefront/routes.py`) is the public shape, field for field:
+    every field but the shop's (#6153: never grams, print time or the cache key)."""
+    assert set(StoreEstimate.model_fields) - SHOP_ONLY_FIELDS == ESTIMATE_FIELDS
+    assert not ESTIMATE_FIELDS & SHOP_ONLY_FIELDS
+    assert {"source", "price_minor", "currency", "minor_exponent", "retry_after"} == ESTIMATE_FIELDS

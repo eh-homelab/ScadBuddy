@@ -79,7 +79,13 @@ staged attachments (`src/attachments/crudStore.ts` `CrudAttachmentStore` behind 
 and the saved http_request bodies (`CrudHttpBodies`, read by range), each chosen per call by
 `gated` in `main.ts`; the bytes are multipart parts and answer bodies. `copyForkBlobs` stays
 SQL, in the forget's transaction, until #5299 step 9.
-These eight have a rolling-deploy fallback:
+A session's background tasks, a Monitor's events
+and a Workflow's journal and child chats (area `background-tasks`, `src/background/store.ts`
+`BackgroundTaskStore`'s `remote`, `CrudBackgroundTasks`) and the command record `ai_operations`
+(area `operations`, `src/operations/store.ts` `CrudOperations`; the API writes the operation's
+activity row in its transaction) are #5299 step 8 (`TASK_AREAS`, backend
+`api/crud_agent_tasks.py`); their bodies go through `crudRead.ts` `wellFormed`, since the API
+refuses a lone surrogate. These ten have a rolling-deploy fallback:
 `src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` from the start with back-off
 (1 s doubling to 30 s) until every one is listed, and until then each stays on SQL, for an API
 pod older than the routes. The small stores (#5299 step 5, `src/api/crudStores.ts`
@@ -326,7 +332,8 @@ opens every one and seals it again byte for byte).
     state lives on the pod, `http_request` and the browser, is `pinned`: its calls run on
     `agent-tools.<hostname>`, which each agent also polls); and `AgentOperation` (`workflows.ts`, bundled by
     `pnpm build` into `dist/temporal/workflow-bundle.js`), the §4.2 command shape for
-    the agent's commands, recorded in `ai_operations` (`src/operations/`). A change to
+    the agent's commands, recorded in `ai_operations` (`src/operations/`; through the API's CRUD
+    routes once it lists area `operations`, #5299 step 8). A change to
     `AgentOperation` goes behind `patched()`; `test/fixtures/agent_operation_histories/`
     replays. Temporal tests (`test/*temporal*.test.ts`)
     skip unless `SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` names a Temporal CLI (or

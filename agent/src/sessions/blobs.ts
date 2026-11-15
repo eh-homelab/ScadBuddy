@@ -108,6 +108,7 @@ export type TurnFence = { attempt: string; turnId: string }
 /** A session's images: `SessionBlobs` over SQL, `CrudSessionBlobs` over the API's routes. */
 export interface SessionImages {
   put(sessionId: string, images: readonly SessionImage[], toolUseId?: string): Promise<void>
+  /** False when the fence refuses; over the API's routes a batch stored before the refusal stays (crudBlobs.ts). */
   putIf(sessionId: string, images: readonly SessionImage[], fence: TurnFence): Promise<boolean>
   get(sessionId: string, name: string): Promise<StoredBlob | undefined>
 }
