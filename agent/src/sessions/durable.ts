@@ -14,7 +14,7 @@ import { DurableGate, DurableUnavailable, sessionWorkflowId } from '../gate/dura
 import { TASK_QUEUE } from '../temporal/names.js'
 import { liveHostQueues } from '../temporal/session/affinity.js'
 import { SESSION_QUEUE, SESSION_WORKFLOW } from '../temporal/session/names.js'
-import { SessionBlobs, sentImageBlobs } from './blobs.js'
+import { SessionBlobs, type SessionImages, sentImageBlobs } from './blobs.js'
 import { type DescribeSession, durableDescriber, endLostTurn, RUNNING_GRACE_MS, type RunningRow, TURN_STATUSES } from './durableSweep.js'
 import { cancelOrphanedEntries } from '../gate/sweep.js'
 import type { AuditSink } from '../audit/log.js'
@@ -130,6 +130,8 @@ export type DurableTurn = {
 export type DurableTurnsDeps = {
   client: Client
   sql: Sql
+  /** A session's images (`SessionBlobs` on `sql` when omitted). */
+  blobs?: SessionImages
   events: EventLog
   /** Tests only: a queue other than `agent-sessions`. */
   sessionQueue?: string
@@ -181,7 +183,7 @@ export class DurableTurns {
   readonly #events: EventLog
   readonly #audit: AuditSink | undefined
   readonly #gate: DurableGate
-  readonly #blobs: SessionBlobs
+  readonly #blobs: SessionImages
   readonly #sessionQueue: string
   readonly #toolsQueue: string
   readonly #liveHosts: () => Promise<ReadonlySet<string>>
@@ -196,7 +198,7 @@ export class DurableTurns {
     this.#events = deps.events
     this.#audit = deps.audit
     this.#gate = new DurableGate(deps.client, deps.cancelTimeoutMs ? { cancelTimeoutMs: deps.cancelTimeoutMs } : {})
-    this.#blobs = new SessionBlobs(deps.sql)
+    this.#blobs = deps.blobs ?? new SessionBlobs(deps.sql)
     this.#sessionQueue = deps.sessionQueue ?? SESSION_QUEUE
     this.#toolsQueue = deps.toolsQueue ?? TASK_QUEUE
     this.#liveHosts = deps.liveHosts ?? (() => liveHostQueues(deps.client))

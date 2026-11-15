@@ -29,7 +29,10 @@ type Grants = Readonly<Record<string, readonly string[]>>
  * records and notification channels, which it seals, opens and re-wraps with the KEK. And the
  * workspace files (#5299 step 7, `api/crud_agent_workspace.py`): their rows and shared bytes
  * (locked FOR KEY SHARE and FOR UPDATE, which need UPDATE), each write's `workspace.file`
- * events with the session's `event_seq` bump and its row lock (UPDATE on `ai_sessions`). */
+ * events with the session's `event_seq` bump and its row lock (UPDATE on `ai_sessions`). And a
+ * session's images, read through its fork chain, a durable tool call's images, the staged
+ * attachments and the saved http_request bodies (#5299 step 7, `api/crud_agent_blobs.py`; a
+ * fenced write locks the session's row FOR SHARE). */
 export const API_AI_GRANTS: Grants = {
   ai_payload_keys: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   ai_forgotten_subjects: ['SELECT', 'INSERT'],
@@ -54,6 +57,10 @@ export const API_AI_GRANTS: Grants = {
   ai_session_files: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   ai_session_file_bytes: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   ai_session_events: ['SELECT', 'INSERT'],
+  ai_session_blobs: ['SELECT', 'INSERT'],
+  ai_session_tool_images: ['SELECT', 'INSERT', 'DELETE'],
+  ai_attachments: ['SELECT', 'INSERT', 'DELETE'],
+  ai_session_http_bodies: ['SELECT', 'INSERT', 'DELETE'],
 }
 
 /** The projects worker's role: it holds no database (ScadBuddy#5298), so the agent takes back
