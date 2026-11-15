@@ -383,11 +383,12 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   What a native slice keeps of a file: `--load-settings` (ScadBuddy's process preset)
   replaces the file's own process keys, `enable_support`, `support_filament` and
   `support_interface_filament` among them; the supports option passes only enable, type and
-  build-plate-only (`supports.py` `SCALAR_KEYS`). An author layout (`print_settings_id`
-  names the H2C) keeps its placement, scale and tower (`bambuddy/send.py` `_laid_out_for`);
-  only a file that already holds G-code prints as it is. The headless CLI draws no plate
-  covers (its GLFW is Wayland-only) and copies the input's; `render/recolour.py` redraws
-  them in the spools' colours (#6170).
+  build-plate-only (`supports.py` `SCALAR_KEYS`). An author layout (`render/bambu3mf.py`
+  `layout_of`: a `print_settings_id` other than ScadBuddy's placeholder) keeps its placement
+  and scale, and its tower unless the target's extruders cannot reach it
+  (`towers_within_reach`, in `bambuddy/send.py` `_laid_out_for`). A sliced file, another
+  slicer's, or one past the caps (`layout_of` `as_is`) prints as it is. The headless CLI
+  draws no plate covers (its GLFW is Wayland-only) and copies the input's (#6170).
   `workflows/slicing.py` is `SliceWorkflow` on the `library` queue (activities in
   `workflows/slicing_activities.py`, the run's `slice_run` and `print_sliced_upload`
   among them); the print worker only starts it. `api/internal_blobs.py` is the hidden
@@ -884,7 +885,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `2026-10-18-orders-design.md`, plan `2026-10-19-orders-phase-1-customers-and-orders.md`):
   customers, orders and line items as ScadBuddy's own records. A library-file item has no
   design revisions (409 "it has no design revisions"): to change one after acceptance, add
-  a new item (`order_item_add_after_acceptance`) and cancel the old one. An item made with
+  a new item (`POST …/{order_id}/items/after-acceptance`, the agent's
+  `order_item_add_after_acceptance`) and cancel the old one. An item made with
   `archive_id` is a library-file item from a copy of the archive's file
   (`origin_archive_ids`); its archive quote needs the archive `completed`. `component.py` `ORDERS`
   (`OrdersComponent`: `store` over the shared `scadbuddy-rows` pool (`rows/component.py`),
