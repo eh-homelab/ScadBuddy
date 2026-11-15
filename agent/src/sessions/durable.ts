@@ -293,7 +293,11 @@ export class DurableTurns {
    * owner): the manager says why. Refused when the workflow refuses the message; a message not
    * accepted in time keeps the claim and is still a turn (Ruling 16).
    */
-  async send(session: SessionRecord, turn: DurableTurn): Promise<Turn | undefined> {
+  send(session: SessionRecord, turn: DurableTurn): Promise<Turn | undefined> {
+    return this.#send(session, turn, false)
+  }
+
+  async #send(session: SessionRecord, turn: DurableTurn, retried: boolean): Promise<Turn | undefined> {
     const id = session.id
     // The images and their previews by name (#2479): the event and the workflow's message carry only these.
     const { blobs, sent } = sentImageBlobs(turn.images)
@@ -327,7 +331,13 @@ export class DurableTurns {
         turn.flow !== undefined || turn.withoutBackground === true,
       ],
     )
-    if (!claimed) return turn.queue ? this.#queue(session, turn) : undefined
+    if (!claimed) {
+      if (!turn.queue) return undefined
+      const queued = await this.#queue(session, turn)
+      // The turn may have ended between the claim and the queue's read: claim once more,
+      // rather than answer `busy` for a session that is idle now.
+      return queued ?? (retried ? undefined : this.#send(session, turn, true))
+    }
     let seq = 0
     try {
       if (claimed.runtime === 'durable') {

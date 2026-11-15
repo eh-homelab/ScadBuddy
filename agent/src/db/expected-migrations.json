@@ -394,5 +394,9 @@
   {
     "id": "20261115T0736Z_audit_payload_key_kind",
     "sha256": "ac4911e12f104ae553e97f15380a60c5939257a15a2b19a6c6f719c0b3fe4688"
+  },
+  {
+    "id": "20261115T1613Z_session_queue_events",
+    "sha256": "3df9ee67d19b1cf5c9fc5b1eb619d038aab8215f9f064f1672fa90d5e9edc423"
   }
 ]

@@ -15,6 +15,7 @@ import {
   QUESTION_TEXT_MAX,
   QUESTIONS_MAX,
 } from '../src/harness/questions.js'
+import { MESSAGE_MAX } from '../src/sessions/clientProtocol.js'
 import { expectPanelAccepts, frontendClientMessages, frontendParseServerEvent } from './support/frontendProtocol.js'
 
 const S = '11111111-2222-4333-8444-555555555555'
@@ -331,6 +332,11 @@ describe('the agent’s protocol mirror', () => {
       QUESTION_TEXT_MAX: panel.QUESTION_TEXT_MAX,
       PREVIEW_MAX: panel.PREVIEW_MAX,
     }).toEqual({ ANSWER_MAX, QUESTIONS_MAX, OPTIONS_MIN, OPTIONS_MAX, QUESTION_TEXT_MAX, PREVIEW_MAX })
+  })
+
+  it('bounds a queued message\'s edit in the panel exactly where the agent does (#6386)', async () => {
+    const panel = (await frontendClientMessages()) as unknown as Record<string, number>
+    expect(panel.MESSAGE_MAX).toBe(MESSAGE_MAX)
   })
 
   it('covers every server event type the panel declares', async () => {

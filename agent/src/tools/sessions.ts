@@ -514,8 +514,9 @@ export const sessionTools: Tool[] = [
           ...(ctx.flowTurn ? { flow: ctx.flowTurn } : {}),
           // From a flow run, or a session with none (#5870): this turn gets no background built-in.
           ...(bare ? { withoutBackground: true } : {}),
-          // While a turn runs, it waits in the queue (#6386).
-          queue: true,
+          // While a turn runs, it waits in the queue (#6386). A flow run's call does not: it is
+          // refused `busy`, so a queued turn never runs tagged as a flow call that has ended.
+          queue: ctx.flowTurn === undefined,
         }),
       )
       // The turn has the bytes; the uploads move into the session (attachments/store.ts `claim`).
