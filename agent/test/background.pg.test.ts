@@ -454,6 +454,20 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
     expect(await send(theirs, 'p', 'c')).toMatchObject({ result: 'end', state: 'failed', reason: expect.stringMatching(/^not sent: /) })
   })
 
+  it("answers a monitor's pending events oldest first by seq, past one digit, and delivers up to the last (#5299 step 8)", async () => {
+    const t = (await store.create({ sessionId, kind: 'monitor', description: 'm', spec: {}, createdBy: browser }))!
+    const [row] = await db.sql<{ last: string }[]>`SELECT coalesce(max(seq), 0)::text AS last FROM ai_background_events`
+    // The next seqs cross a power of ten, whatever ran before.
+    const next = 10 ** (row!.last.length + 1) - 5
+    await db.sql`SELECT setval(pg_get_serial_sequence('ai_background_events', 'seq'), ${next})`
+    for (let n = 0; n < 12; n++) expect(await store.appendEvent(t.id, `line ${n}`)).toBe(true)
+    // The seqs are bigints answered as text: "10" sorts before "9" as text, never here.
+    const pending = await store.pendingEvents(t.id)
+    expect(pending.map((e) => e.text)).toEqual(Array.from({ length: 12 }, (_, n) => `line ${n}`))
+    await store.delivered(t.id, pending.at(-1)!.seq)
+    expect(await store.pendingCount(t.id)).toBe(0)
+  })
+
   it("gives a classic turn the session's CronCreate in place of Claude Code's, which ends with the turn", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'bg-pkg-'))
     await mkdir(path.join(dir, '.claude-plugin'))

@@ -202,6 +202,12 @@ const WAKE_REREAD_PATCH = 'gate-record-wake-reread'
 /** The queue's commands (#6386): asked only for a non-empty queue, which no earlier history held. */
 const QUEUE_PATCH = 'agent-session-queue'
 /**
+ * A queue change made after the write loop's last check but before it cleared `publishing`
+ * (in the same activation) starts a write of its own; without it, that version was never
+ * written until the next change (#6386, PR #6411's CI).
+ */
+const QUEUE_PUBLISH_PATCH = 'agent-session-queue-publish'
+/**
  * How long a head the row is not free for waits before `session.begin_turn` is asked again (a lost
  * turn the sweep ends): BEGIN_RETRY_MS, doubling to BEGIN_RETRY_MAX_MS, so a row that stays taken
  * adds a few events an hour to the history, not one every few seconds.
@@ -330,6 +336,8 @@ export async function AgentSession(started: SessionStart): Promise<void> {
   /** The last version `session.queue_changed` wrote, and the write in flight. */
   let published = queueVersion
   let publishing: Promise<void> | undefined
+  /** Whether the write loop still checks for a newer version: false once it ended, before `publishing` is cleared. */
+  let looping = false
   /** The head being started (its claim in flight): no longer removable or editable. */
   let starting: string | undefined
   /** How many times in a row `session.begin_turn` found the row taken. */
@@ -390,19 +398,25 @@ export async function AgentSession(started: SessionStart): Promise<void> {
   function changed(): void {
     patched(QUEUE_PATCH)
     queueVersion++
-    if (publishing) return
-    publishing = (async () => {
-      while (published < queueVersion) {
-        const version = queueVersion
-        await finish[SESSION_QUEUE_CHANGED_ACTIVITY]!({ sessionId: start.session_id, version, queue: queue.map(queuedView) } satisfies QueueChangedInput)
-        published = version
+    if (publishing && (looping || !patched(QUEUE_PUBLISH_PATCH))) return
+    looping = true
+    const run: Promise<void> = (async () => {
+      try {
+        while (published < queueVersion) {
+          const version = queueVersion
+          await finish[SESSION_QUEUE_CHANGED_ACTIVITY]!({ sessionId: start.session_id, version, queue: queue.map(queuedView) } satisfies QueueChangedInput)
+          published = version
+        }
+      } finally {
+        looping = false
       }
     })()
       // A write that never lands leaves the version unwritten; the next change writes it.
       .catch(() => undefined)
       .finally(() => {
-        publishing = undefined
+        if (publishing === run) publishing = undefined
       })
+    publishing = run
   }
   const queueState = (): QueueState => ({ version: queueVersion, queue: queue.map(queuedView) })
   /** The index of a queued entry that may still change (not the head being started). */

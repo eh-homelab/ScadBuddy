@@ -1279,3 +1279,26 @@ async def test_a_revision_made_after_the_check_refuses_the_slice(
         await quote_run(run, shop.order.id, shop.item.id, request, BY, expected_revision_id=current)
     assert during.value.type == PROBLEMS + "revision_superseded"
     assert shop.rows.quotes(shop.item.id) == []
+
+
+class FollowRefused(FakeSlicer):
+    """A slicer whose follow of a plate fails as a sliced plate that cannot be priced."""
+
+    async def poll(self, started: PreviewStarted, subject: str) -> SlicedPlate | None:
+        raise QuoteError(f"plate {started.plate_id}: the slicer lost it", plate=started.plate_id)
+
+
+async def test_a_quote_error_while_following_a_slice_is_the_sliced_plate_problem(
+    shop: Shop, tmp_path: Path
+) -> None:
+    """#6370 review: the start and the follow run inside the price step
+    (`slice_and_price`), so a `QuoteError` raised while a back-office slice is followed is
+    the 422 ``sliced_plate`` problem naming the plate, and no quote is recorded."""
+    run = run_of(shop, tmp_path, {1: sliced_plate(1, 3600, [12.5, 3.0])})
+    run.slicer = FollowRefused({1: sliced_plate(1, 3600, [12.5, 3.0])})
+    request = shop.request(s0=shop.pla, s1=shop.petg)
+    with pytest.raises(ApiError) as refused:
+        await quote_run(run, shop.order.id, shop.item.id, request, BY)
+    assert (refused.value.status, refused.value.type) == (422, PROBLEMS + "sliced_plate")
+    assert refused.value.extensions["plate"] == 1
+    assert shop.rows.quotes(shop.item.id) == []

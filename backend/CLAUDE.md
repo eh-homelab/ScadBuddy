@@ -324,7 +324,14 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   with the agent's own migration files (`render/agent_migrations.py` `migrate_agent`) and open
   the credential vectors `tests/fixtures/secret-vectors.json`, a copy that
   `lint-codec-copies.sh` keeps equal to the agent's. `notify.py` re-wraps the agent's Web Push
-  keys and notification channels' tokens (#5299 step 5) in the same rotation.
+  keys and notification channels' tokens (#5299 step 5) in the same rotation. `background.py` and `operations.py` are
+  the agent's background tasks (with a Monitor's events, a Workflow's journal and child chats)
+  and its command record `ai_operations`, for `api/crud_agent_tasks.py` (areas
+  `background-tasks`, `operations`, #5299 step 8): the agent's `BackgroundTaskStore` and
+  `OperationStore` statement for statement, a task's create under the session's
+  `bgtask:<session>` advisory lock; an operation's insert or end writes its `activity` row in
+  the same transaction (`ActivityIndex.ingest_agent_operation_in`), and the bus's
+  `ai_operation.changed` stays only for an agent pod still on SQL.
 - The agent's small stores (#5299 step 5): `api/crud_agent_stores.py` (areas
   `activity-kinds`, `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`) and
   `api/crud_agent_notify.py` (area `notify`, sealed with the KEK under the agent's AAD), each
@@ -1073,8 +1080,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   no new revision and no quote dropped), slices every plate through `bambuddy/preview.py` `start_preview_plates`
   (the dialog's background slice, either slicer), keeps each plate's sliced file as the
   directory blob `quote-<sha256>` held by `blob_refs (order_item_quote, <quote id>)`
-  before the quote's row exists, reads each plate with `read_sliced`, prices and records
-  it (`Lifecycle.record_slice_quote`). The quote records its print setup (#4673, order operations spec §5): `choices`
+  before the quote's row exists, reads each plate with `read_sliced` and prices it (these
+  steps are `quote.py` `slice_and_price`, the one slice and price, which a storefront price
+  runs too, #6153), then records it (`Lifecycle.record_slice_quote`). The quote records its print setup (#4673, order operations spec §5): `choices`
   (`quote.py` `print_setup`: printer, path, `PrintChoices`, the `prime_tower`, `supports`,
   `print_sequence` and `process_overrides` (#2998) the body takes in `PrintRunRequest`'s shapes, which `operations.py`
   `preview_request` slices with) and `filament_plan`, null on a manual or archive quote.
@@ -1602,6 +1610,49 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   edit (#6211 review). An item
   print's spools are matched the same way (`orders/spools.py` `_of`, the store's
   `spool_links`), so a hand-set colour still finds its spools.
+- A storefront render's price (#6153, spec 2026-11-13 §5.4, §5.6): `orders/storefront/slice_price.py`,
+  migration `20261115T0825Z_storefront_slice_prices.sql`. The price is firm, and it comes
+  from a slice through the back office's quote path: `quote.py` `slice_and_price` (the same
+  slice, `read_plate` and `price_plates` a quote uses, at the book's policy and the profile
+  printer's machine rate, `MachineRates.for_quote`), never a second formula
+  (`test_slice_price.py` checks a storefront price equals a quote to the cent). The variant
+  is rendered to an output by `rendering.py` `output_for_reference` (saved as
+  `storefront_output_id(render_key)`) and sliced by `operations.py` `PreviewSlicer`, so the
+  template gives the support and process settings. The shop slice profile gives only the
+  printer and a spool per material, and the model's remembered dialog choices the rest
+  (`storefront_choices`; none remembered is Standard 0.4 mm). One row per variant in
+  `storefront_slice_prices`, keyed by `price_key`: a sha256 of the render's 3MF content, the
+  price-book filament per slot (id, material, cost), the profile, the choices, and the
+  book's policy and the live machine rate that prices it (`for_quote` through `live_rate`,
+  read again at most once a minute per process, `RATE_TTL`, and carried to the run,
+  `SliceVariant.machine_rate`). Any change is a new
+  key, so an old price is never read again; the row holds no job id and no bytes, so it
+  outlives the render prune. `GET …/renders/{job}/estimate` (`renders.py`
+  `render_estimate`, `slice_estimate`) answers `StoreEstimate`: `source` `slice` with the
+  price of one, `pending` (with `retry_after`) while the slice runs or waits, or `none`
+  (no profile, no spool for a slot's material, a colour with no listing filament, files
+  lost, a failed slice, or a render whose slug or commit is no longer the listing's). A
+  price is only ever for the visitor's own geometry (#6370 review): the run checks that the
+  3MF it rendered is the one the key names (`SliceRun.rendered_sha256`, the render job's
+  3MF, not the stamped output's), else `GEOMETRY_DIFFERS` and no price. The read starts the slice, only for the render on screen, as the
+  operation `storefront_slice_price` on the `library` queue (`orders/operations.py`,
+  3 attempts, `QUOTE_TIMEOUT`); a re-read joins it. `SlicePrices.claim` admits at most
+  `storefront_slices_concurrent` `running` rows, under one advisory lock; a running row
+  whose operation ended without writing it is failed at the next claim (`_settle_ended`),
+  one past `LOST_AFTER` frees its place, and a failed one is tried again after
+  `RETRY_FAILED_AFTER` (1 h); with no room, a read that cannot claim answers `pending`.
+  Each claim makes its own `claim_key`, which is the operation's `Idempotency-Key`, so a
+  later claim never meets an earlier claim's operation; a start that fails puts the row
+  back as it was before the claim (no row if the claim made it), and one whose answer says
+  the operation may still run (`api/operations.py` `may_still_run`) keeps it `running`
+  (#6370 review). Only deterministic refusals record `failed` (`QuoteError`, a 4xx such as
+  the 0 g `sliced_plate`, the stale profile, a gone filament); a 5xx, 408 or 429 is raised
+  as `SliceUnavailableError`, so the operation tries again. Before it slices, the run checks each profile spool is still
+  offered on the printer (`api/storefront_slice.py` `offered_spools`: a loaded tray's
+  negative id moves), and refuses with no price. The CRUD answer keeps `price_key`, `grams`
+  and `print_seconds` for the shop and the checkout (`estimate.py` `SHOP_ONLY_FIELDS`); the
+  edge sends only `routes.py` `ESTIMATE_FIELDS`. The volume analysis (`storefront_job_parts`)
+  is no longer read; `rough_estimate` stays for the back office.
 - Prepared colour combinations (#6237): `orders/storefront/prepare.py`, routes `GET`/`POST
   /storefront/listings/{id}/prepare` (`api/storefront.py`). The combinations are enumerated
   per printable material (of the listing's effective materials, in order, #6258, those

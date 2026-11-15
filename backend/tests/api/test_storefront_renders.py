@@ -2,7 +2,8 @@
 ``POST …/storefront/renders`` checks the inputs against the listing, counts the render
 against the visitor's and the client's limits (a shared render costs nothing) and renders
 through `RenderService` with ``reuse_finished``; ``GET …/renders/{id}``, its preview and its
-rough estimate answer only the visitor who asked for that render."""
+price answer only the visitor who asked for that render. The price is a slice's (#6153),
+through the back office's quote path; the slicer here is a fake in `PreviewSlicer`'s place."""
 
 from __future__ import annotations
 
@@ -10,21 +11,26 @@ import asyncio
 import hashlib
 import json
 import shutil
-import threading
 import time
 import uuid
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.storefront_slice import ProfileSpool
+from scadbuddy.bambuddy.preview import PreviewStarted
 from scadbuddy.core.settings import Settings
+from scadbuddy.library.settings_store import SettingsPatch
+from scadbuddy.orders import operations as order_operations
 from scadbuddy.orders.component import ORDERS, OrdersComponent
+from scadbuddy.orders.quote import SlicedPlate, SliceQuoteRequest
 from scadbuddy.orders.storefront import renders as renders_module
 from scadbuddy.orders.storefront.renders import RENDER_FAILED, store_render
+from scadbuddy.orders.storefront.slice_profile import StorefrontSliceProfile
 from scadbuddy.render.job_models import Job, QueueFullError, now
 from scadbuddy.render.jobs import SnapshotPendingError, SnapshotUnavailableError
 from scadbuddy.store.cache import materialize_result
@@ -51,6 +57,7 @@ from tests.api.test_storefront_listings import (  # noqa: F401  (fixtures)
 )
 from tests.api.test_storefront_public import CRUD, TOKEN_A, bearer
 from tests.support.operations import press
+from tests.support.sliced3mf import sliced_3mf
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -402,59 +409,6 @@ def test_another_visitors_render_is_404(crud: CrudCaller, listing: dict[str, Any
     assert crud.get(f"/renders/{'0' * 32}", token=TOKEN_A).status_code == 404
 
 
-def test_the_estimate_is_a_price_without_machine_time(
-    crud: CrudCaller, listing: dict[str, Any]
-) -> None:
-    job = render_until_done(crud, TOKEN_A, listing, {"width": 40})
-    r = crud.get(f"/renders/{job['id']}/estimate")
-    assert r.status_code == 200, r.text
-    est = r.json()
-    assert est["estimate"] is True and est["price_minor"] > 0
-    assert float(est["grams"]) > 0 and est["parts"]
-    # Review of #5758, Blocking 2: a visitor never reads the price book's cost price,
-    # markup or rates, only the price.
-    assert set(est) == {
-        "estimate",
-        "price_minor",
-        "currency",
-        "minor_exponent",
-        "grams",
-        "parts",
-        "unknown_parts",
-    }
-    assert "per kg" not in r.text and "Markup" not in r.text and "filament_minor" not in r.text
-    # Analysed once, for every visitor of the render.
-    with _state(crud.api).projection.pool.connection() as conn:
-        rows = conn.execute(
-            "SELECT count(*) AS n FROM storefront_job_parts WHERE job_id = %s", (job["id"],)
-        ).fetchone()
-    assert rows is not None and rows["n"] == 1
-    a_render(crud, TOKEN_B, listing, {"width": 40})
-    assert crud.get(f"/renders/{job['id']}/estimate", token=TOKEN_B).json() == est
-
-
-@pytest.fixture
-def corrupt_done_job(crud: CrudCaller, listing: dict[str, Any]) -> str:
-    """A done render whose 3MF in this process's cache is not a 3MF."""
-    job = render_until_done(crud, TOKEN_A, listing, {"width": 60})
-    state = _state(crud.api)
-    found = state.render.store.read(job["id"])
-    assert found.result is not None and crud.api.portal is not None
-    from scadbuddy.store.cache import materialize_result
-
-    crud.api.portal.call(materialize_result, state.store.blobs, found.result)
-    (state.paths.root / found.result.model_3mf).write_bytes(b"not a 3mf")
-    job_id: str = job["id"]
-    return job_id
-
-
-def test_a_3mf_that_cannot_be_analysed_is_422(crud: CrudCaller, corrupt_done_job: str) -> None:
-    r = crud.get(f"/renders/{corrupt_done_job}/estimate", token=TOKEN_A)
-    assert r.status_code == 422, r.text
-    assert r.json()["type"] == STOREFRONT_PROBLEMS + "estimate_unavailable"
-    assert "not a 3mf" not in r.text and "blobs/" not in r.text
-
-
 def test_an_open_render_has_no_estimate(
     crud: CrudCaller, listing: dict[str, Any], settings: Settings, tmp_path: Path
 ) -> None:
@@ -472,6 +426,212 @@ def test_an_open_render_has_no_estimate(
     finally:
         release.touch()
     wait_done(crud, TOKEN_A, job["id"])
+
+
+# -- the slice price (#6153) ---------------------------------------------------------------
+
+
+class FakeSlicer:
+    """`PreviewSlicer` (`orders/operations.py`) for the storefront's operation: one plate,
+    its sliced file ``file``, and every start kept."""
+
+    file: ClassVar[bytes] = sliced_3mf(plates={1: (3600, [10.0])}, gcode={1: b"M620 S0A\n"})
+    started: ClassVar[list[tuple[str, SliceQuoteRequest, str]]] = []
+
+    def __init__(self, *_args: Any) -> None:
+        pass
+
+    async def start(
+        self, output_id: str, request: SliceQuoteRequest, subject: str
+    ) -> list[PreviewStarted]:
+        FakeSlicer.started.append((output_id, request, subject))
+        return [PreviewStarted(job_id=1, plate_id=1)]
+
+    async def poll(self, started: PreviewStarted, subject: str) -> SlicedPlate | None:
+        return SlicedPlate(plate_id=started.plate_id, slicer="bambuddy", file_id=1)
+
+    async def fetch(self, sliced: SlicedPlate) -> bytes:
+        return FakeSlicer.file
+
+
+@pytest.fixture
+def sliced(crud: CrudCaller, monkeypatch: pytest.MonkeyPatch) -> type[FakeSlicer]:
+    """The shop slice profile set (printer ``p-1``, spool 9 for PLA and 5 for PETG), a
+    fake slicer in `PreviewSlicer`'s place, and the printer offering both."""
+    import scadbuddy.api.storefront_slice as storefront_slice
+
+    monkeypatch.setattr(FakeSlicer, "started", [])
+    monkeypatch.setattr(order_operations, "PreviewSlicer", FakeSlicer)
+
+    async def offered(*_args: Any) -> list[ProfileSpool]:
+        return [
+            ProfileSpool(spool_id=9, material="PLA", label="PLA"),
+            ProfileSpool(spool_id=5, material="PETG", label="PETG"),
+        ]
+
+    monkeypatch.setattr(storefront_slice, "offered_spools", offered)
+    profile = StorefrontSliceProfile(printer="p-1", spools={"pla": 9, "petg": 5})
+    _state(crud.api).settings_store.save(SettingsPatch(storefront_slice_profile=profile))
+    return FakeSlicer
+
+
+def priced(crud: CrudCaller, job_id: str, *, token: str = TOKEN_A) -> dict[str, Any]:
+    """The render's price once it is no longer being worked out."""
+    deadline = time.monotonic() + 60
+    while True:
+        r = crud.get(f"/renders/{job_id}/estimate", token=token)
+        assert r.status_code == 200, r.text
+        answer: dict[str, Any] = r.json()
+        if answer["source"] != "pending":
+            return answer
+        assert answer["retry_after"] >= 1
+        assert time.monotonic() < deadline, "the price was never worked out"
+        time.sleep(0.2)
+
+
+def test_the_price_is_a_slice_through_the_quote_path(
+    crud: CrudCaller, listing: dict[str, Any], sliced: type[FakeSlicer]
+) -> None:
+    job = render_until_done(crud, TOKEN_A, listing, {"width": 40})
+    first = crud.get(f"/renders/{job['id']}/estimate")
+    assert first.status_code == 200, first.text
+    assert first.json()["source"] == "pending" and first.json()["price_minor"] is None
+    est = priced(crud, job["id"])
+    assert est["source"] == "slice" and est["price_minor"] > 0
+    assert (est["currency"], est["minor_exponent"]) == ("USD", 2)
+    # The shop's details stay on the CRUD side; the edge never sends them on.
+    assert est["grams"] == {"0": "10.0"} and est["print_seconds"] == 3600
+    assert len(est["price_key"]) == 64
+    assert "per kg" not in str(est) and "Markup" not in str(est)
+    [(output_id, request, subject)] = sliced.started
+    assert subject == f"storefront_price:{est['price_key']}"
+    # The profile gives the printer and the spool; the template gives supports.
+    assert request.printer == "p-1" and request.supports is None
+    assert [(s.slot_id, s.spool_id) for s in request.filament_plan.slots] == [(1, 9)]
+    with _state(crud.api).projection.pool.connection() as conn:
+        row = conn.execute(
+            "SELECT status, total_minor FROM storefront_slice_prices WHERE price_key = %s",
+            (est["price_key"],),
+        ).fetchone()
+    assert row is not None and (row["status"], row["total_minor"]) == ("done", est["price_minor"])
+    # Another visitor of the same render reads the same price, and nothing is sliced again.
+    a_render(crud, TOKEN_B, listing, {"width": 40})
+    assert crud.get(f"/renders/{job['id']}/estimate", token=TOKEN_B).json() == est
+    assert len(sliced.started) == 1
+    assert output_id
+
+
+def test_a_render_of_the_listing_before_it_moved_has_no_price(
+    crud: CrudCaller, listing: dict[str, Any], sliced: type[FakeSlicer]
+) -> None:
+    """#6370 review: the shop moves the listing to another commit after the render. The
+    price would be of a design the visitor does not see, so there is none, and no slice
+    starts: the page renders again."""
+    job = render_until_done(crud, TOKEN_A, listing, {"width": 63})
+    with _state(crud.api).projection.pool.connection() as conn:
+        conn.execute(
+            "UPDATE storefront_listings SET commit = %s WHERE id = %s", ("f" * 40, listing["id"])
+        )
+    est = crud.get(f"/renders/{job['id']}/estimate")
+    assert est.status_code == 200, est.text
+    assert est.json()["source"] == "none" and est.json()["price_minor"] is None
+    assert sliced.started == []
+
+
+def test_two_reads_at_once_slice_once(
+    crud: CrudCaller, listing: dict[str, Any], sliced: type[FakeSlicer]
+) -> None:
+    job = render_until_done(crud, TOKEN_A, listing, {"width": 62})
+    with ThreadPoolExecutor(2) as pool:
+        answers = list(pool.map(lambda _n: crud.get(f"/renders/{job['id']}/estimate"), range(2)))
+    assert [a.status_code for a in answers] == [200, 200], [a.text for a in answers]
+    assert priced(crud, job["id"])["source"] == "slice"
+    assert len(sliced.started) == 1
+
+
+def test_a_second_variant_waits_for_the_one_slice_at_a_time(
+    crud: CrudCaller, listing: dict[str, Any], sliced: type[FakeSlicer]
+) -> None:
+    """`storefront_slices_concurrent` 1: while one slice runs, another variant's read
+    starts nothing and answers pending; once it is done, the next read starts it. A render
+    of other values whose 3MF has the same content (the fake openscad draws one box for
+    every width) is the same variant, so its price is read with no slice (#6153)."""
+    one = render_until_done(crud, TOKEN_A, listing, {"width": 63})
+    two = render_until_done(crud, TOKEN_A, listing, {"width": 64})
+    prices = _state(crud.api).components.get(ORDERS).slice_prices
+    busy = prices.claim("f" * 64, "0" * 64, limit=1)
+    assert busy.claimed
+    r = crud.get(f"/renders/{one['id']}/estimate")
+    assert r.json()["source"] == "pending"
+    assert sliced.started == []
+    with _state(crud.api).projection.pool.connection() as conn:
+        conn.execute("DELETE FROM storefront_slice_prices WHERE price_key = %s", ("f" * 64,))
+    assert priced(crud, one["id"])["source"] == "slice"
+    assert priced(crud, two["id"]) == priced(crud, one["id"])
+    assert len(sliced.started) == 1
+
+
+def test_with_no_slice_profile_there_is_no_price(crud: CrudCaller, listing: dict[str, Any]) -> None:
+    """If unsure, no price (owner, 2026-11-14): never a volume estimate."""
+    job = render_until_done(crud, TOKEN_A, listing, {"width": 41})
+    r = crud.get(f"/renders/{job['id']}/estimate")
+    assert r.status_code == 200, r.text
+    assert r.json()["source"] == "none" and r.json()["price_minor"] is None
+    assert "grams" not in r.json() or r.json()["grams"] is None
+
+
+def test_a_slice_that_cannot_be_priced_gives_no_price(
+    crud: CrudCaller,
+    listing: dict[str, Any],
+    sliced: type[FakeSlicer],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sliced, "file", sliced_3mf(plates={1: (3600, [0.0])}, gcode={1: b"M620 S0A\n"})
+    )
+    job = render_until_done(crud, TOKEN_A, listing, {"width": 42})
+    assert priced(crud, job["id"])["source"] == "none"
+    # Read again, nothing is sliced again.
+    assert priced(crud, job["id"])["source"] == "none"
+    assert len(sliced.started) == 1
+
+
+def test_a_profile_spool_no_longer_offered_gives_no_price(
+    crud: CrudCaller,
+    listing: dict[str, Any],
+    sliced: type[FakeSlicer],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6255 review: the tray's negative id moved, so the profile is checked first."""
+    import scadbuddy.api.storefront_slice as storefront_slice
+
+    async def swapped(*_args: Any) -> list[ProfileSpool]:
+        return [ProfileSpool(spool_id=-3, material="PLA", label="PLA")]
+
+    monkeypatch.setattr(storefront_slice, "offered_spools", swapped)
+    job = render_until_done(crud, TOKEN_A, listing, {"width": 43})
+    assert priced(crud, job["id"])["source"] == "none"
+    assert sliced.started == []
+
+
+def test_a_slow_fetch_answers_pending_at_once(
+    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6120: no price read waits on a done render's files past `READY_WAIT`."""
+    job = render_until_done(crud, TOKEN_A, listing, {"width": 44})
+    monkeypatch.setattr(renders_module, "READY_WAIT", 0.1)
+    monkeypatch.setattr(renders_module, "_ready", OrderedDict())
+    real = materialize_result
+
+    async def slow(blobs: Any, result: Any) -> None:
+        await asyncio.sleep(0.6)
+        await real(blobs, result)
+
+    monkeypatch.setattr(renders_module, "materialize_result", slow)
+    started = time.monotonic()
+    r = crud.get(f"/renders/{job['id']}/estimate")
+    assert time.monotonic() - started < 0.5
+    assert r.status_code == 200 and r.json()["source"] == "pending", r.text
 
 
 @pytest.mark.parametrize(
@@ -671,89 +831,6 @@ def test_a_submit_that_may_have_started_keeps_its_row(
     wait_done(crud, TOKEN_A, again.json()["id"])
 
 
-class Counted:
-    """`part_volumes` counted, and slowed by ``delay`` seconds."""
-
-    def __init__(self, delay: float = 0.0) -> None:
-        self.calls = 0
-        self.delay = delay
-        self.real = renders_module.part_volumes
-
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        self.calls += 1
-        time.sleep(self.delay)
-        return self.real(*args, **kwargs)
-
-
-def parts_record(crud: CrudCaller, job_id: str) -> dict[str, Any] | None:
-    with _state(crud.api).projection.pool.connection() as conn:
-        row: dict[str, Any] | None = conn.execute(
-            "SELECT parts, error FROM storefront_job_parts WHERE job_id = %s", (job_id,)
-        ).fetchone()
-    return row
-
-
-def test_two_concurrent_estimates_analyse_once(
-    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    job = render_until_done(crud, TOKEN_A, listing, {"width": 62})
-    counted = Counted(delay=1.0)
-    monkeypatch.setattr(renders_module, "part_volumes", counted)
-    with ThreadPoolExecutor(2) as pool:
-        answers = list(pool.map(lambda _n: crud.get(f"/renders/{job['id']}/estimate"), range(2)))
-    assert [a.status_code for a in answers] == [200, 200], [a.text for a in answers]
-    assert answers[0].json() == answers[1].json()
-    assert counted.calls == 1
-
-
-def test_a_failed_analysis_is_not_tried_again(
-    crud: CrudCaller, corrupt_done_job: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    counted = Counted()
-    monkeypatch.setattr(renders_module, "part_volumes", counted)
-    for _ in range(2):
-        r = crud.get(f"/renders/{corrupt_done_job}/estimate")
-        assert r.status_code == 422, r.text
-        assert r.json()["type"] == STOREFRONT_PROBLEMS + "estimate_unavailable"
-    assert counted.calls == 1
-    record = parts_record(crud, corrupt_done_job)
-    assert record is not None and record["parts"] is None and record["error"] == "unreadable"
-
-
-def timeout_of(monkeypatch: pytest.MonkeyPatch, seconds: float) -> None:
-    """The render timeout the storefront reads, as a live settings change sets it."""
-    real = renders_module._runtime
-
-    def runtime(state: Any) -> Settings:
-        return real(state).model_copy(update={"render_timeout": seconds})
-
-    monkeypatch.setattr(renders_module, "_runtime", runtime)
-
-
-def one_worker(monkeypatch: pytest.MonkeyPatch, busy_for: float) -> ThreadPoolExecutor:
-    """The analyses' threads as one, kept busy for ``busy_for`` seconds by other work."""
-    pool = ThreadPoolExecutor(1)
-    pool.submit(time.sleep, busy_for)
-    monkeypatch.setattr(renders_module, "_executor", lambda: pool)
-    return pool
-
-
-def test_an_analysis_past_the_timeout_is_recorded(
-    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    job = render_until_done(crud, TOKEN_A, listing, {"width": 63})
-    timeout_of(monkeypatch, 0.3)
-    counted = Counted(delay=1.5)
-    monkeypatch.setattr(renders_module, "part_volumes", counted)
-    for _ in range(2):
-        r = crud.get(f"/renders/{job['id']}/estimate")
-        assert r.status_code == 422, r.text
-        assert r.json()["type"] == STOREFRONT_PROBLEMS + "estimate_unavailable"
-    assert counted.calls == 1
-    record = parts_record(crud, job["id"])
-    assert record is not None and record["error"] == "timeout"
-
-
 def test_a_shared_guess_that_starts_a_new_run_is_counted(
     crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -801,94 +878,6 @@ def test_a_full_queue_leaves_no_reply_to_replay(
     assert counted_rows(crud, TOKEN_A) == 0 and counted_rows(crud, TOKEN_A, counted=False) == 0
 
 
-def test_a_cancelled_lead_leaves_the_work_to_finish(
-    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Review Important 2: the work owns the flight. A request that leaves (a dropped
-    connection) neither ends the analysis nor makes the next request start another."""
-    job = render_until_done(crud, TOKEN_A, listing, {"width": 64})
-    state = _state(crud.api)
-    found = state.render.store.read(job["id"])
-    counted = Counted(delay=1.0)
-    monkeypatch.setattr(renders_module, "part_volumes", counted)
-
-    async def lead() -> None:
-        await asyncio.wait_for(renders_module._parts(state, found), 0.2)
-
-    assert crud.api.portal is not None
-    with pytest.raises(TimeoutError):
-        crud.api.portal.call(lead)
-    r = crud.get(f"/renders/{job['id']}/estimate")
-    assert r.status_code == 200, r.text
-    assert counted.calls == 1
-    record = parts_record(crud, job["id"])
-    assert record is not None and record["parts"] is not None
-
-
-def test_time_in_the_queue_is_not_a_timeout(
-    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Review Important 4: an analysis gets its own render timeout once it starts."""
-    job = render_until_done(crud, TOKEN_A, listing, {"width": 65})
-    timeout_of(monkeypatch, 2.0)
-    counted = Counted(delay=1.0)
-    monkeypatch.setattr(renders_module, "part_volumes", counted)
-    pool = one_worker(monkeypatch, busy_for=1.5)
-    try:
-        r = crud.get(f"/renders/{job['id']}/estimate")
-        assert r.status_code == 200, r.text
-        record = parts_record(crud, job["id"])
-        assert record is not None and record["error"] is None
-    finally:
-        pool.shutdown(wait=True)
-
-
-def test_an_analysis_that_never_starts_is_withdrawn(
-    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Queue wait past the limit: "not ready yet", nothing recorded, and a later request
-    analyses it."""
-    job = render_until_done(crud, TOKEN_A, listing, {"width": 66})
-    timeout_of(monkeypatch, 0.5)
-    counted = Counted()
-    monkeypatch.setattr(renders_module, "part_volumes", counted)
-    shared = renders_module._executor
-    pool = one_worker(monkeypatch, busy_for=1.5)
-    try:
-        r = crud.get(f"/renders/{job['id']}/estimate")
-        assert r.status_code == 429, r.text
-        assert r.json()["type"] == STOREFRONT_PROBLEMS + "estimate_pending"
-        assert counted.calls == 0 and parts_record(crud, job["id"]) is None
-    finally:
-        pool.shutdown(wait=True)
-    monkeypatch.setattr(renders_module, "_executor", shared)
-    assert crud.get(f"/renders/{job['id']}/estimate").status_code == 200
-    assert counted.calls == 1
-
-
-def test_a_slow_analysis_answers_pending_at_once_and_runs_on(
-    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """#6120: no estimate request waits on the analysis past `READY_WAIT`; the analysis
-    runs on, once, and a later request reads its price."""
-    job = render_until_done(crud, TOKEN_A, listing, {"width": 68})
-    monkeypatch.setattr(renders_module, "READY_WAIT", 0.2)
-    counted = Counted(delay=1.0)
-    monkeypatch.setattr(renders_module, "part_volumes", counted)
-    started = time.monotonic()
-    r = crud.get(f"/renders/{job['id']}/estimate")
-    assert time.monotonic() - started < 0.9
-    assert r.status_code == 429, r.text
-    assert r.json()["type"] == STOREFRONT_PROBLEMS + "estimate_pending"
-    assert r.headers["Retry-After"] == str(renders_module.PENDING_RETRY)
-    deadline = time.monotonic() + 10
-    while (r := crud.get(f"/renders/{job['id']}/estimate")).status_code == 429:
-        assert time.monotonic() < deadline, r.text
-        time.sleep(0.1)
-    assert r.status_code == 200, r.text
-    assert counted.calls == 1
-
-
 def test_a_done_render_names_its_preview_once_its_files_are_here(
     crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -924,7 +913,7 @@ def test_a_render_whose_files_are_lost_names_its_preview_after_a_few_tries(
 ) -> None:
     """#6120 review: a lost blob never leaves the page polling for its whole time limit;
     after `FETCH_TRIES` failed fetches the preview is named, and the estimate says it
-    cannot price it, recording nothing."""
+    has no price (#6153)."""
     job = render_until_done(crud, TOKEN_A, listing, {"width": 70})
     monkeypatch.setattr(renders_module, "_ready", OrderedDict())
     monkeypatch.setattr(renders_module, "_failed", OrderedDict())
@@ -940,26 +929,17 @@ def test_a_render_whose_files_are_lost_names_its_preview_after_a_few_tries(
     assert seen[-1] is not None
     # The preview's read fetches on its own (`get_job_preview`): a blob truly lost is
     # its 404 there; here only this module's fetch fails.
-    # The estimate says so too, and records nothing: once the store is back, the price
-    # is worked out.
+    # The estimate says so too (#6153): no price, and nothing sliced.
     r = crud.get(f"/renders/{job['id']}/estimate")
-    assert r.status_code == 422, r.text
-    assert r.json()["type"] == STOREFRONT_PROBLEMS + "estimate_unavailable"
-    assert parts_record(crud, job["id"]) is None
-    monkeypatch.setattr(renders_module, "_failed", OrderedDict())
-    monkeypatch.setattr(renders_module, "materialize_result", materialize_result)
-    deadline = time.monotonic() + 10
-    while (r := crud.get(f"/renders/{job['id']}/estimate")).status_code == 429:
-        assert time.monotonic() < deadline, r.text
-        time.sleep(0.1)
     assert r.status_code == 200, r.text
+    assert r.json()["source"] == "none" and r.json()["price_minor"] is None
 
 
 def test_the_estimate_fetches_files_the_cache_evicted_after_the_preview_was_named(
-    crud: CrudCaller, listing: dict[str, Any]
+    crud: CrudCaller, listing: dict[str, Any], sliced: type[FakeSlicer]
 ) -> None:
     """#6161 review: a job the status took as ready may have lost its cached files since;
-    the estimate fetches them again rather than analyse a missing file for good."""
+    the estimate fetches them again before it hashes the 3MF (#6153)."""
     job = render_until_done(crud, TOKEN_A, listing, {"width": 71})
     assert crud.get(f"/renders/{job['id']}").json()["preview_url"] is not None
     state = _state(crud.api)
@@ -971,27 +951,7 @@ def test_the_estimate_fetches_files_the_cache_evicted_after_the_preview_was_name
         / Path(found.result.model_3mf).parts[1]
     )
     shutil.rmtree(piece)
-    deadline = time.monotonic() + 10
-    while (r := crud.get(f"/renders/{job['id']}/estimate")).status_code == 429:
-        assert time.monotonic() < deadline, r.text
-        time.sleep(0.1)
-    assert r.status_code == 200, r.text
-    record = parts_record(crud, job["id"])
-    assert record is not None and record["error"] is None
-
-
-def test_a_full_analysis_queue_is_not_ready(
-    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    job = render_until_done(crud, TOKEN_A, listing, {"width": 67})
-    counted = Counted()
-    monkeypatch.setattr(renders_module, "part_volumes", counted)
-    monkeypatch.setattr(renders_module, "ANALYSIS_QUEUE", 0)
-    r = crud.get(f"/renders/{job['id']}/estimate")
-    assert r.status_code == 429, r.text
-    assert r.json()["type"] == STOREFRONT_PROBLEMS + "estimate_pending"
-    assert r.headers["Retry-After"] == str(renders_module.PENDING_RETRY)
-    assert counted.calls == 0 and parts_record(crud, job["id"]) is None
+    assert priced(crud, job["id"])["source"] == "slice"
 
 
 def test_a_shared_guess_over_the_limit_is_refused_and_withdrawn(
@@ -1033,86 +993,6 @@ def test_a_shared_guess_over_the_limit_is_refused_and_withdrawn(
         assert render.store.read(job.id).state == "cancelled"
     finally:
         release.touch()
-
-
-def test_an_analysis_that_cannot_start_leaves_no_flight(
-    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Re-review 1: a pool that refuses the work takes back the flight and its place."""
-    job = render_until_done(crud, TOKEN_A, listing, {"width": 68})
-
-    class Refusing:
-        def submit(self, *_args: Any, **_kwargs: Any) -> Any:
-            raise RuntimeError("cannot schedule new futures after shutdown")
-
-    held = renders_module._held
-    monkeypatch.setattr(renders_module, "_executor", lambda: Refusing())
-    r = crud.get(f"/renders/{job['id']}/estimate")
-    assert r.status_code == 500
-    assert job["id"] not in renders_module._flights
-    assert renders_module._held == held
-
-
-def test_a_job_recorded_in_between_is_not_analysed_again(
-    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Re-review 1: the work recorded its parts after the request's first look; the
-    flight's own look finds them."""
-    job = render_until_done(crud, TOKEN_A, listing, {"width": 69})
-    state = _state(crud.api)
-    assert crud.get(f"/renders/{job['id']}/estimate").status_code == 200
-    counted = Counted()
-    monkeypatch.setattr(renders_module, "part_volumes", counted)
-    real = renders_module._recorded
-    looks: list[str] = []
-
-    def first_look_misses(state_: Any, job_id: str) -> Any:
-        looks.append(job_id)
-        return None if len(looks) == 1 else real(state_, job_id)
-
-    monkeypatch.setattr(renders_module, "_recorded", first_look_misses)
-    assert crud.get(f"/renders/{job['id']}/estimate").status_code == 200
-    assert counted.calls == 0
-    assert state is not None
-
-
-def test_a_slow_record_read_never_blocks_the_loop(
-    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Re-review 2: no I/O under `_lock`, and the loop never takes it. While one job's
-    record read hangs inside `_begin`, another job's estimate is answered."""
-    slow = render_until_done(crud, TOKEN_A, listing, {"width": 77})
-    other = render_until_done(crud, TOKEN_A, listing, {"width": 78})
-    real = renders_module._recorded
-    entered, gate = threading.Event(), threading.Event()
-    looks: list[str] = []
-
-    def hanging(state_: Any, job_id: str) -> Any:
-        looks.append(job_id)
-        if job_id == slow["id"] and looks.count(job_id) == 2:
-            entered.set()
-            gate.wait(30)
-        return real(state_, job_id)
-
-    monkeypatch.setattr(renders_module, "_recorded", hanging)
-    answers: dict[str, int] = {}
-
-    def estimate(job_id: str) -> None:
-        answers[job_id] = crud.get(f"/renders/{job_id}/estimate").status_code
-
-    first = threading.Thread(target=estimate, args=(slow["id"],))
-    first.start()
-    try:
-        assert entered.wait(30), "the slow read never ran"
-        second = threading.Thread(target=estimate, args=(other["id"],))
-        second.start()
-        second.join(10)
-        assert not second.is_alive(), "another estimate waited on the slow read"
-        assert answers[other["id"]] == 200
-    finally:
-        gate.set()
-        first.join(30)
-    assert answers[slow["id"]] == 200
 
 
 # -- one material, picked by colour (#6152, #6258) ---------------------------------------
@@ -1210,10 +1090,12 @@ def test_each_visitor_is_priced_at_its_listings_material(
     crud: CrudCaller,
     template: dict[str, Any],  # noqa: F811
     two_reds: tuple[dict[str, Any], str, str],
+    sliced: type[FakeSlicer],
 ) -> None:
     """Two listings of one design share one render of the same values. One takes the
     shop's order (PETG first), the other puts PLA first: each row keeps the material its
-    colours resolved to, and the estimate prices the red slot at that material's red."""
+    colours resolved to, and the slice prices the red slot at that material's red: each
+    is a variant of its own (#6153), so one slice and one price each."""
     petg_first, cheap, dear = two_reds
     pla_first = _red_listing(client, template, [cheap, dear], materials=["PLA", "PETG"])
     values = {"width": 40, "colour": "#FF0000"}
@@ -1226,9 +1108,10 @@ def test_each_visitor_is_priced_at_its_listings_material(
     )
     assert second.status_code == 202, second.text
     assert second.json()["id"] == job["id"]
-    petg_price = crud.get(f"/renders/{job['id']}/estimate").json()["price_minor"]
-    pla_price = crud.get(f"/renders/{job['id']}/estimate", token=TOKEN_B).json()["price_minor"]
+    petg_price = priced(crud, job["id"])["price_minor"]
+    pla_price = priced(crud, job["id"], token=TOKEN_B)["price_minor"]
     assert petg_price > pla_price
+    assert len(sliced.started) == 2
 
 
 def test_a_page_from_before_the_deploy_still_renders_and_adds(

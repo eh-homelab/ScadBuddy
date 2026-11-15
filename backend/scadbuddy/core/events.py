@@ -299,9 +299,10 @@ class AuthSessionRevoked(BaseEvent):
 
 
 class AgentOperationEvent(BaseEvent):
-    """The agent recorded or ended an ``ai_operations`` row; the agent publishes it
-    itself (``agent/src/operations/store.ts``). The activity component ingests it; it
-    goes to no WebSocket topic."""
+    """The agent recorded or ended an ``ai_operations`` row over its own SQL; the agent
+    publishes it itself (``agent/src/operations/store.ts``). The activity component ingests
+    it; it goes to no WebSocket topic. A row written through the CRUD routes (#5299 step 8,
+    ``api/crud_agent_tasks.py``) gets its activity row in its own transaction instead."""
 
     kind: Literal["ai_operation.changed"] = "ai_operation.changed"
     operation_id: str

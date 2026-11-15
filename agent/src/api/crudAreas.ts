@@ -32,6 +32,13 @@ export const WORKSPACE_AREAS = ['workspace'] as const
  */
 export const BLOB_AREAS = ['session-blobs', 'attachments', 'http-bodies'] as const
 
+/**
+ * The areas of a session's background tasks (with a Monitor's events and a Workflow's journal)
+ * and of the agent's command record, `ai_operations` (#5299 step 8; backend
+ * api/crud_agent_tasks.py; background/store.ts, operations/store.ts).
+ */
+export const TASK_AREAS = ['background-tasks', 'operations'] as const
+
 export type CrudAreasOptions = {
   fetch?: typeof fetch
   /** The areas the agent waits for. */

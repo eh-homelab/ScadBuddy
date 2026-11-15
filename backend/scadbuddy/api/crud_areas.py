@@ -45,7 +45,11 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: fork's chain; its ``attachments`` area is ``…/agent/attachments`` and every route under
 #: it, the images the panel stages before a turn sends them; its ``http-bodies`` area is
 #: ``…/agent/http-bodies`` and every route under it, a session's saved HTTP bodies read by
-#: range (#5299 step 7; `api/crud_agent_blobs.py`). The print ``uploads``
+#: range (#5299 step 7; `api/crud_agent_blobs.py`). Its ``background-tasks`` area is
+#: ``…/agent/background-tasks`` and every route under it, a session's background tasks, a
+#: Monitor's events and a Workflow's journal and child chats; its ``operations`` area is
+#: ``…/agent/operations`` and every route under it, ``ai_operations`` with its activity row
+#: (#5299 step 8, `api/crud_agent_tasks.py`). The print ``uploads``
 #: area also covers ``…/print/slices`` and ``…/print/slice-starts`` (#5298 Task 25). Its
 #: ``previews`` area also covers ``…/print/project-targets``, ``…/print/folderless`` and
 #: ``…/print/destination-touches`` (#5298 Task 26). Its ``copy-leases`` area is
@@ -139,6 +143,8 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "plugin-sessions",
         "plugins",
         "plugin-packages",
+        "background-tasks",
+        "operations",
     ],
     "intake": ["sources"],
 }

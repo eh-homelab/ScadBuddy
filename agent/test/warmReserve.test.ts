@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { Sql } from 'postgres'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { projectDirName } from '../src/harness/confine.js'
 import { claudeConfigDir } from '../src/harness/options.js'
 import type { HarnessRun } from '../src/harness/run.js'
@@ -401,9 +401,23 @@ describe('WarmSessions.reserve and release', () => {
 // replica's Claude Code config dir holds an earlier process's file of it ("Session ID … is
 // already in use", exit 1): one cut off before any of its appends landed leaves one (#6387).
 describe('a new start under the session`s own id (#6387)', () => {
+  /** Each setup's warm cache and directories: closed and removed after the test, passed or not. */
+  const caches: WarmSessions[] = []
+  /** Kept as each is made, so a setup that throws half way still leaves none behind. */
+  const dirs: string[] = []
+  afterEach(async () => {
+    for (const warm of caches.splice(0)) await warm.close()
+    await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })))
+  })
+  const tempDir = async (prefix: string) => {
+    const dir = await mkdtemp(path.join(tmpdir(), prefix))
+    dirs.push(dir)
+    return dir
+  }
+
   async function setup(found: boolean) {
-    const stateDir = await mkdtemp(path.join(tmpdir(), 'moved-warm-'))
-    const cwd = await mkdtemp(path.join(tmpdir(), 'moved-cwd-'))
+    const stateDir = await tempDir('moved-warm-')
+    const cwd = await tempDir('moved-cwd-')
     const log = vi.fn()
     const started: HarnessRun[] = []
     // `found`: whether the table holds a transcript to resume (transcriptExists).
@@ -419,46 +433,54 @@ describe('a new start under the session`s own id (#6387)', () => {
         return process()
       },
     })
+    caches.push(warm)
     const id = randomUUID()
     const stale = path.join(claudeConfigDir({ stateDir }), 'projects', projectDirName(await realpath(cwd)), `${id}.jsonl`)
     const turn = assembly()
     turn.run = { paths: { stateDir }, cwd }
-    const removedLines = () => log.mock.calls.filter(([m]) => String(m).includes('removed an earlier process')).length
-    const cleanUp = () => Promise.all([rm(stateDir, { recursive: true }), rm(cwd, { recursive: true })])
-    return { warm, id, stale, turn, log, removedLines, started, cleanUp }
+    const lines = (text: string) => log.mock.calls.filter(([m]) => String(m).includes(text)).length
+    return { warm, id, stale, turn, log, lines, started }
   }
   const exists = (file: string) => stat(file).then(() => true, () => false)
+  const placeStale = async (stale: string) => {
+    await mkdir(path.dirname(stale), { recursive: true })
+    await writeFile(stale, '{"type":"user"}\n')
+  }
 
   it('removes an earlier process`s file of the session before the start, and says so once', async () => {
     const s = await setup(false)
-    await mkdir(path.dirname(s.stale), { recursive: true })
-    await writeFile(s.stale, '{"type":"user"}\n')
-    const { entry } = await s.warm.acquire(s.id, s.turn, credential, 1)
+    await placeStale(s.stale)
+    await s.warm.acquire(s.id, s.turn, credential, 1)
     expect(await exists(s.stale)).toBe(false)
     expect(s.started[0]?.sessionId).toBe(s.id)
-    expect(s.removedLines()).toBe(1)
-    s.warm.leave(entry)
-    await s.warm.close()
-    await s.cleanUp()
+    expect(s.lines('removed an earlier process')).toBe(1)
   })
 
-  it('says nothing when there is no such file (a session`s first turn), and touches none on a resume', async () => {
-    const fresh = await setup(false)
-    const first = await fresh.warm.acquire(fresh.id, fresh.turn, credential, 1)
-    expect(fresh.log).not.toHaveBeenCalled()
-    fresh.warm.leave(first.entry)
-    await fresh.warm.close()
-    await fresh.cleanUp()
+  it('says nothing when there is no such file (a session`s first turn)', async () => {
+    const s = await setup(false)
+    await s.warm.acquire(s.id, s.turn, credential, 1)
+    expect(s.started[0]?.sessionId).toBe(s.id)
+    expect(s.log).not.toHaveBeenCalled()
+  })
 
-    const resumed = await setup(true)
-    await mkdir(path.dirname(resumed.stale), { recursive: true })
-    await writeFile(resumed.stale, '{"type":"user"}\n')
-    const second = await resumed.warm.acquire(resumed.id, resumed.turn, credential, 1)
-    expect(resumed.started[0]?.resume).toBe(resumed.id)
-    expect(await exists(resumed.stale)).toBe(true)
-    expect(resumed.removedLines()).toBe(0)
-    resumed.warm.leave(second.entry)
-    await resumed.warm.close()
-    await resumed.cleanUp()
+  it('touches no file on a resume', async () => {
+    const s = await setup(true)
+    await placeStale(s.stale)
+    await s.warm.acquire(s.id, s.turn, credential, 1)
+    expect(s.started[0]?.resume).toBe(s.id)
+    expect(await exists(s.stale)).toBe(true)
+    expect(s.lines('removed an earlier process')).toBe(0)
+  })
+
+  it('says so when a file there cannot be removed, and still starts', async () => {
+    const s = await setup(false)
+    // A non-empty directory where the file would be: `rm` without `recursive` refuses it.
+    await mkdir(path.join(s.stale, 'inside'), { recursive: true })
+    await s.warm.acquire(s.id, s.turn, credential, 1)
+    expect(s.started[0]?.sessionId).toBe(s.id)
+    expect(s.lines('could not be removed')).toBe(1)
+    // Never removed recursively: what is there stays.
+    expect(await exists(path.join(s.stale, 'inside'))).toBe(true)
+    expect(s.lines('removed an earlier process')).toBe(0)
   })
 })

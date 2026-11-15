@@ -91,18 +91,27 @@ from scadbuddy.orders.quote import (
     reference_of,
     support_check,
 )
-from scadbuddy.orders.rendering import AttachTo, output_for_reference
+from scadbuddy.orders.rendering import AttachTo, RenderedOutput, output_for_reference
 from scadbuddy.orders.spools import item_plan
+from scadbuddy.orders.storefront.slice_price import (
+    RUN_ATTEMPTS,
+    SLICE_PRICE_KIND,
+    SliceRun,
+    SliceUnavailableError,
+    SliceVariant,
+    model_digest,
+    price_variant,
+)
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.hot_path import native_backends
-from scadbuddy.render.job_models import Job
+from scadbuddy.render.job_models import Job, JobNotFoundError
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.read_budget import budget_of
 from scadbuddy.render.runner import OpenSCADError, cached_schema
 from scadbuddy.render.schema import CustomizerSchema
 from scadbuddy.slicing.component import NO_CONTENT_STORE, SLICING
-from scadbuddy.store.cache import StaleBlobError
+from scadbuddy.store.cache import StaleBlobError, materialize_result
 from scadbuddy.store.content_models import BlobMissingError
 
 if TYPE_CHECKING:
@@ -147,6 +156,8 @@ QUOTE_DETERMINISTIC: tuple[type[Exception], ...] = (
 #: blob swept, while the run read it. The next attempt's ``ensure_output`` renders and
 #: saves the output again, and slices again.
 QUOTE_RETRYABLE: tuple[type[Exception], ...] = (OutputNotFoundError, BlobMissingError)
+#: A storefront slice also tries again after a passing failure (#6370 review).
+SLICE_RETRYABLE: tuple[type[Exception], ...] = (*QUOTE_RETRYABLE, SliceUnavailableError)
 
 
 def _slice_failed(plate_id: int, failure: str | None) -> ApiError:
@@ -1045,7 +1056,84 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         dumped: dict[str, Any] = attachment.model_dump(mode="json")
         return dumped
 
+    async def storefront_slice_check(request: dict[str, Any]) -> dict[str, Any]:
+        SliceVariant.model_validate(request)
+        return {}
+
+    async def storefront_slice_run(
+        request: dict[str, Any], checked: dict[str, Any]
+    ) -> dict[str, Any]:
+        """A storefront variant sliced and priced as a back-office quote is (#6153,
+        ``orders/storefront/slice_price.py`` ``price_variant``): the same render, slicer
+        and price book, here over this process's services."""
+        # Read when it runs: these import back into this module's imports.
+        from scadbuddy.api.storefront_slice import offered_spools
+        from scadbuddy.operations.component import OPERATIONS
+        from scadbuddy.spools.component import SPOOLS
+
+        orders = components.get(ORDERS)
+        create = components.get(OPERATIONS).kinds["output_create"]
+
+        async def create_output(body: dict[str, Any]) -> dict[str, Any]:
+            return await create.run(body, {})
+
+        async def offered(printer: str) -> set[int] | None:
+            settings = await asyncio.to_thread(core.settings_store.load)
+            found = await offered_spools(
+                settings, components.get(PRINTERS), components.get(SPOOLS), printer
+            )
+            return None if found is None else {spool.spool_id for spool in found}
+
+        async def rendered_sha256(rendered: RenderedOutput) -> str | None:
+            if rendered.job_id is None:
+                return None
+            try:
+                job = await asyncio.to_thread(core.render.store.read, rendered.job_id)
+            except JobNotFoundError:
+                return None
+            if job.result is None:
+                return None
+            await materialize_result(core.store.blobs, job.result)
+            path = core.paths.root / job.result.model_3mf
+            return await asyncio.to_thread(model_digest, job.id, path)
+
+        run = SliceRun(
+            prices=orders.slice_prices,
+            filament=orders.store.filament,
+            book=orders.price_book,
+            outputs=core.outputs,
+            renders=_Renders(core),
+            create_output=create_output,
+            slicer=PreviewSlicer(core, components),
+            offered=offered,
+            rendered_sha256=rendered_sha256,
+        )
+        try:
+            row = await price_variant(run, SliceVariant.model_validate(request))
+        except SLICE_RETRYABLE:
+            raise
+        except QUOTE_DETERMINISTIC as error:
+            # As a quote's: a bug is not tried again.
+            raise ApplicationError(
+                type(error).__name__, type=type(error).__name__, non_retryable=True
+            ) from error
+        return {"price_key": row.price_key, "status": row.status}
+
     return [
+        OperationKind(
+            SLICE_PRICE_KIND,
+            storefront_slice_check,
+            storefront_slice_run,
+            # As a quote's (#5353): a worker that stops mid-run is tried again, and every
+            # attempt writes the same row, by the variant's key.
+            run_attempts=RUN_ATTEMPTS,
+            queue="library",
+            run_timeout=QUOTE_TIMEOUT,
+            where="the storefront's slice prices",
+            # The render and the slice outlast the command deadline: the page reads the
+            # price again.
+            answers_running=True,
+        ),
         OperationKind(
             ORDER_ATTEMPT_COPY,
             copy_check_kind,
