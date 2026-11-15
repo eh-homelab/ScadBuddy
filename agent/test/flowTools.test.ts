@@ -79,7 +79,7 @@ describe("a flow's tool tiers (#2704)", () => {
     const sets = [{ name: 'scadbuddy', tool_prefix: 'mcp__scadbuddy__', switchable: false, tools: camera.map((t) => ({ name: t.name, harness_name: `mcp__scadbuddy__${t.name}`, risk: t.risk })) }]
     const svc = services({ toolOverrides: new BuiltInTools(access, sets).registryOverrides() })
     const tier = toolActivities(camera, { services: svc, sessions: { ownerOf: async () => undefined } })[FLOW_TOOL_TIER_ACTIVITY]!
-    expect(await env(`flow-${RUN}`).run(tier, { tool: 'get_printer_camera' })).toEqual({ tier: 'read', disabled: true, declared: 'read' })
+    expect(await env(`flow-${RUN}`).run(tier, { tool: 'get_printer_camera' })).toEqual({ tier: 'read', disabled: true, declared: 'read', keyed: false })
   })
 
   it('/internal/flows/tools lists the camera off as disabled', async () => {
@@ -100,17 +100,24 @@ describe("a flow's tool tiers (#2704)", () => {
     const { svc, set } = rig()
     const tier = toolActivities(TOOLS, { services: svc, sessions: { ownerOf: async () => undefined } })[FLOW_TOOL_TIER_ACTIVITY]!
     const flow = env(`flow-${RUN}`)
-    expect(await flow.run(tier, { tool: 'look' })).toEqual({ tier: 'read', disabled: false, declared: 'read' })
+    expect(await flow.run(tier, { tool: 'look' })).toEqual({ tier: 'read', disabled: false, declared: 'read', keyed: false })
     await set({ look: 'outward' }, ['send'])
-    expect(await flow.run(tier, { tool: 'look' })).toEqual({ tier: 'outward', disabled: false, declared: 'read' })
-    expect(await flow.run(tier, { tool: 'send' })).toEqual({ tier: 'outward', disabled: true, declared: 'outward' })
+    expect(await flow.run(tier, { tool: 'look' })).toEqual({ tier: 'outward', disabled: false, declared: 'read', keyed: false })
+    expect(await flow.run(tier, { tool: 'send' })).toEqual({ tier: 'outward', disabled: true, declared: 'outward', keyed: false })
   })
 
   it('answers the code tier as declared beside a lowered tier, so the flow retries by the stricter (review I2)', async () => {
     const { svc, set } = rig()
     const tier = toolActivities(TOOLS, { services: svc, sessions: { ownerOf: async () => undefined } })[FLOW_TOOL_TIER_ACTIVITY]!
     await set({ send: 'read' }, [])
-    expect(await env(`flow-${RUN}`).run(tier, { tool: 'send' })).toEqual({ tier: 'read', disabled: false, declared: 'outward' })
+    expect(await env(`flow-${RUN}`).run(tier, { tool: 'send' })).toEqual({ tier: 'read', disabled: false, declared: 'outward', keyed: false })
+  })
+
+  it('answers whether every write the tool makes is keyed to the call (#6345)', async () => {
+    const { svc } = rig()
+    const keyedSend = defineTool({ name: 'send', label: 'send', description: 'send', input: z.object({}), risk: 'outward', keyed: true, routes: [], handler: async () => json({}) })
+    const tier = toolActivities([keyedSend], { services: svc, sessions: { ownerOf: async () => undefined } })[FLOW_TOOL_TIER_ACTIVITY]!
+    expect(await env(`flow-${RUN}`).run(tier, { tool: 'send' })).toEqual({ tier: 'outward', disabled: false, declared: 'outward', keyed: true })
   })
 
   it('refuses a tool the agent does not have, one a flow cannot call, and any other caller', async () => {
