@@ -853,7 +853,7 @@ export class TurnHost {
       if (attention.reason !== 'done') return waits(request, attention)
       const classic = this.#deps.questions
       if (!classic) return Promise.resolve({ answered: false, message: NO_PARKS })
-      return classic.gate({ sessionId: session.id, turnId, secrets, signal: stop, turnStartedAt: session.claimedAt })(request)
+      return classic.gate({ sessionId: session.id, turnId, attempt, secrets, signal: stop, turnStartedAt: session.claimedAt })(request)
     }
     const questionGate: QuestionGate = async (request): Promise<QuestionVerdict> => {
       // Only the user is asked, and only by the turn that holds the session: a handoff since the

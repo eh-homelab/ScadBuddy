@@ -384,6 +384,17 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   sends, the session events and the `approval` audit row in one transaction), a prepared action
   used once by its asker for its input hash, and an MCP prepare's bounds under its advisory lock.
   Who may see or decide stays the agent's check. Tests `tests/crud/test_crud_agent_approvals.py`.
+  `api/crud_agent_questions.py` (area `questions`) over `agent_data/questions.py` is the agent's
+  `gate/questions.ts` `QuestionService` SQL: its reads, a `done` summary's dismissal (the guarded
+  UPDATE, its events and its `question` audit row in one transaction), the attention rate limit's
+  count (only while the caller holds the lease `attention-rate`, `agent_data/leases.py`, whose
+  acquire also tries the SQL path's `scadbuddy:attention-rate` transaction lock; 409 `lease-lost`
+  otherwise, never a count), a turn's `done` facts (`gate/doneSummary.ts` `loadDoneSummary`'s two
+  reads; the text is the agent's, which redacts the turn's secrets) and its post (only while the
+  turn's `turn_attempt` and `durable_turn_id` hold the session, read `FOR UPDATE`, and the session
+  is the browser user's; at most `DONE_POSTS_PER_TURN`, a refusal audited `rate_limited`; the
+  summaries it replaces, the events and their audit rows in the same transaction). Tests
+  `tests/crud/test_crud_agent_questions.py`.
 - `backend/scadbuddy/flow_triggers/` — runs started on a schedule or an event (#2484,
   spec 2026-10-11 §12): `store.py` (`flow_triggers`, their standing grants and fires),
   `fire.py` (the `flow_trigger_fire` activity on the `library` queue), `events.py` (the

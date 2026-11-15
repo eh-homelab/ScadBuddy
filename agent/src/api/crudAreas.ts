@@ -50,7 +50,7 @@ export const TASK_AREAS = ['background-tasks', 'operations'] as const
  * approvals, each decision written once with its events and audit row (backend
  * api/crud_agent_approvals.py; approvals/crudApprovals.ts).
  */
-export const GATE_AREAS = ['gate', 'pending-input', 'audit', 'approvals'] as const
+export const GATE_AREAS = ['gate', 'pending-input', 'audit', 'approvals', 'questions'] as const
 
 export type CrudAreasOptions = {
   fetch?: typeof fetch

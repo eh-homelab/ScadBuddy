@@ -74,6 +74,7 @@ import { BLOB_AREAS, CrudAreas, FORGET_AREAS, GATE_AREAS, SECRET_AREAS, TASK_ARE
 import { CrudApprovals } from './approvals/crudApprovals.js'
 import { CrudAudit } from './audit/crudAudit.js'
 import { CrudPending } from './gate/crudPending.js'
+import { CrudQuestions } from './gate/crudQuestions.js'
 import { CrudGate } from './gate/crudStore.js'
 import { gated, STORE_AREAS, type StoreArea } from './api/crudStores.js'
 import { CrudFlowRunReads } from './flows/backendReads.js'
@@ -652,6 +653,7 @@ const sessions =
         sql: database.sql,
         pendingRoutes,
         approvalRoutes: { crud: new CrudApprovals(crudTarget), use: () => crudAreas.has('approvals') },
+        questionRoutes: { crud: new CrudQuestions(crudTarget), use: () => crudAreas.has('questions') },
         blobs: sessionImages(database.sql),
         httpBodies: httpBodies(database.sql),
         browserOrigins: browserOriginsOn(database.sql),

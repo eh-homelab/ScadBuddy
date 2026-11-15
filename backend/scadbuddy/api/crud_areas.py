@@ -99,7 +99,10 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: Its ``audit`` area is ``…/agent/audit/*``: the audit log's rows written, listed and pruned
 #: (`api/crud_agent_audit.py`). Its ``approvals`` area is ``…/agent/approvals/*``: the classic
 #: approvals read, made, decided once (with their events and audit row in the decision's
-#: transaction) and used once (`api/crud_agent_approvals.py`).
+#: transaction) and used once (`api/crud_agent_approvals.py`). Its ``questions`` area is
+#: ``…/agent/questions/*``: the `done` summaries read, dismissed and posted (the post only while
+#: the turn's placement holds the session), and the attention limit's count under its lease
+#: (`api/crud_agent_questions.py`).
 CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "projects": ["flows", "operations", "payload-keys"],
     "render": ["settings", "jobs", "refs", "blob-index", "store-folders", "assets", "libraries"],
@@ -161,6 +164,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "pending-input",
         "audit",
         "approvals",
+        "questions",
     ],
     "intake": ["sources"],
 }

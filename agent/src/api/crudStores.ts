@@ -156,7 +156,7 @@ export const LEASE_RENEW_MS = 30_000
 
 /** The keys the agent may take (backend agent_data/leases.py `KEY_PATTERN`). */
 // eslint-disable-next-line no-control-regex
-export const LEASE_KEY = /^(tool-listing:(remote:[a-z][a-z0-9-]{0,30}[a-z0-9]|package:[^\u0000-\u001f]{1,400})|plugin-oauth:[a-z][a-z0-9-]{0,30}[a-z0-9])$/
+export const LEASE_KEY = /^(tool-listing:(remote:[a-z][a-z0-9-]{0,30}[a-z0-9]|package:[^\u0000-\u001f]{1,400})|plugin-oauth:[a-z][a-z0-9-]{0,30}[a-z0-9]|attention-rate)$/
 
 /** A lease held: its key and the holder's own token. */
 export type HeldLease = { key: string; token: string }

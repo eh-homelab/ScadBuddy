@@ -148,7 +148,16 @@ never answers goes to `onError`, as a failed SQL write did. Test `test/crudAudit
 `ApprovalService`'s SQL; its access checks run here first, as before. A decision on the API
 carries the span started here from the row as read (a decision that loses never ends it, so
 never exports it), and its audit row is written in the decision's transaction, not by `AuditLog`.
-Test `test/crudApprovals.test.ts`. A route's
+Test `test/crudApprovals.test.ts`. Area `questions` (backend `api/crud_agent_questions.py`,
+`src/gate/crudQuestions.ts`) takes `QuestionService`'s SQL: the reads, a summary's dismissal (its
+events and audit row in one transaction on the API), the attention count (read only while this
+process holds the lease `attention-rate`, which the API grants only while no SQL-path pod holds
+`ATTENTION_RATE_LOCK`; a busy lease is tried again until the rate lock's wait, and a lost lease,
+a busy one past the wait or an API error refuses the request, never lets it through), and a turn's
+`done` post: the facts are read through the API, the summary is written here with the turn's
+secrets redacted, and the post lands only while the turn's `turn_attempt` and `durable_turn_id`
+hold the session, with its cap, the summaries it replaces, its events and its audit rows in one
+transaction. Test `test/crudQuestions.test.ts`. A route's
 answer counts only with `X-ScadBuddy-Crud: 1`; any other failure takes the read's existing
 error path (a lookup failure the activity retries, a 500, a resync). A session's successful `order_item_revision_add` (or
 `_after_acceptance`) is an `ai_session_order_costs` row (`src/sessions/orderCosts.ts`
