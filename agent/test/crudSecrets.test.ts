@@ -478,17 +478,46 @@ describe('the credential consumers with no KEK in this process', () => {
     const repo = new CrudCredentials(BASE, { fetch })
     await repo.create({ kind: 'anthropic_api_key', secret: 'sk-ant-api03-turnturnturn' }, undefined)
     const pool = new CredentialPool({ repo, kek: NO_KEK, log: () => {} })
-    const [first] = await pool.candidates()
+    const sessionId = randomUUID()
+    const turnId = randomUUID()
+    const [first] = await pool.candidates({ sessionId, turnId })
     expect(first?.credential).toEqual({ kind: 'anthropic_api_key', secret: 'sk-ant-api03-turnturnturn' })
     expect(api.audited).toEqual(['reveal.turn'])
+    // The reveal names the turn it is for, which the API's audit row keeps.
+    const reveal = api.seen.filter((r) => r.path === '/credentials/reveal').at(-1)?.body as Record<string, unknown>
+    expect([reveal.session_id, reveal.turn_id]).toEqual([sessionId, turnId])
     // The redaction of tool output reads them too, audited as such.
     expect(await toolSecrets({ kek: undefined, credentials: repo }).fresh()).toContain('sk-ant-api03-turnturnturn')
     expect(api.audited).toEqual(['reveal.turn', 'reveal.redact'])
+    // Every tool call's redaction shares one reveal for SAVED_SECRETS_CACHE_MS.
+    const redaction = toolSecrets({ kek: undefined, credentials: repo })
+    await redaction.secrets()
+    expect(await redaction.secrets()).toContain('sk-ant-api03-turnturnturn')
+    expect(api.audited).toEqual(['reveal.turn', 'reveal.redact', 'reveal.redact'])
     // Without a KEK on the API either, none is usable, and the pool says why.
     api.hasKek = false
     await expect(new CredentialPool({ repo: new CrudCredentials(BASE, { fetch }), kek: NO_KEK }).candidates()).rejects.toThrow(
       'no key-encryption key: the API has no key-encryption key',
     )
+  })
+
+  it("/status says the API did not answer, not the database, when the API's key read fails", async () => {
+    const { fetch } = setup()
+    const failing = new (class extends CrudCredentials {
+      override opener(): Promise<never> {
+        return Promise.reject(new Error('the backend could not be reached'))
+      }
+    })(BASE, { fetch })
+    const status = await aiStatus({ database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) }, credentials: failing, kek: NO_KEK }, true)
+    expect(status.ai).toBe('unavailable (the API did not answer for its key-encryption key)')
+  })
+
+  it('refuses a base URL with a bare ? or #, as the API does', async () => {
+    const { fetch } = setup()
+    const repo = new CrudCredentials(BASE, { fetch })
+    for (const base_url of ['https://gw.example/?', 'https://gw.example/#']) {
+      await expect(repo.create({ kind: 'gateway', base_url, secret: 'gw-token-0123456789' }, undefined)).rejects.toThrow('must not have a query or fragment')
+    }
   })
 
   it('the settings routes save, list and test a credential, and /status is enabled', async () => {

@@ -707,6 +707,8 @@ In an `api` process, `temporal` reports its own `agent-tools.<hostname>` worker.
   | `unavailable (database migrations failed)` | `ready()` returned false |
   | `unavailable (waiting for the API to apply the database migrations)` | `ai_migrations` lacks a file this build expects: the API has not migrated yet (#5299) |
   | `unavailable (database timed out)` | `ready()` or the credential read took longer than 2 s (`DEFAULT_HEALTH_TIMEOUT_MS`) |
+  | `unavailable (the API did not answer for its key-encryption key)` | Once the API serves area `credentials` (#5299 step 4): `GET …/crud/agent/credentials/key` failed |
+  | `unavailable (the API timed out answering for its key-encryption key)` | That read took longer than 2 s |
   | `disabled (no key-encryption key: <reason>)` | See §3.2 |
   | `disabled (no Claude credential)` | No row saved |
   | `unavailable (stored credential was sealed with a different key-encryption key)` | The row's `kek_id` does not match the mounted key |

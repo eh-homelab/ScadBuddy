@@ -116,7 +116,7 @@ export type AttemptOutcome =
 /** Where a turn gets its credentials (CredentialPool; a fixed one in tests). */
 export type CredentialSource = {
   /** Usable credentials, in priority order; throws (NoUsableCredentialError) when none is usable now. */
-  candidates(options?: { includeCooling?: boolean }): Promise<PooledCredential[]>
+  candidates(options?: { includeCooling?: boolean; sessionId?: string; turnId?: string }): Promise<PooledCredential[]>
   /** `runWithFallback`'s `report` for one turn, which its audit rows name. */
   reporter(context: { sessionId?: string; turnId?: string }): FallbackOptions['report']
 }
@@ -591,7 +591,7 @@ export class CredentialPool implements CredentialSource {
    * `includeCooling` also lists a rate-limited one (the warm resync looks for the credential a process
    * runs on, which a cooldown does not end); a disabled one is never listed.
    */
-  async candidates(options: { includeCooling?: boolean } = {}): Promise<PooledCredential[]> {
+  async candidates(options: { includeCooling?: boolean; sessionId?: string; turnId?: string } = {}): Promise<PooledCredential[]> {
     // The key that opens them: this process's KEK, or the API's once the credentials go through
     // its CRUD routes (#5299 D5), where this process may hold none.
     const kek = await openerOf(this.repo, this.kek)
@@ -599,7 +599,7 @@ export class CredentialPool implements CredentialSource {
     // One read of every row, its state, epoch and sealed secret together (one transaction on the
     // API, which audits the reveal): the epoch recorded against is always that of the secret the
     // turn runs on.
-    const rows = await this.repo.revealAll(this.kek.ok ? this.kek.kek : undefined, 'turn')
+    const rows = await this.repo.revealAll(this.kek.ok ? this.kek.kek : undefined, 'turn', { sessionId: options.sessionId, turnId: options.turnId })
     const list = rows.map((r) => r.stored)
     const out: PooledCredential[] = []
     for (const { stored: c, credential } of rows) {

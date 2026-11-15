@@ -75,7 +75,7 @@ async function query(deps: NestedDeps, cap: number, base: Omit<HarnessRun, 'cred
     return (deps.run ?? runHarness)({ ...capped, credential: await deps.credential() })
   }
   return runWithFallback(capped, {
-    candidates: await deps.credentials.candidates(),
+    candidates: await deps.credentials.candidates(deps.sessionId ? { sessionId: deps.sessionId } : {}),
     report: deps.credentials.reporter(deps.sessionId ? { sessionId: deps.sessionId } : {}),
     ...(deps.run ? { run: deps.run } : {}),
     ...(deps.probe ? { probe: deps.probe } : {}),

@@ -5,7 +5,9 @@ a Claude credential and a release of a payload data key each write one row, in t
 transaction as the read, so no secret leaves the API without its row. The row never holds
 the secret: ``detail`` names the credential by kind and last four characters, or the
 subject. A payload key's release is written once per subject and window
-(``payload_keys.py`` ``RELEASE_AUDIT_WINDOW``).
+(``payload_keys.py`` ``RELEASE_AUDIT_WINDOW``), and a reveal for redaction once per window
+(``api/crud_agent_secrets.py`` ``REDACT_AUDIT_WINDOW``): the agent asks for both far more
+often than a row per ask would be worth reading (``recorded_lately``).
 """
 
 from __future__ import annotations
@@ -52,4 +54,30 @@ def record(
             outcome,
             detail[:DETAIL_MAX],
         ),
+    )
+
+
+def recorded_lately(
+    conn: Connection[Any],
+    kind: Kind,
+    actions: tuple[str, ...],
+    window: str,
+    *,
+    detail: str | None = None,
+) -> bool:
+    """Whether an ``ok`` row of ``kind`` with one of ``actions`` (and ``detail``, when
+    given) was written inside ``window`` (a Postgres interval). Under an advisory lock of
+    its own per kind, actions and detail, in the caller's transaction, so two calls at once
+    write one row."""
+    conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtext(%s))",
+        (f"scadbuddy:agent_audit:{kind}:{','.join(actions)}:{detail or ''}",),
+    )
+    return (
+        conn.execute(
+            "SELECT 1 FROM ai_audit WHERE kind = %s AND action = ANY(%s) AND outcome = 'ok'"
+            " AND (%s::text IS NULL OR detail = %s) AND at > now() - %s::interval LIMIT 1",
+            (kind, list(actions), detail, detail, window),
+        ).fetchone()
+        is not None
     )

@@ -285,7 +285,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   compare-and-set under the table's lock; `payload_keys.py` a subject's data key released
   (made first under the subject's advisory lock, never for a subject in
   `ai_forgotten_subjects`), never the KEK; `audit.py` the `ai_audit` row each reveal
-  (kind `credential`) and release (kind `payload_key`, once per subject and
+  (kind `credential`; a redaction's once per `REDACT_AUDIT_WINDOW`) and release (kind `payload_key`, once per subject and
   `RELEASE_AUDIT_WINDOW`) writes in its transaction; `rotation.py` the re-wrap of the credentials and payload
   keys at the API's start (`main._rotate_agent_secrets`). Its tests make the agent's tables
   with the agent's own migration files (`render/agent_migrations.py` `migrate_agent`) and open

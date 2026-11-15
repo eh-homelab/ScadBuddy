@@ -291,7 +291,7 @@ export class CoreTurn {
     // The credential the turn is on, moved by each fallback (#2973), for WebFetch's model call.
     const onCredential: { current: PooledCredential | undefined } = { current: undefined }
     try {
-      const turn = await deps.runner.assemble(session, principal, { parent: traced.context() })
+      const turn = await deps.runner.assemble(session, principal, { parent: traced.context(), turnId })
       this.#turn = turn
       secrets = turn.secrets
       const gates = this.#args.gates({
@@ -336,7 +336,7 @@ export class CoreTurn {
         warm: deps.warm,
         sessionId: id,
         first: turn,
-        assemble: () => deps.runner.assemble(session, principal, { parent: traced.context() }),
+        assemble: () => deps.runner.assemble(session, principal, { parent: traced.context(), turnId }),
         stop: signal,
         acquired: onAcquired,
         trace: traced,
