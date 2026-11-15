@@ -51,7 +51,10 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: (the bytes in the body), which tab a session pairs with, which replica holds a tab and
 #: a tab's images; its ``pairings`` area is ``…/agent/pairings`` and every route under it;
 #: its ``mcp-tokens`` area is ``…/agent/mcp-tokens`` and every route under it, the MCP
-#: bearer tokens by their hashes.
+#: bearer tokens by their hashes; its ``notify`` area is ``…/agent/push/*`` and
+#: ``…/agent/notify-channels`` and every route under it, the Web Push records and the
+#: notification channels, sealed and opened with the API's KEK
+#: (`api/crud_agent_notify.py`).
 CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "projects": ["flows", "operations", "payload-keys"],
     "render": ["settings", "jobs", "refs", "blob-index", "store-folders", "assets", "libraries"],
@@ -94,6 +97,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "bridge-tabs",
         "pairings",
         "mcp-tokens",
+        "notify",
     ],
     "intake": ["sources"],
 }

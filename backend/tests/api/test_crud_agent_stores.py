@@ -58,7 +58,14 @@ def test_only_the_agent_credential_reaches_the_routes(client: TestClient) -> Non
 
 def test_the_areas_list_the_small_stores(client: TestClient, agent: dict[str, str]) -> None:
     areas = client.get(f"{BASE}/areas", headers=agent).json()["areas"]
-    for area in ("activity-kinds", "browser-origins", "bridge-tabs", "pairings", "mcp-tokens"):
+    for area in (
+        "activity-kinds",
+        "browser-origins",
+        "bridge-tabs",
+        "pairings",
+        "mcp-tokens",
+        "notify",
+    ):
         assert area in areas
 
 
