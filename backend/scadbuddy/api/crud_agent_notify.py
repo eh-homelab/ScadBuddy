@@ -34,7 +34,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
@@ -358,6 +358,11 @@ async def push_sent(body: SentClaim, state: StateDep) -> Claimed:
     return Claimed(claimed=await _in_tx(state, run))
 
 
+#: The agent's ``notify/dispatcher.ts`` ``WAITING_PUSH_WINDOW_MS``: a request older than
+#: this is not pushed, so it is not listed.
+PUSH_WINDOW = timedelta(hours=24)
+
+
 class WaitingRequest(BaseModel):
     """A flow grant waiting for a person's decision, as a push names it: the id the page's
     own notification uses as its tag (frontend `lib/needsYou.ts`), never what it asks."""
@@ -378,8 +383,10 @@ async def push_waiting(triggers: TriggersDep) -> WaitingRequests:
     """#6399: the flow grants waiting for a person (a run's and a trigger's standing grant),
     which the agent pushes to a closed tab beside its own pending input. The same requests
     as ``GET /api/v1/flow-grant-requests``, by id only."""
-    runs = await triggers.flows.store.requested_grants(GRANT_REQUESTS_MAX)
-    standing = await triggers.store.requested_grant_ids(GRANT_REQUESTS_MAX)
+    # Only those the agent still pushes, so older ones never crowd a new one out of the page.
+    newer_than = datetime.now(UTC) - PUSH_WINDOW
+    runs = await triggers.flows.store.requested_grants(GRANT_REQUESTS_MAX, newer_than)
+    standing = await triggers.store.requested_grant_ids(GRANT_REQUESTS_MAX, newer_than)
     return WaitingRequests(
         requests=[
             WaitingRequest(id=f"run-grant:{grant.id}", reason="grant", since=grant.created_at)

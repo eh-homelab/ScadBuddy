@@ -78,6 +78,21 @@ describe('waiting requests by Web Push (#6399)', () => {
     expect(claims).toEqual(['run-grant:g6 -> push:b1'])
   })
 
+  it("opens no subscription on the timer's wake when nothing young enough waits", async () => {
+    const { store } = recordingStore([sub('b1', owner('browser', 'browser'))])
+    let opened = 0
+    const counting: PushRepo = {
+      ...store,
+      subscriptions: () => {
+        opened += 1
+        return store.subscriptions()
+      },
+    }
+    const old: AttentionNotice = { id: 'run-grant:g7', sessionId: null, reason: 'grant', since: Date.now() - 2 * 24 * 60 * 60_000 }
+    await dispatcher(counting, [], () => Promise.resolve([old])).pass('waiting')
+    expect(opened).toBe(0)
+  })
+
   it("still pushes the agent's own requests when the grants cannot be read", async () => {
     const { store, claims } = recordingStore([sub('b1', owner('browser', 'browser'))])
     const logged: string[] = []

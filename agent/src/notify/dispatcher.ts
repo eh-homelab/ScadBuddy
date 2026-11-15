@@ -146,6 +146,9 @@ export class NotificationDispatcher {
 
   /** Sends what has not been sent yet to every subscription and every enabled channel. */
   async pass(scope: PassScope = 'all'): Promise<void> {
+    // A timer's pass with nothing young enough to push opens no subscription's keys.
+    const waiting = await this.#waiting()
+    if (scope === 'waiting' && waiting.length === 0) return
     // With no KEK in this process, the records are reachable only once the API serves them (#5299 step 5).
     const subscriptions = this.#deps.store.available?.() === false ? [] : await this.#deps.store.subscriptions()
     const channelStore = this.#deps.channels?.available() === false ? undefined : this.#deps.channels
@@ -161,7 +164,6 @@ export class NotificationDispatcher {
     }
     type Job = { notice: AttentionNotice; target: string; run: () => Promise<void> }
     const jobs: Job[] = []
-    const waiting = await this.#waiting()
     let hosts: readonly string[] | undefined
     let vapid: Promise<Vapid> | undefined
     for (const { owner, subs } of byOwner.values()) {

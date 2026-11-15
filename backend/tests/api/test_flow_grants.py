@@ -422,6 +422,26 @@ def test_the_grant_requests_list_a_requested_grant_until_it_is_decided(
     assert client.get(waiting, headers=token(client)).json() == {"requests": []}
 
 
+def test_the_push_route_lists_only_requests_young_enough_to_push(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    """#6399: the agent pushes a request in its first 24 h only, so the route lists no older
+    one, and older ones never crowd a new one out of its page. The UI's list keeps them."""
+    old = started(client, "w1", {"grant": grant({"fn": "queue_print"})}, **AGENT)
+    new = started(client, "w2", {"grant": grant({"fn": "queue_print"})}, **AGENT)
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute(
+            "UPDATE flow_grants SET created_at = now() - interval '25 hours' WHERE run_id = %s",
+            (old,),
+        )
+    waiting = client.get("/api/v1/internal/crud/agent/push/waiting", headers=token(client))
+    assert [r["id"] for r in waiting.json()["requests"]] == [
+        f"run-grant:{view_grant(client, new)['id']}"
+    ]
+    listed = client.get("/api/v1/flow-grant-requests").json()["runs"]
+    assert {r["run_id"] for r in listed} == {old, new}
+
+
 def test_the_grant_requests_leave_out_a_run_that_ended(client: TestClient) -> None:
     """A run that ended asks for nothing more, so its undecided grant is not listed."""
     asked = started(client, "e1", {"grant": grant({"fn": "queue_print"})}, **AGENT)

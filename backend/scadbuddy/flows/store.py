@@ -460,10 +460,13 @@ class FlowStore:
     async def get_grant(self, run_id: str) -> Grant | None:
         return await asyncio.to_thread(self._get_grant, run_id)
 
-    async def requested_grants(self, limit: int) -> list[tuple[Grant, Run]]:
+    async def requested_grants(
+        self, limit: int, newer_than: datetime | None = None
+    ) -> list[tuple[Grant, Run]]:
         """#6399: the grants still waiting for a person's decision (`requested`, not
-        revoked) of runs that have not ended, oldest request first, at most `limit`."""
-        return await asyncio.to_thread(self._requested_grants, limit)
+        revoked) of runs that have not ended, oldest request first, at most `limit`; with
+        `newer_than`, only those requested after it."""
+        return await asyncio.to_thread(self._requested_grants, limit, newer_than)
 
     async def approve_grant(
         self, run_id: str, spec: GrantSpec | None, *, approved_by: str
@@ -626,7 +629,7 @@ class FlowStore:
             ).fetchone()
         return Grant.model_validate(row) if row else None
 
-    def _requested_grants(self, limit: int) -> list[tuple[Grant, Run]]:
+    def _requested_grants(self, limit: int, newer_than: datetime | None) -> list[tuple[Grant, Run]]:
         # The grants first, bounded by `limit`, then only their runs: `_RUN`'s columns are
         # unqualified, so the runs are not joined into the same SELECT.
         with self._pool.connection() as conn:
@@ -634,8 +637,9 @@ class FlowStore:
                 f"SELECT {_GRANT} FROM flow_grants WHERE status = 'requested'"
                 " AND revoked_at IS NULL AND EXISTS (SELECT 1 FROM workflow_runs r"
                 " WHERE r.id = flow_grants.run_id AND NOT (r.status = ANY(%s)))"
+                " AND (%s::timestamptz IS NULL OR created_at > %s)"
                 " ORDER BY created_at, id LIMIT %s",
-                (sorted(TERMINAL), limit),
+                (sorted(TERMINAL), newer_than, newer_than, limit),
             ).fetchall()
             grants = [Grant.model_validate(row) for row in rows]
             if not grants:
