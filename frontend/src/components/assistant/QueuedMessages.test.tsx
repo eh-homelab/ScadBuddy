@@ -75,6 +75,7 @@ describe('QueuedMessages (#6386)', () => {
     expect(item()).toHaveTextContent('Make it red')
     expect(item()).toHaveTextContent('Saving…')
     expect(within(item()).getByRole('button', { name: 'Edit queued message' })).toBeDisabled()
+    expect(within(item()).getByRole('button', { name: 'Remove queued message' })).toBeDisabled()
     // The agent refused it: the old words, and the buttons, are back.
     rerender(<QueuedMessages entries={entries} sessionId="s1" canChange refusals={{ q1: 1 }} onRemove={() => true} onEdit={() => true} />)
     expect(item()).toHaveTextContent('Also make it blue')
@@ -86,6 +87,12 @@ describe('QueuedMessages (#6386)', () => {
     const edited = [{ ...entries[0]!, text: 'Make it red' }, entries[1]!]
     rerender(<QueuedMessages entries={edited} sessionId="s1" canChange refusals={{ q1: 1 }} onRemove={() => true} onEdit={() => true} />)
     expect(item()).toHaveTextContent('Make it red')
+    expect(item()).not.toHaveTextContent('Saving…')
+    expect(within(item()).getByRole('button', { name: 'Edit queued message' })).toBeEnabled()
+    // Changed later from elsewhere (another tab, the API, an agent's tool): those words, plainly.
+    const elsewhere = [{ ...entries[0]!, text: 'Make it green' }, entries[1]!]
+    rerender(<QueuedMessages entries={elsewhere} sessionId="s1" canChange refusals={{ q1: 1 }} onRemove={() => true} onEdit={() => true} />)
+    expect(item()).toHaveTextContent('Make it green')
     expect(item()).not.toHaveTextContent('Saving…')
     expect(within(item()).getByRole('button', { name: 'Edit queued message' })).toBeEnabled()
   })

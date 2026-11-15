@@ -77,11 +77,12 @@ function QueuedMessage({
   const [removingAt, setRemovingAt] = useState<number | undefined>(undefined)
   const removing = removingAt === refused
   /**
-   * New words sent, shown dimmed until a `session.queue` carries them, or until the agent
-   * refuses the edit (the old words stay).
+   * New words sent, shown dimmed while the entry still has the words they replace (`from`):
+   * until a `session.queue` carries them, or any other change of the entry, or until the
+   * agent refuses the edit (the old words stay).
    */
-  const [saved, setSaved] = useState<{ text: string; at: number } | undefined>(undefined)
-  const saving = saved !== undefined && saved.at === refused && saved.text !== entry.text
+  const [saved, setSaved] = useState<{ text: string; from: string; at: number } | undefined>(undefined)
+  const saving = saved !== undefined && saved.at === refused && entry.text === saved.from
   const shown = saving ? saved.text : entry.text
   const label = next ? 'Queued, runs next' : 'Queued'
 
@@ -94,7 +95,7 @@ function QueuedMessage({
     const text = draft.trim()
     if (!text) return
     // The agent trims the words too: a change of surrounding white space only sends nothing.
-    if (text !== entry.text && onEdit(text)) setSaved({ text, at: refused })
+    if (text !== entry.text && onEdit(text)) setSaved({ text, from: entry.text, at: refused })
     setEditing(false)
   }
   const onKey = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -130,7 +131,8 @@ function QueuedMessage({
                 variant="ghost"
                 size="icon-xs"
                 aria-label="Remove queued message"
-                disabled={removing}
+                // While an edit is saving too: both wait on the entry's one refusal count.
+                disabled={removing || saving}
                 onClick={() => {
                   if (onRemove()) setRemovingAt(refused)
                 }}
