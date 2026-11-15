@@ -3,6 +3,7 @@ import { Link, useLocation, useParams, useSearchParams } from 'react-router'
 import { api } from '../api/client'
 import type { ItemPartRow, OrderDetail, OrderItemDetail, OrderItemPatch } from '../api/types'
 import { RevisionsPanel } from '../components/orders/RevisionsPanel'
+import { CustomerModels } from '../components/orders/CustomerModels'
 import { AddItemDialog } from '../components/orders/AddItemDialog'
 import { addMode, isCart, itemOpen, OPEN_FOR_EDITS, priceOpen, TAKES_ITEMS } from '../components/orders/afterAcceptance'
 import { ChargesEditor } from '../components/orders/ChargesEditor'
@@ -12,9 +13,13 @@ import { OrderSummary } from '../components/orders/OrderSummary'
 import { BambuddyProject } from '../components/orders/BambuddyProject'
 import { FulfilmentForm } from '../components/orders/FulfilmentForm'
 import { ItemPicture } from '../components/orders/ItemPicture'
+import { DepositSuggestions } from '../components/orders/DepositSuggestions'
 import { PaymentRequests } from '../components/orders/PaymentRequests'
 import { OrderAttachments } from '../components/orders/OrderAttachments'
 import { OrderFlowRuns } from '../components/orders/OrderFlowRuns'
+import { OrderMessages } from '../components/orders/OrderMessages'
+import { CustomerLink } from '../components/orders/CustomerLink'
+import { CustomerMail } from '../components/orders/CustomerMail'
 import { MarginBadge, OrderCosts } from '../components/orders/OrderCosts'
 import { ItemStatusBadge, OrderStatusBadge } from '../components/orders/OrderStatusBadge'
 import { itemAnchor } from '../components/orders/itemLink'
@@ -80,7 +85,18 @@ function decoded(text: string): string | null {
  */
 export function OrderPage() {
   const { id = '' } = useParams()
-  const view = useAsync(() => api.order(id), [id], [`order:${id}`])
+  // #5282 — the draft sweep tells a cart is deleted. The background read that follows
+  // is a 404, which `useAsync` keeps the stale order over, so the frame itself is read.
+  const [sweptId, setSwept] = useState<string | null>(null)
+  const view = useAsync(
+    () => api.order(id),
+    [id],
+    [`order:${id}`],
+    (signal) => {
+      if (signal !== 'resync' && signal.data.deleted === true) setSwept(id)
+      return true
+    },
+  )
   const events = useAsync(() => api.orderEvents(id), [id], [`order:${id}`])
   // #5326 — the money view, and the header's loss or thin-margin badge.
   const costs = useAsync(() => api.orderCosts(id), [id], [`order:${id}`])
@@ -95,6 +111,8 @@ export function OrderPage() {
   // #5282: a storefront cart has no customer until it is submitted.
   const customerId = detail?.order.customer_id
   const customer = useAsync(() => (customerId ? api.customer(customerId) : Promise.resolve(undefined)), [customerId])
+  // #5283: moves when the shop sends or revokes the customer link, which the mail list re-reads.
+  const [linkVersion, setLinkVersion] = useState(0)
   const [refusal, setRefusal] = useState<{ text: string; items: string[] } | null>(null)
   const [busy, setBusy] = useState(false)
   const [search, setSearch] = useSearchParams()
@@ -136,8 +154,9 @@ export function OrderPage() {
   }, [loaded, openItem])
   const [adding, setAdding] = useState(false)
   // #4955 — the drawer section a row's ⋯ action opened an item at, scrolled to once. Kept
-  // with the item's id, so it never reaches another item's drawer.
-  const [section, setSection] = useState<{ item: string; at: ItemSection } | null>(null)
+  // with the item's id, so it never reaches another item's drawer. `n` counts the clicks, so
+  // a second Slice… of the open item opens its dialog again (#4673).
+  const [section, setSection] = useState<{ item: string; at: ItemSection; n: number } | null>(null)
   const [cancelling, setCancelling] = useState(false)
   const [reason, setReason] = useState('')
   const [notes, setNotes] = useState<string | null>(null)
@@ -172,6 +191,16 @@ export function OrderPage() {
     }
   }
 
+  if (sweptId === id) {
+    return (
+      <div className="mx-auto max-w-5xl px-4 py-6">
+        <h1 className="text-xl font-semibold tracking-tight">Order</h1>
+        <p role="alert" className="mt-2 text-[13px] text-warn">
+          This order was not found. It was deleted.
+        </p>
+      </div>
+    )
+  }
   if (view.error) {
     return (
       <div className="mx-auto max-w-5xl px-4 py-6">
@@ -206,12 +235,18 @@ export function OrderPage() {
   const addresses = customer.data?.addresses ?? []
   const orderProject = detail.projects?.find((p) => p.item_id == null)
 
+  const pendingPurchases = (detail.sources ?? []).filter((s) => s.purpose === 'purchase' && s.status === 'pending').length
   return (
     <div className="h-full overflow-y-auto" data-testid="order-page">
       <div className="mx-auto flex max-w-5xl flex-col gap-4 px-4 py-6">
         <div className="flex flex-wrap items-center gap-3">
           <h1 className="text-xl font-semibold tracking-tight">{order.number ?? 'Cart'}</h1>
           <OrderStatusBadge status={order.status} onHold={order.on_hold} />
+          {pendingPurchases > 0 && (
+            <Badge variant="outline" className="border-warn/40 text-warn">
+              Purchase pending ({pendingPurchases})
+            </Badge>
+          )}
           <MarginBadge state={costs.data?.order_id === order.id ? costs.data.margin_state : null} />
           <span className="text-sm text-muted-foreground">
             for{' '}
@@ -314,7 +349,7 @@ export function OrderPage() {
           unfulfilAllowed={unfulfilAllowed}
           onAdd={() => setAdding(true)}
           onSection={(item, at) => {
-            setSection({ item: item.id, at })
+            setSection((was) => ({ item: item.id, at, n: (was?.n ?? 0) + 1 }))
             setOpenItem(item.id)
           }}
           busy={busy}
@@ -420,6 +455,7 @@ export function OrderPage() {
               )}
               <DepositControls order={order} totals={totals} requests={requests} onChanged={reload} />
               <PaymentRequests order={order} requests={requests} balanceMinor={totals.balance_minor} onChanged={reload} />
+              <DepositSuggestions order={order} onChanged={reload} />
               {order.status !== 'cancelled' && (
                 <form
                   className="flex flex-wrap items-end gap-2"
@@ -522,6 +558,26 @@ export function OrderPage() {
           )
         )}
 
+        {!isCart(order) && (
+          <Card size="sm">
+            <CardContent>
+              <div className="flex flex-col gap-4">
+                <CustomerLink
+                  key={`link-${order.id}`}
+                  orderId={order.id}
+                  onChanged={() => {
+                    setLinkVersion((v) => v + 1)
+                    reload()
+                  }}
+                />
+                <CustomerMail key={`mail-${order.id}`} orderId={order.id} version={linkVersion} />
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        <OrderMessages key={order.id} orderId={order.id} />
+
         <OrderFlowRuns orderId={order.id} />
 
         <section className="flex flex-col gap-1" aria-label="Audit line">
@@ -531,7 +587,7 @@ export function OrderPage() {
               {[...events.data].reverse().map((e) => (
                 <li key={e.id}>
                   <span className="text-foreground">{e.kind}</span>
-                  {typeof e.detail.to === 'string' ? ` → ${e.detail.to}` : ''} · {timeAgo(e.at)} · {e.by.kind === 'agent' ? (e.by.principal ?? 'agent') : e.by.kind === 'provider' ? `${providerLabel((e.by.principal ?? '').replace(/^payment:/, ''))} (provider)` : 'browser'}
+                  {typeof e.detail.to === 'string' ? ` → ${e.detail.to}` : ''} · {timeAgo(e.at)} · {e.by.kind === 'agent' ? (e.by.principal ?? 'agent') : e.by.kind === 'provider' ? `${providerLabel((e.by.principal ?? '').replace(/^payment:/, ''))} (provider)` : e.by.kind === 'customer' ? 'customer' : e.by.kind === 'visitor' ? 'storefront visitor' : 'browser'}
                   {/* #4252 (§7.4): what a flow did, under which run. */}
                   {e.by.run_id && (
                     <>
@@ -559,6 +615,12 @@ export function OrderPage() {
           slices={slices}
           unfulfilAllowed={unfulfilAllowed}
           section={section?.item === current.id ? section.at : null}
+          sliceAsked={section?.item === current.id && section.at === 'slice' ? section.n : 0}
+          // Once its dialog opened, a slice request is the quote's section only (#5797 review); only
+          // this item's (#5832). The item match is defensive: the drawer is keyed by its item and
+          // calls this from its own dialog, so no sequence in the UI today makes a call for
+          // another item's request.
+          onSliceOpened={() => setSection((was) => (was?.item === current.id && was.at === 'slice' ? { ...was, at: 'quote' } : was))}
           onClose={() => {
             setSection(null)
             setOpenItem(null)
@@ -577,6 +639,8 @@ function ItemDrawer({
   slices,
   unfulfilAllowed,
   section = null,
+  sliceAsked = 0,
+  onSliceOpened,
   onClose,
   onChanged,
 }: {
@@ -589,6 +653,9 @@ function ItemDrawer({
   unfulfilAllowed: boolean
   /** #4955 — the section a row's ⋯ action opened the drawer at: scrolled into view. */
   section?: ItemSection | null
+  /** #4673 — each row Slice… of this item, counted: a new count opens the slice dialog. */
+  sliceAsked?: number
+  onSliceOpened?: () => void
   onClose: () => void
   onChanged: () => void
 }) {
@@ -619,7 +686,8 @@ function ItemDrawer({
   // after this component's own effects run), and scrolled to; another section's attaches in its
   // place, so a second ⋯ section for this item scrolls again.
   const [target, setTarget] = useState<HTMLDivElement | null>(null)
-  const sectionRef = (name: ItemSection) => (name === section ? setTarget : undefined)
+  // Slice… (#4673) opens the quote's section with its dialog.
+  const sectionRef = (name: ItemSection) => (name === section || (name === 'quote' && section === 'slice') ? setTarget : undefined)
   useEffect(() => {
     target?.scrollIntoView?.({ block: 'start' })
   }, [target])
@@ -812,6 +880,7 @@ function ItemDrawer({
           </>
         )}
       </dl>
+      <CustomerModels detail={detail} itemId={item.id} onChanged={onChanged} />
       <RevisionsPanel order={order} item={item} attachments={detail.attachments.filter((a) => a.item_id === item.id)} onChanged={onChanged} />
       {parts && <ItemPartsEditor orderId={order.id} item={item} rows={parts} editable={!ENDED.has(order.status) && item.status !== 'fulfilled'} onChanged={onChanged} />}
       {/* A visitor's cart (#5282) has no price or print section, so no menu action opens one. */}
@@ -820,9 +889,9 @@ function ItemDrawer({
       {custom ? (
         // #4954 — a custom item's price is the field above: nothing is recorded here. A price
         // left `quoted` (added after acceptance, or by the agent) is accepted here, unless the order is on hold (#5541).
-        <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={false} acceptPending={editable && !settled && !order.on_hold} onChanged={onChanged} />
+        <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={false} acceptPending={editable && !settled && !order.on_hold} onChanged={onChanged} storefront={order.source === 'storefront'} />
       ) : (
-        <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={quotable && !settled} onChanged={onChanged} item={item} parts={(parts ?? []).map((p) => `${p.part_id}:${p.per_unit}`).join(',')} slice={{ run: slices.runs.get(item.id), start: (body) => slices.start(item.id, body, item.quotes.map((q) => q.id)), dismiss: () => slices.dismiss(item.id) }} />
+        <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={quotable && !settled} onChanged={onChanged} item={item} parts={(parts ?? []).map((p) => `${p.part_id}:${p.per_unit}`).join(',')} slice={{ run: slices.runs.get(item.id), start: (body) => slices.start(item.id, body, item.quotes.map((q) => q.id)), dismiss: () => slices.dismiss(item.id) }} startSlicing={sliceAsked} onSliceOpened={onSliceOpened} storefront={order.source === 'storefront'} />
       )}
       </div>
       )}

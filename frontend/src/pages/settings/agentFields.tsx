@@ -19,7 +19,7 @@ export const AGENT_FIELD_HOME: Record<AgentFormField, { section: string; domId: 
   bambuddy_url: { section: 'connection', domId: 'bambuddy-url' },
   public_url: { section: 'connection', domId: 'public-url' },
   library_folder_id: { section: 'projects', domId: 'library-folder' },
-  printer_id: { section: 'printing', domId: 'printer' },
+  default_printer: { section: 'printing', domId: 'printer' },
   default_plate: { section: 'preview', domId: 'default-plate' },
   display_unit: { section: 'preview', domId: 'display-unit' },
 }
@@ -147,7 +147,7 @@ export function SettingsAgentProvider({ sections, children }: { sections: readon
           api_key_typed: connection?.apiKeyTyped() ?? false,
           choices: {
             library_folder_id: listed('library_folder_id'),
-            printer_id: listed('printer_id'),
+            default_printer: listed('default_printer'),
             default_plate: listed('default_plate'),
             display_unit: listed('display_unit'),
           },

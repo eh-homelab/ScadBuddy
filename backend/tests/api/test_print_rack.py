@@ -47,6 +47,7 @@ from tests.api.test_print_run_choices import (
 from tests.api.test_send import configure, upload_route
 from tests.bambuddy.conftest import recording
 from tests.rack.helpers import INVENTED_SERIALS, invented_status, serial
+from tests.support.printers import linked_printer
 from tests.support.rack_guard import foreign_rack_errors
 from tests.support.temporal import WorkflowReaper
 
@@ -54,14 +55,15 @@ pytestmark = pytest.mark.requires_postgres
 
 
 def test_the_rack_algorithm_is_remembered_per_printer_and_forgotten(client: TestClient) -> None:
+    printer = linked_printer(client, 1)
     put = client.put("/api/v1/print/printers/1/rack-algorithm", json={"algorithm": "newest_first"})
     assert put.status_code == 200, put.text
-    assert put.json() == {"printer_id": 1, "printer": None, "algorithm": "newest_first"}
+    assert put.json() == {"printer_id": 1, "printer": printer, "algorithm": "newest_first"}
     remembered = client.get("/api/v1/settings/remembered").json()
-    assert remembered["printer_rack_algorithms"] == {"1": "newest_first"}
+    assert remembered["printer_rack_algorithms"] == {printer: "newest_first"}
 
     forgot = client.put("/api/v1/print/printers/1/rack-algorithm", json={"algorithm": None})
-    assert forgot.json() == {"printer_id": 1, "printer": None, "algorithm": "least_used"}
+    assert forgot.json() == {"printer_id": 1, "printer": printer, "algorithm": "least_used"}
     assert client.get("/api/v1/settings/remembered").json().get("printer_rack_algorithms", {}) == {}
 
 
@@ -69,6 +71,7 @@ def test_an_older_rack_algorithm_save_is_a_409_and_the_newer_choice_stays(
     client: TestClient,
 ) -> None:
     """#1216: the dialog's version orders its saves, whatever order they arrive in."""
+    printer = linked_printer(client, 1)
     path = "/api/v1/print/printers/1/rack-algorithm"
     newer = client.put(path, json={"algorithm": "bambuddy", "version": 2})
     assert newer.status_code == 200, newer.text
@@ -76,7 +79,7 @@ def test_an_older_rack_algorithm_save_is_a_409_and_the_newer_choice_stays(
     assert older.status_code == 409, older.text
     assert older.json()["type"] == RACK_ALGORITHM_SUPERSEDED_PROBLEM
     remembered = client.get("/api/v1/settings/remembered").json()
-    assert remembered["printer_rack_algorithms"] == {"1": "bambuddy"}
+    assert remembered["printer_rack_algorithms"] == {printer: "bambuddy"}
     put = client.get("/openapi.json").json()["paths"][
         "/api/v1/print/printers/{printer_id}/rack-algorithm"
     ]["put"]
@@ -106,6 +109,7 @@ def test_a_rack_algorithm_save_that_failed_is_a_503_problem_naming_its_cause(
         raise error
 
     monkeypatch.setattr(SettingsStore, "set_printer_rack_algorithm", failed)
+    linked_printer(client, 1)
     response = client.put("/api/v1/print/printers/1/rack-algorithm", json={"algorithm": "bambuddy"})
     assert response.status_code == 503, response.text
     assert response.json()["type"] == DATABASE_UNAVAILABLE_PROBLEM
@@ -122,6 +126,7 @@ def test_a_dropped_connection_does_not_claim_nothing_was_saved(
         raise psycopg.OperationalError("server closed the connection unexpectedly")
 
     monkeypatch.setattr(SettingsStore, "set_printer_rack_algorithm", dropped)
+    linked_printer(client, 1)
     with caplog.at_level(logging.WARNING, logger="scadbuddy.api.printing"):
         response = client.put(
             "/api/v1/print/printers/1/rack-algorithm", json={"algorithm": "bambuddy"}
@@ -140,6 +145,7 @@ def test_a_rack_algorithm_save_held_up_in_postgres_answers_503_and_saves_nothing
 ) -> None:
     """#1129 review: the whole route, against a real row lock, not a stubbed store."""
     monkeypatch.setattr(settings_store, "RACK_ALGORITHM_WRITE_TIMEOUT", 0.2)
+    printer = linked_printer(client, 1)
     path = "/api/v1/print/printers/1/rack-algorithm"
     assert client.put(path, json={"algorithm": "oldest_first"}).status_code == 200
     with psycopg.connect(settings.database_url) as holder, holder.transaction():
@@ -148,7 +154,7 @@ def test_a_rack_algorithm_save_held_up_in_postgres_answers_503_and_saves_nothing
     assert response.status_code == 503, response.text
     assert response.json()["type"] == DATABASE_UNAVAILABLE_PROBLEM
     remembered = client.get("/api/v1/settings/remembered").json()
-    assert remembered["printer_rack_algorithms"] == {"1": "oldest_first"}
+    assert remembered["printer_rack_algorithms"] == {printer: "oldest_first"}
 
 
 def test_a_rack_algorithm_save_with_the_pool_full_answers_503_and_saves_nothing(
@@ -156,6 +162,7 @@ def test_a_rack_algorithm_save_with_the_pool_full_answers_503_and_saves_nothing(
 ) -> None:
     """#1264: the pool-wait half against the app's real pool, not a stubbed store."""
     monkeypatch.setattr(settings_store, "RACK_ALGORITHM_WRITE_TIMEOUT", 0.2)
+    printer = linked_printer(client, 1)
     path = "/api/v1/print/printers/1/rack-algorithm"
     assert client.put(path, json={"algorithm": "oldest_first"}).status_code == 200
     pool = getattr(client.app.state, STATE_ATTR).settings_store.pool  # type: ignore[attr-defined]
@@ -169,7 +176,7 @@ def test_a_rack_algorithm_save_with_the_pool_full_answers_503_and_saves_nothing(
     assert response.json()["type"] == DATABASE_UNAVAILABLE_PROBLEM
     assert "no database connection came free in time" in response.json()["detail"]
     remembered = client.get("/api/v1/settings/remembered").json()
-    assert remembered["printer_rack_algorithms"] == {"1": "oldest_first"}
+    assert remembered["printer_rack_algorithms"] == {printer: "oldest_first"}
 
 
 def test_the_rack_algorithm_routes_503_is_declared(client: TestClient) -> None:
@@ -223,7 +230,7 @@ def test_the_check_lists_each_positions_open_picks(client: TestClient, model: st
     invented_rack_route()
     asyncio.run(
         rack_usage(client).record_picks(
-            51, 1, [PickedHotend(group_id=0, position=2, serial=serial(17))]
+            51, None, [PickedHotend(group_id=0, position=2, serial=serial(17))]
         )
     )
 
@@ -274,9 +281,7 @@ class BrokenUsage(RackUsageStore):
     def __init__(self) -> None:
         pass
 
-    async def seen(
-        self, printer_id: int | None, serials: Iterable[str], printer: str | None = None
-    ) -> None:
+    async def seen(self, printer: str | None, serials: Iterable[str]) -> None:
         return None
 
     async def usage(self, serials: Iterable[str]) -> dict[str, Usage]:
@@ -285,7 +290,7 @@ class BrokenUsage(RackUsageStore):
     async def record_picks(
         self,
         queue_item_id: int,
-        printer_id: int,
+        printer: str | None,
         picks: Sequence[PickedHotend],
         *,
         copies: int = 1,
@@ -967,7 +972,7 @@ def test_the_rack_usage_lists_each_hotend_with_its_serial_filament_and_spools(
     configure(client)
     invented_rack_route()
     store = rack_usage(client)
-    asyncio.run(store.seen(1, [serial(17)]))
+    asyncio.run(store.seen(linked_printer(client, 1), [serial(17)]))
     blue = PickedSpool(
         slot_id=1,
         spool_id=7,
@@ -978,7 +983,7 @@ def test_the_rack_usage_lists_each_hotend_with_its_serial_filament_and_spools(
     )
     asyncio.run(
         store.record_picks(
-            51, 1, [PickedHotend(group_id=0, position=2, serial=serial(17), spools=[blue])]
+            51, None, [PickedHotend(group_id=0, position=2, serial=serial(17), spools=[blue])]
         )
     )
     asyncio.run(

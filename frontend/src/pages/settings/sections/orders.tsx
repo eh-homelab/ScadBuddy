@@ -1,6 +1,7 @@
 import { FilamentsEditor } from '../../../components/orders/FilamentsEditor'
 import { MachineRates } from '../../../components/orders/MachineRates'
 import { DepositPolicyEditor } from '../../../components/settings/DepositPolicyEditor'
+import { CustomerMessaging } from '../../../components/settings/CustomerMessaging'
 import { ShippingOptionsEditor } from '../../../components/settings/ShippingOptionsEditor'
 import { RuntimeRows, SavedSection } from '../formParts'
 import type { AreaId } from '../registry'
@@ -30,6 +31,8 @@ export function Component() {
       {/* #5281 — the deposit policy and the shipping options, each saved on its own. */}
       <DepositPolicyEditor />
       <ShippingOptionsEditor />
+      {/* #5660 — the messaging plugin tool that sends customer messages, saved on its own. */}
+      <CustomerMessaging />
     </SavedSection>
   )
 }

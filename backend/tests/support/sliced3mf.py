@@ -7,10 +7,14 @@ from collections.abc import Mapping
 
 
 def sliced_3mf(
-    *, plates: Mapping[int, tuple[int, list[float]]], gcode: Mapping[int, bytes]
+    *,
+    plates: Mapping[int, tuple[int, list[float]]],
+    gcode: Mapping[int, bytes],
+    images: Mapping[int, bytes] | None = None,
 ) -> bytes:
     """``plates``: plate -> (prediction seconds, used grams per slot from 1);
-    ``gcode``: plate -> its ``Metadata/plate_<n>.gcode``."""
+    ``gcode``: plate -> its ``Metadata/plate_<n>.gcode``; ``images``: plate -> its
+    ``Metadata/plate_<n>.png``."""
     info = ["<config>"]
     for index, (seconds, grams) in plates.items():
         info.append("  <plate>")
@@ -27,6 +31,8 @@ def sliced_3mf(
         archive.writestr("Metadata/slice_info.config", "\n".join(info))
         for index, data in gcode.items():
             archive.writestr(f"Metadata/plate_{index}.gcode", data)
+        for index, data in (images or {}).items():
+            archive.writestr(f"Metadata/plate_{index}.png", data)
     return buffer.getvalue()
 
 

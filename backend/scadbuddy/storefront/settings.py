@@ -14,17 +14,23 @@ from scadbuddy.core.proxies import parse_cidr_list
 from scadbuddy.core.urls import https_origin
 
 #: The edge refuses to start when any of these is set: it must never hold a database
-#: secret or the KEK's file.
+#: secret, the KEK's file or a Temporal address (#5295, #5284); it reaches only the CRUD
+#: service.
 FORBIDDEN_ENV: Final = (
     "SCADBUDDY_DATABASE_URL",
     "PGPASSWORD",
     "PGPASSFILE",
     "SCADBUDDY_SECRET_KEY_FILE",
+    "SCADBUDDY_TEMPORAL_ADDRESS",
 )
 STOREFRONT_PORT: Final = 8083
 STOREFRONT_PREFIX: Final = "/api/store/v1"
 MIN_COOKIE_KEY_BYTES: Final = 32
 LOG_LEVELS: Final = ("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG")
+#: Where the image holds the built page (the Dockerfile's `app` stage).
+CONTAINER_FRONTEND_DIR: Final = Path("/app/frontend/dist")
+# scadbuddy/storefront/settings.py -> storefront -> scadbuddy -> backend -> repo root
+REPO_FRONTEND_DIR: Final = Path(__file__).resolve().parents[3] / "frontend" / "dist"
 
 
 class EdgeRefusal(Exception):  # noqa: N818  (a refusal to start, not an error)
@@ -35,7 +41,7 @@ class EdgeRefusal(Exception):  # noqa: N818  (a refusal to start, not an error)
 
 def check_environment(environ: Mapping[str, str]) -> None:
     reasons = [
-        f"{name} is set; the storefront holds no database secret or key"
+        f"{name} is set; the storefront holds no database secret, key or Temporal address"
         for name in FORBIDDEN_ENV
         if name in environ
     ]
@@ -57,6 +63,8 @@ class StorefrontSettings(BaseSettings):
     storefront_public_url: str
     trusted_proxies: str = ""
     log_level: str = "INFO"
+    #: The built page (`static.py`); else the repo's ``frontend/dist`` or the image's.
+    frontend_dir: Path | None = None
 
     @field_validator("api_internal_url")
     @classmethod
@@ -86,6 +94,15 @@ class StorefrontSettings(BaseSettings):
                 f"SCADBUDDY_LOG_LEVEL must be one of {', '.join(LOG_LEVELS)}, not {value!r}"
             )
         return level
+
+    def resolve_frontend_dir(self) -> Path | None:
+        """The bundle to serve the page from: one with a ``storefront.html``, or None."""
+        candidates = (
+            (self.frontend_dir,)
+            if self.frontend_dir is not None
+            else (REPO_FRONTEND_DIR, CONTAINER_FRONTEND_DIR)
+        )
+        return next((c for c in candidates if (c / "storefront.html").is_file()), None)
 
     @model_validator(mode="after")
     def _one_proof_and_a_strong_key(self) -> StorefrontSettings:

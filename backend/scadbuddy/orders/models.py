@@ -64,7 +64,10 @@ ItemStatus = Literal[
 ContactKind = Literal[
     "phone", "email", "instagram", "facebook", "tiktok", "etsy", "website", "other"
 ]
-ChargeKind = Literal["shipping", "discount", "fee", "tax"]
+#: ``purchase`` and ``handling`` (#6133, spec 2026-11-13 §5.5) are the lifecycle's own: a
+#: thing the shop bought for the customer, and the shop's fee for buying. A body that
+#: sends either kind has it ignored (``Lifecycle._typed``).
+ChargeKind = Literal["shipping", "discount", "fee", "tax", "purchase", "handling"]
 #: A ``slice`` quote is priced from the item's slice; ``manual`` is typed; ``archive``
 #: (#4777) is priced from what a past print used, with no re-slice.
 QuoteSource = Literal["slice", "manual", "archive"]
@@ -93,6 +96,36 @@ Outcome = Literal["succeeded", "failed", "partial", "unknown"]
 
 #: The ``#RRGGBB`` of a colour slot as rendered (§3.3).
 Colour = Annotated[str, Field(pattern=r"^#[0-9a-fA-F]{6}$")]
+#: The ``rgba`` alpha byte of a filament (#6209): 255 is opaque, below it translucent.
+Alpha = Annotated[int, Field(ge=0, le=255)]
+#: One of a multi-colour filament's stops, as Bambuddy's ``extra_colors`` holds them
+#: (6 or 8 hex digits), upper-cased with a ``#``.
+ColourStop = Annotated[
+    str, Field(pattern=r"^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$"), AfterValidator(str.upper)
+]
+#: At most 8, as Bambuddy's ``MAX_EXTRA_COLOR_STOPS``.
+ColourStops = Annotated[list[ColourStop], Field(max_length=8)]
+#: Bambuddy's ``effect_type`` values (``ALLOWED_EFFECT_TYPES``, backend/app/schemas/spool.py
+#: at https://github.com/maziggy/bambuddy/blob/1aa7bce166682fde929fec0d535bdaaa22685aad/backend/app/schemas/spool.py).
+FilamentEffect = Literal[
+    "sparkle",
+    "wood",
+    "marble",
+    "glow",
+    "matte",
+    "silk",
+    "galaxy",
+    "rainbow",
+    "metal",
+    "translucent",
+    "gradient",
+    "dual-color",
+    "tri-color",
+    "multicolor",
+]
+#: Who set a filament's colour, alpha, stops and effect (#6209): the spool ``import``,
+#: which sets them again at each import, or a person (``manual``), which it never does.
+ColourSource = Literal["import", "manual"]
 
 
 def _rate(value: str) -> str:
@@ -130,11 +163,14 @@ class Actor(BaseModel):
     """Who did it: the browser, or the agent principal (and session) a request was
     authored as, exactly as ``api/flows.py`` ``_started_by`` reads it. A ``visitor`` is a
     storefront visitor (#5282), ``storefront_visitor:<row id>``, which only the CRUD side
-    builds (``orders/storefront/visitors.py`` ``visitor_actor``)."""
+    builds (``orders/storefront/visitors.py`` ``visitor_actor``). A ``customer`` is the
+    customer of a submitted storefront order (#5283), ``customer:<customer id>`` with the
+    visitor's or account's row as ``session`` (``orders/storefront/customers.py``
+    ``customer_actor``)."""
 
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["browser", "agent", "provider", "visitor"]
+    kind: Literal["browser", "agent", "provider", "visitor", "customer"]
     principal: str | None = None
     session: str | None = None
     #: The flow run the agent's call was made from (#4252, spec §7.4), when it was.
@@ -181,6 +217,30 @@ class AddressInput(BaseModel):
 class Address(AddressInput):
     id: str
     position: int
+
+
+#: One field of an address a storefront visitor types (#5283).
+_StoreLine = Annotated[str, Field(max_length=200)]
+
+
+class SubmitAddress(BaseModel):
+    """The address a storefront visitor gives at submit (#5283, spec §5.5): an address's
+    fields with every length bounded, and no id, label or default flag, which are the
+    shop's."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    recipient: str = Field(min_length=1, max_length=200)
+    lines: list[_StoreLine] = Field(default_factory=list, max_length=6)
+    locality: _StoreLine | None = None
+    region: _StoreLine | None = None
+    postal_code: Annotated[str, Field(max_length=40)] | None = None
+    country: Country | None = None
+    phone: Annotated[str, Field(max_length=40)] | None = None
+
+    def as_input(self) -> AddressInput:
+        """The address as a new customer's default shipping address."""
+        return AddressInput(**self.model_dump(), default_shipping=True)
 
 
 class AddressSnapshot(AddressInput):
@@ -235,6 +295,8 @@ class Charge(ChargeInput):
     #: The tax ScadBuddy computes from ``orders_tax_percent`` (#5281): no body writes it,
     #: and a save of the charges keeps it.
     auto: bool = False
+    #: The purchase link a ``purchase`` charge is for (#6133); None on every other kind.
+    purchase_link_id: str | None = None
 
 
 class Payment(BaseModel):
@@ -372,6 +434,12 @@ class OrderFilter(BaseModel):
     source: OrderSource | None = None
     #: False leaves out the unsubmitted storefront drafts; True lists only those.
     unsubmitted: bool = False
+    #: Only orders with a customer's own-model request (#6133, spec 2026-11-13 §11).
+    own_model: bool = False
+    #: Only orders with a thing to buy the shop has not priced (`purchase_pending`).
+    purchase_pending: bool = False
+    #: Only orders with a source whose import is stuck (`IMPORT_STUCK`).
+    import_stuck: bool = False
 
 
 # -- line items (§3.3) ------------------------------------------------------------------
@@ -589,6 +657,8 @@ class Fulfilment(BaseModel):
     attempt: int
     #: A ``test`` attempt prints a revision for the shop, and names it.
     purpose: FulfilmentPurpose = "production"
+    #: The revision the attempt printed: a test print's, or for a production attempt the
+    #: item's current revision when it was recorded (#5704). None before the item had one.
     revision_id: str | None = None
     quantity: int
     outcome: Outcome
@@ -721,6 +791,145 @@ class CostEntry(CostEntryInput):
     created_at: datetime
 
 
+# -- purchases (#6133, spec 2026-11-13 §10) ---------------------------------------------
+
+#: What a recorded purchase cost the shop: parts (``material``) or a paid model file
+#: (``other``).
+PurchaseCostKind = Literal["material", "other"]
+#: A purchase link's state: not priced yet, recorded with its cost and charge, or not
+#: needed.
+PurchaseStatus = Literal["pending", "recorded", "not_needed"]
+#: The longest shop note on a purchase, which the customer reads.
+MAX_SHOP_NOTE = 500
+#: A cost entry's ``source`` that a recorded purchase wrote: ``purchase:<source id>``.
+PURCHASE_SOURCE_PREFIX = "purchase:"
+
+
+class PurchaseRecordInput(BaseModel):
+    """What the shop paid for one purchase link, in the order's currency. The same amount
+    becomes the customer's ``purchase`` charge. ``note`` is the cost entry's (the shop's
+    own); the customer never reads it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    amount_minor: Money = Field(ge=1, le=MAX_ENTRY_MINOR)
+    cost_kind: PurchaseCostKind = "material"
+    note: str = Field(default="", max_length=1000)
+
+
+class PurchaseUpdateInput(BaseModel):
+    """A recorded purchase changed: each field given replaces its value."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    amount_minor: Money | None = Field(default=None, ge=1, le=MAX_ENTRY_MINOR)
+    cost_kind: PurchaseCostKind | None = None
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class PurchaseDeclineInput(BaseModel):
+    """A purchase link the shop does not buy, with a note the customer reads."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    shop_note: str = Field(default="", max_length=MAX_SHOP_NOTE)
+
+
+class PurchaseSource(BaseModel):
+    """A purchase link of a request item, as the back office reads it. ``url`` is text
+    only: nothing fetches it (spec §9.3). ``amount_minor`` and ``cost_kind`` are a recorded
+    purchase's, else None."""
+
+    id: str
+    order_id: str
+    item_id: str
+    url: str
+    note: str
+    status: PurchaseStatus
+    amount_minor: Money | None = None
+    cost_kind: PurchaseCostKind | None = None
+    cost_entry_id: str | None = None
+    charge_id: str | None = None
+    shop_note: str = ""
+
+
+#: A file's check by the intake worker (spec 2026-11-13 §7).
+SourceCheckStatus = Literal["checking", "ready", "refused", "failed"]
+#: A print source's state; a purchase link's is `PurchaseStatus`.
+SourceStatus = Literal[
+    "open", "imported", "manual", "declined", "pending", "recorded", "not_needed"
+]
+SourceLinkType = Literal["makerworld", "printables", "thingiverse", "manual"]
+#: The status reason of a staged file's source whose import has not finished an hour after
+#: the submit (spec 2026-11-13 §8.1). The watcher's import child sets it (#6133 PR 5); the
+#: back office shows "Import stuck" and "Retry import", which sends the watcher ``retry``.
+#: It is the shop's: the customer's order page never shows it.
+IMPORT_STUCK = "The import has not finished an hour after the order was sent."
+
+
+class OrderItemSource(BaseModel):
+    """A file or a link of a storefront customer's request item, as the back office reads
+    it (#6133, spec 2026-11-13 §5.3, §11). ``url`` is text only: nothing fetches it.
+    ``staged`` is true while a file's frozen copy waits in the staging area (a download
+    is a presigned GET of it then). ``has_preview`` says the check stored a preview,
+    which ``GET …/sources/{id}/preview`` serves. ``import_stuck`` is true while
+    ``status_reason`` is the watcher's stuck reason (``model_requests.IMPORT_STUCK``).
+    ``amount_minor`` and ``cost_kind`` are a recorded purchase's."""
+
+    id: str
+    order_id: str
+    item_id: str
+    position: int
+    kind: Literal["file", "link"]
+    purpose: Literal["print", "purchase"]
+    filename: str | None = None
+    size: int | None = None
+    media_type: str | None = None
+    url: str | None = None
+    link_type: SourceLinkType | None = None
+    canonical: str | None = None
+    note: str = ""
+    check_status: SourceCheckStatus | None = None
+    check_reason: str | None = None
+    facts: dict[str, Any] | None = None
+    sha256: str | None = None
+    has_preview: bool = False
+    staged: bool = False
+    status: SourceStatus
+    status_reason: str | None = None
+    import_stuck: bool = False
+    library_file_id: int | None = None
+    result_item_id: str | None = None
+    amount_minor: Money | None = None
+    cost_kind: PurchaseCostKind | None = None
+    shop_note: str = ""
+
+
+class ModelRequestColours(BaseModel):
+    """The colours a customer asked for on an own-model request item: the shop's choice,
+    or price book filaments by id."""
+
+    item_id: str
+    shop_choice: bool = False
+    filaments: list[str] = Field(default_factory=list)
+
+
+class SourceDeclineInput(BaseModel):
+    """A print file or link the shop does not take, with its reason (the shop's own)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(default="", max_length=MAX_SHOP_NOTE)
+
+
+class SourceDownload(BaseModel):
+    """A presigned GET of a staged file's frozen copy, as an attachment, until
+    ``expires_at``. The query carries the signature: never log it."""
+
+    url: str
+    expires_at: datetime
+
+
 # -- attachments (§6.2, #4251) ----------------------------------------------------------
 
 #: What a file is, from its bytes (``orders/attachments.py`` ``sniff``): an ``image`` or
@@ -818,7 +1027,8 @@ class DeliveredBody(BaseModel):
 
 class FilamentInput(BaseModel):
     """A filament record as a body carries it: what a kilogram costs (§5.1). Its
-    identity is material, subtype, brand and colour, upper-cased (Ruling 4)."""
+    identity is material, subtype, brand and colour, upper-cased (Ruling 4), and alpha
+    (#6261)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -831,6 +1041,11 @@ class FilamentInput(BaseModel):
     cost_per_kg: CostPerKg
     #: For the rough estimate (§5.3); none gives no estimate.
     density_g_cm3: Density | None = None
+    #: #6209: what Bambuddy keeps beside the RGB. ``colour`` stays ``#RRGGBB``: a clear
+    #: filament is its RGB with ``alpha`` below 255.
+    alpha: Alpha = 255
+    extra_colours: ColourStops = Field(default_factory=list)
+    effect: FilamentEffect | None = None
 
 
 class FilamentPatch(BaseModel):
@@ -846,10 +1061,21 @@ class FilamentPatch(BaseModel):
     colour: Colour | None = None
     cost_per_kg: CostPerKg | None = None
     density_g_cm3: Density | None = None
+    alpha: Alpha | None = None
+    extra_colours: ColourStops | None = None
+    #: ``null`` clears it.
+    effect: FilamentEffect | None = None
+    #: ``import`` hands the colour back to the spool import, which sets it at its next
+    #: run; a colour, alpha, stops or effect sent that differs from the record's makes
+    #: it ``manual`` (#6209).
+    colour_source: ColourSource | None = None
 
 
 class Filament(BaseModel):
     """A filament record, its decimals as strings on the wire (§3.6)."""
+
+    #: Every field is on the wire, so the clients' types need no fallback (#6209).
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
 
     id: str
     material: str
@@ -859,6 +1085,21 @@ class Filament(BaseModel):
     colour: str
     cost_per_kg: str
     density_g_cm3: str | None
+    #: Where ``density_g_cm3`` came from when the spool import, "Fill densities" or a
+    #: manual add with no density read it from Bambuddy's link to the slicer preset
+    #: (#6136, `orders/density.py`): the preset and the id that named it. ``None`` for
+    #: a density a person set, or none.
+    density_profile: str | None = None
+    #: #6209: the ``rgba`` alpha byte (255 opaque), the multi-colour stops and
+    #: Bambuddy's effect. ``colour`` alone is what a render splits parts by.
+    alpha: int = 255
+    extra_colours: list[str] = Field(default_factory=list)
+    effect: FilamentEffect | None = None
+    #: Who set the colour, alpha, stops and effect: the spool ``import`` or a person.
+    colour_source: ColourSource = "manual"
+    #: Whether an import linked the record to spools (``spool_colour`` or ``spool_ids``
+    #: set): only then can "Use spool colour" give it a colour from its spools.
+    spool_linked: bool = False
     archived_at: datetime | None
     created_at: datetime
     updated_at: datetime
@@ -904,15 +1145,27 @@ class SpoolImportRow(BaseModel):
 
     action: SpoolImportAction
     #: Why a group was skipped: ``no_colour`` (its spools carry only a colour's name,
-    #: and a record's colour is ``#RRGGBB``), ``no_price`` (no spool has a price) or
-    #: ``too_long`` (a name past a record's 100 characters).
-    reason: Literal["no_colour", "no_price", "too_long"] | None = None
+    #: and a record's colour is ``#RRGGBB``), ``no_price`` (no spool has a price),
+    #: ``too_long`` (a name past a record's 100 characters) or ``colour_taken`` (another
+    #: record of its material, subtype and brand already has its RGB as its colour,
+    #: #6209). On a matched record, ``colour_taken`` says its colour, alpha, stops and
+    #: effect were kept: another record of its names has the spools' RGB.
+    reason: Literal["no_colour", "no_price", "too_long", "colour_taken"] | None = None
     #: The newest spool's names. A matched record keeps its own: only its price changes.
     material: str
     subtype: str | None = None
     brand: str | None = None
     colour_name: str | None = None
+    #: The record's colour after the import (#6209). A new record's, or a matched
+    #: ``import`` record's, is the spools' RGB. A matched record keeps its own colour when
+    #: a person set it (``colour_source`` ``manual``) or when ``_movers`` held it back
+    #: because another record of its names holds the spools' RGB (``reason``
+    #: ``colour_taken``). A skipped group's is the spools' RGB (``None`` with no ``rgba``).
     colour: str | None = None
+    alpha: int | None = None
+    extra_colours: list[str] = Field(default_factory=list)
+    effect: FilamentEffect | None = None
+    colour_source: ColourSource | None = None
     #: The record made, updated or matched.
     filament_id: str | None = None
     #: The most recent priced spool's (the highest id), as the record now has it.
@@ -923,6 +1176,36 @@ class SpoolImportRow(BaseModel):
     min_cost_per_kg: str | None = None
     max_cost_per_kg: str | None = None
     spool_ids: list[int]
+    #: The record's density after the import (#6136): its own, or the one the import
+    #: read through Bambuddy when it had none.
+    density_g_cm3: str | None = None
+    #: The record's ``density_profile`` after the import: where this import read
+    #: ``density_g_cm3`` from, or where a density it kept was read from before;
+    #: ``None`` for a density a person set, or none.
+    density_profile: str | None = None
+
+
+class DensityFillRow(BaseModel):
+    """One record of the book that had no density, and what filled it (#6136)."""
+
+    filament_id: str
+    material: str
+    subtype: str | None = None
+    brand: str | None = None
+    colour_name: str | None = None
+    colour: str
+    #: The density written; ``None`` when no source gives one, so the record still has
+    #: none and an estimate of it is refused.
+    density_g_cm3: str | None = None
+    #: Where it was read from.
+    density_profile: str | None = None
+
+
+class DensityFill(BaseModel):
+    """`POST /orders/price-book/fill-densities`: one row per record that had no
+    density, in the book's order."""
+
+    rows: list[DensityFillRow]
 
 
 class SpoolImport(BaseModel):

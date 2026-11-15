@@ -7,32 +7,40 @@ import type { Operation } from './registry.js'
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
-    operation: 'GET /api/v1/storefront/listings',
-    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); an agent tool follows with #5283.",
+    operation: 'GET /api/v1/storefront/slice-profile/options',
+    reason: "The printers and spools the Storefront settings control offers for the shop's slice profile (#6153). The assistant reads the profile through get_settings; the shop sets it in Settings, Storefront pricing.",
   },
   {
-    operation: 'POST /api/v1/storefront/listings',
-    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); an agent tool follows with #5283.",
+    operation: 'GET /api/v1/storefront/listings',
+    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); the assistant drafts and publishes through storefront_listing_draft and storefront_listing_publish (#6131).",
   },
   {
     operation: 'PUT /api/v1/storefront/listings/order',
-    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); an agent tool follows with #5283.",
+    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); the assistant drafts and publishes through storefront_listing_draft and storefront_listing_publish (#6131).",
   },
   {
     operation: 'PUT /api/v1/storefront/listings/{listing_id}',
-    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); an agent tool follows with #5283.",
+    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); the assistant drafts and publishes through storefront_listing_draft and storefront_listing_publish (#6131).",
   },
   {
-    operation: 'POST /api/v1/storefront/listings/{listing_id}/publish',
-    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); an agent tool follows with #5283.",
+    operation: 'GET /api/v1/storefront/listings/{listing_id}',
+    reason: "The Storefront page's editor reads one listing at its own address (#6157); an agent tool follows with #5283.",
+  },
+  {
+    operation: 'POST /api/v1/storefront/listings/{listing_id}/move',
+    reason: "The Storefront page's \"Move to top\" and \"Move to position…\" (#6157); an agent tool follows with #5283.",
+  },
+  {
+    operation: 'PUT /api/v1/storefront/listings/{listing_id}/media',
+    reason: "The Storefront page's pictures and a model media's \"Storefront…\" dialog (#6213); an agent tool follows with #5283.",
   },
   {
     operation: 'POST /api/v1/storefront/listings/{listing_id}/unpublish',
-    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); an agent tool follows with #5283.",
+    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); the assistant drafts and publishes through storefront_listing_draft and storefront_listing_publish (#6131).",
   },
   {
     operation: 'DELETE /api/v1/storefront/listings/{listing_id}',
-    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); an agent tool follows with #5283.",
+    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); the assistant drafts and publishes through storefront_listing_draft and storefront_listing_publish (#6131).",
   },
   {
     operation: 'POST /api/v1/parts',
@@ -65,6 +73,11 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
     operation: "POST /api/v1/orders/{order_id}/items/{item_id}/revisions/{revision_id}/answer",
     reason: "The customer's answer to a design revision (#5280, spec 2026-11-02 §4.3): the shop records it by hand in phase 1 and the customer gives it on the storefront in phase 4; an agent never answers for the customer.",
+  },
+  {
+    operation: 'POST /api/v1/orders/{order_id}/items/{item_id}/accept-for-customer',
+    reason:
+      "A person's \"Accept for the customer\" on a storefront order (#5283, spec 2026-11-02 §6.1): the shop's signed-in staff say why the customer did not accept themselves. The lifecycle refuses any actor but a browser (`customer_accepts`), so an agent never accepts for the customer.",
   },
   {
     operation: "POST /api/v1/orders/{order_id}/attachments/{attachment_id}/to-model",
@@ -167,6 +180,10 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     operation: 'POST /api/v1/payments/webhooks/{provider}',
     reason: "A payment provider's call, signed with its own secret (#4957); never an agent's.",
   },
+  {
+    operation: 'POST /api/v1/payments/bank/webhook',
+    reason: "Plaid's call for the linked bank account, signed with its own key (#4961); never an agent's.",
+  },
   ...(
     [
       'GET /api/v1/payments/providers',
@@ -180,16 +197,38 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   })),
   ...(
     [
+      'GET /api/v1/storefront/mail',
+      'GET /api/v1/storefront/mail/password',
+      'PUT /api/v1/storefront/mail/password',
+      'DELETE /api/v1/storefront/mail/password',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason: "Settings → Storefront mail (#5283): a person sets the shop's SMTP password and reads the server's state; the password is sealed and never an agent's.",
+  })),
+  ...(
+    [
       'GET /api/v1/payments/bank',
       'PUT /api/v1/payments/bank/keys',
       'DELETE /api/v1/payments/bank/keys',
       'POST /api/v1/payments/bank/link-token',
       'POST /api/v1/payments/bank/link',
       'DELETE /api/v1/payments/bank/link',
+      'POST /api/v1/payments/bank/reconnected',
     ] as const
   ).map((operation) => ({
     operation,
     reason: "Settings → Payments' bank account (#4961): a person links it in Plaid Link in their own browser; the Plaid keys and the link are never an agent's.",
+  })),
+  ...(
+    [
+      'GET /api/v1/orders/{order_id}/bank-deposits',
+      'POST /api/v1/orders/{order_id}/bank-deposits/{transaction_id}/record',
+      'POST /api/v1/orders/{order_id}/bank-deposits/{transaction_id}/dismiss',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason: "The order page's suggested bank deposits (#4961): a suggestion is never recorded by itself, and only the shop confirms or dismisses one there.",
   })),
   ...(
     [
@@ -200,6 +239,10 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     operation,
     reason: "The order page's (#4957): a person cancels a request or retries its link; the agent opens one with order_request_payment.",
   })),
+  {
+    operation: 'POST /api/v1/orders/{order_id}/messages/{message_id}/mark-sent',
+    reason: "Only a person says a message whose outcome is unknown reached the customer (#5660), on the order page.",
+  },
   {
     operation: 'GET /api/v1/orders/{order_id}/events',
     reason:
@@ -336,7 +379,9 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'leakage), and the runtime settings (render concurrency and timeouts, queue caps, upload and library ' +
       'limits, retention, log level), which decide how the server runs for everyone and are an operator ' +
       'decision made in Settings, and the asset allowlist fetch_asset is held to (#844), which an agent must ' +
-      'not widen for itself. Reading them all, with their sources, is get_settings.',
+      'not widen for itself, and the print watcher (#4699), which reads Bambuddy and the printers by itself, so ' +
+      'the route refuses a change of it by anyone but a person (403 `person_only`, `api/settings.py` ' +
+      '`PRINT_WATCH`). Reading them all, with their sources, is get_settings.',
   },
   {
     operation: 'DELETE /api/v1/settings/remembered',
@@ -437,6 +482,18 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     operation,
     reason: "Serves Bambuddy's image of a library file to the browser; an agent has no use for the bytes (#313).",
   })),
+  ...(
+    [
+      'GET /api/v1/farm/library/{file_id}/thumbnail',
+      'GET /api/v1/farm/archives/{archive_id}/thumbnail',
+      'GET /api/v1/farm/printers/{printer_id}/cover',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      "Serves Bambuddy's picture of a queue item or a printer's job to the Prints page (#3742); list_print_queue " +
+      'and get_printers_now give its URL as `picture`, and an agent has no use for the bytes.',
+  })),
   ...(['GET /api/v1/print/models/{slug}/projects', 'PUT /api/v1/print/models/{slug}/project'] as const).map(
     (operation) => ({
       operation,
@@ -474,6 +531,26 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "each item's `delivered_attachment_id`, and the bytes and thumbnails are for the page to draw. The agent " +
       'adds, edits and removes them with order_attach, order_attachment_update and order_attachment_delete (#4722).',
   })),
+  {
+    operation: 'GET /api/v1/orders/{order_id}/sources/{source_id}/preview',
+    reason:
+      "A storefront customer's file preview (#6133, spec 2026-11-13 §7): untrusted bytes the intake check made, " +
+      "for the order page's \"Customer's models\" panel to draw. The agent reads each file's check and facts " +
+      'from order_get (`sources`); it has no use for the bytes.',
+  },
+  {
+    operation: 'GET /api/v1/orders/{order_id}/sources/{source_id}/download',
+    reason:
+      "A presigned GET of a customer's staged file (#6133, spec 2026-11-13 §11), for a person to download in " +
+      'the browser. The agent never opens a customer file: the intake worker checks it, and the import ' +
+      '(#6133 PR 5) copies it into the library.',
+  },
+  {
+    operation: 'GET /api/v1/orders/{order_id}/items/{item_id}/quotes/{quote_id}/plates/{plate}/thumbnail',
+    reason:
+      "A slice quote's plate image from its sliced file (#4673), which the item's print setups draw. The " +
+      "agent reads each setup's plates, time, grams and choices from order_get; it has no use for the bytes.",
+  },
   ...(
     [
       'GET /api/v1/print/outputs/{output_id}/preview-slices/{job_id}/toolpath',

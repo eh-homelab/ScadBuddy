@@ -25,6 +25,7 @@ from scadbuddy.library.settings_store import ModelProject, S3Settings
 from scadbuddy.main import create_app
 from tests.api.conftest import read_stored
 from tests.support.operations import press
+from tests.support.printers import linked_printer
 
 BAMBUDDY = "https://bambuddy.test/api/v1"
 
@@ -254,6 +255,8 @@ def _remember_everything(client: TestClient) -> None:
     _catalogue(client, "gear")
     client.put("/api/v1/print/models/gear/choices", json={"tier": "fine"})
     client.put("/api/v1/print/models/box/choices", json={"tier": "draft"})
+    linked_printer(client, 1)
+    linked_printer(client, 2)
     client.put("/api/v1/print/printers/1/bed-type", json={"bed_type": "Cool Plate"})
     client.put("/api/v1/print/printers/2/bed-type", json={"bed_type": "Textured PEI Plate"})
     client.put(
@@ -279,6 +282,7 @@ def test_the_remembered_choices_are_listed(client: TestClient) -> None:
 
 def test_forget_all_forgets_every_remembered_choice(client: TestClient) -> None:
     _remember_everything(client)
+    linked_printer(client, 4)
     client.put("/api/v1/settings", json={"printer_id": 4})
     body = client.delete("/api/v1/settings/remembered").json()
     assert body == {
@@ -489,34 +493,37 @@ def test_an_unreadable_model_json_prunes_nothing(client: TestClient, written: st
     assert client.get("/api/v1/settings/remembered").json()["model_projects"] == remembered
 
 
-def _remember_project_targets(client: TestClient) -> None:
+def _remember_project_targets(client: TestClient) -> tuple[str, str]:
+    """Targets on registry printers linked to Bambuddy printers 1 and 2: their ids."""
     uploads = _state(client).uploads
+    one, two = linked_printer(client, 1), linked_printer(client, 2)
 
     async def seed() -> None:
-        await uploads.remember_project_target(3, ProjectTarget(printer_id=1, nozzle_diameter="0.4"))
-        await uploads.remember_project_target(7, ProjectTarget(printer_id=2))
+        await uploads.remember_project_target(3, ProjectTarget(printer=one, nozzle_diameter="0.4"))
+        await uploads.remember_project_target(7, ProjectTarget(printer=two))
 
     asyncio.run(seed())
+    return one, two
 
 
 def test_the_remembered_project_targets_are_listed(client: TestClient) -> None:
     assert client.get("/api/v1/settings/remembered").json()["project_print_targets"] == {}
-    _remember_project_targets(client)
+    one, two = _remember_project_targets(client)
     body = client.get("/api/v1/settings/remembered").json()
     assert body["project_print_targets"] == {
-        "3": {"printer_id": 1, "nozzle_diameter": "0.4"},
-        "7": {"printer_id": 2},
+        "3": {"printer_id": 1, "printer": one, "nozzle_diameter": "0.4"},
+        "7": {"printer_id": 2, "printer": two},
     }
 
 
 def test_forgetting_one_project_target_leaves_the_rest(client: TestClient) -> None:
     _remember_everything(client)
-    _remember_project_targets(client)
+    _, two = _remember_project_targets(client)
     body = client.delete("/api/v1/settings/remembered/projects/3").json()
-    assert body["project_print_targets"] == {"7": {"printer_id": 2}}
+    assert body["project_print_targets"] == {"7": {"printer_id": 2, "printer": two}}
     assert body["printer_bed_types"] == {"1": "Cool Plate", "2": "Textured PEI Plate"}
     assert client.get("/api/v1/settings/remembered").json()["project_print_targets"] == {
-        "7": {"printer_id": 2}
+        "7": {"printer_id": 2, "printer": two}
     }
     # Forgetting what is not remembered is not an error.
     assert client.delete("/api/v1/settings/remembered/projects/3").status_code == 200

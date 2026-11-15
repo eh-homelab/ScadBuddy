@@ -1,5 +1,5 @@
 """`python -m scadbuddy.worker --queue bambuddy` (#1060, spec 2026-10-01 §5.5): the
-``scadbuddy-print`` worker, on Postgres and the API's internal routes only, versioned
+``scadbuddy-print`` worker, on the API's internal routes only (no pool, #5298), versioned
 like the render worker, its workflows AUTO_UPGRADE."""
 
 from __future__ import annotations
@@ -28,14 +28,23 @@ from scadbuddy.bambuddy import output_reader
 from scadbuddy.bambuddy import print_run as print_run_module
 from scadbuddy.bambuddy.print_run import RunRoute, run_route
 from scadbuddy.core.pg_listener import PgListener
+from scadbuddy.core.secrets import load_kek
 from scadbuddy.core.settings import Settings
 from scadbuddy.crud.operations import RemoteOperationStore
-from scadbuddy.crud.print import RemoteEvents, RemotePrintRunStore, WorkerHearsNoEventsError
-from scadbuddy.library.settings_store import PrintSettings, StoredSettings
+from scadbuddy.crud.print import (
+    RemoteEvents,
+    RemotePrinterStore,
+    RemotePrintRunStore,
+    RemoteReports,
+    WorkerHearsNoEventsError,
+)
+from scadbuddy.library.settings_store import PrintSettings, SettingsStore, StoredSettings
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.operations.store import Operation
 from scadbuddy.print_library.ids import NATIVE_ID_BASE
 from scadbuddy.printers.models import LanLink, PrinterCreate, PrinterPatch
+from scadbuddy.printers.reports import PrinterReportStore
+from scadbuddy.printers.store import PrinterStore
 from scadbuddy.slicing import catalogue as native_catalogue_module
 from scadbuddy.worker import (
     ApiUrlMissingError,
@@ -64,12 +73,17 @@ WARM = "native-catalogue-warm"
 
 
 def print_settings(pg_conninfo: str, tmp_path: Path, **fields: Any) -> Settings:
+    """The API's settings (it holds the URL), as the print worker's too: the worker ignores
+    the URL and needs a proof to exchange (#5298 Task 33)."""
+    proof = tmp_path / "bootstrap"
+    proof.write_text("p" * 40)
     return Settings(
         database_url=pg_conninfo,
         temporal_address=UNUSED_TEMPORAL_ADDRESS,
         # No volume: nothing may create it.
         data_dir=tmp_path / "no-volume",
         api_internal_url="http://127.0.0.1:9",
+        service_bootstrap_file=proof,
         **fields,
     )
 
@@ -146,6 +160,10 @@ async def test_the_print_worker_mounts_no_volume(pg_conninfo: str, tmp_path: Pat
         ]
         print_deps = check.__self__.d  # type: ignore[attr-defined]
         assert print_deps.printers is not None and print_deps.reports is not None
+        # #5298 Task 29: through the API's CRUD routes, never the worker's own SQL.
+        assert isinstance(deps.printers, RemotePrinterStore)
+        assert isinstance(deps.reports, RemoteReports)
+        assert print_deps.printers is deps.printers and print_deps.reports is deps.reports
         # #4541: a worker without the reports would stop every waiting LAN sequence.
         [wait] = [
             fn
@@ -417,17 +435,28 @@ async def test_the_print_workers_background_slice_takes_a_native_printers_route(
     monkeypatch.setattr(worker_module, "bambuddy_kinds_over", recording)
     # `slice_route` calls it (#4551), for the quote and the dialog's slice alike.
     monkeypatch.setattr(print_run_module, "run_route", routed)
-    deps = await asyncio.to_thread(
-        build_print_deps, print_settings(pg_conninfo, tmp_path, secret_key_file=kek_file)
-    )
+    settings = print_settings(pg_conninfo, tmp_path, secret_key_file=kek_file)
+    deps = await asyncio.to_thread(build_print_deps, settings)
+    # The API's own store: the worker holds no pool (#5298 Task 31).
+    api = SettingsStore(settings)
+    await asyncio.to_thread(api.open)
     try:
         assert deps.printers is not None and deps.reports is not None
-        row = deps.printers.create(PrinterCreate(serial="01P00A0000000EE", name="Garage"))
-        deps.printers.link_lan(
+        # The worker reads the registry and the reports through the API's CRUD routes
+        # (#5298 Task 29), which this test does not serve: the API's own stores write
+        # the row, and the worker's reads answer what those read.
+        api_printers = PrinterStore(api.pool, load_kek(kek_file))
+        api_reports = PrinterReportStore(api.pool)
+        row = api_printers.create(PrinterCreate(serial="01P00A0000000EE", name="Garage"))
+        api_printers.link_lan(
             row.id, LanLink(host="10.0.0.9", access_code="12345678"), cert_sha256="cd" * 32
         )
-        deps.printers.patch(row.id, PrinterPatch(preferred_path="native"))
-        deps.reports.put(row.id, {"gcode_state": "IDLE"}, datetime.now(UTC))
+        api_printers.patch(row.id, PrinterPatch(preferred_path="native"))
+        api_reports.put(row.id, {"gcode_state": "IDLE"}, datetime.now(UTC))
+        for read in ("get", "list", "by_bambuddy_id", "opens_access_codes"):
+            monkeypatch.setattr(deps.printers, read, getattr(api_printers, read))
+        monkeypatch.setattr(deps.reports, "get", api_reports.get)
+        monkeypatch.setattr(deps.reports, "all", api_reports.all)
         hot_path = StoredSettings(
             slicer_backend="native", library_backend="native", store_backend="s3"
         )
@@ -446,6 +475,7 @@ async def test_the_print_workers_background_slice_takes_a_native_printers_route(
             await preview.run(request, {})
     finally:
         await deps.aclose()
+        await asyncio.to_thread(api.close)
     [route] = routes
     assert route.row is not None and route.row.id == row.id
     assert (route.path, route.native) == ("native", True)

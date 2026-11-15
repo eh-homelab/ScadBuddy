@@ -1,11 +1,12 @@
 import { readFileSync } from 'node:fs'
-import { defineConfig, type ProxyOptions } from 'vite'
+import { defineConfig, type Plugin, type ProxyOptions } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { alias } from './aliases'
 
 const backend = process.env.SCADBUDDY_BACKEND_URL ?? 'http://127.0.0.1:8080'
 const agent = process.env.SCADBUDDY_AGENT_URL ?? 'http://127.0.0.1:8081'
+const storefront = process.env.SCADBUDDY_STOREFRONT_URL ?? 'http://127.0.0.1:8083'
 
 /**
  * One origin in development, routed the way the ingress routes it in a deployment
@@ -34,17 +35,43 @@ const agent = process.env.SCADBUDDY_AGENT_URL ?? 'http://127.0.0.1:8081'
  * Vite's SPA fallback and lose every batch without an error (§5.3). `changeOrigin`
  * rewrites `Host`, not `Origin`, and the relay's origin check accepts a loopback one.
  *
+ * `/api/store/v1` is the storefront edge's (#5282, `python -m scadbuddy.storefront`), a
+ * process of its own on its own host in a deployment: before `/api`, which would take it.
+ *
  * The mocked build (`VITE_MOCK_API=1`) proxies nothing: msw answers every route.
  */
 const proxy: Record<string, ProxyOptions> = {
+  '^/api/store/v1(?:[/?]|$)': { target: storefront, changeOrigin: true },
   '^/api/v1/ai(?:[/?]|$)': { target: agent, ws: true },
   '^/mcp(?:[/?]|$)': { target: agent },
   '/api': { target: backend, changeOrigin: true, ws: true },
   '^/telemetry(?:/|$)': { target: backend, changeOrigin: true },
 }
 
+/**
+ * The public storefront page (`storefront.html`, #5282) is served at `/` on the shop's own
+ * host by the edge (`backend/scadbuddy/storefront/static.py`). One dev or preview server
+ * has the back office at `/`, so the page answers under `/store` here (`src/storefront/main.tsx`
+ * takes that as its router's base in the mocked build). Both servers also answer a
+ * path with no extension by the `.html` file of that name, so the back office's own
+ * `/storefront` route would get the public page: it is sent to `index.html` instead.
+ */
+function storefrontPreview(): Plugin {
+  const rewrite = (req: { url?: string }, _res: unknown, next: () => void) => {
+    const [path = '', query] = (req.url ?? '').split('?')
+    if (path === '/store' || path.startsWith('/store/')) req.url = '/storefront.html'
+    else if (path === '/storefront' || path === '/storefront/') req.url = query === undefined ? '/index.html' : `/index.html?${query}`
+    next()
+  }
+  return {
+    name: 'storefront-preview',
+    configureServer: (server) => void server.middlewares.use(rewrite),
+    configurePreviewServer: (server) => void server.middlewares.use(rewrite),
+  }
+}
+
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), storefrontPreview()],
   resolve: { alias },
   server: {
     port: 5173,
@@ -67,7 +94,11 @@ export default defineConfig({
     // three.js dominates the bundle; the viewer is behind a dynamic import so it
     // lands in its own chunk rather than the entry.
     chunkSizeWarningLimit: 1000,
+    // The storefront edge serves only what `storefront.html` loads, read from this
+    // manifest (`backend/scadbuddy/storefront/static.py`).
+    manifest: true,
     rolldownOptions: {
+      input: { index: 'index.html', storefront: 'storefront.html' },
       output: {
         codeSplitting: {
           // src/lib/zodConfig.ts in zod's own chunk, run right after zod: zod reads

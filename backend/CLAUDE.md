@@ -10,20 +10,29 @@ These notes cover `backend/`; paths are repo-relative; the root CLAUDE.md has th
 ## Database access
 
 The rule is in the root CLAUDE.md, "Database access (#5295)". Today the API connects as the
-database owner and runs SQL on the agent's `ai_*` tables. The print worker connects as a
-role of its own, with the grant list in `auth/caller_grants.py` (`PRINT_GRANTS`, and
-`AGENT_GRANTS` for the agent). The projects and render workers have no database client
-(#5298): they reach their data through CRUD routes. The projects worker has no grant
-list, and the API and the agent revoke what its old role `scadbuddy_projects` held at
-every start (`auth/revoke.py`, `agent/src/db/grants.ts` `revokeRole`); `RENDER_GRANTS`
-(`render/worker_role.py`) is empty until #5298 Task 22 revokes its role. The render
-worker also holds no KEK and runs only on a remote store (plan D11). Template `pipeline/`
+database owner and runs SQL on the agent's `ai_*` tables. The agent's grant list is
+`auth/caller_grants.py` `AGENT_GRANTS`. The print worker holds no Postgres pool (#5298
+Task 31): every store it uses goes through CRUD routes, it has no grant list, and the API
+revokes what its old role `scadbuddy_print` held at every start (`auth/revoke.py`, #5298
+Task 35). It holds no KEK either (#5298 Task 33): it exchanges its proof only (`exchange_source`, no
+view fallback), refuses to start without one, and ignores `SCADBUDDY_DATABASE_URL` with a
+warning; the API opens every sealed value it needs (area `access-codes`: whether the API
+opens access codes, and a virtual printer's sealed code). The projects and render workers have no database client
+(#5298): they reach their data through CRUD routes. Neither has a grant list. The API
+and the agent revoke what the projects worker's old role `scadbuddy_projects` held at
+every start (`auth/revoke.py`, `agent/src/db/grants.ts` `revokeRole`), and the API what
+the render worker's old role `scadbuddy_render` held (#5298 Task 22). The render
+worker also holds no KEK and runs only on a remote store (plan D11). Its blob-index
+routes take an allowlist (`api/crud_render.py` `RENDER_KEY`, `HELD_KEY`): it writes only
+a render job's own `piece` keys, and its settings route never releases the full Bambuddy
+key (`withheld`; with no render key saved the worker gets none). Template `pipeline/`
 Python runs in the render worker's pod, and openscad and `openscad-lsp` run in the API's
 pod.
 
 Under the rule the API becomes the CRUD service: the only process with SQL access, and
-nothing untrusted in its pod. Each worker becomes an HTTP client of it, with a service
-credential, and loses its database secret, role and grant list (#5298). The `ai_*` reads
+nothing untrusted in its pod. Each worker is now an HTTP client of it, with a service
+credential, and has lost its database secret, role and grant list (#5298, done: prod has
+no worker role or worker database secret since 2026-11-14). The `ai_*` reads
 become routes (#5299). Every `/api/v1/internal/*` route requires a service credential, and
 the API moves to `enforce` (#5297). Template Python and openscad move to a pod without a
 database secret (#5296). Never add a worker table grant, a cross-service table read or a
@@ -35,8 +44,9 @@ at `POST /api/v1/auth/service-token` (`ExchangeReader`; route `api/service_token
 `exchange`; verifiers `auth/exchange.py`: TokenReview, bootstrap hashes) for a 15-minute
 credential, falling back to its view on a 404 while it has a database URL; otherwise it
 reads its sealed one from its view (`TokenReader`), as before (#5494). A caller with no database
-(the projects and render workers, #5298) takes `exchange_source` instead: the exchange only, with no
-view, and no proof refuses its start. `ExchangeReader`, `exchange_source` and `ServiceAuth`
+(the projects, render and print workers, #5298) takes `exchange_source` instead: the exchange
+only, with no view, and no proof refuses its start.
+`ExchangeReader`, `exchange_source` and `ServiceAuth`
 live in `auth/service_auth.py`, which imports no Postgres code (`service_credentials.py`
 re-exports them), so the storefront edge (`python -m scadbuddy.storefront`, #5282; it holds
 no database secret and refuses to start with one) can use them. The API's own in-process callers use
@@ -64,6 +74,10 @@ queue, template media's `template_media`) skip unless `SCADBUDDY_TEST_DATABASE_U
 points at a Postgres they can create schemas in, e.g.
 `docker run -d -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=scadbuddy_test -p 5432:5432
 postgres:18` and `SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test`.
+Without Docker, a native Postgres 18 works (`initdb`, then `pg_ctl -o "-p 55432"`). It needs
+`timezone='UTC'` in `postgresql.conf`, or a timezone test fails. A data directory on a long
+path also needs `unix_socket_directories=''`, with TCP only (measured 2026-11-14 on WSL2,
+Homebrew `postgresql@18`, #6322).
 Without it most of `tests/api` skips. CI runs them against a `postgres:18` service
 container. A `Settings` for an app that never starts uses `tests.conftest.UNUSED_DATABASE_URL`.
 Tests marked `requires_fixtures` (#2146) use the real MakerWorld 3MFs in
@@ -110,6 +124,12 @@ but an api module after a non-api module that itself follows an api module loses
 `tests/api/conftest.py`: `uv run --frozen pytest tests/api/test_health.py
 tests/test_config.py tests/api/test_jobs.py` errors at setup of `test_jobs.py`'s tests
 with `fixture 'client' not found`. Put the `tests/api/` paths together.
+A test's result must not depend on runner speed or the date. A retry budget gets an
+injected clock (`CrudClient(clock=..., sleep=...)`, a fake `sleep` that advances it):
+on the real clock a slow runner spent a 0.5 s budget in one try (#6252, #6294). A
+"today" is read at each call, never at import: a shard that loads before midnight UTC
+and makes orders after it dated every fake deposit a day early (#6307). A shard builds
+in about 4 minutes and tests in 25 to 36; `backend-pytest`'s limit is 55 (#6288).
 Renders run on Temporal, and `SCADBUDDY_TEMPORAL_ADDRESS` is required (#546), like
 `SCADBUDDY_DATABASE_URL`; `python -m scadbuddy.worker` is the worker (or
 `SCADBUDDY_TEMPORAL_WORKER_INPROCESS=true` for a one-process dev run). A `Settings` for
@@ -127,8 +147,13 @@ would be joined by the next test that renders it. The dev server's store is a SQ
 file (on `/dev/shm` when it has room): in memory it was lost mid-session under load.
 Backend schema changes are new files in `backend/scadbuddy/migrations/`
 (`<yyyymmdd>T<hhmm>Z_<slug>.sql`, UTC; never edit a merged one); the settings tables are
-`20260928T0840Z_settings.sql`. The only place a real `openscad` exists is the image:
+`20260928T0840Z_settings.sql`. A one-off fix of named rows belongs in a migration only when
+no route can make it and the new code would act wrongly on those rows before it ran; guard
+each row by its id and the values it must still have, so the file is a no-op elsewhere
+(`20261114T1607Z_filaments_alpha_effect.sql`, #6209). Otherwise make it through the API. The only place a real `openscad` exists is the image:
 `docker build --target test -t scadbuddy:test . && docker run --rm scadbuddy:test`.
+A retry or deadline test drives `CrudClient(clock=..., sleep=...)` with a fake clock that
+only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
 
 
 ## Layout
@@ -149,13 +174,15 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   (the render route, an order's quote) a `done` job of the key whose refs still hold its
   result answers at once, its `reused_at` keeping it from the prune,
   `JobProjection.reuse_done`, #4870; a caller whose work follows the run, as the output
-  backfill's attach does, leaves it off), `projection.py` (`render_jobs` as a projection
+  backfill's attach does, leaves it off; a submit that joins an open `render-<key>` or
+  `piece-<key>` execution keeps that run's Temporal priority, not its own, so never start a
+  render at a low priority that another caller may join by key, #6299), `projection.py` (`render_jobs` as a projection
   the workflow writes in place through the `project` activity), `pg_store.py` (the
-  backend's migrations), `worker_role.py` (#601: `RENDER_GRANTS`, now empty, which the
-  API grants the unused role `scadbuddy_render` at start until #5298 Task 22 revokes it,
-  and `grant_role`, which every caller's list goes through; the render worker holds no
-  database, #5298, `tests/test_render_worker_nodb.py`: it reads the store settings and
-  writes its job rows, their events and activity rows, their blob refs, the piece geometry, the blob index, its uploads' `assets` rows (`library/assets.py` `RemoteAssetStore`, the files on its own volume) and its library leases, pin holds and install slots (`RemoteCheckoutLeases`, `RemoteInstallSlots`, under the API's `REMOVAL_LOCK`) only through the API's CRUD routes, `crud/render.py`, where the API also finds the Bambuddy store's folders for it). The legacy in-process queue, its file and Postgres stores
+  backend's migrations); the render worker holds no database (#5298,
+  `tests/test_render_worker_nodb.py`; the API revokes its old role `scadbuddy_render` at
+  every start, `auth/revoke.py`, and every caller's grant list goes through
+  `auth/caller_grants.py` `grant_role`): it reads the store settings and
+  writes its job rows, their events and activity rows, their blob refs, the piece geometry, the blob index, its uploads' `assets` rows (`library/assets.py` `RemoteAssetStore`, the files on its own volume) and its library leases, pin holds and install slots (`RemoteCheckoutLeases`, `RemoteInstallSlots`, under the API's `REMOVAL_LOCK`) only through the API's CRUD routes, `crud/render.py`, where the API also finds the Bambuddy store's folders for it. The legacy in-process queue, its file and Postgres stores
   and its `.renders/<key>` cache are gone (#546): the Temporal path's cache is the blob
   store's piece (`piece.json`), and nothing writes or prunes `models/<slug>/.renders/`
   any more (it stays hidden and git-ignored for volumes that still hold one).
@@ -196,7 +223,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   activity in its `SWEEPS`, never a loop in the API. The preview backfill (#1054): `previews.py`
   (`PreviewBackfill`, `ensure_preview_schedule`), the pass over every model for missing
   default-render previews, on its own hourly Schedule on the same queue; the per-change
-  requests stay in-process (`render/previews.py` `PreviewScheduler`).
+  requests stay in-process (`render/previews.py` `PreviewScheduler`). A customer's staged
+  file (#6133): `staged_file.py` (`StagedFile`, one watcher per upload on the same queue,
+  started by the presign route, not a sweep; "A customer's own models" below).
   Generic commands (#1053): `operation.py` (`OperationWorkflow`: check, insert, run,
   finish; a kind its worker does not register fails the workflow task until a build that
   has it is current, #4139, told by `registered.py` `RegisteredActivities`),
@@ -226,7 +255,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   that has it (`project.offers_host_functions`). A flow's payloads are sealed per run
   (`payload_codec.py`, `flows_client.py`), so flows need `SCADBUDDY_SECRET_KEY_FILE`.
 - `backend/scadbuddy/flows/` — flow versions and runs (`store.py`: `workflow_definitions`,
-  `workflow_runs`, the latter written only by the run's workflow), `typecheck.py` (a
+  `workflow_runs`, the latter written only by the run's workflow), `agent_reads.py` (the
+  agent's questions about the flow tables, read only, for `api/crud_agent.py` area `flows`,
+  #5299 D7: the queries the agent ran over SQL, which `agent/src/flows/backendReads.ts`
+  `SqlFlowRunReads` keeps a copy of until every API pod serves the routes), `typecheck.py` (a
   script's check at registration and at each start), `history.py` (a Reset's preview: the
   outward sends past a point, by activity id), `component.py` (`FLOWS`; runs the
   `projects` worker in-process with `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` or
@@ -327,8 +359,22 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `/opt/slicer-profiles` from the Dockerfile's `slicer-dist`; `Profiles.version` keys the
   slices), `presets.py` (a `SlicePlan` built into machine, process and filament files,
   `native_preset_key`), `slice_info.py` (grams and G-code from the sliced 3MF),
-  `transfer.py` and `transfer_token.py` (the worker's transfer URLs: presigned S3 GET or
-  the internal blob routes, a token MACed under a KEK-derived key; never log one),
+  `transfer.py` and `transfer_token.py` (the slicer worker's transfer URLs: presigned S3
+  GET or the internal blob routes, a token MACed under a KEK-derived key; never log one;
+  the print worker's LAN read URL is minted by the API too, `POST …/print/transfer-urls`,
+  always the internal route's, `READ_TTL`, only for a key the content index holds live as
+  a slicer's output (`SLICE_KIND` with `SLICED_OUTPUT_META`, which `Transfers.finish_put`
+  merges and `store/index.py` `put_in` keeps; its row swept or not; never the slicer's
+  inputs), else 403 `transfer-refused`; ScadBuddy strips print-host credential keys
+  whenever it parses a preset, and never stores, forwards or writes them into a slicer
+  file (`core/credentials.py` `strip_credentials`, applied at parse in `bambuddy/models.py`
+  `LocalPresetDetail`, nested keys too); the API strips the kept presets an older build
+  stored at its start and after each refresh, with no Bambuddy call (`slicing/held_presets.py`
+  `strip_kept_logged`); one window remains: preset files that older builds put in the
+  content store keep the keys until the content sweep collects them; the print worker, which holds the Bambuddy key,
+  can still read Bambuddy's local presets, including any such keys, in the bytes Bambuddy
+  sends, and what protects them is the Bambuddy key's scope; a backend that
+  fails the read is 503 `store_unavailable`, #5298 Task 32),
   `store.py` (`native_slices`; its blobs held in `blob_refs` while the row stands),
   `start.py` (`start_native_slice`: one running execution per copy, subject, copy sha256
   and presets, which the dialog and the run share; the dialog's Reslice gives a
@@ -365,11 +411,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   native run passes `client=None` (`bambuddy/client.py` `maybe_client`), reads printer
   state from the LAN report (`printers/reports.py`), and its filaments are the loaded
   trays plus the physical-spool overlay of cached provider records (`spools/`, refreshed
-  off the path): Bambuddy's inventory and ScadBuddy's own (`native_spools`,
-  `spools/native.py`, provider `native` in `spools/spool_providers.py`, routes
-  `api/native_spools.py`, #4643; each write re-caches it at once; a LAN start saves its
-  slots' grams in `native_spool_uses`, taken off once the run settles with that start
-  `done`, `native_use_hook`; the editor is Settings' `components/settings/NativeSpools.tsx`).
+  off the path): Bambuddy's inventory and ScadBuddy's own (`spools/native.py` over the
+  `filament_*` tables since #6261, provider `native` in `spools/spool_providers.py`,
+  routes `api/native_spools.py`, #4643; each write re-caches it at once; a LAN start
+  books its slots' grams as `print_started` estimates in `filament_spool_events`, and the
+  run's settle books each start's `print_ended` actual (`done`) or 0, `native_use_hook`;
+  the editor is Settings' `components/settings/NativeSpools.tsx`).
   `printers/ams_mapping.py` computes `ams_mapping`/`ams_mapping2` from the
   plan's trays and `printers/nozzle_mapping.py` an H2C rack print's `nozzle_mapping`
   (measured values in the spec's §2); `printers/lan.py` is the FTPS upload and MQTT
@@ -383,8 +430,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `NATIVE_COPIES_SWEEP`, #4337) trashes a folder's superseded copies and what nothing
   records, as Bambuddy's inbox keeps its copies; a moved, restored or copied one is the
   person's (no subject). The Customize page, the dialog's
-  first read and its analysis, and the Prints page's queue and history panels ask
-  Bambuddy nothing on these backends (#4601, #4629; the panels read it only when opened).
+  first read and its analysis, and the Prints page ask Bambuddy nothing on these
+  backends (#4601, #4629); the Prints page reads Bambuddy's queue and history only after
+  its "Show Bambuddy's queue and print history" button (#3745).
   A LAN print's records (#4644, #4543): `print_succeed` writes its `output_last_prints`
   row (`print_route` `lan`), and `lan_print` saves its rack picks keyed by run and
   `subtask_name` (`rack_nozzle_*`'s `lan_run_id`, `lan_subtask`); the follow's read hooks
@@ -427,6 +475,17 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   the stored setting `lan_require_plate_clear`, behind `PLATE_CLEAR_PATCH`), shown from
   `PrintProgress.lan_run` and `PrinterNow.lan_run` by `components/print/LanRunControls.tsx`,
   and the agent's `stop_print_run` and `confirm_plate_clear`.
+- `backend/scadbuddy/filament/` — the filament data model (#6261, epic #6260, spec
+  2026-11-14): `catalog.py` (configurable catalogs, no code enums), `types.py`
+  (`effective()`: spool → type → subtype → material, the one resolver; a type links its
+  price-book row by identity, alpha included, and never rewrites a found row), `spools.py`
+  (instances and tag bindings; every writer locks the tag before the spool; archive closes
+  the open binding), `ledger.py` (`filament_spool_events`, the one source of grams left:
+  the newest absolute reading, then the deltas after it; events carry their physical time,
+  ordered by `(at, seq)`; a time-less event gets a clock-step guard because the WSL clock
+  steps back), `locations.py` (a spool moves only through `move()`; AMS trays are keyed by
+  printer, AMS and tray, never by name), `bambuddy_pull.py` (import and the scheduled pull,
+  read-only toward Bambuddy). Colour is `#RRGGBBAA` (`colour.py`). Routes: `api/filament.py`.
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
   Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),
   `BlobRefs` (`refs.py`, the `blob_refs` table that keeps a blob alive) and `sweep_blobs`
@@ -453,14 +512,44 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `exchange_source`, and refuses the local store (`LocalStoreRefusedError`, plan D11). `run_inprocess_worker` is the API's
   `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` mode (no drain). `--queue bambuddy`
   (`run_print_worker`, #1060) is the print worker, deployment `scadbuddy-print`: no data
-  volume, Postgres and `SCADBUDDY_API_INTERNAL_URL` only (`build_print_deps`); its
+  volume and no Postgres pool, `SCADBUDDY_API_INTERNAL_URL` only (`build_print_deps`,
+  `NoDatabaseSettings`, `tests/test_print_worker_nodb.py`), and no KEK (#5298 Task 33): it
+  exchanges its proof only (`exchange_source`, no view fallback), refuses to start
+  without one, and ignores `SCADBUDDY_DATABASE_URL` with a warning; its
   settings, the Bambuddy key among them, come from the API's CRUD route
   (`crud/print.py` `RemoteSettingsStore`, a `SettingsReader`; route `api/crud_print.py`,
   every sealed field but `PRINT_SECRETS` null, #5298), never from its own SQL; its print
   runs, their outcomes, its operations and the events it publishes go through the same
   routes (`RemotePrintRunStore`, `RemoteOutcomes`, `crud/operations.py`
   `RemoteOperationStore`, `RemoteEvents`; the API writes each with its event and
-  activity row, and logs a posted event once by its id, of `EVENT_KINDS` only), and it
+  activity row, and logs a posted event once by its id, of `EVENT_KINDS` only), as do
+  its Bambuddy uploads, their slices, its slice starts, the dialog's background slices,
+  the projects' printers, folderless projects and destination touches
+  (`RemoteUploadStore`, a `BambuddyUploadStore` with no pool, whose copy lock is the API's
+  copy lease, `bambuddy/copy_leases.py`, #5298 Task 27; a method only the API calls raises `ApiOnlyError`; a slice start, a background slice and
+  its claim take an `Idempotency-Key`), and its print links, sends and outputs' last
+  prints (`RemotePrintLinks`, a `PrintLinkStore` with no pool, and `RemoteOutputPrints`,
+  an `OutputPrintStore` with no pool, area `links`, #5298 Task 28; each refuses the
+  methods only the API calls with `ApiOnlyError`, `pending_library` among them), and its
+  printer registry, LAN reports and printers' access codes (`RemotePrinterStore`, a
+  `PrinterStore` with no pool, and `RemoteReports`, area `printers`, #5298 Task 29: a
+  printer merge runs on the API alone; the access code is opened there and answered to
+  `crud.print` only, `no-store`, never logged; a report's write (`advance`, which answers
+  the print it ended and the one it started, the nudge's start) and a virtual printer's
+  sync take an `Idempotency-Key`; a virtual printer's sealed access code is opened on the API too,
+  `POST …/print/access-codes/virtual-printer`, and the LAN path's gate asks
+  `GET …/print/access-codes` whether the API opens access codes, area `access-codes`,
+  Task 33: with no KEK on the API an `auto` printer goes through Bambuddy and a `native`
+  one is 503 `LAN_NEEDS_KEK`), and its rack hotends' usage (`RemoteRackUsage`, a
+  `RackUsageStore` with no pool, area `rack`, #5298 Task 30: a LAN start's picks are one
+  route and one transaction on the API; every write but `seen` takes an
+  `Idempotency-Key`; `spool_history` is the API's), and its spools, ScadBuddy's own spools
+  and their uses, the kept presets and a native slice's start (`RemoteSpoolStore`,
+  `RemoteNativeSpools`, `RemoteHeldPresets`, `RemoteNativeSlices`, area `spools`, #5298
+  Task 31: each write runs whole on the API under its lock; a provider's records and a
+  run's settle take an `Idempotency-Key`; the refresh, tray links and the shelf's edits
+  are the API's), and a LAN print's read URL of a native slice's file (`RemoteBlobs`
+  asks the API, area `transfer-urls`, #5298 Task 32; it signs nothing), and it
   does not LISTEN, so it keeps no `RecentRuns`; every
   workflow on it AUTO_UPGRADE (`print_deployment`'s default, #2066; `FollowPrint` names
   it itself as `VersionedFollowPrint`, since an unversioned worker refuses a versioning
@@ -473,6 +562,182 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `SCADBUDDY_SERVICE_TOKEN_FILE` or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`; it refuses to
   start without the KEK or a proof, and ignores `SCADBUDDY_DATABASE_URL` with a warning
   (`core/settings.py` `NoDatabaseSettings`).
+- MakerWorld import (#6119, #1254): `api/makerworld.py` (`/makerworld/status`, `/resolve`,
+  `/import`) calls Bambuddy's own MakerWorld routes with the API's key
+  (`BambuddyClient.makerworld_*`; Bambuddy's 400 for a link it refuses is a 422). The
+  assistant imports only through these routes (agent `get_makerworld_status`,
+  `resolve_makerworld_url`, `import_makerworld_model`): the agent worker has no route to
+  Bambuddy and never holds its key. The `makerworld-import` flow (stored in the
+  database, not in this repo) still posts to Bambuddy's `/api/v1/makerworld/import`
+  directly until its `import_one` is changed to call `import_makerworld_model`. The import is the `makerworld_import` operation on the
+  `library` queue (`makerworld/operations.py`): Bambuddy downloads the 3MF (up to
+  `MAKERWORLD_IMPORT_TIMEOUT`), then on `library_backend` native `makerworld/imports.py`
+  copies it into the native library as a `bb_to_sb` copy does
+  (`print_library/copy.py` `copy_file_to_native`: skipped for bytes it holds), so
+  `library_file_id` is the id the order and print routes take. `folder_id` is a native
+  folder (refused 422 on `bambuddy`); `bambuddy_folder_id` is Bambuddy's, such as a print
+  project's `folder_id`. A resolve on native maps Bambuddy's earlier imports to native
+  files by SHA-256.
+- Import print (#4698): `bambuddy/print_import.py` finds every place an archive's 3MF can
+  be (the archive's file and slicer project, Bambuddy library files by name and hash, the
+  printer's storage only when asked) and reads the one chosen; `api/print_imports.py`
+  links the archive to a model as a `print_links` row with the subject `model:<slug>` and
+  `matched_by` `import`, beside its `print_imports` row (`PrintLinkStore.record_import`).
+  Both routes first run the link passes for the one archive (`linking.link_archive`), so a
+  print ScadBuddy made is linked to its run and refused (409), never imported; a run's
+  link found later still owns the print (`_OWNER_ORDER` puts `model:` last). One import
+  of an archive runs at a time (`PrintLinkStore.import_lock`); one that waits past
+  `IMPORT_LOCK_WAIT_S` (30 s) is a 409 to send again. Every owner lookup (`archive_origin`,
+  `archive_run_plates`) orders as `_OWNER_ORDER` does.
+  Only a source the listing finds is read. A printer file is kept as a Bambuddy library
+  file in the inbox folder. A model's delete forgets its imports (`delete_models`).
+  Agent `get_print_sources` and `import_print`; frontend: the Prints page's "Import
+  print" (`components/prints/ImportPrintDialog.tsx`, the unlinked archives through
+  `PastPrintsPicker` `unlinkedOnly`), mocks `src/mocks/features/printImports.ts`.
+- The print watcher (#4699, phase 1; the design and the later phases are comments on
+  the issue): `print_watch/` imports the prints ScadBuddy did not start, with no user
+  step. `sweep.py` is one pass, the housekeeping sweep `housekeeping_auto_import_prints`
+  (both Schedules, behind `AUTO_IMPORT_PATCH`, history `auto_import.json`), run in the
+  API's `library` worker. It obeys its own stored setting, `print_auto_import` (off by
+  default; off, it calls nothing and forgets its floor), and takes only the Bambuddy
+  archives made since it was switched on (`print_auto_import_watch`), at most `LOOKBACK`
+  back, that have a printer not in `print_auto_import_skip_printers`, no link and no row.
+  It links the library prints once a pass (`link_library_prints`), then, under
+  `import_lock`, runs `link_archive` with `library_prints=False` (ScadBuddy's own print
+  is left alone), takes the first allowed source in a fixed order (archive, slicer
+  project, a library file by hash only; then, only when `print_auto_import_sources`
+  names `printer`, a printer file over FTP whose bytes hash to the archive's
+  `content_hash`, compared before it is kept in the library inbox folder; an archive with
+  no hash takes none), and links a model only when earlier imports of the same printed
+  file (`print_imports.content_hash`, the archive's, whatever the source; `sha256` for a
+  row from before it) name one model (`earlier_import`) or the job's name has exactly one
+  slug's words (`print_import.exact_slugs`, `job_name`). Anything else goes to the inbox
+  with `reason` and `suggested`. An archive whose import raises is logged and skipped;
+  a printer read or upload that fails with no answer, 408, 429 or 5xx (`sweep.retryable`)
+  raises, so the next pass tries it again, until `RETRY_AFTER_END` (3 h) after the print
+  ended, or `RETRY_AFTER_START` (24 h) after its archive was made while it has no end
+  (`past_retries`); then, and for any other failure (401, 403, 404, 413, 422, a hash
+  that differs), the print is an inbox row with the reason. A pass takes at most
+  `MAX_IMPORTS` archives: first those whose import never raised, oldest first, then the
+  failed ones, the oldest failure first, so a printer down for hours never holds a pass's
+  slots (#6023; `print_auto_import_failures`, written by `AutoImportStore.failed`,
+  deleted with the archive's row, forgotten past `LOOKBACK`). Under the lock
+  the pass checks `known` again, as both Schedules run it (#6011).
+  `PUT /settings` writes the floor when it switches the watcher on, and forgets it off.
+  `AutoImportStore.floor` reads the switch from `settings` and writes the floor in one
+  transaction under `FLOOR_LOCK`, for the pass and the route both (#6011). `store.py` `AutoImportStore`
+  writes the `print_auto_imports` row, its link (`print_links.import_in`, the body of
+  `record_import`) and its `print_auto_import` activity row (`activity.py`) in one
+  transaction; a re-archived job (same printer, hash and start) is never taken twice.
+  The three settings are a person's only (`api/settings.py` `PRINT_WATCH`, 403
+  `person_only`). `GET /print-imports/auto` lists the rows (`state` `linked` or `inbox`;
+  an inbox row a link names since is left out, and a linked row whose model link a model
+  delete removed is shown as an inbox row, reason `MODEL_GONE`); the agent reads it with `list_auto_imports`
+  (`agent/src/tools/prints.ts`).
+  Phase 2: `POST /print-imports/auto/{archive_id}/dismiss` (`AutoImportStore.dismiss`, under
+  the archive's import lock) sets an inbox row's state to `dismissed` and `dismissed_at`
+  (migration `20261111T0618Z_print_auto_imports_dismissed.sql`). The row stays, so the
+  watcher never takes the archive again. The same transaction rewrites its
+  `print_auto_import` activity row (title "Dismissed print …", facet `state` `dismissed`).
+  A row a link names is 409 (`AutoImportLinkedError`); no row is 404; a second dismiss
+  gives the same answer and writes nothing. A person or an agent may call it
+  (agent `dismiss_auto_import`, `write`): it reaches no printer and no Bambuddy, and Import
+  print can still link the print. When Import print links an archive the watcher took (a
+  dismissed or an inbox row), it rewrites that `print_auto_import` activity row in the
+  link's transaction (#6029: `record_import`'s `also`, `AutoImportStore.imported_in`,
+  `activity.py` `imported_row`): facet `state` `linked`, `matched_by` `import`, the source
+  the person chose. The `print_auto_imports` row stays as the watcher wrote it. `GET /print-imports/auto` takes `state=dismissed` too; a
+  dismissed row that a link names since is in no list, as an inbox row is.
+  The activity repair restores `print_auto_import` rows from `print_auto_imports`
+  (`activity/index.py` `_RepairSource`, keyed by `archive_id`, timed by `seen_at`). The
+  frontend: Settings → Printing's "Print watcher" (`pages/settings/sections/print-watcher.tsx`)
+  and the Prints page's "Unsorted imports" (`components/prints/UnsortedImports.tsx`, which
+  opens `ImportPrintDialog` with `start`, the watcher's recorded source chosen); mocks
+  `src/mocks/features/printWatch.ts`.
+  Phase 3, the LAN nudge (`print_watch/nudge.py`): a printer's LAN watch hands each job
+  start to `Nudger.nudge` (`WatchActivities` `nudge`). A start is a report write whose
+  running print is new (`printers/reports.py` `PrinterReportStore.advance`,
+  `started_print`); `running_subtask` changes once per job under its row lock, so one job
+  is one nudge, across reconnects and watch attempts. It starts a pass only when no
+  native run claims the job (`claimed`: the `scadbuddy-<run id[:8]>-p<plate>[-c<copy>]`
+  name `_start_lan` gives every LAN start), the watcher is on, and the printer row links a
+  Bambuddy printer not in `print_auto_import_skip_printers` (`wanted`). The pass is a
+  `Housekeeping` run with `AUTO_IMPORT_SWEEP` only on the `library` queue (`start_pass`;
+  `Housekeeping.run` already takes its sweeps, so no patch), workflow id `nudge_id` with
+  `USE_EXISTING` (one nudge run in flight; a start meanwhile joins it) and `start_delay`
+  `NUDGE_DELAY` (30 s: Bambuddy makes the archive only once it has read the 3MF from the
+  printer). A pass that still runs before the archive exists loses nothing: the prune
+  Schedule's next pass takes it. The watch runs in the print worker (or the API
+  in-process), so the nudge is a Temporal start: no new SQL, grant or route; it reads
+  the settings over the CRUD route and the row through the watch's own
+  `PrinterStore.get`, the read each watch attempt already makes (in the print worker
+  `RemotePrinterStore.get`, over the CRUD route, #5298 Task 29). The settings read is
+  bounded by `SETTINGS_TIMEOUT` (5 s, #6034), the row read by `PRINTER_TIMEOUT` (3 s,
+  #6037: `PrinterStore.get`'s `timeout`, on the API one deadline for the pool wait and a
+  `SET LOCAL statement_timeout` on the store's own pool, in the print worker the route's
+  request with its retries; it bounds a slow or locked read, not a dead server or a
+  dropped TCP link). Each nudge is a task of its own, off the
+  watch's loop (its heartbeat, next report and rack settle never wait for it), cancelled
+  past `watch.NUDGE_TIMEOUT` (10 s) or when its attempt ends. A nudge that fails is
+  logged and never ends the watch.
+  Phase 4, LAN-only printers (`print_watch/lan.py`, `lan_store.py`,
+  `workflows/lan_auto_import.py`): a physical printer with no Bambuddy link gets no
+  archive, so the watcher keeps its own record, ``print_lan_imports`` (migration
+  `20261111T1313Z_print_lan_imports.sql`; `id` bigserial, unique on `printer_key` (the
+  registry id the job was recorded for, never null), `subtask_name` and `started_at`, the
+  received time of the report that showed the start; the FK `printer` is `ON DELETE SET
+  NULL` and in `PRINTER_REFERENCES`, so a resend for a printer deleted before or between
+  sends still finds its row by the key; a merge moves `printer` and also `printer_key`,
+  except where the kept printer has a row of the same job; and where the gone printer
+  has two rows of one job (one keyed by an older id), only the one keyed by the gone
+  printer moves, `_repoint_lan_imports`, #6045). The nudge gets
+  a `reports.JobStart` (name, time, `gcode_file`); for a LAN-only row not in
+  `print_auto_import_skip_lan_printers` (registry ids, person-only like the other three,
+  `api/settings.py` `PRINT_WATCH`; a printer's merge moves its id there and its delete
+  drops it, `printers/store.py` `PRINTER_LISTED_SETTINGS`) it starts `LanAutoImport` on the ``bambuddy`` queue
+  (`wanted_lan`, `start_lan_import`: id `lan_import_id`, a hash of the name and start,
+  `USE_EXISTING` and `REJECT_DUPLICATE`, so one run per job). Its one activity
+  (`LanImportActivities`, registered in the print worker and the API's in-process print
+  worker) reads the job's 3MF over the printer's own FTPS while it prints, only when
+  `print_auto_import_sources` names `printer` and `library_backend` is `native` (checked
+  before the read; otherwise the print is recorded with no file, `NOT_SERVED`): `/cache`
+  then `/`, the job's name with
+  `.gcode.3mf` then `.3mf` (`printer_paths`; a name with a separator or a control
+  character reads nothing, as it goes into an FTP command), at most `MAX_DOWNLOAD_BYTES`
+  (`LanPrinter.download` `max_bytes`). The printer gives no hash, so a file is the job's
+  only when it holds the plate G-code the report named (`printed_file`). It keeps the
+  file in ScadBuddy's own library, top-level folder `INBOX_FOLDER` ("Unsorted imports"),
+  unmarked (`RemoteLibrary.upload` without `print_subject`, so no per-print sweep takes
+  it), reusing a copy of the same name and hash (it lists only that name's files:
+  `library_listing` ``filename``, the internal route's `filename`). Then it records through `LanRecorder`: in the print worker
+  `crud/print.py` `RemoteLanImports`, the CRUD route `POST /internal/crud/print/lan-imports`
+  (area `lan-imports`, service credential `crud.print`), which runs `StoreLanRecorder` on
+  the API (the same confident match, `decide`: earlier imports of the same SHA-256 in
+  `print_imports` or a linked LAN record, else the job's name word for word); in-process
+  the API calls `StoreLanRecorder` itself. The record and its `print_auto_import`
+  activity row (`activity.py` `lan_row_of`, id `print_auto_import:lan:<id>`, repaired from
+  the table) are one transaction; a record sent again answers the first. A read or a
+  keep that may pass (no answer, a 5xx) raises for `LAN_IMPORT_RETRY` (6 attempts over
+  about 15 minutes); the read and keep are bounded by `CAPTURE_TIMEOUT` (the attempt's
+  timeout less a minute; a cancelled `LanPrinter.download` cuts its FTPS session, so a
+  stalled login or `RETR` ends at once and only a TCP connect still in progress waits,
+  at most `FTP_TIMEOUT`, #6049), and the last attempt records the print in the inbox with the
+  reason whatever they raised, so only a record the API never takes is lost; a 530, a certificate that is not the pinned one or a file past the cap is recorded at
+  once. A linked LAN record writes no `print_links` row (that table is keyed by
+  archive), so it is not on the model's Prints tab; it is in the activity list.
+  #6041: `GET /print-imports/auto/lan` lists the records (`LanImportStore.page`, response
+  `LanPrintRecord` with the printer's name; `state`, `slug`, `before` the record's own id,
+  never mixed with the archive ids; a linked record whose model is not in the catalogue's
+  slugs is shown as an inbox record, reason `MODEL_GONE`). `POST …/lan/{id}/dismiss` and
+  `POST …/lan/{id}/link` (`{slug}`, `matched_by` `import`; 404 for no record or no model,
+  409 for no kept file or a record linked to another model that is there) lock the row
+  and rewrite its activity row in the same transaction; a person or an agent may call
+  them. There is no Import print for them: their one source is the kept file. Agent
+  `list_lan_auto_imports`, `dismiss_lan_auto_import` and `link_lan_auto_import`; the
+  frontend lists them in Unsorted imports, and a model's Prints tab says (when it has
+  one) that they are in Activity. `LanAutoImport` is a new workflow type: a
+  nudge during a roll may reach a print worker build without it, whose workflow task
+  then fails until the new build is current (README, "Rolling it").
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes
   (`send.py`, `dispatch.py`, `print_run.py`, `filaments.py`, `projects.py`), scope-aware
   error mapping (`errors.py`). Everything on the `bambuddy` queue reads outputs through
@@ -521,6 +786,29 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   launcher every openscad-lsp start goes through (`nonet.command`; a seccomp filter, no
   network sockets), and `component.py`, the per-client session cap (on only with
   `SCADBUDDY_TRUSTED_PROXIES` set). The bridge itself is `library/lsp.py`.
+- The storefront's bot check (#5283, storefront spec §5.8): Cloudflare Turnstile, on while
+  `storefront_turnstile_site_key` is set. Only the CRUD service holds the secret
+  (`storefront_turnstile_secret`, a `SECRET_FIELDS` member; a save needs the KEK, as
+  `git_remote_token`'s does), and only it calls Siteverify (`orders/storefront/turnstile.py`
+  `verify`; the Cloudflare facts are its docstring). The edge's `storefront/turnstile.py`
+  `require_turnstile(request, action)` forwards the page's `X-Turnstile-Token` to `POST
+  …/crud/storefront/turnstile/verify` (area `turnstile`) and refuses 403
+  `bot_check_failed` or 503 `bot_check_unavailable`. It fails closed: a site key with no
+  secret this process can open is `unavailable`, never a pass. A client (IPv4
+  address, IPv6 /64) with `FAILED_CHECKS` (10) failed checks in 10 minutes, or any client
+  of a prefix (IPv4 /24, IPv6 /48) with 100, is refused with no Siteverify call
+  (`FailedChecks`; it never evicts a block, and when full of blocks it checks new clients
+  without tracking them, never refusing them). A send with no token is refused but not
+  counted: it costs no Siteverify call. A
+  design request checks its upload allowance first, and only a passed check spends it.
+  The edge asks for the verdict once, never retried, with 15 s to answer; no answer is
+  503 and never counts as a failed check. While the edge's `SiteKey` read no key within
+  `SITE_KEY_TTL` (30 s), the check passes with no call, so a newly set key takes effect
+  within 30 s. A form route awaits it
+  before it reads its body. Design requests (`request`), submit (`submit`), code requests
+  (`sign_up`) and sign-ins (`sign_in`) take it. The edge's page CSP (`storefront/static.py`) names
+  `challenges.cloudflare.com` in `script-src` and `frame-src` only while a site key is set,
+  and until the edge's first site-key read succeeds (`SiteKey.ever_read`).
 - `backend/scadbuddy/api/` — FastAPI routes under `/api/v1`; `core/` — config/settings
   (every env var is `SCADBUDDY_<FIELD>`, see `core/settings.py`).
 - `backend/scadbuddy/core/tracing.py` — OpenTelemetry (#988): the provider from the
@@ -546,6 +834,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   short statements on the API's role go on the shared `scadbuddy-rows` pool
   (`rows/component.py` `ROWS`). `tests/test_pg_pools.py` sums an API process's pools
   and fails on any new or bigger one; change it, and README "Running it", on purpose.
+- A dict read from a `jsonb` column (e.g. `storefront_listings.params`) has no key order:
+  Postgres stores the keys shortest first. Never show or answer its keys in that order;
+  order them by the template schema's parameters (#6302).
 - Activity (principal jobs, spec `2026-10-09-principal-jobs-design.md`): the `activity`
   table is one row per piece of background work, written by the sources (render, operation,
   print run, agent operation) through `ActivityIndex.upsert_in` (`backend/scadbuddy/activity/`:
@@ -603,7 +894,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   a payment or a plain edit), `actor.py` (`created_by` and an audit row's `by` from the
   author header, never a body). The bus events are `OrderChanged` (`order.changed`) and
   `OrderItemChanged` (`order_item.changed`), ids and the new status only, on the realtime
-  topics `orders` and `order:<id>`. Every item's `inputs` join `referenced_asset_ids`, and
+  topics `orders` and `order:<id>`; a frame for a cart the draft sweep deleted also
+  carries `deleted: true` (and `cart`, a flag flow triggers read, marks a storefront cart). Every item's `inputs` join `referenced_asset_ids`, and
   `main.sweep_assets` skips the pass when they cannot be read. Routes `api/customers.py`,
   `api/orders.py` (plain reads and writes; the slice quote is phase 2). Agent tools
   `agent/src/tools/orders.ts` (`read` lists and gets, `write` records the shop keeps,
@@ -614,7 +906,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   Customize page's "Add to order…" and an output's "Order this" (`AddToOrderDialog`); mocks
   `src/mocks/features/orders/`; `lib/ordersQuery.ts` keeps the list's filters in the URL.
   Phase 4, flows (#4252): `builtin_flow.py` is the built-in `order-fulfilment` flow (its
-  script, inputs `notify` and `settle_hours`), registered by
+  script, inputs `notify`, `send` and `settle_hours`), registered by
   `ensure_builtin_flow` at the component's start when the name never had a version
   (`FlowDefinitions.register_new`, `FlowExistsError`), and as a new version when the newest
   is still an unedited built-in one with another script (#4673, `_upgraded`:
@@ -639,8 +931,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   input `settle_hours` (default 48; past it the run ends with a summary and no check);
   an item a failed print left `queued` anyway counts as printed. Only then does it ask
   the agent to record the attempts under a grant kept to the order, and with `notify`,
-  once the re-read order is `ready`, call `order_notify_customer` (`read`: it composes the text and sends nothing; a send
-  through a plugin is #5660). `ensure_builtin_flow` runs as a task beside the
+  once the re-read order is `ready`, call `order_notify_customer` (`read`: it composes the text and sends nothing),
+  and with `send` too (#5660) and the answer's `send_ready`, `order_notify_customer_send` (`outward`,
+  so the trigger's grant must name it); the result's `send` says `sent`, `skipped`, `refused` (the agent's refusal only),
+  `unknown` (a failure that may have sent it) or `not_sent`, and none ends the run. `ensure_builtin_flow` runs as a task beside the
   component's start; it reads the versions first (a name with any registers nothing,
   unless the newest is an unedited older built-in), then runs `check_script` and registers nothing that fails it, and the version's commit names the built-in
   (`ScadBuddy-Flow-Builtin`), so the versions list and reconcile read its author as the
@@ -687,14 +981,17 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   design adds that neither the item nor the body covers is refused after the revision is
   written; the quote is of it (`revision_id` in the operation's request;
   409 `revision_superseded` once another is current, the record's locked check
-  included; a cart is refused `order_not_submitted` first). The lifecycle drops the quote holders §3.4 releases
+  included; a cart is refused `order_not_submitted` first). The page (#4673 PR 4): the
+  row's "Slice…" and the drawer's print setups (`QuoteEditor`, `printSetups.ts`,
+  `DesignInputs.tsx` for the inputs), each plate's image from the quote's sliced file
+  (`GET …/quotes/{quote}/plates/{plate}/thumbnail`, `quote.py` `plate_image`). The lifecycle drops the quote holders §3.4 releases
   after each commit, and `housekeeping_reap_quote_holds` (both Schedules, behind its patch)
   drops any holder older than `QUOTE_TIMEOUT` that no standing quote names. `GET
   /orders/estimate` is the rough estimate from every plate's part volumes, never a record.
   The agent's `order_item_quote` takes `manual` or `slice`, beside `price_book_get`,
   `price_book_set` and `order_estimate`. Frontend: the Settings page's Orders section
   (`components/orders/FilamentsEditor.tsx`), `PrintPicker`'s `quote` mode with
-  `QuoteFilaments` ("Quote from a slice…" in `QuoteEditor`), and the estimate in
+  `QuoteFilaments` ("Slice…" in `QuoteEditor`), and the estimate in
   `AddToOrderDialog`; mocks `src/mocks/features/orders/priceBook.ts`.
   Attachments (#4251, spec §6.2 "As built"): any file on an order, a line item or a print attempt,
   `order_attachments` (subject `order:<id>` / `order_item:<id>` / `order_item_fulfilment:<id>`, an attempt's file listed
@@ -757,7 +1054,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   seen since; one transaction per cart, `FOR UPDATE SKIP LOCKED`, checked again under the
   order's and the visitor's locks (`claim_idle_draft`) before its attachments go through
   `delete_attachment`, then the order), then the visitors idle as long with no order and
-  the `storefront_renders` rows past a day (`VisitorStore.sweep`), 200 of each a run. A cancelled order reopened past `quoted`
+  the `storefront_renders` rows past a day (`VisitorStore.sweep`), 200 of each a run, then
+  the backstop of a customer's staged files (#6133, `staged_files.sweep_staged`). A cancelled order reopened past `quoted`
   that had asked for money gets its balance request again (`_open_balance(reopened=True)`),
   and an accepted order whose deposit paid the whole total opens one once its balance is
   above zero (`_regate_balance`, from `_retax`; never after the shop cancelled the balance
@@ -778,19 +1076,111 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   sent back as read (marked by `auto` or its `id`, whatever the amount) is dropped and
   the auto row is kept and recomputed (`Lifecycle._typed`); any other `tax` charge,
   whatever its label, is typed, and a charge's `shipping_option_id` is kept when
-  sent. `OrdersComponent.rules` reads only its five settings (`SettingsStore.read`, one
+  sent. A charges replace also keeps the `purchase` and `handling` rows and drops a body's
+  (#6133, `store.py` `LIFECYCLE_CHARGES`; the browser's `ChargesEditor` shows them
+  read-only and never sends them, and the mock's `typedCharges` drops them). `OrdersComponent.rules` reads only its seven
+  settings (`SettingsStore.read`, one
   query, no secret unsealed), and `_retax` writes nothing at 0 percent with no auto row.
   `PUT …/shipping-option` (`set_shipping_option`, `{option_id}`, null
   for none) writes the order's one `shipping` charge from Settings → Orders'
   `storefront_shipping_options` while `draft` or `quoted`: an unknown id is 422 on
   `option_id`, an option that ships needs the shipping address
   (`shipping_address_required`), a pickup does not (gap 15), and `PATCH` does not clear
-  the address while such an option stays (`_no_option_ships`, the same slug). A payment
+  the address while such an option stays (`_no_option_ships`, the same slug). An order
+  not in the shop's currency (`orders_currency`) takes no option: 409
+  `shipping_currency_mismatch` (`_shipping_in_currency`; null still removes). A storefront
+  cart holds no amount, so its submit takes the shop's currency first
+  (`OrderStore.claim_draft`), and its draft view shows that currency and its options. A payment
   that reaches the deposit pays the open and failed `deposit` requests (#4959: a failed
   page can be approved again), a provider's as a manual one
   (`_close_deposit`), and their pages are closed after the commit. Routes in
   `api/order_payments.py`; agent `order_deposit_set` and `order_balance_waive` (outward),
   `order_deposit_waive` and `order_shipping_option_set` (write).
+  The storefront's mail (#5283, spec 2026-11-02 §5.7, migration
+  `20261109T0751Z_storefront_mail.sql`): `orders/storefront/mail.py`, `mail_templates.py`
+  (plain text), `links.py` (an order's links: `create_order_link` keeps the token's sha256
+  and the token sealed under the KEK, AAD `storefront_order_links:<id>`;
+  `revoke_order_links` drops the sealed token) and `addresses.py` (`check_address`: exactly
+  one addr-spec, else `EmailInvalidError`, slug `email_invalid`). A change writes a
+  `storefront_mail` row in its own transaction (`queue_mail`), so a rollback leaves none;
+  `orders/store.py` `MAIL_QUEUED` stays set until `Lifecycle._told` kicks
+  `StorefrontMail.send_queued` on the API's loop (a top-level rollback clears it). A pass
+  (one at a time per process; one asked for meanwhile runs after it, also when asked for
+  at the release; a call and the passes it takes on stop claiming `PASS_BUDGET` after the
+  call started) leases one row at a time (`lease_until`, `FOR UPDATE SKIP LOCKED`,
+  committed), sends with no connection held, and stamps the result. A server or setup
+  failure (anything the SMTP session raises that is not the recipient's: connect, TLS and
+  a certificate error, login and a non-ASCII password, sender, timeout; or a password
+  bound to another connection) charges no row: the process backs off (1 min, doubling to
+  1 h; the backoff is per process, which fits the one API replica: several replicas
+  would each back off on their own, while the shared `storefront_mail_server` row stays
+  the shop's view of the last error) and keeps the error in `storefront_mail_server` (`GET /storefront/mail`). One the
+  server answered to the row's own mail counts on the row (`server_failures`): at 3 in a
+  row it charges the row an attempt, so one crafted row cannot hold the queue's head. A
+  recipient refusal (`SMTPRecipientsRefused`, or a 5xx `SMTPDataError` about the
+  recipient or the message, by `_recipients_fault`'s rule: a reply naming the row's
+  `to_address` as a whole address is the row's; one naming the sender as a whole
+  address, or with a setup word outside the recipient's address, is the server's)
+  charges the row (`next_attempt_at` 1, 2, 4 ... min, at most
+  1 h; given up after 8); a message that cannot be built (a template or header error, a
+  revoked link, `link_revoked`) fails it at once. Every order mail names its link (`link_id`, never the token) and
+  carries `{storefront_public_url}/o#{token}`. The
+  `housekeeping_send_storefront_mail` sweep (both Schedules, behind its patch) sends what
+  is left. `send_revision` (`revision_ready`), a recorded quote or an unaccepted custom
+  price (`price_ready`), `open_payment_request` (`payment_requested`) and `add_shipment`
+  (`shipped`) queue only when `storefront_mail_covers` (a live link and a ready
+  mail config: `storefront_mail_host` and `storefront_mail_sender`), to the link's `sent_to`. The SMTP settings are env-seeded
+  `storefront_mail_*` (Settings → Storefront mail), a person's to change
+  (`api/settings.py` `MAIL_CONNECTION`, 403 `person_only`). One setting picks the TLS,
+  `storefront_mail_tls`: `starttls` (the server must offer it; without it, a server
+  failure, never plain), `implicit` (`SMTP_SSL`) or `none` (plain, only with no user:
+  `SettingsStore.save` refuses a user with it, 422, on the merged result, and the sender
+  refuses it as a server failure). The password is sealed in `storefront_mail_secret`,
+  bound to the host, port, user and TLS mode it was saved for (columns and AAD);
+  `PUT`/`DELETE /storefront/mail/password` are a person's only. A `sign_in_code` row's
+  context carries `code` and `link` (`{storefront_public_url}/account/sign-in#code=<code>`,
+  built by the caller), both required by the template. One not sent within `CODE_TTL`
+  (10 min) of `created_at` is given up as `expired` with both cleared, at the start of
+  every pass (the sweep's too), and the claim never takes one.
+  The customer link (#5283, spec §5.2 "Order link"): `mail.py` `issue_link` is the one way
+  to a new link (revoke the live ones, `create_order_link`, queue `order_link`), for
+  `Lifecycle.submit_order` and the back office's `POST /orders/{id}/customer-link`
+  (`send_customer_link`: `to`, or the customer's first email contact that is one address,
+  primary first, a malformed one skipped; 422
+  `no_customer` (an order with no customer: every customer write runs as it), `no_email`,
+  `email_invalid`, 409 `kek_missing`; audit `order.customer_link_sent`). A live link is
+  replaced only when the body says `replace: true`: without it the route answers 409
+  `link_live` and changes nothing, so a stale page cannot revoke a live link.
+  `DELETE` revokes (`order.customer_link_revoked`, only when one was live); `GET` and
+  both writes answer `links.py` `LinkState`, never the token or its hash. Both writes run
+  under the order's lock; the GET takes none. Agent `order_customer_link_get` (read),
+  `order_customer_link_send` (outward), `order_customer_link_revoke` (write).
+  `GET /orders/{id}/mail` (`Lifecycle.order_mail`, `mail.py` `order_mail`, no lock) lists the
+  order's outbox rows, newest first, as `OrderMail`: never the body, context, link or token, and no
+  sign-in code. Agent `order_mail_list` (read).
+  The customer's order page (#5283, spec §5.6): `orders/storefront/order_page.py`, CRUD
+  area `order` (`POST …/storefront/order/view`, `…/revisions/{id}/answer`,
+  `…/quotes/{id}/accept`, `…/cancel`), the edge's `/api/store/v1/order/*`, the page `/o#<token>`.
+  The reader travels in the body only. `resolve` takes a `ByLink` (the token: the live link
+  by its sha256, `links.link_by_token`) or a `ByAccount` (`/o?order=<id>`: the signed-in
+  account must own the submitted order, `accounts.account_owns_order`), and any reader that
+  reads nothing is a 404 with no body on both sides. The first view stamps `opened_at` (`mark_opened`). The
+  view (`CustomerOrderView`) is allowlisted: every field is in `storefront/wire.py`
+  `ORDER_VIEW_FIELDS`, which the edge filters by (`routes.py` `_shown`) and
+  `test_order_page.py` pins. `payment_instructions` is the shop's `storefront_payment_instructions`
+  text (plain text), set only while an open payment request has no provider; `_read` reads that one
+  setting then, in the CRUD process (the edge only forwards it). A revision's pictures (its `render` and `test_print` files and
+  the customer's `reference` files, never another role) are copied once from the packed
+  blob to `customer-file-<sha256>` on S3, held by every attachment that shows them, and
+  presigned; one that cannot be shown (a failed copy, past `MAX_PICTURE_COPY_BYTES`, a store
+  that is not S3) is listed with no URL, never a 500. Its caption is the shop's caption or
+  "Design N, picture K", never the file name. Each revision lists its colour slots with
+  the price book's names. Writes take an `Idempotency-Key` and run as `customer_actor`
+  (session `link:<link id>`, or `account:<account id>` for a signed-in reader) inside the ledger's transaction (`Lifecycle` `InTransaction`,
+  told by `Lifecycle.tell` after commit; the pre-lock checks and `ensure_revision` run on
+  that connection too). The customer's cancel is refused 409 `order_approved` once anything
+  is approved (`Lifecycle.approved_anything`) and 409 `order_paid` once a payment is
+  recorded, a deposit included (`payments.store.has_payment`).
   An item added after acceptance (#5349, spec §3.5 "As built"): `POST
   …/items/after-acceptance` (`Lifecycle.add_item`/`add_request_item`/`add_custom_item`
   with `after_acceptance`, checked by `_takes_item`) on an `accepted`, `in_production` or
@@ -839,7 +1229,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   Job cost phase 1 (#5326, spec `2026-11-05-job-cost-design.md`, plan
   `2026-11-05-job-cost-phase-1.md`): `order_time_entries` and `order_cost_entries`, written
   only through `Lifecycle.add_time_entry`/`remove_time_entry`/`add_cost_entry`/`remove_cost_entry`
-  in every order status, ended and on hold included (`time.added`, `cost.removed`, … on the
+  in every order status, ended and on hold included, except that adding one to a storefront cart not yet submitted is 409 `order_not_submitted` (`time.added`, `cost.removed`, … on the
   audit line); a time entry copies `pricing_labour_rate_per_hour` (null outside the shop's
   currency), and an entry's `source` (a timer's `timer:<item or order>:<started_at>`, a form's
   `manual:<uuid>`, a writer's id) makes a retry write once (200 with the first entry; a time
@@ -919,7 +1309,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `machine_rate_per_hour`. A merge of the three tables runs on the API only: the print
   worker's run makes or merges its printer row through `POST
   /api/v1/internal/crud/print/printers/ensure-bambuddy` (`crud/print.py`
-  `RemotePrinterStore`, area `printer-ensure`, #5298 Task 29's route taken early). Routes
+  `RemotePrinterStore`, area `printer-ensure`, #5298 Task 29). Routes
   `GET`/`PUT`/`DELETE /printers/{id}/machine-rate` (`api/machine_rates.py`). A slice quote
   is priced at the rate of the printer it sliced for (`QuoteRun.machine_rate`,
   `MachineRates.for_quote`: `printer`, else the printer linked to `printer_id`, else the
@@ -986,8 +1376,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   Past prints (#4777, §3.2): `ItemCreate.archive_id` alone (any other source or `kind` is
   422) makes a Bambuddy archive an item (`api/orders.py` `_archive_item`): a `model` item of
   the output whose `print_links` row owns it, else a `library_file` item of the library file
-  that owns it, else (an output or file gone since, or an output whose template was deleted,
-  falls through too) a `library_file` item of
+  that owns it, else (an output or file gone since, an output whose template was deleted,
+  or a print imported onto a model, #4698, falls through too) a `library_file` item of
   a copy of its printed file (`/archives/{id}/download`) in the native library,
   `orders/past_prints.py` `copied_file`, one per archive (`archive_library_copies`, reused while
   the file is not trashed); 409 `archive_gone`, and `archive_copy_not_native` when a copy is
@@ -1021,12 +1411,305 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   of `quantity`, `succeeded`, recorded and accepted through the same `_insert_attempt` and
   `_accept_attempt` as the single routes, in one transaction; an item not `approved` or
   `failed`, or named twice, refuses all). Both refuse a visitor's cart (`order_not_submitted`).
+  Customer messages (#5660, spec `2026-11-08-order-notify-customer-design.md` §7): the agent
+  sends through a messaging plugin and the API keeps the record, `order_messages`
+  (`orders/messages.py` `OrderMessages`, shapes `orders/message_models.py`, routes
+  `api/order_messages.py`), each write under the order's lock with its `order_events` row
+  (`message.sending`, `.sent`, `.failed`, `.unknown`, `.marked_sent`). The agent claims a
+  `sending` row under its `Idempotency-Key` before it calls the plugin (a key seen before
+  answers its row, 200), then posts the outcome, taken from `sending` or `unknown` only. One
+  template is told once per status change (`episode`, the order's newest
+  `order_status_changes` row): a second claim is `already_notified` unless it names
+  `resend_of`; `GET …/messages/check` answers the same and writes nothing. A `sending` row
+  older than `STALE_SENDING_MINUTES` reads `unknown`, is never sent again by itself and has
+  no sweep; only a person marks it sent (`…/mark-sent`, `PERSON_ENDPOINTS`). The plugin
+  binding is the stored setting `orders_customer_messaging` (`MessagingBinding`; no secret,
+  a secret-looking `fixed_args` key is refused; an unreadable one loads as none). The
+  storefront overlap (spec §8): a `quoted` or `shipped` claim is recorded `skipped`, reason
+  `storefront_mail`, audit row `message.skipped`, when `storefront_mail_covers` says the
+  storefront mails that news to the order itself (`STOREFRONT_EVENT`, asked with the
+  lifecycle's `mail_ready`), unless the body sets `also_when_storefront_mails`; the check
+  answers it as `storefront_mail`.
   Bambuddy (phase 5, #4253, spec §8): `orders/bambuddy.py` is the one file in `orders/`
   that imports `bambuddy.client` (`tests/test_orders_bambuddy_seam.py`), reached through
   `orders/integrations.py` `OrderIntegrations` (`OrdersComponent.integrations`, chosen for
   the running `bambuddy_url`; `NotLinked` without one); the quote's Bambuddy slice calls
   live there too. `POST /orders/price-book/import-spools` (`orders/spool_import.py`) makes
   or updates filament records from the spools, on click only (`PriceBook.spool_import`).
+  A record with no density gets one there, from a manual add sent with no density, and
+  from `POST …/price-book/fill-densities` (#6136, `orders/density.py`): the spools' preset id (`slicer_filament`, a K-profile's
+  `setting_id`, the AMS tray's `tray_info_idx`), that preset's density (Bambuddy's local
+  preset, else the image's Bambu Studio preset), else Bambuddy's filament catalogue
+  (only entries whose name holds each word of the spool's subtype); no preset is found
+  by a subtype's name. A density read Bambuddy refuses leaves the density
+  empty and fails nothing. `filaments.density_profile` keeps where it came from; a
+  person's density clears it. An estimate reads only the record's own density.
+  A record's whole colour (#6209, migration `20261114T1607Z_filaments_alpha_effect.sql`):
+  `colour` stays `#RRGGBB` (the render splits parts by it; a clear filament is its RGB with
+  `alpha` 0), beside `alpha`, `extra_colours` (at most 8 stops) and `effect` (Bambuddy's
+  `effect_type` set), all on `Filament` and the storefront's `PublicFilament`. The
+  identity index holds `alpha` too (#6261, `20261115T0154Z_filaments_identity_alpha.sql`):
+  a spool type's book row (`filament/types.py` `_link_price_book`) is one per alpha.
+  `colour_source` is `import` or `manual`: a look sent by a person that differs from the
+  record's makes it `manual`, and the import never sets a `manual` record's look;
+  `colour_source: "import"` in a PATCH hands it back; the editor's "Use spool colour"
+  sends it only for a record an import linked to spools (`Filament.spool_linked`:
+  `spool_colour` or `spool_ids` set). The import matches only a record of
+  the group's material, subtype and brand: by its link to the group's spools (`spool_ids`),
+  else by the spools' RGB (`spool_colour`, then `colour`), never by a colour a person set, so
+  it makes no duplicate, and a spool whose material was corrected is another filament's
+  (`spool_import.py` `_matches`, in three passes over every group, so the groups' order
+  never decides: a record linked to a group whose RGB its spools had, then a record linked
+  to any group's spools, then a record by colour (`_by_colour`); a spool link always wins
+  over a colour. `_movers` picks the matched `import` records whose colour changes and
+  whose new RGB no staying record of their names holds (a record held back stays too,
+  until none changes); the import parks them out of the identity index
+  (`OrderStore.park_filaments`, `archived_at` set inside its transaction) and puts each
+  back with its new colour (`set_import_look` `unpark`), so a chain or a swap of colours
+  settles in one import. A matched record held back keeps its whole look with
+  `colour_taken`. The matched groups are written before the new ones, and a new group
+  whose RGB is another record's colour is skipped `colour_taken`). The migration sets no
+  link (`spool_colour` NULL, `spool_ids` empty) on every existing record but two: the two
+  prod stand-ins for clear spools (ids and colours pinned in it) get `colour_source`
+  `manual` and `spool_colour` `#000000`, so the import finds them by their spools'
+  `#000000`. The next import links every other record by its own `colour`. Until that
+  first import after the deploy, a record with no link is found only by its own colour:
+  change its colour by hand before then, and the import makes a second record of its
+  spools' colour. So run "Import from spools" once after the deploy, before any colour
+  edit (#6211 review). An item
+  print's spools are matched the same way (`orders/spools.py` `_of`, the store's
+  `spool_links`), so a hand-set colour still finds its spools.
+- A customer's own models (#6133, spec 2026-11-13; migration
+  `20261113T1547Z_storefront_customer_models.sql`): `orders/storefront/model_requests.py`,
+  CRUD area `models`, the edge's `POST /api/store/v1/uploads` and `…/draft/models`. The files
+  never pass through ScadBuddy (#5295): `presign_uploads` writes one `storefront_uploads` row
+  per file and answers a presigned PUT of `<prefix>/staging/<id>` (`store/s3.py`
+  `presign_put`, a Signature V4 client of its own so `content-length;content-type` are
+  signed, 15 minutes); the browser PUTs straight to the bucket. `add_model_request` claims the
+  uploads (each the visitor's and unclaimed, frozen by a server-side copy with a SHA-256
+  checksum to `<prefix>/staging/<id>.<nonce>.frozen`, a nonce per claim attempt, which no
+  presigned URL names, whose `HEAD` must be exactly its declared size; its key, ETag and
+  SHA-256 kept in `storefront_uploads.frozen_key`, `frozen_etag`, `frozen_sha256`; a losing
+  or refused attempt deletes its copies, `_drop_losers`; the writable original
+  deleted after the commit; no byte read; the check and the import read only the copy) and adds a `request` item, its `order_item_model_requests` row (the colours asked
+  for) and its `order_item_sources` (files `checking`; links as text only, typed by
+  `orders/customer_links.py`: `makerworld` `open`, any other print link `manual`, a purchase
+  `pending`), in one transaction. Caps (`storefront/wire.py`): 256 MiB a file, 20 files, 10
+  print links, 5 purchase links, 1 GiB a request. The edge's presign takes the design
+  requests' `UploadAllowance` and Turnstile action `model`, and so does the edge's
+  `…/draft/models` when it names no upload (links only); both are 404 `requests_disabled`
+  while requests are off; the page's CSP names the bucket
+  in `connect-src` from `GET …/uploads/config` (`storefront/upload_origin.py`
+  `UploadOrigin`, a bare origin only). The S3 store is required (503 `storefront_needs_s3`).
+  Each upload has a watcher, the workflow `StagedFile` (`workflows/staged_file.py`, `library`
+  queue, id `staged-file:<upload id>`, AUTO_UPGRADE as `VersionedStagedFile`, so a change to
+  its commands goes behind `workflow.patched`), which owns the file's life. The presign
+  starts it before it answers any URL (`staged_files.watch`; a failed start is 503
+  `uploads_unavailable`, no URL, the new rows dropped). Its one activity,
+  `staged_file_step` (`orders/storefront/staged_files.py` `step`), reads the file's state
+  under the order's lock and cleans it up when due, in the same transaction, then deletes
+  the object and its preview: a slot never claimed `UNCLAIMED_GRACE` (1 h) past its URL's
+  expiry, a claim whose line is gone, a claimed file of a cart not submitted `STAGING_TTL`
+  (72 h) after its claim (its source reads `refused`, `EXPIRED`), a declined file, and a
+  file of a submitted order cancelled or closed `ENDED_GRACE` (30 days) before (#6164; its
+  source reads `declined`, `ENDED`; a reopen within the grace clears `cancelled_at` and
+  `closed_at`, so the file waits again). A live submitted order's file has no deadline. The routes signal it after their commits
+  (`staged_files.poke`: `claimed`, `unclaimed`, `submitted`; an order's cancel and close
+  `closed`, its reopen `retry`), but the database is the truth,
+  so a lost signal costs time, never a file; the step retries with no limit.
+  `sweep_staged` (in the storefront drafts sweep) is only the backstop: a staging object no
+  row names past `ORPHAN_AGE` (1 day) is deleted, and a row that old whose watcher is not
+  running gets one started again, and a file source still `checking` past `CHECK_STALE`
+  (1 h) whose check is not running gets its check started again, each counted in
+  `scadbuddy_staged_files_repaired`. A pass checks at most 1000 rows and 1000 waiting sources (`SWEEP_PASS_BATCHES`)
+  and the next goes on from there.
+  The check (#6133 PR 2, spec §7) runs in the intake worker, `python -m
+  scadbuddy.intake_worker` (`intake_worker/`), which holds no database secret or KEK and
+  refuses to start with one (`settings.py` `FORBIDDEN_ENV`); its worker process imports no
+  database code (`tests/intake_worker/test_worker.py`). The claim starts one
+  `CustomerFileCheck` per file source on `temporal_task_queue_customer_files`
+  (`orders/storefront/intake.py` `start_checks`, best effort; the backstop above). Its
+  activity reads the staged file through the CRUD routes of caller `intake` (area
+  `sources`, `api/crud_intake.py`: a presigned GET, a presigned PUT of the preview, the
+  verdict; the GET is of the frozen copy, `If-Match` its ETag), checks it in a child process
+  (`child.py`: `RLIMIT_AS`, non-dumpable, started by its launcher `confine.py`: non-dumpable,
+  new user, network, mount and PID namespaces (the parser forked as PID 1 with
+  `PR_SET_PDEATHSIG`, `/proc` under a tmpfs), the spool under a tmpfs with the box bind-mounted inside it,
+  `PR_SET_NO_NEW_PRIVS`, a seccomp filter, then `execv` as a non-root uid, which clears every
+  capability; a timeout, its own process group; `check.py`: the kind by content, the zip's
+  directory, the read within the read budget) and posts `ready`, `refused` or, once its
+  attempts are spent, `failed`. The worker is non-dumpable from its start (`hardening.py`).
+  `SCADBUDDY_INTAKE_SANDBOX` is required (no default): `true` runs the child in the intake
+  sandbox, a Deployment of its own (`python -m scadbuddy.intake_worker.sandbox`, `sandbox.py`;
+  no ServiceAccount token, proof or secret but the RPC token, its own `emptyDir`, nothing
+  shared with the worker's pod; it exits 2 with any file under `/var/run/secrets/`,
+  `SECRETS_DIR`),
+  never in the worker's, and needs `SCADBUDDY_INTAKE_SANDBOX_URL` (a plain `http://` URL of
+  its Service); only the dev-only `unsafe-local` runs it in the worker's container. The
+  worker hands each file over HTTP (`POST /check` on `SCADBUDDY_INTAKE_SANDBOX_PORT`,
+  default 8090; the body the file, the request JSON in `X-Intake-Request`; the answer
+  binary-framed: `X-Intake-Verdict-Bytes` bytes of verdict JSON, then the preview PNG; the
+  wire format and every cap in `runner.py`'s docstring). Each check carries the RPC token,
+  `Authorization: Bearer <token>`: both processes read it from
+  `SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE` (`runner.read_token`; the Secret
+  `scadbuddy-intake-sandbox-rpc`, mounted outside `/var/run/secrets/`) and refuse to start
+  without a file, with an empty one or a token under 32 bytes. It authorizes calls to the
+  sandbox only, so it is the one secret the sandbox may hold. The sandbox compares it with
+  `hmac.compare_digest` and answers 401 before it reads the body, then closes. A request's
+  head and whole body arrive within `sandbox.REQUEST_DEADLINE` (60 s) or the sandbox drops
+  it and frees the slot. Its NetworkPolicy admits only the worker's pods, and the worker
+  reads every answer as untrusted (`runner._read_answer`: the echoed `X-Intake-Id`, each length within
+  its cap, the verdict validated by `parse_verdict`, the PNG signature and `IHDR` checked).
+  The sandbox fails closed: it runs the launcher with `--strict` (a refused step is exit
+  126, no parse) and exits 3 at start when its probe is refused (`probe_isolation`); the
+  worker counts failed calls, `scadbuddy_intake_sandbox_failed_total` by `reason`, on its
+  `/metrics`. One tenant per pod: the worker and the sandbox each run one check at a time,
+  fixed (a second request is 503, which the worker tries again for up to `BUSY_WAIT`), and
+  the sandbox kills any process of an earlier check before the next (it is the child
+  subreaper; one that survives makes it exit 4); scale with replicas. Each check gets a
+  fresh `box/` (0700, the upload made `O_EXCL | O_NOFOLLOW`), removed after it; a client
+  that goes away, or the timeout, kills the child's group. The RPC tests are
+  `tests/intake_worker/test_sandbox.py`. The
+  API stores the preview as opaque bytes, `customer-preview-<sha256 of the preview's bytes>`
+  (never the worker's reported hash), held by the source
+  (`blob_refs` holder `order_item_source`; the trigger of
+  `20261114T0603Z_intake_worker.sql` drops it with the source). The worker is not
+  versioned: a change to `intake_worker/workflow.py`'s commands goes behind
+  `workflow.patched`.
+  `S3ContentBackend.sweep_unrecorded` never touches `staging/`.
+  Purchases, the handling fee and the gate (#6133 PR 3, spec §10; migration
+  `20261114T1156Z_order_purchase_charges.sql`): `ChargeKind` gains `purchase` and
+  `handling`; `order_charges.purchase_link_id` (UNIQUE, FK to `order_item_sources`) is
+  set exactly on a `purchase` row (`order_charges_purchase_link`), and an order has at
+  most one `handling` row (`order_charges_handling`). Only the lifecycle writes them:
+  `Lifecycle.record_purchase` (one transaction under the order's lock: a cost entry on
+  the link's item, kind `material` or `other`, source `purchase:<source id>`; a
+  `purchase` charge of the same amount labelled `purchase_label`; the source
+  `recorded` with both ids; `_rehandle` and `_retax`; the audit row `purchase.recorded`;
+  a second record of a recorded link with the same amount and cost kind writes nothing,
+  one that differs is `purchase_recorded`), `update_purchase` (the entry and
+  the charge together, `purchase.updated`) and `decline_purchase` (both removed, the
+  source `not_needed` with `shop_note`, `purchase.declined`; a second decline writes
+  nothing). All three work only while `draft` or `quoted` (`purchase_locked`), never on
+  a cart; record refuses a `not_needed` link (`purchase_not_pending`), update one not
+  recorded (`purchase_not_recorded`). A cost entry with a `purchase:` source is neither
+  removed nor added by hand (`purchase_cost_linked`), and its item's delete is
+  `item_has_entries`, whose text names the decline. The handling fee is
+  `money.handling_minor`: Settings → Orders' `orders_purchase_fee_flat_minor` per
+  recorded purchase (only for an order in `orders_currency`) plus
+  `orders_purchase_fee_percent` (0 to 100, two decimals) of their sum, rounded half up
+  once, the row removed at 0; both settings are env-seeded and live, and neither the
+  purchases nor the fee are in the auto tax's base. A change to either setting reprices
+  no order by itself: an order's `handling` row follows it at that order's next record,
+  update or decline. The gate `_no_pending_purchase`
+  (`purchase_pending`, 409, the problem's `sources` and `items` name the pending links)
+  counts only links of items not `cancelled` (`store.py` `pending_purchases`; a reopen
+  brings the link back) and refuses `_accept_quote` (every caller), `_accept_order` (so `_accepted_by_the_last`
+  writes `order.accept_skipped`) and a `balance` payment request; a `deposit` request
+  is not gated. The customer's order view offers no accept while one is pending, and
+  no answer to a `together` item's design, whose accept accepts the quote too
+  (`order_page.py` `_Rows.purchase_pending`). Routes `api/order_purchases.py`: `GET
+  /orders/{id}/purchases`, `POST …/purchases/{source}/record` (201, 200 for a repeat),
+  `PATCH …/purchases/{source}`, `POST …/purchases/{source}/decline`, the three writes
+  each under `_run_linked`; no `Idempotency-Key` (the `purchase:` source and the link's state make
+  a repeat safe). Agent `order_purchases` (read), `order_purchase_record`,
+  `order_purchase_update`, `order_purchase_decline` (write). A design request takes up
+  to `MAX_PURCHASE_LINKS` things to buy too: the multipart part `purchase_links`, a JSON
+  list of `{url, note}` that both sides read with `storefront/uploads.py`
+  `checked_purchase_links` (`too_many_links`, `link_invalid` with `index`, also for a
+  lone surrogate, `draft_body_invalid`); the CRUD side holds each link to `checked_link` and stores it
+  as a `pending` `manual` purchase source (`model_requests.checked_purchase_links`,
+  `insert_links`).
+  The UI's routes (#6133 PR 4, spec §4.3, §7 "Serving the preview", §10.5, §11): a
+  preview is served only by a route that sends `storefront/wire.py` `PREVIEW_HEADERS`
+  (`image/png`, `inline`, `nosniff`, `private, no-cache`), never a presigned URL; the
+  CRUD side reads it (`intake.read_preview`, capped at `MAX_PREVIEW_BYTES`) and the edge
+  streams it (`routes.py` `_relayed_preview`, any refusal a 404 with no body). The cart's
+  is `GET …/draft/sources/{id}/preview` (the visitor's unsubmitted cart only,
+  `intake.draft_preview`); the order page's is `POST …/order/sources/{id}/preview` with the
+  reader in the body (`order_page.preview`). `GET …/models/colours` lists the price book's
+  filaments with no price (the edge keeps `FILAMENT_FIELDS`). Submit refuses a cart with a
+  refused or expired file, 409 `model_file_refused` with `sources` (`submit.py`
+  `_no_refused_file`). The customer's view gains `charges` and `items[].sources`
+  (`CustomerSource`; `customer_reason` only for `ENDED`, `order_page.CUSTOMER_REASONS`). The
+  back office: `api/order_sources.py` (`…/sources/{source}/preview`, `/download` (a
+  presigned GET of the frozen copy, 5 minutes, an attachment), `/check`
+  (`Lifecycle.recheck_source`, then `intake.start_checks`), `/decline`
+  (`Lifecycle.decline_source`, then `poke` `declined`) and `/retry-import`
+  (`Lifecycle.retry_import`, then `poke` `retry`); no `Idempotency-Key`, a repeat writes
+  nothing). `GET /orders/{id}` adds `sources` (`OrderItemSource`, `OrderStore.item_sources`,
+  with `import_stuck` and the reason `models.py` `IMPORT_STUCK`, an hour past the submit)
+  and `model_requests`; `GET /orders` takes `own_model`, `purchase_pending` and
+  `import_stuck`. Agent `order_item_source_decline`, `order_item_source_check_again`,
+  `order_item_source_retry_import` (write); the preview and download are the page's
+  (`coverage.ts`).
+- Storefront accounts (#5283, spec 2026-11-02 §5.2): `orders/storefront/accounts.py`, a
+  passwordless sign-in on the caller's connection (migration `…_storefront_accounts.sql`).
+  - `request_code` makes a sixteen-character code from `CODE_ALPHABET` (Crockford's
+    base32 less `0` and `1`), shown `XXXX-XXXX-XXXX-XXXX`; `verify_code` reads it with
+    case, spaces and hyphens ignored. It does the same for every address, whether or not
+    an account exists (enumeration-safe). Only a salted sha256 is kept. A code dies only
+    when used or after an hour (`CODE_TTL`); wrong guesses never spend it, and a correct
+    live code signs in from any client. No address can be locked: requests are limited
+    per address and client (3 an hour) and per client (10), wrong guesses per client and
+    address (20 an hour) and per client (200), never per address, and a client is
+    `core/proxies.py` `client_key` (IPv4 address, IPv6 /64), so one guesser on a shared
+    network does not stop sign-in at other addresses. The mail cap is 20 live codes per
+    address: past it `request_code` returns None, raises nothing, and the caller answers
+    as usual and sends no mail; the refused request still counts toward the client's
+    limits (a used, expired row). A full cap
+    means 20 live codes in the owner's inbox, and a sign-in marks them all used, freeing
+    it. `verify_code` always makes 20 compares, padding with a dummy digest. The bound is
+    the code (about 10^-17 an hour per address; the arithmetic is in the docstring).
+    `request_code` and `verify_code` each hold transaction locks on the client, then the
+    address, so call them in a transaction. The verify route takes Turnstile
+    (`sign_in`) whenever a site key is set, and the code route takes it (`sign_up`).
+    `POST …/account/code` (`api/crud_storefront.py` `account_code`; the edge sends it
+    once, with no retry) answers 204 for every address: one with an account, one with
+    none, and one past the mail cap. Only when `request_code` made a code does it queue a
+    `sign_in_code` mail (`queue_mail`) in the code's own transaction, with the link
+    `{storefront_public_url}/account/sign-in#code=<code>`, and kick the sender after the
+    commit; with no `storefront_public_url` it queues none and logs it. An address that
+    is not one is 422 `account_body_invalid`, and a client past its limits is 429
+    `sign_in_limited`; neither depends on an account.
+  - `verify_code` makes the account at the first sign-in. It links the one unarchived
+    customer with that email contact, else makes a new customer. It joins a visitor of no
+    account, rotates the session (the old row is deleted), and stores only the 256-bit
+    token's sha256.
+  - What an account sees is `orders_of_account`: its visitors' orders plus `attach_order`'s.
+    The order page attaches an order whose link was opened while signed in, in its own
+    transaction, and only for an explicit view (never the view that answers a write). A
+    link-made `storefront_account_orders` row holds its link's id (`link_id`, FK with
+    ON DELETE CASCADE); a submit's row has none. `attach_order` is INSERT … ON CONFLICT
+    DO NOTHING, so a row is never changed: a submit row always wins. `revoke_order_links`
+    deletes the link-made rows of the links it revokes, in its transaction; a later view
+    through another live link attaches again. Only a revoke removes such a row, never an
+    expiry. `/o?order=<id>` also needs a submitted order: a cart is the same empty 404.
+  - Old code and failure rows are pruned as new rows are written, and every expired
+    session at each sign-in. There is no sweep. The visitor sweep keeps a visitor that
+    joined an account.
+  - The routes: the edge's `storefront/accounts.py` keeps the session in the
+    `sb_session` cookie (`s1.<token>.<mac>` under the edge's cookie key; HttpOnly,
+    Secure, SameSite=Lax) and sends its token as `X-ScadBuddy-Store-Session`. On the
+    CRUD side, area `accounts` (`api/crud_storefront.py`): `store_account` resolves the
+    session, never from a body. Submit takes the account from it (the edge sends the
+    cookie's session on): the order takes the account's customer, makes none (unless the shop archived that
+    customer: then it makes a new one and the account links to it; the account's row is
+    locked first, then the customer's, so two submits at once make one), and is
+    attached to the account (`attach_order`); a cart whose visitor joined another account
+    is 404 `draft_not_found`. The order page takes it too (`/o?order=<id>`, `order_page.ByAccount`).
+    `POST …/account/verify` (Turnstile `sign_in` at the edge, sent once with no retry)
+    answers the new token in that header only, never in a body. `POST …/account/sign-out`
+    deletes the session, and the edge also gives the browser a new visitor. When the CRUD
+    side does not answer, the edge still signs the device out but answers 503
+    `sign_out_incomplete`, and `storefront/sign_out.py` `SignOutRetries` tries the
+    revocation again in the background: five tries over about ten minutes, each logged,
+    from an in-memory queue of at most 1000; every give-up is logged. When the queue is
+    full, nothing is queued and the 503's text says the session ends on its own instead.
+    An edge restart drops the queue, and such a session ends at its expiry (30 days). A code is single-use: a sign-in whose answer is
+    lost spends it. `GET
+    …/account` answers the account's email or null, and `…/account/orders` lists
+    submitted orders only, with no cost or note.
 - `backend/scadbuddy/payments/` — the payments seam (#4957, epic #4962, spec
   `2026-11-02-storefront-design.md`, plan `2026-11-07-storefront-phase-2-payments-deposits.md`):
   a payment request asks the customer for money through a provider's hosted page, or by
@@ -1078,9 +1761,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   and `FAILED` move the request, a declined card leaves it open, and a payment or refund
   with no order is `other`; `verify` gives back the location's currency; the facts, each with its Square
   link, are its docstring),
-  `venmo.py` (#4960: once the storefront's `/pay/<token>` page ships (#5283 phase 4,
-  `PAY_PAGE_READY`, false until then), a USD PayPal request from a shop with the `venmo`
-  setting on will link to it; until then no link is rewritten and a connect with `venmo`
+  `venmo.py` (#4960: once `PAY_PAGE_READY` flips (#5283 phase 4 built the storefront's `/pay#<token>`
+  page; the flag stays false until its PayPal sandbox measurement is made), a USD PayPal request from a shop with the `venmo`
+  setting on will link to it; until it is on no link is rewritten and a connect with `venmo`
   `on` is `VenmoPageMissingError`, 409 `venmo_page_missing`, while a connect that leaves
   it out takes `off` (`ProviderField.default`; `ProviderField.unavailable` makes the form
   show `on` disabled, with why). Only the token's sha256 is kept, in
@@ -1232,7 +1915,64 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   is stored only when the link and the cursor are still the ones it started from. Posted
   deposits on the linked account only, kept in `bank_deposits` with the bank's text masked
   (`mask`: every run of five or more digits, a run going on across single spaces or
-  hyphens; order numbers kept) and suggested in `bank_deposit_matches`
+  hyphens; an order number is a run too, and only the canonical `ORD-yyyy-n` of an
+  order that exists is put back, `_existing`, with digits run on after it still masked; rows stored before that rule were re-masked by
+  `20261109T1420Z_bank_deposits_remask.sql`, every order number and every run of four or more digits, counted as
+  `mask` counts them, in `bank_deposits.description` and in the notes of the payment a confirmed
+  deposit recorded; `order_events.detail` holds ids only) and suggested in `bank_deposit_matches`
   (`order_number`, or `amount`: the balance of an order past `draft`, made on or before the
   deposit's date); nothing is recorded. A Plaid failure keeps its `error_code` as
-  `bank_links.sync_error`, which Settings shows. Unlink drops the Item's deposits.
+  `bank_links.sync_error`, which Settings shows. Unlink drops the Item's deposits but the
+  recorded ones (`bank.py` `_drop_deposits`), which keep their warnings below, and every
+  suggestion; nothing prunes a kept row while its payment stands.
+  The order page (`api/order_bank_deposits.py`, `GET /orders/{id}/bank-deposits`; frontend
+  `components/orders/DepositSuggestions.tsx`, mocks `src/mocks/features/orders/bankDeposits.ts`)
+  lists an order's suggestions; "Record this deposit as payment" (`…/{tx}/record`,
+  `deposits.record_deposit`) is `Lifecycle.add_payment` through `Payments.add_payment`,
+  method `bank_transfer`, reference the transaction id, under the deposit's row lock, so a
+  deposit is recorded once on any order (`deposit_recorded`; `deposit_currency` for another
+  currency; `deposit_changed` when a sync changed its amount meanwhile); the lock is taken in the payment's own transaction (`add_payment`'s
+  `on_insert`), so a confirmation holds one connection. "Not this order" (`…/{tx}/dismiss`)
+  writes a `bank_deposit_dismissals` row (transaction id and order), kept apart from the
+  Item's deposits, so a later sync, an unlink and a new link all keep it. Both are in
+  `PERSON_ENDPOINTS`; a deposit already recorded (by `bank_transfer` and its reference) is
+  never suggested again, after a new link too. A recorded deposit Plaid changed since is
+  listed with `reason` `changed`, and one Plaid removed (its row kept, `removed_at`) with
+  `removed`, each with `recorded_minor`, the sum of the order's `bank_transfer` payments
+  whose reference is the transaction id, while that sum is not the deposit's amount (0 when
+  removed), and only once the bank moved it (removed, or `changed_at`: set the first time a
+  sync reads a new amount for a recorded deposit and kept, so a change back after the
+  shop's correction warns again). Payments are never edited, so the page's warning asks the shop to
+  record the difference with that reference, which clears it. A cancelled order takes no
+  payment and shows no such warning; a removed row whose payment is gone is deleted by the
+  next sync. A sync emits `order.bank_deposits` (`OrderBankDepositsChanged`,
+  topic `order:<id>`) per order it suggested a deposit for, and per order of a recorded
+  deposit whose amount it changed or that it removed, so an open order page reloads.
+  Plaid's webhook (`POST /payments/bank/webhook`, in `PUBLIC_ENDPOINTS`; the link token
+  names it from `public_url`, `PaymentsComponent._webhook_url`) is checked by its
+  `Plaid-Verification` JWT before it is read (`plaid.webhook_key_id`, `verification_key`,
+  `verify_webhook`: ES256 only, a `kid` shaped as a UUID (`KID_SHAPE`) before Plaid is
+  asked, `iat` at most 5 minutes old and at most `WEBHOOK_MAX_SKEW_SECONDS` (60) ahead,
+  the body's SHA-256 compared in constant time; `BankLinks.handle_webhook`, which reads the
+  `bank_links` row only after the key caches and the bucket, so a forged `kid` costs no
+  database read or unseal); a bad one is 400 and changes nothing, a key Plaid could not
+  give, or a link whose keys or access token cannot be read, is 503 (Plaid sends it
+  again). Only a key that verified a webhook is kept by `kid`
+  (at most `MAX_WEBHOOK_KEYS`, least recently used dropped first), and asked for again
+  `KEY_RECHECK_SECONDS` (a day) after Plaid gave it; a key with `expired_at` set verifies
+  nothing and is kept with the unknown ones; a `kid` Plaid does not
+  have (`INVALID_WEBHOOK_VERIFICATION_KEY_ID`) is 400 and goes in a cache of its own for
+  `UNKNOWN_KEY_SECONDS`, so forged `kid`s never evict a verified key. A `kid` in neither
+  cache takes a token from `_KEY_LOOKUPS` (`KeyLookups`): the sender's bucket first (the
+  address `relay_client` trusts, never a raw `X-Forwarded-For`), then the process's
+  (a burst of `KEY_LOOKUP_BURST`); a refusal is 429 with `Retry-After`, which Plaid honours
+  ([webhook retries](https://plaid.com/docs/api/webhooks/#webhook-retries)). A webhook
+  whose `kid` is already being looked up waits for that lookup and takes no token.
+  `SYNC_UPDATES_AVAILABLE` runs `sync_deposits` after the answer (`BackgroundTasks`), the
+  sync's cursor check keeping it apart from the sweep's; an `ITEM` `ERROR` with
+  `ITEM_LOGIN_REQUIRED` (or a sync that gets that code) sets `bank_links.login_required_at`
+  and Settings shows "Reconnect": the link token is then for Link's update mode (the
+  Item's `access_token`, no `products`; a linked row with no token is 409
+  `access_token_missing`, never a fresh Link), and `POST …/reconnected` (person) clears it,
+  with a `sync_error` that was `ITEM_LOGIN_REQUIRED`, and syncs after the answer;
+  `LOGIN_REPAIRED` clears both too, and any sync that reads Plaid clears it. A webhook for another Item is `ignored`.

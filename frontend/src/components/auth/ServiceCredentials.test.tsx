@@ -29,9 +29,11 @@ describe('ServiceCredentials', () => {
   it('rotates and revokes', async () => {
     const user = userEvent.setup()
     renderPage(<ServiceCredentials />)
-    const section = await screen.findByRole('region', { name: 'Print worker' })
+    const printWorker = await screen.findByRole('region', { name: 'Print worker' })
+    expect(within(printWorker).queryByRole('button', { name: 'Rotate now' })).not.toBeInTheDocument()
+    const section = screen.getByRole('region', { name: 'Agent' })
     await user.click(within(section).getByRole('button', { name: 'Rotate now' }))
-    const list = screen.getByRole('list', { name: 'Print worker credentials' })
+    const list = screen.getByRole('list', { name: 'Agent credentials' })
     expect(await within(list).findAllByRole('button', { name: 'Revoke' })).toHaveLength(2)
     await user.click(within(list).getAllByRole('button', { name: 'Revoke' })[0]!)
     expect(await within(list).findByText('revoked')).toBeInTheDocument()

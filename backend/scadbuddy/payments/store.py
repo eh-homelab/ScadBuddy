@@ -121,6 +121,18 @@ def open_requests_for_order(conn: Conn, order_id: str) -> list[PaymentRequest]:
     return [PaymentRequest.model_validate(r) for r in rows]
 
 
+def has_payment(conn: Conn, order_id: str) -> bool:
+    """Whether money is recorded on the order: a payment (a deposit, a manual one) of
+    more than zero, or a paid request."""
+    row = conn.execute(
+        "SELECT EXISTS (SELECT 1 FROM order_payments WHERE order_id = %s AND amount_minor > 0)"
+        " OR EXISTS (SELECT 1 FROM payment_requests WHERE order_id = %s AND status = 'paid')"
+        " AS paid",
+        (order_id, order_id),
+    ).fetchone()
+    return bool(row and row["paid"])
+
+
 def request_by_ref(conn: Conn, provider: str, provider_ref: str) -> PaymentRequestView | None:
     row = conn.execute(
         f"SELECT {_VIEW} FROM payment_requests WHERE provider = %s AND provider_ref = %s",

@@ -1,0 +1,14 @@
+{
+    "type": "filament",
+    "name": "Bambu PLA Silk @base",
+    "from": "system",
+    "instantiation": "false",
+    "inherits": "fdm_filament_pla",
+    "filament_id": "GFA05",
+    "filament_vendor": [
+        "Bambu Lab"
+    ],
+    "filament_density": [
+        "1.32"
+    ]
+}

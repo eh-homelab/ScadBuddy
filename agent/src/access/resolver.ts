@@ -121,12 +121,12 @@ export class AccessResolver {
   }
 
   /**
-   * One of Claude Code's own built-ins (access/nativeBuiltins.ts): its item under
+   * One of Claude Code's own built-ins, or the session's (access/nativeBuiltins.ts): its item under
    * `builtin:claude-code`. With the source switched off it is `off`; else its row, if one is
    * stored. With no row it is `declared`, and a package can switch one `off` by default on:
    * then `builtin` over the `packages` that name it. A source or row a person switched off
    * stays off whatever a package names. `preloaded` is the source's rows when the caller read
-   * them once for every built-in (nativeBuiltins.ts `nativeBuiltinTools`).
+   * them once for every built-in (nativeBuiltins.ts `turnBuiltins`).
    */
   async native(name: string, declared: ToolAccess, packages: readonly string[], preloaded?: readonly AccessRow[]): Promise<ToolAccess> {
     const rows = preloaded ?? (this.reader ? await this.reader.rows([BUILTIN_SOURCES.claudeCode]) : [])

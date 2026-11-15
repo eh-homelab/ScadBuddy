@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import AsyncIterator
 from typing import cast
 
@@ -13,14 +14,26 @@ import respx
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.dispatch import SlicePlan
 from scadbuddy.bambuddy.filaments import FilamentOptions, FilamentPlan, SlotNeed, SpoolOption
-from scadbuddy.bambuddy.models import PresetRef, SlotChoice, SpoolFilamentPreset
+from scadbuddy.bambuddy.models import (
+    LocalPresetDetail,
+    PresetRef,
+    SlotChoice,
+    SpoolFilamentPreset,
+)
 from scadbuddy.bambuddy.resolver import NozzleChoice, PrintChoices, resolve
 from scadbuddy.bambuddy.slot_presets import slot_preset_name
 from scadbuddy.bambuddy.trays import tray_spool_id
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.slicing import catalogue as catalogue_module
 from scadbuddy.slicing.catalogue import catalogue_for, native_catalogue
-from scadbuddy.slicing.held_presets import HeldPresetStore, held_row, refresh_held
+from scadbuddy.slicing.held_presets import (
+    HeldPresetStore,
+    held_row,
+    refresh_held,
+    restripped,
+    setting_sha256,
+    strip_kept_logged,
+)
 from scadbuddy.slicing.presets import build_presets, native_preset_key, needs_bambuddy
 from scadbuddy.slicing.profiles import ProfileError, Profiles
 from scadbuddy.slicing.values import native_values
@@ -388,3 +401,41 @@ def test_a_held_rows_digest_is_its_settings() -> None:
     edited = PLA.model_copy(update={"setting": {**PLA.setting, "nozzle_temperature": ["1"]}})
     assert held_row(PLA).sha256 != held_row(edited).sha256
     assert held_row(PLA).preset.name == PLA.name
+
+
+#: A row an older build kept: the document Bambuddy sent, credential keys and all.
+OLD_ROW = {
+    **PLA.model_dump(mode="json"),
+    "setting": {
+        **PLA.setting,
+        "printhost_apikey": "k",
+        "print_host_extra": {"auth_token": "t", "port": 80},
+    },
+}
+
+
+def test_a_kept_row_with_credentials_is_stripped_with_a_refreshs_digest() -> None:
+    """#5298 Task 32 B3: top-level and nested credential keys go, and the ``sha256`` is
+    the one a refresh writes for the stripped document."""
+    stripped = restripped(OLD_ROW)
+    assert stripped is not None
+    preset, sha256 = stripped
+    assert preset["setting"] == {**PLA.setting, "print_host_extra": {"port": 80}}
+    assert sha256 == setting_sha256(preset["setting"])
+    assert sha256 == held_row(LocalPresetDetail.model_validate(preset)).sha256
+    assert restripped(preset) is None
+
+
+def test_a_clean_kept_row_is_not_rewritten() -> None:
+    assert restripped(PLA.model_dump(mode="json")) is None
+
+
+async def test_the_start_strip_never_fails_the_start(caplog: pytest.LogCaptureFixture) -> None:
+    """A failed strip is logged by its type and raises nothing."""
+
+    class Broken:
+        def strip_kept(self, stop: threading.Event) -> int:
+            raise OSError("down")
+
+    await strip_kept_logged(cast(HeldPresetStore, Broken()), threading.Event())
+    assert any(getattr(record, "error", None) == "OSError" for record in caplog.records)

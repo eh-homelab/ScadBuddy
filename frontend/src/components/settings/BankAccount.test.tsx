@@ -1,4 +1,4 @@
-import { screen } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { resetMockState } from '../../mocks/handlers'
@@ -80,6 +80,27 @@ describe('Settings → Payments → Bank account (#4961)', () => {
     renderSettingsSection(<BankAccount />, { route })
     expect(await screen.findByRole('status')).toHaveTextContent('Plaid could not be read (ITEM_LOGIN_REQUIRED)')
     expect(screen.getByText(/Deposits not read yet/)).toHaveTextContent('the housekeeping sweeps must be on')
+  })
+
+  it('shows Reconnect while Plaid needs a sign-in, and clears it after update mode', async () => {
+    mockBankLink({ linked: true, loginRequired: true, syncError: 'ITEM_LOGIN_REQUIRED' })
+    const create = stubLink({ accounts: [{ id: MOCK_CHECKING }] })
+    const { user } = renderSettingsSection(<BankAccount />, { route })
+    expect(await screen.findByRole('status')).toHaveTextContent('Plaid needs you to sign in to the bank again.')
+    await user.click(screen.getByRole('button', { name: 'Reconnect' }))
+    expect(create).toHaveBeenCalledOnce()
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Reconnect' })).not.toBeInTheDocument())
+    expect(screen.getByText('Plaid Checking')).toBeInTheDocument()
+    // The sync failure was the sign-in: it goes with "Reconnect".
+    expect(screen.queryByText(/could not be read/)).not.toBeInTheDocument()
+  })
+
+  it('keeps Reconnect when the shop closes update mode', async () => {
+    mockBankLink({ linked: true, loginRequired: true })
+    stubLink('exit')
+    const { user } = renderSettingsSection(<BankAccount />, { route })
+    await user.click(await screen.findByRole('button', { name: 'Reconnect' }))
+    expect(await screen.findByRole('button', { name: 'Reconnect' })).toBeEnabled()
   })
 
   it('unlinks the account and keeps the keys', async () => {

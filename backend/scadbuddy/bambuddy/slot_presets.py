@@ -128,6 +128,9 @@ class SlotPresets:
         return plan.model_copy(update={"filament_presets": refs}), shared
 
     async def _own(self, ref: PresetRef, base: str, slot: int) -> PresetRef | None:
+        """The slot's own copy of its filament preset. The copy is created in Bambuddy
+        without its source's credential-named keys, which parsing strips
+        (`core/credentials.py`)."""
         name = slot_preset_name(base, slot)
         if name in self._made:
             return self._made[name]

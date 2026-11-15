@@ -10,6 +10,9 @@ from starlette.staticfiles import StaticFiles
 from starlette.types import Scope
 
 INDEX_NAME = "index.html"
+#: The public storefront page's entry (#5282). The bundle holds it, but only the storefront
+#: edge serves it, on its own host (`storefront/static.py`): here it is a 404.
+STOREFRONT_ENTRY = "storefront.html"
 ASSETS_DIR = "assets"
 #: Every API route lives under ``/api/``. One that reached this mount matched no route,
 #: so it is a 404 problem document, never the SPA's HTML or a 405 (#365).
@@ -137,6 +140,8 @@ class SPAStaticFiles(StaticFiles):
     async def get_response(self, path: str, scope: Scope) -> Response:
         if _is_api(path):
             _refuse_api(path, scope, self)
+        if PurePosixPath(path).parts == (STOREFRONT_ENTRY,):
+            return _missing_asset()
         response = await self._response_or_fallback(path, scope)
         ok = response.status_code in (200, 304)
         response.headers["Cache-Control"] = IMMUTABLE if ok and _is_asset(path) else REVALIDATE

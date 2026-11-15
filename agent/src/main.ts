@@ -21,6 +21,7 @@ import { approvalGrantCheck, FailClosedTokenStore, liveTokenTiers, PostgresToken
 import { ConfigError, loadConfig } from './config.js'
 import { type PolledQueue, queuesPolled, workerHealthApp } from './runtime/health.js'
 import { roleParts } from './runtime/role.js'
+import { inClusterApi, KubernetesSandboxes } from './sandbox/pods.js'
 import { BrowserOrigins } from './browser/store.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
 import { CredentialPool } from './harness/fallback.js'
@@ -32,6 +33,7 @@ import { BackgroundTaskStore } from './background/store.js'
 import { runCronPasses, temporalTaskRunner } from './background/temporal.js'
 import { connectDatabase } from './db.js'
 import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js'
+import { CrudEventLogReads } from './events/eventLogReads.js'
 import { PgEventListener } from './events/pgListener.js'
 import { DEFAULT_STATE_DIR, pluginCacheDir } from './harness/options.js'
 import { OWN_PLUGIN_DIR } from './harness/ownPlugin.js'
@@ -58,6 +60,9 @@ import {
   serviceCredentialMiddleware,
   withServiceCredential,
 } from './api/serviceCredential.js'
+import { untilBackendAnswers } from './api/backendUp.js'
+import { CrudAreas, READ_AREAS } from './api/crudAreas.js'
+import { CrudFlowRunReads, gatedFlowRunReads, SqlFlowRunReads } from './flows/backendReads.js'
 import { BrowserSessions } from './auth/browserSession.js'
 import { sealBackfill } from './sessions/sealBackfill.js'
 import { ApprovalActions } from './approvals/mcp.js'
@@ -93,7 +98,7 @@ import { TASK_QUEUE } from './temporal/names.js'
 import { sessionFinishActivities } from './temporal/session/finishActivity.js'
 import { gateDb, sessionGateActivities } from './temporal/session/gateActivities.js'
 import { acquireActivities, liveHostQueues, releaseActivities } from './temporal/session/affinity.js'
-import { startHostWorkers } from './temporal/session/hostWorkers.js'
+import { startHostWorkers, stopAfter } from './temporal/session/hostWorkers.js'
 import { SESSION_DEPLOYMENT, SESSION_SETTINGS_ACTIVITY, SESSION_QUEUE, sessionHostQueue } from './temporal/session/names.js'
 import { sessionTurnActivity } from './temporal/session/turnActivity.js'
 import { TurnHost } from './sessions/turnHost.js'
@@ -101,6 +106,7 @@ import { SessionDirectory } from './workspace/directory.js'
 import { readRuntimeSettings, RUNTIME_BOUNDS } from './sessions/runtimeSettings.js'
 import { SHARED_PACKAGES, sweepPackageCopies } from './temporal/packageServers.js'
 import { forwardPackageServers } from './plugins/packages/mcp.js'
+import { pluginMessaging } from './orders/messaging.js'
 import { DURABLE_TURNS_DIR, sweepTurnDirs, turnServers } from './temporal/turnServers.js'
 import { SessionClients } from './temporal/sessionClients.js'
 import { type ListedTools, listTurnTools, turnToolActivities, turnToolActivity } from './temporal/turnTools.js'
@@ -119,7 +125,7 @@ import { DurableTurns } from './sessions/durable.js'
 import { DurableRunningSweep, durableDescriber } from './sessions/durableSweep.js'
 import { sweepOrphanedSessionKeys } from './sessions/forget.js'
 import { PendingInputSweep, temporalDescriber } from './gate/sweep.js'
-import { Runtime } from '@temporalio/worker'
+import { type NativeConnection, Runtime } from '@temporalio/worker'
 import { Client, Connection } from '@temporalio/client'
 import { fileURLToPath } from 'node:url'
 import { AgentCommands } from './operations/run.js'
@@ -130,7 +136,7 @@ import { operationActivities } from './temporal/operationActivities.js'
 import { PendingActionStore } from './tools/pending.js'
 import type { ToolServices } from './tools/registry.js'
 import { RenderLimiter, settingsRenderLimits } from './tools/renderLimits.js'
-import { BackendWorkspaceBlobs } from './workspace/blobs.js'
+import { BackendWorkspaceBlobs, WorkspaceBlobError } from './workspace/blobs.js'
 import { rewrapWorkspaceKeys, WorkspaceSealing } from './workspace/sealing.js'
 import { SessionFiles, WORKSPACE_SWEEP_MS, type WorkspaceBytesStatus } from './workspace/store.js'
 
@@ -321,18 +327,34 @@ const backend = createBackendClient(
   serviceCredential ? serviceCredentialMiddleware(serviceCredential) : undefined,
 )
 
+// #5299 D7: the agent's reads of the backend's tables (the event log, flow runs, their
+// decisions and grants) go through the backend's CRUD routes once the API lists their areas,
+// read from the start and again with back-off until it does (api/crudAreas.ts); over SQL until
+// then, as an API pod older than the routes needs during a rolling deploy.
+const crudFetch = serviceCredential ? withServiceCredential(globalThis.fetch, serviceCredential, config.backendUrl) : globalThis.fetch
+const crudAreas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: READ_AREAS })
+crudAreas.start()
+const crudEventLog = new CrudEventLogReads(config.backendUrl, { fetch: crudFetch })
+const flowReads = database
+  ? gatedFlowRunReads(new SqlFlowRunReads(database.sql), new CrudFlowRunReads(config.backendUrl, { fetch: crudFetch }), () => crudAreas.has('flows'))
+  : undefined
+
 // The event bus (spec §7, #264): LISTEN on `scadbuddy_events` on a connection
 // of its own, retried in the background, feeding MCP resource subscriptions.
-const events = config.databaseUrl ? new PgEventListener(config.databaseUrl) : undefined
+const events = config.databaseUrl
+  ? new PgEventListener(config.databaseUrl, { eventLog: () => (crudAreas.has('events') ? crudEventLog : undefined) })
+  : undefined
 // The pending-input tables' change ticks (#815, gate/changes.ts), for the badge's stream.
 const pendingChanges = events ? new PendingChanges(events) : undefined
 // This replica's own queue: a pinned turn tool's calls (#2320), a classic session's
-// Monitor commands, which run where its turns' Bash runs, and the browser_* calls other
-// replicas make for a tab connected here (#4780).
+// Monitor commands, which run where its turns' Bash runs, the browser_* calls other
+// replicas make for a tab connected here (#4780), and the BridgeCall workflows this
+// replica starts for a tab on another one (#5862).
 const HOST_QUEUE = `${TASK_QUEUE}.${replicaIdentity()}`
-// browser_* calls for a tab connected to another replica (#4780, bridge/relay.ts): an
-// activity on the owner's HOST_QUEUE, through Temporal, sealed. Its client is set once made
-// (temporalClient below), only with the KEK; without it, such a call is refused.
+// browser_* calls for a tab connected to another replica (#4780, bridge/relay.ts): a workflow
+// on this replica's HOST_QUEUE whose activity runs on the owner's, through Temporal, sealed.
+// Its client is set once made (temporalClient below), only with the KEK; without it, such a
+// call is refused.
 const tabRelay = database
   ? new TemporalTabRelay({
       owners: new PostgresTabOwnerStore(database.sql),
@@ -424,14 +446,17 @@ const dataKeys = database && kek.ok ? new PgPayloadKeys(database.sql, kek.kek, {
 // backend with store_backend local do they stay in Postgres; on any other, a write this agent
 // cannot seal (no KEK) or store (the backend cannot mint the URLs, is too old, or is down) is
 // refused rather than kept in plaintext.
+const workspaceBlobStore = new BackendWorkspaceBlobs(
+  config.backendUrl,
+  serviceCredential ? { fetch: withServiceCredential(globalThis.fetch, serviceCredential, config.backendUrl) } : {},
+)
 const workspace = database
   ? new SessionFiles(database.sql, {
       settings,
+      // The hourly reconcile runs on one replica at a time, its lock on a lock connection.
+      locks: database.locks,
       blobs: {
-        store: new BackendWorkspaceBlobs(
-          config.backendUrl,
-          serviceCredential ? { fetch: withServiceCredential(globalThis.fetch, serviceCredential, config.backendUrl) } : {},
-        ),
+        store: workspaceBlobStore,
         ...(dataKeys && kek.ok ? { sealing: new WorkspaceSealing(dataKeys, kek.kek, { previous: previousKek?.ok ? previousKek.kek : undefined }) } : {}),
       },
     })
@@ -452,14 +477,24 @@ const workspaceBytesStatus = workspace
       return workspaceBytes.status
     }
   : undefined
-// Once migrations have applied: say where the files go (once, the cause when refused), and move
-// the files written before #4789 (or while the backend kept no blobs) to blobs; what is left is
-// retried at the next start.
+// Once migrations have applied and the backend answers: say where the files go (once, the cause
+// when refused), and move the files written before #4789 (or while the backend kept no blobs) to
+// blobs; what is left is retried at the next start. The API pod's sidecar can start before the
+// backend container answers (#5868): until /healthz answers this waits with back-off
+// (backendUp.ts), logged once as waiting, or as an error once per kind when the backend does not
+// answer for another reason (#5889); writes and reads ask the backend each time and need no wait.
 if (role.http && database && workspace && workspaceBytesStatus) {
   void database
     .ready()
     .then(async (ready) => {
       if (!ready) return
+      await untilBackendAnswers(() => workspaceBlobStore.backend(), {
+        kind: (err) => (err instanceof WorkspaceBlobError ? err.unreachableKind : undefined),
+        log: (message) => console.log(`workspace files: ${message}`),
+        error: (message) => console.error(`workspace files: ${message}`),
+      })
+      // A status read while the backend was down would be served for up to a minute.
+      workspaceBytes = undefined
       const status = await workspaceBytesStatus()
       if (status.store !== 'blobs' && status.unreadable_files) {
         console.error(`workspace files: ${status.unreadable_files} file(s) in the blob store cannot be read from here: ${status.reason}`)
@@ -560,6 +595,16 @@ if (role.http && database && dataKeys) {
 // Undefined: the defaults.
 const memory: MemoryOptions | undefined = undefined
 
+// Bash and PowerShell in a sandbox pod per session (#5864, sandbox/pods.ts): only where turns run,
+// and only once the cluster side is set up (SCADBUDDY_SANDBOX_*). Each minute the pods that have
+// ended (idle, or past their deadline) are deleted.
+const sandboxes = config.sandbox && role.sessionHost ? new KubernetesSandboxes(config.sandbox, inClusterApi(config.sandbox)) : undefined
+if (sandboxes) {
+  setInterval(() => {
+    sandboxes.sweep().catch((err: unknown) => console.error('sandbox: the sweep of ended pods failed:', err instanceof Error ? err.message : String(err)))
+  }, 60_000).unref()
+}
+
 // How a turn's ScadBuddy call runs as its ToolCall workflow (plan 2026-10-13 Step 9.2), once the
 // Temporal client below exists; read by each turn (until then, its calls run in-process).
 let toolCallStart: ToolCallStarter | undefined
@@ -570,6 +615,7 @@ const sessions =
     ? new SessionManager({
         memory,
         sql: database.sql,
+        flowReads,
         paths,
         ...(dataKeys ? { payloadKeys: dataKeys } : {}),
         ...(settings ? { settings } : {}),
@@ -612,6 +658,7 @@ const sessions =
         ...(workspace ? { workspace } : {}),
         // Claude Code's CronCreate and the rest, kept past the turn (src/background/).
         ...(backgroundTasks ? { background: { tasks: backgroundTasks, tz: agentTimezone(), commandQueue: HOST_QUEUE } } : {}),
+        ...(sandboxes ? { sandbox: sandboxes } : {}),
         // Every usable credential in priority order, with fallback; disables,
         // cooldowns, recoveries and fallbacks are audited (#1093).
         credentials: new CredentialPool({ repo: credentials, kek, audit }),
@@ -745,8 +792,8 @@ const durableToolDeps: ToolActivityDeps | undefined = temporal
   ? {
       services: toolServices,
       sessions: new PgSessionOwners(temporal.sql),
-      approvals: new PgApprovalRecords(temporal.sql),
-      flows: new PgFlowRuns(temporal.sql),
+      approvals: new PgApprovalRecords(temporal.sql, flowReads),
+      flows: new PgFlowRuns(temporal.sql, flowReads),
       audit,
       currentTiers: liveTokenTiers(tokens),
       // A result's images, for the durable segment's view_tool_images (#2320).
@@ -825,11 +872,31 @@ const agentSecrets = toolSecrets({
   ...(pluginPackages ? { packages: { store: pluginPackages, installer: packageInstaller } } : {}),
 })
 toolServices.secrets = agentSecrets.secrets
+// The messaging plugin a customer notice goes through (#5660, orders/messaging.ts): the
+// bound remote MCP server through the loopback forwarder, as a turn reaches it, in the one
+// services object every path shares (an in-process turn, /mcp, a ToolCall, a flow's call).
+toolServices.messaging = pluginMessaging({
+  remote: durableRemotePlugins,
+  ...(pluginPackages
+    ? {
+        packages: async () => {
+          const loaded = await loadPackagesForRun(pluginPackages, packageInstaller)
+          try {
+            const forwarded = await forwardPackageServers(loaded.loaded, pluginForwarder, undefined, { access: accessResolver })
+            return { plugins: forwarded.plugins, servers: forwarded.servers, release: () => (forwarded.release(), loaded.release()) }
+          } catch (err) {
+            loaded.release()
+            throw err
+          }
+        },
+      }
+    : {}),
+})
 const turnToolDeps = temporal
   ? {
       sessions: new PgSessionOwners(temporal.sql),
       // A flow's tool(name, ...) reaches the same tools, as the run's starter (#2320).
-      flows: new PgFlowRuns(temporal.sql),
+      flows: new PgFlowRuns(temporal.sql, flowReads),
       servers: turnServers({
         ...(durableRemotePlugins ? { remotePlugins: durableRemotePlugins } : {}),
         access: accessResolver,
@@ -849,7 +916,7 @@ const turnToolDeps = temporal
       }),
       hostQueue: HOST_QUEUE,
       clients: turnClients,
-      approvals: new PgApprovalRecords(temporal.sql),
+      approvals: new PgApprovalRecords(temporal.sql, flowReads),
       audit,
       currentTiers: liveTokenTiers(tokens),
       blobs: new SessionBlobs(temporal.sql),
@@ -890,9 +957,23 @@ const temporalClient = temporal
       ...(dataConverter ? { dataConverter } : {}),
     })
   : undefined
+// This process's agent-tools worker (below), once it starts: a turn here starts its calls eagerly on
+// that worker's connection (activityProjection.ts `ToolCallStarterDeps`, #5865).
+const eager: { worker: AgentWorker | undefined } = { worker: undefined }
+const eagerClients = new WeakMap<NativeConnection, Client>()
+const eagerClient = (): Client | undefined => {
+  const connection = eager.worker?.connection()
+  if (!connection) return undefined
+  let client = eagerClients.get(connection)
+  if (!client) {
+    client = new Client({ connection, namespace: config.temporalNamespace, ...(dataConverter ? { dataConverter } : {}) })
+    eagerClients.set(connection, client)
+  }
+  return client
+}
 if (temporalClient && temporal) {
   const results = { client: temporalClient, blobs: new SessionBlobs(temporal.sql) }
-  toolCallStart = toolCallStarter(results)
+  toolCallStart = toolCallStarter({ ...results, eager: eagerClient })
   // `tool_call_result`: what a finished call returned, which a restarted turn's message names (Step 9.2).
   toolServices.toolCallResults = (session, toolUseId) => toolCallResult(results, session, toolUseId)
 }
@@ -967,13 +1048,19 @@ const temporalWorker =
           ...turnToolActivities(turnToolDeps),
           default: turnToolActivity(turnToolDeps),
           // A flow's agent(...) and ask_session(...) (#1057, 6g): beside the tools, never one.
-          ...flowSessionActivities({ sql: temporal.sql, flows: new PgFlowRuns(temporal.sql) }),
+          ...flowSessionActivities({ sql: temporal.sql, flows: new PgFlowRuns(temporal.sql, flowReads) }),
           ...operationActivities(commandKinds, operationStore),
           ...(background ?? {}),
         },
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
         // The same Deployment and build as agent-sessions (plan Phase 11): Temporal then hands
-        // agent-tools' tasks, whoever schedules them, only to the current build's workers.
+        // agent-tools' tasks, whoever schedules them, only to the current build's workers. A ToolCall
+        // started eagerly (`eager`, above) asks for its first workflow task on this replica's worker
+        // instead, and its activity too when the call is not pinned and the worker has a free slot.
+        // Temporal grants that to a build a later one has superseded too (an old replica during a
+        // rollout): the old build runs the call's first task and activity (measured on a dev server,
+        // Server 1.32.0, test/toolCallLatency.temporal.test.ts `SUPERSEDED`). A call it declines goes
+        // through matching to the current build; the call's span says which (`scadbuddy.eager`).
         ...(config.buildId ? { deployment: { name: SESSION_DEPLOYMENT, buildId: config.buildId, queues: versionedQueues } } : {}),
         // Bundled by `pnpm build` (scripts/bundle-workflows.mjs).
         workflows: {
@@ -981,6 +1068,7 @@ const temporalWorker =
         },
       })
     : undefined
+eager.worker = temporalWorker
 // AgentSession (unified runtime spec 2026-10-13 §5.1): every new session runs here (plan Step 6.3).
 // Versioned as the Deployment `scadbuddy-agent` (D4) when the build has an id (config.buildId),
 // as agent-tools is, else unversioned like the host queues. `session_settings` is a local activity, so it
@@ -1004,7 +1092,7 @@ const sessionWorker =
 // This replica's own queues (temporal/session/hostWorkers.ts), unversioned (plan Phase 11): a queue
 // only one replica polls is no member of a newer build, so once that build is current Temporal
 // would hand a versioned one's tasks to no one while its replica still runs. A pinned turn tool's calls
-// (#2320) and a classic session's Monitor commands on HOST_QUEUE, and AgentSession's turns on SESSION_HOST_QUEUE, limited to the warm
+// (#2320), a classic session's Monitor commands and this replica's BridgeCalls on HOST_QUEUE, and AgentSession's turns on SESSION_HOST_QUEUE, limited to the warm
 // cache's largest setting plus two for releases. Their work dies with the pod; a call scheduled after
 // that fails at its schedule-to-start (a turn) or schedule-to-close (a pinned call) timeout.
 const hostWorkers =
@@ -1022,6 +1110,9 @@ const hostWorkers =
           // Its tabs are claimed once this worker polls (startHosting, below).
           ...(tabRelay ? tabRelay.hostActivities() : {}),
         },
+        // This replica's own browser_* calls for a tab on another replica (#5862): their
+        // workflow tasks never wait on the versioned agent-tools queue's routing.
+        ...(tabRelay ? { pinnedWorkflows: { workflowBundle: { codePath: fileURLToPath(new URL('./temporal/bridge-bundle.js', import.meta.url)) } } } : {}),
         ...(sessionHosting
           ? {
               sessions: {
@@ -1189,6 +1280,9 @@ const app = !role.http
   // Claude credential and every plugin secret, as a turn's upload tools search for them.
   // Read fresh, not through the 30 s cache: a pick is rare, and a secret stored a moment ago counts.
   workspaceSecrets: agentSecrets.fresh,
+  // Settings → Orders' messaging binding check and test send (#5660, routes/messagingBinding.ts).
+  orderMessaging: toolServices.messaging,
+  orderSends: { backend: toolServices.backend, messaging: toolServices.messaging },
   // The panel's background tasks (routes/backgroundTasks.ts).
   ...(backgroundTasks ? { backgroundTasks } : {}),
   ...(audit ? { audit } : {}),
@@ -1289,6 +1383,7 @@ async function stop(): Promise<void> {
   stopTabHosting?.()
   stopSweeper?.()
   stopEscalationSweeper?.()
+  crudAreas.stop()
   stopOrphanSweep?.()
   stopPluginSessionSweep?.()
   stopDurableSweep?.()
@@ -1302,18 +1397,28 @@ async function stop(): Promise<void> {
   // turns' pending approvals stay pending (approvals/service.ts).
   // The agent-tools worker at the same time: it stops polling, its running
   // activities get its 10 s grace and are then cancelled (a fetch's git is killed),
-  // and at 15 s it stops regardless: inside the turns' 17 s budget. Both host workers stop
-  // with it, the session host worker with the turns' 17 s as its grace. AgentSession turns get
+  // and at 15 s it stops regardless: inside the turns' 17 s budget. The session host worker stops
+  // with it, with the turns' 17 s as its grace; the pinned host worker only once they end (below).
+  // AgentSession turns get
   // the classic turns' grace (TurnHost.stop); one still running then is cut and fails
   // ShuttingDown, so its workflow places it on another replica, and one that ended in the grace
   // keeps its end. The warm processes are closed only once those have ended (stopTurns `others`).
   const hostedTurns = turnHost?.stop({ graceMs: TURN_DRAIN_MS, abortWaitMs: TURN_ABORT_WAIT_MS })
-  await Promise.all([
+  const drained = Promise.all([
     temporalWorker?.stop(),
-    hostWorkers?.stop(),
+    hostWorkers?.sessions?.stop(),
     sessionWorker?.stop(),
     sessions?.stopTurns({ graceMs: TURN_DRAIN_MS, abortWaitMs: TURN_ABORT_WAIT_MS, ...(hostedTurns ? { others: hostedTurns } : {}) }),
   ])
+  // The pinned host worker only once those end (#5862 review, stopAfter): it runs this replica's own
+  // BridgeCalls, whose workflow tasks a draining turn's browser_* call needs until the turn ends, and
+  // its pinned calls. It runs beside shutdown() below, which closes the tabs first, so its bridge.tab
+  // calls end at once ("gone"). Its stop ends within PINNED_SHUTDOWN_FORCE_MS (8 s) of the drain, and
+  // shutdown()'s 10 s deadline starts later, so closeDatabase, which awaits it, never closes the pool
+  // under a pinned call still in its grace (a classic Monitor's appendEvent). The server's own close
+  // does not wait for it.
+  const pinnedStopped = hostWorkers ? stopAfter(hostWorkers.pinned, drained) : undefined
+  await drained
   // Kept plugin MCP sessions end with their DELETE while the forwarder still routes it.
   await turnClients.closeAll()
   stopSessionWake?.()
@@ -1352,6 +1457,10 @@ async function stop(): Promise<void> {
     // never wake (#715 review; busEvents.ts).
     closeDatabase: database
       ? async () => {
+          // The pinned host worker's running activities, bounded by its 8 s force time, before the pool closes.
+          // Bounded, not prevented: an activity that ignores its cancel is abandoned at the force time but
+          // runs on in-process, so it may still meet the closed pool (and fail) before process.exit.
+          await pinnedStopped
           sessionEvents?.close()
           await database.close()
         }

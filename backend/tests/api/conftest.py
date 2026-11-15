@@ -430,7 +430,9 @@ def read_stored(conninfo: str) -> dict[str, Any]:
         stored["printer_bed_types"] = {
             str(printer_id): bed_type
             for printer_id, bed_type in conn.execute(
-                "SELECT printer_id, bed_type FROM printer_bed_types"
+                "SELECT p.bambuddy_printer_id, b.bed_type FROM printer_bed_types AS b"
+                " JOIN printers AS p ON p.id = b.printer"
+                " WHERE p.bambuddy_printer_id IS NOT NULL"
             ).fetchall()
         }
     return stored

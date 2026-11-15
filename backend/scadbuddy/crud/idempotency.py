@@ -9,7 +9,8 @@ rolled-back write leaves no reply to replay. Two requests with one key are seria
 transaction-scoped advisory lock on the key, so the second waits and replays the first.
 Rows are kept `RETENTION` (`prune`, in the auth sweep). `idempotent` and `record` are the
 two halves, for a route whose write cannot be one callable. `stored` reads a reply with no
-lock, for a route that answers a retry before it does any other work.
+lock, for a route that answers a retry before it does any other work; `has_reply` says
+whether a key holds one before the body is read.
 """
 
 from __future__ import annotations
@@ -106,6 +107,17 @@ def stored(
     return Replay(row["status"], row["body"])
 
 
+def has_reply(conn: Connection[DictRow], caller: CrudCaller, key: str, route: str) -> bool:
+    """Whether ``key`` holds a committed reply of ``route``, whatever its body: what a
+    route reads before a refusal it makes ahead of the body, so a retry still reaches
+    `stored` and its first answer."""
+    row = conn.execute(
+        "SELECT 1 FROM crud_requests WHERE caller = %s AND key = %s AND route = %s",
+        (caller, key, route),
+    ).fetchone()
+    return row is not None
+
+
 def record(
     conn: Connection[DictRow],
     caller: CrudCaller,
@@ -140,6 +152,16 @@ def idempotent_write(
         reply = write()
         record(conn, caller, key, route, body, reply)
         return reply
+
+
+def forget(conn: Connection[DictRow], caller: CrudCaller, key: str, route: str) -> None:
+    """Drop ``key``'s reply of ``route``, in the caller's transaction: for a write undone
+    after its commit (a presign whose watchers could not start), so a retry of the key
+    writes afresh instead of answering what no longer stands."""
+    conn.execute(
+        "DELETE FROM crud_requests WHERE caller = %s AND key = %s AND route = %s",
+        (caller, key, route),
+    )
 
 
 def prune(conn: Connection[DictRow], older_than: timedelta = RETENTION) -> int:

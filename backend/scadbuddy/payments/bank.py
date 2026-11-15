@@ -10,26 +10,58 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
+import time
 import uuid
-from collections.abc import Sequence
+from collections import OrderedDict
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from scadbuddy.api.realtime import RateLimit
 from scadbuddy.core.secrets import Envelope, Kek, SealError, open_secret, seal_secret
 from scadbuddy.orders.store import Conn, OrderStore
 from scadbuddy.payments import plaid
 from scadbuddy.payments.credentials import CredentialUnreadableError, KekMissingError
 from scadbuddy.payments.plaid import AccountSubtype, Environment, PlaidError, PlaidKeys
+from scadbuddy.payments.provider import BadSignatureError
 
 logger = logging.getLogger(__name__)
 
 _ROW = (
     "id, environment, secret_sealed, dek_sealed, kek_id, saved_at, item_id, account_id,"
-    " account_name, account_type, account_mask, linked_at, sync_cursor, synced_at, sync_error"
+    " account_name, account_type, account_mask, linked_at, sync_cursor, synced_at, sync_error,"
+    " login_required_at"
 )
+#: The keys that verified a webhook, kept in memory by ``kid``; Plaid rotates them
+#: rarely. Only a verified webhook puts a key here, so forged ``kid``s never evict one; a
+#: full cache drops its least recently used key.
+MAX_WEBHOOK_KEYS = 8
+#: A kept key is asked for again this long after Plaid gave it, so a key Plaid expired
+#: since (its ``expired_at``, https://plaid.com/docs/api/webhooks/webhook-verification/)
+#: stops verifying. Plaid's guide says when a key expires but not when to read it again;
+#: once a day is ScadBuddy's choice.
+KEY_RECHECK_SECONDS = 86_400.0
+#: The ``kid``s Plaid said it does not have, in a cache of their own, kept as long as
+#: this, at most this many.
+UNKNOWN_KEY_SECONDS = 300.0
+MAX_UNKNOWN_KEYS = 64
+#: Asking Plaid for a ``kid`` in neither cache (``KeyLookups``): per source address a
+#: burst of ``SOURCE_LOOKUP_BURST`` then one per ``SOURCE_LOOKUP_SECONDS``, and under that,
+#: process-wide, a burst of ``KEY_LOOKUP_BURST`` then one per ``KEY_LOOKUP_SECONDS``. A
+#: stream of forged ``kid``s cannot spend the shop's Plaid calls, and one sender cannot
+#: empty the process bucket alone.
+KEY_LOOKUP_BURST = 5
+KEY_LOOKUP_SECONDS = 5.0
+SOURCE_LOOKUP_BURST = 2
+SOURCE_LOOKUP_SECONDS = 60.0
+#: Sources with a bucket of their own; the least recently admitted is forgotten past it.
+MAX_LOOKUP_SOURCES = 1024
+
+WebhookOutcome = Literal["sync", "login_required", "login_repaired", "ignored"]
 
 #: The longest key, token or id a body takes.
 MAX_CHARS = 200
@@ -125,6 +157,8 @@ class BankStatus(BaseModel):
     #: last read failed (a fixed code, never Plaid's text).
     synced_at: datetime | None = None
     sync_error: str | None = None
+    #: Plaid says the bank needs the shop to sign in again: Settings shows "Reconnect".
+    login_required: bool = False
 
 
 class LinkToken(BaseModel):
@@ -158,6 +192,73 @@ class BankUnlinked(BaseModel):
     note: str | None
 
 
+class BankWebhookAnswer(BaseModel):
+    outcome: WebhookOutcome
+
+
+class WebhookKeyLookupLimitedError(Exception):
+    """A webhook's key is not kept and its source, or the process, asked Plaid for keys
+    too often; Plaid sends the webhook again, after ``retry_after`` seconds."""
+
+    def __init__(self, retry_after: float) -> None:
+        super().__init__("Plaid was asked for webhook keys too often")
+        self.retry_after = retry_after
+
+
+class KeyLookups:
+    """Token buckets for webhook key lookups: one per source address, checked first, and
+    one for the process. A refusal by either spends no token from the other."""
+
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        burst: int = KEY_LOOKUP_BURST,
+        every: float = KEY_LOOKUP_SECONDS,
+        source_burst: int = SOURCE_LOOKUP_BURST,
+        source_every: float = SOURCE_LOOKUP_SECONDS,
+    ) -> None:
+        self._lock = threading.Lock()
+        self._clock = clock
+        self._process = RateLimit(burst, 1 / every, clock)
+        self._source_burst = source_burst
+        self._source_every = source_every
+        self._sources: OrderedDict[str, RateLimit] = OrderedDict()
+
+    def take(self, source: str) -> float:
+        """0 and one token from both buckets, or the seconds until the refusing bucket
+        holds one again. Only an admitted lookup keeps or refreshes its source's bucket, so
+        refused senders cycling addresses cannot push out a bucket that is spent."""
+        with self._lock:
+            limit = self._sources.get(source)
+            if limit is None:
+                limit = RateLimit(self._source_burst, 1 / self._source_every, self._clock)
+            for bucket in (limit, self._process):
+                wait = bucket.retry_after()
+                if wait > 0:
+                    return wait
+            limit.take()
+            self._process.take()
+            _keep(self._sources, source, limit, MAX_LOOKUP_SOURCES)
+            return 0.0
+
+
+#: One per process: every ``BankLinks`` shares it.
+_KEY_LOOKUPS = KeyLookups()
+
+
+#: ``sync_error`` cleared when it is the sign-in's (the one parameter).
+_LOGIN_ERROR_CLEARED = " sync_error = NULLIF(sync_error, %s)"
+
+
+def _keep[V](cache: OrderedDict[str, V], key: str, value: V, limit: int) -> None:
+    """Put ``key`` last in ``cache``, dropping the least recently used entry when full."""
+    cache[key] = value
+    cache.move_to_end(key)
+    while len(cache) > limit:
+        cache.popitem(last=False)
+
+
 @dataclass(frozen=True)
 class LinkedAccess:
     """What a call on the linked Item needs."""
@@ -169,9 +270,27 @@ class LinkedAccess:
 
 
 class BankLinks:
-    def __init__(self, store: OrderStore, kek: Kek | None) -> None:
+    def __init__(
+        self,
+        store: OrderStore,
+        kek: Kek | None,
+        *,
+        webhook_url: Callable[[], str | None] = lambda: None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._store = store
         self._kek = kek
+        #: Where Plaid sends the Item's webhooks; read on each link token (live settings).
+        self._webhook_url = webhook_url
+        self._clock = clock
+        #: Keys that verified a webhook, by ``kid``.
+        #: ``kid`` to its JWK and when Plaid gave it (``self._clock``).
+        self._webhook_keys: OrderedDict[str, tuple[dict[str, Any], float]] = OrderedDict()
+        #: ``kid`` -> when Plaid's "no such key" stops being trusted (``clock`` time).
+        self._unknown_keys: OrderedDict[str, float] = OrderedDict()
+        #: Lookups in flight, by ``kid``: a second webhook with the same ``kid`` waits for
+        #: the first lookup instead of taking a token of its own.
+        self._lookups: dict[str, asyncio.Future[tuple[dict[str, Any], float]]] = {}
 
     @property
     def store(self) -> OrderStore:
@@ -241,6 +360,7 @@ class BankLinks:
             linked_at=row["linked_at"],
             synced_at=row["synced_at"],
             sync_error=row["sync_error"],
+            login_required=row["item_id"] is not None and row["login_required_at"] is not None,
         )
 
     def access(self) -> LinkedAccess | None:
@@ -322,10 +442,136 @@ class BankLinks:
     # -- the link ---------------------------------------------------------------------
 
     async def link_token(self) -> str:
-        row, _, keys = self._keys(await asyncio.to_thread(self._read))
+        """A token for Link; once linked, for update mode ("Reconnect"), which signs the
+        shop in to its bank again and keeps the access token."""
+        row, secrets, keys = self._keys(await asyncio.to_thread(self._read))
+        access_token = None
         if row["item_id"] is not None:
-            raise BankLinkedError()
-        return await plaid.link_token(keys, user_id=str(row["id"]), webhook=None)
+            # Update mode needs the Item's token: without it Link would make a new Item.
+            access_token = secrets.get("access_token")
+            if not access_token:
+                raise AccessTokenMissingError(str(row["item_id"]))
+        return await plaid.link_token(
+            keys, user_id=str(row["id"]), webhook=self._webhook_url(), access_token=access_token
+        )
+
+    def reconnected(self) -> None:
+        """Link's update mode finished: the bank is signed in again, and a sync failure
+        that was the sign-in goes with "Reconnect"."""
+        with self._store.transaction() as conn:
+            done = conn.execute(
+                "UPDATE bank_links SET login_required_at = NULL,"
+                + _LOGIN_ERROR_CLEARED
+                + " WHERE item_id IS NOT NULL",
+                (plaid.LOGIN_REQUIRED,),
+            )
+        if done.rowcount == 0:
+            raise BankNotLinkedError()
+
+    def mark_login(self, item_id: str, *, required: bool) -> None:
+        """Show or clear "Reconnect"; clearing it also clears a sync failure that was the
+        sign-in (any other failure stays until a sync reads Plaid)."""
+        with self._store.transaction() as conn:
+            if required:
+                conn.execute(
+                    "UPDATE bank_links SET login_required_at ="
+                    " COALESCE(login_required_at, clock_timestamp()) WHERE item_id = %s",
+                    (item_id,),
+                )
+            else:
+                conn.execute(
+                    "UPDATE bank_links SET login_required_at = NULL,"
+                    + _LOGIN_ERROR_CLEARED
+                    + " WHERE item_id = %s",
+                    (plaid.LOGIN_REQUIRED, item_id),
+                )
+
+    # -- webhooks ---------------------------------------------------------------------
+
+    async def handle_webhook(
+        self,
+        headers: Mapping[str, str],
+        body: bytes,
+        *,
+        source: str = "unknown",
+        now: float | None = None,
+    ) -> WebhookOutcome:
+        """Verify Plaid's webhook, then read it. ``sync``: the caller syncs the deposits
+        after answering. A `BadSignatureError` reads nothing, including a ``kid`` Plaid
+        does not have; a `PlaidError` is the key Plaid could not give, and
+        `WebhookKeyLookupLimitedError` a lookup ``_KEY_LOOKUPS`` refused ``source`` (the
+        sender's address as the app trusts it). The caches and the bucket come before
+        the row is read: a forged ``kid`` costs no database read and no unseal."""
+        token, kid = plaid.webhook_key_id(headers)
+        jwk, given_at = await self._webhook_key(kid, source)
+        plaid.verify_webhook(token, jwk, body, now=time.time() if now is None else now)
+        linked = await asyncio.to_thread(self.access)
+        if linked is None:
+            raise BadSignatureError("no bank account is linked")
+        _keep(self._webhook_keys, kid, (jwk, given_at), MAX_WEBHOOK_KEYS)
+        try:
+            event = json.loads(body)
+        except ValueError:
+            return "ignored"
+        if not isinstance(event, dict) or event.get("item_id") != linked.item_id:
+            return "ignored"
+        kind, code = event.get("webhook_type"), event.get("webhook_code")
+        if kind == "TRANSACTIONS" and code == "SYNC_UPDATES_AVAILABLE":
+            return "sync"
+        if kind == "ITEM" and code == "ERROR":
+            error = event.get("error")
+            if isinstance(error, dict) and error.get("error_code") == plaid.LOGIN_REQUIRED:
+                await asyncio.to_thread(self.mark_login, linked.item_id, required=True)
+                return "login_required"
+        if kind == "ITEM" and code == "LOGIN_REPAIRED":
+            await asyncio.to_thread(self.mark_login, linked.item_id, required=False)
+            return "login_repaired"
+        return "ignored"
+
+    async def _webhook_key(self, kid: str, source: str) -> tuple[dict[str, Any], float]:
+        """``kid``'s JWK and when Plaid gave it: one that verified before (for at most
+        ``KEY_RECHECK_SECONDS``), the lookup already in flight, or a new lookup that
+        ``_KEY_LOOKUPS`` lets ``source`` make."""
+        kept = self._webhook_keys.get(kid)
+        if kept is not None:
+            if self._clock() - kept[1] <= KEY_RECHECK_SECONDS:
+                return kept
+            del self._webhook_keys[kid]
+        until = self._unknown_keys.get(kid)
+        if until is not None and self._clock() < until:
+            raise BadSignatureError("Plaid has no webhook key with this kid")
+        pending = self._lookups.get(kid)
+        if pending is None:
+            wait = _KEY_LOOKUPS.take(source)
+            if wait > 0:
+                raise WebhookKeyLookupLimitedError(wait)
+            pending = asyncio.ensure_future(self._lookup(kid))
+            self._lookups[kid] = pending
+            pending.add_done_callback(lambda _: self._lookups.pop(kid, None))
+            # Every waiter may be gone (its client went away): the error is still read.
+            pending.add_done_callback(lambda done: done.cancelled() or done.exception())
+        return await asyncio.shield(pending)
+
+    async def _lookup(self, kid: str) -> tuple[dict[str, Any], float]:
+        linked = await asyncio.to_thread(self.access)
+        if linked is None:
+            # Nothing linked: no keys to ask Plaid with, and nothing to change.
+            raise BadSignatureError("no bank account is linked")
+        try:
+            jwk = await plaid.verification_key(linked.keys, kid)
+        except PlaidError as error:
+            if error.code != plaid.UNKNOWN_KEY_ID:
+                raise
+            self._unknown(kid)
+            raise BadSignatureError("Plaid has no webhook key with this kid") from None
+        if jwk.get("expired_at") is not None:
+            # Plaid expired this key: it verifies nothing, and is not asked for again soon.
+            self._unknown(kid)
+            raise BadSignatureError("Plaid's webhook key with this kid has expired")
+        return jwk, self._clock()
+
+    def _unknown(self, kid: str) -> None:
+        _keep(self._unknown_keys, kid, self._clock() + UNKNOWN_KEY_SECONDS, MAX_UNKNOWN_KEYS)
 
     async def link(self, public_token: str, account_ids: Sequence[str]) -> BankStatus:
         """Exchange Link's public token and keep the one chosen account. No account or
@@ -426,10 +672,11 @@ class BankLinks:
                 raise BankNotLinkedError()
             logger.warning("unlinked the bank account here: its stored keys will not open")
             conn.execute("DELETE FROM bank_links WHERE id = %s", (row["id"],))
-            conn.execute("DELETE FROM bank_deposits WHERE item_id = %s", (row["item_id"],))
+            _drop_deposits(conn, str(row["item_id"]))
 
     def _drop_link(self, item_id: str) -> None:
-        """Forget ``item_id``'s token, account, sync cursor and deposits; the keys stay."""
+        """Forget ``item_id``'s token, account, sync cursor and unrecorded deposits; the
+        keys stay."""
         with self._store.transaction() as conn:
             row = self._row(conn, lock=True)
             if row is None or row["item_id"] != item_id:
@@ -440,11 +687,23 @@ class BankLinks:
                 "UPDATE bank_links SET secret_sealed = %s, dek_sealed = %s, kek_id = %s,"
                 " item_id = NULL, account_id = NULL, account_name = NULL, account_type ="
                 " NULL, account_mask = NULL, linked_at = NULL, sync_cursor = NULL,"
-                " sync_loop_cursor = NULL, synced_at = NULL, sync_error = NULL WHERE id = %s",
+                " sync_loop_cursor = NULL, synced_at = NULL, sync_error = NULL,"
+                " login_required_at = NULL WHERE id = %s",
                 (sealed.secret_sealed, sealed.dek_sealed, sealed.kek_id, row["id"]),
             )
-            # The Item's deposits and their suggestions go with it.
-            conn.execute("DELETE FROM bank_deposits WHERE item_id = %s", (item_id,))
+            _drop_deposits(conn, item_id)
+
+
+def _drop_deposits(conn: Conn, item_id: str) -> None:
+    """The Item's deposits and every suggestion go with it, but a recorded deposit's row
+    stays: its order page still compares the payments with what the bank last said (#4961).
+    Nothing prunes such a row while its payment stands."""
+    conn.execute(
+        "DELETE FROM bank_deposit_matches WHERE transaction_id IN (SELECT transaction_id"
+        " FROM bank_deposits WHERE item_id = %s)",
+        (item_id,),
+    )
+    conn.execute("DELETE FROM bank_deposits WHERE item_id = %s AND payment_id IS NULL", (item_id,))
 
 
 async def _remove_quietly(keys: PlaidKeys, access_token: str) -> None:

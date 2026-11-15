@@ -1,7 +1,18 @@
 """A flow script's check at registration and before each run (#1057, plan
 2026-10-09-durable-phase-6-flows.md Task B2)."""
 
-from scadbuddy.flows.typecheck import MAX_SCRIPT_BYTES, check_script
+from typing import Any
+
+import pydantic_monty
+import pytest
+from temporal_agent_harness.harness import agent
+
+from scadbuddy.flows.typecheck import (
+    CHECK_ATTEMPTS,
+    MAX_SCRIPT_BYTES,
+    CheckerUnavailableError,
+    check_script,
+)
 
 
 def _script(*body: str) -> str:
@@ -110,3 +121,45 @@ async def test_scripts_calling_the_with_images_names_still_check() -> None:
         )
         == []
     )
+
+
+class _CrashedError(Exception):
+    """Stands in for `pydantic_monty.MontyCrashedError`, which Python cannot construct."""
+
+
+def _crash_first(monkeypatch: pytest.MonkeyPatch, crashes: int) -> list[int]:
+    """The checker's worker dies on its first `crashes` calls, then checks as before."""
+    calls: list[int] = []
+    check = agent.code_mode_type_check
+
+    async def flaky(tool: Any, script: str) -> str | None:
+        calls.append(1)
+        if len(calls) <= crashes:
+            raise _CrashedError("monty worker killed after exceeding request timeout of 1.05s")
+        result: str | None = await check(tool, script)
+        return result
+
+    monkeypatch.setattr(pydantic_monty, "MontyCrashedError", _CrashedError)
+    monkeypatch.setattr(agent, "code_mode_type_check", flaky)
+    return calls
+
+
+async def test_a_crashed_checker_is_tried_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#6123: a worker killed under load says nothing about the script. Its next try
+    answers: a clean script is clean and a type error is still a problem."""
+    calls = _crash_first(monkeypatch, CHECK_ATTEMPTS - 1)
+    assert await check_script(_script("await sleep(1)")) == []
+    assert len(calls) == CHECK_ATTEMPTS
+    _crash_first(monkeypatch, CHECK_ATTEMPTS - 1)
+    problems = await check_script(_script("await sleep('x')"))
+    assert problems and problems[0].line == 3
+
+
+async def test_a_checker_that_keeps_crashing_is_unavailable_not_a_problem(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6123: never "no longer type-checks" for a checker that did not answer."""
+    calls = _crash_first(monkeypatch, CHECK_ATTEMPTS)
+    with pytest.raises(CheckerUnavailableError):
+        await check_script(_script("await sleep(1)"))
+    assert len(calls) == CHECK_ATTEMPTS

@@ -26,7 +26,8 @@ import {
 } from '../lib/previewFrame'
 import type { CameraView } from '../lib/framing'
 import { BBOX_OBJECT, captureSnapshot, PLATE_OBJECT, type SnapshotOptions } from '../lib/snapshot'
-import { plateSize, useDisplayUnit } from '../lib/units'
+import { plateSize, type DisplayUnit } from '../lib/units'
+import { withPartOpacity } from '../lib/partOpacity'
 import { ErrorBoundary } from './ErrorBoundary'
 import { Spinner } from './ui/spinner'
 import { Badge } from '@/components/ui/badge'
@@ -131,8 +132,22 @@ export interface PreviewCapture {
   cameraView: () => CameraView
 }
 
+/**
+ * The fields of a render the viewer reads. The back office passes its `Job`; the public
+ * storefront page (#5282) its `StoreRender`, which has the first group under the same
+ * names and none of the rest.
+ */
+export type PreviewJob = Pick<Job, 'id' | 'status' | 'preview_url' | 'plates' | 'bbox_mm' | 'colors' | 'error'> &
+  Partial<Pick<Job, 'notes' | 'warnings' | 'diagnostics' | 'log_tail' | 'queue_position' | 'created_at'>>
+
 interface Props {
-  job: Job | undefined
+  job: PreviewJob | undefined
+  /**
+   * The unit to show sizes in. The back office passes its stored setting
+   * (`useDisplayUnit`); the public storefront page passes millimetres. A prop, so the
+   * viewer reads no setting of the back office's itself (spec 2026-11-02 §5.1).
+   */
+  unit: DisplayUnit
   rendering: boolean
   /** #267 — what the render is doing, when known. */
   stage?: RenderStage | undefined
@@ -176,6 +191,7 @@ interface Props {
 
 export function Preview({
   job,
+  unit,
   rendering,
   stage,
   plate,
@@ -426,7 +442,7 @@ export function Preview({
               right side's controls stay on screen. */}
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             {leading}
-            {plate && <PlateBadge plate={plate} compact={compact} />}
+            {plate && <PlateBadge plate={plate} compact={compact} unit={unit} />}
           </div>
           <div className="flex shrink-0 items-center gap-2">
             {(rendering || loading) && (
@@ -443,7 +459,7 @@ export function Preview({
                 {rendering && stage && live?.status !== 'pending' && !compact && (
                   <span data-testid="render-stage">· {STAGE_LABELS[stage]}</span>
                 )}
-                {live && <RenderElapsed since={live.created_at} />}
+                {live?.created_at && <RenderElapsed since={live.created_at} />}
               </Badge>
             )}
             {live && onCancel && (
@@ -486,7 +502,7 @@ export function Preview({
               ))}
             {/* The measured box too (#2866): a library plate framed by it has a size to show.
                 `shown` is checked as well only for its plates: there is no box without it. */}
-            {shown && bbox && <Dimensions bbox={bbox} plates={shown.plates} compact={compact} />}
+            {shown && bbox && <Dimensions unit={unit} bbox={bbox} plates={shown.plates} compact={compact} />}
             {job && platesOfJob > 1 && (
               <PlatePicker
                 plates={plateIndices}
@@ -615,8 +631,7 @@ function PreviewFailed({
   )
 }
 
-function PlateBadge({ plate, compact }: { plate: Plate; compact: boolean }) {
-  const unit = useDisplayUnit()
+function PlateBadge({ plate, compact, unit }: { plate: Plate; compact: boolean; unit: DisplayUnit }) {
   return (
     <span
       data-testid="plate-badge"
@@ -636,8 +651,7 @@ function PlateBadge({ plate, compact }: { plate: Plate; compact: boolean }) {
   )
 }
 
-function Dimensions({ bbox, plates, compact }: { bbox: BoundingBox; plates: number; compact: boolean }) {
-  const unit = useDisplayUnit()
+function Dimensions({ bbox, plates, compact, unit }: { bbox: BoundingBox; plates: number; compact: boolean; unit: DisplayUnit }) {
   if (compact) {
     return (
       <span
@@ -1031,7 +1045,17 @@ function Model({
   onMeasured: (url: string, bbox: BoundingBox) => void
 }) {
   const gltf = useLoader(GLTFLoader, url)
-  const scene = useMemo(() => gltf.scene.clone(true), [gltf])
+  // A translucent part gets materials of its own; the rest share the loader's.
+  const { scene, owned } = useMemo(() => {
+    const copy = gltf.scene.clone(true)
+    return { scene: copy, owned: withPartOpacity(copy) }
+  }, [gltf])
+  useEffect(
+    () => () => {
+      for (const material of owned) material.dispose()
+    },
+    [owned],
+  )
   // #2364 — a mesh that came with no box (a library file's plate, placed where the 3MF
   // put it on the bed) is measured, so it is centred and framed like any other. It is
   // measured on the loader's own scene, never on the drawn clone (#3026 review): the

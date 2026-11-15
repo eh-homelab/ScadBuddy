@@ -269,3 +269,41 @@ describe('RevisionsPanel (#5280)', () => {
     expect(screen.getByRole('button', { name: 'Send to customer' })).toBeDisabled()
   })
 })
+
+// #5283 (storefront spec §6.1): on a storefront order the customer accepts. The shop records
+// their changes, or accepts for them with a reason, never with its own "Accepted".
+describe('RevisionsPanel · a storefront order (#5283)', () => {
+  beforeEach(() => {
+    resetMockState()
+    Object.assign(state.orders.find((o) => o.id === ORDER_DRAFT)!, { source: 'storefront', submitted_at: '2026-10-19T09:00:00Z' })
+  })
+  afterEach(() => vi.restoreAllMocks())
+
+  it('accepts for the customer only with a reason, and never offers the plain accept', async () => {
+    await api.quoteOrderItem(ORDER_DRAFT, ITEM_DRAFT, { unit_price_minor: 1000 })
+    const [rev] = revisionsOf(ITEM_DRAFT)
+    rev!.sent_at = '2026-10-19T10:00:00Z'
+    const answer = vi.spyOn(api, 'answerOrderItemRevision')
+    const { user } = render(ORDER_DRAFT, ITEM_DRAFT)
+    await user.click(await screen.findByRole('button', { name: 'Record changes asked' }))
+    await user.click(screen.getByRole('combobox', { name: "The customer's answer" }))
+    expect(screen.queryByRole('option', { name: 'Accepted' })).toBeNull()
+    await user.keyboard('{Escape}')
+    await user.click(within(screen.getByTestId('revision')).getByRole('button', { name: 'Accept for the customer…' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Accept for the customer' })
+    const confirm = within(dialog).getByRole('button', { name: 'Accept for the customer' })
+    expect(confirm).toBeDisabled()
+    await user.type(within(dialog).getByRole('textbox', { name: 'Reason' }), 'By phone, 9 Nov')
+    await user.click(confirm)
+    await waitFor(() => expect(revisionsOf(ITEM_DRAFT)[0]!.answer).toBe('accepted'))
+    expect(state.events.find((e) => e.kind === 'item.accepted_for_customer')?.detail).toMatchObject({ reason: 'By phone, 9 Nov', what: 'revision' })
+    expect(answer).not.toHaveBeenCalled()
+  })
+
+  it("refuses the shop's own accept in the mocks too", async () => {
+    await api.quoteOrderItem(ORDER_DRAFT, ITEM_DRAFT, { unit_price_minor: 1000 })
+    revisionsOf(ITEM_DRAFT)[0]!.sent_at = '2026-10-19T10:00:00Z'
+    const rev = revisionsOf(ITEM_DRAFT)[0]!
+    await expect(api.answerOrderItemRevision(ORDER_DRAFT, ITEM_DRAFT, rev.id, { answer: 'accepted', note: '' })).rejects.toMatchObject({ status: 409 })
+  })
+})

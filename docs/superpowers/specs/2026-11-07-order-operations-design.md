@@ -247,6 +247,23 @@ main (#5315, #5337, #5347), and #5280 is closed. scadify reviewed §5 against th
   order page says to slice again (`refusal.ts` `SUPERSEDED_TEXT`). A storefront cart is
   refused `order_not_submitted` before anything of a revision is read. The agent's
   `order_item_quote.slice` takes `inputs` and `commit`.
+- PR 4: the page. The row's ⋯ "Slice…" opens the item's drawer at its print setups with
+  the print dialog in its quote mode on top (the drawer's own button is "Slice…" too). The
+  dialog sends the tower, supports and sequence with the quote, and edits the item's
+  inputs in place (`components/orders/DesignInputs.tsx`: the template's form at the item's
+  commit, `ParameterPanel`; sent as `inputs` only when they differ from the item's, so an
+  unchanged form makes no revision; a template with its own page, `ui`, is not edited
+  there **(call)**). The drawer's quotes are the print setups (`QuoteEditor`,
+  `printSetups.ts`), grouped by revision, the current one first: each with its plates,
+  print time and grams, an image per plate from its sliced file (`GET
+  …/quotes/{quote}/plates/{plate}/thumbnail`, `quote.py` `plate_image`:
+  `Metadata/plate_<n>.png`, 404 when the file holds none), and what it changed from the
+  accepted one (each input of its revision, then printer, quality, process, nozzles,
+  tower, supports and sequence). Accept is disabled, with the reason, on a quote of a
+  revision that is not the item's current one. The run's refusal of a support slot the
+  render made a colour slot names the way out (`RENDERED_SUPPORT_HINT`), and the
+  pre-revision price-book check counts only the carried pins still in the book (#5761
+  review).
 
 ## 6. A derived machine rate (#4625)
 

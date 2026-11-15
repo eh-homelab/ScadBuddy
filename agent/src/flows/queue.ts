@@ -1,14 +1,17 @@
 import type { Sql } from 'postgres'
 import { flowRequestId, parseRequestId } from '../gate/ids.js'
+import { type FlowRunReads, type QueueHop, SqlFlowRunReads, type StepRow, type WaitingOn } from './backendReads.js'
 
 // A flow run's one queue (#2482, spec 2026-10-11 §4.5): everything of the run that waits
 // for a decision, from the three places it is recorded, in one read.
 //
 //   - the run's own parked calls: `workflow_runs.waiting_on`, which the backend's
-//     `ProjectWorkflow` projects (the agent reads `workflow_runs` already);
+//     `ProjectWorkflow` projects;
 //   - its child sessions' parked calls from flow turns: `ai_pending_input` rows with
 //     the run's `flow_run_id`;
 //   - its grant while it is requested: `flow_grants`.
+//
+// The backend's tables are read through its CRUD routes (backendReads.ts, #5299 D7).
 //
 // Each entry keeps its own id and is answered where it is today: a `flow:` entry by the
 // backend's `POST /workflow-runs/{id}/decide`, a `durable:` one by
@@ -31,7 +34,7 @@ export const REASONING_MAX = 2048
 export const REASONING_SCAN = 2000
 
 export type QueueStep = { seq: number; fn: string }
-export type QueueHop = { hop: string; action: string; actor: string; at: string; reason?: string | null }
+export type { QueueHop }
 
 type Common = {
   /** Its request id, as the route that answers it takes it; the grant's id for a grant. */
@@ -79,29 +82,6 @@ export type RunQueue = {
   /** The session that started the run, when one did. */
   starter_session: string | null
   entries: QueueEntry[]
-}
-
-type WaitingOn = {
-  call_id: string
-  kind: 'approval' | 'answer'
-  fn: string
-  prompt?: string | null
-  since?: string | null
-  hop?: 'parent' | 'person' | null
-  hop_until?: string | null
-  reason?: string | null
-  proposed?: boolean
-  hops?: QueueHop[]
-}
-type StepRow = { seq: number; fn: string; call_id: string; status: string; session_id?: string | null }
-type RunRow = {
-  id: string
-  name: string
-  status: string
-  workflow_run_id: string
-  started_by: { session?: unknown }
-  waiting_on: WaitingOn[]
-  steps: StepRow[]
 }
 
 /** The run's step of `call_id` (a flow-own call's), or null. */
@@ -169,7 +149,7 @@ export async function childReasoning(sql: Sql, requestId: string, scan = REASONI
 
 type OwnEntry = Extract<QueueEntry, { source: 'flow' }>
 
-function ownEntry(run: Pick<RunRow, 'id' | 'workflow_run_id'>, steps: readonly StepRow[], w: WaitingOn): OwnEntry {
+function ownEntry(run: { id: string; workflow_run_id: string }, steps: readonly StepRow[], w: WaitingOn): OwnEntry {
   return {
     source: 'flow',
     id: flowRequestId(run.id, run.workflow_run_id, w.call_id),
@@ -191,24 +171,19 @@ const iso = (d: Date | string | null): string | null => (d === null ? null : typ
 
 export class FlowQueue {
   readonly #sql: Sql
+  readonly #reads: FlowRunReads
 
-  constructor(sql: Sql) {
+  /** `reads`: the backend's flow tables (backendReads.ts); its SQL on `sql` by default. */
+  constructor(sql: Sql, reads?: FlowRunReads) {
     this.#sql = sql
+    this.#reads = reads ?? new SqlFlowRunReads(sql)
   }
 
   /** The run's one queue, or undefined when there is no such run (or no flows on this deployment). */
   async forRun(runId: string): Promise<RunQueue | undefined> {
-    let run: RunRow | undefined
-    try {
-      ;[run] = await this.#sql<RunRow[]>`
-        SELECT id, name, status, workflow_run_id, started_by, waiting_on, steps FROM workflow_runs WHERE id = ${runId}`
-    } catch (err) {
-      // A deployment without flows has no `workflow_runs`.
-      if ((err as { code?: string }).code === '42P01') return undefined
-      throw err
-    }
+    const run = await this.#reads.queue(runId)
     if (!run) return undefined
-    const steps = Array.isArray(run.steps) ? run.steps : []
+    const steps = run.steps
     const entries: QueueEntry[] = []
     for (const w of run.waiting_on) entries.push(ownEntry(run, steps, w))
     const children = await this.#sql<
@@ -253,15 +228,13 @@ export class FlowQueue {
         reasoning: reasonings[i] ?? '',
       })
     }
-    const [grant] = await this.#sql<{ id: string; created_at: Date }[]>`
-      SELECT id, created_at FROM flow_grants WHERE run_id = ${run.id} AND status = 'requested'`
+    const grant = run.requested_grant
     if (grant) entries.push({ source: 'grant', id: grant.id, status: 'requested', created_at: grant.created_at.toISOString() })
-    const session = run.started_by.session
     return {
       run_id: run.id,
       name: run.name,
       status: run.status,
-      starter_session: typeof session === 'string' ? session : null,
+      starter_session: run.starter_session,
       entries,
     }
   }
@@ -273,35 +246,18 @@ export class FlowQueue {
    * `updated_at` dates an entry that records no `since`.
    */
   async ownEntries(): Promise<{ run: { id: string; name: string; updated_at: string }; starter_session: string | null; entry: OwnEntry }[]> {
-    let runs: (RunRow & { updated_at: Date })[]
-    try {
-      runs = await this.#sql<(RunRow & { updated_at: Date })[]>`
-        SELECT id, name, status, workflow_run_id, started_by, waiting_on, steps, updated_at FROM workflow_runs
-         WHERE status IN ('running', 'waiting') AND jsonb_array_length(waiting_on) > 0
-         ORDER BY updated_at DESC LIMIT 200`
-    } catch (err) {
-      if ((err as { code?: string }).code === '42P01') return []
-      throw err
-    }
-    return runs.flatMap((run) => {
-      const session = run.started_by.session
-      const steps = Array.isArray(run.steps) ? run.steps : []
-      return run.waiting_on.map((w) => ({
+    const runs = await this.#reads.waitingRuns()
+    return runs.flatMap((run) =>
+      run.waiting_on.map((w) => ({
         run: { id: run.id, name: run.name, updated_at: run.updated_at.toISOString() },
-        starter_session: typeof session === 'string' ? session : null,
-        entry: ownEntry(run, steps, w),
-      }))
-    })
+        starter_session: run.starter_session,
+        entry: ownEntry(run, run.steps, w),
+      })),
+    )
   }
 
   /** The steps of `runId`, for a delivery's context; empty when it has none. */
   async steps(runId: string): Promise<StepRow[]> {
-    try {
-      const [r] = await this.#sql<{ steps: StepRow[] }[]>`SELECT steps FROM workflow_runs WHERE id = ${runId}`
-      return r && Array.isArray(r.steps) ? r.steps : []
-    } catch (err) {
-      if ((err as { code?: string }).code === '42P01') return []
-      throw err
-    }
+    return await this.#reads.steps(runId)
   }
 }

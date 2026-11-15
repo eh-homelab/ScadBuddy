@@ -109,12 +109,21 @@ def test_merge_report_keeps_unmentioned_keys_and_replaces_ams() -> None:
 
 
 @dataclass
+class _Wrapped:
+    sock: socket.socket
+    handshakes: int = 0
+
+    def do_handshake(self) -> None:
+        self.handshakes += 1
+
+
+@dataclass
 class _Recorder:
     wrapped: int = 0
 
     def wrap_socket(self, sock: socket.socket, **_: Any) -> Any:
         self.wrapped += 1
-        return ("wrapped", sock)
+        return _Wrapped(sock)
 
 
 def test_implicit_ftp_tls_wraps_socket_once() -> None:
@@ -123,7 +132,7 @@ def test_implicit_ftp_tls_wraps_socket_once() -> None:
     plain, other = socket.socketpair()
     try:
         ftp.sock = plain
-        assert ftp.sock == ("wrapped", plain) and recorder.wrapped == 1
+        assert ftp.sock == _Wrapped(plain, handshakes=1) and recorder.wrapped == 1
         ftp.sock = None
         assert ftp.sock is None and recorder.wrapped == 1
         already = pinned_context("ab" * 32).wrap_socket(

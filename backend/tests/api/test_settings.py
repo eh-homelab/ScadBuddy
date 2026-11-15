@@ -28,6 +28,8 @@ from scadbuddy.main import create_app
 from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.money import NO_RULES, DepositRule, ShippingOption
+from scadbuddy.printers.component import PRINTERS
+from scadbuddy.printers.models import PrinterCreate
 from scadbuddy.workflows.client import connect, connect_lazily
 from scadbuddy.workflows.commands import TemporalRefusedError
 from tests.api.conftest import read_stored
@@ -42,6 +44,7 @@ DEFAULTS: dict[str, object] = {
     "public_url": None,
     "library_folder_id": None,
     "printer_id": None,
+    "default_printer": None,
     "default_plate": None,
     "display_unit": "mm",
     "print_run_retention_seconds": None,
@@ -65,9 +68,12 @@ DEFAULTS: dict[str, object] = {
     "orders_thin_margin_percent": "15",
     "orders_tax_percent": "0",
     "orders_tax_shipping": False,
+    "orders_purchase_fee_flat_minor": 0,
+    "orders_purchase_fee_percent": "0",
     "orders_deposit_policy": [],
     "storefront_shipping_options": [],
     "storefront_payment_instructions": None,
+    "storefront_slice_profile": None,
     "lan_require_plate_clear": False,
     "git_remote_url": None,
     "git_remote_username": None,
@@ -89,7 +95,6 @@ def test_the_api_key_is_write_only(client: TestClient, settings: Settings) -> No
             "bambuddy_url": "https://bambuddy.test",
             "bambuddy_api_key": "s3cret",
             "library_folder_id": 7,
-            "printer_id": 1,
         },
     )
     assert response.status_code == 200
@@ -106,23 +111,23 @@ def test_the_api_key_is_write_only(client: TestClient, settings: Settings) -> No
 
 
 def test_settings_live_in_the_database_not_in_a_file(client: TestClient, data_dir: Path) -> None:
-    client.put("/api/v1/settings", json={"bambuddy_api_key": "s3cret", "printer_id": 3})
+    client.put("/api/v1/settings", json={"bambuddy_api_key": "s3cret", "library_folder_id": 3})
     assert not (data_dir / "settings.json").exists()
 
 
 def test_each_setting_is_its_own_row_and_an_omitted_one_writes_nothing(
     client: TestClient, settings: Settings
 ) -> None:
-    client.put("/api/v1/settings", json={"printer_id": 3})
+    client.put("/api/v1/settings", json={"library_folder_id": 3})
     assert read_stored(settings.database_url) == {
-        "printer_id": 3,
+        "library_folder_id": 3,
         "model_print_choices": {},
         "printer_bed_types": {},
     }
 
     # A clear of a field the environment does not seed goes back to "never set".
-    client.put("/api/v1/settings", json={"printer_id": None})
-    assert "printer_id" not in read_stored(settings.database_url)
+    client.put("/api/v1/settings", json={"library_folder_id": None})
+    assert "library_folder_id" not in read_stored(settings.database_url)
 
 
 @pytest.mark.requires_postgres
@@ -134,7 +139,7 @@ def test_settings_stored_before_312_still_load_and_shed_the_old_keys(
     legacy = {
         "bambuddy_url": "https://bambuddy.test",
         "pipeline_id": 4,
-        "printer_id": 1,
+        "library_folder_id": 1,
         "printer_preset": {"source": "cloud", "id": "GM041"},
         "process_preset": {"source": "cloud", "id": "GP252"},
         "filament_presets": [{"source": "cloud", "id": "GFSA05_22"}],
@@ -147,7 +152,7 @@ def test_settings_stored_before_312_still_load_and_shed_the_old_keys(
 
     body = client.get("/api/v1/settings").json()
     assert body["bambuddy_url"] == "https://bambuddy.test"
-    assert body["printer_id"] == 1
+    assert body["library_folder_id"] == 1
     assert "pipeline_id" not in body
     assert "printer_preset" not in body
 
@@ -162,20 +167,20 @@ def test_settings_stored_before_312_still_load_and_shed_the_old_keys(
         "model_pipelines",
     ):
         assert key not in stored
-    assert stored["printer_id"] == 1
+    assert stored["library_folder_id"] == 1
     assert stored["bambuddy_url"] == "https://bambuddy.test"
 
 
 def test_an_old_client_sending_a_pipeline_is_not_refused(client: TestClient) -> None:
-    response = client.put("/api/v1/settings", json={"pipeline_id": 3, "printer_id": 2})
+    response = client.put("/api/v1/settings", json={"pipeline_id": 3, "library_folder_id": 2})
     assert response.status_code == 200
-    assert response.json()["printer_id"] == 2
+    assert response.json()["library_folder_id"] == 2
     assert "pipeline_id" not in response.json()
 
 
 def test_an_omitted_key_is_kept_and_an_empty_one_clears_it(client: TestClient) -> None:
     client.put("/api/v1/settings", json={"bambuddy_api_key": "s3cret"})
-    assert client.put("/api/v1/settings", json={"printer_id": 3}).json()["has_api_key"] is True
+    assert client.put("/api/v1/settings", json={"library_folder_id": 3}).json()["has_api_key"]
     assert (
         client.put("/api/v1/settings", json={"bambuddy_api_key": ""}).json()["has_api_key"] is False
     )
@@ -188,7 +193,9 @@ def test_the_display_unit_is_stored_and_a_clear_puts_millimetres_back(
         client.put("/api/v1/settings", json={"display_unit": "in"}).json()["display_unit"] == "in"
     )
     # Another field's save leaves it alone.
-    assert client.put("/api/v1/settings", json={"printer_id": 3}).json()["display_unit"] == "in"
+    assert (
+        client.put("/api/v1/settings", json={"library_folder_id": 3}).json()["display_unit"] == "in"
+    )
     assert read_stored(settings.database_url)["display_unit"] == "in"
 
     assert (
@@ -282,7 +289,7 @@ def test_an_operation_retention_is_refused_while_temporal_cannot_say(
     try:
         response = client.put("/api/v1/settings", json={"operation_retention_seconds": 604800})
         # A field that does not depend on Temporal still saves.
-        other = client.put("/api/v1/settings", json={"printer_id": 3})
+        other = client.put("/api/v1/settings", json={"library_folder_id": 3})
     finally:
         state.components.override(OPERATIONS, ops)
     assert response.status_code == 503
@@ -332,7 +339,7 @@ def test_a_field_never_stored_follows_the_environment_it_starts_with(
 ) -> None:
     """A variable added to a deployment later is honoured: nothing stored beats it."""
     with TestClient(create_app(settings)) as client:
-        client.put("/api/v1/settings", json={"printer_id": 3})
+        client.put("/api/v1/settings", json={"library_folder_id": 3})
     later = settings.model_copy(update={"public_url": "https://scad.example"})
     with TestClient(create_app(later)) as client:
         assert client.get("/api/v1/settings").json()["public_url"] == "https://scad.example"
@@ -820,6 +827,42 @@ def test_the_lifecycle_reads_the_money_rules_as_saved(client: TestClient) -> Non
     )
 
 
+def test_the_purchase_fee_is_live_and_read_as_a_rule(client: TestClient) -> None:
+    """#6133 (spec 2026-11-13 §10.3): a flat amount per recorded purchase and a percent of
+    their sum, both env-seeded and live."""
+    saved = client.put(
+        "/api/v1/settings",
+        json={"orders_purchase_fee_flat_minor": 250, "orders_purchase_fee_percent": "12.5"},
+    )
+    assert saved.status_code == 200, saved.text
+    got = client.get("/api/v1/settings").json()
+    assert (got["orders_purchase_fee_flat_minor"], got["orders_purchase_fee_percent"]) == (
+        250,
+        "12.5",
+    )
+    assert got["applies"]["orders_purchase_fee_flat_minor"] == "live"
+    assert got["applies"]["orders_purchase_fee_percent"] == "live"
+    rules = _state(client).components.get(ORDERS).lifecycle.rules()
+    assert (rules.purchase_fee_flat_minor, rules.purchase_fee_percent) == (250, Decimal("12.5"))
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("orders_purchase_fee_percent", "100.01"),
+        ("orders_purchase_fee_percent", "-1"),
+        ("orders_purchase_fee_percent", "1.234"),
+        ("orders_purchase_fee_percent", "lots"),
+        ("orders_purchase_fee_flat_minor", -1),
+    ],
+)
+def test_a_bad_purchase_fee_is_refused(client: TestClient, name: str, value: object) -> None:
+    refused = client.put("/api/v1/settings", json={name: value})
+    assert refused.status_code == 422
+    assert refused.json()["errors"][0]["loc"] == ["body", name]
+    assert client.put("/api/v1/settings", json={name: "100"}).status_code == 200
+
+
 @pytest.mark.parametrize(
     ("name", "value"),
     [
@@ -846,3 +889,163 @@ def test_the_storefront_settings_are_written_through_put(client: TestClient) -> 
     }
     body = client.put("/api/v1/settings", json=sent).json()
     assert {name: body[name] for name in sent} == sent
+
+
+def test_the_slice_concurrency_is_bounded_and_live(client: TestClient) -> None:
+    """#6153: the storefront's slices at once, 1 by default, 1 to 4."""
+    body = client.get("/api/v1/settings").json()
+    assert body["storefront_slices_concurrent"] == 1
+    assert body["applies"]["storefront_slices_concurrent"] == "live"
+    for value in (0, 5):
+        refused = client.put("/api/v1/settings", json={"storefront_slices_concurrent": value})
+        assert refused.status_code == 422
+    saved = client.put("/api/v1/settings", json={"storefront_slices_concurrent": 3})
+    assert saved.json()["storefront_slices_concurrent"] == 3
+
+
+def _profile_printer(client: TestClient) -> str:
+    store = _state(client).components.get(PRINTERS).store
+    return store.create(PrinterCreate(serial="01P00A0000000AA", name="Garage")).id
+
+
+@respx.mock
+def test_profile_with_unknown_spool_is_422(client: TestClient) -> None:
+    """#6153: each spool of the shop slice profile is one the print dialog offers on its
+    printer; here Bambuddy's inventory, as the printer runs on Bambuddy's path."""
+    printer = _profile_printer(client)
+    client.put("/api/v1/settings", json={"bambuddy_url": "https://bambuddy.test"})
+    respx.get("https://bambuddy.test/api/v1/inventory/spools").mock(
+        return_value=httpx.Response(200, json=[{"id": 7, "material": "PLA"}])
+    )
+    refused = client.put(
+        "/api/v1/settings",
+        json={"storefront_slice_profile": {"printer": printer, "spools": {"PETG": 8}}},
+    )
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["errors"][0]["loc"] == [
+        "body",
+        "storefront_slice_profile",
+        "spools",
+        "petg",
+    ]
+    assert client.get("/api/v1/settings").json()["storefront_slice_profile"] is None
+
+    saved = client.put(
+        "/api/v1/settings",
+        json={"storefront_slice_profile": {"printer": printer, "spools": {"PLA": 7}}},
+    )
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["storefront_slice_profile"] == {"printer": printer, "spools": {"pla": 7}}
+    cleared = client.put("/api/v1/settings", json={"storefront_slice_profile": None})
+    assert cleared.json()["storefront_slice_profile"] is None
+
+
+@respx.mock
+def test_profile_is_checked_against_the_connection_sent_beside_it(client: TestClient) -> None:
+    """#6255 review: one PUT that sets the Bambuddy URL and the profile checks the spools
+    at the new URL, not the stored one."""
+    printer = _profile_printer(client)
+    client.put("/api/v1/settings", json={"bambuddy_url": "https://old.test"})
+    respx.get("https://old.test/api/v1/inventory/spools").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    respx.get("https://new.test/api/v1/inventory/spools").mock(
+        return_value=httpx.Response(200, json=[{"id": 7, "material": "PLA"}])
+    )
+    saved = client.put(
+        "/api/v1/settings",
+        json={
+            "bambuddy_url": "https://new.test",
+            "storefront_slice_profile": {"printer": printer, "spools": {"PLA": 7}},
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["storefront_slice_profile"] == {"printer": printer, "spools": {"pla": 7}}
+
+
+@respx.mock
+def test_profile_is_checked_against_a_connection_reset_beside_it(client: TestClient) -> None:
+    """#6255 review: a PUT that resets the Bambuddy URL and sets the profile checks the
+    spools at the deployment's URL, not the stored one."""
+    printer = _profile_printer(client)
+    client.put("/api/v1/settings", json={"bambuddy_url": "https://stored.test"})
+    respx.get("https://stored.test/api/v1/inventory/spools").mock(
+        return_value=httpx.Response(200, json=[{"id": 7, "material": "PLA"}])
+    )
+    refused = client.put(
+        "/api/v1/settings",
+        json={
+            "reset": ["bambuddy_url"],
+            "storefront_slice_profile": {"printer": printer, "spools": {"PLA": 7}},
+        },
+    )
+    # The tests' deployment has no Bambuddy URL, so spool 7 cannot be read.
+    assert refused.status_code != 200, refused.text
+    assert client.get("/api/v1/settings").json()["storefront_slice_profile"] is None
+
+
+def test_profile_with_unknown_printer_is_422(client: TestClient) -> None:
+    refused = client.put(
+        "/api/v1/settings",
+        json={"storefront_slice_profile": {"printer": "nowhere", "spools": {}}},
+    )
+    assert refused.status_code == 422
+    assert refused.json()["errors"][0]["loc"] == ["body", "storefront_slice_profile", "printer"]
+
+
+def test_profile_takes_no_support_or_process_setting(client: TestClient) -> None:
+    refused = client.put(
+        "/api/v1/settings",
+        json={"storefront_slice_profile": {"printer": "p", "spools": {}, "supports": {}}},
+    )
+    assert refused.status_code == 422
+
+
+def test_the_storefront_mail_settings_have_their_defaults(client: TestClient) -> None:
+    body = client.get("/api/v1/settings").json()
+    assert {name: body[name] for name in MAIL_FIELDS} == {
+        "storefront_mail_host": None,
+        "storefront_mail_port": 587,
+        "storefront_mail_user": None,
+        "storefront_mail_sender": None,
+        "storefront_mail_tls": "starttls",
+    }
+    assert all(body["applies"][name] == "live" for name in MAIL_FIELDS)
+    # Env-only: a stored value could point customers' links anywhere.
+    assert "storefront_public_url" not in body["applies"]
+
+
+MAIL_FIELDS = (
+    "storefront_mail_host",
+    "storefront_mail_port",
+    "storefront_mail_user",
+    "storefront_mail_sender",
+    "storefront_mail_tls",
+)
+
+
+def test_the_storefront_mail_settings_are_written_through_put(client: TestClient) -> None:
+    sent = {
+        "storefront_mail_host": "smtp.example.com",
+        "storefront_mail_port": 465,
+        "storefront_mail_user": "shop",
+        "storefront_mail_sender": "shop@example.com",
+        "storefront_mail_tls": "implicit",
+    }
+    body = client.put("/api/v1/settings", json=sent).json()
+    assert {name: body[name] for name in sent} == sent
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("storefront_mail_port", 0),
+        ("storefront_mail_port", 65536),
+        ("storefront_mail_sender", "not an address"),
+        ("storefront_mail_host", "smtp://example.com"),
+    ],
+)
+def test_a_storefront_mail_setting_out_of_bounds_is_refused(
+    client: TestClient, name: str, value: object
+) -> None:
+    assert client.put("/api/v1/settings", json={name: value}).status_code == 422

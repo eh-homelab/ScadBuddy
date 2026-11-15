@@ -22,11 +22,117 @@ the API's `PrintRunStore`, so its ``print.run`` event and activity row commit wi
 record is natural on its run (``ON CONFLICT (run_id) DO NOTHING``), and its
 ``print.outcome`` commits with it.
 
+The queue item ScadBuddy's reprint queues is recorded as a reprint of the archive's
+subject (`POST /reprints`, #3741), so the Prints page marks it. It is not a send. Natural:
+a reprint recorded again keeps the first record.
+
+The archives a subject's prints produced, the queue items a run queued and an output's
+last print (Q20, Q21, #5298 Task 28) are `bambuddy/print_links.py` `PrintLinkStore`'s
+and `library/output_prints.py` `OutputPrintStore`'s, for `RemotePrintLinks` and
+`RemoteOutputPrints` (area ``links``: ``…/links``, ``…/sends``, ``…/last-prints``). Each
+write is natural: a link, a send and a library file's link are ``ON CONFLICT DO
+NOTHING`` on their keys, a gone item sets a flag, and a last print is set by the
+output's key, so a resend after a lost answer leaves what one send left.
+
+A LAN-only printer's job the print watcher read (#4699 phase 4, `print_watch/lan.py`) is
+recorded here (`POST /lan-imports`, area ``lan-imports``): the API matches a model and
+writes the record and its activity row (`print_watch/lan_store.py` `StoreLanRecorder`).
+Natural on the job (the printer, its ``subtask_name`` and start): a record sent again
+answers the first.
+
 A printer row a run's first check needs (`bambuddy/print_run.py` `_ensure_row`) is made
-or merged here (`POST /printers/ensure-bambuddy`, #5298 Task 29's route, taken early by
-#4625): a merge rewrites every table `printers/store.py` `PRINTER_REFERENCES` names, and
-those writes are the API's, never the worker's role's. Natural: decided under the
-registry's lock, so a call sent again finds the row and writes nothing.
+or merged here (`POST /printers/ensure-bambuddy`, area ``printer-ensure``, #5298 Task
+29's route, taken early by #4625): a merge rewrites every table `printers/store.py`
+`PRINTER_REFERENCES` names, and those writes are the API's, never the worker's role's.
+Natural: decided under the registry's lock (``pg_advisory_xact_lock`` on
+``scadbuddy:printers``), so a call sent again finds the row and writes nothing.
+
+The rest of the registry and the reports (Q22-Q26, area ``printers``, #5298 Task 29) are
+`PrinterStore`'s and `PrinterReportStore`'s, for `RemotePrinterStore` and
+`RemoteReports`: the reads, a printer's access code, a virtual printer's sync after a
+write, and the watch's reports. The access code is answered in plaintext to
+``crud.print`` only (plan D8), opened here under the API's KEK, and its answer is logged
+with the printer and the credential, never the code. A virtual printer's row and the
+listed marks answer what that write changed, and a report's ``put`` the print that write
+showed ended, so each takes an ``Idempotency-Key``: a resend answers the first write's
+answer. A ``touch`` never moves ``seen_at`` back, so it is natural.
+
+The uploads and slices (Q15, Q17) are `bambuddy/uploads.py` `BambuddyUploadStore`'s, for
+`RemoteUploadStore`. Each write but one is natural: a record is ``ON CONFLICT`` on the
+key the caller names, a touch, a hash and a forget set or delete by key. A slice start is
+a plain insert, so it takes an ``Idempotency-Key`` and runs with its ledger row
+(`crud/idempotency.py`): a resend after a lost answer records one start.
+
+The print dialog's background slices (Q16), the projects' printers, the projects
+created without their folder yet and the destinations' last touches (Q18) are the same
+store's. A background slice's record is a plain insert and its claim answers whether the
+sweep took it first, so both take an ``Idempotency-Key``: a resend after a lost answer
+records one slice, and a claim it won answers true again, though the slice was retired
+since. Every other write sets or deletes by key.
+
+The copy lease (#5298 Task 27, `bambuddy/copy_leases.py`) is the copy lock the worker
+holds while it finds, uploads and records a library copy: ``POST /copy-leases/{key}``
+takes it for ``token`` (waiting on the API up to ``wait_s``, at most 25 s) or answers 409
+``busy``, ``PUT`` renews it or answers 409 ``lease-lost``, and ``DELETE`` releases it.
+Each is natural on the token. An upload's record that names a lease is written only
+while that lease holds, else 409 ``lease-lost``.
+
+The rack hotends' usage (Q27, area ``rack``, #5298 Task 30) is `rack/usage.py`
+`RackUsageStore`'s, for `RemoteRackUsage`: ``…/rack/seen`` (natural, an upsert by
+serial), the reads ``…/rack/usage`` (a ``POST``, so the hotends' serials stay out of the
+URL), ``…/rack/picked`` and ``…/rack/recorded-archives``, and the writes ``…/rack/picks``,
+``…/rack/prints``, ``…/rack/lan-picks``, ``…/rack/settle-lan`` and
+``…/rack/settle-lan-ended``. Each of those answers the rows it wrote, which a resend
+would not repeat, so each takes an ``Idempotency-Key`` and runs with its ledger row in
+one transaction. A LAN start's picks delete the earlier pick's rows and insert the new
+ones: that is one route, one transaction here (plan D6), never several calls.
+
+The spools, ScadBuddy's own spools, the kept presets and a native slice's start (Q28-Q30,
+area ``spools``, #5298 Task 31) are `SpoolStore`'s, `NativeSpoolStore`'s,
+`HeldPresetStore`'s and `NativeSliceStore`'s, for `RemoteSpoolStore`,
+`RemoteNativeSpools`, `RemoteHeldPresets` and `RemoteNativeSlices`: the overlay (a
+``POST`` read, so the trays' RFID keys stay out of the URL), the shelf, the kept presets,
+and the writes ``…/spools/records`` (a provider's whole inventory under the spools'
+advisory lock), ``…/spools/refreshes/{provider}/failed``, ``…/native-spools/uses``,
+``…/native-spools/uses/settle`` (a run's uses under their row locks) and
+``…/native-slices/start`` (under the lock on its workflow id). Each runs whole in one
+transaction here (plan D6). A failure, a start's uses and a slice's start are natural; a
+provider's records and a settle take an ``Idempotency-Key`` and run with their ledger row.
+
+A LAN print's sliced 3MF is read through a URL minted here (``POST /transfer-urls``, area
+``transfer-urls``, #5298 Task 32), for the print worker's `bambuddy/output_reader.py`
+`RemoteBlobs`: the worker holds no key to sign one. Only a key the content index holds,
+live, as a slicer's output gets one: kind ``slice`` (`SLICE_KIND`) with the mark
+`Transfers.finish_put` gives the slicer's ``sliced_3mf`` (`SLICED_OUTPUT_META`). Any
+other key (unknown, gone, of another kind such as a ``workspace`` file, or a slicer's
+input of kind ``slice``: the laid-out copy and the preset files) is 403
+``transfer-refused``. The inputs are left out as defence in depth: the preset files are
+written with every print-host credential key stripped (`core/credentials.py`
+`strip_credentials`), and an input is no file the print worker prints. The rule follows
+the blob's own life, not its `native_slices` row's: the slice sweep deletes a row 6 h
+after it finished, but a LAN run of several plates or copies reads each file again when it starts
+the next one, up to days later, until the content sweep collects it. Its cost: the print
+worker can read any live sliced output (a run's, the print dialog's or an order
+quote's). A hold of the run on its file (a print-run holder in `blob_refs`, released
+where each run ends) would bind the key to the run; no such hold exists yet (#6122). The
+URL is the internal blob route's (`slicing/transfer.py` `Transfers.internal_get`, good
+for `READ_TTL`), signed under the API's KEK, on every backend: the token reads that one
+key. A backend that fails the key's read (an S3 error other than a missing object, a
+Bambuddy that does not answer) is 503 ``store_unavailable``, logged by the error's type
+only; the CRUD client retries it as it retries any 5xx but ``not_configured``. A read
+that mints, so natural: it takes no ``Idempotency-Key``. Its answer carries a bearer
+token (``no-store``, as every CRUD answer): never logged.
+
+The print worker holds no KEK (#5298 Task 33), so the API answers the two questions its
+key once did (area ``access-codes``): ``GET /access-codes`` says whether this API can
+open an access code at all (the LAN path's gate, `bambuddy/print_run.py`
+`_registry_path`), and ``POST /access-codes/virtual-printer`` opens a virtual printer's
+sealed code (`bambuddy/virtual_printers.py` `access_code_request`, which the API sealed
+when it recorded the request) for the worker's run to send to Bambuddy. The seal's key is
+derived from the KEK for that use alone, so the route opens no other secret. The answer
+is the code in plaintext to ``crud.print`` only (``no-store``), and the log names the
+credential, never the code. With no KEK it is 503 ``not_configured``; a value that does
+not open is 409 ``access-code-unreadable``. Both are reads, so natural.
 
 An event the worker posts is logged once by its id, and NOTIFYed only when logged
 (`PgNotifyEventBus.publish_once`). The worker may post only the kinds it publishes
@@ -37,33 +143,117 @@ only the API writes.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 from collections import OrderedDict
-from datetime import timedelta
+from collections.abc import Callable
+from datetime import datetime, timedelta
+from functools import partial
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import Query, Request, status
-from pydantic import BaseModel
+import psycopg
+from fastapi import Depends, Query, Request, status
+from psycopg import Connection
+from psycopg.rows import DictRow
+from psycopg_pool import ConnectionPool
+from pydantic import BaseModel, Field
 
-from scadbuddy.api.deps import EventsDep, PrintRunsDep, SettingsStoreDep, StateDep
+from scadbuddy.api.deps import (
+    EventsDep,
+    OutputsDep,
+    PrintLinksDep,
+    PrintRunsDep,
+    SettingsStoreDep,
+    StateDep,
+    UploadsDep,
+)
 from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Service
+from scadbuddy.bambuddy.copy_leases import (
+    COPY_LEASE_TTL,
+    MAX_TTL,
+    MAX_WAIT,
+    CopyLease,
+    CopyLeases,
+    LeaseLostError,
+)
+from scadbuddy.bambuddy.models import LocalPreset, LocalPresetDetail
 from scadbuddy.bambuddy.outcomes import PrintOutcomeStore
+from scadbuddy.bambuddy.print_links import LinkedPrint, PrintLink, PrintReprint, PrintSend
 from scadbuddy.bambuddy.print_run import PrintRunResult
 from scadbuddy.bambuddy.progress import PrintProgress
 from scadbuddy.bambuddy.runs import PrintRun, PrintRunError
+from scadbuddy.bambuddy.stages import Stage
 from scadbuddy.bambuddy.subject import PrintSubject
+from scadbuddy.bambuddy.uploads import (
+    BambuddyUploadStore,
+    DestinationKind,
+    LibraryCopy,
+    PreviewSlice,
+    ProjectTarget,
+    SlicedCopy,
+)
+from scadbuddy.core.credentials import strip_credentials
 from scadbuddy.core.events import PrintOutcome, decode_event, emit
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.secrets import SealError
 from scadbuddy.crud.guard import crud_router
+from scadbuddy.crud.idempotency import (
+    MaybeIdempotencyKey,
+    Replay,
+    idempotent,
+    idempotent_write,
+    record,
+    required_key,
+)
 from scadbuddy.crud.operations import operations_router
+from scadbuddy.crud.print import (
+    ACCESS_CODE_UNREADABLE,
+    NO_ACCESS_CODE,
+    NO_SUCH_PRINTER,
+    PAST_DEADLINE,
+    SERIAL_TAKEN,
+    SLICE_SUBJECT,
+)
+from scadbuddy.crud.wire import NOT_CONFIGURED
+from scadbuddy.library.output_prints import OutputPrintStore
+from scadbuddy.library.outputs import LanPlateSend, PlateSend
 from scadbuddy.library.settings_store import PRINT_SECRETS, PrintSettings, print_projection
+from scadbuddy.print_watch.component import AutoImportsDep
+from scadbuddy.print_watch.lan import LanCapture, LanImport
+from scadbuddy.print_watch.lan_store import StoreLanRecorder
 from scadbuddy.printers.component import PrintersDep
 from scadbuddy.printers.lan_models import LanStopped
-from scadbuddy.printers.models import PrinterRow
+from scadbuddy.printers.models import BambuddyView, PrinterRow
+from scadbuddy.printers.reports import PrinterReportStore
+from scadbuddy.printers.store import (
+    KekMissingError,
+    NoAccessCodeError,
+    PrinterNotFoundError,
+    SerialTakenError,
+    VirtualOutcome,
+    printer_uuid,
+)
+from scadbuddy.rack.component import RackUsageDep
+from scadbuddy.rack.usage import PickedHotend, RackUsageStore
+from scadbuddy.slicing.component import SlicingDep
+from scadbuddy.slicing.models import TransferUrl
+from scadbuddy.slicing.store import NativeSlice, SliceSubjectError
+from scadbuddy.slicing.transfer import (
+    READ_TTL,
+    SLICE_KIND,
+    SLICED_OUTPUT_META,
+    STORE_UNAVAILABLE,
+    TRANSFER_REFUSED,
+    TransferUnavailableError,
+)
+from scadbuddy.spools.component import SpoolsDep
+from scadbuddy.spools.models import Overlay, SeenTray, SpoolSnapshot
+from scadbuddy.spools.native import NativeSpool, NativeSpoolStore, SpoolUse
+from scadbuddy.spools.spool_providers import native_provider
 
 logger = logging.getLogger(__name__)
 
@@ -214,9 +404,18 @@ async def find_run(key: str, has_request_id: bool, runs: PrintRunsDep) -> PrintR
 
 @router.get("/runs/lan-waiting", name="crud_print_lan_waiting")
 async def lan_waiting(
-    runs: PrintRunsDep, printers: Annotated[list[UUID], Query(default_factory=list)]
+    runs: PrintRunsDep, printers: Annotated[list[str], Query(default_factory=list)]
 ) -> dict[str, PrintRun]:
-    return await runs.store.lan_waiting([str(printer) for printer in printers])
+    # Registry ids, as `PrintRunStore.lan_waiting` takes them; one that is no UUID would
+    # fail its cast to ``uuid[]`` as a 500.
+    for printer in printers:
+        try:
+            UUID(printer)
+        except ValueError:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, f"Not a printer id: {printer!r}."
+            ) from None
+    return await runs.store.lan_waiting(printers)
 
 
 @router.get("/runs/running", name="crud_print_running_runs")
@@ -299,6 +498,195 @@ async def older_open(subject: str, runs: PrintRunsDep) -> list[PrintRun]:
     return await _outcomes(runs).older_open(subject)
 
 
+class ReprintWrite(BaseModel):
+    """`PrintLinkStore.record_reprint`'s arguments (#3741)."""
+
+    subject: str
+    reprint: PrintReprint
+
+
+@router.post("/reprints", name="crud_print_record_reprint", status_code=status.HTTP_204_NO_CONTENT)
+async def record_reprint(body: ReprintWrite, links: PrintLinksDep) -> None:
+    """The queue item ScadBuddy's reprint of an archive queued (#3741), so the Prints
+    page marks it. Natural: a reprint recorded again keeps the first record."""
+    try:
+        subject = PrintSubject.parse(body.subject)
+    except ValueError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_ENTITY, str(error)) from error
+    await links.record_reprint(subject, body.reprint)
+
+
+# -- links, sends and an output's last print (Q20, Q21) ----------------------------
+
+
+def _subject(key: str) -> PrintSubject:
+    try:
+        return PrintSubject.parse(key)
+    except ValueError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_ENTITY, str(error)) from error
+
+
+class LinkWrite(BaseModel):
+    """`PrintLinkStore.record`'s arguments."""
+
+    subject: str
+    link: PrintLink
+
+
+class SendsWrite(BaseModel):
+    """`PrintLinkStore.record_sends`'s arguments."""
+
+    subject: str
+    sends: list[PrintSend]
+
+
+class LibraryLink(BaseModel):
+    """`PrintLinkStore.link_library`'s arguments but the queue item."""
+
+    archive_id: int
+    name: str | None = None
+
+
+class LastPrintWrite(BaseModel):
+    """`OutputPrintStore.record`'s arguments but the output."""
+
+    queue_item_id: int | None = None
+    slice_job_id: int | None = None
+    project_id: int | None = None
+    plates: list[PlateSend] = Field(default_factory=list)
+
+
+class LanLastPrintWrite(BaseModel):
+    """`OutputPrintStore.record_lan`'s arguments but the output."""
+
+    run_id: str
+    printer: str | None = None
+    plates: list[LanPlateSend] = Field(default_factory=list)
+
+
+class LanProgressWrite(BaseModel):
+    """`OutputPrintStore.record_lan_progress`'s arguments but the output."""
+
+    run_id: str
+    stage: Stage
+    settled: bool
+
+
+@router.post("/links", name="crud_print_record_link", status_code=status.HTTP_204_NO_CONTENT)
+async def record_link(body: LinkWrite, links: PrintLinksDep) -> None:
+    """Natural: a second sighting of the archive keeps the first link."""
+    await links.record(_subject(body.subject), body.link)
+
+
+@router.get("/links", name="crud_print_links_for")
+async def links_for(subject: str, links: PrintLinksDep) -> list[PrintLink]:
+    return await links.for_subject(_subject(subject))
+
+
+@router.get("/links/{archive_id}", name="crud_print_linked")
+async def linked(archive_id: int, links: PrintLinksDep) -> LinkedPrint | None:
+    return await links.linked(archive_id)
+
+
+@router.post("/sends", name="crud_print_record_sends", status_code=status.HTTP_204_NO_CONTENT)
+async def record_sends(body: SendsWrite, links: PrintLinksDep) -> None:
+    """Natural: a queue item recorded again keeps its first record."""
+    await links.record_sends(_subject(body.subject), body.sends)
+
+
+@router.get("/sends", name="crud_print_sends_for")
+async def sends_for(
+    subject: str, links: PrintLinksDep, run_id: str | None = None
+) -> list[PrintSend]:
+    """The subject's sends in the order recorded; only ``run_id``'s when given."""
+    if run_id is None:
+        return await links.sends_for(_subject(subject))
+    return await links.run_sends(_subject(subject), run_id)
+
+
+@router.post(
+    "/sends/{queue_item_id}/library-link",
+    name="crud_print_link_library",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def link_library(queue_item_id: int, body: LibraryLink, links: PrintLinksDep) -> None:
+    """Natural: the first archive the item reported is kept."""
+    await links.link_library(queue_item_id, body.archive_id, body.name)
+
+
+@router.post(
+    "/sends/{queue_item_id}/library-gone",
+    name="crud_print_library_gone",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def library_gone(queue_item_id: int, links: PrintLinksDep) -> None:
+    """Natural: it sets a flag."""
+    await links.library_gone(queue_item_id)
+
+
+def _last_prints(outputs: OutputsDep) -> OutputPrintStore:
+    """The API's own `OutputStore.prints` (`api/deps.py`)."""
+    if outputs.prints is None:
+        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, "this API keeps no last prints")
+    return outputs.prints
+
+
+LastPrintsDep = Annotated[OutputPrintStore, Depends(_last_prints)]
+
+
+@router.put(
+    "/last-prints/{output_id}",
+    name="crud_print_record_last_print",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def record_last_print(output_id: str, body: LastPrintWrite, prints: LastPrintsDep) -> None:
+    """Natural: set by the output's key, so a resend leaves what one send left."""
+    await asyncio.to_thread(
+        prints.record,
+        output_id,
+        queue_item_id=body.queue_item_id,
+        slice_job_id=body.slice_job_id,
+        project_id=body.project_id,
+        plates=body.plates,
+    )
+
+
+@router.put(
+    "/last-prints/{output_id}/lan",
+    name="crud_print_record_lan_last_print",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def record_lan_last_print(
+    output_id: str, body: LanLastPrintWrite, prints: LastPrintsDep
+) -> None:
+    """Natural: recorded again for the same run it keeps the stage written since."""
+    await asyncio.to_thread(
+        prints.record_lan,
+        output_id,
+        run_id=body.run_id,
+        printer=body.printer,
+        plates=body.plates,
+    )
+
+
+@router.put(
+    "/last-prints/{output_id}/lan-progress",
+    name="crud_print_record_lan_progress",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def record_lan_progress(
+    output_id: str, body: LanProgressWrite, prints: LastPrintsDep
+) -> None:
+    """Natural: it sets the run's stage and whether it settled."""
+    await asyncio.to_thread(
+        prints.record_lan_progress,
+        output_id,
+        body.run_id,
+        stage=body.stage,
+        settled=body.settled,
+    )
+
+
 class EnsureBambuddy(BaseModel):
     """`PrinterStore.ensure_bambuddy_written`'s arguments."""
 
@@ -327,6 +715,282 @@ async def ensure_bambuddy(body: EnsureBambuddy, printers: PrintersDep) -> Ensure
     return EnsuredPrinter(row=row, written=written)
 
 
+@router.post("/lan-imports", name="crud_print_record_lan_import")
+async def record_lan_import(
+    body: LanCapture, state: StateDep, auto_imports: AutoImportsDep
+) -> LanImport:
+    """A LAN-only printer's job, as the print worker read it (#4699 phase 4): matched to a
+    model, or put in the inbox, and recorded with its activity row. Natural on the job
+    (the printer, ``subtask_name`` and ``started_at``): sent again, it answers the record
+    as it is and writes nothing."""
+    if printer_uuid(body.job.printer_id) is None:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, f"no printer {body.job.printer_id}")
+    recorder = StoreLanRecorder(auto_imports.lan, state.catalogue.slugs, state.catalogue.exists)
+    return await recorder.record(body)
+
+
+# -- the registry's reads, the access code, the virtual printers' sync and the reports
+# (Q22-Q26, area ``printers``) -----------------------------------------------------------
+
+
+class AccessCode(BaseModel):
+    code: str
+
+
+class VirtualWrite(BaseModel):
+    """`PrinterStore.upsert_virtual`'s arguments but the VP's id, which the path names."""
+
+    serial: str | None = None
+    name: str
+    model: str | None = None
+    mode: str
+    forwards_to: str | None = None
+    view: BambuddyView
+    may_adopt: bool = True
+
+
+class VirtualSynced(BaseModel):
+    row: PrinterRow
+    outcome: VirtualOutcome
+    changed: bool
+
+
+class Listed(BaseModel):
+    listed: list[int]
+
+
+class ListedChanged(BaseModel):
+    #: The rows whose ``bambuddy_active`` this write changed.
+    changed: list[str]
+
+
+class ReportWrite(BaseModel):
+    report: dict[str, Any]
+    seen_at: datetime
+
+
+class EndedPrint(BaseModel):
+    """`printers/reports.py` `PrintEnd`."""
+
+    subtask_name: str
+    timed: bool
+
+
+class ReportWritten(BaseModel):
+    #: The print this write showed ended, if any; a resend answers the first write's.
+    ended: EndedPrint | None
+    #: The print this write showed start (`printers/reports.py` `started_print`), for
+    #: the print watcher's LAN nudge (#4699 phase 3); a resend answers the first write's.
+    started: str | None = None
+
+
+class Seen(BaseModel):
+    seen_at: datetime
+
+
+class SeenReport(BaseModel):
+    report: dict[str, Any]
+    seen_at: datetime
+
+
+VIRTUAL_ROUTE = "PUT /printers/virtual/{vp_id}"
+LISTED_ROUTE = "POST /printers/virtual-listed"
+REPORT_ROUTE = "PUT /reports/{printer_id}"
+
+
+@router.get("/printers", name="crud_print_printers")
+async def list_printers(printers: PrintersDep) -> list[PrinterRow]:
+    return await asyncio.to_thread(printers.store.list)
+
+
+@router.get("/printers/by-serial", name="crud_print_printer_by_serial")
+async def printer_by_serial(serial: str, printers: PrintersDep) -> PrinterRow | None:
+    return await asyncio.to_thread(printers.store.by_serial, serial)
+
+
+@router.get(
+    "/printers/by-bambuddy-id/{bambuddy_printer_id}", name="crud_print_printer_by_bambuddy_id"
+)
+async def printer_by_bambuddy_id(
+    bambuddy_printer_id: int, printers: PrintersDep
+) -> PrinterRow | None:
+    return await asyncio.to_thread(printers.store.by_bambuddy_id, bambuddy_printer_id)
+
+
+@router.get("/printers/{printer_id}", name="crud_print_printer")
+async def get_printer(printer_id: str, printers: PrintersDep) -> PrinterRow | None:
+    return await asyncio.to_thread(printers.store.get, printer_id)
+
+
+@router.get("/printers/{printer_id}/access-code", name="crud_print_access_code")
+async def access_code(printer_id: str, request: Request, printers: PrintersDep) -> AccessCode:
+    """The printer's LAN access code in plaintext, to ``crud.print`` only (plan D8): the
+    watch and a LAN start dial the printer with it. The answer is ``no-store`` (the
+    CRUD router's headers), and the log names the printer and the credential, never the
+    code."""
+    principal = caller_of(request.scope)
+    assert isinstance(principal, Service)
+    try:
+        code = await asyncio.to_thread(printers.store.open_access_code, printer_id)
+    except PrinterNotFoundError:
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND, "There is no such printer.", reason=NO_SUCH_PRINTER
+        ) from None
+    except NoAccessCodeError:
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND,
+            "This printer has no LAN access code.",
+            reason=NO_ACCESS_CODE,
+        ) from None
+    except KekMissingError:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "The API has no SCADBUDDY_SECRET_KEY_FILE, so it cannot open an access code.",
+            reason=NOT_CONFIGURED,
+        ) from None
+    except SealError:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "This printer's access code was sealed under another key; link it again.",
+            reason=ACCESS_CODE_UNREADABLE,
+        ) from None
+    logger.info(
+        "released printer %s's access code to service credential %s",
+        printer_id,
+        principal.credential_id,
+    )
+    return AccessCode(code=code)
+
+
+@router.put("/printers/virtual/{vp_id}", name="crud_print_upsert_virtual")
+async def upsert_virtual(
+    vp_id: int,
+    body: VirtualWrite,
+    printers: PrintersDep,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> VirtualSynced:
+    """A virtual printer's row, under the registry's lock. Once per ``Idempotency-Key``:
+    a resend answers what the first write did, not ``already_linked``."""
+    key = required_key(idempotency_key)
+    store = printers.store
+
+    def write(conn: Connection[DictRow]) -> dict[str, Any]:
+        row, outcome, changed = store.upsert_virtual_in(
+            conn,
+            vp_id,
+            serial=body.serial,
+            name=body.name,
+            model=body.model,
+            mode=body.mode,
+            forwards_to=body.forwards_to,
+            view=body.view,
+            may_adopt=body.may_adopt,
+        )
+        return {"row": row.model_dump(mode="json"), "outcome": outcome, "changed": changed}
+
+    try:
+        answer = await asyncio.to_thread(
+            _once_on,
+            store.pool,
+            key,
+            VIRTUAL_ROUTE,
+            {"vp_id": vp_id, **body.model_dump(mode="json")},
+            write,
+        )
+    except SerialTakenError as error:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "Another printer row holds this virtual printer's serial.",
+            reason=SERIAL_TAKEN,
+            existing_id=error.existing_id,
+        ) from None
+    return VirtualSynced.model_validate(answer)
+
+
+@router.post("/printers/virtual-listed", name="crud_print_mark_virtual_listed")
+async def mark_virtual_listed(
+    body: Listed, printers: PrintersDep, idempotency_key: MaybeIdempotencyKey = None
+) -> ListedChanged:
+    """Which virtual printers Bambuddy lists now. Once per ``Idempotency-Key``: a resend
+    answers the rows the first write changed."""
+    key = required_key(idempotency_key)
+    store = printers.store
+    answer = await asyncio.to_thread(
+        _once_on,
+        store.pool,
+        key,
+        LISTED_ROUTE,
+        body.model_dump(mode="json"),
+        lambda conn: {"changed": list(store.mark_virtual_listed_in(conn, body.listed))},
+    )
+    return ListedChanged.model_validate(answer)
+
+
+@router.get("/reports", name="crud_print_reports")
+async def all_reports(printers: PrintersDep) -> dict[str, SeenReport]:
+    seen = await asyncio.to_thread(printers.reports.all)
+    return {
+        printer_id: SeenReport(report=report, seen_at=seen_at)
+        for printer_id, (report, seen_at) in seen.items()
+    }
+
+
+@router.get("/reports/{printer_id}", name="crud_print_report")
+async def get_report(printer_id: str, printers: PrintersDep) -> SeenReport | None:
+    seen = await asyncio.to_thread(printers.reports.get, printer_id)
+    return None if seen is None else SeenReport(report=seen[0], seen_at=seen[1])
+
+
+@router.put("/reports/{printer_id}", name="crud_print_put_report")
+async def put_report(
+    printer_id: str,
+    body: ReportWrite,
+    printers: PrintersDep,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> ReportWritten:
+    """The watch's write. Only the write that shows a print ended answers that end, and
+    only the one that shows a print start answers that start, so such a write is once
+    per ``Idempotency-Key``: a resend after a lost answer answers the same end and start.
+
+    Only a write that answers an end or a start keeps a ledger row (#5298 final review
+    M2): the watch puts about once a `watch.py` `write_every` (1 s) while a printer
+    reports, so a row per write was tens of thousands a day per printer. A plain write
+    sent again needs none: the row then holds that report at that ``seen_at``, which never
+    moves back, so the resend ends and starts nothing, the same answer as the first
+    send's; one older than the row is `stale` and answers nothing too."""
+    key = required_key(idempotency_key)
+    reports = printers.reports
+    request = {"printer_id": printer_id, **body.model_dump(mode="json")}
+
+    def run() -> dict[str, Any]:
+        with reports.pool.connection() as conn, conn.transaction():
+            stored = idempotent(conn, "print", key, REPORT_ROUTE, request)
+            if stored is not None:
+                answer: dict[str, Any] = stored.body
+                return answer
+            advance = PrinterReportStore.advance_in(conn, printer_id, body.report, body.seen_at)
+            ended = advance.ended
+            answer = {
+                "ended": None if ended is None else dataclasses.asdict(ended),
+                "started": advance.started,
+            }
+            if ended is not None or advance.started is not None:
+                record(conn, "print", key, REPORT_ROUTE, request, Replay(200, answer))
+            return answer
+
+    return ReportWritten.model_validate(await asyncio.to_thread(run))
+
+
+@router.post(
+    "/reports/{printer_id}/touch",
+    name="crud_print_touch_report",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def touch_report(printer_id: str, body: Seen, printers: PrintersDep) -> None:
+    """Natural: ``seen_at`` never moves back."""
+    await asyncio.to_thread(printers.reports.touch, printer_id, body.seen_at)
+
+
 @router.post("/events", name="crud_print_publish_event")
 async def publish_event(body: EventPost, events: EventsDep) -> Logged:
     kind = body.event.get("kind")
@@ -348,3 +1012,949 @@ async def publish_event(body: EventPost, events: EventsDep) -> Logged:
     # A test's in-process bus keeps no log to find a resend in.
     emit(events, event)
     return Logged(logged=True)
+
+
+# -- uploads and slices (inventory Q15, Q17) ----------------------------------------
+
+
+class CopyWrite(BaseModel):
+    output_id: str
+    upload: LibraryCopy
+    #: The copy lease it was uploaded under: written only while that holds.
+    lease: CopyLease | None = None
+
+
+class CopyKey(BaseModel):
+    output_id: str
+    library_file_id: int
+
+
+class FileIds(BaseModel):
+    ids: list[int]
+
+
+class HeldCopy(BaseModel):
+    """A copy that holds the content asked for, and the output it is recorded under."""
+
+    output_id: str
+    upload: LibraryCopy
+
+
+class SentBetween(BaseModel):
+    first_upload: datetime
+    last_slice: datetime
+
+
+class SliceWrite(BaseModel):
+    output_id: str
+    library_file_id: int
+    sliced: SlicedCopy
+
+
+class SliceHash(BaseModel):
+    output_id: str
+    file_hash: str
+
+
+class SliceStart(BaseModel):
+    library_file_id: int
+    job_id: int | None = None
+
+
+SLICE_START_ROUTE = "POST /slice-starts"
+
+
+@router.get("/uploads", name="crud_print_uploads")
+async def uploads_for(
+    uploads: UploadsDep,
+    output_id: Annotated[list[str], Query(default_factory=list)],
+    native: bool = False,
+) -> dict[str, list[LibraryCopy]]:
+    return await uploads.for_outputs(output_id, native=native)
+
+
+@router.post("/uploads", name="crud_print_record_upload", status_code=status.HTTP_204_NO_CONTENT)
+async def record_upload(body: CopyWrite, uploads: UploadsDep) -> None:
+    try:
+        await uploads.record(body.output_id, body.upload, body.lease)
+    except LeaseLostError as error:
+        raise _lease_lost() from error
+
+
+#: A lease another holder keeps for all of the wait, and one its token no longer holds.
+LEASE_BUSY = "busy"
+LEASE_LOST = "lease-lost"
+
+
+def _lease_lost() -> ApiError:
+    return ApiError(
+        status.HTTP_409_CONFLICT, "The copy lease is not held by this token.", reason=LEASE_LOST
+    )
+
+
+class LeaseAsk(BaseModel):
+    token: UUID
+    ttl_s: float = Field(gt=0, le=MAX_TTL)
+    wait_s: float = Field(default=0, ge=0, le=MAX_WAIT)
+
+
+class LeaseRenew(BaseModel):
+    token: UUID
+    ttl_s: float = Field(default=COPY_LEASE_TTL, gt=0, le=MAX_TTL)
+
+
+class LeaseHeld(BaseModel):
+    token: UUID
+    expires_at: datetime
+
+
+@router.post("/copy-leases/{key:path}", name="crud_print_acquire_copy_lease")
+async def acquire_copy_lease(key: str, body: LeaseAsk, uploads: UploadsDep) -> LeaseHeld:
+    expires = await CopyLeases(uploads.pool).acquire(key, str(body.token), body.ttl_s, body.wait_s)
+    if expires is None:
+        raise ApiError(
+            status.HTTP_409_CONFLICT, "Another holder keeps the copy lease.", reason=LEASE_BUSY
+        )
+    return LeaseHeld(token=body.token, expires_at=expires)
+
+
+@router.put("/copy-leases/{key:path}", name="crud_print_renew_copy_lease")
+async def renew_copy_lease(key: str, body: LeaseRenew, uploads: UploadsDep) -> LeaseHeld:
+    expires = await CopyLeases(uploads.pool).renew(key, str(body.token), body.ttl_s)
+    if expires is None:
+        raise _lease_lost()
+    return LeaseHeld(token=body.token, expires_at=expires)
+
+
+@router.delete(
+    "/copy-leases/{key:path}",
+    name="crud_print_release_copy_lease",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def release_copy_lease(key: str, token: UUID, uploads: UploadsDep) -> None:
+    await CopyLeases(uploads.pool).release(key, str(token))
+
+
+@router.get("/uploads/same-content", name="crud_print_same_content")
+async def same_content(
+    uploads: UploadsDep, target_key: str, content_key: str, folder_id: int | None = None
+) -> list[HeldCopy]:
+    found = await uploads.same_content(folder_id, target_key, content_key)
+    return [HeldCopy(output_id=output_id, upload=copy) for output_id, copy in found]
+
+
+@router.get("/uploads/shared", name="crud_print_shared_uploads")
+async def shared_uploads(
+    uploads: UploadsDep, output_id: str, id: Annotated[list[int], Query(default_factory=list)]
+) -> list[int]:
+    return sorted(await uploads.shared(id, output_id))
+
+
+@router.get("/uploads/recorded", name="crud_print_recorded_uploads")
+async def recorded_uploads(
+    uploads: UploadsDep, id: Annotated[list[int], Query(default_factory=list)]
+) -> list[int]:
+    return sorted(await uploads.recorded(id))
+
+
+@router.get("/uploads/recorded-files", name="crud_print_recorded_files")
+async def recorded_files(
+    uploads: UploadsDep, id: Annotated[list[int], Query(default_factory=list)]
+) -> list[int]:
+    return sorted(await uploads.recorded_files(id))
+
+
+@router.get("/uploads/sent-between", name="crud_print_sent_between")
+async def sent_between(output_id: str, uploads: UploadsDep) -> SentBetween | None:
+    window = await uploads.sent_between(output_id)
+    return None if window is None else SentBetween(first_upload=window[0], last_slice=window[1])
+
+
+@router.post(
+    "/uploads/touch", name="crud_print_touch_upload", status_code=status.HTTP_204_NO_CONTENT
+)
+async def touch_upload(body: CopyKey, uploads: UploadsDep) -> None:
+    await uploads.touch(body.output_id, body.library_file_id)
+
+
+@router.post(
+    "/uploads/forget", name="crud_print_forget_upload", status_code=status.HTTP_204_NO_CONTENT
+)
+async def forget_upload(body: CopyKey, uploads: UploadsDep) -> None:
+    await uploads.forget(body.output_id, body.library_file_id)
+
+
+@router.post(
+    "/uploads/forget-files",
+    name="crud_print_forget_upload_files",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def forget_upload_files(body: FileIds, uploads: UploadsDep) -> None:
+    await uploads.forget_files(body.ids)
+
+
+@router.post("/slices", name="crud_print_record_slice", status_code=status.HTTP_204_NO_CONTENT)
+async def record_slice(body: SliceWrite, uploads: UploadsDep) -> None:
+    await uploads.record_sliced(body.output_id, body.library_file_id, body.sliced)
+
+
+@router.get("/slices", name="crud_print_slices_of")
+async def slices_of(
+    output_id: str, library_file_id: int, preset_key: str, uploads: UploadsDep
+) -> list[SlicedCopy]:
+    return await uploads.slices_of(output_id, library_file_id, preset_key)
+
+
+@router.post(
+    "/slices/{sliced_id}/forget",
+    name="crud_print_forget_slice",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def forget_slice(sliced_id: int, output_id: str, uploads: UploadsDep) -> None:
+    """One subject's slice in ``sliced_id``."""
+    await uploads.forget_slice(output_id, sliced_id)
+
+
+@router.post(
+    "/slices/{sliced_id}/gone",
+    name="crud_print_forget_gone_slice",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def forget_gone_slice(sliced_id: int, uploads: UploadsDep) -> None:
+    """Every subject's slice in ``sliced_id``: Bambuddy no longer has the file."""
+    await uploads.forget_gone_slice(sliced_id)
+
+
+@router.put(
+    "/slices/{sliced_id}/hash",
+    name="crud_print_record_slice_hash",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def record_slice_hash(sliced_id: int, body: SliceHash, uploads: UploadsDep) -> None:
+    await uploads.record_slice_hash(body.output_id, sliced_id, body.file_hash)
+
+
+def _once(
+    uploads: BambuddyUploadStore,
+    key: str,
+    route: str,
+    body: dict[str, Any],
+    write: Callable[[Connection[DictRow]], Any],
+) -> Any:
+    """``write``'s JSON answer, once per Idempotency-Key ``key``: the write and its
+    ledger row in one transaction (plan D5)."""
+    return _once_on(uploads.pool, key, route, body, write)
+
+
+def _once_on(
+    pool: ConnectionPool[Connection[DictRow]],
+    key: str,
+    route: str,
+    body: dict[str, Any],
+    write: Callable[[Connection[DictRow]], Any],
+) -> Any:
+    """`_once` on ``pool``."""
+    with pool.connection() as conn:
+        return idempotent_write(
+            conn, "print", key, route, body, lambda: Replay(200, write(conn))
+        ).body
+
+
+@router.post(
+    "/slice-starts", name="crud_print_record_slice_start", status_code=status.HTTP_204_NO_CONTENT
+)
+async def record_slice_start(
+    body: SliceStart, uploads: UploadsDep, idempotency_key: MaybeIdempotencyKey = None
+) -> None:
+    """A plain insert: once per ``Idempotency-Key``, so a resend records one start."""
+    key = required_key(idempotency_key)
+    await asyncio.to_thread(
+        _once,
+        uploads,
+        key,
+        SLICE_START_ROUTE,
+        body.model_dump(mode="json"),
+        lambda conn: BambuddyUploadStore.record_slice_start_in(
+            conn, body.library_file_id, body.job_id
+        ),
+    )
+
+
+# -- background slices, project targets, folderless projects, touches (Q16, Q18) ----
+
+
+class PreviewSliced(BaseModel):
+    sliced_file_id: int
+    name: str | None = None
+
+
+class Claimed(BaseModel):
+    #: False when the sweep took the slice first.
+    claimed: bool
+
+
+class Folderless(BaseModel):
+    name: str
+    parent_id: int | None = None
+
+
+class Touch(BaseModel):
+    kind: DestinationKind
+    target_id: int
+
+
+PREVIEW_ROUTE = "POST /previews"
+CLAIM_ROUTE = "POST /previews/{row_id}/claim"
+
+
+@router.post("/previews", name="crud_print_record_preview", status_code=status.HTTP_204_NO_CONTENT)
+async def record_preview(
+    body: PreviewSlice, uploads: UploadsDep, idempotency_key: MaybeIdempotencyKey = None
+) -> None:
+    """A plain insert: once per ``Idempotency-Key``, so a resend records one slice."""
+    key = required_key(idempotency_key)
+    await asyncio.to_thread(
+        _once,
+        uploads,
+        key,
+        PREVIEW_ROUTE,
+        body.model_dump(mode="json"),
+        lambda conn: BambuddyUploadStore.record_preview_in(conn, body),
+    )
+
+
+@router.get("/previews", name="crud_print_previews_for")
+async def previews_for(
+    library_file_id: int, preset_key: str, uploads: UploadsDep
+) -> list[PreviewSlice]:
+    return await uploads.previews_for(library_file_id, preset_key)
+
+
+@router.get("/previews/find", name="crud_print_find_preview")
+async def find_preview(job_id: int, subject: str, uploads: UploadsDep) -> PreviewSlice | None:
+    return await uploads.preview(job_id, subject)
+
+
+@router.put(
+    "/previews/{row_id}/sliced",
+    name="crud_print_preview_sliced",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def preview_sliced(row_id: int, body: PreviewSliced, uploads: UploadsDep) -> None:
+    await uploads.preview_sliced(row_id, body.sliced_file_id, body.name)
+
+
+@router.post(
+    "/previews/{row_id}/retire",
+    name="crud_print_retire_preview",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def retire_preview(row_id: int, uploads: UploadsDep) -> None:
+    await uploads.retire_preview(row_id)
+
+
+@router.post("/previews/{row_id}/claim", name="crud_print_claim_preview")
+async def claim_preview(
+    row_id: int, uploads: UploadsDep, idempotency_key: MaybeIdempotencyKey = None
+) -> Claimed:
+    """Once per ``Idempotency-Key``: a claim won answers true to its resend, though the
+    slice was retired since, so the run queues the file it holds."""
+    key = required_key(idempotency_key)
+    answer = await asyncio.to_thread(
+        _once,
+        uploads,
+        key,
+        CLAIM_ROUTE,
+        {"row_id": row_id},
+        lambda conn: {"claimed": BambuddyUploadStore.claim_preview_in(conn, row_id)},
+    )
+    return Claimed.model_validate(answer)
+
+
+@router.get("/project-targets/{project_id}", name="crud_print_project_target")
+async def project_target(project_id: int, uploads: UploadsDep) -> ProjectTarget | None:
+    return await uploads.project_target(project_id)
+
+
+@router.put(
+    "/project-targets/{project_id}",
+    name="crud_print_remember_project_target",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def remember_project_target(
+    project_id: int, body: ProjectTarget, uploads: UploadsDep
+) -> None:
+    await uploads.remember_project_target(project_id, body)
+
+
+@router.get("/folderless", name="crud_print_folderless")
+async def folderless(name: str, uploads: UploadsDep, parent_id: int | None = None) -> list[int]:
+    return await uploads.folderless(name, parent_id)
+
+
+@router.put(
+    "/folderless/{project_id}",
+    name="crud_print_remember_folderless",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def remember_folderless(project_id: int, body: Folderless, uploads: UploadsDep) -> None:
+    await uploads.remember_folderless(project_id, body.name, body.parent_id)
+
+
+@router.delete(
+    "/folderless/{project_id}",
+    name="crud_print_forget_folderless",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def forget_folderless(project_id: int, uploads: UploadsDep) -> None:
+    await uploads.forget_folderless(project_id)
+
+
+@router.post(
+    "/destination-touches",
+    name="crud_print_touch_destination",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def touch_destination(body: Touch, uploads: UploadsDep) -> None:
+    await uploads.touch_destination(body.kind, body.target_id)
+
+
+# -- the rack hotends' usage (Q27, area ``rack``, #5298 Task 30) -------------------------
+
+
+#: The most serials one rack call takes. A rack holds six hotends (`rack/rank.py`
+#: `POSITIONS`, positions 1-6) and the callers send one rack's at a time; 64 is far above
+#: that, and bounds the ``IN`` list a buggy caller could send.
+RACK_SERIALS_MAX = 64
+#: The longest serial taken: a hotend's serial is a short code.
+RACK_SERIAL_CHARS = 128
+RackSerial = Annotated[str, Field(max_length=RACK_SERIAL_CHARS)]
+
+
+class RackSeen(BaseModel):
+    #: The registry printer (#5167); none for a printer the registry does not hold.
+    printer: UUID | None = None
+    serials: list[RackSerial] = Field(max_length=RACK_SERIALS_MAX)
+
+
+class RackSerials(BaseModel):
+    serials: list[RackSerial] = Field(max_length=RACK_SERIALS_MAX)
+
+
+class RackUsageRow(BaseModel):
+    """`rack/rank.py` `Usage`."""
+
+    prints: int
+    print_seconds: int
+    grams: float
+    first_seen_at: datetime | None
+    pending: int
+    last_used_at: datetime | None
+
+
+class RackPicks(BaseModel):
+    queue_item_id: int
+    printer: UUID | None = None
+    picks: list[PickedHotend]
+    copies: int = 1
+
+
+class RackPrints(BaseModel):
+    archive_id: int
+    queue_item_id: int
+    settled_at: datetime
+    print_seconds: int | None = None
+    grams: float | None = None
+
+
+class RackLanPicks(BaseModel):
+    run_id: str
+    subtask_name: str
+    printer: UUID | None = None
+    #: A start with no attributable pick saves none (`save_lan_picks`), so none is sent.
+    picks: list[PickedHotend] = Field(min_length=1)
+
+
+class RackSettleLan(BaseModel):
+    run_id: str
+    subtask_name: str | None = None
+    timed: bool = True
+
+
+class RackSettleLanEnded(BaseModel):
+    printer: UUID
+    subtask_name: str
+    ended_at: datetime
+    timed: bool = True
+
+
+class RackWritten(BaseModel):
+    #: The rows the write wrote; a resend under its key answers the first write's.
+    written: int
+
+
+RACK_PICKS_ROUTE = "POST /rack/picks"
+RACK_PRINTS_ROUTE = "POST /rack/prints"
+RACK_LAN_PICKS_ROUTE = "POST /rack/lan-picks"
+RACK_SETTLE_LAN_ROUTE = "POST /rack/settle-lan"
+RACK_SETTLE_LAN_ENDED_ROUTE = "POST /rack/settle-lan-ended"
+
+
+async def _rack_once(
+    rack: RackUsageStore,
+    key: str | None,
+    route: str,
+    body: BaseModel,
+    write: Callable[[Connection[DictRow]], int],
+) -> RackWritten:
+    """``write`` once per ``Idempotency-Key``, with its ledger row in its transaction on
+    the rack store's pool (plan D5): a resend answers the rows the first write wrote."""
+    required = required_key(key)
+
+    def once() -> Any:
+        return _once_on(
+            rack.pool,
+            required,
+            route,
+            body.model_dump(mode="json"),
+            lambda conn: {"written": write(conn)},
+        )
+
+    return RackWritten.model_validate(await asyncio.to_thread(once))
+
+
+@router.post("/rack/seen", name="crud_print_rack_seen", status_code=status.HTTP_204_NO_CONTENT)
+async def rack_seen(body: RackSeen, rack: RackUsageDep) -> None:
+    """Natural: an upsert by serial, which never moves ``first_seen_at``."""
+    printer = None if body.printer is None else str(body.printer)
+    await rack.seen(printer, body.serials)
+
+
+@router.post("/rack/usage", name="crud_print_rack_usage")
+async def rack_usage(body: RackSerials, rack: RackUsageDep) -> dict[str, RackUsageRow]:
+    """A read, sent as a ``POST`` so the serials stay out of the URL (spec §7)."""
+    usage = await rack.usage(body.serials)
+    return {
+        serial: RackUsageRow.model_validate(dataclasses.asdict(used))
+        for serial, used in usage.items()
+    }
+
+
+@router.get("/rack/picked", name="crud_print_rack_picked")
+async def rack_picked(
+    rack: RackUsageDep, id: Annotated[list[int], Query(default_factory=list)]
+) -> list[int]:
+    return sorted(await rack.picked_items(id))
+
+
+@router.get("/rack/recorded-archives", name="crud_print_rack_recorded_archives")
+async def rack_recorded_archives(
+    rack: RackUsageDep, id: Annotated[list[int], Query(default_factory=list)]
+) -> list[int]:
+    return sorted(await rack.recorded_archives(id))
+
+
+@router.post("/rack/picks", name="crud_print_rack_picks")
+async def rack_picks(
+    body: RackPicks, rack: RackUsageDep, idempotency_key: MaybeIdempotencyKey = None
+) -> RackWritten:
+    """A Bambuddy queue item's picks and their spools, in one transaction. ``ON CONFLICT
+    DO NOTHING`` keeps the state, but the answer counts the rows written, so once per
+    ``Idempotency-Key``."""
+    printer = None if body.printer is None else str(body.printer)
+    return await _rack_once(
+        rack,
+        idempotency_key,
+        RACK_PICKS_ROUTE,
+        body,
+        lambda conn: RackUsageStore.record_picks_in(
+            conn, body.queue_item_id, printer, body.picks, body.copies
+        ),
+    )
+
+
+@router.post("/rack/prints", name="crud_print_rack_prints")
+async def rack_prints(
+    body: RackPrints, rack: RackUsageDep, idempotency_key: MaybeIdempotencyKey = None
+) -> RackWritten:
+    """A settled archive's print rows: once per ``Idempotency-Key``, as `rack_picks`."""
+    return await _rack_once(
+        rack,
+        idempotency_key,
+        RACK_PRINTS_ROUTE,
+        body,
+        lambda conn: RackUsageStore.record_prints_in(
+            conn,
+            body.archive_id,
+            body.queue_item_id,
+            body.settled_at,
+            body.print_seconds,
+            body.grams,
+        ),
+    )
+
+
+@router.post("/rack/lan-picks", name="crud_print_rack_lan_picks")
+async def rack_lan_picks(
+    body: RackLanPicks, rack: RackUsageDep, idempotency_key: MaybeIdempotencyKey = None
+) -> RackWritten:
+    """A LAN start's picks: the earlier pick's rows deleted and the new ones inserted in
+    one transaction on the API, with the ledger row (plans D5, D6). Once per
+    ``Idempotency-Key``: a resend after a lost answer neither moves ``picked_at`` nor
+    writes again."""
+    printer = None if body.printer is None else str(body.printer)
+    return await _rack_once(
+        rack,
+        idempotency_key,
+        RACK_LAN_PICKS_ROUTE,
+        body,
+        lambda conn: RackUsageStore.record_lan_picks_in(
+            conn, body.run_id, body.subtask_name, printer, body.picks
+        ),
+    )
+
+
+@router.post("/rack/settle-lan", name="crud_print_rack_settle_lan")
+async def rack_settle_lan(
+    body: RackSettleLan, rack: RackUsageDep, idempotency_key: MaybeIdempotencyKey = None
+) -> RackWritten:
+    """A LAN run's open picks settled, as `RackUsageStore.settle_lan`: once per
+    ``Idempotency-Key``."""
+    return await _rack_once(
+        rack,
+        idempotency_key,
+        RACK_SETTLE_LAN_ROUTE,
+        body,
+        lambda conn: RackUsageStore.settle_lan_in(conn, body.run_id, body.subtask_name, body.timed),
+    )
+
+
+@router.post("/rack/settle-lan-ended", name="crud_print_rack_settle_lan_ended")
+async def rack_settle_lan_ended(
+    body: RackSettleLanEnded, rack: RackUsageDep, idempotency_key: MaybeIdempotencyKey = None
+) -> RackWritten:
+    """A LAN start's open picks settled as its printer's report ends it, as
+    `RackUsageStore.settle_lan_ended`: once per ``Idempotency-Key``."""
+    return await _rack_once(
+        rack,
+        idempotency_key,
+        RACK_SETTLE_LAN_ENDED_ROUTE,
+        body,
+        lambda conn: RackUsageStore.settle_lan_ended_in(
+            conn, str(body.printer), body.subtask_name, body.ended_at, body.timed
+        ),
+    )
+
+
+# -- spools, native spools, held presets, native slices (Q28-Q30, area ``spools``) -------
+
+
+class SpoolRecords(BaseModel):
+    provider: str = Field(min_length=1, max_length=64)
+    snapshots: list[SpoolSnapshot]
+    at: datetime
+    #: Seconds the write may take from the route's receipt, the waits for a connection
+    #: and the lock included; the caller sends less than it waits (`RemoteSpoolStore`).
+    timeout: float | None = Field(default=None, gt=0)
+
+
+class SpoolFailure(BaseModel):
+    at: datetime
+    #: A type, never a message.
+    failure: str = Field(min_length=1, max_length=200)
+
+
+class OverlayAsk(BaseModel):
+    printer_id: UUID
+    trays: list[SeenTray]
+    now: datetime
+    providers: list[str]
+    located: dict[str, str] = Field(default_factory=dict)
+
+
+class AnySpool(BaseModel):
+    any: bool
+
+
+class SpoolUses(BaseModel):
+    run_id: str
+    subtask_name: str
+    uses: list[SpoolUse]
+
+
+class SettleUses(BaseModel):
+    run_id: str
+    stages: list[str]
+
+
+class SpoolsChanged(BaseModel):
+    #: The spools this settle changed; a resend under its key answers the first's.
+    changed: list[UUID]
+
+
+class HeldPresetRow(BaseModel):
+    preset: LocalPreset
+    sha256: str
+
+
+class SliceStartAsk(BaseModel):
+    workflow_id: str = Field(min_length=1, max_length=200)
+    subject: str = Field(min_length=1)
+    library_file_id: int
+    plate_id: int
+    preset_key: str = Field(min_length=1)
+    fresh: bool = False
+
+
+SPOOL_RECORDS_ROUTE = "POST /spools/records"
+SETTLE_USES_ROUTE = "POST /native-spools/uses/settle"
+
+
+def _native_spools(spools: SpoolsDep) -> NativeSpoolStore:
+    return native_provider(spools).store
+
+
+NativeSpoolsDep = Annotated[NativeSpoolStore, Depends(_native_spools)]
+
+
+@router.post(
+    "/spools/records", name="crud_print_spool_records", status_code=status.HTTP_204_NO_CONTENT
+)
+async def replace_spool_records(
+    body: SpoolRecords, spools: SpoolsDep, idempotency_key: MaybeIdempotencyKey = None
+) -> None:
+    """A provider's whole inventory, under the store's advisory lock, in one transaction
+    with its ledger row (plans D5, D6): once per ``Idempotency-Key``. The deadline is
+    ``timeout`` seconds from this route's receipt, before it waits for a connection; a
+    write past it rolls back and is 409 ``past-deadline``, as the SQL store's raises."""
+    key = required_key(idempotency_key)
+    store = spools.store
+    deadline = store.deadline(body.timeout)
+
+    def write(conn: Connection[DictRow]) -> None:
+        store.replace_records_in(conn, body.provider, body.snapshots, body.at, deadline)
+
+    try:
+        await asyncio.to_thread(
+            _once_on, store.pool, key, SPOOL_RECORDS_ROUTE, body.model_dump(mode="json"), write
+        )
+    except (TimeoutError, psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "The refresh ran past its deadline; nothing was written.",
+            reason=PAST_DEADLINE,
+        ) from None
+
+
+@router.post(
+    "/spools/refreshes/{provider}/failed",
+    name="crud_print_spool_refresh_failed",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def spool_refresh_failed(provider: str, body: SpoolFailure, spools: SpoolsDep) -> None:
+    """Natural: an upsert of the provider's failure."""
+    await spools.store.failed(provider, body.at, body.failure)
+
+
+@router.post("/spools/overlay", name="crud_print_spool_overlay")
+async def spool_overlay(body: OverlayAsk, spools: SpoolsDep) -> Overlay:
+    """A read, sent as a ``POST`` so the trays' RFID keys stay out of the URL (spec §7)."""
+    return await spools.store.overlay(
+        body.printer_id,
+        body.trays,
+        now=body.now,
+        providers=body.providers,
+        located=body.located,
+    )
+
+
+@router.get("/native-spools", name="crud_print_native_spools")
+async def native_spools(
+    store: NativeSpoolsDep, include_archived: bool = False
+) -> list[NativeSpool]:
+    return await asyncio.to_thread(partial(store.list, include_archived=include_archived))
+
+
+@router.get("/native-spools/any", name="crud_print_native_spools_any")
+async def native_spools_any(store: NativeSpoolsDep) -> AnySpool:
+    return AnySpool(any=await asyncio.to_thread(store.any))
+
+
+@router.post(
+    "/native-spools/uses",
+    name="crud_print_record_spool_uses",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def record_spool_uses(body: SpoolUses, store: NativeSpoolsDep) -> None:
+    """Natural: ``ON CONFLICT DO NOTHING`` on the start's slot."""
+    await asyncio.to_thread(store.record_uses, body.run_id, body.subtask_name, body.uses)
+
+
+@router.post("/native-spools/uses/settle", name="crud_print_settle_spool_uses")
+async def settle_spool_uses(
+    body: SettleUses, store: NativeSpoolsDep, idempotency_key: MaybeIdempotencyKey = None
+) -> SpoolsChanged:
+    """A run's uses settled under their row locks, whole, in one transaction with its
+    ledger row (plans D5, D6): once per ``Idempotency-Key``, so a resend answers the
+    spools the first settle changed."""
+    key = required_key(idempotency_key)
+
+    def write(conn: Connection[DictRow]) -> dict[str, Any]:
+        changed = NativeSpoolStore.settle_uses_in(conn, body.run_id, body.stages)
+        return {"changed": sorted(str(spool) for spool in changed)}
+
+    answer = await asyncio.to_thread(
+        _once_on, store.pool, key, SETTLE_USES_ROUTE, body.model_dump(mode="json"), write
+    )
+    return SpoolsChanged.model_validate(answer)
+
+
+@router.get("/held-presets", name="crud_print_held_presets")
+async def held_presets(slicing: SlicingDep) -> list[HeldPresetRow]:
+    rows = await slicing.held.rows()
+    return [HeldPresetRow(preset=row.preset, sha256=row.sha256) for row in rows]
+
+
+@router.get("/held-presets/documents", name="crud_print_held_preset_documents")
+async def held_preset_documents(
+    slicing: SlicingDep, id: Annotated[list[int], Query(default_factory=list)]
+) -> dict[int, LocalPresetDetail]:
+    """The kept local presets' documents, each with every print-host credential key
+    removed (`core/credentials.py` `strip_credentials`: ``printhost_apikey``,
+    ``printhost_password``, ``printhost_user``, and any key naming an API key, password,
+    secret or token, at any depth). ScadBuddy strips these keys whenever it parses a
+    preset, and never stores, forwards or writes them into a slicer file; no slice reads
+    them. The API strips the kept presets an older build stored at its start and
+    after each refresh
+    (`slicing/held_presets.py` `strip_kept_logged`). One window remains: preset files
+    that older builds put in the content store keep the keys until the content sweep
+    collects them. The print worker, which holds the Bambuddy key, can still read Bambuddy's local
+    presets, including any such keys, in the bytes Bambuddy sends. What protects them is
+    the Bambuddy key's scope."""
+    documents = await slicing.held.documents(id)
+    return {
+        found: doc.model_copy(update={"setting": strip_credentials(doc.setting)})
+        for found, doc in documents.items()
+    }
+
+
+@router.post("/native-slices/start", name="crud_print_start_native_slice")
+async def start_native_slice(body: SliceStartAsk, slicing: SlicingDep) -> NativeSlice:
+    """Run whole here, under the lock on the workflow id (plan D6). Natural on that id: a
+    start sent again answers the key's newest running or completed row. A copy another
+    subject's row holds is 409 ``slice-subject``."""
+    try:
+        return await slicing.store.start(
+            workflow_id=body.workflow_id,
+            subject=body.subject,
+            library_file_id=body.library_file_id,
+            plate_id=body.plate_id,
+            preset_key=body.preset_key,
+            fresh=body.fresh,
+        )
+    except SliceSubjectError as error:
+        raise ApiError(status.HTTP_409_CONFLICT, str(error), reason=SLICE_SUBJECT) from None
+
+
+class TransferUrlAsk(BaseModel):
+    key: str
+
+
+@router.post("/transfer-urls", name="crud_print_transfer_url")
+async def transfer_url(body: TransferUrlAsk, slicing: SlicingDep) -> TransferUrl:
+    """A read URL of ``key``, only if the content index holds it live as a slicer's
+    output (see the module docstring). Without a content store, an internal URL or a KEK on the
+    API it is 503 ``not_configured``, which the worker does not retry."""
+    try:
+        transfers = slicing.transfers()
+    except RuntimeError as error:  # no content store
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE, str(error), reason=NOT_CONFIGURED
+        ) from None
+    try:
+        stat = await transfers.content.stat(body.key)
+    except psycopg.Error:
+        raise  # the CRUD guard's: a passing one is 503 ``database-unavailable``
+    except Exception as error:
+        # The backend's own text may name the bucket or the object: kept out.
+        logger.warning("the content store did not read a transfer key: %s", type(error).__name__)
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "The blob store did not answer. Try again.",
+            reason=STORE_UNAVAILABLE,
+        ) from None
+    if (
+        stat is None
+        or stat.ref.kind != SLICE_KIND
+        or any(stat.meta.get(k) != v for k, v in SLICED_OUTPUT_META.items())
+    ):
+        raise ApiError(status.HTTP_403_FORBIDDEN, "transfer refused", reason=TRANSFER_REFUSED)
+    try:
+        return transfers.internal_get(body.key, READ_TTL)
+    except TransferUnavailableError as error:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE, str(error), reason=NOT_CONFIGURED
+        ) from None
+
+
+# -- whether the API opens access codes, and a virtual printer's sealed one (area
+# ``access-codes``, #5298 Task 33) ------------------------------------------------------
+
+
+#: Bounds on a sealed virtual printer's code: an 8-character code sealed is far shorter,
+#: and a context is `seal_context`'s, whose create form carries an Idempotency-Key.
+VP_SEALED_MAX = 1024
+VP_CONTEXT_PATTERN = r"^vp-access-code:(vp:\d+|new:.+)$"
+VP_CONTEXT_MAX = 512
+
+
+class AccessCodes(BaseModel):
+    #: Whether this API pod holds the KEK, so it can open an access code.
+    opens: bool
+
+
+class SealedVirtualCode(BaseModel):
+    """A virtual printer's sealed access code (`bambuddy/virtual_printers.py`
+    `access_code_request`) and the context its seal is bound to (`seal_context`)."""
+
+    sealed: str = Field(max_length=VP_SEALED_MAX)
+    context: str = Field(pattern=VP_CONTEXT_PATTERN, max_length=VP_CONTEXT_MAX)
+
+
+@router.get("/access-codes", name="crud_print_access_codes")
+async def access_codes(printers: PrintersDep) -> AccessCodes:
+    """Whether this API can open an access code: the LAN path's gate on the print
+    worker (`bambuddy/print_run.py` `_registry_path`), which holds no KEK."""
+    return AccessCodes(opens=printers.store.opens_access_codes())
+
+
+@router.post("/access-codes/virtual-printer", name="crud_print_open_virtual_code")
+async def open_virtual_code(
+    body: SealedVirtualCode, request: Request, printers: PrintersDep
+) -> AccessCode:
+    """A virtual printer's access code in plaintext, to ``crud.print`` only: the print
+    worker's run sends it to Bambuddy. The API sealed it when it recorded the request,
+    under a key derived for this use alone, so this route opens no other secret. The
+    answer is ``no-store`` (the CRUD router's headers), and the log names the credential,
+    never the code."""
+    principal = caller_of(request.scope)
+    assert isinstance(principal, Service)
+    try:
+        code = printers.store.open_virtual_access_code(body.sealed, body.context)
+    except KekMissingError:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "The API has no SCADBUDDY_SECRET_KEY_FILE, so it cannot open an access code.",
+            reason=NOT_CONFIGURED,
+        ) from None
+    except (SealError, ValueError):
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "This access code was sealed under another key; send it again as a new request.",
+            reason=ACCESS_CODE_UNREADABLE,
+        ) from None
+    logger.info(
+        "released a virtual printer's access code to service credential %s",
+        principal.credential_id,
+    )
+    return AccessCode(code=code)

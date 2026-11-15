@@ -107,8 +107,11 @@ export interface RecentOutputsQuery {
   /** `yes`: only outputs an order item names; `no`: only the others. */
   ordered?: 'yes' | 'no'
 }
-/** #4777 — one Bambuddy archive (a past print, ScadBuddy's or not) and how it went. */
-export type ArchiveOutcome = Schemas['ArchiveOutcome']
+/**
+ * #4777 — one Bambuddy archive (a past print, ScadBuddy's or not) and how it went, and
+ * (#4698) `scadbuddy_print`: whether a print link names it.
+ */
+export type ArchiveOutcome = Schemas['FarmArchive']
 /** #4777 — the filters `GET /farm/archives` takes; status and name are the browser's. */
 export interface FarmArchivesQuery {
   /** First day, inclusive (`YYYY-MM-DD`). */
@@ -365,8 +368,12 @@ export type PrintProgress = Schemas['PrintProgress']
 export type LanRunControl = Schemas['LanRunControl']
 /** #977 — what each printer is doing now, whoever started it. */
 export type PrintersNow = Schemas['PrintersNow']
-/** #2351 — Bambuddy's print queue and the farm's totals, read through `/farm`. */
-export type QueueItem = Schemas['QueueItem']
+/** #2351 — Bambuddy's print queue and the farm's totals, read through `/farm`. Each item
+ * carries `scadbuddy` when ScadBuddy queued it and it is pending or printing (#3741,
+ * #5833). */
+export type QueueItem = Schemas['FarmQueueItem']
+/** #3741 — a queue item or printer job ScadBuddy queued or started. */
+export type ScadBuddyJob = Schemas['ScadBuddyJob']
 export type ArchiveStats = Schemas['ArchiveStats']
 export type PrinterNow = Schemas['PrinterNow']
 /** #3823 — the printer registry: one row per physical printer, keyed by serial. */
@@ -407,6 +414,15 @@ export type CustomerPatch = Partial<Schemas['CustomerPatch']>
 export type Order = Schemas['Order']
 export type OrderStatus = Order['status']
 export type OrderDetail = Schemas['OrderDetail']
+/** #6133 — a storefront customer's file or link on a request item, as the back office reads it. */
+export type OrderItemSource = Schemas['OrderItemSource']
+/** #6133 — the colours an own-model request asked for. */
+export type ModelRequestColours = Schemas['ModelRequestColours']
+/** #6133 — a thing to buy for the customer (`GET /orders/{id}/purchases`). */
+export type PurchaseSource = Schemas['PurchaseSource']
+export type PurchaseRecordInput = Defaulted<Schemas['PurchaseRecordInput'], 'cost_kind' | 'note'>
+export type PurchaseUpdateInput = Partial<Schemas['PurchaseUpdateInput']>
+export type SourceDownload = Schemas['SourceDownload']
 export type OrderItem = Schemas['OrderItem']
 export type OrderItemStatus = OrderItem['status']
 /** An item with its quotes and fulfilment attempts, as `GET /orders/{id}` lists them. */
@@ -427,6 +443,8 @@ export type RevisionAnswer = Revision['answer']
 export type Approval = OrderItem['approval']
 export type RevisionCreate = Defaulted<Schemas['RevisionCreate'], 'note'>
 export type RevisionAnswerInput = Defaulted<Schemas['RevisionAnswerInput'], 'note'>
+/** #5283 — the shop's "Accept for the customer" on a storefront order. */
+export type AcceptForCustomerInput = Schemas['AcceptForCustomerBody']
 export type AttemptArchives = Schemas['AttemptArchives']
 export type ArchiveOffer = Schemas['ArchiveOffer']
 export type ArchiveCopy = Schemas['ArchiveCopy']
@@ -470,21 +488,37 @@ export type ProviderStatus = Schemas['ProviderStatus']
 export type ProviderConnect = Schemas['ProviderConnect']
 /** #4961 — the shop's bank account linked through Plaid, beside the providers. */
 export type BankStatus = Schemas['BankStatus']
+export type MailPasswordStatus = Schemas['MailPasswordStatus']
+export type MailStatusView = Schemas['MailStatusView']
 export type BankKeys = Schemas['BankKeys']
 export type BankLinkCreate = Schemas['BankLinkCreate']
 export type BankUnlinked = Schemas['BankUnlinked']
+/** A deposit of the linked account suggested for an order; it records nothing by itself. */
+export type DepositSuggestion = Schemas['DepositSuggestion']
+/** #5660 — a message to an order's customer, sent (or tried) through the bound messaging plugin. */
+export type OrderMessage = Schemas['OrderMessage']
+/** #5283 — the state of an order's newest customer link; never its token. */
+export type CustomerLinkState = Schemas['LinkState']
+/** #5283 — one of an order's customer mail rows (the outbox); never its body, link or token. */
+export type OrderMail = Schemas['OrderMail']
+/** #5660 — the messaging plugin tool bound to customer messages (`orders_customer_messaging`). */
+export type MessagingBinding = Schemas['MessagingBinding']
 export type PaymentRequestCreate = Partial<Omit<Schemas['PaymentRequestCreate'], 'provider'>> & { provider?: string | null }
 export type PaymentCreate = Defaulted<Schemas['PaymentCreate'], 'notes' | 'method' | 'reference' | 'received_at'>
 /** #5281 — the shop's money rules (Settings → Orders): a rule of the deposit policy, and a
  * way an order reaches its customer at a fixed price. */
 export type DepositRule = Schemas['DepositRule']
 export type ShippingOption = Schemas['ShippingOption']
+/** #6153 — the shop slice profile: a printer and a spool per material. */
+export type StorefrontSliceProfile = Schemas['StorefrontSliceProfile']
+export type ProfileOptions = Schemas['ProfileOptions']
+export type ProfileSpool = Schemas['ProfileSpool']
 /** Orders phase 2 (#4250, spec 2026-10-18 §5): the price book, the slice quote and the
  * rough estimate. Rates are decimal strings; `minor_exponent` is the minor unit's decimal
  * places, the backend's (ISO 4217) and never `Intl`'s. */
 export type QuoteLine = Schemas['QuoteLine']
 export type Filament = Schemas['Filament']
-export type FilamentInput = Defaulted<Schemas['FilamentInput'], 'subtype' | 'brand' | 'colour_name' | 'density_g_cm3'>
+export type FilamentInput = Defaulted<Schemas['FilamentInput'], 'subtype' | 'brand' | 'colour_name' | 'density_g_cm3' | 'alpha'>
 export type FilamentPatch = Partial<Schemas['FilamentPatch']>
 /** #4625 (order operations spec 2026-11-07 §6) — a registry printer's machine rate: its
  * inputs (null with no profile) and the rate they give now, with each part of the sum. */
@@ -500,8 +534,14 @@ export type MachineRateInputs = {
 /** #5282 (spec 2026-11-02 §5.3) — a storefront listing, as the back office's Storefront page edits it. */
 /** Every field is always sent: the ones the spec marks optional have defaults. */
 export type StorefrontListing = Required<Schemas['Listing']>
-export type StorefrontListingInput = Defaulted<Schemas['ListingInput'], 'description' | 'params' | 'fixed' | 'colours' | 'media_ids'>
+export type StorefrontListingInput = Defaulted<
+  Schemas['ListingInput'],
+  'description' | 'params' | 'fixed' | 'colours' | 'media_ids' | 'one_material'
+>
 export type ListingBound = Schemas['NumberBound'] | Schemas['ChoiceBound'] | Schemas['TextBound']
+/** #6157 — one row of the back office's list, and a page of them. */
+export type StorefrontListingRow = Schemas['ListingRow']
+export type StorefrontListingPage = Schemas['ListingPage']
 /** ScadBuddy's own spools (#4643), the native spool provider's records; not Bambuddy's inventory. */
 export type NativeSpool = Schemas['NativeSpool']
 export type NativeSpoolCreate = Schemas['NativeSpoolCreate']
@@ -511,6 +551,8 @@ export type PricingPolicy = Schemas['PricingPolicy']
 export type PolicyUpdate = Defaulted<Schemas['PolicyUpdate'], 'rough_estimate_factor'>
 export type PriceBook = Schemas['PriceBook']
 export type SpoolImport = Schemas['SpoolImport']
+export type DensityFill = Schemas['DensityFill']
+export type DensityFillRow = Schemas['DensityFillRow']
 export type SpoolImportRow = Schemas['SpoolImportRow']
 /** `POST …/items/{item}/quote`: the print dialog's choices, and a price-book filament per
  * colour slot (`colours[].slot`, from 0); with `inputs` or `commit`, a new design first
@@ -551,6 +593,15 @@ export type ActivityPage = Schemas['ActivityPage']
 export type ActivityFacets = Schemas['ActivityFacets']
 export type ActivityDetail = Schemas['ActivityDetail']
 export type PrintDetail = Schemas['PrintDetail']
+/** #4698 — where an unlinked print's 3MF can be, and the models it may be a print of. */
+export type PrintSources = Schemas['PrintSources']
+export type FoundSource = Schemas['FoundSource']
+export type PrintImportRequest = Schemas['ImportRequest']
+export type ImportedPrint = Schemas['ImportedPrint']
+/** #4699 — a print the print watcher took: linked to a model, in Unsorted imports, or dismissed. */
+export type AutoImport = Schemas['AutoImport']
+/** #6041 — a LAN-only printer's print the watcher recorded: its own id, apart from the archive ids. */
+export type LanPrintRecord = Schemas['LanPrintRecord']
 export type TimelapseFrames = Schemas['TimelapseFrames']
 /** #311 — the print detail page's two writes. */
 export type PrintAgain = Schemas['PrintAgain']

@@ -131,11 +131,15 @@ async def test_the_api_restarting_is_waited_out() -> None:
 async def test_the_print_worker_reads_native_files_remotely_and_closes_it(
     pg_conninfo: str, tmp_path: Path
 ) -> None:
+    # The worker ignores the URL and needs a proof to exchange (#5298 Task 33).
+    proof = tmp_path / "bootstrap"
+    proof.write_text("p" * 40)
     settings = Settings(
         database_url=pg_conninfo,
         temporal_address=UNUSED_TEMPORAL_ADDRESS,
         data_dir=tmp_path / "data",
         api_internal_url=BASE,
+        service_bootstrap_file=proof,
     )
     deps = await asyncio.to_thread(build_print_deps, settings)
     library = deps.library
@@ -145,3 +149,19 @@ async def test_the_print_worker_reads_native_files_remotely_and_closes_it(
     await deps.aclose()
 
     assert library.http.is_closed
+
+
+async def test_a_listing_by_filename_sends_the_name() -> None:
+    """#6045: the print watcher's keep asks the API for the files of one name only."""
+    seen: list[httpx.QueryParams] = []
+
+    def api(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.params)
+        return httpx.Response(200, json=[])
+
+    remote = RemoteLibrary(BASE, httpx.AsyncClient(transport=httpx.MockTransport(api)))
+    try:
+        assert await remote.library_listing(folder_id=7, filename="a b.3mf") == []
+    finally:
+        await remote.aclose()
+    assert dict(seen[0]) == {"folder_id": "7", "filename": "a b.3mf"}

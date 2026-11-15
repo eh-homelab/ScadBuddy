@@ -1,0 +1,348 @@
+import { http, HttpResponse } from 'msw'
+import { setupServer } from 'msw/node'
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { tiersUpTo } from '../src/auth/principal.js'
+import { decide } from '../src/harness/permissions.js'
+import { ALL_TOOLS } from '../src/tools/index.js'
+import { EXTRACTORS } from '../src/sessions/touched.js'
+import { pinnedOutward } from '../src/tools/pinnedOutward.js'
+import { effectiveTool, runTool, type Tool, type ToolContext, type ToolOverrides } from '../src/tools/registry.js'
+import { BACKEND, firstText, services } from './helpers/mcp.js'
+
+// #4698 — Import print: list where an unlinked archive's 3MF can be, and link the
+// archive to a model. Reading the printer's storage reaches the printer, so a call that
+// does is pinned outward (pinnedOutward.ts) whatever lowers the tool's tier.
+
+const server = setupServer()
+beforeAll(() => server.listen({ onUnhandledFrame: 'error' }))
+afterEach(() => server.resetHandlers())
+afterAll(() => server.close())
+
+function tool(name: string): Tool {
+  const t = ALL_TOOLS.find((x) => x.name === name)
+  if (!t) throw new Error(`no tool ${name}`)
+  return t
+}
+
+function ctx(overrides: Partial<ToolContext> = {}): ToolContext {
+  return {
+    ...services(),
+    principal: { id: 'test', kind: 'browser', tiers: tiersUpTo('outward') },
+    progress: async () => {},
+    signal: new AbortController().signal,
+    callKey: 'call-1',
+    ...overrides,
+  }
+}
+
+/** Settings lowering every tool to `read`. */
+const lowered: ToolOverrides = { of: async () => ({ tier: 'read', disabled: false }), disabled: async () => new Set() }
+
+const IMPORTED = {
+  archive_id: 193,
+  slug: 'basketball-trophy',
+  print_url: '/api/v1/prints/193',
+  created_model: false,
+  imported: { archive_id: 193, slug: 'basketball-trophy', source: 'archive', filename: 'x.gcode.3mf' },
+}
+
+describe('get_print_sources and import_print (#4698)', () => {
+  it('read the sources, and import as a write, through the import routes', () => {
+    expect(tool('get_print_sources')).toMatchObject({
+      risk: 'read',
+      routes: ['GET /api/v1/print-imports/{archive_id}/sources'],
+    })
+    expect(tool('import_print')).toMatchObject({ risk: 'write', routes: ['POST /api/v1/print-imports/{archive_id}'] })
+  })
+
+  it('reads the printer only when asked', async () => {
+    const seen: URLSearchParams[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/print-imports/193/sources`, ({ request }) => {
+        seen.push(new URL(request.url).searchParams)
+        return HttpResponse.json({ archive_id: 193, sources: [] })
+      }),
+    )
+    const result = await runTool(tool('get_print_sources'), { archive_id: 193 }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(Object.fromEntries(seen[0]!)).toEqual({})
+  })
+
+  it('pins every printer read to a person, whatever the tier', async () => {
+    const onPrinter = { archive_id: 193, source: { kind: 'printer', path: '/cache/x.gcode.3mf' }, slug: 'm' }
+    const fromArchive = { archive_id: 193, source: { kind: 'archive' }, slug: 'm' }
+    expect(pinnedOutward('get_print_sources', { archive_id: 193, printer: true })).toBe(true)
+    expect(pinnedOutward('mcp__scadbuddy__get_print_sources', { archive_id: 193, printer: 'yes' })).toBe(true)
+    expect(pinnedOutward('get_print_sources', { archive_id: 193 })).toBe(false)
+    expect(pinnedOutward('get_print_sources', { archive_id: 193, printer: false })).toBe(false)
+    expect(pinnedOutward('import_print', onPrinter)).toBe(true)
+    expect(pinnedOutward('import_print', { archive_id: 193 })).toBe(true)
+    expect(pinnedOutward('import_print', fromArchive)).toBe(false)
+    expect(await effectiveTool(tool('import_print'), { toolOverrides: lowered }, onPrinter)).toMatchObject({
+      risk: 'outward',
+      gated: true,
+    })
+    const read = () => 'read' as const
+    expect(decide('mcp__scadbuddy__import_print', read, onPrinter)).toMatchObject({
+      decision: 'needs_approval',
+      tier: 'outward',
+    })
+    expect(decide('mcp__scadbuddy__import_print', read, fromArchive)).toMatchObject({ decision: 'allow' })
+  })
+
+  it('parks a printer import for approval and sends nothing', async () => {
+    const sent: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/print-imports/193`, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json(IMPORTED, { status: 201 })
+      }),
+    )
+    const answer = await runTool(
+      tool('import_print'),
+      { archive_id: 193, source: { kind: 'printer', path: '/cache/x.gcode.3mf' }, slug: 'basketball-trophy' },
+      ctx(),
+    )
+    expect(firstText(answer)).toMatchObject({ status: 'pending_approval' })
+    expect(sent).toEqual([])
+  })
+
+  it('imports onto a model with an Idempotency-Key', async () => {
+    const seen: { body: unknown; key: string | null }[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/print-imports/193`, async ({ request }) => {
+        seen.push({ body: await request.json(), key: request.headers.get('Idempotency-Key') })
+        return HttpResponse.json(IMPORTED, { status: 201 })
+      }),
+    )
+    const result = await runTool(
+      tool('import_print'),
+      { archive_id: 193, source: { kind: 'archive' }, slug: 'basketball-trophy' },
+      ctx(),
+    )
+    expect(result.isError).toBeFalsy()
+    expect(firstText(result)).toEqual(IMPORTED)
+    expect(seen).toHaveLength(1)
+    expect(seen[0]!.body).toEqual({ source: { kind: 'archive' }, slug: 'basketball-trophy' })
+    expect(seen[0]!.key).toMatch(/^[0-9a-f]{64}$/)
+  })
+
+  it('links a new model once its operation is done, with the same key', async () => {
+    const keys: (string | null)[] = []
+    const model = { slug: 'trophy', name: 'Trophy' }
+    const op = { id: 'op-1', kind: 'mesh_model_create', subject: 'trophy', status: 'running', created_at: '2026-11-10T00:00:00Z' }
+    server.use(
+      http.post(`${BACKEND}/api/v1/print-imports/193`, ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return keys.length === 1
+          ? HttpResponse.json(op, { status: 202 })
+          : HttpResponse.json({ ...IMPORTED, slug: 'trophy', created_model: true })
+      }),
+      http.get(`${BACKEND}/api/v1/operations/op-1`, () => HttpResponse.json({ ...op, status: 'succeeded', result: model })),
+    )
+    const result = await runTool(
+      tool('import_print'),
+      { archive_id: 193, source: { kind: 'archive_source' }, new_model: { name: 'Trophy' } },
+      ctx({ pollIntervalMs: 1 }),
+    )
+    expect(result.isError).toBeFalsy()
+    expect(firstText(result)).toMatchObject({ slug: 'trophy', created_model: true })
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it('refuses slug and new_model together', async () => {
+    const result = await runTool(
+      tool('import_print'),
+      { archive_id: 193, source: { kind: 'archive' }, slug: 'm', new_model: { name: 'N' } },
+      ctx(),
+    )
+    expect(result.isError).toBe(true)
+  })
+})
+
+describe('the touched list of an import (#5979)', () => {
+  const extract = EXTRACTORS.import_print as NonNullable<(typeof EXTRACTORS)['import_print']>
+  const made = { ...IMPORTED, slug: 'trophy', created_model: true }
+
+  it('records the new model on the request that made the import', () => {
+    const touches = extract({ archive_id: 193 }, { ...made, made_now: true })
+    expect(touches.some((t) => t.action === 'created')).toBe(true)
+  })
+
+  it('records no new model on a repeat, which answers the stored created_model', () => {
+    const touches = extract({ archive_id: 193 }, { ...made, made_now: false })
+    expect(touches.some((t) => t.action === 'created')).toBe(false)
+    expect(touches).toEqual([{ type: 'print_archive', id: '193', action: 'modified' }])
+  })
+})
+
+describe('list_auto_imports (#4699)', () => {
+  it('reads the print watcher\'s imports as a read, paging by the last archive', async () => {
+    expect(tool('list_auto_imports')).toMatchObject({ risk: 'read', routes: ['GET /api/v1/print-imports/auto'] })
+    const seen: URLSearchParams[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/print-imports/auto`, ({ request }) => {
+        const query = new URL(request.url).searchParams
+        seen.push(query)
+        const rows = [{ archive_id: 300, state: 'inbox' }, { archive_id: 250, state: 'inbox' }]
+        return HttpResponse.json(query.get('before') ? [] : rows)
+      }),
+    )
+    const first = await runTool(tool('list_auto_imports'), { state: 'inbox', limit: 2 }, ctx())
+    expect(first.isError).toBeFalsy()
+    expect(firstText(first)).toEqual({ items: [{ archive_id: 300, state: 'inbox' }, { archive_id: 250, state: 'inbox' }], next_cursor: '250' })
+    const next = await runTool(tool('list_auto_imports'), { state: 'inbox', limit: 2, cursor: '250' }, ctx())
+    expect(firstText(next)).toEqual({ items: [] })
+    expect(Object.fromEntries(seen[0]!)).toEqual({ state: 'inbox', limit: '2' })
+    expect(Object.fromEntries(seen[1]!)).toEqual({ state: 'inbox', limit: '2', before: '250' })
+  })
+
+  it('reads the dismissed prints too', async () => {
+    const seen: string[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/print-imports/auto`, ({ request }) => {
+        seen.push(new URL(request.url).searchParams.get('state') ?? '')
+        return HttpResponse.json([])
+      }),
+    )
+    const result = await runTool(tool('list_auto_imports'), { state: 'dismissed' }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(seen).toEqual(['dismissed'])
+  })
+})
+
+describe('dismiss_auto_import (#4699 phase 2)', () => {
+  it('is a write that reaches no printer, on the dismiss route', () => {
+    expect(tool('dismiss_auto_import')).toMatchObject({ risk: 'write', routes: ['POST /api/v1/print-imports/auto/{archive_id}/dismiss'] })
+    expect(pinnedOutward('dismiss_auto_import', { archive_id: 320 })).toBe(false)
+  })
+
+  it('dismisses the inbox print and answers its row', async () => {
+    const posted: string[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/print-imports/auto/:archiveId/dismiss`, ({ params }) => {
+        posted.push(String(params['archiveId']))
+        return HttpResponse.json({ archive_id: 320, state: 'dismissed', suggested: [] })
+      }),
+    )
+    const result = await runTool(tool('dismiss_auto_import'), { archive_id: 320 }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(posted).toEqual(['320'])
+    expect(firstText(result)).toMatchObject({ archive_id: 320, state: 'dismissed' })
+  })
+
+  it('names the refusal of a print that is not in the inbox', async () => {
+    server.use(
+      http.post(`${BACKEND}/api/v1/print-imports/auto/:archiveId/dismiss`, () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Conflict', status: 409, detail: 'archive 321 is a print of model:demo, not in Unsorted imports' },
+          { status: 409, headers: { 'content-type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const result = await runTool(tool('dismiss_auto_import'), { archive_id: 321 }, ctx())
+    expect(result.isError).toBe(true)
+    expect(JSON.stringify(result.content)).toContain('not in Unsorted imports')
+  })
+
+  it('records the archive it touched', () => {
+    const extract = EXTRACTORS.dismiss_auto_import as NonNullable<(typeof EXTRACTORS)['dismiss_auto_import']>
+    expect(extract({ archive_id: 320 }, { archive_id: 320, state: 'dismissed' })).toEqual([
+      { type: 'print_archive', id: '320', action: 'modified' },
+    ])
+  })
+})
+
+// #6041 — the prints the watcher recorded on LAN-only printers: their ids are their own,
+// apart from the archive ids, so they have tools of their own.
+describe('list_lan_auto_imports, dismiss_lan_auto_import and link_lan_auto_import (#6041)', () => {
+  it('list as a read, and dismiss and link as writes that reach no printer, on the LAN routes', () => {
+    expect(tool('list_lan_auto_imports')).toMatchObject({ risk: 'read', routes: ['GET /api/v1/print-imports/auto/lan'] })
+    expect(tool('dismiss_lan_auto_import')).toMatchObject({
+      risk: 'write',
+      routes: ['POST /api/v1/print-imports/auto/lan/{record_id}/dismiss'],
+    })
+    expect(tool('link_lan_auto_import')).toMatchObject({
+      risk: 'write',
+      routes: ['POST /api/v1/print-imports/auto/lan/{record_id}/link'],
+    })
+    expect(pinnedOutward('dismiss_lan_auto_import', { id: 7 })).toBe(false)
+    expect(pinnedOutward('link_lan_auto_import', { id: 7, slug: 'demo' })).toBe(false)
+  })
+
+  it('pages by the last record id, apart from the archives, and filters by model', async () => {
+    const seen: URLSearchParams[] = []
+    let archives = 0
+    server.use(
+      http.get(`${BACKEND}/api/v1/print-imports/auto`, () => {
+        archives += 1
+        return HttpResponse.json([])
+      }),
+      http.get(`${BACKEND}/api/v1/print-imports/auto/lan`, ({ request }) => {
+        const query = new URL(request.url).searchParams
+        seen.push(query)
+        const rows = [
+          { id: 9, subtask_name: 'cube', printer_name: 'Garage', state: 'inbox' },
+          { id: 7, subtask_name: 'vase', printer_name: 'Garage', state: 'inbox' },
+        ]
+        return HttpResponse.json(query.get('before') ? [] : rows)
+      }),
+    )
+    const first = await runTool(tool('list_lan_auto_imports'), { state: 'inbox', limit: 2 }, ctx())
+    expect(first.isError).toBeFalsy()
+    expect(firstText(first)).toMatchObject({ next_cursor: '7' })
+    const next = await runTool(tool('list_lan_auto_imports'), { state: 'inbox', limit: 2, cursor: '7' }, ctx())
+    expect(firstText(next)).toEqual({ items: [] })
+    await runTool(tool('list_lan_auto_imports'), { state: 'linked', slug: 'demo' }, ctx())
+    expect(Object.fromEntries(seen[0]!)).toEqual({ state: 'inbox', limit: '2' })
+    expect(Object.fromEntries(seen[1]!)).toEqual({ state: 'inbox', limit: '2', before: '7' })
+    expect(Object.fromEntries(seen[2]!)).toEqual({ state: 'linked', slug: 'demo', limit: '50' })
+    expect(archives).toBe(0)
+  })
+
+  it('dismisses a record by its own id', async () => {
+    const posted: string[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/print-imports/auto/lan/:id/dismiss`, ({ params }) => {
+        posted.push(String(params['id']))
+        return HttpResponse.json({ id: 7, subtask_name: 'vase', state: 'dismissed', suggested: [] })
+      }),
+    )
+    const result = await runTool(tool('dismiss_lan_auto_import'), { id: 7 }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(posted).toEqual(['7'])
+    expect(firstText(result)).toMatchObject({ id: 7, state: 'dismissed' })
+  })
+
+  it('links a record to the model, and names a refusal', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/print-imports/auto/lan/:id/link`, async ({ params, request }) => {
+        bodies.push(await request.json())
+        if (params['id'] === '6')
+          return HttpResponse.json(
+            { type: 'about:blank', title: 'Conflict', status: 409, detail: 'LAN print 6 has no kept 3MF: a model link needs the file' },
+            { status: 409, headers: { 'content-type': 'application/problem+json' } },
+          )
+        return HttpResponse.json({ id: 7, state: 'linked', slug: 'demo', matched_by: 'import', suggested: [] })
+      }),
+    )
+    const linked = await runTool(tool('link_lan_auto_import'), { id: 7, slug: 'demo' }, ctx())
+    expect(linked.isError).toBeFalsy()
+    expect(firstText(linked)).toMatchObject({ state: 'linked', slug: 'demo', matched_by: 'import' })
+    const refused = await runTool(tool('link_lan_auto_import'), { id: 6, slug: 'demo' }, ctx())
+    expect(refused.isError).toBe(true)
+    expect(JSON.stringify(refused.content)).toContain('a model link needs the file')
+    expect(bodies).toEqual([{ slug: 'demo' }, { slug: 'demo' }])
+  })
+
+  it('records the model a link touched, and nothing for a dismiss', () => {
+    const link = EXTRACTORS.link_lan_auto_import as NonNullable<(typeof EXTRACTORS)['link_lan_auto_import']>
+    expect(link({ id: 7, slug: 'demo' }, { id: 7, state: 'linked' })).toEqual([
+      { type: 'model', id: 'demo', action: 'modified', model: 'demo' },
+    ])
+    const dismiss = EXTRACTORS.dismiss_lan_auto_import as NonNullable<(typeof EXTRACTORS)['dismiss_lan_auto_import']>
+    expect(dismiss({ id: 7 }, { id: 7, state: 'dismissed' })).toEqual([])
+  })
+})

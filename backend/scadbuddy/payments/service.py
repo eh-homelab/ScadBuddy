@@ -215,7 +215,13 @@ class Payments:
             )
         return found
 
-    def _return_url(self, order_id: str) -> str | None:
+    def _return_url(self, order_id: str, source: str) -> str | None:
+        """Where the provider sends the payer back. A storefront order has no back office
+        page for its customer: it is the storefront's ``/o``, which cannot carry the order
+        link's token, so the page asks for the mail's link (#5283 phase 4)."""
+        if source == "storefront":
+            storefront = self._storefront_url()
+            return f"{storefront.rstrip('/')}/o" if storefront else None
         public = self._public_url()
         return f"{public.rstrip('/')}/orders/{order_id}" if public else None
 
@@ -238,7 +244,7 @@ class Payments:
             hosted = await adapter.create_request(
                 credential,
                 found,
-                return_url=self._return_url(found.order_id),
+                return_url=self._return_url(found.order_id, order.source),
                 idempotency_key=found.id,
                 order_number=order.number,
             )
@@ -246,7 +252,7 @@ class Payments:
             if storefront and venmo_eligible(
                 found.provider, credential.settings, found.currency, storefront
             ):
-                # #4960: once the storefront's pay page exists (`PAY_PAGE_READY`), it
+                # #4960: once the pay page is switched on (`PAY_PAGE_READY`), it
                 # offers Venmo for the same order.
                 token, token_digest = pay_token()
                 hosted = HostedRequest.model_validate(
@@ -345,6 +351,15 @@ class Payments:
         result = await asyncio.to_thread(call)
         after = await asyncio.to_thread(self._requests, order_id)
         await self._close_pages(r for r in after if r.status == "cancelled" and r.id not in before)
+        return result
+
+    async def run_closing_linked[T](self, order_id: str, call: Callable[[], T]) -> T:
+        """`run_closing`, then a link for each request ``call`` opened: a lifecycle call
+        that may accept the order (a customer's last accept, #5283), which cancels the
+        order's open and failed requests and opens a balance request."""
+        before = await self.request_ids(order_id)
+        result = await self.run_closing(order_id, call)
+        await self.link_opened(order_id, before)
         return result
 
     async def cancel_order(self, order_id: str, cancel: Callable[[], Order]) -> Order:

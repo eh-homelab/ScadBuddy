@@ -21,10 +21,18 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore
+from scadbuddy.orders.models import FilamentEffect
 from scadbuddy.orders.problems import PROBLEMS
 
 if TYPE_CHECKING:
     from scadbuddy.bambuddy.projects import FolderlessProjects
+
+
+class LocalDensity(BaseModel):
+    """A Bambuddy local preset's name and ``filament_density``."""
+
+    name: str
+    density_g_cm3: str
 
 
 class SpoolGroup(BaseModel):
@@ -39,9 +47,30 @@ class SpoolGroup(BaseModel):
     #: ``#RRGGBB`` from the spools' ``rgba``; ``None`` for a group known only by its
     #: colour's name, which a record cannot carry as its colour.
     colour: str | None = None
+    #: The newest spool's ``rgba`` alpha byte (255 for a 6-digit ``rgba``), its
+    #: ``extra_colors`` as ``#RRGGBB``/``#RRGGBBAA`` stops and its ``effect_type`` (#6209).
+    alpha: int = 255
+    extra_colours: list[str] = Field(default_factory=list)
+    effect: FilamentEffect | None = None
     #: ``(spool id, cost_per_kg)`` of each spool, by id; a spool with no price has
     #: ``None``. A higher id is a spool Bambuddy recorded later.
     spools: list[tuple[int, float | None]] = Field(default_factory=list)
+    #: What gives a record its density (#6136, `orders/density.py` `resolve`):
+    #: the most recent spool's ``slicer_filament`` that names one (``GFA00``, or a
+    #: numeric local preset id); ``None`` when no spool names one.
+    slicer_filament: str | None = None
+    #: The ``setting_id`` of each K-profile of the group's spools, newest spool first.
+    k_profile_settings: list[str] = Field(default_factory=list)
+    #: The ``tray_info_idx`` of the AMS tray a spool of the group is loaded in, read
+    #: only for the spools that name neither of the above; the group uses it only
+    #: after its own preset ids.
+    tray_info_idx: str | None = None
+    #: The Bambuddy local preset ``slicer_filament`` names, when it is one with a density.
+    local_preset: LocalDensity | None = None
+    #: Bambuddy's catalogue ``density`` for the group's material, brand and colour,
+    #: when its entries of them whose ``name`` holds each word of the subtype give
+    #: exactly one.
+    catalogue_density: str | None = None
 
 
 class ShelfSpool(BaseModel):

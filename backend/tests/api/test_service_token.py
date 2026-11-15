@@ -139,7 +139,7 @@ def test_the_render_credential_reaches_nothing_else(client: TestClient, app: Fas
         _count(
             app,
             "scadbuddy_auth_would_refuse_total",
-            {"class": "internal.outputs", "reason": "no_credential"},
+            {"class": "internal.outputs", "reason": "out_of_scope"},
         )
         == 1
     )
@@ -240,8 +240,9 @@ def test_revoke_a_pods_credentials(client: TestClient) -> None:
 
 
 def test_rotate_takes_the_legacy_callers_only(client: TestClient) -> None:
-    response = client.post("/api/v1/auth/service-credentials/rotate", json={"caller": "render"})
-    assert response.status_code == 422
+    for caller in ("render", "print"):
+        response = client.post("/api/v1/auth/service-credentials/rotate", json={"caller": caller})
+        assert response.status_code == 422
 
 
 # Forged and junk proofs never lock a real caller out (review of #5498): they are refused

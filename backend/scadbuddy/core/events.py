@@ -225,6 +225,24 @@ class FlowRunEvent(BaseEvent):
     status: str
 
 
+class FlowChanged(BaseEvent):
+    """A flow's definition changed (#265): registered, restored, renamed, archived,
+    unarchived or deleted. Re-read ``GET /workflows``. Published on ``flows``."""
+
+    kind: Literal["flow.changed"] = "flow.changed"
+    name: str
+
+
+class PreviewSliceEvent(BaseEvent):
+    """The print dialog's background slice moved on (``preview_slice.progress``) or ended
+    (``preview_slice.settled``) (#265). Re-read its ``preview-slices/{job_id}`` route.
+    Published on ``preview-slice:<slicer>:<job id>`` by `preview_follow.follows`."""
+
+    kind: Literal["preview_slice.progress", "preview_slice.settled"]
+    slicer: Literal["bambuddy", "native"]
+    job_id: int
+
+
 class ActivityEvent(BaseEvent):
     """An activity row changed (spec 2026-10-09): re-read ``GET /activity/{id}``."""
 
@@ -243,6 +261,17 @@ class OrderChanged(BaseEvent):
     status: str
     #: A storefront visitor's cart, not yet submitted (#5282): it starts no flow.
     cart: bool = False
+    #: The draft sweep deleted this cart (#5282): ``GET /orders/{order_id}`` is 404.
+    deleted: bool = False
+
+
+class OrderBankDepositsChanged(BaseEvent):
+    """The deposit sync (#4961) suggested a deposit for the order, or changed or removed a
+    deposit recorded on it: re-read ``GET /orders/{order_id}/bank-deposits``. Published on
+    ``order:<order id>``."""
+
+    kind: Literal["order.bank_deposits"] = "order.bank_deposits"
+    order_id: str
 
 
 class OrderItemChanged(BaseEvent):
@@ -395,9 +424,12 @@ Event = Annotated[
     | PrinterEvent
     | OperationEvent
     | FlowRunEvent
+    | FlowChanged
+    | PreviewSliceEvent
     | ActivityEvent
     | OrderChanged
     | OrderItemChanged
+    | OrderBankDepositsChanged
     | AgentOperationEvent
     | AuthSessionRevoked
     | LibraryChanged

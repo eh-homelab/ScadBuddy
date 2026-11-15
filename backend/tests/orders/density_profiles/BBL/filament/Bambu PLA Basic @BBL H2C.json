@@ -1,0 +1,11 @@
+{
+    "type": "filament",
+    "name": "Bambu PLA Basic @BBL H2C",
+    "from": "system",
+    "instantiation": "true",
+    "inherits": "Bambu PLA Basic @base",
+    "setting_id": "GFSA00_99",
+    "filament_density": [
+        "1.30"
+    ]
+}

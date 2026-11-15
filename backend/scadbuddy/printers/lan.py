@@ -50,7 +50,9 @@ import logging
 import re
 import socket
 import ssl
+import threading
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from datetime import UTC, datetime
 from io import BytesIO
 from typing import Any, BinaryIO
@@ -84,6 +86,19 @@ logger = logging.getLogger(__name__)
 #: serial, so it never goes below WARNING whatever the process's level.
 _MQTT_LOGGER = logging.getLogger("scadbuddy.printers.lan.mqtt")
 _MQTT_LOGGER.setLevel(logging.WARNING)
+
+
+class FileTooLargeError(Exception):
+    """A download past its ``max_bytes``: the read stops there."""
+
+    def __init__(self, max_bytes: int) -> None:
+        super().__init__(f"the file is larger than {max_bytes} bytes")
+        self.max_bytes = max_bytes
+
+
+class DownloadCancelledError(Exception):
+    """A download whose caller stopped waiting (a cancelled `LanPrinter.download`): its
+    session is cut, and its thread stops and closes the connection."""
 
 
 class CertificateMismatchError(ssl.SSLError):
@@ -193,10 +208,24 @@ def merge_report(previous: dict[str, Any] | None, delta: dict[str, Any]) -> dict
 class ImplicitFtpTls(ftplib.FTP_TLS):
     """FTPS with TLS from the first byte (port 990), as ha-bambulab's
     ``ImplicitFTP_TLS``: the control socket is wrapped in the (pinned) context as soon
-    as it is set, and each data connection reuses its TLS session."""
+    as it is set, and each data connection reuses its TLS session.
+
+    `cut` stops the session from another thread (a cancelled `LanPrinter.download`): it
+    shuts down the control socket and the current data connection, so a read blocked in
+    either raises at once. It uses ``shutdown``, not ``close``: on Linux a ``close`` does
+    not wake a ``recv`` another thread is blocked in, and the reading thread still owns
+    the close. A socket set after the cut is shut down as it is registered. Only a TCP
+    connect still in progress is not cut; it waits at most `FTP_TIMEOUT`. A data
+    connection is let go at the final reply, or at the session's `close` when the
+    transfer raised and no final reply came. So a cut touches only live sockets, or a
+    data connection already closed and not yet let go, whose ``OSError`` `_shut`
+    ignores (#6055)."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self._sock: Any = None
+        self._data: socket.socket | None = None
+        self._lock = threading.Lock()
+        self.is_cut = False
         super().__init__(*args, **kwargs)
 
     @property
@@ -205,18 +234,58 @@ class ImplicitFtpTls(ftplib.FTP_TLS):
 
     @sock.setter
     def sock(self, value: Any) -> None:
-        if value is not None and not isinstance(value, ssl.SSLSocket):
-            value = self.context.wrap_socket(value)
-        self._sock = value
+        if value is None or isinstance(value, ssl.SSLSocket):
+            self._register("_sock", value)
+            return
+        self._register("_sock", value)
+        wrapped = self.context.wrap_socket(value, do_handshake_on_connect=False)
+        self._register("_sock", wrapped)
+        wrapped.do_handshake()
 
     def ntransfercmd(
         self, cmd: str, rest: int | str | None = None
     ) -> tuple[socket.socket, int | None]:
         conn, size = ftplib.FTP.ntransfercmd(self, cmd, rest)
+        self._register("_data", conn)
         if self._prot_p:  # type: ignore[attr-defined]
             session = self.sock.session if isinstance(self.sock, ssl.SSLSocket) else None
-            conn = self.context.wrap_socket(conn, session=session)
+            conn = self.context.wrap_socket(conn, session=session, do_handshake_on_connect=False)
+            self._register("_data", conn)
+            conn.do_handshake()
         return conn, size
+
+    def voidresp(self) -> str:
+        """Each transfer ends here, after the data connection closes: its final reply
+        (the ``226``). Every other reply passes here too, with no data connection."""
+        self._register("_data", None)
+        return super().voidresp()
+
+    def close(self) -> None:
+        try:
+            super().close()
+        finally:
+            self._register("_data", None)
+
+    def _register(self, slot: str, value: socket.socket | None) -> None:
+        with self._lock:
+            setattr(self, slot, value)
+            if self.is_cut and value is not None:
+                _shut(value)
+
+    def cut(self) -> None:
+        """Stop the session now; safe to call from any thread, and more than once."""
+        with self._lock:
+            self.is_cut = True
+            for held in (self._sock, self._data):
+                if held is not None:
+                    _shut(held)
+
+
+def _shut(held: socket.socket) -> None:
+    """Shut down ``held``'s connection both ways. It is the plain socket call, not
+    `ssl.SSLSocket.shutdown`, which also drops the TLS object a reading thread uses."""
+    with suppress(OSError):  # already closed, or not yet connected
+        socket.socket.shutdown(held, socket.SHUT_RDWR)
 
 
 class LanPrinter:
@@ -300,14 +369,32 @@ class LanPrinter:
         address = await lan_address(self.host)
         return await asyncio.to_thread(self._upload, address, data, remote_name)
 
-    async def download(self, remote_name: str) -> bytes:
-        """``remote_name``'s bytes, read over implicit FTPS (the live test's probe file)."""
-        address = await lan_address(self.host)
-        return await asyncio.to_thread(self._download, address, remote_name)
+    async def download(self, remote_name: str, *, max_bytes: int | None = None) -> bytes:
+        """``remote_name``'s bytes, read over implicit FTPS (the live test's probe file,
+        and the print watcher's copy of a LAN-only printer's job, #4699). Past
+        ``max_bytes`` the read stops with `FileTooLargeError`.
 
-    def _ftps(self, address: str) -> ImplicitFtpTls:
-        """A logged-in, protected FTPS session on ``address``; the caller closes it."""
-        ftp = ImplicitFtpTls(context=ftps_context(self.cert_sha256), timeout=FTP_TIMEOUT)
+        A cancel (a caller's ``wait_for`` that ran out) does not wait for the thread: it
+        cuts the session (`ImplicitFtpTls.cut`), so a login or ``RETR`` blocked on the
+        printer raises at once, and the thread closes the connection. Only a TCP connect
+        still in progress runs on, for at most `FTP_TIMEOUT` (#6049)."""
+        address = await lan_address(self.host)
+        session = self._session()
+        try:
+            return await asyncio.to_thread(self._download, address, remote_name, max_bytes, session)
+        except asyncio.CancelledError:
+            session.cut()
+            raise
+
+    def _session(self) -> ImplicitFtpTls:
+        """A new FTPS session, not yet connected."""
+        return ImplicitFtpTls(context=ftps_context(self.cert_sha256), timeout=FTP_TIMEOUT)
+
+    def _ftps(self, address: str, ftp: ImplicitFtpTls | None = None) -> ImplicitFtpTls:
+        """``ftp`` (else a new session) logged in and protected on ``address``; the
+        caller closes it."""
+        if ftp is None:
+            ftp = self._session()
         try:
             ftp.connect(address, FTPS_PORT)
             ftp.login(USERNAME, self._access_code)
@@ -317,11 +404,29 @@ class LanPrinter:
             raise
         return ftp
 
-    def _download(self, address: str, remote_name: str) -> bytes:
-        ftp = self._ftps(address)
+    def _download(
+        self,
+        address: str,
+        remote_name: str,
+        max_bytes: int | None = None,
+        session: ImplicitFtpTls | None = None,
+    ) -> bytes:
+        ftp = self._ftps(address, session)
         try:
             out = BytesIO()
-            ftp.retrbinary(f"RETR {remote_name}", out.write)
+
+            def write(block: bytes) -> None:
+                if ftp.is_cut:
+                    raise DownloadCancelledError
+                out.write(block)
+                if max_bytes is not None and out.tell() > max_bytes:
+                    raise FileTooLargeError(max_bytes)
+
+            if ftp.is_cut:
+                raise DownloadCancelledError
+            ftp.retrbinary(f"RETR {remote_name}", write)
+            if ftp.is_cut:
+                raise DownloadCancelledError
             return out.getvalue()
         finally:
             ftp.close()

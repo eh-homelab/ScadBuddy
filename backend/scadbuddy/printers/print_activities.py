@@ -45,7 +45,7 @@ import zipfile
 from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
 from dataclasses import dataclass
-from typing import IO, Any
+from typing import IO, TYPE_CHECKING, Any
 
 import aiomqtt
 from fastapi import status
@@ -57,8 +57,8 @@ from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.filaments import FilamentWarning
 from scadbuddy.bambuddy.models import PrinterStatus
 from scadbuddy.bambuddy.output_reader import BlobMissingAnswerError, SlicedBlobs
-from scadbuddy.bambuddy.print_run import LAN_NEEDS_KEK
 from scadbuddy.bambuddy.runs import PrintRunError
+from scadbuddy.core.heartbeat import heartbeating
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsReader
 from scadbuddy.print_library.ids import is_native_id
@@ -82,6 +82,7 @@ from scadbuddy.rack.rank import rack_serials
 from scadbuddy.rack.usage import (
     LanRackUsage,
     PickedHotend,
+    error_facts,
     group_spools,
     record_seen,
     save_lan_picks,
@@ -90,7 +91,8 @@ from scadbuddy.rack.usage import (
 from scadbuddy.render.bambu3mf import PROJECT_SETTINGS_NAME
 from scadbuddy.slicing.slice_info import plate_grams
 from scadbuddy.spools.native import NativeSpoolStore, spool_uses
-from scadbuddy.workflows.print_activities import heartbeating, raised_as
+from scadbuddy.spools.spool_providers import recache
+from scadbuddy.workflows.print_activities import raised_as
 from scadbuddy.workflows.print_models import (
     FAILED,
     LAN_PRINT_ACTIVITY,
@@ -106,6 +108,9 @@ from scadbuddy.workflows.print_models import (
     LanWaitInput,
     SlicedSource,
 )
+
+if TYPE_CHECKING:
+    from scadbuddy.spools.component import Spools
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +205,9 @@ class LanDeps:
     #: Where a start saves what it uses of ScadBuddy's own spools (#4643); ``None``
     #: saves nothing.
     native_spools: NativeSpoolStore | None = None
+    #: The spools whose native records a start re-caches once it saved its uses, so the
+    #: overlay shows the estimate taken off at start (#6261); ``None`` re-caches nothing.
+    spools: Spools | None = None
 
 
 class LanActivities:
@@ -216,8 +224,10 @@ class LanActivities:
             )
         try:
             code = await asyncio.to_thread(self.d.printers.open_access_code, printer_id)
-        except KekMissingError:
-            raise _failed(LAN_NEEDS_KEK, status_code=status.HTTP_503_SERVICE_UNAVAILABLE) from None
+        except KekMissingError as error:
+            # The process that opens the code lacks the key: the API's on the print
+            # worker (#5298 Task 29), which says so.
+            raise _failed(str(error), status_code=status.HTTP_503_SERVICE_UNAVAILABLE) from None
         except NoAccessCodeError:
             raise _failed(
                 f"{row.name} has no LAN access code. Link it again in Settings > Printers.",
@@ -229,8 +239,8 @@ class LanActivities:
         if sliced.blob_key is not None:
             if self.d.blobs is None:
                 raise _failed(
-                    "This worker cannot read the native slicer's files: it needs"
-                    " SCADBUDDY_API_INTERNAL_URL and SCADBUDDY_SECRET_KEY_FILE.",
+                    "This worker cannot read the native slicer's files: the API has no"
+                    " content store (set store_backend to s3 or bambuddy).",
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 )
             async with aclosing(self.d.blobs.stream(sliced.blob_key)) as chunks:
@@ -255,8 +265,10 @@ class LanActivities:
     async def lan_upload(self, input: LanUploadInput) -> LanUploaded:
         """The sliced 3MF, spooled as it downloads (heartbeating per chunk), then sent to
         the printer as ``input.remote_name`` in `UPLOAD_DIR`. Nothing starts here, so an
-        attempt that fails is safe to try again under the same name."""
-        _, lan = await self._printer(input.printer)
+        attempt that fails is safe to try again under the same name. The printer's read
+        (a CRUD call on the print worker) and the read URL's wait heartbeat, so a slow API
+        or Bambuddy never ends the attempt as a heartbeat timeout (#5298 Task 32)."""
+        _, lan = await heartbeating(self._printer(input.printer))
         with tempfile.SpooledTemporaryFile(max_size=SPOOL_IN_MEMORY) as spool:
             size = 0
             try:
@@ -307,9 +319,9 @@ class LanActivities:
         except (OSError, aiomqtt.MqttError, TimeoutError, ConnectionError):
             raise _unsure(f"{row.name} could not be reached over the LAN.") from None
         printer = status_from_report(row, first, now=first.received_at)
-        # The rack's hotends seen, once per report read (#836), under both of the
-        # printer's ids (#4971): whatever the plate prints from, as prepare_run does.
-        await record_seen(self.d.rack, row.bambuddy_printer_id, printer, row.id)
+        # The rack's hotends seen, once per report read (#836), under the printer's
+        # registry id (#4971, #5167): whatever the plate prints from, as prepare_run does.
+        await record_seen(self.d.rack, row.id, printer)
         before = first.print
         error_before = _int(before.get("print_error"))
         if before.get("subtask_name") == input.subtask_name:
@@ -355,7 +367,9 @@ class LanActivities:
 
     async def _save_uses(self, input: LanPrintInput) -> None:
         """What the start uses of ScadBuddy's own spools (#4643), under its run and its
-        ``subtask_name``, settled once the run's print settles
+        ``subtask_name``: an estimate the ledger takes off at once, then the native
+        records re-cached for the overlay (`spools.spool_providers.recache`, as the settle
+        does), settled once the run's print settles
         (`spools.spool_providers.native_use_hook`). Advisory, never raising."""
         run_id = input.uploaded.run_id
         uses = spool_uses(input.spools, input.uploaded.grams_by_slot)
@@ -369,6 +383,9 @@ class LanActivities:
                 "could not save what a LAN print uses of the native spools",
                 extra={"run_id": run_id, "error": type(error).__name__},
             )
+            return
+        if self.d.spools is not None:
+            await recache(self.d.spools)
 
     @staticmethod
     def _named(started: LanStarted, input: LanPrintInput) -> LanStarted:
@@ -386,9 +403,7 @@ class LanActivities:
         run_id = input.uploaded.run_id
         if run_id is None or not picks:
             return
-        await save_lan_picks(
-            self.d.rack, run_id, input.subtask_name, row.bambuddy_printer_id, picks, row.id
-        )
+        await save_lan_picks(self.d.rack, run_id, input.subtask_name, row.id, picks)
 
     async def _taken(
         self,
@@ -469,7 +484,7 @@ class LanActivities:
                     # Usage only ranks (#1043): ranked as if no hotend had printed.
                     logger.warning(
                         "rack usage unreadable; ranked without it",
-                        extra={"printer": row.id, "error": type(exc).__name__},
+                        extra={"printer": row.id, **error_facts(exc)},
                     )
             chosen = choose_nozzles(
                 plan,

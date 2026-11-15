@@ -1,0 +1,175 @@
+"""An order's links for the customer (#5283, plan Tasks 3 and 5): ``/o#<token>``.
+
+A token is 32 random bytes, URL-safe base64. The row keeps its sha256 (hex), which finds
+the link, and the token sealed under the CRUD service's KEK (AAD
+``storefront_order_links:<id>``), which only the mail sender opens, to write the link into
+a mail (ruling R1). Revoking a link drops its sealed token. These run in the caller's
+transaction.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import secrets
+import uuid
+from dataclasses import dataclass
+from datetime import datetime
+
+from pydantic import BaseModel
+
+from scadbuddy.core.secrets import Envelope, Kek, open_secret, seal_secret
+from scadbuddy.orders.store import Conn
+from scadbuddy.orders.storefront.addresses import check_address
+from scadbuddy.payments.credentials import KekMissingError
+
+TOKEN_BYTES = 32
+
+
+def token_aad(link_id: str) -> str:
+    return f"storefront_order_links:{link_id}"
+
+
+def token_sha256(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+@dataclass(frozen=True)
+class LiveLink:
+    id: str
+    sent_to: str
+
+
+def create_order_link(conn: Conn, kek: Kek | None, order_id: str, to: str) -> tuple[str, str]:
+    """A new live link of the order for ``to`` (one address, `check_address`): its id and
+    its token. The token is returned once, for the caller's answer; it is stored only as
+    its sha256 and sealed."""
+    if kek is None:
+        raise KekMissingError()
+    to = check_address(to)
+    link_id = str(uuid.uuid4())
+    token = secrets.token_urlsafe(TOKEN_BYTES)
+    sealed = seal_secret(kek, token, token_aad(link_id))
+    conn.execute(
+        "INSERT INTO storefront_order_links (id, order_id, token_sha256, token_sealed,"
+        " dek_sealed, kek_id, sent_to) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+        (
+            link_id,
+            order_id,
+            token_sha256(token),
+            sealed.secret_sealed,
+            sealed.dek_sealed,
+            sealed.kek_id,
+            to,
+        ),
+    )
+    return link_id, token
+
+
+def revoke_order_links(conn: Conn, order_id: str) -> int:
+    """Revoke every live link of the order, dropping each one's sealed token. How many.
+
+    The account attachments those links made (`accounts.attach_order`'s ``link_id``) go in
+    the same transaction, so a revoked link leaves no way in for the account that opened
+    it; a submit-made attachment (no link) stays. A later view through another live link
+    attaches again.
+
+    The links are revoked first, which locks their rows; the attachments go after. An
+    attach running at the same time takes the link's row ``FOR SHARE``
+    (`accounts.attach_order`), so it waits for this revoke and then finds the link
+    revoked and attaches nothing."""
+    revoked = [
+        str(row["id"])
+        for row in conn.execute(
+            "UPDATE storefront_order_links SET revoked_at = clock_timestamp(),"
+            " token_sealed = NULL, dek_sealed = NULL, kek_id = NULL"
+            " WHERE order_id = %s AND revoked_at IS NULL RETURNING id",
+            (order_id,),
+        ).fetchall()
+    ]
+    if revoked:
+        conn.execute(
+            "DELETE FROM storefront_account_orders WHERE link_id = ANY(%s::text[])", (revoked,)
+        )
+    return len(revoked)
+
+
+def live_link(conn: Conn, order_id: str) -> LiveLink | None:
+    """The order's newest live link: where its mail goes."""
+    row = conn.execute(
+        "SELECT id, sent_to FROM storefront_order_links WHERE order_id = %s"
+        " AND revoked_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 1",
+        (order_id,),
+    ).fetchone()
+    return None if row is None else LiveLink(id=str(row["id"]), sent_to=str(row["sent_to"]))
+
+
+@dataclass(frozen=True)
+class OpenedLink:
+    id: str
+    order_id: str
+
+
+def link_by_token(conn: Conn, token: str) -> OpenedLink | None:
+    """The live link ``token`` opens, found by its sha256; None for any token that reads
+    nothing (unknown, revoked, or not a token at all). Every token costs the same one
+    lookup by an index: none is refused by its shape first."""
+    row = conn.execute(
+        "SELECT id, order_id FROM storefront_order_links"
+        " WHERE token_sha256 = %s AND revoked_at IS NULL",
+        (token_sha256(token),),
+    ).fetchone()
+    return None if row is None else OpenedLink(id=str(row["id"]), order_id=str(row["order_id"]))
+
+
+def mark_opened(conn: Conn, link_id: str) -> None:
+    """Stamp the link's first view (``opened_at``); a later view keeps the first."""
+    conn.execute(
+        "UPDATE storefront_order_links SET opened_at = clock_timestamp()"
+        " WHERE id = %s AND opened_at IS NULL",
+        (link_id,),
+    )
+
+
+class LinkState(BaseModel):
+    """What the back office sees of the order's newest link (`link_state`): whether it is
+    live, when it was made, where its mail went, when the customer first opened it and when
+    it was revoked. Never its token or the token's hash."""
+
+    live: bool
+    created_at: datetime | None
+    sent_to: str | None
+    opened_at: datetime | None
+    revoked_at: datetime | None
+
+
+def link_state(conn: Conn, order_id: str) -> LinkState:
+    """The state of the order's newest link; all empty when it never had one."""
+    row = conn.execute(
+        "SELECT created_at, sent_to, opened_at, revoked_at FROM storefront_order_links"
+        " WHERE order_id = %s ORDER BY created_at DESC, id DESC LIMIT 1",
+        (order_id,),
+    ).fetchone()
+    if row is None:
+        return LinkState(live=False, created_at=None, sent_to=None, opened_at=None, revoked_at=None)
+    return LinkState(live=row["revoked_at"] is None, **row)
+
+
+def sealed_token(conn: Conn, link_id: str) -> Envelope | None:
+    """The link's sealed token, or None once it is revoked (or gone)."""
+    row = conn.execute(
+        "SELECT token_sealed, dek_sealed, kek_id FROM storefront_order_links"
+        " WHERE id = %s AND revoked_at IS NULL AND token_sealed IS NOT NULL",
+        (link_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return Envelope(
+        secret_sealed=bytes(row["token_sealed"]),
+        dek_sealed=bytes(row["dek_sealed"]),
+        kek_id=row["kek_id"],
+    )
+
+
+def open_token(kek: Kek, link_id: str, envelope: Envelope) -> str:
+    """The link's token. Raises `core.secrets.SealError` under another key."""
+    return open_secret(kek, envelope, token_aad(link_id))

@@ -3,13 +3,267 @@ spool inventory, read from Bambuddy and never written to it."""
 
 from __future__ import annotations
 
+import asyncio
+from typing import Any
+
 import httpx
+import psycopg
 import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.bambuddy.print_links import JobMatches, PrintLink, PrintSend
+from scadbuddy.bambuddy.subject import PrintSubject
 from tests.api.test_send import API, configure
 from tests.bambuddy.conftest import recording
+
+
+def _state(client: TestClient) -> AppState:
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    return state
+
+
+@respx.mock
+def test_the_queue_marks_what_scadbuddy_queued(client: TestClient) -> None:
+    """#3741: an item a ScadBuddy run queued (its send), or an item a link names by its
+    queue item id, carries ``scadbuddy``. An item queued from an archive ScadBuddy
+    linked, with no record of the item, carries none: Bambuddy's own reprint of that
+    archive is such an item."""
+    configure(client)
+    # Item 199 waits again here: only an item that can still print carries the mark.
+    queue = [
+        {**item, "status": "pending"} if item["id"] == 199 else item
+        for item in recording("queue.json")
+    ]
+    respx.get(f"{API}/queue/").mock(return_value=httpx.Response(200, json=queue))
+    state = _state(client)
+    output = PrintSubject.output("o" * 32)
+
+    async def seed() -> None:
+        await state.print_runs.store.insert_accepted(
+            "run-3741",
+            subject=output,
+            key="run-3741",
+            slug="keychain",
+            workflow_id="print-run-3741",
+            workflow_run_id="w",
+            retention=None,
+        )
+        await state.print_links.record_sends(
+            output, [PrintSend(queue_item_id=259, plate_id=1, run_id="run-3741")]
+        )
+        # Item 257 is queued from archive 144, which ScadBuddy linked by the sliced
+        # file's hash; nothing records item 257 itself.
+        await state.print_links.record(
+            PrintSubject.library(1615), PrintLink(archive_id=144, matched_by="content_hash")
+        )
+        # Item 199's archive was linked by the item, before sends were recorded.
+        await state.print_links.record(
+            PrintSubject.library(1630),
+            PrintLink(archive_id=130, matched_by="queue_item", queue_item_id=199),
+        )
+
+    asyncio.run(seed())
+
+    response = client.get("/api/v1/farm/queue")
+
+    assert response.status_code == 200, response.text
+    items = {item["id"]: item for item in response.json()}
+    assert items[259]["scadbuddy"] == {
+        "subject": "output:" + "o" * 32,
+        "output_id": "o" * 32,
+        "library_file_id": None,
+        "slug": "keychain",
+        "run_id": "run-3741",
+        "archive_id": None,
+        "matched_by": "queue_item",
+    }
+    assert items[199]["scadbuddy"] == {
+        "subject": "library:1630",
+        "output_id": None,
+        "library_file_id": 1630,
+        "slug": None,
+        "run_id": None,
+        "archive_id": 130,
+        "matched_by": "queue_item",
+    }
+    assert items[257]["scadbuddy"] is None
+    assert items[205]["scadbuddy"] is None
+
+
+@respx.mock
+def test_only_items_that_can_still_print_are_looked_up(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5833: an unfiltered read is mostly history. Only the pending and printing items
+    can carry the mark, so only they are looked up, and a finished or skipped item
+    ScadBuddy sent carries none."""
+    configure(client)
+    queue = [
+        *recording("queue.json"),
+        {**recording("queue.json")[1], "id": 260, "status": "pending"},
+        {**recording("queue.json")[1], "id": 261, "status": "skipped"},
+    ]
+    respx.get(f"{API}/queue/").mock(return_value=httpx.Response(200, json=queue))
+    links = _state(client).print_links
+    asked: list[list[int]] = []
+    jobs = links.jobs
+
+    async def spy(*, queue_items: Any = (), lan_starts: Any = ()) -> JobMatches:
+        asked.append(sorted(queue_items))
+        return await jobs(queue_items=queue_items, lan_starts=lan_starts)
+
+    monkeypatch.setattr(links, "jobs", spy)
+    asyncio.run(
+        links.record_sends(
+            PrintSubject.output("o" * 32),
+            [PrintSend(queue_item_id=205), PrintSend(queue_item_id=261)],
+        )
+    )
+
+    response = client.get("/api/v1/farm/queue")
+
+    assert response.status_code == 200, response.text
+    assert asked == [[257, 259, 260]]
+    items = {item["id"]: item for item in response.json()}
+    assert items[205]["scadbuddy"] is None
+    assert items[261]["scadbuddy"] is None
+
+
+@respx.mock
+def test_the_queue_has_no_marks_when_the_records_are_unreadable(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3741: a database blip costs the marks, never the queue."""
+    configure(client)
+    respx.get(f"{API}/queue/").mock(return_value=httpx.Response(200, json=recording("queue.json")))
+
+    async def broken(**_: object) -> None:
+        raise psycopg.OperationalError("down")
+
+    monkeypatch.setattr(_state(client).print_links, "jobs", broken)
+
+    response = client.get("/api/v1/farm/queue")
+
+    assert response.status_code == 200, response.text
+    assert all(item["scadbuddy"] is None for item in response.json())
+
+
+@respx.mock
+def test_each_queue_item_has_a_picture_and_no_bambuddy_path(client: TestClient) -> None:
+    """#3742: ScadBuddy's own item shows ScadBuddy's picture (its output's thumbnail, or
+    its library file's); any other shows Bambuddy's thumbnail, of the item's library
+    file, else of its archive, through ScadBuddy's farm proxy; an item with neither has
+    none. Bambuddy's file paths are not forwarded."""
+    configure(client)
+    rows = recording("queue.json")
+    queue = [
+        {**rows[1]},  # 259: a ScadBuddy run sent it
+        {**rows[2], "status": "pending"},  # 199: a link names it, library file 1630
+        {**rows[0]},  # 257: not ScadBuddy's; its library file has a thumbnail
+        {**rows[3], "id": 262, "status": "pending"},  # an archive's reprint
+        {**rows[3], "id": 263, "status": "pending", "archive_thumbnail": None},
+        # Bambuddy's soft-deleted archive keeps no thumbnail to show.
+        {**rows[3], "id": 264, "status": "pending", "archive_deleted": True},
+    ]
+    respx.get(f"{API}/queue/").mock(return_value=httpx.Response(200, json=queue))
+    state = _state(client)
+
+    async def seed() -> None:
+        await state.print_links.record_sends(
+            PrintSubject.output("o" * 32), [PrintSend(queue_item_id=259)]
+        )
+        await state.print_links.record(
+            PrintSubject.library(1630),
+            PrintLink(archive_id=130, matched_by="queue_item", queue_item_id=199),
+        )
+
+    asyncio.run(seed())
+
+    response = client.get("/api/v1/farm/queue")
+
+    assert response.status_code == 200, response.text
+    items = {item["id"]: item for item in response.json()}
+    assert {key: item["picture"] for key, item in items.items()} == {
+        259: f"/api/v1/outputs/{'o' * 32}/thumbnail",
+        199: "/api/v1/print/library/1630/thumbnail",
+        257: "/api/v1/farm/library/1615/thumbnail",
+        262: "/api/v1/farm/archives/107/thumbnail",
+        263: None,
+        264: None,
+    }
+    assert all(
+        "archive_thumbnail" not in item and "library_file_thumbnail" not in item
+        for item in items.values()
+    )
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("route", "bambuddy_path"),
+    [
+        ("/api/v1/farm/library/1615/thumbnail", "/library/files/1615/thumbnail"),
+        ("/api/v1/farm/archives/107/thumbnail", "/archives/107/thumbnail"),
+        ("/api/v1/farm/printers/1/cover?archive=90", "/printers/1/cover"),
+    ],
+)
+def test_the_farm_serves_bambuddys_pictures(
+    client: TestClient, route: str, bambuddy_path: str
+) -> None:
+    """#3742: Bambuddy's thumbnail through ScadBuddy, with ScadBuddy's key and never the
+    browser's call to Bambuddy, cacheable, and never sniffed into anything but an
+    image."""
+    configure(client)
+    upstream = respx.get(f"{API}{bambuddy_path}").mock(
+        return_value=httpx.Response(200, content=b"\x89PNG", headers={"content-type": "image/png"})
+    )
+
+    response = client.get(route)
+
+    assert response.status_code == 200, response.text
+    assert response.content == b"\x89PNG"
+    assert response.headers["content-type"] == "image/png"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["cache-control"].startswith("private, max-age=")
+    assert upstream.calls.last.request.headers["x-api-key"] == "s3cret"
+    # The cover's key is ScadBuddy's own, for the browser's cache; Bambuddy is not sent it.
+    assert not upstream.calls.last.request.url.params
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "query", ["?job=Name_Keychain_Font_Basic_Plate_1", ""], ids=["job name", "no key"]
+)
+def test_a_cover_not_keyed_by_its_archive_is_never_kept(client: TestClient, query: str) -> None:
+    """#3742 review: Bambu job names repeat (every keychain variant prints as
+    ``Name_Keychain_Font_Basic_Plate_1``), so only the archive, one per print, keys a
+    cover the browser may keep. A cover keyed by its job's name, or by nothing, is
+    fetched again on each load, never an earlier job's."""
+    configure(client)
+    upstream = respx.get(f"{API}/printers/1/cover").mock(
+        return_value=httpx.Response(200, content=b"\x89PNG", headers={"content-type": "image/png"})
+    )
+
+    response = client.get(f"/api/v1/farm/printers/1/cover{query}")
+
+    assert response.status_code == 200, response.text
+    assert response.headers["cache-control"] == "no-store"
+    assert not upstream.calls.last.request.url.params
+
+
+@respx.mock
+def test_a_picture_bambuddy_does_not_have_is_a_404(client: TestClient) -> None:
+    """#3742: the page shows its placeholder for it, and nothing caches the miss."""
+    configure(client)
+    respx.get(f"{API}/printers/2/cover").mock(
+        return_value=httpx.Response(404, json={"detail": "No cover available"})
+    )
+
+    response = client.get("/api/v1/farm/printers/2/cover")
+
+    assert response.status_code == 404
+    assert "cache-control" not in response.headers
 
 
 @respx.mock
@@ -309,3 +563,118 @@ def test_an_unknown_spool_is_a_404(client: TestClient) -> None:
 
 def test_grams_cannot_be_negative(client: TestClient) -> None:
     assert client.get("/api/v1/farm/spools/1/summary", params={"grams": -1}).status_code == 422
+
+
+def _item(item_id: int, **changes: Any) -> dict[str, Any]:
+    """One item of the recorded queue as ``GET /queue/{id}`` answers it: the same
+    schema as a row of the list (maziggy/bambuddy f9080d1,
+    ``backend/app/api/routes/print_queue.py`` line 1854, ``PrintQueueItemResponse``)."""
+    row: dict[str, Any] = next(row for row in recording("queue.json") if row["id"] == item_id)
+    return {**row, **changes}
+
+
+@respx.mock
+def test_one_queue_item_is_one_bambuddy_read_and_carries_its_scadbuddy_job(
+    client: TestClient,
+) -> None:
+    """#3744: the item page reads the item alone, never the whole queue, and a job
+    ScadBuddy queued carries ``scadbuddy`` in any state, so a finished one still
+    names its output and the archive its print page is at."""
+    configure(client)
+    one = respx.get(f"{API}/queue/205").mock(
+        return_value=httpx.Response(200, json=_item(205, ams_mapping=[4, -1]))
+    )
+    every = respx.get(f"{API}/queue/").mock(return_value=httpx.Response(200, json=[]))
+    output = PrintSubject.output("o" * 32)
+    asyncio.run(
+        _state(client).print_links.record(
+            output, PrintLink(archive_id=107, matched_by="queue_item", queue_item_id=205)
+        )
+    )
+
+    response = client.get("/api/v1/farm/queue/205")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["id"] == 205
+    assert body["status"] == "completed"
+    assert body["ams_mapping"] == [4, -1]
+    assert body["scadbuddy"]["output_id"] == "o" * 32
+    assert body["scadbuddy"]["archive_id"] == 107
+    # #3742's picture, as the list gives it: ScadBuddy's own for its job.
+    assert body["picture"] == f"/api/v1/outputs/{'o' * 32}/thumbnail"
+    assert one.call_count == 1
+    assert not every.called
+
+
+@respx.mock
+def test_a_queue_item_bambuddy_queued_has_no_scadbuddy_job(client: TestClient) -> None:
+    configure(client)
+    respx.get(f"{API}/queue/257").mock(return_value=httpx.Response(200, json=_item(257)))
+
+    response = client.get("/api/v1/farm/queue/257")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["scadbuddy"] is None
+    assert response.json()["printer_name"] == _item(257)["printer_name"]
+    assert response.json()["picture"] == "/api/v1/farm/library/1615/thumbnail"
+
+
+@respx.mock
+def test_a_gone_queue_item_is_a_404(client: TestClient) -> None:
+    """Bambuddy answers 404 "Queue item not found" for an item it no longer has
+    (``print_queue.py`` line 1882 at f9080d1); the page says the item is gone."""
+    configure(client)
+    respx.get(f"{API}/queue/999").mock(
+        return_value=httpx.Response(404, json={"detail": "Queue item not found"})
+    )
+
+    response = client.get("/api/v1/farm/queue/999")
+
+    assert response.status_code == 404
+    assert response.json()["type"].endswith("/bambuddy-not-found")
+
+
+@respx.mock
+def test_a_queue_item_id_below_one_is_refused_before_bambuddy(client: TestClient) -> None:
+    configure(client)
+    route = respx.get(f"{API}/queue/0").mock(return_value=httpx.Response(200, json=_item(205)))
+
+    response = client.get("/api/v1/farm/queue/0")
+
+    assert response.status_code == 422
+    assert not route.called
+
+
+@respx.mock
+def test_reading_one_queue_item_needs_read_status(client: TestClient) -> None:
+    """``GET /queue/{id}`` needs ``queue:read_all`` or ``queue:read_own``
+    (``print_queue.py`` lines 1858-1862 at f9080d1), which an API key holds with
+    ``can_read_status`` (``backend/app/core/auth.py`` lines 89-91), not ``can_queue``."""
+    configure(client)
+    respx.get(f"{API}/queue/205").mock(
+        return_value=httpx.Response(403, json={"detail": "Missing permission"})
+    )
+
+    response = client.get("/api/v1/farm/queue/205")
+
+    assert response.status_code == 409
+    assert response.json()["required_scope"] == "Read Status"
+
+
+@respx.mock
+def test_one_queue_item_has_no_mark_when_the_records_are_unreadable(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configure(client)
+    respx.get(f"{API}/queue/259").mock(return_value=httpx.Response(200, json=_item(259)))
+
+    async def broken(**_: object) -> None:
+        raise psycopg.OperationalError("down")
+
+    monkeypatch.setattr(_state(client).print_links, "jobs", broken)
+
+    response = client.get("/api/v1/farm/queue/259")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["scadbuddy"] is None

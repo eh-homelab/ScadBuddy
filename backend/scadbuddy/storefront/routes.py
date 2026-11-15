@@ -2,38 +2,82 @@
 of which forwards to the CRUD client with the verified visitor id and the browser's
 address. `app.py` answers a CRUD refusal.
 
-A render's body, and a draft item's, goes on as the visitor sent it (at most
-`MAX_RENDER_BODY` bytes). Each write gets a new ``Idempotency-Key`` (a UUID 4) per browser
-request, which the CRUD client keeps across its retries (plan point 21). A render's preview
+A render's body, a draft item's and a submit's go on as the visitor sent them (at most
+`MAX_RENDER_BODY` bytes). Each write needs the browser's ``Idempotency-Key`` (a UUID, one
+per visitor action; 428 without one), forwarded bound to the visitor (`_request_key`): a
+visitor's resend of a request whose answer was lost is the same request to the CRUD side,
+and the CRUD client keeps that key across its own retries (plan point 21). A render's preview
 is relayed as a stream, never held whole, as ``model/gltf-binary``. A design request is
 read with its caps as it arrives (`uploads.py`: refused before any CRUD call), its files
-spooled, then sent on as multipart a chunk at a time."""
+spooled, then sent on as multipart a chunk at a time.
+
+The customer's order page (``/o#<token>``, or ``/o?order=<id>`` signed in) posts the
+order link's token, or the order's id, in each body, which goes on unread with the store
+session's token when there is one (`order_view` and the writes under ``/order``); its
+answer goes back with the fields of `ORDER_VIEW_FIELDS` only (`_shown`). A reader that
+reads nothing is the CRUD side's 404 with no body, and the edge's own 404 with no body
+too.
+
+Accounts (#5283): ``POST /account/code`` (the bot check ``sign_up`` first) has the CRUD
+side mail a sign-in code and answers 204 for every address. ``POST /account/verify`` (the
+bot check ``sign_in`` first) sets the ``sb_session`` cookie from the CRUD side's answer
+(`accounts.py`), ``POST /account/sign-out`` clears it and gives the browser a new visitor,
+and ``GET /account``, ``GET /account/orders`` and ``POST /draft/submit`` send the
+cookie's session on. The POSTs are checked by `CrossSiteGate`, as every write is."""
 
 from __future__ import annotations
 
 import hashlib
+import json
+import logging
+import secrets
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Annotated, Any, Final
 
 import anyio
-from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 from starlette.types import Receive, Scope, Send
 
-from scadbuddy.core.problems import ApiError
+from scadbuddy.core.problems import ApiError, problem_response
 from scadbuddy.core.proxies import client_address
-from scadbuddy.crud.client import CrudStream, CrudUnavailableError
+from scadbuddy.crud.client import CrudRefusedError, CrudStream, CrudUnavailableError
 from scadbuddy.crud.storefront import StorefrontCrud
+from scadbuddy.storefront.accounts import clear_session, session_of, set_session
 from scadbuddy.storefront.ratelimit import REQUEST_LIMITED, UploadAllowance
 from scadbuddy.storefront.settings import STOREFRONT_PREFIX
+from scadbuddy.storefront.sign_out import (
+    SIGN_OUT_INCOMPLETE,
+    SIGN_OUT_INCOMPLETE_TEXT,
+    SIGN_OUT_NOT_QUEUED_TEXT,
+)
+from scadbuddy.storefront.turnstile import SiteKey, require_turnstile
 from scadbuddy.storefront.uploads import UPLOADS_BUSY, RequestUpload, read_request, uploads_busy
-from scadbuddy.storefront.wire import ITEM_ID, JOB_ID, LISTING_ID, STOREFRONT_PROBLEMS
+from scadbuddy.storefront.visitors import VISITOR_COOKIE, VISITOR_MAX_AGE
+from scadbuddy.storefront.visitors import sign as sign_visitor
+from scadbuddy.storefront.wire import (
+    ITEM_ID,
+    JOB_ID,
+    LISTING_ID,
+    LISTINGS_MAX_PAGE,
+    LISTINGS_MAX_QUERY,
+    LISTINGS_QUERY_PATTERN,
+    ORDER_VIEW_FIELDS,
+    PAY_CHECKOUT_FIELDS,
+    PREVIEW_HEADERS,
+    QUOTE_ID,
+    REVISION_ID,
+    SOURCE_ID,
+    STOREFRONT_PROBLEMS,
+)
 
 #: The largest render or draft item body the edge relays: far past any listing's values.
 MAX_RENDER_BODY: Final = 64 * 1024
 GLB_MEDIA_TYPE: Final = "model/gltf-binary"
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 visitor_router = APIRouter(prefix=STOREFRONT_PREFIX)
@@ -70,9 +114,31 @@ Visitor = Annotated[str, Depends(_visitor)]
 Client = Annotated[str, Depends(_client)]
 
 
+@visitor_router.get("/turnstile")
+async def turnstile(request: Request, crud: Crud) -> Any:
+    """The bot check's public site key for the page's widget, or null while the check is
+    off (`turnstile.py`): the CRUD side's ``GET …/turnstile``, as last read."""
+    site_key: SiteKey = request.app.state.turnstile_site_key
+    return {"site_key": await site_key.get(crud)}
+
+
 @visitor_router.get("/listings")
-async def listings(crud: Crud, visitor_id: Visitor, client: Client) -> Any:
-    return await crud.listings(visitor_id=visitor_id, client=client)
+async def listings(
+    crud: Crud,
+    visitor_id: Visitor,
+    client: Client,
+    cursor: Annotated[str | None, Query(max_length=200)] = None,
+    limit: Annotated[int | None, Query(ge=1, le=LISTINGS_MAX_PAGE)] = None,
+    q: Annotated[
+        str | None, Query(max_length=LISTINGS_MAX_QUERY, pattern=LISTINGS_QUERY_PATTERN)
+    ] = None,
+) -> Any:
+    """One page of the published listings (#6154): the edge checks the query's bounds
+    and sends on only these three."""
+    query = {"cursor": cursor, "limit": limit, "q": q}
+    return await crud.listings(
+        {k: v for k, v in query.items() if v is not None}, visitor_id=visitor_id, client=client
+    )
 
 
 @visitor_router.get("/listings/{listing_id}")
@@ -109,8 +175,8 @@ async def _body(request: Request, slug: str) -> bytes:
 
 @visitor_router.post("/renders", status_code=status.HTTP_202_ACCEPTED)
 async def render(request: Request, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
+    key = _request_key(request, visitor_id)
     body = await _body(request, "render_body_invalid")
-    key = str(uuid.uuid4())
     return await crud.render(body, key=key, visitor_id=visitor_id, client=client)
 
 
@@ -139,17 +205,135 @@ async def draft(crud: Crud, visitor_id: Visitor, client: Client) -> Any:
 
 @visitor_router.post("/draft/items")
 async def add_item(request: Request, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
+    key = _request_key(request, visitor_id)
     body = await _body(request, "draft_body_invalid")
-    key = str(uuid.uuid4())
     return await crud.add_item(body, key=key, visitor_id=visitor_id, client=client)
 
 
+def _requests_off() -> ApiError:
+    return ApiError(
+        404,
+        "This shop does not take design requests.",
+        type_=f"{STOREFRONT_PROBLEMS}requests_disabled",
+    )
+
+
+@visitor_router.post("/uploads")
+async def upload_slots(request: Request, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
+    """Upload slots for "Print my own model" (#6133, spec 2026-11-13 §6.2): a presigned
+    PUT per file, straight to the store, so no file byte passes the edge. Refused before
+    the CRUD call: 404 ``requests_disabled`` while "Ask for a design" is off, 428
+    ``idempotency_key_required``, 429 ``request_limited`` (`UploadAllowance`, the design
+    requests' own, so the two forms do not add up), then the bot check (action ``model``;
+    neither refusal spends the allowance). A passed check spends one."""
+    state = request.app.state
+    if not await state.requests_enabled.get(crud, visitor_id=visitor_id, client=client):
+        raise _requests_off()
+    key = _request_key(request, visitor_id)
+    allowance: UploadAllowance = state.upload_allowance
+    held = allowance.start(client)
+    if isinstance(held, int):
+        raise ApiError(
+            429,
+            "You have sent a lot of files, or some are still sending. Try again later.",
+            type_=REQUEST_LIMITED,
+            headers={"Retry-After": str(held)},
+            retry_after=held,
+        )
+    try:
+        await require_turnstile(request, "model")
+        allowance.spend(held)
+        body = await _body(request, "draft_body_invalid")
+    finally:
+        allowance.finish(held)
+    return await crud.upload_slots(body, key=key, visitor_id=visitor_id, client=client)
+
+
+#: The fields of a filament the form shows (`orders/storefront/wire.py` `PublicFilament`):
+#: the edge sends on these only, so no price reaches a visitor.
+FILAMENT_FIELDS: Final = frozenset({"id", "colour", "colour_name", "material"})
+
+
+@visitor_router.get("/models/colours")
+async def model_colours(crud: Crud, visitor_id: Visitor, client: Client) -> Any:
+    """The colours "Print my own model" offers (#6133, spec 2026-11-13 §4.1)."""
+    answer = await crud.model_colours(visitor_id=visitor_id, client=client)
+    filaments = answer.get("filaments", []) if isinstance(answer, dict) else []
+    return {
+        "filaments": [
+            {k: v for k, v in f.items() if k in FILAMENT_FIELDS}
+            for f in filaments
+            if isinstance(f, dict)
+        ]
+    }
+
+
+@visitor_router.post("/draft/models")
+async def add_models(request: Request, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
+    """A "Print my own model" request (#6133, spec 2026-11-13 §6.3): the uploads the
+    browser filled and the links, as the visitor sent them. 404 ``requests_disabled`` while
+    "Ask for a design" is off, as ``POST /uploads``. A request that names an upload had its
+    bot check and allowance at that upload's slots (the CRUD side claims each slot once).
+    One that names none (links only) takes them here, as ``POST /uploads`` does: 429
+    ``request_limited``, then the bot check (action ``model``); a passed check spends one."""
+    state = request.app.state
+    if not await state.requests_enabled.get(crud, visitor_id=visitor_id, client=client):
+        raise _requests_off()
+    key = _request_key(request, visitor_id)
+    body = await _body(request, "draft_body_invalid")
+    if not _names_uploads(body):
+        allowance: UploadAllowance = state.upload_allowance
+        held = allowance.start(client)
+        if isinstance(held, int):
+            raise ApiError(
+                429,
+                "You have sent a lot of requests, or one is still sending. Try again later.",
+                type_=REQUEST_LIMITED,
+                headers={"Retry-After": str(held)},
+                retry_after=held,
+            )
+        try:
+            await require_turnstile(request, "model")
+            allowance.spend(held)
+        finally:
+            allowance.finish(held)
+    return await crud.add_models(body, key=key, visitor_id=visitor_id, client=client)
+
+
+def _names_uploads(body: bytes) -> bool:
+    """Whether the body is a JSON object with a non-empty ``uploads`` list. Anything else
+    takes the gates; the CRUD side judges the body's shape."""
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        return False
+    uploads = parsed.get("uploads") if isinstance(parsed, dict) else None
+    return isinstance(uploads, list) and len(uploads) > 0
+
+
 @visitor_router.delete("/draft/items/{item_id}")
-async def remove_item(item_id: str, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
+async def remove_item(
+    item_id: str, request: Request, crud: Crud, visitor_id: Visitor, client: Client
+) -> Any:
     if ITEM_ID.fullmatch(item_id) is None:
         raise ApiError(404, "There is no such item.", type_=f"{STOREFRONT_PROBLEMS}item_not_found")
-    key = str(uuid.uuid4())
+    key = _request_key(request, visitor_id)
     return await crud.remove_item(item_id, key=key, visitor_id=visitor_id, client=client)
+
+
+@visitor_router.post("/draft/submit")
+async def submit(request: Request, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
+    """The visitor's cart submitted as an order (#5283, spec §5.5): 428
+    ``idempotency_key_required`` without a key, then the bot check (`turnstile.py`, action
+    ``submit``: 403 ``bot_check_failed``, 503 ``bot_check_unavailable``), both before the
+    body is read or the CRUD side is called. The cookie's session goes on, so a signed-in
+    visitor submits for its account."""
+    key = _request_key(request, visitor_id)
+    await require_turnstile(request, "submit")
+    body = await _body(request, "submit_body_invalid")
+    return await crud.submit(
+        body, key=key, visitor_id=visitor_id, client=client, session=session_of(request)
+    )
 
 
 #: How long one replica trusts its read of `requests_enabled`.
@@ -160,13 +344,36 @@ UPLOAD_LOST: Final = (
 )
 
 
+#: How long a refused (visitor, key) is remembered, and how many are kept.
+REFUSED_TTL: Final = 30.0
+REFUSED_MAX: Final = 10_000
+
+
 class RequestsEnabled:
     """The CRUD side's ``storefront_requests_enabled``, read at most once per
-    `ENABLED_TTL` per replica."""
+    `ENABLED_TTL` per replica. Also a short negative cache of the keys it said hold no
+    committed request while requests are off (`REFUSED_TTL`, `REFUSED_MAX`, the oldest
+    evicted): safe, since a refused request never commits."""
 
     def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
         self._read: tuple[float, bool] | None = None
+        self._refused: dict[tuple[str, str], float] = {}
+
+    def is_refused(self, visitor_id: str, key: str) -> bool:
+        at = self._refused.get((visitor_id, key))
+        if at is None:
+            return False
+        if self._clock() - at >= REFUSED_TTL:
+            del self._refused[(visitor_id, key)]
+            return False
+        return True
+
+    def refuse(self, visitor_id: str, key: str) -> None:
+        self._refused.pop((visitor_id, key), None)
+        self._refused[(visitor_id, key)] = self._clock()
+        while len(self._refused) > REFUSED_MAX:
+            del self._refused[next(iter(self._refused))]
 
     async def get(self, crud: StorefrontCrud, *, visitor_id: str, client: str) -> bool:
         now = self._clock()
@@ -177,15 +384,15 @@ class RequestsEnabled:
 
 
 def _request_key(request: Request, visitor_id: str) -> str:
-    """The forwarded ``Idempotency-Key``: the browser's own (a UUID), so a visitor's
-    resend of one request is one request; 428 ``idempotency_key_required`` without one,
+    """The forwarded ``Idempotency-Key`` of every write: the browser's own (a UUID), so a
+    visitor's resend of one request is one request; 428 ``idempotency_key_required`` without one,
     since a request whose answer is lost could not be sent again safely. Bound to the
     visitor, so two visitors' keys never meet."""
     sent = request.headers.get("idempotency-key")
     if sent is None:
         raise ApiError(
             428,
-            "Send an Idempotency-Key with a design request.",
+            "Send an Idempotency-Key with this request.",
             type_=f"{STOREFRONT_PROBLEMS}idempotency_key_required",
         )
     try:
@@ -199,11 +406,38 @@ def _request_key(request: Request, visitor_id: str) -> str:
     return hashlib.sha256(f"{visitor_id}\x1f{browser}".encode()).hexdigest()
 
 
+async def _refuse_unless_sent(
+    request: Request, crud: StorefrontCrud, visitor_id: str, client: str
+) -> None:
+    """404 ``requests_disabled`` unless the request's key holds a request the CRUD side
+    committed (asked while requests are off; a refusal is remembered for `REFUSED_TTL`).
+    A request with no key, or a bad one, is refused as off."""
+    try:
+        key = _request_key(request, visitor_id)
+    except ApiError:
+        key = None
+    cache: RequestsEnabled = request.app.state.requests_enabled
+    if key is None or cache.is_refused(visitor_id, key):
+        refused = True
+    else:
+        refused = not await crud.requests_enabled(visitor_id=visitor_id, client=client, key=key)
+        if refused:
+            cache.refuse(visitor_id, key)
+    if refused:
+        raise ApiError(
+            404,
+            "This shop does not take design requests.",
+            type_=f"{STOREFRONT_PROBLEMS}requests_disabled",
+        )
+
+
 @visitor_router.post("/draft/requests")
 async def add_request(request: Request, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
     """A design request. Refused before its body is read: 404 ``requests_disabled``,
     428 ``idempotency_key_required``, 429 ``request_limited`` (`UploadAllowance`: the
-    client's allowance is spent, or its one upload is running), 503 ``uploads_busy``
+    client's allowance is spent, or its one upload is running), then 403
+    ``bot_check_failed`` or 503 ``bot_check_unavailable`` (`turnstile.py`; neither spends
+    the allowance), 503 ``uploads_busy``
     (`uploads.py` `UploadGate`). The body is then read whole with every cap
     (`read_request`) and spooled before the CRUD call: a deliberate step from the spec's
     "streams each upload" (spec §5.4), so that each cap is refused here before the CRUD
@@ -211,14 +445,12 @@ async def add_request(request: Request, crud: Crud, visitor_id: Visitor, client:
     read, before the forward, which the CRUD side's own gate bounds. A CRUD side that is
     busy is 503 ``uploads_busy`` (it read no byte); any other failed or timed-out call is
     503 ``upload_unavailable``: it may have committed, and the same browser key sent
-    again is the same request."""
+    again is the same request. So while requests are off, the CRUD side is asked about
+    the request's own key: a key that holds a committed request is forwarded, and the
+    CRUD side answers its stored reply."""
     state = request.app.state
     if not await state.requests_enabled.get(crud, visitor_id=visitor_id, client=client):
-        raise ApiError(
-            404,
-            "This shop does not take design requests.",
-            type_=f"{STOREFRONT_PROBLEMS}requests_disabled",
-        )
+        await _refuse_unless_sent(request, crud, visitor_id, client)
     key = _request_key(request, visitor_id)
     allowance: UploadAllowance = state.upload_allowance
     held = allowance.start(client)
@@ -231,13 +463,22 @@ async def add_request(request: Request, crud: Crud, visitor_id: Visitor, client:
             retry_after=held,
         )
     try:
+        # After the allowance, which spends nothing until the check passes: a client out
+        # of allowance costs no Siteverify call, and a failed check spends no allowance
+        # (failed checks have their own limit, `turnstile.py` `FailedChecks`).
+        await require_turnstile(request, "request")
         upload = await _read_spent(request, allowance, held)
     finally:
         allowance.finish(held)
     try:
         upload.release()
         return await crud.add_request(
-            upload.text, upload.files, key=key, visitor_id=visitor_id, client=client
+            upload.text,
+            upload.files,
+            key=key,
+            visitor_id=visitor_id,
+            client=client,
+            purchase_links=upload.purchase_links,
         )
     except CrudUnavailableError as error:
         if error.problem.get("type") == UPLOADS_BUSY:
@@ -267,8 +508,10 @@ class _Relayed(StreamingResponse):
     failed or cancelled (a browser that went away), never left to the garbage
     collector."""
 
-    def __init__(self, stream: CrudStream, *, headers: dict[str, str]) -> None:
-        super().__init__(stream.aiter_bytes(), media_type=GLB_MEDIA_TYPE, headers=headers)
+    def __init__(
+        self, stream: CrudStream, *, headers: dict[str, str], media_type: str = GLB_MEDIA_TYPE
+    ) -> None:
+        super().__init__(stream.aiter_bytes(), media_type=media_type, headers=headers)
         self._stream = stream
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -296,3 +539,228 @@ async def render_preview(
     ):
         headers["Content-Length"] = stream.response.headers["content-length"]
     return _Relayed(stream, headers=headers)
+
+
+async def _relayed_preview(opening: Awaitable[CrudStream]) -> Response:
+    """A checked file's preview relayed as a stream (#6133, spec 2026-11-13 §7 "Serving the
+    preview") with `PREVIEW_HEADERS`, whatever the CRUD side's answer says: the bytes are
+    the untrusted check's, never decoded here. Any refusal is a 404 with no body, so a
+    reader learns no reason."""
+    try:
+        stream = await opening
+    except CrudRefusedError:
+        return Response(status_code=status.HTTP_404_NOT_FOUND)
+    headers = {k: v for k, v in PREVIEW_HEADERS.items() if k != "Content-Type"}
+    if "content-length" in stream.response.headers and (
+        "content-encoding" not in stream.response.headers
+    ):
+        headers["Content-Length"] = stream.response.headers["content-length"]
+    return _Relayed(stream, headers=headers, media_type=PREVIEW_HEADERS["Content-Type"])
+
+
+@visitor_router.get("/draft/sources/{source_id}/preview", response_class=Response)
+async def draft_source_preview(
+    source_id: str, crud: Crud, visitor_id: Visitor, client: Client
+) -> Response:
+    """The preview of a line of the visitor's own cart (#6133): the visitor's cookie reads
+    it, so the page shows it as an ``<img>``. Any other source is a bare 404."""
+    if SOURCE_ID.fullmatch(source_id) is None:
+        return Response(status_code=status.HTTP_404_NOT_FOUND)
+    return await _relayed_preview(
+        crud.draft_source_preview(source_id, visitor_id=visitor_id, client=client)
+    )
+
+
+@visitor_router.post("/order/sources/{source_id}/preview", response_class=Response)
+async def order_source_preview(source_id: str, request: Request, crud: Crud) -> Response:
+    """The preview of a source of the customer's order (#6133, spec 2026-11-13 §10.5). The
+    page POSTs its reader's body (the order link's token, or a signed-in reader's
+    ``order_id``), as it does for the view, so no URL holds the token; the store session
+    goes on. Any reader that reads nothing, or another order's source, is a bare 404."""
+    if SOURCE_ID.fullmatch(source_id) is None:
+        return Response(status_code=status.HTTP_404_NOT_FOUND)
+    body = await _body(request, "order_body_invalid")
+    return await _relayed_preview(
+        crud.order_source_preview(source_id, body, session=session_of(request))
+    )
+
+
+def _shown(node: Any, path: str = "") -> Any:
+    """``node`` (a customer's order view, or a part of it at ``path``) with the fields of
+    `ORDER_VIEW_FIELDS` only: anything else the CRUD side sent stops here."""
+    if isinstance(node, list):
+        return [_shown(value, path) for value in node]
+    if isinstance(node, dict):
+        kept = ORDER_VIEW_FIELDS.get(path, frozenset())
+        return {k: _shown(v, f"{path}.{k}" if path else k) for k, v in node.items() if k in kept}
+    return node
+
+
+async def _order(
+    request: Request, crud: StorefrontCrud, path: str, body: bytes, key: str | None = None
+) -> Any:
+    """The CRUD side's order route's answer, allowlisted, sent with the browser's store
+    session when it has one (a signed-in reader's ``order_id``); a reader that read
+    nothing is a 404 with no body here too."""
+    try:
+        answer = await crud.order(path, body, key=key, session=session_of(request))
+    except CrudRefusedError as error:
+        if error.status == status.HTTP_404_NOT_FOUND and not error.problem:
+            return Response(status_code=status.HTTP_404_NOT_FOUND)
+        raise
+    return _shown(answer)
+
+
+@visitor_router.post("/pay/checkout")
+async def pay_checkout(request: Request, crud: Crud) -> Any:
+    """What the pay page (`/pay#<token>`) needs to render PayPal's buttons. The body's
+    ``token`` goes on in the body, never a path or a log; a token that reads nothing is a
+    404 with no body."""
+    try:
+        answer = await crud.pay_checkout(await _body(request, "pay_body_invalid"))
+    except CrudRefusedError as error:
+        if error.status == status.HTTP_404_NOT_FOUND and not error.problem:
+            return Response(status_code=status.HTTP_404_NOT_FOUND)
+        raise
+    return {k: v for k, v in answer.items() if k in PAY_CHECKOUT_FIELDS}
+
+
+@visitor_router.post("/order/view")
+async def order_view(request: Request, crud: Crud) -> Any:
+    """The customer's order, which the body's token opens, or the ``order_id`` of the
+    signed-in account (``/o?order=<id>``)."""
+    return await _order(request, crud, "view", await _body(request, "order_body_invalid"))
+
+
+@visitor_router.post("/order/revisions/{revision_id}/answer")
+async def order_answer(revision_id: str, request: Request, crud: Crud, visitor_id: Visitor) -> Any:
+    """The customer's answer to a design: ``accepted``, or ``changes_requested`` with a
+    note."""
+    if REVISION_ID.fullmatch(revision_id) is None:
+        raise ApiError(
+            404, "There is no such design.", type_=f"{STOREFRONT_PROBLEMS}revision_not_found"
+        )
+    key = _request_key(request, visitor_id)
+    body = await _body(request, "order_body_invalid")
+    return await _order(request, crud, f"revisions/{revision_id}/answer", body, key)
+
+
+@visitor_router.post("/order/quotes/{quote_id}/accept")
+async def order_accept(quote_id: str, request: Request, crud: Crud, visitor_id: Visitor) -> Any:
+    """The customer accepts a price."""
+    if QUOTE_ID.fullmatch(quote_id) is None:
+        raise ApiError(
+            404, "There is no such price.", type_=f"{STOREFRONT_PROBLEMS}quote_not_found"
+        )
+    key = _request_key(request, visitor_id)
+    body = await _body(request, "order_body_invalid")
+    return await _order(request, crud, f"quotes/{quote_id}/accept", body, key)
+
+
+@visitor_router.post("/order/cancel")
+async def order_cancel(request: Request, crud: Crud, visitor_id: Visitor) -> Any:
+    """The customer cancels the order while nothing is approved and nothing is paid."""
+    key = _request_key(request, visitor_id)
+    body = await _body(request, "order_body_invalid")
+    return await _order(request, crud, "cancel", body, key)
+
+
+def _sign_in_required() -> ApiError:
+    return ApiError(
+        401, "Sign in to see your orders.", type_=f"{STOREFRONT_PROBLEMS}sign_in_required"
+    )
+
+
+@visitor_router.post("/account/code", status_code=status.HTTP_204_NO_CONTENT)
+async def account_code(
+    request: Request, crud: Crud, visitor_id: Visitor, client: Client
+) -> Response:
+    """A sign-in code mailed to the address. The bot check (``sign_up``) first, whenever a
+    site key is set; then the CRUD side's request, sent once (`StorefrontCrud.account_code`).
+    The answer is 204 for every address, so it never tells whether one has an account."""
+    await require_turnstile(request, "sign_up")
+    body = await _body(request, "account_body_invalid")
+    await crud.account_code(body, visitor_id=visitor_id, client=client)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@visitor_router.post("/account/verify")
+async def account_verify(
+    request: Request, response: Response, crud: Crud, visitor_id: Visitor, client: Client
+) -> Any:
+    """A sign-in by the mailed code. The bot check (``sign_in``) first, whenever a site key
+    is set; then the CRUD side's verify, sent once (`StorefrontCrud.account_verify`). Its
+    new session's token becomes the ``sb_session`` cookie and is never in a body. The
+    browser's earlier session is ended there."""
+    await require_turnstile(request, "sign_in")
+    body = await _body(request, "account_body_invalid")
+    account, token = await crud.account_verify(
+        body, visitor_id=visitor_id, client=client, session=session_of(request)
+    )
+    if token is None:
+        logger.error("the CRUD side's sign-in answered with no session")
+        raise ApiError(502, "The shop could not answer this request.")
+    set_session(request, response, token)
+    return account
+
+
+@visitor_router.post("/account/sign-out", status_code=status.HTTP_204_NO_CONTENT)
+async def account_sign_out(
+    request: Request, crud: Crud, visitor_id: Visitor, client: Client
+) -> Response:
+    """Sign-out: the session ends on the CRUD side and its cookie is cleared. The browser
+    also gets a new visitor: the old one belongs to the account, so a cart made next on a
+    shared browser is not the account's. When the CRUD side does not answer, this device
+    is still signed out, but the answer is 503 ``sign_out_incomplete`` and the revocation
+    is tried again in the background (`sign_out.py` `SignOutRetries`), unless that queue
+    is full: then the answer says the session ends at its expiry."""
+    session = session_of(request)
+    response = Response(status_code=status.HTTP_204_NO_CONTENT)
+    if session is not None:
+        try:
+            await crud.account_sign_out(visitor_id=visitor_id, client=client, session=session)
+        except CrudUnavailableError as error:
+            queued = request.app.state.sign_out_retries.add(
+                visitor_id=visitor_id, client=client, session=session
+            )
+            logger.warning(
+                "account sign-out: the CRUD side did not answer (%s); %s",
+                error,
+                "queued" if queued else "not queued",
+            )
+            text = SIGN_OUT_INCOMPLETE_TEXT if queued else SIGN_OUT_NOT_QUEUED_TEXT
+            response = problem_response(request, 503, text, type_=SIGN_OUT_INCOMPLETE)
+    clear_session(response)
+    response.set_cookie(
+        VISITOR_COOKIE,
+        sign_visitor(secrets.token_urlsafe(32), request.app.state.cookie_key),
+        max_age=VISITOR_MAX_AGE,
+        path="/",
+        secure=True,
+        httponly=True,
+        samesite="lax",
+    )
+    return response
+
+
+@visitor_router.get("/account")
+async def account(
+    request: Request, response: Response, crud: Crud, visitor_id: Visitor, client: Client
+) -> Any:
+    """The signed-in account, or ``null``. A cookie whose session ended is cleared."""
+    session = session_of(request)
+    if session is None:
+        return None
+    found = await crud.account(visitor_id=visitor_id, client=client, session=session)
+    if found is None:
+        clear_session(response)
+    return found
+
+
+@visitor_router.get("/account/orders")
+async def account_orders(request: Request, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
+    """What the signed-in account sees; 401 ``sign_in_required`` without a session."""
+    session = session_of(request)
+    if session is None:
+        raise _sign_in_required()
+    return await crud.account_orders(visitor_id=visitor_id, client=client, session=session)

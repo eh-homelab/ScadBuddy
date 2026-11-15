@@ -27,6 +27,7 @@ from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_run_choices import _uploaded_colours, run_print, run_request, run_routes
 from tests.api.test_send import BASE, configure, make_output
 from tests.support.operations import press
+from tests.support.printers import linked_printer
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -100,7 +101,9 @@ def in_spool_nines_colour(paths: DataPaths, model: str, output_id: str) -> None:
 
 
 def remember_h2c_at(client: TestClient, nozzle: str) -> None:
-    """What the print dialog last chose for the model: printer 1 (an H2C) and a nozzle."""
+    """What the print dialog last chose for the model: printer 1 (an H2C) and a nozzle.
+    The choice keeps the registry printer that links printer 1 (#5167)."""
+    linked_printer(client, 1)
     assert (
         client.put(
             "/api/v1/print/models/demo/choices",

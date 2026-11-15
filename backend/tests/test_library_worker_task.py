@@ -270,7 +270,7 @@ async def test_a_failing_sweep_fails_its_activity(
         store=SimpleNamespace(content=None),
         blobs=object(),
         refs=object(),
-        config=SimpleNamespace(job_ttl=60.0),
+        config=SimpleNamespace(sweep_grace=60.0),
         catalogue=SimpleNamespace(sweep_duplicate_staging=_broken(staging_error)),
         paths=SimpleNamespace(claims=None),
         events=None,
@@ -289,6 +289,10 @@ async def test_a_failing_sweep_fails_its_activity(
                 # #5700: the payment pages whose close failed.
                 service=SimpleNamespace(retry_closes=_broken_async, settle_captures=_broken_async),
                 bank=None,  # #4961: the linked account, read by the stubbed sync
+                # #5283: the storefront mail left unsent.
+                mail=SimpleNamespace(send_queued=_broken(OSError("the database is gone"))),
+                # #4699: the print watcher's floor, read before Bambuddy is.
+                floor=_broken_async,
             )
         ),
         settings_store=SimpleNamespace(load=StoredSettings),
@@ -415,6 +419,13 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
 
     monkeypatch.setattr(main, "_sweep_storefront", slow_storefront)
 
+    # #6133: the staged files' backstop, a listing of the staging area.
+    async def slow_staged(state: object) -> int:
+        await asyncio.sleep(0.1)
+        return 0
+
+    monkeypatch.setattr(main, "sweep_staged", slow_staged)
+
     # #4439, #4747: the Bambuddy printer sync, Bambuddy lists and a probe or two.
     async def slow_sync(*args: object) -> SimpleNamespace:
         await asyncio.sleep(0.1)
@@ -438,6 +449,15 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
 
     monkeypatch.setattr(main, "sync_deposits", slow_deposits)
 
+    # #5283: the storefront mail left unsent, an SMTP send per row.
+    def slow_mail() -> int:
+        time.sleep(0.1)
+        return 0
+
+    # #4699: the print watcher, off: one read of its floor, and no Bambuddy call.
+    async def slow_floor() -> None:
+        await asyncio.sleep(0.1)
+
     state.print_runs = SimpleNamespace(client=None, task_queue="bambuddy")
     state.settings_store = SimpleNamespace(load=StoredSettings)
     # #2718: the claims sweep's batch-print store, beside the library index.
@@ -460,6 +480,8 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
             # #4959: the pending captures, a provider read or two per request.
             service=SimpleNamespace(retry_closes=slow_closes, settle_captures=slow_closes),
             bank=None,  # #4961: the linked account, read by the stubbed sync
+            mail=SimpleNamespace(send_queued=slow_mail),
+            floor=slow_floor,
             temporal=object,
             store=None,
             refs=None,

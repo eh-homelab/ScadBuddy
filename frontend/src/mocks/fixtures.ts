@@ -1027,9 +1027,15 @@ export const settingsDefaults = {
   // #5281 — auto tax, the deposit policy and the shipping options, at the backend's defaults.
   orders_tax_percent: '0',
   orders_tax_shipping: false,
+  // #6133 — the handling fee for bought items, at the backend's defaults (none).
+  orders_purchase_fee_flat_minor: 0,
+  orders_purchase_fee_percent: '0',
   orders_deposit_policy: [],
   storefront_shipping_options: [],
   storefront_payment_instructions: null,
+  orders_customer_messaging: null,
+  // #6153 — the shop slice profile: none, so no visitor sees a price.
+  storefront_slice_profile: null,
   // #4250 — the price book's policy and the rough estimate's factor, read by each quote.
   pricing_machine_rate_per_hour: '0',
   pricing_setup_fee: '0',
@@ -1041,8 +1047,18 @@ export const settingsDefaults = {
   storefront_renders_per_minute: 3,
   storefront_renders_per_day: 30,
   storefront_render_concurrency: 2,
+  // #6153 — the storefront's slices at once.
+  storefront_slices_concurrent: 1,
   storefront_draft_ttl_days: 30,
   storefront_requests_enabled: false,
+  // #5283 — the storefront's mail; the password is sealed apart (`/storefront/mail/password`).
+  storefront_mail_host: null,
+  storefront_mail_port: 587,
+  storefront_mail_user: null,
+  storefront_mail_sender: null,
+  storefront_mail_tls: 'starttls',
+  // #5283 — the bot check: off with no site key; the secret is reported only as a flag.
+  storefront_turnstile_site_key: null,
   // #4953 — whether a fulfilled line item may be unfulfilled.
   orders_allow_unfulfil: true,
   // #5326 — job cost: the labour rate a time entry copies, one USD in the shop's currency,
@@ -1071,7 +1087,13 @@ export const settingsDeployment: Record<string, unknown> = {
 }
 
 /** #5281 — stored only, never env-seeded: no source badge and no reset. */
-const STORED_ONLY = new Set(['orders_deposit_policy', 'storefront_shipping_options', 'storefront_payment_instructions'])
+const STORED_ONLY = new Set([
+  'orders_deposit_policy',
+  'storefront_shipping_options',
+  'storefront_payment_instructions',
+  'orders_customer_messaging',
+  'storefront_slice_profile',
+])
 
 /** `core/settings.py` `APPLIES`: when a change to each env-seeded field takes effect. */
 export const settingsApplies: NonNullable<Settings['applies']> = {
@@ -1079,6 +1101,8 @@ export const settingsApplies: NonNullable<Settings['applies']> = {
   bambuddy_api_key: 'live',
   google_fonts_api_key: 'live',
   git_remote_token: 'live',
+  storefront_turnstile_site_key: 'live',
+  storefront_turnstile_secret: 'live',
   // #4249 — copied by each order at create; neither live nor a restart.
   orders_currency: 'next order',
   render_concurrency: 'restart',
@@ -1116,6 +1140,8 @@ export const settings: Settings = {
   public_url: 'https://scadbuddy.internal.nullreference.io',
   library_folder_id: 2,
   printer_id: 1,
+  // #5167 — the default printer by registry id: the mocked registry's row for printer 1.
+  default_printer: '00000000-0000-4000-8000-000000000001',
   default_plate: null,
   display_unit: 'mm',
   print_run_retention_seconds: null,
@@ -1126,11 +1152,17 @@ export const settings: Settings = {
   job_ttl: 3600,
   activity_follow: null,
   asset_fetch_domains: [...DEFAULT_ASSET_FETCH_DOMAINS],
+  // #4699: the print watcher, off by default; the printer's storage is not a default source.
+  print_auto_import: false,
+  print_auto_import_sources: ['archive', 'archive_source', 'library'],
+  print_auto_import_skip_printers: [],
+  print_auto_import_skip_lan_printers: [],
   activity_ttl_seconds: null,
   activity_repair_window_seconds: null,
   has_google_fonts_api_key: false,
   has_store_s3_secret_access_key: false,
   has_git_remote_token: false,
+  has_storefront_turnstile_secret: false,
   sources: {
     ...Object.fromEntries(Object.keys(settingsApplies).map((name) => [name, 'default' as const])),
     bambuddy_url: 'stored',
@@ -1284,6 +1316,8 @@ export const printOptions: PrintOptionsState = {
   printers: {},
   models: {},
   printer_id: 1,
+  // #5167 — the Settings printer by registry id: the mocked registry's row for printer 1.
+  default_printer: '00000000-0000-4000-8000-000000000001',
 }
 
 export const targets: BambuddyTargets = {
@@ -1747,6 +1781,8 @@ function printOf(
     },
     links: { bambuddy_url: 'https://bambuddy.example/archives', customize_url: `/m/${output.slug}` },
     part_settings: null,
+    // #4698: a print a person imported onto a model; none here.
+    imported: null,
     // The summary's own fields went in above; these are the detail's, a disjoint set.
     ...detail,
   }

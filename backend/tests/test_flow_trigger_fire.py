@@ -13,6 +13,7 @@ import pytest
 from scadbuddy.flow_triggers import fire as fire_module
 from scadbuddy.flow_triggers.fire import TriggerFires
 from scadbuddy.flow_triggers.models import ScheduleTiming, Trigger
+from scadbuddy.flows.typecheck import CheckerUnavailableError
 
 
 def trigger() -> Trigger:
@@ -100,3 +101,28 @@ async def test_an_attempt_refused_its_start_settles_with_the_reason_and_starts_n
         assert await fires._decide(found.id, "fire-1", "run-1", None) == ("skipped", reason)
         assert not store.seeded
     assert started == []
+
+
+async def test_a_checker_that_did_not_answer_raises_so_the_fire_is_tried_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6123: a checker whose worker died says nothing about the script, so the attempt
+    raises (the activity's retry tries again) and never settles "no longer type-checks"."""
+
+    async def unavailable(*args: Any) -> list[Any]:
+        raise CheckerUnavailableError
+
+    async def get_definition(definition_id: str) -> Any:
+        return SimpleNamespace(script="", inputs_schema={}, deleted_at=None, archived_at=None)
+
+    monkeypatch.setattr(fire_module, "check_script", unavailable)
+    flows = SimpleNamespace(definitions=SimpleNamespace(get=get_definition), client=object())
+    found = trigger()
+    fires = TriggerFires(
+        FakeStore(found, None),  # type: ignore[arg-type]
+        lambda: flows,  # type: ignore[arg-type,return-value]
+        client=object(),  # type: ignore[arg-type]
+        task_queue="library",
+    )
+    with pytest.raises(CheckerUnavailableError):
+        await fires._decide(found.id, "fire-1", "run-1", None)

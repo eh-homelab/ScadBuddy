@@ -89,7 +89,7 @@ async def test_a_lan_pick_is_pending_until_its_start_settles(
 
 
 async def test_settling_a_start_again_changes_nothing(store: RackUsageStore) -> None:
-    await store.record_lan_picks(RUN, FIRST, 9, [_picked(A)])
+    await store.record_lan_picks(RUN, FIRST, None, [_picked(A)])
     assert await store.settle_lan(RUN, FIRST) == 1
     assert await store.settle_lan(RUN, FIRST) == 0
     assert await store.settle_lan(RUN) == 0
@@ -157,8 +157,8 @@ async def test_a_start_picked_again_keeps_the_newer_pick(store: RackUsageStore) 
 
 
 async def test_a_lan_pick_never_collides_with_a_queue_items(store: RackUsageStore) -> None:
-    await store.record_picks(51, 1, [_picked(A)])
-    await store.record_lan_picks(RUN, FIRST, 1, [_picked(A)])
+    await store.record_picks(51, None, [_picked(A)])
+    await store.record_lan_picks(RUN, FIRST, None, [_picked(A)])
     assert (await store.usage([A]))[A].pending == 2
     await store.record_prints(
         archive_id=101,
@@ -191,7 +191,7 @@ async def test_the_watchs_settle_times_a_start_to_its_reports_end(
     """#5142: the printer watch settles a start as its report ends it, timed to that
     report, however late anything else settles it; the follow's settle after it then
     writes nothing."""
-    await store.record_lan_picks(RUN, FIRST, None, [_picked(A, GREEN)], printer)
+    await store.record_lan_picks(RUN, FIRST, printer, [_picked(A, GREEN)])
     _picked_ago(pg_conninfo, 3600)
 
     ended_at = datetime.now(UTC) - timedelta(seconds=3000)
@@ -206,7 +206,7 @@ async def test_the_watchs_settle_times_a_start_to_its_reports_end(
 async def test_the_watchs_settle_names_only_that_printers_start(
     store: RackUsageStore, printer: str
 ) -> None:
-    await store.record_lan_picks(RUN, FIRST, None, [_picked(A)], printer)
+    await store.record_lan_picks(RUN, FIRST, printer, [_picked(A)])
     assert await store.settle_lan_ended(printer, SECOND, datetime.now(UTC)) == 0
     other = "0" * 8 + "-0000-4000-8000-" + "0" * 12
     assert await store.settle_lan_ended(other, FIRST, datetime.now(UTC)) == 0
@@ -221,8 +221,8 @@ async def test_a_run_settle_stops_an_earlier_copy_at_the_printers_next_start(
     """#5142: a copy the watch and ``lan_wait`` both missed is settled by the run's
     last settle, but the printer had ended it to take the next copy: its time stops at
     that copy's pick, not at the run's end."""
-    await store.record_lan_picks(RUN, FIRST, None, [_picked(A)], printer)
-    await store.record_lan_picks(RUN, SECOND, None, [_picked(B)], printer)
+    await store.record_lan_picks(RUN, FIRST, printer, [_picked(A)])
+    await store.record_lan_picks(RUN, SECOND, printer, [_picked(B)])
     _start_picked_ago(pg_conninfo, FIRST, 3600)
     _start_picked_ago(pg_conninfo, SECOND, 600)
 
@@ -235,7 +235,7 @@ async def test_a_run_settle_stops_an_earlier_copy_at_the_printers_next_start(
 
 class _Recording:
     def __init__(self, *, fail: bool = False) -> None:
-        self.picks: list[tuple[str, str, int | None, list[PickedHotend]]] = []
+        self.picks: list[tuple[str, str, str | None, list[PickedHotend]]] = []
         self.settled: list[tuple[str, str | None, bool]] = []
         self.fail = fail
 
@@ -243,13 +243,12 @@ class _Recording:
         self,
         run_id: str,
         subtask_name: str,
-        printer_id: int | None,
+        printer: str | None,
         picks: list[PickedHotend],
-        printer: str | None = None,
     ) -> int:
         if self.fail:
             raise psycopg.OperationalError("the database is gone")
-        self.picks.append((run_id, subtask_name, printer_id, list(picks)))
+        self.picks.append((run_id, subtask_name, printer, list(picks)))
         return len(picks)
 
     async def settle_lan(

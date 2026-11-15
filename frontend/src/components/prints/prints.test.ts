@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { prints } from '../../mocks/fixtures'
-import { coverSlides } from './prints'
+import type { ScadBuddyJob } from '../../api/types'
+import { coverSlides, scadbuddyJobPath } from './prints'
 
 describe('coverSlides (#2355)', () => {
   it('opens the cover whole, not the card’s small copy of it', () => {
@@ -9,5 +10,37 @@ describe('coverSlides (#2355)', () => {
     expect(coverSlides(done)).toEqual([
       expect.objectContaining({ src: '/api/v1/prints/35/photos/finish_20260927_015703_93372185.jpg' }),
     ])
+  })
+})
+
+describe('scadbuddyJobPath (#3743)', () => {
+  const job = (fields: Partial<ScadBuddyJob>): ScadBuddyJob => ({
+    subject: 'output:luna-0002',
+    output_id: 'luna-0002',
+    library_file_id: null,
+    slug: 'keychain',
+    run_id: 'run-luna-2',
+    archive_id: null,
+    matched_by: 'queue_item',
+    ...fields,
+  })
+
+  it('opens the print once Bambuddy archived it', () => {
+    expect(scadbuddyJobPath(job({ archive_id: 35 }))).toBe('/prints/35')
+  })
+
+  it('opens its queue item page until then, for a queue item (#3744)', () => {
+    expect(scadbuddyJobPath(job({}), 259)).toBe('/prints/queue/259')
+    expect(scadbuddyJobPath(job({ archive_id: 35 }), 259)).toBe('/prints/35')
+  })
+
+  it("opens the output's page until then, for a job with no queue item", () => {
+    expect(scadbuddyJobPath(job({}))).toBe('/edit/luna-0002')
+  })
+
+  it("opens a library file's page in the Library", () => {
+    expect(
+      scadbuddyJobPath(job({ subject: 'library:1630', output_id: null, slug: null, library_file_id: 1630 })),
+    ).toBe('/library?file=1630')
   })
 })

@@ -11,11 +11,12 @@ client of a stand-in API that answers fixed store settings and serves no job rou
 test of the worker that renders nothing. `threaded_render_crud` is a render worker's
 blocking client of the render routes served on a thread of their own, for a test that
 calls them from its event loop or a sync test; `threaded_render_index` is the worker's
-`RemoteBlobIndex` over it. `print_crud_app` serves the print routes over the API's
-settings store (and its run, outcome and operation stores and its bus), `threaded_print_crud`
-is a blocking client of them on a thread of their own, `served_print_crud` an async one on
-a local port, and `static_print_crud` is a print worker's client of a stand-in API that
-answers fixed settings. `FakeClock` is a
+`RemoteBlobIndex` over it, and `threaded_worker_index` its `WorkerViewIndex`.
+`print_crud_app` serves the print routes over the API's settings store (and its run,
+outcome, operation and upload stores and its bus), `threaded_print_crud` is a blocking
+client of them on a thread of their own,
+`served_print_crud` an async one on a local port, and `static_print_crud` is a print
+worker's client of a stand-in API that answers fixed settings. `FakeClock` is a
 client clock that moves only by the client's own waits, so a test's count of tries does
 not depend on wall time."""
 
@@ -25,8 +26,9 @@ import base64
 import hashlib
 import threading
 import time
-from collections.abc import AsyncIterator, Iterator, Mapping
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -49,7 +51,9 @@ from scadbuddy.auth.service_credentials import (
     ServiceCredentialStore,
 )
 from scadbuddy.bambuddy.outcomes import PrintOutcomeStore
+from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.runs import PrintRunStore
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.config import INSTALL_CONCURRENCY
 from scadbuddy.core.events import EventBus
 from scadbuddy.core.metrics import Metrics
@@ -61,6 +65,7 @@ from scadbuddy.crud.client import CrudClient, CrudSyncClient
 from scadbuddy.crud.guard import CRUD_HEADERS
 from scadbuddy.crud.projects import RemoteFlowStore, RemotePayloadKeys
 from scadbuddy.crud.render import (
+    FORGETTABLE_PREFIXES,
     RemoteBlobIndex,
     RemoteBlobRefs,
     RemoteGeometryIndex,
@@ -70,16 +75,30 @@ from scadbuddy.flows.component import FLOWS
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.libraries import CheckoutGate, CheckoutLeases, InstallPermits
+from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.settings_store import PrintSettings, RenderStoreSettings, SettingsStore
 from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.operations.store import OperationStore
+from scadbuddy.print_watch.component import AUTO_IMPORTS
+from scadbuddy.print_watch.store import AutoImportStore
 from scadbuddy.printers.component import PRINTERS
+from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.store import PrinterStore
+from scadbuddy.rack.component import RACK_USAGE
+from scadbuddy.rack.usage import RackUsageStore
 from scadbuddy.render.projection import JobProjection
+from scadbuddy.slicing.component import SLICING
+from scadbuddy.slicing.held_presets import HeldPresetStore
+from scadbuddy.slicing.store import NativeSliceStore
+from scadbuddy.spools.component import SPOOLS
+from scadbuddy.spools.native import NativeSpoolStore
+from scadbuddy.spools.spool_providers import NativeProvider
+from scadbuddy.spools.store import SpoolStore
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.content import ContentStore
-from scadbuddy.store.index import Pool
+from scadbuddy.store.content_models import BlobRef, BlobStat
+from scadbuddy.store.index import BlobIndex, Pool
 from scadbuddy.workflows.flows_client import connect_flows
 from scadbuddy.workflows.payload_codec import Connect, PgPayloadKeys, payload_key_context
 
@@ -382,6 +401,142 @@ def threaded_render_index(pool: Pool) -> Iterator[RemoteBlobIndex]:
         yield RemoteBlobIndex(client)
 
 
+#: The prefixes of the keys only the API writes in production (a print library file's,
+#: an upload's, a font's, a snapshot's, a slice's, a library file's object, an order
+#: attachment's, a customer's or request's file, a quote's, a listing's media, an agent
+#: workspace's). `WorkerViewIndex` writes these over SQL, as the API does.
+API_KEY_PREFIXES = (
+    "library-",
+    "asset-",
+    "font-",
+    "src-",
+    "slice-",
+    "lib3-",
+    "attachment-",
+    "customer-",
+    "request-file-",
+    "quote-",
+    "media-",
+    "workspace-",
+)
+
+
+class WorkerViewIndex:
+    """The blob index as the render worker's store sees it: a render job's own keys
+    (`api/crud_render.py` `RENDER_KEY`), its touches and every read it makes, through the
+    CRUD routes (`RemoteBlobIndex`). Over SQL only a write the API makes in production, of
+    a key with one of `API_KEY_PREFIXES`, so a shared store test that puts, say, a print
+    library file's key runs that write as the API does. Any other key is an
+    `AssertionError`: a test that means to exercise the worker uses a render-shaped key,
+    so its writes reach the routes (#5298 final review).
+    `tests/crud/test_crud_blob_index.py` tests the refusals."""
+
+    def __init__(self, remote: RemoteBlobIndex, sql: BlobIndex) -> None:
+        self.remote = remote
+        self.sql = sql
+
+    def _writer(self, *keys: str, kind: str | None = None) -> RemoteBlobIndex | BlobIndex:
+        if all(crud_render.RENDER_KEY.fullmatch(key) for key in keys) and kind in (
+            None,
+            crud_render.RENDER_KIND,
+        ):
+            return self.remote
+        if all(key.startswith(API_KEY_PREFIXES) for key in keys):
+            return self.sql
+        raise AssertionError(
+            f"{list(keys)!r} ({kind or 'any kind'}): neither a render job's piece nor a key"
+            " the API writes; use a render-shaped key (`tests.support.store.render_key`)"
+        )
+
+    @staticmethod
+    def _reads(key: str) -> bool:
+        return crud_render.HELD_KEY.fullmatch(key) is not None or key.startswith(
+            crud_render.READ_PREFIXES
+        )
+
+    def get(self, key: str) -> BlobStat | None:
+        return (self.remote if self._reads(key) else self.sql).get(key)
+
+    def by_sha(self, sha256: str, kind: str, backend: str) -> BlobRef | None:
+        index = self.remote if kind in crud_render.FOUND_KINDS else self.sql
+        return index.by_sha(sha256, kind, backend)
+
+    def put(
+        self,
+        key: str,
+        ref: BlobRef,
+        *,
+        slug: str | None,
+        meta: dict[str, Any],
+        reuse: bool = False,
+    ) -> BlobRef | None:
+        index = self._writer(key, kind=ref.kind)
+        return index.put(key, ref, slug=slug, meta=meta, reuse=reuse)
+
+    def swap(
+        self,
+        key: str,
+        ref: BlobRef,
+        *,
+        expected: str | None,
+        slug: str | None,
+        meta: dict[str, Any],
+        reuse: bool = False,
+    ) -> bool:
+        index = self._writer(key, kind=ref.kind)
+        return index.swap(key, ref, expected=expected, slug=slug, meta=meta, reuse=reuse)
+
+    def now(self) -> datetime:
+        return self.remote.now()
+
+    def mark(self, keys: Sequence[str], *, backend: str, cutoff: datetime, **meta: Any) -> None:
+        self._writer(*keys).mark(keys, backend=backend, cutoff=cutoff, **meta)
+
+    def touch(self, key: str) -> None:
+        touched = crud_render.HELD_KEY.fullmatch(key) or key.startswith(
+            crud_render.TOUCHED_PREFIXES
+        )
+        (self.remote if touched else self._writer(key)).touch(key)
+
+    def delete(self, key: str, *, backend: str | None = None) -> BlobStat | None:
+        # A forget (no backend) of a font's, snapshot's or library object's copy is the
+        # worker's: `…/forget-copy`.
+        forget = backend is None and key.startswith(FORGETTABLE_PREFIXES)
+        index = self.remote if forget else self._writer(key)
+        return index.delete(key, backend=backend)
+
+    def delete_if_stale(
+        self, key: str, cutoff: datetime, *, backend: str | None = None
+    ) -> BlobStat | None:
+        return self._writer(key).delete_if_stale(key, cutoff, backend=backend)
+
+    def shares_backend_id(self, backend: str, backend_id: str) -> bool:
+        return self.remote.shares_backend_id(backend, backend_id)
+
+    def recorded(self, backend: str, backend_id: str) -> bool:
+        return self.remote.recorded(backend, backend_id)
+
+    def stats(
+        self,
+        kinds: Sequence[str] | None,
+        slug: str | None = None,
+        *,
+        backend: str | None = None,
+    ) -> list[BlobStat]:
+        worker = kinds is not None and set(kinds) <= crud_render.READ_KINDS
+        return (self.remote if worker else self.sql).stats(kinds, slug, backend=backend)
+
+    def usage(self, backend: str) -> tuple[int, int, dict[str, int]]:
+        return self.remote.usage(backend)
+
+
+@contextmanager
+def threaded_worker_index(pool: Pool) -> Iterator[WorkerViewIndex]:
+    """`WorkerViewIndex` over `threaded_render_crud` and ``pool``."""
+    with threaded_render_index(pool) as remote:
+        yield WorkerViewIndex(remote, BlobIndex(pool))
+
+
 class FixedToken:
     """A render credential the stand-in API takes."""
 
@@ -434,25 +589,65 @@ def print_crud_app(
     operations: OperationStore | None = None,
     kinds: Mapping[str, OperationKind] | None = None,
     printers: PrinterStore | None = None,
+    links: PrintLinkStore | None = None,
+    catalogue: Any = None,
+    rack: RackUsageStore | None = None,
+    bootstrap: BootstrapVerifier | None = None,
 ) -> FastAPI:
     """The print routes, reading the settings through the API's ``store``, the runs
     through ``runs`` and ``outcomes``, publishing on ``events``, writing operations
-    through ``operations`` of ``kinds``, and printer rows through ``printers``."""
+    through ``operations`` of ``kinds``, printer rows through ``printers`` (the API's own
+    registry on ``store``'s pool when not given) and the LAN reports on that pool, the print
+    links, sends and the queue item a reprint queued through ``links`` (the API's own
+    on ``store``'s pool when not given), and the uploads, slices, background slices,
+    project records and outputs' last prints on ``store``'s pool. A LAN-only printer's
+    print records go to the watcher's store on ``store``'s pool, matched against
+    ``catalogue`` (none when not given), and the rack hotends' usage goes through
+    ``rack`` (no rack route answers without one), and the spools, native spools, kept
+    presets and native slices through the API's own stores on ``store``'s pool; the
+    exchange too, of the proofs ``bootstrap`` takes, when given (#5298 Task 33)."""
     app = FastAPI(dependencies=[Depends(auth_check)])
     parts: dict[Any, Any] = {
-        AUTH: SimpleNamespace(would_refuse=_Noted()),
+        AUTH: SimpleNamespace(
+            would_refuse=_Noted(),
+            verifiers={} if bootstrap is None else {"bootstrap": bootstrap},
+            credentials=credentials,
+            core=SimpleNamespace(metrics=Metrics()),
+        ),
         OPERATIONS: SimpleNamespace(store=operations, kinds=kinds or {}),
-        PRINTERS: SimpleNamespace(store=printers),
+        AUTO_IMPORTS: AutoImportStore(store.pool),
+        # The registry is the API's own on ``store``'s pool when not given (#5298 Task 29).
+        PRINTERS: SimpleNamespace(
+            store=printers if printers is not None else PrinterStore(store.pool, None),
+            reports=PrinterReportStore(store.pool),
+        ),
+        RACK_USAGE: rack,
+        # The spools, ScadBuddy's own and the kept presets and native slices: the API's
+        # own stores on ``store``'s pool (#5298 Task 31).
+        SPOOLS: SimpleNamespace(
+            store=SpoolStore(store.pool),
+            providers=[NativeProvider(NativeSpoolStore(store.pool))],
+        ),
+        SLICING: SimpleNamespace(
+            store=NativeSliceStore(store.pool), held=HeldPresetStore(store.pool)
+        ),
     }
     app.state.scadbuddy = SimpleNamespace(
         settings=SimpleNamespace(auth_mode="enforce"),
         settings_store=store,
         print_runs=SimpleNamespace(store=runs, outcomes=outcomes),
+        print_links=links if links is not None else PrintLinkStore(store.pool),
+        uploads=BambuddyUploadStore(store.pool),
+        # The API's `OutputStore`, of which the routes read only its last prints.
+        outputs=SimpleNamespace(prints=OutputPrintStore(store.pool)),
         events=events,
+        catalogue=catalogue or SimpleNamespace(slugs=list, exists=lambda slug: False),
         components=SimpleNamespace(get=lambda key: parts[key]),
     )
     app.include_router(crud_print.router, prefix="/api/v1")
     app.include_router(crud_areas.router, prefix="/api/v1")
+    if bootstrap is not None:
+        app.include_router(service_token.router, prefix="/api/v1")
     install_problem_handlers(app)
     app.add_middleware(AuthGate, sessions=lambda: _NoSessions(), credentials=lambda: credentials)
     return app
@@ -515,7 +710,24 @@ def static_print_crud(current: PrintSettings | None = None) -> CrudClient:
     """A print worker's client of an API that lists its areas and answers ``current``
     (the defaults) as the settings. Its other routes are missing (a 404)."""
     body = (current or PrintSettings()).model_dump(mode="json")
-    areas = ["settings", "runs", "operations", "events", "printer-ensure"]
+    areas = [
+        "settings",
+        "runs",
+        "operations",
+        "events",
+        "printer-ensure",
+        "reprints",
+        "uploads",
+        "previews",
+        "copy-leases",
+        "links",
+        "lan-imports",
+        "printers",
+        "rack",
+        "spools",
+        "transfer-urls",
+        "access-codes",
+    ]
 
     def answer(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/print/areas"):

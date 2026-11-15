@@ -67,6 +67,13 @@ def s3_content(
     )
 
 
+def render_key(name: str) -> str:
+    """A piece's key as a render job writes it (64 hex, `workflows/models.py`
+    `piece_key`), named for a test: under ``content``'s worker view its writes reach the
+    CRUD routes (`api/crud_render.py` `RENDER_KEY`)."""
+    return hashlib.sha256(name.encode()).hexdigest()
+
+
 def object_id(store: ContentStore, kind: BlobKind, data: bytes) -> str:
     """The id ``store``'s backend gives ``data`` stored as ``kind``, stored or not."""
     sha256 = hashlib.sha256(data).hexdigest()
@@ -122,8 +129,16 @@ def moto_s3() -> Iterator[S3Settings]:
         yield settings
     finally:
         # moto's state is the process's, not the server's: the next test starts empty.
-        httpx.post(f"{settings.endpoint}/moto-api/reset").raise_for_status()
-        server.stop()
+        # The server runs in this process, so the reset is a call, not a request (#5989):
+        # `POST /moto-api/reset` takes about 20 ms, but on a loaded runner the answer
+        # took 5.5 s behind the app's teardown and missed httpx's 5 s read timeout.
+        # The server stops first, so no request of the test's is still in flight.
+        from moto.moto_api._internal.models import moto_api_backend
+
+        try:
+            server.stop()
+        finally:
+            moto_api_backend.reset()
 
 
 @pytest.fixture(params=["local", "s3", "worker"], ids=["local", "s3", "worker"])
@@ -131,18 +146,20 @@ async def content(
     request: pytest.FixtureRequest, tmp_path: Path, pool: Pool
 ) -> AsyncIterator[ContentStore]:
     """A content store over a directory, then over moto's S3, then the render worker's:
-    over a directory, its index the API's CRUD routes (`RemoteBlobIndex`, #5298)."""
+    over a directory, its index the API's CRUD routes for a render job's keys, its
+    touches and every read it makes (`WorkerViewIndex`, #5298); the API writes the keys
+    only it writes in production. A piece a test stores takes a `render_key`."""
     with ExitStack() as stack:
         if request.param == "local":
             store = local_content(tmp_path / "remote", pool)
         elif request.param == "s3":
             store = s3_content(request.getfixturevalue("s3"), pool)
         else:
-            from tests.crud.crud_support import threaded_render_index
+            from tests.crud.crud_support import threaded_worker_index
 
             store = ContentStore(
                 LocalContentBackend(tmp_path / "remote"),
-                stack.enter_context(threaded_render_index(pool)),
+                stack.enter_context(threaded_worker_index(pool)),
             )
         try:
             yield store

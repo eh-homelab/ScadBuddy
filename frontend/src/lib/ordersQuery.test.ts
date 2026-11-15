@@ -36,4 +36,12 @@ describe('ordersQuery (#4249)', () => {
     expect(isOrdersFiltered({ ...DEFAULT_ORDERS_QUERY, unsubmitted: true })).toBe(true)
     expect(parseOrdersQuery(new URLSearchParams('unsubmitted=0')).unsubmitted).toBe(false)
   })
+  it('keeps the customer models filters in the URL and sends them as true (#6133)', () => {
+    const q = parseOrdersQuery(new URLSearchParams('?own_model=1&purchase_pending=1&import_stuck=1'))
+    expect(q).toMatchObject({ own_model: true, purchase_pending: true, import_stuck: true })
+    expect(toOrdersParams(q).toString()).toBe('own_model=1&purchase_pending=1&import_stuck=1')
+    expect(ordersApiParams(q).toString()).toBe('own_model=true&purchase_pending=true&import_stuck=true')
+    expect(isOrdersFiltered({ ...DEFAULT_ORDERS_QUERY, import_stuck: true })).toBe(true)
+    expect(toOrdersParams(DEFAULT_ORDERS_QUERY).toString()).toBe('')
+  })
 })

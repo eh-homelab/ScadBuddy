@@ -17,16 +17,20 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
-from psycopg import AsyncConnection, Connection
+from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 
+from scadbuddy.bambuddy.copy_leases import (
+    CopyLease,
+    CopyLeases,
+    LeaseLostError,
+    held_in,
+    hold_lease,
+)
 from scadbuddy.print_library.ids import NATIVE_ID_BASE
-
-#: Prefixes the key of :meth:`BambuddyUploadStore.copy_lock`'s advisory lock.
-COPY_LOCK_PREFIX = "scadbuddy-library-copy:"
 
 #: What a print or a Generate is filed into (#3651): a Bambuddy project (its folder), or
 #: a library folder of its own.
@@ -114,11 +118,13 @@ class LostStart(BaseModel):
 
 
 class ProjectTarget(BaseModel):
-    """The printer and nozzle a Bambuddy project last printed on (#317). ``printer_id``
-    is its Bambuddy printer, ``0`` for one with none (a LAN-only printer), which then has
-    only ``printer``, its registry id (#4971)."""
+    """The printer and nozzle a Bambuddy project last printed on (#317). ``printer`` is
+    its registry printer, the one key stored (#4971, #5167). ``printer_id`` is not
+    stored: a read gives the Bambuddy printer that ``printer`` links, ``0`` for none (a
+    LAN-only printer). A write with no ``printer`` (a build before #5167) keeps the
+    registry printer that links ``printer_id``, and nothing when none does."""
 
-    printer_id: int
+    printer_id: int = 0
     printer: str | None = None
     nozzle_diameter: str | None = None
     #: Its ``NozzlePlan`` (#2166), as JSON: this module is below the plan's.
@@ -139,29 +145,21 @@ class BambuddyUploadStore:
     def __init__(self, pool: ConnectionPool[Connection[DictRow]]) -> None:
         self._pool = pool
 
-    @asynccontextmanager
-    async def copy_lock(self, key: str) -> AsyncIterator[None]:
-        """Held, across every replica on this database, while one caller finds, uploads
-        and records a library copy under ``key`` (#317).
+    @property
+    def pool(self) -> ConnectionPool[Connection[DictRow]]:
+        """The pool, for a CRUD route that writes in one transaction with its ledger row
+        (`api/crud_print.py`, #5298)."""
+        return self._pool
 
-        A session-level advisory lock on a connection of its own, closed on the way
-        out, rather than a transaction-level one on the pool's. The section spans a
-        Bambuddy upload (up to its upload timeout), and the pool is the render queue's:
-        a pooled connection held that long takes a slot from it, and the store's own
-        queries inside the section need further slots, so enough folders locked at
-        once would exhaust the pool against itself. Closing the connection releases
-        the lock however the section ends, cancellation and a lost connection included.
+    @asynccontextmanager
+    async def copy_lock(self, key: str) -> AsyncIterator[CopyLease]:
+        """Held, across every replica and the print worker, while one caller finds,
+        uploads and records a library copy under ``key`` (#317): the copy lease
+        (`copy_leases.py`, #5298 Task 27), renewed while the section runs. Pass the
+        lease it yields to `record`, which refuses once another holder took it.
         """
-        pool = self._pool
-        conninfo = pool.conninfo if isinstance(pool.conninfo, str) else pool.conninfo()
-        conn = await AsyncConnection.connect(conninfo, autocommit=True)
-        try:
-            await conn.execute(
-                "SELECT pg_advisory_lock(hashtextextended(%s, 0))", (f"{COPY_LOCK_PREFIX}{key}",)
-            )
-            yield
-        finally:
-            await conn.close()
+        async with hold_lease(CopyLeases(self._pool), key) as lease:
+            yield lease
 
     async def for_output(self, output_id: str, *, native: bool = False) -> list[LibraryCopy]:
         """The output's copies in upload order, each with its slices: Bambuddy's, or with
@@ -176,9 +174,13 @@ class BambuddyUploadStore:
         """:meth:`for_output` for several outputs in two queries, not two per output."""
         return await asyncio.to_thread(self._for_outputs, list(dict.fromkeys(output_ids)), native)
 
-    async def record(self, output_id: str, copy: LibraryCopy) -> None:
-        """Record an upload, replacing the folder and target of one with the same id."""
-        await asyncio.to_thread(self._record, output_id, copy)
+    async def record(
+        self, output_id: str, copy: LibraryCopy, lease: CopyLease | None = None
+    ) -> None:
+        """Record an upload, replacing the folder and target of one with the same id.
+        With the ``lease`` of the `copy_lock` it was uploaded under, only while that
+        lease holds: else `LeaseLostError`, and nothing is written."""
+        await asyncio.to_thread(self._record, output_id, copy, lease)
 
     async def same_content(
         self, folder_id: int | None, target_key: str, content_key: str
@@ -338,18 +340,23 @@ class BambuddyUploadStore:
 
     def _record_preview(self, preview: PreviewSlice) -> None:
         with self._pool.connection() as conn:
-            conn.execute(
-                "INSERT INTO print_preview_slices (job_id, subject, library_file_id,"
-                " preset_key, plate_id, job_created) VALUES (%s, %s, %s, %s, %s, %s)",
-                (
-                    preview.job_id,
-                    preview.subject,
-                    preview.library_file_id,
-                    preview.preset_key,
-                    preview.plate_id,
-                    preview.job_created,
-                ),
-            )
+            self.record_preview_in(conn, preview)
+
+    @staticmethod
+    def record_preview_in(conn: Connection[DictRow], preview: PreviewSlice) -> None:
+        """`record_preview` on ``conn``, in the caller's transaction."""
+        conn.execute(
+            "INSERT INTO print_preview_slices (job_id, subject, library_file_id,"
+            " preset_key, plate_id, job_created) VALUES (%s, %s, %s, %s, %s, %s)",
+            (
+                preview.job_id,
+                preview.subject,
+                preview.library_file_id,
+                preview.preset_key,
+                preview.plate_id,
+                preview.job_created,
+            ),
+        )
 
     def _preview(self, job_id: int, subject: str) -> PreviewSlice | None:
         with self._pool.connection() as conn:
@@ -385,11 +392,16 @@ class BambuddyUploadStore:
 
     def _claim_preview(self, row_id: int) -> bool:
         with self._pool.connection() as conn:
-            row = conn.execute(
-                "UPDATE print_preview_slices SET printed = true"
-                " WHERE id = %s AND NOT retired RETURNING id",
-                (row_id,),
-            ).fetchone()
+            return self.claim_preview_in(conn, row_id)
+
+    @staticmethod
+    def claim_preview_in(conn: Connection[DictRow], row_id: int) -> bool:
+        """`claim_preview` on ``conn``, in the caller's transaction."""
+        row = conn.execute(
+            "UPDATE print_preview_slices SET printed = true"
+            " WHERE id = %s AND NOT retired RETURNING id",
+            (row_id,),
+        ).fetchone()
         return row is not None
 
     def _previews_to_sweep(self, older_than: timedelta) -> list[PreviewSlice]:
@@ -442,10 +454,17 @@ class BambuddyUploadStore:
 
     def _record_slice_start(self, library_file_id: int, job_id: int | None) -> None:
         with self._pool.connection() as conn:
-            conn.execute(
-                "INSERT INTO print_slice_starts (library_file_id, job_id) VALUES (%s, %s)",
-                (library_file_id, job_id),
-            )
+            self.record_slice_start_in(conn, library_file_id, job_id)
+
+    @staticmethod
+    def record_slice_start_in(
+        conn: Connection[DictRow], library_file_id: int, job_id: int | None
+    ) -> None:
+        """`record_slice_start` on ``conn``, in the caller's transaction."""
+        conn.execute(
+            "INSERT INTO print_slice_starts (library_file_id, job_id) VALUES (%s, %s)",
+            (library_file_id, job_id),
+        )
 
     def _prune_slice_starts(self, before: datetime) -> int:
         with self._pool.connection() as conn:
@@ -497,6 +516,23 @@ class BambuddyUploadStore:
         native library (``library_files.sha256``), trashed or not: the hash of the file a
         LAN start of it uploaded. A slice whose row was purged has none."""
         return await asyncio.to_thread(self._native_slice_hashes, output_id)
+
+    async def slice_owners(self, file_hash: str) -> list[str]:
+        """Each run subject (an output's id, or a library file's ``library:<id>``) with a
+        slice whose file has ``file_hash`` (#4698 review): a Bambuddy slice by the hash
+        read from Bambuddy, a native slice by its row's SHA-256. An archive with that
+        ``content_hash`` is a print of it (`linking.link_archive`)."""
+        return await asyncio.to_thread(self._slice_owners, file_hash)
+
+    async def unhashed_near(
+        self, at: datetime, limit: int, *, before: timedelta, after: timedelta
+    ) -> list[str]:
+        """The run subjects, newest slice first, with a Bambuddy slice whose hash was not
+        read yet and whose send window (`sent_between`, widened as `linking` widens it)
+        holds ``at``, ``before`` its first upload to ``after`` its last slice: those an
+        archive made at ``at`` can be a print of, until their hashes are read (#4698
+        review)."""
+        return await asyncio.to_thread(self._unhashed_near, at, limit, before, after)
 
     async def sent_between(self, output_id: str) -> tuple[datetime, datetime] | None:
         """When the output's first recorded copy was uploaded and its last slice was
@@ -562,10 +598,11 @@ class BambuddyUploadStore:
     def _project_targets(self) -> dict[int, ProjectTarget]:
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT project_id, printer_id,"
-                " CASE WHEN printer_id = 0 THEN printer::text END AS printer,"
-                " nozzle_diameter, nozzle_plan"
-                " FROM project_print_targets ORDER BY project_id"
+                "SELECT t.project_id, t.printer::text AS printer,"
+                " COALESCE(p.bambuddy_printer_id, 0) AS printer_id,"
+                " t.nozzle_diameter, t.nozzle_plan"
+                " FROM project_print_targets AS t JOIN printers AS p ON p.id = t.printer"
+                " ORDER BY t.project_id"
             ).fetchall()
         return {row["project_id"]: ProjectTarget.model_validate(row) for row in rows}
 
@@ -581,9 +618,11 @@ class BambuddyUploadStore:
     def _project_target(self, project_id: int) -> ProjectTarget | None:
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT printer_id, CASE WHEN printer_id = 0 THEN printer::text END AS printer,"
-                " nozzle_diameter, nozzle_plan"
-                " FROM project_print_targets WHERE project_id = %s",
+                "SELECT t.printer::text AS printer,"
+                " COALESCE(p.bambuddy_printer_id, 0) AS printer_id,"
+                " t.nozzle_diameter, t.nozzle_plan"
+                " FROM project_print_targets AS t JOIN printers AS p ON p.id = t.printer"
+                " WHERE t.project_id = %s",
                 (project_id,),
             ).fetchone()
         if row is None:
@@ -592,21 +631,32 @@ class BambuddyUploadStore:
 
     def _remember_project_target(self, project_id: int, target: ProjectTarget) -> None:
         with self._pool.connection() as conn:
-            conn.execute(
+            # The registry printer: the one named, else the one that links the Bambuddy
+            # printer (#5167). A target with neither is not remembered, and the project
+            # forgets its earlier target, as an overwrite would (#6106).
+            kept = conn.execute(
                 "INSERT INTO project_print_targets"
-                " (project_id, printer_id, printer, nozzle_diameter, nozzle_plan)"
-                " VALUES (%s, %s, %s, %s, %s) ON CONFLICT (project_id) DO UPDATE"
-                " SET printer_id = EXCLUDED.printer_id, printer = EXCLUDED.printer,"
+                " (project_id, printer, nozzle_diameter, nozzle_plan)"
+                " SELECT %(project)s, p.id, %(nozzle)s, %(plan)s FROM printers AS p"
+                " WHERE CASE WHEN %(printer)s::text IS NOT NULL"
+                " THEN p.id::text = %(printer)s::text"
+                " ELSE p.bambuddy_printer_id = %(bambuddy)s END"
+                " ON CONFLICT (project_id) DO UPDATE"
+                " SET printer = EXCLUDED.printer,"
                 " nozzle_diameter = EXCLUDED.nozzle_diameter,"
                 " nozzle_plan = EXCLUDED.nozzle_plan, updated_at = now()",
-                (
-                    project_id,
-                    target.printer_id,
-                    target.printer,
-                    target.nozzle_diameter,
-                    Jsonb(target.nozzle_plan) if target.nozzle_plan is not None else None,
-                ),
+                {
+                    "project": project_id,
+                    "printer": target.printer,
+                    "bambuddy": target.printer_id or None,
+                    "nozzle": target.nozzle_diameter,
+                    "plan": Jsonb(target.nozzle_plan) if target.nozzle_plan is not None else None,
+                },
             )
+            if kept.rowcount == 0:
+                conn.execute(
+                    "DELETE FROM project_print_targets WHERE project_id = %s", (project_id,)
+                )
 
     def _folderless(self, name: str, parent_id: int | None) -> list[int]:
         with self._pool.connection() as conn:
@@ -684,8 +734,10 @@ class BambuddyUploadStore:
             )
         return found
 
-    def _record(self, output_id: str, copy: LibraryCopy) -> None:
-        with self._pool.connection() as conn:
+    def _record(self, output_id: str, copy: LibraryCopy, lease: CopyLease | None) -> None:
+        with self._pool.connection() as conn, conn.transaction():
+            if lease is not None and not held_in(conn, lease):
+                raise LeaseLostError(f"the copy lease on {lease.key} is not held")
             conn.execute(
                 "INSERT INTO output_bambuddy_uploads"
                 " (output_id, library_file_id, folder_id, target_key, content_key)"
@@ -914,6 +966,44 @@ class BambuddyUploadStore:
                 (output_id, NATIVE_ID_BASE),
             ).fetchall()
         return {row["sha256"] for row in rows}
+
+    def _slice_owners(self, file_hash: str) -> list[str]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT s.output_id FROM output_bambuddy_slices s"
+                " WHERE (s.sliced_library_file_id < %(base)s AND s.file_hash = %(hash)s)"
+                " OR (s.sliced_library_file_id >= %(base)s AND EXISTS (SELECT 1 FROM"
+                "  library_files f WHERE f.id = s.sliced_library_file_id"
+                "  AND f.sha256 = %(hash)s))"
+                " ORDER BY s.output_id",
+                {"hash": file_hash, "base": NATIVE_ID_BASE},
+            ).fetchall()
+        return [row["output_id"] for row in rows]
+
+    def _unhashed_near(
+        self, at: datetime, limit: int, before: timedelta, after: timedelta
+    ) -> list[str]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT s.output_id, max(s.created_at) AS last_slice"
+                " FROM output_bambuddy_slices s"
+                " WHERE s.sliced_library_file_id < %(base)s"
+                " GROUP BY s.output_id"
+                " HAVING bool_or(s.file_hash IS NULL)"
+                " AND max(s.created_at) + %(after)s >= %(at)s"
+                " AND (SELECT min(u.created_at) FROM output_bambuddy_uploads u"
+                "  WHERE u.output_id = s.output_id AND u.library_file_id < %(base)s)"
+                "  - %(before)s <= %(at)s"
+                " ORDER BY last_slice DESC LIMIT %(limit)s",
+                {
+                    "base": NATIVE_ID_BASE,
+                    "at": at,
+                    "after": after,
+                    "before": before,
+                    "limit": limit,
+                },
+            ).fetchall()
+        return [row["output_id"] for row in rows]
 
     def _sent_between(self, output_id: str) -> tuple[datetime, datetime] | None:
         with self._pool.connection() as conn:

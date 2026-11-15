@@ -460,15 +460,35 @@ describe('OrderItemsTable · the items card (#4955)', () => {
     expect(screen.getByTestId(`item-source-${ITEM_DRAFT}`)).toHaveTextContent(/^(model|output)$/)
   })
 
-  it("offers a draft item's actions, and opens the drawer at its quote", async () => {
+  it("offers a draft item's actions, and opens the drawer at its quote with Slice…", async () => {
     const { user } = render(ORDER_DRAFT)
     await screen.findByRole('heading', { name: 'ORD-2026-3' })
     await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Row actions' }))
     const names = (await screen.findAllByRole('menuitem')).map((m) => m.textContent)
-    expect(names).toEqual(['Open details', 'Quote from a slice…', 'Duplicate', 'Delete item'])
-    await user.click(screen.getByRole('menuitem', { name: 'Quote from a slice…' }))
-    const drawer = await screen.findByRole('dialog', { name: 'Name Keychain' })
+    expect(names).toEqual(['Open details', 'Slice…', 'Duplicate', 'Delete item'])
+    await user.click(screen.getByRole('menuitem', { name: 'Slice…' }))
+    // #4673: the drawer opens at the item's print setups, with the slice dialog on top.
+    expect(await screen.findByRole('dialog', { name: 'Quote from a slice' })).toBeInTheDocument()
+    const drawer = screen.getByRole('dialog', { name: 'Name Keychain', hidden: true })
     expect(within(drawer).getByTestId('item-section-quote')).toBeInTheDocument()
+  })
+
+  it('opens the slice dialog again on a second Slice… of the open item (#4673)', async () => {
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Row actions' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Slice…' }))
+    const slicing = await screen.findByRole('dialog', { name: 'Quote from a slice' })
+    // Beside the assistant the dialogs are not modal (#798): Cancel by its click.
+    fireEvent.click(await within(slicing).findByRole('button', { name: 'Cancel', hidden: true }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Quote from a slice', hidden: true })).toBeNull())
+    // The drawer stays open on the item.
+    expect(screen.getByRole('dialog', { name: 'Name Keychain', hidden: true })).toBeInTheDocument()
+    // Beside the drawer the row's menu stays reachable (#798).
+    const trigger = within(row(ITEM_DRAFT)).getByRole('button', { name: 'Row actions', hidden: true })
+    fireEvent.keyDown(trigger, { key: 'Enter' })
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Slice…', hidden: true }))
+    expect(await screen.findByRole('dialog', { name: 'Quote from a slice', hidden: true })).toBeInTheDocument()
   })
 
   describe('the section a menu action opens the drawer at', () => {
@@ -489,7 +509,7 @@ describe('OrderItemsTable · the items card (#4955)', () => {
       const { user } = render(ORDER_DRAFT)
       await screen.findByRole('heading', { name: 'ORD-2026-3' })
       await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Row actions' }))
-      await user.click(await screen.findByRole('menuitem', { name: 'Quote from a slice…' }))
+      await user.click(await screen.findByRole('menuitem', { name: 'Slice…' }))
       await screen.findByRole('dialog', { name: 'Name Keychain' })
       await waitFor(() => expect(scrolled).toContain('item-section-quote'))
       await user.keyboard('{Escape}')
@@ -522,7 +542,7 @@ describe('OrderItemsTable · the items card (#4955)', () => {
       const { user } = render(ORDER_DRAFT)
       await screen.findByRole('heading', { name: 'ORD-2026-3' })
       await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Row actions' }))
-      await user.click(await screen.findByRole('menuitem', { name: 'Quote from a slice…' }))
+      await user.click(await screen.findByRole('menuitem', { name: 'Slice…' }))
       await screen.findByRole('dialog', { name: 'Name Keychain' })
       await waitFor(() => expect(scrolled).toContain('item-section-quote'))
       scrolled.length = 0
@@ -900,5 +920,27 @@ describe('OrderItemsTable · library file items', () => {
     expect(within(row(added.id)).getByRole('button', { name: 'Drawer label' })).toBeInTheDocument()
     // A template's item names no file.
     expect(within(row(ITEM_DRAFT)).queryByTestId('item-library-file')).toBeNull()
+  })
+})
+
+// #5283: a storefront order's customer accepts a price; the row records a typed one only.
+describe('OrderItemsTable · a storefront order (#5283)', () => {
+  beforeEach(() => {
+    resetMockState()
+    Object.assign(state.orders.find((o) => o.id === ORDER_DRAFT)!, { source: 'storefront', submitted_at: '2026-10-19T09:00:00Z' })
+  })
+
+  it('records a typed unit price without accepting it', async () => {
+    const accepted = vi.spyOn(api, 'acceptOrderQuote')
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    expect(within(row(ITEM_DRAFT)).queryByRole('button', { name: 'Accept unit price' })).toBeNull()
+    const input = screen.getByRole('textbox', { name: 'Unit price for Name Keychain' })
+    await user.clear(input)
+    await user.type(input, '12.5')
+    await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Record unit price' }))
+    await waitFor(() => expect(quotesOfDraft().some((q) => q.unit_price_minor === 1250)).toBe(true))
+    expect(quotesOfDraft().some((q) => q.accepted)).toBe(false)
+    expect(accepted).not.toHaveBeenCalled()
   })
 })

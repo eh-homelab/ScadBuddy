@@ -242,28 +242,30 @@ describe('settings tools', () => {
     expect(screen.getByLabelText('Show dimensions in')).toBeVisible()
   })
 
-  it("lists Bambuddy's printers for printer_id, and refuses one it does not report", async () => {
+  it('lists the registry printers for default_printer, and refuses one it does not hold (#5167)', async () => {
     await seeded()
-    // The targets load after the settings.
+    // The registry printers load after the settings.
     await waitFor(async () =>
       expect(await bridge.call('get_form', {})).toMatchObject({
         ok: true,
         result: {
           choices: {
-            printer_id: [
-              { value: '1', name: '3DP-31B-598' },
-              { value: '2', name: '3DP-77A-114' },
+            default_printer: [
+              { value: '00000000-0000-4000-8000-000000000001', name: '3DP-31B-598' },
+              { value: '00000000-0000-4000-8000-0000000000aa', name: 'Garage' },
             ],
           },
         },
       }),
     )
-    const bad = await bridge.call('set_field', { field: 'printer_id', value: '9' })
+    const bad = await bridge.call('set_field', { field: 'default_printer', value: '9' })
     expect(!bad.ok && bad.error.code).toBe('invalid_args')
-    expect(await bridge.call('set_field', { field: 'printer_id', value: '2' })).toMatchObject({ ok: true })
-    expect(screen.getByLabelText('Printer')).toHaveTextContent('3DP-77A-114')
+    expect(
+      await bridge.call('set_field', { field: 'default_printer', value: '00000000-0000-4000-8000-0000000000aa' }),
+    ).toMatchObject({ ok: true })
+    expect(screen.getByLabelText('Printer')).toHaveTextContent('Garage')
     // None is a choice too.
-    expect(await bridge.call('set_field', { field: 'printer_id', value: '' })).toMatchObject({ ok: true })
+    expect(await bridge.call('set_field', { field: 'default_printer', value: '' })).toMatchObject({ ok: true })
     expect(screen.getByLabelText('Printer')).toHaveTextContent('None')
   })
 

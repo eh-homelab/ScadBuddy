@@ -22,6 +22,7 @@ import { renderPage } from '../test/utils'
 import { choose } from '../test/select'
 import { WorkflowRunPage } from './WorkflowRunPage'
 import { ATTENTION_POLL_MS } from '../agent/attention'
+import { fakePendingChanges } from '../lib/pendingChanges.fake'
 import { STALE_ENTRY_MESSAGE } from '../lib/flows'
 
 // #1057 — one flow run (plan 2026-10-09 Task F1): its steps, and its answers and
@@ -296,16 +297,32 @@ describe('WorkflowRunPage', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(STALE_ENTRY_MESSAGE)
   })
 
-  it("re-reads the queue while a child's call shows, which no run topic announces", async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true })
+  it("re-reads the queue on the agent's pending-input stream while a child's call shows, which no run topic announces (#265)", async () => {
+    const stream = fakePendingChanges()
     try {
       render('run-escalated')
       await screen.findByRole('region', { name: 'Waiting for approval: print_output' })
+      setFlowRunChildren('run-escalated', [])
+      await stream.changed()
+      await waitFor(() => expect(screen.queryByRole('region', { name: 'Waiting for approval: print_output' })).toBeNull())
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it("re-reads the queue on a timer only while the agent's stream is unavailable (#265)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const stream = fakePendingChanges()
+    try {
+      render('run-escalated')
+      await screen.findByRole('region', { name: 'Waiting for approval: print_output' })
+      await stream.close()
       setFlowRunChildren('run-escalated', [])
       await act(() => vi.advanceTimersByTimeAsync(ATTENTION_POLL_MS))
       await waitFor(() => expect(screen.queryByRole('region', { name: 'Waiting for approval: print_output' })).toBeNull())
     } finally {
       vi.useRealTimers()
+      vi.unstubAllGlobals()
     }
   })
 

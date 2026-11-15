@@ -15,6 +15,7 @@ import type { ClaimedSession, TurnPrincipal } from '../../src/sessions/manager.j
 import { TurnRunner, type TurnRunnerDeps } from '../../src/sessions/turnRunner.js'
 import type { TurnContext } from '../../src/sessions/turnSlot.js'
 import type { SessionFiles } from '../../src/workspace/store.js'
+import type { BackgroundTasks } from '../../src/background/service.js'
 import { TurnTrace } from '../../src/telemetry/turn.js'
 import { fixedCredentials } from './fixedCredentials.js'
 import { memoryAccess } from './memoryAccess.js'
@@ -54,6 +55,16 @@ export type TurnRunnerTestOptions = {
   reader?: (base: AccessReader) => AccessReader
   /** Settings → Tools & plugins' stored loadings (#838), by bare name; none when undefined. */
   toolLoadings?: Record<string, ToolLoading>
+  /** The sessions' sandbox pods (#5864); none when undefined. */
+  sandbox?: TurnRunnerDeps['sandbox']
+  /** Whether the agent keeps background tasks (`deps.background`: Temporal and a database); none when undefined. */
+  background?: boolean
+  /** The session's `backgroundTools` (false: flow-started, or a Workflow agent's chat); true when undefined. */
+  backgroundTools?: boolean
+  /** The registry's tiers; every tool `read` when undefined. */
+  tierOf?: TurnRunnerDeps['tierOf']
+  /** The turn's calls as activities, with these tools listed as its turn tools (`<server>__<tool>`): its plugins are then proxied. */
+  turnTools?: string[]
 }
 
 /** The runner's `sql`, which only http_request's saved bodies would use: these tests save none. */
@@ -95,6 +106,7 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
     agentModel: null,
     agentEffort: null,
     agentType: null,
+    backgroundTools: options.backgroundTools ?? true,
     claimedAt: now,
   }
   const principal: TurnPrincipal = {}
@@ -122,7 +134,7 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
       },
     },
     access: new AccessResolver(options.reader ? options.reader(store.access) : store.access),
-    tierOf: () => 'read',
+    tierOf: options.tierOf ?? (() => 'read'),
     mcpServers: (_session, _turn, extras) => {
       serverExtras.push(extras)
       return { scadbuddy: createSdkMcpServer({ name: 'scadbuddy', tools: [] }) }
@@ -173,9 +185,22 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
         release: () => {},
       }),
     httpRequest: {},
+    ...(options.sandbox ? { sandbox: options.sandbox } : {}),
+    // Never called: the tests only assemble.
+    ...(options.background ? { background: { tasks: {} as BackgroundTasks, tz: 'UTC', commandQueue: 'agent-sessions.test' } } : {}),
+    ...(options.turnTools
+      ? {
+          toolCalls: () => () => Promise.reject(new Error('turnRunnerForTest runs no tool call')),
+          turnTools: () =>
+            Promise.resolve({
+              tools: options.turnTools!.map((name) => ({ name, description: name, input_schema: { type: 'object' }, may_park: true })),
+            }),
+        }
+      : {}),
     stderr: () => {},
     store: {
       exists: () => Promise.resolve(options.resume ?? false),
+      lastCwd: () => Promise.resolve(undefined),
       append: () => Promise.resolve(),
       load: () => Promise.resolve(null),
     },

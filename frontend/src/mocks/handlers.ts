@@ -66,6 +66,7 @@ import { emitRealtime, realtimeHandler } from './realtime'
 import { features } from './features'
 import { trashFiledMockLibraryFiles } from './features/library'
 import { attachmentsOf } from './features/printAttachments'
+import { printersState } from './features/printers'
 import { mockRackCheck, mockRackPicks } from './features/rack'
 import { mcpOidcHandlers, resetMcpOidcMock } from './mcpOidc'
 import {
@@ -84,6 +85,9 @@ import { UI_MODULES } from './templateUi'
 import { SLICED_REASON, mockLibraryObjects } from './libraryObjects'
 
 const base = '/api/v1'
+
+/** The largest Bambuddy printer id: the backend's `_BAMBUDDY_ID_MAX`, an `integer` column (#6067). */
+const BAMBUDDY_ID_MAX = 2 ** 31 - 1
 
 /** A 1×1 PNG, for the image routes whose pixels no test looks at. */
 const PLACEHOLDER_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='
@@ -112,6 +116,7 @@ export const NO_MODEL_CHOICES: Required<ModelPrintChoices> = {
   process_name: null,
   print_sequence: null,
   part_settings: null,
+  force_colour_match: null,
 }
 
 /** The backend's forget rule (`set_model_choices`): the body equals `ModelPrintChoices()`. */
@@ -122,7 +127,8 @@ export function isNoModelChoices(choices: ModelPrintChoices): boolean {
     !choices.nozzles?.length &&
     choices.tier == null &&
     choices.process_name == null &&
-    choices.print_sequence == null
+    choices.print_sequence == null &&
+    choices.force_colour_match == null
   )
 }
 
@@ -848,6 +854,8 @@ export function mockRemembered() {
       name: null,
       bed_type: bed,
     })),
+    // #5167 — every registry printer's name: the per-printer maps are keyed by its id.
+    printer_names: Object.fromEntries(printersState().map((row) => [row.id, row.name])),
     print_options: dropEmpty(state.printOptions.global_options),
     printer_print_options: structuredClone(state.printOptions.printers ?? {}),
     model_print_options: structuredClone(state.printOptions.models ?? {}),
@@ -3392,17 +3400,37 @@ export const handlers = [
     } satisfies ChoicesView)
   }),
 
+  /**
+   * #5153 — the backend keeps the plate on the registry printer only. A Bambuddy id no
+   * registry printer links is 404, and its forget is a no-op 200 that names no printer.
+   * A numeric id past `BAMBUDDY_ID_MAX` is 404, forget or not (leading zeros count for
+   * nothing, as the backend's `int()`). A registry id the registry does not hold is 404,
+   * forget or not. The key here stays
+   * the Bambuddy id where the registry printer has one, as the choices read looks it up.
+   */
   http.put(`${base}/print/printers/:id/bed-type`, async ({ params, request }) => {
-    const printerId = String(params['id'])
+    const asked = String(params['id'])
     const body = (await request.json()) as { bed_type: string | null }
-    if (body.bed_type === null) delete state.printerBedTypes[printerId]
-    else state.printerBedTypes[printerId] = body.bed_type
-    const bambuddy = /^\d+$/.test(printerId)
-    return HttpResponse.json({
-      printer_id: bambuddy ? Number(printerId) : null,
-      printer: bambuddy ? null : printerId,
-      bed_type: state.printerBedTypes[printerId] ?? null,
-    })
+    const bambuddyId = /^\d+$/.test(asked) ? Number(asked) : null
+    // As `printer_keys(..., forget=False)`: an id past the backend's integer column is no
+    // printer, forget or not (and past 2^53 `Number` would not keep it exact).
+    if (bambuddyId !== null && (asked.replace(/^0+/, '').length > 10 || bambuddyId > BAMBUDDY_ID_MAX)) {
+      return problem(404, 'Not Found', `no printer ${asked}`)
+    }
+    const row = printersState().find((printer) =>
+      bambuddyId === null ? printer.id === asked : printer.bambuddy_printer_id === bambuddyId,
+    )
+    if (!row) {
+      if (bambuddyId !== null && body.bed_type === null) {
+        return HttpResponse.json({ printer_id: bambuddyId, printer: null, bed_type: null })
+      }
+      return problem(404, 'Not Found', `no printer ${asked}`)
+    }
+    const linked = row.bambuddy_printer_id ?? null
+    const key = linked === null ? row.id : String(linked)
+    if (body.bed_type === null) delete state.printerBedTypes[key]
+    else state.printerBedTypes[key] = body.bed_type
+    return HttpResponse.json({ printer_id: linked, printer: row.id, bed_type: state.printerBedTypes[key] ?? null })
   }),
 
   http.put(`${base}/print/models/:slug/choices`, async ({ params, request }) => {
@@ -3490,12 +3518,18 @@ export const handlers = [
     }
     // Resolved as the server does (#124): an omitted `copies` is the remembered quantity,
     // global → the printer the run names → this model, else 1.
-    const scopePrinter = body.printer_id ?? state.printOptions.printer_id ?? null
+    // #5167 — the per-printer options are keyed by the registry id.
+    const scopePrinter =
+      body.printer ??
+      (body.printer_id != null
+        ? printersState().find((row) => row.bambuddy_printer_id === body.printer_id)?.id
+        : state.printOptions.default_printer) ??
+      null
     const copies =
       body.copies ??
       resolveOptions(
         state.printOptions.global_options,
-        scopePrinter === null ? undefined : state.printOptions.printers?.[String(scopePrinter)],
+        scopePrinter === null ? undefined : state.printOptions.printers?.[scopePrinter],
         state.printOptions.models?.[output.slug],
       ).quantity ??
       1
@@ -3928,7 +3962,17 @@ export const handlers = [
   ),
 
   // Takes no body: the server tests what it has stored.
-  http.get(`${base}/settings/print-options`, () => HttpResponse.json(state.printOptions)),
+  // #6106 — the read also names each registry printer's Bambuddy link, as the server's does.
+  http.get(`${base}/settings/print-options`, () =>
+    HttpResponse.json({
+      ...state.printOptions,
+      bambuddy_links: Object.fromEntries(
+        printersState().flatMap((row) =>
+          row.bambuddy_printer_id == null ? [] : [[row.id, row.bambuddy_printer_id]],
+        ),
+      ),
+    }),
+  ),
 
   // Mirrors the server: one scope is replaced wholesale, and an all-unset overlay
   // removes it rather than storing an empty object.
@@ -3951,8 +3995,16 @@ export const handlers = [
       ) {
         return problem(422, 'Unprocessable', `${body.key} is neither a model nor a library file`)
       }
-      if (empty) delete map[body.key]
-      else map[body.key] = options
+      // #5167 — a printer's options are kept under its registry id; a Bambuddy id names
+      // the row that links it.
+      const key =
+        body.scope === 'printer' && /^\d+$/.test(body.key)
+          ? printersState().find((row) => row.bambuddy_printer_id === Number(body.key))?.id
+          : body.key
+      if (key === undefined) {
+        if (!empty) return problem(404, 'Not Found', `no printer ${body.key}`)
+      } else if (empty) delete map[key]
+      else map[key] = options
     }
     // Shaped like the real response, which is declared `response_model=PrintOptionsView`
     // and so cannot carry `printer_id` however much the server-side object holds. Reusing

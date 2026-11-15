@@ -25,6 +25,7 @@ from pydantic import BaseModel
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.commits import upload_into
+from scadbuddy.bambuddy.copy_leases import CopyLease
 from scadbuddy.bambuddy.errors import NOT_FOUND_PROBLEM, PLATE_FIT_PROBLEM, not_configured
 from scadbuddy.bambuddy.extruders import VOLUME_TYPE
 from scadbuddy.bambuddy.models import ExternalLink, LibraryFile, LibraryListRow
@@ -645,6 +646,7 @@ async def upload_copy(
     target: Target | None = None,
     folder_id: int | None = None,
     stem: str | None = None,
+    lease: CopyLease | None = None,
 ) -> tuple[int, str, bool]:
     """Upload a new copy of the 3MF, laid out for ``target``, into ``folder_id`` (the
     inbox when ``None``); returns its library file id, its file name, and whether it was
@@ -697,7 +699,9 @@ async def upload_copy(
         else None
     )
     if content is not None:
-        same = await _same_content(client, uploads, printable.key, folder, target_key, content)
+        same = await _same_content(
+            client, uploads, printable.key, folder, target_key, content, lease
+        )
         if same is not None:
             return same.id, same.filename, False
     listed = await folder_listing(client, folder)
@@ -716,6 +720,7 @@ async def upload_copy(
     await uploads.record(
         printable.key,
         LibraryCopy(id=uploaded.id, folder_id=folder, target_key=target_key, content_key=content),
+        lease,
     )
     if is_inbox(folder, settings):
         for copy in await uploads.for_output(printable.key):
@@ -734,6 +739,7 @@ async def _same_content(
     folder: int | None,
     target_key: str,
     content: str,
+    lease: CopyLease | None,
 ) -> LibraryFile | None:
     """A copy another output put in ``folder`` for the same target, holding the same
     3MF but for the stamp naming the output (#2476): an identical re-Generate files
@@ -753,7 +759,7 @@ async def _same_content(
             await uploads.forget(owner, copy.id)
             continue
         if owner != key:
-            await uploads.record(key, copy)
+            await uploads.record(key, copy, lease)
         return found
     return None
 
@@ -998,7 +1004,7 @@ async def _ensure_copy(
     target = target if target is not None else await target_for(client, settings)
     folder = folder_id if folder_id is not None else settings.library_folder_id
     key = _copy_lock_key(printable.key, folder, settings)
-    async with _copy_lock(key), uploads.copy_lock(f"{key[0] or ''}:{key[1]}"):
+    async with _copy_lock(key), uploads.copy_lock(f"{key[0] or ''}:{key[1]}") as lease:
         for copy in await _reusable(uploads, printable, settings, target, folder):
             found = await _still_there(
                 client, uploads, printable.key, copy, tolerate_errors=tolerate_errors
@@ -1006,7 +1012,14 @@ async def _ensure_copy(
             if found is not None:
                 return _Ensured(copy.id, found.filename, created=False)
         library_file_id, filename, created = await upload_copy(
-            client, uploads, printable, settings, target=target, folder_id=folder_id, stem=stem
+            client,
+            uploads,
+            printable,
+            settings,
+            target=target,
+            folder_id=folder_id,
+            stem=stem,
+            lease=lease,
         )
     return _Ensured(library_file_id, filename, created=created)
 
@@ -1217,7 +1230,7 @@ async def ensure_raw_copy(
     :func:`_left_unrecorded` takes one (#1145): the bytes are hashed as they spool."""
     folder = folder_id if folder_id is not None else settings.library_folder_id
     lock = _copy_lock_key(key, folder, settings)
-    async with _copy_lock(lock), uploads.copy_lock(f"{lock[0] or ''}:{lock[1]}"):
+    async with _copy_lock(lock), uploads.copy_lock(f"{lock[0] or ''}:{lock[1]}") as lease:
         for copy in await uploads.for_output(key):
             if copy.folder_id != folder or copy.target_key != RAW_TARGET:
                 continue
@@ -1227,7 +1240,7 @@ async def ensure_raw_copy(
             client, uploads, folder, filename=filename, media_type=media_type, write=write
         )
         await uploads.record(
-            key, LibraryCopy(id=uploaded.id, folder_id=folder, target_key=RAW_TARGET)
+            key, LibraryCopy(id=uploaded.id, folder_id=folder, target_key=RAW_TARGET), lease
         )
         if is_inbox(folder, settings):
             for copy in await uploads.for_output(key):

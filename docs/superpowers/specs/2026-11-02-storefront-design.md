@@ -238,8 +238,10 @@ not a boundary (the review of PR #5287).
   storefront sends the verified id to the CRUD service in a header (§6.4).
   `storefront_visitors` stores the id's sha256, created and last-seen times, and the account it belongs to, if any. A draft order names its visitor
   (`orders.storefront_visitor_id`).
-- **Account.** "Sign up to save" asks for an email and sends a six-digit code **(call:
-  passwordless, no passwords to store or reset)**. `storefront_accounts`: email
+- **Account.** "Sign up to save" asks for an email and sends a sixteen-character code
+  from Crockford's base32 without 0 and 1, shown in groups of four, and the mail carries a
+  sign-in link (#5283, [comment 6757727525](https://github.com/eh-homelab/ScadBuddy/issues/5283#issuecomment-6757727525))
+  **(call: passwordless, no passwords to store or reset)**. `storefront_accounts`: email
   (verified), `customer_id`, created and last sign-in times. On verify, the visitor joins
   the account and its drafts move with it. An account is linked to a `customers` row: an
   existing customer with that verified email contact, else a new one. The shop sees the
@@ -249,12 +251,17 @@ not a boundary (the review of PR #5287).
   that one order without an account. The shop can revoke it and send a new one. A
   `back_office` order can get a link too ("Send customer link"), so a customer who
   ordered by message can answer revisions and pay online **(call)**.
-- **What an account sees** **(call)**: the orders its own visitors made, and the orders
+- **What an account sees** **(call)**: the orders its own visitors made, the orders
   whose link was opened while signed in to it (opening a link while signed in attaches
-  the order to the account). Nothing else, even when the account's customer has other
+  the order to the account), and the orders submitted while signed in to it (a signed-in
+  submit attaches the order, `attach_order`, even when the cart's visitor never joined the
+  account). Nothing else, even when the account's customer has other
   orders: a contact the shop typed is not proof of who owns an email. An account links to
   an existing customer only when exactly one customer has that email as a contact; with
   none or several it makes a new customer, and the shop merges by hand.
+  A signed-in submit never puts an order on a customer the shop has archived: it makes a
+  new customer, and the account links to it from then on. Two submits of one account at
+  once make one: the account's row is locked before its customer's, always in that order.
 - These are separate from staff sign-in (#4975, `auth_sessions`). A storefront session
   never reaches the back office, and a staff session means nothing to the storefront.
 
@@ -304,6 +311,11 @@ the customer's view.
   housekeeping sweep: its attachment rows first (the FK is `RESTRICT`), then their holds,
   then the order. This is the one exception to the orders spec's Ruling 6 (nothing the
   process produced is deleted): an unsubmitted cart is not yet a record of the shop's.
+  A cart with a time or cost entry is never swept (the lifecycle refuses those on a cart,
+  `order_not_submitted`). Once a delete commits, the bus is told `order.changed` with
+  `deleted: true`: an open orders list reads again without it, and an open `order:<id>`
+  page shows the order as not found when that frame arrives (a page that missed it keeps
+  its last view until it reads the order again).
 
 ### 5.5 Submit
 
@@ -340,7 +352,9 @@ other customer notification stays a plugin's job (orders spec §12).
 ### 5.8 Abuse
 
 Sign-up, submit and design requests take a bot check, Cloudflare Turnstile, on when its
-keys are set **(call)**. Every storefront route has a per-client rate limit. Nothing a
+keys are set **(call)**. Asking for a sign-in code (action `sign_up`) and verifying one
+(`sign_in`) take it too (the coordinator's ruling on #5283, 2026-11-09). Every storefront
+route has a per-client rate limit. Nothing a
 customer writes is rendered as HTML: notes are text.
 
 ## 6. Lifecycle changes
@@ -357,7 +371,11 @@ asks for a reason and records it.
 `add_revision`, `send_revision`, `answer_revision` (customer), `submit_order` (customer),
 `set_deposit`, `waive_balance`. On a `storefront` order, the `answer_revision` or
 `accept_quote` that leaves every open item `approved` runs `accept_order` in the same
-transaction, as the customer (decision 11). Each takes the order's row lock, writes an `order_events` row, and
+transaction, as the customer (decision 11). Only the customer's own accept (or the shop's
+"Accept for the customer") accepts the order this way; a shop's `cancel_item` that leaves
+every open item `approved` does not, and the shop accepts the order itself. When
+`accept_order` refuses (a payment in flight, a hold), the item's accept still commits and the
+audit row `order.accept_skipped` names the refusal. Each takes the order's row lock, writes an `order_events` row, and
 publishes `order.changed` / `order_item.changed`, as every transition does.
 
 ### 6.3 Refusals
@@ -367,7 +385,9 @@ New `LifecycleError` slugs: `item_has_no_design`, `revision_not_newest`,
 `revision_not_quoted` (a `together` send or accept with no quote of the revision),
 `revision_not_accepted` (a price accept, or "Add to model photos", before the design is
 accepted), `revision_not_found` (404), `order_not_submitted`, `order_submitted`
-(a write only a draft allows), `deposit_unpaid`, `balance_unpaid` (§8).
+(a write only a draft allows), `deposit_unpaid`, `balance_unpaid` (§8), `customer_accepts` (the shop's own accept of a revision, a quote or a
+custom price on a storefront order; and "Accept for the customer" by anyone but the shop's
+staff), `order_not_storefront` ("Accept for the customer" on a back-office order).
 
 ### 6.4 The customer actor
 
@@ -376,7 +396,9 @@ or account's id. The CRUD service builds it from the visitor id (and, once signe
 account) that the storefront sends in request headers: `X-ScadBuddy-Visitor` (the verified
 visitor id) and `X-ScadBuddy-Store-Client` (the client address the storefront resolved,
 which keys the per-client render limit, §5.4). It takes those headers only from a call
-made with the storefront's service credential, and never from a request body.
+made with the storefront's service credential, and never from a request body. A customer actor
+acts only on the order whose `customer_id` its principal names; any other order is 404
+`order_not_found`, so its existence does not leak.
 
 ## 7. Payments: what the storefront needs from #4957
 
@@ -386,8 +408,9 @@ made with the storefront's service credential, and never from a request body.
 - A request records a payment made outside ScadBuddy: cash, Square, a bank transfer.
   The existing `POST /orders/{id}/payments` gains an optional `payment_request_id`; a
   manual payment that names an open request of that order closes it as `paid`.
-- The storefront shows the request's hosted URL as "Pay"; a provider's return URL lands
-  on the order page, which waits for the webhook, not the redirect, before it says paid.
+- The storefront shows the request's hosted URL as "Pay". A provider's return URL for a
+  storefront order is `/o` with no token, so the payer sees only "Open your order from the
+  link in your mail". The order page says paid only after a fresh read, never from the redirect.
 - The webhook route `POST /api/v1/payments/webhooks/{provider}` stays on the API; it is
   the one back-office route the public reaches, routed by path at the ingress (#4957
   "Deployment").
@@ -422,7 +445,11 @@ own instructions text (cash, Venmo handle, …) and the shop records the payment
 - **Shipping options**, `storefront_shipping_options` setting: a list of `{id, label,
   amount_minor, ships}`; `ships=false` is pickup and needs no address. Submit writes one
   `shipping` charge from the chosen option. The shop can edit it while the order is open.
-  Carrier rates are a later story.
+  The amounts are in the shop's currency (`orders_currency`) and are never converted: in
+  the back office, an order in another currency (one made before the shop changed it)
+  takes no option (409 `shipping_currency_mismatch`). A cart holds no amount, so a
+  storefront submit first gives the cart the shop's currency, and its draft view shows
+  that currency and its options. Carrier rates are a later story.
 - **Tax**, settings `orders_tax_percent` (default 0, off) and `orders_tax_shipping`
   (bool). The lifecycle keeps one `tax` charge marked `auto` (`order_charges.auto`),
   recomputed in every transaction that changes items, quotes or charges while the order is

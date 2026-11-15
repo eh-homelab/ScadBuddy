@@ -19,9 +19,11 @@ names, signatures and answers. Every write is natural.
 use, `IndexesBlobs`) over the routes, with the same answers: a `put` the object it
 replaced, a delete the row it took, `ReuseLostError` and, once the API's own retries are
 spent, `DeadlockDetected` as over SQL. Its non-natural writes send an
-``Idempotency-Key`` each (`WriteKeys`). A put, swap, mark or delete of a key only the API
-writes (an upload's, a font's, a snapshot's) is refused, a `CrudRefusedError` 403; a
-forget of a font's or snapshot's copy goes to the API's ``forget-copy`` instead.
+``Idempotency-Key`` each (`WriteKeys`). A put, swap, mark or delete of any key that is
+not a render job's (`api/crud_render.py` `RENDER_KEY`), or of a row or ref of another kind
+than a piece, is refused, a `CrudRefusedError` 403; a forget of a font's or snapshot's
+copy goes to the API's ``forget-copy`` instead. A read of a key or kind the worker does
+not read is refused the same way.
 
 `RemoteStoreFolders` is `store/bambuddy.py` `FolderFinder` (`KeepsFolders`) over the
 routes (plan D6): the API finds or makes a folder in Bambuddy itself, with its own render
@@ -90,9 +92,11 @@ REUSE_LOST = "reuse-lost"
 DEADLOCK = "deadlock"
 #: `api/crud_render.py` `BAMBUDDY_UNAVAILABLE`.
 BAMBUDDY_UNAVAILABLE = "bambuddy-unavailable"
-#: `api/crud_render.py` `FORGETTABLE_PREFIXES`: the keys only the API writes that the
-#: worker has it forget.
-FORGETTABLE_PREFIXES = ("font-", "src-")
+#: `api/crud_render.py` `FORGETTABLE_PREFIXES` and `LIBRARY_PIECE_KEY`: the keys only the
+#: API writes that the worker has it forget. A library file's object (``lib3-``) is
+#: forgotten only when the API cannot read it either; else a 409 `COPY_INTACT`.
+FORGETTABLE_PREFIXES = ("font-", "src-", "lib3-")
+COPY_INTACT = "copy-intact"
 #: `api/crud_render.py` `NO_COPY` and `COPY_MISMATCH`: an adopt's own refusals.
 NO_COPY = "no-copy"
 COPY_MISMATCH = "copy-mismatch"
@@ -107,6 +111,11 @@ NOT_HOLDER = "not-holder"
 #: A take's wait for its answer: the route's `LEASE_LOCK_WAIT` (2 s) and a pool wait
 #: (`tests/crud/test_crud_library_leases.py` checks that the two agree).
 TAKE_TIMEOUT = 2.0 + PROJECT_POOL_TIMEOUT
+#: A ``forget-copy``'s wait for its answer: longer than the API's read of a library
+#: object whole (`api/crud_render.py` `FORGET_READ_TIMEOUT`, 60 s), so the worker hears
+#: whether the row was dropped instead of a read timeout
+#: (`tests/crud/test_crud_render_allowlist.py` checks that the two agree).
+FORGET_TIMEOUT = 75.0
 #: A problem's RFC 9457 members; every other member is an extension of the `ApiError`.
 _PROBLEM_MEMBERS = frozenset({"type", "title", "status", "detail", "instance"})
 #: How many activity attempts `WriteKeys` counts writes for at once; the oldest is
@@ -332,9 +341,16 @@ class WriteKeys:
     a reuse of the object the last attempt stored): the ledger refuses the key for it
     (422), and `RemoteBlobIndex` sends that write again under a new key, as a write of
     its own. Outside an activity (a sweep on the worker's own timer), a new UUID per
-    write. Either way the client sends the key again on every retry of that call."""
+    write. Either way the client sends the key again on every retry of that call.
 
-    def __init__(self) -> None:
+    ``namespace`` names the store (``blob-index``, ``previews``, ...) and is part of the
+    key's material, so two stores counting writes in one activity attempt never send
+    one key for two requests. Adding it changed every key once: an attempt retried
+    across that deploy finds its earlier key refused (422) and sends the write again
+    under a new key, the same fallback as above."""
+
+    def __init__(self, namespace: str) -> None:
+        self.namespace = namespace
         self._ordinals: OrderedDict[tuple[str | None, str | None, str, int], int] = OrderedDict()
         self._lock = threading.Lock()
 
@@ -348,7 +364,7 @@ class WriteKeys:
             self._ordinals[attempt] = ordinal + 1
             while len(self._ordinals) > WRITE_KEYS_KEPT:
                 self._ordinals.popitem(last=False)
-        return activity_key(ordinal)
+        return activity_key(ordinal, self.namespace)
 
 
 class RemoteBlobIndex:
@@ -357,7 +373,7 @@ class RemoteBlobIndex:
 
     def __init__(self, client: CrudSyncClient) -> None:
         self._client = client
-        self._keys = WriteKeys()
+        self._keys = WriteKeys("blob-index")
 
     def _read(self, path: str, **query: Any) -> Any:
         return self._client.request("GET", _with(f"{BASE}/blob-index{path}", query)).json()
@@ -453,13 +469,28 @@ class RemoteBlobIndex:
         self._client.request("POST", f"{BASE}/blob-index/{_part(key)}/touch")
 
     def delete(self, key: str, *, backend: str | None = None) -> BlobStat | None:
-        """A font's or snapshot's key with no ``backend`` (`ContentStore.forget` of a copy
-        the worker could not read) goes to ``…/forget-copy``, where the API drops the
-        row: the worker writes no key only the API writes. Any other key only the API
-        writes is refused (a `CrudRefusedError` 403); an upload's copy is dropped through
-        `RemoteAssetRows.drop_copy`."""
+        """A font's, snapshot's or library file object's key with no ``backend``
+        (`ContentStore.forget` of a copy the worker could not read) goes to
+        ``…/forget-copy``, where the API drops the row: the worker writes no key but a
+        render job's. A library object the API reads whole keeps its row (a 409
+        `COPY_INTACT`, answered as None: nothing was taken). Any other key that is not a
+        render job's is refused (a `CrudRefusedError` 403); an upload's copy is dropped
+        through `RemoteAssetRows.drop_copy`."""
         if backend is None and key.startswith(FORGETTABLE_PREFIXES):
-            response = self._client.request("POST", f"{BASE}/blob-index/{_part(key)}/forget-copy")
+            try:
+                response = self._client.request(
+                    "POST",
+                    f"{BASE}/blob-index/{_part(key)}/forget-copy",
+                    timeout=FORGET_TIMEOUT,
+                )
+            except CrudRefusedError as error:
+                if error.status != 409 or error.problem.get("reason") != COPY_INTACT:
+                    raise
+                logger.warning(
+                    "the API reads this library object whole; its row stays",
+                    extra={"key": key},
+                )
+                return None
             forgotten = response.json()
             return None if forgotten is None else BlobStat.model_validate(forgotten)
         body = self._write("DELETE", f"/{_part(key)}", backend=backend)

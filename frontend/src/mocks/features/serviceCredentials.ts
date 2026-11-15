@@ -12,10 +12,11 @@ const SCOPES: Record<ServiceCaller, string[]> = {
   projects: ['crud.projects', 'flow.host'],
   render: ['crud.render'],
   storefront: ['crud.storefront'],
+  intake: ['crud.intake'],
 }
 
 /** The callers that read a sealed credential; the rest exchange a proof (#5298). */
-const SEALED: ServiceCaller[] = ['agent', 'print']
+const SEALED: ServiceCaller[] = ['agent']
 
 function credential(caller: ServiceCaller): ServiceCredentialView {
   counter += 1

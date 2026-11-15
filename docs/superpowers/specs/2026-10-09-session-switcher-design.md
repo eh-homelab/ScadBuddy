@@ -35,7 +35,8 @@ parent, spend and last activity in the list, a Fork button, "Fork from here", an
      by time breaks for a fork of a fork.
    - *How it resolves:* the manager loads the parent's main transcript and takes the entry
      for that block, falling back to the message's last text entry. The panel's events are
-     copied up to and including that message's `assistant.text.done`.
+     taken up to and including that message's `assistant.text.done`: the fork reads them
+     through its cut, `fork_event_cut`, and copies none (#4212).
    - *Errors:* an id that is in neither is a 400 `invalid` error.
 2. **"Fork from here" on a user message forks up to the assistant reply before it, and
    puts that message's text in the composer.** That is "try this question another way".

@@ -112,14 +112,23 @@ class CrudUnavailableError(Exception):
     """The route is missing, answers 5xx or cannot be reached, past the budget. Retryable.
     ``failure`` is the last try's (`Failure`); `passes` says whether it is one that
     passes (`PASSING`), unlike a route's 5xx or a read timeout. ``problem`` is the last
-    try's 5xx problem document, empty when it had none or no answer came."""
+    try's 5xx problem document, empty when it had none or no answer came. ``maybe_sent``
+    says whether ANY try of the call failed with ``transport`` (the request went out and
+    its answer was lost, so the write may have run), whatever the last try's failure; by
+    default it is whether ``failure`` is ``transport``."""
 
     def __init__(
-        self, message: str, failure: Failure, problem: dict[str, Any] | None = None
+        self,
+        message: str,
+        failure: Failure,
+        problem: dict[str, Any] | None = None,
+        *,
+        maybe_sent: bool | None = None,
     ) -> None:
         super().__init__(message)
         self.failure = failure
         self.problem = problem or {}
+        self.maybe_sent = failure == "transport" if maybe_sent is None else maybe_sent
 
     @property
     def passes(self) -> bool:
@@ -139,13 +148,17 @@ class CrudRefusedError(Exception):
         self.retry_after = retry_after
 
 
-def activity_key(ordinal: int) -> str:
+def activity_key(ordinal: int, namespace: str | None = None) -> str:
     """The key of the ``ordinal``-th write of the running activity: the same on every
     retry of the activity (D5), so the API answers a repeated write once. The run is
     part of it: a workflow's next run (a render key's next render, a continue-as-new)
-    numbers its activities from 1 again, and its writes are new ones."""
+    numbers its activities from 1 again, and its writes are new ones. ``namespace``
+    names the counter the ordinal is of (`crud/render.py` `WriteKeys`), so two stores
+    writing in one activity never send one key."""
     info = activity.info()
     material = f"{info.workflow_id}\0{info.workflow_run_id}\0{info.activity_id}\0{ordinal}"
+    if namespace is not None:
+        material = f"{namespace}\0{material}"
     return hashlib.sha256(material.encode()).hexdigest()
 
 
@@ -176,6 +189,8 @@ class _Call:
         self.last = "no attempt"
         self.failure: Failure = "unreached"
         self.problem: dict[str, Any] = {}
+        #: Whether any try failed with ``transport``: sent, and its answer lost.
+        self.maybe_sent = False
 
     def observe(self, outcome: Outcome, started: float) -> None:
         metrics = self._owner._metrics
@@ -225,6 +240,7 @@ class _Call:
         self.problem = {}
         unreached = isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
         self.failure = "unreached" if unreached else "transport"
+        self.maybe_sent = self.maybe_sent or not unreached
         self.observe("transport", started)
 
     def delay(self) -> float:
@@ -232,7 +248,10 @@ class _Call:
         remaining = self._deadline - self._owner._clock()
         if remaining <= 0:
             raise CrudUnavailableError(
-                f"CRUD route unavailable: {self.last}", self.failure, self.problem
+                f"CRUD route unavailable: {self.last}",
+                self.failure,
+                self.problem,
+                maybe_sent=self.maybe_sent,
             )
         wait = float(min(self._owner._backoff * 2**self._attempt, BACKOFF_MAX, remaining))
         self._attempt += 1
@@ -413,8 +432,10 @@ class CrudClient(_Base):
         params: Mapping[str, str] | None = None,
         headers: Mapping[str, str] | None = None,
         budget: float | None = None,
+        content: bytes | None = None,
     ) -> CrudStream:
-        """``request``'s retries and refusals, with the body of a success still unread."""
+        """``request``'s retries and refusals, with the body of a success still unread.
+        ``content`` is a JSON body, sent again on each retry."""
         call = _Call(self, path, budget)
         while True:
             started = time.perf_counter()
@@ -425,7 +446,7 @@ class CrudClient(_Base):
                 # decode a gzipped body to more bytes than that length declares.
                 plain = {"Accept-Encoding": "identity", **(headers or {})}
                 sent = http.build_request(
-                    method, path, params=params, **self._kwargs(None, None, None, plain)
+                    method, path, params=params, **self._kwargs(None, None, None, plain, content)
                 )
                 response = await http.send(sent, stream=True)
             except httpx.TransportError as error:

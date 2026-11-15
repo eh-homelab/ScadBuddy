@@ -121,6 +121,7 @@ from scadbuddy.core.events import (
     AuthSessionRevoked,
     BusResync,
     Event,
+    FlowChanged,
     FlowRunEvent,
     FontInstalled,
     JobEvent,
@@ -129,10 +130,12 @@ from scadbuddy.core.events import (
     LibraryRemoved,
     ModelEvent,
     OperationEvent,
+    OrderBankDepositsChanged,
     OrderChanged,
     OrderItemChanged,
     OutputEvent,
     PresetsChanged,
+    PreviewSliceEvent,
     PrinterEvent,
     PrintEvent,
     PrintOutcome,
@@ -184,6 +187,8 @@ COLLECTION_TOPICS = frozenset(
         "settings",
         "analyzers",
         "workflow-runs",
+        # Flow definitions (#265): a rename shows where runs wait.
+        "flows",
         "activity",
         "printers",
         # Orders (#4249, spec 2026-10-18 §4): the list re-reads on any order's change.
@@ -207,6 +212,8 @@ _TOPIC = re.compile(
             f"print:{_strip_anchors(OUTPUT_ID_PATTERN)}",
             # A library file's print run (#742): its ``output_id`` is ``library:<file id>``.
             r"print:library:[1-9][0-9]{0,17}",
+            # The print dialog's background slice (#265): its slicer and its job id.
+            r"preview-slice:(?:bambuddy|native):[1-9][0-9]{0,17}",
             f"workflow-run:{FLOW_RUN_ID_PATTERN}",
             # A registry printer (#3823): its id is a UUID, as `printers/store.py` makes.
             f"printer:{FLOW_RUN_ID_PATTERN}",
@@ -242,6 +249,10 @@ def topics_of(event: Event) -> list[str]:
             return [f"print:{event.output_id}"]
         case FlowRunEvent():
             return ["workflow-runs", f"workflow-run:{event.run_id}"]
+        case FlowChanged():
+            return ["flows"]
+        case PreviewSliceEvent():
+            return [f"preview-slice:{event.slicer}:{event.job_id}"]
         case PrinterEvent():
             return ["printers", f"printer:{event.printer_id}"]
         case LibraryChanged():
@@ -258,6 +269,8 @@ def topics_of(event: Event) -> list[str]:
             return ["activity", f"activity:{event.activity_id}"]
         case OrderChanged() | OrderItemChanged():
             return ["orders", f"order:{event.order_id}"]
+        case OrderBankDepositsChanged():
+            return [f"order:{event.order_id}"]
         case AgentOperationEvent():
             return []
         case AuthSessionRevoked():
@@ -279,8 +292,10 @@ def topics_of(event: Event) -> list[str]:
 
 def event_frame(event: Event, topics: list[str]) -> dict[str, Any]:
     # An order event's `cart` (#5282) is for the flow triggers only: the frame keeps
-    # spec 2026-10-18 §7.1's fields.
+    # spec 2026-10-18 §7.1's fields, plus `deleted: true` for a cart the draft sweep took.
     data = event.model_dump(mode="json", exclude={"id", "at", "kind", "cart"})
+    if isinstance(event, OrderChanged) and not event.deleted:
+        del data["deleted"]
     return {"type": "event", "id": event.id, "kind": event.kind, "topics": topics, "data": data}
 
 

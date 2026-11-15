@@ -25,12 +25,14 @@ const OrdersPage = lazyRetry(async () => ({ default: (await import('./pages/Orde
 const ProfitPage = lazyRetry(async () => ({ default: (await import('./pages/ProfitPage')).ProfitPage }))
 const PartsPage = lazyRetry(async () => ({ default: (await import('./pages/PartsPage')).PartsPage }))
 const PrintDetailPage = lazyRetry(async () => ({ default: (await import('./pages/PrintDetailPage')).PrintDetailPage }))
+const QueueItemPage = lazyRetry(async () => ({ default: (await import('./pages/QueueItemPage')).QueueItemPage }))
 // Two pages of one module, so one chunk.
 const loadPrints = () => import('./pages/PrintsPage')
 const PrintsPage = lazyRetry(async () => ({ default: (await loadPrints()).PrintsPage }))
 const TemplatePrintsPage = lazyRetry(async () => ({ default: (await loadPrints()).TemplatePrintsPage }))
 const SettingsPage = lazyRetry(async () => ({ default: (await import('./pages/SettingsPage')).SettingsPage }))
 const StorefrontPage = lazyRetry(async () => ({ default: (await import('./pages/StorefrontPage')).StorefrontPage }))
+const StorefrontListingPage = lazyRetry(async () => ({ default: (await import('./pages/StorefrontListingPage')).StorefrontListingPage }))
 const VersionsPage = lazyRetry(async () => ({ default: (await import('./pages/VersionsPage')).VersionsPage }))
 const WorkflowRunPage = lazyRetry(async () => ({ default: (await import('./pages/WorkflowRunPage')).WorkflowRunPage }))
 const WorkflowsPage = lazyRetry(async () => ({ default: (await import('./pages/WorkflowsPage')).WorkflowsPage }))
@@ -105,6 +107,7 @@ export function App() {
         <Route path="prints" element={<PrintsPage />} />
         <Route path="edit/:outputId" element={<EditPage />} />
         <Route path="prints/:archiveId" element={<PrintDetailPage />} />
+        <Route path="prints/queue/:itemId" element={<QueueItemPage />} />
         <Route path="library/*" element={<LibraryPage />} />
         <Route path="orders" element={<OrdersPage />} />
         <Route path="orders/profit" element={<ProfitPage />} />
@@ -113,6 +116,7 @@ export function App() {
         <Route path="customers" element={<CustomersPage />} />
         <Route path="customers/:id" element={<CustomerPage />} />
         <Route path="storefront" element={<StorefrontPage />} />
+        <Route path="storefront/listings/:id" element={<StorefrontListingPage />} />
         <Route path="workflows" element={<WorkflowsPage />} />
         <Route path="workflows/flows" element={<WorkflowsPage tab="flows" />} />
         <Route path="workflows/flows/:id" element={<FlowPage />} />

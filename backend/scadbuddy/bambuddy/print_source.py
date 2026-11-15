@@ -62,6 +62,7 @@ from scadbuddy.bambuddy.uploads import (
     SlicedCopy,
 )
 from scadbuddy.core.problems import ApiError
+from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import OutputFiles, OutputMeta, PlateSend, download_filename
 from scadbuddy.library.settings_store import StoredSettings
@@ -236,8 +237,8 @@ class PrintSource(Protocol):
         printer: str | None = None,
     ) -> None:
         """After a print into a project: what the next Generate into it lays its file
-        out for (#317), its nozzle plan too (#2166), and the registry printer of one with
-        no Bambuddy id (#4971)."""
+        out for (#317), its nozzle plan too (#2166), keyed by the registry printer
+        (#4971, #5167)."""
         ...
 
 
@@ -356,7 +357,7 @@ async def record_sends(
                 for item in outcome.queue_item_ids
             ],
         )
-    except psycopg.Error as exc:
+    except (psycopg.Error, CrudUnavailableError, CrudRefusedError) as exc:
         logger.warning("could not record the sends of %s: %s", subject.key, type(exc).__name__)
 
 
@@ -749,15 +750,22 @@ class PrintPipeline:
         ]
         output_id = self.subject.output_id
         if self.prints is not None and output_id is not None:
-            # The output page's own last print (#1060), beside the subject's record.
-            for queue_item_id in outcome.queue_item_ids:
-                await asyncio.to_thread(
-                    self.prints.record,
-                    output_id,
-                    queue_item_id=queue_item_id,
-                    slice_job_id=outcome.slice_job_id,
-                    project_id=project_id,
-                    plates=sent,
+            # The output page's own last print (#1060), beside the subject's record. Best
+            # effort, as `record_sends`: the plate is queued, and failing the activity
+            # over its record could queue it again on the retry.
+            try:
+                for queue_item_id in outcome.queue_item_ids:
+                    await asyncio.to_thread(
+                        self.prints.record,
+                        output_id,
+                        queue_item_id=queue_item_id,
+                        slice_job_id=outcome.slice_job_id,
+                        project_id=project_id,
+                        plates=sent,
+                    )
+            except (psycopg.Error, CrudUnavailableError, CrudRefusedError) as exc:
+                logger.warning(
+                    "could not record the last print of %s: %s", output_id, type(exc).__name__
                 )
         await record_sends(self.sends, self.subject, plate_id, outcome, project_id, run_id)
         return sent
@@ -771,14 +779,14 @@ class PrintPipeline:
         nozzle_plan: NozzlePlan | None = None,
         printer: str | None = None,
     ) -> None:
-        """``printer`` is the registry printer, kept only beside a ``printer_id`` of 0
-        (a printer with no Bambuddy id, #4971)."""
+        """``printer`` is the registry printer, the target's key (#4971, #5167). Without
+        it, the store keeps the registry printer that links ``printer_id``."""
         assert self.uploads is not None, "a source that remembers needs the uploads"
         await self.uploads.remember_project_target(
             project_id,
             ProjectTarget(
                 printer_id=printer_id,
-                printer=(printer or None) if not printer_id else None,
+                printer=printer or None,
                 nozzle_diameter=nozzle_size,
                 nozzle_plan=nozzle_plan.model_dump() if nozzle_plan is not None else None,
             ),

@@ -32,6 +32,7 @@ import { orderRow } from './costs'
 import { productOf } from './report'
 import { fillFromRule, returnParts, useParts } from './parts'
 import { archiveCopies, pastPrint } from './pastPrints'
+import { compareCharges } from '../../../components/orders/chargeOrder'
 import { balanceUnpaid, closeDeposit, noOptionShips, openBalance, replaceCharges, retax, typedCharges } from './money'
 
 /**
@@ -41,7 +42,7 @@ import { balanceUnpaid, closeDeposit, noOptionShips, openBalance, replaceCharges
  * way, and on hold every step that advances the order is refused.
  */
 
-const LIST_PARAMS = new Set(['status', 'customer_id', 'q', 'from', 'to', 'accepted_from', 'accepted_to', 'currency', 'product', 'margin_state', 'source', 'unsubmitted', 'cursor', 'limit'])
+const LIST_PARAMS = new Set(['status', 'customer_id', 'q', 'from', 'to', 'accepted_from', 'accepted_to', 'currency', 'product', 'margin_state', 'source', 'unsubmitted', 'own_model', 'purchase_pending', 'import_stuck', 'cursor', 'limit'])
 const MARGIN_STATES = new Set(['ok', 'thin', 'loss', 'unknown'])
 /** `SCAN_PAGE_SIZE` and `MAX_SCAN_PAGES` in backend/scadbuddy/api/orders.py (#5515). */
 export const SCAN_PAGE_SIZE = 100
@@ -57,7 +58,8 @@ const FULFILLABLE = new Set(['approved', 'failed'])
 /** #4719 — the print path's states: an attempt is edited, or accepted once printed, in them. */
 const PRINTING = new Set(['queued', 'printing', 'printed'])
 
-const CHARGE_KINDS = new Set(['shipping', 'discount', 'fee', 'tax'])
+// #6133: `purchase` and `handling` pass the check and are dropped from a replace (`typedCharges`).
+const CHARGE_KINDS = new Set(['shipping', 'discount', 'fee', 'tax', 'purchase', 'handling'])
 // #5281: a charge sent back as read carries its `id`, `auto` and `shipping_option_id`.
 const CHARGE_KEYS = new Set(['kind', 'label', 'amount_minor', 'id', 'auto', 'shipping_option_id'])
 
@@ -82,7 +84,7 @@ function chargeProblem(c: unknown): string | null {
   const row = c as Record<string, unknown>
   const extra = Object.keys(row).find((k) => !CHARGE_KEYS.has(k))
   if (extra) return `${extra}: Extra inputs are not permitted`
-  if (typeof row.kind !== 'string' || !CHARGE_KINDS.has(row.kind)) return "kind: Input should be 'shipping', 'discount', 'fee' or 'tax'"
+  if (typeof row.kind !== 'string' || !CHARGE_KINDS.has(row.kind)) return "kind: Input should be 'shipping', 'discount', 'fee', 'tax', 'purchase' or 'handling'"
   const points = typeof row.label === 'string' ? [...row.label].length : 0
   if (points < 1 || points > 200) return 'label: String should have 1 to 200 characters'
   if (laxInt(row.amount_minor) === null) return 'amount_minor: Input should be a valid integer'
@@ -114,14 +116,17 @@ function decodeCursor(cursor: string): [string, string] | null {
 const itemsOf = (orderId: string) => state.items.filter((i) => i.order_id === orderId).sort((a, b) => a.position - b.position)
 export const quotesOf = (itemId: string) => state.quotes.filter((q) => q.order_item_id === itemId)
 const attemptsOf = (itemId: string) => state.fulfilments.filter((f) => f.order_item_id === itemId).sort((a, b) => a.attempt - b.attempt)
-/** `lifecycle.py` `stale_attempt` (#5582, #5592): a production attempt older than the revision
- * the accepted quote prices printed an earlier design. Its accept is refused, and the detail
- * marks it `stale`. */
+/** `lifecycle.py` `stale_attempt` (#5582, #5592, #5704): a production attempt that printed a
+ * revision numbered below the one the accepted quote prices (or none) printed an earlier
+ * design. Its accept is refused, and the detail marks it `stale`. */
 function staleAttempt(attempt: Fulfilment): boolean {
   if (attempt.purpose !== 'production') return false
   const pricedId = quotesOf(attempt.order_item_id).find((q) => q.accepted)?.revision_id
-  const priced = pricedId == null ? undefined : revisionsOf(attempt.order_item_id).find((r) => r.id === pricedId)
-  return priced !== undefined && Date.parse(attempt.created_at) < Date.parse(priced.created_at)
+  const numberOf = (id: string | null | undefined) => (id == null ? undefined : revisionsOf(attempt.order_item_id).find((r) => r.id === id)?.number)
+  const priced = numberOf(pricedId)
+  if (priced === undefined) return false
+  const printed = numberOf(attempt.revision_id)
+  return printed === undefined || printed < priced
 }
 /** The attempts that count (#5280): a test print is never one of the item's production. */
 const productionOf = (itemId: string) => attemptsOf(itemId).filter((f) => f.purpose !== 'test')
@@ -248,7 +253,7 @@ export function rederive(order: Order) {
 function detail(order: Order): OrderDetail {
   const items = itemsOf(order.id).map((i) => ({ ...i, quotes: quotesOf(i.id), fulfilments: attemptsOf(i.id).map((f) => ({ ...f, stale: staleAttempt(f) })), revisions: revisionsOf(i.id) }))
   // `store.charges`: the typed rows by position, then the auto tax row (#5281).
-  const charges = state.charges.filter((c) => c.order_id === order.id).sort((a, b) => Number(a.auto) - Number(b.auto) || a.position - b.position)
+  const charges = state.charges.filter((c) => c.order_id === order.id).sort(compareCharges)
   const payments = state.payments.filter((p) => p.order_id === order.id)
   // `orders/totals.py` `order_totals`: an accepted quote's total, else the newest quote's unit
   // price times the quantity now; an item with no quote is in no sum.
@@ -281,6 +286,9 @@ function detail(order: Order): OrderDetail {
     shipments: shipmentsOf(order.id),
     attachments: state.attachments.filter((a) => a.order_id === order.id),
     projects: state.projects.filter((p) => p.order_id === order.id).map(({ order_id: _order, ...project }) => project),
+    // #6133: a storefront customer's files and links, and the colours each request asked for.
+    sources: state.sources.filter((s) => s.order_id === order.id).sort((a, b) => (a.item_id === b.item_id ? a.position - b.position : a.item_id < b.item_id ? -1 : 1)),
+    model_requests: state.modelRequests.filter((m) => state.items.some((i) => i.id === m.item_id && i.order_id === order.id)),
     totals: {
       subtotal_minor: subtotal,
       pending_minor: pending,
@@ -390,6 +398,13 @@ export function withFilaments(found: OrderItem, filaments: Record<string, string
   }
   const colours = found.colours.map((c) => (String(c.slot) in filaments ? { ...c, filament_id: filaments[String(c.slot)] ?? null } : c))
   return { colours, changed: colours.some((c, i) => c.filament_id !== found.colours[i]?.filament_id) }
+}
+
+/** #5283 — `Lifecycle._accepts`: on a storefront order the shop's own accept is refused. */
+export function customerAccepts(order: Order) {
+  if (order.source === 'storefront') {
+    throw new Refused('customer_accepts', `the customer accepts on storefront order ${order.number}; the shop accepts only with Accept for the customer`)
+  }
 }
 
 /** The refusals of `acceptQuote`, for a caller that must know before it writes. */
@@ -663,11 +678,13 @@ function addItem(afterAcceptance: boolean): Parameters<typeof http.post>[1] {
       if (!body.title?.trim()) return fieldProblem(request, 'body', 'a custom item needs a title')
       const price = body.unit_price_minor
       // After acceptance an unset accept means false, and a true one is refused (#5349).
-      const accept = afterAcceptance ? body.accept === true : body.accept !== false
+      // Before, unset is true on a back-office order and false on a storefront one (#5283).
+      const accept = afterAcceptance ? body.accept === true : (body.accept ?? order.source !== 'storefront')
       if (afterAcceptance && accept) return fieldProblem(request, 'accept', 'accept: an item added after acceptance needs its quote accepted on its own')
       if (price == null || !Number.isInteger(price) || price < 0) return fieldProblem(request, 'body', 'a custom item needs a unit_price_minor')
       try {
         takesItem(order, afterAcceptance)
+        if (accept) customerAccepts(order)
         if (accept) notOnHold(order)
         const at = now()
         const created: OrderItem = {
@@ -801,7 +818,7 @@ const duplicateItem: Parameters<typeof http.post>[1] = async (info) => {
     if (original.kind === 'custom') {
       const quotes = quotesOf(original.id)
       const price = (quotes.find((q) => q.accepted) ?? [...quotes].sort(byCreated).at(-1))?.unit_price_minor ?? 0
-      add = { ...common, kind: 'custom', unit_price_minor: price, requires_printing: original.requires_printing, ...(afterAcceptance ? {} : { accept: true }) }
+      add = { ...common, kind: 'custom', unit_price_minor: price, requires_printing: original.requires_printing }
     } else if (original.kind === 'request') {
       add = { ...common, kind: 'request' }
     } else if (original.library_file) {
@@ -873,6 +890,8 @@ const fulfilItems: Parameters<typeof http.post>[1] = async ({ request, params })
         created_by: BROWSER,
         created_at: at,
         purpose: 'production',
+        // The design it prints: the item's current revision (`OrderStore.insert_fulfilment`, #5704).
+        revision_id: found.current_revision_id ?? null,
         archive_ids: [],
       }
       state.fulfilments.push(attempt)
@@ -923,12 +942,20 @@ export const handlers = [
     const source = sp.get('source')
     if (source !== null && source !== 'back_office' && source !== 'storefront') return fieldProblem(request, 'source', "Input should be 'back_office' or 'storefront'")
     const unsubmitted = sp.get('unsubmitted') === 'true'
+    // #6133: `OrderStore.orders`' own-model, purchase-pending and import-stuck filters.
+    const ownModel = sp.get('own_model') === 'true'
+    const purchasePending = sp.get('purchase_pending') === 'true'
+    const importStuck = sp.get('import_stuck') === 'true'
+    const sourcesOf = (orderId: string) => state.sources.filter((s) => s.order_id === orderId)
     const product = sp.get('product')
     if (product !== null && product !== 'custom' && !/^(model|sku):.+$/.test(product)) return fieldProblem(request, 'product', 'product is model:<slug>, sku:<sku> or custom')
     const rows = [...state.orders]
       .sort((a, b) => (a.created_at === b.created_at ? (a.id < b.id ? 1 : -1) : a.created_at < b.created_at ? 1 : -1))
       .filter((o) => (o.source === 'storefront' && o.submitted_at == null) === unsubmitted)
       .filter((o) => !source || o.source === source)
+      .filter((o) => !ownModel || state.modelRequests.some((m) => state.items.some((i) => i.id === m.item_id && i.order_id === o.id)))
+      .filter((o) => !purchasePending || sourcesOf(o.id).some((s) => s.purpose === 'purchase' && s.status === 'pending'))
+      .filter((o) => !importStuck || sourcesOf(o.id).some((s) => s.import_stuck))
       .filter((o) => statuses.length === 0 || statuses.includes(o.status))
       .filter((o) => !customer || o.customer_id === customer)
       .filter((o) => !from || Date.parse(o.created_at) >= Date.parse(from))
@@ -1079,7 +1106,7 @@ export const handlers = [
       const before = state.charges.filter((c) => c.order_id === order.id).sort((a, b) => a.position - b.position).map(line)
       replaceCharges(order.id, typedCharges(order.id, parsed))
       retax(order.id)
-      const after = state.charges.filter((c) => c.order_id === order.id).sort((a, b) => Number(a.auto) - Number(b.auto) || a.position - b.position).map(line)
+      const after = state.charges.filter((c) => c.order_id === order.id).sort(compareCharges).map(line)
       event(order, 'charges.replaced_after_acceptance', { order_status: order.status, before, after })
       order.updated_at = now()
       return HttpResponse.json(order)
@@ -1355,7 +1382,7 @@ export const handlers = [
         if (body[name] != null && !custom) throw new FieldRefused(name, `${name}: only a custom item takes one`)
       }
       if (body.approval != null && found.kind === 'custom' && resolved === undefined) throw new FieldRefused('approval', 'approval: a custom item has no design')
-      const accept = body.accept !== false
+      const accept = body.accept ?? order.source !== 'storefront'
       let price: number | null = null
       if (custom) {
         // The price it has: its accepted quote's, else its newest's.
@@ -1367,6 +1394,9 @@ export const handlers = [
         const unpinned = accept && !accepted && body.unit_price_minor != null
         if (wanted !== null && (body.quantity != null || wanted !== current || unpinned)) price = wanted
       }
+      // `Lifecycle._custom_price`: an explicit accept of any reprice (a quantity change
+      // too) on a storefront order is the customer's, before anything is written.
+      if (body.accept === true && price !== null) customerAccepts(order)
       const refiled = body.filaments ? withFilaments(found, body.filaments) : undefined
       // #5280: a different reference, or a slot's filament, is the item's next revision; the
       // item's own reference sent again changes nothing and makes none.
@@ -1533,6 +1563,7 @@ export const handlers = [
       const order = lock(String(params.id))
       notEnded(order)
       const found = itemOf(order, String(params.item))
+      customerAccepts(order)
       openForRequote(order, found, "an item's price")
       notOnHold(order)
       const quote = state.quotes.find((q) => q.id === params.quote && q.order_item_id === found.id)
@@ -1566,6 +1597,8 @@ export const handlers = [
         created_by: BROWSER,
         created_at: now(),
         purpose: 'production',
+        // The design it prints: the item's current revision (`OrderStore.insert_fulfilment`, #5704).
+        revision_id: found.current_revision_id ?? null,
         archive_ids: body.archive_id == null ? [] : [body.archive_id],
       }
       state.fulfilments.push(attempt)
@@ -1685,6 +1718,8 @@ export const handlers = [
         created_by: BROWSER,
         created_at: now(),
         purpose: 'production',
+        // The design it prints: the item's current revision (`OrderStore.insert_fulfilment`, #5704).
+        revision_id: found.current_revision_id ?? null,
         print_request_id: printRequestId(found.id, request.headers.get('Idempotency-Key')!),
         print_run_id: newId('run'),
         copies,

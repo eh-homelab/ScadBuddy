@@ -1216,4 +1216,5 @@ Three contradictions are fixed here:
   through the cut instead, and copies them only when the parent is forgotten.
 - **§14.3** says the API pod's `agent` container runs no turn. That holds, but the container
   still runs one Temporal worker: `bridge.tab` on its own `agent-tools.<identity>` (#4806),
-  because the tab's socket is in that process.
+  because the tab's socket is in that process. Since #5862 that worker also runs the
+  `BridgeCall` workflows of the process's own calls to a tab on another pod.

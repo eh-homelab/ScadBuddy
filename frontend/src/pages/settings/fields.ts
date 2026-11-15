@@ -7,12 +7,15 @@ import type { Settings, SettingsUpdate } from '../../api/types'
 export type SectionId =
   | 'connection'
   | 'printing'
+  | 'print-watcher'
   | 'orders'
   | 'projects'
   | 'uploads'
   | 'rendering'
   | 'fonts'
   | 'git-remote'
+  | 'storefront-mail'
+  | 'storefront-pricing'
   | 'preview'
   | 'diagnostics'
   | 'administration'
@@ -141,6 +144,21 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     kind: 'bool',
     help: 'On, the tax is also on the shipping charges. Fees and discounts are never taxed.',
   },
+  // #6133 — the handling fee on the things the shop buys for a customer (spec 2026-11-13 §10.3).
+  {
+    name: 'orders_purchase_fee_flat_minor',
+    section: 'orders',
+    label: 'Handling fee per bought item, minor units',
+    kind: 'count',
+    help: 'Added once for each thing the shop records as bought for a customer, in the minor unit of the orders currency, such as 150 for 1.50. An order in another currency takes only the percent below. 0 adds none.',
+  },
+  {
+    name: 'orders_purchase_fee_percent',
+    section: 'orders',
+    label: 'Handling fee on bought items, percent',
+    kind: 'text',
+    help: 'Added as a percent of what the shop paid for the things it bought for a customer, such as 10 or 7.50. 0 to 100, at most two decimals. The flat fee and this percent make one charge, "Handling for bought items", rounded half up once.',
+  },
   {
     name: 'pricing_usd_rate',
     section: 'orders',
@@ -148,6 +166,23 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     kind: 'text',
     help: 'Converts the assistant\'s spend, which is in US dollars, into a job\'s cost for orders in the shop\'s currency (#5330). 1 when the shop prices in US dollars. More than 0.',
     advanced: true,
+  },
+  // #5283 — the storefront's bot check (storefront spec §5.8): Cloudflare Turnstile on
+  // design requests, submit, sign-in code requests and sign-ins, on while a site key
+  // is set.
+  {
+    name: 'storefront_turnstile_site_key',
+    section: 'orders',
+    label: 'Storefront bot check: Turnstile site key',
+    kind: 'text',
+    help: 'Cloudflare Turnstile\'s public site key for the storefront\'s host. Set, the storefront asks for the check on design requests, submit, sign-in code requests and sign-ins, and refuses them while the secret below is not set. Empty turns the check off.',
+  },
+  {
+    name: 'storefront_turnstile_secret',
+    section: 'orders',
+    label: 'Storefront bot check: Turnstile secret key',
+    kind: 'secret',
+    help: 'The widget\'s secret key, stored sealed under SCADBUDDY_SECRET_KEY_FILE and never shown again. Only this server sends it, to Cloudflare; the storefront and its page never see it.',
   },
   // #4939 — a native run's plate-clear wait, as Bambuddy's queue's `require_plate_clear`.
   {
@@ -271,6 +306,7 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     section: 'rendering',
     label: 'Keep finished renders for',
     kind: 'seconds',
+    help: '0 keeps them forever: the store then keeps every render’s files.',
   },
   {
     name: 'render_concurrency',
@@ -377,6 +413,56 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     kind: 'secret',
     help: 'A token (or password) with write access to the remote, stored sealed under SCADBUDDY_SECRET_KEY_FILE and never shown again.',
   },
+  // #5283 — the storefront's mail, sent by the CRUD service. The password is not a
+  // setting: it is sealed apart (`StorefrontMailPassword`).
+  {
+    name: 'storefront_mail_host',
+    section: 'storefront-mail',
+    label: 'SMTP host',
+    kind: 'text',
+    help: 'Such as smtp.example.com. Empty sends no mail: order links and sign-in codes wait, and order updates are left to a plugin.',
+  },
+  {
+    name: 'storefront_mail_port',
+    section: 'storefront-mail',
+    label: 'SMTP port',
+    kind: 'count',
+    help: 'Usually 587 with STARTTLS.',
+  },
+  {
+    name: 'storefront_mail_user',
+    section: 'storefront-mail',
+    label: 'SMTP user',
+    kind: 'text',
+    help: 'The login. Empty sends without one.',
+  },
+  {
+    name: 'storefront_mail_sender',
+    section: 'storefront-mail',
+    label: 'Sender',
+    kind: 'text',
+    help: 'The From address of every mail, such as shop@example.com.',
+  },
+  {
+    name: 'storefront_mail_tls',
+    section: 'storefront-mail',
+    label: 'TLS',
+    kind: 'select',
+    choices: [
+      { value: 'starttls', label: 'STARTTLS on the port (usually 587)' },
+      { value: 'implicit', label: 'Implicit TLS (usually 465)' },
+      { value: 'none', label: 'None, a relay with no login' },
+    ],
+    help: 'STARTTLS needs a server that offers it. A login is never sent without TLS.',
+  },
+  // #6153 — the storefront's slices at once; the shop slice profile is saved on its own.
+  {
+    name: 'storefront_slices_concurrent',
+    section: 'storefront-pricing',
+    label: 'Slices at once',
+    kind: 'count',
+    help: 'How many storefront slices run at the same time, 1 to 4. The others wait. It takes effect once the storefront prices designs from a slice.',
+  },
   {
     name: 'log_level',
     section: 'diagnostics',
@@ -413,6 +499,7 @@ const HAS_KEY = {
   bambuddy_render_api_key: 'has_render_api_key',
   google_fonts_api_key: 'has_google_fonts_api_key',
   git_remote_token: 'has_git_remote_token',
+  storefront_turnstile_secret: 'has_storefront_turnstile_secret',
 } as const
 export type SecretName = keyof typeof HAS_KEY
 
@@ -432,7 +519,8 @@ export function serverValue(settings: Settings, name: FieldName): string {
     name === 'bambuddy_render_api_key' ||
     name === 'google_fonts_api_key' ||
     name === 'store_s3_secret_access_key' ||
-    name === 'git_remote_token'
+    name === 'git_remote_token' ||
+    name === 'storefront_turnstile_secret'
   )
     return ''
   const value = (settings as Record<string, unknown>)[name]

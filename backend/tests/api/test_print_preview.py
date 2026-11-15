@@ -12,6 +12,7 @@ import io
 import json
 import struct
 import threading
+import time
 import tracemalloc
 import zipfile
 from collections.abc import AsyncIterator, Iterator
@@ -30,7 +31,9 @@ from scadbuddy.bambuddy.output_reader import LocalOutputs, require
 from scadbuddy.bambuddy.preview import _TOOLPATHS, PREVIEW_GRACE, sweep_preview_slices
 from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.bambuddy.print_source import OutputSource, ReadOutOfMemoryError
+from scadbuddy.core.events import Event, PreviewSliceEvent
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.preview_follow.component import PREVIEW_FOLLOWS
 from tests.api.conftest import follow_operation
 from tests.api.test_print_filaments import prepared, queue_route
 from tests.api.test_print_run_choices import body, run_print, run_routes, two_plate_output
@@ -149,6 +152,45 @@ def test_a_background_slice_is_read_back_and_a_run_of_the_same_choices_queues_it
     # The run queued the background slice: nothing was sliced again.
     assert sliced.call_count == 1
     assert json.loads(queued.calls.last.request.content)["library_file_id"] == SLICED
+
+
+@respx.mock
+def test_a_running_background_slice_read_once_is_followed_and_its_end_published(
+    client: TestClient, model: str
+) -> None:
+    """#265: the dialog reads the slice once and then on each event; the route's read
+    starts the follow that publishes them."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    job = Job()
+    job.routes()
+    sliced_routes()
+    start_slice(client, output_id, body())
+    state = _state(client)
+    follows = state.components.get(PREVIEW_FOLLOWS)
+    follows.interval = 0.05
+    heard: list[Event] = []
+    state.events.add_listener(heard.append)
+
+    job.body = {**job.body, "status": "running", "result": None}
+    read = client.get(f"/api/v1/print/outputs/{output_id}/preview-slices/9")
+    assert (read.json()["status"], read.json()["followed"]) == ("running", True)
+    assert follows.following == 1
+    # A second read follows nothing twice.
+    client.get(f"/api/v1/print/outputs/{output_id}/preview-slices/9")
+    assert follows.following == 1
+
+    job.body = Job().body
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not any(
+        isinstance(e, PreviewSliceEvent) and e.kind == "preview_slice.settled" for e in heard
+    ):
+        time.sleep(0.05)
+    settled = [e for e in heard if isinstance(e, PreviewSliceEvent)]
+    assert [(e.kind, e.slicer, e.job_id) for e in settled] == [
+        ("preview_slice.settled", "bambuddy", 9)
+    ]
 
 
 @respx.mock

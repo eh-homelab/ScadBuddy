@@ -1,5 +1,5 @@
 import { screen, waitFor, within } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { api } from '../../../api/client'
 import { mockSettings } from '../../../mocks/handlers'
 import { choose } from '../../../test/select'
@@ -159,5 +159,52 @@ describe('Orders, money rules (#5281)', () => {
     await user.click(within(policy).getByRole('button', { name: 'Save deposit policy' }))
     expect(await within(policy).findByRole('alert')).toHaveTextContent('Rule 1: enter a fixed amount, such as 20.00.')
     expect(mockSettings().orders_deposit_policy).toEqual([])
+  })
+})
+
+describe('the storefront bot check (#5283)', () => {
+  it('saves the site key and a write-only secret, and never shows the secret', async () => {
+    const put = vi.spyOn(api, 'putSettings')
+    const { user } = renderSettingsSection(<Orders />, { route: '/settings/printing' })
+    await seeded()
+    const orders = region('Orders')
+    await user.type(within(orders).getByLabelText('Storefront bot check: Turnstile site key'), '0x4AAA-site')
+    await user.type(within(orders).getByLabelText('Storefront bot check: Turnstile secret key'), '0x4AAA-secret')
+    await user.click(within(orders).getByRole('button', { name: 'Save Orders' }))
+    await waitFor(() => expect(put).toHaveBeenCalled())
+    expect(put.mock.calls[0]?.[0]).toEqual({
+      storefront_turnstile_site_key: '0x4AAA-site',
+      storefront_turnstile_secret: '0x4AAA-secret',
+    })
+    // The server reports only that a secret is set.
+    await waitFor(() => expect(mockSettings().has_storefront_turnstile_secret).toBe(true))
+    expect(mockSettings()).not.toHaveProperty('storefront_turnstile_secret')
+    put.mockRestore()
+  })
+})
+
+describe('Orders, the handling fee on bought items (#6133)', () => {
+  it('saves the flat fee and the percent, and shows the server refusing a percent past 100', async () => {
+    const { user } = renderSettingsSection(<Orders />, { route: '/settings/printing' })
+    await seeded()
+    const orders = region('Orders')
+    const flat = () => within(orders).getByLabelText('Handling fee per bought item, minor units')
+    const percent = () => within(orders).getByLabelText('Handling fee on bought items, percent')
+    expect(flat()).toHaveDisplayValue('0')
+    expect(percent()).toHaveValue('0')
+
+    await user.clear(percent())
+    await enter(user, percent(), '150')
+    await user.click(within(orders).getByRole('button', { name: 'Save Orders' }))
+    await within(orders).findByRole('alert')
+    expect(mockSettings().orders_purchase_fee_percent).toBe('0')
+
+    await user.clear(flat())
+    await enter(user, flat(), '150')
+    await user.clear(percent())
+    await enter(user, percent(), '7.50')
+    await user.click(within(orders).getByRole('button', { name: 'Save Orders' }))
+    await waitFor(() => expect(mockSettings().orders_purchase_fee_percent).toBe('7.50'))
+    expect(mockSettings().orders_purchase_fee_flat_minor).toBe(150)
   })
 })

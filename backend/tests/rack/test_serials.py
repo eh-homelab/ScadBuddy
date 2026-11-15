@@ -19,6 +19,7 @@ from scadbuddy.bambuddy.print_run import (
 )
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.problems import ApiError
+from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
 from scadbuddy.rack.rank import Usage
 from scadbuddy.rack.usage import (
     RACK_PICKS_FALLBACK,
@@ -27,6 +28,7 @@ from scadbuddy.rack.usage import (
     RACK_SETTLE_READ_FALLBACK,
     RACK_STORE_FALLBACKS,
     PickedHotend,
+    error_facts,
     record_seen,
     record_settled,
     save_picks,
@@ -43,9 +45,7 @@ def leak(serial: str) -> str:
 class Leaky:
     """A store whose every call fails with a serial in its message, as a database's might."""
 
-    async def seen(
-        self, printer_id: int | None, serials: Iterable[str], printer: str | None = None
-    ) -> None:
+    async def seen(self, printer: str | None, serials: Iterable[str]) -> None:
         raise RuntimeError(leak(next(iter(serials))))
 
     async def usage(self, serials: Iterable[str]) -> dict[str, Usage]:
@@ -54,7 +54,7 @@ class Leaky:
     async def record_picks(
         self,
         queue_item_id: int,
-        printer_id: int,
+        printer: str | None,
         picks: Sequence[PickedHotend],
         *,
         copies: int = 1,
@@ -123,6 +123,7 @@ async def test_no_serial_reaches_a_log_record(caplog: pytest.LogCaptureFixture) 
         choose = rack_chooser(
             Reads(grouped(requirement()), rack),
             printer_id=1,
+            printer="p1",
             plate_id=1,
             spools={1: SpoolOption(spool_id=9, material="PLA")},
             algorithm="least_used",
@@ -135,6 +136,7 @@ async def test_no_serial_reaches_a_log_record(caplog: pytest.LogCaptureFixture) 
         unreadable = rack_chooser(
             Reads(grouped(requirement()), RuntimeError(leak(INVENTED_SERIALS[4]))),
             printer_id=1,
+            printer="p1",
             plate_id=1,
             spools={1: SpoolOption(spool_id=9, material="PLA")},
             algorithm="least_used",
@@ -143,9 +145,9 @@ async def test_no_serial_reaches_a_log_record(caplog: pytest.LogCaptureFixture) 
             warnings=warnings,
         )
         assert await unreadable(77) is None  # status failed: no choice, a warning
-        await record_seen(Leaky(), 1, rack)
+        await record_seen(Leaky(), "p1", rack)
         await save_picks(
-            Leaky(), 1, [51], [PickedHotend(group_id=0, position=2, serial=INVENTED_SERIALS[2])]
+            Leaky(), "p1", [51], [PickedHotend(group_id=0, position=2, serial=INVENTED_SERIALS[2])]
         )
         await record_settled(
             PrintSubject.output("c" * 32), client=Archives(), links=Links(), store=Leaky()
@@ -242,3 +244,38 @@ def test_the_guard_covers_the_store_fallbacks_and_expects_only_infrastructure() 
     for message in sorted(RACK_STORE_FALLBACKS - {RACK_SETTLE_FALLBACK}):
         records = [record(message, name) for name in bambuddy]
         assert foreign_rack_errors(records) == list(bambuddy), message
+
+
+@pytest.mark.parametrize("message", sorted(RACK_STORE_FALLBACKS | {RACK_USAGE_FALLBACK}))
+def test_the_guard_expects_a_crud_outage_but_not_a_crud_bug(message: str) -> None:
+    """#5298 Task 30: on the print worker a rack store call is a CRUD call. An API out of
+    reach, one that did not answer, or its database out of reach is an outage; a missing
+    route, a route's 5xx, a refused credential and any refusal (a 4xx) are bugs."""
+
+    def record(error: Exception) -> logging.LogRecord:
+        made = logging.LogRecord("x", logging.WARNING, __file__, 1, message, (), None)
+        for name, value in error_facts(error).items():
+            setattr(made, name, value)
+        return made
+
+    outages = [
+        CrudUnavailableError("down", "unreached"),
+        CrudUnavailableError("down", "transport"),
+        CrudUnavailableError("down", "database_unavailable"),
+    ]
+    assert foreign_rack_errors([record(error) for error in outages]) == []
+    bugs = [
+        CrudUnavailableError("down", "route_missing"),
+        CrudUnavailableError("down", "unavailable"),
+        CrudUnavailableError("down", "reexchange"),
+    ]
+    assert foreign_rack_errors([record(error) for error in bugs]) == ["CrudUnavailableError"] * 3
+    refused = CrudRefusedError(422, {"type": "x"})
+    assert foreign_rack_errors([record(refused)]) == ["CrudRefusedError"]
+
+
+def test_a_crud_failure_is_logged_by_its_word_only() -> None:
+    """Spec §7: the logged facts are the type and the fixed ``failure`` word, never text."""
+    error = CrudUnavailableError("CRUD route unavailable: TEST-HOTEND-17", "transport")
+    assert error_facts(error) == {"error": "CrudUnavailableError", "failure": "transport"}
+    assert error_facts(KeyError("TEST-HOTEND-17")) == {"error": "KeyError"}

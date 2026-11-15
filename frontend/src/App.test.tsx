@@ -53,7 +53,7 @@ describe('App routes (#2356)', () => {
   // A lazy page is looked up by its export's name, which no type checks: one renamed
   // would leave its route blank.
   it.each([
-    ['/prints', 'Print history'],
+    ['/prints', 'Prints'],
     ['/m/chunky-name-sign/prints', 'Prints'],
   ])('renders %s through its lazy chunk', async (route, heading) => {
     const { App } = await import('./App')

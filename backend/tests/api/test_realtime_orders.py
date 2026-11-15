@@ -36,6 +36,18 @@ def test_order_topics_are_followed(client: TestClient, bus: EventBus) -> None:
         }
 
 
+def test_a_swept_cart_says_it_is_deleted(client: TestClient, bus: EventBus) -> None:
+    """Review of #5789: the draft sweep's event, so an open list or order page drops it.
+    Only that frame carries ``deleted``."""
+    order_id = "0e5a3c1e-1111-4222-8333-944455556667"
+    with client.websocket_connect(WS) as ws:
+        subscribe(ws, "orders", f"order:{order_id}")
+        bus.publish(OrderChanged(order_id=order_id, status="draft", cart=True, deleted=True))
+        frame = ws.receive_json()
+        assert frame["topics"] == ["orders", f"order:{order_id}"]
+        assert frame["data"] == {"order_id": order_id, "status": "draft", "deleted": True}
+
+
 def test_an_order_change_is_news_for_orders_and_its_order(app: FastAPI, client: TestClient) -> None:
     """A socket following `orders` hears what the lifecycle writes through the
     component, which is what every route of Tasks 6 and 7 goes through."""

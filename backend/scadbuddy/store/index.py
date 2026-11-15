@@ -227,7 +227,9 @@ class BlobIndex:
         meta: dict[str, Any],
         reuse: bool = False,
     ) -> BlobRef | None:
-        """`put` on ``conn``."""
+        """`put` on ``conn``. It writes ``meta`` whole, except that a row's ``output`` mark
+        (`slicing/transfer.py` `SLICED_OUTPUT_META`) stays: a slicer's input of the same
+        bytes as a marked output shares its key, and must not unmark it (#5298 Task 32)."""
         values = (ref.sha256, ref.kind, ref.backend, ref.backend_id, ref.size, slug, Jsonb(meta))
         while True:
             with conn.transaction():
@@ -235,7 +237,9 @@ class BlobIndex:
                 if row is not None:
                     conn.execute(
                         f"UPDATE store_blobs SET {_KEEP_COPY}, sha256 = %s, kind = %s,"
-                        " backend = %s, backend_id = %s, size = %s, slug = %s, meta = %s,"
+                        " backend = %s, backend_id = %s, size = %s, slug = %s,"
+                        " meta = %s || jsonb_strip_nulls("
+                        "jsonb_build_object('output', store_blobs.meta -> 'output')),"
                         " touched_at = now() WHERE key = %s",
                         (*_kept_copy(ref), *values, key),
                     )
@@ -278,8 +282,11 @@ class BlobIndex:
         slug: str | None,
         meta: dict[str, Any],
         reuse: bool = False,
+        only_kind: str | None = None,
     ) -> bool:
-        """`swap` on ``conn``."""
+        """`swap` on ``conn``. With ``only_kind``, a row of another kind is not rewritten
+        (the swap answers false): the render worker's CRUD route passes ``piece``, checked
+        under the row's lock."""
         values = (ref.sha256, ref.kind, ref.backend, ref.backend_id, ref.size, slug, Jsonb(meta))
         with conn.transaction():
             self._locked(conn, key, ref, reuse=reuse, columns="backend, backend_id")
@@ -294,8 +301,9 @@ class BlobIndex:
                 cursor = conn.execute(
                     f"UPDATE store_blobs SET {_KEEP_COPY}, sha256 = %s, kind = %s,"
                     " backend = %s, backend_id = %s, size = %s, slug = %s, meta = %s,"
-                    " touched_at = now() WHERE key = %s AND sha256 = %s",
-                    (*_kept_copy(ref), *values, key, expected),
+                    " touched_at = now() WHERE key = %s AND sha256 = %s"
+                    " AND (%s::text IS NULL OR kind = %s)",
+                    (*_kept_copy(ref), *values, key, expected, only_kind, only_kind),
                 )
             return cursor.rowcount == 1
 
@@ -309,7 +317,8 @@ class BlobIndex:
 
     def mark(self, keys: Sequence[str], *, backend: str, cutoff: datetime, **meta: Any) -> None:
         """Merge ``meta`` into the rows of ``keys`` on ``backend`` not touched since
-        ``cutoff``. A later `put` rewrites `meta`, which clears the mark."""
+        ``cutoff``. A later `put` rewrites `meta`, which clears the mark (all but an
+        ``output`` mark, which `put_in` keeps)."""
         self.retrying(
             ",".join(sorted(keys)),
             lambda conn: self.mark_in(conn, keys, backend=backend, cutoff=cutoff, meta=meta),
@@ -354,6 +363,18 @@ class BlobIndex:
             f" AND (%s::text IS NULL OR backend = %s) RETURNING {_COLUMNS}",
             (key, backend, backend),
         ).fetchone()
+        return _stat(row) if row is not None else None
+
+    def delete_if_names(self, key: str, ref: BlobRef) -> BlobStat | None:
+        """Drop ``key``'s row only while it still names ``ref`` (its object and bytes), in
+        one statement: a row stored again since ``ref`` was read stays. The row taken, or
+        None."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                f"DELETE FROM store_blobs WHERE key = %s AND sha256 = %s AND kind = %s"
+                f" AND backend = %s AND backend_id = %s RETURNING {_COLUMNS}",
+                (key, ref.sha256, ref.kind, ref.backend, ref.backend_id),
+            ).fetchone()
         return _stat(row) if row is not None else None
 
     def delete_if_stale(

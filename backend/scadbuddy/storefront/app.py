@@ -10,6 +10,10 @@ send the ``SameSite=Lax`` visitor cookie on one, so a page elsewhere cannot writ
 visitor. A request with no ``Origin`` is not a browser page (curl), and it has no
 visitor but the one it makes up itself.
 
+Mounted last, `static.py` `StorefrontStatic` serves the page (``storefront.html``) and
+its own chunks from the built bundle (``SCADBUDDY_FRONTEND_DIR``, else the repo's or the
+image's ``frontend/dist``); with none, the edge serves its routes only.
+
 Its lifespan waits until the CRUD service serves every area the edge calls
 (`EDGE_AREAS`), then serves; a SIGTERM or SIGINT ends that wait, and the edge then
 closes its client and never serves. A CRUD route's refusal
@@ -46,6 +50,10 @@ from scadbuddy.crud.storefront import StorefrontCrud
 from scadbuddy.storefront.ratelimit import RequestLimit, UploadAllowance
 from scadbuddy.storefront.routes import RequestsEnabled, router, visitor_router
 from scadbuddy.storefront.settings import STOREFRONT_PREFIX, StorefrontSettings
+from scadbuddy.storefront.sign_out import SignOutRetries
+from scadbuddy.storefront.static import StorefrontStatic
+from scadbuddy.storefront.turnstile import FailedChecks, SiteKey
+from scadbuddy.storefront.upload_origin import UploadOrigin
 from scadbuddy.storefront.visitors import VisitorCookie
 from scadbuddy.storefront.wire import public_problem
 
@@ -100,6 +108,7 @@ def create_app(settings: StorefrontSettings, *, crud: StorefrontCrud | None = No
                     return
             yield
         finally:
+            await app.state.sign_out_retries.aclose()
             await client.aclose()
 
     app = FastAPI(
@@ -116,6 +125,13 @@ def create_app(settings: StorefrontSettings, *, crud: StorefrontCrud | None = No
     # Design requests: their own allowance per client, and "Ask for a design" as read last.
     app.state.upload_allowance = UploadAllowance()
     app.state.requests_enabled = RequestsEnabled()
+    # The bot check's site key (#5283), for the page's config and its CSP.
+    app.state.turnstile_site_key = SiteKey()
+    app.state.turnstile_failures = FailedChecks()
+    # The store's origin for the page's direct uploads (#6133), for its CSP.
+    app.state.upload_origin = UploadOrigin()
+    # Sign-outs the CRUD side did not answer, tried again (`sign_out.py`).
+    app.state.sign_out_retries = SignOutRetries(lambda **call: client.account_sign_out(**call))
     install_problem_handlers(app)
 
     @app.exception_handler(CrudRefusedError)
@@ -142,7 +158,30 @@ def create_app(settings: StorefrontSettings, *, crud: StorefrontCrud | None = No
 
     app.include_router(router)
     app.include_router(visitor_router)
+    # Last, so every route wins the match: the page and its own chunks (`static.py`).
+    frontend = settings.resolve_frontend_dir()
+    if frontend is not None:
+
+        async def turnstile_on() -> bool:
+            # Until a read succeeds the edge cannot know the check is off, so the page's
+            # CSP allows Cloudflare: a later read that finds a key is then not blocked.
+            site_key = app.state.turnstile_site_key
+            return await site_key.get(client) is not None or not site_key.ever_read
+
+        async def upload_origin() -> str | None:
+            origin: UploadOrigin = app.state.upload_origin
+            return await origin.get(client)
+
+        app.mount(
+            "/",
+            StorefrontStatic(frontend, turnstile=turnstile_on, upload_origin=upload_origin),
+            name="storefront-page",
+        )
+    else:
+        logger.info("no storefront page bundle found; serving the API only")
     key = settings.storefront_cookie_key_file.read_bytes()
+    # The session cookie's key too (`accounts.py`), under its own version tag.
+    app.state.cookie_key = key
     # The last added runs first.
     app.add_middleware(VisitorCookie, key=key, prefix=STOREFRONT_PREFIX)
     app.add_middleware(

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { constants } from 'node:fs'
 import { chmod, lstat, mkdir, open, readdir, realpath, rm, stat, utimes } from 'node:fs/promises'
 import path from 'node:path'
@@ -288,6 +289,11 @@ async function measure(dir: string, limit = Infinity, maxEntries = Infinity): Pr
   return { bytes: total, entries: count }
 }
 
+/** Every byte under a session's directory, never following a link (the sandbox's sync-back budget, #5864). */
+export async function dirBytes(dir: string): Promise<number> {
+  return (await measure(dir)).bytes
+}
+
 /** Every byte under `dir`, never following a link (a link counts as itself). */
 async function sizeOf(dir: string): Promise<number> {
   return (await measure(dir)).bytes
@@ -334,8 +340,14 @@ async function readRegular(inside: string, abs: string, max: number): Promise<{ 
 /** Writes `rel` under `dir`, replacing any entry in its way (a link above all) rather than writing through it. */
 async function writeInside(dir: string, rel: string, bytes: Uint8Array): Promise<void> {
   const parts = rel.split('/')
+  // A workspace path only: no `..` or `.`, no empty part, at most MAX_SEGMENTS deep. Checked before
+  // anything is touched, as is each parent below, so nothing outside `dir` is ever made or removed.
+  if (parts.length > MAX_SEGMENTS || rel.length > WORKSPACE_PATH_MAX || !parts.every((p) => SEGMENT.test(p))) {
+    throw new Error(`${JSON.stringify(rel)} is not a workspace path`)
+  }
   let at = dir
   for (const part of parts.slice(0, -1)) {
+    if (!(await within(dir, at))) throw new Error(`${rel} resolves outside the session's directory`)
     at = path.join(at, part)
     const st = await lstat(at).catch((err: unknown) => (missing(err) ? undefined : Promise.reject(err)))
     if (st && !st.isDirectory()) await rm(at, { recursive: true, force: true })
@@ -367,9 +379,53 @@ export async function readDirFile(dir: string, rel: string, max: number): Promis
   return read && 'bytes' in read ? read.bytes : undefined
 }
 
+/**
+ * The sha256 of a regular file at `rel` in a session's directory, read as a stream whatever its
+ * size (never through a link); undefined when there is none, or when it cannot be opened for
+ * lack of permission (EACCES, EPERM); another open error throws. The sandbox's sync uses it for
+ * a file past the per-file cap that is or becomes kept, so a change to such a file is seen (#5942).
+ */
+export async function dirFileSha256(dir: string, rel: string): Promise<string | undefined> {
+  const abs = path.join(dir, rel)
+  if (!(await within(dir, path.dirname(abs)).catch(() => false))) return undefined
+  let handle
+  try {
+    handle = await open(abs, constants.O_RDONLY | constants.O_NOFOLLOW)
+  } catch (err) {
+    // Gone, a link (ELOOP), or not readable (EACCES, EPERM): no sha256 for this one file, never
+    // a failure of the call that asked (the sandbox's sync records it as `large`). Anything else
+    // (EMFILE, EIO) is transient and fails the call: read as `large`, a kept path's pod copy,
+    // the command's only one, would be deleted.
+    const code = (err as NodeJS.ErrnoException).code
+    if (missing(err) || code === 'ELOOP' || code === 'EACCES' || code === 'EPERM') return undefined
+    throw err
+  }
+  try {
+    if (!(await handle.stat()).isFile()) return undefined
+    const hash = createHash('sha256')
+    for await (const chunk of handle.createReadStream({ autoClose: false })) hash.update(chunk as Buffer)
+    return hash.digest('hex')
+  } finally {
+    await handle.close()
+  }
+}
+
 /** Writes a file into a session's directory, never through a link, `rel` a workspace path; the next write-back offers it to the record. */
 export function writeDirFile(dir: string, rel: string, bytes: Uint8Array): Promise<void> {
   return writeInside(dir, rel, bytes)
+}
+
+/** The regular files at workspace paths in a session's directory, by path, never through a link (the sandbox's sync, #5864). */
+export async function dirFiles(dir: string): Promise<Map<string, string>> {
+  return (await walk(dir)).files
+}
+
+/** Removes a regular file at `rel` from a session's directory, only while its directory resolves inside it; never a link's target. */
+export async function removeDirFile(dir: string, rel: string): Promise<void> {
+  const abs = path.join(dir, rel)
+  if (!(await within(dir, path.dirname(abs)).catch(() => false))) return
+  const st = await lstat(abs).catch((err: unknown) => (missing(err) ? undefined : Promise.reject(err)))
+  if (st?.isFile()) await rm(abs, { force: true })
 }
 
 /** The directory itself, a real one: a link or a file in its place is removed first. */

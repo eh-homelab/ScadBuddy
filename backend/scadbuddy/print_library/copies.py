@@ -37,6 +37,7 @@ from scadbuddy.bambuddy.send import Printable, Target, _copy_lock, _hinted, _lai
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.tracing import span
+from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.print_library.reads import LibraryListingSource, LibraryReads, NativeCopies
@@ -134,10 +135,10 @@ async def _still_there(
 async def _touch(uploads: BambuddyUploadStore, key: str, copy_id: int) -> None:
     """The copy this subject used last is the one its folder keeps (#4337). Best
     effort: the print goes on without it, and the sweep then judges by the upload's time
-    (a print worker that starts before the API has migrated has no ``used_at`` yet)."""
+    (an API out of reach, or one that refuses the touch, leaves no ``used_at``)."""
     try:
         await uploads.touch(key, copy_id)
-    except psycopg.Error:
+    except (psycopg.Error, CrudUnavailableError, CrudRefusedError):
         logger.warning("could not record a native copy's reuse", extra={"library_file_id": copy_id})
 
 
@@ -160,7 +161,7 @@ async def ensure_native_copy(
     scheduled (`left_unrecorded`'s ``since``); without it no earlier upload is taken."""
     target_key = _hinted(target.key, len(printable.colours))
     lock = (f"{NATIVE_LOCK}{printable.key}", folder_id)
-    async with _copy_lock(lock), uploads.copy_lock(f"{lock[0]}:{folder_id}"):
+    async with _copy_lock(lock), uploads.copy_lock(f"{lock[0]}:{folder_id}") as lease:
         for copy in await uploads.for_output(printable.key, native=True):
             if copy.folder_id != folder_id or copy.target_key != target_key:
                 continue
@@ -195,7 +196,9 @@ async def ensure_native_copy(
             ).id
         )
         await uploads.record(
-            printable.key, LibraryCopy(id=uploaded, folder_id=folder_id, target_key=target_key)
+            printable.key,
+            LibraryCopy(id=uploaded, folder_id=folder_id, target_key=target_key),
+            lease,
         )
     return uploaded
 

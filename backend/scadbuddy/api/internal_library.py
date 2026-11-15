@@ -61,11 +61,14 @@ async def library_listing(
     folder_id: Annotated[int | None, Query(ge=1)] = None,
     every_folder: bool = False,
     per_print: bool = False,
+    filename: Annotated[str | None, Query(min_length=1, max_length=255)] = None,
 ) -> list[LibraryListRow]:
     native = await _native(library)
     if per_print:
         return await native.per_print_files(folder_id)
-    return await native.library_listing(folder_id=folder_id, every_folder=every_folder)
+    return await native.library_listing(
+        folder_id=folder_id, every_folder=every_folder, filename=filename
+    )
 
 
 @router.get("/folders", response_model=list[Folder])

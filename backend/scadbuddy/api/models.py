@@ -1545,6 +1545,11 @@ async def delete_template(
                     "could not release a deleted model's output Parts",
                     extra={"slug": slug, "id": output_id},
                 )
+    # The prints imported onto it (#4698) go with it, as its outputs' prints do.
+    try:
+        await state.print_links.delete_models([slug])
+    except psycopg.Error:
+        logger.exception("could not forget a deleted model's imported prints", extra={"slug": slug})
     # And the projects it was filed into (#1660), or Settings keeps listing its id.
     try:
         await asyncio.to_thread(state.settings_store.forget_model_projects, slug)

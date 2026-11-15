@@ -13,7 +13,11 @@ from scadbuddy.orders.store import OrderStore
 
 class PriceBookReader:
     def __init__(
-        self, settings: SettingsStore, store: OrderStore, *, spool_import: bool = False
+        self,
+        settings: SettingsStore,
+        store: OrderStore,
+        *,
+        spool_import: bool = False,
     ) -> None:
         self.settings = settings
         self.store = store

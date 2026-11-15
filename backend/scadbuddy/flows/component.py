@@ -101,7 +101,9 @@ def _build(core: Core, components: Components) -> Flows:
     return Flows(
         store=store,
         settings=core.settings,
-        definitions=FlowDefinitions(history, store, FlowStates(core.projection.pool)),
+        definitions=FlowDefinitions(
+            history, store, FlowStates(core.projection.pool), events=core.events
+        ),
         keys=keys[0] if keys is not None else None,
         agent_tools=AgentTools(core.settings.agent_internal_url),
         connect=keys[1] if keys is not None else None,

@@ -7,7 +7,7 @@ import { assertHttpUrl, type Resolver } from '../http/egress.js'
 import { wrapUntrustedText } from '../safety/untrusted.js'
 import type { BuiltinResult } from './result.js'
 
-// Claude Code's WebFetch and WebSearch for a durable turn (#2393); WebFetch for a classic turn too (#2684).
+// Claude Code's WebFetch and WebSearch, as the session serves them in every turn (#2393, #2684; access/nativeBuiltins.ts `SESSION_BUILTINS`).
 //
 // WebFetch is Claude Code's, as its description says it, done here: the URL fetched as
 // given through http_request's exchange (every hop egress-checked and connected to the

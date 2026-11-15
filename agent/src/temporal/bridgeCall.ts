@@ -2,11 +2,12 @@ import { ActivityFailure, isCancellation, proxyActivities, TimeoutFailure } from
 import type { CallOutcome } from '../bridge/protocol.js'
 
 // A browser_* call for a tab whose bridge socket is on another agent replica (#4780,
-// bridge/relay.ts). The workflow runs on the shared `agent-tools` queue, which every
-// replica polls; its one activity runs on the queue of the replica holding the tab
-// (`agent-tools.<identity>`, ai_tab_owners), so Temporal delivers the call to that
-// replica only, once. The result comes back as the activity's result. In the workflow
-// bundle: no Node imports.
+// bridge/relay.ts). The workflow runs on the caller's own queue (`agent-tools.<identity>`,
+// which only the caller's host worker polls, unversioned, #5862); its one activity runs on
+// the queue of the replica holding the tab (`agent-tools.<identity>`, ai_tab_owners), so
+// Temporal delivers the call to that replica only, once. The result comes back as the
+// activity's result. In the workflow bundles (the host workers' `bridge-bundle.js`, and the
+// shared one, scripts/bundle-workflows.mjs): no Node imports.
 
 export const BRIDGE_CALL_WORKFLOW = 'BridgeCall'
 /** The owner's side: runs a request on a tab it holds (bridge/relay.ts `activities`). */

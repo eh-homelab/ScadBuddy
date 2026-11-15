@@ -1,5 +1,4 @@
-import { useEffect, useSyncExternalStore } from 'react'
-import { api } from '../api/client'
+import { useSyncExternalStore } from 'react'
 import type { Settings } from '../api/types'
 
 /**
@@ -30,26 +29,32 @@ export function setDisplayUnit(unit: DisplayUnit): void {
   for (const listener of listeners) listener()
 }
 
-/** Tests only: back to millimetres, and the next {@link loadDisplayUnit} fetches again. */
+/** Tests only: back to millimetres, and the next `loadDisplayUnit` (lib/loadDisplayUnit.ts) fetches again. */
 export function resetDisplayUnit(): void {
   setDisplayUnit('mm')
   loaded = false
 }
 
-/** Fetches the stored unit once per page load. A failure leaves millimetres showing. */
-export function loadDisplayUnit(): void {
-  if (loaded) return
+/**
+ * The fetch of the stored unit (`lib/loadDisplayUnit.ts`) starts: the generation to compare
+ * its answer with, or null when the unit is already loaded or set. Kept here, not in that
+ * module, so this one imports no API client: the public storefront page's viewer reads it
+ * (#5282, spec 2026-11-02 §5.1).
+ */
+export function startDisplayUnitLoad(): number | null {
+  if (loaded) return null
   loaded = true
-  const started = generation
-  api.getSettings().then(
-    // A unit set while this was in flight (a Settings save) is newer than what it read.
-    (settings) => {
-      if (generation === started) setDisplayUnit(settings.display_unit)
-    },
-    () => {
-      loaded = false
-    },
-  )
+  return generation
+}
+
+/** The load's answer, unless a unit was set since it started (a Settings save is newer). */
+export function finishDisplayUnitLoad(started: number, unit: DisplayUnit): void {
+  if (generation === started) setDisplayUnit(unit)
+}
+
+/** The load failed: the next one fetches again. */
+export function failDisplayUnitLoad(): void {
+  loaded = false
 }
 
 function subscribe(listener: () => void): () => void {
@@ -59,11 +64,6 @@ function subscribe(listener: () => void): () => void {
 
 export function useDisplayUnit(): DisplayUnit {
   return useSyncExternalStore(subscribe, getDisplayUnit)
-}
-
-/** Mounted once, by the app shell. */
-export function useLoadDisplayUnit(): void {
-  useEffect(loadDisplayUnit, [])
 }
 
 /** Millimetres to the display unit, as a bare number: one decimal in mm, two in inches. */

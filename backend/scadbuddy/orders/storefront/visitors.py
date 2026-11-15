@@ -86,9 +86,10 @@ class VisitorStore:
         """The housekeeping pass (#5282), on the caller's connection: up to ``limit``
         `storefront_renders` rows made before ``renders_before``, oldest first, then up
         to ``limit`` visitors last seen before ``visitors_before`` that no order names
-        (their newer renders cascade). A visitor with a cart keeps it until the draft
-        sweep takes the cart. A larger backlog drains over later runs. The counts
-        deleted: (visitors, renders)."""
+        and no account holds (their newer renders cascade). A visitor that joined an
+        account (#5283) is kept: its orders are the account's. A visitor with a cart keeps
+        it until the draft sweep takes the cart. A larger backlog drains over later runs.
+        The counts deleted: (visitors, renders)."""
         renders = conn.execute(
             "DELETE FROM storefront_renders WHERE id IN (SELECT id FROM storefront_renders"
             " WHERE created_at < %s ORDER BY created_at LIMIT %s)",
@@ -97,6 +98,7 @@ class VisitorStore:
         visitors = conn.execute(
             "DELETE FROM storefront_visitors WHERE id IN (SELECT v.id FROM storefront_visitors v"
             " WHERE v.last_seen_at < %s"
+            " AND v.account_id IS NULL"
             " AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.storefront_visitor_id = v.id)"
             " ORDER BY v.last_seen_at LIMIT %s)",
             (visitors_before, limit),

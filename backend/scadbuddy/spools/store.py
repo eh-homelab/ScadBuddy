@@ -76,6 +76,11 @@ class SpoolStore:
         #: What a write's deadline (`replace_records`' ``timeout``) is measured on.
         self._clock = clock
 
+    @property
+    def pool(self) -> ConnectionPool[Conn]:
+        """The pool a CRUD route runs a write and its ledger row on (`replace_records_in`)."""
+        return self._pool
+
     async def _call[T](self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         return await asyncio.to_thread(fn, *args, **kwargs)
 
@@ -167,77 +172,95 @@ class SpoolStore:
         at: datetime,
         timeout: float | None,
     ) -> None:
-        deadline = None if timeout is None else self._clock() + timeout
+        deadline = self.deadline(timeout)
+        with self._pool.connection() as conn, conn.transaction():
+            self.replace_records_in(conn, provider, snapshots, at, deadline)
+
+    def deadline(self, timeout: float | None) -> float | None:
+        """``timeout`` seconds from now on the store's clock (`replace_records_in`)."""
+        return None if timeout is None else self._clock() + timeout
+
+    def replace_records_in(
+        self,
+        conn: Conn,
+        provider: str,
+        snapshots: Sequence[SpoolSnapshot],
+        at: datetime,
+        deadline: float | None,
+    ) -> None:
+        """`replace_records` on ``conn``, in its caller's transaction: the CRUD route runs
+        it there with its ledger row (#5298, plan D5), so the lock and every statement
+        commit with that row or not at all. ``deadline`` is on the store's clock
+        (`deadline`), taken by the caller before it waits for a connection."""
         listed: dict[str, SpoolSnapshot] = {}
         for snapshot in snapshots:
             listed.setdefault(snapshot.record_id, snapshot)
-        with self._pool.connection() as conn, conn.transaction():
-            if deadline is not None:
-                bound = f"{max(1, int((deadline - self._clock()) * 1000))}ms"
-                conn.execute("SELECT set_config('lock_timeout', %s, true)", (bound,))
-                conn.execute("SELECT set_config('statement_timeout', %s, true)", (bound,))
-            conn.execute(_LOCK)
-            conn.execute("DELETE FROM spool_provider_records WHERE provider = %s", (provider,))
-            for snapshot in listed.values():
-                conn.execute(
-                    "INSERT INTO spool_provider_records (provider, record_id, snapshot,"
-                    " refreshed_at) VALUES (%s, %s, %s, %s)",
-                    (provider, snapshot.record_id, Jsonb(snapshot.model_dump(mode="json")), at),
-                )
-            existing = {
-                row["record_id"]: row
-                for row in conn.execute(
-                    "SELECT record_id, physical_spool_id, linked_by, linked_at"
-                    " FROM spool_record_links WHERE provider = %s ORDER BY linked_at",
-                    (provider,),
-                )
-            }
-            ambiguous = _ambiguous(_keys_of(s.tray_uuid, s.tag_uid) for s in listed.values())
-            claimed: dict[UUID, str] = {}
-            handled: set[str] = set()
-            final: dict[str, tuple[UUID, LinkedBy]] = {}
-            for snapshot in listed.values():
-                keys = _unambiguous(_keys_of(snapshot.tray_uuid, snapshot.tag_uid), ambiguous)
-                if keys == (None, None):
-                    continue
-                handled.add(snapshot.record_id)
-                current = existing.get(snapshot.record_id)
-                spool = _spool_for_record(
-                    conn, keys, snapshot, current["physical_spool_id"] if current else None
-                )
-                if spool not in claimed:
-                    claimed[spool] = snapshot.record_id
-                    final[snapshot.record_id] = (spool, "rfid")
-            for record_id, row in existing.items():
-                spool = row["physical_spool_id"]
-                if record_id in handled or spool in claimed:
-                    continue
-                claimed[spool] = record_id
-                final[record_id] = (spool, row["linked_by"])
-            conn.execute("DELETE FROM spool_record_links WHERE provider = %s", (provider,))
-            for record_id, (spool, linked_by) in final.items():
-                kept = existing.get(record_id)
-                since = (
-                    kept["linked_at"]
-                    if kept is not None
-                    and kept["physical_spool_id"] == spool
-                    and kept["linked_by"] == linked_by
-                    else None
-                )
-                conn.execute(
-                    "INSERT INTO spool_record_links"
-                    " (provider, record_id, physical_spool_id, linked_by, linked_at)"
-                    " VALUES (%s, %s, %s, %s, COALESCE(%s, now()))",
-                    (provider, record_id, spool, linked_by, since),
-                )
+        if deadline is not None:
+            bound = f"{max(1, int((deadline - self._clock()) * 1000))}ms"
+            conn.execute("SELECT set_config('lock_timeout', %s, true)", (bound,))
+            conn.execute("SELECT set_config('statement_timeout', %s, true)", (bound,))
+        conn.execute(_LOCK)
+        conn.execute("DELETE FROM spool_provider_records WHERE provider = %s", (provider,))
+        for snapshot in listed.values():
             conn.execute(
-                "INSERT INTO spool_provider_refreshes (provider, refreshed_at) VALUES (%s, %s)"
-                " ON CONFLICT (provider) DO UPDATE SET refreshed_at = EXCLUDED.refreshed_at,"
-                " failed_at = NULL, failure = NULL",
-                (provider, at),
+                "INSERT INTO spool_provider_records (provider, record_id, snapshot,"
+                " refreshed_at) VALUES (%s, %s, %s, %s)",
+                (provider, snapshot.record_id, Jsonb(snapshot.model_dump(mode="json")), at),
             )
-            if deadline is not None and self._clock() >= deadline:
-                raise TimeoutError(f"the refresh of {provider} ran past its deadline")
+        existing = {
+            row["record_id"]: row
+            for row in conn.execute(
+                "SELECT record_id, physical_spool_id, linked_by, linked_at"
+                " FROM spool_record_links WHERE provider = %s ORDER BY linked_at",
+                (provider,),
+            )
+        }
+        ambiguous = _ambiguous(_keys_of(s.tray_uuid, s.tag_uid) for s in listed.values())
+        claimed: dict[UUID, str] = {}
+        handled: set[str] = set()
+        final: dict[str, tuple[UUID, LinkedBy]] = {}
+        for snapshot in listed.values():
+            keys = _unambiguous(_keys_of(snapshot.tray_uuid, snapshot.tag_uid), ambiguous)
+            if keys == (None, None):
+                continue
+            handled.add(snapshot.record_id)
+            current = existing.get(snapshot.record_id)
+            spool = _spool_for_record(
+                conn, keys, snapshot, current["physical_spool_id"] if current else None
+            )
+            if spool not in claimed:
+                claimed[spool] = snapshot.record_id
+                final[snapshot.record_id] = (spool, "rfid")
+        for record_id, row in existing.items():
+            spool = row["physical_spool_id"]
+            if record_id in handled or spool in claimed:
+                continue
+            claimed[spool] = record_id
+            final[record_id] = (spool, row["linked_by"])
+        conn.execute("DELETE FROM spool_record_links WHERE provider = %s", (provider,))
+        for record_id, (spool, linked_by) in final.items():
+            kept = existing.get(record_id)
+            since = (
+                kept["linked_at"]
+                if kept is not None
+                and kept["physical_spool_id"] == spool
+                and kept["linked_by"] == linked_by
+                else None
+            )
+            conn.execute(
+                "INSERT INTO spool_record_links"
+                " (provider, record_id, physical_spool_id, linked_by, linked_at)"
+                " VALUES (%s, %s, %s, %s, COALESCE(%s, now()))",
+                (provider, record_id, spool, linked_by, since),
+            )
+        conn.execute(
+            "INSERT INTO spool_provider_refreshes (provider, refreshed_at) VALUES (%s, %s)"
+            " ON CONFLICT (provider) DO UPDATE SET refreshed_at = EXCLUDED.refreshed_at,"
+            " failed_at = NULL, failure = NULL",
+            (provider, at),
+        )
+        if deadline is not None and self._clock() >= deadline:
+            raise TimeoutError(f"the refresh of {provider} ran past its deadline")
 
     def _failed(self, provider: str, at: datetime, failure: str) -> None:
         with self._pool.connection() as conn:

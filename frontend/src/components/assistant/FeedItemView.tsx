@@ -229,7 +229,7 @@ function ApprovalCard({
           site is not on its allow list.
         </p>
       ) : (
-        <p>{item.summary}</p>
+        <p className="whitespace-pre-wrap break-words">{item.summary}</p>
       )}
       {item.state === 'pending' && nav ? (
         <BrowserApprovalButtons nav={nav} sessionId={sessionId} onDecide={onDecide} />

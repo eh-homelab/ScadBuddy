@@ -30,6 +30,8 @@ export type FakeHindsight = {
   retains(): HindsightRequest[]
   memories: string[]
   respond: (request: HindsightRequest) => Answer | Promise<Answer> | undefined
+  /** How many `delayMs` answers are still waiting to be sent; one whose request closed first is not. */
+  pending(): number
   close(): Promise<void>
 }
 
@@ -38,6 +40,7 @@ export const RETAIN_PATH = (bank: string) => `/v1/default/banks/${bank}/memories
 
 export async function startFakeHindsight(): Promise<FakeHindsight> {
   const requests: HindsightRequest[] = []
+  const delayed = new Set<NodeJS.Timeout>()
   const fake: FakeHindsight = {
     port: 0,
     requests,
@@ -45,6 +48,7 @@ export async function startFakeHindsight(): Promise<FakeHindsight> {
     retains: () => requests.filter((r) => r.path.endsWith('/memories')),
     memories: [],
     respond: () => undefined,
+    pending: () => delayed.size,
     close: () => Promise.resolve(),
   }
   const send = (res: ServerResponse, answer: Exclude<Answer, { hang: true }>) => {
@@ -73,8 +77,17 @@ export async function startFakeHindsight(): Promise<FakeHindsight> {
       void Promise.resolve(decided).then(
         (answer) => {
           if ('hang' in answer) return
-          if (answer.delayMs) setTimeout(() => send(res, answer), answer.delayMs)
-          else send(res, answer)
+          if (!answer.delayMs) return send(res, answer)
+          // Cleared when the client gives up first, so a timed-out request leaves no timer behind.
+          const timer = setTimeout(() => {
+            delayed.delete(timer)
+            send(res, answer)
+          }, answer.delayMs)
+          delayed.add(timer)
+          res.on('close', () => {
+            clearTimeout(timer)
+            delayed.delete(timer)
+          })
         },
         // A `respond` Promise that rejects answers 500, never leaves the request hanging.
         (err: unknown) => send(res, { status: 500, text: String(err) }),

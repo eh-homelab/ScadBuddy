@@ -210,6 +210,65 @@ describe('ExchangeCredential', () => {
     expect(await credential.current()).toBeUndefined()
   })
 
+  it('waits for a backend not up yet without back-off, logged once, and recovers as it answers (#5868)', async () => {
+    const backend = fakeBackend()
+    const clock = { now: 0 }
+    let up = false
+    const logs: string[] = []
+    const refused = () =>
+      new TypeError('fetch failed', { cause: Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:8080'), { code: 'ECONNREFUSED' }) })
+    const credential = new ExchangeCredential({
+      backendUrl: 'http://backend:8080/',
+      proofFile: '/var/run/scadbuddy/token',
+      proof: 'k8s',
+      fetchImpl: ((input: string | URL | Request, init?: RequestInit) =>
+        up ? backend.fetchImpl(input, init) : Promise.reject(refused())) as typeof fetch,
+      readProof: async () => 'jwt-1',
+      now: () => clock.now,
+      log: (message) => logs.push(message),
+    })
+    for (let i = 0; i < 5; i += 1) {
+      expect(await credential.current()).toBeUndefined()
+      clock.now += 100
+    }
+    expect(logs).toEqual(["the agent's service credential: waiting for the backend, which is not up yet"])
+    // No back-off: the first call once the backend answers exchanges.
+    up = true
+    expect(await credential.current()).toMatch(/^sbsvc_/)
+    expect(backend.state.calls.length).toBe(1)
+    // Down again later (a restart): the token holds, and the wait is logged once more.
+    up = false
+    clock.now = 451_000
+    expect(await credential.current()).toMatch(/^sbsvc_/)
+    expect(await credential.current()).toMatch(/^sbsvc_/)
+    expect(logs.length).toBe(2)
+    const logged = logs.join('\n')
+    expect(logged).not.toContain('jwt-1')
+    expect(logged).not.toContain('sbsvc_')
+    expect(logged).not.toContain('backend:8080')
+  })
+
+  it('still backs off and logs a failure for any other transport error', async () => {
+    const logs: string[] = []
+    let calls = 0
+    const credential = new ExchangeCredential({
+      backendUrl: 'http://backend:8080/',
+      proofFile: '/var/run/scadbuddy/token',
+      proof: 'k8s',
+      fetchImpl: (() => {
+        calls += 1
+        return Promise.reject(new TypeError('fetch failed', { cause: Object.assign(new Error('x'), { code: 'ENOTFOUND' }) }))
+      }) as typeof fetch,
+      readProof: async () => 'jwt-1',
+      now: () => 0,
+      log: (message) => logs.push(message),
+    })
+    await credential.current()
+    await credential.current()
+    expect(calls).toBe(1)
+    expect(logs).toEqual(["could not exchange the agent's service credential (TypeError)"])
+  })
+
   it('waits out a 429 for its Retry-After', async () => {
     const backend = fakeBackend()
     const clock = { now: 0 }

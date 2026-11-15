@@ -1,6 +1,9 @@
 import { HttpResponse, delay, http } from 'msw'
-import type { BambuddyStatus, Settings } from '../../api/types'
+import type { BambuddyStatus, ProfileSpool, Settings, StorefrontSliceProfile } from '../../api/types'
 import * as fixtures from '../fixtures'
+import { state as orders } from './orders/state'
+import { printersState } from './printers'
+import { SPOOL_INVENTORY } from './spoolInventory'
 import { forgetMockProjectTarget, forgetMockRemembered, mockRemembered, mockSettings, problem, setMockSettings } from '../handlers'
 
 /**
@@ -35,6 +38,7 @@ const SECRETS = {
   google_fonts_api_key: 'has_google_fonts_api_key',
   store_s3_secret_access_key: 'has_store_s3_secret_access_key',
   git_remote_token: 'has_git_remote_token',
+  storefront_turnstile_secret: 'has_storefront_turnstile_secret',
 } as const
 /** The env-seeded fields a clear can hold; the rest are numbers, switches or a level. */
 const NULLABLE = new Set([
@@ -52,7 +56,15 @@ const NULLABLE = new Set([
   'git_remote_url',
   'git_remote_username',
   'git_remote_token',
+  // #5283 — the storefront's mail.
+  'storefront_mail_host',
+  'storefront_mail_user',
+  'storefront_mail_sender',
+  'storefront_turnstile_site_key',
+  'storefront_turnstile_secret',
 ])
+/** #6153 — backend `wire.py` `SUPPORT_MATERIAL`. */
+const SUPPORT_MATERIAL = /support|pva|bvoh|hips/i
 /** ISO 4217's codes with no minor unit (backend `orders/currency.py` `NO_MINOR_UNIT`). */
 const NO_MINOR_UNIT = new Set(['XAG', 'XAU', 'XBA', 'XBB', 'XBC', 'XBD', 'XDR', 'XPD', 'XPT', 'XSU', 'XTS', 'XUA', 'XXX'])
 /** #4250 — the price book's decimal strings (`core/settings.py` `decimal_string`). */
@@ -68,6 +80,8 @@ const PRICING_DECIMALS = new Set([
   'orders_thin_margin_percent',
   // #5281 — auto tax, below 100.
   'orders_tax_percent',
+  // #6133 — the handling fee's percent, 0 to 100, at most two decimals.
+  'orders_purchase_fee_percent',
 ])
 
 /** #5281 — `money.py` `DepositRule`'s checks, or the message of the first one a rule fails. */
@@ -90,6 +104,8 @@ function shippingOptionProblem(option: Record<string, unknown>): string | null {
   if (typeof option.ships !== 'boolean') return 'ships: Input should be a valid boolean'
   return null
 }
+/** #5283 — the storefront mail's login and TLS mode, checked on the merged result. */
+const MAIL_LOGIN_TLS = ['storefront_mail_user', 'storefront_mail_tls']
 /** The settings the backend's `StoreNotReadyError` is decided from. */
 const STORE_READINESS = [
   'store_backend',
@@ -157,6 +173,12 @@ function putSettings(body: Record<string, unknown>) {
       next[name] = rows
       continue
     }
+    // #6153 — `slice_profile.py` keeps each material casefolded.
+    if (name === 'storefront_slice_profile' && value) {
+      const profile = value as StorefrontSliceProfile
+      next[name] = { ...profile, spools: Object.fromEntries(Object.entries(profile.spools ?? {}).map(([m, id]) => [m.toLowerCase(), id])) }
+      continue
+    }
     if (name === 'storefront_payment_instructions' && typeof value === 'string' && value.length > 2000) return refused(name, 'String should have at most 2000 characters')
     if (!envSeeded.has(name)) {
       next[name] =
@@ -182,9 +204,25 @@ function putSettings(body: Record<string, unknown>) {
       if (!/^\d+(\.\d+)?$/.test(text)) return refused(name, `Value error, ${envName(name)} must be at least 0`)
       if ((name === 'rough_estimate_factor' || name === 'pricing_usd_rate') && Number(text) <= 0) return refused(name, `Value error, ${envName(name)} must be more than 0`)
       if (name === 'orders_tax_percent' && Number(text) >= 100) return refused(name, `Value error, ${envName(name)} must be less than 100`)
+      if (name === 'orders_purchase_fee_percent' && (Number(text) > 100 || !/^\d+(\.\d{1,2})?$/.test(text))) {
+        return refused(name, `Value error, ${envName(name)} is 0 to 100 with at most two decimals`)
+      }
     }
     if (name === 'pricing_rounding' && value !== 'to_minor_unit' && value !== 'to_major') {
       return refused(name, "Input should be 'to_minor_unit' or 'to_major'")
+    }
+    // #5283 — `core/settings.py`'s checks of the storefront's mail.
+    if (name === 'storefront_mail_port' && !(Number.isInteger(value) && (value as number) >= 1 && (value as number) <= 65535)) {
+      return refused(name, 'Input should be between 1 and 65535')
+    }
+    if (name === 'storefront_mail_sender' && typeof value === 'string' && !/^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$/.test(value.trim())) {
+      return refused(name, `Value error, ${envName(name)} is an address, such as shop@example.com`)
+    }
+    if (name === 'storefront_mail_tls' && value !== 'starttls' && value !== 'implicit' && value !== 'none') {
+      return refused(name, "Input should be 'starttls', 'implicit' or 'none'")
+    }
+    if (name === 'storefront_mail_host' && typeof value === 'string' && (/[\s/@]/.test(value.trim()) || !value.trim())) {
+      return refused(name, `Value error, ${envName(name)} is a host name, such as smtp.example.com`)
     }
     if (name === 'temporal_ui_url' && typeof value === 'string' && !/^https?:\/\//.test(value)) {
       return refused(name, `Value error, ${envName(name)} must be an http(s) URL, not '${value}'`)
@@ -249,6 +287,18 @@ function putSettings(body: Record<string, unknown>) {
       "ScadBuddy's own library keeps its files in the blob store: set store_backend to s3 or bambuddy first",
     )
   }
+  // #5283 — `SettingsStore.save`: a login is never sent on a plain connection.
+  if (
+    MAIL_LOGIN_TLS.some((name) => name in body || reset.includes(name)) &&
+    next.storefront_mail_user &&
+    next.storefront_mail_tls === 'none'
+  ) {
+    return problem(
+      422,
+      'Unprocessable Content',
+      'a plain connection (storefront_mail_tls none) is for a relay with no login: clear the user, or use starttls or implicit',
+    )
+  }
   // #426 — without their own key, render workers are handed the full one.
   next.render_key_fallback = Boolean(next.has_api_key) && !next.has_render_api_key
   next.sources = sources
@@ -268,6 +318,28 @@ export const handlers = [
     const response = putSettings(body)
     await delay(120)
     return response
+  }),
+
+  // #6153 — the shop slice profile's choices (`api/storefront_slice.py`): the price book's
+  // materials, and Bambuddy's spools, as the mock's printers all run on Bambuddy's path.
+  http.get(`${base}/storefront/slice-profile/options`, ({ request }) => {
+    const materials = new Map<string, string>()
+    for (const f of orders.filaments) if (!f.archived_at && !materials.has(f.material.toLowerCase())) materials.set(f.material.toLowerCase(), f.material)
+    const printer = new URL(request.url).searchParams.get('printer')
+    // As the route: 422 for a printer the registry does not hold.
+    if (printer && !printersState().some((row) => row.id === printer)) return problem(422, 'Unprocessable Content', `no printer ${printer}`)
+    const spools: ProfileSpool[] = printer
+      ? SPOOL_INVENTORY.filter((spool) => !spool.archived).map((spool) => ({
+          spool_id: spool.id,
+          material: spool.material,
+          colour: spool.rgba ? `#${spool.rgba.slice(0, 6)}` : null,
+          label: `${[spool.brand, spool.material, spool.subtype, spool.color_name].filter(Boolean).join(' ')} (#${spool.id})`,
+        }))
+      : []
+    return HttpResponse.json({
+      materials: [...materials.values()].sort((a, b) => a.localeCompare(b)).map((material) => ({ material, support: SUPPORT_MATERIAL.test(material) })),
+      spools,
+    })
   }),
 
   http.post(`${base}/settings/test`, async () => {

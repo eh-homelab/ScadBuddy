@@ -29,6 +29,7 @@ from scadbuddy.api.operations import (
 )
 from scadbuddy.api.printing import printer_keys
 from scadbuddy.api.runtime import apply_runtime, restart_required
+from scadbuddy.api.storefront_slice import check_profile
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.errors import SCOPE_PROBLEM, Scope, UpstreamAnswer
 from scadbuddy.bambuddy.models import Folder, Printer, RackAlgorithm
@@ -38,13 +39,16 @@ from scadbuddy.bambuddy.options import (
     PrintOptions,
     is_options_scope,
 )
+from scadbuddy.bambuddy.print_links import ImportSource
 from scadbuddy.bambuddy.send import SidebarLink
 from scadbuddy.bambuddy.uploads import ProjectTarget
+from scadbuddy.core.authorship import by_a_person
 from scadbuddy.core.config import LibraryBackend, Slicer, StoreBackend
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import (
     APPLIES,
     BOOTSTRAP_FIELDS,
+    ENV_SEEDED,
     Applies,
     Settings,
     env_var,
@@ -54,6 +58,7 @@ from scadbuddy.library.presets import PresetStore, TemplatePresetsUnreadableErro
 from scadbuddy.library.settings_store import (
     DestinationSort,
     DisplayUnit,
+    MailLoginNeedsTlsError,
     ModelPrintChoices,
     ModelProject,
     PrinterPlate,
@@ -65,8 +70,12 @@ from scadbuddy.library.settings_store import (
     StoreNotReadyError,
 )
 from scadbuddy.operations.component import OperationCommands, OperationsDep
+from scadbuddy.orders.message_models import MessagingBinding
 from scadbuddy.orders.money import DepositRule, ShippingOption
+from scadbuddy.orders.storefront.slice_profile import StorefrontSliceProfile
+from scadbuddy.print_watch.component import AUTO_IMPORTS
 from scadbuddy.printers.component import Printers, PrintersDep
+from scadbuddy.spools.component import SpoolsDep
 from scadbuddy.workflows.commands import (
     TemporalRefusedError,
     TemporalUnavailableError,
@@ -111,8 +120,9 @@ class SettingsView(BaseModel):
     #: As saved (comma-separated); the first is where Bambuddy links point (#775).
     bambuddy_web_urls: str | None = None
     has_render_api_key: bool = False
-    #: True while render workers would hold the full key (spec §9): a key is stored and
-    #: no render key is. The Settings page shows a persistent warning.
+    #: True while a key is stored and no render key is (spec §9): standalone render
+    #: workers then get no Bambuddy key, and a render inside the API process uses the
+    #: full one. The Settings page shows a persistent warning.
     render_key_fallback: bool = False
     store_backend: StoreBackend = "local"
     library_backend: LibraryBackend = "bambuddy"
@@ -131,8 +141,21 @@ class SettingsView(BaseModel):
     storefront_renders_per_minute: int = 3
     storefront_renders_per_day: int = 30
     storefront_render_concurrency: int = 2
+    #: The storefront's slices at once, shop-wide (#6153).
+    storefront_slices_concurrent: int = 1
     storefront_draft_ttl_days: int = 30
     storefront_requests_enabled: bool = False
+    #: The storefront's mail (#5283): SMTP host, port, user, From and the TLS mode
+    #: (`starttls`, `implicit` or `none`). The password is sealed apart
+    #: (`GET /storefront/mail/password` says whether it is set).
+    storefront_mail_host: str | None = None
+    storefront_mail_port: int = 587
+    storefront_mail_user: str | None = None
+    storefront_mail_sender: str | None = None
+    storefront_mail_tls: Literal["starttls", "implicit", "none"] = "starttls"
+    #: The bot check (#5283): the public site key, and only whether a secret is set.
+    storefront_turnstile_site_key: str | None = None
+    has_storefront_turnstile_secret: bool = False
     #: Job cost (#5326).
     pricing_labour_rate_per_hour: str = "0"
     pricing_usd_rate: str = "1"
@@ -141,11 +164,20 @@ class SettingsView(BaseModel):
     #: in its base.
     orders_tax_percent: str = "0"
     orders_tax_shipping: bool = False
+    #: The handling fee for bought items (#6133): a flat amount per recorded purchase, in
+    #: the shop's minor units, and a percent of their sum.
+    orders_purchase_fee_flat_minor: int = 0
+    orders_purchase_fee_percent: str = "0"
     #: The shop's money rules (#5281), stored only: the deposit policy, the shipping
     #: options and how a customer pays by hand. An empty list is none.
     orders_deposit_policy: list[DepositRule] = Field(default_factory=list)
     storefront_shipping_options: list[ShippingOption] = Field(default_factory=list)
     storefront_payment_instructions: str | None = None
+    #: The messaging plugin tool bound to "customer messages" (#5660); null is none.
+    orders_customer_messaging: MessagingBinding | None = None
+    #: The shop slice profile (#6153): the printer and a spool per material; null is none,
+    #: and the storefront then shows no price.
+    storefront_slice_profile: StorefrontSliceProfile | None = None
     #: Whether a fulfilled line item may be unfulfilled (#4953); on by default.
     orders_allow_unfulfil: bool = True
     #: Whether a native run waits for a cleared plate between its prints (#4939).
@@ -159,9 +191,10 @@ class SettingsView(BaseModel):
     store_s3_path_style: bool = True
     public_url: str | None = None
     library_folder_id: int | None = None
+    #: The Bambuddy printer the default printer links, if any (#5167). Read only: a
+    #: save of it keeps the registry printer that links it as ``default_printer``.
     printer_id: int | None = None
-    #: The default printer by registry id, when it has no Bambuddy id (#4971); one that
-    #: has one is ``printer_id``.
+    #: The default printer by registry id (#4971, #5167).
     default_printer: str | None = None
     default_plate: str | None = None
     display_unit: DisplayUnit = "mm"
@@ -180,6 +213,13 @@ class SettingsView(BaseModel):
     destination_sort: DestinationSort = "touched"
     #: The domains an asset may be fetched from (#844), with their subdomains.
     asset_fetch_domains: list[str] = Field(default_factory=list)
+    #: The print watcher (#4699): whether it imports the prints ScadBuddy did not start,
+    #: where it may take a 3MF from, and the Bambuddy printers it leaves alone.
+    print_auto_import: bool = False
+    print_auto_import_sources: list[ImportSource] = Field(default_factory=list)
+    print_auto_import_skip_printers: list[int] = Field(default_factory=list)
+    #: The LAN-only printers it leaves alone, by registry id (#4699 phase 4).
+    print_auto_import_skip_lan_printers: list[str] = Field(default_factory=list)
     #: The largest media upload (#274), in bytes, which the UI checks a file against
     #: before sending it.
     media_upload_max_bytes: int
@@ -247,8 +287,7 @@ class PrintOptionsView(BaseModel):
 
     defaults: PrintOptions
     global_options: PrintOptions
-    #: Keyed by a stringified Bambuddy printer id, or the registry id of a printer with
-    #: none (#4971).
+    #: Keyed by the registry printer id (#4971, #5167).
     printers: dict[str, PrintOptions] = Field(default_factory=dict)
     #: Keyed by ScadBuddy model slug.
     models: dict[str, PrintOptions] = Field(default_factory=dict)
@@ -256,9 +295,15 @@ class PrintOptionsView(BaseModel):
 
 class PrintOptionsState(PrintOptionsView):
     """The view plus the printer the per-printer scope keys on: the printer set in
-    Settings, or none. Neither half needs Bambuddy."""
+    Settings, or none. Neither half needs Bambuddy. ``default_printer`` is its registry
+    id, the scope's key (#5167), and ``printer_id`` the Bambuddy printer it links."""
 
     printer_id: int | None = None
+    default_printer: str | None = None
+    #: Registry printer id -> the Bambuddy printer it links (#6106). The print dialog
+    #: finds a Bambuddy printer's key in ``printers`` with it, and needs no registry
+    #: list for that.
+    bambuddy_links: dict[str, int] = Field(default_factory=dict)
 
 
 class PrintOptionsUpdate(BaseModel):
@@ -326,13 +371,13 @@ class RememberedChoices(BaseModel):
     #: Every remembered plate with its registry printer and its Bambuddy one (#4971), a
     #: LAN-only printer's among them; forgotten by either id.
     printer_plates: list[PrinterPlate] = Field(default_factory=list)
-    #: Registry printer id -> its name (#4971), for the entries keyed by a registry id:
-    #: a printer with no Bambuddy id.
+    #: Registry printer id -> its name (#4971, #5167), for every registry printer: the
+    #: per-printer entries below are keyed by the registry id.
     printer_names: dict[str, str] = Field(default_factory=dict)
-    #: A stringified Bambuddy printer id, or the registry id of a printer with none
-    #: (#4971), -> its rack nozzle algorithm (#836).
+    #: Registry printer id (#5167) -> its rack nozzle algorithm (#836).
     printer_rack_algorithms: dict[str, RackAlgorithm] = Field(default_factory=dict)
     print_options: PrintOptions = Field(default_factory=PrintOptions)
+    #: Registry printer id (#5167) -> its print options.
     printer_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
     model_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
     #: Stringified Bambuddy project id -> the printer and nozzle it last printed on (#599).
@@ -433,11 +478,18 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
         last_project_id=stored.last_project_id,
         destination_sort=stored.destination_sort,
         asset_fetch_domains=list(stored.allowed_asset_domains()),
+        print_auto_import=stored.print_auto_import,
+        print_auto_import_sources=list(stored.auto_import_sources()),
+        print_auto_import_skip_printers=stored.print_auto_import_skip_printers or [],
+        print_auto_import_skip_lan_printers=stored.print_auto_import_skip_lan_printers or [],
         orders_deposit_policy=stored.orders_deposit_policy or [],
         storefront_shipping_options=stored.storefront_shipping_options or [],
         storefront_payment_instructions=stored.storefront_payment_instructions,
+        orders_customer_messaging=stored.orders_customer_messaging,
+        storefront_slice_profile=stored.storefront_slice_profile,
         has_google_fonts_api_key=bool(runtime.google_fonts_api_key),
         has_git_remote_token=bool(runtime.git_remote_token),
+        has_storefront_turnstile_secret=bool(runtime.storefront_turnstile_secret),
         sources=snapshot.sources,
         applies=dict(APPLIES),
         restart_required=restart_required(state, runtime),
@@ -499,6 +551,26 @@ async def _check_operation_retention(
         )
 
 
+def _pending(store: SettingsStore, patch: SettingsPatch) -> StoredSettings:
+    """The stored settings as ``patch`` leaves them, for a check that reads the connection
+    this same PUT sets or resets (#6255): a given field takes the patch's value, a reset
+    one the deployment's (the environment's, else the default)."""
+    stored = store.load()
+    fields = StoredSettings.model_fields
+    update: dict[str, Any] = {}
+    for name in patch.reset:
+        if name in fields:
+            update[name] = (
+                getattr(store.defaults, name)
+                if name in ENV_SEEDED
+                else fields[name].get_default(call_default_factory=True)
+            )
+    for name in patch.model_fields_set & fields.keys():
+        if name != "reset":
+            update[name] = getattr(patch, name)
+    return stored.model_copy(update=update)
+
+
 @router.put("/settings", response_model=SettingsView, summary="Update the settings")
 async def put_settings(
     patch: SettingsPatch,
@@ -506,16 +578,24 @@ async def put_settings(
     state: StateDep,
     ops: OperationsDep,
     registry: PrintersDep,
+    spools: SpoolsDep,
 ) -> SettingsView:
     """Saves the fields given; a ``null`` clears one and ``reset`` puts one back on the
     deployment's value. A live field applies before this answers, here and (through
     ``settings.changed``) on every other replica.
 
-    The default printer (#4971) is ``printer_id`` for a printer with a Bambuddy id and
-    ``default_printer`` for one with none, never both: a ``default_printer`` naming a
-    printer that has one is saved as its ``printer_id``, and a ``printer_id`` clears
-    ``default_printer``. 422 for a ``default_printer`` the registry does not hold."""
+    The default printer is ``default_printer``, a registry id (#4971, #5167). An older
+    client's ``printer_id`` (a Bambuddy id) is saved as the registry printer that links
+    it; ``default_printer`` sent beside it wins. 422 for a ``default_printer`` the
+    registry does not hold, and for a ``printer_id`` no registry printer links. 422 for a
+    ``storefront_slice_profile`` whose printer the registry does not hold, or whose spool
+    the print dialog does not offer on that printer (#6153)."""
+    _mail_connection_by_a_person(patch)
+    _print_watch_by_a_person(patch)
     patch = await asyncio.to_thread(_default_printer, patch, registry)
+    if patch.storefront_slice_profile is not None:
+        pending = await asyncio.to_thread(_pending, store, patch)
+        await check_profile(patch.storefront_slice_profile, pending, registry, spools)
     if patch.operation_retention_seconds is not None:
         await _check_operation_retention(store, ops, patch.operation_retention_seconds)
     if patch.git_remote_token and store.kek is None:
@@ -526,19 +606,86 @@ async def put_settings(
             msg,
             errors=[{"loc": ["body", "git_remote_token"], "msg": msg}],
         )
+    if patch.storefront_turnstile_secret and store.kek is None:
+        # #5283: the bot check's secret is only ever stored sealed under the KEK.
+        msg = "The Turnstile secret is stored sealed: set SCADBUDDY_SECRET_KEY_FILE first."
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            msg,
+            errors=[{"loc": ["body", "storefront_turnstile_secret"], "msg": msg}],
+        )
     try:
         await asyncio.to_thread(store.save, patch)
-    except StoreNotReadyError as error:
+    except (StoreNotReadyError, MailLoginNeedsTlsError) as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     snapshot = await asyncio.to_thread(store.snapshot)
+    if "print_auto_import" in patch.model_fields_set:
+        # #4699: the watcher takes the prints started from this moment on, not from its
+        # next pass; switched off, it forgets the moment. It reads the committed switch
+        # itself, under the lock a pass takes (#6011).
+        await state.components.get(AUTO_IMPORTS).floor()
     apply_runtime(state, snapshot.runtime)
     # This process sees its own write at once; workers within the source's TTL.
     state.store.source.invalidate()
     return _view(snapshot, state)
 
 
+#: The storefront mail's connection (#5283, ruling R2): where the sealed SMTP password is
+#: sent. A person's to change, as the password is (`api/storefront.py`): an agent or a
+#: service that could move it could have the password sent to a server of its own.
+MAIL_CONNECTION = frozenset(
+    {
+        "storefront_mail_host",
+        "storefront_mail_port",
+        "storefront_mail_user",
+        "storefront_mail_sender",
+        "storefront_mail_tls",
+    }
+)
+PERSON_ONLY = "https://scadbuddy.dev/problems/storefront/person_only"
+
+
+def _mail_connection_by_a_person(patch: SettingsPatch) -> None:
+    """403 ``person_only`` for a change (or reset) of the mail connection by anyone but a
+    person's own session (`core.authorship.by_a_person`)."""
+    touched = (patch.model_fields_set | set(patch.reset)) & MAIL_CONNECTION
+    if touched and not by_a_person():
+        raise ApiError(
+            status.HTTP_403_FORBIDDEN,
+            "Only a person changes the storefront mail's connection: " + ", ".join(sorted(touched)),
+            type_=PERSON_ONLY,
+        )
+
+
+#: The print watcher's settings (#4699): on, it reads Bambuddy on its own, and with the
+#: ``printer`` source it reads the printers' storage over FTP (a LAN-only printer's over
+#: its own FTPS, phase 4). A person's to change, as
+#: every other tool that reaches a printer waits for a person's approval.
+PRINT_WATCH = frozenset(
+    {
+        "print_auto_import",
+        "print_auto_import_sources",
+        "print_auto_import_skip_printers",
+        "print_auto_import_skip_lan_printers",
+    }
+)
+
+
+def _print_watch_by_a_person(patch: SettingsPatch) -> None:
+    """403 ``person_only`` for a change of the print watcher by anyone but a person's own
+    session (`core.authorship.by_a_person`)."""
+    touched = patch.model_fields_set & PRINT_WATCH
+    if touched and not by_a_person():
+        raise ApiError(
+            status.HTTP_403_FORBIDDEN,
+            "Only a person changes the print watcher: " + ", ".join(sorted(touched)),
+            type_=PERSON_ONLY,
+        )
+
+
 def _default_printer(patch: SettingsPatch, registry: Printers) -> SettingsPatch:
-    """``patch`` with the default printer under one key (#4971, `put_settings`)."""
+    """``patch`` with the default printer as a registry id only (#4971, #5167,
+    `put_settings`)."""
     if "default_printer" in patch.model_fields_set:
         if patch.default_printer is None:
             return patch
@@ -547,13 +694,15 @@ def _default_printer(patch: SettingsPatch, registry: Printers) -> SettingsPatch:
             raise ApiError(
                 status.HTTP_422_UNPROCESSABLE_CONTENT, f"no printer {patch.default_printer}"
             )
-        if row.bambuddy_printer_id is not None:
-            return patch.model_copy(
-                update={"printer_id": row.bambuddy_printer_id, "default_printer": None}
+        return patch.model_copy(update={"default_printer": row.id})
+    if "printer_id" in patch.model_fields_set and patch.printer_id is not None:
+        linked = registry.store.by_bambuddy_id(patch.printer_id)
+        if linked is None:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"no printer links Bambuddy printer {patch.printer_id}",
             )
-        return patch.model_copy(update={"printer_id": None, "default_printer": row.id})
-    if "printer_id" in patch.model_fields_set:
-        return patch.model_copy(update={"default_printer": None})
+        return patch.model_copy(update={"default_printer": linked.id})
     return patch
 
 
@@ -648,7 +797,7 @@ async def get_remembered(
         _current_model_projects, settings, catalogue, presets, store
     )
     rows = await asyncio.to_thread(registry.store.list)
-    names = {row.id: row.name for row in rows if row.bambuddy_printer_id is None}
+    names = {row.id: row.name for row in rows}
     return _remembered(settings, await uploads.project_targets(), model_projects, names)
 
 
@@ -692,7 +841,12 @@ def _options_view(settings: StoredSettings) -> PrintOptionsView:
 )
 def get_print_options(store: SettingsStoreDep) -> PrintOptionsState:
     settings = store.load()
-    return PrintOptionsState(**_options_view(settings).model_dump(), printer_id=settings.printer_id)
+    return PrintOptionsState(
+        **_options_view(settings).model_dump(),
+        printer_id=settings.printer_id,
+        default_printer=settings.default_printer,
+        bambuddy_links=settings.bambuddy_links,
+    )
 
 
 @router.put(
@@ -704,16 +858,15 @@ def put_print_options(
     body: PrintOptionsUpdate, store: SettingsStoreDep, registry: PrintersDep
 ) -> PrintOptionsView:
     """Only the named scope changes; the other two are left exactly as they were. A
-    printer's key is its Bambuddy id, or the registry id of one with none (#4971): the
-    registry id of a printer that has one is kept under the Bambuddy id, as the previous
-    build reads it."""
+    printer's key is its registry id (#5167); a Bambuddy id is resolved to the registry
+    printer that links it (404 when none does, and a forget then removes nothing)."""
     scope: OptionScope = body.scope
     key = body.key
-    stale: tuple[str, ...] = ()
     if scope == "printer" and key is not None:
-        keys = printer_keys(registry.store, key, forget=body.options.is_empty())
-        key, stale = keys.key, keys.stale
-    return _options_view(store.save_print_options(scope, key, body.options, stale=stale))
+        key = printer_keys(registry.store, key, forget=body.options.is_empty()).key
+        if key is None:
+            return _options_view(store.load())
+    return _options_view(store.save_print_options(scope, key, body.options))
 
 
 @router.post("/settings/test", response_model=ConnectionTest, summary="Verify the API key")

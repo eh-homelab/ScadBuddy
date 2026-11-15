@@ -1,6 +1,7 @@
 import { type Client, TimeoutFailure, WorkflowFailedError } from '@temporalio/client'
 import { randomUUID } from 'node:crypto'
-import { TASK_QUEUE } from '../temporal/names.js'
+import type { Span } from '@opentelemetry/api'
+import { tracer } from '../telemetry/trace.js'
 import {
   BRIDGE_CALL_WORKFLOW,
   BRIDGE_TAB_ACTIVITY,
@@ -25,7 +26,7 @@ export type { RelayAnswer, RelayRequest } from '../temporal/bridgeCall.js'
 //   owner (holds the tab's socket)          caller
 //   hello: ai_tab_owners row ← its queue
 //                                           reads the tab's row: the owner's queue
-//                                           starts BridgeCall on `agent-tools`
+//                                           starts BridgeCall on its own queue
 //   activity `bridge.tab` on its queue ◀──  (temporal/bridgeCall.ts)
 //   runs it on the tab (hub.ts, as a local call)
 //   returns the answer                  ──▶ the workflow's result
@@ -33,7 +34,11 @@ export type { RelayAnswer, RelayRequest } from '../temporal/bridgeCall.js'
 //
 // Each replica polls `agent-tools.<identity>` (main.ts HOST_QUEUE), so Temporal delivers
 // the call to the owner only, and once (one attempt). Nothing is sent to the replicas
-// that do not hold the tab.
+// that do not hold the tab. The workflow's own tasks run on the CALLER's queue, which its
+// host worker polls with BridgeCall (#5862): both queues are unversioned and polled by
+// one replica each, so no hop waits on the shared `agent-tools` queue. That queue is
+// versioned, and in prod a BridgeCall's first workflow task there waited 3.4 s for a
+// poller, past the status probe's budget (hub.ts STATUS_PROBE_MS).
 //
 // Sealed, always: the request and the answer (page snapshots, form contents, the
 // editor's text) are the workflow's payloads, and every BridgeCall workflow is a subject
@@ -69,12 +74,29 @@ export const ACK_TIMEOUT_MS = 3_000
  */
 export const MAX_BRIDGE_BYTES = 256 * 1024
 /**
- * Past the owner's own time: the workflow's whole run, for a workflow task that is slow to start.
- * Room for one failed first workflow task too: during a rolling deploy a replica still on the
- * build before #4780 polls the unversioned `agent-tools`, has no BridgeCall, and fails the task,
- * which Temporal then gives to another replica (docs/ai/operating.md, "Rolling deploys").
+ * Past the owner's own time: the workflow's whole run, for its workflow tasks on the caller's own
+ * host worker, which are CPU work there (start, unsealing, the result: up to 4.3 s in all, over a
+ * call's start and its tasks together, on a loaded test runner, #5428; each task has
+ * BRIDGE_WORKFLOW_TASK_TIMEOUT_MS), and for that worker's reconnect if Temporal blips mid-call. Past it the call
+ * answers no_answer.
  */
 const WORKFLOW_SLACK_MS = 15_000
+
+/**
+ * Each BridgeCall workflow task's start-to-close, in place of Temporal's 10 s (#5939). Prod's
+ * Temporal sometimes records a task as started and never delivers it: history's AddWorkflowTask
+ * to the throttled matching times out after the start is recorded, its retry is refused "Workflow
+ * task already started", and the task waits out its timeout (eh-homelab/clusters#3418). That cost
+ * a call 10 s, past the status probe's budget (hub.ts STATUS_PROBE_MS); at 3 s the retry, on the same
+ * worker, has time to run. Every BridgeCall task that completed in prod took at most 2.24 s from
+ * start to completion (57 tasks, 2026-11-09/10), and 2.18 s on a dev server beside a busy main
+ * worker (#5939). A task that runs past 3 s is retried; one that never fits ends the call at its
+ * execution timeout, as a stalled worker's did before.
+ */
+export const BRIDGE_WORKFLOW_TASK_TIMEOUT_MS = 3_000
+
+/** temporal.api.enums.v1.TimeoutType.TIMEOUT_TYPE_START_TO_CLOSE */
+const TIMEOUT_TYPE_START_TO_CLOSE = 1
 
 /**
  * How often a replica refreshes its tabs' rows (`TabOwnerStore.refresh`): a claim lost while
@@ -112,10 +134,12 @@ export interface TabRelay {
 
 export type TemporalTabRelayOptions = {
   owners: TabOwnerStore
-  /** This replica's own queue (main.ts HOST_QUEUE), which its host worker polls with `hostActivities()` (then `startHosting`). */
+  /**
+   * This replica's own queue (main.ts HOST_QUEUE), which its host worker polls with
+   * `hostActivities()` (then `startHosting`) and with the BridgeCall workflow: the calls this
+   * replica starts run their workflow tasks there (#5862).
+   */
   hostQueue: string
-  /** Where BridgeCall runs: `agent-tools`, which every replica's worker polls with the workflow bundle. */
-  workflowQueue?: string
   /** Set later with `useClient` when it is made after the hub (main.ts). */
   client?: SealingClient | undefined
   ackTimeoutMs?: number
@@ -124,6 +148,8 @@ export type TemporalTabRelayOptions = {
   /** The database is migrated (db.ts `ready`): each owner-row write waits for it, and is skipped when it is down. */
   ready?: () => Promise<boolean>
   log?: (message: string) => void
+  /** The clock a call's length is read on; `Date.now` when omitted. */
+  now?: () => number
 }
 
 /**
@@ -154,7 +180,6 @@ const NO_ANSWER: RelayAnswer = {
 export class TemporalTabRelay implements TabRelay {
   readonly #owners: TabOwnerStore
   readonly hostQueue: string
-  readonly #workflowQueue: string
   readonly #ackTimeoutMs: number
   readonly #log: (message: string) => void
   readonly #ready: (() => Promise<boolean>) | undefined
@@ -168,16 +193,17 @@ export class TemporalTabRelay implements TabRelay {
   #writes: Promise<void> = Promise.resolve()
   readonly #refreshMs: number
   #refresh: NodeJS.Timeout | undefined
+  readonly #now: () => number
 
   constructor(options: TemporalTabRelayOptions) {
     this.#owners = options.owners
     this.hostQueue = options.hostQueue
-    this.#workflowQueue = options.workflowQueue ?? TASK_QUEUE
     this.#client = options.client
     this.#ackTimeoutMs = options.ackTimeoutMs ?? ACK_TIMEOUT_MS
     this.#log = options.log ?? ((m) => console.error(m))
     this.#ready = options.ready
     this.#refreshMs = options.refreshMs ?? OWNER_REFRESH_MS
+    this.#now = options.now ?? Date.now
   }
 
   useClient(client: SealingClient): void {
@@ -297,13 +323,22 @@ export class TemporalTabRelay implements TabRelay {
     const { queue } = owner
     const input: BridgeCallInput = { queue, tabId, request, ackTimeoutMs: this.#ackTimeoutMs }
     const workflowId = bridgeWorkflowId()
+    // Before the start: its first workflow task may start before the start's answer comes back.
+    const startedAt = this.#now()
+    const startTime = new Date()
     const handle = await client.workflow.start(BRIDGE_CALL_WORKFLOW, {
-      taskQueue: this.#workflowQueue,
+      // This replica's own queue: its own host worker runs the workflow tasks, at once (#5862).
+      taskQueue: this.hostQueue,
       workflowId,
       args: [input],
       workflowExecutionTimeout: this.#ackTimeoutMs + ownerRunMs(input) + WORKFLOW_SLACK_MS,
+      workflowTaskTimeout: BRIDGE_WORKFLOW_TASK_TIMEOUT_MS,
     })
-    const answer = await new Promise<BridgeCallAnswer | 'failed'>((resolve, reject) => {
+    const span = tracer().startSpan('agent.bridge.call', {
+      startTime,
+      attributes: { 'scadbuddy.bridge.op': request.op, 'scadbuddy.bridge.owner_queue': queue, 'scadbuddy.task_queue': this.hostQueue },
+    })
+    const answering = new Promise<BridgeCallAnswer | 'failed'>((resolve, reject) => {
       const onAbort = () => {
         // The tab is not told, as for a local call; the workflow stops waiting for it. Its
         // key stays for the workflow's last tasks, and the sweep deletes it (sweepBridgeKeys).
@@ -319,13 +354,14 @@ export class TemporalTabRelay implements TabRelay {
         },
         (err: unknown) => {
           signal.removeEventListener('abort', onAbort)
-          // The workflow failed or timed out (a rollout's old replica failing its tasks): the
-          // owner may have run the call, so it is never sent again.
+          // The workflow failed or timed out: the owner may have run the call, so it is never
+          // sent again.
           if (executionTimedOut(err)) {
-            // Named apart from an owner's failure (#4950): WORKFLOW_SLACK_MS covers about one
-            // failed workflow task, so a run of them during a rollout ends here.
+            // Named apart from an owner's failure (#4950): the workflow's own tasks, on this
+            // replica's host worker, did not finish within WORKFLOW_SLACK_MS (a worker that
+            // stopped polling, or failing tasks).
             this.#log(
-              `bridge relay: the call to tab ${tabId} on ${queue} timed out as a workflow (rollout? its workflow tasks may have failed): ${errorMessage(err)}`,
+              `bridge relay: the call to tab ${tabId} on ${queue} timed out as a workflow (is this replica's host worker on ${this.hostQueue} polling? its workflow tasks may have failed): ${errorMessage(err)}`,
             )
           } else {
             this.#failed(err)
@@ -334,6 +370,15 @@ export class TemporalTabRelay implements TabRelay {
         },
       )
     })
+    let answer: BridgeCallAnswer | 'failed'
+    // Only an abort rejects `answering`, and the workflow then runs on (its cancellation task).
+    let closed = false
+    try {
+      answer = await answering
+      closed = true
+    } finally {
+      this.#traceTaskTimeouts(client, workflowId, span, { startedAt, closed }, tabId)
+    }
     // The workflow is closed and its answer read: nobody needs its payloads again.
     dropKey(workflowId).catch((err: unknown) => this.#failed(err))
     if (answer === 'failed') return answer
@@ -344,6 +389,46 @@ export class TemporalTabRelay implements TabRelay {
       return undefined
     }
     return answer.op === 'gone' ? undefined : answer
+  }
+
+  /**
+   * How many of the call's workflow tasks timed out (#5939): `scadbuddy.bridge.task_timeouts` on
+   * its `agent.bridge.call` span, and a log line when any did. A task times out only after
+   * BRIDGE_WORKFLOW_TASK_TIMEOUT_MS, so a workflow that `closed` sooner (the call answered) had
+   * none and its history is not read. Any other call's is, once the workflow has closed, off the
+   * caller's path: a longer one's, and an aborted one's at any length, whose workflow runs its
+   * cancellation task after the caller gave up. The span ends when the caller had its answer.
+   */
+  #traceTaskTimeouts(client: Client, workflowId: string, span: Span, call: { startedAt: number; closed: boolean }, tabId: string): void {
+    const endedAt = this.#now()
+    const answeredAt = new Date()
+    const end = (timeouts: number | undefined) => {
+      if (timeouts !== undefined) span.setAttribute('scadbuddy.bridge.task_timeouts', timeouts)
+      span.end(answeredAt)
+    }
+    if (call.closed && endedAt - call.startedAt < BRIDGE_WORKFLOW_TASK_TIMEOUT_MS) return end(0)
+    void (async () => {
+      const handle = client.workflow.getHandle(workflowId)
+      // An aborted call's workflow runs on: wait only until it closes (its result is not read).
+      if (!call.closed) await handle.result().catch(() => undefined)
+      const { events } = await handle.fetchHistory()
+      // Only the task timeout this counts (a sticky queue's schedule-to-start, after a worker
+      // restart, is another kind).
+      return (events ?? []).filter((e) => e.workflowTaskTimedOutEventAttributes?.timeoutType === TIMEOUT_TYPE_START_TO_CLOSE).length
+    })().then(
+      (timeouts) => {
+        if (timeouts > 0) {
+          this.#log(
+            `bridge relay: the call to tab ${tabId} (${workflowId}) waited out ${timeouts} workflow task timeout(s) of ${BRIDGE_WORKFLOW_TASK_TIMEOUT_MS} ms on ${this.hostQueue}: a task Temporal started and never delivered (#5939, eh-homelab/clusters#3418)`,
+          )
+        }
+        end(timeouts)
+      },
+      (err: unknown) => {
+        this.#log(`bridge relay: could not read ${workflowId}'s history for its task timeouts: ${errorMessage(err)}`)
+        end(undefined)
+      },
+    )
   }
 
   #failed(err: unknown): void {

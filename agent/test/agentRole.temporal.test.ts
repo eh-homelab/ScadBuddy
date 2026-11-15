@@ -252,7 +252,7 @@ describe.skipIf(skip !== '')(`one api process and one worker process${skip}`, { 
           ...common,
           taskQueue: TASK_QUEUE,
           activities: { ...acquire, ...sessionFinishActivities(pool.sql, p.m.events), ...sessionGateActivities({ sql: pool.sql, events: p.m.events }) },
-          // BridgeCall and AgentSession's own bundle, as every shared agent-tools worker carries it.
+          // AgentSession's own bundle, as every shared agent-tools worker carries it.
           workflows: { workflowBundle: bundle },
         }),
         AgentWorker.start({
@@ -269,6 +269,8 @@ describe.skipIf(skip !== '')(`one api process and one worker process${skip}`, { 
       identity,
       dataConverter,
       pinned: { ...relay.hostActivities() },
+      // The process's own BridgeCalls run here, as main.ts's host worker runs them (#5862).
+      pinnedWorkflows: { workflowBundle: bundle },
       ...(p.turnHost
         ? {
             sessions: {

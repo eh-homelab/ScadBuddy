@@ -14,8 +14,9 @@ Three tables, all in ``migrations/20260928T0840Z_settings.sql``:
   (:func:`~scadbuddy.bambuddy.options.options_scope`): a model's slug, or a Bambuddy
   library file's ``library:<file id>`` (#313, #1754).
 - ``printer_bed_types``: the plate last printed on, one row per printer, keyed by the
-  registry printer and, while the previous build may still read it, the Bambuddy
-  printer too (#4971, ``migrations/20261101T1804Z_printer_bed_types_registry.sql``).
+  registry printer, its primary key (#4971, #5153, #6059,
+  ``migrations/20261112T0253Z_printer_bed_types_drop_printer_id.sql``); its Bambuddy
+  id is the registry's link.
 
 ``library_print_choices`` (#313) held a library file's choices until #1754 copied them
 into ``model_print_choices`` (``migrations/20261009T0541Z_print_choices_by_subject.sql``);
@@ -35,7 +36,7 @@ import json
 import logging
 import time
 import types
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
@@ -58,6 +59,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PrivateAttr,
     StringConstraints,
     ValidationError,
     ValidationInfo,
@@ -75,6 +77,7 @@ from scadbuddy.bambuddy.models import (
 )
 from scadbuddy.bambuddy.options import OptionScope, PrintOptions, library_options_scope
 from scadbuddy.bambuddy.part_settings import PartSettingsMap, normalised, parts_set_only
+from scadbuddy.bambuddy.print_links import ImportSource
 from scadbuddy.core.config import LibraryBackend, Slicer, StoreBackend
 from scadbuddy.core.events import EventBus, SettingsChanged, SettingsSection, emit
 from scadbuddy.core.pg_pool import row_pool
@@ -89,7 +92,9 @@ from scadbuddy.core.secrets import (
 from scadbuddy.core.settings import ENV_SEEDED, SECRET_FIELDS, Settings, check_value, env_var
 from scadbuddy.library.asset_fetch import DEFAULT_ASSET_FETCH_DOMAINS, normalise_domain
 from scadbuddy.library.catalogue import PrintSequence
+from scadbuddy.orders.message_models import MessagingBinding
 from scadbuddy.orders.money import DepositRule, ShippingOption
+from scadbuddy.orders.storefront.slice_profile import StorefrontSliceProfile
 from scadbuddy.render.pg_store import MIGRATION_LOCK, migrate
 
 logger = logging.getLogger(__name__)
@@ -107,6 +112,10 @@ DestinationSort = Literal["touched", "modified", "name"]
 #: ``activity_ttl_seconds``): ten years. Each prune computes ``now() - retention`` in
 #: Postgres, which raises "timestamp out of range" for a value a few thousand years long.
 RETENTION_MAX_SECONDS = 3650 * 86400.0
+
+#: Where the print watcher takes a 3MF from by default (#4699): Bambuddy's own copies.
+#: Never the printer's storage, which a person turns on.
+AUTO_IMPORT_SOURCES: tuple[ImportSource, ...] = ("archive", "archive_source", "library")
 
 #: Where an env-seeded field's value comes from (#322): a value saved in the UI, the
 #: deployment's ``SCADBUDDY_<FIELD>``, the built-in default, or a clear saved in the UI,
@@ -188,6 +197,13 @@ STORE_READINESS = frozenset(
 )
 #: `pg_advisory_xact_lock` key (hashed) under which a save checks and writes them.
 STORE_READINESS_LOCK = "scadbuddy:settings:store-readiness"
+#: The storefront mail's login and TLS mode (#5283): a user with `none` (a plain
+#: connection) is refused, checked on the merged result as the store's are.
+MAIL_LOGIN_TLS = frozenset({"storefront_mail_user", "storefront_mail_tls"})
+MAIL_LOGIN_NEEDS_TLS = (
+    "a plain connection (storefront_mail_tls none) is for a relay with no login:"
+    " clear the user, or use starttls or implicit"
+)
 
 
 class RackAlgorithmSupersededError(Exception):
@@ -195,10 +211,19 @@ class RackAlgorithmSupersededError(Exception):
     the newer choice stays whatever order the two arrived in."""
 
 
+class UnknownPrinterError(ValueError):
+    """A default printer named by a Bambuddy id that no registry printer links (#5167)."""
+
+
 class StoreNotReadyError(ValueError):
     """`store_backend = bambuddy` without the Bambuddy URL and inbox folder it needs, or
     `store_backend = s3` without the endpoint, bucket, both keys and a prefix, or
     `library_backend = native` on `store_backend = local`."""
+
+
+class MailLoginNeedsTlsError(ValueError):
+    """A storefront mail user with `storefront_mail_tls = none`: a login is never sent in
+    plain text (#5283)."""
 
 
 S3_NOT_READY = (
@@ -256,6 +281,8 @@ class BambuddyIds(BaseModel):
 
     Integers, because that is what Bambuddy's own OpenAPI declares for ``folder_id``
     and ``printer_id`` — an earlier draft of this file typed them as strings.
+    ``printer_id`` is not stored (#5167): it is the Bambuddy printer that the default
+    printer (``default_printer``, a registry id) links, read through the registry.
     """
 
     library_folder_id: int | None = None
@@ -271,24 +298,27 @@ def _parts_only_when_set(dumped: dict[str, Any]) -> dict[str, Any]:
 
 
 class ModelPrintChoices(BaseModel):
-    """What the print dialog last chose for one model (#78). ``printer_id`` is the
-    printer it printed on. ``filament_plan`` is only a plan the user moved off the
-    auto-match: a spool no longer in the inventory is dropped by the picker, which then
-    falls back to the auto-match for that slot.
+    """What the print dialog last chose for one model (#78). ``printer`` is the
+    registry printer it printed on (#5167). ``printer_id`` is not stored: a load gives
+    the Bambuddy printer that ``printer`` links, and a save of a ``printer_id`` with no
+    ``printer`` keeps the registry printer that links it. ``filament_plan`` is only a
+    plan the user moved off the auto-match: a spool no longer in the inventory is
+    dropped by the picker, which then falls back to the auto-match for that slot.
 
     ``nozzles``, ``tier`` and ``process_name`` are the spool-first dialog's own choices
     (spec 2026-09-27 §7). ``print_sequence`` is its Print sequence (#4970), ``None`` for
     the template's or the process's. ``part_settings`` are its slicer settings per
     filament slot (#5627, ``bambuddy/part_settings.py``), a model's or a library file's
     (#5628). Kept per model or file only, never at the print options' global or printer
-    scope, since a slot number means one file's colour. All default to "nothing remembered", so
-    a settings file written before them still loads; an empty ``nozzles`` means the
-    dialog's default.
+    scope, since a slot number means one file's colour. ``force_colour_match`` is the
+    spool step's "Wait for the right colour" (#6218), kept beside the spools it applies
+    to; ``None`` is nothing remembered, which the dialog and the agent read as on. All
+    default to "nothing remembered", so a settings file written before them still loads;
+    an empty ``nozzles`` means the dialog's default.
     """
 
     printer_id: int | None = None
-    #: The registry printer (#4971), kept only for one with no Bambuddy id (a LAN-only
-    #: printer): while the previous build may still write ``printer_id``, that id wins.
+    #: The registry printer (#4971, #5167).
     printer: str | None = Field(default=None, max_length=64)
     filament_plan: list[SlotChoice] = Field(default_factory=list)
     nozzles: list[NozzleChoice] = Field(default_factory=list, max_length=2)
@@ -296,13 +326,7 @@ class ModelPrintChoices(BaseModel):
     process_name: str | None = Field(default=None, max_length=200)
     print_sequence: PrintSequence | None = None
     part_settings: PartSettingsMap | None = None
-
-    @model_validator(mode="after")
-    def _one_printer_key(self) -> Self:
-        """A printer with a Bambuddy id is remembered by it alone (#4971)."""
-        if self.printer_id is not None and self.printer is not None:
-            self.printer = None
-        return self
+    force_colour_match: bool | None = None
 
     @field_validator("part_settings")
     @classmethod
@@ -340,48 +364,50 @@ def model_project_scope(model_id: str, preset_id: str | None) -> str:
 
 
 class PrinterPlate(BaseModel):
-    """The plate remembered on one printer (#83), with both of its keys (#4971):
-    ``printer`` the registry printer, ``bambuddy_printer_id`` the Bambuddy printer it
-    links. A LAN-only printer has no Bambuddy id; a Bambuddy printer the registry does not
-    hold yet has no registry id. ``name`` is the registry's, when it has the printer."""
+    """The plate remembered on one printer (#83): ``printer`` the registry printer it is
+    kept on (#4971, #5153), ``bambuddy_printer_id`` the Bambuddy printer that printer
+    links now (none for a LAN-only one), ``name`` the registry's name."""
 
-    printer: str | None = None
+    printer: str
     bambuddy_printer_id: int | None = None
     name: str | None = None
     bed_type: str
 
 
-#: Each ``printer_bed_types`` row with both of its keys as the registry has them now
-#: (#4971): a row the previous build wrote names only the Bambuddy printer, so its registry
-#: printer is the one that links that id; a row with a registry printer takes its Bambuddy
-#: id from that printer's current link. Oldest first, so a newer row for the same printer
-#: wins.
+#: Each registry printer that links a Bambuddy printer, with that printer's id (#5167).
+_LINKS: LiteralString = (
+    "SELECT id::text AS printer, bambuddy_printer_id FROM printers"
+    " WHERE bambuddy_printer_id IS NOT NULL"
+)
+
+#: The `StoredSettings` fields a load reads from the registry, never from a `settings`
+#: row (#5167). A row of one of these names (the build before #5167 wrote
+#: ``printer_id``) is ignored.
+DERIVED = frozenset({"printer_id", "bambuddy_links"})
+
+
+def _with_bambuddy_id(choices: Any, linked: Mapping[str, int]) -> Any:
+    """A stored choices row with ``printer_id``, the Bambuddy printer its registry
+    printer links (#5167). A row that is not an object is left for the validator."""
+    if not isinstance(choices, dict):
+        return choices
+    printer = choices.get("printer")
+    return {**choices, "printer_id": linked.get(printer) if isinstance(printer, str) else None}
+
+
+#: Each ``printer_bed_types`` row with its printer's Bambuddy id and name as the registry
+#: has them now (#5153). Oldest first, as the rows were written.
 _PLATES: LiteralString = (
-    "SELECT coalesce(b.printer, linked.id)::text AS printer,"
-    " CASE WHEN own.id IS NOT NULL THEN own.bambuddy_printer_id ELSE b.printer_id END"
-    " AS bambuddy_printer_id,"
-    " coalesce(own.name, linked.name) AS name, b.bed_type"
+    "SELECT b.printer::text AS printer, p.bambuddy_printer_id, p.name, b.bed_type"
     " FROM printer_bed_types AS b"
-    " LEFT JOIN printers AS own ON own.id = b.printer"
-    " LEFT JOIN printers AS linked"
-    " ON b.printer IS NULL AND linked.bambuddy_printer_id = b.printer_id"
+    " JOIN printers AS p ON p.id = b.printer"
     " ORDER BY b.updated_at, b.bed_type"
 )
 
 
 def _plates(rows: list[DictRow]) -> list[PrinterPlate]:
-    """One plate per printer from :data:`_PLATES`' rows, the newest for each."""
-    plates: dict[tuple[str, object], PrinterPlate] = {}
-    for row in rows:
-        plate = PrinterPlate.model_validate(row)
-        key = (
-            ("printer", plate.printer)
-            if plate.printer is not None
-            else ("bambuddy", plate.bambuddy_printer_id)
-        )
-        plates.pop(key, None)
-        plates[key] = plate
-    return list(plates.values())
+    """The plates of :data:`_PLATES`' rows, one per printer (its primary key)."""
+    return [PrinterPlate.model_validate(row) for row in rows]
 
 
 class StoredSettings(BambuddyIds):
@@ -438,6 +464,19 @@ class StoredSettings(BambuddyIds):
     #: The domains `POST /models/{slug}/assets/fetch` may fetch from (#844), each with
     #: its subdomains. ``None`` is :data:`DEFAULT_ASSET_FETCH_DOMAINS`; ``[]`` is none.
     asset_fetch_domains: list[str] | None = None
+    #: #4699: the print watcher imports the prints ScadBuddy did not start (`print_watch/`).
+    #: Off by default: on, it reads Bambuddy every `PRUNE_INTERVAL`. Stored only, and only
+    #: a person sets it: no agent tool writes settings.
+    print_auto_import: bool = False
+    #: Where the watcher may take a print's 3MF from (`print_links.ImportSource`).
+    #: ``None`` is :data:`AUTO_IMPORT_SOURCES`, which leaves out ``printer``: reading the
+    #: printer's storage reaches the printer over FTP, so it is a person's choice.
+    print_auto_import_sources: list[ImportSource] | None = None
+    #: The Bambuddy printers whose prints the watcher leaves alone.
+    print_auto_import_skip_printers: list[int] | None = None
+    #: The LAN-only printers (registry ids, #4699 phase 4) whose prints the watcher leaves
+    #: alone: a printer with no Bambuddy link has no Bambuddy id to name.
+    print_auto_import_skip_lan_printers: list[str] | None = None
 
     # -- the shop's money rules (#5281), stored only: no environment seeds them --------
     #: The deposit policy's rules; ``None`` asks no deposit.
@@ -446,17 +485,24 @@ class StoredSettings(BambuddyIds):
     storefront_shipping_options: list[ShippingOption] | None = None
     #: How a customer pays by hand (shown as text, never HTML).
     storefront_payment_instructions: str | None = None
+    #: The messaging plugin tool bound to "customer messages" (#5660); ``None`` is none,
+    #: so `order_notify_customer` only composes. No secret: the plugin's stay in the agent.
+    orders_customer_messaging: MessagingBinding | None = None
+    #: The shop slice profile (#6153): the printer and a spool per material a storefront
+    #: variant is sliced with. ``None`` slices nothing, so no visitor sees a price.
+    storefront_slice_profile: StorefrontSliceProfile | None = None
 
     #: Options scope (a model slug, or ``library:<file id>``, #1754) -> what the picker
     #: chose, set one at a time (:meth:`SettingsStore.set_model_choices`,
     #: :meth:`SettingsStore.set_library_choices`).
     model_print_choices: dict[str, ModelPrintChoices] = Field(default_factory=dict)
     #: Stringified Bambuddy printer id -> the plate type last printed on it (#83). Per
-    #: printer, not per model: the plate is a property of the machine. Set one printer at
-    #: a time (:meth:`SettingsStore.set_printer_bed_type`).
+    #: printer, not per model: the plate is a property of the machine. Derived from
+    #: ``printer_plates`` through the registry's links (#5153); set one printer at a
+    #: time (:meth:`SettingsStore.set_printer_bed_type`).
     printer_bed_types: dict[str, str] = Field(default_factory=dict)
     #: Every remembered plate with its registry printer (#4971): the one a LAN-only
-    #: printer's is in. ``printer_bed_types`` is the same plates by Bambuddy id.
+    #: printer's is in. ``printer_bed_types`` is the linked ones by Bambuddy id.
     printer_plates: list[PrinterPlate] = Field(default_factory=list)
 
     #: The default Bambuddy project (#79), set only in Settings (#3188). A project
@@ -475,22 +521,28 @@ class StoredSettings(BambuddyIds):
     # #88 — remembered print options, least to most specific. All three start empty, so
     # a ScadBuddy that has never been told otherwise queues with Bambuddy's own
     # defaults. The dict keys are strings because JSON has no integer keys: the printer
-    # map is keyed by a stringified Bambuddy printer id, or the registry id of a
-    # printer with none (#4971), the model map by the print's
+    # map is keyed by the registry printer id (#4971, #5167), the model map by the print's
     # options scope: ScadBuddy's own model slug, or a library file's ``library:<file
     # id>`` (#1754, ``options.options_scope``).
     print_options: PrintOptions = Field(default_factory=PrintOptions)
     printer_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
     model_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
-    #: Stringified Bambuddy printer id -> how ScadBuddy picks that printer's rack nozzle
-    #: (#836). Stored like ``printer_print_options``, one key at a time in the jsonb
-    #: ``settings`` row: no table of its own, and not in ``OWN_TABLES``. A printer with no
-    #: Bambuddy id (LAN-only) is keyed by its registry id in both maps (#4971); one that
-    #: has one keeps its Bambuddy key while the previous build reads it.
+    #: Registry printer id -> how ScadBuddy picks that printer's rack nozzle (#836,
+    #: #5167). Stored like ``printer_print_options``, one key at a time in the jsonb
+    #: ``settings`` row: no table of its own, and not in ``OWN_TABLES``.
     printer_rack_algorithms: dict[str, RackAlgorithm] = Field(default_factory=dict)
-    #: The default printer as a registry id (#4971), set only for a printer with no
-    #: Bambuddy id: one that has one is ``printer_id``, which the previous build reads.
+    #: The default printer as a registry id (#4971, #5167). ``printer_id`` is the
+    #: Bambuddy printer it links.
     default_printer: str | None = None
+    #: Registry printer id -> the Bambuddy printer it links, for each linked printer
+    #: (#5167). Not stored: a load reads it from the registry, so that a reader that
+    #: has only a Bambuddy id finds the registry key (:meth:`registry_printer`).
+    bambuddy_links: dict[str, int] = Field(default_factory=dict)
+    #: ``bambuddy_links`` and its inverse, built once on the first read (#6106). The
+    #: first item is the map the inverse was built from, so a copy with other links
+    #: builds its own. The check is by identity: replace ``bambuddy_links``, never
+    #: change it in place, or the inverse goes stale (#6108).
+    _linked_by: tuple[dict[str, int], dict[int, str]] | None = PrivateAttr(default=None)
 
     @field_validator(
         "print_run_retention_seconds",
@@ -555,6 +607,32 @@ class StoredSettings(BambuddyIds):
                 logger.warning("unreadable money setting entry", extra={"setting": name})
         return kept
 
+    @field_validator("orders_customer_messaging", mode="before")
+    @classmethod
+    def _readable_binding(cls, value: Any) -> Any:
+        """A binding this version cannot read (#5660) is none, so it cannot stop the
+        settings loading; the agent then only composes."""
+        if value is None:
+            return None
+        try:
+            return MessagingBinding.model_validate(value)
+        except ValidationError:
+            logger.warning("unreadable messaging binding")
+            return None
+
+    @field_validator("storefront_slice_profile", mode="before")
+    @classmethod
+    def _readable_profile(cls, value: Any) -> Any:
+        """A profile this version cannot read (#6153) is none, so it cannot stop the
+        settings loading; the storefront then shows no price."""
+        if value is None:
+            return None
+        try:
+            return StorefrontSliceProfile.model_validate(value)
+        except ValidationError:
+            logger.warning("unreadable storefront slice profile")
+            return None
+
     @field_validator("model_print_choices", mode="before")
     @classmethod
     def _readable_choices(cls, value: Any) -> Any:
@@ -584,19 +662,36 @@ class StoredSettings(BambuddyIds):
             return None
         return self.printer_bed_types.get(str(bambuddy_printer_id))
 
+    def registry_printer(self, printer_id: int | None, printer: str | None = None) -> str | None:
+        """The registry printer: ``printer`` when given, else the one that links the
+        Bambuddy printer ``printer_id`` (#5167)."""
+        if printer is not None or printer_id is None:
+            return printer
+        built = self._linked_by
+        if built is None or built[0] is not self.bambuddy_links:
+            inverse: dict[int, str] = {}
+            # At most one row links a Bambuddy printer (`printers.bambuddy_printer_id`
+            # is UNIQUE), so `setdefault` never has to choose.
+            for row, linked in self.bambuddy_links.items():
+                inverse.setdefault(linked, row)
+            built = (self.bambuddy_links, inverse)
+            self._linked_by = built
+        return built[1].get(printer_id)
+
     def rack_algorithm(self, printer_id: int | None, printer: str | None = None) -> RackAlgorithm:
-        """The printer's remembered rack algorithm, else Least used (spec §4): by its
-        Bambuddy id, else by its registry id (#4971)."""
-        return _printer_entry(self.printer_rack_algorithms, printer_id, printer) or (
-            DEFAULT_ALGORITHM
-        )
+        """The printer's remembered rack algorithm, else Least used (spec §4), by its
+        registry id (#5167). A Bambuddy id is read through the registry."""
+        key = self.registry_printer(printer_id, printer)
+        found = self.printer_rack_algorithms.get(key) if key is not None else None
+        return found or DEFAULT_ALGORITHM
 
     def printer_options(
         self, printer_id: int | None, printer: str | None = None
     ) -> PrintOptions | None:
-        """The printer's remembered print options (#88): by its Bambuddy id, else by its
-        registry id (#4971)."""
-        return _printer_entry(self.printer_print_options, printer_id, printer)
+        """The printer's remembered print options (#88), by its registry id (#5167). A
+        Bambuddy id is read through the registry."""
+        key = self.registry_printer(printer_id, printer)
+        return self.printer_print_options.get(key) if key is not None else None
 
     @field_validator("asset_fetch_domains")
     @classmethod
@@ -615,15 +710,23 @@ class StoredSettings(BambuddyIds):
                 logger.warning("ignoring a stored asset domain that is not a domain")
         return list(dict.fromkeys(kept))
 
+    def auto_import_sources(self) -> tuple[ImportSource, ...]:
+        """Where the watcher may take a 3MF from (#4699): the stored list, else
+        :data:`AUTO_IMPORT_SOURCES`."""
+        if self.print_auto_import_sources is None:
+            return AUTO_IMPORT_SOURCES
+        return tuple(self.print_auto_import_sources)
+
     def allowed_asset_domains(self) -> tuple[str, ...]:
         if self.asset_fetch_domains is None:
             return DEFAULT_ASSET_FETCH_DOMAINS
         return tuple(self.asset_fetch_domains)
 
     def render_bambuddy_key(self) -> tuple[str | None, bool]:
-        """The key render workers use, and whether it is the full key by fallback. With
-        no key at all there is nothing to fall back to: ``(None, False)``, as the view's
-        ``render_key_fallback``."""
+        """The key the API's own render store uses, and whether it is the full key by
+        fallback. With no key at all there is nothing to fall back to: ``(None, False)``,
+        as the view's ``render_key_fallback``. A standalone render worker never gets the
+        full key: the CRUD route withholds it (`api/crud_render.py` `withheld`, #5298)."""
         if self.bambuddy_render_api_key:
             return self.bambuddy_render_api_key, False
         return self.bambuddy_api_key, self.bambuddy_api_key is not None
@@ -631,16 +734,6 @@ class StoredSettings(BambuddyIds):
     def s3_settings(self) -> S3Settings | None:
         """The S3 store's connection, or ``None`` until it has all it needs."""
         return _s3_settings(functools.partial(getattr, self))
-
-
-def _printer_entry[T](
-    entries: Mapping[str, T], printer_id: int | None, printer: str | None
-) -> T | None:
-    """A per-printer map's entry (#4971): the Bambuddy key, which both builds write,
-    else the registry key a printer with no Bambuddy id is stored under."""
-    if printer_id is not None and (found := entries.get(str(printer_id))) is not None:
-        return found
-    return entries.get(printer) if printer is not None else None
 
 
 class SettingsPatch(BaseModel):
@@ -664,9 +757,10 @@ class SettingsPatch(BaseModel):
     bambuddy_render_api_key: str | None = None
     public_url: str | None = None
     library_folder_id: int | None = None
+    #: The default printer by its Bambuddy id: an older client's field. The save keeps
+    #: the registry printer that links it as ``default_printer`` (#5167).
     printer_id: int | None = None
-    #: The default printer by registry id (#4971); the route stores a printer that has a
-    #: Bambuddy id as ``printer_id`` instead, so the two never disagree.
+    #: The default printer by registry id (#4971, #5167).
     default_printer: str | None = Field(default=None, max_length=64)
     default_plate: str | None = None
     #: ``null`` puts it back to millimetres.
@@ -692,12 +786,26 @@ class SettingsPatch(BaseModel):
     #: it: no agent tool writes settings.
     asset_fetch_domains: list[str] | None = Field(default=None, max_length=200)
 
+    #: The print watcher (#4699); ``null`` puts each back to its default (off; the
+    #: archive, its slicer project and the library, no printer; no printer skipped, by
+    #: Bambuddy id or, for a LAN-only printer, by registry id).
+    print_auto_import: bool | None = None
+    print_auto_import_sources: list[ImportSource] | None = Field(default=None, max_length=4)
+    print_auto_import_skip_printers: list[int] | None = Field(default=None, max_length=200)
+    print_auto_import_skip_lan_printers: (
+        list[Annotated[str, StringConstraints(min_length=1, max_length=64)]] | None
+    ) = Field(default=None, max_length=200)
+
     # -- the shop's money rules (#5281), stored only; only the user sets them ----------
     #: ``null`` asks no deposit.
     orders_deposit_policy: list[DepositRule] | None = Field(default=None, max_length=20)
     #: The ids are unique; ``null`` offers none.
     storefront_shipping_options: list[ShippingOption] | None = Field(default=None, max_length=20)
     storefront_payment_instructions: str | None = Field(default=None, max_length=2000)
+    #: ``null`` unbinds the messaging plugin (#5660).
+    orders_customer_messaging: MessagingBinding | None = None
+    #: ``null`` removes the shop slice profile (#6153).
+    storefront_slice_profile: StorefrontSliceProfile | None = None
 
     # -- the runtime settings (#322), each env-seeded ---------------------------------
     render_timeout: float | None = None
@@ -758,8 +866,28 @@ class SettingsPatch(BaseModel):
     storefront_renders_per_minute: int | None = None
     storefront_renders_per_day: int | None = None
     storefront_render_concurrency: int | None = None
+    storefront_slices_concurrent: int | None = None
     storefront_draft_ttl_days: int | None = None
     storefront_requests_enabled: bool | None = None
+    #: The storefront's mail (#5283); the password is sealed apart, never a setting.
+    storefront_mail_host: str | None = None
+    storefront_mail_port: int | None = None
+    storefront_mail_user: str | None = None
+    storefront_mail_sender: str | None = None
+    storefront_mail_tls: Literal["starttls", "implicit", "none"] | None = None
+    #: The bot check (#5283): the site key is public; the secret is write-only, ``""``
+    #: clears it, and saving one needs the KEK (`api/settings.py`).
+    storefront_turnstile_site_key: str | None = Field(default=None, max_length=200)
+    storefront_turnstile_secret: str | None = Field(default=None, max_length=200)
+
+    @field_validator("storefront_turnstile_site_key")
+    @classmethod
+    def _site_key_not_blank(cls, value: str | None) -> str | None:
+        """A site key of only spaces is refused: it would read as unset (#5283)."""
+        if value is not None and value and not value.strip():
+            raise ValueError("the bot check's site key is blank; clear it with null instead")
+        return value
+
     #: Job cost (#5326): the labour rate per hour, one USD in the shop's currency, and
     #: the thin-margin threshold percent.
     pricing_labour_rate_per_hour: str | None = None
@@ -768,6 +896,9 @@ class SettingsPatch(BaseModel):
     #: Auto tax (#5281): the percent, and whether shipping is in its base.
     orders_tax_percent: str | None = None
     orders_tax_shipping: bool | None = None
+    #: The handling fee for bought items (#6133): flat per purchase, and a percent.
+    orders_purchase_fee_flat_minor: int | None = None
+    orders_purchase_fee_percent: str | None = None
     #: Whether a fulfilled line item may be unfulfilled (#4953).
     orders_allow_unfulfil: bool | None = None
     #: Whether a native run waits for a cleared plate between its prints (#4939).
@@ -899,13 +1030,10 @@ class SettingsStore:
         """The key the secret settings are sealed with; ``None`` when they are kept plain."""
         return self._kek
 
-    def open(self, *, migrate_schema: bool = True) -> None:
-        """Connect and bring the schema up to date. Fails the start when it cannot.
-        ``migrate_schema=False`` only connects: a worker on a role of its own never
-        migrates (`render/worker_role.py` `open_for_caller`)."""
+    def open(self) -> None:
+        """Connect and bring the schema up to date. Fails the start when it cannot."""
         self._pool.open(wait=True, timeout=self.connect_timeout)
-        if migrate_schema:
-            self.migrate_and_seal()
+        self.migrate_and_seal()
 
     def migrate_and_seal(self) -> None:
         """Apply this build's migrations and seal any plaintext secret setting."""
@@ -962,6 +1090,7 @@ class SettingsStore:
             rows = read("SELECT name, value FROM settings")
             choices = read("SELECT model_id, choices FROM model_print_choices")
             beds = read(_PLATES)
+            links = read(_LINKS)
         stored_rows = _opened(self._kek, {row["name"]: row["value"] for row in rows})
         runtime = self.defaults.model_copy()
         sources: dict[str, SettingSource] = {}
@@ -993,9 +1122,16 @@ class SettingsStore:
                 name in StoredSettings.model_fields
                 and name not in OWN_TABLES
                 and name not in ENV_SEEDED
+                and name not in DERIVED
             ):
                 values[name] = value
-        values["model_print_choices"] = {row["model_id"]: row["choices"] for row in choices}
+        linked = {row["printer"]: row["bambuddy_printer_id"] for row in links}
+        values["bambuddy_links"] = linked
+        default = values.get("default_printer")
+        values["printer_id"] = linked.get(default) if isinstance(default, str) else None
+        values["model_print_choices"] = {
+            row["model_id"]: _with_bambuddy_id(row["choices"], linked) for row in choices
+        }
         plates = _plates(beds)
         values["printer_plates"] = plates
         values["printer_bed_types"] = {
@@ -1060,6 +1196,14 @@ class SettingsStore:
         # but never unset.
         changes = patch.model_dump(mode="json", exclude_unset=True)
         reset = changes.pop("reset", [])
+        if "printer_id" in changes:
+            # An older client's default printer by Bambuddy id (#5167): kept as the
+            # registry printer that links it. A ``default_printer`` sent too wins.
+            bambuddy_id = changes.pop("printer_id")
+            if "default_printer" not in changes:
+                changes["default_printer"] = (
+                    None if bambuddy_id is None else self._linked_printer(bambuddy_id)
+                )
         for secret in SECRET_FIELDS:
             if changes.get(secret) == "":
                 changes[secret] = None
@@ -1075,7 +1219,7 @@ class SettingsStore:
             if problem is not None:
                 raise StoreNotReadyError(problem)
         with self._pool.connection() as conn, conn.transaction():
-            if (changes.keys() | set(reset)) & STORE_READINESS:
+            if (changes.keys() | set(reset)) & (STORE_READINESS | MAIL_LOGIN_TLS):
                 self._check_store_ready(conn, changes, reset)
             conn.execute("DELETE FROM settings WHERE name = ANY(%s)", (list(RETIRED),))
             for name in reset:
@@ -1102,12 +1246,14 @@ class SettingsStore:
         Read under `STORE_READINESS_LOCK`, in the write's own transaction: two saves each
         safe alone (one clears the URL, one switches to Bambuddy) serialize, and the
         second sees the first. A row lock would not do: a value that follows the
-        environment has no row to lock."""
+        environment has no row to lock. The storefront mail's user and TLS mode are
+        checked the same way (`MAIL_LOGIN_TLS`)."""
         conn.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (STORE_READINESS_LOCK,)
         )
         rows = conn.execute(
-            "SELECT name, value FROM settings WHERE name = ANY(%s)", (list(STORE_READINESS),)
+            "SELECT name, value FROM settings WHERE name = ANY(%s)",
+            (list(STORE_READINESS | MAIL_LOGIN_TLS),),
         ).fetchall()
         # Opened, so a sealed secret counts as the value it holds; one this process
         # cannot open follows the environment, as `snapshot` reads it.
@@ -1143,18 +1289,42 @@ class SettingsStore:
             raise StoreNotReadyError(problem)
         if merged("library_backend") == "native" and backend == "local":
             raise StoreNotReadyError(NATIVE_LIBRARY_NOT_READY)
+        if merged("storefront_mail_user") and merged("storefront_mail_tls") == "none":
+            raise MailLoginNeedsTlsError(MAIL_LOGIN_NEEDS_TLS)
+
+    def _linked_printer(self, bambuddy_id: int) -> str:
+        """The registry printer that links the Bambuddy printer ``bambuddy_id``
+        (#5167); :class:`UnknownPrinterError` when none does."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT id::text AS id FROM printers WHERE bambuddy_printer_id = %s",
+                (bambuddy_id,),
+            ).fetchone()
+        if row is None:
+            raise UnknownPrinterError(f"no printer links Bambuddy printer {bambuddy_id}")
+        return str(row["id"])
 
     def _put_choices(self, scope: str, choices: ModelPrintChoices) -> None:
-        """Remember one options scope's choices (#1754); an empty ``choices`` forgets."""
+        """Remember one options scope's choices (#1754); an empty ``choices`` forgets.
+        Only the registry printer is stored (#5167): a ``printer_id`` sent with no
+        ``printer`` is kept as the registry printer that links it, and as no printer
+        when none does."""
+        if choices.printer is None and choices.printer_id is not None:
+            try:
+                printer: str | None = self._linked_printer(choices.printer_id)
+            except UnknownPrinterError:
+                printer = None
+            choices = choices.model_copy(update={"printer": printer})
+        stored = choices.model_copy(update={"printer_id": None})
         with self._pool.connection() as conn:
-            if choices == ModelPrintChoices():
+            if stored == ModelPrintChoices():
                 conn.execute("DELETE FROM model_print_choices WHERE model_id = %s", (scope,))
             else:
                 conn.execute(
                     "INSERT INTO model_print_choices (model_id, choices) VALUES (%s, %s)"
                     " ON CONFLICT (model_id) DO UPDATE"
                     " SET choices = EXCLUDED.choices, updated_at = now()",
-                    (scope, Jsonb(choices.model_dump(mode="json"))),
+                    (scope, Jsonb(stored.model_dump(mode="json", exclude={"printer_id"}))),
                 )
 
     def set_model_choices(self, slug: str, choices: ModelPrintChoices) -> StoredSettings:
@@ -1162,57 +1332,26 @@ class SettingsStore:
         self._put_choices(slug, choices)
         return self._written("model_choices")
 
-    def set_printer_bed_type(
-        self, printer_id: int | None, bed_type: str | None, *, printer: str | None = None
-    ) -> StoredSettings:
-        """Remember the plate on one printer; ``None`` forgets it. ``printer`` is the
-        registry printer and ``printer_id`` the Bambuddy printer it links, either or both
-        (#4971): the row carries both, so the previous build, which reads only
-        ``printer_id``, still finds a Bambuddy printer's plate."""
-        if printer is None and printer_id is None:
-            raise ValueError("a plate is remembered on a printer")
-        with self._pool.connection() as conn, conn.transaction():
+    def set_printer_bed_type(self, printer: str, bed_type: str | None) -> StoredSettings:
+        """Remember the plate on one registry printer (#4971, #5153); ``None`` forgets
+        it."""
+        with self._pool.connection() as conn:
             if bed_type is None:
-                conn.execute(
-                    "DELETE FROM printer_bed_types WHERE printer = %s OR printer_id = %s",
-                    (printer, printer_id),
-                )
-            elif printer is None:
-                conn.execute(
-                    "INSERT INTO printer_bed_types (printer_id, bed_type) VALUES (%s, %s)"
-                    " ON CONFLICT (printer_id) DO UPDATE"
-                    " SET bed_type = EXCLUDED.bed_type, updated_at = now()",
-                    (printer_id, bed_type),
-                )
+                conn.execute("DELETE FROM printer_bed_types WHERE printer = %s", (printer,))
             else:
-                if printer_id is not None:
-                    # This printer's row from before it had a registry id goes, and a row
-                    # of another printer that once linked this Bambuddy id lets it go.
-                    conn.execute(
-                        "DELETE FROM printer_bed_types WHERE printer_id = %s AND printer IS NULL",
-                        (printer_id,),
-                    )
-                    conn.execute(
-                        "UPDATE printer_bed_types SET printer_id = NULL"
-                        " WHERE printer_id = %s AND printer <> %s",
-                        (printer_id, printer),
-                    )
                 conn.execute(
-                    "INSERT INTO printer_bed_types (printer, printer_id, bed_type)"
-                    " VALUES (%s, %s, %s) ON CONFLICT (printer) DO UPDATE"
-                    " SET printer_id = EXCLUDED.printer_id, bed_type = EXCLUDED.bed_type,"
-                    " updated_at = now()",
-                    (printer, printer_id, bed_type),
+                    "INSERT INTO printer_bed_types (printer, bed_type) VALUES (%s, %s)"
+                    " ON CONFLICT (printer) DO UPDATE"
+                    " SET bed_type = EXCLUDED.bed_type, updated_at = now()",
+                    (printer, bed_type),
                 )
         return self._written("printer_bed_type")
 
     def set_printer_rack_algorithm(
         self,
-        printer_id: int | str,
+        printer: str,
         algorithm: RackAlgorithm | None,
         version: int | None = None,
-        *,
-        stale: Sequence[str] = (),
     ) -> RackAlgorithm:
         """Remember how one printer's rack nozzle is picked (#836); ``None`` forgets it.
         Returns the printer's algorithm now.
@@ -1228,11 +1367,9 @@ class SettingsStore:
         (#1129). Nothing is read back afterwards: an unbounded read of every setting
         could outlast the give-up on a save that has already landed.
 
-        ``printer_id`` is the map's key: a Bambuddy id, or the registry id of a printer
-        with none (#4971). ``stale`` keys are removed in the same write: a linked
-        printer's registry-id entry from before it was linked."""
+        ``printer`` is the map's key, the registry printer id (#5167)."""
         bound_ms = int(RACK_ALGORITHM_WRITE_TIMEOUT * 1000)
-        key = str(printer_id)
+        key = printer
         with (
             self._pool.connection(timeout=RACK_ALGORITHM_WRITE_TIMEOUT) as conn,
             conn.transaction(),
@@ -1252,11 +1389,9 @@ class SettingsStore:
                 ).fetchone()
                 if taken is None:
                     raise RackAlgorithmSupersededError(
-                        f"a newer rack-algorithm save is stored for printer {printer_id}"
+                        f"a newer rack-algorithm save is stored for printer {printer}"
                     )
             _put_entry(conn, "printer_rack_algorithms", key, algorithm)
-            for gone in stale:
-                _put_entry(conn, "printer_rack_algorithms", gone, None)
         emit(self.events, SettingsChanged(section="printer_rack_algorithm"))
         return algorithm or DEFAULT_ALGORITHM
 
@@ -1270,12 +1405,16 @@ class SettingsStore:
         scope = library_options_scope(file_id)
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT choices FROM model_print_choices WHERE model_id = %s", (scope,)
+                "SELECT c.choices, p.bambuddy_printer_id FROM model_print_choices AS c"
+                " LEFT JOIN printers AS p ON p.id::text = c.choices ->> 'printer'"
+                " WHERE c.model_id = %s",
+                (scope,),
             ).fetchone()
         if row is None:
             return ModelPrintChoices()
         try:
-            return ModelPrintChoices.model_validate(row["choices"])
+            choices = ModelPrintChoices.model_validate(row["choices"])
+            return choices.model_copy(update={"printer_id": row["bambuddy_printer_id"]})
         except ValidationError:
             logger.warning("unreadable library print choices", extra={"file_id": file_id})
             return ModelPrintChoices()
@@ -1323,8 +1462,6 @@ class SettingsStore:
         scope: OptionScope,
         key: str | None,
         options: PrintOptions,
-        *,
-        stale: Sequence[str] = (),
     ) -> StoredSettings:
         """Replace one scope's print-option overrides.
 
@@ -1347,9 +1484,6 @@ class SettingsStore:
                     raise ValueError(f"the {scope!r} scope needs a key")
                 field = "printer_print_options" if scope == "printer" else "model_print_options"
                 _put_entry(conn, field, key, value)
-                # A linked printer's registry-id entry from before it was linked (#4971).
-                for gone in stale:
-                    _put_entry(conn, field, gone, None)
         return self._written("print_options")
 
     def forget_remembered(self) -> StoredSettings:
@@ -1544,7 +1678,9 @@ class RenderStoreSettings(BaseModel):
     store_backend: StoreBackend = "local"
     bambuddy_url: str | None = None
     api_key: str | None = Field(default=None, repr=False)
-    #: True when `api_key` is the full key because no render key is stored.
+    #: True when no render key is stored but the full key is: the API's own read then
+    #: holds the full key in `api_key`; the CRUD route's answer to a render worker holds
+    #: none (`api/crud_render.py` `withheld`).
     key_is_fallback: bool = False
     library_folder_id: int | None = None
     s3: S3Settings | None = None
@@ -1558,8 +1694,9 @@ def load_render_store_settings(
 ) -> RenderStoreSettings:
     """Read only `RENDER_FIELDS`: a worker holds no settings store (spec §9). Through
     the `render_settings` view, all of the settings a render worker gets (#601), from
-    the API's CRUD route (#5298); the full key is in it only while no render key is
-    stored."""
+    the API's CRUD route (#5298). The full key is in it only while no render key is
+    stored, and the route withholds it from the worker then (`api/crud_render.py`
+    `withheld`)."""
     kek = settings_kek(defaults.secret_key_file)
     with pool.connection() as conn:
         rows = conn.execute(

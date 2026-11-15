@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import psycopg
+
 from scadbuddy.bambuddy.models import (
     FilamentGroup,
     FilamentRequirement,
@@ -11,7 +13,24 @@ from scadbuddy.bambuddy.models import (
     PrinterStatus,
 )
 from scadbuddy.rack.rank import RackGroup
+from scadbuddy.render import pg_store
 from tests.bambuddy.conftest import recording
+
+#: Two registry printers a hotend is seen on (#5167): the rack tables name the registry
+#: printer, a foreign key. :func:`registry_printers` makes them.
+P1 = "00000000-0000-4000-8000-00000000c001"
+P2 = "00000000-0000-4000-8000-00000000c002"
+
+
+def registry_printers(conninfo: str) -> None:
+    """Migrate the schema and add ``P1`` and ``P2``."""
+    with psycopg.connect(conninfo) as conn:
+        pg_store.migrate(conn)
+        conn.execute(
+            "INSERT INTO printers (id, serial, name) VALUES"
+            " (%s, 'TESTRACK00001', 'Rack 1'), (%s, 'TESTRACK00002', 'Rack 2')",
+            (P1, P2),
+        )
 
 
 def serial(rack_id: int) -> str:

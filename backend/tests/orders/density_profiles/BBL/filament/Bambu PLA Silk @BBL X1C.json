@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Bambu PLA Silk @BBL X1C",
+    "from": "system",
+    "instantiation": "true",
+    "inherits": "Bambu PLA Silk @base",
+    "setting_id": "GFSA05"
+}

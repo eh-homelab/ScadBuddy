@@ -27,7 +27,8 @@ import {
 import { formatBytes, formatDuration, timeAgo } from '../lib/format'
 import { temporalWorkflowUrl } from '../lib/temporal'
 import { useAsync } from '../lib/useAsync'
-import { usePollWhile, usePollWhileUnavailable } from '../lib/usePollWhileUnavailable'
+import { useReadOnPendingChanges } from '../lib/pendingChanges'
+import { usePollWhileUnavailable } from '../lib/usePollWhileUnavailable'
 import { ATTENTION_POLL_MS } from '../agent/attention'
 
 /** A box of text set apart: a result. */
@@ -48,8 +49,9 @@ export function WorkflowRunPage() {
   const queue = useAsync(() => api.getFlowRunQueue(id), [id], [flowRunTopic(id)])
   const settings = useAsync(() => api.getSettings(), []).data
   usePollWhileUnavailable(() => view.refresh(), FLOW_POLL_MS)
-  // A child's call is decided or ends in its own session, which no run topic announces.
-  usePollWhile(
+  // A child's call is decided or ends in its own session, which no run topic announces:
+  // the agent's pending-input stream does (#265).
+  useReadOnPendingChanges(
     (queue.data?.entries ?? []).some((e) => e.source === 'child'),
     () => queue.refresh(),
     ATTENTION_POLL_MS,

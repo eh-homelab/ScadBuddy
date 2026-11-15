@@ -136,6 +136,7 @@ ROLE_SERIES: dict[MetricsRole, frozenset[str]] = {
     | {
         "print_follows_running",
         "rack_watch_settle_failed",
+        "printer_watch_write_failed",
         "crud_client_seconds",
     },
     "projects": _WORKER_COMMON | {"crud_client_seconds"},
@@ -339,6 +340,14 @@ class Metrics:
             "else they stay pending until PENDING_PICK_MAX_AGE.",
             registry=r,
         )
+        self.printer_watch_write_failed = Counter(
+            "scadbuddy_printer_watch_write_failed",
+            "LAN reports the printer watch could not write, or touches it could not make "
+            "(#5298), and owed reports given up after their resends. The watch goes on: an "
+            "unwritten report is written at the next quiet tick, a refused one (a 4xx other "
+            "than 429) is dropped, and the row's seen_at ages until a write succeeds.",
+            registry=r,
+        )
         self.queue_wait = Histogram(
             "scadbuddy_render_queue_wait_seconds",
             "Time from submit until its workflow began the render, by kind.",
@@ -462,7 +471,8 @@ class Metrics:
         )
         self.store_render_key_fallback = Gauge(
             "scadbuddy_store_render_key_fallback",
-            "1 while render workers hold the full Bambuddy key (spec 2026-09-27 §9).",
+            "1 while this process's store holds the full Bambuddy key because no render key"
+            " is saved (spec 2026-09-27 §9); a standalone render worker never gets it.",
             registry=r,
         )
         self.worker_cache_bytes = Gauge(
@@ -533,6 +543,14 @@ class Metrics:
         self.assets_swept = Counter(
             "scadbuddy_assets_swept",
             "Stored files removed by the sweep because nothing referenced or used them.",
+            registry=r,
+        )
+        # A customer's staged files (#6133): the backstop's repairs, each a bug signal.
+        self.staged_files_repaired = Counter(
+            "scadbuddy_staged_files_repaired",
+            "Staged customer files the backstop repaired, by kind: a staging object no row"
+            " names (orphan_object) or a row whose watcher was not running (unwatched_row).",
+            ["kind"],
             registry=r,
         )
 

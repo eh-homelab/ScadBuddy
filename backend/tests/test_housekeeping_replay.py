@@ -32,8 +32,10 @@ which also runs ``AUTH_SESSIONS_SWEEP``, and ``payment_closes`` with
 ``PAYMENT_CAPTURES_SWEEP``, and
 ``bank_deposits`` with ``BANK_DEPOSITS_PATCH`` (#4961), which also runs
 ``BANK_DEPOSITS_SWEEP``, and ``storefront_drafts`` with ``STOREFRONT_DRAFTS_PATCH``
-(#5282), which also runs ``STOREFRONT_DRAFTS_SWEEP`` (``SCADBUDDY_RECORD_HISTORIES=1``
-runs the recording below).
+(#5282), which also runs ``STOREFRONT_DRAFTS_SWEEP``, and ``storefront_mail`` with
+``STOREFRONT_MAIL_PATCH`` (#5283), which also runs ``STOREFRONT_MAIL_SWEEP``, and
+``auto_import`` with ``AUTO_IMPORT_PATCH`` (#4699), which also runs ``AUTO_IMPORT_SWEEP``
+(``SCADBUDDY_RECORD_HISTORIES=1`` runs the recording below).
 Never re-record them: a later change adds a history recorded on the changed code beside
 them.
 """
@@ -78,6 +80,8 @@ HISTORIES = Path(__file__).parent / "fixtures" / "housekeeping_histories"
         "payment_captures",
         "bank_deposits",
         "storefront_drafts",
+        "storefront_mail",
+        "auto_import",
     ],
 )
 async def test_housekeeping_replays_its_recorded_history(name: str) -> None:
@@ -95,7 +99,7 @@ def recording_temporal() -> Iterator[str]:
 
 @pytest.mark.requires_temporal
 @pytest.mark.skipif(os.environ.get("SCADBUDDY_RECORD_HISTORIES") != "1", reason="records a history")
-async def test_record_storefront_drafts(recording_temporal: str) -> None:
+async def test_record_auto_import(recording_temporal: str) -> None:
     """Every sweep a stub, so only the workflow's own commands are recorded."""
 
     def stub(name: str) -> Any:
@@ -124,4 +128,4 @@ async def test_record_storefront_drafts(recording_temporal: str) -> None:
         if e.HasField("activity_task_scheduled_event_attributes")
     ]
     assert names == list(SWEEPS)
-    (HISTORIES / "storefront_drafts.json").write_text(history.to_json())
+    (HISTORIES / "auto_import.json").write_text(history.to_json())

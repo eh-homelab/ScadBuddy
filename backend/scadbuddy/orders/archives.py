@@ -6,7 +6,9 @@ link by queue item: ``OrderStore.run_archives``). Once the attempt's print settl
 attempt copies what the archives say: their ids, the printer's start and end, the seconds
 and grams summed (:func:`mirror_archives`). That runs when the print's outcome is heard
 (``printing.py`` ``listen_for_prints``) and again whenever the attempt's archives are read
-(``GET …/fulfilments/{f}/archives``), so a link Bambuddy made late is still copied.
+(``GET …/fulfilments/{f}/archives``), so a link Bambuddy made late is still copied. An
+attempt by hand that names its archives copies them when it is recorded or edited too
+(``api/orders.py`` ``record_fulfilment``, ``update_fulfilment``, #6132).
 
 An archive's ``finish_`` photo and its timelapse are offered as one-click copies into the
 attempt's attachments (§6.2, #4251): the bytes are pulled once through the seam into the claim
@@ -100,13 +102,17 @@ async def _facts(integrations: OrderIntegrations, archive_ids: list[int]) -> lis
 
 
 async def mirror_archives(
-    lifecycle: Lifecycle, integrations: OrderIntegrations, attempt: Fulfilment
+    lifecycle: Lifecycle,
+    integrations: OrderIntegrations,
+    attempt: Fulfilment,
+    read_timeout: float | None = None,
 ) -> tuple[Fulfilment, list[ArchiveFacts]]:
     """The attempt with its archives' facts copied (once its print settled), and those
     facts. An attempt recorded by hand naming its archive (#4251, a print attached to
     the item from its own page) copies that archive's, its print being over. Nothing is
     asked without a Bambuddy, for an attempt by hand naming none, or one whose run
-    Bambuddy has linked no archive to yet."""
+    Bambuddy has linked no archive to yet. A read of Bambuddy slower than
+    ``read_timeout`` raises ``TimeoutError`` before anything is written (#6167)."""
     if not integrations.linked:
         return attempt, []
     if attempt.print_run_id is None:
@@ -116,7 +122,7 @@ async def mirror_archives(
         settled = attempt.finished_at is not None
     if not archive_ids:
         return attempt, []
-    facts = await _facts(integrations, archive_ids)
+    facts = await asyncio.wait_for(_facts(integrations, archive_ids), read_timeout)
     if not settled or not facts:
         return attempt, facts
     started = [f.started_at for f in facts if f.started_at is not None]

@@ -26,9 +26,15 @@ VERSION: Final = "v1"
 _B64_32: Final = re.compile(r"[A-Za-z0-9_-]{43}")
 
 
-def _mac(visitor_id: str, key: bytes) -> str:
-    digest = hmac.new(key, f"{VERSION}.{visitor_id}".encode(), hashlib.sha256).digest()
+def cookie_mac(version: str, value: str, key: bytes) -> str:
+    """HMAC-SHA256 over ``<version>.<value>`` under the edge's cookie key, URL-safe base64
+    unpadded: the mac of the visitor cookie and of the session cookie."""
+    digest = hmac.new(key, f"{version}.{value}".encode(), hashlib.sha256).digest()
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+
+def _mac(visitor_id: str, key: bytes) -> str:
+    return cookie_mac(VERSION, visitor_id, key)
 
 
 def sign(visitor_id: str, key: bytes) -> str:
@@ -62,7 +68,7 @@ def _cookie(headers: list[tuple[bytes, bytes]]) -> str | None:
 class VisitorCookie:
     """ASGI middleware for the paths under ``prefix``: puts the verified visitor id on
     ``request.state.visitor_id``, and sets a new signed cookie when the request had none
-    that verifies."""
+    that verifies, unless the route's response sets one itself."""
 
     def __init__(self, app: ASGIApp, *, key: bytes, prefix: str) -> None:
         self.app = app
@@ -90,7 +96,11 @@ class VisitorCookie:
 
         async def send_with_cookie(message: Message) -> None:
             if message["type"] == "http.response.start":
-                MutableHeaders(scope=message).append("set-cookie", value)
+                headers = MutableHeaders(scope=message)
+                # A route that gives the browser a visitor itself (sign-out) sets the one cookie.
+                own = f"{VISITOR_COOKIE}="
+                if not any(c.startswith(own) for c in headers.getlist("set-cookie")):
+                    headers.append("set-cookie", value)
             await send(message)
 
         await self.app(scope, receive, send_with_cookie)

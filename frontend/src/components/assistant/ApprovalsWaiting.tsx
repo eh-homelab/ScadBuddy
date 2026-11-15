@@ -50,7 +50,7 @@ function PendingApprovalCard({ approval, onDecided }: { approval: PendingApprova
         </h3>
       </div>
       <p className="font-mono text-[12px] break-all">{preparedBy(approval)}</p>
-      {approval.summary && <p className="break-words">{approval.summary}</p>}
+      {approval.summary && <p className="whitespace-pre-wrap break-words">{approval.summary}</p>}
       {state.kind === 'pending' ? (
         <>
           <div className="mt-0.5 flex items-center gap-2">

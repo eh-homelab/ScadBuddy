@@ -90,4 +90,12 @@ describe('ApprovalsWaiting', () => {
     const outside = renderPage(<ApprovalsWaiting />)
     expect(outside.container).toBeEmptyDOMElement()
   })
+
+  it('keeps the line breaks of a summary, as a message to a customer has them (#5660)', () => {
+    const summary = 'Send "Order ready" to ada@example.com through remote:mail:\nHello Ada,\n\nOrder ORD-2026-7 is ready.'
+    shown([{ ...approval, tool: 'order_notify_customer_send', summary }])
+    const text = screen.getByText(/Hello Ada,/)
+    expect(text.textContent).toBe(summary)
+    expect(text).toHaveClass('whitespace-pre-wrap')
+  })
 })

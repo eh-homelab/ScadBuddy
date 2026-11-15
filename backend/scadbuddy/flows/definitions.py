@@ -18,6 +18,7 @@ from typing import Any
 
 import psycopg
 
+from scadbuddy.core.events import EventBus, FlowChanged, emit
 from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
 from scadbuddy.flows.models import (
     Definition,
@@ -63,8 +64,16 @@ class ScriptMissingError(Exception):
 
 
 class FlowDefinitions:
-    def __init__(self, history: FlowHistory, store: FlowStore, states: FlowStates) -> None:
+    def __init__(
+        self,
+        history: FlowHistory,
+        store: FlowStore,
+        states: FlowStates,
+        events: EventBus | None = None,
+    ) -> None:
         self.history = history
+        #: Told of each write (#265): ``flow.changed`` on the ``flows`` topic.
+        self.events = events
         self.store = store
         self.states = states
         #: Each flow's display name as committed at one HEAD (#5357), so a run read
@@ -109,7 +118,7 @@ class FlowDefinitions:
         its inputs schema beside it (#2483) or none, named by ``message`` and ``body``
         when given. A ``display_name`` or ``description`` that changes the flow's details
         is a commit of its own after it (#3186); None leaves one as it is."""
-        return await asyncio.to_thread(
+        written = await asyncio.to_thread(
             self._write,
             name,
             author,
@@ -122,6 +131,8 @@ class FlowDefinitions:
             display_name=display_name,
             description=description,
         )
+        self._changed(name)
+        return written
 
     async def register_new(
         self,
@@ -138,7 +149,7 @@ class FlowDefinitions:
         any version already, a deleted flow's too: a shop's edit or delete stands, and two
         replicas starting at once register it once."""
         try:
-            return await asyncio.to_thread(
+            written = await asyncio.to_thread(
                 self._write,
                 name,
                 author,
@@ -153,6 +164,8 @@ class FlowDefinitions:
             )
         except FlowExistsError:
             return None
+        self._changed(name)
+        return written
 
     async def upgrade_builtin(
         self,
@@ -170,7 +183,7 @@ class FlowDefinitions:
         is deleted, both checked under the history's write lock. The flow's details stay
         as they are."""
         try:
-            return await asyncio.to_thread(
+            written = await asyncio.to_thread(
                 self._write,
                 name,
                 author,
@@ -183,6 +196,8 @@ class FlowDefinitions:
             )
         except FlowExistsError:
             return None
+        self._changed(name)
+        return written
 
     async def restore(
         self,
@@ -197,7 +212,9 @@ class FlowDefinitions:
         a new commit and a new row, with that version's approval timeout. The flow's
         details stay as they are (#3186), except for a deleted flow, which comes back with
         the display name and description it had at ``commit``, in the version's commit."""
-        return await asyncio.to_thread(self._restore, name, commit, author, message, body)
+        done = await asyncio.to_thread(self._restore, name, commit, author, message, body)
+        self._changed(name)
+        return done
 
     def _restore(
         self,
@@ -226,9 +243,11 @@ class FlowDefinitions:
         changed. None leaves a field as it is, an empty string clears it.
         :class:`UnknownFlowError` for a name with no version, :class:`FlowDeletedError`
         for a deleted flow."""
-        return await asyncio.to_thread(
+        details = await asyncio.to_thread(
             self._update_details, name, display_name, description, message, body
         )
+        self._changed(name)
+        return details
 
     def _update_details(
         self,
@@ -382,7 +401,9 @@ class FlowDefinitions:
     async def archive(self, name: str, by: dict[str, Any]) -> FlowState:
         """Archive every version of ``name`` (#2485): hidden by default, never started.
         :class:`UnknownFlowError` for a name with no version."""
-        return await asyncio.to_thread(self._archive, name, by)
+        done = await asyncio.to_thread(self._archive, name, by)
+        self._changed(name)
+        return done
 
     def _archive(self, name: str, by: dict[str, Any]) -> FlowState:
         if not self.states.exists(name):
@@ -393,7 +414,9 @@ class FlowDefinitions:
         return state
 
     async def unarchive(self, name: str) -> FlowState:
-        return await asyncio.to_thread(self._unarchive, name)
+        done = await asyncio.to_thread(self._unarchive, name)
+        self._changed(name)
+        return done
 
     def _unarchive(self, name: str) -> FlowState:
         if not self.states.exists(name):
@@ -413,7 +436,9 @@ class FlowDefinitions:
         versions' rows and commits stay, so a run still reads the script it ran, and a
         restore of a version brings it back. A flow deleted already is answered as it
         is."""
-        return await asyncio.to_thread(self._delete, name, by, message, body)
+        done = await asyncio.to_thread(self._delete, name, by, message, body)
+        self._changed(name)
+        return done
 
     def _delete(
         self, name: str, by: dict[str, Any], message: str | None, body: str | None
@@ -429,6 +454,9 @@ class FlowDefinitions:
             body=body,
         )
         return recorded[0]
+
+    def _changed(self, name: str) -> None:
+        emit(self.events, FlowChanged(name=name))
 
     @staticmethod
     def _flags(state: FlowState) -> dict[str, Any]:

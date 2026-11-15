@@ -528,6 +528,41 @@ describe('extractors', () => {
     ])
   })
 
+  it('records the files a MakerWorld import made, and nothing for a repeat or a running one (#6119)', () => {
+    const imported = {
+      library: 'native',
+      library_file_id: 1_000_000_007,
+      bambuddy_library_file_id: 9,
+      was_existing: false,
+      bambuddy_was_existing: false,
+      copied: true,
+    }
+    expect(touches('import_makerworld_model', { model_id: 1 }, imported, 'outward')).toEqual([
+      { type: 'library_file', id: '1000000007', action: 'created' },
+      { type: 'bambuddy_file', id: '9', action: 'created' },
+    ])
+    const onBambuddy = { library: 'bambuddy', library_file_id: 9, bambuddy_library_file_id: 9, was_existing: false, bambuddy_was_existing: false, copied: false }
+    expect(touches('import_makerworld_model', { model_id: 1 }, onBambuddy, 'outward')).toEqual([
+      { type: 'bambuddy_file', id: '9', action: 'created' },
+    ])
+    const repeat = { ...imported, was_existing: true, bambuddy_was_existing: true, copied: false }
+    expect(touches('import_makerworld_model', { model_id: 1 }, repeat, 'outward')).toEqual([])
+    expect(touches('import_makerworld_model', { model_id: 1 }, { ...onBambuddy, was_existing: true, bambuddy_was_existing: true }, 'outward')).toEqual([])
+    expect(touches('import_makerworld_model', { model_id: 1 }, { status: 'running', operation_id: 'a' }, 'outward')).toEqual([])
+  })
+
+  it('records only the side of a MakerWorld import that made a new file (#6119)', () => {
+    const base = { library: 'native', library_file_id: 1_000_000_007, bambuddy_library_file_id: 9, was_existing: false }
+    // Bambuddy downloads again, but ScadBuddy's library already held the same bytes.
+    expect(touches('import_makerworld_model', { model_id: 1 }, { ...base, bambuddy_was_existing: false, copied: false }, 'outward')).toEqual([
+      { type: 'bambuddy_file', id: '9', action: 'created' },
+    ])
+    // Bambuddy reuses its file, but the copy into ScadBuddy's library stores new bytes.
+    expect(touches('import_makerworld_model', { model_id: 1 }, { ...base, bambuddy_was_existing: true, copied: true }, 'outward')).toEqual([
+      { type: 'library_file', id: '1000000007', action: 'created' },
+    ])
+  })
+
   it('records the library files moved, copied and renamed, never a skipped one (#2670)', () => {
     const moved = { folder_id: 4, moved: [{ id: 1, filename: 'a.3mf' }], skipped: [{ id: 2, reason: 'not owned' }] }
     expect(touches('move_library_file', { file_ids: [1, 2] }, moved, 'outward')).toEqual([

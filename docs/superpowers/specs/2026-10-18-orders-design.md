@@ -465,18 +465,20 @@ its old price (seen on ORD-2026-3).
 - An attempt of the old design (a `printed` item's print, or one recorded by hand) stays
   on the item, not accepted. Once a quote of the new design is accepted, the item is
   `approved` again, and accepting that old attempt is refused (`fulfilment_stale`): an
-  attempt made before the revision the accepted quote prices printed an earlier design
-  (#5582, `Lifecycle.accept_fulfilment`). The rule is `lifecycle.py` `stale_attempt`.
+  attempt that printed a revision earlier than the one the accepted quote prices printed
+  an earlier design (#5582, `Lifecycle.accept_fulfilment`). The rule is `lifecycle.py` `stale_attempt`.
   `GET /orders/{id}` marks such an attempt `stale: true` by the same rule (#5592), and
   the drawer shows it as "Old design" with no Accept (`FulfilmentForm`).
-- The rule compares the attempt's `created_at` (`now()`, the start of its transaction)
-  with the revision's (`clock_timestamp()`). The two come from separate transactions.
-  Their order holds because every writer of an item takes the order's row lock and reads
-  the item after it. The revision is refused while a print of the item is open
-  (`print_in_flight`), and it puts the item back to `draft`. No attempt is recorded or
-  claimed on a `draft` item (`_fulfillable`, `claim_print`). So an attempt whose
-  transaction started before the revision and waited on the lock is refused. Every
-  attempt made after the revision starts after the new quote's acceptance.
+- The rule compares revision numbers, never wall-clock times (#5704). A production
+  attempt names the revision it printed (`revision_id`): the item's current revision,
+  which `OrderStore.insert_fulfilment` reads under the order's row lock when the attempt
+  is recorded or claimed. The attempt is stale when that revision's number is below the
+  number of the revision the accepted quote prices, or when it names no revision (it was
+  made before the item had one). Two `created_at` values written by two transactions
+  are not ordered when the clock steps back between them, which made accepted designs
+  read as stale. Production attempts from before #5704 were backfilled by `created_at`
+  (`20261109T0030Z_order_attempt_printed_revision.sql`): each names the newest revision
+  written no later than it.
 - While the mark stands, the lock is `requote_open` (`orders/lifecycle.py`), not
   `item_open`. The item takes a quote (manual or slice), a quote's acceptance, a
   customer's answer, and more revisions on either route. Its quantity stays pinned.
@@ -578,7 +580,7 @@ every quote; the filaments in a table of their own with an editor beside them):
   `archived_at`. This is the price of a filament, not a spool: `_filament_key`'s
   grouping (material, subtype, brand, colour; `bambuddy/farm.py:187-206`) is the
   identity, so with Bambuddy configured a record is matched to its spools by that key
-  (§8.3).
+  (§8.3; as built, #6209: by the record's link to its spools first, see §8.3).
 - `pricing_policy`: `machine_rate_per_hour` (decimal, may be 0), `setup_fee` (per
   plate, decimal), `labour_per_item` (decimal), `markup_percent` (decimal), `rounding`
   (`to_minor_unit`, the default: each line rounds as §3.6 says and the unit price is
@@ -656,7 +658,9 @@ any print.
 `filament_plan.slots` (F7) when it starts, on the printer it runs on:
 
 - With Bambuddy configured, a slot's spool is the one loaded on that printer whose
-  `_filament_key` is the slot's filament's (§5.1); with none loaded, the unarchived
+  `_filament_key` is the slot's filament's (§5.1; as built, #6209: by the record's link
+  to its spools first, then the spools' colour at the last import, then the record's own
+  colour, see "As built, the spools"); with none loaded, the unarchived
   spool of that filament on the shelf with the most grams left, as the print dialog's
   spool-first choice makes it (`bambuddy/filaments.py` `_display_order`). A spool
   loaded in another printer is never taken: using it means unloading it there, which
@@ -697,7 +701,26 @@ tabs, the browser and the agent) claim once, and a hold or cancel after the chec
 the claim, so only one print starts. The run is then attached (`attach_print`:
 `print_run_id`, the registry `printer`); a start the print path refuses (a 4xx) releases
 the claim (`release_print`, the item back to `approved` or `failed`), and one that may
-still start (a 5xx) keeps it for the operation's retry, which repeats the same run. The
+still start (a 5xx) keeps it. A 5xx that says the start may still run (503
+`command-still-accepting`, or `temporal-unavailable`: Temporal busy or away) is sent again
+inside the run with the same `request_id`, which follows that run, on a backoff (1 s,
+doubled, at most 30 s) for `START_FOLLOW_S` (254 s: `CLIENT_ACCEPTING`, 240 s, past which
+the print run refuses itself on its own clock, plus one `ACCEPT_BUDGET`, 14 s, since that
+clock starts within the first send, #6187) (#6138). Before that fix the operation failed
+on the first such answer, nothing sent the start again, and the claim never got its run.
+When the bound runs out, the run's key is read once (as a retry reads it, below), for the
+time left on the run's one clock, with no cap of its own (#6193: taken on the run's first
+line, before the item's project and the claim, against the run's 300 s less a 10 s attach
+margin; the follow is cut so that the last send and at least 5 s of look stay; with
+nothing slow before the start the look has at least 22 s, and more when the last send
+answers at once): a run there is attached; neither a run nor an open `print-<key>`
+workflow releases the claim; and when it cannot tell (the workflow still accepting,
+Temporal away, or no answer in time) the claim is kept, since a run may exist and a released claim would let a new print
+print the item twice, and the failure names the attempt to settle by hand. A follow cut
+short by slow work before the start can end before the `print-<key>` workflow refuses
+itself, so its look is more likely to find it still accepting and keep the claim: the safe
+outcome, at the cost of a claim to settle by hand (#6202). Any other 5xx
+(a start Temporal refused, 500) fails the operation at once with the claim kept. The
 `request_id` is made from the item and the key, and a claim found under it on another item
 is `print_request_conflict`; a claim's run, once attached, is never replaced. A retry whose
 claim has no run yet starts only while the claim still may print (the order not ended or on
@@ -705,8 +728,9 @@ hold, the item still `queued`, the attempt still open). Otherwise its earlier st
 have made the run all the same (a 5xx after the workflow started), so the retry looks for
 it by the run's key (`print_runs`, then the `print-<key>` workflow): a run there is
 attached and followed, the hold or cancel applying to what comes next; a workflow still
-accepting is a 503 for the retry; only with neither is the open claim released and the
-retry refused. A claim with no run keeps the item `queued` (it is a
+accepting is a 503 for the retry; with no answer in the time left on the run's clock the
+claim is kept and the failure names the attempt (#6193); only with neither is the open
+claim released and the retry refused. A claim with no run keeps the item `queued` (it is a
 print's attempt, not one by hand), and its `PATCH` is refused (`print_starting`) while its
 `order_item_print` operation still runs. The item follows the run from what the print path
 records (`Lifecycle.follow_print`, heard on `print.run`, `print.progress` and
@@ -727,8 +751,9 @@ queue paths (plan 2026-11-03 "Not in this plan").
 **As built, the spools (#4251, plan 2026-11-03 Ruling 4).** `orders/spools.py`, run in
 `order_item_print`'s check, so a refusal writes nothing and the filled plan is recorded with
 the check, which keys a retry's run as its first try's. A slot's filament is matched to
-spools by the spool import's identity (§8.3): material, subtype, brand and `#RRGGBB`,
-upper-cased. The run's printer is the request's `printer_id`, else its registry printer's
+spools as the spool import matches them (§8.3, as built #6209): the same material, subtype
+and brand, upper-cased, and the record's link to the spool (`spool_ids`), else the spools'
+`#RRGGBB` at the last import (`spool_colour`), else the record's own `colour`. The run's printer is the request's `printer_id`, else its registry printer's
 Bambuddy id. A spool named only by its colour's name is never taken. On the native path,
 and for a slot the item names no filament for, the plan stays as the request gave it.
 
@@ -888,7 +913,8 @@ the agent reads it with `order_costs`.
 
 ### 7.1 Events and the trigger
 
-Two bus events (`core/events.py`, ids only): `order.changed` (`order_id`, `status`) and
+Two bus events (`core/events.py`, ids only): `order.changed` (`order_id`, `status`; a
+storefront cart the draft sweep deleted also carries `deleted: true`, storefront spec §5.4) and
 `order_item.changed` (`order_id`, `item_id`, `status`, `attempt`). **A trigger's event
 kind is the bus event's own name.** The existing two kinds are renamings
 (`render.finished` for `job.done`, `model.changed` for `version.committed`, F12); the
@@ -1073,8 +1099,10 @@ What this relies on, and what the design adds for it:
   As built (#4252): `order_notify_customer` is `read` and only composes: it reads the
   order and the customer and answers the template's text addressed to the customer's
   primary contacts, `sent: false`, for a person to send. Sending through a plugin is
-  #5660. The built-in flow is `orders/builtin_flow.py` (`order-fulfilment`, inputs
-  `notify` and `settle_hours`), registered at start when its name never had a version
+  #5660 (`order_notify_customer_send`). The built-in flow is `orders/builtin_flow.py`
+  (`order-fulfilment`, inputs `notify`, `send` and `settle_hours`; `send` sends the
+  `ready` message through the bound plugin, spec 2026-11-08 §6.2), registered at start
+  when its name never had a version
   (`FlowDefinitions.register_new`), and as a new version when the newest is still an
   unedited built-in one with another script (#4673), so a person's edit or delete stands.
   A trigger pins its version: each trigger of an older built-in version moves to the new
@@ -1212,10 +1240,31 @@ Agent tools `order_attempt_archives` (read) and `order_attempt_copy` (write).
 
 The price book's filament records can be **imported from spools**: `POST
 /orders/price-book/import-spools` reads the inventory (`inventory_view`), groups by
-`_filament_key`, and makes or updates one filament record per group with the spools'
+`_filament_key`, and makes or updates one filament record per group (as built, #6209: a
+group finds its record by the link to its spools first, see below) with the spools'
 `cost_per_kg` (the most recent spool's, with the spread shown when they differ) and
 the colour. It is an import, run on click: the book never reads Bambuddy at quote
 time, so a quote is the same with Bambuddy down.
+
+**As built (#6136).** The import also gives a record with no density one, and never
+changes a density a record has: the spools' preset id (`slicer_filament`, a K-profile's
+`setting_id`, the AMS tray's `tray_info_idx`), that preset's `filament_density`
+(Bambuddy's local preset, else the image's Bambu Studio preset), else Bambuddy's filament
+catalogue (`orders/density.py`). `POST /orders/price-book/fill-densities` does the same for
+every record with no density, and a record added by hand with no density takes it too.
+`filaments.density_profile` keeps where each density came from. A density read Bambuddy
+refuses gives no density and fails nothing.
+
+**As built (#6209).** A record keeps the spools' whole colour: `colour` stays `#RRGGBB`
+(the render splits parts by it), beside `alpha`, `extra_colours` and `effect` from the
+spool's `rgba`, `extra_colors` and `effect_type`. `colour_source` says who set them: the
+import sets them again only while it is `import`; a person's change makes it `manual`. The
+import matches only a record of the group's material, subtype and brand: by its link to
+the group's spools (`spool_ids`, a record linked to several groups going to the group with
+its spools' RGB; a link always wins over a colour, whatever the groups' order), else by the
+spools' `#RRGGBB` at the last import (`spool_colour`), else by its own `colour`, so a colour
+a person set makes no second record. An item print's spools
+are matched the same way (`orders/spools.py`).
 
 ### 8.4 Printers
 

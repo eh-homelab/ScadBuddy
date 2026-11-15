@@ -68,7 +68,21 @@ def crud_mock() -> Iterator[respx.Router]:
             200, json={"access_token": TOKEN, "expires_in": 900}
         )
         router.get("/api/v1/internal/crud/storefront/areas", name="areas").respond(
-            200, json={"areas": ["listings", "renders", "drafts", "requests", "pay"]}, headers=CRUD
+            200,
+            json={
+                "areas": [
+                    "listings",
+                    "renders",
+                    "drafts",
+                    "requests",
+                    "pay",
+                    "turnstile",
+                    "accounts",
+                    "order",
+                    "models",
+                ]
+            },
+            headers=CRUD,
         )
         router.get("/api/v1/internal/crud/storefront/listings", name="listings").respond(
             200, json=LISTINGS, headers=CRUD
@@ -79,6 +93,25 @@ def crud_mock() -> Iterator[respx.Router]:
         router.get(
             "/api/v1/internal/crud/storefront/requests-enabled", name="requests_enabled"
         ).respond(200, json={"enabled": True}, headers=CRUD)
+        # The bot check, off (#5283): no site key, and every token passes.
+        router.get("/api/v1/internal/crud/storefront/turnstile", name="site_key").respond(
+            200, json={"site_key": None}, headers=CRUD
+        )
+        router.post("/api/v1/internal/crud/storefront/turnstile/verify", name="turnstile").respond(
+            200, json={"verdict": "off"}, headers=CRUD
+        )
+        # The store is not S3 (#6133): no upload origin, so the page's CSP names none.
+        router.get("/api/v1/internal/crud/storefront/uploads/config", name="upload_origin").respond(
+            503,
+            json={
+                "type": "https://scadbuddy.dev/problems/storefront/storefront_needs_s3",
+                "title": "Service Unavailable",
+                "status": 503,
+                "detail": "The shop is not available right now.",
+                "reason": "not_configured",
+            },
+            headers={**CRUD, "Content-Type": "application/problem+json"},
+        )
         yield router
 
 
@@ -114,8 +147,25 @@ def test_a_database_or_key_variable_refuses_the_start(name: str) -> None:
     with pytest.raises(EdgeRefusal) as refused:
         check_environment({name: "x"})
     assert refused.value.reasons == [
-        f"{name} is set; the storefront holds no database secret or key"
+        f"{name} is set; the storefront holds no database secret, key or Temporal address"
     ]
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "SCADBUDDY_DATABASE_URL",
+        "PGPASSWORD",
+        "PGPASSFILE",
+        "SCADBUDDY_SECRET_KEY_FILE",
+        "SCADBUDDY_TEMPORAL_ADDRESS",
+    ],
+)
+def test_each_named_variable_is_refused(name: str) -> None:
+    """#5284: the list by name, so a variable dropped from FORBIDDEN_ENV fails here. The
+    edge reaches nothing but the CRUD service: no database and no Temporal (#5295)."""
+    with pytest.raises(EdgeRefusal):
+        check_environment({name: "x"})
 
 
 def test_a_clean_environment_is_accepted() -> None:
@@ -149,6 +199,22 @@ def test_the_edge_starts_and_opens_no_database_connection(
     assert sent.headers[CLIENT_HEADER] == CLIENT[0]
     # The lifespan waited for the API's storefront areas before it served.
     assert crud_mock["areas"].called
+
+
+def test_the_edge_sends_on_a_page_and_search_of_the_listings(
+    edge_env: None, crud_mock: respx.Router
+) -> None:
+    """#6154: ``cursor``, ``limit`` and ``q`` reach the CRUD side URL-encoded, and nothing
+    else the visitor put in the query does."""
+    with TestClient(create_app(load()), client=CLIENT) as c:
+        r = c.get("/api/store/v1/listings", params={"q": "a&b=c", "cursor": "5b305d", "x": "1"})
+        assert r.status_code == 200, r.text
+        refused = c.get("/api/store/v1/listings", params={"limit": "49"})
+        assert refused.status_code == 422
+        assert c.get("/api/store/v1/listings", params={"q": "a\x00b"}).status_code == 422
+    sent = crud_mock["listings"].calls.last.request
+    assert dict(sent.url.params) == {"cursor": "5b305d", "q": "a&b=c"}
+    assert crud_mock["listings"].call_count == 1
 
 
 def test_a_crud_refusal_passes_through_with_its_retry_after(

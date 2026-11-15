@@ -13,6 +13,7 @@ import pytest
 from scadbuddy import main
 from scadbuddy.core.settings import Settings
 from scadbuddy.operations.component import OPERATIONS
+from scadbuddy.print_watch.component import AUTO_IMPORTS
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.slicing.component import SLICING
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
@@ -97,27 +98,44 @@ BAMBUDDY_LIBRARY = SimpleNamespace(serving_native=_bambuddy_serves)
 #: is None (plan 2026-10-16 Task 13).
 SLICER = SimpleNamespace(starter=None)
 #: The printer registry (#3823): its watch activity is built over these, never run.
-REGISTRY = SimpleNamespace(store=None, reports=None)
+#: Its store's `get` is the print watcher's nudge's printer read (#4699).
+REGISTRY = SimpleNamespace(store=SimpleNamespace(get=lambda printer_id: None), reports=None)
+
+
+#: The print watcher's records (#4699 phase 4): a LAN-only printer's job is recorded
+#: through its LAN store, never here.
+WATCHER = SimpleNamespace(lan=None)
 
 
 def _state() -> SimpleNamespace:
     return SimpleNamespace(
-        settings=SimpleNamespace(temporal_task_queue_bambuddy="bambuddy"),
+        settings=SimpleNamespace(
+            temporal_task_queue_bambuddy="bambuddy", temporal_task_queue_library="library"
+        ),
         temporal=object(),
-        settings_store=SimpleNamespace(pool=None),
+        # `load` is the print watcher's nudge's settings read (#4699); never called here.
+        settings_store=SimpleNamespace(pool=None, load=lambda: None),
         outputs=SimpleNamespace(prints=None),
         uploads=None,
-        catalogue=None,
+        # The catalogue a LAN-only printer's record is matched against (#4699); never read.
+        catalogue=SimpleNamespace(slugs=list, exists=lambda slug: False),
         print_runs=SimpleNamespace(store=None),
         print_progress=None,
         print_follower=None,
-        metrics=SimpleNamespace(print_follows_running=None, rack_watch_settle_failed=None),
+        metrics=SimpleNamespace(
+            print_follows_running=None,
+            rack_watch_settle_failed=None,
+            printer_watch_write_failed=None,
+        ),
         print_links=None,
         events=None,
         components=SimpleNamespace(
-            get=lambda key: {OPERATIONS: OPS, SLICING: SLICER, PRINTERS: REGISTRY}.get(
-                key, BAMBUDDY_LIBRARY
-            )
+            get=lambda key: {
+                OPERATIONS: OPS,
+                SLICING: SLICER,
+                PRINTERS: REGISTRY,
+                AUTO_IMPORTS: WATCHER,
+            }.get(key, BAMBUDDY_LIBRARY)
         ),
         projection=SimpleNamespace(pool=None),
         # No content store: a LAN print's blob is not read here (plan 2026-10-16 Task 9).

@@ -17,6 +17,8 @@ type SlicePreview struct {
 	filament_changes SlicePreview_SlicePreview_filament_changesable
 	// The filament_used_g property
 	filament_used_g SlicePreview_SlicePreview_filament_used_gable
+	// The followed property
+	followed SlicePreview_SlicePreview_followedable
 	// The job_id property
 	job_id *int32
 	// The print_time_seconds property
@@ -291,6 +293,92 @@ func (m *SlicePreview_SlicePreview_filament_used_g) SetSlicePreviewFilamentUsedG
 	m.slicePreview_filament_used_gMember1 = value
 }
 
+// SlicePreview_SlicePreview_followed composed type wrapper for classes bool, SlicePreview_followedMember1able
+type SlicePreview_SlicePreview_followed struct {
+	// Composed type representation for type bool
+	boolean *bool
+	// Composed type representation for type SlicePreview_followedMember1able
+	slicePreview_followedMember1 SlicePreview_followedMember1able
+}
+
+// NewSlicePreview_SlicePreview_followed instantiates a new SlicePreview_SlicePreview_followed and sets the default values.
+func NewSlicePreview_SlicePreview_followed() *SlicePreview_SlicePreview_followed {
+	m := &SlicePreview_SlicePreview_followed{}
+	return m
+}
+
+// CreateSlicePreview_SlicePreview_followedFromDiscriminatorValue creates a new instance of the appropriate class based on discriminator value
+// returns a Parsable when successful
+func CreateSlicePreview_SlicePreview_followedFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
+	result := NewSlicePreview_SlicePreview_followed()
+	if parseNode != nil {
+		if val, err := parseNode.GetBoolValue(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetBoolean(val)
+		} else if val, err := parseNode.GetObjectValue(CreateSlicePreview_followedMember1FromDiscriminatorValue); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			if cast, ok := val.(SlicePreview_followedMember1able); ok {
+				result.SetSlicePreviewFollowedMember1(cast)
+			}
+		}
+	}
+	return result, nil
+}
+
+// GetBoolean gets the boolean property value. Composed type representation for type bool
+// returns a *bool when successful
+func (m *SlicePreview_SlicePreview_followed) GetBoolean() *bool {
+	return m.boolean
+}
+
+// GetFieldDeserializers the deserialization information for the current model
+// returns a map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error when successful
+func (m *SlicePreview_SlicePreview_followed) GetFieldDeserializers() map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+	return make(map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error)
+}
+
+// GetIsComposedType determines if the current object is a wrapper around a composed type
+// returns a bool when successful
+func (m *SlicePreview_SlicePreview_followed) GetIsComposedType() bool {
+	return true
+}
+
+// GetSlicePreviewFollowedMember1 gets the SlicePreview_followedMember1 property value. Composed type representation for type SlicePreview_followedMember1able
+// returns a SlicePreview_followedMember1able when successful
+func (m *SlicePreview_SlicePreview_followed) GetSlicePreviewFollowedMember1() SlicePreview_followedMember1able {
+	return m.slicePreview_followedMember1
+}
+
+// Serialize serializes information the current object
+func (m *SlicePreview_SlicePreview_followed) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
+	if m.GetBoolean() != nil {
+		err := writer.WriteBoolValue("", m.GetBoolean())
+		if err != nil {
+			return err
+		}
+	} else if m.GetSlicePreviewFollowedMember1() != nil {
+		err := writer.WriteObjectValue("", m.GetSlicePreviewFollowedMember1())
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetBoolean sets the boolean property value. Composed type representation for type bool
+func (m *SlicePreview_SlicePreview_followed) SetBoolean(value *bool) {
+	m.boolean = value
+}
+
+// SetSlicePreviewFollowedMember1 sets the SlicePreview_followedMember1 property value. Composed type representation for type SlicePreview_followedMember1able
+func (m *SlicePreview_SlicePreview_followed) SetSlicePreviewFollowedMember1(value SlicePreview_followedMember1able) {
+	m.slicePreview_followedMember1 = value
+}
+
 // SlicePreview_SlicePreview_print_time_seconds composed type wrapper for classes float64, SlicePreview_print_time_secondsMember1able
 type SlicePreview_SlicePreview_print_time_seconds struct {
 	// Composed type representation for type float64
@@ -487,6 +575,14 @@ type SlicePreview_SlicePreview_filament_used_gable interface {
 	SetSlicePreviewFilamentUsedGMember1(value SlicePreview_filament_used_gMember1able)
 }
 
+type SlicePreview_SlicePreview_followedable interface {
+	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
+	GetBoolean() *bool
+	GetSlicePreviewFollowedMember1() SlicePreview_followedMember1able
+	SetBoolean(value *bool)
+	SetSlicePreviewFollowedMember1(value SlicePreview_followedMember1able)
+}
+
 type SlicePreview_SlicePreview_print_time_secondsable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetDouble() *float64
@@ -561,6 +657,16 @@ func (m *SlicePreview) GetFieldDeserializers() map[string]func(i878a80d2330e89d2
 		}
 		if val != nil {
 			m.SetFilamentUsedG(val.(SlicePreview_SlicePreview_filament_used_gable))
+		}
+		return nil
+	}
+	res["followed"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreateSlicePreview_SlicePreview_followedFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetFollowed(val.(SlicePreview_SlicePreview_followedable))
 		}
 		return nil
 	}
@@ -661,6 +767,12 @@ func (m *SlicePreview) GetFilamentUsedG() SlicePreview_SlicePreview_filament_use
 	return m.filament_used_g
 }
 
+// GetFollowed gets the followed property value. The followed property
+// returns a SlicePreview_SlicePreview_followedable when successful
+func (m *SlicePreview) GetFollowed() SlicePreview_SlicePreview_followedable {
+	return m.followed
+}
+
 // GetJobId gets the job_id property value. The job_id property
 // returns a *int32 when successful
 func (m *SlicePreview) GetJobId() *int32 {
@@ -719,6 +831,12 @@ func (m *SlicePreview) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e
 	}
 	{
 		err := writer.WriteObjectValue("filament_used_g", m.GetFilamentUsedG())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteObjectValue("followed", m.GetFollowed())
 		if err != nil {
 			return err
 		}
@@ -801,6 +919,11 @@ func (m *SlicePreview) SetFilamentUsedG(value SlicePreview_SlicePreview_filament
 	m.filament_used_g = value
 }
 
+// SetFollowed sets the followed property value. The followed property
+func (m *SlicePreview) SetFollowed(value SlicePreview_SlicePreview_followedable) {
+	m.followed = value
+}
+
 // SetJobId sets the job_id property value. The job_id property
 func (m *SlicePreview) SetJobId(value *int32) {
 	m.job_id = value
@@ -842,6 +965,7 @@ type SlicePreviewable interface {
 	GetFailure() SlicePreview_SlicePreview_failureable
 	GetFilamentChanges() SlicePreview_SlicePreview_filament_changesable
 	GetFilamentUsedG() SlicePreview_SlicePreview_filament_used_gable
+	GetFollowed() SlicePreview_SlicePreview_followedable
 	GetJobId() *int32
 	GetPrintTimeSeconds() SlicePreview_SlicePreview_print_time_secondsable
 	GetProgress() SlicePreview_SlicePreview_progressable
@@ -852,6 +976,7 @@ type SlicePreviewable interface {
 	SetFailure(value SlicePreview_SlicePreview_failureable)
 	SetFilamentChanges(value SlicePreview_SlicePreview_filament_changesable)
 	SetFilamentUsedG(value SlicePreview_SlicePreview_filament_used_gable)
+	SetFollowed(value SlicePreview_SlicePreview_followedable)
 	SetJobId(value *int32)
 	SetPrintTimeSeconds(value SlicePreview_SlicePreview_print_time_secondsable)
 	SetProgress(value SlicePreview_SlicePreview_progressable)

@@ -1,137 +1,204 @@
-import { fireEvent, screen, waitFor, within } from '@testing-library/react'
-import userEvent from '@testing-library/user-event'
+import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
+import { Route, Routes, useLocation } from 'react-router'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { api } from '../api/client'
+import type { StorefrontListing } from '../api/types'
 import { resetMockState } from '../mocks/handlers'
-import { keychainSchema, versionIds } from '../mocks/fixtures'
-import { FILAMENT_PLA } from '../mocks/features/orders/state'
+import { FILAMENT_PETG } from '../mocks/features/orders/state'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
+import { StorefrontListingPage } from './StorefrontListingPage'
 import { StorefrontPage } from './StorefrontPage'
 
 const KEYCHAIN = 'name-keychain'
 const COMMIT = 'c3d4e5f6a7b8'.repeat(4).slice(0, 40)
 
-async function seed(title: string) {
-  return api.createStorefrontListing({ slug: KEYCHAIN, commit: COMMIT, title })
+async function seed(title: string, extra: { slug?: string; colours?: string[] } = {}) {
+  return api.createStorefrontListing({ slug: KEYCHAIN, commit: COMMIT, title, ...extra })
 }
 
-/** Requests of `method` to `path` wait until the returned function is called, then fall through. */
-function hold(method: 'post' | 'put' | 'delete', path: string): () => void {
-  let release: () => void = () => undefined
-  const gate = new Promise<void>((resolve) => {
-    release = resolve
-  })
-  server.use(
-    http[method](path, async () => {
-      await gate
-      return undefined
-    }),
+/** Every listing, read whole, in the shop's order. */
+async function stored(): Promise<StorefrontListing[]> {
+  const page = await api.storefrontListings(new URLSearchParams({ limit: '200' }))
+  return Promise.all(page.items.map((row) => api.storefrontListing(row.id)))
+}
+
+/** The address the router is at, for a test to read. */
+function Where() {
+  const location = useLocation()
+  return <span data-testid="where">{location.pathname + location.search}</span>
+}
+
+function renderStorefront(route = '/storefront') {
+  return renderPage(
+    <>
+      <Routes>
+        <Route path="/storefront" element={<StorefrontPage />} />
+        <Route path="/storefront/listings/:id" element={<StorefrontListingPage />} />
+      </Routes>
+      <Where />
+    </>,
+    { route },
   )
-  return release
 }
 
-/** Each request the page sends, as `METHOD path`. */
-function recordRequests(): string[] {
-  const seen: string[] = []
-  server.events.on('request:start', ({ request }) => {
-    seen.push(`${request.method} ${new URL(request.url).pathname}`)
-  })
-  return seen
+/** The titles of the rows shown, in order. */
+function titles(): string[] {
+  return screen.getAllByTestId('storefront-listing').map((row) => within(row).getAllByRole('link')[0]?.textContent ?? '')
 }
 
-describe('StorefrontPage (#5282)', () => {
+describe('StorefrontPage (#5282, #6157)', () => {
   beforeEach(() => resetMockState())
 
-  it('locks a parameter and previews the customer view', async () => {
-    const user = userEvent.setup()
-    renderPage(<StorefrontPage />)
-    await user.click(await screen.findByRole('button', { name: 'New listing' }))
-    // A new listing offers what the schema ranges: the text size among them.
-    const preview = screen.getByTestId('listing-preview')
-    expect(await within(preview).findByLabelText('Text size')).toBeInTheDocument()
-    await user.click(await screen.findByRole('radio', { name: 'Locked at 14' }))
-    expect(within(preview).queryByLabelText('Text size')).toBeNull()
-    await user.click(screen.getByRole('button', { name: 'Publish' }))
-    expect(await screen.findByText('Published')).toBeInTheDocument()
-
-    const [saved] = await api.storefrontListings()
-    expect(saved?.published).toBe(true)
-    expect(saved?.fixed['text_size']).toBe(14)
-    expect(saved?.params['text_size']).toBeUndefined()
-    expect(saved?.params['thickness']).toEqual({ kind: 'number', min: 2, max: 10, step: 0.2 })
-    expect(saved?.title).toBe('Name Keychain')
+  it('lists the listings in a table, 50 to a page, and pages through them', async () => {
+    for (let i = 1; i <= 55; i += 1) await seed(`Listing ${i}`)
+    const { user } = renderStorefront()
+    await waitFor(() => expect(screen.getAllByTestId('storefront-listing')).toHaveLength(50))
+    expect(screen.getByTestId('storefront-range')).toHaveTextContent('1–50 of 55')
+    await user.click(screen.getByRole('button', { name: 'Next' }))
+    await waitFor(() => expect(titles()).toEqual(['Listing 51', 'Listing 52', 'Listing 53', 'Listing 54', 'Listing 55']))
+    expect(screen.getByTestId('where')).toHaveTextContent('/storefront?page=2')
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
   })
 
-  it('shows the shop’s text as text, never as HTML', async () => {
-    const user = userEvent.setup()
-    renderPage(<StorefrontPage />)
-    await user.click(await screen.findByRole('button', { name: 'New listing' }))
-    const description = await screen.findByLabelText('Description')
-    await user.type(description, '<img src=x onerror=alert(1)>')
-    const preview = screen.getByTestId('listing-preview')
-    expect(within(preview).getByText('<img src=x onerror=alert(1)>')).toBeInTheDocument()
-    expect(preview.querySelector('img[src="x"]')).toBeNull()
+  it('searches, filters and sorts on the server, and keeps it in the address', async () => {
+    await seed('Owl cup')
+    await seed('Star tag', { colours: [FILAMENT_PETG] })
+    await seed('Owl tag', { slug: 'gridfinity-bin' })
+    const { user } = renderStorefront()
+    await screen.findByRole('link', { name: 'Owl cup' })
+    await user.type(screen.getByRole('searchbox', { name: 'Search title or model' }), 'owl')
+    await waitFor(() => expect(titles()).toEqual(['Owl cup', 'Owl tag']))
+    expect(screen.getByTestId('where')).toHaveTextContent('/storefront?q=owl')
+    // The model is a filter too; "gridfinity" matches the slug.
+    await user.clear(screen.getByRole('searchbox', { name: 'Search title or model' }))
+    await user.type(screen.getByRole('searchbox', { name: 'Search title or model' }), 'gridfinity')
+    await waitFor(() => expect(titles()).toEqual(['Owl tag']))
+    await user.click(screen.getByRole('button', { name: 'Clear filters' }))
+    await waitFor(() => expect(titles()).toHaveLength(3))
+    // Sort by title, then the other way.
+    await user.click(screen.getByRole('button', { name: 'Title' }))
+    await waitFor(() => expect(titles()).toEqual(['Owl cup', 'Owl tag', 'Star tag']))
+    await user.click(screen.getByRole('button', { name: 'Title' }))
+    await waitFor(() => expect(titles()).toEqual(['Star tag', 'Owl tag', 'Owl cup']))
+    expect(screen.getByTestId('where')).toHaveTextContent('sort=title&dir=desc')
   })
 
-  it('orders the listings and unpublishes one', async () => {
-    const user = userEvent.setup()
-    const first = await seed('First')
-    await seed('Second')
-    await api.publishStorefrontListing(first.id)
-    renderPage(<StorefrontPage />)
-    await user.click(await screen.findByRole('button', { name: 'Move Second up' }))
-    await waitFor(async () => expect((await api.storefrontListings()).map((l) => l.title)).toEqual(['Second', 'First']))
-    const rows = screen.getAllByTestId('storefront-listing')
-    expect(rows.map((row) => within(row).getByRole('button', { name: /^Edit / }).textContent)).toEqual([
-      'SecondNot published',
-      'FirstPublished',
-    ])
-
-    await user.click(screen.getByRole('button', { name: 'Edit First' }))
-    await user.click(await screen.findByRole('button', { name: 'Unpublish' }))
-    await waitFor(() => expect(screen.queryByText('Published')).toBeNull())
-    expect((await api.storefrontListings()).every((l) => !l.published)).toBe(true)
+  it('reads its search and filters from the address', async () => {
+    await seed('Owl cup')
+    await seed('Star tag', { colours: [FILAMENT_PETG] })
+    renderStorefront('/storefront?material=PETG')
+    await waitFor(() => expect(titles()).toEqual(['Star tag']))
   })
 
-  it('offers a colour parameter only once the listing has filaments', async () => {
-    const user = userEvent.setup()
-    renderPage(<StorefrontPage />)
-    await user.click(await screen.findByRole('button', { name: 'New listing' }))
-    const plate = await screen.findByRole('group', { name: /body_color/ })
-    expect(within(plate).getByRole('radio', { name: 'Customer may change' })).toBeDisabled()
-    await user.click(await screen.findByRole('checkbox', { name: 'PLA Sunflower Yellow' }))
-    await user.click(within(plate).getByRole('radio', { name: 'Customer may change' }))
-    await user.click(screen.getByRole('button', { name: 'Save' }))
-    await waitFor(async () => expect(await api.storefrontListings()).toHaveLength(1))
-    const [saved] = await api.storefrontListings()
-    expect(saved?.colours).toEqual([FILAMENT_PLA])
-    expect(saved?.params['body_color']).toEqual({ kind: 'choice', choices: ['#F9D72C'] })
+  it('says when nothing matches, and offers to clear the filters', async () => {
+    await seed('Owl cup')
+    const { user } = renderStorefront('/storefront?q=zebra')
+    expect(await screen.findByText(/No listing matches/)).toBeInTheDocument()
+    await user.click(screen.getAllByRole('button', { name: 'Clear filters' }).at(-1)!)
+    expect(await screen.findByRole('link', { name: 'Owl cup' })).toBeInTheDocument()
   })
 
-  it('shows why a publish is refused', async () => {
-    const user = userEvent.setup()
-    const detail = "'name-keychain' is a pipeline template; the storefront cannot list one yet"
+  it('says how to start when there are no listings', async () => {
+    renderStorefront()
+    expect(await screen.findByText(/No listings yet/)).toBeInTheDocument()
+  })
+
+  it('says why the listings did not load, and tries again', async () => {
     server.use(
-      http.post('/api/v1/storefront/listings/:id/publish', () =>
-        HttpResponse.json(
-          { type: 'https://scadbuddy.dev/problems/storefront/listing_pipeline_unsupported', title: 'Unprocessable Content', status: 422, detail },
-          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
-        ),
+      http.get(
+        '/api/v1/storefront/listings',
+        () => HttpResponse.json({ title: 'Service Unavailable', status: 503, detail: 'database down' }, { status: 503, headers: { 'Content-Type': 'application/problem+json' } }),
+        { once: true },
       ),
     )
-    renderPage(<StorefrontPage />)
-    await user.click(await screen.findByRole('button', { name: 'New listing' }))
-    await within(screen.getByTestId('listing-preview')).findByLabelText('Text size')
-    await user.click(screen.getByRole('button', { name: 'Publish' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent(detail)
-    expect(screen.queryByText('Published')).toBeNull()
+    await seed('Back again')
+    const { user } = renderStorefront()
+    expect(await screen.findByRole('alert')).toHaveTextContent('database down')
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(await screen.findByRole('link', { name: 'Back again' })).toBeInTheDocument()
+  })
+
+  it('publishes, unpublishes and deletes the selected listings, one at a time', async () => {
+    for (const title of ['A', 'B', 'C']) await seed(title)
+    const { user } = renderStorefront()
+    await screen.findByRole('link', { name: 'A' })
+    await user.click(screen.getByRole('checkbox', { name: 'Select A' }))
+    await user.click(screen.getByRole('checkbox', { name: 'Select C' }))
+    await user.click(within(screen.getByRole('region', { name: 'Selected listings' })).getByRole('button', { name: 'Publish' }))
+    await waitFor(async () => expect((await stored()).map((l) => l.published)).toEqual([true, false, true]))
+    expect(await screen.findByText('Published 2 of 2.')).toBeInTheDocument()
+
+    // A published listing is refused a delete; the others go, and the refusal is listed.
+    await user.click(screen.getByRole('checkbox', { name: 'Select every listing on this page' }))
+    await user.click(within(screen.getByRole('region', { name: 'Selected listings' })).getByRole('button', { name: 'Delete' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Delete' }))
+    await waitFor(async () => expect((await stored()).map((l) => l.title)).toEqual(['A', 'C']))
+    expect(await screen.findByText(/Deleted 1 of 3\. 2 refused\./)).toBeInTheDocument()
+    expect(within(screen.getByRole('list', { name: 'Refused' })).getAllByRole('listitem')).toHaveLength(2)
+    // The refused ones stay selected, for an Unpublish.
+    await user.click(within(screen.getByRole('region', { name: 'Selected listings' })).getByRole('button', { name: 'Unpublish' }))
+    await waitFor(async () => expect((await stored()).every((l) => !l.published)).toBe(true))
+  })
+
+  it('moves a listing to the top, or to a place, by one request each', async () => {
+    for (const title of ['A', 'B', 'C', 'D']) await seed(title)
+    const { user } = renderStorefront()
+    await screen.findByRole('link', { name: 'D' })
+    await user.click(screen.getByRole('button', { name: 'Actions for D' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Move to top' }))
+    await waitFor(() => expect(titles()).toEqual(['D', 'A', 'B', 'C']))
+    await user.click(screen.getByRole('button', { name: 'Actions for D' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Move to position…' }))
+    const place = await screen.findByLabelText(/New place/)
+    await user.clear(place)
+    await user.type(place, '3{Enter}')
+    await waitFor(() => expect(titles()).toEqual(['A', 'B', 'D', 'C']))
+    expect((await stored()).map((l) => l.title)).toEqual(['A', 'B', 'D', 'C'])
+  })
+
+  it('moves a listing found by a search to a place past the matches (#6157 review)', async () => {
+    for (const title of ['A', 'B', 'C', 'Owl']) await seed(title)
+    const { user } = renderStorefront('/storefront?q=owl')
+    await screen.findByRole('link', { name: 'Owl' })
+    await user.click(screen.getByRole('button', { name: 'Actions for Owl' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Move to position…' }))
+    // One match, but four listings: the places are the shop's.
+    const place = await screen.findByLabelText('New place in the shop (1 to 4)')
+    await user.clear(place)
+    await user.type(place, '2{Enter}')
+    await waitFor(async () => expect((await stored()).map((l) => l.title)).toEqual(['A', 'Owl', 'B', 'C']))
+  })
+
+  it('moves to the last page when the page asked for is past it (#6157 review)', async () => {
+    for (let i = 1; i <= 3; i += 1) await seed(`Listing ${i}`)
+    renderStorefront('/storefront?page=4')
+    await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent(/^\/storefront$/))
+    await waitFor(() => expect(titles()).toEqual(['Listing 1', 'Listing 2', 'Listing 3']))
+    expect(screen.getByTestId('storefront-range')).toHaveTextContent('1–3 of 3')
+  })
+
+  it('is refused a page out of bounds by the mock, as by the API (422)', async () => {
+    await expect(api.storefrontListings(new URLSearchParams({ offset: '1000001' }))).rejects.toMatchObject({ status: 422 })
+    await expect(api.storefrontListings(new URLSearchParams({ limit: '201' }))).rejects.toMatchObject({ status: 422 })
+    // Pydantic refuses these as integers; it takes spaces and a sign.
+    await expect(api.storefrontListings(new URLSearchParams({ limit: '1e2' }))).rejects.toMatchObject({ status: 422 })
+    await expect(api.storefrontListings(new URLSearchParams({ offset: '0x10' }))).rejects.toMatchObject({ status: 422 })
+    await expect(api.storefrontListings(new URLSearchParams({ limit: ' +5 ' }))).resolves.toMatchObject({ limit: 5 })
+    await expect(api.storefrontListings(new URLSearchParams({ limit: '200', offset: '1000000' }))).resolves.toMatchObject({ items: [] })
+  })
+
+  it('puts the cursor in the search on "/"', async () => {
+    await seed('Owl cup')
+    const { user } = renderStorefront()
+    await screen.findByRole('link', { name: 'Owl cup' })
+    await user.keyboard('/')
+    expect(screen.getByRole('searchbox', { name: 'Search title or model' })).toHaveFocus()
   })
 
   it('switches design requests on', async () => {
-    const user = userEvent.setup()
-    renderPage(<StorefrontPage />)
+    const { user } = renderStorefront()
     const toggle = await screen.findByRole('switch', { name: 'Ask for a design' })
     await waitFor(() => expect(toggle).toBeEnabled())
     await user.click(toggle)
@@ -139,57 +206,13 @@ describe('StorefrontPage (#5282)', () => {
     expect(toggle).toBeChecked()
   })
 
-  it('says why an edit of a listing changed elsewhere is refused', async () => {
-    const user = userEvent.setup()
-    const listing = await seed('Mine')
-    renderPage(<StorefrontPage />)
-    await user.click(await screen.findByRole('button', { name: 'Edit Mine' }))
-    await api.updateStorefrontListing(listing.id, { slug: KEYCHAIN, commit: COMMIT, title: 'Theirs' }, listing.updated_at)
-    const title = await screen.findByLabelText('Title')
-    await user.type(title, '!')
-    await user.click(screen.getByRole('button', { name: 'Save' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('changed since it was read')
-  })
-
-  it('keeps the listing opened while a publish of another was running', async () => {
-    const user = userEvent.setup()
-    await seed('First')
-    await seed('Second')
-    const release = hold('post', '/api/v1/storefront/listings/:id/publish')
-    renderPage(<StorefrontPage />)
-    await user.click(await screen.findByRole('button', { name: 'Edit First' }))
-    await user.click(await screen.findByRole('button', { name: 'Publish' }))
-    await user.click(screen.getByRole('button', { name: 'Edit Second' }))
-    expect(await screen.findByLabelText('Title')).toHaveValue('Second')
-    release()
-    await waitFor(async () => expect((await api.storefrontListings()).find((l) => l.title === 'First')?.published).toBe(true))
-    await waitFor(() => expect(screen.getAllByText('Published')).toHaveLength(1))
-    expect(screen.getByLabelText('Title')).toHaveValue('Second')
-  })
-
-  it('keeps the listing opened while a delete of another was running', async () => {
-    const user = userEvent.setup()
-    await seed('First')
-    await seed('Second')
-    const release = hold('delete', '/api/v1/storefront/listings/:id')
-    renderPage(<StorefrontPage />)
-    await user.click(await screen.findByRole('button', { name: 'Edit First' }))
-    await user.click(await screen.findByRole('button', { name: 'Delete' }))
-    await user.click(screen.getByRole('button', { name: 'Edit Second' }))
-    release()
-    await waitFor(async () => expect(await api.storefrontListings()).toHaveLength(1))
-    await waitFor(() => expect(screen.getAllByTestId('storefront-listing')).toHaveLength(1))
-    expect(screen.getByLabelText('Title')).toHaveValue('Second')
-  })
-
   it('shows the stored design-request switch when the save fails', async () => {
-    const user = userEvent.setup()
     server.use(
       http.put('/api/v1/settings', () =>
         HttpResponse.json({ title: 'Forbidden', status: 403, detail: 'not allowed' }, { status: 403, headers: { 'Content-Type': 'application/problem+json' } }),
       ),
     )
-    renderPage(<StorefrontPage />)
+    const { user } = renderStorefront()
     const toggle = await screen.findByRole('switch', { name: 'Ask for a design' })
     await waitFor(() => expect(toggle).toBeEnabled())
     await user.click(toggle)
@@ -197,146 +220,10 @@ describe('StorefrontPage (#5282)', () => {
     expect(toggle).not.toBeChecked()
   })
 
-  it('says to choose a filament for a colour parameter left with none', async () => {
-    const user = userEvent.setup()
-    const seen = recordRequests()
-    renderPage(<StorefrontPage />)
-    await user.click(await screen.findByRole('button', { name: 'New listing' }))
-    const plate = await screen.findByRole('group', { name: /body_color/ })
-    const pla = await screen.findByRole('checkbox', { name: 'PLA Sunflower Yellow' })
-    await user.click(pla)
-    await user.click(within(plate).getByRole('radio', { name: 'Customer may change' }))
-    await user.click(pla)
-    await user.click(screen.getByRole('button', { name: 'Save' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent(/body_color.*choose at least one filament/)
-    expect(seen.filter((r) => r.startsWith('POST /api/v1/storefront/listings'))).toEqual([])
-  })
-
-  it('publishes again, unchanged, without saving first', async () => {
-    const user = userEvent.setup()
-    const seen = recordRequests()
-    renderPage(<StorefrontPage />)
-    await user.click(await screen.findByRole('button', { name: 'New listing' }))
-    await within(screen.getByTestId('listing-preview')).findByLabelText('Text size')
-    await user.click(screen.getByRole('button', { name: 'Publish' }))
-    expect(await screen.findByText('Published')).toBeInTheDocument()
-    const [listing] = await api.storefrontListings()
-    await user.click(screen.getByRole('button', { name: 'Publish' }))
-    await waitFor(() => expect(seen.filter((r) => r === `POST /api/v1/storefront/listings/${listing?.id}/publish`)).toHaveLength(2))
-    expect(seen.filter((r) => r.startsWith('PUT /api/v1/storefront/listings/'))).toEqual([])
-  })
-
-  it('publishes an unchanged published listing again without taking it down first', async () => {
-    const user = userEvent.setup()
-    const listing = await seed('Live')
-    await api.publishStorefrontListing(listing.id)
-    const seen = recordRequests()
-    renderPage(<StorefrontPage />)
-    await user.click(await screen.findByRole('button', { name: 'Edit Live' }))
-    await within(screen.getByTestId('listing-preview')).findByText('Live')
-    await user.click(screen.getByRole('button', { name: 'Publish' }))
-    await waitFor(() => expect(seen).toContain(`POST /api/v1/storefront/listings/${listing.id}/publish`))
-    expect(seen.filter((r) => r.startsWith('PUT /api/v1/storefront/listings/'))).toEqual([])
-  })
-
-  it('shows the listings again after a refused order', async () => {
-    const user = userEvent.setup()
-    await seed('First')
-    await seed('Second')
-    server.use(
-      http.put('/api/v1/storefront/listings/order', () =>
-        HttpResponse.json(
-          { type: 'https://scadbuddy.dev/problems/storefront/listing_changed', title: 'Conflict', status: 409, detail: 'the order must name every listing once; load the listings again' },
-          { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
-        ),
-      ),
-    )
-    renderPage(<StorefrontPage />)
-    await screen.findByRole('button', { name: 'Edit Second' })
-    // Another tab adds a listing.
-    await seed('Third')
-    await user.click(screen.getByRole('button', { name: 'Move Second up' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('load the listings again')
-    await waitFor(() =>
-      expect(screen.getAllByTestId('storefront-listing').map((row) => within(row).getByRole('button', { name: /^Edit / }).getAttribute('aria-label'))).toEqual([
-        'Edit First',
-        'Edit Second',
-        'Edit Third',
-      ]),
-    )
-  })
-
-  it('drops the parameters a newly chosen version does not have', async () => {
-    const user = userEvent.setup()
-    const older = versionIds.edited
-    server.use(
-      http.get('/api/v1/models/:slug/versions/:commit/schema', ({ params }) =>
-        params['commit'] === older
-          ? HttpResponse.json({ ...keychainSchema, parameters: (keychainSchema.parameters ?? []).filter((p) => p.name !== 'text_size' && p.name !== 'padding') })
-          : undefined,
-      ),
-    )
-    await api.createStorefrontListing({
-      slug: KEYCHAIN,
-      commit: versionIds.raised,
-      title: 'Tag',
-      params: { text_size: { kind: 'number', min: 6, max: 20, step: null } },
-      fixed: { padding: 6, corner_radius: 4 },
-    })
-    renderPage(<StorefrontPage />)
-    await user.click(await screen.findByRole('button', { name: 'Edit Tag' }))
-    await user.click(await screen.findByRole('combobox', { name: 'Version' }))
-    await user.click(await screen.findByRole('option', { name: /Update name-keychain metadata/ }))
-    await waitFor(() => expect(screen.queryByRole('group', { name: /Text size/ })).toBeNull())
-    await user.click(screen.getByRole('button', { name: 'Save' }))
-    await waitFor(async () => expect((await api.storefrontListings())[0]?.commit).toBe(older))
-    const [saved] = await api.storefrontListings()
-    expect(saved?.params).toEqual({})
-    expect(saved?.fixed).toEqual({ corner_radius: 4 })
-  })
-
-  it('takes no drag while an order is being saved', async () => {
-    const user = userEvent.setup()
-    await seed('First')
-    await seed('Second')
-    await seed('Third')
-    const seen = recordRequests()
-    const release = hold('put', '/api/v1/storefront/listings/order')
-    renderPage(<StorefrontPage />)
-    await user.click(await screen.findByRole('button', { name: 'Move Second up' }))
-    const rows = screen.getAllByTestId('storefront-listing')
-    fireEvent.dragStart(rows[2]!)
-    fireEvent.drop(rows[0]!)
-    release()
-    await waitFor(async () => expect((await api.storefrontListings()).map((l) => l.title)).toEqual(['Second', 'First', 'Third']))
-    expect(seen.filter((r) => r === 'PUT /api/v1/storefront/listings/order')).toHaveLength(1)
-  })
-
-  it('shows a refused publish only on its own listing, and leaves another free', async () => {
-    const user = userEvent.setup()
-    await seed('First')
-    await seed('Second')
-    let release: () => void = () => undefined
-    const gate = new Promise<void>((resolve) => {
-      release = resolve
-    })
-    server.use(
-      http.post('/api/v1/storefront/listings/:id/publish', async () => {
-        await gate
-        return HttpResponse.json(
-          { title: 'Unprocessable Content', status: 422, detail: 'refused for First' },
-          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
-        )
-      }),
-    )
-    renderPage(<StorefrontPage />)
-    await user.click(await screen.findByRole('button', { name: 'Edit First' }))
-    await user.click(await screen.findByRole('button', { name: 'Publish' }))
-    await user.click(screen.getByRole('button', { name: 'Edit Second' }))
-    await waitFor(() => expect(screen.getByLabelText('Title')).toHaveValue('Second'))
-    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled()
-    release()
-    await new Promise((resolve) => setTimeout(resolve, 100))
-    expect(screen.queryByRole('alert')).toBeNull()
+  it('opens New listing on its own address', async () => {
+    const { user } = renderStorefront()
+    await user.click(await screen.findByRole('link', { name: 'New listing' }))
+    expect(await screen.findByRole('heading', { name: 'New listing' })).toBeInTheDocument()
+    expect(screen.getByTestId('where')).toHaveTextContent('/storefront/listings/new')
   })
 })

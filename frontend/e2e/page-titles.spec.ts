@@ -17,6 +17,8 @@ const PAGES = [
   '/m/name-keychain/prints',
   '/prints',
   '/prints/35',
+  // One queue item (#3744), from src/mocks/features/printQueue.ts: "Bracket.gcode.3mf · ScadBuddy".
+  '/prints/queue/260',
   '/edit/no-such-output',
   '/library',
   '/workflows',
@@ -37,6 +39,8 @@ const PAGES = [
   '/customers/c1a00000-0000-4000-8000-000000000001',
   // The storefront's listings (#4962): its tab is "Storefront · ScadBuddy".
   '/storefront',
+  // A listing's editor (#6157): its tab is the listing's title, "New listing" for a new one.
+  '/storefront/listings/new',
   // The component gallery (#3653): in the mocked build only, which this spec runs on.
   '/ui-gallery',
 ]
@@ -51,6 +55,11 @@ for (const path of PAGES) {
 test('/orders/profit is the profit report, not an order', async ({ page }) => {
   await page.goto('/orders/profit')
   await expect(page).toHaveTitle('Profit by model · ScadBuddy')
+})
+
+test('/prints/queue/260 is the queue item, not a print', async ({ page }) => {
+  await page.goto('/prints/queue/260')
+  await expect(page).toHaveTitle('Bracket.gcode.3mf · ScadBuddy')
 })
 
 test('/orders/parts is the parts inventory, not an order', async ({ page }) => {

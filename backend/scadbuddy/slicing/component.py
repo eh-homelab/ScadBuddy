@@ -6,6 +6,7 @@ built on first use."""
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from functools import cached_property
@@ -17,7 +18,7 @@ from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.library.settings_store import settings_kek
 from scadbuddy.slicing.catalogue import slices_native, warm_catalogue
-from scadbuddy.slicing.held_presets import HeldPresetStore
+from scadbuddy.slicing.held_presets import HeldPresetStore, strip_kept_logged
 from scadbuddy.slicing.profiles import Profiles
 from scadbuddy.slicing.start import NativeSliceStarter, native_slice_starter
 from scadbuddy.slicing.store import NativeSliceStore
@@ -91,9 +92,19 @@ async def _run(slicing: Slicing) -> AsyncIterator[None]:
     With the spool providers' refresh off (``spool_overlay_refresh_seconds`` 0, which
     applies at a start) nothing keeps the copy of Bambuddy's local presets current, so it
     is forgotten here (#4645 review): a ``local`` preset is read from Bambuddy on every
-    slice again rather than from a copy that only gets older."""
+    slice again rather than from a copy that only gets older.
+
+    Otherwise the kept rows lose any print-host credential key an older build kept, in
+    the background (#5298 Task 32, `held_presets.py` `strip_kept_logged`): no Bambuddy
+    call, and a failure is only logged, so it never holds up or fails the start."""
+    stop = threading.Event()
+    stripping: asyncio.Task[None] | None = None
     if slicing.core.settings.spool_overlay_refresh_seconds == 0:
         await slicing.held.clear()
+    else:
+        stripping = asyncio.create_task(
+            strip_kept_logged(slicing.held, stop), name="strip kept presets"
+        )
     warming = warm_catalogue(
         slicing.profiles,
         slices_native(slicing.core.settings_store),
@@ -101,6 +112,10 @@ async def _run(slicing: Slicing) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        stop.set()
+        if stripping is not None:
+            # It ends after the batch in hand, so its thread never outlives the pool.
+            await asyncio.gather(stripping, return_exceptions=True)
         if warming is not None:
             warming.cancel()
             await asyncio.gather(warming, return_exceptions=True)

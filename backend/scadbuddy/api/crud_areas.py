@@ -15,14 +15,69 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: ``…/render/blob-index/{key}/forget-copy``, added with it (#5298 Task 18). The print
 #: ``runs`` area also covers ``…/print/outcomes``, added with it (#5298 Task 24). The print
 #: ``printer-ensure`` area is Task 29's ``…/print/printers/ensure-bambuddy`` alone, taken
-#: early by #4625 so a merge never runs on the worker's role. The storefront ``pay`` area is
-#: ``…/storefront/pay/checkout`` (#4960), which the edge's ``/pay/{token}`` page reads.
+#: early by #4625 so a merge never runs on the worker's role. The print ``reprints`` area
+#: is ``…/print/reprints``, the queue item a reprint queued (#3741). The storefront ``pay`` area
+#: is ``…/storefront/pay/checkout`` (#4960), which the edge's ``/pay#<token>`` page reads.
+#: The storefront ``turnstile`` area is ``…/storefront/turnstile`` and
+#: ``…/turnstile/verify``, the bot check (#5283). The storefront ``accounts`` area is
+#: ``…/storefront/account`` and its ``verify``, ``sign-out`` and ``orders`` (#5283). The
+#: storefront ``order`` area is ``…/storefront/order/*``, the customer's order page (#5283).
+#: The agent's ``workspace-blob-refs`` area is ``…/agent/workspace-blob-refs`` and its
+#: ``/release`` (#5299), the holds of its workspace files' blobs. Its ``events`` area is
+#: ``…/agent/events`` and ``…/events/head``, the event log's gap and head; its ``flows``
+#: area is ``…/agent/flow-runs/*``, ``…/flow-decisions`` and ``…/flow-grants/in-force``,
+#: its reads of flow runs, their decisions and grants (#5299 D7). The print ``uploads``
+#: area also covers ``…/print/slices`` and ``…/print/slice-starts`` (#5298 Task 25). Its
+#: ``previews`` area also covers ``…/print/project-targets``, ``…/print/folderless`` and
+#: ``…/print/destination-touches`` (#5298 Task 26). Its ``copy-leases`` area is
+#: ``…/print/copy-leases/{key}``, the copy lease (#5298 Task 27). Its ``links`` area is
+#: ``…/print/links``, ``…/print/sends`` and ``…/print/last-prints`` (#5298 Task 28). Its
+#: ``lan-imports`` area is ``…/print/lan-imports``, a LAN-only printer's print record
+#: (#4699 phase 4). Its ``printers`` area is every other ``…/print/printers`` route (the
+#: reads, a printer's access code, a virtual printer's sync) and ``…/print/reports``
+#: (#5298 Task 29). Its ``rack`` area is ``…/print/rack``, the rack hotends' usage
+#: (#5298 Task 30). Its ``spools`` area is ``…/print/spools``, ``…/print/native-spools``,
+#: ``…/print/held-presets`` and ``…/print/native-slices`` (#5298 Task 31). Its
+#: ``transfer-urls`` area is ``…/print/transfer-urls``, a LAN print's read URL of a
+#: native slice's file (#5298 Task 32). Its ``access-codes`` area is
+#: ``…/print/access-codes`` and ``…/access-codes/virtual-printer``: whether the API opens
+#: access codes, and a virtual printer's sealed code opened (#5298 Task 33). The intake
+#: ``sources`` area is ``…/intake/sources/{id}/read``, ``…/preview`` and ``…/check``: a
+#: customer's staged file, checked by the intake worker (#6133).
 CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "projects": ["flows", "operations", "payload-keys"],
     "render": ["settings", "jobs", "refs", "blob-index", "store-folders", "assets", "libraries"],
-    "print": ["settings", "runs", "operations", "events", "printer-ensure"],
-    "storefront": ["listings", "renders", "drafts", "requests", "pay"],
-    "agent": ["order-costs"],
+    "print": [
+        "settings",
+        "runs",
+        "operations",
+        "events",
+        "printer-ensure",
+        "reprints",
+        "uploads",
+        "previews",
+        "copy-leases",
+        "links",
+        "lan-imports",
+        "printers",
+        "rack",
+        "spools",
+        "transfer-urls",
+        "access-codes",
+    ],
+    "storefront": [
+        "listings",
+        "renders",
+        "drafts",
+        "requests",
+        "pay",
+        "turnstile",
+        "accounts",
+        "order",
+        "models",
+    ],
+    "agent": ["order-costs", "workspace-blob-refs", "events", "flows"],
+    "intake": ["sources"],
 }
 
 

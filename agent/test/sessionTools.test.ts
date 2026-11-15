@@ -54,6 +54,45 @@ describe('the sessions_* tools', () => {
     expect(firstText(result)).toMatch(/need the database/)
   })
 
+  it('passes no background built-in on from a flow run or a session that has none, through start, send and fork (#5870)', async () => {
+    const BARE = '0e5a3c1e-1111-4222-8333-000000000001'
+    const FULL = '0e5a3c1e-1111-4222-8333-000000000002'
+    const seen: Record<string, unknown[]> = { start: [], send: [], fork: [] }
+    const sessions = {
+      keepsBackgroundTools: async (id: string) => id === FULL,
+      start: async (_owner: unknown, options: Record<string, unknown>) => {
+        seen.start!.push(options.withoutBackground)
+        return { session: { id: S } }
+      },
+      get: async () => ({ id: S }),
+      events: { lastSeq: async () => 0 },
+      send: async (_id: string, _owner: unknown, _text: string, options: Record<string, unknown>) => {
+        seen.send!.push(options.withoutBackground)
+        return { turnId: 't', done: new Promise(() => {}) }
+      },
+      fork: async (_id: string, _owner: unknown, options: Record<string, unknown>) => {
+        seen.fork!.push(options.withoutBackground)
+        return { id: S }
+      },
+    }
+    const ctx = (from: { flowTurn?: { run_id: string; call_id: string }; session?: string }) => ({
+      ...services(),
+      sessions: sessions as never,
+      principal: { id: 'token:a', kind: 'bearer' as const, tiers: ['read', 'write'] as ('read' | 'write')[] },
+      progress: async () => {},
+      signal: new AbortController().signal,
+      ...from,
+    })
+    const callers = [{ flowTurn: { run_id: 'r1', call_id: 'c1' } }, { session: BARE }, { session: FULL }, {}]
+    for (const from of callers) {
+      await runTool(sessionTools.find((t) => t.name === 'sessions_start')!, { title: 'x' }, ctx(from))
+      await runTool(sessionTools.find((t) => t.name === 'sessions_send')!, { session_id: S, text: 'hi', wait_seconds: 0 }, ctx(from))
+      await runTool(sessionTools.find((t) => t.name === 'sessions_fork')!, { session_id: S }, ctx(from))
+    }
+    // A flow run's call and a call from a session with none pass it on; any other leaves the default.
+    for (const kind of ['start', 'send', 'fork']) expect(seen[kind], kind).toEqual([true, true, undefined, undefined])
+  })
+
   it('hand off only to principal ids that can exist (PR #715 review)', () => {
     for (const to of [
       'browser',

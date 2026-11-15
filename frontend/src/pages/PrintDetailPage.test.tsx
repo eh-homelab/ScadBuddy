@@ -2,9 +2,10 @@ import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import type { ReactNode } from 'react'
 import { Route, Routes, useNavigate, useParams } from 'react-router'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { api } from '../api/client'
 import type { Job } from '../api/types'
+import { resetBambuddyLinks, setBambuddyLinks } from '../lib/bambuddyLinks'
 import type * as embed from '../lib/embed'
 import { DownloadBlockedError, downloadBlob, isEmbedded, openExternal } from '../lib/embed'
 import { outputs, prints, versionIds } from '../mocks/fixtures'
@@ -727,6 +728,25 @@ describe('PrintDetailPage (#311)', () => {
     const { user } = render(35)
     await user.click(await screen.findByRole('button', { name: 'Open in Bambuddy' }))
     expect(openExternal).toHaveBeenCalledWith('https://bambuddy.example/archives')
+  })
+
+  // #6212 — the server builds its links on the default web URL; a page on the other
+  // hostname moves them onto the Bambuddy beside it, as every other Bambuddy link does.
+  it('opens the print and its reprint in the Bambuddy beside the page', async () => {
+    setBambuddyLinks({ bambuddy_url: 'http://bambuddy.svc', bambuddy_web_urls: 'https://bambuddy.example,https://bambuddy.sso.example' })
+    vi.stubGlobal('location', { ...window.location, hostname: 'scadbuddy.sso.example' })
+    onTestFinished(() => {
+      vi.unstubAllGlobals()
+      resetBambuddyLinks()
+    })
+    const { user } = render(35)
+    await user.click(await screen.findByRole('button', { name: 'Open in Bambuddy' }))
+    expect(openExternal).toHaveBeenCalledWith('https://bambuddy.sso.example/archives')
+    await user.click(screen.getByRole('button', { name: 'Print again' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Print again' })
+    await user.click(within(dialog).getByRole('button', { name: 'Queue' }))
+    await user.click(await within(dialog).findByRole('button', { name: 'Open in queue' }))
+    expect(openExternal).toHaveBeenCalledWith('https://bambuddy.sso.example/queue')
   })
 
   it('prints again only once the send is confirmed', async () => {

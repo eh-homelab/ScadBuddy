@@ -30,18 +30,22 @@ from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Annotated, Any, Literal
+from urllib.parse import urlsplit
 
 from psycopg import errors
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 from scadbuddy.core.events import EventBus, OrderChanged, OrderItemChanged, emit
+from scadbuddy.core.secrets import Kek
 from scadbuddy.orders.models import (
     OPEN_FOR_EDITS,
+    PURCHASE_SOURCE_PREFIX,
     REVISION_ROLES,
     SHOWN_IMAGES,
     TAKES_ITEMS,
     Actor,
+    AddressInput,
     AddressSnapshot,
     Approval,
     Attachment,
@@ -50,6 +54,7 @@ from scadbuddy.orders.models import (
     AttachmentRole,
     ChargeInput,
     ColourSlot,
+    ContactInput,
     CostEntry,
     CostEntryInput,
     Fulfilment,
@@ -60,15 +65,20 @@ from scadbuddy.orders.models import (
     Money,
     Order,
     OrderItem,
+    OrderItemSource,
     OrderStatus,
     Outcome,
     Payment,
+    PurchaseRecordInput,
+    PurchaseSource,
+    PurchaseUpdateInput,
     Quote,
     QuoteLine,
     Reference,
     Revision,
     Shipment,
     ShipmentItem,
+    SubmitAddress,
     TimeEntry,
     TimeEntryInput,
 )
@@ -76,6 +86,7 @@ from scadbuddy.orders.money import (
     NO_RULES,
     OrderRules,
     deposit_for,
+    handling_minor,
     skipped_for_currency,
     tax_base,
     tax_minor,
@@ -92,6 +103,8 @@ from scadbuddy.orders.pricing import Plate, Priced, to_minor
 from scadbuddy.orders.reference import ResolvedReference
 from scadbuddy.orders.revisions import RevisionAnswerInput
 from scadbuddy.orders.store import (
+    LIFECYCLE_CHARGES,
+    MAIL_QUEUED,
     UNSET,
     Conn,
     OrderNotFoundError,
@@ -102,6 +115,28 @@ from scadbuddy.orders.store import (
     order_subject,
     quote_file_keys,
     revision_subject,
+)
+from scadbuddy.orders.storefront.accounts import (
+    account_email,
+    attach_order,
+    relink_account,
+    submitting_customer,
+)
+from scadbuddy.orders.storefront.addresses import EmailInvalidError, check_address
+from scadbuddy.orders.storefront.customers import customer_actor
+from scadbuddy.orders.storefront.links import (
+    LinkState,
+    link_state,
+    live_link,
+    revoke_order_links,
+)
+from scadbuddy.orders.storefront.mail import (
+    MailEvent,
+    OrderMail,
+    issue_link,
+    order_mail,
+    queue_mail,
+    storefront_mail_covers,
 )
 from scadbuddy.orders.totals import balance_due, has_standing_balance, totals_of
 from scadbuddy.payments import store as payments
@@ -155,7 +190,7 @@ FEE_RETRY_WINDOW = timedelta(hours=24)
 
 class LifecycleError(Exception):
     """A transition the record refuses: ``slug`` names why (the problem type's last
-    segment), ``items`` and ``shipments`` the rows in the way."""
+    segment), ``items``, ``shipments`` and ``sources`` the rows in the way."""
 
     def __init__(
         self,
@@ -164,6 +199,7 @@ class LifecycleError(Exception):
         *,
         items: Sequence[str] = (),
         shipments: Sequence[str] = (),
+        sources: Sequence[str] = (),
         not_found: bool = False,
         unprocessable: bool = False,
     ) -> None:
@@ -171,6 +207,8 @@ class LifecycleError(Exception):
         self.slug = slug
         self.items = list(items)
         self.shipments = list(shipments)
+        #: The request items' sources in the way (#6133: the purchases still pending).
+        self.sources = list(sources)
         #: The row the call names is not there: a 404 rather than a 409.
         self.not_found = not_found
         #: The body names something that cannot be (a slot the item lacks, a filament
@@ -290,6 +328,21 @@ class ShipmentEdit(BaseModel):
     )
 
 
+class SubmitInput(BaseModel):
+    """A visitor's submit of its cart (#5283, spec §5.5): who it is, where the mail goes,
+    the shipping option and, when that ships, the address. ``email`` is one address
+    (`check_address`). ``account_id`` comes only from the CRUD side's session lookup
+    (`api/crud_storefront.py` `store_account`), never from a body."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+    email: str = Field(max_length=254)
+    shipping_option_id: str | None = None
+    address: SubmitAddress | None = None
+    account_id: str | None = None
+
+
 class OrderEdit(BaseModel):
     """`PATCH /orders/{id}`: notes and the due date in any open state; the addresses
     and the typed charges, replaced whole (the auto tax row stays, ``_typed``), while
@@ -359,7 +412,9 @@ class NewCustomItem(NewItem):
     title: str
     unit_price_minor: int
     requires_printing: bool = False
-    accept: bool = True
+    #: Whether the price is accepted as it is saved; None is the order's default
+    #: (`Lifecycle.price_accepted`).
+    accept: bool | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -378,6 +433,17 @@ class _Change:
     #: Released by a cancel or a close: dropped, under the orders' locks, only while that
     #: still holds when the drop runs, so a reopen keeps the holds it took (§3.5 "Undo").
     ended: bool = False
+
+
+@dataclass
+class InTransaction:
+    """A transition run in the caller's transaction on ``conn`` (as a savepoint): what it
+    changed waits in ``changes`` until the caller's `Lifecycle.tell`, once that
+    transaction commits. The storefront's customer writes run so, in one transaction with
+    their ``Idempotency-Key``'s ledger row (`crud/idempotency.py` `idempotent_write`)."""
+
+    conn: Conn
+    changes: list[_Change] = field(default_factory=list)
 
 
 def _covered(items: Iterable[OrderItem], shipments: Iterable[Shipment]) -> list[str]:
@@ -424,6 +490,18 @@ def _charge_line(charge: ChargeInput) -> dict[str, Any]:
     return {"kind": charge.kind, "label": charge.label, "amount_minor": charge.amount_minor}
 
 
+#: The longest `purchase` charge label (``ChargeInput.label``).
+_LABEL_CHARS = 200
+
+
+def purchase_label(source: PurchaseSource) -> str:
+    """A `purchase` charge's label (#6133, spec 2026-11-13 §10.2): "Bought for your
+    project: " and the customer's note, or the link's host without one, cut to 200
+    characters."""
+    named = " ".join(source.note.split()) or (urlsplit(source.url).hostname or source.url)
+    return f"Bought for your project: {named}"[:_LABEL_CHARS]
+
+
 def item_open(order: Order, quotes: Iterable[Quote]) -> bool:
     """Whether an item's design, quantity and price may still change: while the order is
     `draft` or `quoted`, and past it while the item has no accepted quote, which only an
@@ -454,27 +532,28 @@ REQUOTED: frozenset[ItemStatus] = frozenset({"quoted", "approved", "printed", "f
 def stale_attempt(
     attempt: Fulfilment, quotes: Iterable[Quote], revisions: Iterable[Revision]
 ) -> bool:
-    """Whether a production attempt was made before the revision the accepted quote
-    prices: it printed an earlier design (#5350), so it is never accepted
+    """Whether a production attempt printed a revision earlier than the one the accepted
+    quote prices: an earlier design (#5350), so it is never accepted
     (`fulfilment_stale`). A test print's attempt, a quote that names no revision and an
     item with no accepted quote say nothing. The order detail marks such an attempt
     ``stale`` by this same rule (#5592).
 
-    The two ``created_at`` values come from two transactions: the attempt's is ``now()``,
-    its transaction's start, and the revision's is ``clock_timestamp()``. Their order holds
-    because every writer of an item takes the order's row lock and reads the item after it:
-    a revision after acceptance is refused while a print of the item is open
-    (``print_in_flight``) and puts the item back to `draft`, and no attempt is recorded or
-    claimed on a `draft` item. So an attempt whose transaction began before the revision and
-    waited on the lock finds the item `draft` and is refused, and every attempt made after
-    the revision starts after the new quote's acceptance, later than the revision."""
+    The order is the revisions' numbers, never a wall-clock time: a production attempt
+    names the item's current revision when it is recorded or claimed, under the order's
+    row lock (``OrderStore.insert_fulfilment``). Two ``created_at`` values from two
+    transactions are not ordered when the clock steps back between them (#5704). An
+    attempt that names no revision was made before the item had one."""
     if attempt.purpose != "production":
         return False
     accepted = next((q for q in quotes if q.accepted), None)
     if accepted is None or accepted.revision_id is None:
         return False
-    priced = next((r for r in revisions if r.id == accepted.revision_id), None)
-    return priced is not None and attempt.created_at < priced.created_at
+    numbers = {r.id: r.number for r in revisions}
+    priced = numbers.get(accepted.revision_id)
+    if priced is None:
+        return False
+    printed = None if attempt.revision_id is None else numbers.get(attempt.revision_id)
+    return printed is None or printed < priced
 
 
 def requote_open(order: Order, item: OrderItem, quotes: Iterable[Quote]) -> bool:
@@ -518,6 +597,13 @@ def check_visitors_cart(order: Order, by: Actor) -> None:
         raise LifecycleError("order_not_submitted", f"{order.label} is not yet submitted")
 
 
+def price_accepted(order: Order, accept: bool | None) -> bool:
+    """Whether a custom item's typed price is accepted as it is saved: ``accept`` as
+    given, and unset the order's default, true on a `back_office` order and false on a
+    `storefront` one, whose customer accepts it (#5283, storefront spec §4.5)."""
+    return order.source != "storefront" if accept is None else accept
+
+
 class Lifecycle:
     def __init__(
         self,
@@ -538,6 +624,15 @@ class Lifecycle:
         #: The payment providers offered (#4957, ``payments/registry.py``): a default
         #: provider not among them is no provider. Set by ``OrdersComponent``.
         self.offered_providers: frozenset[str] = frozenset()
+        #: Whether the running mail config has a host and a sender (#5283), read when a
+        #: transition would mail the customer; False queues no order mail. Set by
+        #: ``OrdersComponent``.
+        self.mail_ready: Callable[[], bool] = lambda: False
+        #: Called after a commit that queued mail (`StorefrontMail.kick`).
+        self.on_mail: Callable[[], None] = lambda: None
+        #: The CRUD service's KEK, which seals an order link's token (#5283); None makes
+        #: no link. Set by ``OrdersComponent``.
+        self.kek: Kek | None = None
 
     # -- the frame every transition runs in -------------------------------------------
 
@@ -583,6 +678,9 @@ class Lifecycle:
             logger.exception("could not release an ended item's quotes; the reaper drops them")
 
     def _told(self, change: _Change) -> None:
+        if MAIL_QUEUED.get():
+            MAIL_QUEUED.set(False)
+            self.on_mail()
         if change.ended:
             self._release_ended(change.released)
         else:
@@ -604,6 +702,21 @@ class Lifecycle:
                 ),
             )
 
+    def _tell(self, change: _Change, within: InTransaction | None) -> None:
+        """``change`` told now, or kept for the caller's `tell` when ``within`` its
+        transaction."""
+        if within is None:
+            self._told(change)
+        else:
+            within.changes.append(change)
+
+    def tell(self, within: InTransaction) -> None:
+        """Tell the bus what the transitions run ``within`` the caller's transaction
+        changed, once that has committed."""
+        for change in within.changes:
+            self._told(change)
+        within.changes.clear()
+
     def told(self, order: Order, items: Sequence[OrderItem] = ()) -> None:
         """Tell the bus of a transition that ran in the caller's transaction (``conn``),
         once that has committed: ``order`` as the caller read it inside that transaction
@@ -618,11 +731,11 @@ class Lifecycle:
                 "order_not_found", f"no order {order_id}", not_found=True
             ) from None
 
-    def _not_a_cart(self, order_id: str) -> None:
+    def _not_a_cart(self, order_id: str, conn: Conn | None = None) -> None:
         """:func:`check_submitted` before anything is written (``ensure_revision``'s
         repair among them), so a refusal on a cart writes nothing. The caller checks
-        again under the order's lock."""
-        found = self.store.order(order_id)
+        again under the order's lock. ``conn`` reads on the caller's connection."""
+        found = self.store.order(order_id, conn=conn)
         if found is not None:
             check_submitted(found)
 
@@ -653,6 +766,24 @@ class Lifecycle:
             return
         if order.storefront_visitor_id != visitor_id or not order.unsubmitted:
             raise LifecycleError("order_not_found", f"no order {order.id}", not_found=True)
+
+    def _mail(self, conn: Conn, order: Order, event: MailEvent, **context: Any) -> None:
+        """Queue ``event``'s mail to the customer in the transition's transaction, only
+        when ScadBuddy covers it (`storefront_mail_covers`: a live order link and a ready
+        mail config, a host and a sender, #5283); otherwise nothing, and it stays #5660's
+        plugin's job. The mail goes to the link's address and names the link, whose token it
+        carries. Sent after the commit (``on_mail``)."""
+        if not storefront_mail_covers(conn, order.id, event, ready=self.mail_ready()):
+            return
+        link = live_link(conn, order.id)
+        assert link is not None
+        queue_mail(
+            conn,
+            event,
+            link.sent_to,
+            {"order": order.label, "link_id": link.id, **context},
+            order.id,
+        )
 
     def _event(self, conn: Conn, order: Order, by: Actor, kind: str, **detail: Any) -> None:
         self.store.insert_event(conn, order.id, by, kind, detail)
@@ -767,6 +898,232 @@ class Lifecycle:
         self._told(_Change(order))
         return order
 
+    def submit_order(
+        self,
+        order_id: str,
+        body: SubmitInput,
+        by: Actor,
+        *,
+        cart_of: str | None = None,
+        conn: Conn | None = None,
+    ) -> tuple[Order, str]:
+        """The visitor's cart submitted as an order (#5283, spec §5.5), in one transaction
+        under the order's lock (``conn``'s, as a savepoint, when given; the caller tells
+        the bus then): it
+
+        1. without an account, makes a new customer (`_new_customer`) with the name,
+           ``body.email`` as its primary contact and the address given as its default
+           shipping address, which is the order's. It never links or writes an existing
+           customer, whatever its contacts: a typed email proves nothing (spec §5.2; only
+           a verified account links a customer, and the shop merges customers by hand).
+           With ``body.account_id`` (from the CRUD side's session, never a body) it takes
+           the account's customer (`_account_customer`) and makes none, unless the shop
+           has archived that customer: then it makes a new one and the account links to it;
+        2. takes the year's number (`OrderStore.claim_draft`) and the shop's currency
+           (``orders_currency``): a cart holds no amount, so one made before the shop
+           changed its currency is submitted in the new one;
+        3. sets the shipping option (`_shipping_option`: `shipping_address_required` for
+           one that ships with no address), which
+        4. recomputes the auto tax;
+        5. applies the deposit policy (`_deposit_policy`; a deposit request opened here
+           queues no `payment_requested` mail, since no link exists yet: the order link's
+           mail leads to the page that shows it). An anonymous submit's customer is new, so
+           a ``first_order`` rule always applies to it, even when the email has ordered
+           before; the shop can change the deposit before it accepts (§8). Step 2 gave the
+           cart the shop's currency, so no rule is skipped for its currency;
+        6. stamps ``submitted_at``;
+        7. makes the order link and queues its `order_link` mail to ``body.email``
+           (`issue_link`, the back office's `send_customer_link` path too);
+        8. with an account, attaches the order to it (`attach_order`), so it is in the
+           account's "Your orders" even when the cart's visitor never joined the account.
+
+        Everything after step 1 is recorded as the customer (`customer_actor`, with the
+        cart's visitor row as the session). The order and the link's token, which is
+        returned once and never stored in clear. Refusals: `order_not_found` (404) unless
+        the order is a storefront cart of ``cart_of``'s; `order_submitted` once submitted;
+        `draft_empty` with no item; 422 `shipping_option_id` with no option when the shop
+        lists some, or one it does not list; `shipping_address_required`;
+        `EmailInvalidError`; `KekMissingError` with no KEK. With an account, also
+        `order_not_found` when the cart's visitor belongs to another account."""
+        email = check_address(body.email)
+        with self.store.transaction(conn) as tx:
+            order = self._lock(tx, order_id)
+            if order.source != "storefront" or (
+                cart_of is not None and order.storefront_visitor_id != cart_of
+            ):
+                raise LifecycleError("order_not_found", f"no order {order_id}", not_found=True)
+            if not order.unsubmitted:
+                raise LifecycleError("order_submitted", f"order {order.label} is submitted")
+            if not any(i.status != "cancelled" for i in self.store.items(order.id, conn=tx)):
+                raise LifecycleError("draft_empty", f"{order.label} has no item")
+            rules = self.rules()
+            option_id = body.shipping_option_id
+            if option_id is None and rules.shipping_options:
+                raise LifecycleError(
+                    "shipping_option_id", "shipping_option_id: choose one", unprocessable=True
+                )
+            if option_id is not None and all(o.id != option_id for o in rules.shipping_options):
+                raise LifecycleError(
+                    "shipping_option_id",
+                    f"shipping_option_id: no shipping option {option_id}",
+                    unprocessable=True,
+                )
+            if body.account_id is None:
+                customer_id, address_id = self._new_customer(tx, body, email)
+            else:
+                customer_id, address_id = self._account_customer(tx, body, order)
+            customer = customer_actor(customer_id, order.storefront_visitor_id or "")
+            order = self.store.claim_draft(
+                tx,
+                order.id,
+                customer_id=customer_id,
+                shipping_address_id=address_id,
+                currency=rules.shop_currency,
+            )
+            self._event(tx, order, customer, "order.customer_set")
+            order = self._shipping_option(tx, order, customer, option_id, rules)
+            self._deposit_policy(tx, order, customer, rules)
+            order = self.store.stamp_submitted(tx, order.id)
+            self._event(tx, order, customer, "order.submitted", account_id=body.account_id)
+            token = issue_link(tx, self.kek, order.id, order.label, email)
+            if body.account_id is not None:
+                attach_order(tx, body.account_id, order.id)
+            order = self.store.order(order.id, conn=tx) or order
+        if conn is None:
+            self._told(_Change(order))
+        return order, token
+
+    def customer_link(self, order_id: str) -> LinkState:
+        """The state of the order's newest customer link (spec §5.2), never its token. A
+        plain read: it takes no lock, so the order page's reads never wait behind a write."""
+        with self.store.transaction() as conn:
+            if self.store.order(order_id, conn=conn) is None:
+                raise LifecycleError("order_not_found", f"no order {order_id}", not_found=True)
+            return link_state(conn, order_id)
+
+    def order_mail(self, order_id: str) -> list[OrderMail]:
+        """The order's customer mail, newest first (spec §5.7). A plain read: it takes no
+        lock, and never the body, the context or a link."""
+        with self.store.transaction() as conn:
+            if self.store.order(order_id, conn=conn) is None:
+                raise LifecycleError("order_not_found", f"no order {order_id}", not_found=True)
+            return order_mail(conn, order_id)
+
+    def send_customer_link(
+        self, order_id: str, by: Actor, to: str | None, *, replace: bool = False
+    ) -> LinkState:
+        """The shop sends the order a new customer link (spec §5.2 "Order link"), under the
+        order's lock: with ``replace``, every live link is revoked; then a new one is mailed
+        (`issue_link`) to ``to``, or else to the customer's first email contact that is one
+        address (the primary one first; a contact is free text, and a malformed one is
+        skipped). A `back_office` order gets one too. Audit row `order.customer_link_sent`.
+        Refusals: `order_not_found`; `order_not_submitted` on a cart; 422 `no_customer` for
+        an order with no customer (every customer write runs as the order's customer, so a
+        link with none could read but never answer); `link_live` while a link is live and
+        ``replace`` is false (nothing changes); 422 `no_email` with no ``to`` and no email
+        contact that is one address; `EmailInvalidError`; `KekMissingError`."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            check_submitted(order)
+            if order.customer_id is None:
+                raise LifecycleError(
+                    "no_customer",
+                    "the order has no customer: set one before sending a link",
+                    unprocessable=True,
+                )
+            if not replace and live_link(conn, order.id) is not None:
+                raise LifecycleError(
+                    "link_live",
+                    f"order {order.label} has a live customer link: send again with replace",
+                )
+            address = to if to is not None else self._customer_email(conn, order)
+            if address is None:
+                raise LifecycleError(
+                    "no_email",
+                    "to: the customer has no email contact that is one address",
+                    unprocessable=True,
+                )
+            issue_link(conn, self.kek, order.id, order.label, address)
+            state = link_state(conn, order.id)
+            self._event(conn, order, by, "order.customer_link_sent", to=state.sent_to)
+        self._told(_Change(order))
+        return state
+
+    def revoke_customer_links(self, order_id: str, by: Actor) -> LinkState:
+        """The shop revokes the order's live customer links, under the order's lock. Audit
+        row `order.customer_link_revoked` with how many, when there were any."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            count = revoke_order_links(conn, order.id)
+            if count:
+                self._event(conn, order, by, "order.customer_link_revoked", count=count)
+            state = link_state(conn, order.id)
+        if count:
+            self._told(_Change(order))
+        return state
+
+    def _customer_email(self, conn: Conn, order: Order) -> str | None:
+        """The customer's first email contact that is one address (`check_address`), the
+        primary one first; None when there is none."""
+        if order.customer_id is None:
+            return None
+        customer = self.store.customer(order.customer_id, conn=conn)
+        emails = [c for c in (customer.contacts if customer else []) if c.kind == "email"]
+        emails.sort(key=lambda c: not c.primary)
+        for contact in emails:
+            try:
+                return check_address(contact.value)
+            except EmailInvalidError:
+                continue
+        return None
+
+    def _new_customer(self, conn: Conn, body: SubmitInput, email: str) -> tuple[str, str | None]:
+        """`submit_order`'s step 1 for an anonymous submit: a new customer with the name,
+        ``email`` as its primary contact and the given address as its default shipping
+        address. Its id, and the address's (None without one)."""
+        made = self.store.insert_customer(
+            display_name=body.name,
+            company=None,
+            notes="",
+            tags=[],
+            contacts=[ContactInput(kind="email", value=email, primary=True)],
+            addresses=[] if body.address is None else [body.address.as_input()],
+            conn=conn,
+        )
+        return made.id, made.addresses[0].id if made.addresses else None
+
+    def _account_customer(
+        self, conn: Conn, body: SubmitInput, order: Order
+    ) -> tuple[str, str | None]:
+        """`submit_order`'s step 1 for a signed-in submit: the account's customer
+        (`submitting_customer`), its name and contacts left as they are. The given address
+        is the customer's equal one (`_same_address`: case, spaces and empty lines aside),
+        and then the customer is not touched; with none, it is added, never as a default.
+        The account's row is locked first (`submitting_customer`), then the customer's, so
+        two submits at once add one row, make one new customer for an archived one, and an
+        archive waits for this submit. A customer the shop has archived takes no order, as
+        in `create_order`: the submit makes a new customer as an anonymous one does
+        (`_new_customer`, with the account's verified email as its contact), and the account
+        links to it from then on. Its id, and the address's (None without one).
+        `order_not_found` when the cart's visitor belongs to another account."""
+        assert body.account_id is not None
+        customer_id = submitting_customer(conn, body.account_id, order.storefront_visitor_id)
+        if customer_id is None:
+            raise LifecycleError("order_not_found", f"no order {order.id}", not_found=True)
+        customer = self.store.customer(customer_id, conn=conn, lock=True)
+        assert customer is not None
+        if customer.archived_at is not None:
+            made, address_id = self._new_customer(conn, body, account_email(conn, body.account_id))
+            relink_account(conn, body.account_id, made)
+            return made, address_id
+        if body.address is None:
+            return customer_id, None
+        given = AddressInput(**body.address.model_dump())
+        for kept in customer.addresses:
+            if _same_address(kept, given):
+                return customer_id, kept.id
+        return customer_id, self.store.add_address(conn, customer_id, given).id
+
     def sweep_drafts(self, before: datetime, *, limit: int = 200) -> list[str]:
         """Delete up to ``limit`` storefront carts idle since ``before`` (#5282: the
         housekeeping sweep, after ``storefront_draft_ttl_days``): the candidates
@@ -781,6 +1138,8 @@ class Lifecycle:
         (`OrderStore.claim_idle_draft`), so a cart a visitor touched, changed, wrote to
         or submitted since the listing loses nothing; then its attachments with their
         holds (`OrderStore.delete_attachment`), then the order, whose items cascade.
+        Once committed, ``order.changed`` with ``deleted``: an open orders list reads again
+        without it, and an open ``order:<id>`` page shows it not found on that frame.
         Whether it was deleted."""
         with self.store.transaction() as conn:
             if not self.store.claim_idle_draft(conn, order_id, before=before):
@@ -789,6 +1148,11 @@ class Lifecycle:
                 self.store.delete_attachment(conn, attachment.id)
             if not self.store.delete_draft(conn, order_id):
                 raise RuntimeError(f"cart {order_id} was claimed but not deleted")
+        emit(
+            self.bus,
+            # Only an unsubmitted cart is claimed, and that is always a `draft`.
+            OrderChanged(order_id=order_id, status="draft", cart=True, deleted=True),
+        )
         return True
 
     def edit_order(self, order_id: str, by: Actor, edit: OrderEdit) -> Order:
@@ -880,10 +1244,13 @@ class Lifecycle:
         was read, marked by ``auto`` or its ``id`` (whatever its amount: a read from
         before the items changed is stale), which the order keeps and ``_retax``
         recomputes. Any other `tax` charge, whatever its label, is typed and replaces the
-        auto row."""
+        auto row. A `purchase` or `handling` charge (#6133) is the lifecycle's own: the
+        order keeps its rows and the body's are dropped."""
         auto = next((c for c in self.store.charges(order.id, conn=conn) if c.auto), None)
 
         def is_auto(charge: ChargeInput) -> bool:
+            if charge.kind in LIFECYCLE_CHARGES:
+                return True
             if charge.auto:
                 return True
             if auto is None:
@@ -945,7 +1312,9 @@ class Lifecycle:
         on ``option_id``; an option that ships needs the order's shipping address
         (`shipping_address_required`), a pickup does not. The audit row is
         ``shipping.option_set``. A cart's option is the visitor's alone
-        (`order_not_submitted`, ``check_visitors_cart``)."""
+        (`order_not_submitted`, ``check_visitors_cart``). An order not in the shop's
+        currency (``orders_currency``) takes no option: 409 `shipping_currency_mismatch`
+        (no conversion); None still removes."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             check_visitors_cart(order, by)
@@ -961,41 +1330,63 @@ class Lifecycle:
                     f"order {order.label} is {order.status}: its shipping option is"
                     f" set while draft or quoted{route}",
                 )
-            rules = self.rules()
-            charges: list[ChargeInput] = [
-                charge
-                for charge in self.store.charges(order.id, conn=conn)
-                if not charge.auto and charge.kind != "shipping"
-            ]
-            if option_id is not None:
-                option = next((o for o in rules.shipping_options if o.id == option_id), None)
-                if option is None:
-                    raise LifecycleError(
-                        "option_id",
-                        f"option_id: no shipping option {option_id} (shipping_option_not_found)",
-                        unprocessable=True,
-                    )
-                if option.ships and order.shipping_address_id is None:
-                    raise LifecycleError(
-                        "shipping_address_required",
-                        f"order {order.label} has no shipping address: {option.label} ships"
-                        " it; set the address first, or choose an option that does not ship",
-                    )
-                charges.append(
-                    ChargeInput(
-                        kind="shipping",
-                        label=option.label,
-                        amount_minor=option.amount_minor,
-                        shipping_option_id=option.id,
-                    )
-                )
-            self.store.replace_charges(conn, order.id, charges)
-            self._event(conn, order, by, "shipping.option_set", option_id=option_id)
-            self._retax(conn, order, by, rules)
-            order = self._rederive(conn, order, by)
-            order = self.store.order(order.id, conn=conn) or order
+            order = self._shipping_option(conn, order, by, option_id, self.rules())
         self._told(_Change(order))
         return order
+
+    @staticmethod
+    def _shipping_in_currency(order: Order, rules: OrderRules) -> None:
+        """409 `shipping_currency_mismatch` when ``order`` is not in the shop's currency:
+        the options' amounts are in it, and none is converted."""
+        if order.currency != rules.shop_currency:
+            raise LifecycleError(
+                "shipping_currency_mismatch",
+                f"order {order.label} is in {order.currency}, but the shop's shipping options"
+                f" are priced in {rules.shop_currency}; they cannot be set on it",
+            )
+
+    def _shipping_option(
+        self, conn: Conn, order: Order, by: Actor, option_id: str | None, rules: OrderRules
+    ) -> Order:
+        """`set_shipping_option`'s write on the locked ``order``, with no check of who
+        asks or of the state: the order as the write left it. An option is priced in the
+        shop's currency and the order may be in another (a back-office order made before
+        the shop changed it); there is no conversion, so that is a 409
+        `shipping_currency_mismatch` (`_shipping_in_currency`). None removes the shipping
+        charges in any currency."""
+        charges: list[ChargeInput] = [
+            charge
+            for charge in self.store.charges(order.id, conn=conn)
+            if not charge.auto and charge.kind != "shipping"
+        ]
+        if option_id is not None:
+            self._shipping_in_currency(order, rules)
+            option = next((o for o in rules.shipping_options if o.id == option_id), None)
+            if option is None:
+                raise LifecycleError(
+                    "option_id",
+                    f"option_id: no shipping option {option_id} (shipping_option_not_found)",
+                    unprocessable=True,
+                )
+            if option.ships and order.shipping_address_id is None:
+                raise LifecycleError(
+                    "shipping_address_required",
+                    f"order {order.label} has no shipping address: {option.label} ships"
+                    " it; set the address first, or choose an option that does not ship",
+                )
+            charges.append(
+                ChargeInput(
+                    kind="shipping",
+                    label=option.label,
+                    amount_minor=option.amount_minor,
+                    shipping_option_id=option.id,
+                )
+            )
+        self.store.replace_charges(conn, order.id, charges)
+        self._event(conn, order, by, "shipping.option_set", option_id=option_id)
+        self._retax(conn, order, by, rules)
+        order = self._rederive(conn, order, by)
+        return self.store.order(order.id, conn=conn) or order
 
     def add_payment(
         self,
@@ -1008,6 +1399,7 @@ class Lifecycle:
         received_at: datetime | None = None,
         notes: str = "",
         payment_request_id: str | None = None,
+        on_insert: Callable[[Conn, Payment], None] | None = None,
     ) -> Payment:
         """Money the shop already received: a record, allowed on hold (Ruling 14). A
         payment that names an open request of this order closes it. Named or not, a
@@ -1039,6 +1431,9 @@ class Lifecycle:
                 notes=notes,
                 payment_request_id=payment_request_id,
             )
+            if on_insert is not None:
+                # The caller's own check, in this transaction: a refusal undoes the payment.
+                on_insert(conn, payment)
             if named is not None:
                 payments.set_request_status(conn, named.id, "paid", payment_id=payment.id)
             if payment.amount_minor > 0:
@@ -1110,11 +1505,15 @@ class Lifecycle:
         """A request for ``amount_minor`` (the balance now when None), through
         ``provider`` (the default provider when unset and still offered; None collects by
         hand). A named provider that is not connected is refused as 422 ``provider``. A
-        cart (#5282) takes no money: ``order_not_submitted``, before any provider."""
+        cart (#5282) takes no money: ``order_not_submitted``, before any provider. A
+        ``balance`` request waits for every purchase to be priced (`purchase_pending`,
+        #6133); a ``deposit`` request does not."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             check_submitted(order)
             self._not_ended(order)
+            if kind == "balance":
+                self._no_pending_purchase(conn, order)
             amount = (
                 totals_of(self.store, conn, order.id).balance_minor
                 if amount_minor is None
@@ -1146,6 +1545,9 @@ class Lifecycle:
                 by,
                 "payment_request.opened",
                 {"request_id": opened.id, "kind": kind, "amount_minor": amount},
+            )
+            self._mail(
+                conn, order, "payment_requested", amount_minor=amount, currency=order.currency
             )
         self._told(_Change(order))
         return opened
@@ -1260,37 +1662,43 @@ class Lifecycle:
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._deposit_editable(order)
-            rules = self.rules()
-            items = self.store.items(order.id, conn=conn)
-            context: dict[str, Any] = {
-                "has_request": any(i.kind == "request" and i.status != "cancelled" for i in items),
-                "first_order": order.customer_id is None
-                or not self.store.accepted_before(conn, order.customer_id, order.id),
-                "currency": order.currency,
-                "shop_currency": rules.shop_currency,
-            }
-            amount = deposit_for(
-                rules.deposit_policy,
-                total_minor=totals_of(self.store, conn, order.id).total_minor,
-                **context,
-            )
-            skipped = skipped_for_currency(rules.deposit_policy, **context)
-            if amount is None and skipped:
-                raise LifecycleError(
-                    "deposit_policy_currency",
-                    f"order {order.label} is in {order.currency}: the deposit policy's rules"
-                    f" {skipped} that would apply are in {rules.shop_currency}; set the deposit"
-                    " by hand",
-                )
-            audit: dict[str, Any] = {"policy": True}
-            if skipped:
-                audit["skipped"] = skipped
-            updated = self._set_deposit(conn, order, by, amount, **audit)
+            updated = self._deposit_policy(conn, order, by, self.rules())
             if updated is None:
                 return order
             order = updated
         self._told(_Change(order))
         return order
+
+    def _deposit_policy(
+        self, conn: Conn, order: Order, by: Actor, rules: OrderRules
+    ) -> Order | None:
+        """`apply_deposit_policy`'s write on the locked ``order``, with no check of its
+        state: as `_set_deposit`, the order or None when nothing was written."""
+        items = self.store.items(order.id, conn=conn)
+        context: dict[str, Any] = {
+            "has_request": any(i.kind == "request" and i.status != "cancelled" for i in items),
+            "first_order": order.customer_id is None
+            or not self.store.accepted_before(conn, order.customer_id, order.id),
+            "currency": order.currency,
+            "shop_currency": rules.shop_currency,
+        }
+        amount = deposit_for(
+            rules.deposit_policy,
+            total_minor=totals_of(self.store, conn, order.id).total_minor,
+            **context,
+        )
+        skipped = skipped_for_currency(rules.deposit_policy, **context)
+        if amount is None and skipped:
+            raise LifecycleError(
+                "deposit_policy_currency",
+                f"order {order.label} is in {order.currency}: the deposit policy's rules"
+                f" {skipped} that would apply are in {rules.shop_currency}; set the deposit"
+                " by hand",
+            )
+        audit: dict[str, Any] = {"policy": True}
+        if skipped:
+            audit["skipped"] = skipped
+        return self._set_deposit(conn, order, by, amount, **audit)
 
     def waive_deposit(self, order_id: str, by: Actor, reason: str) -> Order:
         """ "Proceed without deposit": the work goes on unpaid, for ``reason`` (trimmed,
@@ -1897,6 +2305,8 @@ class Lifecycle:
     # -- time and cost entries (job cost spec 2026-11-05 §4.3-4.5, #5326) ---------------
     # A record of what the job took, allowed in every status, ended and on hold included:
     # a fee or a label often arrives after the order moved on. Nothing here moves a status.
+    # A visitor's cart is no job yet, and the draft sweep would drop its entries with it:
+    # ``order_not_submitted`` (#5282).
 
     def _entry_item(self, conn: Conn, order: Order, item_id: str | None) -> list[OrderItem]:
         return [] if item_id is None else [self._item_of(conn, order, item_id)]
@@ -1907,9 +2317,10 @@ class Lifecycle:
         """Time spent, at the labour rate now (copied, in the order's minor units, under
         the order's lock, so a currency change cannot slip in between), and whether this
         call wrote it: a second write of one ``source`` returns the first entry and writes
-        nothing, not even an audit row."""
+        nothing, not even an audit row. ``order_not_submitted`` on a cart."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            check_submitted(order)
             items = self._entry_item(conn, order, body.order_item_id)
             rate = (
                 to_minor(labour_rate.per_hour, order.currency)
@@ -1961,9 +2372,17 @@ class Lifecycle:
         self, order_id: str, body: CostEntryInput, by: Actor
     ) -> tuple[CostEntry, bool]:
         """Money spent, and whether this call wrote it: a second write of one ``source``
-        returns the first entry and writes nothing, not even an audit row."""
+        returns the first entry and writes nothing, not even an audit row.
+        ``order_not_submitted`` on a cart. A ``purchase:`` source is a recorded
+        purchase's alone (`purchase_cost_linked`, #6133): use ``record_purchase``."""
+        if body.source is not None and body.source.startswith(PURCHASE_SOURCE_PREFIX):
+            raise LifecycleError(
+                "purchase_cost_linked",
+                "a purchase: cost entry is written only by recording the purchase",
+            )
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            check_submitted(order)
             items = self._entry_item(conn, order, body.order_item_id)
             entry, written = self.store.insert_cost_entry(conn, order.id, body, created_by=by)
             if not written:
@@ -2041,6 +2460,9 @@ class Lifecycle:
         return entry, True
 
     def remove_cost_entry(self, order_id: str, entry_id: str, by: Actor) -> None:
+        """An entry removed. A recorded purchase's entry (``purchase:<source>``, #6133) is
+        refused (`purchase_cost_linked`): its charge goes with it, through
+        ``decline_purchase``."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             entry = self.store.delete_cost_entry(conn, order.id, entry_id)
@@ -2049,6 +2471,13 @@ class Lifecycle:
                     "cost_entry_not_found",
                     f"no cost entry {entry_id} of order {order.label}",
                     not_found=True,
+                )
+            if entry.source is not None and entry.source.startswith(PURCHASE_SOURCE_PREFIX):
+                # The delete rolls back with the refusal.
+                raise LifecycleError(
+                    "purchase_cost_linked",
+                    f"cost entry {entry_id} is a recorded purchase's: change it or mark the"
+                    " purchase not needed instead",
                 )
             self._event(
                 conn,
@@ -2062,6 +2491,320 @@ class Lifecycle:
             )
             items = self._entry_item(conn, order, entry.order_item_id)
         self._told(_Change(order, [(item, None) for item in items]))
+
+    # -- purchases (#6133, spec 2026-11-13 §10) -----------------------------------------
+
+    def _purchase_source(self, conn: Conn, order: Order, source_id: str) -> PurchaseSource:
+        source = self.store.lock_purchase_source(conn, order.id, source_id)
+        if source is None:
+            raise LifecycleError(
+                "source_not_found",
+                f"no purchase link {source_id} of order {order.label}",
+                not_found=True,
+            )
+        return source
+
+    @staticmethod
+    def _purchase_open(order: Order) -> None:
+        """A purchase changes only while the order is `draft` or `quoted`
+        (`purchase_locked`): past acceptance a later price change is its own charge on the
+        after-acceptance route (#5351)."""
+        if order.status not in OPEN_FOR_EDITS:
+            raise LifecycleError(
+                "purchase_locked",
+                f"order {order.label} is {order.status}: its purchases are fixed; change what"
+                f" it charges with PUT /orders/{order.id}/charges/after-acceptance",
+            )
+
+    def _purchase_items(
+        self, conn: Conn, source: PurchaseSource
+    ) -> list[tuple[OrderItem, int | None]]:
+        item = self.store.item(source.item_id, conn=conn)
+        return [] if item is None else [(item, None)]
+
+    def _rehandle(self, conn: Conn, order: Order, rules: OrderRules) -> None:
+        """The order's `handling` charge as its recorded purchases now say
+        (`money.handling_minor`); none at 0. An order not in the shop's currency takes the
+        percent only: the flat amount is in the shop's currency."""
+        charges = self.store.charges(order.id, conn=conn)
+        amounts = [charge.amount_minor for charge in charges if charge.kind == "purchase"]
+        flat = rules.purchase_fee_flat_minor if order.currency == rules.shop_currency else 0
+        amount = handling_minor(amounts, flat_minor=flat, percent=rules.purchase_fee_percent)
+        self.store.set_handling(conn, order.id, amount or None)
+
+    def _repriced(self, conn: Conn, order: Order, by: Actor) -> Order:
+        """The handling fee and the auto tax recomputed after a purchase changed, on one
+        read of the rules."""
+        rules = self.rules()
+        self._rehandle(conn, order, rules)
+        self._retax(conn, order, by, rules)
+        return self.store.order(order.id, conn=conn) or order
+
+    def record_purchase(
+        self, order_id: str, source_id: str, body: PurchaseRecordInput, by: Actor
+    ) -> tuple[PurchaseSource, bool]:
+        """What the shop paid for the purchase link ``source_id`` (spec §10.2), in one
+        transaction under the order's lock: a cost entry on the link's item (kind
+        ``body.cost_kind``, source ``purchase:<source id>``), a `purchase` charge of the
+        same amount that names the link, labelled by `purchase_label`, the link `recorded`
+        with both ids, the handling fee and the auto tax recomputed, and the audit row
+        ``purchase.recorded``. Returns the link, and whether this call wrote it: a second
+        record of a recorded link with the same amount and cost kind returns it as it is
+        and writes nothing; one that differs is `purchase_recorded` (a change is
+        ``update_purchase``). Refusals: `source_not_found` (404), `order_not_submitted` on
+        a cart, `order_cancelled`/`order_closed`, `purchase_locked` past `quoted`,
+        `purchase_not_pending` for a link marked not needed."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            check_submitted(order)
+            self._not_ended(order)
+            source = self._purchase_source(conn, order, source_id)
+            if source.status == "recorded":
+                if (source.amount_minor, source.cost_kind) != (body.amount_minor, body.cost_kind):
+                    raise LifecycleError(
+                        "purchase_recorded",
+                        f"purchase link {source.id} is already recorded at"
+                        f" {source.amount_minor} ({source.cost_kind}); change it with"
+                        f" PATCH /orders/{order.id}/purchases/{source.id}",
+                    )
+                return source, False
+            self._purchase_open(order)
+            if source.status != "pending":
+                raise LifecycleError(
+                    "purchase_not_pending",
+                    f"purchase link {source.id} is marked not needed; nothing is bought for it",
+                )
+            entry, _ = self.store.insert_cost_entry(
+                conn,
+                order.id,
+                CostEntryInput(
+                    order_item_id=source.item_id,
+                    kind=body.cost_kind,
+                    amount_minor=body.amount_minor,
+                    note=body.note,
+                    source=f"{PURCHASE_SOURCE_PREFIX}{source.id}",
+                ),
+                created_by=by,
+            )
+            charge = self.store.insert_purchase_charge(
+                conn,
+                order.id,
+                source.id,
+                label=purchase_label(source),
+                amount_minor=body.amount_minor,
+            )
+            self.store.set_purchase(
+                conn, source.id, status="recorded", cost_entry_id=entry.id, charge_id=charge.id
+            )
+            order = self._repriced(conn, order, by)
+            self._event(
+                conn,
+                order,
+                by,
+                "purchase.recorded",
+                source_id=source.id,
+                item_id=source.item_id,
+                amount_minor=body.amount_minor,
+                cost_kind=body.cost_kind,
+                entry_id=entry.id,
+                charge_id=charge.id,
+            )
+            recorded = self._purchase_source(conn, order, source.id)
+            items = self._purchase_items(conn, source)
+        self._told(_Change(order, items))
+        return recorded, True
+
+    def update_purchase(
+        self, order_id: str, source_id: str, body: PurchaseUpdateInput, by: Actor
+    ) -> PurchaseSource:
+        """A recorded purchase changed (spec §10.2): its cost entry and its charge
+        together (each field given replaces its value; the amount is both), then the
+        handling fee and the auto tax, and the audit row ``purchase.updated`` with the
+        amount before. Refusals as ``record_purchase``'s, and `purchase_not_recorded` for a
+        link that is not recorded."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            check_submitted(order)
+            self._not_ended(order)
+            source = self._purchase_source(conn, order, source_id)
+            self._purchase_open(order)
+            if source.status != "recorded":
+                raise LifecycleError(
+                    "purchase_not_recorded",
+                    f"purchase link {source.id} is {source.status}: record it first",
+                )
+            assert source.cost_entry_id is not None and source.charge_id is not None
+            assert source.amount_minor is not None and source.cost_kind is not None
+            entries = self.store.cost_entries(order.id, conn=conn)
+            [entry] = [e for e in entries if e.id == source.cost_entry_id]
+            amount = source.amount_minor if body.amount_minor is None else body.amount_minor
+            kind = source.cost_kind if body.cost_kind is None else body.cost_kind
+            self.store.update_cost_entry(
+                conn,
+                entry.id,
+                amount_minor=amount,
+                kind=kind,
+                note=entry.note if body.note is None else body.note,
+            )
+            self.store.set_charge_amount(conn, source.charge_id, amount)
+            order = self._repriced(conn, order, by)
+            self._event(
+                conn,
+                order,
+                by,
+                "purchase.updated",
+                source_id=source.id,
+                item_id=source.item_id,
+                before_minor=source.amount_minor,
+                amount_minor=amount,
+                cost_kind=kind,
+            )
+            updated = self._purchase_source(conn, order, source.id)
+            items = self._purchase_items(conn, source)
+        self._told(_Change(order, items))
+        return updated
+
+    def decline_purchase(
+        self, order_id: str, source_id: str, shop_note: str, by: Actor
+    ) -> PurchaseSource:
+        """A purchase link the shop does not buy (spec §10.2): a recorded one loses its
+        cost entry and its charge, the link is `not_needed` with ``shop_note`` (trimmed;
+        the customer reads it), the handling fee and the auto tax are recomputed, and the
+        audit row is ``purchase.declined``. A link already not needed is returned as it
+        is, and nothing is written. Refusals as ``record_purchase``'s."""
+        shop_note = shop_note.strip()
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            check_submitted(order)
+            self._not_ended(order)
+            source = self._purchase_source(conn, order, source_id)
+            if source.status == "not_needed":
+                return source
+            self._purchase_open(order)
+            self.store.set_purchase(
+                conn,
+                source.id,
+                status="not_needed",
+                cost_entry_id=None,
+                charge_id=None,
+                shop_note=shop_note,
+            )
+            if source.charge_id is not None:
+                self.store.delete_charge(conn, source.charge_id)
+            if source.cost_entry_id is not None:
+                self.store.delete_cost_entry(conn, order.id, source.cost_entry_id)
+            order = self._repriced(conn, order, by)
+            self._event(
+                conn,
+                order,
+                by,
+                "purchase.declined",
+                source_id=source.id,
+                item_id=source.item_id,
+                was=source.status,
+                amount_minor=source.amount_minor,
+            )
+            declined = self._purchase_source(conn, order, source.id)
+            items = self._purchase_items(conn, source)
+        self._told(_Change(order, items))
+        return declined
+
+    # -- a customer's own models (#6133 PR 4, spec 2026-11-13 §8.1, §9.3, §11) -----------
+
+    def _item_source(self, conn: Conn, order: Order, source_id: str) -> OrderItemSource:
+        source = self.store.lock_item_source(conn, order.id, source_id)
+        if source is None:
+            raise LifecycleError(
+                "source_not_found", f"no source {source_id} of order {order.label}", not_found=True
+            )
+        return source
+
+    def decline_source(
+        self, order_id: str, source_id: str, reason: str, by: Actor
+    ) -> OrderItemSource:
+        """A print file or link the shop does not take: ``declined`` with ``reason`` (the
+        shop's; the customer never reads it), audit row ``source.declined``. A declined
+        file's watcher then deletes its staged copy (the caller signals ``declined``). A
+        second decline writes nothing. Refusals: 404 ``source_not_found``; 409
+        ``source_not_print`` for a thing to buy (``decline_purchase`` takes it),
+        ``source_imported`` for one already in the library, ``order_not_submitted`` on a
+        cart, ``order_cancelled`` or ``order_closed``."""
+        reason = reason.strip()
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            check_submitted(order)
+            self._not_ended(order)
+            source = self._item_source(conn, order, source_id)
+            if source.purpose != "print":
+                raise LifecycleError(
+                    "source_not_print", f"source {source_id} is a thing to buy, not a model"
+                )
+            if source.status == "declined":
+                return source
+            if source.status == "imported":
+                raise LifecycleError(
+                    "source_imported", f"source {source_id} is in the library already"
+                )
+            self.store.set_source_status(
+                conn, source.id, status="declined", reason=reason or "Declined by the shop."
+            )
+            self._event(
+                conn, order, by, "source.declined", source_id=source.id, item_id=source.item_id
+            )
+            [declined] = self.store.item_sources(order.id, conn=conn, source_id=source.id)
+            item = self.store.item(source.item_id, conn=conn)
+        self._told(_Change(order, [] if item is None else [(item, None)]))
+        return declined
+
+    def recheck_source(self, order_id: str, source_id: str, by: Actor) -> OrderItemSource:
+        """A file whose check ``failed`` (every attempt timed out or crashed) waits for its
+        check again: ``checking``, audit row ``source.rechecked``. The caller starts the
+        check (`intake.start_checks`). A file already ``checking`` is returned as it is, so
+        the caller starts its check again (a running one is joined). Refusals: 404
+        ``source_not_found``; 409 ``source_not_failed`` for any other check,
+        ``source_not_staged`` once its staged copy is gone, ``order_not_submitted`` on a
+        cart (the back office never acts on one), ``order_cancelled`` or ``order_closed``."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            check_submitted(order)
+            self._not_ended(order)
+            source = self._item_source(conn, order, source_id)
+            if source.kind != "file" or source.check_status not in ("failed", "checking"):
+                raise LifecycleError(
+                    "source_not_failed", f"source {source_id} has no failed check to run again"
+                )
+            if not source.staged:
+                raise LifecycleError(
+                    "source_not_staged", f"source {source_id} has no staged file to check"
+                )
+            if source.check_status == "checking":
+                return source
+            self.store.set_source_checking(conn, source.id)
+            self._event(
+                conn, order, by, "source.rechecked", source_id=source.id, item_id=source.item_id
+            )
+            [checking] = self.store.item_sources(order.id, conn=conn, source_id=source.id)
+        self._told(_Change(order))
+        return checking
+
+    def retry_import(self, order_id: str, source_id: str, by: Actor) -> OrderItemSource:
+        """ "Retry import" on a stuck file (`IMPORT_STUCK`): audit row ``source.import_retry``
+        only; the caller sends the file's watcher ``retry``, which runs the import again.
+        Refusals: 404 ``source_not_found``; 409 ``order_not_submitted`` on a cart, and
+        ``import_not_stuck`` unless the source reads stuck and its staged file is still
+        there."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            check_submitted(order)
+            source = self._item_source(conn, order, source_id)
+            if not source.import_stuck or not source.staged:
+                raise LifecycleError(
+                    "import_not_stuck", f"source {source_id} has no stuck import to retry"
+                )
+            self._event(
+                conn, order, by, "source.import_retry", source_id=source.id, item_id=source.item_id
+            )
+        return source
 
     def hold(self, order_id: str, by: Actor) -> Order:
         return self._set_hold(order_id, by, True)
@@ -2084,45 +2827,63 @@ class Lifecycle:
         """§3.5: every item not cancelled has an accepted quote; the addresses are
         copied (Ruling 11); `accepted_at` is stamped."""
         with self.store.transaction() as conn:
-            order = self._lock(conn, order_id)
-            check_submitted(order)
-            if order.status not in OPEN_FOR_EDITS:
-                raise LifecycleError(
-                    "order_not_acceptable", f"order {order.label} is {order.status}"
-                )
-            self._not_on_hold(order)
-            self._no_payment_in_flight(conn, order)
-            items = self.store.items(order.id, conn=conn)
-            open_items = [item for item in items if item.status != "cancelled"]
-            if not open_items:
-                raise LifecycleError("no_open_items", f"order {order.label} has no open items")
-            unquoted = [item.id for item in open_items if item.status != "approved"]
-            if unquoted:
-                raise LifecycleError(
-                    "items_not_quoted",
-                    f"{len(unquoted)} item(s) of order {order.label} have no accepted quote",
-                    items=unquoted,
-                )
-            snapshots: dict[str, AddressSnapshot | None] = {}
-            for name in ("shipping_address_id", "billing_address_id"):
-                address_id = getattr(order, name)
-                found = self.store.address(address_id, conn=conn) if address_id else None
-                snapshots[name.removesuffix("_id")] = (
-                    AddressSnapshot.model_validate(found[1].model_dump(exclude={"position"}))
-                    if found
-                    else None
-                )
-            self.store.update_order_fields(
-                conn,
-                order.id,
-                shipping_address=snapshots["shipping_address"],
-                billing_address=snapshots["billing_address"],
-            )
-            accepted = self.store.set_order_status(conn, order.id, "accepted")
-            self._event(conn, order, by, "order.status", from_status=order.status, to="accepted")
-            self._open_balance(conn, order, by)
+            accepted = self._accept_order(conn, self._lock(conn, order_id), by)
         self._told(_Change(accepted))
         return accepted
+
+    def _accept_order(self, conn: Conn, order: Order, by: Actor) -> Order:
+        """`accept_order` in the caller's transaction, under its lock of ``order``."""
+        check_submitted(order)
+        if order.status not in OPEN_FOR_EDITS:
+            raise LifecycleError("order_not_acceptable", f"order {order.label} is {order.status}")
+        self._not_on_hold(order)
+        self._no_pending_purchase(conn, order)
+        self._no_payment_in_flight(conn, order)
+        items = self.store.items(order.id, conn=conn)
+        open_items = [item for item in items if item.status != "cancelled"]
+        if not open_items:
+            raise LifecycleError("no_open_items", f"order {order.label} has no open items")
+        unquoted = [item.id for item in open_items if item.status != "approved"]
+        if unquoted:
+            raise LifecycleError(
+                "items_not_quoted",
+                f"{len(unquoted)} item(s) of order {order.label} have no accepted quote",
+                items=unquoted,
+            )
+        snapshots: dict[str, AddressSnapshot | None] = {}
+        for name in ("shipping_address_id", "billing_address_id"):
+            address_id = getattr(order, name)
+            found = self.store.address(address_id, conn=conn) if address_id else None
+            snapshots[name.removesuffix("_id")] = (
+                AddressSnapshot.model_validate(found[1].model_dump(exclude={"position"}))
+                if found
+                else None
+            )
+        self.store.update_order_fields(
+            conn,
+            order.id,
+            shipping_address=snapshots["shipping_address"],
+            billing_address=snapshots["billing_address"],
+        )
+        accepted = self.store.set_order_status(conn, order.id, "accepted")
+        self._event(conn, order, by, "order.status", from_status=order.status, to="accepted")
+        self._open_balance(conn, order, by)
+        return accepted
+
+    def _no_pending_purchase(self, conn: Conn, order: Order) -> None:
+        """Refuses (`purchase_pending`, #6133, spec 2026-11-13 §10.4) while a purchase link
+        of the order is still ``pending``: the price the customer accepts or pays must
+        hold what the shop buys for them. The refusal names the sources and their items."""
+        pending = self.store.pending_purchases(conn, order.id)
+        if not pending:
+            return
+        raise LifecycleError(
+            "purchase_pending",
+            f"order {order.label} has {len(pending)} thing(s) to buy that the shop has not"
+            " priced: record or decline each purchase first",
+            items=list(dict.fromkeys(item_id for _, item_id in pending)),
+            sources=[source_id for source_id, _ in pending],
+        )
 
     def _no_payment_in_flight(self, conn: Conn, order: Order, *, kind: str | None = None) -> None:
         """A pending request (of ``kind``, when given) is money on its way: what would end
@@ -2136,18 +2897,37 @@ class Lifecycle:
                 f"order {order.label} has a payment in flight; wait until it settles",
             )
 
-    def cancel_order(self, order_id: str, by: Actor, reason: str | None = None) -> Order:
+    def cancel_order(
+        self,
+        order_id: str,
+        by: Actor,
+        reason: str | None = None,
+        *,
+        within: InTransaction | None = None,
+    ) -> Order:
         """§3.5: from any state before `shipped`; cancels the open items and the open
         and failed payment requests, and keeps every fulfilled one's attempts. Allowed on
         hold (Ruling 14). A pending request is money on its way, so it refuses the cancel
-        (`payment_in_flight`, #4959) until its provider settles it."""
-        with self.store.transaction() as conn:
+        (`payment_in_flight`, #4959) until its provider settles it. The customer cancels
+        only their own order (`order_not_found`), only while nothing is approved
+        (storefront spec §5.5, `order_approved`) and only while no payment is recorded on
+        it (`order_paid`, a deposit included: the shop refunds by hand, so the customer
+        asks the shop)."""
+        with self.store.transaction(within.conn if within else None) as conn:
             order = self._lock(conn, order_id)
             check_submitted(order)
+            if by.kind == "customer":
+                self._accepts(order, by, None, accepting=False)
             if order.status in ("shipped", *ENDED):
                 raise LifecycleError(
                     "order_not_cancellable", f"order {order.label} is {order.status}"
                 )
+            if by.kind == "customer" and self.approved_anything(conn, order):
+                raise LifecycleError(
+                    "order_approved", f"order {order.label} has something approved"
+                )
+            if by.kind == "customer" and payments.has_payment(conn, order.id):
+                raise LifecycleError("order_paid", f"order {order.label} has a payment")
             self._no_payment_in_flight(conn, order)
             change = _Change(order)
             every = self.store.items(order.id, conn=conn)
@@ -2179,8 +2959,21 @@ class Lifecycle:
                 reason=reason,
             )
             change.order = cancelled
-        self._told(change)
+        self._tell(change, within)
         return cancelled
+
+    def approved_anything(self, conn: Conn, order: Order) -> bool:
+        """Whether anything of ``order`` is approved: the order is past `quoted`, an item
+        is past `quoted`, or a design was accepted. The customer cancels only before
+        (storefront spec §5.5)."""
+        if order.status not in OPEN_FOR_EDITS:
+            return True
+        for item in self.store.items(order.id, conn=conn):
+            if item.status not in ("draft", "quoted", "cancelled"):
+                return True
+            if any(r.answer == "accepted" for r in self.store.revisions(item.id, conn=conn)):
+                return True
+        return False
 
     def close_order(self, order_id: str, by: Actor) -> Order:
         """§3.5's close rule: refused, naming every item not fulfilled or cancelled and
@@ -2588,16 +3381,20 @@ class Lifecycle:
         )
         return item
 
-    def ensure_revision(self, order_id: str, item_id: str, by: Actor) -> OrderItem:
+    def ensure_revision(
+        self, order_id: str, item_id: str, by: Actor, *, within: InTransaction | None = None
+    ) -> OrderItem:
         """`_ensure_revision` in a transaction of its own, so the repair stands when the
         call that needed it is refused (a send naming the revision it superseded). Every
-        path that reads the item's current revision runs it first."""
-        with self.store.transaction() as conn:
+        path that reads the item's current revision runs it first. ``within`` runs it in
+        the caller's transaction instead, so it takes no second connection; a refusal
+        then rolls the repair back with the rest, and the next call repairs again."""
+        with self.store.transaction(within.conn if within else None) as conn:
             order = self._lock(conn, order_id)
             before = self._item_of(conn, order, item_id)
             item = self._ensure_revision(conn, order, before, by)
         if item is not before:
-            self._told(_Change(order, [(item, None)]))
+            self._tell(_Change(order, [(item, None)]), within)
         return item
 
     def add_revision(
@@ -2826,7 +3623,7 @@ class Lifecycle:
         notes: str = "",
         sku: str | None = None,
         requires_printing: bool = False,
-        accept: bool = True,
+        accept: bool | None = None,
         after_acceptance: bool = False,
     ) -> OrderItem:
         """A custom item (#4954): a title, a quantity and a typed price, with no template
@@ -2835,7 +3632,8 @@ class Lifecycle:
         (accepting a quote advances the order). Without (the agent's, whose `write` tier
         accepts nothing) the item is `quoted`, for `accept_quote` to pin. With
         ``after_acceptance`` (#5349) the price is never accepted as it is saved: the item
-        is `quoted`, and ``accept`` is refused (422)."""
+        is `quoted`, and ``accept`` is refused (422). Unset, ``accept`` is the order's
+        default (:func:`price_accepted`, #5283)."""
         entry = NewCustomItem(
             title=title,
             quantity=quantity,
@@ -2862,7 +3660,7 @@ class Lifecycle:
         order operations spec §3.1): a refusal of any adds none. ``after_acceptance`` as
         `add_item`'s, for every entry. ``cart_of`` and ``conn`` as `delete_item`'s."""
         for entry in entries:
-            if isinstance(entry, NewCustomItem) and after_acceptance and entry.accept:
+            if isinstance(entry, NewCustomItem) and after_acceptance and entry.accept is True:
                 raise LifecycleError(
                     "accept",
                     "accept: an item added after acceptance needs its quote accepted on its own",
@@ -2872,7 +3670,10 @@ class Lifecycle:
             order = self._lock(tx, order_id)
             self._visitors_cart(order, cart_of)
             self._takes_item(order, after_acceptance)
-            if any(isinstance(entry, NewCustomItem) and entry.accept for entry in entries):
+            if any(
+                isinstance(entry, NewCustomItem) and price_accepted(order, entry.accept)
+                for entry in entries
+            ):
                 self._not_on_hold(order)
             items = [self._insert_new(tx, order, by, entry, after_acceptance) for entry in entries]
             # Once for the whole add, not once per item.
@@ -2915,10 +3716,10 @@ class Lifecycle:
                     title=item.title,
                     unit_price_minor=priced.unit_price_minor if priced else 0,
                     requires_printing=item.requires_printing,
-                    accept=not after_acceptance,
+                    accept=False if after_acceptance else None,
                     **common,
                 )
-                if entry.accept:
+                if price_accepted(order, entry.accept):
                     self._not_on_hold(order)
             elif item.kind == "request":
                 entry = NewRequestItem(title=item.title, **common)
@@ -3059,6 +3860,17 @@ class Lifecycle:
             )
         return item
 
+    @staticmethod
+    def _customer_accepts_price(order: Order, by: Actor, accept: bool | None) -> None:
+        """An explicit ``accept`` on a storefront order is the customer's to give
+        (`customer_accepts`, storefront spec §4.5)."""
+        if accept and order.source == "storefront" and by.kind != "customer":
+            raise LifecycleError(
+                "customer_accepts",
+                f"the customer accepts a price on storefront order {order.label};"
+                " the shop accepts only with Accept for the customer",
+            )
+
     def _custom_price(
         self,
         conn: Conn,
@@ -3067,12 +3879,16 @@ class Lifecycle:
         unit_price_minor: int,
         by: Actor,
         *,
-        accept: bool,
+        accept: bool | None,
     ) -> OrderItem:
         """A custom item's typed price as a `manual` quote at its quantity now, on the
         audit line: accepted and the item `approved`, or else the item `quoted`. Never
-        on a cart (#5282): a quote is never written there."""
+        on a cart (#5282): a quote is never written there. ``accept`` None is the
+        order's default (:func:`price_accepted`); on a storefront order only the
+        customer accepts it (`customer_accepts`, storefront spec §4.5)."""
         check_submitted(order)
+        self._customer_accepts_price(order, by, accept)
+        accept = price_accepted(order, accept)
         line = QuoteLine(
             kind="manual",
             label="Custom item",
@@ -3092,6 +3908,7 @@ class Lifecycle:
         )
         if not accept:
             self._event(conn, order, by, "quote.recorded", item_id=item.id, quote_id=quote.id)
+            self._mail(conn, order, "price_ready", item=item.title)
             return self.store.update_item(conn, item.id, status="quoted")
         self.store.accept_quote(conn, item.id, quote.id)
         self._event(conn, order, by, "quote.accepted", item_id=item.id, quote_id=quote.id)
@@ -3113,7 +3930,7 @@ class Lifecycle:
         unit_price_minor: int | None = None,
         sku: str | UnsetType | None = UNSET,
         requires_printing: bool | None = None,
-        accept: bool = True,
+        accept: bool | None = None,
         approval: Approval | None = None,
         expected_revision_id: str | None = None,
     ) -> OrderItem:
@@ -3139,9 +3956,10 @@ class Lifecycle:
         new `manual` quote at the price sent, else at the price it has (its accepted
         quote's, or its newest's). With ``accept`` that quote is accepted and the item
         stays `approved` (refused on hold, as an accepted quote is); without (the
-        agent's) the item is `quoted`. A ``reference`` given to it makes it a model item,
-        on the normal flow: its quote is dropped as any reference change drops one. A
-        custom item takes no ``approval`` (422): it has no design to approve.
+        agent's) the item is `quoted`. On a storefront order an explicit ``accept`` is
+        `customer_accepts`, with or without a price. A ``reference`` given to it makes it
+        a model item, on the normal flow: its quote is dropped as any reference change
+        drops one. A custom item takes no ``approval`` (422): it has no design to approve.
 
         With ``expected_revision_id`` (the quote's run) it writes nothing once the item's
         current revision is another (`revision_not_newest`): the caller's work was of a
@@ -3149,6 +3967,10 @@ class Lifecycle:
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._not_ended(order)
+            # Refused with or without a price: without one it would change nothing.
+            self._customer_accepts_price(order, by, accept)
+            explicit = accept is True
+            accept = price_accepted(order, accept)
             item = self._item_of(conn, order, item_id)
             if item.status in SETTLED:
                 raise LifecycleError("item_not_open", f"item {item_id} is {item.status}")
@@ -3286,7 +4108,9 @@ class Lifecycle:
             if fields:
                 item = self.store.update_item(conn, item.id, **fields)
             if price is not None:
-                item = self._custom_price(conn, order, item, price, by, accept=accept)
+                item = self._custom_price(
+                    conn, order, item, price, by, accept=True if explicit else accept
+                )
             self._event(conn, order, by, "item.updated", item_id=item.id, repinned=repins)
             self._retax(conn, order, by)
             order = self._rederive(conn, order, by)
@@ -3365,7 +4189,9 @@ class Lifecycle:
                 raise LifecycleError(
                     "item_has_entries",
                     f"item {item_id} has time or cost entries: remove them or cancel it"
-                    f" (POST /orders/{order_id}/items/{item_id}/cancel)",
+                    f" (POST /orders/{order_id}/items/{item_id}/cancel); a recorded"
+                    " purchase's cost entry goes only with its decline"
+                    f" (POST /orders/{order_id}/purchases/<source id>/decline)",
                     items=[item.id],
                 )
             # Its files go with it, each on the audit line, and with them their holds
@@ -3524,6 +4350,7 @@ class Lifecycle:
             item = self.store.update_item(conn, item.id, status="quoted")
             changed.append((item, None))
         self._event(conn, order, by, "quote.recorded", item_id=item.id, quote_id=quote.id)
+        self._mail(conn, order, "price_ready", item=item.title)
         self._retax(conn, order, by)
         order = self._rederive(conn, order, by)
         released = [
@@ -3630,17 +4457,47 @@ class Lifecycle:
             self.store.drop_holds(conn, QUOTE_HOLDER, quote_id)
         return True
 
-    def accept_quote(self, order_id: str, item_id: str, quote_id: str, by: Actor) -> OrderItem:
+    def accept_quote(
+        self,
+        order_id: str,
+        item_id: str,
+        quote_id: str,
+        by: Actor,
+        *,
+        within: InTransaction | None = None,
+    ) -> OrderItem:
         """Pins the quote (§3.4): the item is `approved`, the order `quoted` once every
         item not cancelled is. A quote of an earlier revision is `quote_stale`, and on a
         `design_first` item the quote's revision must be accepted first
         (`revision_not_accepted`); a custom item has neither. Never on a cart (#5282,
-        ``order_not_submitted``)."""
-        self._not_a_cart(order_id)
-        self.ensure_revision(order_id, item_id, by)
-        with self.store.transaction() as conn:
+        ``order_not_submitted``). On a storefront order only the customer accepts
+        (`customer_accepts`, storefront spec §6.1), and the accept that leaves every open
+        item `approved` accepts the order (§6.2). ``within`` runs it in the caller's
+        transaction."""
+        return self._accept_quote_of(
+            order_id, item_id, quote_id, by, for_customer=None, within=within
+        )
+
+    def _accept_quote_of(
+        self,
+        order_id: str,
+        item_id: str,
+        quote_id: str,
+        by: Actor,
+        *,
+        for_customer: str | None,
+        within: InTransaction | None = None,
+    ) -> OrderItem:
+        """`accept_quote`, or with ``for_customer`` (a reason) the shop's accept of it for
+        a storefront customer (`accept_for_customer`)."""
+        outer = within.conn if within else None
+        self._not_a_cart(order_id, outer)
+        self._customers_accept(order_id, by, for_customer, conn=outer)
+        self.ensure_revision(order_id, item_id, by, within=within)
+        with self.store.transaction(within.conn if within else None) as conn:
             order = self._lock(conn, order_id)
             check_submitted(order)
+            self._accepts(order, by, for_customer)
             self._not_ended(order)
             item = self._item_of(conn, order, item_id)
             self._open_for_requote(conn, order, item, "an item's price")
@@ -3651,7 +4508,135 @@ class Lifecycle:
                     "quote_not_found", f"no quote {quote_id} of item {item_id}", not_found=True
                 )
             order, item, released = self._accept_quote(conn, order, item, quote, by)
-        self._told(_Change(order, [(item, None)], released))
+            self._for_customer(conn, order, by, item, "quote", quote.id, for_customer)
+            order = self._accepted_by_the_last(conn, order, by)
+        self._tell(_Change(order, [(item, None)], released), within)
+        return item
+
+    # -- the storefront's accepts (storefront spec §6.1, §6.2) ----------------------------
+
+    @staticmethod
+    def _accepts(
+        order: Order, by: Actor, for_customer: str | None, *, accepting: bool = True
+    ) -> None:
+        """On a storefront order a revision or a quote is accepted by the customer, or by
+        the shop's staff (a `browser` actor) "for the customer" with a reason
+        (`customer_accepts`); "for the customer" is for a storefront order only
+        (`order_not_storefront`). A customer acts on their own order only: another
+        order is `order_not_found`, so its existence never leaks. ``accepting`` false
+        (an answer that asks for changes) checks only the customer's order."""
+        if by.kind == "customer" and (
+            order.customer_id is None or by.principal != f"customer:{order.customer_id}"
+        ):
+            raise LifecycleError("order_not_found", f"no order {order.id}", not_found=True)
+        if not accepting:
+            return
+        if for_customer is not None:
+            if by.kind != "browser":
+                raise LifecycleError(
+                    "customer_accepts",
+                    "only the shop's staff accept for the customer, from the order page",
+                )
+            if order.source != "storefront":
+                raise LifecycleError(
+                    "order_not_storefront",
+                    f"{order.label} is not a storefront order: accept it as the shop",
+                )
+        elif order.source == "storefront" and by.kind != "customer":
+            raise LifecycleError(
+                "customer_accepts",
+                f"the customer accepts on storefront order {order.label};"
+                " the shop accepts only with Accept for the customer",
+            )
+
+    def _customers_accept(
+        self,
+        order_id: str,
+        by: Actor,
+        for_customer: str | None,
+        *,
+        accepting: bool = True,
+        conn: Conn | None = None,
+    ) -> None:
+        """:meth:`_accepts` before anything is written (``ensure_revision``'s repair among
+        them); the caller checks again under the order's lock. ``conn`` reads on the
+        caller's connection."""
+        found = self.store.order(order_id, conn=conn)
+        if found is not None:
+            self._accepts(found, by, for_customer, accepting=accepting)
+
+    def _for_customer(
+        self,
+        conn: Conn,
+        order: Order,
+        by: Actor,
+        item: OrderItem,
+        what: str,
+        target_id: str,
+        reason: str | None,
+    ) -> None:
+        """The audit row of the shop's accept for the customer, with its reason."""
+        if reason is not None:
+            self._event(
+                conn,
+                order,
+                by,
+                "item.accepted_for_customer",
+                item_id=item.id,
+                what=what,
+                target_id=target_id,
+                reason=reason,
+            )
+
+    def _accepted_by_the_last(self, conn: Conn, order: Order, by: Actor) -> Order:
+        """§6.2, decision 11: on a storefront order the accept that leaves every open item
+        `approved` accepts the order, in its transaction and as ``by``; any other order
+        waits for the shop's `accept_order`. When `accept_order` refuses (a payment in
+        flight, a hold), the accept still commits: the order accept is skipped, in a
+        savepoint, and the audit row ``order.accept_skipped`` names the refusal."""
+        if order.source != "storefront" or order.status not in OPEN_FOR_EDITS:
+            return order
+        items = [i for i in self.store.items(order.id, conn=conn) if i.status != "cancelled"]
+        if not items or any(i.status != "approved" for i in items):
+            return order
+        try:
+            with self.store.transaction(conn):
+                return self._accept_order(conn, order, by)
+        except LifecycleError as refusal:
+            # The item's accept stands (a pending capture can last days); the shop
+            # accepts the order once what refused it is gone.
+            self._event(
+                conn, order, by, "order.accept_skipped", slug=refusal.slug, reason=str(refusal)
+            )
+            return order
+
+    def accept_for_customer(
+        self,
+        order_id: str,
+        item_id: str,
+        what: Literal["revision", "quote"],
+        target_id: str,
+        reason: str,
+        by: Actor,
+    ) -> OrderItem:
+        """The shop's "Accept for the customer" on a storefront order (storefront spec
+        §6.1): the newest sent revision ``target_id`` (an `accepted` answer) or the quote
+        ``target_id``, as the customer's own accept would, for ``reason`` (trimmed, 1 to
+        500 characters), which the audit row ``item.accepted_for_customer`` keeps. A
+        `back_office` order is `order_not_storefront`: the shop accepts it as itself."""
+        reason = reason.strip()
+        if not 1 <= len(reason) <= 500:
+            raise LifecycleError("reason", "a reason is 1 to 500 characters", unprocessable=True)
+        if what == "quote":
+            return self._accept_quote_of(order_id, item_id, target_id, by, for_customer=reason)
+        _, item = self._answer_revision(
+            order_id,
+            item_id,
+            target_id,
+            RevisionAnswerInput(answer="accepted"),
+            by,
+            for_customer=reason,
+        )
         return item
 
     def _accept_quote(
@@ -3659,9 +4644,11 @@ class Lifecycle:
     ) -> tuple[Order, OrderItem, list[str]]:
         """Accepting ``quote`` once the caller has checked the order and the item: the
         refusals, the row, the audit line, the order rederived and §3.4's release of
-        every other quote's sliced file."""
+        every other quote's sliced file. A purchase still pending refuses it
+        (`purchase_pending`, #6133)."""
         if item.status in SETTLED:
             raise LifecycleError("item_not_open", f"item {item.id} is {item.status}")
+        self._no_pending_purchase(conn, order)
         if quote.quantity != item.quantity:
             raise LifecycleError(
                 "quote_stale",
@@ -3748,6 +4735,7 @@ class Lifecycle:
                 )
             revision = self.store.stamp_revision(conn, revision.id, sent_at=datetime.now(UTC))
             self._event(conn, order, by, "revision.sent", item_id=item.id, revision_id=revision.id)
+            self._mail(conn, order, "revision_ready", item=item.title, revision=revision.number)
         self._told(_Change(order, [(item, None)]))
         return revision
 
@@ -3758,15 +4746,43 @@ class Lifecycle:
         revision_id: str,
         body: RevisionAnswerInput,
         by: Actor,
+        *,
+        within: InTransaction | None = None,
     ) -> Revision:
         """The customer's answer to the newest sent revision. On a `together` item an
-        `accepted` also accepts the newest quote that names it, in the same transaction."""
+        `accepted` also accepts the newest quote that names it, in the same transaction.
+        On a storefront order only the customer accepts (`customer_accepts`, storefront
+        spec §6.1; the shop may record their `changes_requested`), and the accept that
+        leaves every open item `approved` accepts the order (§6.2). ``within`` runs it in
+        the caller's transaction."""
+        revision, _ = self._answer_revision(
+            order_id, item_id, revision_id, body, by, for_customer=None, within=within
+        )
+        return revision
+
+    def _answer_revision(
+        self,
+        order_id: str,
+        item_id: str,
+        revision_id: str,
+        body: RevisionAnswerInput,
+        by: Actor,
+        *,
+        for_customer: str | None,
+        within: InTransaction | None = None,
+    ) -> tuple[Revision, OrderItem]:
+        """`answer_revision`, or with ``for_customer`` (a reason) the shop's accept of it
+        for a storefront customer (`accept_for_customer`)."""
         if body.answer == "changes_requested" and not body.note.strip():
             raise LifecycleError("note", "note: say what should change", unprocessable=True)
-        self.ensure_revision(order_id, item_id, by)
+        accepting = body.answer == "accepted"
+        outer = within.conn if within else None
+        self._customers_accept(order_id, by, for_customer, accepting=accepting, conn=outer)
+        self.ensure_revision(order_id, item_id, by, within=within)
         released: list[str] = []
-        with self.store.transaction() as conn:
+        with self.store.transaction(within.conn if within else None) as conn:
             order = self._lock(conn, order_id)
+            self._accepts(order, by, for_customer, accepting=accepting)
             self._not_ended(order)
             item = self._item_of(conn, order, item_id)
             if item.status in SETTLED:
@@ -3810,8 +4826,11 @@ class Lifecycle:
             )
             if quote is not None:
                 order, item, released = self._accept_quote(conn, order, item, quote, by)
-        self._told(_Change(order, [(item, None)], released))
-        return revision
+            self._for_customer(conn, order, by, item, "revision", revision.id, for_customer)
+            if quote is not None:
+                order = self._accepted_by_the_last(conn, order, by)
+        self._tell(_Change(order, [(item, None)], released), within)
+        return revision, item
 
     # -- fulfilment (§6.1 by hand) ---------------------------------------------------------
 
@@ -3979,9 +4998,8 @@ class Lifecycle:
         return attempt
 
     def _before_priced_design(self, conn: Conn, item: OrderItem, attempt: Fulfilment) -> bool:
-        """Whether the attempt was made before the revision the accepted quote prices: it
-        printed an earlier design (#5350). The rule, and why the order of the two
-        ``created_at`` values holds across their transactions, is :func:`stale_attempt`."""
+        """Whether the attempt printed a revision earlier than the one the accepted quote
+        prices: an earlier design (#5350). The rule is :func:`stale_attempt`."""
         return stale_attempt(
             attempt,
             self.store.quotes(item.id, conn=conn),
@@ -4057,9 +5075,9 @@ class Lifecycle:
         self, order_id: str, item_id: str, fulfilment_id: str, by: Actor
     ) -> Fulfilment:
         """§6.1: the attempt's quantity counts as made; the item is `fulfilled` once its
-        accepted attempts reach its quantity. An attempt made before the accepted quote's
-        revision printed an earlier design (an item revised after acceptance, #5350): it is
-        refused (`fulfilment_stale`)."""
+        accepted attempts reach its quantity. An attempt that printed a revision earlier than
+        the accepted quote's printed an earlier design (an item revised after acceptance,
+        #5350): it is refused (`fulfilment_stale`)."""
         with self.store.transaction() as conn:
             order, item = self._in_production(conn, order_id, item_id)
             attempt = self._attempt_of(conn, item, fulfilment_id)
@@ -4339,7 +5357,13 @@ class Lifecycle:
                 if (
                     existing.order_item_id != item_id
                     or existing.purpose != purpose
-                    or existing.revision_id != revision_id
+                    # A production claim names the item's current revision (#5704), and the
+                    # request names none, so only a test print's revision is compared. A
+                    # production claim's revision cannot move while its print may still
+                    # start: no revision is added while a print of the item is in flight
+                    # (`print_in_flight`). Once the print has ended, a retry gets back the
+                    # run's claim with the revision it printed, which is the right answer.
+                    or (purpose == "test" and existing.revision_id != revision_id)
                 ):
                     # One key on `/print` and on a revision's `/test-print` is two
                     # requests: neither answers with the other's attempt.
@@ -4827,6 +5851,7 @@ class Lifecycle:
                 items=[(line.order_item_id, line.quantity) for line in body.items],
             )
             self._event(conn, order, by, "shipment.added", shipment_id=shipment.id)
+            self._mail(conn, order, "shipped", carrier=shipment.carrier, tracking=shipment.tracking)
             order = self._rederive(conn, order, by)
         self._told(_Change(order))
         return shipment
@@ -5151,3 +6176,19 @@ def reap_quote_holds(refs: BlobRefs, store: OrderStore, *, grace: timedelta = QU
     The grace is every row's, so a quote recorded a moment ago is never caught between
     its ref and its row. How many holders went; the blob sweep frees the bytes."""
     return refs.drop_unlisted(QUOTE_HOLDER, store.standing_quote_ids(), older_than=grace)
+
+
+def _fold(value: str | None) -> str:
+    """A field as `_same_address` compares it: spaces collapsed, case folded."""
+    return " ".join((value or "").split()).casefold()
+
+
+def _same_address(a: AddressInput, b: AddressInput) -> bool:
+    """Whether two addresses are one place for one recipient: every field the visitor
+    gives equal once case and spaces are folded and empty lines dropped. The label and the
+    default flags are the shop's and are not compared."""
+    fields = ("recipient", "locality", "region", "postal_code", "country", "phone")
+    lines = [[_fold(line) for line in x.lines if _fold(line)] for x in (a, b)]
+    return lines[0] == lines[1] and all(
+        _fold(getattr(a, name)) == _fold(getattr(b, name)) for name in fields
+    )

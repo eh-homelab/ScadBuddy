@@ -467,6 +467,59 @@ def test_only_a_request_that_never_ran_or_a_database_out_of_reach_passes(
     assert (failed.value.failure, failed.value.passes) == (failure, passes)
 
 
+@pytest.mark.parametrize(
+    ("first", "last", "failure", "maybe_sent"),
+    [
+        # Sent, its answer lost, then a 5xx: the first try may have committed.
+        (httpx.ReadTimeout("slow"), problem(503), "unavailable", True),
+        (httpx.RemoteProtocolError("dropped"), problem(500), "unavailable", True),
+        (httpx.ReadTimeout("slow"), httpx.ConnectError("refused"), "unreached", True),
+        (
+            httpx.ReadTimeout("slow"),
+            problem(503, reason="database-unavailable"),
+            "database_unavailable",
+            True,
+        ),
+        # Never sent, then a 5xx: no try ran the write.
+        (httpx.ConnectError("refused"), problem(503), "unavailable", False),
+        (httpx.ConnectTimeout("slow"), problem(500), "unavailable", False),
+        (httpx.PoolTimeout("full"), httpx.Response(404), "route_missing", False),
+        (problem(503), problem(503), "unavailable", False),
+    ],
+)
+async def test_maybe_sent_says_whether_any_try_lost_its_answer(
+    first: httpx.Response | Exception,
+    last: httpx.Response | Exception,
+    failure: str,
+    maybe_sent: bool,
+) -> None:
+    """claude-review on #6125: ``failure`` is the last try's, so a call whose first try
+    was sent and lost its answer and whose retry got a 5xx would read as never written.
+    ``maybe_sent`` keeps that the write may have run, whatever the last try was."""
+    client, _ = make(Script(first, last), budget=0.1)
+    try:
+        with pytest.raises(CrudUnavailableError) as failed:
+            await client.request("PUT", PATH, json={}, idempotency_key="k")
+    finally:
+        await client.aclose()
+    assert (failed.value.failure, failed.value.maybe_sent) == (failure, maybe_sent)
+
+
+def test_the_sync_client_keeps_maybe_sent_too() -> None:
+    client = _clocked(Script(httpx.ReadTimeout("slow"), problem(503)), FakeClock(), budget=1.0)
+    with pytest.raises(CrudUnavailableError) as failed:
+        client.request("PUT", PATH, json={}, idempotency_key="k")
+    assert (failed.value.failure, failed.value.maybe_sent) == ("unavailable", True)
+
+
+def test_maybe_sent_defaults_to_a_transport_failure() -> None:
+    """Every raise site that names no ``maybe_sent`` keeps its meaning."""
+    assert CrudUnavailableError("x", "transport").maybe_sent
+    assert not CrudUnavailableError("x", "unavailable").maybe_sent
+    assert not CrudUnavailableError("x", "unreached").maybe_sent
+    assert CrudUnavailableError("x", "unavailable", maybe_sent=True).maybe_sent
+
+
 async def test_blocking_shares_the_api_credential_and_options() -> None:
     script = Script(problem(503), ok())
     client, source = make(script, budget=1.0)

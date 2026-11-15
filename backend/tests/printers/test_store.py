@@ -5,14 +5,17 @@ only its own row opens it."""
 from __future__ import annotations
 
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
 import pytest
 from psycopg.types.json import Jsonb
+from psycopg_pool import PoolTimeout
 from pydantic import ValidationError
 
 from scadbuddy.core.secrets import SealError
@@ -54,6 +57,33 @@ def test_create_and_lookup_by_serial(printers: PrinterStore) -> None:
     assert printers.get(row.id) == row
     assert printers.get("nope") is None
     assert [r.id for r in printers.list()] == [row.id]
+
+
+def test_a_bounded_get_gives_up_on_a_locked_read(printers: PrinterStore, pg_conninfo: str) -> None:
+    """#6037: the print watcher's nudge reads the row with a bound, so a read Postgres
+    holds (here behind a table lock) ends with ``QueryCanceled`` and frees its thread."""
+    row = printers.create(PrinterCreate(serial=SERIAL, name="H2C"))
+    with psycopg.connect(pg_conninfo) as holder, holder.transaction():
+        holder.execute("LOCK TABLE printers IN ACCESS EXCLUSIVE MODE")
+        started = time.monotonic()
+        with pytest.raises(psycopg.errors.QueryCanceled):
+            printers.get(row.id, timeout=0.2)
+        assert time.monotonic() - started < 5
+    assert printers.get(row.id, timeout=1.0) == row
+
+
+def test_a_bounded_get_gives_up_on_a_full_pool(printers: PrinterStore) -> None:
+    """#6037: when every connection of the store's pool is out, a bounded read ends with
+    ``PoolTimeout`` instead of waiting for one."""
+    row = printers.create(PrinterCreate(serial=SERIAL, name="H2C"))
+    with ExitStack() as held:
+        for _ in range(printers.pool.max_size):
+            held.enter_context(printers.pool.connection())
+        started = time.monotonic()
+        with pytest.raises(PoolTimeout):
+            printers.get(row.id, timeout=0.2)
+        assert time.monotonic() - started < 5
+    assert printers.get(row.id, timeout=1.0) == row
 
 
 def test_list_is_by_name(printers: PrinterStore) -> None:
@@ -229,15 +259,12 @@ def test_link_bambuddy_takes_over_a_synthetic_row(printers: PrinterStore) -> Non
     assert printers.get(synthetic.id) is None
 
 
-def test_unlink_bambuddy_and_resolve(printers: PrinterStore) -> None:
+def test_unlink_bambuddy(printers: PrinterStore) -> None:
     row = printers.create(PrinterCreate(serial=SERIAL, name="A"))
     printers.link_bambuddy(row.id, 3)
-    assert printers.resolve_bambuddy_id(row.id) == 3
-    assert printers.resolve_bambuddy_id(9) == 9
-    assert printers.resolve_bambuddy_id(None) is None
-    assert printers.resolve_bambuddy_id("nope") is None
+    assert printers.by_bambuddy_id(3) == printers.get(row.id)
     assert printers.unlink_bambuddy(row.id).bambuddy_printer_id is None
-    assert printers.resolve_bambuddy_id(row.id) is None
+    assert printers.by_bambuddy_id(3) is None
 
 
 def test_delete(printers: PrinterStore) -> None:
@@ -255,7 +282,7 @@ def test_ids_are_uuids_and_a_malformed_id_is_not_found(printers: PrinterStore) -
     """M1: `printers.id` is a uuid (spec §6.1)."""
     row = printers.create(PrinterCreate(serial=SERIAL, name="A"))
     assert str(uuid.UUID(row.id)) == row.id
-    assert printers.get("nope") is None and printers.resolve_bambuddy_id("nope") is None
+    assert printers.get("nope") is None
     with pytest.raises(PrinterNotFoundError):
         printers.delete("nope")
 
@@ -301,6 +328,91 @@ def test_a_synthetic_row_merges_into_the_row_holding_the_serial(
     assert printers.get(synthetic.id) is None
     assert reports.get(mine.id) is not None and reports.get(synthetic.id) is None
     assert set(bus.changed()) == {synthetic.id, mine.id}
+
+
+def _lan_import(conn: Any, printer_id: str, name: str, started: datetime) -> None:
+    conn.execute(
+        "INSERT INTO print_lan_imports (printer, printer_key, subtask_name, started_at,"
+        " state, reason) VALUES (%s, %s, %s, %s, 'inbox', 'x')",
+        (printer_id, printer_id, name, started),
+    )
+
+
+def test_a_merge_moves_a_lan_records_key_unless_the_kept_printer_has_the_job(
+    printers: PrinterStore, pg_pool: PgPool
+) -> None:
+    """#6045: a LAN-only printer's print record is found by ``printer_key``. A merge moves
+    the key with the row, so a job recorded again under the kept id finds it. A job the
+    kept printer recorded too keeps its old key: the unique index takes a job once."""
+    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
+    started = datetime(2026, 11, 11, 9, 0, tzinfo=UTC)
+    with pg_pool.connection() as conn:
+        _lan_import(conn, synthetic.id, "moves", started)
+        _lan_import(conn, synthetic.id, "clash", started)
+        _lan_import(conn, mine.id, "clash", started)
+
+    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C")
+
+    with pg_pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT subtask_name AS n, printer::text AS p, printer_key AS k"
+            " FROM print_lan_imports ORDER BY id"
+        ).fetchall()
+    assert [(r["n"], r["p"], r["k"]) for r in rows] == [
+        ("moves", mine.id, mine.id),
+        ("clash", mine.id, synthetic.id),
+        ("clash", mine.id, mine.id),
+    ]
+
+
+def test_a_merge_moves_one_key_of_two_gone_lan_records_of_one_job(
+    printers: PrinterStore, pg_pool: PgPool
+) -> None:
+    """#6045: a gone printer may hold two rows of one job (an earlier merge left one with
+    its old key). Only one moves to the kept key, the one keyed by the gone printer."""
+    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
+    earlier = str(uuid.uuid4())
+    started = datetime(2026, 11, 11, 9, 0, tzinfo=UTC)
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_lan_imports (printer, printer_key, subtask_name, started_at,"
+            " state, reason) VALUES (%s, %s, 'job', %s, 'inbox', 'x')",
+            (synthetic.id, earlier, started),
+        )
+        _lan_import(conn, synthetic.id, "job", started)
+
+    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C")
+
+    with pg_pool.connection() as conn:
+        keys = conn.execute("SELECT printer_key AS k FROM print_lan_imports ORDER BY id").fetchall()
+    assert [r["k"] for r in keys] == [earlier, mine.id]
+
+
+def test_a_merge_moves_a_lone_gone_lan_record_keyed_by_an_older_id(
+    printers: PrinterStore, pg_pool: PgPool
+) -> None:
+    """#6049: a gone printer's row keyed by an older id (an earlier merge left it), of a
+    job the kept printer has no row of, moves to the kept key."""
+    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
+    earlier = str(uuid.uuid4())
+    started = datetime(2026, 11, 11, 9, 0, tzinfo=UTC)
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_lan_imports (printer, printer_key, subtask_name, started_at,"
+            " state, reason) VALUES (%s, %s, 'job', %s, 'inbox', 'x')",
+            (synthetic.id, earlier, started),
+        )
+
+    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C")
+
+    with pg_pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT printer::text AS p, printer_key AS k FROM print_lan_imports"
+        ).fetchall()
+    assert [(r["p"], r["k"]) for r in rows] == [(mine.id, mine.id)]
 
 
 def test_a_merge_moves_the_runs_that_printed_on_the_gone_row(

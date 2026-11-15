@@ -37,11 +37,14 @@ export function PastPrintsPicker({
   picked,
   onPick,
   disabled,
+  unlinkedOnly = false,
 }: {
   open: boolean
   picked: ArchiveOutcome | null
   onPick: (next: ArchiveOutcome | null) => void
   disabled?: boolean
+  /** #4698 — lists only the archives no print link names (`scadbuddy_print` not true). */
+  unlinkedOnly?: boolean
 }) {
   const [fromDay, setFromDay] = useState('')
   const [toDay, setToDay] = useState('')
@@ -74,10 +77,21 @@ export function PastPrintsPicker({
   const [lastPage, setLastPage] = useState(listed.data)
   if (listed.data && listed.data !== lastPage) setLastPage(listed.data)
   const page = listed.data ?? (listed.loading ? lastPage : undefined)
+  // #5992: with `unlinkedOnly`, a full page of ScadBuddy's own prints lists nothing to
+  // pick, so the next page is read until one passes, or the route's most.
+  const allLinked = unlinkedOnly && !!listed.data && listed.data.length === limit && listed.data.every((a) => a.scadbuddy_print === true)
+  useEffect(() => {
+    if (allLinked && limit < MOST) setLimit((n) => Math.min(n + PAGE, MOST))
+  }, [allLinked, limit])
   const rows = useMemo(() => {
     const q = text.trim().toLocaleLowerCase()
-    return (page ?? []).filter((a) => (state === ANY || a.status === state) && (!q || (a.print_name ?? '').toLocaleLowerCase().includes(q)))
-  }, [page, state, text])
+    return (page ?? []).filter(
+      (a) =>
+        (!unlinkedOnly || a.scadbuddy_print !== true) &&
+        (state === ANY || a.status === state) &&
+        (!q || (a.print_name ?? '').toLocaleLowerCase().includes(q)),
+    )
+  }, [page, state, text, unlinkedOnly])
   const printerName = (id: number | null | undefined) => printerChoices.find((p) => p.id === id)?.name ?? (id ? `Printer ${id}` : 'No printer')
 
   return (

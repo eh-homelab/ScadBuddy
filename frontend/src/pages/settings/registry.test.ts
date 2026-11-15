@@ -109,7 +109,7 @@ describe('registry', () => {
   it('holds the spec §3.2 table, with Printers and Orders in Printing', () => {
     expect(AREAS.map((a) => [a.id, SECTION_REGISTRY.filter((s) => s.area === a.id).map((s) => s.id)])).toEqual([
       ['general', ['connection']],
-      ['printing', ['printing', 'printers', 'inventory', 'native-spools', 'orders', 'remembered', 'hotend-usage']],
+      ['printing', ['printing', 'print-watcher', 'printers', 'inventory', 'native-spools', 'orders', 'storefront-pricing', 'remembered', 'hotend-usage']],
       ['library', ['projects', 'uploads', 'fonts', 'libraries', 'git-remote', 'rendering', 'preview']],
       [
         'assistant',
@@ -128,7 +128,7 @@ describe('registry', () => {
       ['tools', ['builtin', 'packages', 'remote']],
       ['mcp', ['mcp-auth-mode', 'mcp-access-tokens', 'mcp-oidc', 'mcp-connect']],
       ['audits', ['audit-log']],
-      ['system', ['diagnostics', 'sign-in', 'signed-in-sessions', 'access-tokens', 'service-credentials', 'payments', 'administration', 'about']],
+      ['system', ['diagnostics', 'sign-in', 'signed-in-sessions', 'access-tokens', 'service-credentials', 'payments', 'storefront-mail', 'administration', 'about']],
     ])
   })
 

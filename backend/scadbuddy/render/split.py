@@ -79,6 +79,10 @@ class ColourPart:
     #: ``subtype="negative_part"``) and counts for nothing a person sees: the box, the
     #: filaments, the preview, the covers and the mesh checks.
     negative: bool = False
+    #: How opaque it draws in the preview and on the covers, 0 to 255 (owner,
+    #: 2026-11-14): below 255 for a colour value given with an alpha
+    #: (`colours.colour_alpha`), which OpenSCAD never sees. It prints as any part does.
+    alpha: int = 255
 
     @property
     def watertight(self) -> bool:
@@ -133,7 +137,9 @@ def painted_pieces(parts: Sequence[ColourPart]) -> list[ColourPart]:
             # unpainted part's shared-vertex mesh is (smoothed across its edges too).
             mesh.merge_vertices()
             name = part.name if colour == own else f"{part.name} ({colour})"
-            out.append(replace(part, name=name, colour=colour, mesh=mesh, paint=None))
+            # A painted colour is another filament: only the part's own keeps its alpha.
+            alpha = part.alpha if colour == own else 255
+            out.append(replace(part, name=name, colour=colour, mesh=mesh, paint=None, alpha=alpha))
     return out
 
 

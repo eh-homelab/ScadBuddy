@@ -15,10 +15,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from collections.abc import Mapping, Sequence
 from contextlib import aclosing
-from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 import psycopg
@@ -62,6 +62,7 @@ from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import QUOTE_TIMEOUT, LifecycleError
 from scadbuddy.orders.models import Actor, Reference
 from scadbuddy.orders.printing import (
+    PRINT_TIMEOUT,
     ItemPrintRequest,
     print_check,
     print_item,
@@ -134,9 +135,6 @@ QUOTE_DETERMINISTIC: tuple[type[Exception], ...] = (
 #: blob swept, while the run read it. The next attempt's ``ensure_output`` renders and
 #: saves the output again, and slices again.
 QUOTE_RETRYABLE: tuple[type[Exception], ...] = (OutputNotFoundError, BlobMissingError)
-#: One ``order_item_print`` run: the print run's accept, which answers within the command
-#: deadline, and the attempt's row. Its slices and queueing are the print run's own.
-PRINT_TIMEOUT = timedelta(minutes=5)
 
 
 def _slice_failed(plate_id: int, failure: str | None) -> ApiError:
@@ -696,6 +694,9 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         """The item claimed, then its print started as the print route starts one
         (``accept_run``), then the run attached (``orders/printing.py`` ``print_item``);
         a test print of the request's ``revision_id`` when it names one."""
+        # The run's one clock (#6193), on its first line: the project and the claim
+        # count against its time (`print_item`'s `started`).
+        started = time.monotonic()
         # Here, not at the top: the orders package imports nothing of `api/` as it loads
         # (`orders/__init__.py`); this run is the one place it reaches the print route.
         from scadbuddy.activity.component import ACTIVITY
@@ -757,7 +758,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             if file_id is not None:
                 # The library print route's own start (#5544): its subject, its slug and
                 # the file's filament slots, read as that route reads them (#2550).
-                started = await start_library_run(
+                library_run = await start_library_run(
                     file_id,
                     print_body(request, copies, projects[0], plan, quoted_settings, setup),
                     runs=core.print_runs,
@@ -770,8 +771,8 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                     # #5602: as the output's run below.
                     api=True if request.get("api") else None,
                 )
-                assert isinstance(started, PrintRun)
-                return started
+                assert isinstance(library_run, PrintRun)
+                return library_run
             run = await accept_run(
                 core.print_runs,
                 Response(),
@@ -799,6 +800,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             sliced_blob_key=checked["sliced_blob_key"],
             project_id=project_id,
             revision_id=request.get("revision_id"),
+            started=started,
         )
         dumped: dict[str, Any] = attempt.model_dump(mode="json")
         return dumped
@@ -975,7 +977,9 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             item_print_check,
             item_print_run,
             # A retry repeats the same print run (its `request_id` is the operation's),
-            # so a start that found Temporal busy is tried again, never printed twice.
+            # never prints twice: a crash, or Bambuddy not making the item's project, is
+            # tried again. A start still being accepted, or one that found Temporal busy
+            # or away, is sent again inside the run (`print_item`, #6138).
             run_attempts=3,
             queue="library",
             run_timeout=PRINT_TIMEOUT,

@@ -11,6 +11,8 @@ import { formatDuration, formatValue } from '../../lib/format'
 import { useAsync } from '../../lib/useAsync'
 import type { PrintsView } from '../../lib/printsQuery'
 import { libraryPrintsPath, printerLabel, printLabel, printPath } from './prints'
+import { LiveDetails, LiveStatus } from './LiveJobItem'
+import type { LiveJob } from './liveJobs'
 import { PrintStatus } from './PrintStatus'
 import { DELETED_STATUS } from './status'
 
@@ -23,6 +25,8 @@ interface Props {
   /** The template's name, shown on the global history only. */
   templateName?: string
   onOpenMedia: (print: PrintSummary) => void
+  /** #3745 — the print's job while it prints or is paused: its state replaces the archive's. */
+  live?: LiveJob | null
 }
 
 /**
@@ -30,7 +34,7 @@ interface Props {
  * stretches over the whole item, so a click anywhere opens the print (#311); the image
  * sits above it and opens the lightbox (#275) instead.
  */
-export function PrintItem({ print, view, templateName, onOpenMedia }: Props) {
+export function PrintItem({ print, view, templateName, onOpenMedia, live = null }: Props) {
   const label = printLabel(print)
   const subject = subjectOf(print)
   const raised = 'relative z-10'
@@ -48,7 +52,7 @@ export function PrintItem({ print, view, templateName, onOpenMedia }: Props) {
         </div>
 
         <div className={`min-w-0 flex-1 ${cards ? 'px-3 pt-2.5 pb-3' : ''}`}>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <h2 className="min-w-0 truncate text-sm font-medium">
               <Link
                 to={printPath(print.archive_id)}
@@ -57,7 +61,7 @@ export function PrintItem({ print, view, templateName, onOpenMedia }: Props) {
                 {label}
               </Link>
             </h2>
-            <PrintStatus status={print.status} />
+            {live ? <LiveStatus job={live} /> : <PrintStatus status={print.status} />}
           </div>
           {templateName &&
             (print.library_file_id !== null ? (
@@ -76,7 +80,8 @@ export function PrintItem({ print, view, templateName, onOpenMedia }: Props) {
               <p className="mt-0.5 truncate text-xs text-muted-foreground">{templateName}</p>
             ))}
           <Facts print={print} />
-          {print.status === 'printing' && subject !== null && (
+          {live && <LiveDetails job={live} />}
+          {!live && print.status === 'printing' && subject !== null && (
             <PrintingNow subject={subject} named={print.printer_name !== null || print.printer_id !== null} />
           )}
           <ParamsDiff diff={print.params_diff} />

@@ -4,22 +4,26 @@ that is restarting, the SPA's fallback page, a 404 that is not the API's problem
 from __future__ import annotations
 
 import asyncio
-import base64
 from collections.abc import Callable
-from datetime import UTC, datetime
 
 import httpx
 import pytest
 
-from scadbuddy.bambuddy.output_reader import BlobMissingAnswerError, RemoteBlobs, RemoteOutputs
+from scadbuddy.auth.service_auth import ServiceAuth
+from scadbuddy.bambuddy.output_reader import (
+    TRANSFER_URLS,
+    BlobMissingAnswerError,
+    RemoteBlobs,
+    RemoteOutputs,
+)
 from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE, ApiError
-from scadbuddy.core.secrets import kek_from_base64
+from scadbuddy.crud.client import CrudClient
+from scadbuddy.crud.guard import CRUD_HEADERS
 from scadbuddy.library.outputs import OutputNotFoundError
 from scadbuddy.slicing.transfer import INTERNAL_BLOBS, TRANSFER_HEADER
-from scadbuddy.slicing.transfer_token import transfer_key, verify
+from tests.crud.crud_support import FixedToken
 
 OUTPUT = "a" * 32
-KEK = kek_from_base64(base64.b64encode(b"\x21" * 32).decode())
 INDEX_HTML = b"<!doctype html><html><body>ScadBuddy</body></html>"
 
 
@@ -95,15 +99,32 @@ def test_the_spa_fallback_page_is_an_error_not_data() -> None:
 
 
 def _blobs(answer: Callable[[httpx.Request], httpx.Response]) -> RemoteBlobs:
-    http = httpx.AsyncClient(base_url="http://api", transport=httpx.MockTransport(answer))
-    return RemoteBlobs("http://api", KEK, client=http)
+    """The read answered by ``answer``, after the API mints its URL (#5298 Task 32)."""
+
+    def route(request: httpx.Request) -> httpx.Response:
+        if request.url.path == TRANSFER_URLS:
+            key = request.read().decode().split('"')[3]
+            return httpx.Response(
+                200,
+                json={
+                    "url": f"http://api{INTERNAL_BLOBS}/{key}",
+                    "headers": {TRANSFER_HEADER: "minted"},
+                    "expires_at": "2026-11-13T12:10:00Z",
+                },
+                headers=CRUD_HEADERS,
+            )
+        return answer(request)
+
+    transport = httpx.MockTransport(route)
+    crud = CrudClient("http://api", "print", ServiceAuth(FixedToken()), transport=transport)
+    return RemoteBlobs(crud, client=httpx.AsyncClient(transport=transport))
 
 
 async def _read(blobs: RemoteBlobs, key: str) -> bytes:
     return b"".join([chunk async for chunk in blobs.stream(key)])
 
 
-def test_a_blob_is_read_with_a_token_for_its_one_key() -> None:
+def test_a_blob_is_read_with_the_url_the_api_minted() -> None:
     key = "slice-" + "b" * 64
     seen: list[httpx.Request] = []
 
@@ -114,14 +135,7 @@ def test_a_blob_is_read_with_a_token_for_its_one_key() -> None:
     assert asyncio.run(_read(_blobs(answer), key)) == b"sliced"
     [request] = seen
     assert request.url.path == f"{INTERNAL_BLOBS}/{key}"
-    token = verify(
-        transfer_key(KEK),
-        request.headers[TRANSFER_HEADER],
-        method="GET",
-        blob_key=key,
-        now=datetime.now(UTC),
-    )
-    assert token.blob_key == key
+    assert request.headers[TRANSFER_HEADER] == "minted"
 
 
 def test_the_apis_404_is_a_missing_blob() -> None:

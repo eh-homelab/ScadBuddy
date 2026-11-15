@@ -219,7 +219,7 @@ async def test_a_quote_is_priced_for_the_printer_it_names(
     assert await machine.for_quote(None, None) is None
     settings_store.save(SettingsPatch(default_printer=lan.id))
     assert machine.resolve(None, None) == lan
-    settings_store.save(SettingsPatch(default_printer=None, printer_id=7))
+    settings_store.save(SettingsPatch(default_printer=linked.id))
     assert machine.resolve(None, None) == linked
     # A named row gone, with no Bambuddy printer to fall back to, is no printer: the
     # book's rate, never the default printer's in its place.

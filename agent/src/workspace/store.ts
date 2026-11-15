@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
 import type { SettingsReader } from '../approvals/service.js'
+import type { LockClient } from '../db.js'
 import { WorkspaceBlobError, type WorkspaceBlobStore } from './blobs.js'
 import { newFileKey, openFile, sealFile, type WorkspaceSealing } from './sealing.js'
 
@@ -22,13 +23,21 @@ import { newFileKey, openFile, sealFile, type WorkspaceSealing } from './sealing
 //
 // The bytes (#4789): with `blobs` (main.ts) a file's bytes are a blob of the
 // backend's content store, sealed under a file key of their own (sealing.ts) and
-// held in `blob_refs` while the row stands (a trigger, migration 20261027T0114Z);
-// the row keeps the metadata and the wrapped key. Only on a backend whose
+// held in `blob_refs` while the row stands; the row keeps the metadata and the
+// wrapped key. The holds go through the agent's CRUD routes (blobs.ts, #5299; no
+// trigger): a hold always comes before the row that names the blob, and a release
+// after the row is gone (`write`, `delete`, `copy`, `moveToBlobs`, `sweep`). A failed
+// release is only logged; `reconcile`, on the sweeper's tick, releases what a
+// session's cascade, forgetSubject, a crash or a failed release left, and holds a
+// row no hold names. Only on a backend whose
 // `store_backend` is `local` (it has no content store), or without `blobs` (tests),
-// do the bytes stay in `data`, as before. On any other backend a write that cannot
+// do the bytes stay in Postgres: one row of `ai_session_file_bytes` per sha256, which
+// every file with those bytes names (`bytes_sha256`), so a fork shares them as it shares
+// a blob (#4212); `dropUnnamedBytes` deletes a row no file names any more. A row an
+// older agent wrote keeps its bytes in `data`. On any other backend a write that cannot
 // be sealed and stored (no KEK here, a backend that cannot mint the URLs or is too
 // old or unreachable) is refused `unavailable`: never kept in plaintext. Reads take
-// either. `moveToBlobs` moves the rows kept in `data` to blobs (main.ts, at start).
+// any. `moveToBlobs` moves the rows kept in Postgres to blobs (main.ts, at start).
 
 /** `ai_settings` key: the largest file (bytes). */
 export const WORKSPACE_FILE_MAX_SETTING = 'workspace_file_max_bytes'
@@ -47,6 +56,17 @@ export const WORKSPACE_MAX_FILES = 5_000
 export const WORKSPACE_TTL_MS = 24 * 60 * 60 * 1000
 /** How often principals' expired files are swept. */
 export const WORKSPACE_SWEEP_MS = 10 * 60 * 1000
+/**
+ * How old an orphan hold must be before `reconcile` releases it: longer than any write
+ * takes from its hold to its commit, so a write about to land keeps its hold.
+ */
+export const RECONCILE_GRACE_MS = 60 * 60 * 1000
+/** How often the sweeper's tick also runs `reconcile`. */
+export const RECONCILE_EVERY_MS = 60 * 60 * 1000
+/** The advisory lock that lets one replica at a time run `reconcile`. */
+export const RECONCILE_LOCK = 'scadbuddy:ai_session_files:reconcile'
+/** Why `reconcile` did nothing: another replica holds RECONCILE_LOCK, or no lock connection was free. */
+export type ReconcileSkipped = 'held' | 'no_connection'
 /** The slice `chunks` reads at a time. */
 export const STREAM_CHUNK_BYTES = 1024 * 1024
 
@@ -130,6 +150,11 @@ function keyOf(ws: WorkspaceRef): { key: string; sessionId: string | null } {
   return ws.kind === 'session'
     ? { key: `session:${ws.sessionId}`, sessionId: ws.sessionId }
     : { key: `principal:${ws.principalKind}:${ws.principalId}`, sessionId: null }
+}
+
+/** The `blob_refs` holder of a workspace file's blob: `<workspace>/<path>`. */
+export function holderOf(workspace: string, path: string): string {
+  return `${workspace}/${path}`
 }
 
 /** The workspace a stored `workspace` key names. */
@@ -324,8 +349,39 @@ async function lockSession(tx: TransactionSql, sessionId: string | null): Promis
   if (sessionId !== null) await tx`SELECT 1 FROM ai_sessions WHERE id = ${sessionId} FOR NO KEY UPDATE`
 }
 
-/** Where a row's bytes are: `data`, or a sealed blob and its wrapped file key. */
+/** Where a row's bytes are: in Postgres (`data` here, from `ai_session_file_bytes` or inline), or a sealed blob and its wrapped file key. */
 type Stored = { data: Buffer | null; blob_key: string | null; key_sealed: Buffer | null; key_kek_id: string | null }
+
+/**
+ * Deletes the rows of `ai_session_file_bytes` no file names any more, of `shas` or all, and
+ * answers how many went. A row a write or a fork is naming meanwhile is locked `FOR KEY SHARE`
+ * by that write's putBytes or the fork's copy, and skipped; one a file names by the time of the delete fails it on the foreign key, so a row a
+ * file names is never lost.
+ */
+export async function dropUnnamedBytes(sql: Sql, shas?: readonly string[]): Promise<number> {
+  if (shas !== undefined && shas.length === 0) return 0
+  const gone = await sql`
+    DELETE FROM ai_session_file_bytes WHERE sha256 IN (
+      SELECT b.sha256 FROM ai_session_file_bytes b
+      WHERE ${shas === undefined ? sql`TRUE` : sql`b.sha256 = ANY(${shas as string[]}::text[])`}
+        AND NOT EXISTS (SELECT 1 FROM ai_session_files f WHERE f.bytes_sha256 = b.sha256)
+      FOR UPDATE SKIP LOCKED)`
+  return gone.count
+}
+
+/**
+ * Locks the row of `ai_session_file_bytes` for `digest` (`FOR KEY SHARE`, which
+ * dropUnnamedBytes's `FOR UPDATE SKIP LOCKED` skips), putting `data` there first when it is
+ * not, so no sweep takes it before the caller's row names it. A row already there is neither
+ * sent, rewritten nor hashed again; one a sweep deletes meanwhile is put again.
+ */
+async function putBytes(tx: TransactionSql, digest: string, data: Buffer): Promise<void> {
+  for (;;) {
+    const [held] = await tx`SELECT 1 FROM ai_session_file_bytes WHERE sha256 = ${digest} FOR KEY SHARE`
+    if (held) return
+    await tx`INSERT INTO ai_session_file_bytes (sha256, data) VALUES (${digest}, ${data}) ON CONFLICT (sha256) DO NOTHING`
+  }
+}
 
 /** How the bytes leave Postgres: the backend's blob store, and who seals for it (none without the KEK). */
 export type WorkspaceBlobs = { store: WorkspaceBlobStore; sealing?: WorkspaceSealing | undefined }
@@ -354,6 +410,10 @@ export class SessionFiles {
   private readonly settings: SettingsReader | undefined
   private readonly fixed: Partial<WorkspaceLimits>
   private readonly blobs: WorkspaceBlobs | undefined
+  private readonly onReleaseError: (message: string) => void
+  private readonly locks: LockClient | undefined
+  /** When `reconcile` last ran on the sweeper's tick (ms). */
+  #reconciledAt = 0
   /** The most files one workspace holds (WORKSPACE_MAX_FILES; tests set fewer). */
   readonly maxFiles: number
 
@@ -364,6 +424,10 @@ export class SessionFiles {
       limits?: Partial<WorkspaceLimits>
       blobs?: WorkspaceBlobs | undefined
       maxFiles?: number | undefined
+      /** A release that failed (its hold stays until `reconcile`); console.error by default. */
+      onReleaseError?: ((message: string) => void) | undefined
+      /** The connections `reconcile` holds its lock on (db.ts `Database.locks`); without them it takes none. */
+      locks?: LockClient | undefined
     } = {},
   ) {
     this.sql = sql
@@ -371,6 +435,47 @@ export class SessionFiles {
     this.fixed = options.limits ?? {}
     this.blobs = options.blobs
     this.maxFiles = options.maxFiles ?? WORKSPACE_MAX_FILES
+    this.onReleaseError = options.onReleaseError ?? ((message) => console.error(message))
+    this.locks = options.locks
+  }
+
+  /** Holds `blobKey` for `<workspace>/<path>`; `unavailable` when the backend refuses it. */
+  async #hold(store: WorkspaceBlobStore, workspace: string, path: string, blobKey: string): Promise<void> {
+    try {
+      await store.hold(blobKey, holderOf(workspace, path))
+    } catch (err) {
+      if (err instanceof WorkspaceBlobError) throw refused(err.message)
+      throw err
+    }
+  }
+
+  /**
+   * Releases `<workspace>/<path>`'s hold of `blobKey` once its row is gone or names another
+   * blob; a row that names it again since keeps it. Never throws: a failure is logged, and
+   * `reconcile` releases the hold later.
+   */
+  async #release(workspace: string, path: string, blobKey: string): Promise<void> {
+    const store = this.blobs?.store
+    if (!store) return
+    try {
+      const [named] = await this.sql`
+        SELECT 1 FROM ai_session_files WHERE workspace = ${workspace} AND path = ${path} AND blob_key = ${blobKey}`
+      if (named) return
+      await store.release(blobKey, holderOf(workspace, path))
+    } catch (err) {
+      this.onReleaseError(`workspace files: could not release blob ${blobKey}; reconcile releases it later: ${(err as Error).message}`)
+    }
+  }
+
+  /** Deletes `shas`' bytes once no file names them. Never throws: a failure is logged, and the sweep deletes them later. */
+  async #dropBytes(shas: readonly (string | null)[]): Promise<void> {
+    const named = shas.filter((sha): sha is string => sha !== null)
+    if (named.length === 0) return
+    try {
+      await dropUnnamedBytes(this.sql, named)
+    } catch (err) {
+      this.onReleaseError(`workspace files: could not delete unnamed bytes; the sweep deletes them later: ${(err as Error).message}`)
+    }
   }
 
   /** How many files the workspace holds now. */
@@ -451,8 +556,9 @@ export class SessionFiles {
   }
 
   /**
-   * Where `data` goes: sealed and uploaded as a blob, or inline only where #target says
-   * Postgres. A store that refuses is `unavailable`.
+   * Where `data` goes: sealed, uploaded as a blob and held for `<workspace>/<path>` (before
+   * the caller writes the row that names it), or inline only where #target says Postgres. A
+   * store that refuses the upload or the hold is `unavailable`.
    */
   async #place(ws: WorkspaceRef, path: string, data: Buffer, digest: string): Promise<Placed> {
     const target = await this.#target()
@@ -466,6 +572,7 @@ export class SessionFiles {
         if (err instanceof WorkspaceBlobError) throw refused(err.message)
         throw err
       }
+      await this.#hold(target.store, keyOf(ws).key, path, blobKey)
       const { sealed, kekId } = await target.sealing.wrap(ws, path, blobKey, fileKey)
       return { data: null, blobKey, keySealed: sealed, kekId }
     } finally {
@@ -553,8 +660,10 @@ export class SessionFiles {
   /** One file with its bytes and sha256, or undefined. */
   async read(ws: WorkspaceRef, path: string): Promise<WorkspaceFile | undefined> {
     const [row] = await this.sql<(Row & Stored)[]>`
-      SELECT path, media_type, size, sha256, source, created_at, updated_at, data, blob_key, key_sealed, key_kek_id
-      FROM ai_session_files WHERE workspace = ${keyOf(ws).key} AND path = ${workspacePath(path)}`
+      SELECT f.path, f.media_type, f.size, f.sha256, f.source, f.created_at, f.updated_at,
+             coalesce(f.data, b.data) AS data, f.blob_key, f.key_sealed, f.key_kek_id
+      FROM ai_session_files f LEFT JOIN ai_session_file_bytes b ON b.sha256 = f.bytes_sha256
+      WHERE f.workspace = ${keyOf(ws).key} AND f.path = ${workspacePath(path)}`
     if (!row) return undefined
     const bytes = row.data ?? (await collect(this.#open(ws, row.path, row.sha256, row)))
     return { ...infoOf(row), bytes }
@@ -594,8 +703,9 @@ export class SessionFiles {
     }
     for (let offset = 0; ; ) {
       const [row] = await this.sql<{ part: Buffer | null; size: number; sha256: string }[]>`
-        SELECT substring(data FROM ${offset + 1}::int FOR ${chunkBytes}::int) AS part, size, sha256
-        FROM ai_session_files WHERE workspace = ${key} AND path = ${name}`
+        SELECT substring(coalesce(f.data, b.data) FROM ${offset + 1}::int FOR ${chunkBytes}::int) AS part, f.size, f.sha256
+        FROM ai_session_files f LEFT JOIN ai_session_file_bytes b ON b.sha256 = f.bytes_sha256
+        WHERE f.workspace = ${key} AND f.path = ${name}`
       if (!row) throw new WorkspaceError('not_found', `no file ${name} in the workspace; workspace_list lists them`)
       if (row.sha256 !== expectedSha256) {
         throw new WorkspaceError(
@@ -629,12 +739,15 @@ export class SessionFiles {
     const source = options.source ?? null
     // Checked before any upload too, so a refused write sends nothing; the checks under the lock below are the ones that hold.
     if (this.blobs) await this.#precheck(key, name, data.byteLength, workspaceMaxBytes, options.expectedSha256)
+    // The blob is held here, before the transaction that writes the row naming it.
     const placed = await this.#place(ws, name, data, digest)
-    return this.sql.begin(async (tx) => {
+    let replaced: string | null = null
+    let replacedBytes: string | null = null
+    const written = await this.sql.begin(async (tx) => {
       if (options.alongside) await lockSession(tx, sessionId)
       await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`scadbuddy:ai_session_files:${key}`}, 0))`
-      const [current] = await tx<{ sha256: string }[]>`
-        SELECT sha256 FROM ai_session_files WHERE workspace = ${key} AND path = ${name} FOR UPDATE`
+      const [current] = await tx<{ sha256: string; blob_key: string | null; bytes_sha256: string | null }[]>`
+        SELECT sha256, blob_key, bytes_sha256 FROM ai_session_files WHERE workspace = ${key} AND path = ${name} FOR UPDATE`
       if (options.expectedSha256 !== undefined) {
         if (options.expectedSha256 === null && current) {
           throw new WorkspaceError('conflict', `${name} already exists (sha256 ${current.sha256}); nothing was written`)
@@ -673,19 +786,28 @@ export class SessionFiles {
             : `${name} is a directory (it holds ${clash.path}), so it cannot be a file too; nothing was written`,
         )
       }
+      // Bytes kept in Postgres are shared by sha256: in place before the row that names them.
+      const bytesSha256 = placed.data === null ? null : digest
+      if (placed.data !== null) await putBytes(tx, digest, placed.data)
       const [row] = await tx<Row[]>`
-        INSERT INTO ai_session_files (workspace, session_id, path, media_type, data, blob_key, key_sealed, key_kek_id, sha256, size, source)
-        VALUES (${key}, ${sessionId}, ${name}, ${mediaType}, ${placed.data}, ${placed.blobKey}, ${placed.keySealed}, ${placed.kekId},
+        INSERT INTO ai_session_files (workspace, session_id, path, media_type, data, bytes_sha256, blob_key, key_sealed, key_kek_id, sha256, size, source)
+        VALUES (${key}, ${sessionId}, ${name}, ${mediaType}, NULL, ${bytesSha256}, ${placed.blobKey}, ${placed.keySealed}, ${placed.kekId},
                 ${digest}, ${data.byteLength}, ${source === null ? null : tx.json(source)})
         ON CONFLICT (workspace, path) DO UPDATE SET
-          media_type = EXCLUDED.media_type, data = EXCLUDED.data, blob_key = EXCLUDED.blob_key,
+          media_type = EXCLUDED.media_type, data = NULL, bytes_sha256 = EXCLUDED.bytes_sha256, blob_key = EXCLUDED.blob_key,
           key_sealed = EXCLUDED.key_sealed, key_kek_id = EXCLUDED.key_kek_id, sha256 = EXCLUDED.sha256,
           size = EXCLUDED.size, source = EXCLUDED.source, updated_at = now()
         RETURNING path, media_type, size, sha256, source, created_at, updated_at`
       const file = infoOf(row!)
       await options.alongside?.(tx, file)
+      replaced = current?.blob_key ?? null
+      replacedBytes = current?.bytes_sha256 ?? null
       return file
     })
+    // The old blob's hold goes once the row names the new one, and old bytes no file names go too.
+    if (replaced !== null && replaced !== placed.blobKey) await this.#release(key, name, replaced)
+    if (replacedBytes !== null && replacedBytes !== digest) await this.#dropBytes([replacedBytes])
+    return written
   }
 
   /**
@@ -699,24 +821,36 @@ export class SessionFiles {
   ): Promise<boolean> {
     const name = workspacePath(path)
     const { key, sessionId } = keyOf(ws)
-    return this.sql.begin(async (tx) => {
+    let released: string | null = null
+    let releasedBytes: string | null = null
+    const deleted = await this.sql.begin(async (tx) => {
       if (options.alongside) await lockSession(tx, sessionId)
       if (options.expectedSha256 === undefined) {
-        const rows = await tx`DELETE FROM ai_session_files WHERE workspace = ${key} AND path = ${name} RETURNING path`
+        const rows = await tx<{ blob_key: string | null; bytes_sha256: string | null }[]>`
+          DELETE FROM ai_session_files WHERE workspace = ${key} AND path = ${name} RETURNING blob_key, bytes_sha256`
         if (rows.length === 0) return false
+        released = rows[0]!.blob_key
+        releasedBytes = rows[0]!.bytes_sha256
       } else {
-        const [row] = await tx<{ sha256: string; deleted: boolean }[]>`
+        const [row] = await tx<{ sha256: string; deleted: boolean; blob_key: string | null; bytes_sha256: string | null }[]>`
           WITH target AS (SELECT sha256 FROM ai_session_files WHERE workspace = ${key} AND path = ${name}),
-               gone AS (DELETE FROM ai_session_files WHERE workspace = ${key} AND path = ${name} AND sha256 = ${options.expectedSha256} RETURNING path)
-          SELECT target.sha256, EXISTS (SELECT 1 FROM gone) AS deleted FROM target`
+               gone AS (DELETE FROM ai_session_files WHERE workspace = ${key} AND path = ${name} AND sha256 = ${options.expectedSha256} RETURNING blob_key, bytes_sha256)
+          SELECT target.sha256, EXISTS (SELECT 1 FROM gone) AS deleted, (SELECT blob_key FROM gone) AS blob_key,
+                 (SELECT bytes_sha256 FROM gone) AS bytes_sha256 FROM target`
         if (!row) return false
         if (!row.deleted) {
           throw new WorkspaceError('conflict', `${name} changed since it was read: its sha256 is ${row.sha256}; nothing was deleted`)
         }
+        released = row.blob_key
+        releasedBytes = row.bytes_sha256
       }
       await options.alongside?.(tx)
       return true
     })
+    // The blob's hold goes once the row is gone, and its bytes once no file names them.
+    if (released !== null) await this.#release(key, name, released)
+    await this.#dropBytes([releasedBytes])
+    return deleted
   }
 
   /** The write's conflict and quota checks, without the lock, before its upload. */
@@ -755,10 +889,13 @@ export class SessionFiles {
   }
 
   /**
-   * A fork's copy of its parent's files. A blob's row names the parent's blob, its file
-   * key wrapped again for the child: no bytes are copied (copy-on-write, #4212). All or
-   * nothing: every file key is wrapped for the child first (what can fail: no KEK here, a
-   * forgotten parent), then every row is written in one transaction.
+   * A fork's copy of its parent's files. No bytes are copied (copy-on-write, #4212): a
+   * blob's row names the parent's blob, its file key wrapped again for the child, and a
+   * row kept in Postgres names the parent's row of `ai_session_file_bytes`. A parent's row an
+   * older agent kept inline (`data`) moves its bytes there first; only one whose bytes do not
+   * match its sha256, which nothing writes, is still copied inline. All or nothing: every
+   * file key is wrapped for the child first (what can fail: no KEK here, a forgotten
+   * parent), then every row is written in one transaction.
    */
   async copy(fromSession: string, toSession: string): Promise<void> {
     const from = `session:${fromSession}`
@@ -779,12 +916,48 @@ export class SessionFiles {
           fileKey.fill(0)
         }
       }
+      // Each child row's hold comes before the insert that names the blob.
+      const { store } = this.#sealing()
+      for (const { row } of wrapped) await this.#hold(store, to, row.path, row.blob_key!)
     }
     await this.sql.begin(async (tx) => {
+      // The parent's write lock, so a write to the parent waits for the fork: it locks its file
+      // row before its bytes, the order this transaction would otherwise reverse.
+      await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`scadbuddy:ai_session_files:${from}`}, 0))`
+      // Every bytes row the child will name is locked FOR KEY SHARE until it commits, so no sweep
+      // or delete in the parent drops it under the child's foreign key; as putBytes does: lock what
+      // is there, put the bytes of the parent's inline rows (an older agent's, whose bytes match
+      // their sha256) that are not, and lock again until all are held. Each pass reads the inline
+      // rows afresh, so one the parent deletes meanwhile drops out; in the usual single pass each
+      // is hashed once. A row named through `bytes_sha256` a sweep deleted before the lock is one
+      // no parent file names any more: the insert below, reading afresh, leaves that file out.
+      let inline: { path: string; sha256: string }[]
+      for (;;) {
+        inline = await tx<{ path: string; sha256: string }[]>`
+          SELECT path, sha256 FROM ai_session_files
+          WHERE workspace = ${from} AND data IS NOT NULL AND sha256 = encode(sha256(data), 'hex')`
+        const held = await tx<{ sha256: string }[]>`
+          SELECT sha256 FROM ai_session_file_bytes
+          WHERE sha256 IN (SELECT bytes_sha256 FROM ai_session_files WHERE workspace = ${from} AND bytes_sha256 IS NOT NULL)
+             OR sha256 = ANY(${[...new Set(inline.map((row) => row.sha256))]}::text[])
+          FOR KEY SHARE`
+        const have = new Set(held.map((row) => row.sha256))
+        const missing = inline.filter((row) => !have.has(row.sha256)).map((row) => row.path)
+        if (missing.length === 0) break
+        await tx`
+          INSERT INTO ai_session_file_bytes (sha256, data)
+          SELECT DISTINCT ON (sha256) sha256, data FROM ai_session_files
+          WHERE workspace = ${from} AND path = ANY(${missing}::text[]) AND data IS NOT NULL
+          ORDER BY sha256
+          ON CONFLICT (sha256) DO NOTHING`
+      }
       await tx`
-        INSERT INTO ai_session_files (workspace, session_id, path, media_type, data, sha256, size, source, created_at, updated_at)
-        SELECT ${to}, ${toSession}, path, media_type, data, sha256, size, source, created_at, updated_at
-        FROM ai_session_files WHERE workspace = ${from} AND data IS NOT NULL
+        UPDATE ai_session_files SET bytes_sha256 = sha256, data = NULL
+        WHERE workspace = ${from} AND path = ANY(${inline.map((row) => row.path)}::text[]) AND data IS NOT NULL`
+      await tx`
+        INSERT INTO ai_session_files (workspace, session_id, path, media_type, data, bytes_sha256, sha256, size, source, created_at, updated_at)
+        SELECT ${to}, ${toSession}, path, media_type, data, bytes_sha256, sha256, size, source, created_at, updated_at
+        FROM ai_session_files WHERE workspace = ${from} AND (data IS NOT NULL OR bytes_sha256 IS NOT NULL)
         ON CONFLICT (workspace, path) DO NOTHING`
       for (const { row, sealed } of wrapped) {
         await tx`
@@ -797,8 +970,9 @@ export class SessionFiles {
   }
 
   /**
-   * Moves every file still kept in `data` to a sealed blob (#4789; main.ts, at start), one
-   * row at a time; a row written meanwhile is left as its writer left it. Idempotent: a
+   * Moves every file still kept in Postgres (`data`, or a row of `ai_session_file_bytes`) to
+   * a sealed blob (#4789; main.ts, at start), one row at a time; a row written meanwhile is
+   * left as its writer left it, and bytes no file names any more are deleted. Idempotent: a
    * row once moved is not read again. `local` when the backend keeps no blobs
    * (store_backend local), which moves nothing; `unavailable` (thrown) when it has a blob
    * store this agent cannot use, which moves nothing either.
@@ -808,36 +982,134 @@ export class SessionFiles {
     let moved = 0
     for (;;) {
       const rows = await this.sql<{ workspace: string; path: string; sha256: string }[]>`
-        SELECT workspace, path, sha256 FROM ai_session_files WHERE data IS NOT NULL ORDER BY workspace, path LIMIT ${batch}`
+        (SELECT workspace, path, sha256 FROM ai_session_files WHERE data IS NOT NULL ORDER BY workspace, path LIMIT ${batch})
+        UNION ALL
+        (SELECT workspace, path, sha256 FROM ai_session_files WHERE bytes_sha256 IS NOT NULL ORDER BY workspace, path LIMIT ${batch})`
       if (rows.length === 0) return { moved, local: false }
       for (const { workspace, path, sha256: digest } of rows) {
-        const [held] = await this.sql<{ data: Buffer }[]>`
-          SELECT data FROM ai_session_files WHERE workspace = ${workspace} AND path = ${path} AND sha256 = ${digest} AND data IS NOT NULL`
+        const [held] = await this.sql<{ data: Buffer; bytes_sha256: string | null }[]>`
+          SELECT coalesce(f.data, b.data) AS data, f.bytes_sha256
+          FROM ai_session_files f LEFT JOIN ai_session_file_bytes b ON b.sha256 = f.bytes_sha256
+          WHERE f.workspace = ${workspace} AND f.path = ${path} AND f.sha256 = ${digest} AND (f.data IS NOT NULL OR f.bytes_sha256 IS NOT NULL)`
         if (!held) continue
         const placed = await this.#place(refOf(workspace), path, held.data, digest)
         if (placed.blobKey === null) return { moved, local: true }
         const updated = await this.sql`
-          UPDATE ai_session_files SET data = NULL, blob_key = ${placed.blobKey}, key_sealed = ${placed.keySealed}, key_kek_id = ${placed.kekId}
-          WHERE workspace = ${workspace} AND path = ${path} AND sha256 = ${digest} AND data IS NOT NULL`
+          UPDATE ai_session_files SET data = NULL, bytes_sha256 = NULL, blob_key = ${placed.blobKey}, key_sealed = ${placed.keySealed}, key_kek_id = ${placed.kekId}
+          WHERE workspace = ${workspace} AND path = ${path} AND sha256 = ${digest} AND (data IS NOT NULL OR bytes_sha256 IS NOT NULL)`
         moved += updated.count
+        await this.#dropBytes([held.bytes_sha256])
       }
     }
   }
 
-  /** Deletes principals' files last written more than `ttlMs` ago; how many went. Sessions' files go with their session. */
+  /**
+   * Deletes principals' files last written more than `ttlMs` ago, then releases their blobs'
+   * holds; how many went. Sessions' files go with their session (`reconcile` releases those).
+   * Then deletes every row of `ai_session_file_bytes` no file names, whatever left it (a
+   * session's cascade, a crash, a failed delete).
+   */
   async sweep(ttlMs = WORKSPACE_TTL_MS): Promise<number> {
-    const rows = await this.sql`
+    const rows = await this.sql<{ workspace: string; path: string; blob_key: string | null }[]>`
       DELETE FROM ai_session_files
-      WHERE session_id IS NULL AND updated_at < now() - (${ttlMs} * interval '1 millisecond') RETURNING path`
+      WHERE session_id IS NULL AND updated_at < now() - (${ttlMs} * interval '1 millisecond') RETURNING workspace, path, blob_key`
+    for (const row of rows) if (row.blob_key !== null) await this.#release(row.workspace, row.path, row.blob_key)
+    // Logged, not thrown, so the tick's reconcile still runs; the next sweep tries again.
+    try {
+      await dropUnnamedBytes(this.sql)
+    } catch (err) {
+      this.onReleaseError(`workspace files: could not delete unnamed bytes; the next sweep tries again: ${(err as Error).message}`)
+    }
     return rows.length
   }
 
-  /** Sweeps every `everyMs` once `ready` says the database is; the returned function stops it. */
+  /**
+   * Makes the backend's holds match the rows: releases every hold older than `graceMs` whose
+   * row is gone or names another blob (what a session's cascade, forgetSubject, a crash or a
+   * failed release left), and holds every row no hold names. Reads every hold, then every
+   * row: a row written meanwhile is held again (a no-op), and a hold taken again meanwhile is
+   * kept, since the backend releases only a hold still older than the grace. Nothing without
+   * a blob store; WorkspaceBlobError when the backend cannot list or answer. With `locks`, one
+   * replica at a time: `skipped` is `held` while another replica holds RECONCILE_LOCK, and
+   * `no_connection` while no lock connection is free (the sweeper then tries again at its next
+   * tick, not an hour later).
+   */
+  async reconcile(graceMs = RECONCILE_GRACE_MS): Promise<{ released: number; held: number; skipped?: ReconcileSkipped }> {
+    const store = this.blobs?.store
+    if (!store) return { released: 0, held: 0 }
+    if (!this.locks) return this.#reconcile(store, graceMs)
+    // One replica at a time: the lock is held on a lock-client connection (db.ts
+    // `createLockClient`), never one of the stores'. With every lock connection out this one
+    // skips `no_connection`, and the sweeper tries again at its next tick; with the lock held
+    // by another replica it skips `held`, since that replica runs it this hour.
+    const lease = await this.locks.take()
+    if (!lease) return { released: 0, held: 0, skipped: 'no_connection' }
+    // Unhealthy unless shown otherwise: a connection whose lock state is unknown is never reused.
+    let healthy = false
+    try {
+      const [lock] = await lease.sql<{ locked: boolean }[]>`
+        SELECT pg_try_advisory_lock(hashtextextended(${RECONCILE_LOCK}, 0)) AS locked`
+      if (!lock?.locked) {
+        healthy = true
+        return { released: 0, held: 0, skipped: 'held' }
+      }
+      try {
+        return await this.#reconcile(store, graceMs)
+      } finally {
+        await lease.sql`SELECT pg_advisory_unlock(hashtextextended(${RECONCILE_LOCK}, 0))`
+        healthy = true
+      }
+    } finally {
+      lease.done(healthy)
+    }
+  }
+
+  async #reconcile(store: WorkspaceBlobStore, graceMs: number): Promise<{ released: number; held: number }> {
+    const holds = await store.listHolds(0)
+    const rows = await this.sql<{ workspace: string; path: string; blob_key: string }[]>`
+      SELECT workspace, path, blob_key FROM ai_session_files WHERE blob_key IS NOT NULL`
+    const named = new Set(rows.map((r) => `${r.blob_key} ${holderOf(r.workspace, r.path)}`))
+    const held = new Set(holds.map((h) => `${h.key} ${h.holderId}`))
+    const olderThanSeconds = Math.floor(graceMs / 1000)
+    let released = 0
+    for (const hold of holds) {
+      if (named.has(`${hold.key} ${hold.holderId}`)) continue
+      if (await store.release(hold.key, hold.holderId, { olderThanSeconds })) released += 1
+    }
+    let holding = 0
+    for (const row of rows) {
+      const holder = holderOf(row.workspace, row.path)
+      if (held.has(`${row.blob_key} ${holder}`)) continue
+      await store.hold(row.blob_key, holder)
+      holding += 1
+    }
+    return { released, held: holding }
+  }
+
+  /**
+   * Sweeps every `everyMs` once `ready` says the database is, and reconciles the holds on the
+   * first tick past RECONCILE_EVERY_MS since the last; a reconcile that skipped
+   * `no_connection` or failed is tried again at the next tick. The returned function stops it.
+   */
   startSweeper(everyMs: number, options: { ready?: () => Promise<boolean>; onError?: (err: unknown) => void } = {}): () => void {
     const ready = options.ready ?? (() => Promise.resolve(true))
     const tick = () => {
       ready()
-        .then((ok) => (ok ? this.sweep() : 0))
+        .then(async (ok) => {
+          if (!ok) return
+          await this.sweep()
+          if (!this.blobs || Date.now() - this.#reconciledAt < RECONCILE_EVERY_MS) return
+          this.#reconciledAt = Date.now()
+          // No replica ran it this hour when no lock connection was free or it failed: try at the next tick.
+          let skipped: ReconcileSkipped | undefined
+          try {
+            skipped = (await this.reconcile()).skipped
+          } catch (err) {
+            this.#reconciledAt = 0
+            throw err
+          }
+          if (skipped === 'no_connection') this.#reconciledAt = 0
+        })
         .catch(options.onError ?? (() => {}))
     }
     const timer = setInterval(tick, everyMs)

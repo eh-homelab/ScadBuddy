@@ -51,6 +51,11 @@ class Scope(StrEnum):
     #: ``can_manage_archives``: photo upload and delete, and pulling a timelapse off
     #: the printer (Bambuddy ``auth.py:194-196`` at v1.2.5.6).
     MANAGE_ARCHIVES = "Manage Archives"
+    #: ``can_control_printer``: the printer's own storage over FTP, which "Import print"
+    #: reads (#4698): ``PRINTERS_FILES`` maps to it (Bambuddy ``core/auth.py`` line 141 at
+    #: maziggy/bambuddy@f9080d1), and its settings UI calls it "Control Printer"
+    #: (``frontend/src/i18n/locales/en.ts`` line 2322).
+    CONTROL_PRINTER = "Control Printer"
     #: ``can_manage_inventory``: spool writes, here only assigning a spool to the tray
     #: a person confirmed it is in (#2164; Bambuddy ``auth.py`` maps
     #: ``INVENTORY_UPDATE`` to it).

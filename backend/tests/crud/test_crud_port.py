@@ -70,7 +70,7 @@ class _Credentials:
 
 
 def test_each_caller_reads_its_own_areas(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert set(CRUD_AREAS) == {"projects", "render", "print", "storefront", "agent"}
+    assert set(CRUD_AREAS) == {"projects", "render", "print", "storefront", "agent", "intake"}
     monkeypatch.setitem(CRUD_AREAS, "render", ["blob-index"])
     app = FastAPI(dependencies=[Depends(auth_check)])
     app.state.scadbuddy = SimpleNamespace(settings=SimpleNamespace(auth_mode="off"))
@@ -84,7 +84,24 @@ def test_each_caller_reads_its_own_areas(monkeypatch: pytest.MonkeyPatch) -> Non
     }
     printing = {"authorization": "Bearer sbsvc_print"}
     assert client.get("/api/v1/internal/crud/print/areas", headers=printing).json() == {
-        "areas": ["settings", "runs", "operations", "events", "printer-ensure"]
+        "areas": [
+            "settings",
+            "runs",
+            "operations",
+            "events",
+            "printer-ensure",
+            "reprints",
+            "uploads",
+            "previews",
+            "copy-leases",
+            "links",
+            "lan-imports",
+            "printers",
+            "rack",
+            "spools",
+            "transfer-urls",
+            "access-codes",
+        ]
     }
     assert client.get("/api/v1/internal/crud/render/areas", headers=printing).status_code == 403
 

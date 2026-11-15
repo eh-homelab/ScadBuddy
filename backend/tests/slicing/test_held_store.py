@@ -3,19 +3,26 @@ off the hot path, on the spool refresh's Schedule, and only what changed."""
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 import respx
+from psycopg.types.json import Jsonb
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.dispatch import SlicePlan
 from scadbuddy.bambuddy.models import LocalPresetDetail, PresetRef
 from scadbuddy.slicing.component import COMPONENT as SLICING_COMPONENT
-from scadbuddy.slicing.held_presets import HeldPresetStore, refresh_held_presets
+from scadbuddy.slicing.held_presets import (
+    HeldPresetStore,
+    refresh_held_presets,
+    setting_sha256,
+)
 from scadbuddy.slicing.presets import build_presets
 from scadbuddy.slicing.profiles import Profiles
 from tests.conftest import PgPool
@@ -174,6 +181,76 @@ async def test_with_the_refresh_off_the_start_forgets_the_copy(
     async with run(cast(Any, slicing)):
         pass
     assert bool(await store.rows()) is kept
+
+
+def keep_raw(pool: PgPool, row: dict[str, Any], sha256: str) -> None:
+    """Keep ``row`` as an older build did: written as sent, with no strip."""
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO held_local_presets (id, preset, updated_at, sha256)"
+            " VALUES (%s, %s, %s, %s)",
+            (row["id"], Jsonb(row), row.get("updated_at"), sha256),
+        )
+
+
+def kept_raw(pool: PgPool) -> dict[int, tuple[dict[str, Any], str, Any]]:
+    with pool.connection() as conn:
+        found = conn.execute(
+            "SELECT id, preset, sha256, kept_at FROM held_local_presets"
+        ).fetchall()
+    return {row["id"]: (row["preset"], row["sha256"], row["kept_at"]) for row in found}
+
+
+async def test_the_start_strips_the_rows_an_older_build_kept(
+    store: HeldPresetStore, pg_pool: PgPool
+) -> None:
+    """#5298 Task 32 B3: a row with a top-level and a nested credential key is rewritten
+    without them and with a refresh's ``sha256``; a clean row is not written; a second run
+    writes nothing. With no Bambuddy at all (no route is mocked)."""
+    dirty = detail(1, "2026-10-22T10:00:00")
+    dirty["setting"] = {
+        **dirty["setting"],
+        "printhost_apikey": "k",
+        "host": {"api_token": "t", "port": 80},
+    }
+    clean = detail(2, "2026-10-22T11:00:00")
+    keep_raw(pg_pool, dirty, "old")
+    keep_raw(pg_pool, clean, setting_sha256(clean["setting"]))
+    before = kept_raw(pg_pool)
+
+    assert store.strip_kept(threading.Event(), batch=1) == 1
+
+    after = kept_raw(pg_pool)
+    preset, sha256, _ = after[1]
+    stripped = {k: v for k, v in dirty["setting"].items() if k != "printhost_apikey"}
+    stripped["host"] = {"port": 80}
+    assert preset["setting"] == stripped
+    assert sha256 == setting_sha256(stripped)
+    assert after[2] == before[2]
+    assert store.strip_kept(threading.Event()) == 0
+    assert kept_raw(pg_pool) == after
+
+
+async def test_the_slicing_start_strips_the_kept_rows(
+    store: HeldPresetStore, pg_pool: PgPool
+) -> None:
+    """The step runs in the slicing component's start, and is joined at its stop."""
+    dirty = detail(1, "2026-10-22T10:00:00")
+    dirty["setting"] = {**dirty["setting"], "printhost_password": "p"}
+    keep_raw(pg_pool, dirty, "old")
+    slicing = SimpleNamespace(
+        held=store,
+        profiles=None,
+        core=SimpleNamespace(
+            settings=SimpleNamespace(spool_overlay_refresh_seconds=300),
+            settings_store=SimpleNamespace(load=lambda: SimpleNamespace(slicer_backend="native")),
+        ),
+    )
+    run = SLICING_COMPONENT.run
+    assert run is not None
+    async with run(cast(Any, slicing)), asyncio.timeout(10):
+        while "printhost_password" in kept_raw(pg_pool)[1][0]["setting"]:
+            await asyncio.sleep(0.05)
 
 
 @respx.mock

@@ -27,7 +27,8 @@ covers the same ground more briefly.
   - `all` (the default): everything, as every pod ran before the roles.
   - `api`: the HTTP server (the routes, the chat and bridge sockets, `/mcp`, the
     loopback `/internal/*` routes), its sweeps and start-time passes, and its own
-    `agent-tools.<hostname>` queue (browser calls for its tabs). It polls neither
+    `agent-tools.<hostname>` queue (browser calls for its tabs, and the `BridgeCall`
+    workflows of its own calls to a tab on another replica, #5862). It polls neither
     `agent-sessions` nor the shared `agent-tools`, nor a session host queue, so it runs
     no `AgentSession` turn (§1.2).
   - `worker`: the Temporal workers that run turns (`agent-tools`, `agent-sessions`,
@@ -90,9 +91,11 @@ covers the same ground more briefly.
   out, a read up to three times and a write at once, and the script sees the error
   (`flow_session_check` retries without limit).
 - **Browser calls across a rollout of #4780.** Since #4780 a browser_* call for a tab on
-  another replica is a `BridgeCall` workflow on `agent-tools`, whose one activity runs
+  another replica is a `BridgeCall` workflow, whose one activity runs
   on the queue of the replica that holds the tab (`ai_tab_owners`;
-  [browser-bridge.md](browser-bridge.md#replicas)). The Postgres relay of #1916 ran
+  [browser-bridge.md](browser-bridge.md#replicas)). Until #5862 the workflow ran on the
+  shared `agent-tools`; it now runs on the caller's own `agent-tools.<hostname>` (see the
+  next item). The Postgres relay of #1916 ran
   beside it for one release, and #4868 removed it: every replica with the KEK since then
   claims its tabs in `ai_tab_owners` (one without it claims none, #4949), so a call finds the owner there or answers "not connected".
   A new replica's tab has no row until its host worker polls, so for those first seconds
@@ -115,7 +118,25 @@ covers the same ground more briefly.
   `PgPayloadKeys` caches any key it opens for 30 s, a `bridge-<uuid>` one included, and
   this build caches none. Once no replica
   runs a build before #4780, nothing takes those tasks but replicas that have the
-  workflow.
+  workflow. Since #5862 no new call starts a workflow on `agent-tools`, so none of this
+  applies to a call made by a replica of that build.
+- **Browser calls across a rollout of #5862.** A replica of #5862's build starts each
+  `BridgeCall` on its own host queue, `agent-tools.<hostname>`, which only its own host worker
+  polls (with `dist/temporal/bridge-bundle.js`), unversioned. In prod the shared, versioned
+  `agent-tools` once took 3.4 s to hand a `BridgeCall`'s first workflow task to a poller,
+  and the status probe (then 6 s, now 10 s) ran out before the activity started (#5862). On
+  the host queue the workflow tasks run at once on the caller, and the activity at once on the
+  owner: a status check between two healthy replicas answers in well under a second on a dev
+  server (`agent/test/bridgeRelay.temporal.test.ts`). In prod each hop is slower while
+  Temporal's matching is CPU-throttled (eh-homelab/clusters#3418): status reads took 2.3–4.0 s
+  on 2026-11-10. The workflow's 15 s of slack
+  (`WORKFLOW_SLACK_MS`, [`agent/src/bridge/relay.ts`](../../agent/src/bridge/relay.ts)) now
+  covers those tasks on a loaded caller and its host worker's reconnect, no longer a failed
+  task on an old replica. While a replica of the build before #5862 still runs, its calls
+  still start on `agent-tools`, so the shared bundle (`agent/src/temporal/workflows.ts`)
+  keeps `BridgeCall` for them. The
+  activity, `bridge.tab`, is unchanged, so a call reaches a tab on a replica of either
+  build.
 
 ### 1.1 Routing the UI's origin to the agent
 
@@ -287,9 +308,9 @@ main on 2026-11-01:
     goes after ScadBuddy's fixed part, which always goes in: the untrusted-data notice
     ([`agent/src/safety/untrusted.ts`](../../agent/src/safety/untrusted.ts)) and the browser
     tools guide. `GET` returns that part as `system_prompt_fixed`, and the section shows it.
-    A session whose plugin package names Claude Code built-ins that the session serves also
-    gets the note on those, after the fixed part; it is per turn, so not in
-    `system_prompt_fixed`. The preset is sent with `excludeDynamicSections`, the minimal base
+    Every session turn also gets a note on the session's own built-ins it serves (`WebFetch`,
+    `WebSearch` and, where the session keeps background tasks, the background ones; #5870), after the fixed part; it is
+    per turn, so not in `system_prompt_fixed`. The preset is sent with `excludeDynamicSections`, the minimal base
     before `SYSTEM_PROMPT_DYNAMIC_BOUNDARY`, both with `snapshot: false`, so the prompt is
     static and its cache is shared across sessions
     ([modifying system prompts](https://code.claude.com/docs/en/agent-sdk/modifying-system-prompts.md)).
@@ -354,6 +375,7 @@ as unset (`present()`).
 | `SCADBUDDY_AGENT_TRUSTED_PROXIES` | unset → no proxy trusted | `parseCidrList()` in `origins.ts` | A comma-separated list of CIDRs or bare addresses whose `X-Forwarded-Proto`/`X-Forwarded-Host` are believed. A malformed entry is a `ConfigError` at start. See §6. |
 | `SCADBUDDY_AGENT_ROLE` | `all` | `loadConfig()` | `all`, `api` or `worker` (§1, "Roles"). Any other value stops the process with exit code 1, naming the value. |
 | `SCADBUDDY_SESSION_DIR` | unset → `work/sessions` under the state directory | `loadConfig()`, `sessionsRoot()` in [`agent/src/harness/stateDirs.ts`](../../agent/src/harness/stateDirs.ts) | Where each session's working directory, `<dir>/<session id>/`, is: the `cwd` of its Claude Code process, a working copy of its workspace (§13). Set it on the workers to a capped emptyDir of the pod's own, never the NAS share (the copies are plaintext, and the share's backup cannot leave a subPath out); every placement refills it from the workspace, so a turn placed on another pod still finds the files the last one wrote back. Must be an absolute path. The process checks at start that it can write there. |
+| `SCADBUDDY_SANDBOX_NAMESPACE`, `SCADBUDDY_SANDBOX_IMAGE`, `SCADBUDDY_SANDBOX_EGRESS_PROXY`, `SCADBUDDY_SANDBOX_KUBE_TOKEN_FILE`, `SCADBUDDY_SANDBOX_KUBE_CA_FILE` | unset → no sandbox: Bash and PowerShell stay `off` | `loadConfig()`; [`agent/src/sandbox/pods.ts`](../../agent/src/sandbox/pods.ts) | The sessions' sandbox pods (#5864, [security.md](security.md), "Bash and PowerShell in a sandbox pod"). All five or none, else a `ConfigError`. The namespace the worker creates one pod per session in; the `sandbox` image (pinned by digest) those pods run; the egress proxy as `http://<host>:<port>`, which the worker resolves and gives each pod as an address (the pods have no DNS); and an apiserver token and the cluster CA, absolute paths re-read on each call. Read only where turns run (`worker`, `all`). The Kubernetes API is `KUBERNETES_SERVICE_HOST`/`_PORT`, which the kubelet sets. |
 
 `main.ts` logs one line at start naming the backend URL, whether a database is
 configured, and where credential writes are accepted from.
@@ -883,8 +905,15 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   an `/mcp` caller outside a session, swept 24 h after its last write) and `path`, with
   the media type, sha256, size and `source`, and the bytes: a sealed blob of the
   backend's store (`blob_key`, `key_sealed`, #4789, `20261027T0114Z_session_files_blobs.sql`)
-  or, where the backend keeps no blobs, `data`. `SessionFiles` in
+  or, where the backend keeps no blobs, a row of `ai_session_file_bytes` it names
+  (`bytes_sha256`), or `data` for a row an older agent wrote. `SessionFiles` in
   [`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts).
+
+- `ai_session_file_bytes`: a workspace file's bytes where the backend keeps no blobs
+  (`store_backend` local; #4212, `20261114T1609Z_session_file_bytes.sql`), one row per
+  sha256 (a CHECK makes the key the hash of the bytes), named by every `ai_session_files`
+  row with those bytes, a fork's included, through a foreign key. A row no file names is
+  deleted after a write or delete, on the sweep, and when its session is forgotten.
 
 - `ai_plugin_packages`: installed Claude plugin packages (#297,
   `20260928T0750Z_plugin_packages.sql`): the source, the pinned commit, the content
@@ -893,11 +922,18 @@ The agent owns and migrates its `ai_*` tables (spec §9;
 The migration advisory lock key is "SCADAGNT", distinct from the backend's "SCADBDDY"
 (the comment on `MIGRATION_LOCK` in `migrations.ts`).
 
-The agent also reads the backend's flow tables, which the backend migrates. Its
-database role needs `UPDATE` on `workflow_runs`, not only `SELECT`: every flow tool call
-reads its run `FOR SHARE` (`PgFlowRuns.startedBy`, `agent/src/temporal/flowRuns.ts`), and
-Postgres requires `UPDATE` for that lock. A role narrowed to `SELECT` fails every flow
-tool call, as a lookup error the activity retries until it gives up.
+The agent also reads the backend's flow tables, which the backend migrates. It asks the
+backend over its CRUD routes (`/api/v1/internal/crud/agent/`, area `flows`,
+`agent/src/flows/backendReads.ts`, #5299) once `GET …/crud/agent/areas` lists the area,
+and reads them over SQL only until then, while an API pod older than the routes answers.
+Over SQL its database role needs `UPDATE` on `workflow_runs`, not only `SELECT`: every
+flow tool call reads its run `FOR SHARE` (`PgFlowRuns.startedBy`,
+`agent/src/temporal/flowRuns.ts`), and Postgres requires `UPDATE` for that lock. A role
+narrowed to `SELECT` fails every flow tool call, as a lookup error the activity retries
+until it gives up. Through the route the backend takes that lock itself. The gate's grant
+check (`agent/src/gate/store.ts` `grantInput`) still reads `flow_grants` and
+`flow_grant_uses` over SQL, under the grant row's share lock, so the role keeps `UPDATE`
+on `flow_grants`.
 
 ## 8. Per-query limits
 
@@ -1053,6 +1089,31 @@ session's Claude Code process offers its own built-ins, each an item of the acce
 | `Read`, `Glob`, `Grep`, `TaskCreate`, `TaskGet`, `TaskList`, `TaskUpdate` | `read` |
 | `Write`, `Edit`, `NotebookEdit` | `write` |
 | `Bash`, `PowerShell` | `off` |
+| `WebFetch`, `WebSearch` (the session's, below) | `outward` |
+| `CronCreate`, `CronDelete`, `ScheduleWakeup`, `Monitor`, `Workflow`, `TaskStop` (the session's, below) | `write` |
+| `CronList` (the session's, below) | `read` |
+
+The last three rows are the session's own built-ins (`SESSION_BUILTINS`), served in place of
+Claude Code's (below) and listed in the same source, so an admin sees and sets them there.
+Every turn offers each one that is not `off`, whether or not a plugin package names it (#2726
+R2; before, only a turn with an allowed package that named one got it). A session a flow run
+started or forked (`sessions_start`, `sessions_fork` in the run's call) and a Workflow agent's
+chat (`SessionManager.startChild`) keep no background tasks, nor does a session one of them
+starts or forks through the `sessions_*` tools, nor a fork of any of them
+(`ai_sessions.background_tools`), so their turns are offered `WebFetch` and `WebSearch` only,
+whatever a package names. A turn a flow run sends (`ask_session`), or such a session sends,
+to any other session gets only those two as well (`ai_sessions.turn_flow`); that session's
+next turn from anyone else gets its own again. So does every turn on an agent without
+Temporal or a database. The tiers:
+`WebFetch` and `WebSearch` reach the internet, so each call asks first. `CronCreate`,
+`ScheduleWakeup` and `Workflow` start turns or agents that spend after this one, and
+`CronDelete` and `TaskStop` end them: each changes what the session keeps, so `write`.
+`CronList` only reads it. A `Monitor` takes the stricter of its item and its source: a `ws`
+source connects to a web host as `WebFetch` does, so `outward`; a `command` source runs a
+shell where `Bash` runs, unsandboxed in the worker pod, so a turn gives it a command queue
+only while `Bash` is on (a package switched it on, or an admin), and a call takes `Bash`'s
+tier if it is stricter. With `Bash` off, its default, a `command` call is refused and a
+Monitor watches a WebSocket only (`nativeBuiltins.ts` `monitorAccess`, `live.ts`).
 
 - They run in the session's working directory (§13), the process's cwd. The permission
   seam refuses a file tool's path outside it: an absolute path elsewhere, `..`, a link
@@ -1083,6 +1144,18 @@ session's Claude Code process offers its own built-ins, each an item of the acce
   A link swapped in between the check and the
   tool's own open is still followed; only a process the session runs (a Monitor command, an
   allowed package's `Bash`) can make one.
+- A fork's working directory is its own, so its first turn resumes a transcript that names
+  the parent's directory. When the transcript's newest entry ran in another directory than
+  this turn's (a fork's first turn, or a moved `SCADBUDDY_SESSION_DIR`), the turn's prompt
+  starts with a note that names the new directory, says the old one is not this session's and
+  calls to it are refused, and asks for the same relative paths there (#5867,
+  `agent/src/sessions/directoryNote.ts`). Hindsight's retain strips the note, so it is never
+  kept as the user's words.
+  Claude Code itself says only "Primary working directory: <new> (was <old>)", and with that
+  alone the model read the parent's path first and the seam refused it. One path for every
+  session, such as `/workspace`, cannot be made: the pod's sessions share one filesystem, a
+  per-process mount is refused (below), and Claude Code takes the real cwd, so a link would
+  not hide it.
 - `Bash` and `PowerShell` are `off` because Claude Code's sandbox cannot run in the worker
   pod. Measured on 2026-11-01 in `scadbuddy-agent-worker` (read-only): `unshare --user
   --map-root-user --pid --fork id` works, but with `--mount` it fails with "cannot change
@@ -1112,7 +1185,7 @@ session's Claude Code process offers its own built-ins, each an item of the acce
   Claude Code's own tools, with paths in the session directory.
 
 The agent still provides these in place of Claude Code's, from the in-process `builtin`
-server (`agent/src/builtins/server.ts`, `mcp__builtin__<Name>`), each outward:
+server (`agent/src/builtins/server.ts`, `mcp__builtin__<Name>`), each `outward` by default:
 
 - `WebFetch` fetches through `http_request`'s exchange (every hop egress-checked and
   pinned; a cross-host redirect is returned, as Claude Code returns it; http is not
@@ -1129,7 +1202,7 @@ as a turn counts Claude Code's own calls.
 session (`agent/src/background/`). Claude Code keeps its own jobs in its
 process ("Session-only (not written to disk, dies when Claude exits)"), which a turn
 ends, so every turn gets these in place of its own (`mcp__builtin__<Name>`, the
-`builtin` in-process server, `sessions/manager.ts`). Each task is a row of
+`builtin` in-process server, `sessions/turnRunner.ts`), at the access in the table above. Each task is a row of
 `ai_background_tasks` and what fires it on `agent-tools`, which carries only the id: a
 recurring cron job is a Temporal Schedule `bgtask-<session>-<id>` (its cron in the task's
 timezone, ending at its expiry) whose every fire is a short `BackgroundFire` workflow
@@ -1154,9 +1227,11 @@ task's workflow is `bgtask-<session id>-<task id>`, which both payload codecs se
 the session's data key; archiving the chat or marking it done ends its tasks, and
 `forgetSubject` ends them and terminates their workflows before it deletes the key.
 
-A `Monitor` is a task of the same kind whose source runs as one heartbeating activity
-where the session's Bash runs: a command in the session's directory on
-the replica that ran the turn (`agent-tools.<hostname>`, `background/monitor.ts`), a
+A `Monitor` is a task of the same kind whose source runs as one heartbeating activity: a
+command (only while Claude Code's own `Bash` is on, above) in the session's directory on the
+replica that ran the turn (`agent-tools.<hostname>`, `background/monitor.ts`), never where a
+sandbox is set up (#5864: there the session's Bash runs in its pod, and Monitor's description
+offers only `ws`), a
 WebSocket on any agent (egress-checked, loopback refused, and connected only to the addresses the
 check passed, with no redirect). A line is cut at 8000 characters and the rest of it
 dropped, and so is a batch, so a command that never writes a newline holds no more. The
@@ -1283,7 +1358,7 @@ user sets them in Settings → Tools & plugins → Packages
     any match it reaches is off.
 - **Hooks change per turn.** No SDK option drops one plugin hook from a
   running query (spec §2), so a hook switched off is left out of the next turn's copy.
-- **Built-ins.** Claude Code's own built-ins are items of `builtin:claude-code` (§9). For a
+- **Built-ins.** Claude Code's own built-ins, and the session's own, are items of `builtin:claude-code` (§9). For a
   pin approved with `allow_refused`, each Claude Code built-in it names is also an item
   `builtin:<Tool>`, with a tool's access; for one of `builtin:claude-code`'s it counts only
   while that item is `off`, as the switch that turns it on. Where several packages of the
@@ -1416,8 +1491,8 @@ with the forwarder).
 
 - **Recall** (`UserPromptSubmit`): the prompt is the query, and the top five memories
   are added as `additionalContext`, wrapped as untrusted data (#258). It gives up after
-  3 s (`RECALL_TIMEOUT_MS`); on a timeout or error nothing is added and the failure is
-  logged.
+  10 s (`RECALL_TIMEOUT_MS`; prod's bank answered in 4.2 to 8.8 s on 2026-11-09, #5866);
+  on a timeout or error nothing is added and the failure is logged.
 - **The recall query's length** (#2655). Only the start of the redacted query is sent:
   `recallMaxQueryChars` characters (code points, so a non-BMP character is never split),
   800 by default and `0` for all of it. This is the Claude Code Hindsight plugin's
@@ -1614,35 +1689,60 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   wrapped under the session's data key (`ai_payload_keys`), or under the KEK for a
   principal's file (re-wrapped at a rotation). A fork's row names the parent's blob with
   the key wrapped again for the child: no bytes are copied. At start the agent moves rows
-  still in `data` to blobs (`SessionFiles.moveToBlobs`); a later migration drops `data`.
+  still in Postgres to blobs (`SessionFiles.moveToBlobs`); a later migration drops `data`.
 - Only on `store_backend` local (no content store; the routes answer 404) do the bytes
-  stay in `data`, in plaintext, as before. On any other backend a write is refused
+  stay in Postgres, in plaintext: one row of `ai_session_file_bytes` per sha256, which
+  every file with those bytes names (`bytes_sha256`). A fork's row names the parent's, so
+  here too no bytes are copied (#4212), save a row an older agent kept inline whose bytes do not match its sha256, which is copied inline; a row no file names any more is deleted after a
+  write or delete, on the sweep, and when its session is forgotten. On any other backend a write is refused
   (`unavailable`, HTTP 503 on the panel's Files routes) and nothing is kept in plaintext
   when the agent has no `SCADBUDDY_SECRET_KEY_FILE`, when the backend cannot mint the URLs
   (no `SCADBUDDY_API_INTERNAL_URL` or KEK: its routes answer 503 saying which), when the
   backend is older than the routes (404), or when it cannot be reached. `moveToBlobs`
   refuses the same way and moves nothing. The agent logs the cause once at start, and
   `GET /api/v1/ai/status` shows it as `workspace_files` (`{store: "blobs" | "postgres" |
-  "refused", ...}`, checked at most once a minute).
+  "refused", ...}`, checked at most once a minute). In the API pod the agent can start
+  before the backend container answers (#5868): a refused connection reads "the backend is
+  not up yet", and the start-up check waits for the backend's `/healthz`, logged once as
+  "waiting for the backend", trying again after 1 s doubling to 30 s
+  ([`agent/src/api/backendUp.ts`](../../agent/src/api/backendUp.ts)). Any other transport
+  error (a host that does not resolve, a timeout: a backend URL that may never answer) is
+  tried again the same way but logged as an error, once per kind (`ENOTFOUND`, ...), so a
+  bad `SCADBUDDY_BACKEND_URL` shows (#5889). Once the backend answers, it logs where
+  the files go and moves them. A write or read asks the backend each time, so it works
+  as soon as the backend answers, with no restart.
 - Rows of both kinds read back only between blob backends (s3 and bambuddy, through
   `/store/migrate`). After a switch back to `store_backend` local the backend's URL route
   answers 404, so every file already in the blob store cannot be read (`unavailable`)
-  until the backend is on a blob store again; new writes go to `data`. `workspace_files`
+  until the backend is on a blob store again; new writes go to `ai_session_file_bytes`. `workspace_files`
   then carries `unreadable_files`, the count of such rows (also when writes are refused).
   Do not switch a deployment that holds workspace blobs back to local.
-- The holder: a trigger on `ai_session_files` (migration
-  `20261027T0114Z_session_files_blobs.sql`) writes and removes each row's holder
-  `(ai_session_file, <workspace>/<path>)` in the backend's `blob_refs`, in the
-  transaction that writes or removes the row (a delete, the sweep, a session's cascade,
-  `forgetSubject`), so the blob sweep keeps a blob while a row names it. This assumes
-  **one database and one role for both services**: the agent's
-  `SCADBUDDY_DATABASE_URL` is the backend's, and its role may write `blob_refs` (the
-  agent already reads the backend's `workflow_runs` the same way). Giving the agent a
-  database or role of its own breaks every workspace write on s3.
-  `agent/test/workspaceBlobs.backend.e2e.test.ts` pins the trigger to the backend's
-  table: it migrates both services into one database, runs the real API on moto's S3
-  (`backend/tests/support/workspace_backend.py`), and checks the `blob_refs` row; a
-  change to that table the trigger does not follow fails it.
+- The holder: each row's blob is held `(ai_session_file, <workspace>/<path>)` in the
+  backend's `blob_refs`, so the blob sweep keeps a blob while a row names it. The agent
+  never writes that table: it holds and releases through its CRUD routes
+  (`backend/scadbuddy/api/crud_agent.py`, `/api/v1/internal/crud/agent/workspace-blob-refs`,
+  the `crud.agent` service credential; #5299, part of #5295). `SessionFiles`
+  (`agent/src/workspace/store.ts`) holds before it writes the row that names a blob
+  (a write, a fork's copy, the move out of `data`), so a write the backend refuses to hold
+  is refused `unavailable` and writes no row; and it releases after the row is gone (a
+  replacement's old blob, a delete, the principals' sweep). A failed release is only logged.
+  `reconcile`, on the sweeper's tick once an hour (a run that failed, or that found no free
+  lock connection, is tried again at the next 10-minute tick) and on one replica at a time (a
+  session advisory lock on a lock connection, `Database.locks`), releases every hold older
+  than an hour whose row is gone or names another blob (a session's cascade, `forgetSubject`,
+  a crash, a failed release), and holds every row no hold names. On `store_backend` local
+  nothing is held.
+  Roll the API before the agent: an agent whose API does not serve the routes yet gets a 404
+  on the hold, and its blob-backed workspace writes are refused `unavailable` until the API
+  has rolled. That fails closed on purpose: a write never leaves a blob that no holder keeps,
+  which the blob sweep could take. The trigger that once did this (migration
+  `20261027T0114Z_session_files_blobs.sql`) is dropped by
+  `20261110T0112Z_drop_session_files_hold_blob.sql`; its rows keep the same holder, so they
+  stay valid, and the API revokes `blob_refs` from the agent's role at every start
+  (`backend/scadbuddy/auth/revoke.py` `RETIRED_GRANTS`).
+  `agent/test/workspaceBlobs.backend.e2e.test.ts` runs the holds against the real API on
+  moto's S3 (`backend/tests/support/workspace_backend.py`), both services migrated into one
+  database, and checks the `blob_refs` rows the routes write.
 - The working directory (plan 2026-10-13 Step 9.5, decision Q5,
   [`agent/src/workspace/directory.ts`](../../agent/src/workspace/directory.ts)): a
   session's Claude Code runs in `<SCADBUDDY_SESSION_DIR>/<session id>/` (§2), a working copy

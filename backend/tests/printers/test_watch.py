@@ -17,7 +17,13 @@ from scadbuddy.printers import watch as watch_module
 from scadbuddy.printers.lan import LanPrinter
 from scadbuddy.printers.lan_models import LanReport
 from scadbuddy.printers.models import LanLink, PrinterCreate
-from scadbuddy.printers.reports import PrintEnd, PrinterReportStore, advance_print
+from scadbuddy.printers.reports import (
+    Advance,
+    JobStart,
+    PrintEnd,
+    PrinterReportStore,
+    advance_print,
+)
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.printers.watch import SHOWN, WatchActivities, shown
 from scadbuddy.rack.usage import LanUsage, PickedHotend, RackUsageStore
@@ -164,7 +170,7 @@ async def test_the_watch_settles_a_start_its_printer_ends_whatever_run_follows(
     rack = RackUsageStore(pg_conninfo)
     try:
         hotend = PickedHotend(group_id=0, position=2, serial=HOTEND)
-        await rack.record_lan_picks(OLD_RUN, OLD_START, None, [hotend], pid)
+        await rack.record_lan_picks(OLD_RUN, OLD_START, pid, [hotend])
         assert (await rack.usage([HOTEND]))[HOTEND].pending == 1
         lan = Lan(
             subscribes=True,
@@ -193,7 +199,7 @@ async def test_a_start_the_printer_moved_on_from_settles_untimed(
     rack = RackUsageStore(pg_conninfo)
     try:
         hotend = PickedHotend(group_id=0, position=2, serial=HOTEND)
-        await rack.record_lan_picks(OLD_RUN, OLD_START, None, [hotend], pid)
+        await rack.record_lan_picks(OLD_RUN, OLD_START, pid, [hotend])
         lan = Lan(
             subscribes=True,
             deltas=[
@@ -348,3 +354,103 @@ def test_a_write_returns_the_end_it_shows_after_a_report_that_says_too_little(
     assert reports.put(pid, {"mc_percent": 3}, datetime.now(UTC)) is None
     assert reports.put(pid, FINISH_X, datetime.now(UTC)) == PrintEnd("x", timed=True)
     assert reports.put(pid, FINISH_X, datetime.now(UTC)) is None
+
+
+def test_a_write_returns_the_start_it_shows_once_per_job(
+    linked: tuple[PrinterStore, PrinterReportStore, str],
+) -> None:
+    """#4699 phase 3: one job is one start, whatever reports repeat it."""
+    _, reports, pid = linked
+    now = datetime.now(UTC)
+    assert reports.advance(pid, RUNNING_X, now) == Advance(started="x")
+    assert reports.advance(pid, {"mc_percent": 3}, now) == Advance()
+    assert reports.advance(pid, RUNNING_X, now) == Advance()
+    y = {"gcode_state": "PREPARE", "subtask_name": "y"}
+    assert reports.advance(pid, y, now) == Advance(ended=PrintEnd("x", timed=False), started="y")
+
+
+class Nudges:
+    """A nudge that records each start the watch hands it, or fails."""
+
+    def __init__(self, *, fails: bool = False) -> None:
+        self.fails = fails
+        self.seen: list[tuple[str, str]] = []
+
+    async def nudge(self, printer_id: str, start: JobStart) -> bool:
+        self.seen.append((printer_id, start.subtask_name))
+        if self.fails:
+            raise RuntimeError("Temporal did not answer")
+        return True
+
+
+async def test_the_watch_nudges_the_print_watcher_once_per_job_start(
+    linked: tuple[PrinterStore, PrinterReportStore, str],
+) -> None:
+    """#4699 phase 3: each job start, and only a start, is handed to the nudge."""
+    printers, reports, pid = linked
+    lan = Lan(
+        subscribes=True,
+        deltas=[
+            RUNNING_X,
+            {**RUNNING_X, "mc_percent": 5},
+            FINISH_X,
+            {"gcode_state": "RUNNING", "subtask_name": "y"},
+        ],
+    )
+    nudges = Nudges()
+    watches = WatchActivities(
+        printers,
+        reports,
+        None,
+        connect=lambda *a: cast(LanPrinter, lan),
+        write_every=0,
+        nudge=nudges.nudge,
+    )
+    await _run_for(ActivityEnvironment(), watches, pid, 0.4)
+
+    assert nudges.seen == [(pid, "x"), (pid, "y")]
+
+
+async def test_a_nudge_that_fails_never_ends_the_watch(
+    linked: tuple[PrinterStore, PrinterReportStore, str],
+) -> None:
+    printers, reports, pid = linked
+    lan = Lan(
+        subscribes=True,
+        deltas=[RUNNING_X, {"gcode_state": "RUNNING", "subtask_name": "y", "mc_percent": 9}],
+    )
+    nudges = Nudges(fails=True)
+    watches = WatchActivities(
+        printers,
+        reports,
+        None,
+        connect=lambda *a: cast(LanPrinter, lan),
+        write_every=0,
+        nudge=nudges.nudge,
+    )
+    await _run_for(ActivityEnvironment(), watches, pid, 0.4)
+
+    assert nudges.seen == [(pid, "x"), (pid, "y")]
+    got = reports.get(pid)
+    assert got is not None and got[0]["subtask_name"] == "y"
+
+
+def test_a_write_older_than_the_row_moves_nothing_back(
+    linked: tuple[PrinterStore, PrinterReportStore, str],
+) -> None:
+    """#5298 Task 30 re-review D2: a write that lands after a newer one (a print worker's
+    request still running on the API after it gave the answer up) writes nothing, ends
+    nothing and keeps the print running; a write as old as the row writes again."""
+    _, reports, pid = linked
+    start = datetime.now(UTC)
+    later = start + timedelta(seconds=5)
+    assert reports.put(pid, RUNNING_X, start) is None
+    assert reports.put(pid, FINISH_X, later) == PrintEnd("x", timed=True)
+    # The older RUNNING report, landing late, would put "x" back running.
+    assert reports.put(pid, RUNNING_X, start) is None
+    assert reports.get(pid) == (FINISH_X, later)
+    # Nothing is running, so the next report ends nothing a second time.
+    assert reports.put(pid, FINISH_X, later + timedelta(seconds=1)) is None
+    # A write as old as the row is the same write again: written, ending nothing.
+    assert reports.put(pid, FINISH_X, later + timedelta(seconds=1)) is None
+    assert reports.get(pid) == (FINISH_X, later + timedelta(seconds=1))

@@ -4,10 +4,10 @@ blobs of the content store (`workspace-<sha256 of the sealed bytes>`), not `byte
 `ai_session_files`. The agent holds no store credential and mints no token: it asks
 here for a `TransferUrl` (`slicing/transfer.py`) to PUT a file to (always the internal
 blob route, `api/internal_blobs.py`), says what it PUT, and asks for one to GET a file
-back (S3's presigned URL on `store_backend` s3). The agent writes each file's holder
-`(ai_session_file, <workspace>/<path>)` in `blob_refs` itself, in the transaction that
-writes its row (a trigger on `ai_session_files`), so the blob sweep keeps a blob while a
-row names it.
+back (S3's presigned URL on `store_backend` s3). The agent holds each file's blob
+`(ai_session_file, <workspace>/<path>)` in `blob_refs` through its CRUD routes
+(`api/crud_agent.py`, #5299) before it writes the row and releases it once the row is
+gone, so the blob sweep keeps a blob while a row names it.
 
 Without a content store (`store_backend` local) every route is a 404, and the agent keeps
 the file's bytes in Postgres as before. With one but without what a `TransferUrl` needs
@@ -43,7 +43,9 @@ WORKSPACE_KEY_PREFIX = "workspace-"
 router = APIRouter(prefix=INTERNAL_WORKSPACE.removeprefix("/api/v1"), include_in_schema=False)
 
 _PENDING_KEY = re.compile(rf"^{WORKSPACE_PENDING_PREFIX}[0-9a-f]{{32}}$")
-_BLOB_KEY = re.compile(rf"^{WORKSPACE_KEY_PREFIX}[0-9a-f]{{64}}$")
+#: A workspace file's blob key; `api/crud_agent.py` holds only these.
+WORKSPACE_BLOB_KEY_PATTERN = rf"^{WORKSPACE_KEY_PREFIX}[0-9a-f]{{64}}$"
+_BLOB_KEY = re.compile(WORKSPACE_BLOB_KEY_PATTERN)
 
 
 class FinishedPut(BaseModel):
@@ -126,4 +128,4 @@ async def mint_download(key: str, slicing: SlicingDep) -> TransferUrl:
         raise _unavailable(err) from None
 
 
-__all__ = ["INTERNAL_WORKSPACE", "WORKSPACE_KEY_PREFIX", "router"]
+__all__ = ["INTERNAL_WORKSPACE", "WORKSPACE_BLOB_KEY_PATTERN", "WORKSPACE_KEY_PREFIX", "router"]

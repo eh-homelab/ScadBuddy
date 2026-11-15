@@ -65,7 +65,7 @@ class MemoryUploads:
     async def for_output(self, output_id: str) -> list[LibraryCopy]:
         return list(self.copies.get(output_id, []))
 
-    async def record(self, output_id: str, copy: LibraryCopy) -> None:
+    async def record(self, output_id: str, copy: LibraryCopy, lease: object = None) -> None:
         self.copies.setdefault(output_id, []).append(copy)
 
     async def recorded(self, library_file_ids: Iterable[int]) -> set[int]:
@@ -493,7 +493,7 @@ class DiesOnce(MemoryUploads):
         super().__init__()
         self.died = False
 
-    async def record(self, output_id: str, copy: LibraryCopy) -> None:
+    async def record(self, output_id: str, copy: LibraryCopy, lease: object = None) -> None:
         if not self.died:
             self.died = True
             raise RuntimeError("the attempt died after the upload")

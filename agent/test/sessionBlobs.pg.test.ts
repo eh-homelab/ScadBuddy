@@ -195,6 +195,20 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session ima
     expect((await get(`/api/v1/ai/sessions/${child.id}/blobs/${NAME}`)).status).toBe(200)
   })
 
+  it('a fork whose parent is forgotten between its insert and its log goes whole (#4212)', async () => {
+    const id = await withImage()
+    await m.store.append({ projectKey: 'p', sessionId: id }, [{ type: 'user', uuid: 'u1', message: {} }])
+    // The workspace copy runs after the insert and before the log is written: forget the parent there.
+    const files = (m as unknown as { files: { copy(from: string, to: string): Promise<void> } }).files
+    const copy = files.copy.bind(files)
+    files.copy = async (from, to) => {
+      await copy(from, to)
+      await forgetSubject({ sql: db.sql, keys: testPayloadKeys(db.sql) }, `session-${id}`)
+    }
+    await expect(m.fork(id, browser)).rejects.toMatchObject({ code: 'not_found' })
+    expect(await db.sql`SELECT 1 FROM ai_sessions WHERE parent_id = ${id}`).toHaveLength(0)
+  })
+
   it('records which images a durable tool call produced, in order, and a retry replaces them (#2478)', async () => {
     const { session } = await m.start(browser, { origin: 'chat' })
     const blobs = new SessionBlobs(db.sql)
@@ -219,7 +233,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session ima
     expect(await db.sql`SELECT 1 FROM ai_session_tool_images WHERE session_id = ${session.id}`).toHaveLength(0)
   })
 
-  it('copies into a fork only the images its copied events name (#2150)', async () => {
+  it('serves a fork only the images the events it reads name, and copies none (#2150, #4212)', async () => {
     const id = await withImage()
     await m.store.append({ projectKey: 'p', sessionId: id }, [{ type: 'user', uuid: 'u1', message: {} }])
     // An image the parent holds that no event the fork copies names.
@@ -229,7 +243,11 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session ima
       VALUES (${id}, ${stray}, 'image/png', ${Buffer.from(PNG, 'base64')})`
     const child = await m.fork(id, browser)
     const rows = await db.sql`SELECT name FROM ai_session_blobs WHERE session_id = ${child.id}`
-    expect(rows.map((r) => r.name as string)).toEqual([NAME])
+    expect(rows).toEqual([])
+    const named = await get(`/api/v1/ai/sessions/${child.id}/blobs/${NAME}`)
+    expect(named.status).toBe(200)
+    expect(Buffer.from(await named.arrayBuffer())).toEqual(Buffer.from(PNG, 'base64'))
+    expect((await get(`/api/v1/ai/sessions/${child.id}/blobs/${stray}`)).status).toBe(404)
   })
 
   describe('the images a user sends with a turn', () => {

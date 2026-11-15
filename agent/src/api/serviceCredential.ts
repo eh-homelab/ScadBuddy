@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises'
 import type { Sql } from 'postgres'
 import type { Middleware } from 'openapi-fetch'
 import { type Kek, openSecret } from '../secrets.js'
+import { backendNotUp } from './backendUp.js'
 
 // #4975 phase 4 (spec 2026-11-01 §7.1, §7.2): the agent's service credential on every call
 // to the backend: the openapi-fetch client (`serviceCredentialMiddleware`) and the workspace
@@ -105,7 +106,11 @@ const TOKEN_TYPES = {
   k8s: 'urn:ietf:params:oauth:token-type:jwt',
   bootstrap: 'urn:scadbuddy:params:token-type:bootstrap',
 } as const
-/** A failed exchange is tried again after 5 s, doubling to 60 s (§6.3). */
+/**
+ * A failed exchange is tried again after 5 s, doubling to 60 s (§6.3). A refused connection
+ * (the backend not up yet, #5868) is not a failure: it is tried again at the next call, which
+ * goes to the same backend and would be refused too, and logged once until the backend answers.
+ */
 export const EXCHANGE_RETRY_FIRST_MS = 5_000
 export const EXCHANGE_RETRY_MAX_MS = 60_000
 /** An old backend answers 404: the view serves, and the exchange is tried again this much later. */
@@ -136,6 +141,8 @@ export class ExchangeCredential implements CredentialSource {
   private delay = EXCHANGE_RETRY_FIRST_MS
   private exchangedAt: number | undefined
   private onFallback = false
+  /** Whether "waiting for the backend" was logged since the backend last answered. */
+  private waiting = false
   private exchanging: Promise<void> | undefined
 
   private readonly url: string
@@ -209,9 +216,15 @@ export class ExchangeCredential implements CredentialSource {
         signal: AbortSignal.timeout(EXCHANGE_TIMEOUT_MS),
       })
     } catch (error) {
+      if (backendNotUp(error)) {
+        if (!this.waiting) this.log("the agent's service credential: waiting for the backend, which is not up yet")
+        this.waiting = true
+        return
+      }
       this.failed((error as Error).name)
       return
     }
+    this.waiting = false
     const now = this.now()
     if (response.status === 200) {
       let body: { access_token?: unknown; expires_in?: unknown }

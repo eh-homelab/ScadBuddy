@@ -55,6 +55,25 @@ describe('ChargesEditor', () => {
     expect(plain).not.toHaveBeenCalled()
   })
 
+  it("shows the purchase and handling rows read-only and never sends them (#6133)", async () => {
+    const plain = vi.spyOn(api, 'updateOrder')
+    const bought: OrderCharge = { ...POST, id: 'h0000000-0000-4000-8000-000000000002', order_id: ORDER_DRAFT, kind: 'purchase', label: 'Bought for your project: magnets', amount_minor: 899, position: 0, purchase_link_id: 's1' }
+    const handling: OrderCharge = { ...POST, id: 'h0000000-0000-4000-8000-000000000003', order_id: ORDER_DRAFT, kind: 'handling', label: 'Handling for bought items', amount_minor: 290, position: 0 }
+    const { user } = show(order(ORDER_DRAFT, 'draft'), [{ ...POST, order_id: ORDER_DRAFT }, bought, handling])
+    const region = screen.getByRole('region', { name: 'Charges' })
+    const kept = within(region).getAllByTestId('lifecycle-charge')
+    expect(kept.map((row) => row.textContent)).toEqual([
+      expect.stringContaining('Bought for your project: magnets'),
+      expect.stringContaining('Handling for bought items'),
+    ])
+    expect(within(region).queryByLabelText('Charge 2 label')).toBeNull()
+    await user.clear(within(region).getByLabelText('Charge 1 amount'))
+    await user.type(within(region).getByLabelText('Charge 1 amount'), '4')
+    await user.click(within(region).getByRole('button', { name: 'Save charges' }))
+    await waitFor(() => expect(plain).toHaveBeenCalled())
+    expect(plain).toHaveBeenCalledWith(ORDER_DRAFT, { charges: [{ kind: 'shipping', label: 'Post', amount_minor: 400 }] })
+  })
+
   it('asks again after a new edit, and Back drops the confirm', async () => {
     const after = vi.spyOn(api, 'replaceChargesAfterAcceptance')
     const { user } = show(order(ORDER_ACCEPTED, 'accepted'))

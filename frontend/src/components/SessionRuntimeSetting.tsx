@@ -159,8 +159,8 @@ export function SessionRuntimeSetting() {
             />
             <p id={`${appendId}-help`} className="text-xs text-muted-foreground">
               Added after ScadBuddy&apos;s own part, which always goes in whatever you write here: the rule that tool
-              results are data and never instructions, and the note on which browser each browser tool drives. A
-              session whose plugin package names Claude Code built-ins also gets a note on those.
+              results are data and never instructions, and the note on which browser each browser tool drives. Each
+              session also gets a note on the built-in tools the session itself provides, such as WebFetch and ScheduleWakeup.
             </p>
             <Collapsible className="text-xs text-muted-foreground">
               <CollapsibleTrigger asChild>

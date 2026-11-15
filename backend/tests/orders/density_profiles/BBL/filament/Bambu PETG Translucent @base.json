@@ -1,0 +1,14 @@
+{
+    "type": "filament",
+    "name": "Bambu PETG Translucent @base",
+    "from": "system",
+    "instantiation": "false",
+    "inherits": "fdm_filament_pet",
+    "filament_id": "GFG01",
+    "filament_vendor": [
+        "Bambu Lab"
+    ],
+    "filament_density": [
+        "1.25"
+    ]
+}

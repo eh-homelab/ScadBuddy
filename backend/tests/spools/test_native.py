@@ -1,5 +1,5 @@
 """ScadBuddy's own spool inventory, the native spool provider (#4643, tier B): its records
-in ``native_spools``, and the provider that the refresh copies them through."""
+in the ``filament_*`` tables (#6261), and the provider that the refresh copies them through."""
 
 from __future__ import annotations
 
@@ -40,9 +40,13 @@ PRINTER = uuid.UUID("5d0c8f1e-0000-4000-8000-000000000643")
 
 
 def _core() -> SettingsOnly:
-    """A worker's core: the provider is built over the settings store's pool, which it
-    does not open until it reads."""
-    return SettingsOnly(cast(SettingsStore, SimpleNamespace(pool=None, load=StoredSettings)))
+    """A worker's core: the settings read through the API, and the native provider built
+    over the worker's remote store of ScadBuddy's own spools, which asks nothing until it
+    reads (#5298 Task 31)."""
+    return SettingsOnly(
+        cast(SettingsStore, SimpleNamespace(load=StoredSettings)),
+        native_spools=cast(NativeSpoolStore, SimpleNamespace()),
+    )
 
 
 def test_the_native_provider_is_discovered_ahead_of_bambuddy() -> None:

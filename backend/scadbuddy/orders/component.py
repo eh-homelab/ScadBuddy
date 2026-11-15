@@ -32,8 +32,10 @@ from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.flow_triggers.store import TriggerStore
 from scadbuddy.flows.component import FLOWS
 from scadbuddy.flows.definitions import FlowDefinitions
+from scadbuddy.library.settings_store import settings_kek
 from scadbuddy.orders.archives import mirror_run
 from scadbuddy.orders.builtin_flow import ensure_builtin_flow
+from scadbuddy.orders.density import DensityTable, density_table
 from scadbuddy.orders.integrations import OrderIntegrations, choose
 from scadbuddy.orders.lifecycle import Lifecycle
 from scadbuddy.orders.machine_rate import MachineRates, MachineRateStore
@@ -42,17 +44,20 @@ from scadbuddy.orders.pricebook import PriceBookReader
 from scadbuddy.orders.printing import listen_for_prints
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.orders.storefront.listings import ListingStore
+from scadbuddy.orders.storefront.mail import MAIL_SETTINGS, MailConfig, StorefrontMail
 from scadbuddy.payments.registry import providers
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.rows.component import ROWS
 from scadbuddy.store.refs import BlobRefs
 
-#: The settings ``OrdersComponent.rules`` reads (#5281).
+#: The settings ``OrdersComponent.rules`` reads (#5281, #6133).
 ORDER_RULE_SETTINGS = frozenset(
     {
         "orders_currency",
         "orders_tax_percent",
         "orders_tax_shipping",
+        "orders_purchase_fee_flat_minor",
+        "orders_purchase_fee_percent",
         "orders_deposit_policy",
         "storefront_shipping_options",
     }
@@ -75,6 +80,7 @@ class OrdersComponent:
         self._store: OrderStore | None = None
         self._lifecycle: Lifecycle | None = None
         self._listings: ListingStore | None = None
+        self._mail: StorefrontMail | None = None
         self._integrations: tuple[str | None, OrderIntegrations] | None = None
         #: The slice quotes' holds on their sliced files (#4250 Ruling 3), on the
         #: projection's autocommit pool as every `blob_refs` writer's.
@@ -114,16 +120,23 @@ class OrdersComponent:
             )
         return self._integrations[1]
 
+    def densities(self) -> DensityTable | None:
+        """The image's vendor presets by id (#6136, `orders/density.py`), built once per
+        process; ``None`` without the image's tree. Blocking: call it in a thread."""
+        return density_table(self.core.settings.slicer_profiles_dir)
+
     @property
     def price_book(self) -> PriceBookReader:
         """The book in force (#4250): the stored policy and the filament records."""
         return PriceBookReader(
-            self.core.settings_store, self.store, spool_import=self.integrations.linked
+            self.core.settings_store,
+            self.store,
+            spool_import=self.integrations.linked,
         )
 
     def rules(self) -> OrderRules:
         """The shop's money rules (#5281) as stored now: the lifecycle reads them on each
-        use, so a change applies to the next transition. One query on their five rows
+        use, so a change applies to the next transition. One query on their seven rows
         (``SettingsStore.read``), never the whole snapshot or a secret; a transition reads
         them once."""
         values = self.core.settings_store.read(ORDER_RULE_SETTINGS)
@@ -133,7 +146,34 @@ class OrdersComponent:
             tax_shipping=values["orders_tax_shipping"],
             deposit_policy=tuple(values["orders_deposit_policy"] or ()),
             shipping_options=tuple(values["storefront_shipping_options"] or ()),
+            purchase_fee_flat_minor=values["orders_purchase_fee_flat_minor"],
+            purchase_fee_percent=Decimal(values["orders_purchase_fee_percent"]),
         )
+
+    def mail_config(self) -> MailConfig:
+        """The storefront's SMTP settings as stored now (#5283): one query on their rows,
+        read by each send and each transition that would mail."""
+        values = self.core.settings_store.read(MAIL_SETTINGS)
+        return MailConfig(
+            host=values["storefront_mail_host"],
+            port=values["storefront_mail_port"],
+            user=values["storefront_mail_user"],
+            sender=values["storefront_mail_sender"],
+            tls=values["storefront_mail_tls"],
+        )
+
+    @property
+    def mail(self) -> StorefrontMail:
+        """The storefront's mail (#5283): the outbox's sender and the sealed SMTP
+        password. Its links use the env-only ``storefront_public_url``."""
+        if self._mail is None:
+            self._mail = StorefrontMail(
+                self.store,
+                settings_kek(self.core.settings.secret_key_file),
+                self.mail_config,
+                lambda: self.core.settings.storefront_public_url,
+            )
+        return self._mail
 
     @property
     def machine_rates(self) -> MachineRates:
@@ -154,6 +194,9 @@ class OrdersComponent:
             self._lifecycle.offered_providers = frozenset(
                 providers(fake=self.core.settings.payments_fake_provider)
             )
+            self._lifecycle.mail_ready = lambda: self.mail_config().ready
+            self._lifecycle.on_mail = self.mail.kick
+            self._lifecycle.kek = settings_kek(self.core.settings.secret_key_file)
         return self._lifecycle
 
 
@@ -182,6 +225,8 @@ async def _run(orders: OrdersComponent) -> AsyncIterator[None]:
         )
     # The print path's follow (#4719): an item follows the print its attempt started.
     # §8.2: a settled print's attempt copies its Bambuddy archives.
+    # #5283: a commit that queued storefront mail sends it on this loop, off the request.
+    orders.mail.bind(asyncio.get_running_loop())
     remove = listen_for_prints(
         orders.core.events,
         orders.lifecycle,
@@ -195,6 +240,7 @@ async def _run(orders: OrdersComponent) -> AsyncIterator[None]:
             with contextlib.suppress(asyncio.CancelledError):
                 await registering
         await remove()
+        await orders.mail.stop()
 
 
 COMPONENT = Component(ORDERS, build=_build, run=_run)

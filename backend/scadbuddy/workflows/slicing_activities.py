@@ -29,6 +29,7 @@ from scadbuddy.bambuddy.print_run import NATIVE_SLICER_UNAVAILABLE, PlannedRun
 from scadbuddy.bambuddy.runs import PrintRunError
 from scadbuddy.bambuddy.send import folder_listing, same_bytes
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
+from scadbuddy.core.heartbeat import heartbeating
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.print_library.component import PrintLibrary
@@ -44,7 +45,7 @@ from scadbuddy.slicing.start import start_native_slice
 from scadbuddy.slicing.store import HOLDER, NativeSlice, SliceSubjectError
 from scadbuddy.slicing.transfer import TransferRecordError, Transfers, TransferUnavailableError
 from scadbuddy.store.content import BlobScope, ContentStore
-from scadbuddy.workflows.print_activities import heartbeating, raised_as
+from scadbuddy.workflows.print_activities import raised_as
 from scadbuddy.workflows.print_models import (
     FAILED,
     SLICE_RUN_ACTIVITY,

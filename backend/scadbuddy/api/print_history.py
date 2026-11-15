@@ -1,7 +1,8 @@
 """The prints API (#308, epic #305; print-history plan §2.4).
 
-A print is one Bambuddy archive linked to one of ScadBuddy's outputs (#306), or to a
-Bambuddy library file ScadBuddy printed (#976), keyed by the archive's id. The list is
+A print is one Bambuddy archive linked to one of ScadBuddy's outputs (#306), to a
+Bambuddy library file ScadBuddy printed (#976), or to a model a person imported it onto
+(#4698, `api/print_imports.py`), keyed by the archive's id. The list is
 driven by those links (``print_links``, keyed by print subject since #1750), so an
 archive printed from anywhere else is never listed: this is ScadBuddy's print history,
 not a copy of Bambuddy's. A library file's print has no
@@ -69,7 +70,12 @@ from scadbuddy.bambuddy.models import (
     TimelapseInfo,
 )
 from scadbuddy.bambuddy.part_settings import PartSettingsMap, parts_set_only
-from scadbuddy.bambuddy.print_links import LanArchiveLink, LinkedPrint, PrintLinkStore
+from scadbuddy.bambuddy.print_links import (
+    LanArchiveLink,
+    LinkedPrint,
+    PrintImport,
+    PrintLinkStore,
+)
 from scadbuddy.bambuddy.print_source import is_sliced, printable
 from scadbuddy.bambuddy.runs import LanPending, PrintRun, PrintRunStore
 from scadbuddy.bambuddy.subject import PrintSubject
@@ -151,9 +157,11 @@ class PrintCover(_Response):
 
 class PrintSummary(_Response):
     archive_id: int
-    #: The output printed; None for a library file's print (``library_file_id``).
+    #: The output printed; None for a library file's print (``library_file_id``) and
+    #: for an imported one.
     output_id: str | None
-    #: The output's template; None for a library file's print.
+    #: The output's template, or the model an imported print is linked to (#4698); None
+    #: for a library file's print.
     slug: str | None
     #: The Bambuddy library file printed, for a print of one (#976); else None.
     library_file_id: int | None
@@ -466,13 +474,18 @@ def _record(archive: ArchiveDetail) -> PrintRecord:
 class PrintLinks(_Response):
     #: Bambuddy's archives page; None when the archive is gone from it.
     bambuddy_url: str | None
-    #: The template's customizer in the UI, relative to it; None for a library file's.
+    #: The template's customizer in the UI, relative to it (an imported print's model's
+    #: too); None for a library file's.
     customize_url: str | None
 
 
 class PrintDetail(PrintSummary):
-    #: The output the print came from; None for a library file's print.
+    #: The output the print came from; None for a library file's print and for an
+    #: imported one.
     provenance: PrintProvenance | None
+    #: For a print a person imported onto a model (#4698): the source its 3MF was read
+    #: from, the file's name, size and hash. None for every other print.
+    imported: PrintImport | None = None
     files: list[PrintFile]
     media: PrintMedia
     outcome: PrintOutcome
@@ -552,7 +565,9 @@ async def _named_run(
     links: PrintLinkStore, runs: PrintRunStore, link: LinkedPrint
 ) -> PrintRun | _ByFile | None:
     """The run a send or a recorded LAN start names, or `_BY_FILE` when neither is
-    recorded for a link found by content hash."""
+    recorded for a link found by content hash. An imported print has no run (#4698)."""
+    if link.matched_by == "import":
+        return None
     if link.queue_item_id is not None:
         send = await links.send(link.queue_item_id)
         if send is None or send.run_id is None:
@@ -746,7 +761,7 @@ def _summary(
         archive_id=link.archive_id,
         queue_item_id=link.queue_item_id,
         output_id=None if meta is None else meta.id,
-        slug=None if meta is None else meta.slug,
+        slug=link.slug if meta is None else meta.slug,
         library_file_id=link.library_file_id,
         library_file_name=file_name,
         output_name=name,
@@ -1057,6 +1072,8 @@ async def list_prints(
     if slug is not None:
         output_ids = await asyncio.to_thread(outputs.ids_for, slug)
         subjects = [PrintSubject.output(output_id) for output_id in output_ids]
+        # The prints a person imported onto the model (#4698).
+        subjects.append(PrintSubject.model(slug))
     elif library_file_id is not None:
         subjects = [PrintSubject.library(library_file_id)]
     defaults = _Defaults(paths=paths, history=history, config=config, fetcher=fetcher)
@@ -1398,6 +1415,7 @@ async def get_print(
             )
     defaults = _Defaults(paths=paths, history=history, config=config, fetcher=fetcher)
     meta = output.meta if output is not None else None
+    imported = await links.import_of(archive_id) if link.matched_by == "import" else None
 
     async with client_for(store.load()) as client:
         archive, part_settings = await _part_settings(cache, client, links, print_runs.store, link)
@@ -1449,9 +1467,16 @@ async def get_print(
         slicing=_slicing(archive) if archive is not None else None,
         record=_record(archive) if archive is not None else None,
         part_settings=part_settings,
+        imported=imported,
         links=PrintLinks(
             bambuddy_url=bambuddy_url,
-            customize_url=f"/m/{output.meta.slug}" if output is not None else None,
+            customize_url=(
+                f"/m/{output.meta.slug}"
+                if output is not None
+                else f"/m/{link.slug}"
+                if link.slug is not None
+                else None
+            ),
         ),
     )
 

@@ -3,7 +3,8 @@ import { proxyActivities } from '@temporalio/workflow'
 // One tool call of a session's turn (unified runtime plan 2026-10-13 Step 9.2, decision Q1): a
 // short workflow of its own, `session-<uuid>-call-<tool_use_id>`, on the shared `agent-tools`
 // queue, whose one activity runs the tool (`tool:<name>`, toolActivities.ts `toolCallActivities`)
-// on `queue`. So the session's own history carries none of the call, and neither of Temporal's
+// on `queue`. A turn starts it eagerly on its own replica's agent-tools worker when it can
+// (tools/activityProjection.ts `ToolCallStarterDeps`, #5865). So the session's own history carries none of the call, and neither of Temporal's
 // per-execution Update limits (10 in flight, 2000 in all) bounds a turn's calls. The id is the
 // call's, so a re-send after a lost answer finds the same execution and its result. Its payloads
 // are sealed under the session's key (payloadCodec.ts `subjectOf`, Step 9.1). In the workflow

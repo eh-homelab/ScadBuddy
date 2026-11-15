@@ -43,3 +43,26 @@ def test_a_malformed_key_is_refused(key: str) -> None:
 def test_a_library_subject_needs_a_file_id() -> None:
     with pytest.raises(ValidationError):
         PrintSubject(kind="library", id="abc")
+
+
+def test_a_model_subject_is_a_print_imported_onto_a_model() -> None:
+    # #4698: a print ScadBuddy did not start, linked to a model, not to an output.
+    model = PrintSubject.model("basketball-trophy")
+
+    assert (model.kind, model.id, model.key) == (
+        "model",
+        "basketball-trophy",
+        "model:basketball-trophy",
+    )
+    assert (model.output_id, model.file_id, model.slug) == (None, None, "basketball-trophy")
+    assert PrintSubject.parse(model.key) == model
+    assert PrintSubject.from_run_subject(model.run_subject) == model
+    assert PrintSubject.output(OUTPUT).slug is None
+
+
+@pytest.mark.parametrize("slug", ["", "Upper", "-lead", "a/b", "a b"])
+def test_a_model_subject_needs_a_model_slug(slug: str) -> None:
+    with pytest.raises(ValueError, match="print subject"):
+        PrintSubject.parse(f"model:{slug}")
+    with pytest.raises(ValidationError):
+        PrintSubject(kind="model", id=slug)

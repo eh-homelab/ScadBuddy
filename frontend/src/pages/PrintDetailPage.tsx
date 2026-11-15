@@ -23,6 +23,7 @@ import { cn } from '@/lib/utils'
 import { modelPath } from '../lib/deeplink'
 import { USER_ONLY } from '../agent/dom'
 import { AttachToOrderItem } from '../components/orders/AttachToOrderItem'
+import { bambuddyLink } from '../lib/bambuddyLinks'
 import { isEmbedded, openExternal } from '../lib/embed'
 import { formatBytes, formatDuration } from '../lib/format'
 import { useAsync } from '../lib/useAsync'
@@ -198,7 +199,7 @@ function PrintView({ print, reload }: { print: PrintDetail; reload: () => void }
               </Button>
             )}
             {print.links.bambuddy_url && (
-              <Button variant="outline" onClick={() => openExternal(print.links.bambuddy_url as string)}>
+              <Button variant="outline" onClick={() => openExternal(bambuddyLink(print.links.bambuddy_url as string))}>
                 <ExternalLinkIcon aria-hidden="true" />
                 Open in Bambuddy
               </Button>
@@ -231,10 +232,13 @@ function PrintView({ print, reload }: { print: PrintDetail; reload: () => void }
           ) : (
             <Section title="Provenance">
               {/* #1860 — say why there is none, rather than leave the section out. */}
-              <p className="text-[13px] text-muted-foreground">
-                {print.library_file_id !== null
-                  ? 'Printed from a Bambuddy library file, not a ScadBuddy template: there is no template, revision or parameters.'
-                  : 'The ScadBuddy output this print came from is not known.'}
+              <p className="text-[13px] text-muted-foreground" data-testid="print-provenance">
+                {print.imported
+                  ? // #4698 — a print a person linked to the model, from the file they chose.
+                    `Imported onto ${print.imported.slug} from ${IMPORT_SOURCE[print.imported.source]} ${print.imported.filename}. ScadBuddy did not print it, so there are no parameters.`
+                  : print.library_file_id !== null
+                    ? 'Printed from a Bambuddy library file, not a ScadBuddy template: there is no template, revision or parameters.'
+                    : 'The ScadBuddy output this print came from is not known.'}
               </p>
             </Section>
           )}
@@ -291,6 +295,7 @@ function GallerySection({ print }: { print: PrintDetail }) {
  * render, or the library file's plate, read from its 3MF as a print of it reads it (#1753).
  */
 function RenderSection({ print }: { print: PrintDetail }) {
+  const unit = useDisplayUnit()
   const glb = print.files.find((file) => file.kind === 'preview_glb')
   const output = useAsync(
     async () => (glb && print.output_id ? await api.getOutput(print.output_id).catch(() => null) : null),
@@ -354,7 +359,7 @@ function RenderSection({ print }: { print: PrintDetail }) {
         ) : (
           !output.loading && (
             <Suspense fallback={null}>
-              <Preview job={job} rendering={false} />
+              <Preview job={job} unit={unit} rendering={false} />
             </Suspense>
           )
         )}
@@ -748,6 +753,14 @@ function RunRow({ run }: { run: Run }) {
       {run.failure_reason && <span className="text-warn">{run.failure_reason}</span>}
     </li>
   )
+}
+
+/** #4698 — where an imported print's 3MF was, as the provenance names it. */
+const IMPORT_SOURCE: Record<NonNullable<PrintDetail['imported']>['source'], string> = {
+  archive: "the archive's file",
+  archive_source: "the archive's slicer project",
+  library: 'the library file',
+  printer: "the printer's file",
 }
 
 function ProvenanceSection({ provenance }: { provenance: NonNullable<PrintDetail['provenance']> }) {

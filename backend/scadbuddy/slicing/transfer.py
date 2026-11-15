@@ -3,7 +3,14 @@
 store credentials: a GET is S3's presigned URL of the object on `store_backend` s3, and
 the internal blob route (`api/internal_blobs.py`) on any other backend; every PUT is
 the internal route's, to a pending key the API stores the body under and records in
-`transfer_puts`. A URL's header carries a bearer token: never log one."""
+`transfer_puts`. A URL's header carries a bearer token: never log one.
+
+The print worker's LAN print reads a native slice's sliced 3MF by a GET URL the API mints
+for it (`POST /api/v1/internal/crud/print/transfer-urls`, #5298 Task 32): always the
+internal route's (`internal_get`, good for `READ_TTL`), never a presigned one, so the print
+pod reaches the API only, and only for a key the content index holds live as a slicer's
+output: a `SLICE_KIND` blob with `SLICED_OUTPUT_META` (the route's module docstring says
+why, and what it costs)."""
 
 from __future__ import annotations
 
@@ -20,10 +27,29 @@ from pydantic import BaseModel, ConfigDict
 from scadbuddy.slicing.models import TransferUrl
 from scadbuddy.slicing.transfer_token import Method, TransferToken, sign
 from scadbuddy.store.content import ContentStore
-from scadbuddy.store.content_models import BlobMissingError
+from scadbuddy.store.content_models import BlobKind, BlobMissingError
 from scadbuddy.store.s3 import S3ContentBackend
 
 TRANSFER_TTL = timedelta(hours=2)
+#: How long the print worker's read URL is good for: one read, started at once.
+READ_TTL = timedelta(minutes=10)
+#: The only blob kind the print worker may get a read URL for. Kind ``slice`` holds every
+#: native slice's file, and also the slicer's inputs (the laid-out copy and the preset
+#: files), so the kind alone does not admit a key: :data:`SLICED_OUTPUT_META` does.
+SLICE_KIND: BlobKind = "slice"
+#: The index ``meta`` :meth:`Transfers.finish_put` merges into a slicer's output, and the
+#: mark the print worker's read URL needs. The slicer's inputs get no mark. A later put of
+#: the same key keeps it (`store/index.py` `put_in`).
+SLICED_OUTPUT_META: dict[str, str] = {"output": "sliced"}
+#: A `BlobIndex.mark` cutoff that every row passes.
+_EVER = datetime.max.replace(tzinfo=UTC)
+#: The reason of the 403 for any other key: unknown, gone, of another kind, or a
+#: slicer's input.
+TRANSFER_REFUSED = "transfer-refused"
+#: The reason of the 503 when the content store's backend does not answer the read of
+#: the key: a passing failure, which the CRUD client retries as it does any 5xx but
+#: ``not_configured``.
+STORE_UNAVAILABLE = "store_unavailable"
 TRANSFER_HEADER = "X-ScadBuddy-Transfer"
 INTERNAL_BLOBS = "/api/v1/internal/blobs"
 #: The internal PUT route takes only a key with this prefix: a token never writes a
@@ -109,7 +135,7 @@ class Transfers:
         self.secret = secret
         self.now = now
 
-    def _internal(self, method: Method, key: str) -> TransferUrl:
+    def _internal(self, method: Method, key: str, ttl: timedelta = TRANSFER_TTL) -> TransferUrl:
         if self.internal_base_url is None:
             raise TransferUnavailableError(
                 "the native slicer needs SCADBUDDY_API_INTERNAL_URL: the worker reaches the"
@@ -122,7 +148,7 @@ class Transfers:
             )
         # Whole seconds, as the token carries: the URL then says the instant the route
         # stops taking it, not up to a second after.
-        expires_at = (self.now() + TRANSFER_TTL).replace(microsecond=0)
+        expires_at = (self.now() + ttl).replace(microsecond=0)
         token = TransferToken(method=method, blob_key=key, expires_at=expires_at)
         return TransferUrl(
             url=f"{self.internal_base_url}{INTERNAL_BLOBS}/{key}",
@@ -130,12 +156,13 @@ class Transfers:
             expires_at=expires_at,
         )
 
-    def internal_get(self, key: str) -> TransferUrl:
+    def internal_get(self, key: str, ttl: timedelta = TRANSFER_TTL) -> TransferUrl:
         """The internal GET route's URL of ``key``, whether or not it is stored, on any
-        backend. Public for the route's tests, which run on moto's S3, where `mint_get`
-        presigns instead. A caller that needs ``key`` stored (a `BlobMissingError` now,
-        not a 404 from the worker later) uses `mint_get`."""
-        return self._internal("GET", key)
+        backend, good for ``ttl``. The print worker's read URL (`READ_TTL`), and the
+        route's tests', which run on moto's S3, where `mint_get` presigns instead. A
+        caller that needs ``key`` stored (a `BlobMissingError` now, not a 404 from the
+        worker later) uses `mint_get`."""
+        return self._internal("GET", key, ttl)
 
     async def mint_get(self, key: str) -> TransferUrl:
         """A URL that reads the stored ``key``: `BlobMissingError` if it is not."""
@@ -161,8 +188,23 @@ class Transfers:
     async def finish_put(self, put: PendingPut, *, sha256: str, size: int) -> str:
         """The key the PUT to ``put`` was stored under, once the worker's reported
         sha256 and size are the ones the route stored and the key is stored still (the
-        `slice` kind is swept, and nothing holds it until the caller's `BlobRefs.add`)."""
-        return await self.finish_pending(put.pending_key, sha256=sha256, size=size)
+        `slice` kind is swept, and nothing holds it until the caller's `BlobRefs.add`).
+
+        The key is marked a slicer's output (:data:`SLICED_OUTPUT_META`), the one mark
+        the print worker's read URL needs. Only the slice record step calls this, for the
+        ``sliced_3mf`` PUT: the worker's ``slicedata`` PUT is never finished, so never
+        marked. Inputs and outputs of the same bytes share one key, so an output PUT of an
+        input's bytes marks that input; only a compromised slicer worker could send one,
+        and it already holds those bytes (accepted)."""
+        key = await self.finish_pending(put.pending_key, sha256=sha256, size=size)
+        await asyncio.to_thread(
+            self.content.index.mark,
+            [key],
+            backend=self.content.name,
+            cutoff=_EVER,
+            **SLICED_OUTPUT_META,
+        )
+        return key
 
     async def finish_pending(self, pending_key: str, *, sha256: str, size: int) -> str:
         """`finish_put` by the pending key alone (the agent's workspace files, #4789)."""

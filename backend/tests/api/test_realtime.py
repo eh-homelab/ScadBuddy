@@ -22,6 +22,7 @@ from scadbuddy.core.events import (
     BusResync,
     Event,
     EventBus,
+    FlowChanged,
     FlowRunEvent,
     FontInstalled,
     InProcessEventBus,
@@ -30,6 +31,7 @@ from scadbuddy.core.events import (
     LibraryRemoved,
     ModelEvent,
     OutputEvent,
+    PreviewSliceEvent,
     PrinterEvent,
     PrintEvent,
     PrintRunEvent,
@@ -98,7 +100,7 @@ PRINTER_ID = "6f1c2a9e-3b4d-4e5f-8a7b-9c0d1e2f3a4b"
 def test_a_printer_reaches_a_socket_following_the_printers(
     client: TestClient, bus: EventBus
 ) -> None:
-    """#3823: Now printing follows `printers`; a printer's own topic is `printer:<id>`."""
+    """#3823: /prints follows `printers`; a printer's own topic is `printer:<id>`."""
     with client.websocket_connect(WS) as ws:
         subscribe(ws, "printers", f"printer:{PRINTER_ID}")
         bus.publish(PrinterEvent(kind="printer.report", printer_id=PRINTER_ID))
@@ -408,6 +410,12 @@ def test_allowed_origins_env_is_split_on_commas() -> None:
             ["analyzers"],
         ),
         (SessionBusEvent(kind="session.message", session_id="s", seq=3), []),
+        # #265: the dialog's background slice, and a flow's definition.
+        (
+            PreviewSliceEvent(kind="preview_slice.progress", slicer="native", job_id=12),
+            ["preview-slice:native:12"],
+        ),
+        (FlowChanged(name="swap"), ["flows"]),
     ],
 )
 def test_topics_of(event: Any, topics: list[str]) -> None:
@@ -426,6 +434,9 @@ def test_every_topic_an_event_names_is_one_a_client_may_follow() -> None:
         FontInstalled(family="DejaVu Sans"),
         SettingsChanged(section="connection"),
         FlowRunEvent(run_id=FLOW_RUN_ID, definition_id="d1", status="running"),
+        FlowChanged(name="swap"),
+        PreviewSliceEvent(kind="preview_slice.settled", slicer="bambuddy", job_id=7),
+        PreviewSliceEvent(kind="preview_slice.progress", slicer="native", job_id=10**17),
     ]
     for event in events:
         for topic in realtime.topics_of(event):

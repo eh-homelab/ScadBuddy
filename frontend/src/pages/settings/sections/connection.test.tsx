@@ -1,8 +1,9 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { api } from '../../../api/client'
 import type { Settings } from '../../../api/types'
+import { resetBambuddyLinks, setBambuddyLinks } from '../../../lib/bambuddyLinks'
 import { mockSettings } from '../../../mocks/handlers'
 import { server } from '../../../mocks/server'
 import { enter, region, renderSettingsSection } from '../testing'
@@ -195,6 +196,25 @@ describe('Connection', () => {
     )
   })
 
+  it('links to the Bambuddy beside the page, as every Bambuddy link does (#6212)', async () => {
+    setBambuddyLinks({
+      bambuddy_url: 'http://bambuddy.svc',
+      bambuddy_web_urls: 'https://bambuddy.internal.nullreference.io,https://bambuddy.sso.nullreference.io',
+    })
+    vi.stubGlobal('location', { ...window.location, hostname: 'scadbuddy.sso.nullreference.io' })
+    onTestFinished(() => {
+      vi.unstubAllGlobals()
+      resetBambuddyLinks()
+    })
+    renderSettingsSection(<Connection />)
+    const status = await screen.findByTestId('bambuddy-status')
+    await waitFor(() => expect(status).toHaveTextContent('Finish photo in Bambuddy: off'))
+    expect(within(status).getByRole('link', { name: 'Turn it on in Bambuddy' })).toHaveAttribute(
+      'href',
+      'https://bambuddy.sso.nullreference.io/settings',
+    )
+  })
+
   it('typing a key after Remove key replaces it instead of clearing it', async () => {
     const put = vi.spyOn(api, 'putSettings')
     const { user } = renderSettingsSection(<Connection />)
@@ -244,14 +264,14 @@ describe('Connection render key (#426)', () => {
     return bodies
   }
 
-  it('warns while render workers would hold the full key', async () => {
+  it('warns while no render key is saved', async () => {
     serve({ ...stored, has_render_api_key: false, render_key_fallback: true })
     renderSettingsSection(<Connection />)
     await seeded()
     const warning = screen.getByTestId('render-key-fallback')
     expect(warning).toHaveAttribute('role', 'status')
     expect(warning).toHaveTextContent(
-      /^Render workers hold the full Bambuddy key; template code can print\. Create a key with only Manage Library in Bambuddy and paste it above as the render key\.$/,
+      /^No render key is saved\. Render workers get no Bambuddy key, so their renders on the Bambuddy store fail; a worker inside the API process uses the full key, and template code can print\. Create a key with only Manage Library in Bambuddy and paste it above as the render key\.$/,
     )
     expect(screen.getByLabelText('Render key')).toHaveAttribute('placeholder', 'Paste the key')
   })

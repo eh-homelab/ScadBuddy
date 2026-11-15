@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import (
@@ -21,6 +21,8 @@ from pydantic import (
     field_validator,
 )
 from pydantic.json_schema import SkipJsonSchema
+
+from scadbuddy.core.credentials import strip_credentials
 
 PresetSource = Literal["orca_cloud", "cloud", "local", "standard"]
 SliceStatus = Literal["pending", "running", "completed", "failed"]
@@ -96,6 +98,10 @@ class LocalPreset(BambuddyModel):
     default_filament_colour: str | None = None
     compatible_printers: str | None = None
     inherits: str | None = None
+    #: The preset's density in g/cm³ as Bambuddy stores it, text
+    #: (``backend/app/models/local_preset.py`` at v1.3.2b1-daily.20261113; ``"1.275"`` in
+    #: ``tests/bambuddy/recordings/local-presets.json``), #6136.
+    filament_density: str | None = None
     #: When Bambuddy last wrote the row, as it sends it: its model's ``updated_at`` is
     #: ``onupdate=func.now()`` (``backend/app/models/local_preset.py`` at
     #: maziggy/bambuddy@98ecaf50, read 2026-11-01), so an edit moves it. What the kept
@@ -116,9 +122,18 @@ class LocalPresetDetail(LocalPreset):
     uploaded document merged over the OrcaSlicer BBL base its ``inherits`` names, child
     over parent, with ``inherits`` kept (``services/orca_profiles.py`` ``import_orca_file``
     and ``resolve_preset``); ``PUT /local-presets/{id}`` rewrites it under the same id. A
-    stored document Bambuddy cannot parse answers ``{}``."""
+    stored document Bambuddy cannot parse answers ``{}``.
+
+    ``setting`` loses its print-host credential keys here, as it is parsed
+    (`core/credentials.py` `strip_credentials`, nested ones too), so no caller on the API
+    or the print worker holds them past parsing (#5298 Task 32)."""
 
     setting: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("setting")
+    @classmethod
+    def _without_credentials(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return strip_credentials(value)
 
 
 class LocalPresetCatalogue(BambuddyModel):
@@ -310,6 +325,10 @@ class ArchiveExtra(BambuddyModel):
     printable_objects: dict[str, str] = Field(default_factory=dict)
     filament_slots: list[ArchiveFilamentSlot] = Field(default_factory=list)
     filament_used_mm: float | None = None
+    #: Bambuddy archived the print without its 3MF (#4698): the printer did not serve it
+    #: (``routes/archives.py`` line 589 at maziggy/bambuddy@f9080d1 reads this marker).
+    no_3mf_available: bool = False
+    no_3mf_reason: str | None = None
 
 
 class ArchiveDetail(Archive):
@@ -437,6 +456,27 @@ class PrinterMediaFile(BambuddyModel):
     mtime: datetime | None = None
     #: ``timelapse`` or ``ipcam``.
     kind: str
+
+
+class PrinterFile(BambuddyModel):
+    """One entry of ``GET /printers/{id}/files`` (Bambuddy ``services/bambu_ftp.py``
+    ``list_files``, lines 876-882 at f9080d1): ``mtime`` only when the FTP listing gave a
+    time it could read."""
+
+    name: str
+    path: str
+    is_directory: bool = False
+    size: int = 0
+    mtime: datetime | None = None
+
+
+class PrinterFiles(BambuddyModel):
+    """``GET /printers/{id}/files?path=`` (``routes/printers.py`` lines 1604-1629 at
+    f9080d1): ``warnings`` holds ``printer_unavailable`` when the printer did not answer."""
+
+    path: str
+    files: list[PrinterFile] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class PrinterMedia(BambuddyModel):
@@ -989,6 +1029,26 @@ class SliceJob(BambuddyModel):
         return "Bambuddy did not say why"
 
 
+class SpoolKProfile(BambuddyModel):
+    """A spool's K-profile, as ``GET /inventory/spools`` nests it: only the preset it
+    names (#6136)."""
+
+    setting_id: str | None = None
+
+
+class CatalogFilament(BambuddyModel):
+    """A row of ``GET /api/v1/filament-catalog/`` (``FilamentResponse`` in Bambuddy's
+    ``backend/app/schemas/filament.py`` at v1.3.2b1-daily.20261113): a filament type
+    with its cost and properties, not a spool. ``density`` is g/cm³."""
+
+    id: int
+    name: str
+    type: str
+    brand: str | None = None
+    color_hex: str | None = None
+    density: float | None = None
+
+
 class Spool(BambuddyModel):
     """A row of ``GET /api/v1/inventory/spools`` — Bambuddy's own spool inventory.
 
@@ -1007,6 +1067,11 @@ class Spool(BambuddyModel):
     subtype: str | None = None
     color_name: str | None = None
     rgba: str | None = None
+    #: Comma-separated 6- or 8-digit stops of a multi-colour spool, and its swatch
+    #: effect (#6209; ``models/spool.py`` at
+    #: https://github.com/maziggy/bambuddy/blob/1aa7bce166682fde929fec0d535bdaaa22685aad/backend/app/models/spool.py).
+    extra_colors: str | None = None
+    effect_type: str | None = None
     brand: str | None = None
     label_weight: int = 0
     core_weight: int = 0
@@ -1026,6 +1091,32 @@ class Spool(BambuddyModel):
     #: or ``None``, for a spool with no tag (``tests/bambuddy/recordings/inventory-spools.json``).
     tag_uid: str | None = None
     tray_uuid: str | None = None
+    #: Its pressure-advance calibrations, each naming the ``setting_id`` of the preset it
+    #: was made with (#6136; ``SpoolKProfileResponse`` in Bambuddy's
+    #: ``backend/app/schemas/spool.py`` at v1.3.2b1-daily.20261113).
+    k_profiles: list[SpoolKProfile] = Field(default_factory=list)
+    #: What ScadBuddy's import reads (#6261, spec §8.1): the product code ScadBuddy's
+    #: spool type keeps as ``code`` (beside ``extra_colors`` and ``effect_type`` above),
+    #: Bambuddy's spool catalog entry of the core, when the row last changed, the last
+    #: scale reading (gross, the core included: ``backend/app/models/spool.py`` line 43 at
+    #: https://github.com/maziggy/bambuddy/tree/1aa7bce166682fde929fec0d535bdaaa22685aad),
+    #: the last drying and the weight lock. Bambuddy's times are naive UTC
+    #: (``created_at``/``updated_at`` in ``tests/bambuddy/recordings/inventory-spools.json``);
+    #: these read as UTC.
+    material_number: str | None = None
+    core_weight_catalog_id: int | None = None
+    updated_at: datetime | None = None
+    last_scale_weight: int | None = None
+    last_weighed_at: datetime | None = None
+    last_dried_at: datetime | None = None
+    weight_locked: bool = False
+
+    @field_validator("updated_at", "last_weighed_at", "last_dried_at")
+    @classmethod
+    def _utc(cls, value: datetime | None) -> datetime | None:
+        if value is None or value.tzinfo is not None:
+            return value
+        return value.replace(tzinfo=UTC)
 
     @property
     def remaining_g(self) -> float:
@@ -1180,8 +1271,22 @@ class QueueItem(BambuddyModel):
     filament_used_grams: float | None = None
     filament_type: str | None = None
     filament_color: str | None = None
+    #: The build plate to mount (Bambuddy's ``bed_type``, #1281 there).
+    bed_type: str | None = None
+    #: One global AMS tray id per filament slot of the plate, ``-1`` for a slot no tray
+    #: feeds or an external spool (``printers/ams_mapping.py``); ``None`` when Bambuddy
+    #: picks the trays at dispatch.
+    ams_mapping: list[int] | None = None
     batch_name: str | None = None
     created_at: datetime | None = None
+    #: Bambuddy's paths on its own disk of the item's thumbnails (#3742), set only when
+    #: it has one: Bambuddy's ``PrintQueueItemResponse`` at maziggy/bambuddy f9080d1,
+    #: ``backend/app/schemas/print_queue.py`` lines 232-241. Read only to say whether
+    #: there is a thumbnail to show (`bambuddy/pictures.py`), and never forwarded.
+    library_file_thumbnail: str | None = Field(default=None, exclude=True)
+    archive_thumbnail: str | None = Field(default=None, exclude=True)
+    #: Bambuddy soft-deleted the archive: its files, the thumbnail too, are gone.
+    archive_deleted: bool = Field(default=False, exclude=True)
 
 
 class ArchiveStats(BambuddyModel):

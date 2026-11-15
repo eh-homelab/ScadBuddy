@@ -8,26 +8,34 @@ import { type BackgroundContext, cronCreate, cronDelete, cronList, monitor, sche
 import { MAX_ACTIVE } from '../background/store.js'
 import { WORKFLOW_SCRIPT_MAX } from '../background/workflowScript.js'
 import { CALL_ID_META } from './callId.js'
+import { runShell, SHELL_BUILTINS, SHELL_DESCRIPTIONS, ShellInput, type ShellContext } from './sandboxShell.js'
 
 // The built-ins the session provides in place of Claude Code's (#2393): WebFetch,
 // WebSearch and the background ones, as one MCP server named `builtin`. Each takes
-// Claude Code's own input and answers in its words. Since Step 9.6 Claude Code's file
-// tools and task list run in its own process (access/nativeBuiltins.ts), so a package
-// that named `builtin__Read` and the like gets the native tool instead.
+// Claude Code's own input and answers in its words. Every session turn offers each one
+// whose item under `builtin:claude-code` is not off (access/nativeBuiltins.ts
+// `SESSION_BUILTINS`, the same names as BUILTINS), the background ones where the session
+// keeps background tasks; a package that names one no longer decides whether it exists.
+// Since Step 9.6 Claude Code's file tools and task list run in its own process
+// (`NATIVE_BUILTINS`), so a package that named `builtin__Read` and the like gets the native
+// tool instead.
 
 export const BUILTIN_SERVER = 'builtin'
 
 export type BuiltinContext = {
   web: WebContext
-  /** The session's background tasks (CronCreate and the rest); absent where there are none (a flow). */
+  /** The session's background tasks (CronCreate and the rest); absent where the agent keeps none (no Temporal or no database). */
   background?: BackgroundContext | undefined
   /** The call's tool_use id, when its turn tool sends one (CALL_ID_META): a retried call is the same call. */
   callId?: string | undefined
+  /** The session's sandbox, for Bash and PowerShell (#5864); absent where none is set up. */
+  shell?: ShellContext | undefined
 }
 
 /** The background built-ins: kept by the session past its turn (background.ts). */
 export const BACKGROUND_BUILTINS: readonly string[] = ['CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'Monitor', 'Workflow', 'TaskStop']
 
+const noSandbox = (): BuiltinResult => ({ text: 'This session has no sandbox to run commands in.', isError: true })
 const noTasks = (): BuiltinResult => ({ text: 'This session cannot keep background tasks.', isError: true })
 const withTasks =
   <I>(run: (ctx: BackgroundContext, input: I) => Promise<BuiltinResult>) =>
@@ -90,8 +98,8 @@ export const BUILTINS: Record<string, Builtin> = {
   },
   Monitor: {
     description:
-      "Claude Code's Monitor: starts a background watch that streams events. With `command`, a shell script (bash, in the same " +
-      'directory as this session\'s Bash) whose stdout lines are the events, batched within 200 ms, and whose exit ends the watch; ' +
+      "Claude Code's Monitor: starts a background watch that streams events. With `command`, a bash script run in this session's " +
+      'directory, whose stdout lines are the events, batched within 200 ms, and whose exit ends the watch; ' +
       'filter it to the lines you would act on (grep --line-buffered), covering failures as well as success. With `ws`, a WebSocket ' +
       'whose text frames are the events. It expires after `timeout_ms` (default 5 minutes, at most 30); a monitor making more than ' +
       '200 events is stopped. Events reach you as a new message once the session is idle. Use TaskStop to cancel it early. For one ' +
@@ -124,6 +132,16 @@ export const BUILTINS: Record<string, Builtin> = {
     }),
     run: withTasks(workflow),
   },
+  Bash: {
+    description: SHELL_DESCRIPTIONS.Bash!,
+    input: ShellInput,
+    run: (ctx, input: Parameters<typeof runShell>[2]) => (ctx.shell ? runShell(ctx.shell, 'bash', input) : noSandbox()),
+  },
+  PowerShell: {
+    description: SHELL_DESCRIPTIONS.PowerShell!,
+    input: ShellInput,
+    run: (ctx, input: Parameters<typeof runShell>[2]) => (ctx.shell ? runShell(ctx.shell, 'pwsh', input) : noSandbox()),
+  },
   TaskStop: {
     description: "Claude Code's TaskStop: stops one of this session's background tasks (a cron job, wakeup, monitor or workflow) by its ID.",
     input: z.object({ task_id: z.string().optional(), shell_id: z.string().optional() }),
@@ -146,9 +164,10 @@ function toResult(result: BuiltinResult): CallToolResult {
 
 /** `context` whose web work also stops when the call's caller gives up on it (its request timed out or was cancelled, #3199). */
 function stoppable(context: BuiltinContext, signal: AbortSignal): BuiltinContext {
+  const shell = context.shell ? { shell: { ...context.shell, signal: AbortSignal.any([context.shell.signal, signal]) } } : {}
   // A context with no web work (a test's of only the background built-ins) has nothing to stop.
-  if (!(context.web as WebContext | undefined)) return context
-  return { ...context, web: { ...context.web, signal: AbortSignal.any([context.web.signal, signal]) } }
+  if (!(context.web as WebContext | undefined)) return { ...context, ...shell }
+  return { ...context, ...shell, web: { ...context.web, signal: AbortSignal.any([context.web.signal, signal]) } }
 }
 
 /** An MCP server offering `names` (those of BUILTINS), each run with `context()`. */
@@ -178,42 +197,73 @@ export function builtinServer(names: readonly string[], context: () => BuiltinCo
 
 /**
  * The built-ins a classic turn gets from the session instead of Claude Code, served
- * in-process. The background ones (CronCreate and the rest) live in Claude Code's own
- * process, which the turn ends ("Session-only (not written to disk, dies when Claude
- * exits)"), while these are kept by the session (src/background/). WebFetch's fetch
- * connects only to the addresses its egress check passed (#2684; Claude Code's resolves
- * the name again as it connects). Each call is outward, as every package built-in is.
+ * in-process: every one of BUILTINS. The background ones (CronCreate and the rest) live in
+ * Claude Code's own process, which the turn ends ("Session-only (not written to disk, dies
+ * when Claude exits)"), while these are kept by the session (src/background/). WebFetch's
+ * fetch connects only to the addresses its egress check passed (#2684; Claude Code's
+ * resolves the name again as it connects), and WebSearch is ScadBuddy's too (decision Q2).
+ * Each call is at its item's tier (access/nativeBuiltins.ts `sessionTierOf`).
  */
-export const CLASSIC_BUILTINS: readonly string[] = [...BACKGROUND_BUILTINS, 'WebFetch']
+export const CLASSIC_BUILTINS: readonly string[] = Object.keys(BUILTINS)
 
-/** A classic turn's in-process `builtin` server, serving the CLASSIC_BUILTINS of `names`. */
+/**
+ * Monitor's description where the session's Bash runs in a sandbox pod (#5864): `ws` only, since
+ * a command would run on the worker, not in the pod (#5916).
+ */
+export const MONITOR_WS_ONLY =
+  "Claude Code's Monitor: starts a background watch that streams events from a WebSocket (`ws`), whose text frames are the " +
+  'events. `command` is not available in this session: its Bash runs in a sandbox pod, and a monitor command would not. It ' +
+  'expires after `timeout_ms` (default 5 minutes, at most 30); a monitor making more than 200 events is stopped. Events reach ' +
+  'you as a new message once the session is idle. Use TaskStop to cancel it early.'
+
+/** A classic turn's in-process `builtin` server, serving the CLASSIC_BUILTINS of `names`, and Bash and PowerShell with a sandbox (#5864). */
 export function classicBuiltinServer(
   names: readonly string[],
-  context: { background?: BackgroundContext | undefined; web?: WebContext | undefined },
+  context: { background?: BackgroundContext | undefined; web?: WebContext | undefined; shell?: ShellContext | undefined },
 ): McpSdkServerConfigWithInstance {
   return createSdkMcpServer({
     name: BUILTIN_SERVER,
     tools: names
-      .filter((n) => CLASSIC_BUILTINS.includes(n))
+      .filter((n) => CLASSIC_BUILTINS.includes(n) || (context.shell !== undefined && SHELL_BUILTINS.includes(n)))
       .map((name) => {
         const builtin = BUILTINS[name]!
-        return tool(name, builtin.description, (builtin.input as z.ZodObject).shape, async (args) =>
-          toResult(await builtin.run(context as BuiltinContext, args as never)),
-        )
+        const description = name === 'Monitor' && context.shell !== undefined ? MONITOR_WS_ONLY : builtin.description
+        return tool(name, description, (builtin.input as z.ZodObject).shape, async (args, extra) => {
+          // The call's own signal, when the SDK gives one: a call Claude Code gives up on stops its command too.
+          const signal = (extra as { signal?: AbortSignal } | undefined)?.signal
+          const ctx = signal ? stoppable(context as BuiltinContext, signal) : (context as BuiltinContext)
+          return toResult(await builtin.run(ctx, args as never))
+        })
       }),
   })
 }
 
-/** What a classic turn's model is told about the built-ins it gets that way. */
-export function classicBuiltinNote(names: readonly string[]): string {
+/**
+ * What a classic turn's model is told about the built-ins it gets that way: `served` with
+ * their tiers, `shell`, Bash's tier when Claude Code's own Bash is on (a Monitor may run a
+ * command, at the stricter of the two), else undefined, and `sandboxed`, whether the session's
+ * Bash runs in a sandbox pod (#5864), where a Monitor runs no command.
+ */
+export function classicBuiltinNote(served: readonly { name: string; tier: string }[], shell: string | undefined, sandboxed = false): string {
+  const names = served.map((t) => t.name)
   const tools = names.map((n) => `${n} (mcp__${BUILTIN_SERVER}__${n})`).join(', ')
+  const asking = served.filter((t) => t.tier === 'outward').map((t) => t.name)
+  const asks = asking.length ? ` A call of ${asking.join(', ')} asks the user first.` : ''
   const kept = names.some((n) => BACKGROUND_BUILTINS.includes(n))
     ? ' The session keeps the jobs, wakeups, watches and workflows they start past this turn: each sends its prompt, events or result to the ' +
       'session as a new message when it is due and the session is idle.'
     : ''
+  const monitor = names.includes('Monitor')
+    ? shell !== undefined
+      ? shell === 'outward'
+        ? ' A Monitor with a `ws` or a `command` source asks the user first (Bash is outward here).'
+        : ' A Monitor with a `ws` source asks the user first.'
+      : sandboxed
+        ? " Monitor watches a WebSocket (`ws`) only, and asks the user first: its `command` source would not run in this session's sandbox."
+        : ' Monitor watches a WebSocket (`ws`) only, and asks the user first: its `command` source needs Bash, which is off here.'
+    : ''
   return (
-    `Claude Code's built-in tools ${tools} are provided in this session as tools of the "${BUILTIN_SERVER}" server, because a ` +
-    'plugin package you have names them. Use them where its skills or agents say to use the built-in of that name: they take ' +
-    `the same input. Every call of one asks the user first.${kept}`
+    `Claude Code's built-in tools ${tools} are provided in this session as tools of the "${BUILTIN_SERVER}" server. Use them ` +
+    `wherever you would use the built-in of that name, and where a plugin's skills or agents say to: they take the same input.${asks}${kept}${monitor}`
   )
 }

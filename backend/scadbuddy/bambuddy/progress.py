@@ -32,6 +32,7 @@ from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.events import EventBus, PrintEvent, emit
 from scadbuddy.core.problems import ApiError
+from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
 from scadbuddy.library.outputs import OutputMeta, PrintRoute
 from scadbuddy.library.settings_store import StoredSettings
 
@@ -223,7 +224,8 @@ _last_hash_scan: dict[str, float] = {}
 
 #: What recording a link can fail with. Linking is a side effect of the progress read:
 #: none of these may fail the read, nor another plate's read beside it (#522 review).
-_LINK_ERRORS = (ApiError, psycopg.Error)
+#: The print worker records over the API's CRUD routes (#5298), the API over SQL.
+_LINK_ERRORS = (ApiError, psycopg.Error, CrudUnavailableError, CrudRefusedError)
 
 
 def _claim_hash_scan(output_id: str, now: float) -> bool:

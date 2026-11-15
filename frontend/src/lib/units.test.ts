@@ -3,7 +3,8 @@ import { delay, HttpResponse, http } from 'msw'
 import { describe, expect, it } from 'vitest'
 import { server } from '../mocks/server'
 import { settings } from '../mocks/fixtures'
-import { fineLength, length, loadDisplayUnit, plateSize, setDisplayUnit, useDisplayUnit } from './units'
+import { loadDisplayUnit } from './loadDisplayUnit'
+import { fineLength, length, plateSize, setDisplayUnit, useDisplayUnit } from './units'
 
 describe('length', () => {
   it('keeps one decimal in millimetres and converts to two in inches', () => {

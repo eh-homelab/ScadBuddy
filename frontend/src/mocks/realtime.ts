@@ -36,3 +36,14 @@ export function emitRealtime(kind: string, topics: string[], data: Record<string
     client.send(JSON.stringify({ type: 'event', id: `mock-${++seq}`, kind, topics: matched, data }))
   }
 }
+
+/**
+ * #265 — as the backend's follow of a background slice (`preview_follow/follows.py`):
+ * a read that finds the slice running is followed by a change on its topic, after the
+ * interval the backend reads at.
+ */
+export const PREVIEW_FOLLOW_MS = 2000
+
+export function announcePreviewSlice(slicer: 'bambuddy' | 'native', jobId: number) {
+  setTimeout(() => emitRealtime('preview_slice.progress', [`preview-slice:${slicer}:${jobId}`]), PREVIEW_FOLLOW_MS)
+}

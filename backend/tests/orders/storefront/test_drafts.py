@@ -6,12 +6,16 @@ draft it is."""
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import io
+import json
 import os
 import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -19,11 +23,13 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from starlette.datastructures import UploadFile
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.auth.service_credentials import ServiceCredentialStore
 from scadbuddy.core.events import Event, EventBus, OrderChanged, OrderItemChanged, emit
 from scadbuddy.core.settings import Settings
+from scadbuddy.crud.storefront import _multipart as edge_multipart
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.main import create_app
 from scadbuddy.orders import lifecycle as lifecycle_module
@@ -35,7 +41,14 @@ from scadbuddy.orders.storefront.inputs import listing_reference
 from scadbuddy.orders.storefront.wire import Listing, ListingInput, ListingSnapshot
 from scadbuddy.render.schema import CustomizerSchema, Parameter
 from scadbuddy.storefront import uploads
-from scadbuddy.storefront.wire import CLIENT_HEADER, STOREFRONT_PROBLEMS, VISITOR_HEADER
+from scadbuddy.storefront.wire import (
+    CLIENT_HEADER,
+    MAX_LINK_CHARS,
+    MAX_PURCHASE_LINKS,
+    SESSION_HEADER,
+    STOREFRONT_PROBLEMS,
+    VISITOR_HEADER,
+)
 from tests.support.store import s3  # noqa: F401  (fixture)
 
 pytestmark = pytest.mark.requires_postgres
@@ -46,7 +59,9 @@ TOKEN_B = "B" * 43
 COMMIT = "c" * 40
 SCHEMA = CustomizerSchema(
     parameters=[
-        Parameter(name="width", type="number", initial=50, min=10, max=100, step=1),
+        Parameter(
+            name="width", type="number", initial=50, min=10, max=100, step=1, caption="Width (mm)"
+        ),
         Parameter(name="height", type="number", initial=5),
     ]
 )
@@ -82,14 +97,16 @@ class CrudCaller:
         issued = ServiceCredentialStore(pool).issue("storefront", "bootstrap", rate_limited=False)
         self.bearer = {"Authorization": f"Bearer {issued.token}"}
 
-    def _headers(self, token: str, key: str | None) -> dict[str, str]:
+    def _headers(self, token: str, key: str | None, session: str | None = None) -> dict[str, str]:
         sent = {**self.bearer, VISITOR_HEADER: token, CLIENT_HEADER: "203.0.113.1"}
         if key is not None:
             sent["Idempotency-Key"] = key
+        if session is not None:
+            sent[SESSION_HEADER] = session
         return sent
 
-    def get(self, path: str, *, token: str = TOKEN_A) -> Any:
-        return self.api.get(CRUD + path, headers=self._headers(token, None))
+    def get(self, path: str, *, token: str = TOKEN_A, key: str | None = None) -> Any:
+        return self.api.get(CRUD + path, headers=self._headers(token, key))
 
     def post(
         self,
@@ -101,8 +118,9 @@ class CrudCaller:
         key: str | None = None,
         data: dict[str, str] | None = None,
         files: Any = None,
+        session: str | None = None,
     ) -> Any:
-        headers = self._headers(token, key)
+        headers = self._headers(token, key, session)
         if data is not None or files is not None:
             return self.api.post(CRUD + path, data=data, files=files, headers=headers)
         if content is not None:
@@ -210,8 +228,13 @@ def test_add_to_order_makes_revision_one(
             "quantity": 2,
             # Only what the listing offered: never its locks or the template's defaults.
             "inputs": {"width": 40},
+            # What the page shows beside each value: the schema's caption (#5282).
+            "labels": {"width": "Width (mm)"},
             "notes": None,
             "attachments": [],
+            # A customer's own files and links (#6133): none on a listing's item.
+            "sources": [],
+            "own_model": False,
         }
     ]
 
@@ -709,6 +732,115 @@ def test_a_request_may_come_with_no_files(asks: CrudCaller) -> None:
     assert r.json()["items"][0]["attachments"] == []
 
 
+def _with_links(text: str, links: str) -> bytes:
+    return (
+        b'--b\r\nContent-Disposition: form-data; name="text"\r\n\r\n'
+        + text.encode()
+        + b'\r\n--b\r\nContent-Disposition: form-data; name="purchase_links"\r\n\r\n'
+        + links.encode()
+        + b"\r\n--b--\r\n"
+    )
+
+
+def ask_with_links(crud: CrudCaller, links: str, *, key: str) -> Any:
+    headers = crud._headers(TOKEN_A, key)
+    headers["Content-Type"] = "multipart/form-data; boundary=b"
+    return crud.api.post(
+        CRUD + "/draft/requests", content=_with_links("A hook", links), headers=headers
+    )
+
+
+def test_a_design_request_takes_things_to_buy(asks: CrudCaller) -> None:
+    """#6133 (spec 2026-11-13 §10.1): each purchase link is a `pending` source of the
+    request item, a `manual` link kept as text, with the customer's note."""
+    links = json.dumps(
+        [
+            {"url": "https://Parts.Example.com/magnets?x=1", "note": "  6x3 magnets  "},
+            {"url": "https://makerworld.com/en/models/123"},
+        ]
+    )
+    r = ask_with_links(asks, links, key="r30")
+    assert r.status_code == 200, r.text
+    [item] = r.json()["items"]
+    assert [
+        (s["kind"], s["purpose"], s["url"], s["note"], s["status"]) for s in item["sources"]
+    ] == [
+        ("link", "purchase", "https://parts.example.com/magnets?x=1", "6x3 magnets", "pending"),
+        ("link", "purchase", "https://makerworld.com/en/models/123", "", "pending"),
+    ]
+    assert item["own_model"] is False
+
+
+def test_a_design_request_takes_at_most_five_things_to_buy(asks: CrudCaller) -> None:
+    links = json.dumps([{"url": f"https://parts.example.com/{n}"} for n in range(6)])
+    r = ask_with_links(asks, links, key="r31")
+    assert r.status_code == 422, r.text
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}too_many_links"
+    assert asks.get("/draft").json() is None
+
+
+@pytest.mark.parametrize(
+    ("links", "problem"),
+    [
+        (json.dumps([{"url": "ftp://parts.example.com/x"}]), "link_invalid"),
+        (json.dumps([{"url": "https://user:pw@parts.example.com/x"}]), "link_invalid"),
+        (json.dumps([{"url": "https://parts.example.com/x", "note": "n" * 501}]), "link_invalid"),
+        (json.dumps([{"url": "https://parts.example.com/" + "x" * 2048}]), "link_invalid"),
+        (json.dumps([{"url": "https://parts.example.com/x", "price": 1}]), "link_invalid"),
+        ('[{"url": "https://parts.example.com/\\ud83d"}]', "link_invalid"),
+        ('[{"url": "https://parts.example.com/x", "note": "\\udc00"}]', "link_invalid"),
+        ("not json", "draft_body_invalid"),
+        (json.dumps({"url": "https://parts.example.com/x"}), "draft_body_invalid"),
+    ],
+)
+def test_a_bad_thing_to_buy_is_refused(asks: CrudCaller, links: str, problem: str) -> None:
+    r = ask_with_links(asks, links, key=f"r32-{sha256(links.encode()).hexdigest()[:8]}")
+    assert r.status_code == 422, r.text
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}{problem}"
+    assert asks.get("/draft").json() is None
+
+
+def test_the_edges_multipart_carries_the_things_to_buy(asks: CrudCaller) -> None:
+    from scadbuddy.storefront.uploads import PurchaseLinkAsk
+
+    links = [PurchaseLinkAsk(url="https://parts.example.com/x", note="hooks")]
+
+    async def body() -> bytes:
+        return b"".join([chunk async for chunk in edge_multipart("b", "A hook", [], links)])
+
+    headers = asks._headers(TOKEN_A, "r33")
+    headers["Content-Type"] = "multipart/form-data; boundary=b"
+    r = asks.api.post(CRUD + "/draft/requests", content=asyncio.run(body()), headers=headers)
+    assert r.status_code == 200, r.text
+    [source] = r.json()["items"][0]["sources"]
+    assert (source["url"], source["note"]) == ("https://parts.example.com/x", "hooks")
+
+
+def test_five_longest_links_of_astral_characters_reach_the_crud_side(asks: CrudCaller) -> None:
+    """Review of #6200: the edge's part is UTF-8, so what the edge took fits the cap here
+    too (a ``json.dumps`` with ``ensure_ascii`` made each such character 12 bytes)."""
+    from scadbuddy.storefront.uploads import PurchaseLinkAsk
+
+    host = "https://parts.example.com/"
+    links = [
+        PurchaseLinkAsk(
+            url=host + "\U0001f600" * (MAX_LINK_CHARS - len(host)), note="\U0001f9f2" * 500
+        )
+        for _ in range(MAX_PURCHASE_LINKS)
+    ]
+
+    async def body() -> bytes:
+        return b"".join([chunk async for chunk in edge_multipart("b", "A hook", [], links)])
+
+    headers = asks._headers(TOKEN_A, "r34")
+    headers["Content-Type"] = "multipart/form-data; boundary=b"
+    r = asks.api.post(CRUD + "/draft/requests", content=asyncio.run(body()), headers=headers)
+    assert r.status_code == 200, r.text
+    sources = r.json()["items"][0]["sources"]
+    assert len(sources) == MAX_PURCHASE_LINKS
+    assert all(s["note"] == "\U0001f9f2" * 500 for s in sources)
+
+
 def test_requests_are_off_by_default(requests_off: CrudCaller) -> None:
     r = ask(requests_off, key="r3")
     assert r.status_code == 404
@@ -770,6 +902,64 @@ def test_a_retried_request_makes_one_item_whatever_changed_since(
     # the replay is compared without them.
     assert (again.status_code, _unsigned(again.json())) == (200, _unsigned(first.json()))
     assert len(asks.get("/draft").json()["items"]) == 1
+
+
+def test_a_committed_request_sent_again_after_requests_went_off_answers_its_reply(
+    asks: CrudCaller, s3_api: TestClient
+) -> None:
+    """Review of #5789: its answer was lost (the edge's 503 ``upload_unavailable`` says
+    "send it again"), then the shop turned requests off. The cart holds the request, so
+    the resend answers it, as any retry does "whatever changed since"."""
+    files = [("files", ("a.png", PNG, "image/png"))]
+    first = ask(asks, files, key="r18")
+    assert first.status_code == 200, first.text
+    off = s3_api.put("/api/v1/settings", json={"storefront_requests_enabled": False})
+    assert off.status_code == 200, off.text
+    # The edge's pre-check, with the key: on for this request alone.
+    assert asks.get("/requests-enabled", key="r18").json() == {"enabled": True}
+    assert asks.get("/requests-enabled").json() == {"enabled": False}
+    again = ask(asks, files, key="r18")
+    assert (again.status_code, _unsigned(again.json())) == (200, _unsigned(first.json()))
+    # A new key is still refused, before its body is read.
+    assert asks.get("/requests-enabled", key="r19").json() == {"enabled": False}
+    r = ask(asks, files, key="r19")
+    assert r.status_code == 404
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}requests_disabled"
+    assert len(asks.get("/draft").json()["items"]) == 1
+
+
+JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 64
+
+
+@pytest.mark.parametrize(
+    ("sent", "kept"),
+    [
+        # A name the edge's own parser read whole (a client that does not escape).
+        ('a"b.jpg', 'a"b.jpg'),
+        # What a browser sends for ``a"b.jpg`` (WHATWG HTML escapes ``"``, CR and LF).
+        ("a%22b.jpg", 'a"b.jpg'),
+        ("h\u00e9llo w\u00f6rld \u2713.jpg", "h\u00e9llo w\u00f6rld \u2713.jpg"),
+        ("a\\b.jpg", "b.jpg"),
+    ],
+)
+def test_a_files_name_survives_the_edges_multipart(asks: CrudCaller, sent: str, kept: str) -> None:
+    """Review of #5789: the edge percent-escapes ``"``, ``\\`` and control characters in
+    the name it forwards (`crud/storefront.py`), and the CRUD side decodes them. The
+    multipart parser ignores ``filename*`` (RFC 7578 §4.2), so the name goes as
+    ``filename``."""
+    upload = UploadFile(io.BytesIO(JPEG), filename=sent)
+
+    async def body() -> bytes:
+        return b"".join([chunk async for chunk in edge_multipart("b", "A hook", [upload])])
+
+    headers = asks._headers(TOKEN_A, f"r-{sha256(sent.encode()).hexdigest()[:8]}")
+    headers["Content-Type"] = "multipart/form-data; boundary=b"
+    r = asks.api.post(CRUD + "/draft/requests", content=asyncio.run(body()), headers=headers)
+    assert r.status_code == 200, r.text
+    [attachment] = r.json()["items"][0]["attachments"]
+    assert attachment["filename"] == kept
+    got = httpx.get(attachment["url"])
+    assert got.status_code == 200 and got.content == JPEG
 
 
 def test_a_request_counts_against_the_draft_cap(
@@ -840,3 +1030,98 @@ def test_removing_a_request_drops_its_files_holds(asks: CrudCaller, s3_api: Test
             "SELECT count(*) AS n FROM blob_refs WHERE holder_kind = 'attachment'"
         ).fetchone()
     assert held is not None and held["n"] == 0
+
+
+def test_the_view_reads_only_the_listings_its_items_name(
+    crud: CrudCaller, api: TestClient, listing: Listing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The labels come from the listings at the items' (slug, commit), read in one query:
+    never every listing of the shop on each draft read."""
+    store = _orders(api).listings
+    other = store.create(ListingInput(slug="other", commit="d" * 40, title="Another"))
+    store.mark_published(
+        other.id, snapshot=_snapshot(), media=[], expected_updated_at=other.updated_at
+    )
+    asked: list[set[tuple[str, str]]] = []
+    real = type(store).at_commits
+
+    def spy(self: Any, pairs: Any) -> Any:
+        asked.append(set(pairs))
+        found = real(self, pairs)
+        assert {(found_.slug, found_.commit) for found_ in found} <= set(pairs)
+        return found
+
+    monkeypatch.setattr(type(store), "at_commits", spy)
+    monkeypatch.setattr(type(store), "all", lambda self: pytest.fail("read every listing"))
+    r = crud.post("/draft/items", json=add_body(listing, {"width": 40}), key="lab1")
+    assert r.status_code == 200, r.text
+    assert r.json()["items"][0]["labels"] == {"width": "Width (mm)"}
+    assert asked and all(pairs == {("demo", COMMIT)} for pairs in asked)
+
+
+def test_a_view_with_no_listing_item_reads_no_listing(
+    asks: CrudCaller, api: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _orders(api).listings
+    monkeypatch.setattr(type(store), "at_commits", lambda self, pairs: pytest.fail("read"))
+    monkeypatch.setattr(type(store), "all", lambda self: pytest.fail("read every listing"))
+    r = ask(asks, key="r-nolisting")
+    assert r.status_code == 200, r.text
+    assert r.json()["items"][0]["labels"] == {}
+
+
+def test_an_item_added_before_a_new_commit_shows_raw_parameter_names(
+    crud: CrudCaller, api: TestClient, listing: Listing
+) -> None:
+    """Captions come from the listing at the item's own (slug, commit). Once the listing
+    is republished at another commit, an older item falls back to the parameter's name
+    (the `DraftItem.labels` docstring); it never borrows the new commit's captions."""
+    r = crud.post("/draft/items", json=add_body(listing, {"width": 40}), key="old1")
+    assert r.status_code == 200, r.text
+    assert r.json()["items"][0]["labels"] == {"width": "Width (mm)"}
+    store = _orders(api).listings
+    current = store.get(listing.id)
+    assert current is not None
+    moved = store.update(
+        listing.id,
+        ListingInput(
+            slug="demo",
+            commit="e" * 40,
+            title="A demo box",
+            params={"width": {"kind": "number", "min": 20, "max": 80, "step": 1}},  # type: ignore[dict-item]
+        ),
+        expected_updated_at=current.updated_at,
+    )
+    store.mark_published(
+        moved.id, snapshot=_snapshot(), media=[], expected_updated_at=moved.updated_at
+    )
+    [item] = crud.get("/draft").json()["items"]
+    assert item["inputs"] == {"width": 40}
+    assert item["labels"] == {"width": "width"}
+
+
+def test_the_view_labels_an_item_with_its_listings_own_label(
+    crud: CrudCaller, api: TestClient, listing: Listing
+) -> None:
+    """A listing's own label reaches the cart through the draft view (#6137)."""
+    store = _orders(api).listings
+    current = store.get(listing.id)
+    assert current is not None
+    labelled = store.update(
+        listing.id,
+        ListingInput(
+            slug="demo",
+            commit=COMMIT,
+            title="A demo box",
+            params={
+                "width": {"kind": "number", "min": 20, "max": 80, "step": 1, "label": "How wide"}  # type: ignore[dict-item]
+            },
+        ),
+        expected_updated_at=current.updated_at,
+    )
+    published = store.mark_published(
+        labelled.id, snapshot=_snapshot(), media=[], expected_updated_at=labelled.updated_at
+    )
+    r = crud.post("/draft/items", json=add_body(published, {"width": 40}), key="own1")
+    assert r.status_code == 200, r.text
+    assert r.json()["items"][0]["labels"] == {"width": "How wide"}

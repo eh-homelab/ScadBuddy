@@ -1,15 +1,31 @@
-import { screen, waitFor, within } from '@testing-library/react'
-import { Route, Routes, useLocation } from 'react-router'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { Link, Route, Routes, useLocation } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { HttpResponse, http } from 'msw'
 import { api } from '../api/client'
 import { server } from '../mocks/server'
 import { mockSettings, resetMockState, setMockSettings } from '../mocks/handlers'
+import { emitRealtime } from '../mocks/realtime'
 import { mockConnectProvider, mockPaymentEvent } from '../mocks/features/payments'
+import { mockOrderMessage } from '../mocks/features/orders/messages'
+import { mockCustomerLink, mockOrderMail } from '../mocks/features/orders/customerLink'
+import { setMockMailServerError } from '../mocks/features/storefrontMail'
 import { choose } from '../test/select'
-import { CUSTOMER_BOB, ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, item, seedCart, state } from '../mocks/features/orders/state'
+import { CUSTOMER_BOB, ITEM_APPROVED, ITEM_DRAFT, ITEM_MODELS, ORDER_ACCEPTED, ORDER_CLOSED, ORDER_DRAFT, ORDER_MODELS, item, seedCart, state } from '../mocks/features/orders/state'
 import { renderPage } from '../test/utils'
 import { OrderPage } from './OrderPage'
+import { readSpec } from '../test/spec'
+
+/** The mail route's `maxItems` in the exported spec: the backend's `ORDER_MAIL_MAX`, read
+ * rather than restated, so the card's `MAIL_MAX` must match it (#5969 review). */
+function specMailMax(): number {
+  const { json, path } = readSpec()
+  type Get = { responses?: { '200'?: { content?: { 'application/json'?: { schema?: { maxItems?: unknown } } } } } }
+  const spec = json as { paths?: Record<string, { get?: Get }> }
+  const max = spec.paths?.['/api/v1/orders/{order_id}/mail']?.get?.responses?.['200']?.content?.['application/json']?.schema?.maxItems
+  if (typeof max !== 'number') throw new Error(`the mail route's maxItems is not in the spec at ${path}`)
+  return max
+}
 
 function render(id: string, suffix = '') {
   return renderPage(
@@ -49,6 +65,29 @@ describe('OrderPage (#4249)', () => {
     expect(screen.getByRole('heading', { name: 'Summary' })).toBeInTheDocument()
     expect(within(totals).getByText('Shipping · Post')).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'History' })).toBeInTheDocument()
+  })
+
+  it("shows the purchases still pending in the header, and the customer's models on the request item (#6133)", async () => {
+    render(ORDER_MODELS, `?item=${ITEM_MODELS}`)
+    // The open item drawer hides the page behind it from the accessibility tree.
+    expect(await screen.findByRole('region', { name: "Customer's models" })).toBeInTheDocument()
+    expect(screen.getByText('ORD-2026-4')).toBeInTheDocument()
+    expect(screen.getByText('Purchase pending (1)')).toBeInTheDocument()
+  })
+
+  it('shows no purchase badge on an order with nothing to buy (#6133)', async () => {
+    render(ORDER_ACCEPTED)
+    expect(await screen.findByRole('heading', { name: 'ORD-2026-2' })).toBeInTheDocument()
+    expect(screen.queryByText(/Purchase pending/)).toBeNull()
+  })
+
+  it('shows a swept cart as not found once its deleted frame arrives (#5282)', async () => {
+    render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    state.orders = state.orders.filter((o) => o.id !== ORDER_DRAFT)
+    emitRealtime('order.changed', [`order:${ORDER_DRAFT}`], { order_id: ORDER_DRAFT, status: 'draft', cart: true, deleted: true })
+    expect(await screen.findByText(/This order was not found/)).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'ORD-2026-3' })).toBeNull()
   })
 
   it('shows the money view before accept, and a Loss badge in the header (#5326)', async () => {
@@ -106,6 +145,99 @@ describe('OrderPage (#4249)', () => {
     expect(within(drawer).queryByLabelText(/Price per unit/)).toBeNull()
     expect(within(drawer).queryByTestId('print-item')).toBeNull()
     expect(within(drawer).queryByTestId('test-print-item')).toBeNull()
+  })
+
+  // #5660: the customer messages belong to the order shown. Moving to another order closes the
+  // first one's preview (OrderMessages.test.tsx covers a preview that answers after the move).
+  describe('customer messages across orders', () => {
+    function renderWithLink() {
+      return renderPage(
+        <Routes>
+          <Route
+            path="/orders/:id"
+            element={
+              <>
+                <OrderPage />
+                <Link to={`/orders/${ORDER_DRAFT}`}>Other order</Link>
+              </>
+            }
+          />
+        </Routes>,
+        { route: `/orders/${ORDER_ACCEPTED}` },
+      )
+    }
+
+    beforeEach(() => {
+      mockOrderMessage(ORDER_ACCEPTED, { status: 'failed', reason: 'transport' })
+      mockOrderMessage(ORDER_DRAFT, { status: 'failed', reason: 'transport' })
+    })
+
+    it('closes the open preview when the page moves to another order', async () => {
+      const { user } = renderWithLink()
+      await screen.findByRole('heading', { name: 'ORD-2026-2' })
+      const list = await screen.findByRole('list', { name: 'Customer messages' })
+      await user.click(within(list).getByRole('button', { name: 'Send again' }))
+      expect(await screen.findByRole('region', { name: 'Message to send' })).toHaveTextContent(ORDER_ACCEPTED)
+      await user.click(screen.getByRole('link', { name: 'Other order' }))
+      await screen.findByRole('heading', { name: 'ORD-2026-3' })
+      await screen.findByRole('list', { name: 'Customer messages' })
+      expect(screen.queryByRole('region', { name: 'Message to send' })).not.toBeInTheDocument()
+    })
+  })
+
+  // #4673, #5832: a slice request is used once (`onSliceOpened`). Reopening the drawer, from
+  // the row or from the address (Back and Forward, a link), never opens the slice dialog
+  // again; a new Slice… does.
+  it('reopens the drawer without the slice dialog, and Slice… still opens it', async () => {
+    const { user } = renderPage(
+      <Routes>
+        <Route
+          path="/orders/:id"
+          element={
+            <>
+              <OrderPage />
+              <Link to={`/orders/${ORDER_DRAFT}`}>Leave the item</Link>
+              <Link to={`/orders/${ORDER_DRAFT}?item=${ITEM_DRAFT}`}>Link to the item</Link>
+            </>
+          }
+        />
+      </Routes>,
+      { route: `/orders/${ORDER_DRAFT}` },
+    )
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    const row = () => screen.getByTestId(`order-item-${ITEM_DRAFT}`)
+    const sliceDialog = () => screen.queryByRole('dialog', { name: 'Quote from a slice', hidden: true })
+    const slice = async () => {
+      fireEvent.keyDown(within(row()).getByRole('button', { name: 'Row actions', hidden: true }), { key: 'Enter' })
+      fireEvent.click(await screen.findByRole('menuitem', { name: 'Slice…', hidden: true }))
+      return screen.findByRole('dialog', { name: 'Quote from a slice', hidden: true })
+    }
+    const cancel = async (dialog: HTMLElement) => {
+      // Beside the assistant the dialogs are not modal (#798): Cancel by its click.
+      fireEvent.click(await within(dialog).findByRole('button', { name: 'Cancel', hidden: true }))
+      await waitFor(() => expect(sliceDialog()).toBeNull())
+    }
+    const drawerShown = async () => {
+      const drawer = await screen.findByRole('dialog', { name: 'Name Keychain', hidden: true })
+      await within(drawer).findByTestId('quote-from-slice')
+    }
+
+    await cancel(await slice())
+    // Closed and reopened from the address: the page's request is not used again.
+    fireEvent.click(screen.getByRole('link', { name: 'Leave the item', hidden: true }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Name Keychain', hidden: true })).toBeNull())
+    fireEvent.click(screen.getByRole('link', { name: 'Link to the item', hidden: true }))
+    await drawerShown()
+    expect(sliceDialog()).toBeNull()
+
+    // Closed and reopened from the row.
+    await user.click(within(screen.getByRole('dialog', { name: 'Name Keychain' })).getByRole('button', { name: 'Close' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Name Keychain' })).toBeNull())
+    await user.click(within(row()).getByRole('button', { name: 'Name Keychain' }))
+    await drawerShown()
+    expect(sliceDialog()).toBeNull()
+
+    expect(await slice()).toBeInTheDocument()
   })
 
   it('prices an item from its drawer, accepts the order, and closes it from a shipment', async () => {
@@ -202,7 +334,7 @@ describe('OrderPage (#4249)', () => {
     let drawer = await screen.findByRole('dialog', { name: approved.title })
     // Accepted: the price is pinned, and a new design goes through the confirm.
     expect(within(drawer).getByLabelText('Quantity')).toBeDisabled()
-    expect(within(drawer).queryByRole('button', { name: 'Quote from a slice…' })).toBeNull()
+    expect(within(drawer).queryByRole('button', { name: 'Slice…' })).toBeNull()
     expect(within(drawer).queryByRole('button', { name: 'Record and accept' })).toBeNull()
     first.unmount()
 
@@ -211,7 +343,7 @@ describe('OrderPage (#4249)', () => {
     drawer = await screen.findByRole('dialog', { name: approved.title })
     await within(drawer).findByTestId('revised-after-acceptance')
     // `priceOpen`: the new design takes a quote (its filaments with it) and more revisions, as the backend allows.
-    expect(within(drawer).getByRole('button', { name: 'Quote from a slice…' })).toBeEnabled()
+    expect(within(drawer).getByRole('button', { name: 'Slice…' })).toBeEnabled()
     expect(within(drawer).getByRole('button', { name: 'Record and accept' })).toBeInTheDocument()
     expect(within(drawer).getByRole('button', { name: 'New revision' })).toBeEnabled()
     // The quantity stays pinned: it would reprice the old quote.
@@ -308,6 +440,21 @@ describe('OrderPage payment requests (#4957)', () => {
     render(ORDER_ACCEPTED)
     await screen.findByLabelText('Received (USD)')
     expect(screen.queryByRole('combobox', { name: 'For request' })).not.toBeInTheDocument()
+  })
+
+  it('names the customer in the history, not the browser (#5283)', async () => {
+    state.events.push({
+      id: state.events.length + 1,
+      order_id: ORDER_ACCEPTED,
+      at: new Date().toISOString(),
+      by: { kind: 'customer', principal: `customer:${CUSTOMER_BOB}`, session: 'v-1' },
+      kind: 'revision.answered',
+      detail: {},
+    })
+    render(ORDER_ACCEPTED)
+    const history = await screen.findByRole('region', { name: 'Audit line' })
+    const answered = (await within(history).findByText('revision.answered')).closest('li')!
+    expect(answered).toHaveTextContent('· customer')
   })
 
   it('names a provider in the history, not the browser', async () => {
@@ -489,3 +636,393 @@ describe('OrderPage, the shipping option and the charges (#5281)', () => {
   })
 })
 
+
+// #5283 (storefront spec §5.2 "Order link"): the shop sends, replaces and revokes the order's
+// customer link. The card shows the link's state, never the link itself.
+describe('OrderPage, the customer link (#5283)', () => {
+  beforeEach(() => resetMockState())
+  afterEach(() => vi.useRealTimers())
+
+  it("sends a link to the customer's email, replaces it after a confirm, and revokes it", async () => {
+    const { user } = render(ORDER_ACCEPTED)
+    const card = await screen.findByRole('region', { name: 'Customer link' })
+    expect(await within(card).findByText('No link sent yet.')).toBeInTheDocument()
+    expect(within(card).queryByRole('button', { name: 'Revoke' })).toBeNull()
+
+    await user.click(within(card).getByRole('button', { name: 'Send link' }))
+    expect(await within(card).findByText(/Sent to/)).toHaveTextContent('ada@example.test')
+    expect(within(card).getByText('Not opened')).toBeInTheDocument()
+
+    // A live link: a new one asks first, since the old one stops working.
+    await user.type(within(card).getByLabelText('Send to'), 'grace@example.org')
+    await user.click(within(card).getByRole('button', { name: 'Send a new link' }))
+    expect(within(card).getByText(/stops working/)).toHaveTextContent('The link sent to ada@example.test stops working.')
+    await user.click(within(card).getByRole('button', { name: 'Yes, send a new link' }))
+    expect(await within(card).findByText(/Sent to/)).toHaveTextContent('grace@example.org')
+
+    await user.click(within(card).getByRole('button', { name: 'Revoke' }))
+    expect(await within(card).findByText(/Revoked/)).toBeInTheDocument()
+    expect(within(card).getByRole('button', { name: 'Send link' })).toBeInTheDocument()
+    expect(card.textContent).not.toMatch(/token|\/o#/)
+  })
+
+  it('asks to confirm on a 409 link_live from a stale read, and sends again with replace', async () => {
+    mockCustomerLink(ORDER_ACCEPTED, { sent_to: 'ada@example.test' })
+    let stale = true
+    server.use(
+      http.get('/api/v1/orders/:id/customer-link', () =>
+        stale ? HttpResponse.json({ live: false, created_at: null, sent_to: null, opened_at: null, revoked_at: null }) : undefined,
+      ),
+    )
+    const send = vi.spyOn(api, 'sendCustomerLink')
+    const { user } = render(ORDER_ACCEPTED)
+    const card = await screen.findByRole('region', { name: 'Customer link' })
+    await within(card).findByText('No link sent yet.')
+    stale = false
+    await user.click(within(card).getByRole('button', { name: 'Send link' }))
+    expect(await within(card).findByText(/stops working/)).toHaveTextContent('The link sent to ada@example.test stops working.')
+    expect(within(card).queryByRole('alert')).toBeNull()
+    expect(send).toHaveBeenLastCalledWith(ORDER_ACCEPTED, undefined, false)
+    await user.click(within(card).getByRole('button', { name: 'Yes, send a new link' }))
+    await waitFor(() => expect(send).toHaveBeenLastCalledWith(ORDER_ACCEPTED, undefined, true))
+    await waitFor(() => expect(within(card).queryByText(/stops working/)).toBeNull())
+    expect(within(card).queryByRole('alert')).toBeNull()
+    send.mockRestore()
+  })
+
+  it('says the state could not be read again when the fresh read after a 409 link_live fails', async () => {
+    let reads = 0
+    server.use(
+      http.get('/api/v1/orders/:id/customer-link', () => {
+        reads += 1
+        return reads === 1
+          ? HttpResponse.json({ live: false, created_at: null, sent_to: null, opened_at: null, revoked_at: null })
+          : HttpResponse.json({ detail: 'down' }, { status: 503 })
+      }),
+      http.post('/api/v1/orders/:id/customer-link', () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/orders/link_live', status: 409, detail: 'a link is live' },
+          { status: 409 },
+        ),
+      ),
+    )
+    const { user } = render(ORDER_ACCEPTED)
+    const card = await screen.findByRole('region', { name: 'Customer link' })
+    await within(card).findByText('No link sent yet.')
+    await user.click(within(card).getByRole('button', { name: 'Send link' }))
+    expect(await within(card).findByText(/could not be read again/)).toHaveTextContent(
+      'A link is live, but its state could not be read again. That link stops working.',
+    )
+  })
+
+  it('closes the confirm when a later read of the link shows none live', async () => {
+    let reads = 0
+    const none = { live: false, created_at: null, sent_to: null, opened_at: null, revoked_at: null }
+    server.use(
+      http.get('/api/v1/orders/:id/customer-link', () => {
+        reads += 1
+        return reads === 2 ? HttpResponse.json({ detail: 'down' }, { status: 503 }) : HttpResponse.json(none)
+      }),
+      http.post('/api/v1/orders/:id/customer-link', () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/orders/link_live', status: 409, detail: 'a link is live' },
+          { status: 409 },
+        ),
+      ),
+    )
+    const { user } = render(ORDER_ACCEPTED)
+    const card = await screen.findByRole('region', { name: 'Customer link' })
+    await within(card).findByText('No link sent yet.')
+    await user.click(within(card).getByRole('button', { name: 'Send link' }))
+    // The re-read failed, so the confirm opened; the refresh after it lands with no live link.
+    await waitFor(() => expect(reads).toBeGreaterThanOrEqual(3))
+    await waitFor(() => expect(within(card).queryByText(/stops working/)).toBeNull())
+    expect(within(card).getByRole('button', { name: 'Send link' })).toBeEnabled()
+    expect(within(card).queryByText(/could not be read again/)).toBeNull()
+  })
+
+  it.each([
+    ['ada@example.test', 'The link sent to ada@example.test stops working.'],
+    [null, 'The live link stops working.'],
+  ])('keeps the confirm when a later read shows a live link (sent to %s)', async (sentTo, text) => {
+    let reads = 0
+    const none = { live: false, created_at: null, sent_to: null, opened_at: null, revoked_at: null }
+    const live = { live: true, created_at: '2026-11-10T10:00:00Z', sent_to: sentTo, opened_at: null, revoked_at: null }
+    server.use(
+      http.get('/api/v1/orders/:id/customer-link', () => {
+        reads += 1
+        if (reads === 1) return HttpResponse.json(none)
+        return reads === 2 ? HttpResponse.json({ detail: 'down' }, { status: 503 }) : HttpResponse.json(live)
+      }),
+      http.post('/api/v1/orders/:id/customer-link', () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/orders/link_live', status: 409, detail: 'a link is live' },
+          { status: 409 },
+        ),
+      ),
+    )
+    const { user } = render(ORDER_ACCEPTED)
+    const card = await screen.findByRole('region', { name: 'Customer link' })
+    await within(card).findByText('No link sent yet.')
+    await user.click(within(card).getByRole('button', { name: 'Send link' }))
+    // The re-read failed, so the confirm opened; the refresh after it lands with a live link.
+    await waitFor(() => expect(reads).toBeGreaterThanOrEqual(3))
+    await waitFor(() => expect(within(card).queryByText(/could not be read again/)).toBeNull())
+    expect(within(card).getByText(/stops working/)).toHaveTextContent(text)
+    expect(within(card).getByRole('button', { name: 'Yes, send a new link' })).toBeInTheDocument()
+  })
+
+  it('asks nothing on a 409 link_live when a fresh read shows no live link', async () => {
+    const none = { live: false, created_at: null, sent_to: null, opened_at: null, revoked_at: null }
+    server.use(
+      http.get('/api/v1/orders/:id/customer-link', () => HttpResponse.json(none)),
+      http.post('/api/v1/orders/:id/customer-link', () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/orders/link_live', status: 409, detail: 'a link is live' },
+          { status: 409 },
+        ),
+      ),
+    )
+    const { user } = render(ORDER_ACCEPTED)
+    const card = await screen.findByRole('region', { name: 'Customer link' })
+    await within(card).findByText('No link sent yet.')
+    await user.click(within(card).getByRole('button', { name: 'Send link' }))
+    await waitFor(() => expect(within(card).getByRole('button', { name: 'Send link' })).toBeEnabled())
+    expect(within(card).queryByText(/stops working/)).toBeNull()
+    expect(within(card).queryByRole('alert')).toBeNull()
+  })
+
+  it('says so when the customer has no email address, and sends to an address typed', async () => {
+    const { user } = render(ORDER_CLOSED)
+    const card = await screen.findByRole('region', { name: 'Customer link' })
+    await within(card).findByText('No link sent yet.')
+    await user.click(within(card).getByRole('button', { name: 'Send link' }))
+    expect(await within(card).findByRole('alert')).toHaveTextContent('The customer has no email contact that is one address')
+    await user.type(within(card).getByLabelText('Send to'), 'bob@example.org')
+    await user.click(within(card).getByRole('button', { name: 'Send link' }))
+    expect(await within(card).findByText(/Sent to/)).toHaveTextContent('bob@example.org')
+    expect(within(card).queryByRole('alert')).toBeNull()
+  })
+
+  it('renders what the link row holds as text', async () => {
+    const odd = '<b>x</b>@example.org'
+    mockCustomerLink(ORDER_ACCEPTED, { sent_to: odd, opened_at: '2026-11-09T10:00:00Z' })
+    render(ORDER_ACCEPTED)
+    const card = await screen.findByRole('region', { name: 'Customer link' })
+    expect(await within(card).findByText(/Sent to/)).toHaveTextContent(odd)
+    expect(within(card).getByText(/Opened on/)).toBeInTheDocument()
+    expect(card.querySelector('b')).toBeNull()
+  })
+
+  it("says when the link's state cannot be read, holds Send until it is, and tries again", async () => {
+    let fail = true
+    server.use(
+      http.get('/api/v1/orders/:id/customer-link', () =>
+        fail ? HttpResponse.json({ detail: 'database away' }, { status: 500 }) : undefined,
+      ),
+    )
+    const { user } = render(ORDER_ACCEPTED)
+    const card = await screen.findByRole('region', { name: 'Customer link' })
+    expect(await within(card).findByRole('alert')).toHaveTextContent("The link's state could not be read: database away")
+    // A send would revoke a live link with no confirm, so it waits for the state.
+    expect(within(card).getByRole('button', { name: 'Send link' })).toBeDisabled()
+    expect(within(card).getByText(/Sending waits until the state is read/)).toBeInTheDocument()
+    fail = false
+    await user.click(within(card).getByRole('button', { name: 'Try again' }))
+    expect(await within(card).findByText('No link sent yet.')).toBeInTheDocument()
+    expect(within(card).getByRole('button', { name: 'Send link' })).toBeEnabled()
+    expect(within(card).queryByRole('alert')).toBeNull()
+  })
+
+  it('shows each mail with its event, address and state, and says the mail server is not set up', async () => {
+    const row = { to: 'ada@example.test', attempts: 0, last_error: null, sent_at: null, failed_at: null }
+    mockOrderMail(ORDER_ACCEPTED, [
+      { ...row, event: 'shipped', created_at: '2026-11-04T10:00:00Z', next_attempt_at: '2026-11-04T10:00:00Z' },
+      { ...row, event: 'price_ready', created_at: '2026-11-03T10:00:00Z', next_attempt_at: '2026-11-03T10:00:00Z', failed_at: '2026-11-03T10:05:00Z', attempts: 5, last_error: 'mailbox full' },
+      { ...row, event: 'revision_ready', created_at: '2026-11-02T10:00:00Z', next_attempt_at: '2026-11-09T11:00:00Z', attempts: 1, last_error: 'try later' },
+      { ...row, event: 'order_link', created_at: '2026-11-01T10:00:00Z', next_attempt_at: '2026-11-01T10:00:00Z', sent_at: '2026-11-01T10:01:00Z' },
+    ])
+    // Only Date is faked, so the page's timers and requests run as usual.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-11-09T10:00:00Z'))
+    render(ORDER_ACCEPTED)
+    const list = await screen.findByRole('region', { name: 'Customer mail' })
+    const items = await within(list).findAllByRole('listitem')
+    expect(items).toHaveLength(4)
+    expect(items[0]).toHaveTextContent('Order shipped')
+    expect(items[0]).toHaveTextContent('ada@example.test')
+    expect(items[0]).toHaveTextContent('Queued')
+    expect(items[1]).toHaveTextContent('Price ready')
+    expect(items[1]).toHaveTextContent('Failed: mailbox full')
+    expect(items[2]).toHaveTextContent('Revision ready')
+    expect(items[2]).toHaveTextContent('Waiting until')
+    expect(items[2]).toHaveTextContent('try later')
+    expect(items[3]).toHaveTextContent('Order link')
+    expect(items[3]).toHaveTextContent('Sent')
+    // The default settings name no SMTP host.
+    expect(within(list).getByText(/mail server is not set up/)).toBeInTheDocument()
+  })
+
+  it('says the list shows only the newest rows when it is at the cap', async () => {
+    const row = { event: 'shipped' as const, to: 'ada@example.test', attempts: 0, last_error: null, sent_at: '2026-11-01T10:01:00Z', failed_at: null, next_attempt_at: '2026-11-01T10:00:00Z' }
+    mockOrderMail(
+      ORDER_ACCEPTED,
+      Array.from({ length: specMailMax() }, (_, i) => ({ ...row, created_at: new Date(Date.UTC(2026, 10, 1, 10, 0, 0) - i * 1000).toISOString() })),
+    )
+    render(ORDER_ACCEPTED)
+    const list = await screen.findByRole('region', { name: 'Customer mail' })
+    expect(await within(list).findByText(`The list shows at most the newest ${specMailMax()}.`)).toBeInTheDocument()
+  })
+
+  it('reads a backed-off mail as queued once its next try has passed', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-11-09T12:00:00Z'))
+    mockOrderMail(ORDER_ACCEPTED, [
+      { event: 'revision_ready', to: 'ada@example.test', created_at: '2026-11-02T10:00:00Z', sent_at: null, failed_at: null, attempts: 1, last_error: 'try later', next_attempt_at: '2026-11-09T11:00:00Z' },
+    ])
+    render(ORDER_ACCEPTED)
+    const list = await screen.findByRole('region', { name: 'Customer mail' })
+    const [item] = await within(list).findAllByRole('listitem')
+    expect(item).toHaveTextContent('Queued')
+    expect(item).not.toHaveTextContent('Waiting until')
+    expect(item).toHaveTextContent('try later')
+  })
+
+  it("shows the mail server's last error, and no note once a host and a sender are set", async () => {
+    setMockSettings({ ...mockSettings(), storefront_mail_host: 'smtp.example.com', storefront_mail_sender: 'shop@example.com' })
+    setMockMailServerError('login refused')
+    mockOrderMail(ORDER_ACCEPTED, [])
+    render(ORDER_ACCEPTED)
+    const list = await screen.findByRole('region', { name: 'Customer mail' })
+    expect(await within(list).findByRole('alert')).toHaveTextContent('login refused')
+    expect(within(list).queryByText(/mail server is not set up/)).toBeNull()
+    expect(await within(list).findByText('No mail yet.')).toBeInTheDocument()
+  })
+
+  it('says the mail server is not set up when a host is set and the sender is not', async () => {
+    setMockSettings({ ...mockSettings(), storefront_mail_host: 'smtp.example.com', storefront_mail_sender: null })
+    mockOrderMail(ORDER_ACCEPTED, [])
+    render(ORDER_ACCEPTED)
+    const list = await screen.findByRole('region', { name: 'Customer mail' })
+    expect(await within(list).findByText(/mail server is not set up/)).toBeInTheDocument()
+  })
+
+  describe('mail refresh', () => {
+    const WAITING = {
+      event: 'shipped' as const,
+      to: 'ada@example.test',
+      created_at: '2026-11-04T10:00:00Z',
+      next_attempt_at: '2026-11-04T10:00:00Z',
+      attempts: 0,
+      last_error: null,
+      sent_at: null,
+      failed_at: null,
+    }
+
+    function countMailReads() {
+      const reads = { count: 0 }
+      server.use(
+        http.get('/api/v1/orders/:id/mail', () => {
+          reads.count += 1
+          return HttpResponse.json([WAITING])
+        }),
+      )
+      return reads
+    }
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('does not poll the mail while the mail server is not set up', async () => {
+      const reads = countMailReads()
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+      render(ORDER_ACCEPTED)
+      const list = await screen.findByRole('region', { name: 'Customer mail' })
+      expect(await within(list).findByText(/mail server is not set up/)).toBeInTheDocument()
+      await within(list).findAllByRole('listitem')
+      const before = reads.count
+      await vi.advanceTimersByTimeAsync(31_000)
+      expect(reads.count).toBe(before)
+    })
+
+    it('reads the settings slowly while mail is queued and the mail server is not set up', async () => {
+      countMailReads()
+      let settingsReads = 0
+      server.use(
+        http.get('/api/v1/settings', () => {
+          settingsReads += 1
+          return HttpResponse.json(mockSettings())
+        }),
+      )
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+      render(ORDER_ACCEPTED)
+      const list = await screen.findByRole('region', { name: 'Customer mail' })
+      expect(await within(list).findByText(/mail server is not set up/)).toBeInTheDocument()
+      await within(list).findAllByRole('listitem')
+      const before = settingsReads
+      await vi.advanceTimersByTimeAsync(31_000)
+      expect(settingsReads).toBe(before)
+      setMockSettings({ ...mockSettings(), storefront_mail_host: 'smtp.example.com', storefront_mail_sender: 'shop@example.com' })
+      await vi.advanceTimersByTimeAsync(30_000)
+      await waitFor(() => expect(within(list).queryByText(/mail server is not set up/)).toBeNull())
+      // One read at 60 s, none before it: the slow cadence itself.
+      expect(settingsReads).toBe(before + 1)
+    })
+
+    it('reads the settings and the server error again on the poll', async () => {
+      setMockSettings({ ...mockSettings(), storefront_mail_host: 'smtp.example.com', storefront_mail_sender: 'shop@example.com' })
+      const reads = countMailReads()
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+      render(ORDER_ACCEPTED)
+      const list = await screen.findByRole('region', { name: 'Customer mail' })
+      await within(list).findAllByRole('listitem')
+      expect(within(list).queryByRole('alert')).toBeNull()
+      const before = reads.count
+      setMockMailServerError('login refused')
+      await vi.advanceTimersByTimeAsync(16_000)
+      await waitFor(() => expect(reads.count).toBeGreaterThan(before))
+      expect(await within(list).findByRole('alert')).toHaveTextContent('login refused')
+    })
+
+    it('reads the settings again when a link send changes the page', async () => {
+      const { user } = render(ORDER_ACCEPTED)
+      const card = await screen.findByRole('region', { name: 'Customer link' })
+      const list = await screen.findByRole('region', { name: 'Customer mail' })
+      expect(await within(list).findByText(/mail server is not set up/)).toBeInTheDocument()
+      setMockSettings({ ...mockSettings(), storefront_mail_host: 'smtp.example.com', storefront_mail_sender: 'shop@example.com' })
+      await within(card).findByText('No link sent yet.')
+      await user.type(within(card).getByLabelText('Send to'), 'grace@example.org')
+      await user.click(within(card).getByRole('button', { name: 'Send link' }))
+      await waitFor(() => expect(within(list).queryByText(/mail server is not set up/)).toBeNull())
+    })
+  })
+
+  it('lists the mail a link send queues', async () => {
+    const { user } = render(ORDER_ACCEPTED)
+    const card = await screen.findByRole('region', { name: 'Customer link' })
+    await within(card).findByText('No link sent yet.')
+    await user.type(within(card).getByLabelText('Send to'), 'grace@example.org')
+    await user.click(within(card).getByRole('button', { name: 'Send link' }))
+    const list = await screen.findByRole('region', { name: 'Customer mail' })
+    expect(await within(list).findByText('Order link')).toBeInTheDocument()
+    expect(within(list).getByText('grace@example.org')).toBeInTheDocument()
+  })
+
+  it('renders a mail row as text', async () => {
+    mockOrderMail(ORDER_ACCEPTED, [
+      { event: 'order_link', to: '<b>x</b>@example.org', created_at: '2026-11-01T10:00:00Z', sent_at: null, failed_at: '2026-11-01T10:05:00Z', attempts: 5, last_error: '<i>bad</i>', next_attempt_at: '2026-11-01T10:00:00Z' },
+    ])
+    render(ORDER_ACCEPTED)
+    const list = await screen.findByRole('region', { name: 'Customer mail' })
+    expect(await within(list).findByText(/bad/)).toBeInTheDocument()
+    expect(list.querySelector('b, i')).toBeNull()
+  })
+
+  it('shows no card on a cart', async () => {
+    const cart = seedCart()
+    render(cart.id)
+    await screen.findByText(/A storefront cart the visitor has not submitted/)
+    expect(screen.queryByRole('region', { name: 'Customer link' })).toBeNull()
+  })
+})

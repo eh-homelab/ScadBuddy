@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import type { components } from '../api/schema.js'
 import { ok } from './call.js'
@@ -16,7 +17,8 @@ import {
   supportsChoice,
   tier,
 } from './print.js'
-import { defineTool, json, type Tool, type ToolContext, ToolError } from './registry.js'
+import { messageArguments, openChecked } from '../orders/messaging.js'
+import { defineTool, idempotencyKey, json, type Tool, type ToolContext, ToolError } from './registry.js'
 import { FROM_WORKSPACE_ONLY, uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 
 /** A request body as sent: every field may be left out, each with the schema's type. */
@@ -96,6 +98,8 @@ export function composeNotice(
   detail: NoticeOrder,
   customer: NoticeCustomer,
   note?: string,
+  /** The bound channel's contact kind (#5660): only contacts of that kind are addressed. */
+  contactKind?: string,
 ): {
   template: NotifyTemplate
   to: { kind: string; value: string }[]
@@ -113,15 +117,323 @@ export function composeNotice(
     shipped: [`Order ${number} has shipped`, `Order ${number} has shipped.`],
   }
   const [subject, body] = lines[template]
-  const primary = customer.contacts.filter((c) => c.primary)
-  const to = (primary.length > 0 ? primary : customer.contacts).map(({ kind, value }) => ({ kind, value }))
+  const reachable = contactKind === undefined ? customer.contacts : customer.contacts.filter((c) => c.kind === contactKind)
+  const primary = reachable.filter((c) => c.primary)
+  const to = (primary.length > 0 ? primary : reachable).map(({ kind, value }) => ({ kind, value }))
   const text = [`Hello ${customer.display_name},`, '', body, ...(note ? ['', note] : [])].join('\n')
   // Review of #5682: an unaddressed message says so, so a sender (#5660) never sends it blind.
   if (to.length === 0) {
-    return { template, to, subject, text, sent: false, warning: `${customer.display_name} has no contacts to send it to.` }
+    const which = contactKind === undefined ? 'contacts' : `${contactKind} contacts`
+    return { template, to, subject, text, sent: false, warning: `${customer.display_name} has no ${which} to send it to.` }
   }
   return { template, to, subject, text, sent: false }
 }
+// #5660 (spec 2026-11-08-order-notify-customer-design.md §5-§7): sending a notice through the
+// messaging plugin the shop bound (the stored setting `orders_customer_messaging`). The
+// backend keeps the record (`/orders/{id}/messages`); the plugin is called here, once per
+// claimed message, through orders/messaging.ts.
+
+type Binding = components['schemas']['MessagingBinding']
+type Notice = ReturnType<typeof composeNotice>
+type OrderMessage = components['schemas']['OrderMessage']
+/** What the send helpers read of a call's context: the order page's own send (routes/orderMessages.ts) has no more. */
+type SendContext = Pick<ToolContext, 'backend' | 'messaging' | 'callKey'>
+
+/** What a person approves: the message itself, so what runs is what was approved. */
+const APPROVED_MESSAGE = z.object({
+  source: z.string().max(300),
+  tool: z.string().max(128),
+  to: z.array(z.object({ kind: z.string().max(40), value: z.string().max(320) })).max(20),
+  subject: z.string().max(300).nullable(),
+  text: z.string().max(12_000),
+})
+export type ApprovedMessage = z.infer<typeof APPROVED_MESSAGE>
+
+/** The order's notice, composed for the bound channel when there is one. */
+async function composeFor(
+  ctx: SendContext,
+  order_id: string,
+  template: NotifyTemplate,
+  note: string | undefined,
+): Promise<{ binding: Binding | null; notice: Notice }> {
+  const { backend } = ctx
+  const detail = await ok(backend.GET('/api/v1/orders/{order_id}', { params: { path: { order_id } } }), `get order ${order_id}`)
+  const { customer_id, number } = detail.order
+  // A visitor's cart (#5282) has no customer and no number yet: nobody to address.
+  if (customer_id == null || number == null) {
+    throw new ToolError(`order ${order_id} has no customer or number yet (a cart), so there is no one to notify`)
+  }
+  const customer = await ok(
+    backend.GET('/api/v1/customers/{customer_id}', { params: { path: { customer_id } } }),
+    `get customer ${customer_id}`,
+  )
+  const settings = await ok(backend.GET('/api/v1/settings', {}), 'read the settings')
+  const binding = settings.orders_customer_messaging ?? null
+  const order = { order: { ...detail.order, number }, totals: detail.totals }
+  return { binding, notice: composeNotice(template, order, customer, note, binding?.contact_kind) }
+}
+
+/** `message_models.py` `MessageClaim.recipients`' bound. */
+const MAX_RECIPIENTS = 20
+
+type SendArgs = {
+  order_id: string
+  template: NotifyTemplate
+  note?: string | undefined
+  resend_of?: string | undefined
+  also_when_storefront_mails?: boolean | undefined
+}
+type SendPlan = { binding: Binding; notice: Notice; approved: ApprovedMessage }
+
+/** The message a send would send now, or why it cannot be sent (nothing sent, nothing recorded). */
+async function sendPlan(ctx: SendContext, args: SendArgs): Promise<SendPlan> {
+  const { binding, notice } = await composeFor(ctx, args.order_id, args.template, args.note)
+  if (!binding) {
+    throw new ToolError(
+      'no_messaging_plugin: the shop bound no messaging plugin (Settings → Orders), so nothing was sent; ' +
+        `send this by hand to the customer: subject "${notice.subject}", text:\n${notice.text}`,
+    )
+  }
+  if (notice.to.length === 0) {
+    throw new ToolError(`no_contact: ${notice.warning ?? 'the customer has no contact of the plugin’s kind'} Nothing was sent.`)
+  }
+  // The record takes at most MAX_RECIPIENTS (the backend's `MessageClaim.recipients`).
+  if (notice.to.length > MAX_RECIPIENTS) {
+    throw new ToolError(
+      `too_many_recipients: the customer has ${notice.to.length} ${binding.contact_kind} contacts to address and a ` +
+        `message goes to at most ${MAX_RECIPIENTS}; mark the ones to use as primary. Nothing was sent.`,
+    )
+  }
+  const subject = binding.args.subject ? notice.subject : null
+  return {
+    binding,
+    notice,
+    approved: { source: binding.source, tool: binding.tool, to: notice.to, subject, text: notice.text },
+  }
+}
+
+/**
+ * What the backend's read-only check refuses before anything parks (§5.2): `already_notified`
+ * (unless `resend_of` names the message), and `storefront_mail` (§8: the storefront mails this
+ * template's news to the order's customer itself) unless `also_when_storefront_mails`. With
+ * `key`, a key that already claimed a message refuses nothing: its claim answers that row (a
+ * retry after a lost answer is served from the first claim, never refused). Answers the row the
+ * key claimed, else null.
+ */
+async function refuseIfTold(ctx: SendContext, args: SendArgs, key?: string): Promise<OrderMessage | null> {
+  const { order_id, template } = args
+  const header = key === undefined ? {} : { header: { 'Idempotency-Key': key } }
+  const check = await ok(
+    ctx.backend.GET('/api/v1/orders/{order_id}/messages/check', {
+      params: { path: { order_id }, query: { template }, ...header },
+    }),
+    `check order ${order_id}'s messages`,
+  )
+  if (check.claimed) return check.claimed
+  const told = check.already_notified
+  if (told && args.resend_of === undefined) {
+    throw new ToolError(
+      `already_notified: the customer was already sent "${template}" (message ${told.id}, ${told.status}) since the ` +
+        'order last changed status; name it in resend_of to send it again',
+    )
+  }
+  if (check.storefront_mail && !args.also_when_storefront_mails) {
+    throw new ToolError(
+      `storefront_mail: the storefront mails the "${template}" news to this order's customer itself (the order has ` +
+        'a live order link), so nothing was sent through the plugin; set also_when_storefront_mails to send it ' +
+        'here too',
+    )
+  }
+  return null
+}
+
+/** The approval's line: who gets it, through what, and the text. */
+function approvalLine(message: ApprovedMessage, alsoStorefront = false): string {
+  const to = message.to.map((r) => r.value).join(', ')
+  const subject = message.subject === null ? '' : ` "${message.subject}"`
+  const also = alsoStorefront ? ' (the storefront mail also sends this)' : ''
+  return `Send${subject} to ${to} through ${message.source}${also}:\n${message.text}`
+}
+
+/** What a send answers for a claim recorded `skipped` (§8), fresh or replayed. */
+const STOREFRONT_SKIPPED =
+  'the storefront mails this to the customer itself, so nothing was sent through the plugin; send it ' +
+  'with also_when_storefront_mails to send it here too'
+
+/** The backend's `STALE_SENDING_MINUTES` (`orders/messages.py`): a `sending` row older reads `unknown`. */
+const STALE_SENDING_MINUTES = 15
+
+/** What a send answers: the recorded message, and whether the plugin reached the customer. */
+export type SendAnswer = { sent: boolean; message: OrderMessage; warning?: string }
+
+/**
+ * Claims the message, calls the plugin once, records the outcome (§7.2). A claim that comes
+ * back as an earlier one (the same call retried) never sends again, unless the binding
+ * gives the plugin a dedupe key: then the plugin drops the copy.
+ */
+async function sendMessage(ctx: SendContext, args: SendArgs, plan: Pick<SendPlan, 'binding' | 'approved'>): Promise<SendAnswer> {
+  const { backend } = ctx
+  const order_id = args.order_id
+  if (!ctx.messaging) {
+    throw new ToolError('messaging_plugin_unavailable: this agent cannot reach plugins, so nothing was sent')
+  }
+  // §4.3: the binding is checked again against the tool as it is now, before anything is claimed.
+  const connection = await openChecked(ctx.messaging, plan.binding)
+  if (typeof connection === 'string') throw new ToolError(`messaging_plugin_unavailable: ${connection}; nothing was sent`)
+  try {
+    const claimed = await backend.POST('/api/v1/orders/{order_id}/messages', {
+      params: { path: { order_id }, header: { 'Idempotency-Key': idempotencyKey(ctx) } },
+      body: {
+        template: args.template,
+        source: plan.approved.source,
+        tool: plan.approved.tool,
+        recipients: plan.approved.to,
+        subject: plan.approved.subject,
+        text: plan.approved.text,
+        ...(args.resend_of === undefined ? {} : { resend_of: args.resend_of }),
+        also_when_storefront_mails: args.also_when_storefront_mails === true,
+      },
+    })
+    const message = await ok(Promise.resolve(claimed), `record the message to order ${order_id}'s customer`)
+    const fresh = claimed.response.status === 201
+    if (message.status === 'skipped') {
+      // §8: the storefront mails it itself (it began to between the check and the claim).
+      return { sent: false, message, warning: STOREFRONT_SKIPPED }
+    }
+    if (!fresh && (message.status === 'sent' || message.status === 'failed')) {
+      return { sent: message.status === 'sent', message }
+    }
+    // A replayed claim goes again only through the plugin and tool it was recorded for, which
+    // is what drops the copy by its dedupe key.
+    const keyed =
+      plan.binding.args.idempotency_key != null && message.source === plan.binding.source && message.tool === plan.binding.tool
+    // A replayed claim still `sending` and fresh is another call's send in flight: without a dedupe
+    // key it is neither sent again nor given an outcome here (#5858 review). Past the stale limit
+    // the backend reads it `unknown`, and that is recorded below.
+    if (!fresh && message.status === 'sending' && !keyed) {
+      return {
+        sent: false,
+        message,
+        warning:
+          `this message was claimed by an earlier call and may still be in flight; nothing was sent again. It reads ` +
+          `unknown after ${STALE_SENDING_MINUTES} minutes with no outcome. Check the order’s messages ` +
+          '(order_messages_list) for its outcome',
+      }
+    }
+    const resendable = fresh || keyed
+    // The claimed row is the record (#5980 review): what goes is its own recipients and text,
+    // never a message composed since, which a replay's claim body does not change.
+    const outcome = resendable
+      ? await connection.send(
+          messageArguments(plan.binding, { to: message.recipients, subject: message.subject ?? null, text: message.text, key: message.id }),
+        )
+      : ({ status: 'unknown', reason: 'no_answer' } as const)
+    const recorded = await backend.POST('/api/v1/orders/{order_id}/messages/{message_id}/outcome', {
+      params: { path: { order_id, message_id: message.id } },
+      body:
+        outcome.status === 'sent'
+          ? { status: 'sent', ...(outcome.providerMessageId ? { provider_message_id: outcome.providerMessageId } : {}) }
+          : { status: outcome.status, reason: outcome.reason },
+    })
+    // §7.2 step 4: a replayed claim with no dedupe key is not sent again; a person checks.
+    const notResent =
+      'this send was tried before and may have reached the customer; it was not sent again. Ask a person to ' +
+      'check the inbox, then "Mark sent" on the order page, or send it again with resend_of'
+    if (!recorded.response.ok) {
+      // The plugin's answer stands; the record keeps `sending`, which reads `unknown` later.
+      const unrecorded = `the order's record could not be updated (HTTP ${recorded.response.status})`
+      return {
+        sent: outcome.status === 'sent',
+        message,
+        warning: resendable ? `the plugin answered ${outcome.status}, but ${unrecorded}` : `${notResent}; ${unrecorded}`,
+      }
+    }
+    const answer: SendAnswer = { sent: outcome.status === 'sent', message: recorded.data as OrderMessage }
+    return resendable ? answer : { ...answer, warning: notResent }
+  } finally {
+    await connection.close().catch(() => {})
+  }
+}
+
+/** The digest of an approved message, which the order page's preview gives and its send names. */
+export function messageDigest(message: ApprovedMessage): string {
+  return createHash('sha256').update(JSON.stringify(message)).digest('hex')
+}
+
+/**
+ * A person's own send from the order page (#5660 PR 3): the template, the message it sends again,
+ * and `also_when_storefront_mails` once the person said yes to sending what the storefront emails.
+ */
+export type PersonSend = {
+  order_id: string
+  template: NotifyTemplate
+  resend_of?: string | undefined
+  also_when_storefront_mails?: boolean | undefined
+}
+
+/** The message a person's send would send now, and its digest; nothing is sent or recorded. */
+export async function previewPersonSend(
+  ctx: SendContext,
+  args: PersonSend,
+): Promise<{ message: ApprovedMessage; digest: string }> {
+  const planned = await sendPlan(ctx, args)
+  await refuseIfTold(ctx, args)
+  return { message: planned.approved, digest: messageDigest(planned.approved) }
+}
+
+/**
+ * Sends the message composed now, only when it is the one the person previewed (`digest`):
+ * the browser names what it saw and never supplies the text.
+ */
+export async function personSend(ctx: SendContext, args: PersonSend, digest: string): Promise<SendAnswer> {
+  // The key's claim first (#5978): a retry of a send already claimed is answered from that claim,
+  // never refused and never composed again (it may have reached the customer). Without one, the
+  // preview's refusals stand at the send too (the storefront may have begun to mail it since),
+  // and so do the composition's and the digest. Their order (the check's before the composition's)
+  // differs from the preview's, which composes first. After a preview that is harmless: it can
+  // change which refusal a send names, never whether it sends.
+  const claimed = await refuseIfTold(ctx, args, idempotencyKey(ctx))
+  if (claimed) return replayClaim(ctx, args, claimed)
+  const planned = await sendPlan(ctx, args)
+  if (messageDigest(planned.approved) !== digest) {
+    throw new ToolError(
+      'message_changed: the order, the customer or the messaging binding changed since the preview, so nothing ' +
+        'was sent; preview it again',
+    )
+  }
+  return sendMessage(ctx, args, planned)
+}
+
+/**
+ * A send whose key already claimed `claimed`. An ended row is answered as it is, with no plugin.
+ * One with no outcome (`sending`, `unknown`) goes through `sendMessage` with its own recipients
+ * and text: the plugin is called again only when the binding gives it a dedupe key (§7.2 step 4),
+ * else nothing is sent and a person checks. It needs no contact (the row carries its
+ * recipients), but it needs the binding: none is `no_messaging_plugin`.
+ */
+async function replayClaim(ctx: SendContext, args: PersonSend, claimed: OrderMessage): Promise<SendAnswer> {
+  if (claimed.status === 'skipped') return { sent: false, message: claimed, warning: STOREFRONT_SKIPPED }
+  if (claimed.status !== 'sending' && claimed.status !== 'unknown') {
+    return { sent: claimed.status === 'sent', message: claimed }
+  }
+  const settings = await ok(ctx.backend.GET('/api/v1/settings', {}), 'read the settings')
+  const binding = settings.orders_customer_messaging ?? null
+  if (!binding) {
+    throw new ToolError(
+      `no_messaging_plugin: message ${claimed.id} was claimed and has no outcome, and the shop no longer binds a ` +
+        'messaging plugin (Settings → Orders), so nothing was sent again; check the inbox, then "Mark sent" on the order page',
+    )
+  }
+  const approved = {
+    source: claimed.source,
+    tool: claimed.tool,
+    to: claimed.recipients,
+    subject: claimed.subject ?? null,
+    text: claimed.text,
+  }
+  return sendMessage(ctx, args, { binding, approved })
+}
+
 const itemId = ID.describe('A line item id, as order_get lists them')
 const customerId = ID.describe('A customer id, as customer_list returns it')
 const attachmentId = ID.describe("An attachment id, as order_get lists them under `attachments`")
@@ -159,7 +471,9 @@ const address = z
 const AUTO_TAX =
   'The auto tax row (#5281, `auto: true` in order_get) is not part of the list: leave it out and the order keeps it ' +
   'and recomputes it. Sent back as read, with its `id` and `auto`, it stays the auto row and is recomputed, ' +
-  'whatever the amount. Any other `tax` charge, whatever its label, is a typed tax and replaces the auto row.'
+  'whatever the amount. Any other `tax` charge, whatever its label, is a typed tax and replaces the auto row. ' +
+  'The `purchase` and `handling` rows (#6133) are not part of the list either: leave them out, and the order keeps ' +
+  'them; only order_purchase_record, order_purchase_update and order_purchase_decline change them.'
 const charge = z
   .object({
     kind: z.enum(['shipping', 'discount', 'fee', 'tax']),
@@ -317,6 +631,22 @@ const filamentFields = {
   colour: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
   cost_per_kg: decimal.optional().describe('In the shop\'s currency'),
   density_g_cm3: decimal.nullable().optional().describe('g/cm³, for the rough estimate'),
+  // #6209: what Bambuddy keeps beside the RGB; `colour` stays #RRGGBB for the render.
+  alpha: z.number().int().min(0).max(255).optional().describe('The alpha byte: 255 opaque, below it translucent (a clear filament is its RGB with alpha 0)'),
+  extra_colours: z
+    .array(z.string().regex(/^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/))
+    .max(8)
+    .optional()
+    .describe('A multi-colour filament\'s stops, #RRGGBB or #RRGGBBAA'),
+  effect: z
+    .enum(['sparkle', 'wood', 'marble', 'glow', 'matte', 'silk', 'galaxy', 'rainbow', 'metal', 'translucent', 'gradient', 'dual-color', 'tri-color', 'multicolor'])
+    .nullable()
+    .optional()
+    .describe("Bambuddy's swatch effect"),
+  colour_source: z
+    .literal('import')
+    .optional()
+    .describe('Edit only: hand the colour back to the spool import, which sets it at its next run. A colour, alpha, stops or effect changed here marks it set by hand'),
 }
 /** The print dialog's choices (`PrintChoices`): what the item is sliced with. */
 const printChoices = z
@@ -343,7 +673,7 @@ const sliceQuote = z
           'and a printer a run reaches over the LAN is sliced for with no Bambuddy call',
       ),
     filament_plan: z
-      .object({ slots: z.array(slotChoice), force_colour_match: z.boolean().default(false) })
+      .object({ slots: z.array(slotChoice), force_colour_match: z.boolean().default(true) })
       .describe('One spool per slot (slot_id from 1), as the print dialog sends it'),
     choices: printChoices,
     filaments: z
@@ -591,7 +921,9 @@ export const orderTools: Tool[] = [
       'One order whole: its status, number and addresses, its line items with their quotes, design `revisions` ' +
       'and fulfilment attempts (every attempt has a `purpose`: `production`, or `test` for a revision\'s test print), ' +
       'charges, payments, shipments and totals. A payment\'s `method` says how it was paid: a provider id, ' +
-      '`venmo` for a PayPal payment funded by Venmo (#4960), or a method recorded by hand.',
+      '`venmo` for a PayPal payment funded by Venmo (#4960), or a method recorded by hand. A customer\'s own ' +
+      'models request (#6133) adds `sources` (each file and link: its check, status, `import_stuck`, cost and ' +
+      'charge) and `model_requests` (the colours the customer asked for, per item).',
     input: z.object({ order_id: orderId }),
     risk: 'read',
     routes: ['GET /api/v1/orders/{order_id}'],
@@ -737,7 +1069,8 @@ export const orderTools: Tool[] = [
       "Choose the order's shipping option (#5281) while it is draft or quoted: `option_id` is one of the shop's " +
       'shipping options, kept in Settings → Orders (read them with get_settings, `storefront_shipping_options`); null ' +
       "removes it. The option becomes the order's one `shipping` charge. An option that ships needs the order's " +
-      'shipping address (`shipping_address_required`); a pickup does not.',
+      'shipping address (`shipping_address_required`); a pickup does not. An order in another currency than ' +
+      "the shop's takes no option (`shipping_currency_mismatch`): the amounts are in the shop's currency.",
     input: z.object({
       order_id: orderId,
       option_id: z.string().min(1).max(100).nullable().describe('A shipping option id; null for none'),
@@ -755,13 +1088,100 @@ export const orderTools: Tool[] = [
       ),
   }),
   defineTool({
+    name: 'order_customer_link_get',
+    label: "Read an order's customer link",
+    description:
+      "The state of the order's newest customer link (#5283): `live`, `created_at`, `sent_to` (where its mail " +
+      'went), `opened_at` (when the customer first opened it) and `revoked_at`; all null with `live: false` when ' +
+      'the order never had one. Never the link itself.',
+    input: z.object({ order_id: orderId }),
+    risk: 'read',
+    routes: ['GET /api/v1/orders/{order_id}/customer-link'],
+    handler: async ({ order_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/orders/{order_id}/customer-link', { params: { path: { order_id } } }),
+          `read the customer link of order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_mail_list',
+    label: "List an order's customer mail",
+    description:
+      "The storefront mail of an order (#5283), newest first: each `event` (`order_link`, `revision_ready`, " +
+      '`price_ready`, `payment_requested`, `shipped`), `to`, `created_at`, `sent_at`, `failed_at`, `attempts`, ' +
+      '`last_error` and `next_attempt_at`. A row with no `sent_at` and no `failed_at` is queued or waiting for its next ' +
+      'try. Never the body, a link or a token. A sign-in code is not listed. Not the messaging plugin: see order_messages_list.',
+    input: z.object({ order_id: orderId }),
+    risk: 'read',
+    source: "the mail server's error text, which a recipient's server writes",
+    routes: ['GET /api/v1/orders/{order_id}/mail'],
+    handler: async ({ order_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/orders/{order_id}/mail', { params: { path: { order_id } } }),
+          `list the customer mail of order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_customer_link_send',
+    label: 'Send the customer an order link',
+    description:
+      "Mail the order's customer a link that opens the order on the storefront without an account (#5283, storefront " +
+      'spec §5.2), so they can answer revisions and pay online. Every live link of the order is revoked first: an ' +
+      "old one stops working, and this tool always replaces (`replace: true`). The mail goes to `to` (one address), or else to the customer's email contact. This " +
+      'mails the customer, so it is outward: a person must approve it first (it returns a pending action). The ' +
+      'reply is the link state (`live`, `created_at`, `sent_to`, `opened_at`, `revoked_at`), never the link itself. ' +
+      '422 `no_customer` for an order with no customer (set one first); 422 `no_email` with no `to` and no ' +
+      'email contact; 422 `email_invalid` for anything but one address; ' +
+      '`order_not_submitted` on a storefront cart.',
+    input: z.object({
+      order_id: orderId,
+      to: z.string().min(1).max(320).optional().describe("One email address; the customer's email contact when left out"),
+    }),
+    risk: 'outward',
+    routes: ['POST /api/v1/orders/{order_id}/customer-link'],
+    summarize: ({ order_id, to }) => `Send a new customer link for order ${order_id}${to ? ` to ${to}` : ''}`,
+    handler: async ({ order_id, to }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/customer-link', {
+            params: { path: { order_id } },
+            body: to === undefined ? { replace: true } : { to, replace: true },
+          }),
+          `send a customer link for order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_customer_link_revoke',
+    label: "Revoke an order's customer link",
+    description:
+      "Revoke the order's live customer links (#5283): each stops opening the order at once. It only removes the " +
+      "customer's access and sends nothing. The reply is the newest link's state.",
+    input: z.object({ order_id: orderId }),
+    risk: 'write',
+    routes: ['DELETE /api/v1/orders/{order_id}/customer-link'],
+    summarize: ({ order_id }) => `Revoke the customer link of order ${order_id}`,
+    handler: async ({ order_id }, { backend }) =>
+      json(
+        await ok(
+          backend.DELETE('/api/v1/orders/{order_id}/customer-link', { params: { path: { order_id } } }),
+          `revoke the customer link of order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
     name: 'order_notify_customer',
     label: 'Write a message to an order’s customer',
     description:
       "Compose a message to an order's customer from a template (`quoted`, `accepted`, `ready`, `shipped`), " +
       "addressed to the customer's primary contacts, with an optional `note` added. It sends nothing: the " +
-      'answer is the text (`sent: false`) for a person to send. Sending through a messaging plugin is a ' +
-      'later change (#5660).',
+      'answer is the text (`sent: false`) for a person to send. When the shop bound a messaging plugin ' +
+      '(Settings → Orders, #5660), `channel` names it, `to` holds only contacts of its kind, and `send_ready` ' +
+      'says order_notify_customer_send can send it; with none, `channel` is null.',
     input: z.object({
       order_id: orderId,
       template: z.enum(NOTIFY_TEMPLATES),
@@ -770,22 +1190,94 @@ export const orderTools: Tool[] = [
     // It composes text and changes nothing; the person who sends it decides.
     risk: 'read',
     source: 'the order and the customer record, which anyone who edits them can write',
-    routes: ['GET /api/v1/orders/{order_id}', 'GET /api/v1/customers/{customer_id}'],
-    handler: async ({ order_id, template, note }, { backend }) => {
-      const detail = await ok(
-        backend.GET('/api/v1/orders/{order_id}', { params: { path: { order_id } } }),
-        `get order ${order_id}`,
-      )
-      const { customer_id, number } = detail.order
-      // A visitor's cart (#5282) has no customer and no number yet: nobody to address.
-      if (customer_id == null || number == null) {
-        throw new ToolError(`order ${order_id} has no customer or number yet (a cart), so there is no one to notify`)
+    routes: ['GET /api/v1/orders/{order_id}', 'GET /api/v1/customers/{customer_id}', 'GET /api/v1/settings'],
+    handler: async ({ order_id, template, note }, ctx) => {
+      const { binding, notice } = await composeFor(ctx, order_id, template, note)
+      const channel = binding ? { source: binding.source, contact_kind: binding.contact_kind } : null
+      return json({ ...notice, channel, send_ready: binding !== null && notice.to.length > 0 })
+    },
+  }),
+  defineTool({
+    name: 'order_messages_list',
+    label: 'List the messages sent to an order’s customer',
+    description:
+      "The messages sent, or tried, to an order's customer through the messaging plugin (#5660), newest first, " +
+      'as the order page lists them: each id, template, recipients, text and status (`sending`, `sent`, ' +
+      `\`failed\`, \`unknown\`, \`skipped\`; a \`sending\` one older than ${STALE_SENDING_MINUTES} minutes reads \`unknown\`). An id here is ` +
+      "what order_notify_customer_send's `resend_of` takes.",
+    input: z.object({ order_id: orderId }),
+    risk: 'read',
+    source: 'the order and the customer record, which anyone who edits them can write',
+    routes: ['GET /api/v1/orders/{order_id}/messages'],
+    handler: async ({ order_id }, ctx) =>
+      json(
+        await ok(
+          ctx.backend.GET('/api/v1/orders/{order_id}/messages', { params: { path: { order_id } } }),
+          `list order ${order_id}'s messages`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_notify_customer_send',
+    label: 'Send a message to an order’s customer',
+    description:
+      "Send a template message (`quoted`, `accepted`, `ready`, `shipped`) to an order's customer through the " +
+      'messaging plugin the shop bound in Settings → Orders (#5660, spec 2026-11-08 §5): the text ' +
+      "order_notify_customer composes, addressed to the customer's contacts of the plugin's kind. Outward: a " +
+      'person approves the exact recipients and text, or a grant covers it; if the order, the customer or the ' +
+      'binding changes before it runs, it is refused `message_changed` and nothing is sent. Each send is recorded ' +
+      'on the order. A template is sent once per status change of the order: a second send is refused ' +
+      "`already_notified` unless `resend_of` names the earlier message (a person's \"Send again\"). With no " +
+      'plugin bound it is refused with the text, for a person to send by hand. When the storefront mails the ' +
+      'same news to the customer itself (`quoted` and `shipped`, on an order with a live order link), it is ' +
+      'refused `storefront_mail` unless `also_when_storefront_mails` is set. The answer is the recorded ' +
+      'message: `sent`, `failed` (the plugin refused it), or `unknown` (no answer came: it may have reached the ' +
+      'customer, and it is never sent again by itself).',
+    input: z.object({
+      order_id: orderId,
+      template: z.enum(NOTIFY_TEMPLATES),
+      note: z.string().min(1).max(2000).optional().describe('A line added after the template’s text'),
+      resend_of: ID.optional().describe(
+        'An earlier message of this order to send again, as order_messages_list (and the order page) lists it',
+      ),
+      also_when_storefront_mails: z
+        .boolean()
+        .optional()
+        .describe(
+          'Send it even when the storefront mails this news to the customer itself (a second channel, such as ' +
+            'an SMS nudge). Leave it out otherwise; a flow never sets it.',
+        ),
+      approved: APPROVED_MESSAGE.optional().describe('Filled by the approval: what the person approved. Leave it out.'),
+    }),
+    risk: 'outward',
+    source: 'the order and the customer record, which anyone who edits them can write',
+    routes: [
+      'GET /api/v1/orders/{order_id}/messages/check',
+      'POST /api/v1/orders/{order_id}/messages',
+      'POST /api/v1/orders/{order_id}/messages/{message_id}/outcome',
+    ],
+    title: ({ template }) => `Send the "${template}" message`,
+    summarize: ({ order_id, template }) => `Send the "${template}" message of order ${order_id}`,
+    // #4442: the approval holds the message itself, so what runs is what the person saw.
+    prepareApproval: async (args, ctx) => {
+      const planned = await sendPlan(ctx, args)
+      await refuseIfTold(ctx, args)
+      return {
+        input: { ...args, approved: planned.approved },
+        summary: approvalLine(planned.approved, args.also_when_storefront_mails === true),
       }
-      const customer = await ok(
-        backend.GET('/api/v1/customers/{customer_id}', { params: { path: { customer_id } } }),
-        `get customer ${customer_id}`,
-      )
-      return json(composeNotice(template, { order: { ...detail.order, number }, totals: detail.totals }, customer, note))
+    },
+    // A flow's approval binds the message too (#4445), so a change since it is not run.
+    flowBinding: (_args, resolved) => ({ approved: resolved.approved ?? null }),
+    handler: async (args, ctx) => {
+      const planned = await sendPlan(ctx, args)
+      if (args.approved !== undefined && JSON.stringify(args.approved) !== JSON.stringify(planned.approved)) {
+        throw new ToolError(
+          'message_changed: the order, the customer or the messaging binding changed since this message was ' +
+            'approved, so nothing was sent; ask for a new approval',
+        )
+      }
+      return json(await sendMessage(ctx, args, planned))
     },
   }),
   defineTool({
@@ -811,7 +1303,7 @@ export const orderTools: Tool[] = [
       ),
   }),
   // Job cost (#5326, spec 2026-11-05 §4.3, §4.4): a record of what the job took, in any
-  // order status. Removing one is the order page's (coverage.ts).
+  // order status except a storefront cart not yet submitted. Removing one is the order page's (coverage.ts).
   defineTool({
     name: 'order_time_add',
     label: 'Log time on an order',
@@ -820,7 +1312,8 @@ export const orderTools: Tool[] = [
       "`post_processing`, `packing` or `other`, in whole minutes. It copies the shop's labour rate now, so a later " +
       "change never rewrites it, and one entry replaces the item's default labour in order_costs. With `source` " +
       'a second call with the same source returns the first entry as it was recorded, whatever its kind, and ' +
-      'writes nothing. Allowed in every order status, closed, cancelled and on hold included.',
+      'writes nothing. Allowed in every order status, closed, cancelled and on hold included, except a ' +
+      'storefront cart not yet submitted (409 order_not_submitted).',
     input: z.object({
       order_id: orderId,
       order_item_id: itemId.optional(),
@@ -853,7 +1346,8 @@ export const orderTools: Tool[] = [
       "`assistant` (the assistant's spend), `payment_fee`, `material` (magnets, keyrings, paint) or `other`. " +
       "Shipping is a shipment's cost, never an entry. With `source` (such as `ai_session:<id>`) a second call " +
       'with the same kind and source returns the first entry as it was recorded, whatever the amount, note or item ' +
-      'this call names, and writes nothing. Allowed in every order status.',
+      'this call names, and writes nothing. Allowed in every order status, except a storefront cart not yet ' +
+      'submitted (409 order_not_submitted).',
     input: z.object({
       order_id: orderId,
       order_item_id: itemId.optional(),
@@ -874,6 +1368,186 @@ export const orderTools: Tool[] = [
         await ok(
           backend.POST('/api/v1/orders/{order_id}/cost-entries', { params: { path: { order_id } }, body }),
           `add a cost to order ${order_id}`,
+        ),
+      ),
+  }),
+  // Purchases (#6133, spec 2026-11-13 §10, §11): the things a storefront customer asked the
+  // shop to buy for their project. Each link is text only; no tool fetches it.
+  defineTool({
+    name: 'order_purchases',
+    label: "List an order's things to buy",
+    description:
+      "The things a storefront customer asked the shop to buy for their project, by item: each purchase link's `id` " +
+      '(the `source_id` the purchase tools take), the link as text (never fetch it), the customer\'s note, its ' +
+      '`status` (`pending`, `recorded`, `not_needed`), a recorded one\'s `amount_minor` and `cost_kind`, and the ' +
+      "shop's note to the customer. While one is `pending`, the order cannot be accepted and no balance request " +
+      'opens (409 purchase_pending).',
+    input: z.object({ order_id: orderId }),
+    risk: 'read',
+    routes: ['GET /api/v1/orders/{order_id}/purchases'],
+    handler: async ({ order_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/orders/{order_id}/purchases', { params: { path: { order_id } } }),
+          `list the purchases of order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_purchase_record',
+    label: 'Record what the shop paid for a thing to buy',
+    description:
+      "Record what the shop paid for one purchase link, in the order's minor units: one cost entry on the link's " +
+      'item (`material` for parts, `other` for a paid model file) and a `purchase` charge of the same amount that ' +
+      "the customer pays, labelled \"Bought for your project: …\". The handling fee (Settings → Orders) and the " +
+      'auto tax are recomputed. A second call for a recorded link with the same amount and cost_kind returns it as ' +
+      'it is and writes nothing; one that differs is 409 purchase_recorded (use order_purchase_update). Only ' +
+      'while the order is `draft` or `quoted` (409 purchase_locked after); 409 purchase_not_pending for a link ' +
+      'marked not needed.',
+    input: z.object({
+      order_id: orderId,
+      source_id: ID.describe('A purchase link id, as order_purchases lists them'),
+      amount_minor: money.min(1),
+      cost_kind: z.enum(['material', 'other']).default('material'),
+      note: z.string().max(1000).default('').describe("The cost entry's note, the shop's own; the customer never reads it"),
+    }),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/{order_id}/purchases/{source_id}/record'],
+    title: ({ order_id, amount_minor }) => `Record a purchase of ${amount_minor} on order ${order_id}`,
+    handler: async ({ order_id, source_id, ...body }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/purchases/{source_id}/record', {
+            params: { path: { order_id, source_id } },
+            body,
+          }),
+          `record purchase ${source_id} of order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_purchase_update',
+    label: 'Change a recorded purchase',
+    description:
+      'Change a recorded purchase: its cost entry and its charge change together (each field given replaces its ' +
+      'value; the amount is both). The handling fee and the auto tax are recomputed. 409 purchase_not_recorded ' +
+      'for a link not recorded; 409 purchase_locked once the order is accepted (then change the charges with ' +
+      'order_charges_update_after_acceptance).',
+    input: z.object({
+      order_id: orderId,
+      source_id: ID.describe('A purchase link id, as order_purchases lists them'),
+      amount_minor: money.min(1).optional(),
+      cost_kind: z.enum(['material', 'other']).optional(),
+      note: z.string().max(1000).optional(),
+    }),
+    risk: 'write',
+    routes: ['PATCH /api/v1/orders/{order_id}/purchases/{source_id}'],
+    title: ({ order_id, source_id }) => `Change purchase ${source_id} of order ${order_id}`,
+    handler: async ({ order_id, source_id, ...body }, { backend }) =>
+      json(
+        await ok(
+          backend.PATCH('/api/v1/orders/{order_id}/purchases/{source_id}', {
+            params: { path: { order_id, source_id } },
+            body,
+          }),
+          `change purchase ${source_id} of order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_purchase_decline',
+    label: 'Mark a thing to buy not needed',
+    description:
+      'Mark a purchase link not needed: a recorded one loses its cost entry and its charge, and the link keeps ' +
+      '`shop_note`, which the customer reads. The handling fee and the auto tax are recomputed. A link already ' +
+      'not needed is returned as it is. 409 purchase_locked once the order is accepted.',
+    input: z.object({
+      order_id: orderId,
+      source_id: ID.describe('A purchase link id, as order_purchases lists them'),
+      shop_note: z.string().max(500).default('').describe('Why it is not needed, in words the customer reads'),
+    }),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/{order_id}/purchases/{source_id}/decline'],
+    title: ({ order_id, source_id }) => `Mark purchase ${source_id} of order ${order_id} not needed`,
+    handler: async ({ order_id, source_id, shop_note }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/purchases/{source_id}/decline', {
+            params: { path: { order_id, source_id } },
+            body: { shop_note },
+          }),
+          `decline purchase ${source_id} of order ${order_id}`,
+        ),
+      ),
+  }),
+  // A customer's own models (#6133 PR 4, spec 2026-11-13 §11): the back office's actions on
+  // a request's files and links, as `order_get`'s `sources` lists them. Download, the
+  // preview and "Open link" are the page's (coverage.ts).
+  defineTool({
+    name: 'order_item_source_decline',
+    label: "Decline a customer's model",
+    description:
+      "Decline a file or link of a customer's own models request: the shop will not print it. A staged file is " +
+      'deleted by its watcher. `reason` is the shop\'s; the customer never reads it. ' +
+      'A source already declined is returned as it is. 409 source_not_print for a thing to buy (use ' +
+      'order_purchase_decline), source_imported once it is in the library.',
+    input: z.object({
+      order_id: orderId,
+      source_id: ID.describe("A source id, as order_get's sources list them"),
+      reason: z.string().max(500).default('').describe('Why, for the shop; empty is "Declined by the shop."'),
+    }),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/{order_id}/sources/{source_id}/decline'],
+    title: ({ order_id, source_id }) => `Decline source ${source_id} of order ${order_id}`,
+    handler: async ({ order_id, source_id, reason }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/sources/{source_id}/decline', {
+            params: { path: { order_id, source_id } },
+            body: { reason },
+          }),
+          `decline source ${source_id} of order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_item_source_check_again',
+    label: "Check a customer's file again",
+    description:
+      "Start the check of a customer's staged file again after it failed (`check_status` `failed`). A file still " +
+      '`checking` is not refused: it is returned as it is and its check is started again (a running check is ' +
+      'joined), for a check that stalled. 409 source_not_failed for a file that is ready or refused, ' +
+      'source_not_staged once its staged copy is gone, order_not_submitted on a visitor\'s cart.',
+    input: z.object({ order_id: orderId, source_id: ID.describe("A file source id, as order_get's sources list them") }),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/{order_id}/sources/{source_id}/check'],
+    title: ({ order_id, source_id }) => `Check source ${source_id} of order ${order_id} again`,
+    handler: async ({ order_id, source_id }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/sources/{source_id}/check', { params: { path: { order_id, source_id } } }),
+          `check source ${source_id} of order ${order_id} again`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_item_source_retry_import',
+    label: "Retry a customer's file import",
+    description:
+      "Ask the watcher of a customer's file to import it into the library again, when `import_stuck` says the " +
+      'import has not finished an hour after the order was sent. 409 import_not_stuck otherwise, ' +
+      "order_not_submitted on a visitor's cart.",
+    input: z.object({ order_id: orderId, source_id: ID.describe("A file source id, as order_get's sources list them") }),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/{order_id}/sources/{source_id}/retry-import'],
+    title: ({ order_id, source_id }) => `Retry the import of source ${source_id} of order ${order_id}`,
+    handler: async ({ order_id, source_id }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/sources/{source_id}/retry-import', {
+            params: { path: { order_id, source_id } },
+          }),
+          `retry the import of source ${source_id} of order ${order_id}`,
         ),
       ),
   }),
@@ -1398,7 +2072,7 @@ export const orderTools: Tool[] = [
     label: "Accept a line item's quote",
     description:
       "Pin a quote as the item's price: the item becomes approved, and the order quoted once every open item is. " +
-      'Commits the shop to that price.',
+      'Commits the shop to that price. On a storefront order only the customer accepts: refused with `customer_accepts`.',
     input: z.object({ order_id: orderId, item_id: itemId, quote_id: ID }),
     risk: 'outward',
     routes: ['POST /api/v1/orders/{order_id}/items/{item_id}/quotes/{quote_id}/accept'],
@@ -2033,6 +2707,7 @@ export const orderTools: Tool[] = [
         if (archive && unarchive) throw new ToolError('archive and unarchive cannot both be true')
         if (filament_id === undefined) {
           if (archive || unarchive) throw new ToolError(`${archive ? 'archive' : 'unarchive'} needs a filament_id`)
+          if (fields.colour_source !== undefined) throw new ToolError('colour_source needs a filament_id: a new filament\'s colour is set by hand')
           answer.filament = await ok(backend.POST('/api/v1/orders/price-book/filaments', { body: body as never }), 'add a filament')
         } else {
           const path = { filament_id }
@@ -2160,7 +2835,12 @@ export const orderTools: Tool[] = [
       "Make or update the price book's filament records from Bambuddy's spool inventory: one record per filament " +
       '(material, subtype, brand and colour), made when the book has none, else given the most recent priced ' +
       "spool's cost per kilogram; `min_cost_per_kg`/`max_cost_per_kg` show the spread when the spools' prices " +
-      'differ. A filament known only by its colour name, or with no priced spool, is `skipped` with its `reason`. ' +
+      'differ. A record keeps its link to its spools, so a colour set by hand makes no second record; the import sets ' +
+      "a record's colour, alpha, stops and effect only while its `colour_source` is `import`. " +
+      'A filament known only by its colour name, with no priced spool, or whose colour another record of its ' +
+      'material, subtype and brand already has (`colour_taken`), is `skipped` with its `reason`. A matched record ' +
+      "whose spools' colour another record of its names holds keeps its own colour, alpha, stops and effect, and " +
+      'comes back `updated` or `unchanged` with `reason` `colour_taken`. ' +
       "Only when Bambuddy is linked (price_book_get's `spool_import`); else `not_linked`. Quotes never read spools.",
     input: z.object({}),
     risk: 'write',
@@ -2168,6 +2848,22 @@ export const orderTools: Tool[] = [
     title: () => 'Import filaments from spools',
     handler: async (_input, { backend }) =>
       json(await ok(backend.POST('/api/v1/orders/price-book/import-spools'), 'import filaments from spools')),
+  }),
+  defineTool({
+    name: 'price_book_fill_densities',
+    label: 'Fill empty filament densities',
+    description:
+      'Give every price-book filament with no density the one its Bambuddy spools link to: the preset id ' +
+      "(the spool's slicer preset, then its K-profile's, then its AMS tray's) gives Bambuddy's local preset or " +
+      "the Bambu Studio vendor preset's `filament_density`, then Bambuddy's filament catalogue. Never " +
+      "overwrites a density that is set. Each row is filled with its `density_profile` (the source) or has no " +
+      "`density_g_cm3` (no source: enter it with price_book_set). Only when Bambuddy is linked; else `not_linked`.",
+    input: z.object({}),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/price-book/fill-densities'],
+    title: () => 'Fill filament densities',
+    handler: async (_input, { backend }) =>
+      json(await ok(backend.POST('/api/v1/orders/price-book/fill-densities'), 'fill filament densities')),
   }),
   defineTool({
     name: 'order_estimate',

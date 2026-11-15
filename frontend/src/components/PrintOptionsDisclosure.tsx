@@ -12,6 +12,7 @@ import {
   lanHonours,
   optionValue,
   PREHEAT_CHOICES,
+  linkedRegistryPrinter,
   PRINT_OPTIONS,
   resolveOptions,
   scopeLabel,
@@ -45,8 +46,9 @@ interface Props {
    */
   printerId?: number | null
   /**
-   * #4971 — the registry printer, which keys the per-printer scope of a printer with no
-   * Bambuddy id (a LAN-only one).
+   * #5167 — the registry printer, which keys the per-printer scope of any printer. With a
+   * `printerId` but no registry printer, the options read's `bambuddy_links` names it
+   * (#6106); a printer no registry printer links keys no scope.
    */
   registryPrinter?: string | null
   /** Per-send overrides. Owned by the parent, which is what puts them on the wire. */
@@ -124,12 +126,17 @@ export function PrintOptionsDisclosure({
   // the scope keys on is kept separately: only the GET resolves it, so reading it off
   // this object would make it vanish the moment a save lands — and `printer_id` being
   // optional in the generated types means TypeScript would not have said a word.
+  // #5167 — the Settings printer is its registry id, `default_printer`: the scope's key.
   const [read, setRemembered] = useState<PrintOptionsView | null>(null)
-  const [readPrinterId, setServerPrinterId] = useState<number | null>(null)
+  const [readDefaultPrinter, setServerDefaultPrinter] = useState<string | null>(null)
+  // #6106 — registry id to Bambuddy id, from the same GET, so a Bambuddy printer's key
+  // needs no registry list.
+  const [readLinks, setReadLinks] = useState<Record<string, number> | null>(null)
   // Simple mode's held list takes the dialog's own read rather than reading again
   // (#2361: one read per open); a Stop remembering's answer then replaces it here.
   const remembered = heldOnly ? (read ?? known ?? null) : read
-  const serverPrinterId = heldOnly ? (known?.printer_id ?? null) : readPrinterId
+  const serverDefaultPrinter = heldOnly ? (known?.default_printer ?? null) : readDefaultPrinter
+  const links = heldOnly ? (known?.bambuddy_links ?? null) : readLinks
   const [loading, setLoading] = useState(true)
   const [scope, setScope] = useState<OptionScope>('printer')
   const [busy, setBusy] = useState(false)
@@ -144,7 +151,8 @@ export function PrintOptionsDisclosure({
       .then((view) => {
         if (!live) return
         setRemembered(view)
-        setServerPrinterId(view.printer_id ?? null)
+        setServerDefaultPrinter(view.default_printer ?? null)
+        setReadLinks(view.bambuddy_links ?? null)
       })
       .catch((cause: unknown) =>
         live && setError(cause instanceof ApiError ? cause.detail : 'Could not read the options.'),
@@ -157,15 +165,12 @@ export function PrintOptionsDisclosure({
 
   // The per-printer scope only applies once the printer is known; with none chosen and
   // none in Settings, saving there would go nowhere — hence the disabled option and the note below.
-  const resolvedPrinterId = printerId ?? serverPrinterId
-  // #4971 — a chosen LAN-only printer (no Bambuddy id) is keyed by its registry id, before
-  // the Settings printer: that one is another printer.
+  // #5167 — the scope is keyed by the registry id: the chosen printer's, else, with no
+  // printer chosen, the Settings printer's. A chosen Bambuddy printer is found in the
+  // read's links when the caller has no registry printer yet (#6106). One no registry
+  // printer links keys nothing, rather than the Settings printer, which is another printer.
   const printerKey =
-    printerId == null && registryPrinter
-      ? registryPrinter
-      : resolvedPrinterId == null
-        ? null
-        : String(resolvedPrinterId)
+    registryPrinter ?? (printerId == null ? serverDefaultPrinter : linkedRegistryPrinter(links, printerId))
   // The scope state can still say "This printer" when no printer is known (it opens on
   // it). Falling back here means a click always does
   // something visible, rather than hitting a guard and changing nothing on screen.

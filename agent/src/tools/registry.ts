@@ -15,6 +15,7 @@ import { authored, authorHeaders } from './authorship.js'
 import { type OutwardActions, PendingStoreFullError } from './pending.js'
 import type { RenderLimiter } from './renderLimits.js'
 import { pinnedOutward } from './pinnedOutward.js'
+import type { CustomerMessaging } from '../orders/messaging.js'
 import type { FetchGrantMinter } from './fetchGrant.js'
 
 // The tool registry, spec §5.1 and D3
@@ -33,6 +34,8 @@ export type BambuddyScope =
   | 'Manage Queue'
   | 'Manage Projects'
   | 'Manage Archives'
+  /** #4698: Bambuddy's `can_control_printer`, which reads the printer's storage over FTP. */
+  | 'Control Printer'
   /** #4747: Bambuddy's `settings:update`, which no API key holds while its auth is on. */
   | 'Settings (admin only)'
 
@@ -54,8 +57,9 @@ export type TabWait =
   | { back: false; message: string }
 /**
  * `signal`: the call's own (it stops waiting, the others sharing the wait do not).
- * `isBack`: whether the call's tab is connected now, checked once the wait is
- * recorded, so a tab that came back in between is not waited for; `signal`
+ * `isBack`: whether the call's tab is connected now, or may be (its replica was too slow
+ * to answer a status read, #5962), checked once the wait is recorded, so a tab that came
+ * back in between is not waited for; `signal`
  * aborts once the wait no longer needs the answer, and the check stops then.
  */
 export type WaitForTab = (request: {
@@ -63,6 +67,12 @@ export type WaitForTab = (request: {
   toolUseId: string | undefined
   signal: AbortSignal
   isBack: (signal: AbortSignal) => Promise<boolean>
+  /**
+   * Asked once before a new wait opens, after the turn's latch and its wait limit (#5981 review):
+   * a message when the tab's replica is only slow to answer, so no wait is opened (it would show
+   * no card and still use up the turn's and the user's waits); undefined to wait as usual.
+   */
+  slow?: (signal: AbortSignal) => Promise<string | undefined>
 }) => Promise<TabWait>
 
 /** Shared by every call: what `main.ts` (or a test) wires up once. */
@@ -133,6 +143,12 @@ export type ToolServices = {
   toolOverrides?: ToolOverrides | undefined
   /** Mints the grant an approved one-off fetch off the asset allowlist sends (#959, fetchGrant.ts); absent without a KEK. */
   fetchGrant?: FetchGrantMinter | undefined
+  /**
+   * The messaging plugin a customer notice is sent through (#5660, orders/messaging.ts):
+   * the bound remote MCP server through the loopback forwarder. order_notify_customer_send
+   * refuses without it.
+   */
+  messaging?: CustomerMessaging | undefined
 }
 
 /** One tool's override: a tier other than its own (raised or lowered, #2171), and whether it is disabled. */
@@ -482,12 +498,18 @@ export class ToolError extends Error {
   readonly untrusted: string | undefined
   /** The ScadBuddy-authored part of the message. */
   readonly summary: string
+  /**
+   * The slug a ScadBuddy problem `type` ends in (`…/problems/orders/already_notified`), set by
+   * call.ts `ok` only for types under `https://scadbuddy.dev/problems/` (`PROBLEM_TYPE`).
+   */
+  readonly problem: string | undefined
 
-  constructor(message: string, status?: number, untrusted?: string) {
+  constructor(message: string, status?: number, untrusted?: string, problem?: string) {
     super(untrusted ? `${message}: ${untrusted}` : message)
     this.status = status
     this.untrusted = untrusted
     this.summary = message
+    this.problem = problem
   }
 }
 

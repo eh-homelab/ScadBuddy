@@ -1,5 +1,6 @@
 """Time and cost entries (job cost spec 2026-11-05 §4.3-4.5, #5326): written through the
-lifecycle in any order status, each on the audit line and told after commit."""
+lifecycle in any order status (except a storefront cart not yet submitted, 409
+``order_not_submitted``), each on the audit line and told after commit."""
 
 from __future__ import annotations
 

@@ -42,7 +42,7 @@ def _too_large() -> ApiError:
     )
 
 
-async def _body(request: Request) -> bytes:
+async def read_body(request: Request) -> bytes:
     """The raw body, read no further than the limit."""
     declared = request.headers.get("content-length")
     if declared is not None and declared.isdigit() and int(declared) > MAX_WEBHOOK_BYTES:
@@ -71,7 +71,7 @@ async def _body(request: Request) -> bytes:
 async def receive_webhook(
     provider: str, request: Request, payments: PaymentsDep, later: BackgroundTasks
 ) -> WebhookAnswer:
-    body = await _body(request)
+    body = await read_body(request)
     headers = {name.lower(): value for name, value in request.headers.items()}
     try:
         # #5700: the pages the payment marked are closed once the answer is sent.

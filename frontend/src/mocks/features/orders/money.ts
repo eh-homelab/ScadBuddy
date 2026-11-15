@@ -121,10 +121,13 @@ export function retax(orderId: string): void {
  * `Lifecycle._typed`: the charges a replace writes, less the auto row sent back as read,
  * marked by `auto` or its `id`. Any other `tax` charge, whatever its label, is typed.
  */
-export function typedCharges<T extends { id?: string | null; auto?: boolean | null }>(orderId: string, charges: T[]): T[] {
+export function typedCharges<T extends { id?: string | null; auto?: boolean | null; kind?: string }>(orderId: string, charges: T[]): T[] {
   const auto = chargesOf(orderId).find((c) => c.auto)
-  return charges.filter((c) => !(c.auto || (auto && c.id === auto.id)))
+  return charges.filter((c) => !(c.auto || (auto && c.id === auto.id) || LIFECYCLE_CHARGES.has(String(c.kind))))
 }
+
+/** #6133 — `store.py` `LIFECYCLE_CHARGES`: the kinds only the lifecycle writes. A replace keeps their rows. */
+export const LIFECYCLE_CHARGES = new Set(['purchase', 'handling'])
 
 /** `money.skipped_for_currency`: the rules `depositFor` skips only for the order's currency. */
 function skippedForCurrency(policy: readonly DepositRule[], { hasRequest, firstOrder, currency, shopCurrency }: { hasRequest: boolean; firstOrder: boolean; currency: string; shopCurrency: string }): number[] {
@@ -149,10 +152,12 @@ export function noOptionShips(order: Order, charges: { shipping_option_id?: stri
 
 /** `replace_charges`: the typed charges replaced whole; the auto row stays. */
 export function replaceCharges(orderId: string, charges: { kind: OrderCharge['kind']; label: string; amount_minor: number; shipping_option_id?: string | null }[]) {
-  state.charges = state.charges.filter((c) => c.order_id !== orderId || c.auto)
-  charges.forEach((c, position) =>
-    state.charges.push({ id: newId('h'), order_id: orderId, kind: c.kind, label: c.label, amount_minor: c.amount_minor, position, auto: false, shipping_option_id: c.shipping_option_id ?? null }),
-  )
+  state.charges = state.charges.filter((c) => c.order_id !== orderId || c.auto || LIFECYCLE_CHARGES.has(c.kind))
+  charges
+    .filter((c) => !LIFECYCLE_CHARGES.has(c.kind))
+    .forEach((c, position) =>
+      state.charges.push({ id: newId('h'), order_id: orderId, kind: c.kind, label: c.label, amount_minor: c.amount_minor, position, auto: false, shipping_option_id: c.shipping_option_id ?? null, purchase_link_id: null }),
+    )
 }
 
 /** `Lifecycle._deposit_paid`: refused while a deposit is set, not waived and not paid. */

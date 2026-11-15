@@ -11,19 +11,24 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from scadbuddy.api import orders as orders_api
 from scadbuddy.core.settings import Settings
 from scadbuddy.orders.component import ORDERS
+from scadbuddy.orders.store import OrderStore
 from scadbuddy.orders.storefront.visitors import VisitorStore, visitor_actor
 from scadbuddy.payments import store as payments_store
 from scadbuddy.payments.fake import FAKE
 from scadbuddy.payments.models import PaymentRequestStatus
 from scadbuddy.payments.provider import ProviderError
+from scadbuddy.store.refs import BlobRefs
 from tests.api.test_customers import create as create_customer
 from tests.api.test_order_payments import connect_fake, request_payment, with_payments
 from tests.api.test_orders import create_order
 from tests.api.test_orders_lifecycle import add_item, fulfil, problem
 from tests.api.test_settings_runtime import _state
 from tests.conftest import PgPool
+from tests.orders.storefront.test_customer_actor import storefront_order
+from tests.orders.test_lifecycle import Shop
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -257,6 +262,61 @@ def test_accept_closes_each_page_it_cancels(
     last = detail(client, order["id"])["payment_requests"][-1]
     assert (last["kind"], last["amount_minor"], last["status"]) == ("balance", 1000, "open")
     assert last["hosted_url"]
+
+
+@pytest.mark.parametrize("what", ["revision", "quote"])
+def test_the_last_accept_for_the_customer_closes_each_page_it_cancels(
+    client: TestClient, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch, what: str
+) -> None:
+    """#5283: the accept that accepts a storefront order cancels its open requests as
+    `POST …/accept` does, and closes their pages right after the commit; the balance
+    request it opens is linked, and the order's Bambuddy projects are made."""
+    closed = cancels(monkeypatch)
+    ensured: list[str] = []
+
+    async def ensure(store: object, integrations: object, order_id: str) -> None:
+        ensured.append(order_id)
+
+    monkeypatch.setattr(orders_api, "ensure_projects", ensure)
+    connect_fake(client)
+    order = storefront_order(Shop(OrderStore(pg_pool), BlobRefs(pg_pool)), pg_pool, 1)
+    put_deposit(client, order.id, 300)
+    [deposit] = detail(client, order.id)["payment_requests"]
+    assert deposit["hosted_url"]
+    item = detail(client, order.id)["items"][0]
+    target = item["revisions"][-1]["id"] if what == "revision" else item["quotes"][0]["id"]
+    accepted = client.post(
+        f"/api/v1/orders/{order.id}/items/{item['id']}/accept-for-customer",
+        json={"what": what, "target_id": target, "reason": "By phone"},
+    )
+    assert accepted.status_code == 200, accepted.text
+    assert detail(client, order.id)["order"]["status"] == "accepted"
+    assert closed == [deposit["provider_ref"]]
+    assert statuses(client, order.id)[deposit["id"]] == "cancelled"
+    last = detail(client, order.id)["payment_requests"][-1]
+    assert (last["kind"], last["status"]) == ("balance", "open")
+    assert last["hosted_url"]
+    assert ensured == [order.id]
+
+
+def test_an_accept_that_leaves_the_order_open_makes_no_projects(
+    client: TestClient, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ensured: list[str] = []
+
+    async def ensure(store: object, integrations: object, order_id: str) -> None:
+        ensured.append(order_id)
+
+    monkeypatch.setattr(orders_api, "ensure_projects", ensure)
+    order = storefront_order(Shop(OrderStore(pg_pool), BlobRefs(pg_pool)), pg_pool, 2)
+    item = detail(client, order.id)["items"][0]
+    accepted = client.post(
+        f"/api/v1/orders/{order.id}/items/{item['id']}/accept-for-customer",
+        json={"what": "revision", "target_id": item["revisions"][-1]["id"], "reason": "x"},
+    )
+    assert accepted.status_code == 200, accepted.text
+    assert detail(client, order.id)["order"]["status"] != "accepted"
+    assert ensured == []
 
 
 def test_accept_keeps_a_balance_request_and_its_page(

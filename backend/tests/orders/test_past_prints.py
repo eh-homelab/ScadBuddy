@@ -144,6 +144,23 @@ def test_an_archives_run_lists_every_plate_and_its_archive(rows: OrderStore, poo
     assert rows.archive_run_plates(99) == []
 
 
+def test_a_run_s_link_found_after_an_import_owns_the_archive(
+    rows: OrderStore, pool: PgPool
+) -> None:
+    """#4698 review: an import's `model:` link, though older, never hides the run's."""
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_links (subject, archive_id, matched_by, first_seen)"
+            " VALUES ('model:imported', 81, 'import', now() - interval '1 hour')"
+        )
+    subject = f"output:{OUTPUT}"
+    send(pool, subject, "run-1", 51, 1, 81)
+    send(pool, subject, "run-1", 52, 2, 82)
+    out = rows.archive_origin(81)
+    assert out is not None and (out.output_id, out.library_file_id) == (OUTPUT, None)
+    assert rows.archive_run_plates(81) == [(1, 81), (2, 82)]
+
+
 def test_an_item_keeps_the_archives_it_was_taken_from(shop: QuoteShop) -> None:
     order = shop.order
     model, library = shop.lifecycle.add_items(

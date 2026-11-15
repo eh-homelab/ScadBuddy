@@ -15,7 +15,11 @@ from fastapi.testclient import TestClient
 
 from scadbuddy import main
 from scadbuddy.api.deps import STATE_ATTR
-from scadbuddy.auth.service_credentials import TokenReader, _insert
+from scadbuddy.auth.service_credentials import (
+    ServiceCaller,
+    ServiceCredentialStore,
+    _insert,
+)
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import _grant_and_rotate_at_start, _rotate_service_credentials
 
@@ -47,17 +51,18 @@ def _count(app: FastAPI, route_cls: str, reason: str) -> float:
 
 def test_each_caller_has_one_at_start(client: TestClient) -> None:
     rows = client.get("/api/v1/auth/service-credentials").json()
-    # #5298: the projects worker exchanges its credential; it gets no sealed one.
-    assert sorted(row["caller"] for row in rows) == ["agent", "print"]
+    # #5298: the projects and print workers exchange their credentials; they get no
+    # sealed one.
+    assert sorted(row["caller"] for row in rows) == ["agent"]
     assert all(row["live"] for row in rows)
     assert all("secret" not in key for row in rows for key in row)
 
 
 def test_a_bearer_is_the_service(client: TestClient, app: FastAPI, settings: Settings) -> None:
     state = getattr(app.state, STATE_ATTR)
-    kek = state.settings_store.kek
-    token = TokenReader("print", settings.database_url, kek).token()
-    assert token is not None
+    # The print worker exchanges its proof for its credential (#5298), as here.
+    store = ServiceCredentialStore(state.settings_store.pool)
+    token = store.issue("print", "bootstrap", rate_limited=False).token
     client.get(
         "/api/v1/internal/outputs/nope/model.3mf", headers={"Authorization": f"Bearer {token}"}
     )
@@ -78,22 +83,27 @@ def test_rotate_and_revoke(client: TestClient) -> None:
     assert client.delete(f"/api/v1/auth/service-credentials/{agents[0]['id']}").status_code == 404
 
 
-def test_the_projects_caller_cannot_be_rotated(client: TestClient) -> None:
-    response = client.post("/api/v1/auth/service-credentials/rotate", json={"caller": "projects"})
+@pytest.mark.parametrize("caller", ["projects", "print"])
+def test_a_worker_caller_cannot_be_rotated(client: TestClient, caller: str) -> None:
+    response = client.post("/api/v1/auth/service-credentials/rotate", json={"caller": caller})
     assert response.status_code == 422
 
 
-def test_the_start_revokes_a_sealed_projects_credential(client: TestClient, app: FastAPI) -> None:
+@pytest.mark.parametrize("caller", ["projects", "print"])
+def test_the_start_revokes_a_workers_sealed_credential(
+    client: TestClient, app: FastAPI, caller: ServiceCaller
+) -> None:
     """#5298: one minted before this release is revoked at the API's start (and at every
-    rotation), so it cannot be used; none is minted again."""
+    rotation), so it cannot be used; none is minted again. The print worker's since
+    #5298 Task 35."""
     state = getattr(app.state, STATE_ATTR)
     with state.settings_store.pool.connection() as conn:
-        _insert(conn, state.settings_store.kek, "projects", datetime.now(UTC))
+        _insert(conn, state.settings_store.kek, caller, datetime.now(UTC))
     _rotate_service_credentials(state)
     _rotate_service_credentials(state)
     rows = client.get("/api/v1/auth/service-credentials").json()
-    projects = [row for row in rows if row["caller"] == "projects"]
-    assert len(projects) == 1 and not projects[0]["live"] and projects[0]["revoked_at"]
+    sealed = [row for row in rows if row["caller"] == caller]
+    assert len(sealed) == 1 and not sealed[0]["live"] and sealed[0]["revoked_at"]
 
 
 def test_the_start_revokes_the_retired_roles(

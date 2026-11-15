@@ -88,6 +88,8 @@ def check_approval_timeout(value: int, name: str) -> int:
 
 #: SCADBUDDY_CRUD_PORT's default (#5298); `tests/conftest.py` moves it to 0.
 DEFAULT_CRUD_PORT = 8082
+#: A mail address as the storefront's sender takes it: one ``@``, no space or angle bracket.
+_ADDRESS = re.compile(r"[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+")
 
 
 class Settings(BaseSettings):
@@ -208,6 +210,12 @@ class Settings(BaseSettings):
     # none. A typed tax charge wins over it.
     orders_tax_percent: str = "0"
     orders_tax_shipping: bool = False
+    # The handling fee for bought items (#6133, spec 2026-11-13 §10.3): a flat amount per
+    # recorded purchase in the shop's minor units (`SCADBUDDY_ORDERS_PURCHASE_FEE_FLAT_MINOR`)
+    # and a percent of their sum, 0 to 100 with at most two decimals
+    # (`SCADBUDDY_ORDERS_PURCHASE_FEE_PERCENT`). Both 0 by default: no fee.
+    orders_purchase_fee_flat_minor: int = Field(default=0, ge=0, le=1_000_000_000)
+    orders_purchase_fee_percent: str = "0"
     # SCADBUDDY_ROUGH_ESTIMATE_FACTOR: the rough estimate's allowance for walls, infill
     # and purge over a part's enclosed volume (orders spec §5.3), more than 0.
     rough_estimate_factor: str = "1.15"
@@ -220,8 +228,36 @@ class Settings(BaseSettings):
     storefront_renders_per_minute: int = Field(default=3, ge=1, le=60)
     storefront_renders_per_day: int = Field(default=30, ge=1, le=10000)
     storefront_render_concurrency: int = Field(default=2, ge=1, le=50)
+    # SCADBUDDY_STOREFRONT_SLICES_CONCURRENT: the storefront's slices that run at once,
+    # shop-wide (#6153); the rest wait. Nothing reads it until the storefront prices a
+    # design from a slice (#6153 PR A).
+    storefront_slices_concurrent: int = Field(default=1, ge=1, le=4)
     storefront_draft_ttl_days: int = Field(default=30, ge=1, le=365)
     storefront_requests_enabled: bool = False
+    # The storefront's mail (#5283, spec 2026-11-02 §5.7), sent only by the CRUD service
+    # (`orders/storefront/mail.py`): the SMTP host (unset sends nothing), its port, the
+    # login user, the From address, and the connection's TLS: `starttls` (the server must
+    # offer STARTTLS), `implicit` (TLS from the first byte, usually port 465) or `none`
+    # (plain, only with no user: a LAN relay with no login; `api/settings.py` refuses a
+    # user with it). A login is never sent in plain text. The password is not a setting:
+    # it is sealed under the KEK in `storefront_mail_secret`, bound to the host, port,
+    # user and TLS mode. These are a person's to change (`api/settings.py`
+    # `MAIL_CONNECTION`). The links in a mail come from `storefront_public_url`, which
+    # stays env-only.
+    # SCADBUDDY_STOREFRONT_MAIL_HOST, _PORT, _USER, _SENDER and _TLS.
+    storefront_mail_host: str | None = None
+    storefront_mail_port: int = Field(default=587, ge=1, le=65535)
+    storefront_mail_user: str | None = None
+    storefront_mail_sender: str | None = None
+    storefront_mail_tls: Literal["starttls", "implicit", "none"] = "starttls"
+    # The storefront's bot check (#5283, spec §5.8): Cloudflare Turnstile on design
+    # requests, submit, sign-in code requests and sign-ins, on while the site key is
+    # set. The secret is sealed at
+    # rest like the other secrets, and saving one needs SCADBUDDY_SECRET_KEY_FILE; only
+    # this process reads it (`orders/storefront/turnstile.py`), never the edge or a page.
+    # SCADBUDDY_STOREFRONT_TURNSTILE_SITE_KEY and _SECRET.
+    storefront_turnstile_site_key: str | None = Field(default=None, max_length=200)
+    storefront_turnstile_secret: str | None = Field(default=None, repr=False, max_length=200)
     # #4953: whether a fulfilled line item may be unfulfilled (#4952). Off, the shop
     # treats a fulfilment as final: `POST …/unfulfil` answers 409 `unfulfil_disabled`,
     # for a person and the agent alike. A change writes nothing to existing orders.
@@ -259,8 +295,9 @@ class Settings(BaseSettings):
     # ingress, which the server cannot infer from a request behind a proxy.
     public_url: str | None = None
     # SCADBUDDY_STOREFRONT_PUBLIC_URL (#4960): the storefront edge's origin, the same
-    # variable the edge reads. Once the storefront's pay page ships (`payments.venmo`
-    # `PAY_PAGE_READY`), a Venmo-eligible PayPal request's link is that page.
+    # variable the edge reads. Once the pay page is switched on (`payments.venmo`
+    # `PAY_PAGE_READY`, after its sandbox measurement), a Venmo-eligible PayPal
+    # request's link is that page.
     storefront_public_url: str | None = None
     # SCADBUDDY_ALLOWED_ORIGINS: comma-separated origins the UI is ALSO served under,
     # besides the public URL's — the LAN hostname when the public URL is an SSO
@@ -373,12 +410,49 @@ class Settings(BaseSettings):
             raise ValueError(f"{env_var('orders_tax_percent')} must be less than 100")
         return text
 
+    @field_validator("orders_purchase_fee_percent")
+    @classmethod
+    def _purchase_fee_percent(cls, value: str) -> str:
+        label = env_var("orders_purchase_fee_percent")
+        text = decimal_string(value, label)
+        number = Decimal(text)
+        if number > 100:
+            raise ValueError(f"{label} must be at most 100")
+        exponent = number.as_tuple().exponent
+        if isinstance(exponent, int) and exponent < -2:
+            raise ValueError(f"{label} has at most two decimals")
+        return text
+
     @field_validator("store_s3_prefix")
     @classmethod
     def _bare_prefix(cls, prefix: str) -> str:
         # Keys are `<prefix>/<kind>/<sha>`: "p/" would make `p//piece/<sha>`. An empty
         # prefix stays empty, and a start on S3 refuses it (`store.backends`).
         return prefix.strip("/")
+
+    @field_validator("storefront_mail_host")
+    @classmethod
+    def _mail_host_is_a_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        host = value.strip()
+        if not host or any(c.isspace() for c in host) or "/" in host or "@" in host:
+            raise ValueError(
+                "SCADBUDDY_STOREFRONT_MAIL_HOST is a host name, such as smtp.example.com"
+            )
+        return host
+
+    @field_validator("storefront_mail_sender")
+    @classmethod
+    def _mail_sender_is_an_address(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        sender = value.strip()
+        if not _ADDRESS.fullmatch(sender):
+            raise ValueError(
+                "SCADBUDDY_STOREFRONT_MAIL_SENDER is an address, such as shop@example.com"
+            )
+        return sender
 
     @field_validator("storefront_public_url")
     @classmethod
@@ -433,12 +507,15 @@ class Settings(BaseSettings):
     # SCADBUDDY_SECRET_KEY_FILE: the key-encryption key the agent uses too (#602): 32
     # random bytes, base64 (`openssl rand -base64 32`). With it the `SECRET_FIELDS` are
     # sealed at rest (`core/secrets.py`); unset, they stay plaintext, with a warning at
-    # start. Every process that reads them (the API and both workers) needs the same file.
+    # start. Only the API reads the settings' sealed values: the render and print workers
+    # read theirs, already opened, from its CRUD routes (#5298). The projects worker
+    # reads the same file for its flows' sealed payloads.
     secret_key_file: Path | None = None
     # SCADBUDDY_SECRET_KEY_PREVIOUS_FILE: during a rotation, the KEK before it (the
     # agent's variable of the same name). Tried after the current key only where a value
-    # sealed before the rotation may still be in flight: a virtual printer's access code
-    # sealed by the API and opened by the print worker's run (#4888).
+    # sealed before the rotation may still be in flight: a virtual printer's access code,
+    # which the API seals and, for a print worker's run, opens again
+    # (`printers/component.py`, #4888, #5298).
     secret_key_previous_file: Path | None = None
 
     @field_validator("database_url")
@@ -490,6 +567,10 @@ class Settings(BaseSettings):
     # SCADBUDDY_TEMPORAL_TASK_QUEUE_SLICER: where the `scadbuddy-slicer` worker serves
     # `slice_plate` (spec 2026-10-16 §5.2); `SliceWorkflow` runs it there.
     temporal_task_queue_slicer: str = "slicer"
+    # SCADBUDDY_TEMPORAL_TASK_QUEUE_CUSTOMER_FILES: where the intake worker
+    # (`python -m scadbuddy.intake_worker`, #6133) checks a customer's staged files; the
+    # API starts `CustomerFileCheck` on it.
+    temporal_task_queue_customer_files: str = "customer-files"
     # SCADBUDDY_TEMPORAL_SDK_METRICS_PORT: the loopback port where a worker's Temporal
     # SDK exports its own metrics, which the worker's /metrics appends (#3788); 0 turns
     # it off.
@@ -574,6 +655,7 @@ class Settings(BaseSettings):
         "temporal_task_queue_projects",
         "temporal_task_queue_agent_tools",
         "temporal_task_queue_slicer",
+        "temporal_task_queue_customer_files",
     )
     @classmethod
     def _temporal_without_whitespace(cls, value: str, info: ValidationInfo) -> str:
@@ -712,8 +794,10 @@ class Settings(BaseSettings):
 
 
 class NoDatabaseSettings(Settings):
-    """The settings of a worker that holds no SQL (#5298): the projects and render
-    workers. It starts with ``SCADBUDDY_DATABASE_URL`` unset, and ignores it when set."""
+    """The settings of a worker that holds no SQL pool (#5298): the projects, render and
+    print workers. Each starts with ``SCADBUDDY_DATABASE_URL`` unset and ignores it, with a
+    warning, when set: each exchanges a proof for its credential and has no view to read
+    (`worker.py` `exchange_source`, #5298 Task 33 for the print worker)."""
 
     @field_validator("database_url")
     @classmethod
@@ -848,6 +932,10 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
             "Paired with the Temporal address: the API starts slices on it, and the"
             " scadbuddy-slicer worker must name the same queue."
         ),
+        "temporal_task_queue_customer_files": (
+            "Paired with the Temporal address: the API starts customer file checks on it,"
+            " and the intake worker must name the same queue."
+        ),
         "agent_internal_url": (
             "Where the API reaches the agent sidecar in its own pod, which the deployment lays out."
         ),
@@ -900,6 +988,7 @@ SECRET_FIELDS: Final = frozenset(
         "google_fonts_api_key",
         "store_s3_secret_access_key",
         "git_remote_token",
+        "storefront_turnstile_secret",
     }
 )
 
@@ -983,8 +1072,17 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "storefront_renders_per_minute": "live",
         "storefront_renders_per_day": "live",
         "storefront_render_concurrency": "live",
+        "storefront_slices_concurrent": "live",
         "storefront_draft_ttl_days": "live",
         "storefront_requests_enabled": "live",
+        # Read from the store by each send of the storefront's mail (#5283).
+        "storefront_mail_host": "live",
+        "storefront_mail_port": "live",
+        "storefront_mail_user": "live",
+        "storefront_mail_sender": "live",
+        "storefront_mail_tls": "live",
+        "storefront_turnstile_site_key": "live",
+        "storefront_turnstile_secret": "live",
         # Read by each time entry and each costs read (#5326).
         "pricing_labour_rate_per_hour": "live",
         "pricing_usd_rate": "live",
@@ -992,6 +1090,9 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         # Read from the store by each recompute of an order's auto tax (#5281).
         "orders_tax_percent": "live",
         "orders_tax_shipping": "live",
+        # Read from the store by each recorded, changed or declined purchase (#6133).
+        "orders_purchase_fee_flat_minor": "live",
+        "orders_purchase_fee_percent": "live",
         # Read from the store by each unfulfil.
         "orders_allow_unfulfil": "live",
         # Read from the store by each print run's plan; a run keeps what it read.

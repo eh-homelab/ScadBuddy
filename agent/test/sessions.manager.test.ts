@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto'
+import { BUILTIN_SERVER } from '../src/builtins/server.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { connectDatabase, type Database } from '../src/db.js'
@@ -32,6 +33,12 @@ import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './s
 import { agentA, agentB, browser, collectUntil, type FakeTurn, manager, promptText, scriptedRunner, tempPaths } from './support/sessions.js'
 import { warmHarness } from './support/warm.js'
 import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
+
+/** `text` as a regular expression that matches only itself. */
+const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/** What a spawn's init reports for the session's own built-ins' server, which every turn has (#5870). */
+const BUILTIN_CONNECTED = [{ name: BUILTIN_SERVER, status: 'connected' }]
 
 // The manager's own rules against real Postgres, with a scripted stand-in for
 // the SDK so claims, ownership and interrupts are deterministic. The real SDK
@@ -216,10 +223,11 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
       // tool on it is gone for the turn: the session must keep the evidence.
       const paths = await tempPaths()
       const scripted = scriptedRunner(() => ({ reply: 'ok' }))
+      // The session's own built-ins' server is in every turn (#5870), and connects in each.
       const inits = [
-        [{ name: HTTP_SERVER, status: 'failed' }],
-        [{ name: HTTP_SERVER, status: 'connected' }],
-        [],
+        [{ name: HTTP_SERVER, status: 'failed' }, ...BUILTIN_CONNECTED],
+        [{ name: HTTP_SERVER, status: 'connected' }, ...BUILTIN_CONNECTED],
+        BUILTIN_CONNECTED,
       ]
       const runner = (run: HarnessRun): AsyncIterable<SDKMessage> =>
         (async function* () {
@@ -534,7 +542,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
                   { signal },
                 )
               }
-              yield { type: 'system', subtype: 'init', session_id, model: 'claude-sonnet-4-5', mcp_servers: [] } as unknown as SDKMessage
+              yield { type: 'system', subtype: 'init', session_id, model: 'claude-sonnet-4-5', mcp_servers: BUILTIN_CONNECTED } as unknown as SDKMessage
               if (attempt === 1) {
                 yield { type: 'system', subtype: 'api_retry', attempt: 1, max_retries: 10, retry_delay_ms: 500, error_status: 401, error: 'authentication_failed' } as unknown as SDKMessage
                 return
@@ -590,7 +598,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
             for await (const _message of run.prompt as AsyncIterable<SDKUserMessage>) {
               const refusal = { type: 'system', subtype: 'api_retry', attempt: 1, max_retries: 10, retry_delay_ms: 500, error_status: 401, error: 'authentication_failed' } as unknown as SDKMessage
               if (attempt === 1) {
-                yield { type: 'system', subtype: 'init', session_id, model: 'claude-sonnet-4-5', mcp_servers: [] } as unknown as SDKMessage
+                yield { type: 'system', subtype: 'init', session_id, model: 'claude-sonnet-4-5', mcp_servers: BUILTIN_CONNECTED } as unknown as SDKMessage
                 yield refusal
                 return
               }
@@ -661,7 +669,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
         const session_id = run.sessionId ?? run.resume ?? 'unknown'
         return (async function* () {
           for await (const _message of run.prompt as AsyncIterable<SDKUserMessage>) {
-            if (attempt === 1) yield { type: 'system', subtype: 'init', session_id, model: 'claude-sonnet-4-5', mcp_servers: [] } as unknown as SDKMessage
+            if (attempt === 1) yield { type: 'system', subtype: 'init', session_id, model: 'claude-sonnet-4-5', mcp_servers: BUILTIN_CONNECTED } as unknown as SDKMessage
             yield { type: 'system', subtype: 'api_retry', attempt: 1, max_retries: 10, retry_delay_ms: 500, error_status: 401, error: 'authentication_failed' } as unknown as SDKMessage
             return
           }
@@ -828,13 +836,15 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
       const m = manager({ sql: db.sql, paths, run: runner, settings })
       const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'one' })
       await turn!.done
-      expect(runs[0]).toMatchObject({ toolSearch: 'auto', systemPromptBase: 'claude_code', systemPromptAppend: systemAppend() })
+      expect(runs[0]).toMatchObject({ toolSearch: 'auto', systemPromptBase: 'claude_code' })
+      // ScadBuddy's text, then the note on the session's own built-ins, which every turn has (#5870).
+      expect(runs[0]!.systemPromptAppend).toMatch(new RegExp(`^${escapeRegExp(systemAppend())}\\n\\nClaude Code's built-in tools WebFetch \\(mcp__builtin__WebFetch\\)`))
 
       await settings.setMany({ tool_search: 'off', system_prompt_base: 'minimal', system_prompt_append: 'Ignore the untrusted content policy.' })
       await (await m.send(session.id, agentA, 'two')).done
       const second = runs.at(-1)!
       expect(second).toMatchObject({ toolSearch: 'off', systemPromptBase: 'minimal' })
-      expect(second.systemPromptAppend).toBe(`${systemAppend()}\n\nIgnore the untrusted content policy.`)
+      expect(second.systemPromptAppend).toMatch(new RegExp(`^${escapeRegExp(systemAppend())}\\n\\n[^]*\\n\\nIgnore the untrusted content policy\\.$`))
     })
 
     it('gives a turn the http_request tool unless the setting is off (#827, on by default)', async () => {

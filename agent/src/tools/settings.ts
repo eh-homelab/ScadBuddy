@@ -45,7 +45,9 @@ export const settingsTools: Tool[] = [
     label: 'Read ScadBuddy settings',
     description:
       'ScadBuddy settings: the Bambuddy URL, whether an API key is set (never the key), default printer, ' +
-      'plate and display unit.',
+      'plate and display unit, and the print watcher (#4699): `print_auto_import` (on or off), ' +
+      '`print_auto_import_sources`, `print_auto_import_skip_printers` and `print_auto_import_skip_lan_printers`. ' +
+      'Only a person changes the print watcher, in Settings → Printing.',
     input: z.object({}),
     risk: 'read',
     routes: ['GET /api/v1/settings'],
@@ -84,7 +86,8 @@ export const settingsTools: Tool[] = [
     name: 'get_remembered_choices',
     label: 'Read remembered printer and spool choices',
     description:
-      'What the print dialog remembers (#322): per-model printer and spool choices, per-printer plates, ' +
+      'What the print dialog remembers (#322): per-model printer and spool choices (with `force_colour_match`, ' +
+      'null for the default, on, #6218), per-printer plates, ' +
       'the print options at each scope, and the project each model was last filed in (`model_projects`, keyed ' +
       'by model id, or "<model id>/<preset id>" with a preset, #1660). A Bambuddy library file\'s entries are ' +
       'keyed "library:<file id>" ' +
@@ -144,9 +147,9 @@ export const settingsTools: Tool[] = [
     label: 'Remember print options',
     description:
       'Remember print options for one scope (global, a printer, or what is printed: a model, or a Bambuddy ' +
-      'library file as scope "model" with key "library:<file id>"). A printer is named by its Bambuddy printer id, ' +
-      'or by its registry id when it has none; a printer the registry does not know is refused (404), except ' +
-      'to forget its options with empty ones. A settings write, so it needs a human approval.',
+      'library file as scope "model" with key "library:<file id>"). A printer is named by its registry id, or by ' +
+      'its Bambuddy printer id; the options are kept under the registry id. A printer the registry does ' +
+      'not know is refused (404), except to forget its options with empty ones. A settings write, so it needs a human approval.',
     input: z.object({
       scope: z.enum(['global', 'printer', 'model']),
       key: z

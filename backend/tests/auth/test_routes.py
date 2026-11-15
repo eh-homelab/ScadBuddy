@@ -75,6 +75,7 @@ def test_every_route_has_a_class() -> None:
             "crud.print",
             "crud.storefront",
             "crud.agent",
+            "crud.intake",
             "flow.host",
         )
 
@@ -219,7 +220,7 @@ def _person(kind: SessionKind = "login") -> Person:
         ("exchange", ANONYMOUS, False, None),
         # The render worker's credential reaches no route yet (#5298 adds `crud.render`).
         ("api", Service("render", frozenset({"crud.render"})), False, "out_of_scope"),
-        ("internal.outputs", Service("render", frozenset({"crud.render"})), False, "no_credential"),
+        ("internal.outputs", Service("render", frozenset({"crud.render"})), False, "out_of_scope"),
         ("api", ANONYMOUS, False, "signed_out"),
         ("api", _person(), True, None),
         ("api", _person(), False, "no_request_header"),
@@ -253,7 +254,7 @@ def _person(kind: SessionKind = "login") -> Person:
             "internal.library",
             Service("print", frozenset({"internal.outputs"})),
             False,
-            "no_credential",
+            "out_of_scope",
         ),
     ],
 )
@@ -286,8 +287,10 @@ def test_no_header_is_needed_where_none_can_be_sent() -> None:
 
 def test_only_the_webhook_is_public_among_payments_routes() -> None:
     classes = {endpoint_name(r): route_class(r) for r in ROUTES if "payment" in r.path}
-    assert [n for n, c in classes.items() if c == "public"] == [
-        "scadbuddy.api.payment_webhooks.receive_webhook"
+    assert sorted(n for n, c in classes.items() if c == "public") == [
+        # #4961: Plaid's webhook for the linked bank account.
+        "scadbuddy.api.bank_link.receive_bank_webhook",
+        "scadbuddy.api.payment_webhooks.receive_webhook",
     ]
     assert {n for n, c in classes.items() if c == "person"} == {
         "scadbuddy.api.payments.connect_provider",
@@ -299,4 +302,28 @@ def test_only_the_webhook_is_public_among_payments_routes() -> None:
         "scadbuddy.api.bank_link.create_bank_link_token",
         "scadbuddy.api.bank_link.create_bank_link",
         "scadbuddy.api.bank_link.delete_bank_link",
+        "scadbuddy.api.bank_link.reconnect_bank_link",
+    }
+
+
+def test_only_a_person_confirms_or_dismisses_a_suggested_deposit() -> None:
+    """#4961: a suggestion is never recorded by itself; reading them is any api caller's."""
+    classes = {endpoint_name(r): route_class(r) for r in ROUTES if "/bank-deposits" in r.path}
+    assert classes == {
+        "scadbuddy.api.order_bank_deposits.list_order_bank_deposits": "api",
+        "scadbuddy.api.order_bank_deposits.record_order_bank_deposit": "person",
+        "scadbuddy.api.order_bank_deposits.dismiss_order_bank_deposit": "person",
+    }
+
+
+def test_only_a_person_marks_a_message_sent() -> None:
+    """#5660: the agent claims a message and records its outcome; only a person says an
+    unknown one reached the customer."""
+    classes = {endpoint_name(r): route_class(r) for r in ROUTES if "/messages" in r.path}
+    assert classes == {
+        "scadbuddy.api.order_messages.list_order_messages": "api",
+        "scadbuddy.api.order_messages.check_order_message": "api",
+        "scadbuddy.api.order_messages.claim_order_message": "api",
+        "scadbuddy.api.order_messages.record_order_message_outcome": "api",
+        "scadbuddy.api.order_messages.mark_order_message_sent": "person",
     }

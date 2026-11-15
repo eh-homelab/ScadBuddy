@@ -47,4 +47,23 @@ describe('shutdown', () => {
       }),
     ).toBe('clean')
   })
+
+  it("never holds the server's close behind a slow step of closeDatabase (#5881 review)", async () => {
+    const order: string[] = []
+    let endPinned!: () => void
+    const pinnedStopped = new Promise<void>((resolve) => (endPinned = resolve))
+    const done = shutdown({
+      closeServer: async () => void order.push('server closed'),
+      closeDatabase: async () => {
+        await pinnedStopped
+        order.push('database closed')
+      },
+      timeoutMs: 1_000,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(order).toEqual(['server closed'])
+    endPinned()
+    expect(await done).toBe('clean')
+    expect(order).toEqual(['server closed', 'database closed'])
+  })
 })

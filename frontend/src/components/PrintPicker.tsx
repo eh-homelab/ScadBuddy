@@ -54,7 +54,7 @@ import {
   withoutSeededDefaults,
 } from '../lib/partSettings'
 import { printChoicesOf, sliceOverrides } from '../lib/printChoices'
-import { resolveOptions } from '../lib/printOptions'
+import { linkedRegistryPrinter, resolveOptions } from '../lib/printOptions'
 import { useLanCleared } from '../lib/useLanCleared'
 import {
   attachPrintToProject,
@@ -74,6 +74,7 @@ import { usePrintProgress } from '../lib/usePrintProgress'
 import { printRunBody, useRunPrint } from '../lib/useRunPrint'
 import { FilamentPicker } from './FilamentPicker'
 import { AdvancedSwitch } from './print/AdvancedSwitch'
+import { ColourMatchSwitch } from './print/ColourMatchSwitch'
 import { AnalyzerPanel } from './print/AnalyzerPanel'
 import { CopiesField } from './print/CopiesField'
 import { FlowChoice } from './print/FlowChoice'
@@ -102,6 +103,7 @@ import { QueuedPanel } from './print/QueuedPanel'
 import { PlateClearNotice } from './print/PlateClearNotice'
 import { RackNozzleLine, RackNozzleStep } from './print/RackNozzle'
 import { PrintOptionsDisclosure } from './PrintOptionsDisclosure'
+import { DesignInputs, type ItemDesign } from './orders/DesignInputs'
 import { QuoteFilaments } from './orders/QuoteFilaments'
 import { refusalText } from './orders/refusal'
 import { breadcrumbs, type ProjectList, useProjectList } from '../lib/projects'
@@ -267,6 +269,12 @@ interface Props {
      * so a new quote keeps them. Left out, the model's remembered ones.
      */
     partSettings?: PartSettingsMap | null
+    /**
+     * #4673 PR 4 — the item's design, whose inputs the dialog edits in place: changed, the
+     * quote sends them, and the backend makes a revision of them first. Left out (a
+     * library file item), no inputs are shown.
+     */
+    design?: ItemDesign
     /** Settles once the quote is accepted (or done); rejects with a refusal from its check. */
     start: (body: SliceQuoteRequest) => Promise<void>
   }
@@ -551,7 +559,17 @@ export function PrintPicker({
     : itemPrint
       ? sentPartSettings(itemPrint.quoted)
       : sentPartSettings(picker.partSettings)
-  const { filaments, plan, setPlan, planChanged, filamentError, planReady, retryFilaments } = useFilamentPlan(
+  const {
+    filaments,
+    plan,
+    setPlan,
+    planChanged,
+    filamentError,
+    planReady,
+    retryFilaments,
+    forceColourMatch,
+    setForceColourMatch,
+  } = useFilamentPlan(
     source,
     choices,
     plate,
@@ -700,8 +718,8 @@ export function PrintPicker({
     const session = algorithmSession.current
     const save = ++algorithmSave.current
     const savedOn = printerId
-    // #4971 — a LAN-only printer has no Bambuddy id, so its registry id names it.
-    const savedAt = printerId ?? registryPrinter
+    // #5167 — kept under the registry id; a Bambuddy id the server resolves to it.
+    const savedAt = registryPrinter ?? printerId
     if (savedAt === null) return
     // Taken when chosen, not when sent, so the order is the user's (#1216).
     const version = nextRackAlgorithmVersion()
@@ -910,6 +928,7 @@ export function PrintPicker({
     selection: { ...selection, plate },
     plan,
     planChanged,
+    forceColourMatch,
     copies,
     projectId,
     folderId,
@@ -934,6 +953,8 @@ export function PrintPicker({
   const [priced, setPriced] = useState<Record<string, string>>({})
   // #4625 §6.3 — each support slot's price-book filament, keyed as `priced` is.
   const [support, setSupport] = useState<Record<string, string>>({})
+  // #4673 PR 4 — the inputs edited in the quote dialog, null while they are the item's.
+  const [designInputs, setDesignInputs] = useState<Record<string, unknown> | null>(null)
   // The quote and item-print modes (`handing`): the one request the dialog hands the page.
   const [handingBusy, setHandingBusy] = useState(false)
   const [handingError, setHandingError] = useState<string | null>(null)
@@ -1044,7 +1065,7 @@ export function PrintPicker({
               goal: arrangeGoal,
               ...(registryPrinter ? { printer: registryPrinter } : {}),
               printer_id: sentPrinterId,
-              filament_plan: { slots: plan, force_colour_match: false },
+              filament_plan: { slots: plan, force_colour_match: forceColourMatch },
               // #3637 — every colour a recoloured copy prints in has its slot, whether
               // or not this output's `colors` already lists it.
               colours: [
@@ -1103,8 +1124,10 @@ export function PrintPicker({
     }
   }, [open, scopeKey])
 
-  // #4971 — a LAN-only printer's options are kept under its registry id.
-  const printerKey = printerId === null ? registryPrinter : String(printerId)
+  // #5167 — a printer's options are kept under its registry id. #6106: the options read
+  // names each Bambuddy printer's registry id too, so the key does not wait for the
+  // registry list, and a failed list still finds it.
+  const printerKey = registryPrinter ?? linkedRegistryPrinter(remembered?.bambuddy_links, printerId)
   const rememberedCopies =
     resolveOptions(
       remembered?.global_options,
@@ -1129,7 +1152,7 @@ export function PrintPicker({
           // The registry printer, so a native dialog's analysis asks Bambuddy nothing (#4629).
           ...(registryPrinter ? { printer: registryPrinter } : {}),
           printer_id: sentPrinterId,
-          filament_plan: { slots: plan, force_colour_match: false },
+          filament_plan: { slots: plan, force_colour_match: forceColourMatch },
           choices: printChoices,
           ...plateFields(plate),
           copies: effectiveCopies,
@@ -1148,7 +1171,7 @@ export function PrintPicker({
       ? {
           ...(registryPrinter ? { printer: registryPrinter } : {}),
           printer_id: sentPrinterId,
-          filament_plan: { slots: plan, force_colour_match: false },
+          filament_plan: { slots: plan, force_colour_match: forceColourMatch },
           choices: printChoices,
           ...plateFields(plate),
           rack_position: rackPosition,
@@ -1371,10 +1394,17 @@ export function PrintPicker({
     seeding.current = 'done'
     if (!project && 'project_id' in seed) setOwnProjectId(seed.project_id ?? null)
     // An item print's quote with no plan seeds none (#4673): the picks stay.
-    const chosen = (seed.filament_plan as PrintRunRequest['filament_plan'] | undefined)?.slots ?? []
+    const seededPlan = seed.filament_plan as PrintRunRequest['filament_plan'] | undefined
+    const chosen = seededPlan?.slots ?? []
     const mine = slotKeys(filaments)
     const same = mine.length === seeded.seedSlots.length && mine.every((key, at) => key === seeded.seedSlots[at])
     if (!seeded.seedIsOwn && !same) return
+    // #6218: the seed's colour match, as it was chosen or quoted. A seed made before
+    // #6218 (an item quoted, or a batch step saved, then) carries the dialog's old fixed
+    // `false`, so it opens with the switch off, as it was quoted; the user may switch it on.
+    // This runs after the choices read settles; a later re-read of the same remembered
+    // value keeps the seeded flag (`useFilamentPlan` resets only on a new source or value).
+    if (typeof seededPlan?.force_colour_match === 'boolean') setForceColourMatch(seededPlan.force_colour_match)
     const inventory = new Set((filaments.spools ?? []).map((spool) => spool.spool_id))
     setPlan((current) =>
       current.map((choice) => {
@@ -1426,6 +1456,7 @@ export function PrintPicker({
     changeNozzles,
     changeQuality,
     setPlan,
+    setForceColourMatch,
     setPlate,
     setPrintSequence,
     setPartSettings,
@@ -1441,6 +1472,7 @@ export function PrintPicker({
       printerId: sentPrinterId,
       registryPrinter,
       plan,
+      forceColourMatch,
       printChoices,
       copies,
       plate,
@@ -1493,13 +1525,18 @@ export function PrintPicker({
       await quote.start({
         ...(registryPrinter ? { printer: registryPrinter } : {}),
         printer_id: sentPrinterId,
-        filament_plan: { slots: plan, force_colour_match: false },
+        filament_plan: { slots: plan, force_colour_match: forceColourMatch },
         choices: printChoices,
         filaments: priced,
         // A support slot with no filament chosen yet prices nothing.
         support_filaments: Object.fromEntries(Object.entries(support).filter(([, filament]) => filament)),
         // #5627: what the quote slices with, so its print can send the same.
         ...(sentParts === null ? {} : { part_settings: sentParts }),
+        // #4673: the whole print setup, which the quote records and its print sends.
+        ...(printSequence === null ? {} : { print_sequence: printSequence }),
+        ...(supports === null ? {} : { supports }),
+        ...(primeTower === null ? {} : { prime_tower: primeTower }),
+        ...(designInputs === null ? {} : { inputs: designInputs }),
       })
       close()
     } catch (cause) {
@@ -1518,7 +1555,7 @@ export function PrintPicker({
       await itemPrint.start({
         ...(registryPrinter ? { printer: registryPrinter } : {}),
         printer_id: sentPrinterId,
-        filament_plan: { slots: plan, force_colour_match: false },
+        filament_plan: { slots: plan, force_colour_match: forceColourMatch },
         choices: printChoices,
         // #5627: the quote's, as the background slice was made with them.
         ...(sentParts === null ? {} : { part_settings: sentParts }),
@@ -1727,6 +1764,7 @@ export function PrintPicker({
       ) : (
         <>
           {batch?.strip((step) => batch.onJump(step, stepChoice()))}
+          {quote?.design && <DesignInputs design={quote.design} onChange={setDesignInputs} />}
           {loading && !choices && (
             <div className="mb-4 space-y-2" data-testid="print-loading">
               <p className="text-sm text-muted-foreground">Reading the printer and the inventory</p>
@@ -1913,6 +1951,10 @@ export function PrintPicker({
                           : undefined
                       }
                     />
+                  )}
+                  {/* #6218: a native LAN run maps its trays itself and never reads the flag. */}
+                  {filaments && !native && (
+                    <ColourMatchSwitch value={forceColourMatch} onChange={setForceColourMatch} />
                   )}
                   {partsUnquoted && (
                     <p className="text-sm text-muted-foreground" role="status" data-testid="part-settings-unquoted">

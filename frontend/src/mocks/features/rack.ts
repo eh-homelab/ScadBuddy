@@ -8,6 +8,7 @@ import type {
   RackOption,
   RackSentPick,
 } from '../../api/types'
+import { printersState } from './printers'
 
 /** #836 — the rack algorithm remembered per printer. */
 const base = '/api/v1'
@@ -110,15 +111,23 @@ export const handlers = [
     } satisfies PrinterRackUsage),
   ),
   http.put(`${base}/print/printers/:id/rack-algorithm`, async ({ params, request }) => {
-    const id = String(params['id'])
+    const asked = String(params['id'])
     const body = (await request.json()) as { algorithm: RackAlgorithm | null }
+    // #5167 — kept under the registry id; a Bambuddy id names the row that links it.
+    const bambuddyId = /^\d+$/.test(asked) ? Number(asked) : null
+    const row = printersState().find((printer) =>
+      bambuddyId === null ? printer.id === asked : printer.bambuddy_printer_id === bambuddyId,
+    )
+    const id = row?.id ?? (bambuddyId === null ? asked : null)
+    if (id === null || (!row && body.algorithm !== null)) {
+      if (body.algorithm === null) return HttpResponse.json({ printer_id: bambuddyId, printer: null, algorithm: 'least_used' })
+      return HttpResponse.json({ detail: `no printer ${asked}` }, { status: 404 })
+    }
     if (body.algorithm === null) delete state.algorithms[id]
     else state.algorithms[id] = body.algorithm
-    // #4971 — a registry id names a LAN-only printer.
-    const bambuddy = /^\d+$/.test(id)
     return HttpResponse.json({
-      printer_id: bambuddy ? Number(id) : null,
-      printer: bambuddy ? null : id,
+      printer_id: row?.bambuddy_printer_id ?? null,
+      printer: row ? row.id : null,
       algorithm: state.algorithms[id] ?? 'least_used',
     } satisfies PrinterRackAlgorithm)
   }),

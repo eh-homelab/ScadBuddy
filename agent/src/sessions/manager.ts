@@ -1,6 +1,7 @@
 import type { AccessResolver } from '../access/resolver.js'
 import type { ToolLoadings } from '../harness/toolSearch.js'
 import type { nestedQueries } from '../builtins/nested.js'
+import type { Sandboxes } from '../sandbox/client.js'
 import type { BackgroundTasks } from '../background/service.js'
 import { randomUUID } from 'node:crypto'
 import {
@@ -55,7 +56,7 @@ import { SessionBlobs, type StoredBlob } from './blobs.js'
 import { PgHttpBodies } from './httpBodies.js'
 import { SessionFiles } from '../workspace/store.js'
 import { SessionEdits } from './edits.js'
-import { blobNames, forkHistory, transcriptCut } from './forkPoint.js'
+import { forkEventCut, transcriptCut } from './forkPoint.js'
 import type { TitleResolver } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
 import type { UserImage } from './images.js'
@@ -63,6 +64,7 @@ import { type ResourceRef, SessionResources, type TouchedRecord } from './touche
 import { type DurableGate, DurableUnavailable } from '../gate/durable.js'
 import type { DurableTurns, SessionRuntime } from './durable.js'
 import { PendingProjection } from '../gate/projection.js'
+import type { FlowRunReads } from '../flows/backendReads.js'
 import { Escalations } from '../flows/escalations.js'
 import { TurnRunner } from './turnRunner.js'
 import { type WarmQuery, WarmSessions } from './warm.js'
@@ -188,10 +190,41 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
   // finds no tab fails at once. The latch lasts until the turn ends, never less.
   let gaveUp: string | undefined
   let started = 0
-  return ({ tool, toolUseId, signal, isBack }) => {
-    // A call already stopped opens nothing: no row, no card, no use of the turn's waits.
-    if (signal.aborted) return Promise.resolve({ back: false, message: 'The call stopped before it waited for the tab.' })
-    if (gaveUp !== undefined) return Promise.resolve({ back: false, message: gaveUp })
+  // Calls that found the tab's replica only slow and opened no wait (#5981 review): bounded
+  // like the waits, so a model that keeps retrying stops paying a status read per call.
+  let slowSeen = 0
+  return async ({ tool, toolUseId, signal, isBack, slow }) => {
+    const stopped = (): TabWait | undefined => {
+      // A call already stopped opens nothing: no row, no card, no use of the turn's waits.
+      if (signal.aborted) return { back: false, message: 'The call stopped before it waited for the tab.' }
+      if (gaveUp !== undefined) return { back: false, message: gaveUp }
+      return undefined
+    }
+    const early = stopped()
+    if (early) return early
+    // Only once the latch and the limit allow a new wait (#5981 review): a slow owner opens none.
+    if (!open && started < TAB_WAITS_PER_TURN && slow) {
+      const message = await slow(signal).catch(() => undefined)
+      // Another call may have latched the turn while this check ran: the latch wins.
+      const latched = stopped()
+      if (latched) return latched
+      if (message !== undefined) {
+        if (++slowSeen >= TAB_WAITS_PER_TURN && gaveUp === undefined) {
+          gaveUp =
+            `The tab's agent replica was slow to answer ${TAB_WAITS_PER_TURN} times this turn. Carry on without the tab ` +
+            'for the rest of this turn.'
+          // The call that latches says so, not "call again" (#5981 review).
+          return { back: false, message: gaveUp }
+        }
+        return { back: false, message }
+      }
+    }
+    // Another call may have opened a wait while this one's check ran: it joins that wait, its
+    // check already paid for. Harmless, and the join keeps one card for the turn's calls.
+    return joinOrOpen(tool, toolUseId, signal, isBack)
+  }
+
+  function joinOrOpen(tool: string, toolUseId: string | undefined, signal: AbortSignal, isBack: (signal: AbortSignal) => Promise<boolean>): Promise<TabWait> {
     if (!open && started >= TAB_WAITS_PER_TURN) {
       // Neutral on purpose (#1393): the waits counted here may have ended any
       // way (a reconnect to this replica or another, a withdrawn call), and this
@@ -257,7 +290,8 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
           // test can still be held up (a lock, the pool) until a later wait has
           // opened, so it resolves only this wait's row, never the session's (#1360).
           // The check gets the same signal, so one that hangs (#1352) is cancelled
-          // with the wait rather than held for the life of the process.
+          // with the wait rather than held for the life of the process. A slow tab owner
+          // counts as back (tools/browser.ts, #5962), so it resolves the wait `reconnected`.
           onParked: async (parked, questionId) => {
             if ((await isBack(parked)) && !parked.aborted) await reconnected(questionId)
           },
@@ -442,6 +476,12 @@ export type ClaimedSession = SessionRecord & {
   agentModel: string | null
   agentEffort: EffortLevel | null
   agentType: string | null
+  /**
+   * Whether its running turn is offered the session's background built-ins (#5870): false for a
+   * session a flow run started or forked, a Workflow agent's chat and a fork of one
+   * (`ai_sessions.background_tools`), and for any turn a flow run sent (`turn_flow`).
+   */
+  backgroundTools: boolean
   /** The claim's `now()` as Postgres wrote it, microseconds kept: `updatedAt` is a JS Date's milliseconds (#1383). */
   claimedAt: string
 }
@@ -455,7 +495,13 @@ export type ClaimedSession = SessionRecord & {
  */
 export const CLAIMED_AT = `to_char(coalesce(turn_started_at, updated_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS claimed_at`
 
-type ClaimRow = Row & { unpriced_cost_usd: number; claimed_at: string; agent_model: string | null; agent_effort: EffortLevel | null; agent_type: string | null }
+/**
+ * Whether the running turn is offered the background built-ins (#5870): the session keeps them
+ * (`background_tools`) and its turn was not sent by a flow run (`turn_flow`, durable.ts `send`).
+ */
+const BACKGROUND_TOOLS = '(background_tools AND NOT turn_flow) AS background_tools'
+
+type ClaimRow = Row & { unpriced_cost_usd: number; claimed_at: string; agent_model: string | null; agent_effort: EffortLevel | null; agent_type: string | null; background_tools: boolean }
 
 const claimed = (row: ClaimRow): ClaimedSession => ({
   ...record(row),
@@ -463,6 +509,7 @@ const claimed = (row: ClaimRow): ClaimedSession => ({
   agentModel: row.agent_model,
   agentEffort: row.agent_effort,
   agentType: row.agent_type,
+  backgroundTools: row.background_tools,
   claimedAt: row.claimed_at,
 })
 
@@ -479,7 +526,7 @@ export async function runningDurableTurn(
   if (!isUuid(id)) return undefined
   // A claim's shape, so a Workflow agent's model, effort and type assemble as its classic turns do.
   const [row] = await sql.unsafe<(ClaimRow & { turn_tiers: { tiers?: Tier[] } | null })[]>(
-    `SELECT ${COLUMNS}, unpriced_cost_usd, agent_model, agent_effort, agent_type, ${CLAIMED_AT}, turn_tiers FROM ai_sessions
+    `SELECT ${COLUMNS}, unpriced_cost_usd, agent_model, agent_effort, agent_type, ${BACKGROUND_TOOLS}, ${CLAIMED_AT}, turn_tiers FROM ai_sessions
      WHERE id = $1 AND durable_turn_id = $2 AND status IN ('running', 'waiting_approval', 'waiting_input')`,
     [id, turnId],
   )
@@ -513,6 +560,11 @@ export type StartOptions = {
   tiers?: readonly Tier[]
   /** With `prompt`: see SendOptions.flow. */
   flow?: FlowTurn
+  /**
+   * A flow run, or a session that keeps no background tasks, starts it (#5870): its turns are
+   * not offered the background built-ins (ClaimedSession.backgroundTools).
+   */
+  withoutBackground?: boolean
   /** Taken and ignored (plan Step 6.3): every session is an AgentSession. */
   mode?: SessionMode
 }
@@ -541,9 +593,12 @@ export type SendOptions = {
   /**
    * The flow run and step that send this turn (#2481), set only by the sessions tools
    * from a flow activity's own context (ToolContext.flowTurn): a durable turn carries
-   * it, so the run's grant may cover its calls. A classic turn ignores it.
+   * it, so the run's grant may cover its calls. A classic turn ignores it. Such a turn is offered
+   * no background built-in (#5870, `turn_flow`).
    */
   flow?: FlowTurn
+  /** Sent from a session that keeps no background tasks (#5870): this turn is offered none either (`turn_flow`). */
+  withoutBackground?: boolean
 }
 
 /** Who a turn's in-process tools act for, beyond the session's owner (SendOptions.tiers). */
@@ -627,6 +682,8 @@ function startedQuery(run: QueryRunner): (spawn: HarnessRun) => WarmQuery {
 
 export type SessionManagerDeps = {
   sql: Sql
+  /** The backend's flow tables (flows/backendReads.ts, #5299 D7); their SQL on `sql` by default. */
+  flowReads?: FlowRunReads | undefined
   paths: HarnessPaths
   /**
    * The Claude credentials a turn may use, in priority order, and where what
@@ -736,11 +793,19 @@ export type SessionManagerDeps = {
    */
   workspace?: SessionFiles
   /**
-   * A session's background tasks (src/background/): a classic turn whose allowed packages
-   * name CronCreate and the rest gets the session's in place of Claude Code's own, which
-   * end with the turn. Without it those are Claude Code's.
+   * A session's background tasks (src/background/): every turn gets the session's CronCreate
+   * and the rest (each not off under `builtin:claude-code`) in place of Claude Code's own,
+   * which end with the turn, unless the session keeps none (ClaimedSession.backgroundTools: a
+   * flow-started session, a Workflow agent's chat). Without it (no Temporal or no database)
+   * no turn has them.
    */
   background?: { tasks: BackgroundTasks; tz: string; commandQueue?: string }
+  /**
+   * The sessions' sandbox pods (#5864, sandbox/pods.ts): with it, a turn's Bash and PowerShell
+   * are the session's own (builtins/sandboxShell.ts), run there, never Claude Code's in this
+   * process. Without it they stay `off`.
+   */
+  sandbox?: Sandboxes
   run?: QueryRunner
   /**
    * The warm process cache's limits (warm.ts; spec 2026-10-13 §5.3),
@@ -1020,9 +1085,10 @@ export class SessionManager {
       ...(deps.run ? { start: startedQuery(deps.run) } : {}),
       ...(deps.warm?.log ? { log: deps.warm.log } : {}),
     })
-    this.queue = new FlowQueue(deps.sql)
+    this.queue = new FlowQueue(deps.sql, deps.flowReads)
     this.escalations = new Escalations({
       sql: deps.sql,
+      reads: deps.flowReads,
       durable: () => this.durable,
       ...(deps.currentTiers ? { currentTiers: deps.currentTiers } : {}),
       // A delivery turn (#2482): as the owner, with the tiers its owner holds now.
@@ -1073,8 +1139,14 @@ export class SessionManager {
   revalidateWarm(): Promise<void> {
     return this.warm.revalidate(async (entry) => {
       // A claim's shape, so a Workflow agent's model, effort and type assemble as its turns do.
+      // The session's own background_tools, not the last turn's `turn_flow` (#5870): an idle
+      // process is checked against the shape the session's next own turn has. The trade is meant:
+      // a session with background_tools true that a flow keeps sending to loses its flow-shaped
+      // process at each resync, and the next flow turn spawns one again (a cold start), rather
+      // than a slot holding a process the session's own next turn cannot reuse. A session a flow
+      // started or forked (background_tools false) already has the flow's shape, so its process stays.
       const [row] = await this.deps.sql.unsafe<ClaimRow[]>(
-        `SELECT ${COLUMNS}, 0::float8 AS unpriced_cost_usd, agent_model, agent_effort, agent_type, ${CLAIMED_AT} FROM ai_sessions WHERE id = $1`,
+        `SELECT ${COLUMNS}, 0::float8 AS unpriced_cost_usd, agent_model, agent_effort, agent_type, background_tools, ${CLAIMED_AT} FROM ai_sessions WHERE id = $1`,
         [entry.sessionId],
       )
       if (!row) return undefined
@@ -1197,6 +1269,8 @@ export class SessionManager {
       runtime?: SessionRuntime
       /** A fork that reads its parent's transcript through the cut (store.ts): the parent, and how many of its entries. */
       forkOf?: { parentId: string; cut: number }
+      /** `ai_sessions.background_tools` (#5870): false given; else the parent's, for a session with one; else true. */
+      backgroundTools?: false
     },
     options: { rateLimited?: boolean; budgetOf?: SessionRecord } = {},
   ): Promise<SessionRecord> {
@@ -1210,12 +1284,19 @@ export class SessionManager {
       await sql`
         INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id,
                                  status, title, tags, scope, parent_id, runtime, max_turns, budget_usd, budget_root_id,
-                                 fork_parent_id, fork_cut)
+                                 fork_parent_id, fork_cut, background_tools)
         VALUES (${id}, ${fields.origin}, ${principal.kind}, ${principal.id}, ${principal.label},
                 ${principal.kind}, ${principal.id}, 'idle', ${fields.title}, ${sql.array(fields.tags)},
                 ${sql.json(fields.scope as never)}, ${fields.parentId}, ${fields.runtime ?? null}, ${maxTurns}, ${budgetUsd},
                 ${from ? sql`(SELECT coalesce(budget_root_id, id) FROM ai_sessions WHERE id = ${from.id})` : null},
-                ${forkOf?.parentId ?? null}, ${forkOf?.cut ?? null})`
+                ${forkOf?.parentId ?? null}, ${forkOf?.cut ?? null},
+                ${
+                  fields.backgroundTools === false
+                    ? false
+                    : fields.parentId
+                      ? sql`coalesce((SELECT background_tools FROM ai_sessions WHERE id = ${fields.parentId}), true)`
+                      : true
+                })`
     }
     if (options.rateLimited || forkOf) {
       await this.deps.sql.begin(async (tx) => {
@@ -1275,6 +1356,7 @@ export class SessionManager {
       scope: options.scope ?? {},
       parentId: null,
       runtime: 'unified',
+      ...(options.withoutBackground ? { backgroundTools: false as const } : {}),
     }, { rateLimited: true })
     await this.events.append(id, [
       event({
@@ -1299,6 +1381,16 @@ export class SessionManager {
   }
 
   /**
+   * Whether session `id`'s running turn is offered the background built-ins (#5870,
+   * BACKGROUND_TOOLS): what a session it starts, forks or sends a turn to inherits
+   * (tools/sessions.ts). False for a session that is gone.
+   */
+  async keepsBackgroundTools(id: string): Promise<boolean> {
+    const [row] = await this.deps.sql.unsafe<{ background_tools: boolean }[]>(`SELECT ${BACKGROUND_TOOLS} FROM ai_sessions WHERE id = $1`, [id])
+    return row?.background_tools ?? false
+  }
+
+  /**
    * A new chat that runs one agent() of a session's Workflow (background/workflowAgents.ts):
    * owned by `principal`, its parent recorded, in the parent's mode, and spending from the
    * parent's budget (its lineage, as a fork does, #823), so a workflow never makes budget.
@@ -1315,7 +1407,8 @@ export class SessionManager {
     const session = await this.insert(
       id,
       principal,
-      { origin: parent.origin, title: options.title, tags: options.tags ?? [], scope: parent.scope, parentId, runtime: 'unified' },
+      // A Workflow agent's chat starts no background task of its own (#5870): no nested Workflow or cron without a person.
+      { origin: parent.origin, title: options.title, tags: options.tags ?? [], scope: parent.scope, parentId, runtime: 'unified', backgroundTools: false },
       { budgetOf: parent },
     )
     const agent = options.agent
@@ -1354,6 +1447,7 @@ export class SessionManager {
       systemAppend: systemAppend(),
       ...(options.tiers ? { tiers: options.tiers } : {}),
       ...(options.flow ? { flow: options.flow } : {}),
+      ...(options.withoutBackground ? { withoutBackground: true } : {}),
     })
     if (!turn) throw await this.whyNotClaimed(id, principal, before)
     return turn
@@ -1578,7 +1672,8 @@ export class SessionManager {
    * Branches a session. The child copies no transcript: it records the cut (`fork_parent_id`,
    * `fork_cut`), and the store reads the parent's entries through it, then the child's own
    * (store.ts, plan 2026-10-13 Step 6.5). The child is owned by whoever forked it, records its
-   * parent, and starts with the parent's conversation events so attach shows its history.
+   * parent, and reads the parent's conversation events and the images they name through its event
+   * cut (`fork_event_cut`, eventLog.ts, blobs.ts, #4212), so attach shows its history; it copies none.
    *
    * Only the browser user's "continue in a new chat" (`freshBudget`, the HTTP
    * route) gives the child a budget of its own. Like `raiseBudget`, that is
@@ -1619,6 +1714,8 @@ export class SessionManager {
       freshBudget?: boolean
       upTo?: string
       audit?: Omit<AuditContext, 'actor'>
+      /** A flow run, or a session that keeps none, forks it (#5870): the fork keeps no background tasks, whatever its parent's. */
+      withoutBackground?: boolean
     } = {},
   ): Promise<SessionRecord> {
     const startedAt = new Date()
@@ -1637,15 +1734,17 @@ export class SessionManager {
     }
     // Through the entry the SDK's forkSession({upToMessageId}) sliced at (forkPoint.ts), inclusive.
     const upToMessageId = options.upTo === undefined || !transcript ? undefined : transcriptCut(transcript, options.upTo)
-    const history = await forkHistory(this.events, id, options.upTo)
-    if (!history || (options.upTo !== undefined && transcript && upToMessageId === undefined)) {
+    // Where the child's log is cut (#4212): the parent's seq of that reply's end, or its last.
+    const eventCut = await forkEventCut(this.events, id, options.upTo)
+    if (eventCut === undefined || (options.upTo !== undefined && transcript && upToMessageId === undefined)) {
       throw new SessionError('invalid', `session ${id} has no finished reply ${options.upTo} to fork from`)
     }
     // Where the child's transcript is cut: how many of the parent's entries, as the parent loads them, it
-    // reads. None for a parent with no transcript, whose child reads nothing of it.
-    const forkOf = transcript
-      ? { parentId: id, cut: upToMessageId === undefined ? transcript.length : transcript.findIndex((e) => e.uuid === upToMessageId) + 1 }
-      : undefined
+    // reads. None for a parent with no transcript, whose child reads only its log through the link.
+    const forkOf = {
+      parentId: id,
+      cut: !transcript ? 0 : upToMessageId === undefined ? transcript.length : transcript.findIndex((e) => e.uuid === upToMessageId) + 1,
+    }
     // A fork of a spent lineage could not run a turn; say why now rather than at its first send.
     if (!fresh && parent.costUsd >= parent.budgetUsd) {
       throw new SessionError(
@@ -1660,14 +1759,22 @@ export class SessionManager {
     // review). Checked first too, so a refused fork leaves nothing behind; the
     // insert's check under the lock is the one that holds.
     await this.withinNewSessionLimit(principal, this.deps.sql)
-    const fields = { origin: options.origin ?? parent.origin, title, tags: parent.tags, scope: parent.scope, parentId: parent.id }
+    // A fork keeps its parent's background_tools (insert), and a flow's fork none (#5870).
+    const fields = {
+      origin: options.origin ?? parent.origin,
+      title,
+      tags: parent.tags,
+      scope: parent.scope,
+      parentId: parent.id,
+      ...(options.withoutBackground ? { backgroundTools: false as const } : {}),
+    }
     const insertOptions = { rateLimited: options.rateLimited ?? true, ...(fresh ? {} : { budgetOf: parent }) }
     // The parent's transcript, read through the cut: the child is an AgentSession, as every new
     // session is (plan Step 6.3). Forks made before Step 6.5 hold a copy.
     const child = await this.insert(
       randomUUID(),
       principal,
-      { ...fields, runtime: 'unified', ...(forkOf ? { forkOf } : {}) },
+      { ...fields, runtime: 'unified', forkOf },
       insertOptions,
     )
     try {
@@ -1679,24 +1786,37 @@ export class SessionManager {
       throw err
     }
     const childId = child.id
-    // The images the copied events name (#782, #2150), before the events that name them: the
-    // parent's others (a later turn's, past `upTo`) stay the parent's, so a fork chain does not
-    // copy every image of every ancestor.
-    await this.blobs.copy(id, childId, blobNames(history))
-    await this.events.append(childId, [
-      event({
-        type: 'session.started',
-        sessionId: childId,
-        origin: child.origin,
-        owner: child.owner,
-        title,
-        budgetUsd: child.budgetUsd,
-        mode: child.mode,
-      }),
-      // The conversation, re-addressed to the child.
-      ...history.map((e) => ({ ...e, sessionId: childId })),
-      event({ type: 'session.status', sessionId: childId, status: 'idle' }),
-    ])
+    // Its log (#4212): its own start, then the parent's conversation through the cut, read through
+    // the link and never copied (eventLog.ts), with the images it names (blobs.ts), then its own
+    // status. In one transaction, so the start is its seq 1 and nothing of its own lands in the range.
+    const started = event({
+      type: 'session.started',
+      sessionId: childId,
+      origin: child.origin,
+      owner: child.owner,
+      title,
+      budgetUsd: child.budgetUsd,
+      mode: child.mode,
+    })
+    const idle = event({ type: 'session.status', sessionId: childId, status: 'idle' })
+    let seqs: number[]
+    try {
+      seqs = await this.deps.sql.begin(async (tx) => {
+        // Under the parent's lock, shared, as the insert was: a forget of the parent since the insert
+        // has copied the child's transcript and cleared its link, and the log it reads through is gone.
+        await tx`SELECT pg_advisory_xact_lock_shared(hashtext(${payloadKeyLock(`session-${id}`)}))`
+        const [linked] = await tx`SELECT 1 FROM ai_sessions WHERE id = ${childId}::uuid AND fork_parent_id = ${id}::uuid`
+        if (!linked) throw new SessionError('not_found', `session ${id} was forgotten while it was forked`)
+        const first = await this.events.append(childId, [started], tx)
+        await this.events.inheritThrough(childId, eventCut, tx)
+        return [...first, ...(await this.events.append(childId, [idle], tx))]
+      })
+    } catch (err) {
+      // A fork with no log is no fork: it goes whole, as one whose files could not be copied.
+      await this.dropFailedFork(childId)
+      throw err
+    }
+    this.events.committed(childId, [started, idle], seqs)
     // Recorded once the child is complete (#2159): a fork that failed after the insert has only
     // the failures-only mount's `error` row (app.ts), never an `ok` one beside it.
     if (options.audit) {

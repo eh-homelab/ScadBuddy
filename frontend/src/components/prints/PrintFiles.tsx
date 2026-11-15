@@ -12,6 +12,7 @@ import { Card } from '@/components/ui/card'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Spinner } from '../ui/spinner'
+import { useDisplayUnit } from '../../lib/units'
 
 const Preview = lazy(async () => ({ default: (await import('../Preview')).Preview }))
 
@@ -299,6 +300,7 @@ function Mesh({
   output: Output | null
   loading: boolean
 }) {
+  const unit = useDisplayUnit()
   if (loading) {
     return (
       <div role="status" aria-label="Loading the 3D preview">
@@ -318,7 +320,7 @@ function Mesh({
   return (
     <div data-testid="file-mesh" className="aspect-[4/3] w-full overflow-hidden rounded-lg">
       <Suspense fallback={null}>
-        <Preview job={job} rendering={false} />
+        <Preview job={job} unit={unit} rendering={false} />
       </Suspense>
     </div>
   )

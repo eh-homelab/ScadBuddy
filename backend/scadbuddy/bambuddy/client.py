@@ -32,7 +32,7 @@ from typing import IO, Any, Literal, Self
 import httpx
 from fastapi import status
 from opentelemetry.trace import Span, SpanKind
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from scadbuddy.bambuddy.errors import (
     REJECTED_PROBLEM,
@@ -42,6 +42,7 @@ from scadbuddy.bambuddy.errors import (
     map_transport,
     not_configured,
     scrubbed_detail,
+    upstream_detail,
 )
 from scadbuddy.bambuddy.models import (
     Archive,
@@ -50,6 +51,7 @@ from scadbuddy.bambuddy.models import (
     ArchiveRunList,
     ArchiveStats,
     AvailableFilament,
+    CatalogFilament,
     ExternalLink,
     FilamentRequirements,
     FileUpdate,
@@ -68,6 +70,7 @@ from scadbuddy.bambuddy.models import (
     PresetRef,
     PresetValues,
     Printer,
+    PrinterFiles,
     PrinterMaintenanceOverview,
     PrinterMedia,
     PrinterStatus,
@@ -92,6 +95,11 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import split_urls
 from scadbuddy.core.tracing import detached_span, span
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.makerworld.models import (
+    BambuddyMakerWorldImported,
+    BambuddyMakerWorldResolved,
+    BambuddyMakerWorldStatus,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +114,11 @@ DEFAULT_UPLOAD_TIMEOUT = 180.0
 #: under a megabyte, so past this Bambuddy is answering something else (#1006).
 MAX_CAMERA_FRAME_BYTES = 16 * 1024 * 1024
 DEFAULT_SLICE_TIMEOUT = 600.0
+#: A MakerWorld import (#6119): Bambuddy downloads the 3MF from MakerWorld inside the one
+#: request, which ran past 120 s on prod on 2026-11-13 (the session #6119 cites).
+MAKERWORLD_IMPORT_TIMEOUT = 600.0
+#: Read by `BambuddyClient._parsed`, not mapped by `_send`: a link or id Bambuddy refuses.
+_REFUSED_LINK = frozenset({400})
 DEFAULT_SLICE_POLL = 2.0
 #: The largest page ``GET /library/trash`` serves (``limit`` is ``le=500``).
 TRASH_PAGE = 500
@@ -152,6 +165,7 @@ Operation = Literal[
     "external_links.create",
     "external_links.list",
     "external_links.update",
+    "filaments.catalog",
     "library.annotate",
     "library.bulk_delete",
     "library.delete",
@@ -182,10 +196,16 @@ Operation = Literal[
     "media.thumbnail",
     "media.timelapse",
     "maintenance.printer",
+    "makerworld.import",
+    "makerworld.resolve",
+    "makerworld.status",
     "printers.available_filaments",
     "printers.camera.snapshot",
     "printers.camera.stream",
     "printers.camera.token",
+    "printers.cover",
+    "printers.files",
+    "printers.files.download",
     "printers.inventory_remain",
     "printers.list",
     "printers.read",
@@ -743,6 +763,13 @@ class BambuddyClient:
         Archived spools are excluded by default because the picker offers what can be
         printed with today; ``include_archived`` is Bambuddy's own query parameter.
         """
+        rows = await self.spool_rows(include_archived=include_archived)
+        return [Spool.model_validate(row) for row in rows]
+
+    async def spool_rows(self, *, include_archived: bool = False) -> list[Any]:
+        """`spools`' rows as Bambuddy sent them, not yet validated: a caller that takes
+        each row on its own (`filament/bambuddy_pull.py`) skips a malformed one rather than
+        losing them all."""
         what = "list the filament spools"
         response = await self._send(
             "GET",
@@ -752,7 +779,24 @@ class BambuddyClient:
             what=what,
             params={"include_archived": include_archived},
         )
-        return [Spool.model_validate(row) for row in self._rows(response, what=what)]
+        return self._rows(response, what=what)
+
+    async def filament_catalog(self) -> list[CatalogFilament]:
+        """``GET /api/v1/filament-catalog/`` — Bambuddy's filament catalogue, each entry
+        with its ``density`` (#6136). Bambuddy gates it with ``FILAMENTS_READ``
+        (``backend/app/api/routes/filaments.py``), which an API key holds through
+        ``can_read_status`` (``_APIKEY_SCOPE_BY_PERMISSION``,
+        ``backend/app/core/auth.py``), both at maziggy/bambuddy v1.3.2b1-daily.20261113.
+        """
+        what = "list the filament catalogue"
+        response = await self._send(
+            "GET",
+            "/filament-catalog/",
+            scope=Scope.READ_STATUS,
+            operation="filaments.catalog",
+            what=what,
+        )
+        return [CatalogFilament.model_validate(row) for row in self._rows(response, what=what)]
 
     async def spool_filament_presets(self, spool_id: int) -> list[SpoolFilamentPreset]:
         """``GET /api/v1/inventory/spools/{id}/filament-presets`` — per-nozzle presets.
@@ -1038,6 +1082,20 @@ class BambuddyClient:
         )
         return PrinterMedia.model_validate(response.json())
 
+    async def printer_files(self, printer_id: int, path: str) -> PrinterFiles:
+        """``GET /printers/{id}/files?path=`` (#4698): one directory of the printer's
+        storage, read over FTP. Only on an explicit request: it reaches the printer. The key
+        needs Control Printer (``PRINTERS_FILES``)."""
+        response = await self._send(
+            "GET",
+            f"/printers/{printer_id}/files",
+            scope=Scope.CONTROL_PRINTER,
+            operation="printers.files",
+            what=f"list {path} on printer {printer_id}",
+            params={"path": path},
+        )
+        return PrinterFiles.model_validate(response.json())
+
     async def select_timelapse(self, archive_id: int, filename: str) -> None:
         """Pull ``filename`` off the printer and attach it to the archive. Only on an
         explicit request: it downloads over FTP, as Bambuddy's own UI does."""
@@ -1088,6 +1146,7 @@ class BambuddyClient:
         if_range: str | None = None,
         params: Mapping[str, str] | None = None,
         pass_416: bool = True,
+        scope: Scope = Scope.READ_STATUS,
     ) -> AsyncIterator[httpx.Response]:
         """``GET path`` without reading the body, for the media proxy (#307).
 
@@ -1114,7 +1173,7 @@ class BambuddyClient:
         # the ``async with`` (a browser that went away) leaves it, and is raised after.
         # A transport error there is the body's read failing, which is Bambuddy's.
         consumer_error: Exception | None = None
-        with _call_span(operation, "GET", Scope.READ_STATUS, detached=True) as current:
+        with _call_span(operation, "GET", scope, detached=True) as current:
             try:
                 response = await self._http.send(request, stream=True)
             except httpx.HTTPError as error:
@@ -1124,7 +1183,7 @@ class BambuddyClient:
             try:
                 if not response.is_success and (response.status_code != 416 or not pass_416):
                     await response.aread()
-                    raise map_response(response, scope=Scope.READ_STATUS, what=what)
+                    raise map_response(response, scope=scope, what=what)
                 try:
                     yield response
                 except httpx.HTTPError as error:
@@ -1558,10 +1617,14 @@ class BambuddyClient:
         return [QueueItem.model_validate(row) for row in self._rows(response, what=what)]
 
     async def queue_item(self, item_id: int) -> QueueItem:
+        """``GET /api/v1/queue/{id}``. It needs ``queue:read_all`` or ``queue:read_own``
+        (``backend/app/api/routes/print_queue.py`` lines 1854-1863 at maziggy/bambuddy
+        f9080d1), which an API key holds with ``can_read_status`` (``auth.py`` lines
+        89-91), as the list does; 404 "Queue item not found" for an item it lacks."""
         response = await self._send(
             "GET",
             f"/queue/{item_id}",
-            scope=Scope.MANAGE_QUEUE,
+            scope=Scope.READ_STATUS,
             operation="queue.read",
             what=f"read queue item {item_id}",
         )
@@ -1587,6 +1650,84 @@ class BambuddyClient:
         )
         return QueueItem.model_validate(response.json())
 
+    # --- MakerWorld (#6119) ----------------------------------------------------
+    # Bambuddy's ``backend/app/api/routes/makerworld.py`` (maziggy/bambuddy at
+    # v1.3.2b1-daily.20261112): status and resolve need ``makerworld:view`` (Read Status
+    # for a key), import ``makerworld:import`` (Manage Library), by ``core/auth.py``
+    # ``_APIKEY_SCOPE_BY_PERMISSION``. The download also needs a Bambu Cloud token: for an
+    # API key its owner's, and only when the key has cloud access.
+
+    @staticmethod
+    def _parsed[M: BaseModel](response: httpx.Response, model: type[M], *, what: str) -> M:
+        """``response`` read as ``model``. A 400 is Bambuddy refusing the link or id
+        (``_map_service_error``'s ``ProviderUrlError``, an unknown source type): the
+        caller's to fix, so a 422 with Bambuddy's own words."""
+        if response.status_code == status.HTTP_400_BAD_REQUEST:
+            detail = upstream_detail(response)
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"Bambuddy rejected the request to {what}" + (f": {detail}" if detail else ""),
+                type_=REJECTED_PROBLEM,
+                bambuddy_status=response.status_code,
+            )
+        try:
+            return model.model_validate(response.json())
+        except (ValueError, ValidationError) as error:
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Bambuddy's answer was not the expected shape when asked to {what}",
+                type_=REJECTED_PROBLEM,
+            ) from error
+
+    async def makerworld_status(self) -> BambuddyMakerWorldStatus:
+        what = "read its MakerWorld status"
+        response = await self._send(
+            "GET",
+            "/makerworld/status",
+            scope=Scope.READ_STATUS,
+            operation="makerworld.status",
+            passthrough=_REFUSED_LINK,
+            what=what,
+        )
+        return self._parsed(response, BambuddyMakerWorldStatus, what=what)
+
+    async def makerworld_resolve(self, url: str) -> BambuddyMakerWorldResolved:
+        what = "resolve a MakerWorld link"
+        response = await self._send(
+            "POST",
+            "/makerworld/resolve",
+            scope=Scope.READ_STATUS,
+            operation="makerworld.resolve",
+            passthrough=_REFUSED_LINK,
+            what=what,
+            json={"url": url},
+        )
+        return self._parsed(response, BambuddyMakerWorldResolved, what=what)
+
+    async def makerworld_import(
+        self, model_id: int, *, profile_id: int | None, folder_id: int | None
+    ) -> BambuddyMakerWorldImported:
+        """Bambuddy downloads the profile's 3MF into its library, in ``folder_id`` (its own
+        ``MakerWorld`` folder without one). It dedupes by the model and profile's source
+        URL: a repeat answers the first file with ``was_existing`` and downloads nothing."""
+        what = f"import MakerWorld model {model_id}"
+        response = await self._send(
+            "POST",
+            "/makerworld/import",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="makerworld.import",
+            passthrough=_REFUSED_LINK,
+            what=what,
+            json={
+                "model_id": model_id,
+                "source_type": "makerworld",
+                "profile_id": profile_id,
+                "folder_id": folder_id,
+            },
+            timeout=MAKERWORLD_IMPORT_TIMEOUT,
+        )
+        return self._parsed(response, BambuddyMakerWorldImported, what=what)
+
     # --- the connection test (#322) -------------------------------------------
 
     async def version(self) -> str:
@@ -1598,7 +1739,18 @@ class BambuddyClient:
             operation="version",
             what="read Bambuddy's version",
         )
-        return str(response.json().get("version") or "unknown")
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            # #5840: an answer that is not an object names no version.
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Bambuddy answered {type(body).__name__}, not an object, "
+                "when asked to read Bambuddy's version",
+            )
+        return str(body.get("version") or "unknown")
 
     async def capture_finish_photo(self) -> bool:
         """Bambuddy's ``capture_finish_photo`` setting (``GET /api/v1/settings/``, which

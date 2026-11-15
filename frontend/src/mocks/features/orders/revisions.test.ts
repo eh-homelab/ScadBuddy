@@ -257,8 +257,9 @@ describe('revisions after acceptance mock (#5350)', () => {
 
   it('never accepts an attempt of the old design (#5582)', async () => {
     const old = await api.recordFulfilment(ORDER_ACCEPTED, ITEM_APPROVED, { quantity: 1, outcome: 'succeeded' })
-    // Pinned before the revision, as the backend's test does.
-    state.fulfilments.find((f) => f.id === old.id)!.created_at = '2026-01-01T00:00:00Z'
+    // It names revision 1. Its time is moved past the revision that follows, as the backend's
+    // test does: the revision's number orders them, not the clock (#5704).
+    state.fulfilments.find((f) => f.id === old.id)!.created_at = '2099-01-01T00:00:00Z'
     await api.addOrderItemRevisionAfterAcceptance(ORDER_ACCEPTED, ITEM_APPROVED, { note: 'loop' })
     const quote = await api.quoteOrderItem(ORDER_ACCEPTED, ITEM_APPROVED, { unit_price_minor: 1300 })
     expect(await api.acceptOrderQuote(ORDER_ACCEPTED, ITEM_APPROVED, quote.id)).toMatchObject({ status: 'approved' })
@@ -269,6 +270,29 @@ describe('revisions after acceptance mock (#5350)', () => {
     const fresh = await api.recordFulfilment(ORDER_ACCEPTED, ITEM_APPROVED, { quantity: 1, outcome: 'succeeded' })
     const flags = Object.fromEntries((await itemOf()).fulfilments.map((f) => [f.id, f.stale]))
     expect(flags).toEqual({ [old.id]: true, [fresh.id]: false })
+  })
+
+  it('orders an attempt and the priced revision by revision number, not by time (#5704)', async () => {
+    const attempt = (id: string) => state.fulfilments.find((f) => f.id === id)!
+    const stale = async () => Object.fromEntries((await itemOf()).fulfilments.map((f) => [f.id, f.stale]))
+    const first = (await revisionsOf(ORDER_ACCEPTED, ITEM_APPROVED)).at(-1)!
+    const before = await api.recordFulfilment(ORDER_ACCEPTED, ITEM_APPROVED, { quantity: 1, outcome: 'succeeded' })
+    expect(attempt(before.id).revision_id).toBe(first.id)
+    await api.addOrderItemRevisionAfterAcceptance(ORDER_ACCEPTED, ITEM_APPROVED, { note: 'loop' })
+    const quote = await api.quoteOrderItem(ORDER_ACCEPTED, ITEM_APPROVED, { unit_price_minor: 1300 })
+    await api.acceptOrderQuote(ORDER_ACCEPTED, ITEM_APPROVED, quote.id)
+    const after = await api.recordFulfilment(ORDER_ACCEPTED, ITEM_APPROVED, { quantity: 1, outcome: 'succeeded' })
+    const priced = (await revisionsOf(ORDER_ACCEPTED, ITEM_APPROVED)).at(-1)!
+    expect(attempt(after.id).revision_id).toBe(priced.id)
+    // A time later than the priced revision, naming the earlier one: stale.
+    attempt(before.id).created_at = '2099-01-01T00:00:00Z'
+    // A time earlier than the priced revision (the clock stepped back), naming it: not stale.
+    attempt(after.id).created_at = '2000-01-01T00:00:00Z'
+    expect(await stale()).toEqual({ [before.id]: true, [after.id]: false })
+    await api.acceptFulfilment(ORDER_ACCEPTED, ITEM_APPROVED, after.id)
+    // An attempt that names no revision was made before the item had one: stale.
+    attempt(before.id).revision_id = null
+    expect((await stale())[before.id]).toBe(true)
   })
 
   it('refuses a new design once an attempt is accepted (#5592)', async () => {

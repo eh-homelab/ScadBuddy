@@ -77,10 +77,11 @@ from scadbuddy.bambuddy.choices import (
     with_lan_printers,
 )
 from scadbuddy.bambuddy.client import MJPEG_TYPE, client_for, maybe_client
+from scadbuddy.bambuddy.component import ArchiveCacheDep
 from scadbuddy.bambuddy.destinations import DefaultDestination, default_destination
 from scadbuddy.bambuddy.filament_ids import filament_material, filament_name
 from scadbuddy.bambuddy.filaments import MAX_PLATES, FilamentOptions
-from scadbuddy.bambuddy.models import RackAlgorithm
+from scadbuddy.bambuddy.models import DEFAULT_ALGORITHM, RackAlgorithm
 from scadbuddy.bambuddy.options import LAN_CALIBRATION_API_HINT, LAN_CALIBRATION_PROBLEM
 from scadbuddy.bambuddy.output_reader import LocalOutputs
 from scadbuddy.bambuddy.preview import (
@@ -90,6 +91,7 @@ from scadbuddy.bambuddy.preview import (
     read_preview,
     read_toolpath,
 )
+from scadbuddy.bambuddy.print_links import JobMatches, PrintLinkStore
 from scadbuddy.bambuddy.print_run import (
     PROCESS_VALUES_QUERY,
     PrintCheck,
@@ -104,7 +106,18 @@ from scadbuddy.bambuddy.print_run import (
     lan_printers,
 )
 from scadbuddy.bambuddy.print_source import OutputSource, PrintSource
-from scadbuddy.bambuddy.printers_now import PrintersNow, printers_now, with_lan_runs
+from scadbuddy.bambuddy.printers_now import (
+    NOT_ASKED,
+    PrintersNow,
+    PrintingItems,
+    job_keys,
+    needs_archive_pages,
+    printers_now,
+    printing_items,
+    with_archive_pages,
+    with_lan_runs,
+    with_scadbuddy_jobs,
+)
 from scadbuddy.bambuddy.progress import (
     LanRunControl,
     PrintProgress,
@@ -150,6 +163,7 @@ from scadbuddy.library.settings_store import (
 )
 from scadbuddy.library.slugs import MAX_SLUG_LENGTH
 from scadbuddy.operations.component import OperationsDep
+from scadbuddy.preview_follow.component import PreviewFollowsDep
 from scadbuddy.print_library.component import PrintLibraryDep
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.printers.component import Printers, PrintersDep
@@ -276,39 +290,35 @@ PrinterIdPath = Annotated[
 
 @dataclass(frozen=True)
 class PrinterKeys:
-    """Where a per-printer settings map write lands (#4971): ``key``, and the ``stale``
-    keys it removes, ``bambuddy_id`` and ``printer`` the printer's two ids."""
+    """Where a per-printer settings map write lands (#4971, #5167): ``key``, the
+    registry printer id (``None`` for a forget with nothing to remove), ``bambuddy_id``
+    and ``printer`` the printer's two ids."""
 
-    key: str
-    stale: tuple[str, ...]
+    key: str | None
     bambuddy_id: int | None
     printer: str | None
 
 
 def printer_keys(store: PrinterStore, printer_id: str, *, forget: bool) -> PrinterKeys:
-    """A per-printer map's key for a route's path (#4971): the Bambuddy id, which the
-    previous build reads, else the registry id of a printer with none. A printer with
-    both ids also drops the entry its registry id kept from before it was linked, which
-    the previous build never reads, so it cannot outlive a change or a forget. A forget
-    naming a registry id the registry no longer holds removes that key as given, so a
-    deleted printer's entry can still go; any other unknown id is 404."""
+    """A per-printer map's key for a route's path (#5167): the registry printer id. A
+    Bambuddy id is resolved to the registry printer that links it. A forget that names
+    a registry id the registry no longer holds removes that key as given, so a deleted
+    printer's entry can still go. A forget that names a Bambuddy id no registry printer
+    links has nothing to remove. Any other unknown id is 404."""
     if printer_id.isascii() and printer_id.isdecimal():
         bambuddy_id = int(printer_id)
-        if bambuddy_id > _BAMBUDDY_ID_MAX:
+        linked = store.by_bambuddy_id(bambuddy_id) if bambuddy_id <= _BAMBUDDY_ID_MAX else None
+        if linked is None:
             if forget:
-                return PrinterKeys(printer_id, (), None, None)
+                return PrinterKeys(None, bambuddy_id, None)
             raise ApiError(status.HTTP_404_NOT_FOUND, f"no printer {printer_id}")
-        linked = store.by_bambuddy_id(bambuddy_id)
-        stale = (linked.id,) if linked is not None else ()
-        return PrinterKeys(printer_id, stale, bambuddy_id, linked.id if linked else None)
+        return PrinterKeys(linked.id, bambuddy_id, linked.id)
     row = store.get(printer_id)
     if row is None:
         if forget:
-            return PrinterKeys(printer_id, (), None, None)
+            return PrinterKeys(printer_id, None, None)
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no printer {printer_id}")
-    if row.bambuddy_printer_id is None:
-        return PrinterKeys(row.id, (), None, row.id)
-    return PrinterKeys(str(row.bambuddy_printer_id), (row.id,), row.bambuddy_printer_id, row.id)
+    return PrinterKeys(row.id, row.bambuddy_printer_id, row.id)
 
 
 class PrinterRackAlgorithmPut(BaseModel):
@@ -326,8 +336,8 @@ RACK_ALGORITHM_SUPERSEDED_PROBLEM = "https://scadbuddy.dev/problems/rack-algorit
 
 
 class PrinterRackAlgorithm(BaseModel):
-    """The rack algorithm in force on one printer (#836): ``printer_id`` its Bambuddy
-    printer, ``printer`` its registry printer when it has no Bambuddy id (#4971)."""
+    """The rack algorithm in force on one printer (#836): ``printer`` its registry
+    printer (#4971, #5167), ``printer_id`` the Bambuddy printer it links, if any."""
 
     printer_id: int | None = None
     printer: str | None = None
@@ -491,12 +501,23 @@ def put_printer_bed_type(
     ScadBuddy's own memory, because Bambuddy's printer status reports no plate type.
     Needs no Bambuddy, like the model's other remembered choices. The path names a
     registry printer, so a LAN-only one remembers its plate too (#4971), or a Bambuddy
-    printer by its integer id, as before; the plate is kept under both where the registry
-    links them. 404 for a registry id the registry does not hold.
+    printer by its integer id, resolved to the registry printer that links it. The plate
+    is kept on the registry printer only (#5153). 404 for a registry id the registry does
+    not hold, and for a Bambuddy id no registry printer links; forgetting that one's
+    plate forgets nothing.
     """
-    keys = printer_keys(registry.store, printer_id, forget=False)
+    keys = printer_keys(registry.store, printer_id, forget=body.bed_type is None)
     bambuddy_id, printer = keys.bambuddy_id, keys.printer
-    settings = store.set_printer_bed_type(bambuddy_id, body.bed_type, printer=printer)
+    if printer is None and keys.key is not None:
+        # A registry id the registry does not hold: 404 for a forget too.
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no printer {printer_id}")
+    if printer is None:
+        if body.bed_type is not None:
+            raise ApiError(status.HTTP_404_NOT_FOUND, f"no printer {printer_id}")
+        # On purpose: a Bambuddy id no registry printer links has no plate to forget, so
+        # the forget answers `printer: None` and never calls the store.
+        return PrinterBedType(printer_id=bambuddy_id, printer=None, bed_type=None)
+    settings = store.set_printer_bed_type(printer, body.bed_type)
     return PrinterBedType(
         printer_id=bambuddy_id,
         printer=printer,
@@ -531,16 +552,20 @@ def put_printer_rack_algorithm(
     registry: PrintersDep,
 ) -> PrinterRackAlgorithm:
     """The print dialog's Advanced rack algorithm (#836, spec §4), per printer. Needs no
-    Bambuddy, like the printer's remembered plate. The path is a Bambuddy printer's id or
-    a registry printer's (#4971): one with a Bambuddy id is kept under it, as the
-    previous build reads it, one with none (LAN-only) under its registry id."""
+    Bambuddy, like the printer's remembered plate. The path is a registry printer's id
+    or a Bambuddy printer's (#4971). It is kept under the registry id (#5167): a
+    Bambuddy id is resolved to the registry printer that links it, and is 404 when none
+    does (a forget then has nothing to remove)."""
     keys = printer_keys(registry.store, printer_id, forget=body.algorithm is None)
-    bambuddy_id = keys.bambuddy_id
-    printer = None if bambuddy_id is not None else keys.printer
-    try:
-        algorithm = store.set_printer_rack_algorithm(
-            keys.key, body.algorithm, body.version, stale=keys.stale
+    bambuddy_id, printer = keys.bambuddy_id, keys.printer
+    if keys.key is None:
+        # A forget of a Bambuddy id no registry printer links: echo the id, as the
+        # bed-type route does (#6106).
+        return PrinterRackAlgorithm(
+            printer_id=bambuddy_id, printer=None, algorithm=DEFAULT_ALGORITHM
         )
+    try:
+        algorithm = store.set_printer_rack_algorithm(keys.key, body.algorithm, body.version)
     except RackAlgorithmSupersededError:
         raise ApiError(
             status.HTTP_409_CONFLICT,
@@ -698,12 +723,25 @@ async def post_tray_spool(
         "time left and its HMS errors, whoever started the job, from Bambuddy's status or "
         "the printer's own LAN report (`path`). A job whose archive "
         "ScadBuddy linked is `linked` (its print is `/prints/{archive_id}`); any other "
-        "names Bambuddy's archives page. A printer whose status cannot be read is a "
-        "card with `error`, never a failed page."
+        "links its archive in Bambuddy (`bambuddy_url`): that archive's page, "
+        "`/archives/{id}`, on a Bambuddy of version 1.3.0 or later but 1.3.1b1, else the "
+        "archives page "
+        "(#3743). A printing or paused job ScadBuddy queued or "
+        "started carries `scadbuddy` (#3741): the output or library file. On a printer "
+        "linked to Bambuddy, when Bambuddy's queue has a printing item on it, only "
+        "ScadBuddy's record of that item matches, and when the queue cannot be read, "
+        "nothing matches. Otherwise a run's LAN start on that printer under the job's name "
+        "matches, until the run records that start's end. A linked archive alone is not a "
+        "match, as Bambuddy's reprint of it prints the same archive. "
+        "A printer whose status cannot be read is a card with `error`, never a failed page."
     ),
 )
 async def get_printers_now(
-    store: SettingsStoreDep, links: PrintLinksDep, printers: PrintersDep, runs: PrintRunsDep
+    store: SettingsStoreDep,
+    links: PrintLinksDep,
+    printers: PrintersDep,
+    runs: PrintRunsDep,
+    cache: ArchiveCacheDep,
 ) -> PrintersNow:
     now = datetime.now(UTC)
     settings = await asyncio.to_thread(store.load)
@@ -718,12 +756,34 @@ async def get_printers_now(
         cards = await printers_now(
             None, links, printers.store, printers.reports, now=now, native=native
         )
+        printing = NOT_ASKED
     else:
         async with client_for(settings) as client:
             cards = await printers_now(
                 client, links, printers.store, printers.reports, now=now, native=native
             )
+            # #3741: the queue item each working card prints, in one read of Bambuddy's.
+            printing = await printing_items(client, cards)
+            # #3743: an archive's own page, where this Bambuddy has one; its version is
+            # kept, so the polled strip asks it once in `VERSION_TTL`.
+            if needs_archive_pages(cards):
+                cards = with_archive_pages(cards, client, await cache.version(client))
+    cards = with_scadbuddy_jobs(cards, await _scadbuddy_jobs(links, cards, printing), printing)
     return with_lan_runs(cards, await _lan_controls(runs, cards))
+
+
+async def _scadbuddy_jobs(
+    links: PrintLinkStore, cards: PrintersNow, printing: PrintingItems
+) -> JobMatches:
+    """Which working cards' jobs ScadBuddy queued or started (#3741), in one read; none
+    when its records cannot be read, so a database blip costs the badges, never the
+    strip."""
+    queue_items, starts = job_keys(cards, printing)
+    try:
+        return await links.jobs(queue_items=queue_items, lan_starts=starts)
+    except DATABASE_ERRORS:
+        logger.warning("print links unreadable; the strip shows no ScadBuddy marks")
+        return JobMatches()
 
 
 async def _lan_controls(runs: PrintCommands, cards: PrintersNow) -> dict[str, LanRunControl]:
@@ -1475,6 +1535,7 @@ async def get_preview_slice(
     store: SettingsStoreDep,
     uploads: UploadsDep,
     slicing: SlicingDep,
+    follows: PreviewFollowsDep,
     slicer: SlicerQuery = "bambuddy",
 ) -> SlicePreview:
     """#2169: grams per slot, print time, the side each filament went to and how many
@@ -1482,10 +1543,16 @@ async def get_preview_slice(
     this output, while Bambuddy's job is still that slice; else 404. ``slicer`` is the
     one `PreviewStarted` named: a native slice's id is a `native_slices` row's."""
     meta = require_output(outputs, output_id)
-    if slicer == "native":
-        return await read_native_preview(slicing, job_id, PrintSubject.output(meta.id).run_subject)
-    async with client_for(store.load()) as client:
-        return await read_preview(client, uploads, job_id, PrintSubject.output(meta.id).run_subject)
+    subject = PrintSubject.output(meta.id).run_subject
+
+    async def read() -> SlicePreview:
+        if slicer == "native":
+            return await read_native_preview(slicing, job_id, subject)
+        async with client_for(store.load()) as client:
+            return await read_preview(client, uploads, job_id, subject)
+
+    # #265: the slice is followed from here, so the dialog hears of each change.
+    return await follows.read(slicer, job_id, subject, read)
 
 
 @router.get(
@@ -1535,11 +1602,10 @@ def names_no_printer(settings: StoredSettings, printer: str | None, printer_id: 
 def remembered_printer(
     printer: str | None, printer_id: int | None, remembered: ModelPrintChoices | None
 ) -> tuple[str | None, int | None]:
-    """The request's printer, else the one the subject last printed on: its Bambuddy id,
-    else the registry id of a printer with none (#4971)."""
-    printer_id = printer_id or (remembered.printer_id if remembered else None)
-    if printer is None and printer_id is None and remembered is not None:
-        printer = remembered.printer
+    """The request's printer, else the one the subject last printed on (#4971): its
+    registry id and the Bambuddy printer that one links now (#5167)."""
+    if printer is None and not printer_id and remembered is not None:
+        return remembered.printer, remembered.printer_id
     return printer, printer_id
 
 

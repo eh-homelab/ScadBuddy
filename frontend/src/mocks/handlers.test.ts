@@ -1596,3 +1596,62 @@ describe('a URL with more tags than MAX_TAGS that fold to MAX_TAGS (#5292 review
     expect(facets.matched).toBe(0)
   })
 })
+
+describe('mock PUT /print/printers/:id/bed-type, as the backend keys it (#5153)', () => {
+  beforeEach(() => resetMockState())
+
+  it('keeps the plate on the registry printer that links a Bambuddy id', async () => {
+    await expect(api.putPrinterBedType(1, 'Cool Plate')).resolves.toEqual({
+      printer_id: 1,
+      printer: '00000000-0000-4000-8000-000000000001',
+      bed_type: 'Cool Plate',
+    })
+  })
+
+  it('refuses a Bambuddy id no registry printer links, and forgets nothing for it', async () => {
+    await expect(api.putPrinterBedType(2, 'Cool Plate')).rejects.toMatchObject({ status: 404 })
+    await expect(api.putPrinterBedType(2, null)).resolves.toEqual({ printer_id: 2, printer: null, bed_type: null })
+  })
+
+  it('refuses a Bambuddy id past the backend\u2019s integer column, forget or not', async () => {
+    for (const id of ['2147483648', '99999999999999999999']) {
+      await expect(api.putPrinterBedType(id, 'Cool Plate')).rejects.toMatchObject({ status: 404 })
+      await expect(api.putPrinterBedType(id, null)).rejects.toMatchObject({ status: 404 })
+    }
+  })
+
+  it('reads a Bambuddy id with leading zeros as the backend\u2019s int() does', async () => {
+    await expect(api.putPrinterBedType('000000000001', 'Cool Plate')).resolves.toMatchObject({
+      printer_id: 1,
+      printer: '00000000-0000-4000-8000-000000000001',
+    })
+  })
+
+  it('refuses a zero-padded id past the integer column, and reads all zeros as printer 0', async () => {
+    await expect(api.putPrinterBedType('0002147483648', 'Cool Plate')).rejects.toMatchObject({ status: 404 })
+    await expect(api.putPrinterBedType('0002147483648', null)).rejects.toMatchObject({ status: 404 })
+    await expect(api.putPrinterBedType('00000000000', 'Cool Plate')).rejects.toMatchObject({ status: 404 })
+    await expect(api.putPrinterBedType('00000000000', null)).resolves.toEqual({ printer_id: 0, printer: null, bed_type: null })
+  })
+
+  it('strips leading zeros before the length test: 15 digits can still be the largest id', async () => {
+    await expect(api.putPrinterBedType('000002147483647', null)).resolves.toEqual({
+      printer_id: 2147483647,
+      printer: null,
+      bed_type: null,
+    })
+  })
+
+  it('refuses a registry id the registry does not hold, forget or not', async () => {
+    await expect(api.putPrinterBedType('no-such-printer', 'Cool Plate')).rejects.toMatchObject({ status: 404 })
+    await expect(api.putPrinterBedType('no-such-printer', null)).rejects.toMatchObject({ status: 404 })
+  })
+
+  it('keeps a LAN-only printer’s plate under its registry id', async () => {
+    await expect(api.putPrinterBedType('00000000-0000-4000-8000-0000000000aa', 'Cool Plate')).resolves.toEqual({
+      printer_id: null,
+      printer: '00000000-0000-4000-8000-0000000000aa',
+      bed_type: 'Cool Plate',
+    })
+  })
+})

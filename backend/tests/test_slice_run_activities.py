@@ -25,9 +25,10 @@ from temporalio.testing import ActivityEnvironment
 from scadbuddy.bambuddy.dispatch import SlicePlan
 from scadbuddy.bambuddy.models import PresetRef
 from scadbuddy.bambuddy.print_run import PlannedRun
+from scadbuddy.core import heartbeat
 from scadbuddy.print_library.ids import NATIVE_ID_BASE
 from scadbuddy.print_library.store import file_type_of
-from scadbuddy.workflows import print_activities, printing
+from scadbuddy.workflows import printing
 from scadbuddy.workflows.print_models import NativeSliced, SlicedUploadInput, SliceRunInput
 from scadbuddy.workflows.slicing import SLICE_ROUND, failure_status, slice_failure
 from scadbuddy.workflows.slicing_activities import RunActivities, _refused
@@ -155,7 +156,7 @@ async def test_slice_run_beats_before_its_wait(
 ) -> None:
     """Review M1: what runs before the wait (settings, the copy's read, the presets, the
     start) beats too, so a slow Bambuddy does not time the attempt out."""
-    monkeypatch.setattr(print_activities, "HEARTBEAT_EVERY", 0.05)
+    monkeypatch.setattr(heartbeat, "HEARTBEAT_EVERY", 0.05)
 
     async def slow() -> Any:
         await asyncio.sleep(0.3)
@@ -281,7 +282,7 @@ async def test_the_sliced_upload_beats_while_it_uploads(
 ) -> None:
     """Task 13 review I1 (the slow-upload half): an upload longer than the heartbeat
     interval beats, so only a dead worker times it out, not a large plate."""
-    monkeypatch.setattr(print_activities, "HEARTBEAT_EVERY", 0.05)
+    monkeypatch.setattr(heartbeat, "HEARTBEAT_EVERY", 0.05)
 
     class Slow(_Native):
         async def upload(

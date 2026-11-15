@@ -35,14 +35,14 @@ ARG BAMBU_STUDIO_SHA256_AMD64=d501b103fac5424513ec0e8d6bc145fb30719de2c7d94d7320
 # A FROM line, not `COPY --from=ghcr.io/astral-sh/uv:...`, so Dependabot's
 # docker ecosystem sees the version and can bump it. The image is scratch-based
 # and holds nothing but the two static binaries.
-FROM ghcr.io/astral-sh/uv:0.13.6 AS uv
+FROM ghcr.io/astral-sh/uv:0.13.7 AS uv
 
 # ── base: OS packages, fonts, users ───────────────────────────────────────────
 # Pinned to a dated nightly by tag AND index digest (amd64 + arm64), so the base
 # cannot move under a build. OpenSCAD's only stable release (2021.01) has no
 # Manifold backend, so a nightly it has to be. Bump deliberately: tag, digest and
 # OPENSCAD_VERSION below together, after re-verifying §3 of the design spec.
-FROM openscad/openscad:dev.2026-11-02@sha256:c84e6f1e5962e446091f3c20e838429231043ba4d1fac9549cc62e26f8839ae3 AS base
+FROM openscad/openscad:dev.2026-11-09@sha256:3a040760d376ccbb3bff07e44a1be3c2570435f093f5fa4bf08e3991e7412b8c AS base
 
 # DL3008 (pin apt versions) is disabled repo-wide in .hadolint.yaml: the base is
 # a nightly on Debian trixie, so a pinned version here would break the
@@ -126,7 +126,8 @@ RUN uv sync --frozen --no-dev --no-install-project
 # The venv's python, not `uv run`: that would sync the dev group too.
 COPY backend/ ./
 RUN uv sync --frozen --no-dev \
-    && /opt/venv/bin/python -m scadbuddy.tools.export_openapi /src/openapi.json
+    && /opt/venv/bin/python -m scadbuddy.tools.export_openapi /src/openapi.json \
+    && /opt/venv/bin/python -m scadbuddy.tools.export_openapi --storefront /src/storefront-openapi.json
 
 # ── frontend bundle ───────────────────────────────────────────────────────────
 # Built here rather than copied from the host so a stale local `frontend/dist`
@@ -161,9 +162,11 @@ RUN corepack enable
 COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 
-# After the install, so an API change does not re-download node_modules.
-COPY --from=api-spec /src/openapi.json /src/openapi.json
-ENV SCADBUDDY_OPENAPI_JSON=/src/openapi.json
+# After the install, so an API change does not re-download node_modules. The storefront
+# edge's spec types the public page (src/storefront/api/schema.d.ts, #5282).
+COPY --from=api-spec /src/openapi.json /src/storefront-openapi.json /src/
+ENV SCADBUDDY_OPENAPI_JSON=/src/openapi.json \
+    SCADBUDDY_STOREFRONT_OPENAPI_JSON=/src/storefront-openapi.json
 
 COPY frontend/ ./
 # The browser's `service.version` (tracing spec 2026-10-01 §3): the same label the
@@ -289,6 +292,78 @@ CMD ["node", "--import", "./dist/telemetry.js", "dist/main.js"]
 # backend's, so the exit status is the signal.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["node", "-e", "fetch('http://127.0.0.1:8081/healthz').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+
+# ── sandbox: a session's Bash and PowerShell, and their egress proxy (#5864) ───
+# One image, two roles (agent/src/sandbox/main.ts): SCADBUDDY_SANDBOX_ROLE=exec is a
+# session's sandbox pod, which the agent worker creates in its own namespace with no
+# secret, no service-account token and no DNS (agent/src/sandbox/pods.ts); `egress` is the
+# sandbox pods' CONNECT proxy, which checks each target as WebFetch does and refuses
+# private addresses (agent/src/sandbox/egressProxy.ts). Only Node's built-ins run here:
+# the sandbox files and http/egress.ts, compiled in `agent-build`, and no node_modules.
+#
+# PowerShell is Microsoft's release tarball, pinned by version, sha256 and REST asset id
+# (the fallback when the release URL fails, #5706; release-asset-pins.sh checks it weekly).
+# amd64 only: no CI job builds arm64. Bump the three ARGs together.
+FROM node:24-bookworm-slim AS sandbox
+
+ARG POWERSHELL_VERSION=7.6.9
+ARG POWERSHELL_SHA256_AMD64=1da6d6d6035d651f20e70ddee7c4c15ac6ab8b9fb40ee92240d91263f28a884b
+ARG POWERSHELL_ASSET_AMD64=675638183
+
+# What a command is likely to need: a shell's tools, git and curl (through the proxy),
+# python3, jq, and PowerShell's own libraries (libicu, libssl).
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       tini bash ca-certificates curl git jq less procps python3 python3-venv unzip xz-utils zip \
+       libicu72 libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /tmp/pwsh
+# The single quotes are PowerShell's: `$PSVersionTable` is its variable, not the shell's.
+# hadolint ignore=SC2016
+RUN { curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+        --output pwsh.tar.gz \
+        "https://github.com/PowerShell/PowerShell/releases/download/v${POWERSHELL_VERSION}/powershell-${POWERSHELL_VERSION}-linux-x64.tar.gz" \
+      || curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+        --header "Accept: application/octet-stream" --output pwsh.tar.gz \
+        "https://api.github.com/repos/PowerShell/PowerShell/releases/assets/${POWERSHELL_ASSET_AMD64}"; } \
+    && printf '%s  pwsh.tar.gz\n' "$POWERSHELL_SHA256_AMD64" > pwsh.sha256 \
+    && sha256sum --check --strict pwsh.sha256 \
+    && mkdir -p /opt/microsoft/powershell/7 \
+    && tar -xzf pwsh.tar.gz -C /opt/microsoft/powershell/7 \
+    && chmod 0755 /opt/microsoft/powershell/7/pwsh \
+    && ln -s /opt/microsoft/powershell/7/pwsh /usr/local/bin/pwsh \
+    && rm -rf /tmp/pwsh \
+    && HOME=/tmp POWERSHELL_TELEMETRY_OPTOUT=1 pwsh -NoLogo -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.ToString()'
+
+# uid 10001 like every ScadBuddy image. /work (the session's files) and /tmp are the pod's
+# emptyDirs; the root filesystem is read-only.
+RUN groupadd --gid 10001 sandbox \
+    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /tmp/home --shell /bin/bash sandbox \
+    && install -d -o 10001 -g 10001 /work
+
+WORKDIR /app
+COPY --from=agent-build /src/agent/dist/sandbox ./dist/sandbox
+COPY --from=agent-build /src/agent/dist/http/egress.js /src/agent/dist/http/origins.js ./dist/http/
+# ESM: dist/*.js are modules, as agent/package.json's "type" says.
+RUN printf '{"type":"module"}\n' > package.json
+
+ENV NODE_ENV=production \
+    SCADBUDDY_SANDBOX_WORK=/work \
+    SCADBUDDY_SANDBOX_HOME=/tmp/home \
+    POWERSHELL_TELEMETRY_OPTOUT=1 \
+    DOTNET_CLI_TELEMETRY_OPTOUT=1
+
+ARG SCADBUDDY_REVISION=unknown
+ARG SCADBUDDY_VERSION=dev
+ENV SCADBUDDY_REVISION=${SCADBUDDY_REVISION} \
+    SCADBUDDY_VERSION=${SCADBUDDY_VERSION}
+
+USER 10001:10001
+EXPOSE 8090 3128
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["node", "dist/sandbox/main.js"]
 
 # ── agent-durable: ScadBuddy's Python agent parts (spec 2026-10-13 §14.4) ─────
 # Its Deployment of its own, trusted like `agent` (#1030). The Python turn is retired
@@ -646,7 +721,7 @@ FROM base AS app
 # never fire; it stays as the check that the tag, digest and version agree. When
 # bumping the base, re-verify §3 of the design spec against the new build and
 # change the FROM line and the default below in the same commit.
-ARG OPENSCAD_VERSION=2026.11.02
+ARG OPENSCAD_VERSION=2026.11.09
 # Written to a file rather than piped into sed: every `run:`-style pipe here
 # trips hadolint's DL4006, and `SHELL -o pipefail` for one command is a worse
 # trade than a temp file.

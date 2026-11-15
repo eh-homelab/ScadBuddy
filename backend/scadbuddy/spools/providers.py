@@ -15,17 +15,12 @@ from dataclasses import dataclass
 from types import ModuleType
 from typing import Protocol
 
-from psycopg import Connection
-from psycopg.rows import DictRow
-from psycopg_pool import ConnectionPool
-
 import scadbuddy
 from scadbuddy.core.components import Components, feature_exports
-from scadbuddy.library.settings_store import SettingsReader, StoredSettings
+from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.spools.models import SeenTray, SpoolSnapshot
-
-Pool = ConnectionPool[Connection[DictRow]]
+from scadbuddy.spools.native import NativeSpoolStore
 
 PROVIDER_MODULE = "spool_providers"
 PROVIDER_ATTR = "SPOOL_PROVIDERS"
@@ -63,25 +58,10 @@ class TraySource(Protocol):
 
 
 class ProviderSettings(Protocol):
-    """What a provider's build reads: the settings, and the pool its own tables are on.
-    The API's `SettingsStore` is one, and so is :class:`SplitSettings`."""
-
-    @property
-    def pool(self) -> Pool: ...
+    """What a provider's build reads of the settings: the API's `SettingsStore` is one,
+    and so is the print worker's `crud/print.py` `RemoteSettingsStore`."""
 
     def load(self, timeout: float | None = None) -> StoredSettings: ...
-
-
-@dataclass(frozen=True)
-class SplitSettings:
-    """The print worker's :class:`ProviderSettings`: the settings read through the API's
-    CRUD route (#5298), the spool tables on the worker's own pool."""
-
-    settings: SettingsReader
-    pool: Pool
-
-    def load(self, timeout: float | None = None) -> StoredSettings:
-        return self.settings.load(timeout)
 
 
 class ProviderCore(Protocol):
@@ -95,9 +75,13 @@ class ProviderCore(Protocol):
 
 @dataclass(frozen=True)
 class SettingsOnly:
-    """The :class:`ProviderCore` of a process with no `Core` (the print worker)."""
+    """The :class:`ProviderCore` of a process with no `Core` (the print worker): the
+    settings read through the API's CRUD route, and ScadBuddy's own spools through its
+    CRUD routes (`crud/print.py` `RemoteNativeSpools`, #5298 Task 31), so a provider's
+    build there opens no pool."""
 
     settings_store: ProviderSettings
+    native_spools: NativeSpoolStore
 
 
 #: Builds a feature's provider over the core services and the components, which are

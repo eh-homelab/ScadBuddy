@@ -1,9 +1,9 @@
 import { http, HttpResponse } from 'msw'
-import type { ArchiveQuoteRequest, Filament, FilamentInput, FilamentPatch, OrderEstimate, PolicyUpdate, PriceBook, PricingPolicy, Quote, QuoteLine, SliceQuoteRequest, SpoolImportRow } from '../../../api/types'
+import type { ArchiveQuoteRequest, DensityFillRow, Filament, FilamentInput, FilamentPatch, OrderEstimate, PolicyUpdate, PriceBook, PricingPolicy, Quote, QuoteLine, SliceQuoteRequest, SpoolImportRow } from '../../../api/types'
 import { mockSettings, setMockSettings } from '../../handlers'
 import { SPOOL_INVENTORY } from '../spoolInventory'
 import { acceptOperation } from '../operations'
-import { FilamentsRefused, event, itemOf, lock, notEnded, rederive, requoteOpen, refused, SETTLED, withFilaments } from './orders'
+import { FilamentsRefused, event, itemOf, lock, notEnded, quotesOf, rederive, requoteOpen, refused, SETTLED, TAKES_ITEMS, withFilaments } from './orders'
 import { machineRateFor } from './machineRates'
 import { pushRevision } from './revisions'
 import { pastPrint } from './pastPrints'
@@ -34,6 +34,33 @@ function policy(): PricingPolicy {
   }
 }
 
+/**
+ * #6136 — the density chain's mock (backend `orders/density.py`): the preset id each
+ * mock spool names (Bambuddy's `slicer_filament`), and that preset's density in Bambu
+ * Studio v02.08.02.61's tree. A record with no spool of its identity has no source.
+ */
+const MOCK_SPOOL_PRESETS: Record<number, string> = { 1: 'GFA00', 2: 'GFA00' }
+const MOCK_PRESETS: Record<string, { density_g_cm3: string; name: string }> = {
+  GFA00: { density_g_cm3: '1.26', name: 'Bambu PLA Basic @base' },
+}
+
+function spoolColour(rgba: string | null | undefined): string | null {
+  return rgba && /^[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/.test(rgba) ? `#${rgba.slice(0, 6).toUpperCase()}` : null
+}
+
+export function mockDensity(f: { material: string; subtype?: string | null; brand?: string | null; colour: string | null }): { density_g_cm3: string; profile: string } | null {
+  const key = (x: { material: string; subtype?: string | null; brand?: string | null }, colour: string | null) => [x.material, x.subtype ?? '', x.brand ?? '', colour ?? ''].map((part) => part.trim().toUpperCase()).join('|')
+  const spool = SPOOL_INVENTORY.find((s) => !s.archived && key(s, spoolColour(s.rgba)) === key(f, f.colour))
+  const presetId = spool ? MOCK_SPOOL_PRESETS[spool.id] : undefined
+  const preset = presetId ? MOCK_PRESETS[presetId] : undefined
+  return presetId && preset ? { density_g_cm3: preset.density_g_cm3, profile: `${preset.name} (spool preset ${presetId})` } : null
+}
+
+function added(body: FilamentInput): Pick<Filament, 'density_g_cm3' | 'density_profile'> {
+  const found = mockSettings().bambuddy_url ? mockDensity({ ...body, colour: body.colour.toUpperCase() }) : null
+  return { density_g_cm3: found?.density_g_cm3 ?? null, density_profile: found?.profile ?? null }
+}
+
 function book(includeArchived = false): PriceBook {
   const currency = mockSettings().orders_currency
   return {
@@ -59,6 +86,8 @@ function importSpools(): SpoolImportRow[] {
     const latest = spools.at(-1)
     if (!latest) return []
     const colour = latest.rgba && /^[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/.test(latest.rgba) ? `#${latest.rgba.slice(0, 6).toUpperCase()}` : null
+    // #6209: the alpha byte rides beside the RGB.
+    const alpha = latest.rgba && /^[0-9a-fA-F]{8}$/.test(latest.rgba) ? parseInt(latest.rgba.slice(6), 16) : 255
     const priced = spools.filter((s) => s.cost_per_kg != null)
     const prices = [...new Set(priced.map((s) => s.cost_per_kg as number))]
     const row: SpoolImportRow = {
@@ -68,6 +97,9 @@ function importSpools(): SpoolImportRow[] {
       brand: latest.brand ?? null,
       colour_name: latest.color_name ?? null,
       colour,
+      alpha,
+      extra_colours: [],
+      effect: null,
       spool_ids: spools.map((s) => s.id),
       min_cost_per_kg: prices.length > 1 ? String(Math.min(...prices)) : null,
       max_cost_per_kg: prices.length > 1 ? String(Math.max(...prices)) : null,
@@ -76,6 +108,7 @@ function importSpools(): SpoolImportRow[] {
     if (priced.length === 0) return [{ ...row, reason: 'no_price' }]
     const cost = String(priced.at(-1)?.cost_per_kg)
     const found = state.filaments.find((f) => !f.archived_at && identity(f) === identity({ material: row.material, subtype: row.subtype ?? null, brand: row.brand ?? null, colour }))
+    const profile = mockDensity({ ...row, colour })
     if (!found) {
       const made: Filament = {
         id: newId('f'),
@@ -84,19 +117,30 @@ function importSpools(): SpoolImportRow[] {
         brand: row.brand ?? null,
         colour_name: row.colour_name ?? null,
         colour,
+        alpha,
+        extra_colours: [],
+        effect: null,
+        colour_source: 'import',
+        spool_linked: true,
         cost_per_kg: cost,
-        density_g_cm3: null,
+        density_g_cm3: profile?.density_g_cm3 ?? null,
+        density_profile: profile?.profile ?? null,
         archived_at: null,
         created_at: now(),
         updated_at: now(),
       }
       state.filaments.push(made)
-      return [{ ...row, action: 'created', filament_id: made.id, cost_per_kg: cost }]
+      return [{ ...row, action: 'created', filament_id: made.id, colour_source: 'import', cost_per_kg: cost, density_g_cm3: made.density_g_cm3, density_profile: made.density_profile }]
     }
     const previous = found.cost_per_kg
-    const action = Number(previous) === Number(cost) ? 'unchanged' : 'updated'
-    if (action === 'updated') Object.assign(found, { cost_per_kg: cost, updated_at: now() })
-    return [{ ...row, action, filament_id: found.id, cost_per_kg: cost, previous_cost_per_kg: previous }]
+    const fill = found.density_g_cm3 ? null : profile
+    const look = found.colour_source === 'import' && found.alpha !== alpha ? { alpha } : {}
+    const action = Number(previous) === Number(cost) && !fill && !('alpha' in look) ? 'unchanged' : 'updated'
+    if (action === 'updated') Object.assign(found, { cost_per_kg: cost, ...look, updated_at: now() })
+    if (fill) Object.assign(found, { density_g_cm3: fill.density_g_cm3, density_profile: fill.profile })
+    // A matched record is linked to its spools, so "Use spool colour" can recolour it.
+    found.spool_linked = true
+    return [{ ...row, action, filament_id: found.id, colour: found.colour, alpha: found.alpha, colour_source: found.colour_source, cost_per_kg: cost, previous_cost_per_kg: previous, density_g_cm3: found.density_g_cm3, density_profile: found.density_profile ?? null }]
   })
 }
 
@@ -198,6 +242,12 @@ function priced(
   }
 }
 
+/** A 1×1 grey PNG: every mocked plate image. */
+const PLATE_PNG = Uint8Array.from(
+  atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGO4BwAA6gDpRGJRjQAAAABJRU5ErkJggg=='),
+  (c) => c.charCodeAt(0),
+)
+
 export const handlers = [
   http.get(`${base}/price-book`, ({ request }) => HttpResponse.json(book(new URL(request.url).searchParams.get('include_archived') === 'true'))),
   http.put(`${base}/price-book`, async ({ request }) => {
@@ -229,6 +279,19 @@ export const handlers = [
     }
     return HttpResponse.json({ rows: importSpools() })
   }),
+  http.post(`${base}/price-book/fill-densities`, ({ request }) => {
+    if (!mockSettings().bambuddy_url) {
+      return problem(request, 409, 'Bambuddy is not linked: set its URL in Settings to import spools', PROBLEMS + 'not_linked')
+    }
+    const rows = state.filaments
+      .filter((f) => !f.archived_at && !f.density_g_cm3)
+      .map((f): DensityFillRow => {
+        const found = mockDensity(f)
+        if (found) Object.assign(f, { density_g_cm3: found.density_g_cm3, density_profile: found.profile, updated_at: now() })
+        return { filament_id: f.id, material: f.material, subtype: f.subtype, brand: f.brand, colour_name: f.colour_name, colour: f.colour, density_g_cm3: found?.density_g_cm3 ?? null, density_profile: found?.profile ?? null }
+      })
+    return HttpResponse.json({ rows })
+  }),
   http.post(`${base}/price-book/filaments`, async ({ request }) => {
     const body = (await request.json()) as FilamentInput
     if (!body.material) return fieldProblem(request, 'material', 'Field required')
@@ -241,8 +304,14 @@ export const handlers = [
       brand: body.brand ?? null,
       colour_name: body.colour_name ?? null,
       colour: body.colour,
+      alpha: body.alpha ?? 255,
+      extra_colours: body.extra_colours ?? [],
+      effect: body.effect ?? null,
+      colour_source: 'manual',
+      spool_linked: false,
       cost_per_kg: body.cost_per_kg,
-      density_g_cm3: body.density_g_cm3 ?? null,
+      // #6136: added with no density while Bambuddy is linked, it takes its spools'.
+      ...(body.density_g_cm3 ? { density_g_cm3: body.density_g_cm3, density_profile: null } : added(body)),
       archived_at: null,
       created_at: now(),
       updated_at: now(),
@@ -260,6 +329,9 @@ export const handlers = [
     if (!found) return problem(request, 404, `no filament '${String(params.id)}'`)
     if (body.cost_per_kg != null && !DECIMAL.test(body.cost_per_kg)) return fieldProblem(request, 'cost_per_kg', 'Value error, the value must be at least 0')
     const next = { ...found, ...Object.fromEntries(Object.entries(body).filter(([, v]) => v !== undefined)), updated_at: now() } as Filament
+    // #6209: a look sent that differs from the record's is a person's.
+    const differs = (['colour', 'alpha', 'effect'] as const).some((k) => body[k] !== undefined && String(body[k]).toUpperCase() !== String(found[k]).toUpperCase())
+    if (!body.colour_source && (differs || (body.extra_colours != null && body.extra_colours.join() !== found.extra_colours.join()))) next.colour_source = 'manual'
     const taken = state.filaments.find((f) => f.id !== found.id && !f.archived_at && !next.archived_at && identity(f) === identity(next))
     if (taken) {
       return problem(request, 409, `a filament with that material, subtype, brand and colour exists: ${taken.id}`, PROBLEMS + 'filament_exists', { filament_id: taken.id })
@@ -294,6 +366,17 @@ export const handlers = [
     try {
       const order = lock(String(params.id))
       const found = itemOf(order, String(params.item))
+      // #4673 PR 3 (`api/orders.py` `_slice_revision`): new inputs or a commit are a revision
+      // of the item first, through the revise path (after acceptance for an accepted item).
+      if ((body.inputs ?? null) !== null || (body.commit ?? null) !== null) {
+        if (found.reference === null) throw new Refused('item_custom', `item ${found.id} has no design to slice with new inputs`, [found.id])
+        const next = { ...found.reference, ...(body.commit ? { commit: body.commit } : {}), ...(body.inputs ? { inputs: body.inputs } : {}) }
+        if (JSON.stringify(next) !== JSON.stringify(found.reference)) {
+          notEnded(order)
+          const after = TAKES_ITEMS.has(order.status) && quotesOf(found.id).some((q) => q.accepted) && !found.revised_after_acceptance
+          pushRevision(order, found, next, found.colours, '', after)
+        }
+      }
       // The check (Ruling 8): the rows alone, nothing written.
       // `lifecycle.py` `requote_open` (#5349, #5350): past `quoted`, an item with no accepted
       // quote, or one revised after acceptance, is quoted too.
@@ -334,6 +417,17 @@ export const handlers = [
         quantity: found.quantity,
         created_by: BROWSER,
         ...priced(found.colours, order.currency, body),
+        // #4673 PR 1 (`quote.py` `print_setup`): the whole print setup, as recorded.
+        choices: {
+          printer_id: body.printer_id ?? null,
+          printer: body.printer ?? null,
+          path: body.path ?? null,
+          choices: body.choices,
+          prime_tower: body.prime_tower ?? null,
+          supports: body.supports ?? null,
+          print_sequence: body.print_sequence ?? null,
+        },
+        filament_plan: body.filament_plan as Quote['filament_plan'],
         total_minor: 0,
       }
       made.total_minor = made.unit_price_minor * made.quantity
@@ -347,6 +441,16 @@ export const handlers = [
     } catch (error) {
       return refused(request, error)
     }
+  }),
+
+  // #4673 PR 4 — a slice quote's plate image, from its sliced file: one grey square here.
+  http.get(`${base}/:id/items/:item/quotes/:quote/plates/:plate/thumbnail`, ({ request, params }) => {
+    const quote = state.quotes.find((q) => q.id === params.quote && q.order_item_id === params.item)
+    const plate = Number(params.plate)
+    if (!quote?.sliced_blob_key || !(quote.plates as { index?: number }[]).some((p) => p.index === plate)) {
+      return problem(request, 404, `quote ${String(params.quote)} has no image of plate ${plate}`)
+    }
+    return new HttpResponse(PLATE_PNG, { headers: { 'Content-Type': 'image/png' } })
   }),
 
   // #4777 — an `archive` quote (`orders/past_prints.py` `quote_from_archive`): every plate
@@ -430,14 +534,15 @@ export const handlers = [
     if (!outputId || !filamentId) return fieldProblem(request, outputId ? 'filament_id' : 'output_id', 'Field required')
     const record = state.filaments.find((f) => f.id === filamentId)
     if (!record) return problem(request, 404, `no filament '${filamentId}'`)
-    if (!record.density_g_cm3) {
-      return problem(request, 422, `filament ${filamentId} has no density, so there is no estimate`, PROBLEMS + 'filament_density')
+    const density = record.density_g_cm3
+    if (!density) {
+      return problem(request, 422, `filament ${filamentId} has no density, so there is no estimate: fill it from Bambuddy (POST /orders/price-book/fill-densities) or set it`, PROBLEMS + 'filament_density')
     }
     const currency = mockSettings().orders_currency
     const exponent = minorExponent(currency)
     const factor = mockSettings().rough_estimate_factor
     // One closed part of 8 cm3: the mock measures no 3MF.
-    const grams = Math.round(8 * Number(record.density_g_cm3) * Number(factor) * 100) / 100
+    const grams = Math.round(8 * Number(density) * Number(factor) * 100) / 100
     const answer: OrderEstimate = {
       estimate: true,
       grams: grams.toFixed(2),
@@ -447,6 +552,7 @@ export const handlers = [
       factor,
       parts: [{ plate: 1, part: 1, name: 'Color 1', colour: '#F9D72C', volume_mm3: 8000 }],
       unknown_parts: 0,
+      densities: [{ filament_id: record.id, density_g_cm3: density, profile: record.density_profile ?? null }],
     }
     return HttpResponse.json(answer)
   }),

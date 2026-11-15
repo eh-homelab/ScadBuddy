@@ -39,15 +39,25 @@ service credential (PR #5211). The owner decided this on 2026-11-05.
   a pod that holds a database secret.
 - New data that crosses services goes through a CRUD route that requires a service
   credential from its first PR.
+- Retiring a caller's role goes in this order. First add it to `auth/revoke.py`
+  `RETIRED_ROLES` (the API revokes at every start) and deploy. On prod, check that it has
+  0 rows in `information_schema.role_table_grants`, owns 0 relations and has 0
+  `pg_stat_activity` sessions. Only then set `ensure: absent` in eh-homelab/clusters
+  `cnpg-cluster.yaml`, delete its `onepassworditem-*-db.yaml`, and archive the 1Password
+  item (#5298; how to read prod: `deploy/CLAUDE.md` "Prod checks").
 
-Today's code still breaks the rule: seven processes hold a Postgres secret (six once
-eh-homelab/clusters drops the projects worker's, which it no longer uses; the API and
-the agent revoke its role `scadbuddy_projects` at every start, #5298), the agent
-and the API share tables through grants, and template Python runs in the render worker's
-pod. Do the work in this order: #5298 (the workers), #5299 (the agent), #5297 (authenticate
-`/api/v1/internal/*`, then `enforce`), #5296 (untrusted code out of pods with a database
-secret), then eh-homelab/clusters#3182 (the network). The evidence and the zones are in
-[docs/security/trust-boundaries.md](docs/security/trust-boundaries.md).
+Today's code still breaks the rule: four processes hold a Postgres secret (the API, the
+agent sidecar, the agent worker and agent-durable), and the agent and the API share
+tables through grants. The render, print and projects workers hold none: #5298 is done,
+and prod has no `scadbuddy_render`, `scadbuddy_print` or `scadbuddy_projects` role and no
+database secret in those pods (measured 2026-11-14, after eh-homelab/clusters#3555,
+#3566 and #3578). The API still revokes those roles at every start where they exist, and
+the agent what it granted `scadbuddy_projects`. Template Python still runs in the render
+worker's pod, which holds no database secret now but holds its `crud.render` credential,
+the S3 keys and the Bambuddy render key. Do the rest in this order: #5299 (the agent),
+#5297 (authenticate `/api/v1/internal/*`, then `enforce`), #5296 (untrusted code out of
+pods with a database secret: openscad and `openscad-lsp` still run in the API's), then eh-homelab/clusters#3182 (the network). The evidence and the zones
+are in [docs/security/trust-boundaries.md](docs/security/trust-boundaries.md).
 
 ## Commands (what CI runs)
 
@@ -61,7 +71,10 @@ Generated API files (#492): `backend/openapi.json`, `frontend/src/api/schema.d.t
 client. `typecheck`, `test` and (in the agent) `build` run it first, so both packages need
 uv and the backend tree. With `SCADBUDDY_OPENAPI_JSON` set, it reads that spec and skips
 the export. That's how the Dockerfile's `frontend` and `agent-build` stages use the spec
-from its `api-spec` stage. A frontend vitest run outside `pnpm test` (`pnpm exec vitest
+from its `api-spec` stage. The frontend's `gen:api` also writes
+`src/storefront/api/schema.d.ts` (gitignored) from the storefront edge's spec
+(`export_openapi --storefront`, `backend/storefront-openapi.json`, gitignored), or from
+`SCADBUDDY_STOREFRONT_OPENAPI_JSON` when it is set (#5282). A frontend vitest run outside `pnpm test` (`pnpm exec vitest
 <file>`) needs `pnpm gen:api` first, or `SCADBUDDY_OPENAPI_JSON` set, because some unit
 tests read bounds from the exported spec (`components/settings/Printers.test.tsx`
 `specAccessCodeMax`, #4502). The `freshness` job no longer commits anything. It checks
@@ -121,9 +134,9 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
 
 ## Verified OpenSCAD facts (do not re-derive; re-measure if the base image moves)
 
-- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-11-02@sha256:…`
+- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-11-09@sha256:…`
   (tag plus index digest; the only stable release, 2021.01, has no Manifold). The
-  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.11.02). Bump
+  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.11.09). Bump
   deliberately: re-verify spec §3 against the new build, then change the tag,
   digest and `OPENSCAD_VERSION` in the same commit. The weekly `OpenSCAD Bump`
   workflow (`openscad-bump.yml`) opens that PR when a newer nightly exists; its CI
@@ -234,6 +247,10 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
   (QEMU-emulated, with a PR-time `openscad-lsp-arm64` check, #199) was dropped; the
   Dockerfile still handles `TARGETARCH=arm64`, so re-enabling it is `platforms` plus
   `docker/setup-qemu-action`.
+- A public GHCR image's tags and digest need no `read:packages` (which `gh`'s token
+  lacks): `T=$(curl -s "https://ghcr.io/token?scope=repository:eh-homelab/<image>:pull" | jq -r .token)`,
+  then `GET https://ghcr.io/v2/eh-homelab/<image>/tags/list`, or `HEAD …/manifests/<tag>`
+  for its `docker-content-digest`, both with `Authorization: Bearer $T`.
 
 - Go (#2686): `ci.yml`'s `go-select` (`.github/scripts/select-go.sh`, tested by
   `select-go.test.sh`) decides whether a change touched Go, and the `go` job always
@@ -279,8 +296,14 @@ The Go and Rust commands and toolchain notes: `tools/go/CLAUDE.md`, `workers/rus
   a link, every measured fact says where and how it was measured (spec §3).
   `lint-plugin.sh` checks it for plugin skills only; `link-check.yml` checks weekly that
   the links in `docs/`, `README.md`, this file, every per-directory `CLAUDE.md` and every `SKILL.md` still resolve.
+- A `claude-review` comment ends with `<!-- claude-review-sha: <sha> -->`. Only the one
+  whose sha is the PR's current head counts; a script that waits for the review waits for
+  that one, not the newest comment.
 - Required checks on `main`: **`CI Summary`** and **`claude-review`** (the ruleset
   lives in eh-homelab/clusters, so renaming either job breaks the gate silently).
+  A script that reads the gate: `claude-review` is a commit status (`gh pr view --json
+  statusCheckRollup` gives it `.state`, not `.conclusion`), and the gate's outstanding
+  findings are in the PR comment marked `<!-- merge-gate-sticky -->`.
 - `claude-review` is a merge gate: the review runs after CI and sorts its findings into
   `## Blocking` and `## Non-blocking`; a classifier passes only when every Blocking
   finding in the review for *this* commit is fixed or tracked in an open `pr-feedback`
@@ -316,3 +339,15 @@ The Go and Rust commands and toolchain notes: `tools/go/CLAUDE.md`, `workers/rus
 - Frontend vitest tests can time out when the machine is under heavy load (e.g.
   several builds or agents at once). Re-run before debugging; a failure that repeats
   on an idle machine is real.
+- Backend: `test_a_cancelled_slice_is_recorded_cancelled` can error with
+  `httpx.ReadTimeout` on a slow runner (#6301). Re-run the shard.
+- Backend: `test_submit.py::test_a_slow_first_accept_is_retried_in_the_same_run`
+  (`assert 3 == 2`) is timing-sensitive under CI load. Re-run the failed jobs once
+  before you debug it.
+
+## Prod gotchas
+
+- A merged eh-homelab/clusters change that never reaches prod: check the `scadbuddy` Argo
+  CD app's `status.history[-1].deployedAt` and its PostSync hook Jobs (`kubectl -n
+  bambuddy get jobs`). A Job stuck in deletion with `argocd.argoproj.io/hook-finalizer`
+  blocks every sync until its finalizers are removed (clusters#3564).

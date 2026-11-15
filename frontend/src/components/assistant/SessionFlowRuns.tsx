@@ -3,7 +3,7 @@ import { api } from '../../api/client'
 import type { FlowQueueEntry, FlowRunQueue } from '../../api/types'
 import { FLOW_RUNS_TOPIC, flowRunPath, hopUntilText } from '../../lib/flows'
 import { useAsync } from '../../lib/useAsync'
-import { usePollWhile } from '../../lib/usePollWhileUnavailable'
+import { useReadOnPendingChanges } from '../../lib/pendingChanges'
 import { ATTENTION_POLL_MS } from '../../agent/attention'
 
 const TOPICS = [FLOW_RUNS_TOPIC]
@@ -23,8 +23,9 @@ export function SessionFlowRuns({ sessionId }: { sessionId: string }) {
   const runs = useAsync(() => api.listFlowRuns({ session: sessionId }), [sessionId], TOPICS)
   const open = (runs.data ?? []).filter((r) => OPEN.has(r.status)).map((r) => r.id)
   const queues = useAsync(() => readQueues(open), [open.join(',')], TOPICS)
-  // A child's call is decided or ends in its own session, which no run topic announces.
-  usePollWhile(
+  // A child's call is decided or ends in its own session, which no run topic announces:
+  // the agent's pending-input stream does (#265).
+  useReadOnPendingChanges(
     (queues.data ?? []).some((q) => q.entries.some((e) => e.source === 'child')),
     () => queues.refresh(),
     ATTENTION_POLL_MS,

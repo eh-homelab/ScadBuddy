@@ -25,7 +25,9 @@ that every foreign key to ``printers`` is listed), in one of two forms:
   ``(printer_id, ams_id, tray_id)``) is registered this way with
   ``spools.store.repoint_tray_links``, in which ``into``'s link wins (#4190). A bare
   hook is accepted too, for a reference with no column to name: Task 8's print-run
-  activity facet is one (`_repoint_run_activity`).
+  activity facet is one (`_repoint_run_activity`). The filament inventory's AMS tray
+  places and K values (#6261) are registered with hooks in `filament/locations.py` and
+  `filament/types.py`.
 
 A table that names a printer also carries ``REFERENCES printers (id) ON DELETE
 CASCADE`` (``tray_spool_links``: 20261019T0304Z), so a delete takes its rows with it
@@ -34,6 +36,7 @@ and the test above sees it; ``print_runs.printer`` is ``ON DELETE SET NULL`` ins
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -116,8 +119,8 @@ ANY_HOST = object()
 
 
 class KekMissingError(Exception):
-    def __init__(self) -> None:
-        super().__init__("LAN printing needs SCADBUDDY_SECRET_KEY_FILE")
+    def __init__(self, message: str = "LAN printing needs SCADBUDDY_SECRET_KEY_FILE") -> None:
+        super().__init__(message)
 
 
 class NoAccessCodeError(LookupError):
@@ -159,6 +162,22 @@ def _repoint_tray_links(conn: Connection[DictRow], merged: str, into: str) -> No
     repoint_tray_links(conn, uuid.UUID(merged), uuid.UUID(into))
 
 
+def _repoint_filament_locations(conn: Connection[DictRow], merged: str, into: str) -> None:
+    # Imported here, as `spools` is: the filament inventory is a feature of its own.
+    from scadbuddy.filament.locations import repoint_printer_locations
+
+    repoint_printer_locations(conn, uuid.UUID(merged), uuid.UUID(into))
+
+
+def _repoint_k_values(table: str) -> RepointHook:
+    def repoint(conn: Connection[DictRow], merged: str, into: str) -> None:
+        from scadbuddy.filament.types import repoint_k_values
+
+        repoint_k_values(conn, table, uuid.UUID(merged), uuid.UUID(into))
+
+    return repoint
+
+
 def _repoint_run_activity(conn: Connection[DictRow], merged: str, into: str) -> None:
     # A print run's activity row names its printer in the ``printer`` facet (#3823 Task
     # 8), a JSON value rather than a column, so no foreign key keeps it.
@@ -175,6 +194,26 @@ def _forget_run_activity(conn: Connection[DictRow], printer_id: str) -> None:
         " WHERE kind = 'print_run' AND facets->>'printer' = %s",
         (printer_id,),
     )
+
+
+def _repoint_lan_imports(conn: Connection[DictRow], merged: str, into: str) -> None:
+    # #6045: a LAN-only printer's print record (#4699 phase 4) is found by
+    # ``printer_key``, so the key follows the row to the kept printer, and a job recorded
+    # again after the merge (under the kept id) finds its row. A job the kept printer
+    # recorded too keeps its old key (the unique index takes each key and job once), and
+    # of two gone rows of one job only one moves: the one keyed by the gone printer, else
+    # the first.
+    conn.execute(
+        "UPDATE print_lan_imports SET printer_key = %(into)s WHERE id IN ("
+        " SELECT DISTINCT ON (subtask_name, started_at) id FROM print_lan_imports AS gone"
+        " WHERE gone.printer = %(merged)s::uuid AND NOT EXISTS ("
+        "  SELECT 1 FROM print_lan_imports AS kept WHERE kept.printer_key = %(into)s"
+        "  AND kept.subtask_name = gone.subtask_name AND kept.started_at = gone.started_at)"
+        " ORDER BY subtask_name, started_at, (printer_key = %(merged_key)s) DESC, id)",
+        # One parameter per type: the ``::uuid`` cast types ``merged`` for every use.
+        {"into": into, "merged": merged, "merged_key": merged},
+    )
+    conn.execute("UPDATE print_lan_imports SET printer = %s WHERE printer = %s", (into, merged))
 
 
 #: A printer's machine rate inputs (#4625), one profile with its wear parts and tasks.
@@ -194,8 +233,7 @@ def _repoint_machine_rate(conn: Connection[DictRow], merged: str, into: str) -> 
             conn.execute(f"UPDATE {table} SET printer = %s WHERE printer = %s", (into, merged))
 
 
-#: The per-printer settings maps whose keys may be a registry id (#4971): a LAN-only
-#: printer's entries, keyed by its row since it has no Bambuddy id.
+#: The per-printer settings maps, keyed by the registry id (#4971, #5167).
 PRINTER_KEYED_SETTINGS = (
     "printer_rack_algorithms",
     "printer_rack_algorithm_versions",
@@ -203,10 +241,15 @@ PRINTER_KEYED_SETTINGS = (
 )
 
 
+#: The settings lists that may hold a registry id (#4699 phase 4): the LAN-only printers
+#: the print watcher skips. A JSON array of ids, not a map.
+PRINTER_LISTED_SETTINGS = ("print_auto_import_skip_lan_printers",)
+
+
 def _repoint_settings(conn: Connection[DictRow], merged: str, into: str) -> None:
-    # The default printer and the registry-keyed map entries are JSON values in
-    # `settings` (#4971), so no foreign key keeps them. A map entry ``into`` has of its
-    # own wins.
+    # The default printer, the registry-keyed map entries and each subject's
+    # remembered printer are JSON values (#4971, #5167), so no foreign key keeps them. A
+    # map entry ``into`` has of its own wins.
     conn.execute(
         "UPDATE settings SET value = to_jsonb(%s::text), updated_at = now()"
         " WHERE name = 'default_printer' AND value = to_jsonb(%s::text)",
@@ -217,6 +260,19 @@ def _repoint_settings(conn: Connection[DictRow], merged: str, into: str) -> None
         " ELSE (value - %(merged)s) || jsonb_build_object(%(into)s::text, value -> %(merged)s)"
         " END, updated_at = now() WHERE name = ANY(%(names)s) AND value ? %(merged)s",
         {"into": into, "merged": merged, "names": list(PRINTER_KEYED_SETTINGS)},
+    )
+    conn.execute(
+        "UPDATE model_print_choices"
+        " SET choices = jsonb_set(choices, '{printer}', to_jsonb(%s::text)), updated_at = now()"
+        " WHERE choices ->> 'printer' = %s",
+        (into, merged),
+    )
+    # A listed id follows its row; listed once when ``into`` was listed too.
+    conn.execute(
+        "UPDATE settings SET value = CASE WHEN value ? %(into)s THEN value - %(merged)s"
+        " ELSE (value - %(merged)s) || jsonb_build_array(%(into)s::text) END,"
+        " updated_at = now() WHERE name = ANY(%(names)s) AND value ? %(merged)s",
+        {"into": into, "merged": merged, "names": list(PRINTER_LISTED_SETTINGS)},
     )
 
 
@@ -230,7 +286,14 @@ def _forget_settings(conn: Connection[DictRow], printer_id: str) -> None:
     conn.execute(
         "UPDATE settings SET value = value - %s, updated_at = now()"
         " WHERE name = ANY(%s) AND value ? %s",
-        (printer_id, list(PRINTER_KEYED_SETTINGS), printer_id),
+        (printer_id, [*PRINTER_KEYED_SETTINGS, *PRINTER_LISTED_SETTINGS], printer_id),
+    )
+    # A subject's remembered printer goes too (#6106): the dialog does not offer a gone
+    # printer.
+    conn.execute(
+        "UPDATE model_print_choices SET choices = choices - 'printer', updated_at = now()"
+        " WHERE choices ->> 'printer' = %s",
+        (printer_id,),
     )
 
 
@@ -255,8 +318,25 @@ PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
     PrinterReference("printer_cost_profiles", "printer", repoint=_repoint_machine_rate),
     PrinterReference("printer_wear_parts", "printer", repoint=_repoint_machine_rate),
     PrinterReference("printer_maintenance_costs", "printer", repoint=_repoint_machine_rate),
+    # #4699 phase 4: the LAN-only printer a print the watcher recorded ran on, and its
+    # job key (#6045).
+    PrinterReference("print_lan_imports", "printer", repoint=_repoint_lan_imports),
+    # #6261: a printer's AMS tray places (``into``'s wins a tray both have; the gone
+    # one's spools move there) and its K values (``into``'s wins a key both have).
+    PrinterReference("filament_locations", "printer_id", repoint=_repoint_filament_locations),
+    PrinterReference(
+        "filament_spool_type_k_values",
+        "printer_id",
+        repoint=_repoint_k_values("filament_spool_type_k_values"),
+    ),
+    PrinterReference(
+        "filament_spool_k_values",
+        "printer_id",
+        repoint=_repoint_k_values("filament_spool_k_values"),
+    ),
     _repoint_run_activity,
-    # #4971: the default printer and the registry-keyed settings map entries.
+    # #4971: the default printer and the registry-keyed settings map entries; #4699: the
+    # registry ids in the print watcher's skip list.
     _repoint_settings,
 )
 
@@ -332,13 +412,19 @@ class PrinterStore:
         events: EventBus | None = None,
         previous_kek: Kek | None = None,
     ) -> None:
-        self.pool = pool
+        self._pool = pool
         self.kek = kek
         #: The KEK before a rotation (`SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`), tried after
         #: ``kek`` where a value sealed before the rotation may still be opened (#4888).
         self.previous_kek = previous_kek
         #: Where a merge announces the two rows it touched (``printer.changed``).
         self.events = events
+
+    @property
+    def pool(self) -> Pool:
+        """The pool, for a CRUD route that writes in one transaction with its ledger row
+        (`api/crud_print.py`)."""
+        return self._pool
 
     # ── reads ─────────────────────────────────────────────────────────────────────
 
@@ -351,8 +437,23 @@ class PrinterStore:
         data = found.fetchone()
         return None if data is None else _row(data)
 
-    def get(self, printer_id: str) -> PrinterRow | None:
-        with self.pool.connection() as conn:
+    def get(self, printer_id: str, timeout: float | None = None) -> PrinterRow | None:
+        """``timeout``, in seconds, is one deadline for a slow or locked read (#6037): the
+        pool wait (`PoolTimeout`) and then the statement, which gets what the wait left
+        (`QueryCanceled`, a ``statement_timeout`` local to this read's transaction), on
+        the store's own pool. ``statement_timeout`` is enforced by the server, so a dead
+        server or a dropped TCP link still blocks the client (that is the pool's
+        keepalives, `core/pg_keepalive.py`). With a timeout the read costs a ``BEGIN``,
+        a ``SET LOCAL`` and a ``COMMIT`` more than without one. None waits as long as it
+        takes."""
+        if timeout is None:
+            with self.pool.connection() as conn:
+                return self._one(conn, "id", printer_id)
+        deadline = time.monotonic() + timeout
+        with self.pool.connection(timeout=timeout) as conn, conn.transaction():
+            # 0 would be no bound at all; 1 ms is the least.
+            left_ms = max(1, int((deadline - time.monotonic()) * 1000))
+            conn.execute(f"SET LOCAL statement_timeout = {left_ms}")
             return self._one(conn, "id", printer_id)
 
     def by_serial(self, serial: str) -> PrinterRow | None:
@@ -373,15 +474,6 @@ class PrinterStore:
         if row is None:
             raise PrinterNotFoundError(printer_id)
         return row
-
-    def resolve_bambuddy_id(self, printer_id: str | int | None) -> int | None:
-        """The Bambuddy integer behind a registry id, an integer passed through, or
-        ``None``: the one way the tables still keyed by the Bambuddy printer id are
-        reached from a registry id (plan, "Deferred to 3b")."""
-        if printer_id is None or isinstance(printer_id, int):
-            return printer_id
-        row = self.get(printer_id)
-        return None if row is None else row.bambuddy_printer_id
 
     # ── writes ────────────────────────────────────────────────────────────────────
 
@@ -521,16 +613,21 @@ class PrinterStore:
         Writes only the rows that change, and returns their ids. Each of this and
         `mark_bambuddy_active` writes ``bambuddy_active`` on its own kind of row only
         (#4921), so neither can overwrite the other's whatever links a row holds."""
-        ids = sorted(set(listed))
         with self.pool.connection() as conn:
-            changed = conn.execute(
-                "UPDATE printers SET bambuddy_active = (bambuddy_vp_id = ANY(%s)),"
-                " updated_at = now() WHERE kind = 'bambuddy_virtual'"
-                " AND bambuddy_vp_id IS NOT NULL"
-                " AND bambuddy_active IS DISTINCT FROM (bambuddy_vp_id = ANY(%s))"
-                " RETURNING id",
-                (ids, ids),
-            ).fetchall()
+            return self.mark_virtual_listed_in(conn, listed)
+
+    @staticmethod
+    def mark_virtual_listed_in(conn: Connection[DictRow], listed: Iterable[int]) -> tuple[str, ...]:
+        """`mark_virtual_listed` on ``conn``, in the caller's transaction."""
+        ids = sorted(set(listed))
+        changed = conn.execute(
+            "UPDATE printers SET bambuddy_active = (bambuddy_vp_id = ANY(%s)),"
+            " updated_at = now() WHERE kind = 'bambuddy_virtual'"
+            " AND bambuddy_vp_id IS NOT NULL"
+            " AND bambuddy_active IS DISTINCT FROM (bambuddy_vp_id = ANY(%s))"
+            " RETURNING id",
+            (ids, ids),
+        ).fetchall()
         return tuple(str(row["id"]) for row in changed)
 
     def unlink_bambuddy(self, printer_id: str) -> PrinterRow:
@@ -634,6 +731,23 @@ class PrinterStore:
             kek_id=data["access_code_kek_id"],
         )
         return open_secret(self.kek, envelope, access_code_aad(str(data["id"]), data["serial"]))
+
+    def opens_access_codes(self) -> bool:
+        """Whether this store can open an access code: it holds the KEK. The LAN path
+        needs it (`bambuddy/print_run.py` `_registry_path`)."""
+        return self.kek is not None
+
+    def open_virtual_access_code(self, sealed: str, context: str) -> str:
+        """A virtual printer's sealed access code (`bambuddy/virtual_printers.py`
+        `access_code_request`), opened under the KEK or, during a rotation, the previous
+        one. Raises `KekMissingError` with no KEK and `SealError` when ``sealed`` does not
+        open for ``context``."""
+        # Imported here: `virtual_printers` imports this module.
+        from scadbuddy.bambuddy.virtual_printers import open_access_code
+
+        if self.kek is None:
+            raise KekMissingError()
+        return open_access_code(self.kek, sealed, context, previous=self.previous_kek)
 
     def ensure_bambuddy(
         self,
@@ -880,62 +994,89 @@ class PrinterStore:
         new row) or ``conflict`` (another row holds the serial and keeps it: a new row
         under `synthetic_vp_serial`, never an overwrite)."""
         with self.pool.connection() as conn, conn.transaction():
-            conn.execute(_LOCK)
-            fields = "vp_mode = %s, forwards_to = %s, bambuddy_view = %s"
-            args: tuple[Any, ...] = (
-                mode,
-                None if forwards_to is None else uuid.UUID(forwards_to),
-                Jsonb(view.model_dump(mode="json")),
+            return self.upsert_virtual_in(
+                conn,
+                vp_id,
+                serial=serial,
+                name=name,
+                model=model,
+                mode=mode,
+                forwards_to=forwards_to,
+                view=view,
+                may_adopt=may_adopt,
             )
-            row = self._one(conn, "bambuddy_vp_id", vp_id)
-            if row is not None:
-                renamed = row.bambuddy_view is None or row.name != row.bambuddy_view.name
-                new_name = row.name if renamed else name
-                new_model = model or row.model
-                if (
-                    _same_view(row.bambuddy_view, view)
-                    and row.vp_mode == mode
-                    and row.forwards_to == forwards_to
-                    and row.name == new_name
-                    and row.model == new_model
-                ):
-                    return row, "already_linked", False
-                return (
-                    self._update(
-                        conn,
-                        row.id,
-                        f"{fields}, name = %s, model = %s",
-                        (*args, new_name, new_model),
-                    ),
-                    "already_linked",
-                    True,
-                )
-            holder = None if serial is None else self._one(conn, "serial", serial)
-            if holder is not None and adopts_for_virtual(holder, may_adopt=may_adopt):
-                return (
-                    self._update(
-                        conn,
-                        holder.id,
-                        f"{fields}, kind = 'bambuddy_virtual', bambuddy_vp_id = %s,"
-                        " model = COALESCE(model, %s)",
-                        (*args, vp_id, model),
-                    ),
-                    "linked",
-                    True,
-                )
-            if serial is None or holder is not None:
-                serial = synthetic_vp_serial(vp_id)
-                if self._one(conn, "serial", serial) is not None:
-                    raise SerialTakenError(serial)
-            data = conn.execute(
-                "INSERT INTO printers (id, serial, name, model, preferred_path, kind,"
-                " bambuddy_vp_id, vp_mode, forwards_to, bambuddy_view)"
-                " VALUES (%s, %s, %s, %s, 'bambuddy', 'bambuddy_virtual', %s, %s, %s, %s)"
-                f" RETURNING {_COLUMNS}",
-                (str(uuid.uuid4()), serial, name, model, vp_id, *args),
-            ).fetchone()
-            assert data is not None
-            return _row(data), "created" if holder is None else "conflict", True
+
+    def upsert_virtual_in(
+        self,
+        conn: Connection[DictRow],
+        vp_id: int,
+        *,
+        serial: str | None,
+        name: str,
+        model: str | None,
+        mode: str,
+        forwards_to: str | None,
+        view: BambuddyView,
+        may_adopt: bool = True,
+    ) -> tuple[PrinterRow, VirtualOutcome, bool]:
+        """`upsert_virtual` on ``conn``, in the caller's transaction, under the registry's
+        lock, which it takes."""
+        conn.execute(_LOCK)
+        fields = "vp_mode = %s, forwards_to = %s, bambuddy_view = %s"
+        args: tuple[Any, ...] = (
+            mode,
+            None if forwards_to is None else uuid.UUID(forwards_to),
+            Jsonb(view.model_dump(mode="json")),
+        )
+        row = self._one(conn, "bambuddy_vp_id", vp_id)
+        if row is not None:
+            renamed = row.bambuddy_view is None or row.name != row.bambuddy_view.name
+            new_name = row.name if renamed else name
+            new_model = model or row.model
+            if (
+                _same_view(row.bambuddy_view, view)
+                and row.vp_mode == mode
+                and row.forwards_to == forwards_to
+                and row.name == new_name
+                and row.model == new_model
+            ):
+                return row, "already_linked", False
+            return (
+                self._update(
+                    conn,
+                    row.id,
+                    f"{fields}, name = %s, model = %s",
+                    (*args, new_name, new_model),
+                ),
+                "already_linked",
+                True,
+            )
+        holder = None if serial is None else self._one(conn, "serial", serial)
+        if holder is not None and adopts_for_virtual(holder, may_adopt=may_adopt):
+            return (
+                self._update(
+                    conn,
+                    holder.id,
+                    f"{fields}, kind = 'bambuddy_virtual', bambuddy_vp_id = %s,"
+                    " model = COALESCE(model, %s)",
+                    (*args, vp_id, model),
+                ),
+                "linked",
+                True,
+            )
+        if serial is None or holder is not None:
+            serial = synthetic_vp_serial(vp_id)
+            if self._one(conn, "serial", serial) is not None:
+                raise SerialTakenError(serial)
+        data = conn.execute(
+            "INSERT INTO printers (id, serial, name, model, preferred_path, kind,"
+            " bambuddy_vp_id, vp_mode, forwards_to, bambuddy_view)"
+            " VALUES (%s, %s, %s, %s, 'bambuddy', 'bambuddy_virtual', %s, %s, %s, %s)"
+            f" RETURNING {_COLUMNS}",
+            (str(uuid.uuid4()), serial, name, model, vp_id, *args),
+        ).fetchone()
+        assert data is not None
+        return _row(data), "created" if holder is None else "conflict", True
 
     def delete(self, printer_id: str) -> None:
         key = printer_uuid(printer_id)

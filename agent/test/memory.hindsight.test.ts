@@ -16,14 +16,17 @@ import {
   type MemoryHooksOptions,
   hindsightTarget,
   RECALL_SPAN,
+  RECALL_TIMEOUT_MS,
   retryQueryLength,
 } from '../src/memory/hindsight.js'
 import { CONTINUE_PROMPT } from '../src/harness/fallback.js'
+import { DIRECTORY_NOTE_MARK, directoryNote } from '../src/sessions/directoryNote.js'
 import { forwardForRun, PluginForwarder } from '../src/plugins/forwarder.js'
 import type { RemotePlugin } from '../src/plugins/registry.js'
 import { UNTRUSTED_KEY, unwrapUntrusted } from '../src/safety/untrusted.js'
 import { type FakeHindsight, RECALL_PATH, RETAIN_PATH, startFakeHindsight } from './support/fakeHindsight.js'
 import { resetTracing, testTracing, waitForSpan } from './support/tracing.js'
+import { until } from './support/until.js'
 
 // The automatic-memory hooks (memory/hindsight.ts) against a local fake
 // Hindsight. The plugin URL names a host that does not resolve
@@ -328,6 +331,28 @@ describe('memory hooks against a fake Hindsight', () => {
     expect(logs[0]).toMatch(/recall from bank scadbuddy failed \(timed out after 100 ms\); no memories were injected/)
   })
 
+  // #5866: prod's bank answered a recall in 4.2–8.8 s (p50 4.9 s), so the old 3 s
+  // budget gave up on nearly every turn. The default budget must cover the slowest prod
+  // recall measured, 8.8 s, and the hook's own timeout must outlast it. The wait itself is
+  // checked on a scaled budget (500 ms), so the test does not sleep for seconds: a recall
+  // well inside the budget injects its memories, one past it injects nothing.
+  it('waits for a slow recall inside its budget, and the default budget covers prod (#5866)', async () => {
+    expect(RECALL_TIMEOUT_MS).toBeGreaterThanOrEqual(8_800)
+    expect(hooks().hooks.UserPromptSubmit?.[0]?.timeout).toBeGreaterThan(RECALL_TIMEOUT_MS / 1000)
+    const memory = { results: [{ text: 'The user prints in PETG.', type: 'world' }] }
+    fake.respond = () => ({ delayMs: 20, json: memory })
+    const inside = await call(hooks({ recallTimeoutMs: 500 }).hooks.UserPromptSubmit?.[0]?.hooks[0], prompt('Make a box'))
+    expect(logs).toEqual([])
+    expect(JSON.stringify(inside)).toContain('The user prints in PETG.')
+    fake.respond = () => ({ delayMs: 1_000, json: memory })
+    const past = await call(hooks({ recallTimeoutMs: 500 }).hooks.UserPromptSubmit?.[0]?.hooks[0], prompt('Make a box'))
+    expect(past).toEqual({})
+    expect(logs).toHaveLength(1)
+    expect(logs[0]).toMatch(/timed out after 500 ms/)
+    // The timed-out request's 1 s answer is not left pending in the fake.
+    await until(() => fake.pending() === 0, 300)
+  })
+
   it('injects nothing and logs when recall fails, with the plugin secret redacted', async () => {
     fake.respond = () => ({ status: 500, text: `boom: bad token Bearer ${TOKEN}` })
     const out = await call(hooks().hooks.UserPromptSubmit?.[0]?.hooks[0], prompt('Make a box'))
@@ -394,6 +419,90 @@ describe('memory hooks against a fake Hindsight', () => {
     expect(String(item.content)).not.toContain('HUGE TOOL OUTPUT')
     expect(String(item.content)).not.toContain(CREDENTIAL)
     expect(logs).toEqual([])
+  })
+
+  // #5867: a fork's first turn starts with the directory note (sessions/directoryNote.ts), as a
+  // paragraph before a string prompt's text or as a text block of its own (withNote). It is
+  // ScadBuddy's text, never the user's words.
+  it("retains a fork's first turn without the directory note, in either form (#5867)", async () => {
+    const h = hooks()
+    const note = directoryNote('/sessions/parent', '/sessions/child')
+    const file = await transcript([
+      { type: 'user', timestamp: '2026-11-10T10:00:00.000Z', message: { role: 'user', content: `${note}\n\nRead notes/test.txt` } },
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'It says hello.' }] } },
+      { type: 'user', message: { role: 'user', content: [{ type: 'text', text: note }, { type: 'text', text: 'And notes/b.txt?' }] } },
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'It is empty.' }] } },
+    ])
+    await call(h.hooks.Stop?.[0]?.hooks[0], stop(file))
+    await h.settled()
+    const item = (fake.retains()[0]!.body as { items: Record<string, unknown>[] }).items[0]!
+    expect(String(item.content).split('\n').map((l) => JSON.parse(l) as unknown)).toEqual([
+      { role: 'system', content: `REF-ID: conversation:${SESSION}` },
+      { role: 'user', content: 'Read notes/test.txt', timestamp: '2026-11-10T10:00:00.000Z' },
+      { role: 'assistant', content: 'It says hello.' },
+      { role: 'user', content: 'And notes/b.txt?' },
+      { role: 'assistant', content: 'It is empty.' },
+    ])
+    expect(String(item.content)).not.toContain(DIRECTORY_NOTE_MARK)
+  })
+
+  // withNote puts the note only at the start of a text block or as a paragraph of its own, so a
+  // user's line that quotes its words mid-line is the user's and is kept whole.
+  it("keeps a user's line that quotes the directory note's words mid-line (#5867)", async () => {
+    const h = hooks()
+    const quoted = `Why did you say "${DIRECTORY_NOTE_MARK} /sessions/child"? Explain it.`
+    const file = await transcript([
+      { type: 'user', message: { role: 'user', content: quoted } },
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'The session was forked.' }] } },
+    ])
+    await call(h.hooks.Stop?.[0]?.hooks[0], stop(file))
+    await h.settled()
+    const item = (fake.retains()[0]!.body as { items: Record<string, unknown>[] }).items[0]!
+    expect(String(item.content).split('\n').map((l) => JSON.parse(l) as unknown)).toEqual([
+      { role: 'system', content: `REF-ID: conversation:${SESSION}` },
+      { role: 'user', content: quoted },
+      { role: 'assistant', content: 'The session was forked.' },
+    ])
+  })
+
+  // withNote puts the note at the very start of a string or text block, never after other text, so
+  // a user's paragraph that starts with the note's words, after a paragraph of their own, is kept.
+  it("keeps a user's paragraph that starts with the directory note's words after other text (#5904 review)", async () => {
+    const h = hooks()
+    const typed = `What does this mean?\n\n${DIRECTORY_NOTE_MARK} /sessions/child.`
+    const file = await transcript([
+      { type: 'user', message: { role: 'user', content: typed } },
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'The session was forked.' }] } },
+    ])
+    await call(h.hooks.Stop?.[0]?.hooks[0], stop(file))
+    await h.settled()
+    const item = (fake.retains()[0]!.body as { items: Record<string, unknown>[] }).items[0]!
+    expect(String(item.content).split('\n').map((l) => JSON.parse(l) as unknown)).toEqual([
+      { role: 'system', content: `REF-ID: conversation:${SESSION}` },
+      { role: 'user', content: typed },
+      { role: 'assistant', content: 'The session was forked.' },
+    ])
+  })
+
+  // A turn whose only text is the note (a string prompt, or a text block beside images) cleans
+  // to nothing and leaves no empty user turn behind.
+  it('retains no user turn for a turn whose only text is the directory note (#5867)', async () => {
+    const h = hooks()
+    const note = directoryNote('/sessions/parent', '/sessions/child')
+    const file = await transcript([
+      { type: 'user', message: { role: 'user', content: note } },
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Nothing to do.' }] } },
+      { type: 'user', message: { role: 'user', content: [{ type: 'text', text: note }] } },
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Still nothing.' }] } },
+    ])
+    await call(h.hooks.Stop?.[0]?.hooks[0], stop(file))
+    await h.settled()
+    const item = (fake.retains()[0]!.body as { items: Record<string, unknown>[] }).items[0]!
+    expect(String(item.content).split('\n').map((l) => JSON.parse(l) as unknown)).toEqual([
+      { role: 'system', content: `REF-ID: conversation:${SESSION}` },
+      { role: 'assistant', content: 'Nothing to do.' },
+      { role: 'assistant', content: 'Still nothing.' },
+    ])
   })
 
   // #3701: a turn that failed over to another credential (harness/fallback.ts) leaves in

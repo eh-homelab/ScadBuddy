@@ -303,8 +303,9 @@ Design: `docs/superpowers/specs/2026-10-09-session-switcher-design.md`.
   chat has a reply. A fork's bar reads **Forked from {parent}**, which opens the
   parent.
 - **Fork from here** on a reply forks up to that reply (`up_to`, the reply's message
-  id; the agent cuts both the SDK transcript and the copied events there,
-  `agent/src/sessions/forkPoint.ts`).
+  id; the agent cuts both the SDK transcript and the event log there,
+  `agent/src/sessions/forkPoint.ts`). A fork copies neither: it reads its parent's
+  transcript, events and images through the cut (#4212).
 - **Fork from here** on a user message forks up to the reply before it, and puts the
   message back in the composer to edit and send. The first message has none.
 - **Budget:** every panel fork is the user's, so it gets a budget of its own. An

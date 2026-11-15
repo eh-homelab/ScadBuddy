@@ -148,6 +148,7 @@ from scadbuddy.library.settings_store import ModelPrintChoices, SettingsStore
 from scadbuddy.library_search.component import LibraryIndexDep
 from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationsDep
+from scadbuddy.preview_follow.component import PreviewFollowsDep
 from scadbuddy.print_library.component import PrintLibraryDep
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.print_library.reads import (
@@ -1582,15 +1583,19 @@ async def get_library_preview_slice(
     store: SettingsStoreDep,
     uploads: UploadsDep,
     slicing: SlicingDep,
+    follows: PreviewFollowsDep,
     slicer: SlicerQuery = "bambuddy",
 ) -> SlicePreview:
     """As ``/print/outputs/{id}/preview-slices/{job}``, for a file in Bambuddy's library."""
-    if slicer == "native":
-        return await read_native_preview(slicing, job_id, PrintSubject.library(file_id).run_subject)
-    async with client_for(store.load()) as client:
-        return await read_preview(
-            client, uploads, job_id, PrintSubject.library(file_id).run_subject
-        )
+    subject = PrintSubject.library(file_id).run_subject
+
+    async def read() -> SlicePreview:
+        if slicer == "native":
+            return await read_native_preview(slicing, job_id, subject)
+        async with client_for(store.load()) as client:
+            return await read_preview(client, uploads, job_id, subject)
+
+    return await follows.read(slicer, job_id, subject, read)
 
 
 @router.get(

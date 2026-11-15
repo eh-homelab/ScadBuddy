@@ -75,6 +75,13 @@ describe('order tools (#4249)', () => {
       'order_deposit_waive',
       'order_balance_waive',
       'order_shipping_option_set',
+      'order_customer_link_get',
+      'order_mail_list',
+      'order_customer_link_send',
+      'order_customer_link_revoke',
+      'order_notify_customer',
+      'order_notify_customer_send',
+      'order_messages_list',
     ]
     expect(Object.fromEntries(names.map((n) => [n, tool(n).risk]))).toEqual({
       customer_list: 'read',
@@ -108,6 +115,13 @@ describe('order tools (#4249)', () => {
       order_deposit_waive: 'write',
       order_balance_waive: 'outward',
       order_shipping_option_set: 'write',
+      order_customer_link_get: 'read',
+      order_mail_list: 'read',
+      order_customer_link_send: 'outward',
+      order_customer_link_revoke: 'write',
+      order_notify_customer: 'read',
+      order_notify_customer_send: 'outward',
+      order_messages_list: 'read',
     })
   })
 
@@ -155,6 +169,7 @@ describe('order tools (#4249)', () => {
           totals: { total_minor: 4250 },
         }),
       ),
+      http.get(`${BACKEND}/api/v1/settings`, () => HttpResponse.json({ orders_customer_messaging: null })),
       http.get(`${BACKEND}/api/v1/customers/${CUSTOMER}`, () =>
         HttpResponse.json({
           display_name: 'Ada',
@@ -176,6 +191,9 @@ describe('order tools (#4249)', () => {
       subject: 'Order ORD-2026-7 accepted',
       text: 'Hello Ada,\n\nWe have accepted order ORD-2026-7 (42.50 USD) and will start on it.\n\nThanks!',
       sent: false,
+      // No messaging plugin is bound (#5660): a person sends it.
+      channel: null,
+      send_ready: false,
     })
   })
 
@@ -236,6 +254,96 @@ describe('order tools (#4249)', () => {
     const removals = NOT_A_TOOL.map((n) => n.operation)
     expect(removals).toContain('DELETE /api/v1/orders/{order_id}/time-entries/{entry_id}')
     expect(removals).toContain('DELETE /api/v1/orders/{order_id}/cost-entries/{entry_id}')
+  })
+
+  it('lists, records, changes and declines purchases through their routes (#6133)', async () => {
+    const SOURCE = '5d6e7f80-1111-4222-8333-944455556666'
+    const sent: { method: string; path: string; body?: unknown }[] = []
+    const base = `${BACKEND}/api/v1/orders/${ORDER}/purchases`
+    const view = { id: SOURCE, order_id: ORDER, item_id: ITEM, url: 'https://parts.example.com/x', note: '', status: 'recorded' }
+    server.use(
+      http.get(base, () => HttpResponse.json([view])),
+      http.post(`${base}/${SOURCE}/record`, async ({ request }) => {
+        sent.push({ method: 'POST', path: 'record', body: await request.json() })
+        return HttpResponse.json({ ...view, amount_minor: 899 }, { status: 201 })
+      }),
+      http.patch(`${base}/${SOURCE}`, async ({ request }) => {
+        sent.push({ method: 'PATCH', path: 'update', body: await request.json() })
+        return HttpResponse.json({ ...view, amount_minor: 950 })
+      }),
+      http.post(`${base}/${SOURCE}/decline`, async ({ request }) => {
+        sent.push({ method: 'POST', path: 'decline', body: await request.json() })
+        return HttpResponse.json({ ...view, status: 'not_needed' })
+      }),
+    )
+    expect(
+      ['order_purchases', 'order_purchase_record', 'order_purchase_update', 'order_purchase_decline'].map((n) => tool(n).risk),
+    ).toEqual(['read', 'write', 'write', 'write'])
+
+    const listed = await tool('order_purchases').execute({ order_id: ORDER }, ctx())
+    const recorded = await tool('order_purchase_record').execute({ order_id: ORDER, source_id: SOURCE, amount_minor: 899 }, ctx())
+    const updated = await tool('order_purchase_update').execute({ order_id: ORDER, source_id: SOURCE, amount_minor: 950 }, ctx())
+    const declined = await tool('order_purchase_decline').execute(
+      { order_id: ORDER, source_id: SOURCE, shop_note: 'We had them in stock.' },
+      ctx(),
+    )
+
+    expect(firstText(listed)).toEqual([view])
+    expect(firstText(recorded)).toEqual({ ...view, amount_minor: 899 })
+    expect(firstText(updated)).toEqual({ ...view, amount_minor: 950 })
+    expect(firstText(declined)).toEqual({ ...view, status: 'not_needed' })
+    expect(sent).toEqual([
+      { method: 'POST', path: 'record', body: { amount_minor: 899, cost_kind: 'material', note: '' } },
+      { method: 'PATCH', path: 'update', body: { amount_minor: 950 } },
+      { method: 'POST', path: 'decline', body: { shop_note: 'We had them in stock.' } },
+    ])
+    expect(() => tool('order_purchase_record').execute({ order_id: ORDER, source_id: SOURCE, amount_minor: 0 }, ctx())).toThrow(
+      'amount_minor',
+    )
+    expect(() =>
+      tool('order_purchase_decline').execute({ order_id: ORDER, source_id: SOURCE, shop_note: 'x'.repeat(501) }, ctx()),
+    ).toThrow('shop_note')
+  })
+
+  it("declines, checks again and retries the import of a customer's model through their routes (#6133)", async () => {
+    const SOURCE = '6e7f8091-1111-4222-8333-944455556666'
+    const sent: { path: string; body?: unknown }[] = []
+    const base = `${BACKEND}/api/v1/orders/${ORDER}/sources/${SOURCE}`
+    const view = { id: SOURCE, order_id: ORDER, item_id: ITEM, kind: 'file', purpose: 'print', status: 'open' }
+    server.use(
+      http.post(`${base}/decline`, async ({ request }) => {
+        sent.push({ path: 'decline', body: await request.json() })
+        return HttpResponse.json({ ...view, status: 'declined' })
+      }),
+      http.post(`${base}/check`, () => {
+        sent.push({ path: 'check' })
+        return HttpResponse.json({ ...view, check_status: 'checking' })
+      }),
+      http.post(`${base}/retry-import`, () => {
+        sent.push({ path: 'retry-import' })
+        return HttpResponse.json(view)
+      }),
+    )
+    expect(
+      ['order_item_source_decline', 'order_item_source_check_again', 'order_item_source_retry_import'].map((n) => tool(n).risk),
+    ).toEqual(['write', 'write', 'write'])
+    const declined = await tool('order_item_source_decline').execute({ order_id: ORDER, source_id: SOURCE, reason: 'Too big.' }, ctx())
+    const checked = await tool('order_item_source_check_again').execute({ order_id: ORDER, source_id: SOURCE }, ctx())
+    const retried = await tool('order_item_source_retry_import').execute({ order_id: ORDER, source_id: SOURCE }, ctx())
+    expect(firstText(declined)).toEqual({ ...view, status: 'declined' })
+    expect(firstText(checked)).toEqual({ ...view, check_status: 'checking' })
+    expect(firstText(retried)).toEqual(view)
+    expect(sent).toEqual([{ path: 'decline', body: { reason: 'Too big.' } }, { path: 'check' }, { path: 'retry-import' }])
+    expect(() =>
+      tool('order_item_source_decline').execute({ order_id: ORDER, source_id: SOURCE, reason: 'x'.repeat(501) }, ctx()),
+    ).toThrow('reason')
+  })
+
+  it('tells the charges tools to leave the purchase and handling rows out (review of #6200)', () => {
+    for (const name of ['order_update', 'order_charges_update_after_acceptance']) {
+      expect(tool(name).description).toMatch(/`purchase` and `handling` rows/)
+    }
+    expect(tool('order_purchase_record').description).toContain('purchase_recorded')
   })
 
   it('lists parts, adds stock and sets an item\'s parts through their routes (#5543)', async () => {
@@ -376,6 +484,55 @@ describe('order tools (#4249)', () => {
     expect(firstText(await tool('order_payment_requests').execute({ order_id: ORDER }, ctx()))).toEqual([REQUEST])
     await tool('order_request_payment').execute({ order_id: ORDER, provider: null }, ctx())
     expect(sent).toEqual({ provider: null })
+  })
+
+  it("lists an order's customer mail with no lock and no approval (#5283)", async () => {
+    const MAIL = [
+      {
+        event: 'order_link',
+        to: 'ada@example.com',
+        created_at: '2026-11-10T00:00:00Z',
+        sent_at: null,
+        failed_at: null,
+        attempts: 1,
+        last_error: 'try later',
+        next_attempt_at: '2026-11-10T01:00:00Z',
+      },
+    ]
+    server.use(http.get(`${BACKEND}/api/v1/orders/${ORDER}/mail`, () => HttpResponse.json(MAIL)))
+    expect(tool('order_mail_list').gated).toBe(false)
+    expect(firstText(await tool('order_mail_list').execute({ order_id: ORDER }, ctx()))).toEqual(MAIL)
+  })
+
+  it('reads, sends and revokes the customer link; only the send waits for a person (#5283)', async () => {
+    const STATE = { live: true, created_at: '2026-11-10T00:00:00Z', sent_to: 'ada@example.com', opened_at: null, revoked_at: null }
+    const calls: string[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/customer-link`, async ({ request }) => {
+        calls.push(`SEND ${await request.text()}`)
+        return HttpResponse.json(STATE)
+      }),
+      http.get(`${BACKEND}/api/v1/orders/${ORDER}/customer-link`, () => {
+        calls.push('READ')
+        return HttpResponse.json(STATE)
+      }),
+      http.delete(`${BACKEND}/api/v1/orders/${ORDER}/customer-link`, () => {
+        calls.push('REVOKE')
+        return HttpResponse.json({ ...STATE, live: false, revoked_at: '2026-11-10T01:00:00Z' })
+      }),
+    )
+    // The send mails the customer: the harness parks it as a pending action for a person.
+    expect(tool('order_customer_link_send').gated).toBe(true)
+    expect(tool('order_customer_link_revoke').gated).toBe(false)
+    expect(tool('order_customer_link_get').gated).toBe(false)
+    expect(firstText(await tool('order_customer_link_get').execute({ order_id: ORDER }, ctx()))).toEqual(STATE)
+    expect(firstText(await tool('order_customer_link_send').execute({ order_id: ORDER }, ctx()))).toEqual(STATE)
+    await tool('order_customer_link_send').execute({ order_id: ORDER, to: 'grace@example.org' }, ctx())
+    const revoked = firstText(await tool('order_customer_link_revoke').execute({ order_id: ORDER }, ctx()))
+    expect(revoked).toMatchObject({ live: false })
+    expect(calls).toEqual(['READ', 'SEND {"replace":true}', 'SEND {"to":"grace@example.org","replace":true}', 'REVOKE'])
+    expect(tool('order_customer_link_send').summarize({ order_id: ORDER, to: 'grace@example.org' })).toContain('grace@example.org')
+    expect(() => tool('order_customer_link_send').execute({ order_id: ORDER, to: '' }, ctx())).toThrow('to')
   })
 
   it('sets a deposit or applies the policy as an outward step, waives with a reason (#5281)', async () => {
@@ -882,10 +1039,15 @@ describe('pricing tools (#4250)', () => {
 
   it('tiers the book, the quote and the estimate as Ruling 11 does', () => {
     expect(
-      ['price_book_get', 'price_book_set', 'price_book_import_spools', 'order_estimate', 'order_item_quote'].map(
-        (n) => tool(n).risk,
-      ),
-    ).toEqual(['read', 'write', 'write', 'read', 'write'])
+      [
+        'price_book_get',
+        'price_book_set',
+        'price_book_import_spools',
+        'price_book_fill_densities',
+        'order_estimate',
+        'order_item_quote',
+      ].map((n) => tool(n).risk),
+    ).toEqual(['read', 'write', 'write', 'write', 'read', 'write'])
   })
 
   // #4253 §8.3
@@ -899,6 +1061,30 @@ describe('pricing tools (#4250)', () => {
       }),
     )
     expect(firstText(await tool('price_book_import_spools').execute({}, ctx()))).toEqual({ rows })
+    expect(posted).toBe(1)
+  })
+
+  // #6136
+  it("fills the empty densities from Bambuddy's preset links", async () => {
+    const rows = [
+      {
+        filament_id: FILAMENT,
+        material: 'PLA',
+        subtype: 'Basic',
+        colour: '#FF0000',
+        density_g_cm3: '1.26',
+        density_profile: 'Bambu PLA Basic @base (spool preset GFA00)',
+      },
+      { filament_id: 'f22a0000-1111-4222-8333-944455556666', material: 'PLA', subtype: 'Dual Color', colour: '#00FF00', density_g_cm3: null, density_profile: null },
+    ]
+    let posted = 0
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/price-book/fill-densities`, () => {
+        posted += 1
+        return HttpResponse.json({ rows })
+      }),
+    )
+    expect(firstText(await tool('price_book_fill_densities').execute({}, ctx()))).toEqual({ rows })
     expect(posted).toBe(1)
   })
 
@@ -924,7 +1110,7 @@ describe('pricing tools (#4250)', () => {
     expect(body).toEqual({
       ...SLICE,
       printer,
-      filament_plan: { ...SLICE.filament_plan, force_colour_match: false },
+      filament_plan: { ...SLICE.filament_plan, force_colour_match: true },
       choices: { nozzles: [{ size: '0.4', flow: 'standard' }] },
     })
     // #5352: the quote slices on the route its print will take.
@@ -999,7 +1185,7 @@ describe('pricing tools (#4250)', () => {
     // Copies and plates are the item's: the tool sends none.
     expect(body).toEqual({
       ...dialog,
-      filament_plan: { ...dialog.filament_plan, force_colour_match: false },
+      filament_plan: { ...dialog.filament_plan, force_colour_match: true },
       choices: { nozzles: [{ size: '0.4', flow: 'standard' }] },
     })
     expect(tool('order_item_print').summarize?.({ order_id: ORDER, item_id: ITEM, ...dialog } as never)).toContain(
@@ -1230,6 +1416,14 @@ describe('pricing tools (#4250)', () => {
       { method: 'ARCHIVE', body: null },
     ])
     await expect(tool('price_book_set').execute({}, ctx())).rejects.toThrow(ToolError)
+    // #6211: a new filament's colour is set by hand, so colour_source needs a filament_id.
+    await expect(
+      tool('price_book_set').execute(
+        { filament: { material: 'PLA', colour: '#FFFFFF', cost_per_kg: '20', colour_source: 'import' } },
+        ctx(),
+      ),
+    ).rejects.toThrow(/colour_source needs a filament_id/)
+    expect(sent).toHaveLength(3)
   })
 
   // #4977

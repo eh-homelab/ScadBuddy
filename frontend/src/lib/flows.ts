@@ -81,6 +81,8 @@ export const STALE_ENTRY_MESSAGE = 'This request is out of date. The run has mov
 
 /** The topic every run's change is published on, and one run's (backend `api/realtime.py`). */
 export const FLOW_RUNS_TOPIC = 'workflow-runs'
+/** #265 — a flow's definition changed: registered, restored, renamed, archived or deleted. */
+export const FLOWS_TOPIC = 'flows'
 export const flowRunTopic = (id: string) => `workflow-run:${id}`
 
 /** How often the pages read while the realtime socket is unavailable. */

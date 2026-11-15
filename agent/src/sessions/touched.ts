@@ -321,6 +321,14 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   order_fulfil: () => [],
   order_time_add: () => [],
   order_cost_add: () => [],
+  // Purchases (#6133): the order's audit line records them.
+  order_purchase_record: () => [],
+  order_purchase_update: () => [],
+  order_purchase_decline: () => [],
+  // A customer's models (#6133 PR 4): the order's audit line records them.
+  order_item_source_decline: () => [],
+  order_item_source_check_again: () => [],
+  order_item_source_retry_import: () => [],
   // Parts (#5543): a part's stock line and the order's audit line record them.
   part_stock_add: () => [],
   order_item_parts_set: () => [],
@@ -329,17 +337,27 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   order_cancel: () => [],
   order_reopen: () => [],
   order_request_payment: () => [],
+  // A customer message (#5660): the order's messages and its audit line record it.
+  order_notify_customer_send: () => [],
   // Deposits, the waivers and the shipping option (#5281): the order's audit line records them.
   order_deposit_set: () => [],
   order_deposit_waive: () => [],
   order_balance_waive: () => [],
   order_shipping_option_set: () => [],
+  // The customer link (#5283): the order's audit line records a send and a revoke.
+  order_customer_link_send: () => [],
+  order_customer_link_revoke: () => [],
   order_attach: () => [],
   order_attachment_update: () => [],
   order_attachment_delete: () => [],
+  // A storefront listing (#6131) is a record of its own, on the Storefront page; the draft's
+  // answer links it there.
+  storefront_listing_draft: () => [],
+  storefront_listing_publish: () => [],
   // The price book (#4250) is a record of its own, edited on the Settings page.
   price_book_set: () => [],
   price_book_import_spools: () => [],
+  price_book_fill_densities: () => [],
   // A printer's machine rate (#4625) is a record of its own, edited on the Settings page.
   machine_rate_set: () => [],
   // Analyzer decisions (#4966) are a print's checks, not a resource: the print dialog's
@@ -498,6 +516,17 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
     const id = str(field(result, 'copy_id'))
     return id ? setting(`library_copy:${id}`) : []
   },
+  // #6119: each library file a MakerWorld import made. Bambuddy's file only when Bambuddy
+  // downloaded it (`bambuddy_was_existing` false); on native, ScadBuddy's file only when the copy
+  // stored new bytes (`copied`). Nothing while it still runs (no ids yet).
+  import_makerworld_model: (_input, result) => {
+    const made: string[] = []
+    const native = field(result, 'library') === 'native' && field(result, 'copied') === true ? bambuddyId(field(result, 'library_file_id')) : null
+    if (native) made.push(native)
+    const bambuddy = field(result, 'bambuddy_was_existing') === false ? bambuddyId(field(result, 'bambuddy_library_file_id')) : null
+    if (bambuddy) made.push(bambuddy)
+    return made.map((id) => ({ type: libraryFileType(id), id, action: 'created' as const }))
+  },
   // #2167: only the files Bambuddy deleted or restored; a skipped one was not touched.
   delete_library_files: (_input, result) => libraryFiles(field(result, 'deleted'), 'deleted'),
   restore_library_files: (_input, result) =>
@@ -583,6 +612,28 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
       ...ids(field(result, 'archive_ids')).map((id) => ({ type: 'print_archive' as const, id, action: 'modified' as const, before })),
     ]
   },
+  // #4698: the archive becomes a print of the model; a new model is created with it.
+  import_print: (input, result) => {
+    const archive = bambuddyId(input.archive_id)
+    const touched: Touch[] = archive ? [{ type: 'print_archive', id: archive, action: 'modified' }] : []
+    // A repeat (200, `made_now: false`) answers the stored `created_model`: only the import's own request made it.
+    return field(result, 'created_model') === true && field(result, 'made_now') !== false
+      ? [...touched, ...modelCreated(result)]
+      : touched
+  },
+  // #4699: the inbox print's row is dismissed; the archive itself is unchanged in Bambuddy.
+  dismiss_auto_import: (input) => {
+    const archive = bambuddyId(input.archive_id)
+    return archive ? [{ type: 'print_archive', id: archive, action: 'modified' }] : []
+  },
+  // #6041: a LAN-only printer's print record is no resource of a kind the list keeps (it has no
+  // archive); a dismiss changes only that record.
+  dismiss_lan_auto_import: () => [],
+  // #6041: the model gets the print (it is in Activity under the model, not on its Prints tab).
+  link_lan_auto_import: (input) => {
+    const slug = str(input.slug)
+    return slug ? [{ type: 'model', id: slug, action: 'modified', model: slug }] : []
+  },
   pull_print_timelapse: (input) => {
     const archive = bambuddyId(input.archive_id)
     return archive ? [{ type: 'print_archive', id: archive, action: 'modified' }] : []
@@ -648,10 +699,25 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   // tray_spool_links; the spool and its providers' records are unchanged).
   'link_tray_spool',
   'unlink_tray_spool',
-  // ScadBuddy's own spools (#4643, native_spools) are no recorded resource kind: the
+  // ScadBuddy's own spools (#4643, filament_spools rows since #6261) are no recorded resource kind: the
   // shelf lists them, and the overlay's cached copy follows each write.
   'native_spool_upsert',
   'native_spool_delete',
+  // The filament inventory (#6261: catalogs, types, spools, tags, the ledger, locations)
+  // is no recorded resource kind either; each spool's ledger is its own history.
+  'filament_catalog_upsert',
+  'filament_type_upsert',
+  'filament_type_set_presets',
+  'filament_type_set_k_values',
+  'filament_spool_upsert',
+  'filament_spool_archive',
+  'filament_spool_delete',
+  'filament_spool_bind_tag',
+  'filament_tag_unbind',
+  'filament_spool_add_event',
+  'filament_location_upsert',
+  'filament_spool_move',
+  'filament_bambuddy_import',
   // A re-pin's dry run (#1914): the pin and the history stay as they were. The candidate's
   // checkout is a cache on the volume, swept at boot when nothing pins it.
   'check_library_candidate',

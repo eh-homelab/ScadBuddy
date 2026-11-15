@@ -6,8 +6,9 @@ the real hidden routes, in the database it names, beside its own tables.
 ``SCADBUDDY_DATABASE_URL`` set: it starts a Temporal dev server (as the API tests do:
 SCADBUDDY_TEST_TEMPORAL_DEV_SERVER or ``temporal`` on PATH) and moto's S3, serves the app
 on a free loopback port with ``store_backend`` s3 and a KEK of its own, and prints
-``READY <base url>`` once ``/healthz`` answers. It runs until it is signalled or its
-stdin closes; the test kills its process group."""
+``READY <base url> <agent token>`` once ``/healthz`` answers: the token is an ``agent``
+service credential, which the holds' CRUD routes (`api/crud_agent.py`, #5299) require.
+It runs until it is signalled or its stdin closes; the test kills its process group."""
 
 from __future__ import annotations
 
@@ -24,6 +25,8 @@ from pathlib import Path
 import httpx
 import uvicorn
 
+from scadbuddy.auth.component import AUTH
+from scadbuddy.auth.service_credentials import InProcessProvider
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from tests.support.store import moto_s3
@@ -77,8 +80,9 @@ def main() -> None:
             secret_key_file=kek,
             api_internal_url=base,
         )
+        app = create_app(settings)
         server = uvicorn.Server(
-            uvicorn.Config(create_app(settings), host="127.0.0.1", port=port, log_level="warning")
+            uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
         )
         thread = threading.Thread(target=server.run, daemon=True)
         thread.start()
@@ -92,7 +96,11 @@ def main() -> None:
             if not thread.is_alive() or time.monotonic() > deadline:
                 sys.exit("the API did not start")
             time.sleep(0.5)
-        print(f"READY {base}", flush=True)
+        credentials = app.state.scadbuddy.components.get(AUTH).credentials
+        token = InProcessProvider("agent", lambda: credentials).token()
+        if token is None:
+            sys.exit("the API minted no agent credential")
+        print(f"READY {base} {token}", flush=True)
         # Until the test closes stdin (or kills the group).
         sys.stdin.read()
         server.should_exit = True

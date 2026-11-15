@@ -90,6 +90,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.crud import idempotency
 from scadbuddy.crud import listener as crud_listener
+from scadbuddy.filament.component import FILAMENT
 from scadbuddy.flow_triggers.component import FLOW_TRIGGERS
 from scadbuddy.flow_triggers.events import listen_for_triggers
 from scadbuddy.flow_triggers.fire import TriggerFires, reconcile_trigger_schedules
@@ -115,12 +116,18 @@ from scadbuddy.operations.kinds import OperationKind, Queue
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import reap_quote_holds as reap_orphan_quote_holds
+from scadbuddy.orders.storefront.staged_files import staged_file_activities, sweep_staged
 from scadbuddy.orders.storefront.visitors import VisitorStore
 from scadbuddy.payments.component import PAYMENTS
 from scadbuddy.payments.deposits import sync_deposits
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.copy import library_copy_activities
 from scadbuddy.print_library.sweep import sweep_library, sweep_print_copies
+from scadbuddy.print_watch.component import AUTO_IMPORTS
+from scadbuddy.print_watch.lan import LanImportActivities
+from scadbuddy.print_watch.lan_store import StoreLanRecorder
+from scadbuddy.print_watch.nudge import Nudger
+from scadbuddy.print_watch.sweep import auto_import
 from scadbuddy.printers.bambuddy_sync import (
     apply_virtual_printers,
     boot_adoption_due,
@@ -134,11 +141,10 @@ from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
 from scadbuddy.render.previews import PreviewUnrunError
 from scadbuddy.render.runner import probe_openscad_version
-from scadbuddy.render.worker_role import grant_at_start
 from scadbuddy.slicing.component import SLICING
 from scadbuddy.slicing.held_presets import HeldPresetStore, held_presets_activity
 from scadbuddy.slicing.start import stop_lost_native_slices, sweep_native_slices
-from scadbuddy.spools.activities import spool_activities
+from scadbuddy.spools.activities import filament_pull_activity, spool_activities
 from scadbuddy.spools.component import SPOOLS
 from scadbuddy.spools.native import NativeSpoolStore
 from scadbuddy.store import sweep_blobs
@@ -181,6 +187,7 @@ from scadbuddy.workflows.housekeeping import (
     ACTIVITY_SWEEP,
     ATTACHMENTS_SWEEP,
     AUTH_SESSIONS_SWEEP,
+    AUTO_IMPORT_SWEEP,
     BACKFILL_SWEEP,
     BANK_DEPOSITS_SWEEP,
     FLOWS_SWEEP,
@@ -200,6 +207,7 @@ from scadbuddy.workflows.housekeeping import (
     QUOTE_HOLDS_SWEEP,
     REAP_SWEEP,
     STOREFRONT_DRAFTS_SWEEP,
+    STOREFRONT_MAIL_SWEEP,
     SWEEPS,
     TRANSFER_PUTS_SWEEP,
     ensure_schedules,
@@ -220,6 +228,7 @@ from scadbuddy.workflows.printer_watch import ensure_watches
 from scadbuddy.workflows.slicing import VersionedSliceWorkflow
 from scadbuddy.workflows.slicing_activities import slice_activities
 from scadbuddy.workflows.spool_refresh import VersionedSpoolRefresh, ensure_spool_schedule
+from scadbuddy.workflows.staged_file import VersionedStagedFile
 from scadbuddy.workflows.store_migration import VersionedStoreMigration
 
 API_PREFIX = "/api/v1"
@@ -455,18 +464,18 @@ async def _sweep_blobs_logged(state: AppState) -> None:
     try:
         if state.store.content is None:
             removed = await asyncio.to_thread(
-                sweep_blobs, state.blobs, state.refs, grace=state.config.job_ttl
+                sweep_blobs, state.blobs, state.refs, grace=state.config.sweep_grace
             )
         else:
             failed = False
             try:
                 removed = await sweep_content(
-                    state.store.content, state.refs, grace=state.config.job_ttl
+                    state.store.content, state.refs, grace=state.config.sweep_grace
                 )
                 backend = state.store.content.backend
                 if isinstance(backend, UnrecordedSweeper):
                     # #701: an upload whose process died before its row was written.
-                    cutoff = datetime.now(UTC) - timedelta(seconds=state.config.job_ttl)
+                    cutoff = datetime.now(UTC) - timedelta(seconds=state.config.sweep_grace)
                     index = state.store.content.index
                     swept = await backend.sweep_unrecorded(
                         cutoff=cutoff, recorded=partial(index.shares_backend_id, backend.backend)
@@ -731,6 +740,14 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def sweep_storefront_drafts() -> None:
         await _heartbeating(_sweep_storefront_drafts_logged(state))
 
+    @activity.defn(name=STOREFRONT_MAIL_SWEEP)
+    async def send_storefront_mail() -> None:
+        await _heartbeating(_send_storefront_mail_logged(state))
+
+    @activity.defn(name=AUTO_IMPORT_SWEEP)
+    async def auto_import_prints() -> None:
+        await _heartbeating(_auto_import_prints_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -759,6 +776,8 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         settle_payment_captures,
         sync_bank_deposits,
         sweep_storefront_drafts,
+        send_storefront_mail,
+        auto_import_prints,
     ]
 
 
@@ -1120,7 +1139,7 @@ def _rotate_service_credentials(state: AppState) -> None:
     """#4975 phase 4 (spec 2026-11-01 §7.2): each caller's next credential when its
     newest has under seven days left, and the long-dead ones forgotten. Without the KEK
     none can be sealed, so none are issued. First, a sealed credential of a caller that
-    reads none any more (the projects worker's, #5298) is revoked, KEK or not."""
+    reads none any more (the projects and print workers', #5298) is revoked, KEK or not."""
     auth = state.components.get(AUTH)
     try:
         retired = auth.credentials.revoke_retired_legacy()
@@ -1143,8 +1162,9 @@ def _rotate_service_credentials(state: AppState) -> None:
 
 def _grant_and_rotate_at_start(state: AppState) -> None:
     """At start, after the migrations: each caller's role its own view, a retired
-    caller's role nothing (#5298 Task 11), and the credentials due. A failure is logged,
-    never fatal, as `grant_at_start`."""
+    caller's role nothing (#5298 Tasks 11, 22 and 35), a table dropped from a caller's list
+    taken back (`auth/revoke.py` `RETIRED_GRANTS`), and the credentials due. A failure is
+    logged, never fatal."""
     try:
         with state.settings_store.pool.connection() as conn:
             granted = grant_caller_views(conn)
@@ -1245,7 +1265,7 @@ async def _sync_bank_deposits_logged(state: AppState) -> None:
     """#4961: read the linked bank account's new deposits and suggest their orders."""
     payments = state.components.get(PAYMENTS)
     try:
-        suggested = await sync_deposits(payments.bank)
+        suggested = await sync_deposits(payments.bank, state.events)
     except Exception:
         logger.exception("could not sync the bank deposits")
         raise
@@ -1274,17 +1294,77 @@ def _sweep_storefront(
 
 async def _sweep_storefront_drafts_logged(state: AppState) -> None:
     """#5282: the storefront carts idle past ``storefront_draft_ttl_days``, then the
-    visitors idle as long with no order, and the visitors' renders past a day."""
+    visitors idle as long with no order, the visitors' renders past a day, and the
+    storefront's staged files' backstop (#6133, `staged_files.sweep_staged`)."""
     try:
         drafts, visitors, renders = await asyncio.to_thread(_sweep_storefront, state)
+        # The backstop only: each staged file's watcher owns its clean-up.
+        staged = await sweep_staged(state)
     except Exception:
         logger.exception("could not sweep the idle storefront carts")
         raise
-    if drafts or visitors or renders:
+    if drafts or visitors or renders or staged:
         logger.info(
             "swept idle storefront carts",
-            extra={"drafts": len(drafts), "visitors": visitors, "renders": renders},
+            extra={
+                "drafts": len(drafts),
+                "visitors": visitors,
+                "renders": renders,
+                "staged": staged,
+            },
         )
+
+
+async def _send_storefront_mail_logged(state: AppState) -> None:
+    """#5283: the storefront mail its after-commit send left queued."""
+    mail = state.components.get(ORDERS).mail
+    try:
+        sent = await asyncio.to_thread(mail.send_queued)
+    except Exception:
+        logger.exception("could not send the queued storefront mail")
+        raise
+    if sent:
+        logger.info("sent queued storefront mail", extra={"count": sent})
+
+
+async def _auto_import_prints_logged(state: AppState) -> None:
+    """#4699: the print watcher's pass. With ``print_auto_import`` off it reads nothing
+    from Bambuddy and no printer, and forgets when it was switched on. The switch is
+    read with the floor, in one transaction (`AutoImportStore.floor`), not from
+    ``settings``: a ``PUT /settings`` that commits between the two reads never loses its
+    floor (#6011)."""
+    store = state.components.get(AUTO_IMPORTS)
+    settings = await asyncio.to_thread(state.settings_store.load)
+    try:
+        since = await store.floor()
+    except Exception:
+        logger.exception("could not read when the print watcher was switched on")
+        raise
+    if since is None:
+        return
+
+    async def sweep(client: BambuddyClient) -> None:
+        try:
+            result = await auto_import(
+                client,
+                settings,
+                since,
+                links=state.print_links,
+                uploads=state.uploads,
+                store=store,
+                slugs=state.catalogue.slugs,
+                exists=state.catalogue.exists,
+            )
+        except Exception:
+            logger.exception("could not import the prints ScadBuddy did not start")
+            raise
+        if result.linked or result.inbox:
+            logger.info(
+                "imported prints ScadBuddy did not start",
+                extra={"linked": result.linked, "inbox": result.inbox},
+            )
+
+    await _with_bambuddy(state, sweep)
 
 
 async def _reap_quote_holds_logged(state: AppState) -> None:
@@ -1535,6 +1615,14 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         state.events,
         rack=state.components.get(RACK_USAGE),
         settle_failed=state.metrics.rack_watch_settle_failed,
+        # A LAN job start starts a print watcher pass on the library queue (#4699).
+        nudge=Nudger(
+            state.settings_store.load,
+            registry.store.get,
+            settings.temporal_task_queue_library,
+            settings.temporal_task_queue_bambuddy,
+        ).nudge,
+        write_failed=state.metrics.printer_watch_write_failed,
     )
     content = state.store.content
     lan = LanDeps(
@@ -1547,11 +1635,21 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         # A run's next plate copy waits on the printer's report (#4541).
         reports=registry.reports,
         native_spools=NativeSpoolStore(state.settings_store.pool),
+        spools=state.components.get(SPOOLS),
     )
+    auto_imports = state.components.get(AUTO_IMPORTS)
     activities = [
         *PrintActivities(deps).all(),
         *LanActivities(lan).all(),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "bambuddy")),
+        # A LAN-only printer's job (#4699 phase 4), recorded through this process's own
+        # store, as the CRUD route records the print worker's.
+        LanImportActivities(
+            registry.store,
+            state.settings_store.load,
+            state.components.get(PRINT_LIBRARY).serving_native,
+            StoreLanRecorder(auto_imports.lan, state.catalogue.slugs, state.catalogue.exists),
+        ).lan_auto_import,
     ]
     while not stop.is_set():
         # A worker that fails is said at once and started again: until then every
@@ -1602,6 +1700,7 @@ LIBRARY_WORKFLOWS: tuple[type, ...] = (
     VersionedLibraryCopy,
     VersionedSliceWorkflow,
     VersionedSpoolRefresh,
+    VersionedStagedFile,
 )
 
 
@@ -1707,6 +1806,8 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
         *_housekeeping_activities(state),
         *_preview_activities(state),
         *spool_activities(state.components.get(SPOOLS)),
+        # Bambuddy's spools pulled into ScadBuddy's own (#6261), on the spools' Schedule.
+        filament_pull_activity(state.components.get(FILAMENT), lambda: state.settings_store.load()),
         # Bambuddy's local presets kept for native runs (#4645), on the spools' Schedule.
         held_presets_activity(
             lambda: HeldPresetStore(state.projection.pool), lambda: state.settings_store.load()
@@ -1725,7 +1826,8 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
             state.components.get(PRINT_LIBRARY),
             lambda: state.settings_store,
             lambda: state.uploads,
-        ),
+        ),  # Each staged customer file's watcher (#6133).
+        *staged_file_activities(state),
     ]
     try:
         while not stop.is_set():
@@ -1891,10 +1993,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # First: without its database ScadBuddy has no settings, so it does not start.
     # It also brings the schema up to date, before the projection opens.
     await asyncio.to_thread(state.settings_store.open)
-    # The render worker's old role, if the deployment made one, gets `RENDER_GRANTS`
-    # (#601), now empty: the worker holds no database (#5298), and the role keeps what
-    # it was granted before until #5298 Task 22 revokes it.
-    await asyncio.to_thread(grant_at_start, state.settings_store.pool)
     # #4975 phase 4: the service credentials, before any caller reads its own.
     await asyncio.to_thread(_grant_and_rotate_at_start, state)
     # #4975 phase 8 (spec 2026-11-01 §9.1): `enforce` without a usable login stops here.

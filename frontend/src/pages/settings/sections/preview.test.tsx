@@ -62,16 +62,17 @@ describe('Preview', () => {
     put.mockRestore()
   })
 
-  it('offers the folders and printers Bambuddy reports, and no slicer pipeline', async () => {
+  it("offers the folders Bambuddy reports, the registry's printers, and no slicer pipeline", async () => {
     const { user } = renderAll()
     await loaded()
-    // The stored ids (folder 2, printer 1) are shown by the names Bambuddy reports.
+    // The stored folder 2 is shown by the name Bambuddy reports; the default printer is a
+    // registry printer (#5167), a LAN-only one (Garage) among them.
     await waitFor(() => expect(screen.getByLabelText('Inbox folder, for sends without a project')).toHaveTextContent('ScadBuddy'))
-    expect(screen.getByLabelText('Printer')).toHaveTextContent('3DP-31B-598 (H2C)')
+    await waitFor(() => expect(screen.getByLabelText('Printer')).toHaveTextContent('3DP-31B-598 (H2C)'))
     expect(await optionsOf(user, screen.getByLabelText('Printer'))).toEqual([
       'None',
       '3DP-31B-598 (H2C)',
-      '3DP-77A-114 (H2C)',
+      'Garage (H2C)',
     ])
     // #312: printing is the Print dialog's, which derives its own presets.
     expect(screen.queryByLabelText('Slicer pipeline')).not.toBeInTheDocument()
@@ -85,7 +86,7 @@ describe('Preview', () => {
     await choose(user, screen.getByLabelText('Printer'), 'None')
     await user.click(within(region('Printing defaults')).getByRole('button', { name: 'Save Printing defaults' }))
     await waitFor(() => expect(put).toHaveBeenCalled())
-    expect(put.mock.calls[0]?.[0]).toEqual({ printer_id: null })
+    expect(put.mock.calls[0]?.[0]).toEqual({ default_printer: null })
     put.mockRestore()
   })
 })

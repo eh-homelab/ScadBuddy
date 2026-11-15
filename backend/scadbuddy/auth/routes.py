@@ -34,6 +34,7 @@ RouteClass = Literal[
     "crud.print",
     "crud.storefront",
     "crud.agent",
+    "crud.intake",
     # The projects worker's flow host routes (#5298): `api` routes it may call too.
     "flow.host",
 ]
@@ -67,6 +68,8 @@ PUBLIC_ENDPOINTS = frozenset(
         "scadbuddy.api.auth.delegated_sign_in",
         # A payment provider's event (#4957): its signature is the credential.
         "scadbuddy.api.payment_webhooks.receive_webhook",
+        # Plaid's webhook for the linked bank account (#4961): its JWT is the credential.
+        "scadbuddy.api.bank_link.receive_bank_webhook",
     }
 )
 #: The service-token exchange (#5494, spec 2026-11-05 §6.2): the proof in its body is
@@ -114,6 +117,15 @@ PERSON_ENDPOINTS = frozenset(
         "scadbuddy.api.bank_link.create_bank_link_token",
         "scadbuddy.api.bank_link.create_bank_link",
         "scadbuddy.api.bank_link.delete_bank_link",
+        # The storefront's SMTP password (#5283): a settings write, never an agent's.
+        "scadbuddy.api.storefront.put_mail_password",
+        "scadbuddy.api.storefront.delete_mail_password",
+        "scadbuddy.api.bank_link.reconnect_bank_link",
+        # A suggested deposit is recorded or dismissed by the shop on the order (#4961).
+        "scadbuddy.api.order_bank_deposits.record_order_bank_deposit",
+        "scadbuddy.api.order_bank_deposits.dismiss_order_bank_deposit",
+        # Only a person says a message whose outcome is unknown reached the customer (#5660).
+        "scadbuddy.api.order_messages.mark_order_message_sent",
     }
 )
 #: The public routes the projects worker's flow host functions and grant checks call
@@ -200,6 +212,7 @@ CRUD_CLASSES: dict[str, RouteClass] = {
     "print": "crud.print",
     "storefront": "crud.storefront",
     "agent": "crud.agent",
+    "intake": "crud.intake",
 }
 CRUD_CALLERS = frozenset(CRUD_CLASSES)
 
@@ -256,9 +269,11 @@ def would_refuse(
     if route_cls in ("public", "transfer", "exchange"):
         return None
     if route_cls.startswith("internal."):
-        if isinstance(caller, Service) and route_cls in caller.scopes:
-            return None
-        return "no_credential"
+        # A live service credential without the class is a 403, as on a CRUD route
+        # (#5514): a 401 tells the client to exchange again, and it would loop.
+        if not isinstance(caller, Service):
+            return "no_credential"
+        return None if route_cls in caller.scopes else "out_of_scope"
     if route_cls.startswith("crud."):
         # A live service credential of another caller, or without the class, is a 403
         # as `crud/guard.py` answers it in `off`; only no live credential is a 401.

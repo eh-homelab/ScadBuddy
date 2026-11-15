@@ -251,7 +251,7 @@ async def _choices(
         reading = asyncio.ensure_future(read_status(client, printer_id))
         read_presets, seen, plate, read = await asyncio.gather(
             presets,
-            _record_seen(rack, printer_id, reading),
+            _record_seen(rack, settings.registry_printer(printer_id), reading),
             _last_bed_type(client, printer_id),
             filament_options(client, ready, printer_id=printer_id, status=reading),
             return_exceptions=True,
@@ -363,7 +363,7 @@ async def native_choices_for(
         overlay=overlay,
         provider_labels=provider_labels,
     )
-    await record_seen(rack, route.printer_id, status, route.row.id)
+    await record_seen(rack, route.row.id, status)
     printers = [
         Printer(id=row.bambuddy_printer_id, name=row.name, model=row.model)
         for row in rows
@@ -417,11 +417,11 @@ async def _given(source: PrintSource) -> PrintSource:
 
 
 async def _record_seen(
-    rack: RackUsage | None, printer_id: int, status: Awaitable[PrinterStatus | None]
+    rack: RackUsage | None, printer: str | None, status: Awaitable[PrinterStatus | None]
 ) -> None:
     """Awaits the shared status read directly, so a cancelled ``choices_for`` cancels
     the read with it; ``filament_options``' wait only keeps its own cancellation out."""
-    await record_seen(rack, printer_id, await status)
+    await record_seen(rack, printer, await status)
 
 
 async def _last_bed_type(client: BambuddyClient, printer_id: int) -> str | None:

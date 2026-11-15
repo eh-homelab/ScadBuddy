@@ -4,8 +4,10 @@ name: Build Image
 # Publishes ghcr.io/eh-homelab/scadbuddy for the cluster to pull, the AI
 # agent sidecar as ghcr.io/eh-homelab/scadbuddy-agent (the `agent` job below),
 # the durable sessions sidecar as ghcr.io/eh-homelab/scadbuddy-agent-durable
-# (the `agent-durable` job, #1056), and the slicer worker as
-# ghcr.io/eh-homelab/scadbuddy-slicer (the `slicer` job, #3821).
+# (the `agent-durable` job, #1056), the slicer worker as
+# ghcr.io/eh-homelab/scadbuddy-slicer (the `slicer` job, #3821), and the
+# sessions' shell sandbox as ghcr.io/eh-homelab/scadbuddy-sandbox (the
+# `sandbox` job, #5864).
 #
 # THE PACKAGE MUST BE PUBLIC. Nodes on the target cluster pull ghcr.io through
 # an ANONYMOUS Nexus proxy (`ghcr-proxy`), so a per-pod imagePullSecret
@@ -411,6 +413,113 @@ jobs:
           set -euo pipefail
           {
             echo "### Published \`ghcr.io/eh-homelab/scadbuddy-agent-durable\`"
+            echo
+            echo "**Digest:** \`${DIGEST}\`"
+            echo
+            echo "**Tags:**"
+            echo '```'
+            printf '%s\n' "$TAGS"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # A session's Bash and PowerShell sandbox and its egress proxy (#5864): the
+  # Dockerfile's `sandbox` target, published as ghcr.io/eh-homelab/scadbuddy-sandbox.
+  # The agent worker creates one pod of it per session (SCADBUDDY_SANDBOX_IMAGE,
+  # agent/src/sandbox/pods.ts), and eh-homelab/clusters runs its egress role as a
+  # Deployment. `continue-on-error` as the agent jobs: a first publish of a new
+  # package (private until its visibility is changed, see the header) must not hold
+  # back a deploy.
+  sandbox:
+    name: Build and push sandbox (amd64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    continue-on-error: true
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - uses: docker/setup-buildx-action@v4
+        # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@v6
+        env:
+          DOCKER_METADATA_SHORT_SHA_LENGTH: "7"
+        with:
+          images: ghcr.io/eh-homelab/scadbuddy-sandbox
+          tags: |
+            type=raw,value=main,enable={{is_default_branch}}
+            type=sha,format=short,prefix=sha-
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          labels: |
+            org.opencontainers.image.title=ScadBuddy sandbox
+            org.opencontainers.image.description=A ScadBuddy session's Bash and PowerShell sandbox, and its egress proxy
+
+      # The same label as the other two jobs: `X.Y.Z` for a `vX.Y.Z` tag,
+      # `sha-<short>` otherwise.
+      - name: Pick the version label
+        id: label
+        env:
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$REF" =~ ^refs/tags/v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            version="${BASH_REMATCH[1]}"
+          else
+            version="sha-${SHA:0:7}"
+          fi
+          echo "version=$version" | tee -a "$GITHUB_OUTPUT"
+
+      # `type=gha` on a hosted runner only, as above. It builds on the agent's
+      # stages (agent-build), so it reads the `agent` scope, and writes only its
+      # own final stage, at mode=min (the repo's Actions cache is at its
+      # ceiling, #743).
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: sandbox
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            SCADBUDDY_REVISION=${{ github.sha }}
+            SCADBUDDY_VERSION=${{ steps.label.outputs.version }}
+          provenance: false
+          cache-from: |
+            type=gha,scope=agent
+            type=gha,scope=sandbox
+          cache-to: type=gha,scope=sandbox,mode=min
+
+      - name: Report the published digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Published \`ghcr.io/eh-homelab/scadbuddy-sandbox\`"
             echo
             echo "**Digest:** \`${DIGEST}\`"
             echo

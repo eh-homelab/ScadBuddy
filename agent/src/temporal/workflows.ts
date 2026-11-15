@@ -33,7 +33,9 @@ import {
 } from './names.js'
 
 export { AgentSession } from './session/workflow.js'
-// browser_* calls between replicas, to the one holding the tab (#4780, bridge/relay.ts).
+// browser_* calls between replicas, to the one holding the tab (#4780, bridge/relay.ts). A
+// replica now runs its own on its host queue (#5862, bridge-bundle.js); kept here for a
+// rollout, while a replica of the build before #5862 still starts them on `agent-tools`.
 export { BridgeCall } from './bridgeCall.js'
 // A session turn's tool calls, each an execution of its own (plan 2026-10-13 Step 9.2).
 export { ToolCall } from './toolCall.js'

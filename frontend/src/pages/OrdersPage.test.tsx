@@ -3,7 +3,7 @@ import { useLocation } from 'react-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import { resetMockState } from '../mocks/handlers'
-import { ORDER_ACCEPTED, ORDER_DRAFT, seedCart } from '../mocks/features/orders/state'
+import { ORDER_ACCEPTED, ORDER_DRAFT, ORDER_MODELS, seedCart } from '../mocks/features/orders/state'
 import { seedPart } from '../mocks/features/orders/parts'
 import { choose } from '../test/select'
 import { renderPage } from '../test/utils'
@@ -30,7 +30,7 @@ describe('OrdersPage (#4249)', () => {
     )
     const table = await screen.findByRole('table', { name: 'Orders' })
     const rows = within(table).getAllByRole('row').slice(1)
-    expect(rows.map((r) => within(r).getByRole('link').textContent)).toEqual(['ORD-2026-3', 'ORD-2026-2', 'ORD-2026-1'])
+    expect(rows.map((r) => within(r).getByRole('link').textContent)).toEqual(['ORD-2026-3', 'ORD-2026-2', 'ORD-2026-1', 'ORD-2026-4'])
     expect(within(screen.getByTestId(`order-row-${ORDER_ACCEPTED}`)).getByText('Ada Lovelace')).toBeInTheDocument()
     expect(within(screen.getByTestId(`order-row-${ORDER_ACCEPTED}`)).getByText('Accepted')).toBeInTheDocument()
   })
@@ -66,6 +66,10 @@ describe('OrdersPage (#4249)', () => {
     expect(screen.queryByTestId(`order-row-${ORDER_ACCEPTED}`)).toBeNull()
     await choose(user, screen.getByRole('combobox', { name: 'Customer' }), 'Bob Builder')
     expect(screen.getByTestId('location')).toHaveTextContent('status=draft&customer=c1a00000-0000-4000-8000-000000000002')
+    // Bob's one draft is the storefront request with his own models (#6133).
+    await waitFor(() => expect(screen.queryByTestId(`order-row-${ORDER_DRAFT}`)).toBeNull())
+    expect(screen.getByTestId(`order-row-${ORDER_MODELS}`)).toBeInTheDocument()
+    await user.click(screen.getByRole('radio', { name: 'Accepted' }))
     await waitFor(() => expect(screen.getByText('No orders match.')).toBeInTheDocument())
     await user.click(screen.getByRole('button', { name: 'Clear filters' }))
     expect(screen.getByTestId('location')).toHaveTextContent(/\/orders$/)
@@ -92,6 +96,26 @@ describe('OrdersPage (#4249)', () => {
     await user.click(screen.getByRole('radio', { name: 'Storefront' }))
     expect(screen.getByTestId('location')).toHaveTextContent('/orders?source=storefront&unsubmitted=1')
     expect(await screen.findByText('Cart')).toBeInTheDocument()
+  })
+
+  it("filters the orders with a customer's own model, a purchase pending or a stuck import (#6133)", async () => {
+    const { user } = renderPage(
+      <>
+        <OrdersPage />
+        <Location />
+      </>,
+      { route: '/orders' },
+    )
+    await screen.findByTestId(`order-row-${ORDER_MODELS}`)
+    expect(screen.getByTestId(`order-row-${ORDER_DRAFT}`)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Purchase pending' }))
+    expect(screen.getByTestId('location')).toHaveTextContent('/orders?purchase_pending=1')
+    await waitFor(() => expect(screen.queryByTestId(`order-row-${ORDER_DRAFT}`)).toBeNull())
+    expect(screen.getByTestId(`order-row-${ORDER_MODELS}`)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Own model' }))
+    await user.click(screen.getByRole('button', { name: 'Import stuck' }))
+    expect(screen.getByTestId('location')).toHaveTextContent('/orders?own_model=1&purchase_pending=1&import_stuck=1')
+    expect(await screen.findByTestId(`order-row-${ORDER_MODELS}`)).toBeInTheDocument()
   })
 
   it('makes a new order for a customer and moves to it', async () => {
@@ -267,12 +291,13 @@ describe('OrdersPage margin (#5327)', () => {
     expect(header).toHaveAttribute('aria-sort', 'ascending')
     expect(order()).toEqual(ids(sortByMargin(loaded, 'ascending')))
     expect(order()[0]).toBe(`order-row-${ORDER_ACCEPTED}`)
-    expect(order().at(-1)).toBe(`order-row-${ORDER_DRAFT}`)
+    // The two drafts have no margin yet, so they come last (#6133 adds the second).
+    expect(order().slice(-2)).toEqual([`order-row-${ORDER_DRAFT}`, `order-row-${ORDER_MODELS}`])
 
     await user.click(within(header).getByRole('button', { name: 'Margin' }))
     expect(header).toHaveAttribute('aria-sort', 'descending')
     expect(order()).toEqual(ids(sortByMargin(loaded, 'descending')))
-    expect(order().at(-1)).toBe(`order-row-${ORDER_DRAFT}`)
+    expect(order().slice(-2)).toEqual([`order-row-${ORDER_DRAFT}`, `order-row-${ORDER_MODELS}`])
 
     await user.click(within(header).getByRole('button', { name: 'Margin' }))
     expect(header).toHaveAttribute('aria-sort', 'none')

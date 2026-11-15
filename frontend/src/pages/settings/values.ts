@@ -12,6 +12,7 @@ export const SECRETS = [
   'google_fonts_api_key',
   'store_s3_secret_access_key',
   'git_remote_token',
+  'storefront_turnstile_secret',
 ] as const
 export type Secret = (typeof SECRETS)[number]
 
@@ -26,6 +27,7 @@ const SECRET_FLAGS: Record<Secret, keyof Settings> = {
   google_fonts_api_key: 'has_google_fonts_api_key',
   store_s3_secret_access_key: 'has_store_s3_secret_access_key',
   git_remote_token: 'has_git_remote_token',
+  storefront_turnstile_secret: 'has_storefront_turnstile_secret',
 }
 
 /**
@@ -46,12 +48,20 @@ export function patchFields(settings: Settings, from: Settings, names: readonly 
   return out as Settings
 }
 
-const ID_FIELDS: readonly FieldName[] = ['library_folder_id', 'printer_id', 'last_project_id']
+const ID_FIELDS: readonly FieldName[] = ['library_folder_id', 'last_project_id']
 
 /** The fields each section saves. The runtime ones come from `RUNTIME_FIELDS`. */
 export const HAND_LAID: Partial<Record<SectionId, readonly FieldName[]>> = {
   connection: ['bambuddy_url', 'bambuddy_web_urls', 'bambuddy_api_key', 'bambuddy_render_api_key', 'public_url'],
-  printing: ['printer_id', 'print_run_retention_seconds', 'operation_retention_seconds'],
+  printing: ['default_printer', 'print_run_retention_seconds', 'operation_retention_seconds'],
+  // #4699 — the print watcher's settings; only a person saves them (403 `person_only`).
+  // #6041 — and the LAN-only printers it leaves alone, by registry id.
+  'print-watcher': [
+    'print_auto_import',
+    'print_auto_import_sources',
+    'print_auto_import_skip_printers',
+    'print_auto_import_skip_lan_printers',
+  ],
   // #426 — the blob store beside the inbox folder it needs.
   projects: [
     'library_folder_id',
@@ -134,7 +144,34 @@ export const FOLLOW_NOBODY = 'none'
  */
 export const FETCH_NOWHERE = 'none'
 
+/**
+ * #4699 — where the print watcher may take a print's 3MF from, in the watcher's fixed
+ * order. The form holds the allowed ones joined by commas, in this order.
+ */
+export const AUTO_IMPORT_SOURCES = ['archive', 'archive_source', 'library', 'printer'] as const
+export type AutoImportSource = (typeof AUTO_IMPORT_SOURCES)[number]
+
+/** The form's value for a list of sources: in `AUTO_IMPORT_SOURCES` order, comma-joined. */
+export function sourcesValue(sources: readonly string[]): string {
+  return AUTO_IMPORT_SOURCES.filter((source) => sources.includes(source)).join(',')
+}
+
+/** The form's value for a list of printer ids: ascending, comma-joined. */
+export function printerIdsValue(ids: readonly number[]): string {
+  return [...new Set(ids)].sort((a, b) => a - b).join(',')
+}
+
+/** #6041 — the form's value for a list of registry printer ids (uuids): sorted, comma-joined. */
+export function registryIdsValue(ids: readonly string[]): string {
+  return [...new Set(ids)].sort().join(',')
+}
+
 export function baseline(settings: Settings, name: FieldName): string {
+  if (name === 'print_auto_import') return settings.print_auto_import ? 'true' : 'false'
+  if (name === 'print_auto_import_sources') return sourcesValue(settings.print_auto_import_sources ?? [])
+  if (name === 'print_auto_import_skip_printers') return printerIdsValue(settings.print_auto_import_skip_printers ?? [])
+  if (name === 'print_auto_import_skip_lan_printers')
+    return registryIdsValue(settings.print_auto_import_skip_lan_printers ?? [])
   if (name === 'display_unit') return settings.display_unit ?? 'mm'
   if (name === 'destination_sort') return settings.destination_sort ?? 'touched'
   if (name === 'activity_follow') {
@@ -164,7 +201,11 @@ export function toPatchValue(name: FieldName, raw: string, settings: Settings): 
     name === 'slicer_backend'
   )
     return raw
-  if (name === 'store_s3_path_style') return raw === 'true'
+  if (name === 'store_s3_path_style' || name === 'print_auto_import') return raw === 'true'
+  // #4699 — an empty list allows no source (each print goes to Unsorted imports) or skips no printer.
+  if (name === 'print_auto_import_sources') return raw === '' ? [] : raw.split(',')
+  if (name === 'print_auto_import_skip_printers') return raw === '' ? [] : raw.split(',').map(Number)
+  if (name === 'print_auto_import_skip_lan_printers') return raw === '' ? [] : raw.split(',')
   if (RETENTIONS.includes(name)) {
     // Empty keeps every row; a number of days prunes the older ones.
     if (raw.trim() === '') return null
