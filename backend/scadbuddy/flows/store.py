@@ -462,9 +462,10 @@ class FlowStore:
 
     async def requested_grants(
         self, limit: int, newer_than: datetime | None = None
-    ) -> list[tuple[Grant, Run]]:
+    ) -> tuple[list[tuple[Grant, Run]], int]:
         """#6399: the grants still waiting for a person's decision (`requested`, not
-        revoked) of runs that have not ended, oldest request first, at most `limit`; with
+        revoked) of runs that have not ended, the newest request first, at most `limit`
+        (so a new one is never pushed out by old ones), and how many there are in all; with
         `newer_than`, only those requested after it."""
         return await asyncio.to_thread(self._requested_grants, limit, newer_than)
 
@@ -629,21 +630,27 @@ class FlowStore:
             ).fetchone()
         return Grant.model_validate(row) if row else None
 
-    def _requested_grants(self, limit: int, newer_than: datetime | None) -> list[tuple[Grant, Run]]:
+    def _requested_grants(
+        self, limit: int, newer_than: datetime | None
+    ) -> tuple[list[tuple[Grant, Run]], int]:
         # The grants first, bounded by `limit`, then only their runs: `_RUN`'s columns are
         # unqualified, so the runs are not joined into the same SELECT.
         with self._pool.connection() as conn:
             rows = conn.execute(
-                f"SELECT {_GRANT} FROM flow_grants WHERE status = 'requested'"
+                f"SELECT {_GRANT}, count(*) OVER () AS total FROM flow_grants"
+                " WHERE status = 'requested'"
                 " AND revoked_at IS NULL AND EXISTS (SELECT 1 FROM workflow_runs r"
                 " WHERE r.id = flow_grants.run_id AND NOT (r.status = ANY(%s)))"
                 " AND (%s::timestamptz IS NULL OR created_at > %s)"
-                " ORDER BY created_at, id LIMIT %s",
+                " ORDER BY created_at DESC, id DESC LIMIT %s",
                 (sorted(TERMINAL), newer_than, newer_than, limit),
             ).fetchall()
-            grants = [Grant.model_validate(row) for row in rows]
+            total = int(rows[0]["total"]) if rows else 0
+            grants = [
+                Grant.model_validate({k: v for k, v in row.items() if k != "total"}) for row in rows
+            ]
             if not grants:
-                return []
+                return [], 0
             runs = {
                 row["id"]: Run.model_validate(row)
                 for row in conn.execute(
@@ -651,7 +658,7 @@ class FlowStore:
                     ([g.run_id for g in grants],),
                 ).fetchall()
             }
-        return [(grant, runs[grant.run_id]) for grant in grants if grant.run_id in runs]
+        return [(grant, runs[grant.run_id]) for grant in grants if grant.run_id in runs], total
 
     def _locked_grant(self, conn: Connection[DictRow], run_id: str) -> Grant | None:
         row = conn.execute(

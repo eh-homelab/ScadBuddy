@@ -108,6 +108,10 @@ export function NeedsYouRow({
   const ctx = useContext(NeedsYouContext)
   const [state, setState] = useState<RowState>({ kind: 'idle' })
   const [reviewing, setReviewing] = useState(open)
+  // The bell's "Review" on this page changes `REVIEW_PARAM` under a row already shown.
+  useEffect(() => {
+    if (open) setReviewing(true)
+  }, [open])
   const refresh = () => ctx?.refresh()
   const headingId = `needs-you-${compact ? 'bell-' : ''}${item.key}`
 
@@ -287,15 +291,19 @@ export function NeedsYouList({ compact = false, onLeave }: { compact?: boolean; 
   const [params] = useSearchParams()
   const opened = compact ? null : params.get(REVIEW_PARAM)
   const items = ctx?.items ?? []
+  const more = ctx?.more ?? 0
   if (items.length === 0) return null
   return (
-    <ul className="flex flex-col gap-1.5">
-      {items.map((item) => (
-        <li key={item.key}>
-          <NeedsYouRow item={item} compact={compact} now={now} onLeave={onLeave} open={item.key === opened} />
-        </li>
-      ))}
-    </ul>
+    <>
+      <ul className="flex flex-col gap-1.5">
+        {items.map((item) => (
+          <li key={item.key}>
+            <NeedsYouRow item={item} compact={compact} now={now} onLeave={onLeave} open={item.key === opened} />
+          </li>
+        ))}
+      </ul>
+      {more > 0 && <p className="px-1 text-xs text-muted-foreground">and {more} more grant {more === 1 ? 'request' : 'requests'}</p>}
+    </>
   )
 }
 

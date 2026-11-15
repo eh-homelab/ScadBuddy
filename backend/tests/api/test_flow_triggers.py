@@ -307,6 +307,7 @@ def test_the_grant_requests_list_a_requested_standing_grant_until_it_is_decided(
     assert attach(client, approved["id"], grant({"fn": "queue_print"})).status_code == 200
     body = client.get("/api/v1/flow-grant-requests").json()
     assert [t["id"] for t in body["triggers"]] == [asked["id"]]
+    assert body["triggers_total"] == 1
     listed = body["triggers"][0]
     assert listed["grant"]["status"] == "requested"
     assert listed["seen"] == view(client, asked["id"])["seen"]

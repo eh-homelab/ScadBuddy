@@ -230,9 +230,10 @@ class TriggerStore:
         `seen` is not the trigger's `state_hash` now."""
         return await self._call(self._attach_grant, trigger_id, spec, status, requested_by, seen)
 
-    async def requested_grant_triggers(self, limit: int) -> list[Trigger]:
+    async def requested_grant_triggers(self, limit: int) -> tuple[list[Trigger], int]:
         """#6399: the triggers whose standing grant waits for a person's decision
-        (`requested`, not revoked), the oldest request first, at most `limit`."""
+        (`requested`, not revoked), the newest request first, at most `limit`, and how many
+        there are in all."""
         return await self._call(self._requested_grant_triggers, limit)
 
     async def requested_grant_ids(
@@ -240,7 +241,7 @@ class TriggerStore:
     ) -> list[tuple[str, datetime]]:
         """#6399: the ids of the standing grants that wait for a person's decision
         (`requested`, not revoked), asked for (`requested_at`, set again when an edit
-        returns one to `requested`) after `newer_than`, and when each was, the oldest
+        returns one to `requested`) after `newer_than`, and when each was, the newest
         first, at most `limit`: what Web Push tells a closed tab of."""
         return await self._call(self._requested_grant_ids, limit, newer_than)
 
@@ -619,25 +620,29 @@ class TriggerStore:
             ).fetchone()
         return state_hash(trigger, StandingGrant.model_validate(row) if row else None)
 
-    def _requested_grant_triggers(self, limit: int) -> list[Trigger]:
+    def _requested_grant_triggers(self, limit: int) -> tuple[list[Trigger], int]:
         with self._pool.connection() as conn:
             rows = conn.execute(
-                f"SELECT {_TRIGGER}, (SELECT min(g.requested_at) FROM flow_trigger_grants g"
+                f"SELECT {_TRIGGER}, (SELECT max(g.requested_at) FROM flow_trigger_grants g"
                 " WHERE g.trigger_id = flow_triggers.id AND g.status = 'requested'"
-                " AND g.revoked_at IS NULL) AS requested_at FROM flow_triggers"
-                " WHERE EXISTS (SELECT 1 FROM flow_trigger_grants g"
+                " AND g.revoked_at IS NULL) AS requested_at, count(*) OVER () AS total"
+                " FROM flow_triggers WHERE EXISTS (SELECT 1 FROM flow_trigger_grants g"
                 " WHERE g.trigger_id = flow_triggers.id AND g.status = 'requested'"
                 " AND g.revoked_at IS NULL)"
-                " ORDER BY requested_at, id LIMIT %s",
+                " ORDER BY requested_at DESC, id DESC LIMIT %s",
                 (limit,),
             ).fetchall()
-        return [Trigger.model_validate(row) for row in rows]
+        total = int(rows[0]["total"]) if rows else 0
+        return [
+            Trigger.model_validate({k: v for k, v in row.items() if k != "total"}) for row in rows
+        ], total
 
     def _requested_grant_ids(self, limit: int, newer_than: datetime) -> list[tuple[str, datetime]]:
         with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT id, requested_at FROM flow_trigger_grants WHERE status = 'requested'"
-                " AND revoked_at IS NULL AND requested_at > %s ORDER BY requested_at, id LIMIT %s",
+                " AND revoked_at IS NULL AND requested_at > %s"
+                " ORDER BY requested_at DESC, id DESC LIMIT %s",
                 (newer_than, limit),
             ).fetchall()
         return [(str(row["id"]), row["requested_at"]) for row in rows]

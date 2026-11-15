@@ -19,7 +19,8 @@ agent that still reads the table over SQL with the KEK, and the other way round 
   not open;
 - ``POST …/push/sent`` claims telling a target of a request, once across replicas;
 - ``GET …/push/waiting`` the flow grants waiting for a person, by id (#6399), which the
-  agent pushes beside its own pending input;
+  agent pushes beside its own pending input; ``POST …/push/poll-lease`` lets one agent
+  replica a window run that timed poll;
 - ``…/notify-channels``: the list (never a token), a create and an update (the token sealed
   with the channel's id, kind and URL; an update with ``keep_token`` keeps the sealed one
   only while the kind and URL are unchanged), a delete, a channel opened for a send, the
@@ -371,6 +372,38 @@ def _epoch_s(at: datetime) -> int:
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 
+class PollLease(_Body):
+    #: The poll's name: one lease row each (``lease:<name>`` in ``ai_notifications_sent``).
+    name: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9-]*$")
+    #: How long a holder keeps it: no other caller takes it again sooner.
+    seconds: int = Field(ge=1, le=3600)
+
+
+class Held(BaseModel):
+    held: bool
+
+
+@router.post("/push/poll-lease", name="crud_agent_push_poll_lease")
+async def push_poll_lease(body: PollLease, state: StateDep) -> Held:
+    """#6399: one agent replica a window runs a timed poll (the Web Push pass over the
+    waiting grants and pairings). One row per poll name, upserted: taken when it is new or
+    its last take is at least ``seconds`` old by the database's clock, so the replicas'
+    clocks never decide it, and it is refreshed on each take, so the 2-day sweep of
+    ``ai_notifications_sent`` never reaches it while a replica polls."""
+
+    def run(conn: psycopg.Connection[Any]) -> bool:
+        row = conn.execute(
+            "INSERT INTO ai_notifications_sent (request_id, target) VALUES (%s, 'lease')"
+            " ON CONFLICT (request_id, target) DO UPDATE SET sent_at = now()"
+            " WHERE ai_notifications_sent.sent_at <= now() - make_interval(secs => %s)"
+            " RETURNING 1",
+            (f"lease:{body.name}", body.seconds),
+        ).fetchone()
+        return row is not None
+
+    return Held(held=await _in_tx(state, run))
+
+
 class WaitingRequest(BaseModel):
     """A flow grant waiting for a person's decision, as a push names it: the id the page's
     own notification uses as its tag (frontend `lib/needsYou.ts`), never what it asks."""
@@ -395,7 +428,7 @@ async def push_waiting(triggers: TriggersDep) -> WaitingRequests:
     a grant an edit returned to ``requested`` is a new request with a claim of its own."""
     # Only those the agent still pushes, so older ones never crowd a new one out of the page.
     newer_than = datetime.now(UTC) - PUSH_WINDOW
-    runs = await triggers.flows.store.requested_grants(GRANT_REQUESTS_MAX, newer_than)
+    runs, _ = await triggers.flows.store.requested_grants(GRANT_REQUESTS_MAX, newer_than)
     standing = await triggers.store.requested_grant_ids(GRANT_REQUESTS_MAX, newer_than)
     return WaitingRequests(
         requests=[

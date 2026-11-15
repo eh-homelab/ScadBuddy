@@ -1,6 +1,6 @@
 import { pendingInput } from './routes/pendingInput.js'
 import { pendingNotices, NotificationDispatcher, WAITING_POLL_MS } from './notify/dispatcher.js'
-import { crudGrantRequests, pairingRequests, waitingNotices } from './notify/waiting.js'
+import { crudGrantRequests, crudPollLease, pairingRequests, waitingNotices } from './notify/waiting.js'
 import { pushHostsOf, SETTING_PUSH_HOSTS } from './notify/pushEgress.js'
 import { CrudPushStore, type PushRepo, PushStore } from './notify/pushStore.js'
 import { ChannelStore, CrudChannelRows } from './notify/channels.js'
@@ -1309,6 +1309,7 @@ const pushDispatcher =
           crudGrantRequests(crudTarget, storeArea('notify')),
           ...(pairingStore ? [pairingRequests(pairingStore)] : []),
         ]),
+        pollLease: crudPollLease(crudTarget, storeArea('notify')),
         // RFC 8292 §2.1: who the push service may contact about these messages.
         subject: config.publicUrl ?? 'mailto:scadbuddy@localhost',
         // The push-service allowlist, as Settings last saved it (notify/pushEgress.ts).

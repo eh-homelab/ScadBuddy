@@ -438,8 +438,23 @@ def test_the_push_route_lists_only_requests_young_enough_to_push(
     assert [r["id"] for r in waiting.json()["requests"]] == [
         f"run-grant:{view_grant(client, new)['id']}"
     ]
-    listed = client.get("/api/v1/flow-grant-requests").json()["runs"]
-    assert {r["run_id"] for r in listed} == {old, new}
+    listed = client.get("/api/v1/flow-grant-requests").json()
+    # Newest first, with how many wait in all, so a page past the cap still says so.
+    assert [r["run_id"] for r in listed["runs"]] == [new, old]
+    assert (listed["runs_total"], listed["triggers_total"]) == (2, 0)
+
+
+def test_the_grant_requests_list_the_newest_and_count_the_rest(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6399: past the cap a new request is still listed (the oldest drop off), and the
+    total says how many more wait."""
+    monkeypatch.setattr("scadbuddy.api.flow_triggers.GRANT_REQUESTS_MAX", 1)
+    started(client, "c1", {"grant": grant({"fn": "queue_print"})}, **AGENT)
+    new = started(client, "c2", {"grant": grant({"fn": "queue_print"})}, **AGENT)
+    listed = client.get("/api/v1/flow-grant-requests").json()
+    assert [r["run_id"] for r in listed["runs"]] == [new]
+    assert listed["runs_total"] == 2
 
 
 def test_the_grant_requests_leave_out_a_run_that_ended(client: TestClient) -> None:

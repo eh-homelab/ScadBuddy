@@ -781,7 +781,8 @@ export const handlers = [
         started_by: r.started_by,
         grant: g!,
       }))
-    return HttpResponse.json({ runs: asked, triggers: requestedTriggers() })
+    const triggers = requestedTriggers()
+    return HttpResponse.json({ runs: asked, triggers, runs_total: asked.length, triggers_total: triggers.length })
   }),
   // As `FlowStates.newest`: each name's newest version only, by name; archived and
   // deleted flows only with `?archived=true`.

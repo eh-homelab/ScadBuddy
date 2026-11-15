@@ -1,6 +1,6 @@
 import { useCallback, useMemo, type ReactNode } from 'react'
 import { useAttention } from '../agent/attention'
-import { NeedsYouContext, needsYouItems, useGrantRequests, type NeedsYou } from '../lib/needsYou'
+import { NeedsYouContext, needsYouItems, notListed, useGrantRequests, type NeedsYou } from '../lib/needsYou'
 
 /**
  * #6399 — the shell's "Needs you" read, as `AppShell` builds it, over the msw mocks: the agent's
@@ -19,6 +19,7 @@ export function NeedsYouHarness({ children, openSession = null }: { children: Re
     () => ({
       // From whichever read has answered, as `AppShell` builds it.
       items: counts || grants ? needsYouItems(counts?.waiting ?? [], grants, []) : null,
+      more: notListed(grants),
       refresh,
       openSession,
     }),

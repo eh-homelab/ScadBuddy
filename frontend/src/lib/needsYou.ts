@@ -91,10 +91,16 @@ export function needsYouNotices(items: readonly NeedsYouItem[]): AttentionNotice
 
 export const runName = (request: FlowRunGrantRequest): string => request.display_name || request.name
 
+/** How many grant requests wait past the newest the API lists of each kind (`GRANT_REQUESTS_MAX`). */
+export const notListed = (grants: FlowGrantRequests | null): number =>
+  grants ? Math.max(0, grants.runs_total - grants.runs.length) + Math.max(0, grants.triggers_total - grants.triggers.length) : 0
+
 /** The shell's list, and a way to read it again once one is answered; null outside the shell. */
 export interface NeedsYou {
   /** Null until the first read answered (unknown is not "nothing waits"). */
   items: readonly NeedsYouItem[] | null
+  /** How many more grant requests wait than `items` lists (`notListed`). */
+  more: number
   refresh: () => void
   /** Opens the assistant panel, on the session when one is named; null while the assistant is not there. */
   openSession: ((sessionId: string | null) => void) | null

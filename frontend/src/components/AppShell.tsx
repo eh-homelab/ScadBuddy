@@ -41,6 +41,7 @@ import {
   needsYouItems,
   needsYouLabel,
   needsYouNotices,
+  notListed,
   useGrantRequests,
   useNeedsYouToasts,
   type NeedsYouSource,
@@ -301,6 +302,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   const needsYou = useMemo<NeedsYou>(
     () => ({
       items: needsItems,
+      more: notListed(grants),
       refresh: refreshNeeds,
       openSession: shown
         ? (sessionId) => {
@@ -309,7 +311,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
           }
         : null,
     }),
-    [needsItems, refreshNeeds, shown, openPanel],
+    [needsItems, grants, refreshNeeds, shown, openPanel],
   )
   const closePanel = useCallback(() => {
     setOpen(false)

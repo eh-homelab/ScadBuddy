@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { REQUEST_TTL_MS } from '../src/bridge/pairings.js'
-import { type AttentionNotice, attentionMessage, NotificationDispatcher, noticeTitle, WAITING_POLL_MS, WAITING_PUSH_WINDOW_MS } from '../src/notify/dispatcher.js'
+import { type AttentionNotice, attentionMessage, NotificationDispatcher, noticeTitle, WAITING_POLL_LEASE, WAITING_POLL_LEASE_S, WAITING_PUSH_WINDOW_MS } from '../src/notify/dispatcher.js'
 import { type PushRepo, type PushSubscriptionRow, SENT_KEEP_DAYS } from '../src/notify/pushStore.js'
-import { crudGrantRequests, pairingRequests, waitingNotices } from '../src/notify/waiting.js'
+import { crudGrantRequests, crudPollLease, pairingRequests, waitingNotices } from '../src/notify/waiting.js'
 import type { Owner } from '../src/sessions/protocol.js'
 
 // #6399: a flow grant or an agent's pairing request reaches a person by Web Push with every tab
@@ -20,8 +20,6 @@ function recordingStore(subs: PushSubscriptionRow[]) {
     unsubscribe: () => Promise.resolve(true),
     subscriptions: () => Promise.resolve(subs),
     claim: (requestId, target) => {
-      // A timer window's lease: this replica polls.
-      if (requestId.startsWith('waiting-poll:')) return Promise.resolve(true)
       claims.push(`${requestId} -> ${target}`)
       // Claimed by "another replica": the send itself is not this test's.
       return Promise.resolve(false)
@@ -36,9 +34,11 @@ const dispatcher = (
   waiting: () => Promise<AttentionNotice[]>,
   log: (m: string) => void = () => {},
   ownReads: Owner[] = [],
+  pollLease?: (name: string, seconds: number) => Promise<boolean>,
 ) =>
   new NotificationDispatcher({
     store,
+    ...(pollLease ? { pollLease } : {}),
     notices: (o) => {
       ownReads.push(o)
       return Promise.resolve(own)
@@ -95,23 +95,39 @@ describe('waiting requests by Web Push (#6399)', () => {
     expect(opened).toBe(0)
   })
 
-  it("reads the waiting requests on one replica a timer window: another's claim of the window skips it", async () => {
-    const { store } = recordingStore([sub('b1', owner('browser', 'browser'))])
+  it("reads the waiting requests on one replica a timer window: another's lease skips it, and claims nothing", async () => {
+    const { store, claims } = recordingStore([sub('b1', owner('browser', 'browser'))])
     const leases: string[] = []
     let reads = 0
-    const lost: PushRepo = {
-      ...store,
-      claim: (requestId, target) => {
-        leases.push(`${requestId} -> ${target}`)
-        return Promise.resolve(false)
-      },
-    }
-    await dispatcher(lost, [], () => {
+    const read = () => {
       reads += 1
       return Promise.resolve([])
-    }).pass('waiting')
+    }
+    const take = (held: boolean | Error) => (name: string, seconds: number) => {
+      leases.push(`${name}/${seconds}`)
+      return held instanceof Error ? Promise.reject(held) : Promise.resolve(held)
+    }
+    await dispatcher(store, [], read, () => {}, [], take(false)).pass('waiting')
+    await dispatcher(store, [], read, () => {}, [], take(new Error('HTTP 503'))).pass('waiting')
     expect(reads).toBe(0)
-    expect(leases).toEqual([`waiting-poll:${Math.floor(Date.now() / WAITING_POLL_MS)} -> poll`])
+    await dispatcher(store, [], read, () => {}, [], take(true)).pass('waiting')
+    expect(reads).toBe(1)
+    // One lease row per poll name, not a claim per window.
+    expect(leases).toEqual(Array(3).fill(`${WAITING_POLL_LEASE}/${WAITING_POLL_LEASE_S}`))
+    expect(claims).toEqual([])
+  })
+
+  it('takes the poll lease through the CRUD route, and polls on every replica before the API serves it', async () => {
+    const seen: { url: string; body: unknown }[] = []
+    const fetch = (input: string | URL | Request, init?: RequestInit) => {
+      seen.push({ url: String(input), body: JSON.parse(String(init?.body)) })
+      return Promise.resolve(new Response(JSON.stringify({ held: false }), { status: 200, headers: { 'content-type': 'application/json', 'x-scadbuddy-crud': '1' } }))
+    }
+    const target = { baseUrl: 'http://api.test', fetch: fetch as typeof globalThis.fetch }
+    expect(await crudPollLease(target)('waiting-poll', 25)).toBe(false)
+    expect(seen).toEqual([{ url: 'http://api.test/api/v1/internal/crud/agent/push/poll-lease', body: { name: 'waiting-poll', seconds: 25 } }])
+    expect(await crudPollLease(target, () => false)('waiting-poll', 25)).toBe(true)
+    expect(seen).toHaveLength(1)
   })
 
   it("still pushes the agent's own requests when the grants cannot be read", async () => {

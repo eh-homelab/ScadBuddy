@@ -19,6 +19,20 @@ export function crudGrantRequests(target: CrudTarget, available: () => boolean =
   }
 }
 
+/**
+ * Takes a timed poll's lease through the API (backend `push_poll_lease`, area `notify`): one
+ * row per name, so one replica a window polls. Until the API serves area `notify`, every
+ * replica polls (each send is still claimed once).
+ */
+export function crudPollLease(target: CrudTarget, available: () => boolean = () => true): (name: string, seconds: number) => Promise<boolean> {
+  const call = crudOf(target)
+  return async (name, seconds) => {
+    if (!available()) return true
+    const { held } = await call<{ held: boolean }>('the poll lease', '/push/poll-lease', { method: 'POST', body: { name, seconds } })
+    return held
+  }
+}
+
 /** The pairing requests waiting for a person to type their code. */
 export function pairingRequests(store: Pick<PairingStore, 'pending'>): () => Promise<AttentionNotice[]> {
   // A request started REQUEST_TTL_MS before it expires.

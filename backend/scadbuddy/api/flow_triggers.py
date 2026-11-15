@@ -320,7 +320,13 @@ class RunGrantRequest(BaseModel):
 
 
 class GrantRequests(BaseModel):
-    """Every grant that waits for a person's decision, the oldest request first."""
+    """The grants that wait for a person's decision: the newest `GRANT_REQUESTS_MAX` of
+    each kind, and how many wait in all, so the page can say how many it does not show."""
+
+    #: How many run grants and standing grants wait in all; at most `GRANT_REQUESTS_MAX`
+    #: of each are listed.
+    runs_total: int
+    triggers_total: int
 
     #: Requested run grants of runs that have not ended.
     runs: list[RunGrantRequest]
@@ -339,7 +345,7 @@ async def list_flow_grant_requests(triggers: TriggersDep) -> GrantRequests:
     pending input. Read as the other flow reads are; only a person decides each one
     (`/workflow-runs/{id}/grant/approve`, `/flow-triggers/{id}/grant/approve`)."""
     flows = triggers.flows
-    requested = await flows.store.requested_grants(GRANT_REQUESTS_MAX)
+    requested, runs_total = await flows.store.requested_grants(GRANT_REQUESTS_MAX)
     names = await flows.definitions.display_names({run.name for _, run in requested})
     runs = [
         RunGrantRequest(
@@ -352,7 +358,7 @@ async def list_flow_grant_requests(triggers: TriggersDep) -> GrantRequests:
         )
         for grant, run in requested
     ]
-    listed = await triggers.store.requested_grant_triggers(GRANT_REQUESTS_MAX)
+    listed, triggers_total = await triggers.store.requested_grant_triggers(GRANT_REQUESTS_MAX)
     gate = asyncio.Semaphore(LIST_VIEWS_AT_ONCE)
 
     async def one(trigger: Trigger) -> TriggerView:
@@ -360,7 +366,9 @@ async def list_flow_grant_requests(triggers: TriggersDep) -> GrantRequests:
             return await _view(triggers, trigger)
 
     views = await asyncio.gather(*(one(t) for t in listed))
-    return GrantRequests(runs=runs, triggers=list(views))
+    return GrantRequests(
+        runs=runs, triggers=list(views), runs_total=runs_total, triggers_total=triggers_total
+    )
 
 
 @router.get("/flow-triggers/{trigger_id}", response_model=TriggerView, summary="Get a flow trigger")

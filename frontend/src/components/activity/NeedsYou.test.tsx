@@ -1,5 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
+import { Link } from 'react-router'
 import { api } from '../../api/client'
 import { reviewPath } from '../../lib/needsYou'
 import { server } from '../../mocks/server'
@@ -74,6 +75,34 @@ describe('NeedsYouSection (#6399)', () => {
     const standing = await waitFor(() => item('Standing grant request'))
     expect(within(standing).getByRole('button', { name: 'Hide trigger' })).toHaveAttribute('aria-expanded', 'true')
     expect(within(item('Grant request')).getByRole('button', { name: 'Review grant…' })).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  it("opens a shown row's review when the link changes under it: the bell's Review on /activity", async () => {
+    const { triggers } = await api.flowGrantRequests()
+    const grant = triggers[0]!.grant!
+    const key = `trigger-grant:${grant.id}:${Math.floor(Date.parse(grant.requested_at) / 1000)}`
+    const { user } = renderPage(
+      <NeedsYouHarness>
+        <Link to={reviewPath(key)}>Review from the bell</Link>
+        <NeedsYouSection />
+      </NeedsYouHarness>,
+      { route: '/activity' },
+    )
+    const standing = await waitFor(() => item('Standing grant request'))
+    expect(within(standing).getByRole('button', { name: 'Review grant…' })).toHaveAttribute('aria-expanded', 'false')
+    await user.click(screen.getByRole('link', { name: 'Review from the bell' }))
+    expect(within(item('Standing grant request')).getByRole('button', { name: 'Hide trigger' })).toHaveAttribute('aria-expanded', 'true')
+  })
+
+  it('says how many grant requests wait past the ones listed', async () => {
+    const listed = await api.flowGrantRequests()
+    server.use(http.get('/api/v1/flow-grant-requests', () => HttpResponse.json({ ...listed, runs_total: listed.runs.length + 2, triggers_total: listed.triggers.length + 1 })))
+    renderPage(
+      <NeedsYouHarness>
+        <NeedsYouSection />
+      </NeedsYouHarness>,
+    )
+    expect(await screen.findByText('and 3 more grant requests')).toBeInTheDocument()
   })
 
   it('approves through the respond route, and the answered request leaves', async () => {
