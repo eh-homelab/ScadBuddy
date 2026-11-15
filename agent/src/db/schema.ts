@@ -89,7 +89,8 @@ export async function awaitMigrations(
       log(
         positional
           ? "waiting for the API to apply the agent's database migrations: ai_migrations is still keyed by " +
-              "position (before #491), and the API's next start rewrites it"
+              "position (before #491); the API's next start rewrites it, or stops if it holds a row main " +
+              "never had (see the API's log)"
           : `waiting for the API to apply the agent's database migrations: ${missing.length} of ${expected.length} ` +
               `not in ai_migrations yet (first ${missing[0]!.id})`,
       )
@@ -108,7 +109,8 @@ export async function awaitMigrations(
 /**
  * The expected files' rows of the ledger, id to checksum; none while the API has not made
  * the ledger, and `positional` while it is still keyed by position (no `id` column, before
- * #491), which the API's runner rewrites at its next start.
+ * #491), which the API's runner rewrites at its next start; a row main never had stops
+ * that start instead (AgentMigrationLedgerError).
  */
 async function readLedger(
   sql: Sql,
