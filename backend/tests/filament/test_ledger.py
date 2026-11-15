@@ -8,8 +8,9 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from scadbuddy.filament import ledger
 from scadbuddy.filament.catalog import CatalogStore
-from scadbuddy.filament.ledger import grams_left, record
+from scadbuddy.filament.ledger import grams_left, job_of, record
 from scadbuddy.filament.models import Material, SpoolEvent
 from tests.conftest import PgPool
 
@@ -77,6 +78,101 @@ def test_no_reading_leaves_grams_left_unknown_and_never_below_zero() -> None:
     assert grams_left([use], weight_locked=False, label_weight_g=1000) is None
     events = [_event(0, "weighed", "scale", grams_after=3), use]
     assert grams_left(events, weight_locked=False, label_weight_g=1000) == 0
+
+
+def _left(events: list[SpoolEvent]) -> float | None:
+    return grams_left(events, weight_locked=False, label_weight_g=1000)
+
+
+def _sb(minute: int, kind: str, delta: float, ref: str = "r/J/0", **over: Any) -> SpoolEvent:
+    source = "print_estimate" if kind == "print_started" else "print_actual"
+    return _event(
+        minute, kind, source, delta_g=delta, ref_kind=ledger.PRINT_RUN, ref_id=ref, **over
+    )
+
+
+def _bb(minute: int, delta: float, job: str = "J") -> SpoolEvent:
+    return _event(
+        minute,
+        "print_ended",
+        "print_actual",
+        delta_g=delta,
+        ref_kind=ledger.BB_USAGE,
+        ref_id=f"usage-{job}-{minute}",
+        data={"job": job},
+    )
+
+
+def test_a_reading_at_a_plate_end_holds_that_plate() -> None:
+    reading = _event(1, "ams_reading", "ams_remain", data={"remain_pct": 70})
+    events = [_event(0, "weighed", "scale", grams_after=800), reading, _sb(1, "print_ended", -50)]
+    assert _left(events) == 700
+
+
+def test_an_ams_reading_while_printing_is_no_anchor() -> None:
+    base = [_event(0, "weighed", "scale", grams_after=800), _sb(1, "print_started", -40)]
+    printing = _event(2, "ams_reading", "ams_remain", data={"remain_pct": 74, "printing": True})
+    assert _left([*base, printing]) == 760
+    idle = _event(2, "ams_reading", "ams_remain", data={"remain_pct": 74})
+    assert _left([*base, idle]) == 740
+
+
+def test_bb_usage_and_sb_end_of_one_plate_count_once() -> None:
+    events = [
+        _event(0, "weighed", "scale", grams_after=800),
+        _sb(1, "print_started", -40),
+        _bb(2, -41),
+        _sb(3, "print_ended", -38),
+    ]
+    assert _left(events) == 759
+
+
+def test_a_bb_reading_holds_its_own_usage_row() -> None:
+    def bb_reading(minute: int) -> SpoolEvent:
+        return _event(minute, "synced_from_bb", "bb", grams_after=500, ref_kind="bb_spool")
+
+    ahead = [_sb(5, "print_ended", -38), _bb(10, -41), bb_reading(10)]
+    assert _left(ahead) == 500
+    behind = [_sb(2, "print_ended", -38), _bb(2, -41), bb_reading(10)]
+    assert _left(behind) == 500
+
+
+def test_an_ams_reading_after_the_sb_end_holds_a_pair_whose_bb_time_is_later() -> None:
+    events = [
+        _sb(5, "print_ended", -38),
+        _event(6, "ams_reading", "ams_remain", data={"remain_pct": 50}),
+        _bb(9, -41),
+    ]
+    assert _left(events) == 500
+
+
+def test_a_failed_plate_takes_bbs_partial_grams() -> None:
+    events = [
+        _event(0, "weighed", "scale", grams_after=600),
+        _sb(1, "print_ended", 0, data={"basis": "not_applied", "job": "J"}),
+        _bb(2, -23.4),
+    ]
+    assert _left(events) == pytest.approx(576.6)
+
+
+def test_one_spool_in_two_slots_is_one_bb_row() -> None:
+    events = [
+        _event(0, "weighed", "scale", grams_after=300),
+        _sb(1, "print_ended", -10, ref="r/J/0"),
+        _sb(1, "print_ended", -15, ref="r/J/1"),
+        _bb(2, -26),
+    ]
+    assert _left(events) == 274
+
+
+def test_a_job_from_an_old_ref_id_pairs() -> None:
+    old = _sb(1, "print_ended", -38, ref="run1/J/2")
+    assert "job" not in old.data
+    assert job_of(old) == "J"
+    assert job_of(_bb(2, -41)) == "J"
+    assert job_of(_event(1, "weighed", "scale", ref_kind="bb_scale", ref_id="a/b/c")) is None
+    events = [_event(0, "weighed", "scale", grams_after=800), old, _bb(2, -41)]
+    assert _left(events) == 759
 
 
 def _spool(pool: PgPool) -> UUID:

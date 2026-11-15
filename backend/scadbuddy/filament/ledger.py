@@ -12,17 +12,29 @@ of a ``print_actual`` event, or of a ``print_estimate`` event while no ``print_e
 event has its ``ref_id``: a print's actual replaces its estimate, and a print that ended
 with no actual known (``delta_g`` null) drops its estimate.
 
-The order is when things physically happened, so a print two sources both booked is
-counted once (§8.2, "Consumption is counted once"). An event that names its time (``at``)
-keeps it: a BB weighing or drying at BB's time, BB's state (``synced_from_bb``) at the BB
-row's ``updated_at``, a print's ``print_ended`` at its plate's start (`spools/native.py`
-`settle_uses_in`). A reading taken after a plate started is therefore read as holding that
-plate, and the plate's actual is not taken off it again. An event with no ``at`` is
-booked now: the clock's time, but never earlier than a microsecond after the spool's
+The order is when things physically happened (§8.2, "Consumption is counted once"). An
+event that names its time (``at``) keeps it: a BB weighing or drying at BB's time, BB's
+state (``synced_from_bb``) at the BB row's ``updated_at``, a BB usage row at its
+``created_at``, a print's ``print_started`` when the printer takes the plate and its
+``print_ended`` at the report that shows the plate's timed end. An event with no ``at``
+is booked now: the clock's time, but never earlier than a microsecond after the spool's
 newest event, so a clock that steps back (WSL's does) cannot put an event before the one
 it follows. That guard only moves an event booked now, never a named time, so it never
-pushes a physical time past a newer anchor. Two events of one time keep the order they
-were booked in (``seq``), as a pull's ``created`` and ``synced_from_bb`` at one BB time.
+pushes a physical time past a newer anchor. Three rules (#6263, spec §5.5):
+
+1. At one instant every delta comes before every reading, and events of one kind keep
+   the order they are given in (`events` gives them in insert order, ``seq``). A reading
+   taken as a plate ends holds that plate. BB writes a usage row and its spool's
+   ``updated_at`` at one instant, so a BB reading holds its own usage row.
+2. An ``ams_remain`` reading with ``data.printing`` true is recorded but is never an
+   anchor: the AMS remain % moves in steps during a plate.
+3. One plate is counted once. SB's events (``ref_kind`` `PRINT_RUN`) and BB's usage row
+   (`BB_USAGE`) of one job (`job_of`) on one spool are a pair. For a pair, SB's events
+   are skipped and BB's ``delta_g`` counts, because BB keeps a failed plate's partial
+   grams and SB books 0 g. The pair counts when it lies after the anchor, and each
+   anchor is compared in its own clock: an anchor from BB (`BB_REFS`) with BB's usage
+   time, any other anchor with SB's time of the plate (its newest end, else its start).
+   So the skew between BB's clock and SB's cannot count a plate twice or drop it.
 
 `refresh_derived` reads a spool's whole history for each event. That is cheap at a few
 events a print; #6263's AMS readings, one per tick, will need an incremental path.
@@ -49,6 +61,26 @@ _ABSOLUTE = frozenset({"scale", "person", "bb", "ams_remain"})
 _MANUAL = frozenset({"scale", "person"})
 _DELTA = frozenset({"print_actual", "print_estimate"})
 _USED = frozenset({"print_started", "print_ended"})
+
+#: The ``ref_kind`` of SB's plate events (``ref_id`` ``run/subtask/slot``).
+PRINT_RUN = "print_run"
+#: The ``ref_kind`` of a BB usage row booked on the spool.
+BB_USAGE = "bb_usage"
+#: The ``ref_kind``s of the events that carry BB's clock.
+BB_REFS = frozenset({"bb_spool", "bb_scale", "bb_dried", BB_USAGE})
+
+
+def job_of(event: m.SpoolEvent) -> str | None:
+    """The job an event belongs to: ``data.job``, else for a `PRINT_RUN` event from
+    before #6263 the subtask in its ``ref_id`` (``run/subtask/slot``)."""
+    job = event.data.get("job")
+    if isinstance(job, str):
+        return job
+    if event.ref_kind == PRINT_RUN and event.ref_id:
+        parts = event.ref_id.split("/")
+        if len(parts) >= 3:
+            return "/".join(parts[1:-1])
+    return None
 
 
 def record(
@@ -127,8 +159,10 @@ def grams_left(
     events: Sequence[m.SpoolEvent], *, weight_locked: bool, label_weight_g: int | None
 ) -> float | None:
     """The grams left on a spool by the rule above; ``None`` with no reading to anchor
-    on. Never below zero. Events of one time keep the order they are given in."""
-    ordered = sorted(events, key=lambda e: e.at)
+    on. Never below zero. At one time, deltas come first and events of one kind keep the
+    order they are given in (rule 1)."""
+    # sorted() is stable, so the given order breaks the remaining ties.
+    ordered = sorted(events, key=lambda e: (e.at, 0 if e.source in _DELTA else 1))
     readings = [_reading(e, label_weight_g) for e in ordered]
     manual = max(
         (i for i, e in enumerate(ordered) if e.source in _MANUAL and readings[i] is not None),
@@ -138,16 +172,40 @@ def grams_left(
     for i, event in enumerate(ordered):
         if readings[i] is None:
             continue
-        if event.source == "ams_remain" and (weight_locked or i < manual):
+        if event.source == "ams_remain" and (
+            weight_locked or i < manual or event.data.get("printing") is True
+        ):
             continue
         anchor = i
     if anchor < 0:
         return None
+    # Rule 3: a job with a BB usage row and an SB plate event on this spool is a pair.
+    # `plate` is SB's position of the plate per job: its newest end, else its newest start.
+    used = {job_of(e) for e in ordered if e.ref_kind == BB_USAGE and e.kind == "print_ended"}
+    ends: dict[str, int] = {}
+    starts: dict[str, int] = {}
+    for i, event in enumerate(ordered):
+        job = job_of(event)
+        if event.ref_kind == PRINT_RUN and job in used and job is not None:
+            if event.kind == "print_ended":
+                ends[job] = i
+            elif event.kind == "print_started":
+                starts[job] = i
+    plate = starts | ends
+    bb_anchor = ordered[anchor].ref_kind in BB_REFS
     ended = {(e.ref_kind, e.ref_id) for e in ordered if e.kind == "print_ended" and e.ref_id}
     value = readings[anchor]
     assert value is not None
-    for event in ordered[anchor + 1 :]:
-        if event.source not in _DELTA or event.delta_g is None:
+    for i, event in enumerate(ordered):
+        job = job_of(event)
+        if job in plate and event.ref_kind == PRINT_RUN:
+            continue
+        if job in plate and event.ref_kind == BB_USAGE:
+            after = i > anchor if bb_anchor else plate[job] > anchor
+            if after and event.kind == "print_ended" and event.delta_g is not None:
+                value += event.delta_g
+            continue
+        if i <= anchor or event.source not in _DELTA or event.delta_g is None:
             continue
         if event.source == "print_estimate" and (event.ref_kind, event.ref_id) in ended:
             continue
