@@ -339,7 +339,10 @@ def resolve_choice(
             rest = [n for n in kept if n != name]
             if rest and fits(rest) is None:
                 kept = rest
-        raise ColoursClashError([n for n in parts if n in kept])
+        # Named in the template's parameter order, then the slots: `listing.params`
+        # comes from jsonb, which keeps no key order (#6302 CI).
+        place = {name: i for i, name in enumerate(by_name)}
+        raise ColoursClashError(sorted(kept, key=lambda n: (place.get(n, len(place)), n)))
     if chosen is None:
         # No colour to choose and no filament: the shop picks the slots.
         return ResolvedChoice(material=None, values=dict(values), filaments=[])
