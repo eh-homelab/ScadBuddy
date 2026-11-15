@@ -97,7 +97,7 @@ export type TurnCoreDeps = {
   transcripts: Pick<PostgresSessionStore, 'userLanded'>
   runner: Pick<TurnRunner, 'assemble'>
   warm: WarmSessions
-  events: Pick<EventLog, 'append' | 'committed'>
+  events: Pick<EventLog, 'append' | 'committed' | 'appendFenced'>
   blobs: Pick<SessionImages, 'put'>
   credentials: CredentialSource
   probe?: (credential: Credential, model: string | undefined) => Promise<ProbeVerdict>

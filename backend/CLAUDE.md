@@ -346,6 +346,12 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`turn_attempt`, `durable_turn_id`, `FOR SHARE`) and its insert are one transaction, and a
   fork's transcript is read through its chain (`LEAST(bound, cut)`) in one snapshot, read again
   when an ancestor was forgotten meanwhile (tests `tests/crud/test_crud_agent_transcripts.py`).
+  `events.py` is a session's event log, for `api/crud_agent_events.py` (area `session-events`,
+  #5299 step 9, part b): the agent's `PgEventRows` statement for statement, a seq taken from
+  `ai_sessions.event_seq` in the insert's statement, a turn's append fenced `FOR UPDATE` on its
+  placement, a fork's read through its chain (`LEAST(bound, cut)`) in one statement, and a new
+  fork's log under its parent's payload-key lock, shared (tests
+  `tests/crud/test_crud_agent_events.py`).
 - The agent's small stores (#5299 step 5): `api/crud_agent_stores.py` (areas
   `activity-kinds`, `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`) and
   `api/crud_agent_notify.py` (area `notify`, sealed with the KEK under the agent's AAD), each

@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events'
 import type { Sql, TransactionSql } from 'postgres'
 import type { AppendHook } from './busEvents.js'
+import { payloadKeyLock } from '../temporal/payloadCodec.js'
 import type { ServerEvent } from './protocol.js'
 
 // Each session's panel-protocol events, in order, in `ai_session_events`
@@ -24,7 +25,7 @@ import type { ServerEvent } from './protocol.js'
 // A fork is copy-on-write for its log (#4212): its `ai_sessions` row names the session it was
 // forked from (`fork_parent_id`) and the seq of the last event of that session's log, as that
 // session reads it, it takes (`fork_event_cut`). Its own `session.started` is its seq 1, and its
-// own later events come after the cut (`inheritThrough`), so `read` is the parent's conversation
+// own later events come after the cut (`forkLog`), so `read` is the parent's conversation
 // events through the cut (for a fork of a fork, the parent's own read, through the smallest cut on
 // the chain) in among the child's own rows, by seq, each addressed to the child. Nothing is copied
 // at the fork. Forgetting a parent copies each child's range into the child first
@@ -37,7 +38,7 @@ export type LoggedEvent = { seq: number; event: ServerEvent }
 export const FORK_EVENT_TYPES: readonly ServerEvent['type'][] = ['user.turn', 'assistant.text.delta', 'assistant.text.done', 'tool.call', 'tool.result']
 
 export const DEFAULT_POLL_MS = 1000
-const PAGE = 500
+export const PAGE = 500
 
 /**
  * `sessionId` and the sessions its log reads through: each one's id, its depth (the session itself
@@ -59,7 +60,7 @@ export function forkChain(sql: Sql | TransactionSql, sessionId: string) {
  * The rows of `sessionId`'s log after `afterSeq`, by seq: its own (with `ancestors`) and those it
  * takes through its fork chain, the latter re-addressed to it. One statement, so one snapshot.
  */
-async function chainRows(
+export async function chainRows(
   sql: Sql | TransactionSql,
   sessionId: string,
   afterSeq: number,
@@ -129,8 +130,114 @@ export async function appendEventsIn(db: Sql | TransactionSql, sessionId: string
   return rows.map((r) => Number(r.seq)).sort((a, b) => a - b)
 }
 
+/** The placement that writes a turn's events (turnHost.ts): the row still names it, checked `FOR UPDATE` in the append's transaction. */
+export type TurnFence = { attempt: string; turnId: string }
+
+/** A turn's own events from its `user.turn` on (flowSessions.ts `turnReader`): whether the session stands, the seq read through. */
+export type TurnEvents = { here: boolean; after: string | undefined; events: ServerEvent[] }
+
+/** A new fork's log could not be written: its parent was forgotten since the fork's insert. */
+export class ForkParentGone extends Error {}
+
+/**
+ * Where a session's log is kept (#5299 step 9, part b): `PgEventRows` on the agent's SQL, or the
+ * API's CRUD routes (`crudEvents.ts` `CrudEventRows`, area `session-events`), each method one
+ * statement or one transaction. An append with a caller's own transaction stays `appendEventsIn`.
+ */
+export interface EventRows {
+  /** The events appended, their seqs; with `fence` only while the row names that placement (undefined otherwise). */
+  append(sessionId: string, events: readonly ServerEvent[], fence?: TurnFence): Promise<number[] | undefined>
+  read(sessionId: string, afterSeq: number, limit: number): Promise<LoggedEvent[]>
+  userTurnText(sessionId: string, turnId: string): Promise<string | undefined>
+  lastSeq(sessionId: string): Promise<number>
+  turnEvents(sessionId: string, turnId: string, after: string | undefined): Promise<TurnEvents>
+  /**
+   * A new fork's own `started`, its parent's log taken through `cut`, then its own `then`, in one
+   * transaction under the parent's payload-key lock, shared; their seqs. `ForkParentGone` once the
+   * parent was forgotten since the fork's insert.
+   */
+  forkLog(childId: string, parentId: string, cut: number, started: readonly ServerEvent[], then: readonly ServerEvent[]): Promise<number[]>
+}
+
+export class PgEventRows implements EventRows {
+  readonly #sql: Sql
+
+  constructor(sql: Sql) {
+    this.#sql = sql
+  }
+
+  async append(sessionId: string, events: readonly ServerEvent[], fence?: TurnFence): Promise<number[] | undefined> {
+    if (!fence) return appendEventsIn(this.#sql, sessionId, events)
+    return this.#sql.begin(async (tx) => {
+      const [held] = await tx`
+        SELECT 1 FROM ai_sessions WHERE id = ${sessionId} AND turn_attempt = ${fence.attempt} AND durable_turn_id = ${fence.turnId} FOR UPDATE`
+      return held ? appendEventsIn(tx, sessionId, events) : undefined
+    })
+  }
+
+  read(sessionId: string, afterSeq: number, limit: number): Promise<LoggedEvent[]> {
+    return chainRows(this.#sql, sessionId, afterSeq, limit, true)
+  }
+
+  async userTurnText(sessionId: string, turnId: string): Promise<string | undefined> {
+    const [row] = await this.#sql<{ event: string }[]>`
+      SELECT event FROM ai_session_events WHERE ${userTurnRows(this.#sql, sessionId, turnId)}
+      ORDER BY seq DESC LIMIT 1`
+    const turn = row ? (JSON.parse(row.event) as ServerEvent) : undefined
+    return turn?.type === 'user.turn' ? turn.text : undefined
+  }
+
+  async lastSeq(sessionId: string): Promise<number> {
+    const [row] = await this.#sql<{ event_seq: string }[]>`
+      SELECT event_seq FROM ai_sessions WHERE id = ${sessionId}`
+    return row ? Number(row.event_seq) : 0
+  }
+
+  async turnEvents(sessionId: string, turnId: string, after: string | undefined): Promise<TurnEvents> {
+    const sql = this.#sql
+    if (after === undefined) {
+      const [start] = await sql<{ here: boolean; seq: string | null }[]>`
+        SELECT EXISTS (SELECT 1 FROM ai_sessions WHERE id = ${sessionId}::uuid) AS here, e.seq
+          FROM (SELECT 1) AS one
+          LEFT JOIN ai_session_events e ON ${userTurnRows(sql, sessionId, turnId)}
+          ORDER BY e.seq DESC NULLS LAST LIMIT 1`
+      if (!start?.here) return { here: false, after: undefined, events: [] }
+      if (start.seq === null) return { here: true, after: undefined, events: [] }
+      after = start.seq
+    }
+    const rows = await sql<{ here: boolean; seq: string | null; event: string | null }[]>`
+      SELECT EXISTS (SELECT 1 FROM ai_sessions WHERE id = ${sessionId}::uuid) AS here, e.seq, e.event
+        FROM (SELECT 1) AS one
+        LEFT JOIN LATERAL (
+          SELECT seq, event FROM ai_session_events WHERE session_id = ${sessionId} AND seq > ${after} ORDER BY seq
+        ) e ON true`
+    if (!rows[0]?.here) return { here: false, after: undefined, events: [] }
+    const events: ServerEvent[] = []
+    for (const r of rows) {
+      if (r.seq === null || r.event === null) continue
+      events.push(JSON.parse(r.event) as ServerEvent)
+      after = r.seq
+    }
+    return { here: true, after, events }
+  }
+
+  forkLog(childId: string, parentId: string, cut: number, started: readonly ServerEvent[], then: readonly ServerEvent[]): Promise<number[]> {
+    return this.#sql.begin(async (tx) => {
+      // Under the parent's lock, shared, as the insert was: a forget of the parent since the insert
+      // has copied the child's transcript and cleared its link, and the log it reads through is gone.
+      await tx`SELECT pg_advisory_xact_lock_shared(hashtext(${payloadKeyLock(`session-${parentId}`)}))`
+      const [linked] = await tx`SELECT 1 FROM ai_sessions WHERE id = ${childId}::uuid AND fork_parent_id = ${parentId}::uuid`
+      if (!linked) throw new ForkParentGone(`session ${parentId} was forgotten while it was forked`)
+      const first = await appendEventsIn(tx, childId, started)
+      await tx`
+        UPDATE ai_sessions SET fork_event_cut = ${cut}, event_seq = GREATEST(event_seq, ${cut}) WHERE id = ${childId}`
+      return [...first, ...(await appendEventsIn(tx, childId, then))]
+    })
+  }
+}
+
 export class EventLog {
-  private readonly sql: Sql
+  private readonly rows: EventRows
   private readonly pollMs: number
   private readonly emitter = new EventEmitter()
   /**
@@ -146,8 +253,9 @@ export class EventLog {
   /** Told of every append once it has committed (busEvents.ts, the `session.*` publisher). */
   private readonly onAppend: AppendHook | undefined
 
-  constructor(sql: Sql, options: { pollMs?: number; onAppend?: AppendHook } = {}) {
-    this.sql = sql
+  /** `rows` is where the log is kept: `PgEventRows` on `sql` when omitted, the API's routes once main.ts gates them in. */
+  constructor(sql: Sql, options: { pollMs?: number; onAppend?: AppendHook; rows?: EventRows } = {}) {
+    this.rows = options.rows ?? new PgEventRows(sql)
     this.pollMs = options.pollMs ?? DEFAULT_POLL_MS
     this.onAppend = options.onAppend
     this.emitter.setMaxListeners(0)
@@ -159,9 +267,36 @@ export class EventLog {
    * change they report; the caller then calls `committed` once it has committed.
    */
   async append(sessionId: string, events: readonly ServerEvent[], tx?: TransactionSql): Promise<number[]> {
-    const seqs = await appendEventsIn(tx ?? this.sql, sessionId, events)
-    if (!tx && seqs.length > 0) this.committed(sessionId, events, seqs)
+    if (tx) return appendEventsIn(tx, sessionId, events)
+    const seqs = events.length === 0 ? [] : ((await this.rows.append(sessionId, events)) ?? [])
+    if (seqs.length > 0) this.committed(sessionId, events, seqs)
     return seqs
+  }
+
+  /**
+   * A turn's events, only while the row names its placement (`fence`, checked `FOR UPDATE` in the
+   * append's transaction); committed once written. Whether they were written.
+   */
+  async appendFenced(sessionId: string, events: readonly ServerEvent[], fence: TurnFence): Promise<boolean> {
+    if (events.length === 0) return true
+    const seqs = await this.rows.append(sessionId, events, fence)
+    if (seqs) this.committed(sessionId, events, seqs)
+    return seqs !== undefined
+  }
+
+  /**
+   * A new fork's log (`EventRows.forkLog`), committed once written: its own `started`, its
+   * parent's log through `cut`, then its own `then`.
+   */
+  async forkLog(childId: string, parentId: string, cut: number, started: readonly ServerEvent[], then: readonly ServerEvent[]): Promise<number[]> {
+    const seqs = await this.rows.forkLog(childId, parentId, cut, started, then)
+    this.committed(childId, [...started, ...then], seqs)
+    return seqs
+  }
+
+  /** A turn's own events from its `user.turn` on, past `after` (flowSessions.ts). */
+  turnEvents(sessionId: string, turnId: string, after: string | undefined): Promise<TurnEvents> {
+    return this.rows.turnEvents(sessionId, turnId, after)
   }
 
   /**
@@ -184,18 +319,9 @@ export class EventLog {
     this.onAppend(sessionId, events, await this.lastSeq(sessionId))
   }
 
-  /**
-   * A new fork (`sessionId`, its `session.started` already logged) takes its parent's log through
-   * seq `cut`: its own events go on after it. Its row must already name the parent.
-   */
-  async inheritThrough(sessionId: string, cut: number, tx?: TransactionSql): Promise<void> {
-    await (tx ?? this.sql)`
-      UPDATE ai_sessions SET fork_event_cut = ${cut}, event_seq = GREATEST(event_seq, ${cut}) WHERE id = ${sessionId}`
-  }
-
   /** Events after `afterSeq`, oldest first: a fork's through its chain too. */
   async read(sessionId: string, afterSeq = 0, limit = PAGE): Promise<LoggedEvent[]> {
-    return chainRows(this.sql, sessionId, afterSeq, limit, true)
+    return this.rows.read(sessionId, afterSeq, limit)
   }
 
   /**
@@ -205,11 +331,7 @@ export class EventLog {
    * it: the read's cost still grows with the session, only the transfer does not.
    */
   async userTurnText(sessionId: string, turnId: string): Promise<string | undefined> {
-    const [row] = await this.sql<{ event: string }[]>`
-      SELECT event FROM ai_session_events WHERE ${userTurnRows(this.sql, sessionId, turnId)}
-      ORDER BY seq DESC LIMIT 1`
-    const turn = row ? (JSON.parse(row.event) as ServerEvent) : undefined
-    return turn?.type === 'user.turn' ? turn.text : undefined
+    return this.rows.userTurnText(sessionId, turnId)
   }
 
   /**
@@ -217,9 +339,7 @@ export class EventLog {
    * from "now". `sessionId` must be a session's id (a UUID).
    */
   async lastSeq(sessionId: string): Promise<number> {
-    const [row] = await this.sql<{ event_seq: string }[]>`
-      SELECT event_seq FROM ai_sessions WHERE id = ${sessionId}`
-    return row ? Number(row.event_seq) : 0
+    return this.rows.lastSeq(sessionId)
   }
 
   /**

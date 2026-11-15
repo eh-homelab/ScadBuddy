@@ -92,6 +92,8 @@ import { harnessTools } from './tools/harness.js'
 import { CrudResourceRows, PgResourceRows, type ResourceRows, SessionResources } from './sessions/touched.js'
 import { CrudSessionRows, PgSessionRows, type SessionRows } from './sessions/rows.js'
 import { CrudTranscriptRows } from './sessions/crudTranscripts.js'
+import { CrudEventRows } from './sessions/crudEvents.js'
+import { type EventRows, PgEventRows } from './sessions/eventLog.js'
 import { PgTranscriptRows, type TranscriptRows } from './sessions/store.js'
 import { crudCostPoster, OrderCosts, touchedSinks } from './sessions/orderCosts.js'
 import { ALL_TOOLS } from './tools/index.js'
@@ -294,6 +296,10 @@ const resourceRows = (sql: Sql): ResourceRows => gated<ResourceRows>(new PgResou
 const crudTranscripts = new CrudTranscriptRows(config.backendUrl, { fetch: crudFetch })
 const transcriptRows = (sql: Sql, keys: PayloadKeys | undefined): TranscriptRows =>
   gated<TranscriptRows>(new PgTranscriptRows(sql, keys), crudTranscripts, () => crudAreas.has('transcripts'))
+// The sessions' event logs (#5299 step 9, part b, backend api/crud_agent_events.py): over SQL until
+// the API lists area `session-events`. An append in a caller's own transaction stays SQL.
+const crudEvents = new CrudEventRows(config.backendUrl, { fetch: crudFetch })
+const eventRows = (sql: Sql): EventRows => gated<EventRows>(new PgEventRows(sql), crudEvents, () => crudAreas.has('session-events'))
 // The headless browser's approved origins (#982), over `sql` or through area `browser-origins`.
 const browserOriginsOn = (sql: Sql) =>
   new BrowserOrigins(sql, settings, { crud: new CrudSessionOrigins(crudTarget), use: storeArea('browser-origins') })
@@ -653,6 +659,7 @@ const sessions =
         rows: sessionRows(database.sql),
         resourceRows: resourceRows(database.sql),
         transcripts: transcriptRows(database.sql, dataKeys),
+        eventRows: eventRows(database.sql),
         blobs: sessionImages(database.sql),
         httpBodies: httpBodies(database.sql),
         browserOrigins: browserOriginsOn(database.sql),
@@ -1117,7 +1124,7 @@ const temporalWorker =
           ...turnToolActivities(turnToolDeps),
           default: turnToolActivity(turnToolDeps),
           // A flow's agent(...) and ask_session(...) (#1057, 6g): beside the tools, never one.
-          ...flowSessionActivities({ sql: temporal.sql, flows: new PgFlowRuns(temporal.sql, flowReads) }),
+          ...flowSessionActivities({ sql: temporal.sql, flows: new PgFlowRuns(temporal.sql, flowReads), events: eventRows(temporal.sql) }),
           ...operationActivities(commandKinds, operationStore),
           ...(background ?? {}),
         },

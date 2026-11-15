@@ -15,7 +15,7 @@ import type { Sql } from 'postgres'
 import type { BrowserOrigins } from '../browser/store.js'
 import type { Tier } from '../auth/principal.js'
 import type { Credential } from '../credentials.js'
-import { payloadKeyLock, type PayloadKeys } from '../temporal/payloadCodec.js'
+import type { PayloadKeys } from '../temporal/payloadCodec.js'
 import type { ProbeVerdict } from '../harness/credentialErrors.js'
 import type { CredentialSource } from '../harness/fallback.js'
 import type { HarnessPaths } from '../harness/options.js'
@@ -40,7 +40,7 @@ import { SERVER_NAME } from '../tools/projections.js'
 import type { FlowTurn, TabWait, Tool, WaitForTab } from '../tools/registry.js'
 import type { AuditContext, AuditDeps } from '../audit/log.js'
 import type { AppendHook } from './busEvents.js'
-import { EventLog, type LoggedEvent } from './eventLog.js'
+import { EventLog, type EventRows, ForkParentGone, type LoggedEvent } from './eventLog.js'
 import {
   canSee,
   event,
@@ -663,6 +663,8 @@ export type SessionManagerDeps = {
   resourceRows?: ResourceRows
   /** Where the transcripts' rows are kept (`PgTranscriptRows` on `sql` with `payloadKeys` when omitted; gated in main.ts, #5299 step 9). */
   transcripts?: TranscriptRows
+  /** Where the sessions' event logs are kept (`PgEventRows` on `sql` when omitted; gated in main.ts, #5299 step 9). */
+  eventRows?: EventRows
   /** The backend's flow tables, through its CRUD routes (flows/backendReads.ts, #5299 D7). */
   flowReads: FlowRunReads
   paths: HarnessPaths
@@ -946,6 +948,7 @@ export class SessionManager {
     this.blobs = deps.blobs ?? new SessionBlobs(deps.sql)
     this.files = deps.workspace ?? new SessionFiles(deps.sql, { settings: deps.settings })
     this.events = new EventLog(deps.sql, {
+      ...(deps.eventRows ? { rows: deps.eventRows } : {}),
       ...(deps.pollMs === undefined ? {} : { pollMs: deps.pollMs }),
       ...(deps.onAppend ? { onAppend: deps.onAppend } : {}),
     })
@@ -1663,24 +1666,16 @@ export class SessionManager {
       mode: child.mode,
     })
     const idle = event({ type: 'session.status', sessionId: childId, status: 'idle' })
-    let seqs: number[]
     try {
-      seqs = await this.deps.sql.begin(async (tx) => {
-        // Under the parent's lock, shared, as the insert was: a forget of the parent since the insert
-        // has copied the child's transcript and cleared its link, and the log it reads through is gone.
-        await tx`SELECT pg_advisory_xact_lock_shared(hashtext(${payloadKeyLock(`session-${id}`)}))`
-        const [linked] = await tx`SELECT 1 FROM ai_sessions WHERE id = ${childId}::uuid AND fork_parent_id = ${id}::uuid`
-        if (!linked) throw new SessionError('not_found', `session ${id} was forgotten while it was forked`)
-        const first = await this.events.append(childId, [started], tx)
-        await this.events.inheritThrough(childId, eventCut, tx)
-        return [...first, ...(await this.events.append(childId, [idle], tx))]
-      })
+      // Under the parent's lock, shared, as the insert was (eventLog.ts `forkLog`): a forget of the
+      // parent since the insert has copied the child's transcript and cleared its link.
+      await this.events.forkLog(childId, id, eventCut, [started], [idle])
     } catch (err) {
       // A fork with no log is no fork: it goes whole, as one whose files could not be copied.
       await this.dropFailedFork(childId)
+      if (err instanceof ForkParentGone) throw new SessionError('not_found', err.message)
       throw err
     }
-    this.events.committed(childId, [started, idle], seqs)
     // Recorded once the child is complete (#2159): a fork that failed after the insert has only
     // the failures-only mount's `error` row (app.ts), never an `ok` one beside it.
     if (options.audit) {

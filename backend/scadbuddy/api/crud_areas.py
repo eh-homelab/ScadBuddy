@@ -58,7 +58,10 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: ``transcripts`` area is ``…/agent/transcripts`` and ``…/agent/sessions/{id}/entries``,
 #: ``…/transcript``, ``…/cwd`` and ``…/subkeys`` with every route under them: a session's
 #: transcript, sealed and opened on the API, a fork's read through its chain (#5299 step 9,
-#: `api/crud_agent_transcripts.py`). The print ``uploads``
+#: `api/crud_agent_transcripts.py`). Its ``session-events`` area is
+#: ``…/agent/sessions/{id}/events`` and ``…/fork-log`` with every route under them: a session's
+#: event log, a fork's read through its chain (#5299 step 9, `api/crud_agent_events.py`). The
+#: print ``uploads``
 #: area also covers ``…/print/slices`` and ``…/print/slice-starts`` (#5298 Task 25). Its
 #: ``previews`` area also covers ``…/print/project-targets``, ``…/print/folderless`` and
 #: ``…/print/destination-touches`` (#5298 Task 26). Its ``copy-leases`` area is
@@ -143,6 +146,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "sessions",
         "session-resources",
         "transcripts",
+        "session-events",
     ],
     "intake": ["sources"],
 }

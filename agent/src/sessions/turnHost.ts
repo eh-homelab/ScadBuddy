@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { SDKResultMessage } from '@anthropic-ai/claude-agent-sdk'
 import { ApplicationFailure } from '@temporalio/common'
 import { context as otelContext } from '@opentelemetry/api'
-import type { Sql, TransactionSql } from 'postgres'
+import type { Sql } from 'postgres'
 import type { GateTrace } from '../approvals/service.js'
 import { contextFrom } from '../telemetry/trace.js'
 import { turnCostEntry } from '../audit/turn.js'
@@ -455,17 +455,6 @@ export class TurnHost {
       return undefined
     }
     /**
-     * This placement still holds its turn: checked, row locked, in each write's own transaction.
-     * The turn as well as the attempt: an attempt id is the run's and the cycle's, so the next
-     * turn's first placement in the same run carries this one's, and the turn ended leaves it.
-     */
-    const holds = async (tx: TransactionSql, lock: 'share' | 'update') => {
-      const rows = lock === 'share'
-        ? await tx`SELECT 1 FROM ai_sessions WHERE id = ${id} AND turn_attempt = ${attempt} AND durable_turn_id = ${turnId} FOR SHARE`
-        : await tx`SELECT 1 FROM ai_sessions WHERE id = ${id} AND turn_attempt = ${attempt} AND durable_turn_id = ${turnId} FOR UPDATE`
-      return rows.length > 0
-    }
-    /**
      * The transcript's fence (store.ts `AppendFence`): this placement holds the row, or is the
      * session's last placement and no turn runs, checked FOR SHARE in each append's transaction.
      */
@@ -521,11 +510,11 @@ export class TurnHost {
       // A tool result's images, and its events, only while this placement holds the turn, checked with the write.
       // `holds(tx, 'share')`'s check, run on whichever side stores the images.
       storeImages: (images) => this.#deps.images.putIf(id, images, { attempt, turnId }),
-      appendEvents: async (batch) => {
-        const written = await sql.begin(async (tx) => ((await holds(tx, 'update')) ? await events.append(id, batch, tx) : undefined))
-        if (written) events.committed(id, batch, written)
-        return written !== undefined
-      },
+      // This placement still holds its turn: checked, row locked, in the append's own transaction, on
+      // whichever side keeps the log (eventLog.ts `appendFenced`). The turn as well as the attempt: an
+      // attempt id is the run's and the cycle's, so the next turn's first placement in the same run
+      // carries this one's, and the turn ended leaves it.
+      appendEvents: (batch) => events.appendFenced(id, batch, { attempt, turnId }),
     }))
     // The fence: still the row's placement and turn, and what it has spent so far written. A
     // Stop's flag (DurableTurns.interrupt) ends the turn here, on this tick: the workflow's

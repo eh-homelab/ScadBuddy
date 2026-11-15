@@ -30,23 +30,24 @@ describe.skipIf(!TEST_DATABASE_URL)(`fork event logs and images${TEST_DATABASE_U
     await t?.drop()
   })
 
-  /** A session row, and its `session.started` as its seq 1, as every session's log begins. */
-  async function session(parent?: string): Promise<string> {
+  /** A session row, and its `session.started` as its seq 1, as every session's log begins (a fork's comes with its log, `fork`). */
+  async function session(parent?: string, logged = true): Promise<string> {
     const id = randomUUID()
     await t.db.sql`
       INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd,
                                fork_parent_id, fork_cut)
       VALUES (${id}, 'mcp', 'browser', 'browser', 'Someone', 'browser', 'browser', 'idle', 10, 1,
               ${parent ?? null}, ${parent ? 0 : null})`
-    await log.append(id, [event({ type: 'session.started', sessionId: id, origin: 'mcp', owner: BROWSER, title: 't' })])
+    if (logged) await log.append(id, [started(id)])
     return id
   }
 
+  const started = (id: string) => event({ type: 'session.started', sessionId: id, origin: 'mcp', owner: BROWSER, title: 't' })
+
   /** A fork of `parent` that takes its log through seq `cut`, as SessionManager.fork makes one. */
   async function fork(parent: string, cut: number): Promise<string> {
-    const child = await session(parent)
-    await log.inheritThrough(child, cut)
-    await log.append(child, [event({ type: 'session.status', sessionId: child, status: 'idle' })])
+    const child = await session(parent, false)
+    await log.forkLog(child, parent, cut, [started(child)], [event({ type: 'session.status', sessionId: child, status: 'idle' })])
     return child
   }
 

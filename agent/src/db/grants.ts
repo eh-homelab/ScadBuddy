@@ -39,7 +39,8 @@ type Grants = Readonly<Record<string, readonly string[]>>
  * session's row as the session manager reads and writes it, a failed fork discarded with its
  * transcript rows and its key, and what its tool calls touched (#5299 step 9,
  * `api/crud_agent_sessions.py`). And a session's transcript, sealed and opened by the API
- * (#5299 step 9, part b, `api/crud_agent_transcripts.py`). */
+ * (#5299 step 9, part b, `api/crud_agent_transcripts.py`), and its event log
+ * (`api/crud_agent_events.py`). */
 export const API_AI_GRANTS: Grants = {
   ai_payload_keys: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   ai_forgotten_subjects: ['SELECT', 'INSERT'],
