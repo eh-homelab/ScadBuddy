@@ -442,6 +442,14 @@ class NativeLibraryStore:
         with self._pool.connection() as conn:
             return _rows_of_output(conn, output_id, which="filed")
 
+    def live_for_outputs(self, output_ids: list[str]) -> list[NativeFile]:
+        """Every live row naming one of ``output_ids``, filed or moved (#6395)."""
+        return self._files(
+            f"SELECT {_FILE_COLUMNS} FROM library_files WHERE output_id = ANY(%s)"
+            f" AND deleted_at IS NULL ORDER BY id",
+            (list(output_ids),),
+        )
+
     def live_copy_in_folder(self, output_id: str, folder_id: int) -> NativeFile | None:
         """The output's live copy in ``folder_id``, if any; no lock, so a hint only."""
         with self._pool.connection() as conn:
