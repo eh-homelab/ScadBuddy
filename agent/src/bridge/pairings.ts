@@ -1,7 +1,7 @@
 import { createHash, randomInt, randomUUID, timingSafeEqual } from 'node:crypto'
 import type { Sql } from 'postgres'
 import { CrudReadError } from '../api/crudRead.js'
-import { type CrudTarget, crudOf, qs } from '../api/crudStores.js'
+import { chunks, type CrudTarget, crudOf, qs, segment, TABS_PER_CALL, UUID_SEGMENT } from '../api/crudStores.js'
 import type { Principal } from '../auth/principal.js'
 
 // Pairing an external agent with the user's tab (spec §8.5, #254). The
@@ -312,7 +312,7 @@ export class CrudPairingStore implements PairingStore {
       principal_kind: Principal['kind'] | null
       principal_id: string | null
       attempts_left: number | null
-    }>('a pairing accepted', `/pairings/${id}/accept`, { body: { code_hash: hashCode(code), tab_id: tabId } })
+    }>('a pairing accepted', `/pairings/${segment(id, UUID_SEGMENT, 'a pairing id')}/accept`, { body: { code_hash: hashCode(code), tab_id: tabId } })
     if (answer.result === 'ok' && answer.pairing && answer.principal_kind && answer.principal_id) {
       return { ok: true, pairing: fromWire(answer.pairing), principal: { kind: answer.principal_kind, id: answer.principal_id } }
     }
@@ -322,12 +322,12 @@ export class CrudPairingStore implements PairingStore {
 
   async deny(id: string): Promise<boolean> {
     if (!UUID.test(id)) return false
-    return (await this.#call<{ done: boolean }>('a pairing denied', `/pairings/${id}/deny`, { method: 'POST' })).done
+    return (await this.#call<{ done: boolean }>('a pairing denied', `/pairings/${segment(id, UUID_SEGMENT, 'a pairing id')}/deny`, { method: 'POST' })).done
   }
 
   async end(id: string, tabId: string): Promise<boolean> {
     if (!UUID.test(id)) return false
-    return (await this.#call<{ done: boolean }>('a pairing ended', `/pairings/${id}/end`, { body: { tab_id: tabId } })).done
+    return (await this.#call<{ done: boolean }>('a pairing ended', `/pairings/${segment(id, UUID_SEGMENT, 'a pairing id')}/end`, { body: { tab_id: tabId } })).done
   }
 
   async pairedTab(principal: Pick<Principal, 'kind' | 'id'>, signal?: AbortSignal): Promise<(PairingView & { tabId: string }) | undefined> {
@@ -347,9 +347,11 @@ export class CrudPairingStore implements PairingStore {
 
   async pairedWith(tabIds: readonly string[]): Promise<Map<string, PairingView[]>> {
     const out = new Map<string, PairingView[]>()
-    if (tabIds.length === 0) return out
-    const { pairings } = await this.#call<{ pairings: WirePairedTab[] }>('the pairings of tabs', '/pairings/paired-with', { body: { tab_ids: tabIds } })
-    for (const p of pairings) out.set(p.tab_id, [...(out.get(p.tab_id) ?? []), fromWire(p)])
+    // In runs the route takes; each tab's pairings come in one run, so their order holds.
+    for (const run of chunks(tabIds, TABS_PER_CALL)) {
+      const { pairings } = await this.#call<{ pairings: WirePairedTab[] }>('the pairings of tabs', '/pairings/paired-with', { body: { tab_ids: run } })
+      for (const p of pairings) out.set(p.tab_id, [...(out.get(p.tab_id) ?? []), fromWire(p)])
+    }
     return out
   }
 }

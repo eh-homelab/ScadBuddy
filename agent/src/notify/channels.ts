@@ -4,8 +4,8 @@ import { assertHostAllowed, EgressError, isPrivateAddress, type Resolver, system
 import { isLoopbackPeer } from '../http/origins.js'
 import { pinnedFetch } from '../http/pinned.js'
 import { CrudReadError } from '../api/crudRead.js'
-import { type CrudTarget, crudOf } from '../api/crudStores.js'
-import { type Envelope, type Kek, last4, openSecret, rewrap, SealError, sealSecret } from '../secrets.js'
+import { type CrudTarget, crudOf, segment, UUID_SEGMENT } from '../api/crudStores.js'
+import { type Envelope, type Kek, last4, openSecret, sealSecret } from '../secrets.js'
 
 // #815 §3, out of the browser: an ntfy topic or a Home Assistant notify service, set in
 // Settings (routes/notifyChannels.ts; the agent has no tool for them, so it cannot add a
@@ -257,27 +257,6 @@ export class ChannelStore {
     if (response.status < 200 || response.status >= 300) throw new ChannelError(`HTTP ${response.status}`)
   }
 
-  /** Key rotation (spec §9): each channel token's data key, re-sealed under `current`. */
-  async rewrapFrom(previous: Kek, current: Kek): Promise<{ rewrapped: number; failed: number }> {
-    const result = { rewrapped: 0, failed: 0 }
-    if (previous.id === current.id) return result
-    const rows = await this.#sql<Row[]>`SELECT * FROM ai_notify_channels WHERE kek_id = ${previous.id}`
-    for (const row of rows) {
-      let next: Envelope
-      try {
-        next = rewrap(previous, current, envelope(row), aad(row.id, row.kind, row.url))
-      } catch (err) {
-        if (!(err instanceof SealError)) throw err
-        result.failed++
-        continue
-      }
-      const updated = await this.#sql`
-        UPDATE ai_notify_channels SET dek_sealed = ${next.dekSealed}, kek_id = ${next.kekId} WHERE id = ${row.id} AND kek_id = ${previous.id}`
-      result.rewrapped += updated.count
-    }
-    return result
-  }
-
   #open(row: Row): string {
     return openSecret(this.#key(), envelope(row), aad(row.id, row.kind, row.url))
   }
@@ -374,7 +353,7 @@ export class CrudChannelRows {
 
   async view(id: string): Promise<ChannelView | undefined> {
     if (!UUID.test(id)) return undefined
-    const { channel } = await this.#call<{ channel: ChannelView | null }>('a notification channel', `/notify-channels/${id}`)
+    const { channel } = await this.#call<{ channel: ChannelView | null }>('a notification channel', `/notify-channels/${segment(id, UUID_SEGMENT, 'a channel id')}`)
     return channel ? viewOfWire(channel) : undefined
   }
 
@@ -388,7 +367,7 @@ export class CrudChannelRows {
     if (!UUID.test(id)) return false
     const body = { ...fieldsOf(checked), enabled, ...(keepToken ? { keep_token: true } : checked.token ? { token: checked.token } : {}) }
     try {
-      return (await this.#call<{ done: boolean }>('a notification channel changed', `/notify-channels/${id}/update`, { body })).done
+      return (await this.#call<{ done: boolean }>('a notification channel changed', `/notify-channels/${segment(id, UUID_SEGMENT, 'a channel id')}/update`, { body })).done
     } catch (err) {
       if (err instanceof CrudReadError && err.fromRoute && err.reason === CHANNEL_MOVED) throw new ChannelError(err.detail)
       throw err
@@ -397,13 +376,13 @@ export class CrudChannelRows {
 
   async delete(id: string): Promise<boolean> {
     if (!UUID.test(id)) return false
-    return (await this.#call<{ done: boolean }>('a notification channel deleted', `/notify-channels/${id}/delete`, { method: 'POST' })).done
+    return (await this.#call<{ done: boolean }>('a notification channel deleted', `/notify-channels/${segment(id, UUID_SEGMENT, 'a channel id')}/delete`, { method: 'POST' })).done
   }
 
   async open(id: string): Promise<OpenChannel | undefined> {
     if (!UUID.test(id)) return undefined
     try {
-      const { channel } = await this.#call<{ channel: OpenChannel | null }>('a notification channel opened', `/notify-channels/${id}/open`, { method: 'POST' })
+      const { channel } = await this.#call<{ channel: OpenChannel | null }>('a notification channel opened', `/notify-channels/${segment(id, UUID_SEGMENT, 'a channel id')}/open`, { method: 'POST' })
       return channel ? { ...channel, token: channel.token ?? undefined } : undefined
     } catch (err) {
       // A token the API's key does not open, as the SQL store's SealError.
@@ -422,7 +401,7 @@ export class CrudChannelRows {
   }
 
   async record(id: string, error: string | null): Promise<void> {
-    await this.#call('a notification sent', `/notify-channels/${id}/record`, { body: { error } })
+    await this.#call('a notification sent', `/notify-channels/${segment(id, UUID_SEGMENT, 'a channel id')}/record`, { body: { error } })
   }
 }
 

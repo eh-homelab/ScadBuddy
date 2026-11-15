@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import type { Sql } from 'postgres'
-import { type CrudTarget, crudOf } from '../api/crudStores.js'
+import { type CrudTarget, crudOf, segment, UUID_SEGMENT } from '../api/crudStores.js'
 import { type Principal, type Tier, tiersUpTo } from './principal.js'
 
 // Bearer tokens for `/mcp` (spec §8.3, issue #251 "Auth"): minted in Settings,
@@ -244,7 +244,9 @@ export class CrudTokenStore implements TokenStore {
 
   async revoke(id: string): Promise<boolean> {
     if (!UUID.test(id)) return false
-    return (await this.#call<{ done: boolean }>('an MCP token revoked', `/mcp-tokens/${id}/revoke`, { method: 'POST' })).done
+    // An id that is no UUID names no token, and never reaches the URL.
+    if (!UUID_SEGMENT.test(id)) return false
+    return (await this.#call<{ done: boolean }>('an MCP token revoked', `/mcp-tokens/${segment(id, UUID_SEGMENT, 'an MCP token id')}/revoke`, { method: 'POST' })).done
   }
 
   async list(): Promise<TokenRecord[]> {
@@ -252,7 +254,7 @@ export class CrudTokenStore implements TokenStore {
   }
 
   async #live(id: string): Promise<{ tier: Tier | null; approval_grant: boolean }> {
-    return this.#call('a live MCP token', `/mcp-tokens/${id}/live`)
+    return this.#call('a live MCP token', `/mcp-tokens/${segment(id, UUID_SEGMENT, 'an MCP token id')}/live`)
   }
 
   async approvalGrant(id: string): Promise<boolean> {

@@ -397,6 +397,23 @@ def test_concurrent_requests_never_pass_the_cap(client: TestClient, agent: dict[
     assert refused.json()["reason"] == "pairing-refused"
 
 
+def test_a_long_principal_id_still_pairs(client: TestClient, agent: dict[str, str]) -> None:
+    # The agent's fallback label holds the principal's id, which may be 500 characters.
+    who = "o" * 500
+    answer = client.post(
+        f"{BASE}/pairings",
+        json={
+            "principal_kind": "oidc",
+            "principal_id": who,
+            "fallback_label": f"OIDC user {who}",
+            "code_hash": _sha("ABCD-EFGH"),
+        },
+        headers=agent,
+    )
+    assert answer.status_code == 201, answer.text
+    assert answer.json()["label"] == f"OIDC user {who}"
+
+
 def test_a_bad_code_hash_is_refused(client: TestClient, agent: dict[str, str]) -> None:
     answer = client.post(
         f"{BASE}/pairings",

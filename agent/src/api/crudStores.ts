@@ -100,6 +100,32 @@ export function crudOf(target: CrudTarget): <T>(step: string, path: string, init
 }
 
 /** A query string of `params`, `?` first. */
+/** A UUID, as every id the agent's CRUD routes take in their path is. */
+export const UUID_SEGMENT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** A path segment that fails its rule: it is never sent. */
+export class CrudPathError extends Error {}
+
+/**
+ * `value` as one path segment of a CRUD route, only when it passes `rule`, then encoded. A name
+ * or id from a caller never reaches the URL as it is, so `../x` cannot name another route under
+ * this process's service credential.
+ */
+export function segment(value: string, rule: RegExp, what: string): string {
+  if (!rule.test(value)) throw new CrudPathError(`${what} is not valid`)
+  return encodeURIComponent(value)
+}
+
+/** The most tab ids one call sends (backend api/crud_agent_stores.py `TABS_MAX`). */
+export const TABS_PER_CALL = 500
+
+/** `items` in runs of at most `size`, in order. */
+export function chunks<T>(items: readonly T[], size: number): T[][] {
+  const out: T[][] = []
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size))
+  return out
+}
+
 export function qs(params: Record<string, string>): string {
   return `?${new URLSearchParams(params).toString()}`
 }

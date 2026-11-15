@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import { crudUpsertActivityKinds } from '../src/activity/kinds.js'
 import { CrudReadError } from '../src/api/crudRead.js'
-import { crudCall, gated, STORE_AREAS } from '../src/api/crudStores.js'
+import { crudCall, CrudPathError, gated, segment, STORE_AREAS, TABS_PER_CALL, UUID_SEGMENT } from '../src/api/crudStores.js'
 import { CrudTokenStore, hashToken, TOKEN_PREFIX } from '../src/auth/tokens.js'
 import { CrudPairingStore, hashCode, PairingError } from '../src/bridge/pairings.js'
 import { CrudSessionTabStore } from '../src/bridge/sessionTabs.js'
@@ -307,6 +307,33 @@ describe('the small stores through CRUD routes (#5299 step 5)', () => {
     expect(await owners.ownerOf('t1')).toBeUndefined()
     // An empty refresh sends nothing.
     expect(api.seen.filter((s) => s.path === '/tab-owners/refresh')).toHaveLength(0)
+  })
+
+  it('refuses an id or a name that is not one before it builds the path: ../ never reaches the API', async () => {
+    const api = new FakeApi()
+    const bad = '../order-costs'
+    expect(await new CrudPairingStore(target(api)).deny(bad)).toBe(false)
+    expect(await new CrudPairingStore(target(api)).accept(bad, 'ABCD-EFGH', 't1')).toEqual({ ok: false, reason: 'gone' })
+    expect(await new CrudTokenStore(target(api)).revoke(bad)).toBe(false)
+    expect(await new CrudChannelRows(target(api)).delete(bad)).toBe(false)
+    expect(await new CrudChannelRows(target(api)).view(`${randomUUID()}/../x`)).toBeUndefined()
+    // The last guard, under every store's own check: a failed rule is never sent.
+    expect(() => segment(bad, UUID_SEGMENT, "an id")).toThrow(CrudPathError)
+    const images = new CrudTabImageStore(target(api))
+    await expect(images.put({ name: `../${'a'.repeat(64)}.png`, mediaType: 'image/png', bytes: Buffer.from('x') } as never)).rejects.toThrow(CrudPathError)
+    expect(await images.take('../x.png')).toBeUndefined()
+    expect(api.seen).toEqual([])
+  })
+
+  it('sends a long list of tabs in runs the route takes', async () => {
+    const api = new FakeApi()
+    const tabIds = Array.from({ length: TABS_PER_CALL * 2 + 1 }, (_, i) => `t${i}`)
+    await new CrudTabOwnerStore(target(api)).refresh(tabIds, 'agent-tools.a')
+    const refreshes = api.seen.filter((s) => s.path === '/tab-owners/refresh').map((s) => ((s.body as { tab_ids: string[] }).tab_ids).length)
+    expect(refreshes).toEqual([TABS_PER_CALL, TABS_PER_CALL, 1])
+    await new CrudPairingStore(target(api)).pairedWith(tabIds)
+    const reads = api.seen.filter((s) => s.path === '/pairings/paired-with').map((s) => ((s.body as { tab_ids: string[] }).tab_ids).length)
+    expect(reads).toEqual([TABS_PER_CALL, TABS_PER_CALL, 1])
   })
 
   it("sends a tab's image as bytes, never JSON, and takes it once", async () => {

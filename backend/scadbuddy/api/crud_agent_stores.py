@@ -86,6 +86,8 @@ SHA256_HEX = r"^[0-9a-f]{64}$"
 #: An activity kind's key, label and facets (``activity/kinds.ts``).
 ACTIVITY_KINDS_MAX = 500
 LABEL_MAX = 300
+#: A fallback label's longest: its prefix and a `principal_id` of up to 500.
+FALLBACK_LABEL_MAX = 600
 
 Hash = Annotated[str, Field(pattern=SHA256_HEX)]
 TabId = Annotated[str, Field(min_length=1, max_length=TAB_ID_MAX)]
@@ -505,8 +507,9 @@ class PairedTab(Pairing):
 class PairingAsk(_Body):
     principal_kind: PrincipalKind
     principal_id: str = Field(min_length=1, max_length=500)
-    #: What the tab shows when the principal is not a named token (the agent's own words).
-    fallback_label: str = Field(min_length=1, max_length=LABEL_MAX)
+    #: What the tab shows when the principal is not a named token (the agent's own words:
+    #: a short prefix and the principal's id, or a client address).
+    fallback_label: str = Field(min_length=1, max_length=FALLBACK_LABEL_MAX)
     code_hash: Hash
 
 

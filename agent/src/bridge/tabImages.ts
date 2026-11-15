@@ -1,7 +1,7 @@
 import type { Sql } from 'postgres'
-import { type CrudTarget, crudCall } from '../api/crudStores.js'
+import { type CrudTarget, crudCall, segment } from '../api/crudStores.js'
 import { type ImageMediaType, IMAGE_MEDIA_TYPES } from '../sessions/images.js'
-import type { SessionImage } from '../sessions/blobs.js'
+import { BLOB_NAME, type SessionImage } from '../sessions/blobs.js'
 
 // The images a tab answers with (`browser_screenshot`, #254), between the replica that
 // holds the tab's socket and the one whose call asked for it (bridge/relay.ts, #4780).
@@ -106,7 +106,7 @@ export class CrudTabImageStore implements TabImageStore {
   }
 
   async put(image: SessionImage): Promise<void> {
-    const response = await crudCall(this.#fetch, this.#base, "a tab's image stored", `/tab-images/${encodeURIComponent(image.name)}`, {
+    const response = await crudCall(this.#fetch, this.#base, "a tab's image stored", `/tab-images/${segment(image.name, BLOB_NAME, "a tab's image name")}`, {
       method: 'PUT',
       bytes: image.bytes,
       contentType: image.mediaType,
@@ -115,7 +115,9 @@ export class CrudTabImageStore implements TabImageStore {
   }
 
   async take(name: string, signal?: AbortSignal): Promise<StoredTabImage | undefined> {
-    const response = await crudCall(this.#fetch, this.#base, "a tab's image", `/tab-images/${encodeURIComponent(name)}/take`, {
+    // A name that is no blob's names no image, as the SQL store answers it.
+    if (!BLOB_NAME.test(name)) return undefined
+    const response = await crudCall(this.#fetch, this.#base, "a tab's image", `/tab-images/${segment(name, BLOB_NAME, "a tab's image name")}/take`, {
       method: 'POST',
       signal,
     })

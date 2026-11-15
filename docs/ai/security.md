@@ -1382,8 +1382,9 @@ From the merged code and PR bodies:
    started (the comment on `sessions` in `main.ts`). ScadBuddy's own plugin is
    loaded into each of those turns (#896, see [Plugin vetting](#plugin-vetting)).
 8. **Rotation leaves unopenable rows** as they are, and counts them in the log
-   (the API's `agent_data/rotation.py` for the Claude credentials and payload keys,
-   `rewrapFrom()` for the rest).
+   (the API's `agent_data/rotation.py` for the Claude credentials, payload keys, Web
+   Push keys and notification channel tokens, the agent's `rewrapFrom()` for its
+   workspace file keys, plugin secrets and plugin sign-ins).
 9. **Write-tier calls are not gated, so injected content can drive one.** Tiers put
    `update_source` and other `write` tools in the tier that runs without a human,
    because a write is reversible through the model's git history (spec §8.1). The
