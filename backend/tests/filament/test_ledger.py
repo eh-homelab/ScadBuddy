@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
@@ -19,9 +20,13 @@ T0 = datetime(2026, 11, 14, 12, tzinfo=UTC)
 SPOOL = UUID(int=1)
 
 
+_SEQ = itertools.count(1)
+
+
 def _event(minute: int, kind: str, source: str | None, **over: Any) -> SpoolEvent:
     values: dict[str, Any] = {
         "id": uuid4(),
+        "seq": next(_SEQ),
         "spool_id": SPOOL,
         "at": T0 + timedelta(minutes=minute),
         "kind": kind,
@@ -38,6 +43,12 @@ def _event(minute: int, kind: str, source: str | None, **over: Any) -> SpoolEven
         "data": {},
     }
     return SpoolEvent.model_validate(values | over)
+
+
+def test_events_of_one_time_are_taken_in_seq_order() -> None:
+    later = _event(1, "weighed", "scale", grams_after=500, seq=2)
+    earlier = _event(1, "weighed", "scale", grams_after=800, seq=1)
+    assert grams_left([later, earlier], weight_locked=False, label_weight_g=1000) == 500
 
 
 def test_grams_left_anchors_then_subtracts() -> None:

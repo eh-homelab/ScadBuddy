@@ -506,6 +506,10 @@ async function runCall(
     flow,
     signal: context.cancellationSignal,
     heartbeat: (details) => context.heartbeat(details),
+    // The gate's request id is the same on every attempt of this activity, so each attempt keys
+    // its commands alike and a retry is answered from the first's operation (#6345); a fresh key
+    // per attempt made a second attempt a second operation.
+    callKey: caller.requestId,
     span,
   })
   if (context.cancellationSignal.aborted || run.outcome !== 'ok') span?.setAttribute('scadbuddy.outcome', run.outcome)

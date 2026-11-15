@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api, ApiError } from '../../api/client'
-import type { Quote, SliceQuoteRequest } from '../../api/types'
+import type { OrderItem, Quote, SliceQuoteRequest } from '../../api/types'
 import { reset, seedUnitCost } from '../../mocks/features/orders/history'
 import { printersState } from '../../mocks/features/printers'
 import { mockSettings, resetMockState, setMockSettings } from '../../mocks/handlers'
@@ -9,6 +9,7 @@ import { FILAMENT_PETG, FILAMENT_PLA, ITEM_DRAFT, ORDER_DRAFT, item } from '../.
 import { selectOption } from '../../test/select'
 import { renderPage } from '../../test/utils'
 import { CHECK_DEBOUNCE_MS, QuoteEditor } from './QuoteEditor'
+import { NO_SLICE_SOURCE } from './itemActions'
 import { groupName } from './printSetups'
 import type { SliceQuoteRun } from './useSliceQuotes'
 
@@ -166,6 +167,51 @@ describe('QuoteEditor · a quote from a slice (#4250)', () => {
     )
     expect(screen.getByTestId('quote-running')).toHaveTextContent(/Slicing every plate/)
     expect(screen.getByTestId('quote-from-slice')).toBeDisabled()
+  })
+
+  it('shows the render stage of a slice of an item with no output (#6324)', () => {
+    const draft = { ...item(ITEM_DRAFT, ORDER_DRAFT, 'draft'), output_id: null }
+    renderPage(
+      <QuoteEditor
+        orderId={ORDER_DRAFT}
+        itemId={ITEM_DRAFT}
+        currency="USD"
+        exponent={2}
+        quotes={[]}
+        editable
+        onChanged={vi.fn()}
+        item={draft}
+        slice={{ run: { startedAt: Date.now(), error: null, known: [], stage: 'rendering' }, start: vi.fn(), render: vi.fn(), dismiss: vi.fn() }}
+      />,
+    )
+    expect(screen.getByTestId('quote-running')).toHaveTextContent(/Rendering the design/)
+    expect(screen.getByTestId('quote-from-slice')).toBeDisabled()
+  })
+
+  it('offers Slice… for a design with no output, and says why only when there is no design (#6324)', async () => {
+    const render = vi.fn<() => Promise<boolean>>().mockResolvedValue(false)
+    const editor = (fields: Partial<OrderItem>) => (
+      <QuoteEditor
+        orderId={ORDER_DRAFT}
+        itemId={ITEM_DRAFT}
+        currency="USD"
+        exponent={2}
+        quotes={[]}
+        editable
+        onChanged={vi.fn()}
+        item={{ ...item(ITEM_DRAFT, ORDER_DRAFT, 'draft'), output_id: null, ...fields }}
+        slice={{ start: vi.fn(), render, dismiss: vi.fn() }}
+      />
+    )
+    const { user, rerender } = renderPage(editor({}))
+    expect(screen.getByTestId('quote-from-slice')).toBeEnabled()
+    expect(screen.queryByText(NO_SLICE_SOURCE)).toBeNull()
+    await user.click(screen.getByTestId('quote-from-slice'))
+    expect(render).toHaveBeenCalledTimes(1)
+    rerender(editor({ kind: 'request', reference: null, colours: [] }))
+    expect(screen.getByTestId('quote-from-slice')).toBeDisabled()
+    expect(screen.getByText(NO_SLICE_SOURCE)).toBeInTheDocument()
+    expect(NO_SLICE_SOURCE).not.toMatch(/render/i)
   })
 
   it('shows a failed slice quote, and offers another and a dismiss (#4693)', async () => {
