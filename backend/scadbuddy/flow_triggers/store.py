@@ -230,6 +230,11 @@ class TriggerStore:
         `seen` is not the trigger's `state_hash` now."""
         return await self._call(self._attach_grant, trigger_id, spec, status, requested_by, seen)
 
+    async def requested_grant_triggers(self, limit: int) -> list[Trigger]:
+        """#6399: the triggers whose standing grant waits for a person's decision
+        (`requested`, not revoked), the oldest request first, at most `limit`."""
+        return await self._call(self._requested_grant_triggers, limit)
+
     async def current_grant(self, trigger_id: str) -> StandingGrant | None:
         return await self._call(self._current_grant, trigger_id)
 
@@ -602,6 +607,20 @@ class TriggerStore:
                 (trigger.id,),
             ).fetchone()
         return state_hash(trigger, StandingGrant.model_validate(row) if row else None)
+
+    def _requested_grant_triggers(self, limit: int) -> list[Trigger]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT {_TRIGGER}, (SELECT min(g.created_at) FROM flow_trigger_grants g"
+                " WHERE g.trigger_id = flow_triggers.id AND g.status = 'requested'"
+                " AND g.revoked_at IS NULL) AS requested_at FROM flow_triggers"
+                " WHERE EXISTS (SELECT 1 FROM flow_trigger_grants g"
+                " WHERE g.trigger_id = flow_triggers.id AND g.status = 'requested'"
+                " AND g.revoked_at IS NULL)"
+                " ORDER BY requested_at, id LIMIT %s",
+                (limit,),
+            ).fetchall()
+        return [Trigger.model_validate(row) for row in rows]
 
     def _current_grant(self, trigger_id: str) -> StandingGrant | None:
         with self._pool.connection() as conn:

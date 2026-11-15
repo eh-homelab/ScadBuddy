@@ -460,6 +460,11 @@ class FlowStore:
     async def get_grant(self, run_id: str) -> Grant | None:
         return await asyncio.to_thread(self._get_grant, run_id)
 
+    async def requested_grants(self, limit: int) -> list[tuple[Grant, Run]]:
+        """#6399: the grants still waiting for a person's decision (`requested`, not
+        revoked) of runs that have not ended, oldest request first, at most `limit`."""
+        return await asyncio.to_thread(self._requested_grants, limit)
+
     async def approve_grant(
         self, run_id: str, spec: GrantSpec | None, *, approved_by: str
     ) -> Grant | None:
@@ -620,6 +625,28 @@ class FlowStore:
                 f"SELECT {_GRANT} FROM flow_grants WHERE run_id = %s", (run_id,)
             ).fetchone()
         return Grant.model_validate(row) if row else None
+
+    def _requested_grants(self, limit: int) -> list[tuple[Grant, Run]]:
+        with self._pool.connection() as conn:
+            runs = {
+                row["id"]: Run.model_validate(row)
+                for row in conn.execute(
+                    f"SELECT {_RUN} FROM workflow_runs WHERE NOT (status = ANY(%s)) AND id IN"
+                    " (SELECT run_id FROM flow_grants"
+                    " WHERE status = 'requested' AND revoked_at IS NULL)",
+                    (sorted(TERMINAL),),
+                ).fetchall()
+            }
+            if not runs:
+                return []
+            rows = conn.execute(
+                f"SELECT {_GRANT} FROM flow_grants WHERE status = 'requested'"
+                " AND revoked_at IS NULL AND run_id = ANY(%s)"
+                " ORDER BY created_at, id LIMIT %s",
+                (list(runs), limit),
+            ).fetchall()
+        grants = [Grant.model_validate(row) for row in rows]
+        return [(grant, runs[grant.run_id]) for grant in grants]
 
     def _locked_grant(self, conn: Connection[DictRow], run_id: str) -> Grant | None:
         row = conn.execute(

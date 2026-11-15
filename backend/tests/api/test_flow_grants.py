@@ -383,3 +383,44 @@ def test_an_agents_run_from_a_run_is_linked_and_only_requests_its_grant(
             json={},
         )
         assert refused.status_code == 409, refused.text
+
+
+def test_the_grant_requests_list_a_requested_grant_until_it_is_decided(
+    client: TestClient,
+) -> None:
+    """#6399: the bell's and Activity's "Needs you" read. An agent's request is listed with
+    its run; a browser start's approved grant never is; a decision takes it off."""
+    asked = started(client, "q1", {"grant": grant({"fn": "queue_print"})}, **AGENT)
+    started(client, "q2", {"grant": grant({"fn": "queue_print"})})
+    listed = client.get("/api/v1/flow-grant-requests")
+    assert listed.status_code == 200, listed.text
+    body = listed.json()
+    assert [r["run_id"] for r in body["runs"]] == [asked]
+    request = body["runs"][0]
+    assert request["run_status"] == "waiting"
+    assert request["started_by"]["kind"] == "agent"
+    assert (request["grant"]["status"], request["grant"]["in_force"]) == ("requested", False)
+    assert request["grant"]["requested_by"]["principal"] == "token:p1"
+    # Read as any flow read is: an agent sees the same list, and still cannot decide.
+    assert client.get("/api/v1/flow-grant-requests", headers=AGENT).json()["runs"] == body["runs"]
+    refused = client.post(f"/api/v1/workflow-runs/{asked}/grant/decline", headers=AGENT)
+    assert refused.status_code == 403
+    assert client.post(f"/api/v1/workflow-runs/{asked}/grant/decline").status_code == 200
+    assert client.get("/api/v1/flow-grant-requests").json()["runs"] == []
+
+
+def test_the_grant_requests_leave_out_a_run_that_ended(client: TestClient) -> None:
+    """A run that ended asks for nothing more, so its undecided grant is not listed."""
+    asked = started(client, "e1", {"grant": grant({"fn": "queue_print"})}, **AGENT)
+    assert [r["run_id"] for r in client.get("/api/v1/flow-grant-requests").json()["runs"]] == [
+        asked
+    ]
+    view = until(client, asked, lambda v: v["status"] == "waiting" and v["pending"])
+    answered = client.post(
+        f"/api/v1/workflow-runs/{asked}/answer",
+        json={"call_id": view["pending"][0]["call_id"], "answer": "yes"},
+        headers={"Idempotency-Key": "e1-answer"},
+    )
+    assert answered.status_code == 200, answered.text
+    until(client, asked, lambda v: v["status"] == "succeeded")
+    assert client.get("/api/v1/flow-grant-requests").json()["runs"] == []

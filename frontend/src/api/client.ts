@@ -149,6 +149,7 @@ import type {
   FlowDefinition,
   FlowDetails,
   FlowDetailsUpdate,
+  FlowGrantRequests,
   FlowGrantSpec,
   FlowGrantView,
   FlowHostInterface,
@@ -1268,6 +1269,8 @@ export const api = {
     request<FlowStandingGrant>(`/flow-triggers/${seg(id)}/grant/decline`, { method: 'POST' }),
   revokeFlowTriggerGrant: (id: string) =>
     request<FlowStandingGrant>(`/flow-triggers/${seg(id)}/grant/revoke`, { method: 'POST' }),
+  /** #6399 — every run and trigger grant waiting for a person's decision, the oldest first. */
+  flowGrantRequests: () => request<FlowGrantRequests>('/flow-grant-requests'),
 
   /** Forgets a run: its payload key, its workflow (stopped if open) and its row. */
   deleteFlowRun: (id: string) => request<void>(`/workflow-runs/${seg(id)}`, { method: 'DELETE' }),

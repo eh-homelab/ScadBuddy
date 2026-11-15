@@ -259,6 +259,9 @@ export type FlowGrantView = Schemas['GrantView']
 export type FlowGrantUse = Schemas['GrantUseView']
 /** #2484 — a flow trigger: a schedule or an event that starts runs of a pinned version. */
 export type FlowTrigger = Schemas['TriggerView']
+/** #6399 — the run and trigger grants that wait for a person's decision. */
+export type FlowGrantRequests = Schemas['GrantRequests']
+export type FlowRunGrantRequest = Schemas['RunGrantRequest']
 export type FlowTriggerCreate = Schemas['TriggerCreate']
 export type FlowTriggerUpdate = Schemas['TriggerUpdate']
 export type FlowTriggerSchedule = Schemas['ScheduleTiming']

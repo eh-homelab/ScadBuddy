@@ -8,7 +8,7 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react'
-import { NavLink, Outlet, matchPath, useLocation } from 'react-router'
+import { NavLink, Outlet, matchPath, useLocation, useNavigate } from 'react-router'
 import {
   ActivityIcon,
   BoxIcon,
@@ -33,7 +33,18 @@ import {
   ApprovalsWaitingContext,
   type AttentionNotice,
   type PendingApproval,
+  type WaitingEntry,
 } from '../agent/attention'
+import type { PairingEntry } from '../agent/linkProtocol'
+import {
+  NeedsYouContext,
+  needsYouItems,
+  needsYouLabel,
+  needsYouNotices,
+  useGrantRequests,
+  useNeedsYouToasts,
+  type NeedsYou,
+} from '../lib/needsYou'
 import { useAttentionNotifications } from '../agent/attentionNotifications'
 import { useWebPush } from '../agent/webPush'
 import { useAiAvailability } from '../agent/chat/availability'
@@ -66,6 +77,7 @@ import {
   SidebarGroupContent,
   SidebarHeader,
   SidebarMenu,
+  SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarProvider,
@@ -108,6 +120,8 @@ const PANEL_ID = 'assistant-panel'
 /** One empty list, so the approvals' context and toasts do not change while none waits. */
 const NO_APPROVALS: readonly PendingApproval[] = []
 const NO_NOTICES: readonly AttentionNotice[] = []
+const NO_WAITING: readonly WaitingEntry[] = []
+const NO_PAIRINGS: readonly PairingEntry[] = []
 
 interface Props {
   embedded?: boolean
@@ -187,8 +201,25 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   // state: idle shows neither.
   const working = attention.running === true ? WORKING_LABEL : ''
   const toggleLabel = [working, waitingLabel, summaries].filter(Boolean).join(', ')
+  // #6399 — everything that waits on the person, the assistant's and the rest: the flow grants
+  // to decide, and the agents asking this tab to pair. The bell lists and counts it, Activity's
+  // "Needs you" lists it in full, and each new one is toasted and (hidden) notified.
+  const [pairings, setPairings] = useState<readonly PairingEntry[]>(NO_PAIRINGS)
+  const { grants, refresh: refreshGrants } = useGrantRequests()
+  const waitingEntries = attention.counts?.waiting ?? NO_WAITING
+  // Known once each read that applies has answered: a reload must not announce what already waited.
+  const needsKnown = grants !== null && (!shown || attention.counts !== null)
+  const needsItems = useMemo(
+    () => (needsKnown ? needsYouItems(waitingEntries, grants, pairings) : null),
+    [needsKnown, waitingEntries, grants, pairings],
+  )
+  const refreshNeeds = useCallback(() => {
+    refreshAttention()
+    refreshGrants()
+  }, [refreshAttention, refreshGrants])
+  useNeedsYouToasts(needsItems)
   const mainElement = useRef<HTMLElement>(null)
-  useAttentionTitle(attention.waiting, !embedded, usePageTitle(mainElement))
+  useAttentionTitle(needsItems === null ? attention.waiting : needsItems.length, !embedded, usePageTitle(mainElement))
   const [focusKey, setFocusKey] = useState(0)
   const toggleButton = useRef<HTMLButtonElement>(null)
   // #2013 — below `md` the panel lies over the page (the aside's classes), so a dialog
@@ -224,15 +255,22 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   const openHandled = useCallback(() => setOpenRequest(null), [])
   // #815 — an OS notification for a pending request that opens while this page is hidden;
   // a click opens its session. Not when embedded: a cross-origin frame cannot ask for the permission.
-  const notices = attention.counts === null ? null : (attention.counts.notices ?? NO_NOTICES)
+  const agentNotices = attention.counts?.notices ?? NO_NOTICES
+  const notices = useMemo(
+    () => (needsItems === null ? null : [...agentNotices, ...needsYouNotices(needsItems)]),
+    [agentNotices, needsItems],
+  )
+  const navigate = useNavigate()
   const openNotice = useCallback(
-    (sessionId: string | null) => {
+    (sessionId: string | null, href?: string) => {
+      // #6399 — a request no session holds is answered on its page.
+      if (href) return void navigate(href)
       if (sessionId) setOpenRequest({ sessionId })
       openPanel()
     },
-    [openPanel],
+    [openPanel, navigate],
   )
-  useAttentionNotifications(notices, shown && !embedded, openNotice)
+  useAttentionNotifications(notices, !embedded, openNotice)
   // #815 — and with every tab closed, through Web Push; its click opens the session here.
   useWebPush(shown && !embedded, openNotice)
   const opener = useMemo<AssistantOpener | null>(
@@ -246,6 +284,19 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
           }
         : null,
     [shown, openPanel],
+  )
+  const needsYou = useMemo<NeedsYou>(
+    () => ({
+      items: needsItems,
+      refresh: refreshNeeds,
+      openSession: shown
+        ? (sessionId) => {
+            if (sessionId) setOpenRequest({ sessionId })
+            openPanel()
+          }
+        : null,
+    }),
+    [needsItems, refreshNeeds, shown, openPanel],
   )
   const closePanel = useCallback(() => {
     setOpen(false)
@@ -312,6 +363,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
     <AssistantOpenerContext.Provider value={opener}>
       <RunsWaitingContext.Provider value={attention.counts?.runs ?? null}>
       <ApprovalsWaitingContext.Provider value={approvalsWaiting}>
+      <NeedsYouContext.Provider value={needsYou}>
       <ModalCompanionContext.Provider value={shown && mounted && open ? panelElement : null}>
       <TooltipProvider>
         {/* #3653 — shadcn's sidebar: beside the page from `md` up, collapsing to its icons;
@@ -338,7 +390,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
           >
             Skip to main content
           </a>
-          <AppSidebar embedded={embedded} />
+          <AppSidebar embedded={embedded} needsYou={needsItems?.length ?? 0} />
 
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
             <header
@@ -431,7 +483,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
               // boundary logs it to the console.
               <ErrorBoundary fallback={() => null}>
                 <Suspense fallback={null}>
-                  <AgentLink factory={tabLink} />
+                  <AgentLink factory={tabLink} onPairings={setPairings} />
                 </Suspense>
               </ErrorBoundary>
             )}
@@ -487,6 +539,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
         </SidebarProvider>
       </TooltipProvider>
       </ModalCompanionContext.Provider>
+      </NeedsYouContext.Provider>
       </ApprovalsWaitingContext.Provider>
       </RunsWaitingContext.Provider>
     </AssistantOpenerContext.Provider>
@@ -526,7 +579,7 @@ function rememberSidebar(embedded: boolean, open: boolean): void {
 /** From here up the sidebar starts expanded; a page keeps 1024 px beside it. */
 const WIDE_WINDOW = 1280
 
-function AppSidebar({ embedded }: { embedded: boolean }) {
+function AppSidebar({ embedded, needsYou }: { embedded: boolean; needsYou: number }) {
   const { pathname } = useLocation()
   const { isMobile, setOpenMobile } = useSidebar()
   // In the sheet a link's page replaces the sheet, as it does a dialog.
@@ -574,8 +627,19 @@ function AppSidebar({ embedded }: { embedded: boolean }) {
                       <NavLink to={item.to} end={item.end} onClick={followed}>
                         <item.icon aria-hidden="true" />
                         <span>{item.label}</span>
+                        {/* #6399 — named in the link, so it is read with it; the badge is only seen. */}
+                        {item.to === '/activity' && needsYou > 0 && <span className="sr-only">, {needsYouLabel(needsYou)}</span>}
                       </NavLink>
                     </SidebarMenuButton>
+                    {item.to === '/activity' && needsYou > 0 && (
+                      <SidebarMenuBadge
+                        aria-hidden="true"
+                        data-testid="nav-needs-you"
+                        className="rounded-full bg-needs font-semibold text-needs-ink peer-hover/menu-button:text-needs-ink peer-data-active/menu-button:text-needs-ink"
+                      >
+                        {needsYou}
+                      </SidebarMenuBadge>
+                    )}
                   </SidebarMenuItem>
                 ))}
               </SidebarMenu>

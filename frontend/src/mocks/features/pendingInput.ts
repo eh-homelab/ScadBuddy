@@ -17,6 +17,26 @@ import { mockAgentSessions } from '../agent'
  */
 
 const state = { approvals: 0, questions: 0, attention: 0, done: 0, summariesTruncated: false }
+
+/**
+ * #6399 — a Playwright test parks requests before the page loads: `{"approvals": 1}` (any of
+ * `approvals`, `questions`, `attention`) under this `sessionStorage` key, read once at load.
+ */
+export const PENDING_INPUT_SEED_KEY = 'scadbuddy.mock.pending-input'
+
+function seed(): void {
+  try {
+    const raw = typeof sessionStorage === 'undefined' ? null : sessionStorage.getItem(PENDING_INPUT_SEED_KEY)
+    if (!raw) return
+    const seeded = JSON.parse(raw) as Partial<Record<'approvals' | 'questions' | 'attention', number>>
+    state.approvals = seeded.approvals ?? 0
+    state.questions = seeded.questions ?? 0
+    state.attention = seeded.attention ?? 0
+  } catch {
+    // Nothing seeded.
+  }
+}
+seed()
 let responses: { id: string; body: RespondBody }[] = []
 /** Listed entries already responded to, with how each ended. */
 const ended = new Map<string, string>()

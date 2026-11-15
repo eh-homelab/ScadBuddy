@@ -120,6 +120,11 @@ export function flowTriggerRequests(): readonly { path: string; body: Record<str
   return requests
 }
 
+/** #6399 — the triggers whose standing grant waits for a person (`flows.ts` serves the read). */
+export function requestedTriggers(): FlowTrigger[] {
+  return triggers.filter((t) => t.grant?.status === 'requested' && !t.grant.revoked_at)
+}
+
 /** Change a trigger behind the page's back, as an assistant's edit would. */
 export function changeFlowTrigger(id: string, fields: Partial<FlowTrigger>): void {
   triggers = triggers.map((t) => (t.id === id ? touched({ ...t, ...fields }) : t))

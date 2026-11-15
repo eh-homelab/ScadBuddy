@@ -14,6 +14,7 @@ import type {
   FlowState,
   FlowStep,
 } from '../../api/types'
+import { requestedTriggers } from './flowTriggers'
 
 /**
  * #1057 — flow runs (backend `api/flows.py`): the list, one run's view, and a person's
@@ -756,6 +757,23 @@ async function keep(request: Request): Promise<Record<string, unknown>> {
 }
 
 export const handlers = [
+  // #6399 — the grants waiting for a person (backend `api/flow_triggers.py`
+  // `list_flow_grant_requests`): requested run grants of runs not ended, and the triggers'.
+  http.get('/api/v1/flow-grant-requests', () => {
+    const ended = new Set(['succeeded', 'failed', 'terminated'])
+    const asked = runs
+      .map((r) => ({ run: r, grant: grants.get(r.id) }))
+      .filter(({ run: r, grant: g }) => g?.status === 'requested' && !g.revoked_at && !ended.has(r.status))
+      .map(({ run: r, grant: g }) => ({
+        run_id: r.id,
+        run_status: r.status,
+        name: r.name,
+        display_name: detailsOf(r.name).display_name ?? null,
+        started_by: r.started_by,
+        grant: g!,
+      }))
+    return HttpResponse.json({ runs: asked, triggers: requestedTriggers() })
+  }),
   // As `FlowStates.newest`: each name's newest version only, by name; archived and
   // deleted flows only with `?archived=true`.
   http.get('/api/v1/workflows', ({ request }) => {

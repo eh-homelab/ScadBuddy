@@ -334,6 +334,12 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'agent-authored request.',
   },
   {
+    operation: 'GET /api/v1/flow-grant-requests',
+    reason:
+      'The grants waiting for a decision, for the bell and the Activity page\'s "Needs you" (#6399). Only a person ' +
+      'decides a grant; the assistant reads a run\'s grant with get_flow_run and a trigger\'s with get_flow_trigger.',
+  },
+  {
     operation: 'GET /api/v1/workflow-runs/{run_id}/proposals/{call_id}',
     reason:
       "A parent's narrowing beside the call it narrows, for the person to compare before approving it by " +

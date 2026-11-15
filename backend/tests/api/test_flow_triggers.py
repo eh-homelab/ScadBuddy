@@ -292,6 +292,26 @@ def test_an_agents_standing_grant_is_requested_and_only_the_browser_decides_it(
 
 
 @pytest.mark.usefixtures("triggers")
+def test_the_grant_requests_list_a_requested_standing_grant_until_it_is_decided(
+    client: TestClient,
+) -> None:
+    """#6399: a trigger whose standing grant waits for a person is listed as its view, with
+    the `seen` an approval sends back; an approved one is not; a decision takes it off."""
+    definition = register(client, WAITS)
+    asked = create(client, definition["id"], AGENT)
+    approved = create(client, definition["id"])
+    assert attach(client, asked["id"], grant({"fn": "queue_print"}), AGENT).status_code == 200
+    assert attach(client, approved["id"], grant({"fn": "queue_print"})).status_code == 200
+    body = client.get("/api/v1/flow-grant-requests").json()
+    assert [t["id"] for t in body["triggers"]] == [asked["id"]]
+    listed = body["triggers"][0]
+    assert listed["grant"]["status"] == "requested"
+    assert listed["seen"] == view(client, asked["id"])["seen"]
+    assert approve(client, asked["id"]).status_code == 200
+    assert client.get("/api/v1/flow-grant-requests").json()["triggers"] == []
+
+
+@pytest.mark.usefixtures("triggers")
 def test_a_standing_grant_expires_within_30_days(client: TestClient) -> None:
     definition = register(client, WAITS)
     trigger = create(client, definition["id"])
