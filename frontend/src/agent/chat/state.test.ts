@@ -674,6 +674,9 @@ describe('the queue (#6386)', () => {
     expect(refused.sessions.s1?.queueRefusals).toEqual({ q1: 1 })
     expect(refused.sessions.s1?.items.at(-1)).toMatchObject({ kind: 'error' })
     expect(run([server({ type: 'error', sessionId: 's1', code: 'internal', message: 'other' })], refused).sessions.s1?.queueRefusals).toEqual({ q1: 1 })
+    // Kept while the entry waits; dropped once a session.queue no longer lists it.
+    expect(run([queue(2, ['q1'])], refused).sessions.s1?.queueRefusals).toEqual({ q1: 1 })
+    expect(run([queue(2, ['q2'])], refused).sessions.s1?.queueRefusals).toEqual({})
   })
 
   it('clears the queue for a replay, which rebuilds it from the log', () => {
