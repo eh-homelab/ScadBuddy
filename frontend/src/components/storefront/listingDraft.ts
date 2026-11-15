@@ -47,7 +47,7 @@ export function draftOf(listing: StorefrontListing): ListingDraft {
     colours: listing.colours,
     media_ids: listing.media_ids,
     // A listing stored before #6258 has none: the shop's default.
-    materials: listing.materials ?? [],
+    materials: (listing.materials as string[] | undefined) ?? [],
   }
 }
 
@@ -427,7 +427,8 @@ export function previewListing(
         : []
     }),
     // #6258: empty is the shop's default, which the preview does not read.
-    materials: draft.materials,
+    // A draft stored before #6258 has none: the shop's default too.
+    materials: (draft.materials as string[] | undefined) ?? [],
     media: draft.media_ids.flatMap((id) => {
       const item = media.find((m) => m.id === id)
       return item ? [{ url: mediaUrl(item), kind: item.kind, caption: item.caption }] : []

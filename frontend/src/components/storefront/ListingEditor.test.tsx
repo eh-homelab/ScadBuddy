@@ -395,4 +395,13 @@ describe('the editor’s preview (#6258)', () => {
     expect(screen.getByRole('button', { name: /^Plate/ })).toHaveAccessibleName('Plate Ocean')
     expect(draftOf(stored).materials).toEqual([])
   })
+
+  it('renders a draft with no materials, and a listing the preview gets with none', () => {
+    const { materials: _none, ...draft } = { ...emptyDraft('name-keychain', COMMIT), title: 'Old tag', ...defaultsFor(keychainSchema, [RED, BLUE, CORAL]) }
+    const listing = previewListing(draft as ListingDraft, keychainSchema, [RED, BLUE, CORAL], [], () => '')
+    expect(listing.materials).toEqual([])
+    const { materials: _drop, ...bare } = listing
+    renderPage(<ListingView listing={bare as typeof listing} values={{}} onChange={() => undefined} headingLevel={2} />)
+    expect(screen.getByRole('button', { name: /^Plate/ })).toHaveAccessibleName('Plate Ocean')
+  })
 })
