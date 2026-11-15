@@ -239,6 +239,8 @@ def test_a_public_listing_shows_what_a_visitor_may_choose(
             "brand": None,
         }
     ]
+    # #6258: no materials of its own, so the shop's default (`storefront_materials`).
+    assert listing["materials"] == ["PETG", "PLA"]
     # Nothing the shop keeps to itself: no price, snapshot or blob key.
     assert set(listing) == {
         "id",
@@ -247,10 +249,13 @@ def test_a_public_listing_shows_what_a_visitor_may_choose(
         "params",
         "colours",
         "media",
-        # #6152: whether every colour is of one material.
-        "one_material",
+        # #6258: the materials a print may be made of, in the shop's order.
+        "materials",
         "updated_at",
+        # #6302 review: False when no render of it can be made.
+        "available",
     }
+    assert listing["available"] is True
     [media] = listing["media"]
     assert media["kind"] == "image" and media["caption"] == ""
     # Presigned for an hour (moto's endpoint takes the query-string signature, whose
@@ -320,7 +325,7 @@ def test_the_reference_matches_the_back_offices(
     listing = Listing.model_validate(client.get(f"{LISTINGS}/{published['id']}").json())
     book = client.get(BOOK).json()
     filaments = {f["id"]: Filament.model_validate(f) for f in book["filaments"]}
-    values = listing_values(listing, {"width": 40}, filaments)
+    values = listing_values(listing, {"width": 40}, filaments, ["PLA"])
     ours = listing_reference(listing, values, {0: pla_red}, filaments=filaments)
     state = _state(client)
     assert client.portal is not None

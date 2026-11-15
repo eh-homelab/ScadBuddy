@@ -317,7 +317,16 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   first, #5299 D6). Its tests make the agent's tables
   with the agent's own migration files (`render/agent_migrations.py` `migrate_agent`) and open
   the credential vectors `tests/fixtures/secret-vectors.json`, a copy that
-  `lint-codec-copies.sh` keeps equal to the agent's.
+  `lint-codec-copies.sh` keeps equal to the agent's. `notify.py` re-wraps the agent's Web Push
+  keys and notification channels' tokens (#5299 step 5) in the same rotation.
+- The agent's small stores (#5299 step 5): `api/crud_agent_stores.py` (areas
+  `activity-kinds`, `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`) and
+  `api/crud_agent_notify.py` (area `notify`, sealed with the KEK under the agent's AAD), each
+  route one method of the agent's store and its SQL, a transaction as one transaction: the
+  pairing request's advisory lock, the accept's `FOR UPDATE` with the code hash compared in
+  constant time, a push subscription under its endpoint row's lock. A tab image's bytes are
+  the request's and the answer's body, checked against its sha256 name. Tests
+  `tests/api/test_crud_agent_stores.py`, `test_crud_agent_notify.py`.
 - `backend/scadbuddy/flow_triggers/` — runs started on a schedule or an event (#2484,
   spec 2026-10-11 §12): `store.py` (`flow_triggers`, their standing grants and fires),
   `fire.py` (the `flow_trigger_fire` activity on the `library` queue), `events.py` (the
@@ -1549,13 +1558,23 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   print's spools are matched the same way (`orders/spools.py` `_of`, the store's
   `spool_links`), so a hand-set colour still finds its spools.
 - Prepared colour combinations (#6237): `orders/storefront/prepare.py`, routes `GET`/`POST
-  /storefront/listings/{id}/prepare` (`api/storefront.py`). A combination is one colour per
-  offered colour parameter (the public listing's colours, in each spelling the page can
-  send: each offered filament's own `colour`, as `ParamField.tsx` sends it, and the effective
-  default when no filament spells it so, #6299 review); each is built by the visitor path's
-  `listing_values` and `listing_reference`, a colour at its effective default (same
-  spelling) left out as the page leaves it out, so a visitor's render reuses the prepared
-  job. The POST starts the workflow
+  /storefront/listings/{id}/prepare` (`api/storefront.py`). The combinations are enumerated
+  per printable material (of the listing's effective materials, in order, #6258, those
+  `inputs.py` `printable_materials` keeps: each locked colour and a choice of each offered
+  colour, #6302 review): for one
+  material, a combination is one colour per offered colour parameter (that material's
+  customer filaments' colours, support excluded, in each spelling the page can send: each
+  filament's own `colour`, as `ParamField.tsx` sends it, and the effective default when no
+  filament spells it so, #6299 review). Each is built by the visitor's render path
+  (`listing_values`, `resolve_choice`, `listing_reference`), a colour at its effective
+  default (same spelling) left out as the page leaves it out, so a visitor's render of the
+  same picks has its render key and reuses the prepared job. A clash
+  (`ColoursClashError`) is left out; a listing no material can print
+  (`LockedColoursClashError`) has no combination. The list is one combination per render key (the
+  first in material order); `count` is the number of keys. The list is built once per
+  listing, price book and materials (a small in-process cache), so an index names one
+  combination; above `ENUMERATION_LIMIT` (16384) picks it is not built and `count` is the
+  picks. The POST starts the workflow
   `PrepareListing` (`workflows/prepare_listing.py`, `library` queue, id
   `prepare-listing:<listing id>`, `USE_EXISTING`: a second POST joins it; AUTO_UPGRADE as
   `VersionedPrepareListing`) and answers at once (`{count, started}`). The run submits by

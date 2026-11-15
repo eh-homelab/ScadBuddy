@@ -82,6 +82,7 @@ export type TurnRunnerDeps = Pick<
   | 'memory'
   | 'httpRequest'
   | 'sql'
+  | 'browserOrigins'
   | 'background'
   | 'sandbox'
   | 'nestedQueries'
@@ -685,7 +686,7 @@ export class TurnRunner {
         tierOf: proxies ? pluginTiers : tierOf,
         // The headless browser's lists (#982): every remote plugin's browser_* calls.
         browser: browserGuard({
-          store: new BrowserOrigins(this.deps.sql, this.deps.settings),
+          store: this.deps.browserOrigins ?? new BrowserOrigins(this.deps.sql, this.deps.settings),
           sessionId: id,
           plugins: remotePlugins.map((p) => p.name),
         }),

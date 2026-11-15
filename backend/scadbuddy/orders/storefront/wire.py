@@ -17,8 +17,10 @@ import re
 from datetime import datetime
 from typing import Annotated, Final, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+from pydantic.json_schema import SkipJsonSchema
 
+from scadbuddy.core.settings import unique_materials
 from scadbuddy.library.libraries import ModelLibrary
 from scadbuddy.library.media import MEDIA_ID_PATTERN, MediaKind
 from scadbuddy.orders.customer_links import MAX_LINK_CHARS
@@ -189,10 +191,21 @@ class ListingInput(BaseModel):
     colours: list[str] = Field(default_factory=list)
     #: Ids of the template's media (``template_media``), in the order to show them.
     media_ids: list[str] = Field(default_factory=list)
-    #: Every colour of an order is of one material (#6152): each pick, the filament of
-    #: each offered colour left at its default, and every slot filament share one; else
-    #: 422 ``listing_mixed_material``.
-    one_material: bool = False
+    #: The materials a print of this listing may be made of, in the shop's order of
+    #: preference (#6258). Compared casefolded, at most `MAX_MATERIALS`, repeats dropped
+    #: (`unique_materials`). Empty is the shop's default (``storefront_materials``). A
+    #: print is always of one material (`inputs.py` `resolve_choice`).
+    materials: list[str] = Field(default_factory=list)
+    #: Accepted and ignored for one release (#6302 review): the back office and the
+    #: agent built before #6258 still send ``one_material`` on every save, and a body
+    #: that refused it would fail that save. It is never dumped, answered or in the
+    #: spec. A later PR drops it with the ``one_material`` and ``picks`` columns (#6258).
+    one_material: SkipJsonSchema[bool] = Field(default=False, exclude=True)
+
+    @field_validator("materials")
+    @classmethod
+    def _materials(cls, value: list[str]) -> list[str]:
+        return unique_materials(value, "materials")
 
 
 class Listing(ListingInput):
@@ -388,12 +401,22 @@ class PublicListing(BaseModel):
     title: str
     description: str
     params: dict[str, PublicParam]
-    #: The listing filaments a visitor may pick: never a support material (#6152).
+    #: The listing filaments a visitor may pick: never a support material (#6152), and
+    #: only of a printable material in ``materials`` (#6258; `inputs.py`
+    #: `printable_materials`: each locked colour and a choice of each offered colour,
+    #: #6302 review). Each parameter's choices are of those materials only too.
     colours: list[PublicFilament]
-    #: Every pick must share one material (#6152).
-    one_material: bool = False
+    #: The materials a print may be made of, in the shop's order (#6258): the listing's,
+    #: else the shop's default (``storefront_materials``). A print is of a printable one:
+    #: the first that offers every colour the visitor gives, and of those the first that
+    #: also offers each untouched part's default (`inputs.py` `resolve_choice`, #6302
+    #: review).
+    materials: list[str]
     media: list[PublicMedia]
     updated_at: datetime
+    #: False when no render of it can be made: no material is printable, or a colour
+    #: parameter has no colour left (#6302 review). The card's ``available`` is the same.
+    available: bool = True
 
 
 class PublicListingCard(BaseModel):
@@ -405,7 +428,7 @@ class PublicListingCard(BaseModel):
     description: str
     #: The listing's first picture, as a presigned GET, if it has one.
     image: PublicMedia | None
-    #: False when a colour the customer must pick has no filament left (`colourGone`).
+    #: False when no render of it can be made (`PublicListing.available`, #6302 review).
     available: bool
 
 
@@ -437,15 +460,22 @@ class RenderBody(BaseModel):
     #: The listing's ``updated_at`` as the page read it: another is 409 ``listing_changed``.
     listing_updated_at: datetime
     values: dict[str, ParamValue] = Field(default_factory=dict, max_length=200)
-    #: The listing filament the visitor chose for each colour slot of the render.
+    #: The listing filament the visitor chose for each colour slot of the render. It
+    #: must be of the material the colours resolve to (`inputs.py` `resolve_choice`).
+    #: A colour the visitor picks is its value in ``values`` (#6258): the CRUD side
+    #: finds its filament.
     colours: dict[ColourSlotIndex, str] = Field(default_factory=dict, max_length=64)
-    #: The listing filament the visitor picked for each offered colour parameter, by
-    #: parameter name (#6152). Its colour must be the parameter's value. The CRUD side
-    #: maps picks to the render's slots by colour, so the page never guesses a slot.
-    picks: dict[
-        Annotated[str, StringConstraints(max_length=200)],
-        Annotated[str, StringConstraints(max_length=200)],
-    ] = Field(default_factory=dict, max_length=200)
+    #: Accepted and ignored for one release (#6302 review): a page loaded before #6258
+    #: still sends ``picks`` (``{}`` when nothing is picked), and a body that refused it
+    #: would fail that page's every preview and add. It is never dumped (so a request
+    #: key's record does not hold it) and not in the spec. A later PR drops it with the
+    #: ``one_material`` and ``picks`` columns (#6258).
+    picks: SkipJsonSchema[
+        dict[
+            Annotated[str, StringConstraints(max_length=200)],
+            Annotated[str, StringConstraints(max_length=200)],
+        ]
+    ] = Field(default_factory=dict, max_length=200, exclude=True)
 
 
 class StoreRender(BaseModel):
@@ -465,6 +495,12 @@ class StoreRender(BaseModel):
     #: polling (#6120).
     preview_url: str | None
     error: str | None
+    #: The colour parameters' values the render takes, as the CRUD side settled them
+    #: (`inputs.py` `resolve_choice`): a colour the visitor did not set can move to the
+    #: closest colour of the material. The page shows these (#6258, #6302 review). Only
+    #: the start of a render answers them; a status read has null. Never the material:
+    #: the customer never sees one.
+    values: dict[str, ParamValue] | None = None
 
 
 # -- the visitor's draft (Task 8) ------------------------------------------------------

@@ -362,7 +362,8 @@ async def get_draft(state: AppState, visitor_id: str) -> DraftView | None:
 
 async def _render_colours(state: AppState, visitor_id: str, render_key: str) -> list[str] | None:
     """The slot colours of the visitor's own done render of ``render_key``, or None when
-    it has none (#6152): the add fills each slot the page left out from the picks."""
+    it has none (#6152): the add fills each slot the page left out with the filament of
+    its colour in the resolved material (#6258)."""
 
     def read() -> list[str] | None:
         visitor = VisitorStore(state.projection.pool).find(visitor_id)
@@ -389,16 +390,21 @@ async def add_listing_item(
     add: a model item with revision 1, titled as the listing. A retry of a committed add
     (the same key) answers its order as it is now and does nothing else. Refusals: 404
     ``listing_not_found``, 409 ``listing_changed``, 422 ``input_outside_listing`` (with
-    ``name`` and ``reason``), 422 ``listing_mixed_material``, 422 ``pick_colour_clash``
-    (with ``name``), 409 ``render_pending`` (`checked_choice`, #6152), 422
-    ``draft_full``, 409 ``draft_changed``."""
+    ``name`` and ``reason``), 422 ``listing_colours_clash`` (with ``parts``), 409
+    ``render_pending`` (`checked_choice`, #6152, #6258), 422 ``draft_full``, 409
+    ``draft_changed``. Each slot takes the filament of its colour in the one material
+    the visitor's colours resolve to (`inputs.py` `resolve_choice`)."""
     orders = _orders(state)
     asked = {"visitor": token_sha256(visitor_id), **body.model_dump(mode="json")}
     reply = await asyncio.to_thread(_stored, state, key, ADD_ROUTE, asked)
     if reply is not None:
         return await _answer(state, visitor_id, reply)
-    listing, resolved = await checked_choice(
-        orders, body, render_colours=lambda key: _render_colours(state, visitor_id, key)
+    shop = await asyncio.to_thread(lambda: state.settings_store.snapshot().runtime)
+    listing, resolved, _choice = await checked_choice(
+        orders,
+        body,
+        shop.storefront_materials,
+        render_colours=lambda key: _render_colours(state, visitor_id, key),
     )
     visitor = await asyncio.to_thread(VisitorStore(state.projection.pool).ensure, visitor_id)
     by = visitor_actor(visitor)

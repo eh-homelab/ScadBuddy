@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { CHARM, KEYCHAIN } from '../mocks/features/storefrontPublic'
-import { oneFilamentPerColour, settleMaterial, startColour, startMaterial,filamentFinish, filamentLabels, keepOffered, keepPicks, nearestFilament, paramFilaments, parseNumber, shownLabel, swatchBackground, valueText } from './params'
+import { startColour, filamentFinish, filamentLabels, keepOffered, paramFilaments, parseNumber, shownLabel, swatchBackground, valueText } from './params'
 
 describe('parseNumber', () => {
   it.each([
@@ -64,27 +64,14 @@ describe('shownLabel (#6137)', () => {
   })
 })
 
-describe('picks (#6152)', () => {
+describe('colour choices (#6152)', () => {
   const blue = KEYCHAIN.colours[0]!
   const orange = KEYCHAIN.colours[1]!
-
-  it('finds the nearest colour by RGB distance', () => {
-    expect(nearestFilament('#E0602A', KEYCHAIN.colours)).toBe(orange)
-    expect(nearestFilament('#102080', KEYCHAIN.colours)).toBe(blue)
-    expect(nearestFilament('#102080', [])).toBeUndefined()
-  })
-
-  it('keeps only a pick of an offered colour parameter whose colour is the value', () => {
-    const values = { base_colour: '#e8532f', name: 'Ada' }
-    expect(keepPicks(KEYCHAIN, values, { base_colour: orange.id })).toEqual({ base_colour: orange.id })
-    expect(keepPicks(KEYCHAIN, values, { base_colour: blue.id, name: orange.id, gone: blue.id })).toEqual({})
-  })
 
   it('never offers a support material', () => {
     const pva = { id: 'f-pva', colour: '#1B6CA8', colour_name: 'Natural', material: 'PVA' }
     const param = KEYCHAIN.params.base_colour!
     expect(paramFilaments(param, [...KEYCHAIN.colours, pva]).map((f) => f.id)).toEqual([blue.id, orange.id])
-    expect(paramFilaments(param, KEYCHAIN.colours, 'PETG')).toEqual([])
   })
 })
 
@@ -130,68 +117,11 @@ describe('filament names and finishes (#6152)', () => {
   })
 })
 
-describe('one material (#6152)', () => {
-  it('starts a colour at what an unpicked render takes, never at its first choice (#6144)', () => {
+describe('start colours (#6144)', () => {
+  it('starts a colour at what an unpicked render takes, never at its first choice', () => {
     const body = CHARM.params.body_colour!
     expect(startColour({ ...body, default: '#E8532F' })).toBe('#E8532F')
     // No default the page may show (its filament is gone): no start colour.
     expect(startColour({ ...body, default: null })).toBeUndefined()
-  })
-
-  it('starts at the material that has every start colour', () => {
-    expect(startMaterial(CHARM)).toBe('PLA')
-    const tealStart = {
-      ...CHARM,
-      params: Object.fromEntries(Object.entries(CHARM.params).map(([name, param]) => [name, { ...param, default: '#1C8C8C' }])),
-    }
-    expect(startMaterial(tealStart)).toBe('PETG')
-  })
-
-  it('sets every colour, set or not, to a filament of the material', () => {
-    const settled = settleMaterial(CHARM, { body_colour: '#E8532F' }, { body_colour: 'f-orange' }, 'PETG')
-    expect(settled).toEqual({
-      values: { body_colour: '#C0502A', rim_colour: '#1C8C8C' },
-      picks: { body_colour: 'f-petg-rust', rim_colour: 'f-petg-teal' },
-      moved: true,
-    })
-    // A pick already of the material stays, and the unset rim says nothing moved.
-    expect(settleMaterial(CHARM, { body_colour: '#C0502A' }, { body_colour: 'f-petg-rust' }, 'PETG').moved).toBe(false)
-    // Any other listing is left as it is.
-    expect(settleMaterial({ ...CHARM, one_material: false }, {}, {}, 'PETG')).toEqual({ values: {}, picks: {}, moved: false })
-  })
-})
-
-describe('oneFilamentPerColour (#6152)', () => {
-  const cheap = { id: 'f-cheap', colour: '#C0392B', colour_name: 'Cheap red', material: 'PLA' }
-  const dear = { id: 'f-dear', colour: '#c0392b', colour_name: 'Dear red', material: 'PLA' }
-  const choice = { kind: 'choice' as const, group: '', colour: true, choices: ['#C0392B', '#1B6CA8'] }
-  const listing = {
-    ...CHARM,
-    one_material: false,
-    params: { body_colour: { ...choice, label: 'Body colour' }, rim_colour: { ...choice, label: 'Rim colour' } },
-    colours: [cheap, dear, CHARM.colours[0]!],
-  }
-
-  it('moves an earlier pick of the colour to the filament just picked, and names it', () => {
-    expect(oneFilamentPerColour(listing, { body_colour: 'f-cheap', rim_colour: 'f-dear' }, 'rim_colour')).toEqual({
-      picks: { body_colour: 'f-dear', rim_colour: 'f-dear' },
-      moved: ['body_colour'],
-    })
-  })
-
-  it('leaves picks of other colours, and of one filament, as they are', () => {
-    const picks = { body_colour: 'f-cheap', rim_colour: CHARM.colours[0]!.id }
-    expect(oneFilamentPerColour(listing, picks, 'rim_colour')).toEqual({ picks, moved: [] })
-    expect(oneFilamentPerColour(listing, { body_colour: 'f-dear', rim_colour: 'f-dear' })).toEqual({
-      picks: { body_colour: 'f-dear', rim_colour: 'f-dear' },
-      moved: [],
-    })
-  })
-
-  it('gives each colour one filament when a material settles (#6152 review)', () => {
-    const one = { ...listing, one_material: true }
-    // The body keeps its pick; the rim, unset, starts at the same red, so it takes that filament.
-    const settled = settleMaterial(one, { body_colour: '#c0392b' }, { body_colour: 'f-dear' }, 'PLA')
-    expect(settled.picks).toEqual({ body_colour: 'f-dear', rim_colour: 'f-dear' })
   })
 })

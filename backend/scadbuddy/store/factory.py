@@ -164,8 +164,13 @@ class StoreHealth(BaseModel):
     settings_current: bool
 
 
-async def store_health(bundle: StoreBundle) -> StoreHealth:
-    current = await bundle.source.current()
+async def store_health(bundle: StoreBundle, *, wait: bool = True) -> StoreHealth:
+    """The store as this process runs it. With `wait` false (the API's `/healthz`, #6354)
+    it answers from the settings last read and never waits for a read, unless none has
+    been read yet."""
+    current = None if wait else bundle.source.known()
+    if current is None:
+        current = await bundle.source.current()
     return StoreHealth(
         backend=bundle.backend,
         configured_backend=current.store_backend,

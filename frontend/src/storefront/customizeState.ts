@@ -10,10 +10,6 @@ import type { ParamValue } from './api/client'
 export interface SavedChoices {
   values: Record<string, ParamValue>
   quantity: number
-  /** The filament picked for each colour parameter, by id (#6152). */
-  picks?: Record<string, string>
-  /** With the listing's `one_material`: the material chosen (#6152). */
-  material?: string | null
 }
 
 const VERSION = 1
@@ -33,25 +29,15 @@ export function loadChoices(listingId: string): SavedChoices | null {
     if (text === null) return null
     const saved: unknown = JSON.parse(text)
     if (typeof saved !== 'object' || saved === null) return null
-    const { v, values, quantity, picks, material } = saved as {
-      v?: unknown
-      values?: unknown
-      quantity?: unknown
-      picks?: unknown
-      material?: unknown
-    }
+    // #6258: choices saved before it may still hold `picks` and `material`; they are
+    // read past, as a pick is now the colour in `values`.
+    const { v, values, quantity } = saved as { v?: unknown; values?: unknown; quantity?: unknown }
     if (v !== VERSION || typeof values !== 'object' || values === null) return null
     const kept: Record<string, ParamValue> = {}
     for (const [name, value] of Object.entries(values)) if (isValue(value)) kept[name] = value
-    const keptPicks: Record<string, string> = {}
-    if (typeof picks === 'object' && picks !== null && !Array.isArray(picks)) {
-      for (const [name, id] of Object.entries(picks)) if (typeof id === 'string') keptPicks[name] = id
-    }
     return {
       values: kept,
       quantity: typeof quantity === 'number' && Number.isInteger(quantity) && quantity >= 1 ? quantity : 1,
-      picks: keptPicks,
-      material: typeof material === 'string' ? material : null,
     }
   } catch {
     return null

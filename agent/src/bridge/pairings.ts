@@ -1,5 +1,7 @@
 import { createHash, randomInt, randomUUID, timingSafeEqual } from 'node:crypto'
 import type { Sql } from 'postgres'
+import { CrudReadError } from '../api/crudRead.js'
+import { chunks, type CrudTarget, crudOf, qs, segment, TABS_PER_CALL, UUID_SEGMENT } from '../api/crudStores.js'
 import type { Principal } from '../auth/principal.js'
 
 // Pairing an external agent with the user's tab (spec §8.5, #254). The
@@ -262,6 +264,94 @@ export class PostgresPairingStore implements PairingStore {
        WHERE status = 'paired' AND expires_at > now() AND tab_id IN ${this.#sql(tabIds)}
        ORDER BY paired_at, id`
     for (const row of rows) out.set(row.tab_id, [...(out.get(row.tab_id) ?? []), viewOf(row)])
+    return out
+  }
+}
+
+type WirePairing = { id: string; label: string; expires_at: string }
+type WirePairedTab = WirePairing & { tab_id: string }
+
+function fromWire(p: WirePairing): PairingView {
+  return { id: p.id, label: p.label, expiresAt: new Date(p.expires_at) }
+}
+
+/** The route's reason for a request it refuses (backend api/crud_agent_stores.py `PAIRING_REFUSED`). */
+const PAIRING_REFUSED = 'pairing-refused'
+
+/**
+ * The pairing store through the API's CRUD routes, area `pairings` (#5299 step 5; backend
+ * api/crud_agent_stores.py): the API runs each method's transaction, `request`'s cap check
+ * under the same advisory lock and `accept` under the row's `FOR UPDATE`. The code never leaves
+ * this process: the API is sent its SHA-256 only, and compares hashes.
+ */
+export class CrudPairingStore implements PairingStore {
+  readonly #call: ReturnType<typeof crudOf>
+
+  constructor(target: CrudTarget) {
+    this.#call = crudOf(target)
+  }
+
+  async request(principal: Principal): Promise<PairingRequest> {
+    if (principal.kind === 'browser') throw new PairingError('the browser user pairs a tab by chatting from it')
+    const code = newPairingCode()
+    const body = { principal_kind: principal.kind, principal_id: principal.id, fallback_label: fallbackLabel(principal), code_hash: hashCode(code) }
+    try {
+      const made = await this.#call<WirePairing>('a pairing request', '/pairings', { body })
+      return { id: made.id, code, label: made.label, expiresAt: new Date(made.expires_at) }
+    } catch (err) {
+      if (err instanceof CrudReadError && err.fromRoute && err.reason === PAIRING_REFUSED) throw new PairingError(err.detail)
+      throw err
+    }
+  }
+
+  async accept(id: string, code: string, tabId: string): Promise<AcceptResult> {
+    if (!UUID.test(id)) return { ok: false, reason: 'gone' }
+    const answer = await this.#call<{
+      result: 'ok' | 'wrong_code' | 'gone'
+      pairing: WirePairing | null
+      principal_kind: Principal['kind'] | null
+      principal_id: string | null
+      attempts_left: number | null
+    }>('a pairing accepted', `/pairings/${segment(id, UUID_SEGMENT, 'a pairing id')}/accept`, { body: { code_hash: hashCode(code), tab_id: tabId } })
+    if (answer.result === 'ok' && answer.pairing && answer.principal_kind && answer.principal_id) {
+      return { ok: true, pairing: fromWire(answer.pairing), principal: { kind: answer.principal_kind, id: answer.principal_id } }
+    }
+    if (answer.result === 'wrong_code') return { ok: false, reason: 'wrong_code', attemptsLeft: answer.attempts_left ?? 0 }
+    return { ok: false, reason: 'gone' }
+  }
+
+  async deny(id: string): Promise<boolean> {
+    if (!UUID.test(id)) return false
+    return (await this.#call<{ done: boolean }>('a pairing denied', `/pairings/${segment(id, UUID_SEGMENT, 'a pairing id')}/deny`, { method: 'POST' })).done
+  }
+
+  async end(id: string, tabId: string): Promise<boolean> {
+    if (!UUID.test(id)) return false
+    return (await this.#call<{ done: boolean }>('a pairing ended', `/pairings/${segment(id, UUID_SEGMENT, 'a pairing id')}/end`, { body: { tab_id: tabId } })).done
+  }
+
+  async pairedTab(principal: Pick<Principal, 'kind' | 'id'>, signal?: AbortSignal): Promise<(PairingView & { tabId: string }) | undefined> {
+    // A browser principal is never paired (`request` refuses it); the route takes only an MCP kind.
+    if (principal.kind === 'browser') return undefined
+    const { pairing } = await this.#call<{ pairing: WirePairedTab | null }>(
+      "a principal's paired tab",
+      `/pairings/paired-tab${qs({ principal_kind: principal.kind, principal_id: principal.id })}`,
+      { signal },
+    )
+    return pairing ? { ...fromWire(pairing), tabId: pairing.tab_id } : undefined
+  }
+
+  async pending(): Promise<PairingView[]> {
+    return (await this.#call<{ pairings: WirePairing[] }>('the pending pairings', '/pairings/pending')).pairings.map(fromWire)
+  }
+
+  async pairedWith(tabIds: readonly string[]): Promise<Map<string, PairingView[]>> {
+    const out = new Map<string, PairingView[]>()
+    // In runs the route takes; each tab's pairings come in one run, so their order holds.
+    for (const run of chunks(tabIds, TABS_PER_CALL)) {
+      const { pairings } = await this.#call<{ pairings: WirePairedTab[] }>('the pairings of tabs', '/pairings/paired-with', { body: { tab_ids: run } })
+      for (const p of pairings) out.set(p.tab_id, [...(out.get(p.tab_id) ?? []), fromWire(p)])
+    }
     return out
   }
 }
