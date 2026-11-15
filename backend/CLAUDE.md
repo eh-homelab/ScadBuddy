@@ -306,7 +306,19 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   copies their ranges itself until its sessions move here), a browser call's key dropped and the
   hourly sweep of the keys no forget deletes; `flow_blobs.py` a flow run's images kept (sealed by
   the agent, sent as multipart bytes; the tombstone check and `FLOW_IMAGES_MAX` under the lock)
-  and read. `flows/forget.py` and `flows/images.py` run the same statements on the API's own
+  and read. For `api/crud_agent_workspace.py` (area `workspace`, #5299 step 7): `workspace.py`
+  is the agent's `workspace/store.ts` `SessionFiles` on the API, with the sealing
+  (`seal_file`, `open_file`: the agent's `workspace/sealing.ts` format) and the file keys
+  wrapped and opened here under the session's payload key (`payload_keys.py` `key_in`, no
+  audit row: the key never leaves the API) or the KEK; each write's row, its blob's
+  `blob_refs` hold and its `workspace.file` events in one transaction, the reconcile one
+  transaction under `RECONCILE_LOCK`, and `rewrap` at a rotation. `api/crud_agent_blobs.py`
+  (areas `session-blobs`, `attachments`, `http-bodies`, #5299 step 7) is the agent's
+  `sessions/blobs.ts`, `attachments/store.ts` and `sessions/httpBodies.ts` statement for
+  statement: an image's name and signature checked from its bytes, a tool call's images
+  replaced whole, a fenced write checked `FOR SHARE`, a fork's read through its chain, an
+  attachment's caps under its owner's lock, a saved body read by range (tests
+  `tests/crud/test_crud_agent_blobs.py`). `flows/forget.py` and `flows/images.py` run the same statements on the API's own
   tables, with no fallback for a database the agent never migrated (the API applies its files
   first, #5299 D6). Its tests make the agent's tables
   with the agent's own migration files (`render/agent_migrations.py` `migrate_agent`) and open
@@ -434,6 +446,15 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   and presets, which the dialog and the run share; the dialog's Reslice gives a
   completed slice a new row of its own, `reslice_of`, #4433; the lost-row repair), `preview.py` (the
   dialog's reads under `?slicer=native`) and `component.py` (`SLICING`).
+  What a native slice keeps of a file: `--load-settings` (ScadBuddy's process preset)
+  replaces the file's own process keys, `enable_support`, `support_filament` and
+  `support_interface_filament` among them; the supports option passes only enable, type and
+  build-plate-only (`supports.py` `SCALAR_KEYS`). An author layout (`render/bambu3mf.py`
+  `layout_of`: a `print_settings_id` other than ScadBuddy's placeholder) keeps its placement
+  and scale, and its tower unless the target's extruders cannot reach it
+  (`towers_within_reach`, in `bambuddy/send.py` `_laid_out_for`). A sliced file, another
+  slicer's, or one past the caps (`layout_of` `as_is`) prints as it is. The headless CLI
+  draws no plate covers (its GLFW is Wayland-only) and copies the input's (#6170).
   `workflows/slicing.py` is `SliceWorkflow` on the `library` queue (activities in
   `workflows/slicing_activities.py`, the run's `slice_run` and `print_sliced_upload`
   among them); the print worker only starts it. `api/internal_blobs.py` is the hidden
@@ -940,7 +961,12 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `mocks/features/activity.ts`.
 - `backend/scadbuddy/orders/` — orders phase 1 (#4249, epic #4248, spec
   `2026-10-18-orders-design.md`, plan `2026-10-19-orders-phase-1-customers-and-orders.md`):
-  customers, orders and line items as ScadBuddy's own records. `component.py` `ORDERS`
+  customers, orders and line items as ScadBuddy's own records. A library-file item has no
+  design revisions (409 "it has no design revisions"): to change one after acceptance, add
+  a new item (`POST …/{order_id}/items/after-acceptance`, the agent's
+  `order_item_add_after_acceptance`) and cancel the old one. An item made with
+  `archive_id` is a library-file item from a copy of the archive's file
+  (`origin_archive_ids`); its archive quote needs the archive `completed`. `component.py` `ORDERS`
   (`OrdersComponent`: `store` over the shared `scadbuddy-rows` pool (`rows/component.py`),
   opened on first use, `lifecycle` over the core's bus; `OrdersDep`), `models.py` (the wire and row shapes; money is integer minor
   units, `*_minor`), `store.py` (`OrderStore`, plain CRUD per table; `transaction()` and

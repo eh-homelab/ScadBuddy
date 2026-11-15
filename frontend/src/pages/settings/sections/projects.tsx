@@ -11,6 +11,7 @@ import { useAsync } from '../../../lib/useAsync'
 import { useSettingsAgentField } from '../agentFields'
 import { useBambuddyResources } from '../bambuddyResources'
 import { FieldRow } from '../controls'
+import { docOf } from '../fields'
 import { usePeerDraft } from '../dirty'
 import { FieldBadge, RuntimeRows, SavedSection } from '../formParts'
 import type { AreaId } from '../registry'
@@ -57,8 +58,7 @@ export function Component() {
     <SavedSection form={form} id={id} title={title}>
       <FieldRow
         id="library-folder"
-        label="Inbox folder, for sends without a project"
-        help="Where a 3MF goes when it is sent without a project. A send to a project uses the project's own folder."
+        {...docOf(form.settings, 'library_folder_id')}
       >
         <ChoiceSelect
           id="library-folder"
@@ -73,12 +73,10 @@ export function Component() {
 
       <FieldRow
         id="default-project"
-        label="Default project"
-        help={
-          projectsState.error
-            ? `Could not list the projects: ${projectsState.error instanceof ApiError ? projectsState.error.detail : 'no answer'}`
-            : 'Where a print, Arrange or Generate is filed when what it holds is not all in one project already (then it opens on that project). A model opens on the project it was last filed in. None set: no project.'
-        }
+        {...docOf(form.settings, 'last_project_id')}
+        {...(projectsState.error
+          ? { help: `Could not list the projects: ${projectsState.error instanceof ApiError ? projectsState.error.detail : 'no answer'}` }
+          : {})}
       >
         <ChoiceSelect
           id="default-project"
@@ -96,8 +94,7 @@ export function Component() {
 
       <FieldRow
         id="destination-sort"
-        label="Sort projects and folders by"
-        help="How the project and folder picker opens. It can be re-sorted there."
+        {...docOf(form.settings, 'destination_sort')}
       >
         <ChoiceSelect
           id="destination-sort"
@@ -113,10 +110,9 @@ export function Component() {
 
       <FieldRow
         id="store-backend"
-        label="Blob store"
+        {...docOf(form.settings, 'store_backend')}
         badge={<FieldBadge form={form} name="store_backend" />}
         error={errors.store_backend}
-        help="Takes effect when ScadBuddy and its render workers restart."
       >
         <ChoiceSelect
           id="store-backend"
@@ -152,10 +148,9 @@ export function Component() {
 
       <FieldRow
         id="library-backend"
-        label="Print library"
+        {...docOf(form.settings, 'library_backend')}
         badge={<FieldBadge form={form} name="library_backend" />}
         error={errors.library_backend}
-        help="Where print files are kept. Takes effect when the ScadBuddy API restarts; its workers need no restart. Switching moves no files: ScadBuddy’s own library starts empty, and Bambuddy’s files stay in Bambuddy."
       >
         <ChoiceSelect
           id="library-backend"
@@ -175,10 +170,9 @@ export function Component() {
 
       <FieldRow
         id="slicer-backend"
-        label="Slicer"
+        {...docOf(form.settings, 'slicer_backend')}
         badge={<FieldBadge form={form} name="slicer_backend" />}
         error={errors.slicer_backend}
-        help="Who slices the print dialog’s plates and the prints it queues. Takes effect at once. ScadBuddy’s slicer runs the Bambu Studio CLI in the scadbuddy-slicer worker; Bambuddy still queues and prints."
       >
         <ChoiceSelect
           id="slicer-backend"
@@ -195,18 +189,10 @@ export function Component() {
         <p id="store-s3-heading" className="text-sm font-medium">
           S3 store
         </p>
-        {(
-          [
-            ['store_s3_endpoint', 'Endpoint', 'The service’s URL, e.g. https://s3.us-east-1.amazonaws.com or a MinIO or Garage address.'],
-            ['store_s3_region', 'Region', 'The region requests are signed for; most self-hosted services take any.'],
-            ['store_s3_bucket', 'Bucket', 'An existing bucket. ScadBuddy does not create it.'],
-            ['store_s3_prefix', 'Prefix', 'Every object goes under this key prefix in the bucket.'],
-            ['store_s3_access_key_id', 'Access key id', undefined],
-          ] as const
-        ).map(([name, label, help]) => {
+        {(['store_s3_endpoint', 'store_s3_region', 'store_s3_bucket', 'store_s3_prefix', 'store_s3_access_key_id'] as const).map((name) => {
           const id = `setting-${name}`
           return (
-            <FieldRow key={name} id={id} label={label} badge={<FieldBadge form={form} name={name} />} error={errors[name]} help={help}>
+            <FieldRow key={name} id={id} {...docOf(form.settings, name)} badge={<FieldBadge form={form} name={name} />} error={errors[name]}>
               <Input
                 id={id}
                 value={value(name)}
@@ -218,10 +204,9 @@ export function Component() {
         })}
         <FieldRow
           id="setting-store_s3_secret_access_key"
-          label="Secret access key"
+          {...docOf(form.settings, 'store_s3_secret_access_key')}
           badge={<FieldBadge form={form} name="store_s3_secret_access_key" />}
           error={errors.store_s3_secret_access_key}
-          help="Sealed at rest, and never shown again once saved."
         >
           <div className="flex gap-2">
             <Input
@@ -253,10 +238,9 @@ export function Component() {
         </FieldRow>
         <FieldRow
           id="setting-store_s3_path_style"
-          label="Path-style addressing"
+          {...docOf(form.settings, 'store_s3_path_style')}
           badge={<FieldBadge form={form} name="store_s3_path_style" />}
           error={errors.store_s3_path_style}
-          help="The bucket in the path rather than the hostname. Most self-hosted services need it on."
         >
           <Switch
             id="setting-store_s3_path_style"

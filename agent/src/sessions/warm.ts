@@ -3,6 +3,8 @@
 // still matches the turn's.
 
 import { createHash } from 'node:crypto'
+import { realpath, rm } from 'node:fs/promises'
+import path from 'node:path'
 import type {
   Query,
   SDKMessage,
@@ -13,7 +15,9 @@ import type {
 } from '@anthropic-ai/claude-agent-sdk'
 import type { Sql } from 'postgres'
 import type { Credential } from '../credentials.js'
+import { projectDirName } from '../harness/confine.js'
 import { RESTORED_EPSILON } from '../harness/fallback.js'
+import { claudeConfigDir, scratchDir } from '../harness/options.js'
 import { Inbox } from '../harness/inbox.js'
 import { type HarnessRun, runHarness } from '../harness/run.js'
 import { type AppendFence, type PostgresSessionStore, transcriptExists } from './store.js'
@@ -647,6 +651,13 @@ export class WarmSessions {
     const carriedUsd = costStateUsd(costState === null ? null : JSON.stringify(costState), this.log)
     const inbox = new Inbox()
     const { resume: _resume, sessionId: _sessionId, ...run } = turn.run
+    // A new process under the session's own id finds no file of an earlier one here: Claude Code
+    // refuses an id it has a file for ("Session ID … is already in use", exit 1; measured on the
+    // bundled 0.3.314). An earlier process leaves one when its placement was cut off before any of
+    // its appends landed, and the turn is placed here again (#6387). The table is the transcript.
+    // A directory that is not there yet held no process, so there is no file to remove.
+    const ranIn = resume ? undefined : await realpath(run.cwd ?? scratchDir(run.paths)).catch(() => undefined)
+    if (ranIn !== undefined) await rm(path.join(claudeConfigDir(run.paths), 'projects', projectDirName(ranIn), `${sessionId}.jsonl`), { force: true })
     const query = this.start({
       ...run,
       credential,

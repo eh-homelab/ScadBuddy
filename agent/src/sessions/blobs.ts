@@ -29,6 +29,11 @@ import type { ImageRef, SentImage, ServerEvent } from './protocol.js'
 // them. A fork copies none (#4212): it reads its ancestors' images that the events it
 // reads through its chain name (`get`), never those past its cut (#2150), and
 // forgetting a parent copies those into it first (`copyForkBlobs`).
+//
+// Once the API lists area `session-blobs` (#5299 step 7), `CrudSessionBlobs` (crudBlobs.ts)
+// runs each method on the API's CRUD routes instead (backend api/crud_agent_blobs.py), the
+// same statements in one transaction; `copyForkBlobs` stays here, in the forget's own
+// transaction, until the sessions move (#5299 step 9).
 
 /** The most images one tool result keeps; any past it stay `[image]` in the summary. */
 export const RESULT_IMAGES_MAX = 8
@@ -94,7 +99,20 @@ export function sentImageBlobs(images: readonly UserImage[]): { blobs: SessionIm
 
 export type StoredBlob = { mediaType: ImageMediaType; bytes: Buffer }
 
-export class SessionBlobs {
+/**
+ * An AgentSession placement's hold on its turn (turnHost.ts): the session's row still names
+ * this attempt and this turn, checked `FOR SHARE` in the write's own transaction.
+ */
+export type TurnFence = { attempt: string; turnId: string }
+
+/** A session's images: `SessionBlobs` over SQL, `CrudSessionBlobs` over the API's routes. */
+export interface SessionImages {
+  put(sessionId: string, images: readonly SessionImage[], toolUseId?: string): Promise<void>
+  putIf(sessionId: string, images: readonly SessionImage[], fence: TurnFence): Promise<boolean>
+  get(sessionId: string, name: string): Promise<StoredBlob | undefined>
+}
+
+export class SessionBlobs implements SessionImages {
   private readonly sql: Sql
 
   constructor(sql: Sql) {
@@ -124,9 +142,12 @@ export class SessionBlobs {
    * `put` under a fence checked in the same transaction (an AgentSession placement's hold on its
    * turn, turnHost.ts): false, and nothing stored, when the fence refuses.
    */
-  async putIf(sessionId: string, images: readonly SessionImage[], fence: (tx: TransactionSql) => Promise<boolean>): Promise<boolean> {
+  async putIf(sessionId: string, images: readonly SessionImage[], fence: TurnFence): Promise<boolean> {
     return this.sql.begin(async (tx) => {
-      if (!(await fence(tx))) return false
+      const held = await tx`
+        SELECT 1 FROM ai_sessions WHERE id = ${sessionId} AND turn_attempt = ${fence.attempt}
+           AND durable_turn_id = ${fence.turnId} FOR SHARE`
+      if (held.length === 0) return false
       await this.insert(tx, sessionId, images)
       return true
     })

@@ -340,13 +340,12 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session ima
     const { session } = await m.start(browser, { origin: 'chat' })
     const blobs = new SessionBlobs(db.sql)
     const image = sessionImage('image/png', Buffer.from(PNG, 'base64'))
-    const inTx = async (tx: { unsafe: (q: string) => Promise<unknown> }, answer: boolean) => {
-      await tx.unsafe('SELECT 1')
-      return answer
-    }
-    expect(await blobs.putIf(session.id, [image], (tx) => inTx(tx, false))).toBe(false)
+    const turnId = randomUUID()
+    await db.sql`UPDATE ai_sessions SET turn_attempt = 'run:1', durable_turn_id = ${turnId} WHERE id = ${session.id}`
+    expect(await blobs.putIf(session.id, [image], { attempt: 'run:2', turnId })).toBe(false)
+    expect(await blobs.putIf(session.id, [image], { attempt: 'run:1', turnId: randomUUID() })).toBe(false)
     expect(await blobs.get(session.id, NAME)).toBeUndefined()
-    expect(await blobs.putIf(session.id, [image], (tx) => inTx(tx, true))).toBe(true)
+    expect(await blobs.putIf(session.id, [image], { attempt: 'run:1', turnId })).toBe(true)
     expect((await blobs.get(session.id, NAME))?.mediaType).toBe('image/png')
   })
 

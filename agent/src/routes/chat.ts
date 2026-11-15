@@ -7,7 +7,7 @@ import { QuestionError } from '../gate/questions.js'
 import { contextFrom } from '../telemetry/trace.js'
 import type { TabHub } from '../bridge/hub.js'
 import type { OriginPolicy } from '../http/origins.js'
-import { type AttachmentRef, AttachmentError, type AttachmentStore, type ResolvedAttachment } from '../attachments/store.js'
+import { type AttachmentRef, AttachmentError, type Attachments, type ResolvedAttachment } from '../attachments/store.js'
 import { type ClientMessage, isAnswerId, isSessionId, parseClientFrame, renderPageContext } from '../sessions/clientProtocol.js'
 import { checkedImages } from '../sessions/images.js'
 import { type SessionManager, SessionError } from '../sessions/manager.js'
@@ -130,7 +130,7 @@ export type ChatConnectionOptions = {
   /** The client's address, for the audit rows of what it does here (a question's answer, #1075). */
   clientIp?: string | undefined
   /** The panel's uploaded images (#1941), which a `user.message` names by id; without it such a message is refused. */
-  attachments?: AttachmentStore | undefined
+  attachments?: Attachments | undefined
   /**
    * Whether the signed-in session the socket was opened under is still live (#5217):
    * asked before every frame and every snapshot; undefined when it could not be read.
@@ -158,7 +158,7 @@ export type ChatRouteDeps = {
   /** The browser bridge's tabs (#254, bridge/hub.ts). */
   tabs?: Pick<TabHub, 'pairSession' | 'sessionTab' | 'pairSessionIfStill'> | undefined
   /** The panel's uploaded images (#1941, attachments/store.ts). */
-  attachments?: AttachmentStore | undefined
+  attachments?: Attachments | undefined
   /** The signed-in sessions (#4975 phase 5): a socket opened under one closes when it ends (#5217). */
   browserSessions?: BrowserSessions | undefined
   /** With `off`, a socket never re-checks its session, as before #5217. */
@@ -231,7 +231,7 @@ export class ChatConnection {
   /** The tab this panel is in, once it said (`tab.bind`). */
   private tabId: string | undefined
   private readonly clientIp: string | undefined
-  private readonly attachments: AttachmentStore | undefined
+  private readonly attachments: Attachments | undefined
   private readonly signedIn: (() => Promise<boolean | undefined>) | undefined
   private readonly signedOut: () => void
 

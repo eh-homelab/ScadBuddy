@@ -1,4 +1,4 @@
-import { useId, useState } from 'react'
+import { useId, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import type { CustomizerSchema, Filament, ListingBound, MediaView, ModelSummary, ModelVersion, Param, ParamValue } from '../../api/types'
 import { Button } from '@/components/ui/button'
@@ -8,7 +8,7 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
-import { colourProblems, effectiveMaterials, emptyDraft, fixColour, isSupport, isSupportOnly, lockedValue, materialKey, MAX_TEXT_LENGTH, nearestFilaments, offerable, priceBookMaterials, schemaBound, shownParams, titleColours, withoutWords, type ListingDraft, type ListingRefusal } from './listingDraft'
+import { colourProblems, defaultFits, effectiveMaterials, emptyDraft, fittedDefault, fixColour, isSupport, isSupportOnly, lockedValue, materialKey, MAX_TEXT_LENGTH, nearestFilaments, offerable, priceBookMaterials, pickableColours, refusalText, sameColour, schemaBound, shownParams, titleColours, withoutWords, type ListingDraft, type ListingRefusal } from './listingDraft'
 import { customerFilaments } from '../../storefront/params'
 import { MaterialOrder } from './MaterialOrder'
 import { ListingPictures, type LivePictures, type MediaState } from './ListingPictures'
@@ -220,6 +220,111 @@ function LockedField({
   return <Input id={id} aria-label={`Value of ${label}`} value={value === undefined ? '' : String(value)} onChange={(event) => onChange(parsed(param, event.target.value))} />
 }
 
+/**
+ * #6144 — the value an offered parameter starts at, which a customer who picks nothing
+ * gets: the template's default while the bounds allow it, else the listing's own `default`.
+ * Its choices are what the bounds allow (a colour: the colours on offer, `colours`); a value
+ * outside them is named, as publish refuses it (`listing_default_invalid`).
+ */
+function DefaultField({
+  param,
+  bound,
+  label,
+  colours,
+  filaments,
+  onChange,
+}: {
+  param: Param
+  bound: ListingBound
+  label: string
+  colours: readonly string[]
+  filaments: readonly Filament[]
+  onChange: (bound: ListingBound) => void
+}) {
+  const id = useId()
+  const value = bound.default ?? param.initial ?? undefined
+  const fits = defaultFits(param, bound, value, colours)
+  const templateFits = defaultFits(param, bound, param.initial, colours)
+  // A colour is the template's in any case, as publish compares colours (#6402 review).
+  const isTemplate = (next: ParamValue) => (param.type === 'color' ? sameColour(next, param.initial) : next === param.initial)
+  // Set back to the template's, the listing's own default is dropped: an unpicked render takes the template's.
+  const set = (next: ParamValue) => {
+    const { default: _own, ...rest } = bound
+    onChange(templateFits && isTemplate(next) ? (rest as ListingBound) : ({ ...rest, default: next } as ListingBound))
+  }
+  const choiceName = (choice: ParamValue) =>
+    param.type === 'boolean' ? (choice ? 'On' : 'Off') : ((param.options ?? []).find((option) => option.value === choice)?.name || String(choice))
+  const options =
+    param.type === 'color'
+      ? colours.map((colour) => {
+          const filament = filaments.find((f) => f.colour.toLowerCase() === colour.toLowerCase())
+          return { name: filament ? filamentName(filament) : colour, value: colour as ParamValue }
+        })
+      : bound.kind === 'choice'
+        ? bound.choices.map((choice) => ({ name: choiceName(choice), value: choice }))
+        : null
+  let field
+  if (options) {
+    const at = options.findIndex((option) => (param.type === 'color' ? String(option.value).toLowerCase() === String(value).toLowerCase() : option.value === value))
+    field = (
+      <Select
+        value={at < 0 ? undefined : String(at)}
+        disabled={options.length === 0}
+        onValueChange={(index) => {
+          const option = options[Number(index)]
+          if (option) set(option.value)
+        }}
+      >
+        <SelectTrigger id={id} aria-label={`Default of ${label}`} className="w-full sm:w-64">
+          <SelectValue placeholder={value === undefined ? 'Choose' : param.type === 'boolean' ? choiceName(value) : String(value)} />
+        </SelectTrigger>
+        <SelectContent>
+          {options.map((option, index) => (
+            <SelectItem key={index} value={String(index)}>
+              {param.type === 'color' && <Swatch colour={String(option.value)} />}
+              {option.name}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    )
+  } else {
+    field = (
+      <Input
+        id={id}
+        aria-label={`Default of ${label}`}
+        className="w-full sm:w-64"
+        type={bound.kind === 'number' ? 'number' : 'text'}
+        step={bound.kind === 'number' ? (bound.step ?? param.step ?? 'any') : undefined}
+        value={value === undefined ? '' : String(value)}
+        onChange={(event) => set(parsed(param, event.target.value))}
+      />
+    )
+  }
+  return (
+    <div className="flex flex-col gap-1">
+      <Label htmlFor={id} className="text-xs font-normal">
+        Starts at
+      </Label>
+      {field}
+      {!fits ? (
+        <p className="text-xs text-destructive">
+          {value === undefined
+            ? 'Choose the value a customer who picks nothing gets.'
+            : `A customer who picks nothing gets ${shown(value)}, which these choices do not allow. Choose another starting value.`}
+        </p>
+      ) : bound.default != null && templateFits && !isTemplate(bound.default) ? (
+        <Button variant="link" size="sm" className="h-auto justify-self-start p-0 text-xs" onClick={() => set(param.initial as ParamValue)}>
+          Use the template’s ({shown(param.initial ?? undefined)})
+        </Button>
+      ) : null}
+    </div>
+  )
+}
+
+/** A refit that left no starting value where the person had chosen one (`ParamRow` `forced`). */
+const DROPPED = Symbol('dropped')
+
 /** Why the customer cannot be given `param`, or null. */
 function whyNotOffered(param: Param, draft: ListingDraft, schema: CustomizerSchema | undefined, filaments: readonly Filament[]): string | null {
   if (isSupport(param)) return 'Support settings are yours: a customer never sees them.'
@@ -231,7 +336,21 @@ function whyNotOffered(param: Param, draft: ListingDraft, schema: CustomizerSche
   return null
 }
 
-function ParamRow({ param, draft, schema, filaments, onChange }: { param: Param; draft: ListingDraft; schema: CustomizerSchema | undefined; filaments: readonly Filament[]; onChange: (draft: ListingDraft) => void }) {
+function ParamRow({
+  param,
+  draft,
+  schema,
+  filaments,
+  refusal,
+  onChange,
+}: {
+  param: Param
+  draft: ListingDraft
+  schema: CustomizerSchema | undefined
+  filaments: readonly Filament[]
+  refusal: ListingRefusal | null
+  onChange: (draft: ListingDraft) => void
+}) {
   const id = useId()
   const label = param.caption || param.name
   const bound = draft.params[param.name]
@@ -240,6 +359,30 @@ function ParamRow({ param, draft, schema, filaments, onChange }: { param: Param;
   // #6152: a label that says "support" or "interface" makes a support setting, which the
   // saved body locks (`listingInput`), as publish refuses to offer it.
   const supportLabel = bound !== undefined && !isSupport(param) && isSupport(param, bound.label)
+  const colours = pickableColours(draft, schema, filaments)
+  // #6144: what publish refused about this parameter, until the next edit.
+  const refused = refusal?.kind === 'param' && refusal.name === param.name ? refusal : null
+  const setBound = (next: ListingBound) => onChange({ ...draft, params: { ...draft.params, [param.name]: next } })
+  // #6402 review: the starting value the person chose (none: the template's), and the one the
+  // last refit chose for them. Each bound change refits from the person's choice, never from a
+  // value a half-typed bound forced, so typing "150" through "1" and "15" ends where it began.
+  const chosen = useRef<ParamValue | undefined>(undefined)
+  const forced = useRef<ParamValue | typeof DROPPED | undefined>(undefined)
+  const refit = (next: ListingBound): ListingBound => {
+    const { default: _dropped, ...rest } = next
+    // A default the last refit did not force (or drop) is the person's: typed, or saved with the listing.
+    const current = bound?.default ?? undefined
+    const own = current === undefined ? (forced.current === DROPPED ? chosen.current : undefined) : current === forced.current ? chosen.current : current
+    chosen.current = own
+    const fitted = fittedDefault(param, (own === undefined ? rest : { ...rest, default: own }) as ListingBound, colours, own ?? param.initial)
+    const start = fitted.default ?? undefined
+    forced.current = start === own ? undefined : start === undefined ? DROPPED : start
+    return fitted
+  }
+  const choose = (next: ListingBound) => {
+    forced.current = undefined
+    setBound(next)
+  }
 
   function lock() {
     const { [param.name]: _dropped, ...params } = draft.params
@@ -248,7 +391,10 @@ function ParamRow({ param, draft, schema, filaments, onChange }: { param: Param;
 
   function offer() {
     const { [param.name]: _dropped, ...fixed } = draft.fixed
-    onChange({ ...draft, fixed, params: { ...draft.params, [param.name]: schemaBound(param) } })
+    chosen.current = undefined
+    const fitted = fittedDefault(param, schemaBound(param), colours, value)
+    forced.current = fitted.default ?? undefined
+    onChange({ ...draft, fixed, params: { ...draft.params, [param.name]: fitted } })
   }
 
   return (
@@ -268,7 +414,11 @@ function ParamRow({ param, draft, schema, filaments, onChange }: { param: Param;
         </label>
       </div>
       {bound ? (
-        <BoundFields param={param} bound={bound} onChange={(next) => onChange({ ...draft, params: { ...draft.params, [param.name]: next } })} />
+        <>
+          {/* #6144: bounds that leave out the value it starts at move it to the one nearest, never past them. */}
+          <BoundFields param={param} bound={bound} onChange={(next) => setBound(refit(next))} />
+          <DefaultField param={param} bound={bound} label={label} colours={colours} filaments={filaments} onChange={choose} />
+        </>
       ) : (
         <LockedField
           id={`${id}-value`}
@@ -280,6 +430,11 @@ function ParamRow({ param, draft, schema, filaments, onChange }: { param: Param;
         />
       )}
       {why && <p className="text-xs text-muted-foreground">{why}</p>}
+      {refused && (
+        <p role="alert" className="text-xs text-destructive">
+          {refusalText(refused, label)}
+        </p>
+      )}
       {supportLabel && (
         <p className="text-xs text-destructive">A label with “support” or “interface” makes this a support setting: a customer never sees it. Change the label.</p>
       )}
@@ -714,7 +869,7 @@ export function ListingEditor({ draft, onChange, models, versions, schema, filam
         {/* #6290 — one list in template order: a switch never moves its parameter. */}
         <ul className="flex flex-col gap-2">
           {params.map((param) => (
-            <ParamRow key={param.name} param={param} draft={draft} schema={schema} filaments={filaments} onChange={onChange} />
+            <ParamRow key={param.name} param={param} draft={draft} schema={schema} filaments={filaments} refusal={refusal} onChange={onChange} />
           ))}
         </ul>
       </section>

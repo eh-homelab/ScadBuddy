@@ -8,6 +8,8 @@ SCADBUDDY_TEST_TEMPORAL_DEV_SERVER or ``temporal`` on PATH) and moto's S3, serve
 on a free loopback port with ``store_backend`` s3 and a KEK of its own, and prints
 ``READY <base url> <agent token>`` once ``/healthz`` answers: the token is an ``agent``
 service credential, which the holds' CRUD routes (`api/crud_agent.py`, #5299) require.
+``SCADBUDDY_TEST_WORKSPACE_KEK`` (base64), when set, is that KEK, so the test's own sealing
+and the API's open each other's files (#5299 step 7).
 It runs until it is signalled or its stdin closes; the test kills its process group."""
 
 from __future__ import annotations
@@ -49,7 +51,10 @@ def main() -> None:
     ):
         root = Path(scratch)
         kek = root / "kek"
-        kek.write_text(base64.b64encode(os.urandom(32)).decode())
+        kek.write_text(
+            os.environ.get("SCADBUDDY_TEST_WORKSPACE_KEK")
+            or base64.b64encode(os.urandom(32)).decode()
+        )
         (root / "seed").mkdir()
         port = _free_port()
         base = f"http://127.0.0.1:{port}"

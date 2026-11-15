@@ -182,10 +182,15 @@ describe('StorefrontPage (#5282, #6157)', () => {
   it('is refused a page out of bounds by the mock, as by the API (422)', async () => {
     await expect(api.storefrontListings(new URLSearchParams({ offset: '1000001' }))).rejects.toMatchObject({ status: 422 })
     await expect(api.storefrontListings(new URLSearchParams({ limit: '201' }))).rejects.toMatchObject({ status: 422 })
-    // Pydantic refuses these as integers; it takes spaces and a sign.
-    await expect(api.storefrontListings(new URLSearchParams({ limit: '1e2' }))).rejects.toMatchObject({ status: 422 })
+    // Pydantic refuses these as integers; it takes spaces, a sign, `_` between digits and a
+    // fraction of zeros.
+    for (const limit of ['1e2', '5.', '.0', '5.5', '_1', '1_', '1__0', '1.0_0']) {
+      await expect(api.storefrontListings(new URLSearchParams({ limit }))).rejects.toMatchObject({ status: 422 })
+    }
     await expect(api.storefrontListings(new URLSearchParams({ offset: '0x10' }))).rejects.toMatchObject({ status: 422 })
     await expect(api.storefrontListings(new URLSearchParams({ limit: ' +5 ' }))).resolves.toMatchObject({ limit: 5 })
+    await expect(api.storefrontListings(new URLSearchParams({ limit: '5.00' }))).resolves.toMatchObject({ limit: 5 })
+    await expect(api.storefrontListings(new URLSearchParams({ limit: '1_00' }))).resolves.toMatchObject({ limit: 100 })
     await expect(api.storefrontListings(new URLSearchParams({ limit: '200', offset: '1000000' }))).resolves.toMatchObject({ items: [] })
   })
 

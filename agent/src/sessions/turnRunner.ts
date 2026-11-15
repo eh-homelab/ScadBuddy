@@ -36,7 +36,7 @@ import { harnessToolName, toolPrefix } from '../plugins/registry.js'
 import type { CheckedPlugin } from '../plugins/registry.js'
 import { withSpan } from '../telemetry/trace.js'
 import { TurnTrace } from '../telemetry/turn.js'
-import type { SessionFiles } from '../workspace/store.js'
+import type { WorkspaceFiles } from '../workspace/store.js'
 import { directoryNote } from './directoryNote.js'
 import type { EventLog } from './eventLog.js'
 import type { ClaimedSession, SessionManagerDeps, SessionRecord, TurnPrincipal } from './manager.js'
@@ -50,7 +50,7 @@ import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-
 import { type ProxiedTool, type ToolCallRequest, turnToolProxies } from '../tools/activityProjection.js'
 import { poolRemainingUsd, recordMemoryActivity, SETTING_MODEL, systemAppend } from './turnShared.js'
 import { createTurnSlot, NO_TURN, slotHooks, slotHttpContext, slotWebContext, type TurnContext, type TurnSlot } from './turnSlot.js'
-import { PgHttpBodies } from './httpBodies.js'
+import { pgHttpBodies } from './httpBodies.js'
 import { nestedQueries } from '../builtins/nested.js'
 import { browserGuard } from '../browser/guard.js'
 import { BrowserOrigins } from '../browser/store.js'
@@ -81,6 +81,7 @@ export type TurnRunnerDeps = Pick<
   | 'packageServers'
   | 'memory'
   | 'httpRequest'
+  | 'httpBodies'
   | 'sql'
   | 'browserOrigins'
   | 'background'
@@ -93,7 +94,7 @@ export type TurnRunnerDeps = Pick<
   store: SessionStore & Pick<PostgresSessionStore, 'exists' | 'lastCwd'>
   events: Pick<EventLog, 'append'>
   /** The workspace http_request's `save_to_workspace` writes to (#2329). */
-  files: SessionFiles
+  files: WorkspaceFiles
 }
 
 /** Everything fixed at spawn that decides whether a warm process may serve a turn (spec §5.3 "Reuse rule"). */
@@ -624,7 +625,7 @@ export class TurnRunner {
           ? httpRequestServer(
               slotHttpContext(
                 {
-                  saved: new PgHttpBodies(this.deps.sql, id),
+                  saved: (this.deps.httpBodies ?? pgHttpBodies(this.deps.sql))(id),
                   // save_to_workspace (#2329): the body becomes one of the session's files.
                   workspace: { files: this.deps.files, ref: { kind: 'session', sessionId: id } },
                   secrets: () => secrets,

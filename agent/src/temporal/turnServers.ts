@@ -17,7 +17,7 @@ import {
   httpTierOf,
   type SavedBodies,
 } from '../harness/httpRequest.js'
-import { PgHttpBodies } from '../sessions/httpBodies.js'
+import { type HttpBodiesFor, pgHttpBodies } from '../sessions/httpBodies.js'
 import type { HttpLimits } from '../harness/httpRequest.js'
 import type { Resolver } from '../http/egress.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
@@ -25,7 +25,7 @@ import type { LoadedPackage, PackagesForRun } from '../plugins/packages/install.
 import { type PackageServers, serverAccess } from '../plugins/packages/mcp.js'
 import { pluginTierResolver } from '../plugins/registry.js'
 import { browserGuard, type BrowserOriginsAccess } from '../browser/guard.js'
-import type { SessionFiles } from '../workspace/store.js'
+import type { WorkspaceFiles } from '../workspace/store.js'
 import { localPackageServers, switchedOffServer } from './packageServers.js'
 import { connectHttp, connectInProcess, type TurnContext, type TurnServer, type TurnServers } from './turnTools.js'
 
@@ -115,7 +115,9 @@ export type TurnServerDeps = {
         resolve?: Resolver
         limits?: Partial<HttpLimits>
         /** The sessions' workspaces, where `save_to_workspace` stores a body (#2496), as a classic turn's. */
-        files?: SessionFiles | undefined
+        files?: WorkspaceFiles | undefined
+        /** A session's saved bodies (`PgHttpBodies` on `sql` when omitted). */
+        bodies?: HttpBodiesFor | undefined
       }
     | undefined
   /** The enabled plugin packages (`loadPackagesForRun`, as a turn's): their MCP servers offered as turn tools. */
@@ -202,7 +204,7 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
         const saveDir = path.join(http.saveRoot, context.session, 'http')
         await mkdir(saveDir, { recursive: true })
         saved = dirBodies(saveDir)
-      } else saved = new PgHttpBodies(http.sql, context.session)
+      } else saved = (http.bodies ?? pgHttpBodies(http.sql))(context.session)
       servers.push({
         name: HTTP_SERVER,
         connect: () =>

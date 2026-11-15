@@ -446,7 +446,8 @@ kubectl -n scadbuddy create secret generic scadbuddy-agent-kek \
   ([`backend/scadbuddy/api/crud_agent_secrets.py`](../../backend/scadbuddy/api/crud_agent_secrets.py)),
   and the agent asks it whether it holds a key (`GET …/crud/agent/credentials/key`). The
   agent's own file still opens its plugin secrets, Web Push and channel keys, plugin
-  sign-ins and workspace file keys, until the later steps of #5299. Mount the same key
+  sign-ins, and its workspace file keys while the API does not list area `workspace`
+  (#5299 step 7), until the later steps of #5299. Mount the same key
   in both.
 - **Keep a copy.** Each stored row records the KEK's id (the first 16 hex characters of
   SHA-256 over the key; `kekFromBase64()`). A credential sealed under a lost key cannot
@@ -478,13 +479,13 @@ key, and they stop opening once the old key's mount is removed.
    - The API, after its migrations: `ai_credentials` (the Claude credentials),
      `ai_payload_keys` (the durable payload keys), and `ai_push_vapid`,
      `ai_push_subscriptions` and `ai_notify_channels` (the Web Push keys and the
-     notification channels' tokens, #5299 step 5). The log line reads
-     `secret key rotation: re-wrapped the agent's credentials` (or `payload_keys`, or
-     `notify`), with the counts.
+     notification channels' tokens, #5299 step 5), and `ai_session_files` (the workspace's
+     principal file keys, #5299 step 7). The log line reads
+     `secret key rotation: re-wrapped the agent's credentials` (or `payload_keys`,
+     `notify`, or `session_files`), with the counts.
    - The agent, once migrations have applied (the `afterMigrate` hook of
-     `connectDatabase()`): `ai_session_files` (workspace file keys), `ai_plugins` (plugin
-     secrets) and `ai_plugin_oauth` (plugin sign-ins). The later steps of #5299 move these
-     to the API too.
+     `connectDatabase()`): `ai_plugins` (plugin secrets) and `ai_plugin_oauth` (plugin
+     sign-ins). The later steps of #5299 move these to the API too.
 
    The sealed secret and `updated_at` are not touched. Each `UPDATE` is conditional on
    `kek_id`, so two pods rotating at once do not overwrite each other.
@@ -1703,7 +1704,9 @@ call (`agent/src/access/live.ts`), so `off` refuses a call in a turn under way.
   #2511), never base64 in the result. A longer text body is saved in
   Postgres (`ai_session_http_bodies`, #2374), the 10 newest per session, so any replica pages it with `http_response_read`. That is up to
   10 × 20 MiB of plaintext `bytea` a session: size the database for it beside the other
-  per-session storage. The rows go with the session. A flow run's bodies stay on the
+  per-session storage. The rows go with the session; once the API lists area `http-bodies`
+  (#5299 step 7), they are written and read by range through its CRUD routes
+  ([`backend/scadbuddy/api/crud_agent_blobs.py`](../../backend/scadbuddy/api/crud_agent_blobs.py)). A flow run's bodies stay on the
   replica that ran the call, under `durable-turns/flow-<id>/http/`, removed by every
   pod's hourly sweep after 7 days (#2496); that sweep also clears a `durable-turns/<id>/`
   directory a pod left before #2374.
@@ -1720,6 +1723,21 @@ the pod's disk, so every replica, every session and `/mcp` see the same
 files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), tools in
 [`agent/src/tools/workspace.ts`](../../agent/src/tools/workspace.ts)).
 
+- Who keeps them (#5299 step 7): the API, once it lists area `workspace` (`GET
+  …/crud/agent/areas`). Its routes `/api/v1/internal/crud/agent/workspace/*`
+  ([`backend/scadbuddy/api/crud_agent_workspace.py`](../../backend/scadbuddy/api/crud_agent_workspace.py),
+  the `crud.agent` credential; the agent's
+  [`agent/src/workspace/crudStore.ts`](../../agent/src/workspace/crudStore.ts)) take and give
+  plaintext and seal, store and open each file on the API, with its KEK and the session's
+  payload key, in the format below, so either side opens what the other sealed. A write's
+  row, its blob's hold and its `workspace.file` events are one transaction there, so no hold
+  waits for a release, and the API re-wraps principals' file keys at a rotation
+  (`agent_data/rotation.py`). The reconcile is one transaction on the API too, under
+  `RECONCILE_LOCK` as a transaction lock, which an agent pod still on SQL takes as a session
+  lock: never two at once. A workspace and a path go in the query or the body, never in a
+  route's path. A file is at most `workspace_file_max_bytes` and, whatever that setting says,
+  100 MiB (the Settings form's ceiling, `FILE_BYTES_CEILING`). Until the API lists the area
+  (a rolling deploy) the agent does all of the below itself, over SQL.
 - Where the bytes are (#4789): a blob of the backend's content store (`store_backend` s3
   or bambuddy), `workspace-<sha256 of the sealed bytes>`. The agent reads which store the
   backend runs on from its `/healthz` (`store.backend`), and asks its hidden

@@ -23,8 +23,9 @@ that each shard ran what it selected, as `backend-pytest-split` does.
 (its header lists the script `E2E_AGENT_SCRIPTED=1` expects; `pnpm preview` routes the
 same way, `vite.config.ts`).
 - `pnpm exec tsc -p tsconfig.app.json --noEmit` - the quick typecheck. It skips
-  `pretypecheck`, so run `pnpm gen:api` once first, or the generated `src/api/schema.d.ts` and
-  `src/storefront/api/schema.d.ts` are missing.
+  `pretypecheck`, so run `pnpm gen:api` once first, or the generated `src/api/schema.d.ts`,
+  `src/storefront/api/schema.d.ts` and `src/api/settingDocs.json` (the Settings field docs
+  `mocks/fixtures.ts` imports) are missing.
   Run it again after a merge or rebase onto main: a stale `schema.d.ts` gives type errors
   about fields the merge added or removed.
   Playwright's web server runs `pnpm build`, which typechecks first, so one type error in
@@ -131,7 +132,8 @@ same way, `vite.config.ts`).
   unsaved (`components/storefront/sellSource.ts`; the list redirects the address to
   `/storefront/listings/new?sell=…`); `?listing=<id>` redirects to a saved one's editor. The smart defaults are `listingDraft.ts` `defaultsFor` (free text and
   every colour offered, from the priced filaments of the design's material, the rest locked;
-  a support setting is never offered, `isSupport`), pinned by
+  a support setting is never offered, `isSupport`; an offered colour whose template default
+  no colour on offer has starts at one that is, `fittedDefault`, #6144), pinned by
   `test-fixtures/storefront/sell-draft-vectors.json`, which the agent's copy
   (`agent/src/tools/storefrontDraft.ts`) is tested against too; a
   colour no listing filament has is `colourProblems`. e2e `e2e/storefront-sell.spec.ts`.
@@ -144,8 +146,12 @@ same way, `vite.config.ts`).
   position…" send `POST /storefront/listings/{id}/move`; there is no drag. The editor is
   `pages/StorefrontListingPage.tsx` at `/storefront/listings/<id>` (or `new`); the list's
   links pass its query in the history state, which "Back to listings" returns to. While it
-  holds unsaved edits, `lib/useLeaveGuard.ts` holds every in-app navigation away and asks. The old
-  `/storefront?listing=<id>` and `?sell=…` addresses redirect to it. Mocks
+  holds unsaved edits, `lib/useLeaveGuard.ts` holds every in-app navigation away and asks.
+  Each offered parameter's "Starts at" (`DefaultField`, #6144) is the value an unpicked render
+  takes: the template's while the bounds allow it, else the listing's `default`, which
+  narrowed bounds move to the nearest value they allow (`listingDraft.ts` `fittedDefault`). A
+  publish refused about one parameter (`listingRefusal` kind `param`) is said under it. The old
+  `/storefront?listing=<id>` and `?sell=…` addresses redirect to the editor. Mocks
   `src/mocks/features/storefront.ts`; e2e `e2e/storefront-admin.spec.ts` seeds 2,000
   listings into the mock's `sessionStorage`.
   Materials (#6258): the editor's "Materials allowed" is the listing's `materials`, first

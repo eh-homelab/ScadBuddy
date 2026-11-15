@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useParams, useSearchParams } from 'react-router'
 import { ArrowLeftIcon } from 'lucide-react'
 import { api, ApiError } from '../api/client'
-import type { ModelSummary, StorefrontListing, StorefrontListingInput } from '../api/types'
+import type { CustomizerSchema, ModelSummary, StorefrontListing, StorefrontListingInput } from '../api/types'
 import { ListingEditor } from '../components/storefront/ListingEditor'
 import { PrepareColours } from '../components/storefront/PrepareColours'
 import type { LivePictures } from '../components/storefront/ListingPictures'
@@ -102,6 +102,15 @@ function opened(listing: StorefrontListing, key: symbol = newKey()): Open {
 
 function message(error: unknown): string {
   return error instanceof ApiError || error instanceof Error ? error.message : String(error)
+}
+
+/** The alert for a refusal said beside its control (#6258, #6144): it points there. */
+function refusalAlert(refusal: ListingRefusal, schema: CustomizerSchema | undefined): string {
+  if (refusal.kind === 'material_not_allowed') return 'Not published: a colour on offer is of a material this listing does not allow. See “Materials allowed” below.'
+  if (refusal.kind === 'locked_colours_unprintable') return 'Not published: no allowed material can print these colours. See “Colours on offer” below.'
+  if (refusal.kind === 'filament_unknown') return 'Not published: a colour on offer is no longer in the price book. Untick it under “Colours on offer”, then publish again.'
+  const param = schema?.parameters?.find((p) => p.name === refusal.name)
+  return `Not published: “${param?.caption || refusal.name}” needs a change. See the note under it below.`
 }
 
 /** What the list's links pass: the list's own query, so "Back to listings" returns to the same page. */
@@ -344,13 +353,7 @@ export function StorefrontListingPage() {
       // #6258 — a refusal about the materials is said beside its control; the alert points there.
       const refused = caught instanceof ApiError ? listingRefusal(caught.problem) : null
       setRefusal(refused)
-      setError(
-        refused === null
-          ? message(caught)
-          : refused.kind === 'material_not_allowed'
-            ? 'Not published: a colour on offer is of a material this listing does not allow. See “Materials allowed” below.'
-            : 'Not published: no allowed material can print these colours. See “Colours on offer” below.',
-      )
+      setError(refused === null ? message(caught) : refusalAlert(refused, schema.data))
     } finally {
       setBusy(false)
     }

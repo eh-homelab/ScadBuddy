@@ -173,8 +173,9 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     await waitFor(async () => expect(await stored()).toHaveLength(1))
     const [saved] = await stored()
     expect(saved?.colours).toEqual([FILAMENT_PLA, FILAMENT_PETG])
-    // Stored as the backend stores it: an unset label and default are null.
-    expect(saved?.params['body_color']).toEqual({ kind: 'choice', choices: ['#F9D72C', '#1E1E1E'], label: null, default: null })
+    // Stored as the backend stores it: an unset label is null. No filament has the template's
+    // colour, so the colour starts at the first on offer (#6144).
+    expect(saved?.params['body_color']).toEqual({ kind: 'choice', choices: ['#F9D72C', '#1E1E1E'], label: null, default: '#F9D72C' })
     expect(saved?.fixed['text_color']).toBe('#E8532F')
   })
 
@@ -568,7 +569,7 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
       )
     }
 
-    it('opens the listing filled in from a render, unsaved, and publishes it once its colours are fixed', async () => {
+    it('opens the listing filled in from a render, unsaved, each colour starting at one on offer, and publishes it', async () => {
       serveJob()
       const seen = recordRequests()
       // The old address still works: the list sends it on to the new listing.
@@ -579,29 +580,26 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
       // The design and the version the render read.
       expect(await screen.findByTestId('listing-design')).toHaveTextContent(`Name Keychainversion ${versionIds.edited.slice(0, 7)}Change`)
       // Both colours are offered; the plate's yellow is a PLA, so the PLA filaments are on offer.
-      // A customer who picks none gets each template default, which no filament on offer has.
-      const problems = await screen.findByTestId('colour-problems')
-      expect(problems).toHaveTextContent('Plate is #1B6CA8')
-      expect(problems).toHaveTextContent('Text is #E8532F')
+      // No filament on offer has either template default, so each starts at one that is (#6144):
+      // the plate at the yellow the render used, the text at the first on offer.
       await user.click(within(screen.getByRole('group', { name: 'Colours on offer' })).getByRole('button', { name: /^Show all/ }))
       expect(screen.getByRole('checkbox', { name: 'PLA Sunflower Yellow' })).toBeChecked()
       expect(screen.getByRole('checkbox', { name: 'PETG Black' })).not.toBeChecked()
+      expect(screen.queryByTestId('colour-problems')).not.toBeInTheDocument()
       expect(seen.filter((r) => r.startsWith('POST /api/v1/storefront/listings'))).toEqual([])
 
-      // Choosing a filament for each locks it there: the person's choice. (A listing cannot set an
-      // offered colour's default yet, so locking is the one fix today.)
-      await user.click(within(problems).getByRole('combobox', { name: 'Filament for Text' }))
-      await user.click(await screen.findByRole('option', { name: 'PETG Black' }))
-      await user.click(within(problems).getByRole('combobox', { name: 'Filament for Plate' }))
-      await user.click(await screen.findByRole('option', { name: 'PLA Sunflower Yellow' }))
       await user.click(screen.getByRole('button', { name: 'Publish' }))
       expect(await screen.findByText('Published')).toBeInTheDocument()
 
       const [saved] = await stored()
       expect(saved?.commit).toBe(versionIds.edited)
-      expect(saved?.params).toEqual({ name: { kind: 'text', max_length: 20, label: null, default: null } })
-      expect(saved?.fixed).toMatchObject({ text_size: 20, body_color: '#F9D72C', text_color: '#1E1E1E', thickness: 5.2 })
-      expect(saved?.colours).toEqual([FILAMENT_PLA, FILAMENT_PETG])
+      expect(saved?.params).toEqual({
+        name: { kind: 'text', max_length: 20, label: null, default: null },
+        body_color: { kind: 'choice', choices: ['#F9D72C'], label: null, default: '#f9d72c' },
+        text_color: { kind: 'choice', choices: ['#F9D72C'], label: null, default: '#F9D72C' },
+      })
+      expect(saved?.fixed).toMatchObject({ text_size: 20, thickness: 5.2 })
+      expect(saved?.colours).toEqual([FILAMENT_PLA])
       expect(saved?.media_ids).toEqual(['thumbnail'])
     })
 

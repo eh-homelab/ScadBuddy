@@ -17,7 +17,7 @@ import type { QuestionGate } from '../harness/questions.js'
 import { redact } from '../secrets.js'
 import { TurnTrace } from '../telemetry/turn.js'
 import type { WaitForTab } from '../tools/registry.js'
-import type { SessionBlobs, SessionImage } from './blobs.js'
+import type { SessionImages, SessionImage } from './blobs.js'
 import type { EventLog } from './eventLog.js'
 import type { ClaimedSession, TurnOutcome, TurnPrincipal } from './manager.js'
 import { event, type ServerEvent, type SessionStatus } from './protocol.js'
@@ -92,7 +92,7 @@ export type TurnCoreDeps = {
   runner: Pick<TurnRunner, 'assemble'>
   warm: WarmSessions
   events: Pick<EventLog, 'append' | 'committed'>
-  blobs: Pick<SessionBlobs, 'put'>
+  blobs: Pick<SessionImages, 'put'>
   credentials: CredentialSource
   probe?: (credential: Credential, model: string | undefined) => Promise<ProbeVerdict>
   titleOf?: TitleResolver

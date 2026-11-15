@@ -32,7 +32,7 @@ import { flowOf, type FlowRuns } from './flowRuns.js'
 import { FLOW_TOOL_TIER_ACTIVITY, flowToolTierActivity } from './flowTools.js'
 import { BUILTIN_TIER_ACTIVITY, builtinTier, TOOL_TIER_ACTIVITY, toolTierActivity } from './toolTier.js'
 import type { AccessResolver } from '../access/resolver.js'
-import { type SessionFiles, withWorkspaceSize } from '../workspace/store.js'
+import { type WorkspaceFiles, withWorkspaceSize } from '../workspace/store.js'
 
 // Every tool as an activity on `agent-tools` (spec 2026-10-01 §6.3, #1055), registered
 // under the tool's name, which is how the durable worker's `activity_as_tool` stubs
@@ -942,7 +942,7 @@ export const DESCRIBE_CALL_ACTIVITY = 'gate.describe_call'
  */
 export function gateActivities(
   deps: Pick<ToolActivityDeps, 'audit' | 'sessions' | 'currentTiers'> & {
-    workspace?: SessionFiles | undefined
+    workspace?: WorkspaceFiles | undefined
     /**
      * The tools whose own `prepareApproval` decides what a call parks (#4442), and the
      * services it reads with, as the session's owner. Without them, every call parks as sent.

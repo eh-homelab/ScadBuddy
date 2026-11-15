@@ -154,6 +154,62 @@ describe('ListingEditor (#5282, #6131)', () => {
     expect(last(seen).fixed['name']).toBe('Reagan')
   })
 
+  it('starts an offered number at the template’s value, and moves it inside a range that leaves it out (#6144)', async () => {
+    const seen: ListingDraft[] = []
+    const { user } = renderPage(<Harness seen={seen} />)
+    await user.click(screen.getByRole('switch', { name: 'Customer can change Text size' }))
+    expect(last(seen).params['text_size']).toEqual({ kind: 'number', min: 6, max: 28, step: 0.5 })
+    expect(screen.getByLabelText('Default of Text size')).toHaveValue(14)
+
+    fireEvent.change(screen.getByLabelText('From Text size'), { target: { value: '16' } })
+    expect(last(seen).params['text_size']).toEqual({ kind: 'number', min: 16, max: 28, step: 0.5, default: 16 })
+    fireEvent.change(screen.getByLabelText('Default of Text size'), { target: { value: '20' } })
+    expect(last(seen).params['text_size']).toMatchObject({ default: 20 })
+
+    // The range takes the template's value again: the listing's own stays until the person goes back.
+    fireEvent.change(screen.getByLabelText('From Text size'), { target: { value: '6' } })
+    expect(last(seen).params['text_size']).toMatchObject({ min: 6, default: 20 })
+    await user.click(screen.getByRole('button', { name: 'Use the template’s (14)' }))
+    expect(last(seen).params['text_size']).toEqual({ kind: 'number', min: 6, max: 28, step: 0.5 })
+  })
+
+  it('refits a starting value from the person’s choice as a bound is typed, never from a half-typed one (#6402 review)', async () => {
+    const seen: ListingDraft[] = []
+    const { user } = renderPage(<Harness seen={seen} />)
+    // "12" passes through "1", which leaves out the template's "Reagan"; "12" takes it again.
+    // One change per keystroke, as typing into the field sends them.
+    for (const value of ['1', '12']) fireEvent.change(screen.getByLabelText('Most characters'), { target: { value } })
+    expect(seen.map((draft) => draft.params['name']?.default)).toContain('R')
+    expect(last(seen).params['name']).toEqual({ kind: 'text', max_length: 12 })
+
+    // The person's own starting value comes back once the range takes it again.
+    await user.click(screen.getByRole('switch', { name: 'Customer can change Text size' }))
+    fireEvent.change(screen.getByLabelText('Default of Text size'), { target: { value: '20' } })
+    for (const value of ['2', '25']) fireEvent.change(screen.getByLabelText('To Text size'), { target: { value } })
+    expect(last(seen).params['text_size']).toEqual({ kind: 'number', min: 6, max: 25, step: 0.5, default: 20 })
+  })
+
+  it('names a starting value the bounds leave out (#6144)', async () => {
+    const seen: ListingDraft[] = []
+    const { user } = renderPage(<Harness seen={seen} />)
+    await user.click(screen.getByRole('switch', { name: 'Customer can change Text size' }))
+    fireEvent.change(screen.getByLabelText('Default of Text size'), { target: { value: '14.2' } })
+    expect(screen.getByText('A customer who picks nothing gets 14.2, which these choices do not allow. Choose another starting value.')).toBeInTheDocument()
+  })
+
+  it('starts a choice the person narrowed at one it still offers (#6144)', async () => {
+    const seen: ListingDraft[] = []
+    const { user } = renderPage(<Harness seen={seen} />)
+    await user.click(screen.getByRole('switch', { name: 'Customer can change Hole position' }))
+    await user.click(screen.getByRole('checkbox', { name: 'Offer Left' }))
+    expect(last(seen).params['hole_side']).toEqual({ kind: 'choice', choices: ['right', 'top'], default: 'right' })
+  })
+
+  it('starts a colour at a colour on offer when none has the template’s (#6144)', () => {
+    renderPage(<Harness seen={[]} filaments={[RED, BLUE]} />)
+    expect(within(screen.getByRole('group', { name: 'Text' })).getByLabelText('Default of Text')).toHaveTextContent('PLA Ocean')
+  })
+
   it('says why a typeface is never the customer’s', async () => {
     renderPage(<Harness seen={[]} />)
     expect(screen.getByRole('switch', { name: 'Customer can change Typeface' })).toBeDisabled()
@@ -226,6 +282,9 @@ describe('ListingEditor (#5282, #6131)', () => {
   it('names a colour no filament has, and uses the filament chosen instead', async () => {
     const seen: ListingDraft[] = []
     const { user } = renderPage(<Harness seen={seen} filaments={[RED, CORAL]} />)
+    // Offered, the colour starts at one on offer (#6144); locked at the template's, it has no filament.
+    expect(screen.queryByTestId('colour-problems')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('switch', { name: 'Customer can change Plate' }))
     const problems = screen.getByTestId('colour-problems')
     expect(problems).toHaveTextContent('Plate is #1B6CA8')
     expect(within(problems).getByRole('link', { name: 'add one to the price book' })).toHaveAttribute('href', '/settings/printing#orders')
@@ -490,6 +549,21 @@ describe('ListingEditor materials and colours on offer (#6258)', () => {
   it('says beside the materials which filament publish refused for its material', () => {
     renderPage(<Editor seen={[]} start={{ colours: [ABS_GREY.id] }} refusal={{ kind: 'material_not_allowed', filament: ABS_GREY.id, detail: 'x' }} />)
     expect(within(allowed()).getByRole('alert')).toHaveTextContent('Not published: ABS Grey is ABS, which this listing does not allow. Allow ABS, or untick ABS Grey under Colours on offer.')
+  })
+
+  it('says beside a setting what publish refused about it (#6144, #6152)', () => {
+    const { rerender } = renderPage(<Editor seen={[]} start={{ colours: [RED.id] }} refusal={{ kind: 'param', code: 'default_invalid', name: 'name', detail: 'x' }} />)
+    expect(within(screen.getByRole('group', { name: 'Name on the tag' })).getByRole('alert')).toHaveTextContent(
+      'Not published: “Name on the tag” starts at a value these choices do not allow. Set “Starts at” to one they allow.',
+    )
+    rerender(<Editor seen={[]} start={{ colours: [RED.id] }} refusal={{ kind: 'param', code: 'colour_unknown', name: 'text_color', detail: 'x' }} />)
+    expect(within(screen.getByRole('group', { name: 'Text' })).getByRole('alert')).toHaveTextContent(
+      'Not published: “Text” uses a colour that no colour on offer has. Pick a colour on offer, or tick a filament of that colour under “Colours on offer”.',
+    )
+    rerender(<Editor seen={[]} start={{ colours: [RED.id] }} refusal={{ kind: 'param', code: 'support_offered', name: 'name', detail: 'x' }} />)
+    expect(within(screen.getByRole('group', { name: 'Name on the tag' })).getByRole('alert')).toHaveTextContent(
+      'Not published: “Name on the tag” sets support, which stays yours and a customer never sees. Turn off “Customer can change”.',
+    )
   })
 
   it('says beside the colours why publish found no material to print in', () => {

@@ -107,6 +107,28 @@ export function userTurnRows(sql: Sql, sessionId: string, turnId: string) {
   return sql`session_id = ${sessionId} AND event::jsonb->>'type' = 'user.turn' AND event::jsonb->>'turnId' = ${turnId}`
 }
 
+/**
+ * Appends `events` to the session's log on `db` (a transaction of the caller's, or the pool),
+ * bumping `event_seq`; their seqs, oldest first. Whoever commits it calls EventLog `committed`
+ * after. The API runs the same statement for a workspace write (backend agent_data/workspace.py).
+ */
+export async function appendEventsIn(db: Sql | TransactionSql, sessionId: string, events: readonly ServerEvent[]): Promise<number[]> {
+  if (events.length === 0) return []
+  const texts = events.map((e) => JSON.stringify(e))
+  const rows = await db<{ seq: string }[]>`
+    WITH s AS (
+      UPDATE ai_sessions SET event_seq = event_seq + ${texts.length}, updated_at = now()
+      WHERE id = ${sessionId}
+      RETURNING event_seq - ${texts.length} AS base
+    )
+    INSERT INTO ai_session_events (session_id, seq, event)
+    SELECT ${sessionId}, s.base + e.ord, e.event
+    FROM s, unnest(${db.array(texts)}::text[]) WITH ORDINALITY AS e(event, ord)
+    RETURNING seq`
+  if (rows.length !== texts.length) throw new Error(`session ${sessionId} does not exist`)
+  return rows.map((r) => Number(r.seq)).sort((a, b) => a - b)
+}
+
 export class EventLog {
   private readonly sql: Sql
   private readonly pollMs: number
@@ -137,22 +159,8 @@ export class EventLog {
    * change they report; the caller then calls `committed` once it has committed.
    */
   async append(sessionId: string, events: readonly ServerEvent[], tx?: TransactionSql): Promise<number[]> {
-    if (events.length === 0) return []
-    const texts = events.map((e) => JSON.stringify(e))
-    const db = tx ?? this.sql
-    const rows = await db<{ seq: string }[]>`
-      WITH s AS (
-        UPDATE ai_sessions SET event_seq = event_seq + ${texts.length}, updated_at = now()
-        WHERE id = ${sessionId}
-        RETURNING event_seq - ${texts.length} AS base
-      )
-      INSERT INTO ai_session_events (session_id, seq, event)
-      SELECT ${sessionId}, s.base + e.ord, e.event
-      FROM s, unnest(${this.sql.array(texts)}::text[]) WITH ORDINALITY AS e(event, ord)
-      RETURNING seq`
-    if (rows.length !== texts.length) throw new Error(`session ${sessionId} does not exist`)
-    const seqs = rows.map((r) => Number(r.seq)).sort((a, b) => a - b)
-    if (!tx) this.committed(sessionId, events, seqs)
+    const seqs = await appendEventsIn(tx ?? this.sql, sessionId, events)
+    if (!tx && seqs.length > 0) this.committed(sessionId, events, seqs)
     return seqs
   }
 
