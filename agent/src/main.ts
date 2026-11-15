@@ -62,7 +62,7 @@ import {
   withServiceCredential,
 } from './api/serviceCredential.js'
 import { untilBackendAnswers } from './api/backendUp.js'
-import { CrudAreas, FORGET_AREAS, SECRET_AREAS } from './api/crudAreas.js'
+import { CrudAreas, FORGET_AREAS, SECRET_AREAS, WORKSPACE_AREAS } from './api/crudAreas.js'
 import { gated, STORE_AREAS, type StoreArea } from './api/crudStores.js'
 import { CrudFlowRunReads } from './flows/backendReads.js'
 import { BrowserSessions } from './auth/browserSession.js'
@@ -138,7 +138,8 @@ import { PendingActionStore } from './tools/pending.js'
 import type { ToolServices } from './tools/registry.js'
 import { RenderLimiter, settingsRenderLimits } from './tools/renderLimits.js'
 import { BackendWorkspaceBlobs, WorkspaceBlobError } from './workspace/blobs.js'
-import { rewrapWorkspaceKeys, WorkspaceSealing } from './workspace/sealing.js'
+import { CrudSessionFiles, gatedWorkspaceFiles } from './workspace/crudStore.js'
+import { WorkspaceSealing } from './workspace/sealing.js'
 import { SessionFiles, WORKSPACE_SWEEP_MS, type WorkspaceBytesStatus } from './workspace/store.js'
 
 // Fixed rather than configurable: the listening port is part of the pod
@@ -212,17 +213,11 @@ const database = config.databaseUrl
       },
       afterMigrate: async (sql) => {
         if (!previousKek?.ok || !kek.ok) return
-        // The Claude credentials, the payload keys, the Web Push keys and the notification
-        // channels' tokens are re-wrapped by the API at its start (#5299 D5 and step 5, backend
-        // agent_data/rotation.py), which holds the KEK they are opened with. The rest is
-        // re-wrapped here until the steps of #5299 that move those tables.
-        const files = await rewrapWorkspaceKeys(sql, previousKek.kek, kek.kek)
-        if (files.rewrapped || files.failed) {
-          console.log(
-            `secret key rotation: re-wrapped ${files.rewrapped} workspace file key(s)` +
-              (files.failed ? `; ${files.failed} could not be opened with the previous key` : ''),
-          )
-        }
+        // The Claude credentials, the payload keys, the Web Push keys, the notification
+        // channels' tokens and the workspace's file keys are re-wrapped by the API at its start
+        // (#5299 D5 and steps 5 and 7, backend agent_data/rotation.py), which holds the KEK they
+        // are opened with. The rest is re-wrapped here until the steps of #5299 that move those
+        // tables.
         const plugins = await new PluginStore(sql).rewrapFrom(previousKek.kek, kek.kek)
         if (plugins.rewrapped || plugins.failed) {
           console.log(
@@ -264,7 +259,7 @@ const serviceCredential: CredentialSource | undefined =
 // with those areas listed this process needs no KEK for them. So do the key deletes and a flow
 // run's images (#5299 step 6, area `forget`).
 const crudFetch = serviceCredential ? withServiceCredential(globalThis.fetch, serviceCredential, config.backendUrl) : globalThis.fetch
-const crudAreas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: [...SECRET_AREAS, ...FORGET_AREAS, ...STORE_AREAS] })
+const crudAreas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: [...SECRET_AREAS, ...FORGET_AREAS, ...STORE_AREAS, ...WORKSPACE_AREAS] })
 crudAreas.start()
 // The small stores (#5299 step 5, api/crudStores.ts): each through its CRUD routes once the API
 // lists its area, over SQL until then.
@@ -453,16 +448,22 @@ const workspaceBlobStore = new BackendWorkspaceBlobs(
   config.backendUrl,
   serviceCredential ? { fetch: withServiceCredential(globalThis.fetch, serviceCredential, config.backendUrl) } : {},
 )
+// The API keeps them once it lists area `workspace` (#5299 step 7, workspace/crudStore.ts): it
+// seals and opens them with its own KEK, so this process needs none; until then, over SQL.
 const workspace = database
-  ? new SessionFiles(database.sql, {
-      settings,
-      // The hourly reconcile runs on one replica at a time, its lock on a lock connection.
-      locks: database.locks,
-      blobs: {
-        store: workspaceBlobStore,
-        ...(dataKeys && kek.ok ? { sealing: new WorkspaceSealing(dataKeys, kek.kek, { previous: previousKek?.ok ? previousKek.kek : undefined }) } : {}),
-      },
-    })
+  ? gatedWorkspaceFiles(
+      new SessionFiles(database.sql, {
+        settings,
+        // The hourly reconcile runs on one replica at a time, its lock on a lock connection.
+        locks: database.locks,
+        blobs: {
+          store: workspaceBlobStore,
+          ...(dataKeys && kek.ok ? { sealing: new WorkspaceSealing(dataKeys, kek.kek, { previous: previousKek?.ok ? previousKek.kek : undefined }) } : {}),
+        },
+      }),
+      new CrudSessionFiles(config.backendUrl, { fetch: crudFetch, settings }),
+      () => crudAreas.has('workspace'),
+    )
   : undefined
 if (workspace) toolServices.workspace = workspace
 // Where writes go, for GET /api/v1/ai/status: checked at most once a minute (the backend may start after this).

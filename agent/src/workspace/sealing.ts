@@ -1,5 +1,4 @@
 import { randomBytes } from 'node:crypto'
-import type { Sql } from 'postgres'
 import { KEK_BYTES, type Kek, openBytes, SealError, sealBytes } from '../secrets.js'
 import type { PayloadKeys } from '../temporal/payloadCodec.js'
 import type { WorkspaceRef } from './store.js'
@@ -17,7 +16,8 @@ import type { WorkspaceRef } from './store.js'
 //   as its transcript is, #3560). Forgetting the session (sessions/forget.ts) deletes
 //   that key, so its rows' file keys, and so its blobs, cannot be opened any more;
 // - a principal's (outside a session, swept after a day): under the KEK, its id in
-//   `key_kek_id`, and re-wrapped at a key rotation (rewrapWorkspaceKeys).
+//   `key_kek_id`, and re-wrapped at a key rotation by the API (backend agent_data/workspace.py
+//   `rewrap`, run at its start by agent_data/rotation.py).
 //
 // A fork (SessionFiles.copy) opens the parent's file key and wraps it again under the
 // child's data key: the child's row names the same blob, and no byte is copied or
@@ -127,28 +127,4 @@ export class WorkspaceSealing {
 
 function workspaceKey(ws: WorkspaceRef): string {
   return ws.kind === 'session' ? `session:${ws.sessionId}` : `principal:${ws.principalKind}:${ws.principalId}`
-}
-
-/** Re-wraps every principal file key sealed under `previous` to `current` (key rotation, main.ts). */
-export async function rewrapWorkspaceKeys(sql: Sql, previous: Kek, current: Kek): Promise<{ rewrapped: number; failed: number }> {
-  const result = { rewrapped: 0, failed: 0 }
-  const rows = await sql<{ workspace: string; path: string; blob_key: string; key_sealed: Buffer }[]>`
-    SELECT workspace, path, blob_key, key_sealed FROM ai_session_files WHERE key_kek_id = ${previous.id}`
-  for (const row of rows) {
-    let fileKey: Buffer | undefined
-    try {
-      const context = fileKeyContext(row.workspace, row.path, row.blob_key)
-      fileKey = openBytes(previous.key, row.key_sealed, context)
-      const updated = await sql`
-        UPDATE ai_session_files SET key_sealed = ${sealBytes(current.key, fileKey, context)}, key_kek_id = ${current.id}
-        WHERE workspace = ${row.workspace} AND path = ${row.path} AND blob_key = ${row.blob_key} AND key_kek_id = ${previous.id}`
-      result.rewrapped += updated.count
-    } catch (err) {
-      if (!(err instanceof SealError)) throw err
-      result.failed += 1
-    } finally {
-      fileKey?.fill(0)
-    }
-  }
-  return result
 }

@@ -3,7 +3,7 @@ import { browserUser } from '../auth/browserSession.js'
 import type { OriginPolicy } from '../http/origins.js'
 import type { SessionManager, SessionRecord } from '../sessions/manager.js'
 import { ID_MAX, LOOKUP_TYPES, type LookupType, type ResourceRef } from '../sessions/touched.js'
-import type { SessionFiles } from '../workspace/store.js'
+import type { WorkspaceFiles } from '../workspace/store.js'
 import { type RemoteAddress, uiReadProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
 import { fileView, type WorkspaceFileView } from './sessionFiles.js'
@@ -59,7 +59,7 @@ export type PickerSession = {
 
 export type WorkspacePickerDeps = {
   sessions: SessionManager | undefined
-  workspace: SessionFiles | undefined
+  workspace: WorkspaceFiles | undefined
   ready: () => Promise<boolean>
   remoteAddress: RemoteAddress
   origins: OriginPolicy

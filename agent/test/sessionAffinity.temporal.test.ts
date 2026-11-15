@@ -1063,6 +1063,52 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     expect(await said(b, id, 'late from B')).toBe(true)
   })
 
+  /** How many session_turn placements, and how many failures of one, the run's history holds. */
+  async function placements(id: string, runId: string) {
+    type Event = { eventId: string; eventType: string; activityTaskScheduledEventAttributes?: { activityType?: { name?: string } }; activityTaskFailedEventAttributes?: { scheduledEventId?: string } }
+    const events = (await historyTypes(id, runId)) as Event[]
+    const turns = new Set(events.filter((e) => e.activityTaskScheduledEventAttributes?.activityType?.name === 'session_turn').map((e) => String(e.eventId)))
+    return { placed: turns.size, failed: events.filter((e) => turns.has(String(e.activityTaskFailedEventAttributes?.scheduledEventId))).length }
+  }
+
+  it('a placement cut off mid-turn because another placement claimed the row is placed again, restarted, and the turn ends well: no failure shown (#6387)', async () => {
+    const hold = latch()
+    slowGate = hold.promise
+    script = (r) => (conversation(r).includes(RESTARTED_PROMPT) ? { text: 'carried on' } : { toolUse: { name: 'mcp__stub__slow', input: { q: 'x' } } })
+    const a = await replica('a')
+    const { id, turn } = await startOn(a, 'do the slow thing')
+    const run = await runningRun(id)
+    await pollUntil(() => slowCalls, 1)
+    // Another placement claims the row, as a stray session_turn's claim does (TurnHost #claim).
+    await db.sql`UPDATE ai_sessions SET turn_attempt = 'a-stray-placement' WHERE id = ${id}`
+    expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    await settled(id)
+    hold.release()
+    // The cut placement failed once, and the workflow placed the turn again, which resumed it.
+    expect(await placements(id, run)).toEqual({ placed: 2, failed: 1 })
+    expect(conversation(fake.messageCalls().at(-1)!)).toContain(RESTARTED_PROMPT)
+    expect(await said(a, id, 'carried on')).toBe(true)
+    expect(await types(a, id)).not.toContain('error')
+    expect((await db.sql<{ status: string }[]>`SELECT status FROM ai_sessions WHERE id = ${id}`)[0]?.status).toBe('idle')
+  })
+
+  it('a placement cut off mid-turn because its turn ended is never placed again (#6387)', async () => {
+    const hold = latch()
+    slowGate = hold.promise
+    script = () => ({ toolUse: { name: 'mcp__stub__slow', input: { q: 'x' } } })
+    const a = await replica('a')
+    const { id } = await startOn(a, 'do the slow thing')
+    const run = await runningRun(id)
+    await pollUntil(() => slowCalls, 1)
+    // The row runs another turn now: this one is over (TurnHost #holds `ended`).
+    await db.sql`UPDATE ai_sessions SET durable_turn_id = ${randomUUID()} WHERE id = ${id}`
+    // The workflow closes the turn, and continues as new.
+    await pollUntil(async () => (await runningRun(id)) !== run, true)
+    hold.release()
+    expect(await placements(id, run)).toEqual({ placed: 1, failed: 1 })
+    expect(a.acquired).toBe(1)
+  })
+
   it('warm_max_per_replica 0: a turn is admitted and runs cold to its end (I2)', async () => {
     const a = await replica('a', { maxEntries: 0 })
     const { id, turn } = await startOn(a, 'first')

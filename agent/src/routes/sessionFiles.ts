@@ -1,13 +1,12 @@
 import type { Context, Hono, MiddlewareHandler } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
-import type { TransactionSql } from 'postgres'
 import type { AuditOutcome, AuditRepo } from '../audit/log.js'
 import { UI_ACTOR } from '../audit/writes.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { archivedError, type SessionManager, SessionError, type SessionRecord } from '../sessions/manager.js'
 import { event, type ServerEvent, sameOwner } from '../sessions/protocol.js'
 import {
-  type SessionFiles,
+  type WorkspaceFiles,
   type WorkspaceFileInfo,
   WorkspaceError,
   type WorkspaceRef,
@@ -54,7 +53,7 @@ import { ready, type RouteModule } from './module.js'
 
 export type SessionFileRouteDeps = {
   sessions: SessionManager | undefined
-  workspace: SessionFiles | undefined
+  workspace: WorkspaceFiles | undefined
   ready: () => Promise<boolean>
   remoteAddress: RemoteAddress
   origins: OriginPolicy
@@ -69,7 +68,7 @@ declare module '../app.js' {
      * The assistant's workspace (#2329, workspace/store.ts): the panel's Files
      * routes (routes/sessionFiles.ts) read and write it. Undefined without a database.
      */
-    workspace?: SessionFiles | undefined
+    workspace?: WorkspaceFiles | undefined
     /**
      * Every saved Claude credential and every plugin secret (plugins/secrets.ts
      * `readPluginSecrets`: header values and OAuth tokens), which a turn's upload tools
@@ -155,7 +154,7 @@ function filePathOf(c: Context): string | undefined {
 }
 
 export function registerSessionFileRoutes(app: Hono, deps: SessionFileRouteDeps): void {
-  type Ready = { sessions: SessionManager; files: SessionFiles }
+  type Ready = { sessions: SessionManager; files: WorkspaceFiles }
 
   async function stores(): Promise<Ready | string> {
     if (!deps.sessions || !deps.workspace) return NO_DATABASE
@@ -318,7 +317,6 @@ export function registerSessionFileRoutes(app: Hono, deps: SessionFileRouteDeps)
       let name = rawPath
       let stored: WorkspaceFileInfo
       // The event commits with the file (#2469); followers hear of it once it has.
-      let logged: { events: ServerEvent[]; seqs: number[] } | undefined
       try {
         name = workspacePath(rawPath)
         const bytes = new Uint8Array(await file.arrayBuffer())
@@ -327,8 +325,8 @@ export function registerSessionFileRoutes(app: Hono, deps: SessionFileRouteDeps)
           source: { kind: 'upload', by: 'browser', ...(file.name ? { filename: file.name.slice(0, 255) } : {}) },
           // A new path must not exist yet; replacing one needs the sha256 it has now.
           expectedSha256: expected ?? null,
-          alongside: async (tx, file) => {
-            const events = [
+          log: {
+            events: (file) => [
               event({
                 type: 'workspace.file',
                 sessionId,
@@ -339,15 +337,14 @@ export function registerSessionFileRoutes(app: Hono, deps: SessionFileRouteDeps)
                 mediaType: file.mediaType,
                 sha256: file.sha256,
               }),
-            ]
-            logged = { events, seqs: await sessions.events.append(sessionId, events, tx) }
+            ],
+            committed: (events, seqs) => sessions.events.committed(sessionId, events, seqs),
           },
         })
       } catch (err) {
         if (err instanceof WorkspaceError) await auditRefused(c, 'workspace_upload', sessionId, `${JSON.stringify(name.slice(0, 200))}: ${err.code}`)
         throw err
       }
-      if (logged) sessions.events.committed(sessionId, logged.events, logged.seqs)
       await audited(c, 'workspace_upload', sessionId, 'ok', `${name} (${stored.size} bytes, ${stored.mediaType}, sha256 ${stored.sha256})`)
       return c.json({ file: fileView(stored) }, expected === undefined ? 201 : 200)
     }, 'workspace_upload'),
@@ -361,22 +358,19 @@ export function registerSessionFileRoutes(app: Hono, deps: SessionFileRouteDeps)
         return c.json({ detail: 'expected_sha256: a lowercase hex sha256' }, 400)
       }
       let name = filePathOf(c) ?? ''
-      let logged: { events: ServerEvent[]; seqs: number[] } | undefined
       try {
         name = workspacePath(name)
-        const checked = name
-        const alongside = async (tx: TransactionSql) => {
-          const events = [event({ type: 'workspace.file', sessionId, path: checked, change: 'deleted', by: browserUser(c) })]
-          logged = { events, seqs: await sessions.events.append(sessionId, events, tx) }
+        const log = {
+          events: [event({ type: 'workspace.file', sessionId, path: name, change: 'deleted', by: browserUser(c) })],
+          committed: (events: readonly ServerEvent[], seqs: readonly number[]) => sessions.events.committed(sessionId, events, seqs),
         }
-        if (!(await files.delete(ws, name, expected === undefined ? { alongside } : { expectedSha256: expected, alongside }))) {
+        if (!(await files.delete(ws, name, expected === undefined ? { log } : { expectedSha256: expected, log }))) {
           throw new WorkspaceError('not_found', `no file ${name} in this session's workspace`)
         }
       } catch (err) {
         if (err instanceof WorkspaceError) await auditRefused(c, 'workspace_delete', sessionId, `${JSON.stringify(name.slice(0, 200))}: ${err.code}`)
         throw err
       }
-      if (logged) sessions.events.committed(sessionId, logged.events, logged.seqs)
       await audited(c, 'workspace_delete', sessionId, 'ok', name)
       return c.body(null, 204)
     }, 'workspace_delete'),

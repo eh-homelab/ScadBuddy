@@ -37,7 +37,10 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: ``…/payload-key-sweeps`` and ``…/flow-blobs/{subject}`` with its ``/{name}``: a subject's
 #: tombstone with its key and flow images, a browser call's key dropped, the keys no forget
 #: deletes swept, and a flow run's images kept and read (#5299 step 6;
-#: `api/crud_agent_forget.py`). The print ``uploads``
+#: `api/crud_agent_forget.py`). Its ``workspace`` area is every ``…/agent/workspace/*`` route:
+#: the workspace files, sealed and opened on the API, their blobs' holds and their events
+#: written in each write's transaction, a fork's copy, the move to blobs, the sweep and the
+#: reconcile (#5299 step 7; `api/crud_agent_workspace.py`). The print ``uploads``
 #: area also covers ``…/print/slices`` and ``…/print/slice-starts`` (#5298 Task 25). Its
 #: ``previews`` area also covers ``…/print/project-targets``, ``…/print/folderless`` and
 #: ``…/print/destination-touches`` (#5298 Task 26). Its ``copy-leases`` area is
@@ -113,6 +116,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "pairings",
         "mcp-tokens",
         "notify",
+        "workspace",
     ],
     "intake": ["sources"],
 }

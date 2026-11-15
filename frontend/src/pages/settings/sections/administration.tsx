@@ -3,10 +3,11 @@ import { Input } from '@/components/ui/input'
 import { NEW_TAB } from '../../../lib/embed'
 import { safeHttpUrl } from '../../../lib/safeUrl'
 import { FieldRow } from '../controls'
+import { docOf } from '../fields'
 import { Advanced, RuntimeRows, SavedSection } from '../formParts'
 import type { AreaId } from '../registry'
 import { useBackendSettings } from '../useBackendSettings'
-import { ACTIVITY_REPAIR, ACTIVITY_TTL, FOLLOW_NOBODY, fieldsOf } from '../values'
+import { ACTIVITY_REPAIR, ACTIVITY_TTL, fieldsOf } from '../values'
 
 export const id = 'administration'
 export const area: AreaId = 'system'
@@ -22,8 +23,7 @@ export function Component() {
     <SavedSection form={form} id={id} title={title}>
       <FieldRow
         id="activity-follow"
-        label="Notify me about activity from"
-        help={`Principals whose finished activity rings the bell and shows a toast, comma-separated, as stored: "browser" is this browser; others look like "token:…" or an agent session's id. Empty is the default, "browser"; "${FOLLOW_NOBODY}" follows nobody.`}
+        {...docOf(form.settings, 'activity_follow')}
         error={errors.activity_follow}
       >
         <Input
@@ -40,8 +40,7 @@ export function Component() {
       >
         <FieldRow
           id="activity-ttl"
-          label="Keep activity for (seconds)"
-          help="86400 (a day) to 315360000 (ten years). Empty is the default, 30 days."
+          {...docOf(form.settings, 'activity_ttl_seconds')}
           error={errors.activity_ttl_seconds}
         >
           <Input
@@ -59,8 +58,7 @@ export function Component() {
         </FieldRow>
         <FieldRow
           id="activity-repair"
-          label="Repair activity rows from the last (seconds)"
-          help="600 to 604800. Empty is the default, one day."
+          {...docOf(form.settings, 'activity_repair_window_seconds')}
           error={errors.activity_repair_window_seconds}
         >
           <Input
