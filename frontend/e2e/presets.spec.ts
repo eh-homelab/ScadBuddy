@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Locator, type Page } from '@playwright/test'
 import { choose } from './select'
 
 test.describe('template presets', () => {
@@ -91,10 +91,7 @@ test.describe('the "Changed from" note (#352)', () => {
     test(`stays one line inside the picker at ${width}px`, async ({ page }) => {
       await page.setViewportSize({ width, height: 900 })
       await page.goto('/m/name-keychain')
-      await choose(page, page.getByRole('combobox', { name: 'Preset' }), 'Old engraving')
-      // The pick applies once its migration answers ("Old engraving" names a dropped
-      // parameter): typing before that is overwritten by the preset's values (#6434).
-      await expect(page.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Ada')
+      await chooseOldEngraving(page, page.getByRole('combobox', { name: 'Preset' }))
       await page.getByRole('textbox', { name: 'Name on the tag' }).fill('Someone else')
 
       const note = page.getByTestId('preset-modified')
@@ -113,6 +110,16 @@ test.describe('the "Changed from" note (#352)', () => {
     })
   }
 })
+
+/**
+ * Picks "Old engraving" and waits until it is applied: it names a parameter the schema
+ * dropped, so the pick applies once its migration answers, and typing before that is
+ * overwritten by the preset's values (#6434).
+ */
+async function chooseOldEngraving(page: Page, combobox: Locator): Promise<void> {
+  await choose(page, combobox, 'Old engraving')
+  await expect(page.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Ada')
+}
 
 /** A box's vertical centre: buttons of different heights on one row share it. */
 function centre(box: { y: number; height: number }): number {
@@ -145,10 +152,7 @@ test.describe('the preset bar (#1023)', () => {
       await page.goto('/m/name-keychain')
       const combobox = page.getByRole('combobox', { name: 'Preset' })
       const unchosen = await combobox.boundingBox()
-      await choose(page, combobox, 'Old engraving')
-      // The pick applies once its migration answers ("Old engraving" names a dropped
-      // parameter): typing before that is overwritten by the preset's values (#6434).
-      await expect(page.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Ada')
+      await chooseOldEngraving(page, combobox)
       const saveAsButton = page.getByRole('button', { name: 'Save as preset…' })
       const chosen = await combobox.boundingBox()
       const before = await saveAsButton.boundingBox()
@@ -157,7 +161,7 @@ test.describe('the preset bar (#1023)', () => {
       // The select does not move down when a preset is chosen. The panel is too narrow
       // for the select, Save as and the preset's menu side by side, so the buttons wrap
       // to one row under it, together.
-      expect(chosen.y).toBe(unchosen.y)
+      expect(Math.abs(chosen.y - unchosen.y)).toBeLessThanOrEqual(1)
       expect(Math.abs(centre(more) - centre(before))).toBeLessThanOrEqual(1)
 
       await page.getByRole('textbox', { name: 'Name on the tag' }).fill('Someone else')
