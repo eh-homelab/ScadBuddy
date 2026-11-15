@@ -282,6 +282,48 @@ def test_two_imports_at_once_make_one_default_folder(
 
 
 @respx.mock
+def test_a_copy_that_cannot_pass_says_not_to_import_again(native_client: TestClient) -> None:
+    # Bambuddy serves bytes that do not hash to its own `file_hash`: every try fails so.
+    route = respx.post(f"{API}/makerworld/import").mock(
+        return_value=Response(200, json=_imported())
+    )
+    respx.get(f"{API}/library/files/9").mock(
+        return_value=Response(
+            200, json={"id": 9, "filename": "Benchy.3mf", "folder_id": 31, "file_hash": DIGEST}
+        )
+    )
+    respx.get(f"{API}/library/files/9/download").mock(
+        return_value=Response(200, content=b"other bytes")
+    )
+    answer = native_client.post(
+        "/api/v1/makerworld/import", json={"model_id": 123}, headers=press()
+    )
+    assert answer.status_code == 502, answer.text
+    detail = answer.json()["detail"]
+    assert "sha256 mismatch" in detail
+    assert "Importing again fails the same way" in detail
+    assert route.call_count == 1
+
+
+@pytest.fixture
+def full_store_client(settings: Settings, s3: S3Settings) -> Iterator[TestClient]:
+    with TestClient(create_app(_native_settings(settings, s3, store_max_total_bytes=16))) as client:
+        configure(client)
+        yield client
+
+
+@respx.mock
+def test_a_copy_into_a_full_store_says_to_make_room(full_store_client: TestClient) -> None:
+    respx.post(f"{API}/makerworld/import").mock(return_value=Response(200, json=_imported()))
+    _bambuddy_file()
+    answer = full_store_client.post(
+        "/api/v1/makerworld/import", json={"model_id": 123}, headers=press()
+    )
+    assert answer.status_code == 507, answer.text
+    assert "Make room in the blob store, then import again" in answer.json()["detail"]
+
+
+@respx.mock
 def test_import_on_native_into_a_named_folder(native_client: TestClient) -> None:
     native = _native(native_client)
     folder = native.rows.create_folder("Boats", None)
