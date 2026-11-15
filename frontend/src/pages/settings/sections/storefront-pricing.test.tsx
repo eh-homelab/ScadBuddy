@@ -105,3 +105,38 @@ describe('Settings → Storefront pricing (#6153)', () => {
     options.mockRestore()
   })
 })
+
+describe('Settings → Storefront pricing: Storefront materials (#6258)', () => {
+  beforeEach(() => resetMockState())
+
+  const rows = (section: HTMLElement) => within(section).getAllByTestId('material-row').map((row) => row.getAttribute('data-material'))
+
+  it('shows the shop default in order, reorders, adds and removes, and saves the list', async () => {
+    const { user } = renderSettingsSection(<StorefrontPricing />, { route })
+    const section = await screen.findByRole('region', { name: 'Storefront materials' })
+    await waitFor(() => expect(rows(section)).toEqual(['PETG', 'PLA']))
+    await user.click(within(section).getByRole('button', { name: 'Move PLA up' }))
+    expect(rows(section)).toEqual(['PLA', 'PETG'])
+    // By keyboard: the moved row's other button has the focus.
+    expect(within(section).getByRole('button', { name: 'Move PLA down' })).toHaveFocus()
+    await user.click(within(section).getByRole('button', { name: 'Remove PETG' }))
+    expect(rows(section)).toEqual(['PLA'])
+    expect(within(section).getByRole('button', { name: 'Remove PLA' })).toBeDisabled()
+    // The price book's materials not on the list.
+    await choose(user, within(section).getByRole('combobox', { name: 'Add a material' }), 'PETG')
+    expect(rows(section)).toEqual(['PLA', 'PETG'])
+    await user.click(within(section).getByRole('button', { name: 'Save materials' }))
+    expect(await within(section).findByText('Saved.')).toBeInTheDocument()
+    expect(mockSettings().storefront_materials).toEqual(['PLA', 'PETG'])
+  })
+
+  it('says why a save is refused', async () => {
+    vi.spyOn(api, 'putSettings').mockRejectedValueOnce(new Error('SCADBUDDY_STOREFRONT_MATERIALS needs at least one material'))
+    const { user } = renderSettingsSection(<StorefrontPricing />, { route })
+    const section = await screen.findByRole('region', { name: 'Storefront materials' })
+    await waitFor(() => expect(rows(section)).toEqual(['PETG', 'PLA']))
+    await user.click(within(section).getByRole('button', { name: 'Save materials' }))
+    expect(await within(section).findByRole('alert')).toHaveTextContent('needs at least one material')
+    vi.restoreAllMocks()
+  })
+})

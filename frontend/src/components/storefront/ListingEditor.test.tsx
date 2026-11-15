@@ -182,7 +182,7 @@ describe('ListingEditor (#5282, #6131)', () => {
     // The smart defaults put it on the listing, so publish takes the locked support colour.
     expect(within(colours).getByRole('checkbox', { name: 'PVA Natural' })).toBeChecked()
     expect(within(colours).getByText('PVA Natural').closest('label')).toHaveTextContent('(for supports only, not offered)')
-    expect(within(colours).getByText('PLA Ocean').closest('label')).not.toHaveTextContent('for supports only')
+    expect(within(colours).getByRole('checkbox', { name: 'PLA Ocean' }).closest('label')).not.toHaveTextContent('for supports only')
   })
 
   it('marks a support-only filament in the folded names too (#6292 review)', () => {
@@ -370,5 +370,138 @@ describe('ListingEditor (#5282, #6131)', () => {
     expect(value).toBeChecked()
     await user.click(value)
     expect(last(seen).fixed['keyring_hole']).toBe(false)
+  })
+})
+
+describe('ListingEditor materials and colours on offer (#6258)', () => {
+  const PETG_BLACK = { ...filament('g1', '#1E1E1E', 'Black'), material: 'PETG' }
+  const PETG_CLEAR = { ...filament('g2', '#EEF3F4', 'Clear'), material: 'PETG' }
+  const ABS_GREY = { ...filament('a1', '#7D7F7C', 'Grey'), material: 'ABS' }
+  const ALL = [RED, BLUE, PETG_BLACK, PETG_CLEAR, ABS_GREY]
+  const SHOP = ['PETG', 'PLA']
+
+  function Editor({ seen, start, refusal = null, shop = SHOP }: { seen: ListingDraft[]; start: Partial<ListingDraft>; refusal?: ComponentProps<typeof ListingEditor>['refusal']; shop?: string[] }) {
+    const [draft, setDraft] = useState<ListingDraft>({ ...emptyDraft('name-keychain', COMMIT), title: 'Tag', ...start })
+    return (
+      <ListingEditor
+        draft={draft}
+        onChange={(next) => {
+          seen.push(next)
+          setDraft(next)
+        }}
+        models={[]}
+        versions={[]}
+        schema={keychainSchema}
+        filaments={ALL}
+        media={[]}
+        shopMaterials={shop}
+        refusal={refusal}
+      />
+    )
+  }
+
+  const allowed = () => screen.getByRole('group', { name: 'Materials allowed' })
+  const order = () => within(allowed()).getAllByTestId('material-row').map((row) => row.getAttribute('data-material'))
+
+  it('shows the shop default for a listing that names no materials, and overrides it', async () => {
+    const seen: ListingDraft[] = []
+    const { user } = renderPage(<Editor seen={seen} start={{ colours: [RED.id] }} />)
+    expect(allowed()).toHaveTextContent('Shop default (PETG, PLA)')
+    expect(within(allowed()).getByRole('link', { name: 'Change the shop default' })).toHaveAttribute('href', '/settings/printing#storefront-pricing')
+    await user.click(within(allowed()).getByRole('button', { name: 'Choose for this listing' }))
+    expect(last(seen).materials).toEqual(['PETG', 'PLA'])
+    expect(order()).toEqual(['PETG', 'PLA'])
+    await user.click(within(allowed()).getByRole('button', { name: 'Use the shop default' }))
+    expect(last(seen).materials).toEqual([])
+    expect(allowed()).toHaveTextContent('Shop default (PETG, PLA)')
+  })
+
+  it('reorders by its up and down buttons, by keyboard too', async () => {
+    const seen: ListingDraft[] = []
+    const { user } = renderPage(<Editor seen={seen} start={{ materials: ['PETG', 'PLA', 'ABS'] }} />)
+    expect(within(allowed()).getByRole('button', { name: 'Move PETG up' })).toBeDisabled()
+    expect(within(allowed()).getByRole('button', { name: 'Move ABS down' })).toBeDisabled()
+    await user.click(within(allowed()).getByRole('button', { name: 'Move PLA up' }))
+    expect(last(seen).materials).toEqual(['PLA', 'PETG', 'ABS'])
+    // At the top, the focus moves to the row's other button, so the keyboard can go on.
+    expect(within(allowed()).getByRole('button', { name: 'Move PLA down' })).toHaveFocus()
+    await user.keyboard('{Enter}')
+    expect(last(seen).materials).toEqual(['PETG', 'PLA', 'ABS'])
+    expect(within(allowed()).getByRole('button', { name: 'Move PLA down' })).toHaveFocus()
+    await user.keyboard('{Enter}')
+    expect(order()).toEqual(['PETG', 'ABS', 'PLA'])
+  })
+
+  it('adds a material of the price book and removes one, never the last', async () => {
+    const seen: ListingDraft[] = []
+    const { user } = renderPage(<Editor seen={seen} start={{ materials: ['PETG'] }} />)
+    expect(within(allowed()).getByRole('button', { name: 'Remove PETG' })).toBeDisabled()
+    await user.click(within(allowed()).getByRole('combobox', { name: 'Add a material' }))
+    // The price book's materials not on the list yet.
+    expect((await screen.findAllByRole('option')).map((option) => option.textContent)).toEqual(['ABS', 'PLA'])
+    await user.click(screen.getByRole('option', { name: 'ABS' }))
+    expect(last(seen).materials).toEqual(['PETG', 'ABS'])
+    await user.click(within(allowed()).getByRole('button', { name: 'Remove PETG' }))
+    expect(last(seen).materials).toEqual(['ABS'])
+  })
+
+  it('groups the colours on offer by allowed material, in the list’s order, with Offer all and Offer none', async () => {
+    const seen: ListingDraft[] = []
+    const { user } = renderPage(<Editor seen={seen} start={{ materials: ['PLA', 'PETG'], colours: [RED.id, PETG_BLACK.id] }} />)
+    const colours = screen.getByRole('group', { name: 'Colours on offer' })
+    await user.click(within(colours).getByRole('button', { name: /^Show all/ }))
+    const groups = () => within(colours).getAllByTestId('material-colours')
+    expect(groups().map((group) => group.getAttribute('aria-label'))).toEqual(['PLA colours', 'PETG colours'])
+    expect(groups()[0]).toHaveTextContent('1 of 2 offered')
+    // ABS is not allowed, so its filament is not listed.
+    expect(within(colours).queryByRole('checkbox', { name: 'ABS Grey' })).toBeNull()
+
+    await user.click(within(groups()[1]!).getByRole('button', { name: 'Offer all' }))
+    expect(new Set(last(seen).colours)).toEqual(new Set([RED.id, PETG_BLACK.id, PETG_CLEAR.id]))
+    await user.click(within(groups()[0]!).getByRole('button', { name: 'Offer none' }))
+    expect(new Set(last(seen).colours)).toEqual(new Set([PETG_BLACK.id, PETG_CLEAR.id]))
+    await user.click(within(groups()[0]!).getByRole('checkbox', { name: 'PLA Ocean' }))
+    expect(last(seen).colours).toContain(BLUE.id)
+
+    // Reordering the materials reorders the groups.
+    await user.click(within(allowed()).getByRole('button', { name: 'Move PETG up' }))
+    expect(groups().map((group) => group.getAttribute('aria-label'))).toEqual(['PETG colours', 'PLA colours'])
+  })
+
+  it('names a ticked colour whose material is not allowed, and allows it', async () => {
+    const seen: ListingDraft[] = []
+    const { user } = renderPage(<Editor seen={seen} start={{ colours: [RED.id, ABS_GREY.id] }} />)
+    const outside = screen.getByTestId('materials-not-allowed')
+    expect(outside).toHaveTextContent('ABS Grey')
+    await user.click(within(outside).getByRole('button', { name: 'Allow ABS' }))
+    // The shop default, with ABS last.
+    expect(last(seen).materials).toEqual(['PETG', 'PLA', 'ABS'])
+    expect(screen.queryByTestId('materials-not-allowed')).toBeNull()
+  })
+
+  it('unticks the colours whose material is not allowed', async () => {
+    const seen: ListingDraft[] = []
+    const { user } = renderPage(<Editor seen={seen} start={{ colours: [RED.id, ABS_GREY.id] }} />)
+    await user.click(within(screen.getByTestId('materials-not-allowed')).getByRole('button', { name: 'Untick it' }))
+    expect(last(seen).colours).toEqual([RED.id])
+  })
+
+  it('says beside the materials which filament publish refused for its material', () => {
+    renderPage(<Editor seen={[]} start={{ colours: [ABS_GREY.id] }} refusal={{ kind: 'material_not_allowed', filament: ABS_GREY.id, detail: 'x' }} />)
+    expect(within(allowed()).getByRole('alert')).toHaveTextContent('Not published: ABS Grey is ABS, which this listing does not allow. Allow ABS, or untick ABS Grey under Colours on offer.')
+  })
+
+  it('says beside the colours why publish found no material to print in', () => {
+    renderPage(<Editor seen={[]} start={{ colours: [RED.id] }} refusal={{ kind: 'locked_colours_unprintable', names: ['text_color'], detail: 'x' }} />)
+    const colours = screen.getByRole('group', { name: 'Colours on offer' })
+    expect(within(colours).getByRole('alert')).toHaveTextContent(
+      'Not published: no allowed material has the locked colour of Text and a colour for each setting the customer picks. Tick those colours in one material, or let the customer change Text.',
+    )
+  })
+
+  it('never sends one_material, and sends the materials in their order', () => {
+    const body = listingInput({ ...emptyDraft('name-keychain', COMMIT), title: 'Tag', materials: ['PLA', 'PETG'] }, keychainSchema, ALL)
+    expect(body).not.toHaveProperty('one_material')
+    expect(body.materials).toEqual(['PLA', 'PETG'])
   })
 })

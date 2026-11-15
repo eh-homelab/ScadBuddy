@@ -8,7 +8,9 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
-import { colourProblems, emptyDraft, fixColour, isSupport, isSupportOnly, lockedValue, MAX_TEXT_LENGTH, nearestFilaments, offerable, schemaBound, shownParams, titleColours, withoutWords, type ListingDraft } from './listingDraft'
+import { colourProblems, effectiveMaterials, emptyDraft, fixColour, isSupport, isSupportOnly, lockedValue, materialKey, MAX_TEXT_LENGTH, nearestFilaments, offerable, priceBookMaterials, schemaBound, shownParams, titleColours, withoutWords, type ListingDraft, type ListingRefusal } from './listingDraft'
+import { customerFilaments } from '../../storefront/params'
+import { MaterialOrder } from './MaterialOrder'
 import { ListingPictures, type LivePictures, type MediaState } from './ListingPictures'
 
 /**
@@ -16,7 +18,8 @@ import { ListingPictures, type LivePictures, type MediaState } from './ListingPi
  * the Storefront page's editor, in the order a shop thinks: the design it sells (one line,
  * "Change" opens the template and version), the product (title, description, pictures),
  * the settings (every parameter in the design's order: an offered one's bounds, a locked
- * one's value; its switch changes the row in place, #6290), and the colours on offer. A colour that publish would refuse is named first, with a filament
+ * one's value; its switch changes the row in place, #6290), the materials allowed and the
+ * colours on offer, grouped by material (#6258). A colour that publish would refuse is named first, with a filament
  * to use instead. Controlled: the page holds the draft, loads the schema, the price book
  * and the media, and saves.
  */
@@ -46,6 +49,10 @@ export interface ListingEditorProps {
   schemaState?: 'loading' | 'failed'
   /** The price book's read, alone (#6292 review): what "Colours on offer" says while it has no filaments. Default ready. */
   bookState?: 'loading' | 'failed' | 'ready'
+  /** #6258 — the shop's default materials (`storefront_materials`); undefined until read. */
+  shopMaterials?: readonly string[]
+  /** #6258 — what the last publish refused about the materials, said beside the control it concerns. */
+  refusal?: ListingRefusal | null
 }
 
 /** Where the price book's filaments are added (Settings → Printing → Orders). */
@@ -394,9 +401,97 @@ function DesignLine({ draft, onChange, models, versions }: Pick<ListingEditorPro
   )
 }
 
+/** Where the shop's default materials are set (Settings → Printing → Storefront pricing). */
+export const SHOP_MATERIALS_PATH = '/settings/printing#storefront-pricing'
+
+/**
+ * #6258 — "Materials allowed": the materials a print of this listing may be made of, first
+ * preferred. A print is always of one material: the first on this list that has every colour
+ * the customer picks (backend `inputs.py` `resolve_choice`). Empty is the shop's default
+ * (`storefront_materials`), shown as such until the person chooses the listing's own.
+ */
+function MaterialsAllowed({
+  draft,
+  shop,
+  filaments,
+  refusal,
+  onChange,
+}: {
+  draft: ListingDraft
+  shop: readonly string[] | undefined
+  filaments: readonly Filament[]
+  refusal: ListingRefusal | null
+  onChange: (draft: ListingDraft) => void
+}) {
+  const own = draft.materials.length > 0
+  const refused = refusal?.kind === 'material_not_allowed' ? refusal : null
+  const refusedFilament = refused ? filaments.find((filament) => filament.id === refused.filament) : undefined
+  return (
+    <section className="flex flex-col gap-2" role="group" aria-label="Materials allowed">
+      <h3 className="text-sm font-semibold">Materials allowed</h3>
+      <p className="text-xs text-muted-foreground">
+        A print never mixes materials. When a colour comes in more than one, the first material on this list is used. Customers never see the material.
+      </p>
+      {own ? (
+        <>
+          <MaterialOrder label="Materials allowed, first preferred" materials={draft.materials} choices={priceBookMaterials(filaments)} onChange={(materials) => onChange({ ...draft, materials })} />
+          <Button variant="link" size="sm" className="h-auto self-start p-0" onClick={() => onChange({ ...draft, materials: [] })}>
+            Use the shop default
+          </Button>
+        </>
+      ) : (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-dashed px-2.5 py-2 text-sm">
+          <span>{shop ? `Shop default (${shop.join(', ')})` : 'Shop default'}</span>
+          <Button variant="outline" size="sm" disabled={!shop} onClick={() => shop && onChange({ ...draft, materials: [...shop] })}>
+            Choose for this listing
+          </Button>
+          <Link to={SHOP_MATERIALS_PATH} className="text-xs text-muted-foreground underline">
+            Change the shop default
+          </Link>
+        </div>
+      )}
+      {refused && (
+        <p role="alert" className="text-xs text-destructive">
+          {refusedFilament
+            ? `Not published: ${filamentName(refusedFilament)} is ${refusedFilament.material}, which this listing does not allow. Allow ${refusedFilament.material}, or untick ${filamentName(refusedFilament)} under Colours on offer.`
+            : `Not published: ${refused.detail}.`}
+        </p>
+      )}
+    </section>
+  )
+}
+
+/** Why publish found no material to print `refusal`'s listing in, said beside the colours. */
+function unprintableText(refusal: Extract<ListingRefusal, { kind: 'locked_colours_unprintable' }>, schema: CustomizerSchema | undefined): string {
+  const captions = refusal.names.map((name) => schema?.parameters?.find((param) => param.name === name)?.caption || name)
+  if (captions.length === 0) {
+    return 'Not published: no allowed material has a colour for each setting the customer picks. Tick colours of one material for each of them.'
+  }
+  const list = captions.join(' and ')
+  return `Not published: no allowed material has the locked colour${captions.length > 1 ? 's' : ''} of ${list} and a colour for each setting the customer picks. Tick those colours in one material, or let the customer change ${list}.`
+}
+
+/** One filament's tick in "Colours on offer". */
+function FilamentTick({ filament, draft, schema, filaments, offersColour, full = false, onTick }: { filament: Filament; full?: boolean; draft: ListingDraft; schema: CustomizerSchema | undefined; filaments: readonly Filament[]; offersColour: boolean; onTick: (on: boolean) => void }) {
+  const name = filamentName(filament)
+  return (
+    <li className="min-w-0">
+      <label className="flex min-w-0 items-center gap-2 text-sm">
+        <Checkbox checked={draft.colours.includes(filament.id)} aria-label={name} onCheckedChange={(on) => onTick(on === true)} />
+        <Swatch colour={filament.colour} />
+        <span className="truncate">{full ? name : (filament.colour_name ?? filament.colour)}</span>
+        {offersColour && isSupportOnly(filament, draft, schema, filaments) && <span className="text-xs text-muted-foreground">(for supports only, not offered)</span>}
+      </label>
+    </li>
+  )
+}
+
 /**
  * #6290 — the listing's filaments, after the settings: a long list (a price book holds
- * dozens), so folded to a count and the ticked names until asked for. Whether it is open is
+ * dozens), so folded to a count and the ticked names until asked for. #6258: grouped by
+ * allowed material, in the list's order, each with "Offer all" and "Offer none"; a ticked
+ * filament of a material the listing does not allow is named apart, as publish refuses it
+ * (`listing_material_not_allowed`), and support filaments are listed last. Whether it is open is
  * decided once per listing opened, when the listing has loaded (`settled`: the price book
  * has answered and a new listing's smart defaults are in): open when no colour is ticked,
  * folded otherwise. From then on it stays as the person leaves it, so it never folds while
@@ -411,6 +506,8 @@ function ColoursOnOffer({
   offersColour,
   settled,
   bookState,
+  materials,
+  refusal,
   onChange,
 }: {
   draft: ListingDraft
@@ -419,6 +516,9 @@ function ColoursOnOffer({
   offersColour: boolean
   settled: boolean
   bookState: 'loading' | 'failed' | 'ready'
+  /** The allowed materials, first preferred (`effectiveMaterials`); null while the shop's default is not read: every material is listed. */
+  materials: readonly string[] | null
+  refusal: ListingRefusal | null
   onChange: (draft: ListingDraft) => void
 }) {
   const id = useId()
@@ -427,20 +527,66 @@ function ColoursOnOffer({
   const open = chosen ?? ticked.length === 0
   // The decision on load, made once: later ticks never change it.
   if (settled && chosen === null) setChosen(ticked.length === 0)
+
+  const customer = customerFilaments(filaments)
+  const support = filaments.filter((filament) => !customer.includes(filament))
+  const groups = (materials ?? priceBookMaterials(filaments)).map((material) => ({
+    material,
+    filaments: customer.filter((filament) => materialKey(filament.material) === materialKey(material)),
+  }))
+  const allowed = new Set(groups.map((group) => materialKey(group.material)))
+  const outside = customer.filter((filament) => draft.colours.includes(filament.id) && !allowed.has(materialKey(filament.material)))
+  const outsideMaterials = [...new Map(outside.map((filament) => [materialKey(filament.material), filament.material.trim()])).values()]
+  const listed = groups.reduce((count, group) => count + group.filaments.length, 0) + support.length
+
+  function tick(filament: Filament, on: boolean) {
+    setChosen(true)
+    onChange({ ...draft, colours: on ? [...draft.colours, filament.id] : draft.colours.filter((c) => c !== filament.id) })
+  }
+  function tickAll(of: readonly Filament[], on: boolean) {
+    setChosen(true)
+    const ids = new Set(of.map((filament) => filament.id))
+    const rest = draft.colours.filter((c) => !ids.has(c))
+    onChange({ ...draft, colours: on ? [...rest, ...of.map((filament) => filament.id)] : rest })
+  }
+  const tickProps = { draft, schema, filaments, offersColour }
+
   return (
     <section className="flex flex-col gap-1" role="group" aria-label="Colours on offer">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="text-sm font-semibold">Colours on offer</h3>
-        {filaments.length > 0 && (
+        {listed > 0 && (
           <Button variant="link" size="sm" className="h-auto p-0" aria-expanded={open} aria-controls={`${id}-filaments`} onClick={() => setChosen(!open)}>
-            {open ? 'Hide the filaments' : `Show all ${filaments.length} filaments`}
+            {open ? 'Hide the filaments' : `Show all ${listed} filaments`}
           </Button>
         )}
       </div>
       <p className="text-xs text-muted-foreground">
-        {offersColour ? 'The filaments a customer can pick from' : 'The filaments this product is printed in'}
-        {open ? '.' : ticked.length === 0 ? ': none ticked yet.' : `: ${ticked.length} ticked (${ticked.map((filament) => (offersColour && isSupportOnly(filament, draft, schema, filaments) ? `${filamentName(filament)}, for supports only` : filamentName(filament))).join('; ')}).`}
+        {offersColour ? 'The filaments a customer can pick from, by allowed material' : 'The filaments this product is printed in, by allowed material'}
+        {open ? '. Untick a colour to hide it from customers.' : ticked.length === 0 ? ': none ticked yet.' : `: ${ticked.length} ticked (${ticked.map((filament) => (offersColour && isSupportOnly(filament, draft, schema, filaments) ? `${filamentName(filament)}, for supports only` : filamentName(filament))).join('; ')}).`}
       </p>
+      {refusal?.kind === 'locked_colours_unprintable' && (
+        <p role="alert" className="text-xs text-destructive">
+          {unprintableText(refusal, schema)}
+        </p>
+      )}
+      {materials && outside.length > 0 && (
+        <div className="flex flex-col gap-1.5 rounded-md border border-warn/50 bg-warn/5 p-2.5 text-xs" data-testid="materials-not-allowed">
+          <p>
+            Ticked, but not of an allowed material: {outside.map(filamentName).join('; ')}. Publish refuses {outside.length === 1 ? 'it' : 'them'}.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {outsideMaterials.map((material) => (
+              <Button key={materialKey(material)} variant="outline" size="xs" onClick={() => onChange({ ...draft, materials: [...materials, material] })}>
+                Allow {material}
+              </Button>
+            ))}
+            <Button variant="outline" size="xs" onClick={() => tickAll(outside, false)}>
+              {outside.length === 1 ? 'Untick it' : 'Untick them'}
+            </Button>
+          </div>
+        </div>
+      )}
       {filaments.length === 0 && bookState === 'loading' ? (
         <p className="text-xs text-muted-foreground">Reading the price book…</p>
       ) : filaments.length === 0 && bookState === 'failed' ? (
@@ -455,37 +601,66 @@ function ColoursOnOffer({
         </p>
       ) : (
         open && (
-          <ul id={`${id}-filaments`} className="flex flex-wrap gap-x-4 gap-y-1">
-            {filaments.map((filament) => {
-              const name = filamentName(filament)
+          <div id={`${id}-filaments`} className="mt-1 flex flex-col">
+            {groups.map(({ material, filaments: own }) => {
+              const offered = own.filter((filament) => draft.colours.includes(filament.id)).length
               return (
-                <li key={filament.id}>
-                  <label className="flex items-center gap-2 text-sm">
-                    <Checkbox
-                      checked={draft.colours.includes(filament.id)}
-                      aria-label={name}
-                      onCheckedChange={(on) => {
-                        setChosen(true)
-                        onChange({ ...draft, colours: on === true ? [...draft.colours, filament.id] : draft.colours.filter((c) => c !== filament.id) })
-                      }}
-                    />
-                    <Swatch colour={filament.colour} />
-                    {name}
-                    {offersColour && isSupportOnly(filament, draft, schema, filaments) && (
-                      <span className="text-xs text-muted-foreground">(for supports only, not offered)</span>
+                <div key={materialKey(material)} role="group" aria-label={`${material} colours`} data-testid="material-colours" className="flex flex-col gap-1.5 border-t py-2.5">
+                  <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                    <span className="text-sm font-medium">{material}</span>
+                    <span className="text-xs text-muted-foreground">
+                      {offered} of {own.length} offered
+                    </span>
+                    {own.length > 0 && (
+                      <span className="ml-auto flex gap-3">
+                        <Button variant="link" size="sm" className="h-auto p-0 text-xs" disabled={offered === own.length} onClick={() => tickAll(own, true)}>
+                          Offer all
+                        </Button>
+                        <Button variant="link" size="sm" className="h-auto p-0 text-xs" disabled={offered === 0} onClick={() => tickAll(own, false)}>
+                          Offer none
+                        </Button>
+                      </span>
                     )}
-                  </label>
-                </li>
+                  </div>
+                  {own.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">
+                      The price book has no {material} filament.{' '}
+                      <Link to={PRICE_BOOK_PATH} className="underline">
+                        Add one
+                      </Link>
+                      .
+                    </p>
+                  ) : (
+                    <ul className="grid grid-cols-[repeat(auto-fill,minmax(10rem,1fr))] gap-x-3 gap-y-1">
+                      {own.map((filament) => (
+                        <FilamentTick key={filament.id} filament={filament} {...tickProps} onTick={(on) => tick(filament, on)} />
+                      ))}
+                    </ul>
+                  )}
+                </div>
               )
             })}
-          </ul>
+            {support.length > 0 && (
+              <div role="group" aria-label="Support colours" data-testid="support-colours" className="flex flex-col gap-1.5 border-t py-2.5">
+                <div className="flex flex-wrap items-baseline gap-x-3">
+                  <span className="text-sm font-medium">Support (internal)</span>
+                  <span className="text-xs text-muted-foreground">For a support colour you lock. A customer never picks one.</span>
+                </div>
+                <ul className="grid grid-cols-[repeat(auto-fill,minmax(10rem,1fr))] gap-x-3 gap-y-1">
+                  {support.map((filament) => (
+                    <FilamentTick key={filament.id} filament={filament} {...tickProps} full onTick={(on) => tick(filament, on)} />
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
         )
       )}
     </section>
   )
 }
 
-export function ListingEditor({ draft, onChange, models, versions, schema, filaments, media, live = null, mediaState = 'ready', onPictureUploaded, coloursSettled = true, bookState = 'ready', schemaState = 'loading' }: ListingEditorProps) {
+export function ListingEditor({ draft, onChange, models, versions, schema, filaments, media, live = null, mediaState = 'ready', onPictureUploaded, coloursSettled = true, bookState = 'ready', schemaState = 'loading', shopMaterials, refusal = null }: ListingEditorProps) {
   const id = useId()
   const params = shownParams(schema)
   const offersColour = params.some((param) => param.type === 'color' && draft.params[param.name])
@@ -544,7 +719,18 @@ export function ListingEditor({ draft, onChange, models, versions, schema, filam
         </ul>
       </section>
 
-      <ColoursOnOffer draft={draft} schema={schema} filaments={filaments} offersColour={offersColour} settled={coloursSettled} bookState={bookState} onChange={onChange} />
+      <MaterialsAllowed draft={draft} shop={shopMaterials} filaments={filaments} refusal={refusal} onChange={onChange} />
+      <ColoursOnOffer
+        draft={draft}
+        schema={schema}
+        filaments={filaments}
+        offersColour={offersColour}
+        settled={coloursSettled}
+        bookState={bookState}
+        materials={effectiveMaterials(draft, shopMaterials)}
+        refusal={refusal}
+        onChange={onChange}
+      />
     </div>
   )
 }

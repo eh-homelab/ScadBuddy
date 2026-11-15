@@ -106,7 +106,11 @@ customize page "horrible". A Playwright walk on 2026-11-13 confirmed each point:
   `names`). A listing that has none since (published before that check, or after the
   materials or the price book changed) renders as 409 `listing_unavailable`, and its card
   and page say `available: false`. Materials compare trimmed and casefolded. The render row
-  keeps the resolved `material`, which the estimate prices by.
+  keeps the resolved `material`, which the estimate prices by. The back office sets a
+  listing's list in the editor's "Materials allowed" (an empty list shows as the shop's
+  default, with a way to choose the listing's own) and ticks its colours per allowed
+  material in "Colours on offer"; the shop's default is Settings → Storefront pricing →
+  "Storefront materials" (`components/storefront/MaterialOrder.tsx` is both lists).
 
 ### 5.2 Colour picker (frontend, `storefront/components/ColourPicker.tsx`)
 
