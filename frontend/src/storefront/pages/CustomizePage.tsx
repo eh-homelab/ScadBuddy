@@ -142,7 +142,8 @@ export function CustomizePage({
   /**
    * #6302 review: the colour values the latest render reply says the print takes. A part the
    * visitor did not set shows its colour from here (the shop may move it to the closest colour
-   * of the material), else the listing's default while no reply has come back.
+   * of the material), else the listing's default while no reply has come back or after a
+   * start the shop refused.
    */
   const [settled, setSettled] = useState<Record<string, ParamValue>>()
   const [renderError, setRenderError] = useState<string | null>(null)
@@ -311,10 +312,14 @@ export function CustomizePage({
     setRenderError(null)
     // #6152: the old price is hidden until the new one is read (spec 2026-11-13 §5.3).
     setEstimate(undefined)
+    let begun = false
     try {
       const first = await store.startRender(body, renderKey.current.for(JSON.stringify(body)))
+      begun = true
       renderKey.current.done()
       if (!live()) return
+      // While it runs the preview still shows the last render, so the colours stay that
+      // render's until this one answers its own (#6302 review).
       if (first.values) setSettled(first.values)
       setJob(onScreen(first))
       const done = await follow(first, live)
@@ -328,6 +333,9 @@ export function CustomizePage({
       if (rough && live()) setEstimate({ job: done.id, key, estimate: rough })
     } catch (caught) {
       if (!live()) return
+      // A start refused or failed settled nothing: the parts the visitor did not set show
+      // the listing's defaults again (#6302 review).
+      if (!begun) setSettled(undefined)
       if (changedListing(caught)) setStale(true)
       setRenderError(refusalText(caught))
       if (retryable(caught) && !retry) {

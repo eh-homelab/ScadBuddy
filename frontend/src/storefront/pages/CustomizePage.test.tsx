@@ -154,6 +154,28 @@ describe('CustomizePage', () => {
     expect(await screen.findByRole('button', { name: /Rim colour Teal/ })).toBeInTheDocument()
   })
 
+  it('shows the listing default again once a render start is refused (#6302 review)', async () => {
+    server.use(
+      http.post('/api/store/v1/renders', async ({ request }) => {
+        const body = (await request.json()) as { values: Record<string, string> }
+        if (body.values.body_colour === '#C0502A') return HttpResponse.json({ ...RUNNING, values: { body_colour: '#C0502A', rim_colour: '#1C8C8C' } }, { status: 202 })
+        if (body.values.body_colour === undefined) return HttpResponse.json({ ...RUNNING, values: { body_colour: '#1B6CA8', rim_colour: '#1B6CA8' } }, { status: 202 })
+        return HttpResponse.json(
+          { type: PROBLEMS + 'listing_colours_clash', title: 'Unprocessable Content', status: 422, detail: 'No.', parts: ['body_colour'] },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        )
+      }),
+      http.get('/api/store/v1/renders/:id', () => HttpResponse.json(RUNNING)),
+    )
+    const { user } = show(CHARM_ID)
+    await user.click(await screen.findByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Rust PETG' }))
+    expect(await screen.findByRole('button', { name: /Rim colour Teal/ })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Teal PETG' }))
+    expect(await screen.findByRole('button', { name: /Rim colour Ocean blue/ })).toBeInTheDocument()
+  })
+
   it('says plainly when colours of no one material are set (#6258)', async () => {
     const { user } = show(CHARM_ID)
     await user.click(await screen.findByRole('button', { name: /Body colour/ }))

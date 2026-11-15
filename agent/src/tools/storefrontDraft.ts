@@ -65,7 +65,7 @@ export function offeredFilaments(colourValues: readonly unknown[], filaments: re
  * #6258, #6302 review: the materials a draft allows, so it can publish even when the design's
  * material is not one the shop's default (`storefront_materials`) allows. They are the
  * materials of the listing's filaments, casefolded, support left out: PETG, then PLA, then the
- * rest by name (the order the backend's migration `20261115T0000Z_listing_materials_backfill.sql`
+ * rest by name (the order the backend's migration `20261115T0346Z_listing_materials_backfill.sql`
  * gives existing listings).
  */
 export function draftMaterials(colours: readonly string[], filaments: readonly Filament[]): string[] {

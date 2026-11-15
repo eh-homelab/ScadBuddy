@@ -1219,14 +1219,21 @@ def test_each_visitor_is_priced_at_its_listings_material(
     assert petg_price > pla_price
 
 
-def test_a_render_takes_no_picks(
+def test_a_page_from_before_the_deploy_still_renders_and_adds(
     crud: CrudCaller, two_reds: tuple[dict[str, Any], str, str]
 ) -> None:
-    """#6258: a pick is the colour in ``values``; ``picks`` is no field of the body."""
+    """#6302 review: the page built before #6258 always sends ``picks`` (``{}`` when
+    nothing is picked). For one release the body takes it and ignores it, so an open tab
+    still renders and adds to the order."""
     listing, cheap, _ = two_reds
-    body = {**render_body(listing, {"colour": "#FF0000"}), "picks": {"colour": cheap}}
-    r = crud.post("/renders", json=body, key=uuid.uuid4().hex)
-    assert r.status_code == 422, r.text
+    for picks in ({}, {"colour": cheap}):
+        body = {**render_body(listing, {"width": 40, "colour": "#FF0000"}), "picks": picks}
+        rendered = crud.post("/renders", json=body, key=uuid.uuid4().hex)
+        assert rendered.status_code == 202, rendered.text
+        job = wait_done(crud, TOKEN_A, rendered.json()["id"])
+        assert job["status"] == "done", job
+        added = crud.post("/draft/items", json=body, key=uuid.uuid4().hex)
+        assert added.status_code == 200, added.text
 
 
 def test_add_to_order_fills_the_slots_from_the_resolved_material(
@@ -1433,11 +1440,15 @@ def test_the_backfill_gives_an_old_listing_the_materials_it_offers(
 ) -> None:
     """#6302 review: a listing from before #6258 has no materials of its own. The
     migration gives it the materials of its filaments, support left out, PETG and PLA
-    first, so no colour goes on deploy. A listing with materials is left alone."""
+    first, so no colour goes on deploy. Of two spellings of one material, the first
+    filament's in ``colours`` is kept, as the agent's ``draftMaterials`` keeps it. A listing
+    with materials is left alone."""
     abs_blue = _filament(client, "#0000FF", "31", "ABS")
+    pla_green = _filament(client, "#00FF00", "34", "pla")
     petg_red = _filament(client, "#FF0000", "32", "petg")
+    petg_green = _filament(client, "#00FF00", "35", "PETG")
     pva = _filament(client, "#FFFFFF", "33", "PVA")
-    colours = [abs_blue, dense_red, petg_red, pva]
+    colours = [abs_blue, pla_green, dense_red, petg_red, petg_green, pva]
     old = create(client, listing_body(template, dense_red, colours=colours, materials=["ABS"]))
     kept = create(
         client, listing_body(template, dense_red, colours=colours, materials=["ABS", "PETG"])
@@ -1450,4 +1461,5 @@ def test_the_backfill_gives_an_old_listing_the_materials_it_offers(
             ([old["id"], kept["id"]],),
         ).fetchall()
     found = {row["id"]: row["materials"] for row in rows}
-    assert found == {old["id"]: ["petg", "PLA", "ABS"], kept["id"]: ["ABS", "PETG"]}
+    # `min` would keep "PETG" and "PLA"; the first spellings are "petg" and "pla".
+    assert found == {old["id"]: ["petg", "pla", "ABS"], kept["id"]: ["ABS", "PETG"]}

@@ -644,11 +644,15 @@ def test_the_estimate_prices_a_locked_support_colour(listing: Listing) -> None:
     assert chosen["#ff0000"].id == PLA_RED
 
 
-def test_a_render_takes_no_picks() -> None:
-    """#6258: a pick is the colour in ``values``; the CRUD side finds its filament."""
+def test_a_render_accepts_and_ignores_old_picks() -> None:
+    """#6258: a pick is the colour in ``values``. A page from before it still sends
+    ``picks``: it is taken and never dumped (#6302 review), so it changes no request key."""
     body = {"listing_id": "l", "listing_updated_at": NOW.isoformat()}
+    old = RenderBody.model_validate({**body, "picks": {"colour": "f"}})
+    assert "picks" not in old.model_dump(mode="json")
+    assert old.model_dump() == RenderBody.model_validate(body).model_dump()
     with pytest.raises(ValidationError):
-        RenderBody.model_validate({**body, "picks": {"colour": "f"}})
+        RenderBody.model_validate({**body, "one_material": True})
 
 
 def test_a_listings_materials_are_kept_in_order_without_repeats() -> None:
@@ -657,9 +661,10 @@ def test_a_listings_materials_are_kept_in_order_without_repeats() -> None:
     assert kept.materials == ["PLA", "petg"]
     with pytest.raises(ValidationError):
         ListingInput.model_validate({**fields, "materials": [f"M{n}" for n in range(17)]})
-    # One material is always on (#6258): the old switch is no field any more.
-    with pytest.raises(ValidationError):
-        ListingInput.model_validate({**fields, "one_material": True})
+    # One material is always on (#6258). A back office from before it still sends the old
+    # switch: for one release it is taken and ignored, never dumped (#6302 review).
+    old = ListingInput.model_validate({**fields, "one_material": True})
+    assert "one_material" not in old.model_dump(mode="json")
 
 
 def test_publish_refuses_a_filament_of_a_material_not_allowed(listing: Listing) -> None:

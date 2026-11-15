@@ -18,6 +18,7 @@ from datetime import datetime
 from typing import Annotated, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from scadbuddy.core.settings import unique_materials
 from scadbuddy.library.libraries import ModelLibrary
@@ -195,6 +196,11 @@ class ListingInput(BaseModel):
     #: (`unique_materials`). Empty is the shop's default (``storefront_materials``). A
     #: print is always of one material (`inputs.py` `resolve_choice`).
     materials: list[str] = Field(default_factory=list)
+    #: Accepted and ignored for one release (#6302 review): the back office and the
+    #: agent built before #6258 still send ``one_material`` on every save, and a body
+    #: that refused it would fail that save. It is never dumped, answered or in the
+    #: spec. A later PR drops it with the ``one_material`` and ``picks`` columns (#6258).
+    one_material: SkipJsonSchema[bool] = Field(default=False, exclude=True)
 
     @field_validator("materials")
     @classmethod
@@ -453,6 +459,17 @@ class RenderBody(BaseModel):
     #: A colour the visitor picks is its value in ``values`` (#6258): the CRUD side
     #: finds its filament.
     colours: dict[ColourSlotIndex, str] = Field(default_factory=dict, max_length=64)
+    #: Accepted and ignored for one release (#6302 review): a page loaded before #6258
+    #: still sends ``picks`` (``{}`` when nothing is picked), and a body that refused it
+    #: would fail that page's every preview and add. It is never dumped (so a request
+    #: key's record does not hold it) and not in the spec. A later PR drops it with the
+    #: ``one_material`` and ``picks`` columns (#6258).
+    picks: SkipJsonSchema[
+        dict[
+            Annotated[str, StringConstraints(max_length=200)],
+            Annotated[str, StringConstraints(max_length=200)],
+        ]
+    ] = Field(default_factory=dict, max_length=200, exclude=True)
 
 
 class StoreRender(BaseModel):
