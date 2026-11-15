@@ -694,3 +694,4 @@ test. If one is missing or differs, stop and report.
 - Task 1 kept its clock-skew step (Date headers, read-only), although the controller first asked to re-measure only the window: issue item 6 needs the skew, and the earlier probe had one sample.
 - The owner judged the earlier local exposure of the BB API key acceptable and chose not to rotate it (2026-11-15).
 - Task 4: the backfill equals `ledger.job_of` for a subtask that contains `/` (`run/a/b/slot` gives `a/b`); `split_part(ref_id, '/', 2)` would cut it to `a`. It also treats a non-string `data.job` as absent, as `job_of` does.
+- Task 7: a usage row with no `print_name` is booked with `data.job` null. SB's own plates always carry a subtask name with the run id, so a nameless row is never an SB plate and pairs with nothing. Cost if wrong: an SB plate whose BB row lost its name counts twice.

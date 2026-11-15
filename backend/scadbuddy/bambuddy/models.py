@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, overload
 
 from pydantic import (
     BaseModel,
@@ -33,6 +33,20 @@ PreheatOverride = Literal["inherit", "on", "off"]
 
 #: A Bambu printer serial, as the registry stores one (`printers.models.PrinterCreate`).
 _SERIAL = re.compile(r"[0-9A-Z]{8,32}")
+
+
+@overload
+def as_utc(value: datetime) -> datetime: ...
+@overload
+def as_utc(value: None) -> None: ...
+@overload
+def as_utc(value: datetime | None) -> datetime | None: ...
+def as_utc(value: datetime | None) -> datetime | None:
+    """A Bambuddy time as an aware one: a naive time reads as UTC, which is what
+    Bambuddy writes (`Spool`)."""
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=UTC)
 
 
 class BambuddyModel(BaseModel):
@@ -1114,14 +1128,38 @@ class Spool(BambuddyModel):
     @field_validator("updated_at", "last_weighed_at", "last_dried_at")
     @classmethod
     def _utc(cls, value: datetime | None) -> datetime | None:
-        if value is None or value.tzinfo is not None:
-            return value
-        return value.replace(tzinfo=UTC)
+        return as_utc(value)
 
     @property
     def remaining_g(self) -> float:
         """What the label says minus what has been used, floored at zero."""
         return max(0.0, float(self.label_weight) - self.weight_used)
+
+
+class SpoolUsage(BambuddyModel):
+    """A row of ``GET /api/v1/inventory/usage`` (#6263): what one print took from one
+    spool. The shape is Bambuddy's ``SpoolUsageHistoryResponse`` (``id``, ``spool_id``,
+    ``printer_id``, ``print_name``, ``weight_used``, ``percent_used``, ``status``,
+    ``cost``, ``created_at``; Bambuddy 1.2.6b1, read from the live instance on
+    2026-11-15, plan ``docs/superpowers/plans/2026-11-15-filament-capture.md`` "What a
+    read-only probe of the live Bambuddy showed"). BB keeps one row per spool per print,
+    ScadBuddy's own LAN prints included, with SB's ``subtask_name`` as ``print_name``;
+    a failed print keeps its partial grams. ``created_at`` is naive UTC, the same
+    instant as the spool's ``updated_at`` (spec §8.2); it reads as UTC."""
+
+    id: int
+    spool_id: int
+    printer_id: int | None = None
+    print_name: str | None = None
+    weight_used: float
+    percent_used: float | None = None
+    status: str | None = None
+    created_at: datetime
+
+    @field_validator("created_at")
+    @classmethod
+    def _utc(cls, value: datetime) -> datetime:
+        return as_utc(value)
 
 
 class SpoolFilamentPreset(BambuddyModel):

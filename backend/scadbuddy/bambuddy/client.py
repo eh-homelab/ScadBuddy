@@ -84,6 +84,7 @@ from scadbuddy.bambuddy.models import (
     Spool,
     SpoolAssignment,
     SpoolFilamentPreset,
+    SpoolUsage,
     TimelapseInfo,
     TimelapseThumbnails,
     TrashedLibraryFile,
@@ -230,6 +231,7 @@ Operation = Literal[
     "spools.assignments",
     "spools.filament_presets",
     "spools.list",
+    "spools.usage",
     "version",
     "virtual_printers.create",
     "virtual_printers.delete",
@@ -780,6 +782,33 @@ class BambuddyClient:
             params={"include_archived": include_archived},
         )
         return self._rows(response, what=what)
+
+    async def spool_usage(self, *, limit: int = 200) -> list[SpoolUsage]:
+        """``GET /api/v1/inventory/usage`` (#6263): BB's usage rows, one per spool per
+        print. The prod key's scopes answered it with 200 on 2026-11-15 (the probe in
+        ``docs/superpowers/plans/2026-11-15-filament-capture.md``). Each row is validated
+        on its own: one that is not a usage row is logged and left out."""
+        what = "list the spool usage history"
+        response = await self._send(
+            "GET",
+            "/inventory/usage",
+            scope=Scope.READ_STATUS,
+            operation="spools.usage",
+            what=what,
+            params={"limit": limit},
+        )
+        rows: list[SpoolUsage] = []
+        for row in self._rows(response, what=what):
+            try:
+                rows.append(SpoolUsage.model_validate(row))
+            except ValidationError:
+                row_id = row.get("id") if isinstance(row, dict) else None
+                logger.warning(
+                    "a Bambuddy usage row is not a usage row; skipped",
+                    extra={"bb_usage_id": row_id if isinstance(row_id, int) else None},
+                    exc_info=True,
+                )
+        return rows
 
     async def filament_catalog(self) -> list[CatalogFilament]:
         """``GET /api/v1/filament-catalog/`` — Bambuddy's filament catalogue, each entry

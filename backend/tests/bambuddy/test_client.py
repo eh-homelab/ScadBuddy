@@ -6,6 +6,7 @@ import errno
 import os
 import socket
 import ssl
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -522,3 +523,32 @@ def test_retry_after_keeps_only_a_delay_or_an_http_date(
     """#2037: the peer's header is carried into a problem's detail, so only what RFC
     9110 allows, at a bounded length, is kept."""
     assert retry_after(header) == kept
+
+
+@respx.mock
+async def test_spool_usage_reads_and_skips_a_bad_row(
+    bambuddy: BambuddyClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``GET /inventory/usage`` (#6263): BB's naive times read as UTC, and a row that is
+    not a usage row is logged and left out, not the whole read."""
+    good = {
+        "id": 457,
+        "spool_id": 31,
+        "printer_id": 1,
+        "print_name": "scadbuddy-ac13ac3c-p1",
+        "weight_used": 75.1,
+        "percent_used": 7.5,
+        "status": "completed",
+        "cost": 1.5,
+        "created_at": "2026-11-13T08:24:44.614397",
+    }
+    route = respx.get(f"{API}/inventory/usage").mock(
+        return_value=httpx.Response(200, json=[good, {"id": 458, "spool_id": None}])
+    )
+
+    rows = await bambuddy.spool_usage(limit=60)
+
+    assert route.calls.last.request.url.params["limit"] == "60"
+    assert [(r.id, r.spool_id, r.weight_used) for r in rows] == [(457, 31, 75.1)]
+    assert rows[0].created_at == datetime(2026, 11, 13, 8, 24, 44, 614397, tzinfo=UTC)
+    assert "is not a usage row; skipped" in caplog.text

@@ -34,13 +34,11 @@ catalog entry that has no SB insert type yet, so the insert type is not pulled.
 
 A pulled weight is an absolute reading at the BB row's ``updated_at``, not at the pull:
 BB's state is as of its last write (the ``created`` and every ``synced_from_bb`` event
-take that time; with none sent, the pull's). SB books a native print's ``print_ended`` at
-its plate's start (`spools/native.py` `settle_uses_in`), so a plate that started before
-BB's write is under BB's anchor and is not taken off again, and one that started after is
-(§8.2, "Consumption is counted once"; the rule is `ledger.py`'s). That holds when BB
-deducts a plate as it ends, which it does per plate. It does not hold when BB's row moved
-during a plate for another reason (an edit in BB): that plate is then not taken off, until
-BB's next write, at its end, anchors again. BB's clock and SB's are compared as they are.
+take that time; with none sent, the pull's). BB's usage rows (`bambuddy_usage.py`) sit at
+their ``created_at``, the same instant as the deduction, and at one instant a delta comes
+before a reading, so a BB reading holds its own usage row and that plate is not taken off
+again. SB's own plates pair with BB's usage rows by job and count once (§8.2,
+"Consumption is counted once"; the rules are `ledger.py`'s).
 """
 
 from __future__ import annotations
@@ -58,8 +56,9 @@ from psycopg.rows import DictRow
 from pydantic import BaseModel, Field, ValidationError
 
 from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.models import Archive, SpoolUsage
 from scadbuddy.bambuddy.models import Spool as BbSpool
-from scadbuddy.filament import ledger
+from scadbuddy.filament import bambuddy_usage, ledger
 from scadbuddy.filament import models as m
 from scadbuddy.filament.colour import normalise_rgba
 from scadbuddy.filament.component import Filament
@@ -75,7 +74,7 @@ Conn = Connection[DictRow]
 ACTOR = "bambuddy"
 #: The ``ref_kind`` of the pull's events; the ``ref_id`` is the BB spool id, with BB's
 #: ``updated_at`` on a ``synced_from_bb`` event, so a retried pull books nothing twice.
-REF_KIND = "bb_spool"
+REF_KIND = ledger.BB_SPOOL
 #: The advisory lock's first key: with the BB spool id, two pulls (the Schedule's and a
 #: person's import) take one BB spool in turn.
 _LOCK = 6261
@@ -127,6 +126,10 @@ class PullReport(BaseModel):
     archived_ids: list[UUID] = Field(default_factory=list)
     failed_bb_ids: list[int] = Field(default_factory=list)
     invalid_bb_ids: list[int] = Field(default_factory=list)
+    #: BB's usage rows the pull booked as print ends, and those of a BB spool no SB
+    #: spool is linked to (`bambuddy_usage.py`).
+    usage_booked: int = 0
+    usage_unlinked: int = 0
 
 
 def _text(value: str | None) -> str | None:
@@ -727,15 +730,60 @@ async def read_and_pull(
     store: Filament, settings: StoredSettings, *, actor: str = ACTOR
 ) -> PullReport:
     """Read BB's unarchived spools and pull them; a malformed row is skipped and counted
-    as ``invalid``. BB not configured is `client_for`'s 409; BB's own errors are its
-    client's."""
+    as ``invalid``. Then book BB's usage rows (`bambuddy_usage.py`). BB not configured is
+    `client_for`'s 409; BB's own errors on the spools are its client's.
+
+    The usage rows are read right after the spools, so a deduction BB writes between the
+    two reads shows in the usage rows, never only in a spool's value. The archives are
+    read only when a usage row is not booked yet. The usage and archive reads, and the
+    booking, each fail alone: logged, and the spool pull's report stands."""
+    usage: list[SpoolUsage] = []
+    archives: list[Archive] = []
     async with client_for(settings) as client:
         rows = await client.spool_rows()
+        try:
+            usage = await client.spool_usage()
+        except Exception as error:
+            _failed("could not read Bambuddy's usage rows", error)
+        ids = [row.id for row in usage if row.weight_used > 0]
+        pending = await asyncio.to_thread(_unbooked, store, ids) if ids else set()
+        if pending:
+            try:
+                archives = await client.archives(limit=50)
+            except Exception as error:
+                _failed("could not read Bambuddy's archives", error)
     spools, bad = parse_rows(rows)
     report = await asyncio.to_thread(pull, store, spools, now=datetime.now(UTC), actor=actor)
     report.invalid = len(bad)
     report.invalid_bb_ids = [i for i in bad if i is not None]
+    if usage:
+        try:
+            booked = await asyncio.to_thread(_book_usage, store, usage, archives, actor)
+        except Exception as error:
+            _failed("could not book Bambuddy's usage rows", error)
+        else:
+            report.usage_booked, report.usage_unlinked = booked.booked, booked.unlinked
+    logger.info(
+        "pulled Bambuddy's spools",
+        extra={"usage_booked": report.usage_booked, "usage_unlinked": report.usage_unlinked},
+    )
     return report
+
+
+def _failed(message: str, error: Exception) -> None:
+    logger.warning(message, extra={"error": type(error).__name__}, exc_info=True)
+
+
+def _unbooked(store: Filament, ids: Sequence[int]) -> set[int]:
+    with store.spools.transaction() as conn:
+        return bambuddy_usage.unbooked(conn, ids)
+
+
+def _book_usage(
+    store: Filament, usage: Sequence[SpoolUsage], archives: Sequence[Archive], actor: str
+) -> bambuddy_usage.UsageReport:
+    with store.spools.transaction() as conn:
+        return bambuddy_usage.book_usage(conn, usage, archives, actor=actor)
 
 
 async def scheduled_pull(store: Filament, load: Callable[[], StoredSettings]) -> Outcome:

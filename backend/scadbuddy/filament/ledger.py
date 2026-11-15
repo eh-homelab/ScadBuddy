@@ -75,8 +75,10 @@ _USED = frozenset({"print_started", "print_ended"})
 PRINT_RUN = "print_run"
 #: The ``ref_kind`` of a BB usage row booked on the spool.
 BB_USAGE = "bb_usage"
+#: The ``ref_kind`` of a BB pull's ``created`` and ``synced_from_bb`` events.
+BB_SPOOL = "bb_spool"
 #: The ``ref_kind``s of the events that carry BB's clock.
-BB_REFS = frozenset({"bb_spool", "bb_scale", "bb_dried", BB_USAGE})
+BB_REFS = frozenset({BB_SPOOL, "bb_scale", "bb_dried", BB_USAGE})
 
 
 def job_of(event: m.SpoolEvent) -> str | None:
