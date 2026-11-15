@@ -16,8 +16,9 @@ import { type Principal, type Tier, tiersUpTo } from './principal.js'
 //
 // Persistence is Postgres only (spec §9: "All AI state lives in the #241
 // database, in `ai_*` tables"): `PostgresTokenStore` over `ai_mcp_tokens`
-// (backend/scadbuddy/migrations_agent/20260928T0734Z_mcp_tokens.sql). There is no file or in-memory
-// fallback. With no database configured, main.ts wires `FailClosedTokenStore`
+// (backend/scadbuddy/migrations_agent/20260928T0734Z_mcp_tokens.sql), or `CrudTokenStore`, the
+// same statements run by the API once it lists area `mcp-tokens` (#5299 step 5). There is no
+// file or in-memory fallback. With no database configured, main.ts wires `FailClosedTokenStore`
 // and /mcp answers 503 "AI disabled: no database" before any token is looked
 // at (app.ts); tests use test/support/memoryTokens.ts.
 
