@@ -66,7 +66,9 @@ import { PgResourceRows, type ResourceRows, SessionResources, type TouchedRecord
 import { type ListFilter, PgSessionRows, ROW_TITLE_MAX, type SessionRow, type SessionRows, type TurnRow } from './rows.js'
 import { type DurableGate, DurableUnavailable } from '../gate/durable.js'
 import type { DurableTurns, SessionRuntime } from './durable.js'
-import { PendingProjection } from '../gate/projection.js'
+import { PendingProjection, type PendingReads } from '../gate/projection.js'
+import { gated } from '../api/crudStores.js'
+import type { ApprovalRoutes } from '../approvals/crudApprovals.js'
 import type { FlowRunReads } from '../flows/backendReads.js'
 import { Escalations } from '../flows/escalations.js'
 import { TurnRunner } from './turnRunner.js'
@@ -656,6 +658,10 @@ function startedQuery(run: QueryRunner): (spawn: HarnessRun) => WarmQuery {
 }
 
 export type SessionManagerDeps = {
+  /** The API's `pending-input` routes (gate/crudPending.ts), which the projection reads while `use()` holds. */
+  pendingRoutes?: { crud: PendingReads; use: () => boolean } | undefined
+  /** The API's `approvals` routes (approvals/crudApprovals.ts), which the approvals take while `use()` holds. */
+  approvalRoutes?: { crud: ApprovalRoutes; use: () => boolean } | undefined
   sql: Sql
   /** The sessions' rows (`PgSessionRows` on `sql` when omitted; gated to the API's routes in main.ts, #5299 step 9). */
   rows?: SessionRows
@@ -895,7 +901,7 @@ export class SessionManager {
   /** The gate's questions outside the workflow (gate/questions.ts): done summaries, and the attention rate limits. */
   readonly questions: QuestionService
   /** Durable sessions' parked calls as projected in ai_pending_input (spec §6.6). */
-  readonly projection: PendingProjection
+  readonly projection: PendingReads
   /** A flow run's calls waiting at the session that started it (#2482, flows/escalations.ts). */
   readonly escalations: Escalations
   /** A flow run's one queue (#2482, spec 2026-10-11 §4.5). */
@@ -960,9 +966,12 @@ export class SessionManager {
       ...(deps.audit ? { audit: deps.audit } : {}),
       ...(deps.approvalHashKey ? { hashKey: deps.approvalHashKey } : {}),
       workspace: this.files,
+      routes: deps.approvalRoutes,
     })
     this.questions = new QuestionService({ sql: deps.sql, events: this.events, ...(deps.audit ? { audit: deps.audit } : {}) })
-    this.projection = new PendingProjection(deps.sql)
+    // The API's `pending-input` routes once it lists the area (#5299 step 10), SQL until then.
+    const pending = new PendingProjection(deps.sql)
+    this.projection = deps.pendingRoutes ? gated<PendingReads>(pending, deps.pendingRoutes.crud, deps.pendingRoutes.use) : pending
     this.warm = new WarmSessions({
       store: this.store,
       maxEntries: deps.warm?.maxEntries ?? DEFAULT_WARM_MAX_ENTRIES,

@@ -23,6 +23,7 @@ import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
+from scadbuddy.agent_data import gate_validate
 from scadbuddy.agent_data.gate_canonical import response_hash
 from scadbuddy.api import crud_agent_gate, crud_areas
 from scadbuddy.auth.check import auth_check
@@ -440,6 +441,36 @@ def test_a_decide_refuses_what_the_sql_path_refused(agent: Agent, tables: PgPool
     _sql(tables, "UPDATE ai_pending_input SET expires_at = now() - interval '1 second'")
     assert agent.post("/gate/decide", _decide(_rid(session), APPROVE))["refused"]["code"] == (
         "resolving"
+    )
+
+
+def test_a_response_too_large_in_bytes_is_the_validators_refusal(
+    agent: Agent, tables: PgPool
+) -> None:
+    """A response is bounded by its UTF-8 bytes, as the agent's body limit counts them: one past
+    the validator's cap is refused ``too_large``, as on the SQL path, never a 422, however many
+    characters its escapes would take."""
+    session = _session(tables)
+    body = _open(session, kind="answer")
+    agent.post("/gate/open", {**body, "gate": _record(body)})
+    # 4 UTF-8 bytes each, 12 characters each as an escaped JSON string.
+    emoji = "\U0001f600" * (gate_validate.RESPONSE_MAX // 4 + 1)
+    request = _decide(_rid(session), {"kind": "answer", "answers": [emoji]})
+    assert agent.post("/gate/decide", request)["refused"]["code"] == "too_large"
+
+
+def test_a_decide_stores_the_agents_hash_of_the_raw_response(agent: Agent, tables: PgPool) -> None:
+    """The agent hashes the response as the person sent it (#3724), as a resolve does."""
+    session = _session(tables)
+    body = _open(session)
+    agent.post("/gate/open", {**body, "gate": _record(body)})
+    digest = "c" * 64
+    request = _decide(_rid(session), APPROVE, response_hash=digest)
+    assert agent.post("/gate/decide", request)["decided"]["outcome"] == "approved"
+    [row] = _sql(tables, "SELECT response_hash FROM ai_input_responses")
+    assert row["response_hash"] == digest
+    assert (
+        agent.status("/gate/decide", _decide(_rid(session), APPROVE, response_hash="../x")) == 422
     )
 
 

@@ -106,7 +106,15 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: gate's writes, an entry opened, a run grant's approval checked against ``flow_grants``, a
 #: flow's refusal, an entry resolved, a response decided against the row's record by the
 #: gate's validator, and the record read, each with its session events, status, audit row and
-#: ``scadbuddy_input`` NOTIFY in its transaction (#5299 step 10, `api/crud_agent_gate.py`).
+#: ``scadbuddy_input`` NOTIFY in its transaction (#5299 step 10, `api/crud_agent_gate.py`). Its
+#: ``pending-input`` area is ``…/agent/pending-input/*``: the open entries and their responses
+#: read, a parked call's and a decision's span written, the first only while the durable turn's
+#: placement holds the session, the orphan sweep's cancels (each with its events, status and
+#: audit row in its transaction), and a call's recorded approval (`api/crud_agent_pending.py`).
+#: Its ``audit`` area is ``…/agent/audit/*``: the audit log's rows written, listed and pruned
+#: (`api/crud_agent_audit.py`). Its ``approvals`` area is ``…/agent/approvals/*``: the classic
+#: approvals read, made, decided once (with their events and audit row in the decision's
+#: transaction) and used once (`api/crud_agent_approvals.py`).
 CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "projects": ["flows", "operations", "payload-keys"],
     "render": ["settings", "jobs", "refs", "blob-index", "store-folders", "assets", "libraries"],
@@ -165,6 +173,9 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "background-tasks",
         "operations",
         "gate",
+        "pending-input",
+        "audit",
+        "approvals",
         "sessions",
         "session-resources",
         "transcripts",

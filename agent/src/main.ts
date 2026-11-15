@@ -71,6 +71,9 @@ import {
 } from './api/serviceCredential.js'
 import { untilBackendAnswers } from './api/backendUp.js'
 import { BLOB_AREAS, CrudAreas, FORGET_AREAS, GATE_AREAS, SECRET_AREAS, SESSION_AREAS, TASK_AREAS, WORKSPACE_AREAS } from './api/crudAreas.js'
+import { CrudApprovals } from './approvals/crudApprovals.js'
+import { CrudAudit } from './audit/crudAudit.js'
+import { CrudPending } from './gate/crudPending.js'
 import { CrudGate } from './gate/crudStore.js'
 import { gated, STORE_AREAS, type StoreArea } from './api/crudStores.js'
 import { CrudFlowRunReads } from './flows/backendReads.js'
@@ -266,6 +269,8 @@ const crudTarget = { baseUrl: config.backendUrl, fetch: crudFetch }
 const storeArea = (area: StoreArea) => () => crudAreas.has(area)
 // The tool-call gate's routes (#5299 step 10, backend api/crud_agent_gate.py).
 const gateRoutes = { crud: new CrudGate(crudTarget), use: () => crudAreas.has('gate') }
+// The gate's pending input and responses beyond its writers (#5299 step 10, area `pending-input`).
+const pendingRoutes = { crud: new CrudPending(crudTarget), use: () => crudAreas.has('pending-input') }
 // A session's images, the staged attachments and the saved http_request bodies (#5299 step 7,
 // backend api/crud_agent_blobs.py): over SQL on `sql` until the API lists their areas.
 const crudBlobs = new CrudSessionBlobs(config.backendUrl, { fetch: crudFetch })
@@ -305,6 +310,8 @@ const audit = database
       sql: database.sql,
       settings: (): SettingsStore | undefined => settings,
       ...(kek.ok ? { hashKey: approvalHashKey(kek.kek) } : {}),
+      // #5299 step 10: the API's `audit` routes once it lists the area.
+      routes: { crud: new CrudAudit(crudTarget), use: () => crudAreas.has('audit') },
       onError: (err, entry) =>
         console.error(`audit log: could not record ${entry.kind} ${entry.action}:`, (err as Error).message),
     })
@@ -671,6 +678,8 @@ const sessions =
         resourceRows: resourceRows(database.sql),
         transcripts: transcriptRows(database.sql, dataKeys),
         eventRows: eventRows(database.sql),
+        pendingRoutes,
+        approvalRoutes: { crud: new CrudApprovals(crudTarget), use: () => crudAreas.has('approvals') },
         blobs: sessionImages(database.sql),
         httpBodies: httpBodies(database.sql),
         browserOrigins: browserOriginsOn(database.sql),
@@ -879,7 +888,7 @@ const durableToolDeps: ToolActivityDeps | undefined = temporal
   ? {
       services: toolServices,
       sessions: new PgSessionOwners(temporal.sql),
-      approvals: new PgApprovalRecords(temporal.sql, flowReads),
+      approvals: new PgApprovalRecords(temporal.sql, flowReads, pendingRoutes),
       flows: new PgFlowRuns(temporal.sql, flowReads),
       audit,
       currentTiers: liveTokenTiers(tokens),
@@ -919,6 +928,7 @@ const turnHost =
     ? new TurnHost({
         core: sessions.turnCore,
         sql: temporal.sql,
+        pendingRoutes,
         images: sessionImages(temporal.sql),
         hostQueue: SESSION_HOST_QUEUE,
         ...(events ? { listen: (channel: string, onNotify: (payload: string) => void) => events.listenAlso(channel, onNotify) } : {}),
@@ -1003,7 +1013,7 @@ const turnToolDeps = temporal
       }),
       hostQueue: HOST_QUEUE,
       clients: turnClients,
-      approvals: new PgApprovalRecords(temporal.sql, flowReads),
+      approvals: new PgApprovalRecords(temporal.sql, flowReads, pendingRoutes),
       audit,
       currentTiers: liveTokenTiers(tokens),
       blobs: sessionImages(temporal.sql),
@@ -1253,6 +1263,7 @@ if (sessions && temporalClient && payloadKeys && database) {
     blobs: sessionImages(database.sql),
     events: sessions.events,
     audit,
+    pendingRoutes,
     // A unified session is ready while some replica hosts its turns (§5.2), this one or a worker's (§14.3).
   })
 }
@@ -1274,7 +1285,7 @@ const stopDurableSweep =
 // Every 30 s: ai_pending_input rows whose workflow run ended without resolving them.
 const stopOrphanSweep =
   role.http && sessions && temporalClient
-    ? new PendingInputSweep({ sql: database!.sql, describe: temporalDescriber(temporalClient), events: sessions.events, audit }).start(
+    ? new PendingInputSweep({ sql: database!.sql, describe: temporalDescriber(temporalClient), events: sessions.events, audit, routes: pendingRoutes }).start(
         APPROVAL_SWEEP_MS,
         {
           ...(database ? { ready: database.ready } : {}),

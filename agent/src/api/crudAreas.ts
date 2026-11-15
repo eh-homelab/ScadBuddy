@@ -40,11 +40,17 @@ export const BLOB_AREAS = ['session-blobs', 'attachments', 'http-bodies'] as con
 export const TASK_AREAS = ['background-tasks', 'operations'] as const
 
 /**
- * The area of the tool-call gate's writes: an entry opened, resolved or decided, a flow's
- * refusal and a request's response read (#5299 step 10; backend api/crud_agent_gate.py;
- * gate/crudStore.ts). A run grant's check goes through its route whether or not it is listed.
+ * The tool-call gate's areas (#5299 step 10). `gate`, its writes: an entry opened, resolved or
+ * decided, a flow's refusal and a request's response read (backend api/crud_agent_gate.py;
+ * gate/crudStore.ts); a run grant's check goes through its route whether or not it is listed.
+ * `pending-input`: the projection's reads, the orphan sweep's cancels, a durable turn's response
+ * read and its fenced span mark, and a call's recorded approval (backend
+ * api/crud_agent_pending.py; gate/crudPending.ts). `audit`: the audit log's rows written, listed
+ * and pruned (backend api/crud_agent_audit.py; audit/crudAudit.ts). `approvals`: the classic
+ * approvals, each decision written once with its events and audit row (backend
+ * api/crud_agent_approvals.py; approvals/crudApprovals.ts).
  */
-export const GATE_AREAS = ['gate'] as const
+export const GATE_AREAS = ['gate', 'pending-input', 'audit', 'approvals'] as const
 
 /**
  * The areas of the sessions' rows and of what their tool calls touched (#5299 step 9, part a;
