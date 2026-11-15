@@ -317,6 +317,15 @@ export async function AgentSession(started: SessionStart): Promise<void> {
   /** The messages waiting for their turns (#6386), oldest first. */
   const queue: QueuedMessage[] = [...(start.queue ?? [])]
   let queueVersion = start.queue_version ?? 0
+  /**
+   * The ids that left the queue lately, carried over a continue-as-new: an Update sent again
+   * (its id is deduped only within a run) must not queue a message that already ran.
+   */
+  const left: string[] = [...(start.queue_left ?? [])]
+  const leave = (...ids: string[]): void => {
+    left.push(...ids)
+    left.splice(0, Math.max(0, left.length - 2 * QUEUE_MAX))
+  }
   /** The last version `session.queue_changed` wrote, and the write in flight. */
   let published = queueVersion
   let publishing: Promise<void> | undefined
@@ -407,6 +416,7 @@ export async function AgentSession(started: SessionStart): Promise<void> {
   setHandler(
     queueUpdate,
     (m: QueuedMessage): QueueAnswer => {
+      if (left.includes(m.turn_id)) return { id: m.turn_id, position: 0, version: queueVersion }
       let at = queue.findIndex((q) => q.turn_id === m.turn_id)
       // A re-sent Update after a continue-as-new (its id deduped only within a run) finds its entry.
       if (at < 0) {
@@ -419,7 +429,7 @@ export async function AgentSession(started: SessionStart): Promise<void> {
     {
       validator: (m: QueuedMessage) => {
         if (ended) throw endedFailure()
-        if (queue.some((q) => q.turn_id === m.turn_id)) return
+        if (left.includes(m.turn_id) || queue.some((q) => q.turn_id === m.turn_id)) return
         if (queue.length >= QUEUE_MAX || tooLarge([...queue, m])) throw full()
       },
     },
@@ -428,6 +438,7 @@ export async function AgentSession(started: SessionStart): Promise<void> {
     removeQueuedUpdate,
     ({ id }: { id: string }): QueueState => {
       queue.splice(waiting(id), 1)
+      leave(id)
       changed()
       return queueState()
     },
@@ -469,6 +480,7 @@ export async function AgentSession(started: SessionStart): Promise<void> {
     gate.setOwner(owner)
     const kept = queue.filter((q) => q.turn_id === starting || mayStillSend(q.author, owner))
     if (kept.length !== queue.length) {
+      leave(...queue.filter((q) => !kept.includes(q)).map((q) => q.turn_id))
       queue.splice(0, queue.length, ...kept)
       changed()
     }
@@ -731,6 +743,7 @@ export async function AgentSession(started: SessionStart): Promise<void> {
     if (outcome !== 'started' && outcome !== 'dropped') return undefined
     const at = queue.findIndex((q) => q.turn_id === next.turn_id)
     if (at >= 0) queue.splice(at, 1)
+    leave(next.turn_id)
     changed()
     return outcome === 'started' ? queuedTurnMessage(next) : undefined
   }
@@ -762,6 +775,7 @@ export async function AgentSession(started: SessionStart): Promise<void> {
   /** `end`: the messages still waiting go with the session. */
   function dropQueue(): void {
     if (queue.length === 0) return
+    leave(...queue.map((q) => q.turn_id))
     queue.length = 0
     changed()
   }
@@ -835,8 +849,10 @@ export async function AgentSession(started: SessionStart): Promise<void> {
         delete next.continuation
         delete next.queue
         delete next.queue_version
+        delete next.queue_left
         delete next.message
         if (queueVersion > 0) Object.assign(next, { queue: [...queue], queue_version: queueVersion })
+        if (left.length > 0) next.queue_left = [...left]
         if (message !== undefined) {
           next.message = message
           // A Stop since the turn's end is for that message's turn.

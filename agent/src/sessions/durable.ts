@@ -15,7 +15,7 @@ import { TASK_QUEUE } from '../temporal/names.js'
 import { liveHostQueues } from '../temporal/session/affinity.js'
 import { EDIT_QUEUED_UPDATE, QUEUE_MESSAGE_UPDATE, REMOVE_QUEUED_UPDATE, SESSION_QUEUE, SESSION_WORKFLOW } from '../temporal/session/names.js'
 import { NOT_QUEUED, QUEUE_FULL, type QueueAnswer, type QueuedMessage, type QueueState } from '../temporal/session/models.js'
-import { SessionBlobs, sentImageBlobs } from './blobs.js'
+import { SessionBlobs, type SessionImages, sentImageBlobs } from './blobs.js'
 import { type DescribeSession, durableDescriber, endLostTurn, RUNNING_GRACE_MS, type RunningRow, TURN_STATUSES } from './durableSweep.js'
 import { cancelOrphanedEntries } from '../gate/sweep.js'
 import type { AuditSink } from '../audit/log.js'
@@ -142,6 +142,8 @@ export type DurableTurn = {
 export type DurableTurnsDeps = {
   client: Client
   sql: Sql
+  /** A session's images (`SessionBlobs` on `sql` when omitted). */
+  blobs?: SessionImages
   events: EventLog
   /** Tests only: a queue other than `agent-sessions`. */
   sessionQueue?: string
@@ -208,7 +210,7 @@ export class DurableTurns {
   readonly #events: EventLog
   readonly #audit: AuditSink | undefined
   readonly #gate: DurableGate
-  readonly #blobs: SessionBlobs
+  readonly #blobs: SessionImages
   readonly #sessionQueue: string
   readonly #toolsQueue: string
   readonly #liveHosts: () => Promise<ReadonlySet<string>>
@@ -223,7 +225,7 @@ export class DurableTurns {
     this.#events = deps.events
     this.#audit = deps.audit
     this.#gate = new DurableGate(deps.client, deps.cancelTimeoutMs ? { cancelTimeoutMs: deps.cancelTimeoutMs } : {})
-    this.#blobs = new SessionBlobs(deps.sql)
+    this.#blobs = deps.blobs ?? new SessionBlobs(deps.sql)
     this.#sessionQueue = deps.sessionQueue ?? SESSION_QUEUE
     this.#toolsQueue = deps.toolsQueue ?? TASK_QUEUE
     this.#liveHosts = deps.liveHosts ?? (() => liveHostQueues(deps.client))
@@ -291,7 +293,11 @@ export class DurableTurns {
    * owner): the manager says why. Refused when the workflow refuses the message; a message not
    * accepted in time keeps the claim and is still a turn (Ruling 16).
    */
-  async send(session: SessionRecord, turn: DurableTurn): Promise<Turn | undefined> {
+  send(session: SessionRecord, turn: DurableTurn): Promise<Turn | undefined> {
+    return this.#send(session, turn, false)
+  }
+
+  async #send(session: SessionRecord, turn: DurableTurn, retried: boolean): Promise<Turn | undefined> {
     const id = session.id
     // The images and their previews by name (#2479): the event and the workflow's message carry only these.
     const { blobs, sent } = sentImageBlobs(turn.images)
@@ -325,7 +331,13 @@ export class DurableTurns {
         turn.flow !== undefined || turn.withoutBackground === true,
       ],
     )
-    if (!claimed) return turn.queue ? this.#queue(session, turn) : undefined
+    if (!claimed) {
+      if (!turn.queue) return undefined
+      const queued = await this.#queue(session, turn)
+      // The turn may have ended between the claim and the queue's read: claim once more,
+      // rather than answer `busy` for a session that is idle now.
+      return queued ?? (retried ? undefined : this.#send(session, turn, true))
+    }
     let seq = 0
     try {
       if (claimed.runtime === 'durable') {

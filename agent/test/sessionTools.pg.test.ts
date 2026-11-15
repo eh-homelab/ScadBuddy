@@ -352,6 +352,25 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
       expect(sent.turn).toMatchObject({ finished: true, result: 'success' })
     })
 
+    it("refuses a flow run's send while a turn runs: only a caller's own send is queued (#6386)", async () => {
+      const { agent, sessions } = await setup(() => ({ hang: true }))
+      const a = await agent('write')
+      const { session } = ok<{ session: { id: string } }>(await a.call('sessions_start', { prompt: 'take your time' }))
+      const byName = new Map(ALL_TOOLS.map((t) => [t.name, t]))
+      const ctx = {
+        ...services({ sessions }),
+        principal: a.principal,
+        flowTurn: { run_id: 'run-1', call_id: 'call-1' },
+        progress: async () => {},
+        signal: new AbortController().signal,
+        gate: 'workflow' as const,
+      }
+      const result = (await runTool(byName.get('sessions_send')!, { session_id: session.id, text: 'from a flow' }, ctx)) as Result
+      expect(errorText(result)).toMatch(/already running/)
+      expect(ok<{ queue: unknown[] }>(await a.call('sessions_get', { session_id: session.id })).queue).toEqual([])
+      expect(ok(await a.call('sessions_interrupt', { session_id: session.id }))).toEqual({ interrupted: true })
+    })
+
     it('forks a session into one the caller owns, with the conversation so far', async () => {
       const { agent, sessions } = await setup()
       const a = await agent('write')

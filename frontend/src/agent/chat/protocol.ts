@@ -107,6 +107,8 @@ export const OPTIONS_MIN = 2
 export const OPTIONS_MAX = 4
 export const QUESTION_TEXT_MAX = 2_000
 export const PREVIEW_MAX = 20_000
+/** The agent's bound on a queued message's edited words (`src/sessions/clientProtocol.ts` `MESSAGE_MAX`, #6386). */
+export const MESSAGE_MAX = 32_000
 
 /**
  * #940 — one question the agent asks the user (Claude Code's AskUserQuestion). The user
@@ -580,7 +582,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   z.object({ v, type: z.literal('session.interrupt'), sessionId }),
   /** #6386 — remove a queued message, or give it new words, before it starts. */
   z.object({ v, type: z.literal('queue.remove'), sessionId, id: z.string().min(1).max(200) }),
-  z.object({ v, type: z.literal('queue.edit'), sessionId, id: z.string().min(1).max(200), text: z.string().min(1) }),
+  z.object({ v, type: z.literal('queue.edit'), sessionId, id: z.string().min(1).max(200), text: z.string().min(1).max(MESSAGE_MAX) }),
   z.object({ v, type: z.literal('session.handoff'), sessionId }),
   /** Watch a session: the server replays its transcript as events, then streams live. */
   z.object({ v, type: z.literal('session.attach'), sessionId }),

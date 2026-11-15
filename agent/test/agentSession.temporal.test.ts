@@ -864,6 +864,9 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       expect(second).not.toBe(first)
       expect(await handleOf(id).query(TURN_QUERY)).toBe('q1')
       expect(await handleOf(id).query<QueueState>(QUEUE_QUERY)).toMatchObject({ version: 3, queue: [{ id: 'q2' }] })
+      // q1's Update sent again in this run (its id is deduped only within a run) does not queue it twice.
+      expect(await enqueue(id, queued('q1'))).toEqual({ id: 'q1', position: 0, version: 3 })
+      expect(await queueOf(id)).toEqual(['q2'])
       // Still editable there.
       await handleOf(id).executeUpdate(EDIT_QUEUED_UPDATE, { args: [{ id: 'q2', words: 'second, edited' }] })
       hold.release()

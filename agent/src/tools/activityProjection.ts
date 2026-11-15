@@ -7,7 +7,7 @@ import { TOOL_USE_META, toolContextFor } from '../telemetry/trace.js'
 import { type Client, WorkflowFailedError, WorkflowNotFoundError } from '@temporalio/client'
 import { WorkflowExecutionAlreadyStartedError } from '@temporalio/common'
 import type { Sql } from 'postgres'
-import type { SessionBlobs } from '../sessions/blobs.js'
+import type { SessionImages } from '../sessions/blobs.js'
 import { failureClass, traceparentOf } from '../telemetry/trace.js'
 import { TASK_QUEUE, TURN_TOOL_PREFIX } from '../temporal/names.js'
 import {
@@ -80,7 +80,7 @@ function failureMessage(err: unknown): string {
 }
 
 /** A ToolCall's result as the model reads it: its text, and each image read back from the session's blobs. */
-export async function callToolResult(sessionId: string, result: ToolCallResult, blobs: Pick<SessionBlobs, 'get'>): Promise<CallToolResult> {
+export async function callToolResult(sessionId: string, result: ToolCallResult, blobs: Pick<SessionImages, 'get'>): Promise<CallToolResult> {
   const content: CallToolResult['content'] = []
   for (const block of result.content) {
     if (block.type === 'text') {
@@ -106,7 +106,7 @@ export async function callToolResult(sessionId: string, result: ToolCallResult, 
  */
 export type ToolCallStarterDeps = {
   client: Client
-  blobs: Pick<SessionBlobs, 'get'>
+  blobs: Pick<SessionImages, 'get'>
   timeoutMs?: number
   queue?: string
   eager?: () => Client | undefined
@@ -252,7 +252,7 @@ export async function finishedToolCalls(deps: { sql: Sql; client: Client }, sess
 }
 
 /** What a session's completed ToolCall returned, as the model reads a tool result (`tool_call_result`); undefined while it runs, or when it never ran or failed. */
-export async function toolCallResult(deps: { client: Client; blobs: Pick<SessionBlobs, 'get'> }, sessionId: string, toolUseId: string): Promise<CallToolResult | undefined> {
+export async function toolCallResult(deps: { client: Client; blobs: Pick<SessionImages, 'get'> }, sessionId: string, toolUseId: string): Promise<CallToolResult | undefined> {
   const handle = deps.client.workflow.getHandle(toolCallWorkflowId(sessionId, toolUseId))
   try {
     if ((await handle.describe()).status.name !== 'COMPLETED') return undefined

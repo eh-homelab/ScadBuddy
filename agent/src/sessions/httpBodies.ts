@@ -3,7 +3,18 @@ import { MAX_SAVED, type SavedBodies, type SavedMeta } from '../harness/httpRequ
 
 // A session's saved http_request bodies (#2374), in `ai_session_http_bodies`: any
 // replica serves them, and a deploy keeps them, for as long as the session and its
-// audit rows name them. The newest MAX_SAVED are kept, as on disk before.
+// audit rows name them. The newest MAX_SAVED are kept, as on disk before. Once the API lists
+// area `http-bodies` (#5299 step 7), `CrudHttpBodies` (crudBlobs.ts) runs each method on the
+// API's CRUD routes instead (backend api/crud_agent_blobs.py), a ranged read as a ranged read.
+
+/** A session's saved bodies, by its id: `PgHttpBodies` or `CrudHttpBodies`. */
+export type HttpBodiesFor = (sessionId: string) => SavedBodies
+
+/** `PgHttpBodies` on `sql`, per session. */
+export const pgHttpBodies =
+  (sql: Sql): HttpBodiesFor =>
+  (sessionId) =>
+    new PgHttpBodies(sql, sessionId)
 
 type Row = { url: string; content_type: string | null; size_bytes: number; complete: boolean }
 

@@ -46,7 +46,10 @@ export type QueuedMessage = Message & {
 /** A queued message as the session's readers see it (the `queue` Query, the `session.queue` event): no page context, no claim columns. */
 export type QueuedView = QueuedEntry
 
-/** `queue_message`'s answer: the entry's id, its place (1 is next), and the queue's version with it in. */
+/**
+ * `queue_message`'s answer: the entry's id, its place (1 is next; 0 when it has left the queue,
+ * for an Update sent again after its entry started or was removed), and the queue's version.
+ */
 export type QueueAnswer = { id: string; position: number; version: number }
 
 /** The `edit_queued` Update's argument: the entry and its new words. */
@@ -120,6 +123,8 @@ export type SessionStart = {
   /** The messages waiting for their turns (#6386), carried over a continue-as-new, and the queue's version. */
   queue?: QueuedMessage[] | null
   queue_version?: number | null
+  /** The ids that left the queue lately (started, removed or dropped), so an Update sent again does not queue one twice. */
+  queue_left?: string[] | null
   /** A queued message the last turn's end started (the row is its turn's), carried to the run that runs it. */
   message?: Message | null
 }

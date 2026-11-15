@@ -394,7 +394,35 @@ def pg_conninfo(_pg_database_url: str | None) -> Iterator[str]:
         yield make_conninfo(url, options=f"-c search_path={schema}")
     finally:
         with psycopg.connect(url, autocommit=True) as conn:
-            conn.execute(f'DROP SCHEMA "{schema}" CASCADE'.encode())
+            drop_schema(conn, schema)
+
+
+#: Tables dropped per transaction by `drop_schema`.
+DROP_BATCH = 20
+
+
+def drop_schema(conn: Connection[Any], schema: str) -> None:
+    """Drop ``schema`` on an autocommit connection, its tables first in batches.
+
+    One ``DROP SCHEMA … CASCADE`` locks every relation in one transaction: 4,643 locks for a
+    schema with the backend's and the agent's tables (209 tables, 505 indexes, measured
+    2026-11-15 on Postgres 18). The shared lock table holds ``max_locks_per_transaction``
+    (64) times ``max_connections`` (100 on CI's ``postgres:18``), 6,400, so two xdist
+    workers' teardowns at once ran it out ("out of shared memory"). A batch of
+    `DROP_BATCH` tables held at most 532, and the last ``DROP SCHEMA`` 8 (same schema).
+    """
+    tables = [
+        name
+        for (name,) in conn.execute(
+            "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+            " WHERE n.nspname = %s AND c.relkind IN ('r', 'p') AND NOT c.relispartition",
+            (schema,),
+        )
+    ]
+    for start in range(0, len(tables), DROP_BATCH):
+        names = ", ".join(f'"{schema}"."{name}"' for name in tables[start : start + DROP_BATCH])
+        conn.execute(f"DROP TABLE IF EXISTS {names} CASCADE".encode())
+    conn.execute(f'DROP SCHEMA "{schema}" CASCADE'.encode())
 
 
 PgPool = ConnectionPool[Connection[DictRow]]

@@ -1201,6 +1201,16 @@ async def _require_print(links: PrintLinksDep, archive_id: int) -> LinkedPrint:
     return linked
 
 
+async def _require_known(links: PrintLinksDep, archive_id: int) -> None:
+    """A read that needs no owner: linked, or claimed by an order attempt
+    (`PrintLinkStore.known`), as the media proxy's gate."""
+    if not await links.known(archive_id):
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND,
+            f"archive {archive_id} is not a print of any ScadBuddy output",
+        )
+
+
 def _files(
     outputs: OutputStore,
     meta: OutputMeta | None,
@@ -1536,7 +1546,7 @@ async def get_timelapse_frames(
     store: SettingsStoreDep,
     cache: ArchiveCacheDep,
 ) -> TimelapseFrames:
-    await _require_print(links, archive_id)
+    await _require_known(links, archive_id)
     async with client_for(store.load()) as client:
         path = await _timelapse_path(cache, client, archive_id)
 
@@ -1570,7 +1580,7 @@ async def get_timelapse_frame(
     store: SettingsStoreDep,
     cache: ArchiveCacheDep,
 ) -> Response:
-    await _require_print(links, archive_id)
+    await _require_known(links, archive_id)
     async with client_for(store.load()) as client:
         path = await _timelapse_path(cache, client, archive_id)
         frames = await _frames(cache, client, archive_id, path)
