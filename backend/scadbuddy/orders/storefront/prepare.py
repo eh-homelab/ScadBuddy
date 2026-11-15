@@ -1,16 +1,22 @@
 """Every colour combination of a listing, rendered before a visitor asks (#6237).
 
-A combination is one value for each offered colour parameter of a published listing:
-the colours of its bound that the public listing offers (`public_listing`: the listing
-filaments the price book still has, never a support filament, #6152), in each spelling
-the page can send (`colour_choices`). Every other offered parameter stays at its effective default
-(`effective_default`). A visitor's page sends only the values the visitor set, so a
-colour at its effective default is left out of what a combination asks, exactly as the
-page leaves it out on its first load.
+A print is made of one material (#6258), so the combinations are enumerated per
+printable material: of the listing's effective materials (`effective_materials`), in
+order, those `printable_materials` keeps (#6302 review). For one
+material, a combination is one value for each offered colour parameter of the published
+listing: the colours of its bound that the material's customer filaments have
+(`customer_filaments`: the listing filaments the price book still has, never a support
+filament, #6152), in each spelling the page can send (`colour_choices`). Every other
+offered parameter stays at its effective default (`effective_default`). A visitor's page
+sends only the values the visitor set, so a colour at its effective default is left out
+of what a combination asks, exactly as the page leaves it out on its first load.
 
-`combinations` builds each one through the visitor path's own `listing_values` and
-`listing_reference`, so its render key is the key a visitor's render of the same choice
-has, and that render reuses the prepared job (`reuse_finished`).
+`combinations` builds each one through the visitor's render path: `listing_values`, then
+`resolve_choice`, then `listing_reference` (#6302 review). So its render key is the key a
+visitor's render of the same picks has, and that render reuses the prepared job
+(`reuse_finished`). A combination that clashes (`ColoursClashError`) is left out. The
+combinations are one per render key: of those with one key, the first in material order
+is kept. ``count`` is the number of render keys, and the cap applies to it.
 
 `start_run` starts the listing's ``PrepareListing`` run (`workflows/prepare_listing.py`) on
 the ``library`` queue. The run submits the combinations a few at a time
@@ -18,8 +24,8 @@ the ``library`` queue. The run submits the combinations a few at a time
 combination joins the prepared execution, so a lower priority would hold the visitor up.
 Its activities are `submit` and `still_open`. `progress` reads the newest job of each
 combination's render key (no table of its own: the key is deterministic) and the run's
-state. Neither route enumerates a listing whose count is over the cap: the count is a
-product, computed first.
+state. No route enumerates a listing with more than `ENUMERATION_LIMIT` picks: that
+bound is a sum of products, computed first.
 """
 
 from __future__ import annotations
@@ -28,7 +34,9 @@ import asyncio
 import itertools
 import logging
 import math
-from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
+import threading
+from collections import OrderedDict
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
@@ -42,10 +50,15 @@ from temporalio.service import RPCError
 from scadbuddy.core.problems import ApiError
 from scadbuddy.orders.models import Filament, Reference
 from scadbuddy.orders.storefront.inputs import (
+    ColoursClashError,
+    LockedColoursClashError,
     customer_filaments,
     effective_default,
+    effective_materials,
     listing_reference,
     listing_values,
+    printable_materials,
+    resolve_choice,
 )
 from scadbuddy.orders.storefront.listings import listing_not_found, problem
 from scadbuddy.orders.storefront.wire import ChoiceBound, Listing
@@ -72,6 +85,12 @@ logger = logging.getLogger(__name__)
 
 #: A job state that is not settled yet.
 OPEN_STATES: Final = ("pending", "running")
+
+#: The most picks (the sum, over the materials, of the product of each colour
+#: parameter's choices) that are enumerated. Above it, ``count`` is that sum, an upper
+#: bound of the render keys: at least 4 times the highest cap the setting allows
+#: (``storefront_prepare_cap``, at most 4096), so it is over any cap.
+ENUMERATION_LIMIT: Final = 16384
 
 
 class PrepareProgress(BaseModel):
@@ -136,17 +155,30 @@ def not_started(run: RunState, states: Sequence[str | None]) -> int:
     return sum(1 for i in set(run.failed_indices) if i < len(states) and states[i] != "done")
 
 
-def colour_choices(listing: Listing, filaments: Mapping[str, Filament]) -> dict[str, list[str]]:
-    """Each offered colour parameter of the published ``listing``, by name: each spelling
-    a visitor's page can send for it, in the bound's order (casefolded, each colour once).
-    The page sends a picked filament's own ``colour`` (`ParamField.tsx`), and a spelling is
-    part of the render key, so a colour takes each offered filament's spelling of it, once.
-    The effective default comes first when no filament spells it so: it is what the page's
-    first load renders (#6299 review)."""
+def colour_choices(
+    listing: Listing, filaments: Mapping[str, Filament], materials: Sequence[str]
+) -> dict[str, dict[str, list[str]]]:
+    """For each printable one of ``materials`` (the effective materials, in order,
+    `effective_materials`; `printable_materials`, #6302 review):
+    each offered colour parameter of the published ``listing``, by name, with each spelling
+    a visitor's page can send for it in that material, in the bound's order (casefolded,
+    each colour once). The page sends a picked filament's own ``colour`` (`ParamField.tsx`),
+    and a spelling is part of the render key, so a colour takes each of the material's
+    filaments' spelling of it, once. The effective default comes first when no filament
+    spells it so: it is what the page's first load renders (#6299 review)."""
+    # Only a printable material (#6302 review): another can only clash, or never renders.
+    return {
+        material: _material_choices(listing, customer_filaments(listing, filaments, [material]))
+        for material in printable_materials(listing, filaments, materials)
+    }
+
+
+def _material_choices(listing: Listing, offered: Sequence[Filament]) -> dict[str, list[str]]:
+    """`colour_choices` of one material, whose customer filaments are ``offered``."""
     assert listing.snapshot is not None
     by_name = {p.name: p for p in listing.snapshot.schema_.parameters}
     spellings: dict[str, list[str]] = {}
-    for filament in customer_filaments(listing, filaments):
+    for filament in offered:
         same = spellings.setdefault(filament.colour.casefold(), [])
         if filament.colour not in same:
             same.append(filament.colour)
@@ -176,64 +208,112 @@ def colour_choices(listing: Listing, filaments: Mapping[str, Filament]) -> dict[
     return choices
 
 
-def combination_count(choices: Mapping[str, Collection[str]]) -> int:
-    """How many combinations ``choices`` make: 0 with no colour parameter."""
-    return math.prod(len(c) for c in choices.values()) if choices else 0
+def picks(choices: Mapping[str, Mapping[str, Collection[str]]]) -> int:
+    """The sum, over the materials of ``choices`` (`colour_choices`), of the product of
+    each colour parameter's choices: an upper bound of the combinations. 0 with no colour
+    parameter."""
+    return sum(math.prod(len(c) for c in each.values()) if each else 0 for each in choices.values())
 
 
-def _asker(
-    listing: Listing, filaments: Mapping[str, Filament], names: Sequence[str]
-) -> Callable[[Sequence[str]], Combination]:
-    """The combination of one colour per name in ``names``, as a visitor's page asks for
-    it: a colour that is its effective default, in the same spelling, is left out."""
+def _build(
+    listing: Listing,
+    filaments: Mapping[str, Filament],
+    materials: Sequence[str],
+    choices: Mapping[str, Mapping[str, list[str]]],
+) -> list[Combination]:
+    """`combinations`, built: each material's picks in `itertools.product` order (the
+    last name varies fastest), the materials in order. Each is asked as a visitor's page
+    asks for it: a colour that is its effective default, in the same spelling, is left
+    out. Then it goes through the visitor's render path (`renders.py` `checked_choice`):
+    `listing_values`, `resolve_choice` with the asked names as given, `listing_reference`.
+    A clash is left out, and of the combinations with one render key the first is kept."""
     assert listing.snapshot is not None
     by_name = {p.name: p for p in listing.snapshot.schema_.parameters}
-    defaults = {name: effective_default(by_name[name], listing.params[name]) for name in names}
+    built: dict[str, Combination] = {}
+    for each in choices.values():
+        names = list(each)
+        if not names:
+            continue
+        defaults = {n: effective_default(by_name[n], listing.params[n]) for n in names}
+        for picked in itertools.product(*(each[n] for n in names)):
+            asked: dict[str, ParamValue] = {
+                n: value for n, value in zip(names, picked, strict=True) if value != defaults[n]
+            }
+            values = listing_values(listing, asked, filaments, materials)
+            try:
+                choice = resolve_choice(listing, values, asked.keys(), filaments, materials)
+            except ColoursClashError:
+                continue
+            except LockedColoursClashError:
+                # No material can print it: no combination renders (#6302 review).
+                return []
+            reference = listing_reference(listing, choice.values, {}, filaments=filaments).reference
+            built.setdefault(reference.render_key, Combination(asked=asked, reference=reference))
+    return list(built.values())
 
-    def ask(picked: Sequence[str]) -> Combination:
-        asked: dict[str, ParamValue] = {
-            name: value
-            for name, value in zip(names, picked, strict=True)
-            if value != defaults[name]
-        }
-        values = listing_values(listing, asked, filaments)
-        resolved = listing_reference(listing, values, {}, filaments=filaments)
-        return Combination(asked=asked, reference=resolved.reference)
 
-    return ask
+#: The newest built combinations, by what they are built from (`_cache_key`). A run
+#: submits one index per activity, so each submit would build every combination again.
+_BUILT: OrderedDict[tuple[str, ...], list[Combination]] = OrderedDict()
+_BUILT_LOCK = threading.Lock()
+_BUILT_SIZE: Final = 16
+
+
+def _cache_key(
+    listing: Listing, filaments: Mapping[str, Filament], materials: Sequence[str]
+) -> tuple[str, ...]:
+    """Everything a combination is built from: the listing, the price book's filaments of
+    the listing, and the materials."""
+    return (
+        listing.model_dump_json(),
+        *(filaments[f].model_dump_json() for f in listing.colours if f in filaments),
+        "\0".join(materials),
+    )
 
 
 def combinations(
-    listing: Listing, filaments: Mapping[str, Filament], choices: Mapping[str, list[str]]
-) -> Iterator[Combination]:
-    """Each combination of ``choices`` (`colour_choices`), in `itertools.product` order."""
-    names = list(choices)
-    ask = _asker(listing, filaments, names)
-    for picked in itertools.product(*(choices[name] for name in names)):
-        yield ask(picked)
+    listing: Listing, filaments: Mapping[str, Filament], materials: Sequence[str]
+) -> list[Combination]:
+    """The combinations of the published ``listing`` with ``materials`` (its effective
+    materials, `effective_materials`), one per render key, in a fixed order (`_build`):
+    the same listing, price book and materials give the same list, so an index names one
+    combination (`combination_at`). Empty with more than `ENUMERATION_LIMIT` picks."""
+    key = _cache_key(listing, filaments, materials)
+    with _BUILT_LOCK:
+        if key in _BUILT:
+            _BUILT.move_to_end(key)
+            return _BUILT[key]
+    choices = colour_choices(listing, filaments, materials)
+    built = (
+        _build(listing, filaments, materials, choices)
+        if picks(choices) <= ENUMERATION_LIMIT
+        else []
+    )
+    with _BUILT_LOCK:
+        _BUILT[key] = built
+        while len(_BUILT) > _BUILT_SIZE:
+            _BUILT.popitem(last=False)
+    return built
+
+
+def combination_count(
+    listing: Listing, filaments: Mapping[str, Filament], materials: Sequence[str]
+) -> int:
+    """How many combinations the listing has: the number of render keys of
+    `combinations`. With more than `ENUMERATION_LIMIT` picks, the picks (`picks`). 0 with
+    no colour parameter."""
+    bound = picks(colour_choices(listing, filaments, materials))
+    if bound > ENUMERATION_LIMIT:
+        return bound
+    return len(combinations(listing, filaments, materials))
 
 
 def combination_at(
-    listing: Listing,
-    filaments: Mapping[str, Filament],
-    choices: Mapping[str, list[str]],
-    index: int,
+    listing: Listing, filaments: Mapping[str, Filament], materials: Sequence[str], index: int
 ) -> Combination:
-    """The combination at ``index`` of `combinations`, built alone (the last name varies
-    fastest, as in `itertools.product`). ``index`` is below `combination_count`."""
-    names = list(choices)
-    picked: list[str] = []
-    rest = index
-    for name in reversed(names):
-        rest, at = divmod(rest, len(choices[name]))
-        picked.append(choices[name][at])
-    picked.reverse()
-    return _asker(listing, filaments, names)(picked)
-
-
-def _runtime_cap(state: AppState) -> int:
-    cap: int = state.settings_store.snapshot().runtime.storefront_prepare_cap
-    return cap
+    """The combination at ``index`` of `combinations`. ``index`` is below
+    `combination_count`."""
+    return combinations(listing, filaments, materials)[index]
 
 
 def _published(orders: OrdersComponent, listing_id: str) -> Listing:
@@ -249,13 +329,31 @@ def _published(orders: OrdersComponent, listing_id: str) -> Listing:
     return listing
 
 
-def _facts(
-    state: AppState, orders: OrdersComponent, listing_id: str
-) -> tuple[Listing, dict[str, Filament], dict[str, list[str]], int]:
-    """Blocking: the published listing, the price book, its colour choices and the cap."""
+@dataclass(frozen=True)
+class _Facts:
+    listing: Listing
+    filaments: dict[str, Filament]
+    #: The listing's effective materials (`effective_materials`, #6258).
+    materials: list[str]
+    cap: int
+    #: `combination_count`.
+    count: int
+
+
+def _facts(state: AppState, orders: OrdersComponent, listing_id: str) -> _Facts:
+    """Blocking: the published listing, the price book, the listing's effective materials,
+    the cap, and the count of its combinations."""
     listing = _published(orders, listing_id)
     filaments = {f.id: f for f in orders.store.filaments()}
-    return listing, filaments, colour_choices(listing, filaments), _runtime_cap(state)
+    runtime = state.settings_store.snapshot().runtime
+    materials = effective_materials(listing, runtime.storefront_materials)
+    return _Facts(
+        listing=listing,
+        filaments=filaments,
+        materials=materials,
+        cap=runtime.storefront_prepare_cap,
+        count=combination_count(listing, filaments, materials),
+    )
 
 
 def job_states(state: AppState, slug: str, keys: Collection[str]) -> dict[str, str]:
@@ -366,8 +464,8 @@ async def progress(state: AppState, orders: OrdersComponent, listing_id: str) ->
     parameter answers a ``count`` of 0. The run's state is read only for a listing that
     can be prepared (``0 < count <= cap``); when Temporal does not answer, the run reads as
     not running, so one failed read never fails the whole panel (#6299 review)."""
-    listing, filaments, choices, cap = await asyncio.to_thread(_facts, state, orders, listing_id)
-    count = combination_count(choices)
+    facts = await asyncio.to_thread(_facts, state, orders, listing_id)
+    count, cap = facts.count, facts.cap
     if count == 0 or count > cap:
         return PrepareProgress(
             count=count,
@@ -386,8 +484,9 @@ async def progress(state: AppState, orders: OrdersComponent, listing_id: str) ->
 
     def read_states() -> tuple[list[str], dict[str, str]]:
         # Up to the cap of references and keys: off the event loop (#6299 review).
-        keys = [c.reference.render_key for c in combinations(listing, filaments, choices)]
-        return keys, job_states(state, listing.slug, keys)
+        every = combinations(facts.listing, facts.filaments, facts.materials)
+        keys = [c.reference.render_key for c in every]
+        return keys, job_states(state, facts.listing.slug, keys)
 
     keys, states = await asyncio.to_thread(read_states)
     seen = [states.get(key) for key in keys]
@@ -408,8 +507,8 @@ async def start_run(state: AppState, orders: OrdersComponent, listing_id: str) -
     offered colour parameter, or one with no colour left), 422
     ``listing_combinations_over_cap`` (with ``count`` and ``cap``), 503
     ``render_unavailable`` when Temporal does not start the run."""
-    _, _, choices, cap = await asyncio.to_thread(_facts, state, orders, listing_id)
-    count = combination_count(choices)
+    facts = await asyncio.to_thread(_facts, state, orders, listing_id)
+    count, cap = facts.count, facts.cap
     if count == 0:
         raise problem(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -435,16 +534,15 @@ async def submit(
     last combination, or the listing is not published (or is over the cap) any more.
     ``run_id`` is the prepare run's: it scopes the render's claim (`request_id`)."""
     try:
-        listing, filaments, choices, cap = await asyncio.to_thread(
-            _facts, state, orders, ask.listing_id
-        )
+        facts = await asyncio.to_thread(_facts, state, orders, ask.listing_id)
     except ApiError:
         return Submitted(outcome="end")
-    count = combination_count(choices)
-    if ask.index >= count or count > cap:
+    listing = facts.listing
+    if ask.index >= facts.count or facts.count > facts.cap:
         return Submitted(outcome="end")
     assert listing.snapshot is not None
-    reference = combination_at(listing, filaments, choices, ask.index).reference
+    # `_facts` built them: this reads the cache.
+    reference = combination_at(listing, facts.filaments, facts.materials, ask.index).reference
     job = OpenJob(slug=listing.slug, render_key=reference.render_key)
     found = (await asyncio.to_thread(job_states, state, job.slug, [job.render_key])).get(
         job.render_key

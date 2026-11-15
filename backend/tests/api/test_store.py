@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from typing import Any, NoReturn
 
 import pytest
@@ -86,7 +88,35 @@ def test_healthz_is_degraded_not_failed_while_the_settings_cannot_be_read(
 
     monkeypatch.setattr("scadbuddy.store.bambuddy.load_render_store_settings", down)
     getattr(client.app.state, STATE_ATTR).store.source.invalidate()  # type: ignore[attr-defined]
-    response = client.get("/healthz")
+    # The re-read runs behind the probe (#6354): the first answer is the last good one,
+    # and a later one says the re-read failed.
+    first = client.get("/healthz")
+    assert first.status_code == 200
+    deadline = time.monotonic() + 10
+    while (response := client.get("/healthz")).json()["status"] != "degraded":
+        assert time.monotonic() < deadline, response.text
+        time.sleep(0.05)
     assert response.status_code == 200
-    assert response.json()["status"] == "degraded"
     assert response.json()["store"]["settings_current"] is False
+
+
+def test_healthz_never_waits_for_a_settings_read(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6354: a liveness probe has 5 s; a settings read that hangs (a full default
+    executor, an empty database pool) must not hold its answer."""
+    release = threading.Event()
+
+    def hung(*_: object) -> NoReturn:
+        release.wait(10)
+        raise OSError("connection refused")
+
+    monkeypatch.setattr("scadbuddy.store.bambuddy.load_render_store_settings", hung)
+    getattr(client.app.state, STATE_ATTR).store.source.invalidate()  # type: ignore[attr-defined]
+    try:
+        for _ in range(3):
+            started = time.monotonic()
+            assert client.get("/healthz").status_code == 200
+            assert time.monotonic() - started < 2
+    finally:
+        release.set()

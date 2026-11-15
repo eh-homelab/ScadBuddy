@@ -129,7 +129,7 @@ function fields(body: StorefrontListingInput) {
     fixed: body.fixed ?? {},
     colours: body.colours ?? [],
     media_ids: body.media_ids ?? [],
-    one_material: body.one_material ?? false,
+    materials: body.materials ?? [],
   }
 }
 

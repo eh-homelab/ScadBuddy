@@ -548,7 +548,7 @@ export type MachineRateInputs = {
 export type StorefrontListing = Required<Schemas['Listing']>
 export type StorefrontListingInput = Defaulted<
   Schemas['ListingInput'],
-  'description' | 'params' | 'fixed' | 'colours' | 'media_ids' | 'one_material'
+  'description' | 'params' | 'fixed' | 'colours' | 'media_ids' | 'materials'
 >
 /** #6237 — a listing's colour combinations and how far their renders are; a prepare's answer. */
 export type ListingPrepareProgress = Schemas['PrepareProgress']

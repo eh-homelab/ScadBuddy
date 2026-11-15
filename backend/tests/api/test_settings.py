@@ -888,10 +888,19 @@ def test_the_storefront_settings_are_written_through_put(client: TestClient) -> 
         "storefront_render_concurrency": 4,
         "storefront_draft_ttl_days": 7,
         "storefront_requests_enabled": True,
+        "storefront_materials": ["PLA", "PETG-CF"],
         "storefront_prepare_cap": 64,
     }
     body = client.put("/api/v1/settings", json=sent).json()
     assert {name: body[name] for name in sent} == sent
+
+
+def test_the_storefront_materials_default_and_apply_live(client: TestClient) -> None:
+    # #6258: the shop's order of preference, read by each storefront request.
+    body = client.get("/api/v1/settings").json()
+    assert body["storefront_materials"] == ["PETG", "PLA"]
+    assert body["applies"]["storefront_materials"] == "live"
+    assert client.put("/api/v1/settings", json={"storefront_materials": []}).status_code == 422
 
 
 def test_the_slice_concurrency_is_bounded_and_live(client: TestClient) -> None:

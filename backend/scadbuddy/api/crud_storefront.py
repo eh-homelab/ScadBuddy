@@ -299,7 +299,10 @@ async def listings(
     snapshot = await asyncio.to_thread(state.settings_store.snapshot)
     shown = page[:limit]
     return PublicListings(
-        listings=[await public_card(content, item, filaments) for item in shown],
+        listings=[
+            await public_card(content, item, filaments, snapshot.runtime.storefront_materials)
+            for item in shown
+        ],
         next_cursor=listing_cursor(shown[-1]) if len(page) > limit else None,
         requests_enabled=snapshot.runtime.storefront_requests_enabled,
     )
@@ -313,7 +316,8 @@ async def listing(
     content = public_content(state)
     found = await asyncio.to_thread(published_listing, orders.listings, listing_id)
     filaments = await asyncio.to_thread(_filaments, orders)
-    return await public_listing(content, found, filaments)
+    snapshot = await asyncio.to_thread(state.settings_store.snapshot)
+    return await public_listing(content, found, filaments, snapshot.runtime.storefront_materials)
 
 
 async def _body[Body: BaseModel](

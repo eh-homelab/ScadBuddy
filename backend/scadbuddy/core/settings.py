@@ -234,6 +234,11 @@ class Settings(BaseSettings):
     storefront_slices_concurrent: int = Field(default=1, ge=1, le=4)
     storefront_draft_ttl_days: int = Field(default=30, ge=1, le=365)
     storefront_requests_enabled: bool = False
+    # The materials a storefront print may be made of, in the shop's order of preference
+    # (#6258): a listing with no materials of its own takes these. Compared casefolded,
+    # at most `MAX_MATERIALS`, at least one (`unique_materials`). A JSON list:
+    # SCADBUDDY_STOREFRONT_MATERIALS='["PETG", "PLA"]'.
+    storefront_materials: list[str] = Field(default_factory=lambda: ["PETG", "PLA"])
     # The most colour combinations one "Prepare every colour combination" run of a
     # listing queues (#6237); a listing with more is refused with its count.
     # SCADBUDDY_STOREFRONT_PREPARE_CAP.
@@ -405,6 +410,14 @@ class Settings(BaseSettings):
         name = info.field_name or ""
         positive = name in {"rough_estimate_factor", "pricing_usd_rate"}
         return decimal_string(value, env_var(name), positive=positive)
+
+    @field_validator("storefront_materials")
+    @classmethod
+    def _storefront_materials(cls, value: list[str]) -> list[str]:
+        materials = unique_materials(value, env_var("storefront_materials"))
+        if not materials:
+            raise ValueError(f"{env_var('storefront_materials')} needs at least one material")
+        return materials
 
     @field_validator("orders_tax_percent")
     @classmethod
@@ -1079,6 +1092,7 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "storefront_slices_concurrent": "live",
         "storefront_draft_ttl_days": "live",
         "storefront_requests_enabled": "live",
+        "storefront_materials": "live",
         # Read from the store by each prepare of a listing's colours (#6237).
         "storefront_prepare_cap": "live",
         # Read from the store by each send of the storefront's mail (#5283).
@@ -1142,6 +1156,28 @@ def decimal_string(value: str, label: str, *, positive: bool = False) -> str:
     if number >= MAX_DECIMAL_RATE:
         raise ValueError(f"{label} must be less than {MAX_DECIMAL_RATE}")
     return text
+
+
+#: The most materials a listing or the shop's default may name (#6258).
+MAX_MATERIALS: Final = 16
+#: The longest material name: longer than any price book's (``PETG-CF``, ``PLA Basic``).
+MAX_MATERIAL_LENGTH: Final = 64
+
+
+def unique_materials(values: list[str], label: str) -> list[str]:
+    """``values`` stripped, with blanks and repeats (casefolded) dropped, the first
+    spelling kept, in order (#6258). ``ValueError`` naming ``label`` past `MAX_MATERIALS`
+    or for a name past `MAX_MATERIAL_LENGTH`."""
+    kept: dict[str, str] = {}
+    for value in values:
+        text = value.strip()
+        if len(text) > MAX_MATERIAL_LENGTH:
+            raise ValueError(f"{label}: a material is at most {MAX_MATERIAL_LENGTH} characters")
+        if text:
+            kept.setdefault(text.casefold(), text)
+    if len(kept) > MAX_MATERIALS:
+        raise ValueError(f"{label}: at most {MAX_MATERIALS} materials")
+    return list(kept.values())
 
 
 def split_urls(value: str | None) -> list[str]:
