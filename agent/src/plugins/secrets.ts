@@ -70,15 +70,17 @@ export const PLUGIN_SECRETS_CACHE_MS = 30_000
  */
 export function toolSecrets(deps: {
   kek: Kek | undefined
-  credentials?: Pick<CredentialRepo, 'revealAll'> | undefined
+  credentials?: Pick<CredentialRepo, 'revealAll' | 'opener'> | undefined
   plugins?: Pick<PluginStore, 'enabled'> | undefined
   oauth?: Pick<PluginOAuth, 'storedSecrets'> | undefined
   packages?: PackageSecretSource | undefined
 }): { secrets: () => Promise<string[]>; fresh: () => Promise<string[]> } {
   const { kek, credentials } = deps
-  // None without the KEK, which opens them.
+  // None without a key that opens them: this process's KEK, or the API's (#5299 D5, the store's `opener`).
   const saved = async (): Promise<string[]> =>
-    credentials && kek ? (await credentials.revealAll(kek)).flatMap((row) => (row.credential ? [row.credential.secret] : [])) : []
+    credentials && (kek || credentials.opener)
+      ? (await credentials.revealAll(kek, 'redact')).flatMap((row) => (row.credential ? [row.credential.secret] : []))
+      : []
   const read = () => readPluginSecrets(deps)
   let cache: { at: number; read: Promise<string[]> } | undefined
   const cached = (): Promise<string[]> => {
