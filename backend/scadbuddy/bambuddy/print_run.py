@@ -482,12 +482,16 @@ class PrintRunRequest(BaseModel):
         """``process_overrides`` as the plan takes them (#2998); empty for none."""
         return normalised_overrides(self.process_overrides) or {}
 
-    def plate_type(self) -> str:
-        """The plate the slice uses: a ``curr_bed_type`` override, which wins at the
-        slice on both paths (#2998, ``dispatch.slice_request``, ``build_presets``), else
-        the chosen ``bed_type``. The check's plate warnings name this one."""
-        asked = self.overrides().get("curr_bed_type")
-        return asked if isinstance(asked, str) and asked else self.choices.bed_type
+    def plate_type(self, template: Mapping[str, ProcessValue]) -> str:
+        """The plate the slice uses: a ``curr_bed_type`` in the plan's overrides wins at
+        the slice on both paths (#2998, ``dispatch.slice_request``, ``build_presets``),
+        so the request's own, else the template's ``print_settings`` (``template``), as
+        ``plan_run`` merges them; else the chosen ``bed_type``. The check's plate
+        warnings name this one."""
+        for value in (self.overrides().get("curr_bed_type"), template.get("curr_bed_type")):
+            if isinstance(value, str) and value:
+                return value
+        return self.choices.bed_type
 
     def asked_plates(self) -> list[int] | None:
         """The plates asked for, in plate order; ``None`` for every plate."""
@@ -1437,7 +1441,9 @@ async def check_print(
             *rack_notes,
             *_listed(
                 plate_unlisted_warning(
-                    request.plate_type(), prepared.printer_model, prepared.printer_name
+                    request.plate_type(source.print_settings),
+                    prepared.printer_model,
+                    prepared.printer_name,
                 )
             ),
             *(
@@ -1614,7 +1620,9 @@ async def _native_check(
             *rack_notes,
             *_listed(
                 plate_unlisted_warning(
-                    request.plate_type(), prepared.printer_model, prepared.printer_name
+                    request.plate_type(source.print_settings),
+                    prepared.printer_model,
+                    prepared.printer_name,
                 )
             ),
             *(
@@ -3463,7 +3471,7 @@ async def plan_run(
         printer_status,
         printer_name=planned[0][1].printer_name,
         printer_model=prepared.printer_model,
-        plate_type=request.plate_type(),
+        plate_type=request.plate_type(source.print_settings),
     )
     hardware += high_flow_warnings(
         printer_status,

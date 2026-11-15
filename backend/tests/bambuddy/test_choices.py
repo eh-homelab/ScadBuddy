@@ -150,8 +150,13 @@ def test_a_bed_type_override_is_the_plate_the_check_names() -> None:
     plain = PrintRunRequest(filament_plan=plan, choices=choices)
     asked = plain.model_copy(update={"process_overrides": {"curr_bed_type": "Textured PEI Plate"}})
 
-    assert plain.plate_type() == "Cool Plate"
-    assert asked.plate_type() == "Textured PEI Plate"
+    template = {"curr_bed_type": "Engineering Plate"}
+
+    assert plain.plate_type({}) == "Cool Plate"
+    # A template's `curr_bed_type` reaches the plan's overrides and wins at the slice.
+    assert plain.plate_type(template) == "Engineering Plate"
+    # The request's own override wins over the template's, as `plan_run` merges them.
+    assert asked.plate_type(template) == "Textured PEI Plate"
 
 
 def test_a_size_not_in_the_rack_warns() -> None:

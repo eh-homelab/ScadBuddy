@@ -300,9 +300,10 @@ slicer is the only judge.
   `prime_tower.prime_tower_warnings`) read the request's `process_overrides` too, as
   `_sequence_clearance` does for `print_sequence`: a support or tower key the request
   sets is left to `override_warnings`, and `enable_support` or `enable_prime_tower` set
-  to `"0"` leaves nothing else of that choice to warn about. A `curr_bed_type` override
+  to `"0"` leaves nothing else of that choice to warn about. A `curr_bed_type` in the plan's overrides
   wins at the slice on both paths (`dispatch.slice_request`, `slicing/presets.py`
-  `build_presets`), so the plate warnings name it (`PrintRunRequest.plate_type`).
+  `build_presets`), so the plate warnings name it: the request's, else the template's
+  `print_settings`, else the chosen plate (`PrintRunRequest.plate_type`).
 - **Host-side settings are stripped.** "Allow everything" covers what the slicer does with
   the print, not commands or files on the machine that slices (the native slicer's pod,
   Bambuddy's slicer sidecar). `process_overrides.HOST_SIDE_KEYS` lists every option of
