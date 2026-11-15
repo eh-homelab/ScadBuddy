@@ -30,6 +30,7 @@ from scadbuddy.flow_triggers.component import FLOW_TRIGGERS
 from scadbuddy.flow_triggers.fire import ensure_trigger_schedules
 from scadbuddy.workflows.flow_triggers import schedule_id
 from tests.api.conftest import FakeAgentTools
+from tests.api.test_crud_agent_cost import token
 from tests.api.test_customers import create as create_customer
 from tests.api.test_flows import AGENT, register, script, settings, until
 from tests.api.test_orders import create_order
@@ -38,6 +39,8 @@ from tests.support.temporal import WorkflowReaper
 __all__ = ["settings"]
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
+
+CRUD_AGENT = "/api/v1/internal/crud/agent"
 
 OTHER = {"X-ScadBuddy-Agent-Author": "token:p2", "X-ScadBuddy-Agent-Author-Session": "s2"}
 WAITS = script("await wait_for_human('Go on?', 600)")
@@ -307,8 +310,15 @@ def test_the_grant_requests_list_a_requested_standing_grant_until_it_is_decided(
     listed = body["triggers"][0]
     assert listed["grant"]["status"] == "requested"
     assert listed["seen"] == view(client, asked["id"])["seen"]
+    # The agent's Web Push reads the same requests by id, with its service credential only.
+    waiting = f"{CRUD_AGENT}/push/waiting"
+    assert client.get(waiting).status_code in (401, 403)
+    assert client.get(waiting, headers=token(client)).json() == {
+        "requests": [{"id": f"trigger-grant:{listed['grant']['id']}", "reason": "grant"}]
+    }
     assert approve(client, asked["id"]).status_code == 200
     assert client.get("/api/v1/flow-grant-requests").json()["triggers"] == []
+    assert client.get(waiting, headers=token(client)).json() == {"requests": []}
 
 
 @pytest.mark.usefixtures("triggers")

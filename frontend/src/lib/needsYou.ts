@@ -45,12 +45,12 @@ export function needsYouItems(
       entry,
     })),
     ...(grants?.runs ?? []).map(
-      (request): NeedsYouItem => ({ kind: 'run-grant', key: `run-grant:${request.run_id}`, since: request.grant.created_at, request }),
+      (request): NeedsYouItem => ({ kind: 'run-grant', key: `run-grant:${request.grant.id}`, since: request.grant.created_at, request }),
     ),
     ...(grants?.triggers ?? []).map(
       (trigger): NeedsYouItem => ({
         kind: 'trigger-grant',
-        key: `trigger-grant:${trigger.id}`,
+        key: `trigger-grant:${trigger.grant?.id ?? trigger.id}`,
         ...(trigger.grant ? { since: trigger.grant.created_at } : {}),
         trigger,
       }),

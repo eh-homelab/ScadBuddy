@@ -228,7 +228,11 @@ same way, `vite.config.ts`).
   (opening the bell clears only the finished rows) and turns `bg-needs` (the `--sb-needs`
   tokens, AA in `theme.contrast.test.ts`) while anything waits; the Activity page's
   `#needs-you` (`components/activity/NeedsYou.tsx`) lists it in full. Each new item is
-  toasted and, while the page is hidden, notified (`needsYouNotices`). Tests build the same
+  toasted and, while the page is hidden, notified (`needsYouNotices`). With every tab closed
+  the agent pushes the grants and pairing requests too (`agent/src/notify/waiting.ts`, read
+  every 30 s), under the same notice ids (`run-grant:<grant id>`, `trigger-grant:<grant id>`,
+  `pairing:<id>`), so a push and the page's notification share one tag; a click opens
+  `#needs-you` (`public/push-sw.js`). Tests build the same
   context with `src/test/needsYou.tsx` `NeedsYouHarness`; a Playwright test parks agent
   requests with the `sessionStorage` key `scadbuddy.mock.pending-input`
   (`mocks/features/pendingInput.ts`). The mocks hold two requested grants by default

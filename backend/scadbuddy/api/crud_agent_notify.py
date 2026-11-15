@@ -18,6 +18,8 @@ agent that still reads the table over SQL with the KEK, and the other way round 
   ``GET …/push/subscriptions`` lists them with their keys opened, skipping one the key does
   not open;
 - ``POST …/push/sent`` claims telling a target of a request, once across replicas;
+- ``GET …/push/waiting`` the flow grants waiting for a person, by id (#6399), which the
+  agent pushes beside its own pending input;
 - ``…/notify-channels``: the list (never a token), a create and an update (the token sealed
   with the channel's id, kind and URL; an update with ``keep_token`` keeps the sealed one
   only while the kind and URL are unchanged), a delete, a channel opened for a send, the
@@ -44,6 +46,7 @@ from scadbuddy.agent_data.notify import VAPID_AAD
 from scadbuddy.agent_data.notify import channel_aad as _channel_aad
 from scadbuddy.agent_data.notify import subscription_aad as _subscription_aad
 from scadbuddy.api.deps import StateDep
+from scadbuddy.api.flow_triggers import GRANT_REQUESTS_MAX
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.secrets import (
     Envelope,
@@ -54,6 +57,7 @@ from scadbuddy.core.secrets import (
     seal_secret,
 )
 from scadbuddy.crud.guard import crud_router
+from scadbuddy.flow_triggers.component import TriggersDep
 from scadbuddy.library.settings_store import settings_kek
 
 router = crud_router("agent")
@@ -352,6 +356,31 @@ async def push_sent(body: SentClaim, state: StateDep) -> Claimed:
         return row is not None
 
     return Claimed(claimed=await _in_tx(state, run))
+
+
+class WaitingRequest(BaseModel):
+    """A flow grant waiting for a person's decision, as a push names it: the id the page's
+    own notification uses as its tag (frontend `lib/needsYou.ts`), never what it asks."""
+
+    id: str
+    reason: Literal["grant"]
+
+
+class WaitingRequests(BaseModel):
+    requests: list[WaitingRequest]
+
+
+@router.get("/push/waiting", name="crud_agent_push_waiting")
+async def push_waiting(triggers: TriggersDep) -> WaitingRequests:
+    """#6399: the flow grants waiting for a person (a run's and a trigger's standing grant),
+    which the agent pushes to a closed tab beside its own pending input. The same requests
+    as ``GET /api/v1/flow-grant-requests``, by id only."""
+    runs = await triggers.flows.store.requested_grants(GRANT_REQUESTS_MAX)
+    standing = await triggers.store.requested_grant_ids(GRANT_REQUESTS_MAX)
+    return WaitingRequests(
+        requests=[WaitingRequest(id=f"run-grant:{grant.id}", reason="grant") for grant, _ in runs]
+        + [WaitingRequest(id=f"trigger-grant:{gid}", reason="grant") for gid in standing]
+    )
 
 
 # -- notification channels ----------------------------------------------------------------

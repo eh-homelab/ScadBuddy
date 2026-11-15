@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api.flows import FLOW_NAMESPACE
 from tests.api.conftest import FakeAgentTools
+from tests.api.test_crud_agent_cost import token
 from tests.api.test_customers import create as create_customer
 from tests.api.test_flows import AGENT, register, script, settings, start, until
 from tests.api.test_orders import create_order
@@ -401,12 +402,18 @@ def test_the_grant_requests_list_a_requested_grant_until_it_is_decided(
     assert request["started_by"]["kind"] == "agent"
     assert (request["grant"]["status"], request["grant"]["in_force"]) == ("requested", False)
     assert request["grant"]["requested_by"]["principal"] == "token:p1"
+    # The agent's Web Push reads the same request by its grant's id (#6399).
+    waiting = "/api/v1/internal/crud/agent/push/waiting"
+    assert client.get(waiting, headers=token(client)).json() == {
+        "requests": [{"id": f"run-grant:{request['grant']['id']}", "reason": "grant"}]
+    }
     # Read as any flow read is: an agent sees the same list, and still cannot decide.
     assert client.get("/api/v1/flow-grant-requests", headers=AGENT).json()["runs"] == body["runs"]
     refused = client.post(f"/api/v1/workflow-runs/{asked}/grant/decline", headers=AGENT)
     assert refused.status_code == 403
     assert client.post(f"/api/v1/workflow-runs/{asked}/grant/decline").status_code == 200
     assert client.get("/api/v1/flow-grant-requests").json()["runs"] == []
+    assert client.get(waiting, headers=token(client)).json() == {"requests": []}
 
 
 def test_the_grant_requests_leave_out_a_run_that_ended(client: TestClient) -> None:

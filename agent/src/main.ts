@@ -1,5 +1,6 @@
 import { pendingInput } from './routes/pendingInput.js'
-import { pendingNotices, NotificationDispatcher } from './notify/dispatcher.js'
+import { pendingNotices, NotificationDispatcher, WAITING_POLL_MS } from './notify/dispatcher.js'
+import { crudGrantRequests, pairingRequests, waitingNotices } from './notify/waiting.js'
 import { pushHostsOf, SETTING_PUSH_HOSTS } from './notify/pushEgress.js'
 import { CrudPushStore, type PushRepo, PushStore } from './notify/pushStore.js'
 import { ChannelStore, CrudChannelRows } from './notify/channels.js'
@@ -401,8 +402,9 @@ const toolServices: ToolServices = {
 // The browser bridge (#254, bridge/hub.ts): the tabs connected over
 // /api/v1/ai/bridge, which the browser_* tools drive; MCP clients pair with
 // one through `ai_browser_pairings` (spec §8.5).
+const pairingStore = database ? gated<PairingStore>(new PostgresPairingStore(database.sql), new CrudPairingStore(crudTarget), storeArea('pairings')) : undefined
 const tabs = new TabHub({
-  pairings: database ? gated<PairingStore>(new PostgresPairingStore(database.sql), new CrudPairingStore(crudTarget), storeArea('pairings')) : undefined,
+  pairings: pairingStore,
   relay: tabRelay,
   // A durable session's browser_* calls run on whichever replica took the
   // activity, so the tab its chat socket paired is read from Postgres (#2086).
@@ -1293,6 +1295,11 @@ const pushDispatcher =
     ? new NotificationDispatcher({
         store: pushStore,
         notices: async (owner) => pendingNotices(await pendingInput(sessions, owner)),
+        // #6399: the flow grants (the API's, through area `notify`) and the pairing requests.
+        waiting: waitingNotices([
+          crudGrantRequests(crudTarget, storeArea('notify')),
+          ...(pairingStore ? [pairingRequests(pairingStore)] : []),
+        ]),
         // RFC 8292 §2.1: who the push service may contact about these messages.
         subject: config.publicUrl ?? 'mailto:scadbuddy@localhost',
         // The push-service allowlist, as Settings last saved it (notify/pushEgress.ts).
@@ -1304,6 +1311,8 @@ const pushDispatcher =
 if (pushDispatcher && database) {
   pendingChanges?.subscribe(() => pushDispatcher.wake())
   void database.untilReady().then(() => pushDispatcher.wake())
+  // Nothing here hears a flow grant or a pairing request change (#6399): a pass now and then.
+  setInterval(() => pushDispatcher.wake(), WAITING_POLL_MS).unref()
 }
 
 const app = !role.http
