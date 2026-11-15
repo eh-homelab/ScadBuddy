@@ -296,7 +296,15 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `ai_forgotten_subjects`), never the KEK; `audit.py` the `ai_audit` row each reveal
   (kind `credential`; a redaction's once per `REDACT_AUDIT_WINDOW`) and release (kind `payload_key`, once per subject and
   `RELEASE_AUDIT_WINDOW`) writes in its transaction; `rotation.py` the re-wrap of the credentials and payload
-  keys at the API's start (`main._rotate_agent_secrets`). Its tests make the agent's tables
+  keys at the API's start (`main._rotate_agent_secrets`). For `api/crud_agent_forget.py` (area
+  `forget`, #5299 step 6): `forget.py` a subject's tombstone, its flow images and its key in one
+  transaction under its lock (a session with forks refused, `ForksTakeRangesError`: the agent
+  copies their ranges itself until its sessions move here), a browser call's key dropped and the
+  hourly sweep of the keys no forget deletes; `flow_blobs.py` a flow run's images kept (sealed by
+  the agent, sent as multipart bytes; the tombstone check and `FLOW_IMAGES_MAX` under the lock)
+  and read. `flows/forget.py` and `flows/images.py` run the same statements on the API's own
+  tables, with no fallback for a database the agent never migrated (the API applies its files
+  first, #5299 D6). Its tests make the agent's tables
   with the agent's own migration files (`render/agent_migrations.py` `migrate_agent`) and open
   the credential vectors `tests/fixtures/secret-vectors.json`, a copy that
   `lint-codec-copies.sh` keeps equal to the agent's.
