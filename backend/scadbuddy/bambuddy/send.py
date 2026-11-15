@@ -19,7 +19,6 @@ import zipfile
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import BinaryIO, Literal, NamedTuple, Protocol
-from xml.etree import ElementTree as ET
 
 from fastapi import status
 from pydantic import BaseModel
@@ -183,6 +182,11 @@ _BED_STATED = "#bed"
 #: its tower at ``wipe_tower_y`` 5 (3 mm reserved for its brim), which a tall plate's
 #: brim passes, and reusing it kept every quote failing after the fix (#5566).
 _TOWER_BRIM = "#brim"
+#: Follows :data:`_TOWER_BRIM` in every :attr:`Target.key` of a copy laid out since an
+#: author's covers are redrawn in the spools' colours (:func:`_recoloured_covers`,
+#: #6170). A copy recorded before keeps the author's covers, which the slicer copies into
+#: the sliced file, so reusing it would keep Bambuddy's job cover in the wrong colours.
+_COVERS_REDRAWN = "#covers"
 #: Why a print's settings per part (#5571) are refused for a 3MF nothing can be
 #: written into (``layout_of`` ``as_is``), or a library file with no 3MF to lay out: it
 #: prints as it is, so it cannot carry them.
@@ -252,11 +256,12 @@ class Target:
     def key(self) -> str:
         """Recorded as a copy's ``target_key``: a reused upload has to match both halves.
 
-        It starts with the plate's own key, :data:`_BED_STATED` and :data:`_TOWER_BRIM`,
-        so a copy recorded before #4638, whose file states no bed, or before #5545, whose
-        tower leaves no room for a tall plate's brim, is never reused.
+        It starts with the plate's own key, :data:`_BED_STATED`, :data:`_TOWER_BRIM` and
+        :data:`_COVERS_REDRAWN`, so a copy recorded before #4638, whose file states no bed,
+        before #5545, whose tower leaves no room for a tall plate's brim, or before #6170,
+        whose covers are the author's, is never reused.
         """
-        key = f"{self.plate.key}{_BED_STATED}{_TOWER_BRIM}"
+        key = f"{self.plate.key}{_BED_STATED}{_TOWER_BRIM}{_COVERS_REDRAWN}"
         if self.nozzle_diameter is not None:
             key = f"{key}@{self.nozzle_diameter}"
         if self.nozzle_stats is not None:
@@ -476,10 +481,11 @@ def _recoloured_covers(payload: bytes, colours: Sequence[str] | None) -> bytes:
     sliced file's plate image, Bambuddy's job cover (#6170). The plates are read as a
     library file's preview reads them (:func:`read_plates_parts`: build items, multi-part
     objects, object-level extruders), all of them within one read budget of
-    :data:`COVER_MAX_TRIANGLES`. A file that does not read back (still the author's,
-    :func:`layout_of`), or that is past the budget
-    (:class:`~scadbuddy.render.objects3mf.OverBudgetError`), keeps its
-    covers."""
+    :data:`COVER_MAX_TRIANGLES`. The covers are cosmetic, so any failure keeps the
+    author's and the print goes on: a file that does not read back (still the author's,
+    :func:`layout_of`), one past the budget
+    (:class:`~scadbuddy.render.objects3mf.OverBudgetError`), or geometry the rasteriser
+    cannot draw."""
     if colours is None:
         return payload
     budget = ReadBudget(max_triangles=COVER_MAX_TRIANGLES)
@@ -489,7 +495,7 @@ def _recoloured_covers(payload: bytes, colours: Sequence[str] | None) -> bytes:
 
     try:
         return recolour_3mf(payload, colours, read_plates=read_plates)
-    except (LookupError, ValueError, ET.ParseError, zipfile.BadZipFile) as error:
+    except Exception as error:  # the covers are cosmetic; the print goes on
         logger.warning(
             "the 3MF's covers could not be redrawn in the spools' colours",
             extra={"error": type(error).__name__},
