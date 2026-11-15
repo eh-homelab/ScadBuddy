@@ -74,10 +74,14 @@ ATTACHMENTS_PER_CALL = 4
 #: (``harness/httpRequest.ts`` ``SAVE_MAX_BYTES``, ``MAX_SAVED``).
 HTTP_BODY_BYTES_MAX = 20 * 1024 * 1024
 MAX_SAVED = 10
-URL_MAX = 8192
-CONTENT_TYPE_MAX = 512
-#: The largest ``meta`` part, and what multipart framing may add.
-META_BYTES_MAX = 16 * 1024
+#: A saved body's URL (the one asked, at most 8192 characters, or a redirect's ``Location``)
+#: and content type come from headers, which Node caps at 16 KiB by default
+#: (https://nodejs.org/api/cli.html#--max-http-header-sizesize).
+URL_MAX = 16 * 1024
+CONTENT_TYPE_MAX = 16 * 1024
+#: The largest ``meta`` part (a saved body's holds its URL and content type), and what
+#: multipart framing may add.
+META_BYTES_MAX = 48 * 1024
 FRAMING_BYTES_MAX = 16 * 1024
 
 OwnerKind = Literal["browser", "bearer", "oidc", "anonymous", "flow"]
