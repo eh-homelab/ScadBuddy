@@ -36,21 +36,19 @@ export type FieldKind =
 /** Every field `PUT /settings` takes, other than `reset`. */
 export type FieldName = Exclude<keyof SettingsUpdate, 'reset'>
 
+/**
+ * Where a field is laid out and how it is edited. Its label and help are not here: they
+ * are the backend's (#887, `core/setting_docs.py`), read with `docOf`.
+ */
 export type FieldSpec = {
   name: FieldName
   section: SectionId
-  label: string
   kind: FieldKind
-  help?: string
   /** In a section's "Advanced" disclosure. */
   advanced?: boolean
   /** A `select`'s choices. */
   choices?: readonly { value: string; label: string }[]
 }
-
-/** #4250 — the help each price-book rate shows: a decimal string, never a float. */
-const DECIMAL_HELP = 'A decimal amount in the shop\'s currency, such as 1.50; 0 adds no line.'
-
 
 /**
  * The runtime settings (#322): each is env-seeded, so it carries a source badge and a
@@ -61,110 +59,82 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
   {
     name: 'orders_currency',
     section: 'orders',
-    label: 'Orders currency',
     kind: 'text',
-    help: 'The ISO 4217 code, such as USD or EUR, an order copies when it is made. A change applies to the next order; an existing order keeps its own.',
   },
   // #4250 — the price book's policy (spec 2026-10-18 §5.1): read by each quote and copied
   // into its lines, so a change never moves a recorded quote.
   {
     name: 'pricing_machine_rate_per_hour',
     section: 'orders',
-    label: 'Machine rate per hour',
     kind: 'text',
-    help: `What an hour of print time costs, from the slice. ${DECIMAL_HELP}`,
   },
   {
     name: 'pricing_setup_fee',
     section: 'orders',
-    label: 'Setup fee per plate',
     kind: 'text',
-    help: `Charged once for each plate an item prints. ${DECIMAL_HELP}`,
   },
   {
     name: 'pricing_labour_per_item',
     section: 'orders',
-    label: 'Labour per item',
     kind: 'text',
-    help: `Charged once per unit. ${DECIMAL_HELP}`,
   },
   {
     name: 'pricing_markup_percent',
     section: 'orders',
-    label: 'Markup, percent',
     kind: 'text',
-    help: 'A percentage of the other lines, such as 15 for 15 %. 0 adds no line.',
   },
   {
     name: 'pricing_rounding',
     section: 'orders',
-    label: 'Round the unit price',
     kind: 'select',
     choices: [
       { value: 'to_minor_unit', label: 'Each line to the cent' },
       { value: 'to_major', label: 'Up to a whole unit' },
     ],
-    help: 'Every line is rounded to the minor unit once. Up to a whole unit then adds the difference as a line of its own.',
   },
   {
     name: 'rough_estimate_factor',
     section: 'orders',
-    label: 'Rough estimate factor',
     kind: 'text',
-    help: 'Multiplies a part\'s enclosed volume for walls, infill and purge in the estimate before a slice, such as 1.15. More than 0.',
     advanced: true,
   },
   // #5326 — job cost (spec 2026-11-05 §4.3, §4.4, §5), in the shop's currency.
   {
     name: 'pricing_labour_rate_per_hour',
     section: 'orders',
-    label: 'Labour rate per hour',
     kind: 'text',
-    help: 'What an hour of your time costs a job. Each time entry keeps the rate in force when it was logged, so a change never rewrites past jobs. A decimal amount in the shop\'s currency, such as 25.',
   },
   {
     name: 'orders_thin_margin_percent',
     section: 'orders',
-    label: 'Thin margin below, percent',
     kind: 'text',
-    help: 'An order or item whose margin is below this percent of what was charged is marked thin, in amber. Below 0 it is a loss, in red. Such as 15.',
   },
   // #5281 — auto tax (storefront spec §9): one `tax` charge ScadBuddy computes on an open order.
   {
     name: 'orders_tax_percent',
     section: 'orders',
-    label: 'Tax, percent',
     kind: 'text',
-    help: 'Added to an open order as one tax charge: this percent of its items, rounded half up, such as 8.25. At least 0 and below 100; 0 adds none. A tax charge typed on an order replaces it. A change applies to an order the next time its items or charges change.',
   },
   {
     name: 'orders_tax_shipping',
     section: 'orders',
-    label: 'Tax shipping too',
     kind: 'bool',
-    help: 'On, the tax is also on the shipping charges. Fees and discounts are never taxed.',
   },
   // #6133 — the handling fee on the things the shop buys for a customer (spec 2026-11-13 §10.3).
   {
     name: 'orders_purchase_fee_flat_minor',
     section: 'orders',
-    label: 'Handling fee per bought item, minor units',
     kind: 'count',
-    help: 'Added once for each thing the shop records as bought for a customer, in the minor unit of the orders currency, such as 150 for 1.50. An order in another currency takes only the percent below. 0 adds none.',
   },
   {
     name: 'orders_purchase_fee_percent',
     section: 'orders',
-    label: 'Handling fee on bought items, percent',
     kind: 'text',
-    help: 'Added as a percent of what the shop paid for the things it bought for a customer, such as 10 or 7.50. 0 to 100, at most two decimals. The flat fee and this percent make one charge, "Handling for bought items", rounded half up once.',
   },
   {
     name: 'pricing_usd_rate',
     section: 'orders',
-    label: 'One US dollar in the shop\'s currency',
     kind: 'text',
-    help: 'Converts the assistant\'s spend, which is in US dollars, into a job\'s cost for orders in the shop\'s currency (#5330). 1 when the shop prices in US dollars. More than 0.',
     advanced: true,
   },
   // #5283 — the storefront's bot check (storefront spec §5.8): Cloudflare Turnstile on
@@ -173,322 +143,241 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
   {
     name: 'storefront_turnstile_site_key',
     section: 'orders',
-    label: 'Storefront bot check: Turnstile site key',
     kind: 'text',
-    help: 'Cloudflare Turnstile\'s public site key for the storefront\'s host. Set, the storefront asks for the check on design requests, submit, sign-in code requests and sign-ins, and refuses them while the secret below is not set. Empty turns the check off.',
   },
   {
     name: 'storefront_turnstile_secret',
     section: 'orders',
-    label: 'Storefront bot check: Turnstile secret key',
     kind: 'secret',
-    help: 'The widget\'s secret key, stored sealed under SCADBUDDY_SECRET_KEY_FILE and never shown again. Only this server sends it, to Cloudflare; the storefront and its page never see it.',
   },
   // #4939 — a native run's plate-clear wait, as Bambuddy's queue's `require_plate_clear`.
   {
     name: 'lan_require_plate_clear',
     section: 'printing',
-    label: 'Wait for a cleared plate between prints over the LAN',
     kind: 'bool',
-    help: 'On, a run of several plates or copies sent over the LAN waits after each print until someone says the plate is clear, on the Prints page, in the print dialog or through the assistant. Off, the next print starts once the printer has finished, as Bambuddy\'s queue does by default. A run keeps the setting it started with.',
   },
   // #4953 — whether a fulfilled line item may be unfulfilled (#4952), by a person or the agent.
   {
     name: 'orders_allow_unfulfil',
     section: 'orders',
-    label: 'Allow Unfulfil on a line item',
     kind: 'bool',
-    help: 'Off, a fulfilment is final: nobody can undo one, in the order page or through the agent. A change writes nothing to existing orders.',
   },
   {
     name: 'temporal_ui_url',
     section: 'administration',
-    label: 'Temporal UI URL',
     kind: 'url',
-    help: 'The Temporal web UI, where render workflows can be inspected. Empty shows no link.',
   },
   {
     name: 'spool_overlay_refresh_seconds',
     section: 'administration',
-    label: 'Refresh the spool providers\' records every',
     kind: 'seconds',
-    help: "Bambuddy's spool records, copied on a schedule of their own so a print never waits on Bambuddy. 0 turns the refresh off.",
   },
   {
     name: 'media_upload_max_bytes',
     section: 'uploads',
-    label: 'Largest media upload',
     kind: 'bytes',
-    help: 'For template videos and print photos. The ingress in front of ScadBuddy has its own body limit; a value above it fails there instead.',
   },
   {
     name: 'asset_max_total_bytes',
     section: 'uploads',
-    label: 'File parameter uploads, total size',
     kind: 'bytes',
-    help: 'The SVGs and PNGs attached to file parameters. 0 is no limit.',
   },
   {
     name: 'asset_max_count',
     section: 'uploads',
-    label: 'File parameter uploads, count',
     kind: 'count',
-    help: '0 is no limit.',
   },
   {
     name: 'asset_sweep_grace',
     section: 'uploads',
-    label: 'Keep an unused upload for',
     kind: 'seconds',
-    help: 'An upload no output, preset or render uses is removed after this long. At least an hour.',
   },
   {
     name: 'asset_sweep_interval',
     section: 'uploads',
-    label: 'Sweep unused uploads every',
     kind: 'seconds',
-    help: '0 turns the sweep off.',
   },
   {
     name: 'read_max_triangles',
     section: 'projects',
-    label: 'Read at most this many triangles from a library file',
     kind: 'count',
-    help: 'For Arrange, and a library file’s preview and print checks. 0 (the default) is no limit: any file is read, however large, so a huge one can use all of the server’s memory. Any other number refuses a file that expands to more, saying so. Every copy an object’s components place counts; one request may ask for its own.',
     advanced: true,
   },
   {
     name: 'read_max_objects',
     section: 'projects',
-    label: 'Distinct objects read from a library file',
     kind: 'count',
-    help: 'At most 2,000.',
     advanced: true,
   },
   {
     name: 'read_max_visits',
     section: 'projects',
-    label: 'Objects visited reading a library file',
     kind: 'count',
-    help: 'Components included: a small file whose components name one object many times expands to many visits. At most 200,000.',
     advanced: true,
   },
   {
     name: 'read_max_paint_digits',
     section: 'projects',
-    label: 'Painting read from a library file (digits)',
     kind: 'count',
-    help: 'Bambu Studio colour painting, counted once for every copy of a painted object. At most 50,000,000.',
     advanced: true,
   },
   {
     name: 'library_max_bytes',
     section: 'uploads',
-    label: 'Largest OpenSCAD library checkout',
     kind: 'bytes',
   },
   {
     name: 'render_timeout',
     section: 'rendering',
-    label: 'Render timeout',
     kind: 'seconds',
-    help: 'How long one openscad run may take before it is stopped.',
   },
   {
     name: 'template_activity_max_timeout',
     section: 'rendering',
-    label: 'Template activity limit',
     kind: 'seconds',
-    help: "The longest a template pipeline's own activity may run; a whole pipeline gets four times this.",
   },
   {
     name: 'job_ttl',
     section: 'rendering',
-    label: 'Keep finished renders for',
     kind: 'seconds',
-    help: '0 keeps them forever: the store then keeps every render’s files.',
   },
   {
     name: 'render_concurrency',
     section: 'rendering',
-    label: 'Renders at once',
     kind: 'count',
   },
   {
     name: 'solid_concurrency',
     section: 'rendering',
-    label: 'Colours rendered at once, per job',
     kind: 'count',
-    help: "0 works it out from the CPUs of the container that renders: the render worker's when it runs on its own, else the API's.",
   },
   {
     name: 'check_concurrency',
     section: 'rendering',
-    label: 'Editor checks at once',
     kind: 'count',
   },
   {
     name: 'lsp_sessions',
     section: 'rendering',
-    label: 'Editor language servers',
     kind: 'count',
-    help: 'One per open editor. Past it, an editor goes without completion and hover.',
   },
   {
     name: 'render_queue_max',
     section: 'rendering',
-    label: 'Refuse renders past this many waiting',
     kind: 'count',
-    help: '0 accepts every render.',
   },
   {
     name: 'preview_renders',
     section: 'rendering',
-    label: 'Render a preview for models with no thumbnail',
     kind: 'bool',
   },
   {
     name: 'render_queue_depth_slo',
     section: 'rendering',
-    label: 'Queue depth objective',
     kind: 'count',
-    help: 'Exported for alerts; nothing is refused on reaching it.',
     advanced: true,
   },
   {
     name: 'render_latency_slo',
     section: 'rendering',
-    label: 'Render latency objective',
     kind: 'seconds',
-    help: 'Exported for alerts; nothing is refused on reaching it.',
     advanced: true,
   },
   {
     name: 'duplicate_staging_max_age',
     section: 'rendering',
-    label: 'Treat an unfinished duplicate as abandoned after',
     kind: 'seconds',
     advanced: true,
   },
   {
     name: 'flow_approval_timeout_seconds',
     section: 'rendering',
-    label: 'Deny a flow step waiting for approval after',
     kind: 'seconds',
-    help: '0 is never. A flow, or one of its runs, can set its own.',
     advanced: true,
   },
   {
     name: 'google_fonts_api_key',
     section: 'fonts',
-    label: 'Google Fonts API key',
     kind: 'secret',
-    help: 'Optional. Without one the catalogue comes from fonts.google.com. A new key refetches the catalogue.',
   },
   {
     name: 'fonts_catalogue_ttl',
     section: 'fonts',
-    label: 'Refresh the font catalogue after',
     kind: 'seconds',
   },
   // #4974 — the off-box copy of the model and flow history.
   {
     name: 'git_remote_url',
     section: 'git-remote',
-    label: 'Remote URL',
     kind: 'url',
-    help: 'An http(s) git URL with no credentials in it. Models go to its `models` branch, flows to `flows`. Empty pushes nothing.',
   },
   {
     name: 'git_remote_username',
     section: 'git-remote',
-    label: 'Username',
     kind: 'text',
-    help: 'Who the token belongs to. Empty sends `git`, which GitHub and Gitea take with a token.',
   },
   {
     name: 'git_remote_token',
     section: 'git-remote',
-    label: 'Token',
     kind: 'secret',
-    help: 'A token (or password) with write access to the remote, stored sealed under SCADBUDDY_SECRET_KEY_FILE and never shown again.',
   },
   // #5283 — the storefront's mail, sent by the CRUD service. The password is not a
   // setting: it is sealed apart (`StorefrontMailPassword`).
   {
     name: 'storefront_mail_host',
     section: 'storefront-mail',
-    label: 'SMTP host',
     kind: 'text',
-    help: 'Such as smtp.example.com. Empty sends no mail: order links and sign-in codes wait, and order updates are left to a plugin.',
   },
   {
     name: 'storefront_mail_port',
     section: 'storefront-mail',
-    label: 'SMTP port',
     kind: 'count',
-    help: 'Usually 587 with STARTTLS.',
   },
   {
     name: 'storefront_mail_user',
     section: 'storefront-mail',
-    label: 'SMTP user',
     kind: 'text',
-    help: 'The login. Empty sends without one.',
   },
   {
     name: 'storefront_mail_sender',
     section: 'storefront-mail',
-    label: 'Sender',
     kind: 'text',
-    help: 'The From address of every mail, such as shop@example.com.',
   },
   {
     name: 'storefront_mail_tls',
     section: 'storefront-mail',
-    label: 'TLS',
     kind: 'select',
     choices: [
       { value: 'starttls', label: 'STARTTLS on the port (usually 587)' },
       { value: 'implicit', label: 'Implicit TLS (usually 465)' },
       { value: 'none', label: 'None, a relay with no login' },
     ],
-    help: 'STARTTLS needs a server that offers it. A login is never sent without TLS.',
   },
   // #6153 — the storefront's slices at once; the shop slice profile is saved on its own.
   {
     name: 'storefront_slices_concurrent',
     section: 'storefront-pricing',
-    label: 'Slices at once',
     kind: 'count',
-    help: 'How many storefront slices run at the same time, 1 to 4. The others wait. It takes effect once the storefront prices designs from a slice.',
   },
   {
     name: 'log_level',
     section: 'diagnostics',
-    label: 'Log level',
     kind: 'level',
   },
   {
     name: 'event_log_retention_seconds',
     section: 'diagnostics',
-    label: 'Keep live-update events for',
     kind: 'seconds',
-    help: 'For replay after a short disconnect. 0 is no limit.',
   },
   {
     name: 'event_log_retention_rows',
     section: 'diagnostics',
-    label: 'Keep at most this many live-update events',
     kind: 'count',
-    help: '0 is no limit.',
   },
   {
     name: 'realtime_sockets',
     section: 'diagnostics',
-    label: 'Live-update connections',
     kind: 'count',
-    help: 'One per open tab.',
   },
 ]
 
@@ -506,6 +395,19 @@ export type SecretName = keyof typeof HAS_KEY
 /** The flag a secret is reported under: `has_api_key`, `has_render_api_key`, … */
 export function hasKey(name: SecretName): (typeof HAS_KEY)[SecretName] {
   return HAS_KEY[name]
+}
+
+/** #887 — a field's label, help and env var, as `GET /settings` gives them in `docs`. */
+export type FieldDoc = { label: string; help?: string; env?: string }
+
+/**
+ * The label and help of `name` from the backend's docs, and its env var when one seeds it.
+ * A field the docs do not know (an older server) is labelled by its name.
+ */
+export function docOf(settings: Settings | undefined, name: string): FieldDoc {
+  const doc = settings?.docs?.[name]
+  if (!doc) return { label: name }
+  return { label: doc.title, help: doc.description, env: doc.env_var ?? undefined }
 }
 
 export function envVar(name: string): string {

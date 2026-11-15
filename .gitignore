@@ -223,6 +223,7 @@ __marimo__/
 backend/openapi.json
 backend/storefront-openapi.json
 frontend/src/api/schema.d.ts
+frontend/src/api/settingDocs.json
 frontend/src/storefront/api/schema.d.ts
 agent/src/api/schema.d.ts
 

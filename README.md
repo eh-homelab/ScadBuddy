@@ -1565,7 +1565,7 @@ workers restart.
   1. Set Bambuddy's URL (Settings → *Connection*) and the **Inbox folder, for sends
      without a project** (Settings → *Projects & files*), which is the store's inbox.
   2. In Bambuddy, create a key with *Manage Library* only, and paste it into Settings as
-     **Render key**.
+     **Render worker API key**.
   3. Choose **Bambuddy library** under **Blob store**, and restart the API and the
      workers.
 
@@ -1729,7 +1729,7 @@ workers restart.
 |---|---|---|
 | `SCADBUDDY_STORE_BACKEND` | `local` | Seeds the stored **Blob store** setting. A value saved in Settings wins. |
 | `SCADBUDDY_LIBRARY_BACKEND` | `bambuddy` | Seeds the stored **Print library** setting (`bambuddy` or `native`; applies on restart). A value saved in Settings wins. `native` keeps print files in ScadBuddy's own library, in the blob store, and needs `store_backend` `s3` or `bambuddy`: a start with `native` on the `local` store is refused, and so is a save in Settings (422, `NATIVE_LIBRARY_NOT_READY`). |
-| `SCADBUDDY_BAMBUDDY_RENDER_API_KEY` | none | Seeds the stored **Render key**. It is stored like `SCADBUDDY_BAMBUDDY_API_KEY` and never returned by the API. |
+| `SCADBUDDY_BAMBUDDY_RENDER_API_KEY` | none | Seeds the stored **Render worker API key**. It is stored like `SCADBUDDY_BAMBUDDY_API_KEY` and never returned by the API. |
 | `SCADBUDDY_STORE_MAX_TOTAL_BYTES` | 50 GiB | Past this, a new blob is refused (a re-put of one already stored never is). `0` is no limit. |
 | `SCADBUDDY_STORE_MAX_COUNT` | 200000 | The same, counted in blobs. |
 | `SCADBUDDY_WORKER_CACHE_MAX_BYTES` | 10 GiB | Each process's local piece cache on the `bambuddy` store. It is trimmed to this every `SCADBUDDY_ASSET_SWEEP_INTERVAL` (on a worker, every 300 s when that is `0`), not on write. |
