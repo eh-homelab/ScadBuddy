@@ -3556,6 +3556,25 @@ describe('list_recent_outputs (#4777)', () => {
     const other = await runTool(recent, { ...args, q: 'other', cursor: first.next_cursor }, ctx())
     expect(other.isError).toBe(true)
   })
+
+  it("leaves the storefront's outputs out unless asked, as the backend does (#6371)", async () => {
+    const queries: URLSearchParams[] = []
+    const record = ({ request }: { request: Request }) => {
+      queries.push(new URL(request.url).searchParams)
+      return HttpResponse.json([], { headers: { 'X-Total-Count': '0' } })
+    }
+    server.use(http.get(`${BACKEND}/api/v1/outputs`, record), http.get(`${BACKEND}/api/v1/models/:slug/outputs`, record))
+    for (const [name, args] of [
+      ['list_recent_outputs', {}],
+      ['list_outputs', { slug: 'box' }],
+    ] as const) {
+      expect(z.object(tool(name).shape).safeParse({ ...args, include_storefront: 'yes' }).success).toBe(false)
+      await runTool(tool(name), args, ctx())
+      await runTool(tool(name), { ...args, include_storefront: false }, ctx())
+      await runTool(tool(name), { ...args, include_storefront: true }, ctx())
+    }
+    expect(queries.map((q) => q.get('include_storefront'))).toEqual([null, null, 'true', null, null, 'true'])
+  })
 })
 
 describe('a command the backend answers 202 accepting (#2795)', () => {

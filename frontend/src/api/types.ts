@@ -106,6 +106,8 @@ export interface RecentOutputsQuery {
   q?: string
   /** `yes`: only outputs an order item names; `no`: only the others. */
   ordered?: 'yes' | 'no'
+  /** #6371: also the outputs the storefront's slice run saved; left out by default. */
+  include_storefront?: boolean
 }
 /**
  * #4777 — one Bambuddy archive (a past print, ScadBuddy's or not) and how it went, and

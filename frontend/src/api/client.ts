@@ -1915,6 +1915,7 @@ export const api = {
     if (filters.tag) query.set('tag', filters.tag)
     if (filters.q) query.set('q', filters.q)
     if (filters.ordered) query.set('ordered', filters.ordered)
+    if (filters.include_storefront) query.set('include_storefront', 'true')
     if (page.limit !== undefined) query.set('limit', String(page.limit))
     if (page.after !== undefined) query.set('after', page.after)
     const response = await send(`${API_BASE}/outputs?${query}`, { headers: { Accept: 'application/json' }, signal })

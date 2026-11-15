@@ -49,6 +49,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from scadbuddy.bambuddy.extruders import default_nozzles, one_flow
 from scadbuddy.bambuddy.resolver import DEFAULT_BED, PrintChoices
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.outputs import STOREFRONT, storefront_output_id
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.orders.currency import minor_exponent
 from scadbuddy.orders.estimate import StoreEstimate
@@ -459,12 +460,6 @@ class SliceVariant(BaseModel):
     machine_rate: MachineRateBreakdown | None = None
 
 
-def storefront_output_id(render_key: str) -> str:
-    """The id the variant's render is saved under as an output: one per render key, so
-    every variant of one render shares one output."""
-    return uuid.uuid5(uuid.NAMESPACE_URL, f"scadbuddy:storefront_output:{render_key}").hex
-
-
 def subject_of(key: str) -> str:
     """The subject of a variant's slice and its operation."""
     return f"storefront_price:{key}"
@@ -522,6 +517,8 @@ async def price_variant(run: SliceRun, variant: SliceVariant) -> PriceRow:
             create_output=run.create_output,
             name=f"Storefront: {variant.reference.template_name}",
             saved_as=storefront_output_id(variant.reference.render_key),
+            # #6371: kept out of the back office's Recent renders.
+            source=STOREFRONT,
             follow_every=run.follow_every,
         )
         # Only the visitor's own geometry is priced (#6370 review): a render of another

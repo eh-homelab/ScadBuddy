@@ -1507,7 +1507,17 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   a model's delete, the orphan sweep and a reused slug); the API's start runs
   `OutputIndex.sync` in the background (adds a row for any output with none, drops rows
   whose output is gone, `main._index_outputs_logged`), and a listed row whose files are
-  gone is dropped as it is read. `POST /orders/{id}/items/batch` and
+  gone is dropped as it is read. Each output has a `source` (#6371; `OutputMeta.source`
+  in `meta.json`, `output_index.source`): `back_office`, or `storefront` for the outputs
+  the storefront slice run saves (`output_for_reference`'s `source`, which only
+  `slice_price.py` sets; an order's render and a quote keep the default). `GET /outputs`
+  and `GET /models/{slug}/outputs` leave the storefront's out unless `include_storefront`
+  is true, and so do the agent's `list_recent_outputs` and `list_outputs`; a read by id
+  (`GET /outputs/{id}`, an item's `output_id`, the print dialog, slicing, printing, job
+  cost) finds either. An output saved before the mark is marked by the start's sync, once:
+  the migration `20261115T2118Z_output_index_source.sql` drops the rows named
+  "Storefront: …", and the sync marks one only when its id is `storefront_output_id` of
+  its own render key (`output_index.py` `saved_by_storefront_run`). `POST /orders/{id}/items/batch` and
   `…/items/after-acceptance/batch` (`ItemBatch`, at most `MAX_BATCH_ITEMS` 50) add
   `ItemCreate`s through `Lifecycle.add_items`, the one transaction every single add now
   uses (`NewModelItem`, `NewLibraryItem`, `NewCustomItem`, `NewRequestItem`); a body
@@ -1629,7 +1639,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   printer's machine rate, `MachineRates.for_quote`), never a second formula
   (`test_slice_price.py` checks a storefront price equals a quote to the cent). The variant
   is rendered to an output by `rendering.py` `output_for_reference` (saved as
-  `storefront_output_id(render_key)`) and sliced by `operations.py` `PreviewSlicer`, so the
+  `library/outputs.py` `storefront_output_id(render_key)`, `source` `storefront`, #6371) and sliced by `operations.py` `PreviewSlicer`, so the
   template gives the support and process settings. The shop slice profile gives only the
   printer and a spool per material, and the model's remembered dialog choices the rest
   (`storefront_choices`; none remembered is Standard 0.4 mm). One row per variant in

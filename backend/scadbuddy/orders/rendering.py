@@ -27,7 +27,7 @@ from typing import Any, Protocol
 from fastapi import status
 
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.outputs import OutputMeta, OutputNotFoundError
+from scadbuddy.library.outputs import BACK_OFFICE, OutputMeta, OutputNotFoundError, OutputSource
 from scadbuddy.orders.lifecycle import Lifecycle, LifecycleError
 from scadbuddy.orders.models import Actor, Order, OrderItem, Reference
 from scadbuddy.orders.problems import refused
@@ -152,12 +152,15 @@ async def output_for_reference(
     schema: CustomizerSchema | None = None,
     follow_every: float = FOLLOW_EVERY,
     item: AttachTo | None = None,
+    source: OutputSource = BACK_OFFICE,
 ) -> RenderedOutput:
     """The output for ``reference``: the item's own while it matches (with ``item``),
     else the output saved under ``saved_as`` while it matches, else the reference
     rendered at its commit with its whole inputs, waited on through the projection and
     saved as ``POST /outputs`` saves one (``create_output``, ``output_create``'s run),
     named ``name``. With ``item`` the output is set on that item (:class:`AttachTo`).
+    ``source`` marks who saves a new output (#6371): only the storefront slice run
+    passes ``storefront``; an order's render and a quote keep the back office's.
 
     The save claims ``saved_as`` first (``OutputStore.claim``): a directory already
     there (another attempt's save still writing, or an output that does not match) is
@@ -208,6 +211,7 @@ async def output_for_reference(
             "index": 0,
             "inputs": reference.inputs,
             "name": name,
+            "source": source,
             **({"output_id": saved_as} if saved_as is not None else {}),
         }
     )
