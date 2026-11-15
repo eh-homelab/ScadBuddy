@@ -37,8 +37,16 @@ named time, so it never pushes a physical time past a newer anchor. Three rules 
    time, any other anchor with SB's time of the plate (its newest end, else its start).
    So the skew between BB's clock and SB's cannot count a plate twice or drop it.
 
-`refresh_derived` reads a spool's whole history for each event. That is cheap at a few
-events a print; #6263's AMS readings, one per tick, will need an incremental path.
+`refresh_derived` reads a spool's whole history, except for an event booked on top of
+it (`record` passes the event; #6263's AMS readings come one per tick). When no other
+event of the spool is later than it, it is not a delta (``source`` ``print_actual`` or
+``print_estimate``), not a ``print_started`` or ``print_ended``, and changes nothing
+(no ``data.changes``: an edit can lock the weight or move the label weight), the event
+sorts last and joins no pair, so the walk's answer is known without the walk. A reading
+that qualifies as an anchor (an ``ams_remain`` one when the weight is not locked and it
+is not ``printing``) gives ``grams_left``; any other event leaves it. A ``weighed`` or
+``scale`` event with ``grams_after`` sets ``last_weighed_*``, a ``dried`` one
+``last_dried_*``. Any other event takes the full walk.
 """
 
 from __future__ import annotations
@@ -141,8 +149,9 @@ def record(
     ).fetchone()
     if row is None:
         return None
-    refresh_derived(conn, spool_id)
-    return m.SpoolEvent.model_validate(row)
+    event = m.SpoolEvent.model_validate(row)
+    refresh_derived(conn, spool_id, event)
+    return event
 
 
 def _reading(event: m.SpoolEvent, label_weight_g: int | None) -> float | None:
@@ -223,11 +232,12 @@ def events(conn: Conn, spool_id: UUID) -> list[m.SpoolEvent]:
     return [m.SpoolEvent.model_validate(row) for row in rows]
 
 
-def refresh_derived(conn: Conn, spool_id: UUID) -> None:
+def refresh_derived(conn: Conn, spool_id: UUID, event: m.SpoolEvent | None = None) -> None:
     """Recompute the spool's ``grams_left`` and ``last_*`` columns from its events. The
     label weight is the spool's own, else its type's. The spool's row is locked (`record`
     has locked it already), so two transactions that each record an event read each
-    other's in turn."""
+    other's in turn. With ``event`` (the one just booked), an event on top of the history
+    updates the columns without reading it, by the module's rule."""
     spool = conn.execute(
         "SELECT s.weight_locked, coalesce(s.label_weight_g, t.label_weight_g) AS label_weight_g"
         " FROM filament_spools s LEFT JOIN filament_spool_types t ON t.id = s.type_id"
@@ -236,12 +246,11 @@ def refresh_derived(conn: Conn, spool_id: UUID) -> None:
     ).fetchone()
     if spool is None:
         return
+    if event is not None and _on_top(conn, spool_id, event):
+        _book_on_top(conn, spool_id, event, spool["weight_locked"], spool["label_weight_g"])
+        return
     history = events(conn, spool_id)
-    weighed = [
-        e
-        for e in history
-        if (e.kind == "weighed" or e.source == "scale") and e.grams_after is not None
-    ]
+    weighed = [e for e in history if _weighs(e)]
     dried = [e for e in history if e.kind == "dried"]
     used = [e for e in history if e.kind in _USED]
     last_weighed = weighed[-1] if weighed else None
@@ -265,3 +274,50 @@ def refresh_derived(conn: Conn, spool_id: UUID) -> None:
             spool_id,
         ),
     )
+
+
+def _weighs(event: m.SpoolEvent) -> bool:
+    return (event.kind == "weighed" or event.source == "scale") and event.grams_after is not None
+
+
+def _on_top(conn: Conn, spool_id: UUID, event: m.SpoolEvent) -> bool:
+    """True when ``event`` sorts last in the walk and can join no pair or change the
+    rule's inputs: the module's fast-path rule."""
+    if event.source in _DELTA or event.kind in _USED or event.data.get("changes"):
+        return False
+    row = conn.execute(
+        "SELECT max(at) AS at FROM filament_spool_events WHERE spool_id = %s AND id <> %s",
+        (spool_id, event.id),
+    ).fetchone()
+    newest = row["at"] if row is not None else None
+    return newest is None or newest <= event.at
+
+
+def _book_on_top(
+    conn: Conn,
+    spool_id: UUID,
+    event: m.SpoolEvent,
+    weight_locked: bool,
+    label_weight_g: int | None,
+) -> None:
+    """The columns ``event`` changes when it is on top. A last reading is the walk's
+    anchor whenever it qualifies (no manual reading is later), and no delta follows it."""
+    sets: dict[str, Any] = {}
+    reading = _reading(event, label_weight_g)
+    if reading is not None and not (
+        event.source == "ams_remain" and (weight_locked or event.data.get("printing") is True)
+    ):
+        sets["grams_left"] = max(reading, 0.0)
+    if _weighs(event):
+        sets |= {"last_weighed_g": event.grams_after, "last_weighed_at": event.at}
+    if event.kind == "dried":
+        sets |= {
+            "last_dried_at": event.at,
+            "last_dried_temp_c": event.data.get("temp_c"),
+            "last_dried_hours": event.data.get("hours"),
+        }
+    if sets:
+        columns = ", ".join(f"{c} = %s" for c in sets)
+        conn.execute(
+            f"UPDATE filament_spools SET {columns} WHERE id = %s", [*sets.values(), spool_id]
+        )

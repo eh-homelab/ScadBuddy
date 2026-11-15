@@ -200,11 +200,13 @@ def test_a_job_from_an_old_ref_id_pairs() -> None:
     assert _left(events) == 759
 
 
-def _spool(pool: PgPool) -> UUID:
+def _spool(pool: PgPool, label_weight_g: int | None = None) -> UUID:
     material = next(r.id for r in CatalogStore(pool).list("materials") if isinstance(r, Material))
     with pool.connection() as conn:
         row = conn.execute(
-            "INSERT INTO filament_spools (material_id) VALUES (%s) RETURNING id", (material,)
+            "INSERT INTO filament_spools (material_id, label_weight_g) VALUES (%s, %s)"
+            " RETURNING id",
+            (material, label_weight_g),
         ).fetchone()
     assert row is not None
     return UUID(str(row["id"]))
@@ -232,3 +234,252 @@ def test_recording_the_same_print_twice_is_ignored(pg_pool: PgPool) -> None:
     assert derived["grams_left"] == 880
     assert derived["last_weighed_g"] == 900
     assert derived["last_used_at"] == first.at
+
+
+_DERIVED = (
+    "grams_left, weight_locked, last_weighed_g, last_weighed_at, last_dried_at,"
+    " last_dried_temp_c, last_dried_hours, last_used_at"
+)
+
+
+def _derived(conn: ledger.Conn, spool: UUID) -> dict[str, Any]:
+    row = conn.execute(f"SELECT {_DERIVED} FROM filament_spools WHERE id = %s", (spool,)).fetchone()
+    assert row is not None
+    return dict(row)
+
+
+def _counting(monkeypatch: pytest.MonkeyPatch) -> list[UUID]:
+    """Every read of a spool's whole history, by spool."""
+    reads: list[UUID] = []
+    real = ledger.events
+
+    def counted(conn: ledger.Conn, spool_id: UUID) -> list[SpoolEvent]:
+        reads.append(spool_id)
+        return real(conn, spool_id)
+
+    monkeypatch.setattr(ledger, "events", counted)
+    return reads
+
+
+@pg
+def test_an_ams_reading_on_top_does_not_read_the_history(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spool = _spool(pg_pool, label_weight_g=1000)
+    with pg_pool.connection() as conn:
+        record(conn, spool, "weighed", source="scale", absolute_g=900, at=T0)
+        reads = _counting(monkeypatch)
+        record(
+            conn,
+            spool,
+            "ams_reading",
+            source="ams_remain",
+            at=T0 + timedelta(minutes=1),
+            data={"remain_pct": 60},
+        )
+        assert reads == []
+        assert _derived(conn, spool)["grams_left"] == 600
+        assert _derived(conn, spool)["last_weighed_g"] == 900
+
+
+@pg
+def test_an_event_with_an_older_time_takes_the_full_path(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spool = _spool(pg_pool, label_weight_g=1000)
+    with pg_pool.connection() as conn:
+        record(conn, spool, "weighed", source="scale", absolute_g=900, at=T0)
+        reads = _counting(monkeypatch)
+        record(
+            conn,
+            spool,
+            "synced_from_bb",
+            source="bb",
+            absolute_g=700,
+            ref_kind="bb_spool",
+            ref_id="1@old",
+            at=T0 - timedelta(minutes=1),
+        )
+        assert reads == [spool]
+        assert _derived(conn, spool)["grams_left"] == 900
+
+
+def _book(conn: ledger.Conn, spool: UUID, event: SpoolEvent) -> None:
+    record(
+        conn,
+        spool,
+        event.kind,
+        source=event.source,
+        delta_g=event.delta_g,
+        absolute_g=event.grams_after,
+        ref_kind=event.ref_kind,
+        ref_id=event.ref_id,
+        at=event.at,
+        data=event.data,
+    )
+
+
+def _assert_full_path_agrees(conn: ledger.Conn, spool: UUID) -> None:
+    """The columns the booking left are what the full walk and a full refresh give."""
+    booked = _derived(conn, spool)
+    label = conn.execute(
+        "SELECT label_weight_g FROM filament_spools WHERE id = %s", (spool,)
+    ).fetchone()
+    assert label is not None
+    walked = grams_left(
+        ledger.events(conn, spool),
+        weight_locked=booked["weight_locked"],
+        label_weight_g=label["label_weight_g"],
+    )
+    ledger.refresh_derived(conn, spool)
+    assert booked == _derived(conn, spool)
+    assert booked["grams_left"] == walked
+
+
+@pg
+def test_the_fast_path_matches_a_full_recompute(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spool = _spool(pg_pool, label_weight_g=1000)
+    newest = 9
+    steps: list[SpoolEvent | str] = [
+        _event(0, "weighed", "scale", grams_after=900),
+        _event(1, "ams_reading", "ams_remain", data={"remain_pct": 85}),
+        _sb(2, "print_started", -40),
+        _event(3, "ams_reading", "ams_remain", data={"remain_pct": 80, "printing": True}),
+        _sb(4, "print_ended", -38),
+        _event(5, "ams_reading", "ams_remain", data={"remain_pct": 79}),
+        _event(6, "loaded", None),
+        _event(7, "weighed", "scale", ref_kind="bb_scale", ref_id="w1"),
+        _event(newest, "dried", None, data={"temp_c": 55, "hours": 6}),
+        _event(newest - 1, "weighed", "scale", grams_after=760),
+        "lock",
+        _event(newest + 1, "ams_reading", "ams_remain", data={"remain_pct": 75}),
+    ]
+    reads = _counting(monkeypatch)
+    fast = 0
+    with pg_pool.connection() as conn:
+        for step in steps:
+            reads.clear()
+            if step == "lock":
+                conn.execute(
+                    "UPDATE filament_spools SET weight_locked = true WHERE id = %s", (spool,)
+                )
+                changes = {"weight_locked": [False, True]}
+                at = T0 + timedelta(minutes=newest, seconds=30)
+                record(conn, spool, "edited", at=at, data={"changes": changes})
+            else:
+                assert isinstance(step, SpoolEvent)
+                _book(conn, spool, step)
+            fast += not reads
+            _assert_full_path_agrees(conn, spool)
+            if step is steps[7]:
+                assert _derived(conn, spool)["last_weighed_g"] == 900
+        final = _derived(conn, spool)
+    # The weighing with no reading keeps the scale's 900 g as the last weighing until
+    # the 760 g one, booked older than the drying, takes its place.
+    assert final["last_weighed_g"] == 760
+    assert final["last_dried_temp_c"] == 55
+    # With the lock, the 75 % reading is no anchor: the 760 g weighing stays one.
+    assert final["grams_left"] == 760
+    assert fast >= 5
+
+
+@pg
+def test_a_lock_change_takes_the_full_path(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, label_weight_g=1000)
+    with pg_pool.connection() as conn:
+        record(conn, spool, "weighed", source="scale", absolute_g=800, at=T0)
+        reading = {"remain_pct": 70}
+        at = T0 + timedelta(minutes=1)
+        record(conn, spool, "ams_reading", source="ams_remain", at=at, data=reading)
+        assert _derived(conn, spool)["grams_left"] == 700
+        conn.execute("UPDATE filament_spools SET weight_locked = true WHERE id = %s", (spool,))
+        changes = {"weight_locked": [False, True]}
+        at = T0 + timedelta(minutes=2)
+        record(conn, spool, "edited", at=at, data={"changes": changes})
+        assert _derived(conn, spool)["grams_left"] == 800
+        _assert_full_path_agrees(conn, spool)
+
+
+_RULE_CASES: dict[str, list[SpoolEvent]] = {
+    "anchors_then_subtracts": [
+        _event(1, "weighed", "scale", grams_after=800),
+        _event(2, "print_ended", "print_actual", delta_g=-50, ref_kind="print_run", ref_id="r"),
+        _event(3, "ams_reading", "ams_remain", grams_after=700),
+    ],
+    "estimate_replaced": [
+        _event(1, "weighed", "scale", grams_after=500),
+        _sb(2, "print_started", -40, ref="r1"),
+        _sb(3, "print_ended", -35, ref="r1"),
+    ],
+    "ams_older_than_weighing": [
+        _event(1, "ams_reading", "ams_remain", data={"remain_pct": 90}),
+        _event(2, "weighed", "person", grams_after=600),
+    ],
+    "reading_at_plate_end": [
+        _event(0, "weighed", "scale", grams_after=800),
+        _event(1, "ams_reading", "ams_remain", data={"remain_pct": 70}),
+        _sb(1, "print_ended", -50),
+    ],
+    "plate_end_then_reading": [
+        _event(0, "weighed", "scale", grams_after=800),
+        _sb(1, "print_ended", -50),
+        _event(1, "ams_reading", "ams_remain", data={"remain_pct": 70}),
+    ],
+    "printing_reading": [
+        _event(0, "weighed", "scale", grams_after=800),
+        _sb(1, "print_started", -40),
+        _event(2, "ams_reading", "ams_remain", data={"remain_pct": 74, "printing": True}),
+        _event(3, "ams_reading", "ams_remain", data={"remain_pct": 74}),
+    ],
+    "bb_and_sb_once": [
+        _event(0, "weighed", "scale", grams_after=800),
+        _sb(1, "print_started", -40),
+        _bb(2, -41),
+        _sb(3, "print_ended", -38),
+    ],
+    "bb_reading_holds_usage_ahead": [_sb(5, "print_ended", -38), _bb(10, -41), _bb_reading(10)],
+    "bb_reading_holds_usage_behind": [_sb(2, "print_ended", -38), _bb(2, -41), _bb_reading(10)],
+    "bb_reading_before_usage": [_sb(5, "print_ended", -38), _bb_reading(10), _bb(10, -41)],
+    "bb_reading_sb_end_later": [_bb(2, -41), _bb_reading(2), _sb(5, "print_ended", -38)],
+    "ams_after_sb_end_bb_later": [
+        _sb(5, "print_ended", -38),
+        _event(6, "ams_reading", "ams_remain", data={"remain_pct": 50}),
+        _bb(9, -41),
+    ],
+    "failed_plate": [
+        _event(0, "weighed", "scale", grams_after=600),
+        _sb(1, "print_ended", 0, data={"basis": "not_applied", "job": "J"}),
+        _bb(2, -23.4),
+    ],
+    "failed_plate_by_sb_end": [
+        _sb(0, "print_started", -40),
+        _bb(1, -23.4),
+        _event(2, "ams_reading", "ams_remain", data={"remain_pct": 60}),
+        _sb(3, "print_ended", 0, data={"basis": "not_applied", "job": "J"}),
+    ],
+    "two_slots": [
+        _event(0, "weighed", "scale", grams_after=300),
+        _sb(1, "print_ended", -10, ref="r/J/0"),
+        _sb(1, "print_ended", -15, ref="r/J/1"),
+        _bb(2, -26),
+    ],
+    "old_ref_id": [
+        _event(0, "weighed", "scale", grams_after=800),
+        _sb(1, "print_ended", -38, ref="run1/J/2"),
+        _bb(2, -41),
+    ],
+}
+
+
+@pg
+@pytest.mark.parametrize("case", list(_RULE_CASES))
+def test_the_fast_path_matches_the_full_walk_on_the_rule_cases(pg_pool: PgPool, case: str) -> None:
+    """Booked one by one, each event leaves what the full walk gives, also when it
+    sits on top of the history (the fast path)."""
+    spool = _spool(pg_pool, label_weight_g=1000)
+    with pg_pool.connection() as conn:
+        for event in _RULE_CASES[case]:
+            _book(conn, spool, event)
+            _assert_full_path_agrees(conn, spool)
