@@ -559,6 +559,13 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "A slice quote's plate image from its sliced file (#4673), which the item's print setups draw. The " +
       "agent reads each setup's plates, time, grams and choices from order_get; it has no use for the bytes.",
   },
+  {
+    operation: 'POST /api/v1/orders/{order_id}/items/{item_id}/render',
+    reason:
+      "The order page's Slice… renders an item with a design and no output first, so the print dialog has an " +
+      "output to open on (#6324). The agent's order_item_quote `slice` needs no dialog: its run renders the " +
+      'item itself when it has no matching output.',
+  },
   ...(
     [
       'GET /api/v1/print/outputs/{output_id}/preview-slices/{job_id}/toolpath',

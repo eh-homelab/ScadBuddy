@@ -51,7 +51,6 @@ from scadbuddy.bambuddy.resolver import PrintChoices
 from scadbuddy.bambuddy.supports import SupportsChoice
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import PrintSequence
-from scadbuddy.library.outputs import OutputMeta, OutputNotFoundError
 from scadbuddy.operations.kinds import to_thread_to_end
 from scadbuddy.orders.lifecycle import (
     QUOTE_HOLDER,
@@ -76,23 +75,25 @@ from scadbuddy.orders.models import (
 )
 from scadbuddy.orders.pricing import Plate, PlateFilament, Priced, PricingError, price
 from scadbuddy.orders.problems import PROBLEMS, refused
-from scadbuddy.orders.reference import colours_of, is_commit_id
+from scadbuddy.orders.rendering import (
+    FOLLOW_EVERY,
+    AttachTo,
+    OutputsRead,
+    Renders,
+    output_for_reference,
+    reference_matches,
+)
 from scadbuddy.orders.store import OrderStore
-from scadbuddy.render.inputs import inputs_key
-from scadbuddy.render.job_models import Job
-from scadbuddy.render.runner import with_defaults
 from scadbuddy.render.schema import CustomizerSchema
 from scadbuddy.slicing.slice_info import read_sliced
 from scadbuddy.store import BlobStore
 from scadbuddy.store.content_models import BlobScope
 from scadbuddy.store.refs import BlobRefs
 
-__all__ = ["QUOTE_TIMEOUT"]
+__all__ = ["FOLLOW_EVERY", "QUOTE_TIMEOUT", "OutputsRead", "Renders"]
 
 logger = logging.getLogger(__name__)
 
-#: How often a run reads a render or a slice it waits on (Ruling 7, Task 4).
-FOLLOW_EVERY = 2.0
 #: The file a quote's blob keeps.
 SLICED_NAME = "sliced.3mf"
 #: A sliced file past this is not kept (as the dialog's reads bound it).
@@ -448,38 +449,10 @@ def set_filaments(
     return lifecycle.update_item(order_id, item_id, by, filaments=mine)
 
 
-class OutputsRead(Protocol):
-    """What :func:`ensure_output` reads of an output (``OutputStore``'s)."""
-
-    def get(self, output_id: str) -> OutputMeta: ...
-    def inputs(self, output_id: str) -> dict[str, Any]: ...
-    def arranged_from(self, output_id: str) -> list[str]: ...
-
-
 class PolicySource(Protocol):
     """The book's policy as each quote reads it (``PriceBookReader.policy``)."""
 
     def policy(self) -> tuple[str, PricingPolicy, str]: ...
-
-
-class Renders(Protocol):
-    """What :func:`ensure_output` renders with: ``RenderService``'s submit and read."""
-
-    async def submit(
-        self,
-        slug: str,
-        params: Mapping[str, Any],
-        *,
-        model_version: str | None = ...,
-        inputs: Mapping[str, Any] | None = ...,
-        whole_inputs: bool = ...,
-    ) -> Job: ...
-
-    def read(self, job_id: str) -> Job: ...
-
-
-#: A settled render's states other than `done` (`render/job_models.py` `JobState`).
-_SETTLED_JOB = frozenset({"failed", "cancelled"})
 
 
 def output_matches(
@@ -488,49 +461,13 @@ def output_matches(
     item: OrderItem,
     schema: CustomizerSchema | None = None,
 ) -> bool:
-    """The output is there and its ``meta.json`` and inputs are the reference's (Ruling
-    7): its ``slug``, ``model_version`` and normalised inputs. An arranged output records
-    a content hash where a render records its commit, and the item pins the template's
-    commit instead (#4565): no render of the reference remakes the arrangement, so its
-    hash stands for the pinned commit.
-
-    With ``schema`` (the commit's), both inputs are compared at its defaults where they
-    omit one (#4774): an output saved before renders filled them records only the params
-    it was sent, and is still the render of a reference that names its defaults."""
-    return output_id is not None and _matching(outputs, output_id, item, schema) is not None
-
-
-def _matching(
-    outputs: OutputsRead, output_id: str, item: OrderItem, schema: CustomizerSchema | None
-) -> OutputMeta | None:
-    """The output's ``meta.json`` when it matches (:func:`output_matches`), from one
-    read of it."""
-    try:
-        meta = outputs.get(output_id)
-        inputs = outputs.inputs(output_id)
-        arranged = not is_commit_id(meta.model_version) and bool(outputs.arranged_from(output_id))
-    except (OutputNotFoundError, OSError, ValueError):
-        return None
-    reference = item.reference
-    if reference is None:
-        return None
-    if (
-        meta.slug == reference.slug
-        and (meta.model_version == reference.commit or arranged)
-        and _at_defaults(inputs, schema) == _at_defaults(reference.inputs, schema)
-    ):
-        return meta
-    return None
-
-
-def _at_defaults(inputs: Mapping[str, Any], schema: CustomizerSchema | None) -> dict[str, Any]:
-    if schema is None:
-        return dict(inputs)
-    params = inputs.get("params", {})
-    if not isinstance(params, dict):
-        # A malformed row is compared exactly, never read as an all-defaults render.
-        return dict(inputs)
-    return {**inputs, "params": with_defaults(schema, params)}
+    """The output is there and is the render of the item's reference
+    (``orders/rendering.py`` :func:`reference_matches`)."""
+    return (
+        output_id is not None
+        and item.reference is not None
+        and reference_matches(outputs, output_id, item.reference, schema) is not None
+    )
 
 
 async def ensure_output(
@@ -549,116 +486,33 @@ async def ensure_output(
     saved_as: str | None = None,
     carried: Mapping[int, str] | None = None,
 ) -> str:
-    """The output the item slices (Ruling 7): its own while it matches the reference,
-    else the reference rendered at its commit, waited on through the projection, saved
-    as ``POST /outputs`` saves one (``create_output``, ``output_create``'s run) and set
-    as the item's ``output_id``. An item with no colour slots takes the render's, with
-    ``filaments`` on them. ``schema`` is the reference commit's, for `output_matches`.
-    With ``revision_id`` (the quote's run) the render is of that revision: once the
-    item has another, nothing is written and the run is refused `revision_not_newest`.
-    ``saved_as`` is the id a new output is saved under (:func:`operation_output_id`,
-    #5390): an output of that id that matches is one an earlier attempt of the same
-    operation saved before it stopped, and is set on the item without a second render
-    or save. The save claims the id first (``OutputStore.claim``): a directory already
-    there (another attempt's save still writing, or an output that does not match) is
-    left alone, and the new output gets an id of its own. ``carried`` (#4673, a slice's
-    new design) are the filaments the item had pinned before that revision: the fill
-    puts each on the rendered slot of its number, under ``filaments``, and drops the
-    rest."""
-    if await asyncio.to_thread(output_matches, outputs, item.output_id, item, schema):
-        assert item.output_id is not None
-        return item.output_id
-    if saved_as is not None:
-        earlier = await asyncio.to_thread(_matching, outputs, saved_as, item, schema)
-        if earlier is not None:
-            return await _set_output(
-                lifecycle,
-                order,
-                item,
-                saved_as,
-                list(earlier.colors),
-                filaments,
-                by,
-                revision_id,
-                carried,
-            )
-    reference = reference_of(item)
-    params = reference.inputs.get("params", {})
-    pipeline = reference.render_key == inputs_key(
-        reference.slug, reference.inputs, reference.commit
+    """The output the item slices (Ruling 7): ``orders/rendering.py``
+    :func:`output_for_reference` of the item's reference, set on the item. ``schema`` is
+    the reference commit's. With ``revision_id`` (the quote's run) the render is of that
+    revision: once the item has another, nothing is written and the run is refused
+    `revision_not_newest`. ``saved_as`` is the id a new output is saved under
+    (:func:`operation_output_id`, #5390). ``carried`` (#4673, a slice's new design) are
+    the filaments the item had pinned before that revision."""
+    rendered = await output_for_reference(
+        reference_of(item),
+        outputs=outputs,
+        renders=renders,
+        create_output=create_output,
+        name=f"{order.label} {item.title}",
+        saved_as=saved_as,
+        schema=schema,
+        follow_every=follow_every,
+        item=AttachTo(
+            lifecycle=lifecycle,
+            order=order,
+            item=item,
+            by=by,
+            filaments=filaments,
+            revision_id=revision_id,
+            carried=carried,
+        ),
     )
-    job = await renders.submit(
-        reference.slug,
-        params if isinstance(params, dict) else {},
-        model_version=reference.commit,
-        inputs=reference.inputs,
-        whole_inputs=pipeline,
-    )
-    while job.state not in ("done", *_SETTLED_JOB):
-        await asyncio.sleep(follow_every)
-        job = await asyncio.to_thread(renders.read, job.id)
-    if job.state != "done":
-        raise ApiError(
-            status.HTTP_409_CONFLICT,
-            f"the item's render, job {job.id}, is {job.state}"
-            + (f": {job.error}" if job.error else ""),
-            job_id=job.id,
-        )
-    saved = await create_output(
-        {
-            "slug": reference.slug,
-            "job_id": job.id,
-            "index": 0,
-            "inputs": reference.inputs,
-            "name": f"{order.label} {item.title}",
-            **({"output_id": saved_as} if saved_as is not None else {}),
-        }
-    )
-    return await _set_output(
-        lifecycle,
-        order,
-        item,
-        str(saved["id"]),
-        saved.get("colors") or [],
-        filaments,
-        by,
-        revision_id,
-        carried,
-    )
-
-
-async def _set_output(
-    lifecycle: Lifecycle,
-    order: Order,
-    item: OrderItem,
-    output_id: str,
-    colours: Sequence[str],
-    filaments: Mapping[int, str],
-    by: Actor,
-    revision_id: str | None,
-    carried: Mapping[int, str] | None = None,
-) -> str:
-    """The item's ``output_id`` set to the saved output, with its colour slots when the
-    item has none: ``filaments`` on them, over the ``carried`` ones the render has."""
-    slots = colours_of(colours)
-    rendered = {slot.slot for slot in slots}
-    fill = {slot: f for slot, f in (carried or {}).items() if slot in rendered}
-    fill.update(filaments)
-    try:
-        await asyncio.to_thread(
-            lambda: lifecycle.update_item(
-                order.id,
-                item.id,
-                by,
-                output_id=output_id,
-                colours=slots if not item.colours else None,
-                filaments=None if item.colours else fill or None,
-                expected_revision_id=revision_id,
-            )
-        )
-    except LifecycleError as error:
-        raise refused(error) from None
-    return output_id
+    return rendered.output_id
 
 
 @dataclass(frozen=True)

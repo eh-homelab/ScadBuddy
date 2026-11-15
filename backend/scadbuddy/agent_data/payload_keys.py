@@ -126,20 +126,14 @@ def release(
 
 
 def _released_lately(conn: Connection[Any], subject: str) -> bool:
-    """Whether the subject's key was released (or made) inside the window. Under a lock of
-    its own per subject, so two releases at once write one row; never the subject's own
-    lock, which a forget holds."""
-    conn.execute(
-        "SELECT pg_advisory_xact_lock(hashtext(%s))", (f"scadbuddy:payload_key_audit:{subject}",)
-    )
-    return (
-        conn.execute(
-            "SELECT 1 FROM ai_audit WHERE kind = 'payload_key' AND detail = %s"
-            " AND action IN ('payload_key.release', 'payload_key.create') AND outcome = 'ok'"
-            " AND at > now() - %s::interval LIMIT 1",
-            (subject, RELEASE_AUDIT_WINDOW),
-        ).fetchone()
-        is not None
+    """Whether the subject's key was released (or made) inside the window; never under the
+    subject's own lock, which a forget holds."""
+    return audit.recorded_lately(
+        conn,
+        "payload_key",
+        ("payload_key.release", "payload_key.create"),
+        RELEASE_AUDIT_WINDOW,
+        detail=subject,
     )
 
 

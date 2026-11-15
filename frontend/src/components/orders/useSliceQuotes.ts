@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, ApiError, mayHaveRun } from '../../api/client'
+import { api, ApiError, mayHaveRun, RENDER_KIND } from '../../api/client'
 import type { Activity, ActivityPage, OrderItemDetail, SliceQuoteRequest } from '../../api/types'
 import { refusalText } from './refusal'
 
@@ -19,6 +19,13 @@ export interface SliceQuoteRun {
   detached?: boolean
   /** The item's quote ids as it started. */
   known: readonly string[]
+  /**
+   * #6324 — `rendering` while "Slice…" renders an item that has a design and no output (the
+   * `order_item_render` operation), before the print dialog opens on the new output; left out
+   * while the quote slices. A detached render ends once the item shows an output. A failed
+   * render keeps it, so its error reads as the render's.
+   */
+  stage?: 'rendering'
 }
 
 export type SliceQuoteRuns = ReadonlyMap<string, SliceQuoteRun>
@@ -29,6 +36,8 @@ interface Failure {
   startedAt: number
   finishedAt: number
   error: string
+  /** #6324 — a failed render (`order_item_render`), which an output on the item answers. */
+  render: boolean
 }
 
 /**
@@ -81,6 +90,9 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
   // #5585 — the operations whose failure, carried by a probe, was shown: a dismissed one
   // does not come back on the next reload, as `followed` keeps a failed row's from coming back.
   const shownFailures = useRef(new Set<string>())
+  // #6324 — the renders that landed, by item, each settled once the order's reload shows the
+  // item's output: a reload that fails settles nothing, so no dialog opens later unasked.
+  const rendered = useRef(new Map<string, () => void>())
   useEffect(() => {
     quoted.current = onQuoted
     seen.current = { items, runs }
@@ -94,6 +106,7 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
     followed.current = new Set()
     probes.current = new Map()
     shownFailures.current = new Set()
+    rendered.current = new Map()
     return () => {
       current.current = ''
       controller.abort()
@@ -160,6 +173,37 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
 
   const dismiss = useCallback((itemId: string) => update(orderId, itemId, null), [orderId, update])
 
+  /**
+   * #6324 — "Slice…" on an item with a design and no output: its render first, shown as this
+   * item's run at the `rendering` stage, and the order read again once it lands. Settles true
+   * once the output is the item's, so the caller opens the print dialog on it; false when it
+   * failed (the run shows why, where a failed quote does) or may still be running (detached).
+   */
+  const render = useCallback(
+    (itemId: string, known: readonly string[]) =>
+      new Promise<boolean>((done) => {
+        const run: SliceQuoteRun = { startedAt: Date.now(), error: null, known, stage: 'rendering' }
+        const followedSet = followed.current
+        update(orderId, itemId, run)
+        api
+          .renderItem(orderId, itemId, (operation) => followedSet.add(operation.id), follows.current.signal)
+          .then(
+            () => {
+              update(orderId, itemId, null)
+              if (current.current !== orderId) return done(false)
+              rendered.current.set(itemId, () => done(true))
+              quoted.current()
+            },
+            (cause: unknown) => {
+              if (mayHaveRun(cause)) update(orderId, itemId, { ...run, detached: true })
+              else update(orderId, itemId, { ...run, error: refusalText(cause), finishedAt: Date.now() })
+              done(false)
+            },
+          )
+      }),
+    [orderId, update],
+  )
+
   // Each time this order's items are read (the page's first read, and every reload, so a
   // quote started in another tab shows too): the quotes of them still running, which this
   // page does not follow yet, followed as `start` follows its own. Best effort: without the
@@ -198,7 +242,12 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
         if (seen.current.runs.has(itemId) || followedSet.has(operationId)) continue
         followedSet.add(operationId)
         const started = row.created_at ? Date.parse(row.created_at) : NaN
-        const run: SliceQuoteRun = { startedAt: Number.isNaN(started) ? Date.now() : started, error: null, known: item.quotes.map((q) => q.id) }
+        const run: SliceQuoteRun = {
+          startedAt: Number.isNaN(started) ? Date.now() : started,
+          error: null,
+          known: item.quotes.map((q) => q.id),
+          ...(row.kind === RENDER_KIND ? { stage: 'rendering' as const } : {}),
+        }
         // Shown only once its operation reads as running: one that already ended behind a
         // stale row is no run of this page's. Its failure, if it failed, goes to the probe,
         // and shows when it is the item's newest.
@@ -242,7 +291,10 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
               const ended = row.finished_at ?? row.updated_at
               const finishedAt = shown ? Date.now() : ended && !Number.isNaN(Date.parse(ended)) ? Date.parse(ended) : started
               if (shown && failed) shownSet.add(operationId)
-              settle({ running: false, failure: failed ? { operationId, startedAt: started, finishedAt, error: refusalText(cause) } : undefined })
+              settle({
+                running: false,
+                failure: failed ? { operationId, startedAt: started, finishedAt, error: refusalText(cause), render: row.kind === RENDER_KIND } : undefined,
+              })
               if (shown) update(forOrder, itemId, { ...run, error: refusalText(cause), finishedAt: Date.now() })
             },
           )
@@ -255,12 +307,20 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
       // The item's newest failed row (the rows come newest first, one to a page).
       const operationId = row ? idsOf(row).operationId : ''
       const started = row?.created_at ? Date.parse(row.created_at) : NaN
-      const answered = (at: number) => item.quotes.some((q) => Date.parse(q.created_at) >= at)
+      // A quote made since it started answers a failure; #6324 — an output on the item answers a
+      // failed render too, since a render that succeeds makes no quote.
+      const answered = (at: number, render: boolean) => (render && item.output_id !== null) || item.quotes.some((q) => Date.parse(q.created_at) >= at)
       // #5585 — a stale `running` row's failure that started later is the item's newest.
       if (stale && (!operationId || Number.isNaN(started) || stale.startedAt >= started)) {
-        if (shownSet.has(stale.operationId) || answered(stale.startedAt)) return
+        if (shownSet.has(stale.operationId) || answered(stale.startedAt, stale.render)) return
         shownSet.add(stale.operationId)
-        update(forOrder, itemId, { startedAt: stale.startedAt, finishedAt: stale.finishedAt, error: stale.error, known: item.quotes.map((q) => q.id) })
+        update(forOrder, itemId, {
+          startedAt: stale.startedAt,
+          finishedAt: stale.finishedAt,
+          error: stale.error,
+          known: item.quotes.map((q) => q.id),
+          ...(stale.render ? { stage: 'rendering' as const } : {}),
+        })
         return
       }
       if (!row || !operationId || Number.isNaN(started)) return
@@ -268,7 +328,7 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
       const finished = Number.isNaN(ended) ? started : ended
       if (followedSet.has(operationId)) return
       // A quote made since it started answers it: the failure is no longer the latest.
-      if (answered(started)) return
+      if (answered(started, row.kind === RENDER_KIND)) return
       followedSet.add(operationId)
       // The row carries no error: its operation's read does (a failed one throws it).
       api.followQuote(operationId, signal).then(
@@ -278,7 +338,13 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
           // #5585 — its operation was pruned (`operation_retention_seconds` is shorter than
           // the activity's TTL): no error is left to show, and "not found" is not one.
           if (cause instanceof ApiError && cause.status === 404) return
-          update(forOrder, itemId, { startedAt: started, finishedAt: finished, error: refusalText(cause), known: item.quotes.map((q) => q.id) })
+          update(forOrder, itemId, {
+            startedAt: started,
+            finishedAt: finished,
+            error: refusalText(cause),
+            known: item.quotes.map((q) => q.id),
+            ...(row.kind === RENDER_KIND ? { stage: 'rendering' as const } : {}),
+          })
         },
       )
     }
@@ -310,6 +376,15 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
     }
   }, [itemsOf, items, update])
 
+  useEffect(() => {
+    if (!items) return
+    for (const [itemId, settle] of rendered.current) {
+      if (!items.find((i) => i.id === itemId)?.output_id) continue
+      rendered.current.delete(itemId)
+      settle()
+    }
+  }, [items])
+
   // A detached run ends when its quote shows on the item: a slice quote it did not have
   // (one typed by hand meanwhile is not it).
   useEffect(() => {
@@ -317,9 +392,10 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
     for (const [itemId, run] of runs) {
       if (!run.detached) continue
       const item = items.find((i) => i.id === itemId)
-      if (!item || item.quotes.some((q) => q.source === 'slice' && !run.known.includes(q.id))) dismiss(itemId)
+      const landed = run.stage === 'rendering' ? item?.output_id : item?.quotes.some((q) => q.source === 'slice' && !run.known.includes(q.id))
+      if (!item || landed) dismiss(itemId)
     }
   }, [items, runs, dismiss])
 
-  return { runs: runs as SliceQuoteRuns, start, dismiss }
+  return { runs: runs as SliceQuoteRuns, start, render, dismiss }
 }

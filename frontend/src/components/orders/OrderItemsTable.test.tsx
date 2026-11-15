@@ -263,6 +263,38 @@ describe('OrderItemsTable · unit price', () => {
     expect(within(drawer).getByTestId('quote-from-slice')).toBeDisabled()
   })
 
+  it('shows an item still rendering for Slice… after a reload, and offers no second (#6324)', async () => {
+    const at = new Date().toISOString()
+    const subject = `order_item:${ITEM_DRAFT}`
+    const draft = state.items.find((i) => i.id === ITEM_DRAFT)
+    if (draft) draft.output_id = null
+    seedOperation({ id: 'op-rendering', kind: 'order_item_render', subject, status: 'running', created_at: at })
+    seedActivity([
+      {
+        id: 'operation:op-rendering',
+        kind: 'operation.order_item_render',
+        principal: 'browser',
+        session: null,
+        via_tool: null,
+        subject,
+        status: 'running',
+        title: `Order item render ${subject}`,
+        parent_id: null,
+        detail: {},
+        created_at: at,
+        updated_at: at,
+        finished_at: null,
+      },
+    ])
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    expect(await within(row(ITEM_DRAFT)).findByText('Rendering…')).toBeInTheDocument()
+    await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Name Keychain' }))
+    const drawer = await screen.findByRole('dialog', { name: 'Name Keychain' })
+    expect(within(drawer).getByTestId('quote-running')).toHaveTextContent(/Rendering the design/)
+    expect(within(drawer).getByTestId('quote-from-slice')).toBeDisabled()
+  })
+
   it('clears a picked-up quote once it lands, reloads once, and never follows it again (#4736 review)', async () => {
     const at = new Date().toISOString()
     const subject = `order_item:${ITEM_DRAFT}`
@@ -360,6 +392,61 @@ describe('OrderItemsTable · times (#5554)', () => {
     const drawer = await screen.findByRole('dialog', { name: 'Name Keychain' })
     expect(within(drawer).getByTestId('quote-error')).toHaveTextContent('No printer takes this plate.')
     expect(within(drawer).getByTestId('quote-error-times')).toHaveTextContent(/Started Oct 30, 09:04.*ended Oct 30, 09:06/)
+  })
+
+  // #6324 review: a render that succeeds makes no quote, so the item's output answers a failed one.
+  const failedRender = (id: string, created: string, finished: string) => {
+    const subject = `order_item:${ITEM_DRAFT}`
+    seedOperation({
+      id,
+      kind: 'order_item_render',
+      subject,
+      status: 'failed',
+      created_at: created,
+      finished_at: finished,
+      error: { type: 'about:blank', title: 'Conflict', status: 409, detail: 'the render of name-keychain, job j1, is failed' },
+    })
+    return { id: `operation:${id}`, kind: 'operation.order_item_render', principal: 'browser', session: null, via_tool: null, subject, title: `Order item render ${subject}`, parent_id: null, detail: {}, created_at: created, updated_at: finished }
+  }
+
+  it('shows a failed render while the item has no output, and none once it has one (#6324)', async () => {
+    const row0 = failedRender('op-render-failed', '2026-10-30T13:04:00Z', '2026-10-30T13:06:00Z')
+    seedActivity([{ ...row0, status: 'failed', finished_at: row0.updated_at }])
+    const draft = state.items.find((i) => i.id === ITEM_DRAFT)!
+    draft.output_id = null
+    const first = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    expect(await within(row(ITEM_DRAFT)).findByTestId(`item-quote-failed-${ITEM_DRAFT}`)).toHaveAttribute('title', expect.stringContaining('is failed'))
+    first.unmount()
+
+    // Rendered since (the item has an output), with no quote made: the old failure is not shown,
+    // and its operation is not even read.
+    draft.output_id = 'a'.repeat(32)
+    const failures = vi.spyOn(api, 'failedQuotes')
+    const follow = vi.spyOn(api, 'followQuote')
+    render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    await waitFor(() => expect(failures).toHaveBeenCalled())
+    await act(async () => {
+      await failures.mock.results[0]?.value
+    })
+    expect(follow).not.toHaveBeenCalled()
+    expect(within(row(ITEM_DRAFT)).queryByTestId(`item-quote-failed-${ITEM_DRAFT}`)).toBeNull()
+  })
+
+  it('shows no failed render behind a stale running row once the item has an output (#6324)', async () => {
+    const row0 = failedRender('op-render-stale', new Date(Date.now() - 60_000).toISOString(), new Date().toISOString())
+    // The row stayed `running` after its operation failed, as a swallowed write leaves it.
+    seedActivity([{ ...row0, status: 'running', finished_at: null }])
+    const failures = vi.spyOn(api, 'failedQuotes')
+    render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    // The stale row's follow found the failure; the item's failures are read only after it.
+    await waitFor(() => expect(failures).toHaveBeenCalled())
+    await act(async () => {
+      await failures.mock.results[0]?.value
+    })
+    expect(within(row(ITEM_DRAFT)).queryByTestId(`item-quote-failed-${ITEM_DRAFT}`)).toBeNull()
   })
 })
 

@@ -405,7 +405,10 @@ AAD, so a row either side seals opens on the other).
   subject's payload data key from `POST …/crud/agent/payload-keys/{subject}`, never the
   KEK. Each answers the `agent` service credential only, writes its `ai_audit` row in the
   same transaction (principal `service:agent`, never the secret), and is `no-store`. A
-  reveal's row is kind `credential`, action `reveal.<purpose>`, one per call. A payload
+  reveal's row is kind `credential`, action `reveal.<purpose>`: one per call, but
+  `reveal.redact` (every tool call's redaction, which the agent also keeps 10 s,
+  `plugins/secrets.ts` `SAVED_SECRETS_CACHE_MS`) once in 10 minutes
+  (`api/crud_agent_secrets.py` `REDACT_AUDIT_WINDOW`). A payload
   key's is kind `payload_key`: `payload_key.create` and a refusal every time, and
   `payload_key.release` once per subject in 10 minutes (`agent_data/payload_keys.py`
   `RELEASE_AUDIT_WINDOW`), since the agent asks at transcript-read rate. A

@@ -127,8 +127,8 @@ def grams_left(
     events: Sequence[m.SpoolEvent], *, weight_locked: bool, label_weight_g: int | None
 ) -> float | None:
     """The grams left on a spool by the rule above; ``None`` with no reading to anchor
-    on. Never below zero. Events of one time keep the order they are given in."""
-    ordered = sorted(events, key=lambda e: e.at)
+    on. Never below zero. Events of one time keep the order they were booked in (``seq``)."""
+    ordered = sorted(events, key=lambda e: (e.at, e.seq))
     readings = [_reading(e, label_weight_g) for e in ordered]
     manual = max(
         (i for i, e in enumerate(ordered) if e.source in _MANUAL and readings[i] is not None),

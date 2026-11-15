@@ -102,6 +102,17 @@ export type OpenerStatus = { ok: true; kek: { readonly id: string } } | { ok: fa
 
 /** What a plaintext is revealed for, on the API's audit row (#5299 D5). */
 export type RevealPurpose = 'turn' | 'redact' | 'test'
+/** The turn a reveal is for, which the API's audit row names (each a UUID; anything else is left out). */
+export type RevealIds = { sessionId?: string | undefined; turnId?: string | undefined }
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+function wireIds(ids: RevealIds): { session_id?: string; turn_id?: string } {
+  return {
+    ...(ids.sessionId && UUID_RE.test(ids.sessionId) ? { session_id: ids.sessionId } : {}),
+    ...(ids.turnId && UUID_RE.test(ids.turnId) ? { turn_id: ids.turnId } : {}),
+  }
+}
 
 /** The store as the routes, health and the harness see it; tests substitute an in-memory one. */
 export type CredentialRepo = {
@@ -113,13 +124,13 @@ export type CredentialRepo = {
    * The credential decrypted. The SQL store opens it with `kek` (a SealError without one); the
    * CRUD store asks the API, which opens it and audits the reveal (`purpose`), and ignores `kek`.
    */
-  reveal(kek: Kek | undefined, id?: string, purpose?: RevealPurpose): Promise<Credential | undefined>
+  reveal(kek: Kek | undefined, id?: string, purpose?: RevealPurpose, ids?: RevealIds): Promise<Credential | undefined>
   /**
    * Every credential in priority order, with its secret decrypted where the
    * key opens it (undefined where it does not, every one without a key), all
    * from one read: each row's `epoch` is that of the secret beside it.
    */
-  revealAll(kek: Kek | undefined, purpose?: RevealPurpose): Promise<{ stored: StoredCredential; credential: Credential | undefined }[]>
+  revealAll(kek: Kek | undefined, purpose?: RevealPurpose, ids?: RevealIds): Promise<{ stored: StoredCredential; credential: Credential | undefined }[]>
   /**
    * Who opens the secrets, when it is not the caller's own KEK: the API's key (the CRUD
    * store). Left out, the caller's own `KekStatus` is the opener.
@@ -259,7 +270,9 @@ export function normaliseBaseUrl(raw: string): string {
   if (url.username || url.password) {
     throw new CredentialError('base_url must not carry credentials; put the token in secret', 400)
   }
-  if (url.search || url.hash) {
+  // A bare `?` or `#` leaves `search` and `hash` empty but stays in the URL: refused too, as the
+  // API refuses any `?` or `#` (backend agent_data/credentials.py `check_base_url`).
+  if (url.search || url.hash || url.href.includes('?') || url.href.includes('#')) {
     throw new CredentialError('base_url must not have a query or fragment', 400)
   }
   return url.toString().replace(/\/+$/, '')
@@ -952,19 +965,24 @@ export class CrudCredentials implements CredentialRepo {
     return credential ? fromWire(credential) : undefined
   }
 
-  async reveal(_kek: Kek | undefined, id?: string, purpose: RevealPurpose = 'test'): Promise<Credential | undefined> {
+  async reveal(_kek: Kek | undefined, id?: string, purpose: RevealPurpose = 'test', ids: RevealIds = {}): Promise<Credential | undefined> {
     const { credential } = await this.#call<{ credential: WireCredential | null }>('a credential opened', '/credentials/reveal', {
       ...(id === undefined ? {} : { id }),
       purpose,
+      ...wireIds(ids),
     })
     return credential ? credentialFromWire(credential) : undefined
   }
 
-  async revealAll(_kek: Kek | undefined, purpose: RevealPurpose = 'turn'): Promise<{ stored: StoredCredential; credential: Credential | undefined }[]> {
+  async revealAll(
+    _kek: Kek | undefined,
+    purpose: RevealPurpose = 'turn',
+    ids: RevealIds = {},
+  ): Promise<{ stored: StoredCredential; credential: Credential | undefined }[]> {
     const { credentials } = await this.#call<{ credentials: { stored: WireStored; credential: WireCredential | null }[] }>(
       'the credentials opened',
       '/credentials/reveal',
-      { all: true, purpose },
+      { all: true, purpose, ...wireIds(ids) },
     )
     return credentials.map((row) => ({ stored: fromWire(row.stored), credential: row.credential ? credentialFromWire(row.credential) : undefined }))
   }
@@ -1035,8 +1053,8 @@ export function gatedCredentials(sql: CredentialRepo, crud: CrudCredentials, use
     opener: () => (useCrud() ? crud.opener() : Promise.resolve(own)),
     list: () => pick().list(),
     get: (id) => pick().get(id),
-    reveal: (kek, id, purpose) => pick().reveal(kek, id, purpose),
-    revealAll: (kek, purpose) => pick().revealAll(kek, purpose),
+    reveal: (kek, id, purpose, ids) => pick().reveal(kek, id, purpose, ids),
+    revealAll: (kek, purpose, ids) => pick().revealAll(kek, purpose, ids),
     put: (update, kek, id) => pick().put(update, kek, id),
     create: (update, kek) => pick().create(update, kek),
     delete: (id) => pick().delete(id),

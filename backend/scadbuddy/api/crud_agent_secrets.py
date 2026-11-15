@@ -79,6 +79,8 @@ _SETTING_KEY = re.compile(SETTING_KEY)
 SETTINGS_MAX = 50
 #: The longest value written, as JSON text.
 SETTING_VALUE_MAX = 256 * 1024
+#: How long one ``reveal.redact`` audit row stands for every later reveal for redaction.
+REDACT_AUDIT_WINDOW = "10 minutes"
 #: A credential's id: the agent's (a UUID, or `default` for the row #255 made).
 CREDENTIAL_ID = Annotated[str, Field(min_length=1, max_length=64)]
 
@@ -89,6 +91,7 @@ def _pool(state: Any) -> Pool:
 
 
 def _keks(state: Any) -> tuple[Kek | None, Kek | None]:
+    """The current and previous KEK, read once per process (``kek_at``), never per request."""
     return kek_at(state.settings.secret_key_file), kek_at(state.settings.secret_key_previous_file)
 
 
@@ -457,14 +460,18 @@ def _reveal(conn: Any, body: RevealAsk, kek: Kek) -> Revealed | SealError:
                         opened = None
                 out.append(RevealedRow(stored=_stored(row), credential=opened))
             count = sum(1 for r in out if r.credential is not None)
-            audit.record(
-                conn,
-                "credential",
-                action,
-                "ok",
-                f"opened {count} of {len(out)} credential(s)",
-                **body.ids(),
-            )
+            # Redaction reads every credential at tool-call rate: one row a window says it did.
+            if body.purpose != "redact" or not audit.recorded_lately(
+                conn, "credential", (action,), REDACT_AUDIT_WINDOW
+            ):
+                audit.record(
+                    conn,
+                    "credential",
+                    action,
+                    "ok",
+                    f"opened {count} of {len(out)} credential(s)",
+                    **body.ids(),
+                )
             return Revealed(credentials=out)
         found = store.sealed_rows(conn, body.id)
         if not found:

@@ -18,6 +18,8 @@ export type AiStatus =
   | 'unavailable (database migrations failed)'
   | 'unavailable (database timed out)'
   | 'unavailable (waiting for the API to apply the database migrations)'
+  | 'unavailable (the API did not answer for its key-encryption key)'
+  | 'unavailable (the API timed out answering for its key-encryption key)'
   | `disabled (no key-encryption key: ${string})`
   | 'disabled (no Claude credential)'
   | 'unavailable (stored credential was sealed with a different key-encryption key)'
@@ -81,9 +83,9 @@ export async function aiStatus(
   try {
     opener = await within(openerOf(deps.credentials, deps.kek), timeoutMs)
   } catch {
-    return { ai: 'unavailable (database unreachable)', credential }
+    return { ai: 'unavailable (the API did not answer for its key-encryption key)', credential }
   }
-  if (opener === TIMED_OUT) return { ai: 'unavailable (database timed out)', credential }
+  if (opener === TIMED_OUT) return { ai: 'unavailable (the API timed out answering for its key-encryption key)', credential }
   const kek: OpenerStatus = opener
   if (!kek.ok) return { ai: `disabled (no key-encryption key: ${kek.reason})`, credential }
   const kekId = kek.kek.id

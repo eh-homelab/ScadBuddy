@@ -12,6 +12,7 @@ steps of #5299 that move those tables (5 and 7).
 
 from __future__ import annotations
 
+import functools
 import logging
 from pathlib import Path
 from typing import Any
@@ -25,8 +26,11 @@ from scadbuddy.library.settings_store import settings_kek
 logger = logging.getLogger(__name__)
 
 
+@functools.cache
 def kek_at(path: Path | None) -> Kek | None:
-    """The key in ``path``, read once per process; None without one, or when it cannot be
+    """The key in ``path``, read once per process and kept (by path): the routes ask at
+    every request, so no request reads a file, and the API's start (``main``
+    ``_rotate_agent_secrets``) makes the first read. None without one, or when it cannot be
     read (the settings store's own start refuses a bad current key first)."""
     try:
         return settings_kek(path)

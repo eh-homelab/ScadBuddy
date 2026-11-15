@@ -334,7 +334,7 @@ export const filamentTools: Tool[] = [
     label: 'Delete a spool',
     description:
       'Delete a spool that never printed (one added by mistake), with its ledger and tag bindings. 409 when its ' +
-      'ledger holds a print: use filament_spool_archive instead. Only when the user asks. Writes ScadBuddy only.',
+      'ledger holds a print or Bambuddy links it (the next pull would make it again): use filament_spool_archive instead. Only when the user asks. Writes ScadBuddy only.',
     input: z.object({ spool_id: z.string().uuid() }),
     risk: 'write',
     source: SOURCE,

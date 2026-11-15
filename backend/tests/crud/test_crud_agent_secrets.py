@@ -41,6 +41,7 @@ from scadbuddy.auth.service_credentials import (
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.secrets import Kek, kek_from_base64, open_bytes, seal_bytes, seal_secret
+from scadbuddy.library.settings_store import settings_kek
 from scadbuddy.render.agent_migrations import migrate_agent
 from scadbuddy.workflows.payload_codec import payload_key_context, payload_key_lock
 from tests.conftest import PgPool
@@ -375,6 +376,9 @@ def test_a_row_another_key_sealed_is_not_opened(agent: Agent, tables: PgPool) ->
         ("reveal.redact", "ok"),
         ("reveal.test", "error"),
     ]
+    # Redaction reads at tool-call rate: one row a window (REDACT_AUDIT_WINDOW).
+    agent.post("/credentials/reveal", {"all": True, "purpose": "redact"})
+    assert [a["action"] for a in _audit(tables)].count("reveal.redact") == 1
 
 
 def test_the_agents_own_rows_open_here(tables: PgPool, tmp_path: Path) -> None:
@@ -536,6 +540,30 @@ def test_without_a_kek_nothing_is_sealed_or_opened(tables: PgPool, tmp_path: Pat
 
 def test_the_key_route_names_the_apis_key(agent: Agent) -> None:
     assert agent.get("/credentials/key").json() == {"ok": True, "kek_id": KEK.id, "reason": None}
+
+
+def test_the_key_files_are_read_once_not_per_request(
+    tables: PgPool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reads: list[Path | None] = []
+    real = settings_kek
+
+    def counted(path: Path | None) -> Kek | None:
+        reads.append(path)
+        return real(path)
+
+    monkeypatch.setattr("scadbuddy.agent_data.rotation.settings_kek", counted)
+    app = _app(tables, tmp_path, kek=KEK_B64, previous=OLD_B64)
+    subject = f"flow-{uuid.uuid4()}"
+    with TestClient(app) as client:
+        agent = Agent(client, _token(app))
+        for _ in range(3):
+            assert agent.get("/credentials/key").status_code == 200
+            assert agent.post(f"/payload-keys/{subject}", {"create": True}).status_code == 200
+    settings = app.state.scadbuddy.settings
+    assert sorted(map(str, reads)) == sorted(
+        [str(settings.secret_key_file), str(settings.secret_key_previous_file)]
+    )
 
 
 # --- payload keys -----------------------------------------------------------------------

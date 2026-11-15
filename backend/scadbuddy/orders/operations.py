@@ -59,7 +59,13 @@ from scadbuddy.orders.bambuddy import (
     start_quote_preview,
 )
 from scadbuddy.orders.component import ORDERS
-from scadbuddy.orders.lifecycle import QUOTE_TIMEOUT, LifecycleError
+from scadbuddy.orders.lifecycle import (
+    QUOTE_TIMEOUT,
+    SETTLED,
+    LifecycleError,
+    check_submitted,
+    requote_open,
+)
 from scadbuddy.orders.models import Actor, Reference
 from scadbuddy.orders.printing import (
     PRINT_TIMEOUT,
@@ -82,8 +88,10 @@ from scadbuddy.orders.quote import (
     operation_quote_id,
     quote_check,
     quote_run,
+    reference_of,
     support_check,
 )
+from scadbuddy.orders.rendering import AttachTo, output_for_reference
 from scadbuddy.orders.spools import item_plan
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.printers.component import PRINTERS
@@ -100,6 +108,7 @@ from scadbuddy.store.content_models import BlobMissingError
 if TYPE_CHECKING:
     from scadbuddy.api.deps import PrintCommands
     from scadbuddy.core.components import Components, Core
+    from scadbuddy.orders.store import OrderStore
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +119,9 @@ BODY_ONLY = "body_only"
 #: The item's pinned filaments before a slice's revision (#4673, #5761 review), set by
 #: the quote route with that revision and not keyed: the render's slots take them.
 CARRIED = "carried_filaments"
+#: An item's design rendered and its output set on the item (#6324), so the print dialog
+#: has an output to open on for "Slice…".
+ORDER_ITEM_RENDER = "order_item_render"
 ORDER_ATTACHMENT_ADD = "order_attachment_add"
 ORDER_ITEM_PRINT = "order_item_print"
 ORDER_ATTEMPT_COPY = "order_attempt_copy"
@@ -464,6 +476,57 @@ async def claimed_run(
     return None
 
 
+def render_output_id(operation: str | None) -> str:
+    """The id an item's render saves its output under (#6324): one per operation, so an
+    attempt that runs again after its worker stopped finds the output an earlier attempt
+    saved instead of saving a second. A run outside an operation gets one of its own."""
+    if operation is None:
+        return uuid.uuid4().hex
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"scadbuddy:order_item_render_output:{operation}").hex
+
+
+def render_check(store: OrderStore, order_id: str, item_id: str) -> None:
+    """The refusals of an item's render (#6324), from the rows alone, writing nothing:
+    404 for an unknown order or item, 409 ``order_not_submitted`` for a storefront cart,
+    ``item_library_file`` (it slices its file), ``item_custom`` and
+    ``item_has_no_design`` (``reference_of``), ``order_not_open`` while the item takes no
+    new quote (``requote_open``) and ``item_not_open`` for a settled item: what the slice
+    quote's own check refuses."""
+    order = store.order(order_id)
+    if order is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
+    try:
+        check_submitted(order)
+    except LifecycleError as error:
+        raise refused(error) from None
+    item = store.item(item_id)
+    if item is None or item.order_id != order.id:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order.label}")
+    if item.library_file is not None:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"item {item_id} is a library file item: it slices its file, and has no design"
+            " to render",
+            type_=PROBLEMS + "item_library_file",
+            items=[item.id],
+        )
+    reference_of(item)
+    if not requote_open(order, item, store.quotes(item.id)):
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"order {order.label} is {order.status}: an item is rendered for a quote while"
+            " the order is draft or quoted, or, past that, while the item has no accepted"
+            " quote or was revised after acceptance",
+            type_=PROBLEMS + "order_not_open",
+        )
+    if item.status in SETTLED:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"item {item_id} is {item.status}",
+            type_=PROBLEMS + "item_not_open",
+        )
+
+
 def order_kinds(core: Core, components: Components) -> list[OperationKind]:
     """The orders' kinds, bound to this process's state."""
 
@@ -565,6 +628,58 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 type(error).__name__, type=type(error).__name__, non_retryable=True
             ) from error
         dumped: dict[str, Any] = quote.model_dump(mode="json")
+        return dumped
+
+    async def render_check_kind(request: dict[str, Any]) -> dict[str, Any]:
+        store = components.get(ORDERS).store
+        await asyncio.to_thread(render_check, store, request["order_id"], request["item_id"])
+        return {}
+
+    async def render_run_kind(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        # Read when it runs: the operations component is built after this one's kinds.
+        from scadbuddy.operations.component import OPERATIONS
+
+        orders = components.get(ORDERS)
+        lifecycle = orders.lifecycle
+        order_id, item_id = request["order_id"], request["item_id"]
+        by = Actor.model_validate(request["by"])
+        create = components.get(OPERATIONS).kinds["output_create"]
+
+        async def create_output(body: dict[str, Any]) -> dict[str, Any]:
+            return await create.run(body, {})
+
+        try:
+            # The revision the output is of: one made while it renders refuses the write.
+            item = await asyncio.to_thread(lifecycle.ensure_revision, order_id, item_id, by)
+        except LifecycleError as error:
+            raise refused(error) from None
+        order = await asyncio.to_thread(orders.store.order, order_id)
+        if order is None:
+            raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
+        reference = reference_of(item)
+        await output_for_reference(
+            reference,
+            outputs=core.outputs,
+            renders=_Renders(core),
+            create_output=create_output,
+            name=f"{order.label} {item.title}",
+            saved_as=render_output_id(OPERATION_RUN.get()),
+            schema=await reference_schema(core, reference),
+            item=AttachTo(
+                lifecycle=lifecycle,
+                order=order,
+                item=item,
+                by=by,
+                revision_id=item.current_revision_id,
+                # The order or the item may have moved on while it rendered. A refusal
+                # here leaves the output saved: a render of the template like any other
+                # (the model's outputs and Recent renders list it), set on no item.
+                check=lambda: render_check(orders.store, order_id, item_id),
+            ),
+        )
+        rendered = await asyncio.to_thread(orders.store.item, item_id)
+        assert rendered is not None
+        dumped: dict[str, Any] = rendered.model_dump(mode="json")
         return dumped
 
     async def item_print_check(request: dict[str, Any]) -> dict[str, Any]:
@@ -970,6 +1085,20 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             unkeyed=frozenset({"revision_id", CARRIED}),
             # The render and every plate's slice outlast the command deadline: the
             # caller follows the operation anyway.
+            answers_running=True,
+        ),
+        OperationKind(
+            ORDER_ITEM_RENDER,
+            render_check_kind,
+            render_run_kind,
+            # A worker that stops mid-render (a rollout) fails its attempt; the next one
+            # joins the same render by its key and finds the output an earlier attempt
+            # saved under the operation's id (`render_output_id`).
+            run_attempts=3,
+            queue="library",
+            run_timeout=QUOTE_TIMEOUT,
+            where="the item's output",
+            # A render outlasts the command deadline: the caller follows the operation.
             answers_running=True,
         ),
         OperationKind(

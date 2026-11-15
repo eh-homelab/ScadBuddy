@@ -127,7 +127,9 @@ function SetupFacts({ orderId, itemId, quote, changes }: { orderId: string; item
  * by the revision each was made of: each with its plates, time, grams, plate previews and
  * what it changed from the accepted one. Accept is off, with the reason, on a quote of a
  * revision that is no longer the item's current one. Slice… opens the print dialog on the
- * item's design, its inputs editable in place (`DesignInputs`).
+ * item's design, its inputs editable in place (`DesignInputs`). #6324 — an item with a design
+ * and no output (a storefront item) is rendered first, in the same press: the run shows
+ * "Rendering", and the dialog opens by itself on the new output.
  */
 export function QuoteEditor({
   orderId,
@@ -158,8 +160,9 @@ export function QuoteEditor({
   /** What a slice quote slices: the item's output or library file, and its colours' filaments. */
   item?: Pick<OrderItem, 'output_id' | 'reference' | 'colours'> &
     Partial<Pick<OrderItem, 'library_file' | 'origin_archive_ids' | 'current_revision_id'>> & { revisions?: Revision[] }
-  /** The page's slice quote of this item (`useSliceQuotes`): its run, and how to start one. */
-  slice?: { run?: SliceQuoteRun; start: (body: SliceQuoteRequest) => Promise<void>; dismiss: () => void }
+  /** The page's slice quote of this item (`useSliceQuotes`): its run, and how to start one.
+   * `render` (#6324) renders an item with a design and no output, settling true once it has one. */
+  slice?: { run?: SliceQuoteRun; start: (body: SliceQuoteRequest) => Promise<void>; render?: () => Promise<boolean>; dismiss: () => void }
   /** #5543: the item's parts as a key (`part:per_unit,…`): the history's unit cost carries
    * them, so a change reads it again. */
   parts?: string
@@ -171,19 +174,32 @@ export function QuoteEditor({
   /** The dialog opened for `startSlicing`: the page drops the request, so a remount does not open it again. */
   onSliceOpened?: () => void
 }) {
-  const [slicing, setSlicing] = useState(startSlicing > 0)
+  // What a slice quote slices: the item's output, or a library file item's file (#5544).
+  const sliceSource = item ? orderItemSource(item) : null
+  // #6324 — a design with no output yet: Slice… renders it first.
+  const renders = sliceSource === null && !!item?.reference && !item.library_file && slice?.render !== undefined
+  const [slicing, setSlicing] = useState(startSlicing > 0 && sliceSource !== null)
+  /** Slice…: the dialog on the item's output, or the design's render first and then the dialog. */
+  function beginSlice() {
+    if (sliceSource) setSlicing(true)
+    // One render at a time: the row's Slice… is offered while one runs, the drawer's is not.
+    else if (renders && !(slice?.run && !slice.run.error)) {
+      void slice?.render?.().then(
+        (rendered) => setSlicing(rendered),
+        () => setSlicing(false),
+      )
+    }
+  }
   // Slice… again on the row while the drawer is open: the dialog opens again.
   useEffect(() => {
     if (startSlicing > 0) {
-      setSlicing(true)
+      beginSlice()
       onSliceOpened?.()
     }
     // Only a new request opens it; the callback's identity is the page's.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [startSlicing])
   const [fromPrint, setFromPrint] = useState(false)
-  // What a slice quote slices: the item's output, or a library file item's file (#5544).
-  const sliceSource = item ? orderItemSource(item) : null
   const [price, setPrice] = useState('')
   const [label, setLabel] = useState('')
   const [busy, setBusy] = useState(false)
@@ -330,6 +346,10 @@ export function QuoteEditor({
             <span>
               No answer from the quote started at <When at={running.startedAt} /> ({elapsed(running.startedAt, now)} ago): it may still be slicing, and shows here when it lands. If it never started, stop waiting and quote again.
             </span>
+          ) : running.stage === 'rendering' ? (
+            <span>
+              Rendering the design. The print dialog opens when it is done. Started <When at={running.startedAt} />, running for <span data-testid="quote-elapsed">{elapsed(running.startedAt, now)}</span>…
+            </span>
           ) : (
             <span>
               Slicing every plate and pricing it. Started <When at={running.startedAt} />, running for <span data-testid="quote-elapsed">{elapsed(running.startedAt, now)}</span>…
@@ -346,7 +366,7 @@ export function QuoteEditor({
       {slice?.run?.error && (
         <p role="alert" className="flex flex-wrap items-center gap-2 text-[13px] text-warn" data-testid="quote-error">
           <span>
-            The slice quote failed: {slice.run.error}
+            {slice.run.stage === 'rendering' ? 'The render of the design failed' : 'The slice quote failed'}: {slice.run.error}
           </span>
           <span className="text-xs text-muted-foreground" data-testid="quote-error-times">
             Started <When at={slice.run.startedAt} />
@@ -367,8 +387,8 @@ export function QuoteEditor({
             type="button"
             size="sm"
             variant="outline"
-            disabled={busy || !(item.output_id || item.library_file) || (slice.run !== undefined && !slice.run.error)}
-            onClick={() => setSlicing(true)}
+            disabled={busy || !(sliceSource || renders) || (slice.run !== undefined && !slice.run.error)}
+            onClick={beginSlice}
             data-testid="quote-from-slice"
           >
             Slice…
@@ -378,7 +398,7 @@ export function QuoteEditor({
               Quote from the print…
             </Button>
           )}
-          {!item.output_id && !item.library_file && (
+          {!item.output_id && !item.library_file && !item.reference && (
             <span className="text-xs text-muted-foreground">{NO_SLICE_SOURCE}</span>
           )}
         </div>

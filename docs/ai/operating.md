@@ -708,6 +708,8 @@ In an `api` process, `temporal` reports its own `agent-tools.<hostname>` worker.
   | `unavailable (database migrations failed)` | `ready()` returned false |
   | `unavailable (waiting for the API to apply the database migrations)` | `ai_migrations` lacks a file this build expects: the API has not migrated yet (#5299) |
   | `unavailable (database timed out)` | `ready()` or the credential read took longer than 2 s (`DEFAULT_HEALTH_TIMEOUT_MS`) |
+  | `unavailable (the API did not answer for its key-encryption key)` | Once the API serves area `credentials` (#5299 step 4): `GET …/crud/agent/credentials/key` failed |
+  | `unavailable (the API timed out answering for its key-encryption key)` | That read took longer than 2 s |
   | `disabled (no key-encryption key: <reason>)` | See §3.2 |
   | `disabled (no Claude credential)` | No row saved |
   | `unavailable (stored credential was sealed with a different key-encryption key)` | The row's `kek_id` does not match the mounted key |
@@ -958,9 +960,13 @@ The agent's migration advisory lock key is "SCADAGNT", distinct from the backend
 
 The agent also reads the backend's flow tables, which the backend migrates. It asks the
 backend over its CRUD routes (`/api/v1/internal/crud/agent/`, area `flows`,
-`agent/src/flows/backendReads.ts`, #5299), and never over SQL: the API takes back its
-role's grants on `events`, `workflow_runs` and `workflow_run_decisions` at every start
-(`backend/scadbuddy/auth/revoke.py` `RETIRED_GRANTS`). Every flow tool call reads its run
+`agent/src/flows/backendReads.ts`, #5299), and never over SQL. The API takes back the
+grants of its role `scadbuddy_agent` on `events`, `workflow_runs` and
+`workflow_run_decisions` at every start (`backend/scadbuddy/auth/revoke.py`
+`RETIRED_GRANTS`), but the agent still connects as the database owner, so that revoke binds
+nothing until #5299 step 12 removes the agent's database URL. Until then the guard is
+`agent/test/retiredTables.test.ts`, which fails on agent SQL that names one of those tables.
+Every flow tool call reads its run
 `FOR SHARE` (`PgFlowRuns.startedBy`, `agent/src/temporal/flowRuns.ts`); the backend's
 route takes that lock in its own transaction. The gate's grant check
 (`agent/src/gate/store.ts` `grantInput`) still reads `flow_grants` and `flow_grant_uses`
