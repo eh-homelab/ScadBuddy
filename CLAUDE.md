@@ -239,6 +239,10 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
   (QEMU-emulated, with a PR-time `openscad-lsp-arm64` check, #199) was dropped; the
   Dockerfile still handles `TARGETARCH=arm64`, so re-enabling it is `platforms` plus
   `docker/setup-qemu-action`.
+- A public GHCR image's tags and digest need no `read:packages` (which `gh`'s token
+  lacks): `T=$(curl -s "https://ghcr.io/token?scope=repository:eh-homelab/<image>:pull" | jq -r .token)`,
+  then `GET https://ghcr.io/v2/eh-homelab/<image>/tags/list`, or `HEAD …/manifests/<tag>`
+  for its `docker-content-digest`, both with `Authorization: Bearer $T`.
 
 - Go (#2686): `ci.yml`'s `go-select` (`.github/scripts/select-go.sh`, tested by
   `select-go.test.sh`) decides whether a change touched Go, and the `go` job always
@@ -284,6 +288,9 @@ The Go and Rust commands and toolchain notes: `tools/go/CLAUDE.md`, `workers/rus
   a link, every measured fact says where and how it was measured (spec §3).
   `lint-plugin.sh` checks it for plugin skills only; `link-check.yml` checks weekly that
   the links in `docs/`, `README.md`, this file, every per-directory `CLAUDE.md` and every `SKILL.md` still resolve.
+- A `claude-review` comment ends with `<!-- claude-review-sha: <sha> -->`. Only the one
+  whose sha is the PR's current head counts; a script that waits for the review waits for
+  that one, not the newest comment.
 - Required checks on `main`: **`CI Summary`** and **`claude-review`** (the ruleset
   lives in eh-homelab/clusters, so renaming either job breaks the gate silently).
   A script that reads the gate: `claude-review` is a commit status (`gh pr view --json
@@ -329,3 +336,10 @@ The Go and Rust commands and toolchain notes: `tools/go/CLAUDE.md`, `workers/rus
 - Backend: `test_submit.py::test_a_slow_first_accept_is_retried_in_the_same_run`
   (`assert 3 == 2`) is timing-sensitive under CI load. Re-run the failed jobs once
   before you debug it.
+
+## Prod gotchas
+
+- A merged eh-homelab/clusters change that never reaches prod: check the `scadbuddy` Argo
+  CD app's `status.history[-1].deployedAt` and its PostSync hook Jobs (`kubectl -n
+  bambuddy get jobs`). A Job stuck in deletion with `argocd.argoproj.io/hook-finalizer`
+  blocks every sync until its finalizers are removed (clusters#3564).
