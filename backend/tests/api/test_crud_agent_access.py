@@ -198,6 +198,22 @@ def test_a_lease_is_busy_while_an_sql_pod_holds_the_advisory_lock(
         assert _lease(client, agent, server, str(uuid.uuid4())).status_code == 200
 
 
+def test_an_sql_pod_can_still_lock_a_plugin_whose_lease_is_held(
+    client: TestClient, agent: dict[str, str], pg_conninfo: str
+) -> None:
+    """The other way round is not covered, by design (``agent_data/leases.py``): the acquire
+    takes the advisory lock for its transaction only, and an SQL-path pod does not read
+    ``agent_leases``, so during a roll it can start a test while a lease holds."""
+    assert _lease(client, agent, "tool-listing:remote:files", str(uuid.uuid4())).status_code == 200
+    with psycopg.connect(pg_conninfo, autocommit=True) as old_pod:
+        row = old_pod.execute(
+            "SELECT pg_try_advisory_lock("
+            "hashtextextended('scadbuddy:ai_tool_listings:test:files', 0))"
+        ).fetchone()
+        assert row is not None and row[0] is True
+        old_pod.execute("SELECT pg_advisory_unlock_all()")
+
+
 def test_a_listing_is_stored_only_while_the_lease_holds_and_the_plugin_stands(
     client: TestClient, agent: dict[str, str], db: Any
 ) -> None:
