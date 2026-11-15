@@ -444,7 +444,8 @@ async def _picture_url(
 
 def _quote(item: OrderItem, rows: _Rows, revisions: list[Revision]) -> CustomerQuote | None:
     """The item's price: its accepted quote, else its newest, shown once the design it
-    names was sent (an item with no design shows its price at once)."""
+    names was sent (an item with no design, or a `storefront` quote, #6153, shows its
+    price at once)."""
     quotes = rows.quotes[item.id]
     if not quotes:
         return None
@@ -455,7 +456,10 @@ def _quote(item: OrderItem, rows: _Rows, revisions: list[Revision]) -> CustomerQ
     # `created_at`, never one sent after. None when no design was sent by then.
     before = [r for r in revisions if r.sent_at is not None and r.sent_at <= quote.created_at]
     named = by_id.get(quote.revision_id) if quote.revision_id else (before[-1] if before else None)
-    if revisions and (named is None or named.sent_at is None):
+    # A storefront line's firm price (#6153) is of the design the customer made on the
+    # storefront: it shows with no design sent.
+    own = quote.source == "storefront"
+    if revisions and not own and (named is None or named.sent_at is None):
         return None
     open_order = (
         rows.order.status in ("draft", "quoted")
@@ -479,6 +483,7 @@ def _quote(item: OrderItem, rows: _Rows, revisions: list[Revision]) -> CustomerQ
         and quote is quotes[-1]
         and (
             not revisions
+            or (own and item.approval == "together")
             or (
                 item.approval == "design_first"
                 and agreed is not None

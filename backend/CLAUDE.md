@@ -1636,6 +1636,27 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   and `print_seconds` for the shop and the checkout (`estimate.py` `SHOP_ONLY_FIELDS`); the
   edge sends only `routes.py` `ESTIMATE_FIELDS`. The volume analysis (`storefront_job_parts`)
   is no longer read; `rough_estimate` stays for the back office.
+  Checkout charges that price (#6153 PR B, `orders/storefront/line_prices.py`, migration
+  `20261115T1823Z_storefront_item_prices.sql`). The server never takes a price from the
+  browser: `add_listing_item` makes the line's key as the estimate does
+  (`slice_price.py` `firm_price`, read only: it starts no slice) from the visitor's own
+  done render (`variant_at_add`, `renders.py` `variant_of`) and keeps the listing, the 3MF
+  sha256, the slot filaments and the price it found in `storefront_item_prices`. The
+  draft view answers each item's `price` (`firm` with `unit_price_minor` and
+  `total_minor`, else `by_hand` and no number) and `pay_now` (every item firm). The
+  submit prices each line again (`reprice`: a fresh key from the kept variant, no price
+  when the listing is gone, unpublished or at another slug or commit, or a slot
+  filament is gone or archived). A price that changed, or one where there was none, is
+  written and refused 409 `prices_changed` (with `items`); a price that is gone is
+  written and the line goes to the shop's check. `Lifecycle.submit_order(firm=...)`
+  records a `storefront` quote (`QuoteSource`, no sliced file, so a print slices again)
+  of each firm line before the deposit policy; when every open item has one it accepts
+  them and the order as the customer (`_accepted_by_the_last`), and the answer's
+  `pay_now` is true. The submit runs under `Payments.run_closing_linked`, so the balance
+  request's page is linked and the deposit request it replaced is closed. A storefront
+  customer's last accept now always opens the balance request (`_accept_order(balance=True)`,
+  decision 11), deposit or not. The order page shows a `storefront` quote with no design
+  sent, and lets the customer accept it on a `together` item.
 - Prepared colour combinations (#6237): `orders/storefront/prepare.py`, routes `GET`/`POST
   /storefront/listings/{id}/prepare` (`api/storefront.py`). The combinations are enumerated
   per printable material (of the listing's effective materials, in order, #6258, those

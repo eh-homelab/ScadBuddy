@@ -646,6 +646,71 @@ def answer_of(row: PriceRow) -> StoreEstimate:
     )
 
 
+def _orders(state: AppState) -> OrdersComponent:
+    # Here, not at the top: the orders component imports this module.
+    from scadbuddy.orders.component import ORDERS
+
+    orders: OrdersComponent = state.components.get(ORDERS)
+    return orders
+
+
+async def _planned(
+    state: AppState,
+    *,
+    reference: Reference,
+    model_sha256: str,
+    filaments: Sequence[Filament] | None,
+) -> Planned | None:
+    """The variant's key and its operation's request, as the shop's settings, the price
+    book and the live machine rate stand now; None when it has no slice price (a slot
+    with no filament, no shop slice profile, or no spool for a slot's material)."""
+    if filaments is None:
+        return None
+    orders = _orders(state)
+    settings = await asyncio.to_thread(state.settings_store.load)
+    profile = settings.storefront_slice_profile
+    if profile is None:
+        return None
+    currency, policy, _ = await asyncio.to_thread(orders.price_book.policy)
+    # The live rate, as a back-office quote prices it: the key holds it and the run
+    # prices with it, so a rate change is a new key (#6153).
+    rate = await live_rate(orders.machine_rates, profile.printer)
+    return plan_variant(
+        settings=settings,
+        reference=reference,
+        model_sha256=model_sha256,
+        filaments=filaments,
+        currency=currency,
+        policy=policy,
+        machine_rate=rate,
+    )
+
+
+async def firm_price(
+    state: AppState,
+    *,
+    reference: Reference,
+    model_sha256: str,
+    filaments: Sequence[Filament] | None,
+) -> PriceRow | None:
+    """The variant's firm price as it stands now, read only (#6153): the ``done`` row of
+    the key made from the variant and the shop's settings, the price book and the live
+    machine rate now, the same key :func:`slice_estimate` makes. None when the key has
+    no ``done`` row (a slice still running or failed, or a key that moved because the
+    book, the rate or the profile changed). It starts no slice. A cart line's add and the
+    checkout read it (``line_prices.py``), so the server never takes a price from the
+    browser."""
+    planned = await _planned(
+        state, reference=reference, model_sha256=model_sha256, filaments=filaments
+    )
+    if planned is None:
+        return None
+    row = await asyncio.to_thread(_orders(state).slice_prices.get, planned.key)
+    if row is None or row.status != "done" or row.currency is None:
+        return None
+    return row
+
+
 async def slice_estimate(
     state: AppState,
     *,
@@ -658,32 +723,12 @@ async def slice_estimate(
     ``storefront_slices_concurrent`` run, else pending. ``filaments`` are the price-book
     filament of each slot of the render, or None when a slot has none: then, and with no
     shop slice profile or no spool for a slot's material, there is no price."""
-    # Here, not at the top: the orders component imports this module.
-    from scadbuddy.orders.component import ORDERS
-
-    if filaments is None:
-        return NO_PRICE
-    orders: OrdersComponent = state.components.get(ORDERS)
-    settings = await asyncio.to_thread(state.settings_store.load)
-    profile = settings.storefront_slice_profile
-    if profile is None:
-        return NO_PRICE
-    currency, policy, _ = await asyncio.to_thread(orders.price_book.policy)
-    # The live rate, as a back-office quote prices it: the key holds it and the run
-    # prices with it, so a rate change is a new key (#6153).
-    rate = await live_rate(orders.machine_rates, profile.printer)
-    planned = plan_variant(
-        settings=settings,
-        reference=reference,
-        model_sha256=model_sha256,
-        filaments=filaments,
-        currency=currency,
-        policy=policy,
-        machine_rate=rate,
+    planned = await _planned(
+        state, reference=reference, model_sha256=model_sha256, filaments=filaments
     )
     if planned is None:
         return NO_PRICE
-    prices = orders.slice_prices
+    prices = _orders(state).slice_prices
     row = await asyncio.to_thread(prices.get, planned.key)
     if row is not None and row.status == "done":
         return answer_of(row)
