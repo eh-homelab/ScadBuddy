@@ -482,6 +482,30 @@ def test_a_colour_not_given_moves_to_the_closest_in_the_material(listing: Listin
     assert _resolve(two, {"colour": "#FF0000"}, ["PLA", "PETG"]).values["trim"] == "#0000FF"
 
 
+def test_the_closest_colour_reads_each_filaments_alpha(listing: Listing) -> None:
+    """#6258: the trim's default is a clear PLA blue (``alpha`` 0, its hex ``#RRGGBB``).
+    PETG has no such blue, so the trim takes PETG's clear blue, not the opaque blue whose
+    RGB is nearer."""
+    clear = {
+        "pla-clear-blue": filament("pla-clear-blue", "#0000FF").model_copy(update={"alpha": 0}),
+        "petg-blue": filament("petg-blue", "#0A0AF0", "PETG"),
+        "petg-clear-blue": filament("petg-clear-blue", "#3030C0", "PETG").model_copy(
+            update={"alpha": 0}
+        ),
+    }
+    book = {**WITH_RED_TOO, **clear}
+    two = _two_colours(listing, PETG_RED, *clear)
+    choices = {"kind": "choice", "choices": ["#FF0000", "#0000FF", "#0A0AF0", "#3030C0"]}
+    two = Listing.model_validate(
+        {**two.model_dump(by_alias=True), "params": {"colour": choices, "trim": choices}}
+    )
+    asked = {"colour": "#FF0000"}
+    values = listing_values(two, asked, book, PETG_FIRST)
+    resolved = resolve_choice(two, values, asked.keys(), book, PETG_FIRST)
+    assert resolved.material == "PETG"
+    assert resolved.values["trim"] == "#3030C0"
+
+
 def test_with_nothing_given_the_first_material_holds_and_defaults_move(
     listing: Listing,
 ) -> None:

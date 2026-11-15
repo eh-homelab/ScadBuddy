@@ -360,12 +360,16 @@ def resolve_choice(
             if key not in seen and (choices is None or key in choices):
                 seen.add(key)
                 candidates.append(filament)
-        named = next(
-            (f.colour_name for f in offered if f.colour.casefold() == value.casefold()), None
-        )
+        # The target is a filament's colour when one has it: that filament's name and
+        # alpha (#6258).
+        own = next((f for f in offered if f.colour.casefold() == value.casefold()), None)
         index = closest_colour(
-            Swatch(hex=value, name=named),
-            [Swatch(hex=f.colour, name=f.colour_name) for f in candidates],
+            Swatch(
+                hex=value,
+                name=own.colour_name if own else None,
+                alpha=own.alpha if own else None,
+            ),
+            [Swatch(hex=f.colour, name=f.colour_name, alpha=f.alpha) for f in candidates],
         )
         assert index is not None  # `fits` keeps only a material with a choice of it.
         settled[name] = candidates[index].colour

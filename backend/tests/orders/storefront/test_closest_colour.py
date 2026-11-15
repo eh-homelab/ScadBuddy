@@ -15,7 +15,7 @@ VECTORS = Path(__file__).resolve().parents[4] / "test-fixtures/storefront/closes
 
 
 def _swatch(raw: dict[str, Any]) -> Swatch:
-    return Swatch(hex=raw["hex"], name=raw["name"])
+    return Swatch(hex=raw["hex"], name=raw["name"], alpha=raw.get("alpha"))
 
 
 def _vectors() -> list[dict[str, Any]]:

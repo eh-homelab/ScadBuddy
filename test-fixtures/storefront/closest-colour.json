@@ -128,5 +128,23 @@
       { "hex": "#2266AA", "name": "Ocean Blue" }
     ],
     "want": 0
+  },
+  {
+    "case": "a filament's alpha field makes clear differ from opaque white of the same RGB",
+    "target": { "hex": "#FFFFFF", "name": "Snow" },
+    "candidates": [
+      { "hex": "#FFFFFF", "name": "Clear", "alpha": 0 },
+      { "hex": "#E6E6E6", "name": "Light grey", "alpha": 255 }
+    ],
+    "want": 1
+  },
+  {
+    "case": "the alpha field wins over the hex's alpha byte, on the target and a candidate",
+    "target": { "hex": "#FFFFFF", "name": null, "alpha": 64 },
+    "candidates": [
+      { "hex": "#FFFFFF", "name": "White" },
+      { "hex": "#F0F0F0FF", "name": "Frost", "alpha": 80 }
+    ],
+    "want": 1
   }
 ]

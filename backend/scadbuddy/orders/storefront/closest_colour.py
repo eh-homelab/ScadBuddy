@@ -5,7 +5,7 @@ does not offer its colour. The page has a twin of this function; the shared vect
 The rule, in order:
 
 1. The first candidate (in candidate order) with the same colour name (casefolded, never
-   a missing name) or the same hex (`parse_hex`: case aside, ``#RRGGBB`` is
+   a missing name) or the same colour (`rgba`: case aside, ``#RRGGBB`` is
    ``#RRGGBBFF``).
 2. Else the candidate at the least distance. The distance is
    ``sqrt(dE00**2 + (ALPHA_WEIGHT * dA)**2)``: dE00 is CIEDE2000 between the two
@@ -14,6 +14,9 @@ The rule, in order:
    far as a mid grey is from white, and an opaque light grey is nearer.
 3. A tie goes to the first candidate. A candidate hex that is not a colour is never
    chosen by distance.
+
+A swatch's alpha is its ``alpha`` field when it is set (a filament's ``Filament.alpha``,
+0 to 255, #6258), else the hex's ``AA`` byte, else opaque (`rgba`).
 """
 
 from __future__ import annotations
@@ -35,10 +38,13 @@ _WHITE: Final = (0.95047, 1.0, 1.08883)
 
 @dataclass(frozen=True)
 class Swatch:
-    """A colour to compare: its hex (``#RRGGBB`` or ``#RRGGBBAA``) and its name, if any."""
+    """A colour to compare: its hex (``#RRGGBB`` or ``#RRGGBBAA``), its name, if any, and
+    its alpha (0 to 255), if it has one apart from the hex (#6258: a filament's
+    ``alpha``)."""
 
     hex: str
     name: str | None
+    alpha: int | None = None
 
 
 def parse_hex(text: str) -> tuple[int, int, int, int] | None:
@@ -54,6 +60,15 @@ def parse_hex(text: str) -> tuple[int, int, int, int] | None:
         int(rgb[4:6], 16),
         int(alpha, 16) if alpha is not None else 255,
     )
+
+
+def rgba(swatch: Swatch) -> tuple[int, int, int, int] | None:
+    """``swatch`` as red, green, blue and alpha, or None when its hex is not one. The
+    alpha is the swatch's ``alpha`` when it is set, else the hex's (#6258)."""
+    parsed = parse_hex(swatch.hex)
+    if parsed is None or swatch.alpha is None:
+        return parsed
+    return (*parsed[:3], swatch.alpha)
 
 
 def _linear(channel: int) -> float:
@@ -132,13 +147,13 @@ def _same(target: Swatch, candidate: Swatch) -> bool:
         and target.name.casefold() == candidate.name.casefold()
     ):
         return True
-    parsed = parse_hex(target.hex)
-    return parsed is not None and parsed == parse_hex(candidate.hex)
+    parsed = rgba(target)
+    return parsed is not None and parsed == rgba(candidate)
 
 
 def distance(target: Swatch, candidate: Swatch) -> float:
     """The distance of the module's rule, step 2; infinite when either hex is not one."""
-    first, second = parse_hex(target.hex), parse_hex(candidate.hex)
+    first, second = rgba(target), rgba(candidate)
     if first is None or second is None:
         return math.inf
     d_e = ciede2000(lab(*first[:3]), lab(*second[:3]))
