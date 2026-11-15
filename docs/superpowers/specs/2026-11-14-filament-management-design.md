@@ -139,8 +139,9 @@ linking needs the exact RGBA, alpha included (the `filament-intake` skill's
 traps table). A `#RRGGBB` value from an old row or a person reads as alpha
 `FF`.
 
-Today SB drops the alpha in several places; each changes:
-- `native_spools.colour` is `^#[0-9A-Fa-f]{6}$` (`spools/native.py:57`).
+Before #6261, SB dropped the alpha in several places; each changes:
+- `native_spools.colour` was `^#[0-9A-Fa-f]{6}$`; since #6261 native spools are
+  RGBA spools, and the native API shows the first 7 characters until #6262.
 - The tray fingerprint is `material|RRGGBB` (`spools/models.py:59-62`), so a
   clear and an opaque spool of one hue look alike.
 - The price book kept `#RRGGBB` (`orders/bambuddy.py:63-64`, `_colour`). #6209 closed
@@ -267,13 +268,37 @@ anchor, then subtract the **deltas** of every later event.
 - An `ams_remain` reading is an anchor only if it is newer than the newest
   `scale` or `person` reading and the spool is not locked. With the weight lock
   on, `ams_remain` is recorded but never used.
+- The weight lock guards against estimates only: `ams_remain` and BB's own
+  `label_weight - weight_used`. A scale weighing always counts, a BB one
+  included (BB's `last_scale_weight` is gross, so SB books it net of the
+  insert's empty weight, else BB's `core_weight`).
+- Order is physical time (as built in #6261). Each event carries when it
+  happened: a print's `print_started` and `print_ended` at the plate's start, a
+  BB reading at the BB row's `updated_at`, a scale reading at its weighing time.
+  An event with no time of its own gets the clock time, kept after the spool's
+  newest event (the WSL clock can step back). Events of one time keep insert
+  order (`seq`).
 - The UI shows the anchor and the deltas that make the current value.
 
-`native_spool_uses` (`20261101T1849Z_native_spool_uses.sql`) holds a LAN
-print's sliced grams, taken off when the run settles. The migration writes an
-applied row as `print_actual` with `data.basis = "sliced"` (a LAN print has no
-archive actual, so the sliced grams are the best actual known), and an
-unapplied row as `print_estimate`, which the run's end then replaces.
+Known limits of the time rule (#6261, to revisit in #6263, which records plate
+end times and AMS readings per tick):
+- A BB write during a plate that is not a deduction (a rename, say) becomes an
+  anchor before BB took the plate off, so that plate is under-counted until the
+  next absolute reading.
+- A BB clock behind SB's by more than a plate's length counts that plate twice
+  until the next reading.
+- A reading taken in the middle of a plate hides the rest of that plate.
+- The rule assumes BB deducts `weight_used` when a print ends (§8.2); this is
+  not yet measured on a live BB.
+
+`native_spool_uses` (`20261101T1849Z_native_spool_uses.sql`) held a LAN print's
+sliced grams. Since #6261 the native store writes only the ledger, and the
+migration `20261114T1302Z` copied the old rows: an applied use as `print_ended`
+/ `print_actual` with `data.basis = "sliced"` (a LAN print has no archive
+actual, so the sliced grams are the best actual known), a settled but unapplied
+use as `print_ended` with delta 0 (`basis = "not_applied"`), and an unsettled
+use as `print_started` / `print_estimate`, which the run's end then replaces.
+The old tables are dropped in #6262.
 
 ### 5.6 Locations
 

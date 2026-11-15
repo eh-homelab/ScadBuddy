@@ -344,3 +344,48 @@ Rules (spec §5.3, §5.5):
 - [ ] Run `uv run --frozen pytest tests/filament tests/spools tests/api/test_native_spools.py tests/api/test_filament.py tests/crud/test_crud_spools.py tests/orders tests/test_pg_migrations.py tests/test_spool_refresh_replay.py tests/api/test_openapi.py tests/api/test_routes.py`, ruff, mypy; `cd agent && pnpm test && pnpm typecheck`.
 - [ ] In `docs/superpowers/specs/2026-11-14-filament-management-design.md` §12, change the #6209 sentence to: "#6209 (the price book keeps alpha, colour stops and effect) landed in #6211 before #6261; #6261's types write the book's alpha, stops and effect from it."
 - [ ] Open the PR: `feat(filament): spool types, instances, catalogs and ledger (#6261)`, body `Closes #6261`, the session marker, and the footer. Shepherd it.
+
+## Decisions made while building (#6261)
+
+The controller's rulings during the build, each with what it costs if wrong.
+The spec's §5.5 and §8.2 carry the rules that changed the design.
+
+Model and migration
+- `Filament` gets each store in the task that builds it. Cost: none.
+- Native preset → a spool preset row with `printer_model='*'`, `nozzle_diameter='*'`. Cost: none; #6262 changes native preset readers.
+- `filament_spool_events.printer_id` has no FK, so the history outlives a deleted printer. Cost: a deleted printer shows as unknown.
+- Seed PA-CF. Cost: none.
+- Native name → `colour_name`; no material → `Unknown` (shown as no material by the native API). Cost: a person renames or types it in #6262's UI.
+- A settled but unapplied native use → `print_ended`, delta 0, `basis = "not_applied"`. Cost: grams-left drift if wrong.
+- Migrated spools take their physical spool id; `spool_record_links` and `spool_provider_records` are rewritten to it. An in-flight LAN run across the upgrade skips its use, and a remembered tray "no" asks once more. Cost: one transient loss.
+- Archived native spools get a closed binding, reason `archived`, as every archive path does now. Cost: none.
+
+Ledger and grams left
+- A native print's estimate comes off at print start (spec §5.5 beats the plan's "tests unchanged"; three old tests changed). Cost: none expected.
+- One source of truth: the native store never writes `native_spools` or `native_spool_uses`. Cost: none.
+- Order is physical time: `print_ended` at the plate's start (no plate end is stored), a BB reading at its `updated_at`. Cost: the under/over-counts listed in spec §5.5, until #6263 records plate ends.
+- The weight lock guards only estimates; a scale weighing (BB's included, net of core) always counts. Cost: a wrong scale reading wins on a locked spool.
+- `ledger.record` locks the spool before its insert. Cost: none.
+
+Spools, tags, locations
+- A spool's location changes only through `move()`; `location_id` is refused on create and patch (422). Cost: an API client must call the move route.
+- AMS tray locations are keyed by (printer, AMS, tray); their names never clash. Cost: two tray places may share a label.
+- Every writer locks the tag before the spool; archive closes the open binding, restore binds nothing (native restore rebinds its last tag). Cost: a person rebinds a restored spool's tag by hand.
+- Native delete: hard delete when no print ended on the spool, else 409. Cost: a used spool stays archived.
+- Native lists include spools made through `/filament`; one inventory. Cost: none expected.
+- A printer merge moves locations and K values: the kept printer's tray place and K value win, spools move with a `moved` event (source NULL, actor `system:printer-merge`), the gone place is archived. Cost: a `system` source needs a CHECK change later.
+- Native routes and the import route record `actor(caller)`; system writers keep their names.
+
+Price book
+- A type's book row identity includes alpha (`20261115T0154Z`, which changes #6211's identity index); insert writes alpha, extra colours and effect; a found row is never rewritten. Cost: opaque and translucent of one hue are separate rows.
+- Order import and item-print matching still compare RGB only: #6316.
+
+Bambuddy pull
+- The pull runs on the library worker in the API process (the CRUD service), so it calls the store directly and needs no CRUD route.
+- Step 2 also links through an existing `spool_record_links` row for the BB record. A tag held by an archived SB spool is ignored (a new spool takes the tag); a record link to an archived spool stays as it is and is reported in `PullReport.archived`.
+- A BB unlock clears the lock only when the newest lock change was a pull's; an SB lock wins.
+- BB's last weighing → `weighed` (`bb_scale`), last drying → `dried` (`bb_dried`), each booked once. `extra_colors` is comma-separated hex (BB `schemas/spool.py`). `core_weight_catalog_id` is not mapped (#6262). Per-type sync settings are #6263.
+- One malformed BB row is skipped and counted; the rest go on.
+
+Unrelated flakes seen: #6313 (a lease test under xdist), a payments balance test under load.
+
