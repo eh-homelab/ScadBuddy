@@ -3,7 +3,7 @@ import { builtinItem, itemKindIn, skillItem, subagentItem } from '../../access/i
 import { packageSource } from '../../access/model.js'
 import { notifyWarmEvict } from '../../sessions/warmEvict.js'
 import { CrudReadError } from '../../api/crudRead.js'
-import { type CrudCallInit, type CrudTarget, crudOf, qs } from '../../api/crudStores.js'
+import { type CrudCallInit, type CrudTarget, crudOf, qs, segment } from '../../api/crudStores.js'
 import { PluginError } from '../registry.js'
 import { diffFiles, type FileDiff, type FileList } from './hash.js'
 import type { PackageSource } from './source.js'
@@ -493,13 +493,13 @@ export class CrudPackageStore implements PackageRepo {
 
   async #rowOf(name: string): Promise<Row | undefined> {
     if (!PACKAGE_NAME_RE.test(name)) return undefined
-    const { package: row } = await this.#call<{ package: WireRow | null }>('a plugin package', `/plugin-packages/${encodeURIComponent(name)}`)
+    const { package: row } = await this.#call<{ package: WireRow | null }>('a plugin package', `/plugin-packages/${segment(name, PACKAGE_NAME_RE, 'a package name')}`)
     return row ? fromWire(row) : undefined
   }
 
   #path(name: string, action: string): string {
     if (!PACKAGE_NAME_RE.test(name)) throw new PluginError(`no plugin package named "${name}"`, 404)
-    return `/plugin-packages/${encodeURIComponent(name)}/${action}`
+    return `/plugin-packages/${segment(name, PACKAGE_NAME_RE, 'a package name')}/${action}`
   }
 
   async list(): Promise<PackageView[]> {

@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
 import { CrudReadError } from '../api/crudRead.js'
-import { CrudLeases, type CrudTarget, crudOf, type HeldLease } from '../api/crudStores.js'
+import { CrudLeases, type CrudTarget, crudOf, type HeldLease, segment } from '../api/crudStores.js'
+// Read at call time only: registry.ts imports this module too.
+import { PLUGIN_NAME_RE } from './registry.js'
 import { type Resolver, systemResolver } from '../http/egress.js'
 import { type Envelope, type Kek, openSecret, SealError, sealSecret } from '../secrets.js'
 import { notifyWarmEvict } from '../sessions/warmEvict.js'
@@ -884,7 +886,7 @@ export class CrudOAuthRows {
   async openGrant(plugin: string, pluginUrl: string, grant: string): Promise<OpenedGrantAnswer> {
     const answer = await this.#call<{ grant: (Omit<OpenedGrant, 'secret'> & { secret: WireSecret }) | null; fail: string | null }>(
       "a plugin sign-in's token",
-      `/plugin-oauth/grants/${plugin}/open`,
+      `/plugin-oauth/grants/${segment(plugin, PLUGIN_NAME_RE, 'a plugin name')}/open`,
       { body: { plugin_url: pluginUrl, grant } },
     )
     return { fail: answer.fail, grant: answer.grant ? { ...answer.grant, secret: secretOf(answer.grant.secret) } : null }
@@ -894,7 +896,7 @@ export class CrudOAuthRows {
   async refreshed(plugin: string, lease: HeldLease, body: GrantRefreshed): Promise<boolean | 'lease-lost'> {
     try {
       return (
-        await this.#call<{ stored: boolean }>("a plugin sign-in's renewal", `/plugin-oauth/grants/${plugin}/refreshed`, {
+        await this.#call<{ stored: boolean }>("a plugin sign-in's renewal", `/plugin-oauth/grants/${segment(plugin, PLUGIN_NAME_RE, 'a plugin name')}/refreshed`, {
           body: { lease_token: lease.token, ...body },
         })
       ).stored
@@ -905,13 +907,13 @@ export class CrudOAuthRows {
   }
 
   async mark(plugin: string, reason: string, grant?: string): Promise<void> {
-    await this.#call('a plugin sign-in marked', `/plugin-oauth/grants/${plugin}/mark`, {
+    await this.#call('a plugin sign-in marked', `/plugin-oauth/grants/${segment(plugin, PLUGIN_NAME_RE, 'a plugin name')}/mark`, {
       body: { reason: reason.slice(0, 2048), ...(grant ? { grant } : {}) },
     })
   }
 
   async forget(plugin: string): Promise<boolean> {
-    return (await this.#call<{ done: boolean }>('a plugin signed out', `/plugin-oauth/grants/${plugin}/forget`, { method: 'POST' })).done
+    return (await this.#call<{ done: boolean }>('a plugin signed out', `/plugin-oauth/grants/${segment(plugin, PLUGIN_NAME_RE, 'a plugin name')}/forget`, { method: 'POST' })).done
   }
 
   async storedSecrets(): Promise<GrantSecret[]> {

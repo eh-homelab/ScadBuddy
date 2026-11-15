@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { Sql } from 'postgres'
 import { afterEach, describe, expect, it } from 'vitest'
 import { type AgentApp, createApp } from '../src/app.js'
+import { CrudPathError } from '../src/api/crudStores.js'
 import { originPolicy } from '../src/http/origins.js'
 import { CrudOAuthRows, PluginOAuth, refreshLease } from '../src/plugins/oauthStore.js'
 import { CrudPluginStore, PluginError } from '../src/plugins/registry.js'
@@ -299,5 +300,34 @@ describe('the remote plugins and their sign-ins through CRUD routes (#5299 step 
     await expect(other.source('github', mcp.url, grant.grant_id, undefined).header()).rejects.toThrow(/sign in again/)
     expect(api.grants.get('github')).toMatchObject({ status: 'error' })
     expect(await oauth.forget('github')).toBe(true)
+  })
+  it('refuses a plugin name outside the rule before any call: no path reaches another route', async () => {
+    const api = new FakeApi()
+    const { oauth, plugins } = stores(api)
+    for (const bad of ['../x', '..', 'a/b', '%2e%2e']) {
+      expect(await plugins.get(bad)).toBeUndefined()
+      expect(await plugins.reveal(bad, undefined)).toBeUndefined()
+      expect(await plugins.delete(bad)).toBe(false)
+      await expect(plugins.update(bad, { url: 'https://x.example/' }, undefined)).rejects.toMatchObject({ status: 404 })
+      await expect(plugins.setToolAccess(bad, 't', 'read')).rejects.toMatchObject({ status: 404 })
+      await expect(oauth.forget(bad)).rejects.toBeInstanceOf(CrudPathError)
+      await expect(oauth.mark(bad, 'why')).rejects.toBeInstanceOf(CrudPathError)
+      await expect(oauth.source(bad, 'https://x.example/', randomUUID(), undefined).header()).rejects.toBeInstanceOf(CrudPathError)
+    }
+    // The sign-out route refuses it too.
+    const app: AgentApp = createApp({
+      database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
+      backend: () => Promise.resolve(true),
+      kek: { ok: false, reason: 'not set' },
+      credentials: new MemoryCredentials(),
+      plugins,
+      pluginOAuth: oauth,
+      testConnection: () => Promise.resolve({ ok: true, detail: '', duration_ms: 0, model: null }),
+      remoteAddress: () => '10.0.0.7',
+      origins: originPolicy('https://scadbuddy.example', '10.0.0.0/8'),
+    })
+    const out = await app.request('/api/v1/ai/plugins/..%2Fx/oauth', { method: 'DELETE', headers: UI })
+    expect(out.status).toBe(404)
+    expect(api.seen).toEqual([])
   })
 })

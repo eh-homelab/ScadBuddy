@@ -8,7 +8,7 @@ import { notifyWarmEvict } from '../sessions/warmEvict.js'
 import { assertHostAllowed, EgressError, isPrivateAddress, type Resolver, systemResolver } from '../http/egress.js'
 import { RISK_TIERS, type RiskTier, type TierResolver } from '../harness/permissions.js'
 import { CrudReadError } from '../api/crudRead.js'
-import { type CrudTarget, crudOf } from '../api/crudStores.js'
+import { type CrudTarget, crudOf, segment } from '../api/crudStores.js'
 import { type Envelope, type Kek, last4, openSecret, SealError, sealSecret } from '../secrets.js'
 import { OAuthError } from './oauth.js'
 import { GrantError, type PluginOAuth, type TokenSource } from './oauthStore.js'
@@ -961,7 +961,7 @@ export class CrudPluginStore implements PluginStoreLike {
 
   async get(name: string): Promise<PluginSummary | undefined> {
     if (!PLUGIN_NAME_RE.test(name)) return undefined
-    const { plugin } = await this.#call<{ plugin: WireRow | null }>('a plugin', `/plugins/${name}`)
+    const { plugin } = await this.#call<{ plugin: WireRow | null }>('a plugin', `/plugins/${segment(name, PLUGIN_NAME_RE, 'a plugin name')}`)
     return plugin ? summaryOf(plugin) : undefined
   }
 
@@ -996,7 +996,7 @@ export class CrudPluginStore implements PluginStoreLike {
     if (patch.auth_header !== undefined) body.auth_header = patch.auth_header === null ? null : validateHeaderName(patch.auth_header)
     if (patch.secret !== undefined) body.secret = patch.secret === null ? null : validateSecret(patch.secret)
     return summaryOf(
-      await this.#refusing(() => this.#call<WireRow>('a plugin changed', `/plugins/${name}/update`, { body })),
+      await this.#refusing(() => this.#call<WireRow>('a plugin changed', `/plugins/${segment(name, PLUGIN_NAME_RE, 'a plugin name')}/update`, { body })),
     )
   }
 
@@ -1007,19 +1007,19 @@ export class CrudPluginStore implements PluginStoreLike {
     else if (value !== null) validateToolTiers({ [tool]: value })
     const body = { tool, access: value, by: updatedBy(context) }
     return summaryOf(
-      await this.#refusing(() => this.#call<WireRow>("a plugin tool's access", `/plugins/${name}/tool-access`, { body })),
+      await this.#refusing(() => this.#call<WireRow>("a plugin tool's access", `/plugins/${segment(name, PLUGIN_NAME_RE, 'a plugin name')}/tool-access`, { body })),
     )
   }
 
   async delete(name: string): Promise<boolean> {
     if (!PLUGIN_NAME_RE.test(name)) return false
-    return (await this.#call<{ done: boolean }>('a plugin deleted', `/plugins/${name}/delete`, { method: 'POST' })).done
+    return (await this.#call<{ done: boolean }>('a plugin deleted', `/plugins/${segment(name, PLUGIN_NAME_RE, 'a plugin name')}/delete`, { method: 'POST' })).done
   }
 
   /** Throws SealError (the API cannot open the secret), and for a signed-in plugin GrantError or OAuthError. */
   async reveal(name: string, kek: Kek | undefined): Promise<RemotePlugin | undefined> {
     if (!PLUGIN_NAME_RE.test(name)) return undefined
-    const { plugin } = await this.#call<{ plugin: WireOpened | null }>('a plugin opened', `/plugins/${name}/reveal`, { method: 'POST' })
+    const { plugin } = await this.#call<{ plugin: WireOpened | null }>('a plugin opened', `/plugins/${segment(name, PLUGIN_NAME_RE, 'a plugin name')}/reveal`, { method: 'POST' })
     return plugin ? signIn(this.oauth, plugin, openedOf(plugin), kek) : undefined
   }
 
