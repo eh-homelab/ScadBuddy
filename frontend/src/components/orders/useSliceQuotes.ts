@@ -189,9 +189,13 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
           .renderItem(orderId, itemId, (operation) => followedSet.add(operation.id), follows.current.signal)
           .then(
             () => {
-              update(orderId, itemId, null)
               if (current.current !== orderId) return done(false)
-              rendered.current.set(itemId, () => done(true))
+              // The run stays `rendering` until the reload shows the output, so Slice… stays
+              // held and no second render starts in between.
+              rendered.current.set(itemId, () => {
+                update(orderId, itemId, null)
+                done(true)
+              })
               quoted.current()
             },
             (cause: unknown) => {
