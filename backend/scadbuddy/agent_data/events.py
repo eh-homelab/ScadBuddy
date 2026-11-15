@@ -28,7 +28,7 @@ FORK_EVENT_TYPES = [
 ]
 
 
-class SessionGoneError(Exception):
+class SessionGoneError(LookupError):
     """The session has no row: nothing is appended."""
 
 

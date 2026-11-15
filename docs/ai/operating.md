@@ -972,10 +972,11 @@ nothing until #5299 step 12 removes the agent's database URL. Until then the gua
 Every flow tool call reads its run
 `FOR SHARE` (`PgFlowRuns.startedBy`, `agent/src/temporal/flowRuns.ts`); the backend's
 route takes that lock in its own transaction. The gate's grant check
-(`agent/src/gate/store.ts` `grantInput`) still reads `flow_grants` and `flow_grant_uses`
-over SQL, under the grant row's share lock, so the role keeps `SELECT` on both and
-`UPDATE` on `flow_grants` (Postgres requires `UPDATE` for `FOR SHARE`), until the gate
-moves to the CRUD service (#5299 step 10).
+(`agent/src/gate/store.ts` `grantInput`) reads `flow_grants` and `flow_grant_uses` on the
+API, under the grant row's share lock, in the grant route's transaction
+(`backend/scadbuddy/api/crud_agent_gate.py`, area `gate`, #5299 step 10), so the role
+holds no backend table: the API takes back `flow_grants` and `flow_grant_uses` at every
+start too, and `agent/test/retiredTables.test.ts` names them.
 
 ## 8. Per-query limits
 
