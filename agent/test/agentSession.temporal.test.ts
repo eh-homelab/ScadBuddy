@@ -669,7 +669,8 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     await send(env.client, id, message('t2'))
     await poll(() => finished.map((f) => f.outcome), ['done', 'failed'])
     expect(placed('t2')).toEqual([['0', undefined], ['1', 'restarted'], ['2', 'restarted']])
-    // A home cut off by another placement is alive: no acquire steers the turn away from it.
+    // A home cut off by another placement is alive: no acquire steers the turn away from it. Over
+    // both turns on purpose: t1's second acquire is the one that would name HOST.
     expect(excluded.flat()).toEqual([])
     expect(finished[1]?.message).toBe('the turn could not be placed on a worker: another placement took the turn over (3 tries); send the message again')
     await handleOf(id).signal('end')
