@@ -455,23 +455,39 @@ kubectl -n scadbuddy create secret generic scadbuddy-agent-kek \
 
 Spec §9: "Rotating it re-wraps the data keys only." The procedure comes from the
 comment above `previousKek` in `main.ts` and from
-[`backend/scadbuddy/agent_data/rotation.py`](../../backend/scadbuddy/agent_data/rotation.py):
+[`backend/scadbuddy/agent_data/rotation.py`](../../backend/scadbuddy/agent_data/rotation.py)
+(`main._rotate_agent_secrets` calls it).
+
+In normal running no container sets `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`: in
+eh-homelab/clusters' `scadbuddy.yaml` neither the API container nor the agent sidecar
+sets it (the API container at line 471, the agent at 652), and the comment at line 651 says it is added only during a rotation (read on clusters main,
+2026-11-15). Since #5299 step 4 the API re-wraps the Claude credentials and the payload
+keys, so a rotation sets the previous key on the API container as well as on the agent's
+containers (the sidecar and the `scadbuddy-agent-worker` Deployment). A rotation that
+sets it on the agent alone leaves `ai_credentials` and `ai_payload_keys` under the old
+key, and they stop opening once the old key's mount is removed.
 
 1. Generate a new key file (§3.1).
 2. Mount the **new** key as `SCADBUDDY_SECRET_KEY_FILE` and the **old** one as
-   `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`, in the API **and** the agent, then restart.
-3. At the API's start, after its migrations, every Claude credential and payload key
-   whose `kek_id` is the old key's has its data key re-sealed under the new key (#5299
-   step 4: the API holds the KEK they are opened with). The log line reads
-   `secret key rotation: re-wrapped the agent's credentials` (or `payload_keys`), with
-   the counts. At the agent's start, once migrations have applied (the `afterMigrate`
-   hook of `connectDatabase()`), the agent re-wraps the rest: workspace file keys,
-   plugin secrets, Web Push keys, notification channel tokens and plugin sign-ins. The
-   sealed secret and `updated_at` are not touched. Each `UPDATE` is conditional on
+   `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` on the **API container and the agent's
+   containers**, then restart them.
+3. Each one re-wraps its own tables at its start. Only the data key of a row whose
+   `kek_id` is the old key's is sealed again under the new key:
+   - The API, after its migrations: `ai_credentials` (the Claude credentials) and
+     `ai_payload_keys` (the durable payload keys). The log line reads
+     `secret key rotation: re-wrapped the agent's credentials` (or `payload_keys`), with
+     the counts.
+   - The agent, once migrations have applied (the `afterMigrate` hook of
+     `connectDatabase()`): `ai_session_files` (workspace file keys), `ai_plugins` (plugin
+     secrets), `ai_push_vapid` and `ai_push_subscriptions` (Web Push keys),
+     `ai_notify_channels` (notification channel tokens) and `ai_plugin_oauth` (plugin
+     sign-ins). The later steps of #5299 move these to the API too.
+
+   The sealed secret and `updated_at` are not touched. Each `UPDATE` is conditional on
    `kek_id`, so two pods rotating at once do not overwrite each other.
 4. A row the old key cannot open (altered, or in the v1 format) is left as it is and
    counted as `failed` in the same log line.
-5. Remove the previous-key mounts and restart again.
+5. Remove the previous-key mounts from every container and restart again.
 
 If the previous file cannot be loaded, the log says so and nothing is re-wrapped
 (`main.ts`, and the API's start).
