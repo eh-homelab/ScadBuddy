@@ -147,10 +147,11 @@ const PORT = 8081
 const APPROVAL_SWEEP_MS = 30_000
 /** How often sessions left `running` with nothing behind them are ended (DurableRunningSweep). */
 const SESSION_REAP_MS = 30_000
-// The shutdown's budget for running turns, inside the pod's 30 s
-// terminationGracePeriodSeconds (clusters, strategy Recreate): TURN_DRAIN_MS
-// for them to finish, TURN_ABORT_WAIT_MS for the rest to record that they were
-// stopped, then shutdown()'s own 10 s.
+// The shutdown's budget for running turns, inside the pod's 60 s
+// terminationGracePeriodSeconds (clusters applications/scadbuddy/scadbuddy.yaml and
+// scadbuddy-agent-worker.yaml, a RollingUpdate with maxSurge 1, maxUnavailable 0):
+// TURN_DRAIN_MS for them to finish, TURN_ABORT_WAIT_MS for the rest to record that
+// they were stopped, then shutdown()'s own 10 s.
 const TURN_DRAIN_MS = 12_000
 const TURN_ABORT_WAIT_MS = 5_000
 /** How often audit rows past their retention are deleted (audit/log.ts). */
