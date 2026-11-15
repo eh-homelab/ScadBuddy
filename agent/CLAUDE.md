@@ -10,8 +10,9 @@ the agent workers connect as the database owner (`SCADBUDDY_DATABASE_URL`), keep
 `flow_grant_uses`: `src/gate/store.ts` `grantInput`, under the grant row's share lock, until
 the gate moves to the CRUD service, #5299 step 10; `backend/scadbuddy/auth/caller_grants.py`
 `AGENT_GRANTS`). The agent's other reads of backend tables (the event log, flow runs, their
-decisions and grants) go through CRUD routes (#5299 D7, below), over SQL only while the API
-does not list their areas yet. The workspace files' `blob_refs` holds go through CRUD routes
+decisions and grants) go only through CRUD routes (#5299 D7, below); the API revokes its
+role's grants on `events`, `workflow_runs` and `workflow_run_decisions` at every start
+(`backend/scadbuddy/auth/revoke.py` `RETIRED_GRANTS`). The workspace files' `blob_refs` holds go through CRUD routes
 (#5299, below), no longer a trigger. `src/db/grants.ts`
 grants the API's role its `ai_*` reads and writes, and revokes what it once granted the
 projects worker's role `scadbuddy_projects` (#5298; the worker holds no database).
@@ -42,12 +43,12 @@ by `pgListener.ts`) and area `flows` (a run's starter, its decision checks, a gr
 a run's queue and steps, the waiting runs, the parent-hop approvals and which of them still
 wait: `src/flows/backendReads.ts` `CrudFlowRunReads`, used by `temporal/flowRuns.ts`,
 `flows/queue.ts`, `flows/escalations.ts` and `temporal/toolActivities.ts`
-`PgApprovalRecords`). `src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` from
-the start with back-off (1 s doubling to 30 s) until both are listed; until then each read
-stays on SQL (`SqlFlowRunReads`, the listener's own connection), the rolling deploy's
-fallback for an API pod older than the routes. A route's answer counts only with
-`X-ScadBuddy-Crud: 1`; any other failure takes the read's existing error path (a lookup
-failure the activity retries, a 500, a resync). A session's successful `order_item_revision_add` (or
+`PgApprovalRecords`), all over `src/api/crudRead.ts` `crudRead`. There is no SQL fallback:
+`test/retiredTables.test.ts` fails on agent SQL that names `events`, `workflow_runs` or
+`workflow_run_decisions`, and the Postgres tests answer the flow reads with
+`test/support/sqlFlowRunReads.ts` (the backend's queries on the test database). A route's
+answer counts only with `X-ScadBuddy-Crud: 1`; any other failure takes the read's existing
+error path (a lookup failure the activity retries, a 500, a resync). A session's successful `order_item_revision_add` (or
 `_after_acceptance`) is an `ai_session_order_costs` row (`src/sessions/orderCosts.ts`
 `OrderCosts`, a `TouchedSink` beside `SessionResources`); each turn's end
 (`temporal/session/finishActivity.ts`, a retry too, not awaited: it never holds up the next
@@ -238,11 +239,20 @@ opens every one and seals it again byte for byte).
   auth in `src/auth/`); every `/api/v1` operation needs a tool or a
   `src/tools/coverage.ts` entry, or `test/coverage.test.ts` fails.
   - Database: the agent owns the `ai_*` tables (today's state; #5295 moves them behind
-    CRUD routes and takes the agent's database secret away, #5299). Schema changes are new files in
-    `src/db/migrations/` (see "Migrations" below; `src/db/migrations.ts` applies them at
-    start under advisory lock "SCADAGNT" with `lock_timeout`/`statement_timeout`,
-    ledger `ai_migrations` with a sha256 per file: an edited merged file stops the
-    service at start; separate from the backend's `scadbuddy_migrations`). Secrets are
+    CRUD routes and takes the agent's database secret away, #5299). The agent does not
+    migrate them: the API applies their files at its start (root CLAUDE.md "Migrations
+    (#491)", #5299 D6), and `ready()` (`src/db.ts`) is true once `ai_migrations` holds
+    every file in `src/db/expected-migrations.json` (`src/db/schema.ts` `awaitMigrations`;
+    one read a call, so a route that asks fails fast; a row with other SQL than listed is
+    `MigrationChecksumError`, and `main.ts` exits on it). Work a process does once at start
+    waits for `untilReady()`, which calls `ready()` again 1 s apart, doubling to 30 s,
+    until it is true, so an API that migrates late drops none of it; the agent logs
+    `waiting for the API to apply the agent's database migrations` once a wait; meanwhile
+    `/healthz` says `unavailable (waiting for the API to apply the database migrations)`
+    (`waitingForMigrations`). The
+    tests make their schemas with the agent's old runner, `test/support/migrations.ts`
+    (`test/support/postgres.ts` `migrateSchema`, the `schema` option of
+    `connectDatabase`), and `test/schema.test.ts` checks the list against both runners. Secrets are
     envelope-encrypted with `src/secrets.ts` under the KEK in
     `SCADBUDDY_SECRET_KEY_FILE` (32 random bytes, base64; spec §9); the AAD binds each
     value to its row and to the columns that say where it is sent (for the credential:

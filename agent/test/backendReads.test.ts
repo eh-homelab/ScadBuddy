@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { CrudAreas, CrudReadError, crudRead, READ_AREAS } from '../src/api/crudAreas.js'
+import { CrudReadError, crudRead } from '../src/api/crudRead.js'
 import { CrudEventLogReads } from '../src/events/eventLogReads.js'
-import { CrudFlowRunReads, type FlowRunReads, gatedFlowRunReads, STILL_WAITING_BATCH } from '../src/flows/backendReads.js'
+import { CrudFlowRunReads, STILL_WAITING_BATCH } from '../src/flows/backendReads.js'
 
 // The agent's reads of the backend's tables through its CRUD routes (#5299 D7): the clients
-// against a fake API, and the rolling deploy's switch from SQL once the API lists the areas.
+// against a fake API.
 
 const BASE = 'http://api:8080/'
 const AGENT = 'http://api:8080/api/v1/internal/crud/agent'
@@ -52,81 +52,6 @@ describe('crudRead', () => {
     const error = (await crudRead(down, BASE, 'the x', '/x').catch((e: unknown) => e)) as Error
     expect(error.message).toBe('the backend is not up yet (the x: ECONNREFUSED)')
     expect(error.message).not.toContain('api:8080')
-  })
-})
-
-describe('CrudAreas', () => {
-  it('waits, logging once, until the API lists every area, then holds it', async () => {
-    const logs: string[] = []
-    let listed: string[] = ['order-costs']
-    const areas = new CrudAreas(BASE, { fetch: api([() => ({ body: { areas: listed } })]), wanted: READ_AREAS, log: (m) => logs.push(m) })
-    expect(await areas.refresh()).toBe(false)
-    expect(await areas.refresh()).toBe(false)
-    expect(areas.has('events')).toBe(false)
-    expect(logs).toEqual(["CRUD areas: waiting for the backend's agent areas (missing events, flows); reading over SQL until it lists them"])
-    listed = ['order-costs', 'events']
-    expect(await areas.refresh()).toBe(false)
-    expect([areas.has('events'), areas.has('flows'), areas.complete]).toEqual([true, false, false])
-    listed = ['events', 'flows']
-    expect(await areas.refresh()).toBe(true)
-    expect(areas.complete).toBe(true)
-    expect(logs.at(-1)).toBe("CRUD areas: the agent reads events, flows through the backend's CRUD routes")
-    // Listed once, for good: an older pod answering later does not take it back.
-    listed = []
-    await areas.refresh()
-    expect(areas.has('flows')).toBe(true)
-  })
-
-  it('treats an API without the areas route as one that lists none', async () => {
-    const logs: string[] = []
-    const areas = new CrudAreas(BASE, { fetch: api([]), wanted: ['flows'], log: (m) => logs.push(m) })
-    expect(await areas.refresh()).toBe(false)
-    expect(logs[0]).toContain('no CRUD route answered its areas (HTTP 404)')
-  })
-
-  it("names a refused credential, apart from waiting for an older pod (#6234 review)", async () => {
-    const logs: string[] = []
-    let status = 404
-    const fetchAreas: typeof fetch = async () => new Response('', { status, headers: status === 404 ? {} : { 'x-scadbuddy-crud': '1' } })
-    const areas = new CrudAreas(BASE, { fetch: fetchAreas, wanted: READ_AREAS, log: (m) => logs.push(m) })
-    await areas.refresh()
-    status = 401
-    await areas.refresh()
-    await areas.refresh()
-    expect(logs).toHaveLength(2)
-    expect(logs[1]).toContain("the backend refused the agent's service credential (HTTP 401)")
-  })
-
-  it("keeps a proxy's 401 apart from the route's, and logs a varying detail once", async () => {
-    const logs: string[] = []
-    let answer = (): Response => new Response('', { status: 401 })
-    const areas = new CrudAreas(BASE, { fetch: async () => answer(), wanted: READ_AREAS, log: (m) => logs.push(m) })
-    await areas.refresh()
-    expect(logs[0]).toContain('no CRUD route answered its areas (HTTP 401)')
-    expect(logs[0]).not.toContain('service credential')
-    let n = 0
-    answer = () => new Response(JSON.stringify({ detail: `request ${n++}` }), { status: 503, headers: { 'x-scadbuddy-crud': '1' } })
-    for (let i = 0; i < 5; i++) await areas.refresh()
-    expect(logs).toHaveLength(2)
-    expect(logs[1]).toContain('HTTP 503: request 0')
-  })
-
-  it('reads again with back-off from the start until they are listed', async () => {
-    let calls = 0
-    const fetchAreas = api([
-      () => {
-        calls += 1
-        return { body: { areas: calls >= 3 ? ['events', 'flows'] : [] } }
-      },
-    ])
-    const areas = new CrudAreas(BASE, { fetch: fetchAreas, wanted: READ_AREAS, log: () => {}, firstMs: 1, maxMs: 4 })
-    areas.start()
-    for (let i = 0; i < 200 && !areas.complete; i++) await new Promise((r) => setTimeout(r, 5))
-    expect(areas.complete).toBe(true)
-    const after = calls
-    await new Promise((r) => setTimeout(r, 30))
-    expect(calls).toBe(after)
-    areas.stop()
   })
 })
 
@@ -216,32 +141,6 @@ describe('CrudFlowRunReads', () => {
     const reads = new CrudFlowRunReads(BASE, { fetch: api([() => ({ status: 503, body: { detail: 'database-unavailable' } })]) })
     await expect(reads.starter('r1', 'e1')).rejects.toThrow("the backend refused a flow run's starter (HTTP 503: database-unavailable)")
     await expect(reads.waitingRuns()).rejects.toBeInstanceOf(CrudReadError)
-  })
-})
-
-describe('gatedFlowRunReads', () => {
-  it('reads over SQL until the area is listed, then through the routes', async () => {
-    const said = (who: string): FlowRunReads =>
-      ({
-        starter: async () => ({ open: true, unrecorded: false, started_by: { kind: who } }),
-        decisions: async () => ({ approved: who === 'crud', approvedUnresolved: false, byPerson: false, lapsed: false }),
-        grantInForce: async () => who === 'crud',
-        queue: async () => undefined,
-        waitingRuns: async () => [],
-        steps: async () => [{ seq: 1, fn: who, call_id: 'c', status: 'running' }],
-        parentHopApprovals: async () => ({ runs: [], next: null }),
-        stillAtParentHop: async () => new Set([who]),
-      }) satisfies FlowRunReads
-    let listed = false
-    const reads = gatedFlowRunReads(said('sql'), said('crud'), () => listed)
-    expect((await reads.starter('r', 'e'))?.started_by.kind).toBe('sql')
-    expect(await reads.grantInForce('g')).toBe(false)
-    listed = true
-    expect((await reads.starter('r', 'e'))?.started_by.kind).toBe('crud')
-    expect(await reads.grantInForce('g')).toBe(true)
-    expect((await reads.decisions('q', 'h')).approved).toBe(true)
-    expect((await reads.steps('r'))[0]?.fn).toBe('crud')
-    expect(await reads.stillAtParentHop(['x'])).toEqual(new Set(['crud']))
   })
 })
 

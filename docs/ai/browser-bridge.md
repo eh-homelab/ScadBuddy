@@ -356,7 +356,7 @@ agent needs a pairing token that the user accepts **in the tab**, in every auth 
   (`MAX_PENDING_PER_PRINCIPAL`, `MAX_PENDING`), so a LAN client cannot fill the prompt.
 - **The pairing.** One tab per principal: accepting a new pairing ends the old one in
   the same transaction, and a partial unique index enforces it
-  ([`20260929T1330Z_browser_pairings.sql`](../../agent/src/db/migrations/20260929T1330Z_browser_pairings.sql)).
+  ([`20260929T1330Z_browser_pairings.sql`](../../backend/scadbuddy/migrations_agent/20260929T1330Z_browser_pairings.sql)).
   It lasts until the user presses Disconnect in that tab, 8 hours pass
   (`PAIRED_TTL_MS`), or the tab reloads (a new tab id). Rows a day past their use are
   deleted on the next request.
@@ -468,7 +468,7 @@ sequenceDiagram
   connected" after 3 s; the tabs of both builds have `ai_tab_owners` rows, so that is
   only a tab that no replica holds. The table stayed for one more release, because a
   replica of the build before #4868 still wrote it; #5109 drops it
-  ([`20261102T0038Z_drop_bridge_messages.sql`](../../agent/src/db/migrations/20261102T0038Z_drop_bridge_messages.sql)).
+  ([`20261102T0038Z_drop_bridge_messages.sql`](../../backend/scadbuddy/migrations_agent/20261102T0038Z_drop_bridge_messages.sql)).
 - **Not covered:** a cancelled call cancels its workflow, but is not withdrawn from the
   tab, as with a local call. Without a database there is no relay, and only tabs on the
   same process can be reached.

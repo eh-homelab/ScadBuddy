@@ -1,7 +1,7 @@
 """The questions the agent asks of the flow tables (#5299 D7), answered for its CRUD routes
-(`api/crud_agent.py`). Each query is the one the agent ran over SQL before
-(``agent/src/flows/backendReads.ts`` `SqlFlowRunReads` keeps a copy until every API pod
-serves these routes), so the answers do not change. The agent reads; nothing here writes.
+(`api/crud_agent.py`). Each query is the one the agent ran over SQL before, so the answers
+did not change; the agent's tests run a copy on their own database
+(``agent/test/support/sqlFlowRunReads.ts``). The agent reads; nothing here writes.
 
 The JSON in ``workflow_runs.waiting_on`` and ``steps`` is passed on as the backend's
 projection wrote it (`workflows/flow_models.py`), field by field: a time stays the

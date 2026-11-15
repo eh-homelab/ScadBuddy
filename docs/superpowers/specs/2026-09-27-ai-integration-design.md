@@ -661,7 +661,7 @@ As built (#300; `agent/src/tools/sessions.ts`, `docs/ai/agent-sessions.md`):
   (`SendOptions.tiers`, `tools/harness.ts` `turnPrincipal`); without them a
   non-browser owner's turns are `read` only. An approval a turn asks for records
   those tiers (`ai_approvals.requested_tiers`,
-  `agent/src/db/migrations/20260929T2258Z_approval_requested_tiers.sql`), so the turn
+  `backend/scadbuddy/migrations_agent/20260929T2258Z_approval_requested_tiers.sql`), so the turn
   that resumes an orphan approved after a restart (§8.2) is offered the approved tool
   again. It gets them only while the requester still owns the session, and no more
   than a bearer token holds at resume time (`auth/tokens.ts` `liveTokenTiers`: a
@@ -681,7 +681,7 @@ As built (#300; `agent/src/tools/sessions.ts`, `docs/ai/agent-sessions.md`):
   "Explicitly" above now means the receiving principal agrees too: a handoff to the
   browser user moves at once (it may take any session over and sees every one), but to
   an MCP principal it records a pending offer (`ai_sessions.pending_owner_*`,
-  `agent/src/db/migrations/20260929T1825Z_session_handoff_offers.sql`) that only that
+  `backend/scadbuddy/migrations_agent/20260929T1825Z_session_handoff_offers.sql`) that only that
   principal accepts, as `confirm_action` completes only for the principal that
   prepared the call (§8.2). The owner withdraws it and the target declines it
   (`sessions_cancel_handoff`); it expires after an hour and ends on any change of
@@ -695,7 +695,7 @@ As built (#300; `agent/src/tools/sessions.ts`, `docs/ai/agent-sessions.md`):
   label that does not name it (`agent/src/sessions/protocol.ts` `ownerSeenBy`), since
   an id is what a handoff addresses. The browser user sees every id.
 - **The per-token grant** is `ai_mcp_tokens.approval_grant`
-  (`agent/src/db/migrations/20260929T0249Z_mcp_token_approval_grant.sql`), off by
+  (`backend/scadbuddy/migrations_agent/20260929T0249Z_mcp_token_approval_grant.sql`), off by
   default and allowed only on an `outward` token, set when the token is minted
   (`POST /api/v1/ai/mcp-tokens` `approval_grant`). `auth/tokens.ts`
   `approvalGrantCheck` reads it on every decision, for bearer tokens only; §8.2's
@@ -997,8 +997,9 @@ example).
 
 ## 9. Persistence and credentials
 
-All AI state lives in the #241 database, in `ai_*` tables owned and migrated by the
-agent service:
+All AI state lives in the #241 database, in `ai_*` tables owned by the agent service.
+Since #5299 the API applies their migrations at its start
+(`backend/scadbuddy/render/agent_migrations.py`), and the agent waits for them:
 
 - Claude credentials (encrypted);
 - MCP auth mode, tokens (hashed), and OIDC configuration;

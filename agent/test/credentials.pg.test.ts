@@ -10,7 +10,7 @@ import {
   TOO_MANY_MESSAGE,
 } from '../src/credentials.js'
 import type { Database } from '../src/db.js'
-import { migrate, MIGRATIONS } from '../src/db/migrations.js'
+import { migrate, MIGRATIONS } from './support/migrations.js'
 import { CredentialPool, NoUsableCredentialError } from '../src/harness/fallback.js'
 import { kekFromBase64, type KekStatus, sealSecret } from '../src/secrets.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'

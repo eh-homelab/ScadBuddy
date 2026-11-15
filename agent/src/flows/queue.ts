@@ -1,6 +1,6 @@
 import type { Sql } from 'postgres'
 import { flowRequestId, parseRequestId } from '../gate/ids.js'
-import { type FlowRunReads, type QueueHop, SqlFlowRunReads, type StepRow, type WaitingOn } from './backendReads.js'
+import type { FlowRunReads, QueueHop, StepRow, WaitingOn } from './backendReads.js'
 
 // A flow run's one queue (#2482, spec 2026-10-11 §4.5): everything of the run that waits
 // for a decision, from the three places it is recorded, in one read.
@@ -173,10 +173,10 @@ export class FlowQueue {
   readonly #sql: Sql
   readonly #reads: FlowRunReads
 
-  /** `reads`: the backend's flow tables (backendReads.ts); its SQL on `sql` by default. */
-  constructor(sql: Sql, reads?: FlowRunReads) {
+  /** `reads`: the backend's flow tables, through its CRUD routes (backendReads.ts). */
+  constructor(sql: Sql, reads: FlowRunReads) {
     this.#sql = sql
-    this.#reads = reads ?? new SqlFlowRunReads(sql)
+    this.#reads = reads
   }
 
   /** The run's one queue, or undefined when there is no such run (or no flows on this deployment). */

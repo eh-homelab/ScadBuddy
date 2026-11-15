@@ -682,8 +682,8 @@ function startedQuery(run: QueryRunner): (spawn: HarnessRun) => WarmQuery {
 
 export type SessionManagerDeps = {
   sql: Sql
-  /** The backend's flow tables (flows/backendReads.ts, #5299 D7); their SQL on `sql` by default. */
-  flowReads?: FlowRunReads | undefined
+  /** The backend's flow tables, through its CRUD routes (flows/backendReads.ts, #5299 D7). */
+  flowReads: FlowRunReads
   paths: HarnessPaths
   /**
    * The Claude credentials a turn may use, in priority order, and where what
@@ -939,7 +939,7 @@ export function titleFrom(prompt: string): string {
 /**
  * The SQL behind `list()`, exported so a test can EXPLAIN it: the owner-or-
  * creator-or-offered filter is served by the ai_sessions_owner,
- * ai_sessions_creator (db/migrations/20260928T0107Z_sessions.sql) and
+ * ai_sessions_creator (backend/scadbuddy/migrations_agent/20260928T0107Z_sessions.sql) and
  * ai_sessions_pending_owner (20260929T1825Z_session_handoff_offers.sql) indexes.
  */
 export function listQuery(principal: Owner, filter: ListFilter = {}): { text: string; params: (string | number)[] } {

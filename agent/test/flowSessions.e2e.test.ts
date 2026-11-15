@@ -23,6 +23,7 @@ import { harnessTools } from '../src/tools/harness.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { PendingActionStore } from '../src/tools/pending.js'
 import type { ToolServices } from '../src/tools/registry.js'
+import { SqlFlowRunReads } from './support/sqlFlowRunReads.js'
 import { AGENT_SESSIONS_SKIP, agentSessions, agentSessionsEnv } from './support/agentSessions.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
 import { fixedCredentials } from './support/fixedCredentials.js'
@@ -215,7 +216,7 @@ describe.skipIf(skip !== undefined)(`a flow's agent() and ask_session() end to e
       hash: (tool: string, input: unknown) => createHash('sha256').update(JSON.stringify([tool, input])).digest('hex'),
       summarise: (tool: string) => `call ${tool}`,
     }
-    const flows = new PgFlowRuns(db.sql)
+    const flows = new PgFlowRuns(db.sql, new SqlFlowRunReads(db.sql))
     worker = AgentWorker.start({
       address: env.address,
       namespace: 'default',
@@ -224,7 +225,7 @@ describe.skipIf(skip !== undefined)(`a flow's agent() and ask_session() end to e
         ...toolActivities(ALL_TOOLS, {
           services,
           sessions: new PgSessionOwners(db.sql),
-          approvals: new PgApprovalRecords(db.sql),
+          approvals: new PgApprovalRecords(db.sql, new SqlFlowRunReads(db.sql)),
           flows,
           audit,
         }),

@@ -1,16 +1,31 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { useLocation } from 'react-router'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import { resetMockState } from '../mocks/handlers'
-import { ORDER_ACCEPTED, ORDER_DRAFT, ORDER_MODELS, seedCart } from '../mocks/features/orders/state'
+import { ORDER_ACCEPTED, ORDER_CLOSED, ORDER_DRAFT, ORDER_MODELS, seedCart } from '../mocks/features/orders/state'
 import { seedPart } from '../mocks/features/orders/parts'
 import { choose } from '../test/select'
 import { renderPage } from '../test/utils'
 import type { OrderRow } from '../api/types'
 import { sortByMargin } from '../components/orders/marginSort'
 import { DEFAULT_ORDERS_QUERY } from '../lib/ordersQuery'
+import { ORDERS_MEMORY_KEY, resetOrdersMemory } from '../lib/orderViews'
 import { OrdersPage } from './OrdersPage'
+
+/** #6334: the list hides orders closed long ago, so the page's day is pinned: ORDER_CLOSED
+ * closed on 2026-10-18, a week before. Only `Date` is faked; the timers run. Each test
+ * starts with nothing remembered. */
+function pinToday() {
+  vi.useFakeTimers({ toFake: ['Date'], now: new Date('2026-10-25T12:00:00Z') })
+  window.localStorage.clear()
+  resetOrdersMemory()
+}
+
+/** The Filters button opens the filters past the views. */
+async function openFilters(user: { click: (element: Element) => Promise<void> }) {
+  await user.click(screen.getByRole('button', { name: /^Filters/ }))
+}
 
 function Location() {
   const location = useLocation()
@@ -18,7 +33,11 @@ function Location() {
 }
 
 describe('OrdersPage (#4249)', () => {
-  beforeEach(() => resetMockState())
+  beforeEach(() => {
+    resetMockState()
+    pinToday()
+  })
+  afterEach(() => vi.useRealTimers())
 
   it('lists orders newest first with their customer and status', async () => {
     renderPage(
@@ -60,7 +79,8 @@ describe('OrdersPage (#4249)', () => {
       { route: '/orders' },
     )
     await screen.findByRole('table', { name: 'Orders' })
-    await user.click(screen.getByRole('radio', { name: 'Draft' }))
+    await openFilters(user)
+    await user.click(screen.getByRole('button', { name: 'Draft' }))
     expect(screen.getByTestId('location')).toHaveTextContent('/orders?status=draft')
     await waitFor(() => expect(screen.getByTestId(`order-row-${ORDER_DRAFT}`)).toBeInTheDocument())
     expect(screen.queryByTestId(`order-row-${ORDER_ACCEPTED}`)).toBeNull()
@@ -69,7 +89,10 @@ describe('OrdersPage (#4249)', () => {
     // Bob's one draft is the storefront request with his own models (#6133).
     await waitFor(() => expect(screen.queryByTestId(`order-row-${ORDER_DRAFT}`)).toBeNull())
     expect(screen.getByTestId(`order-row-${ORDER_MODELS}`)).toBeInTheDocument()
-    await user.click(screen.getByRole('radio', { name: 'Accepted' }))
+    // #6334: statuses are several at once, in the list's order.
+    await user.click(screen.getByRole('button', { name: 'Accepted' }))
+    expect(screen.getByTestId('location')).toHaveTextContent('status=draft%2Caccepted&customer=')
+    await user.click(screen.getByRole('button', { name: 'Draft' }))
     await waitFor(() => expect(screen.getByText('No orders match.')).toBeInTheDocument())
     await user.click(screen.getByRole('button', { name: 'Clear filters' }))
     expect(screen.getByTestId('location')).toHaveTextContent(/\/orders$/)
@@ -87,6 +110,7 @@ describe('OrdersPage (#4249)', () => {
     await screen.findByRole('table', { name: 'Orders' })
     // The list leaves the storefront's unsubmitted carts out until they are asked for.
     expect(screen.queryByTestId(`order-row-${cart.id}`)).toBeNull()
+    await openFilters(user)
     await user.click(screen.getByRole('radio', { name: 'Unsubmitted carts' }))
     expect(screen.getByTestId('location')).toHaveTextContent('/orders?unsubmitted=1')
     const row = await screen.findByTestId(`order-row-${cart.id}`)
@@ -108,6 +132,7 @@ describe('OrdersPage (#4249)', () => {
     )
     await screen.findByTestId(`order-row-${ORDER_MODELS}`)
     expect(screen.getByTestId(`order-row-${ORDER_DRAFT}`)).toBeInTheDocument()
+    await openFilters(user)
     await user.click(screen.getByRole('button', { name: 'Purchase pending' }))
     expect(screen.getByTestId('location')).toHaveTextContent('/orders?purchase_pending=1')
     await waitFor(() => expect(screen.queryByTestId(`order-row-${ORDER_DRAFT}`)).toBeNull())
@@ -247,8 +272,113 @@ describe('OrdersPage (#4249)', () => {
   })
 })
 
+describe('OrdersPage views and memory (#6334)', () => {
+  beforeEach(() => {
+    resetMockState()
+    pinToday()
+  })
+  afterEach(() => vi.useRealTimers())
+
+  const page = () =>
+    renderPage(
+      <>
+        <OrdersPage />
+        <Location />
+      </>,
+      { route: '/orders' },
+    )
+
+  it('lists a view by its rule, and goes back to All', async () => {
+    const { user } = page()
+    await screen.findByTestId(`order-row-${ORDER_CLOSED}`)
+    expect(screen.getByTestId('order-view-all')).toHaveAttribute('aria-pressed', 'true')
+
+    await user.click(screen.getByTestId('order-view-needs_action'))
+    expect(screen.getByTestId('location')).toHaveTextContent('/orders?status=draft%2Caccepted%2Cready')
+    expect(screen.getByTestId('order-view-needs_action')).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByTestId('order-view-rule')).toHaveTextContent('the next step is yours')
+    await waitFor(() => expect(screen.queryByTestId(`order-row-${ORDER_CLOSED}`)).toBeNull())
+    expect(screen.getByTestId(`order-row-${ORDER_DRAFT}`)).toBeInTheDocument()
+    expect(screen.getByTestId(`order-row-${ORDER_ACCEPTED}`)).toBeInTheDocument()
+
+    await user.click(screen.getByTestId('order-view-closed'))
+    await waitFor(() => expect(screen.queryByTestId(`order-row-${ORDER_DRAFT}`)).toBeNull())
+    expect(screen.getByTestId(`order-row-${ORDER_CLOSED}`)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Show all' }))
+    expect(screen.getByTestId('location')).toHaveTextContent(/\/orders$/)
+    expect(await screen.findByTestId(`order-row-${ORDER_DRAFT}`)).toBeInTheDocument()
+  })
+
+  it('lists the orders awaiting payment', async () => {
+    await api.requestPayment(ORDER_ACCEPTED, {})
+    const { user } = page()
+    await screen.findByTestId(`order-row-${ORDER_DRAFT}`)
+    await user.click(screen.getByTestId('order-view-owing'))
+    expect(screen.getByTestId('location')).toHaveTextContent('/orders?owing=1')
+    await waitFor(() => expect(screen.queryByTestId(`order-row-${ORDER_DRAFT}`)).toBeNull())
+    expect(screen.getByTestId(`order-row-${ORDER_ACCEPTED}`)).toBeInTheDocument()
+  })
+
+  it('hides orders closed more than N days ago, shows them on asking, and remembers N', async () => {
+    vi.setSystemTime(new Date('2026-12-01T12:00:00Z'))
+    const { user } = page()
+    await screen.findByTestId(`order-row-${ORDER_DRAFT}`)
+    // ORDER_CLOSED closed on 2026-10-18, past the default 30 days.
+    expect(screen.queryByTestId(`order-row-${ORDER_CLOSED}`)).toBeNull()
+    expect(screen.getByTestId('orders-hidden-note')).toHaveTextContent('Closed and cancelled orders older than30 daysare hidden.')
+
+    await user.click(screen.getByRole('button', { name: 'Show them' }))
+    expect(screen.getByTestId('location')).toHaveTextContent('/orders?old=1')
+    expect(await screen.findByTestId(`order-row-${ORDER_CLOSED}`)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Hide the old ones' }))
+    await waitFor(() => expect(screen.queryByTestId(`order-row-${ORDER_CLOSED}`)).toBeNull())
+
+    await choose(user, screen.getByRole('combobox', { name: 'Hide closed orders after' }), '90 days')
+    expect(await screen.findByTestId(`order-row-${ORDER_CLOSED}`)).toBeInTheDocument()
+    expect(JSON.parse(window.localStorage.getItem(ORDERS_MEMORY_KEY) ?? '{}')).toMatchObject({ hideDays: 90 })
+  })
+
+  it("lists every order of a profit report row, however long ago it closed", async () => {
+    vi.setSystemTime(new Date('2026-12-15T12:00:00Z'))
+    // `rowLink`'s query: the orders accepted in October, in USD. ORDER_CLOSED closed on
+    // 2026-10-18, past the default 30 days.
+    renderPage(<OrdersPage />, { route: '/orders?accepted_from=2026-10-01T00%3A00%3A00Z&accepted_to=2026-11-01T00%3A00%3A00Z&currency=USD' })
+    expect(await screen.findByTestId(`order-row-${ORDER_CLOSED}`)).toBeInTheDocument()
+    expect(screen.getByTestId(`order-row-${ORDER_ACCEPTED}`)).toBeInTheDocument()
+    expect(screen.queryByTestId('orders-hidden-note')).toBeNull()
+  })
+
+  it('opens the remembered view, and forgets it once remembering is off', async () => {
+    window.localStorage.setItem(ORDERS_MEMORY_KEY, JSON.stringify({ hideDays: 30, remember: true, query: 'status=ready' }))
+    const first = page()
+    await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent('/orders?status=ready'))
+    expect(screen.getByTestId('order-view-ready')).toHaveAttribute('aria-pressed', 'true')
+    await first.user.click(screen.getByRole('switch', { name: 'Remember my view' }))
+    expect(JSON.parse(window.localStorage.getItem(ORDERS_MEMORY_KEY) ?? '{}')).toMatchObject({ remember: false, query: '' })
+    first.unmount()
+
+    page()
+    await screen.findByRole('table', { name: 'Orders' })
+    expect(screen.getByTestId('location')).toHaveTextContent(/\/orders$/)
+  })
+
+  it('remembers the last view, never a search or a profit report row', async () => {
+    const { user } = page()
+    await screen.findByRole('table', { name: 'Orders' })
+    await user.click(screen.getByTestId('order-view-in_progress'))
+    await user.type(screen.getByRole('searchbox', { name: 'Search orders' }), 'ada')
+    await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent('q=ada'))
+    expect(JSON.parse(window.localStorage.getItem(ORDERS_MEMORY_KEY) ?? '{}')).toMatchObject({ query: 'status=accepted%2Cin_production' })
+  })
+})
+
 describe('OrdersPage margin (#5327)', () => {
-  beforeEach(() => resetMockState())
+  beforeEach(() => {
+    resetMockState()
+    pinToday()
+  })
+  afterEach(() => vi.useRealTimers())
 
   it('shows each margin, tints a loss, and filters to loss or thin', async () => {
     const { user } = renderPage(
@@ -264,6 +394,7 @@ describe('OrdersPage margin (#5327)', () => {
     expect((await api.orderCosts(ORDER_ACCEPTED)).margin_state).toBe('ok')
 
     await api.addCostEntry(ORDER_ACCEPTED, { kind: 'other', amount_minor: 1_000_000 })
+    await openFilters(user)
     await user.click(screen.getByRole('radio', { name: 'Loss or thin' }))
     expect(screen.getByTestId('location')).toHaveTextContent('/orders?margin=loss_thin')
     await waitFor(() => expect(screen.queryByTestId(`order-row-${ORDER_DRAFT}`)).toBeNull())

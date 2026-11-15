@@ -117,4 +117,5 @@ markers = [
     "requires_fixtures: needs the Git LFS files under test-fixtures/ (git lfs pull), or SCADBUDDY_TEST_FIXTURES naming where they are",
     "requires_slicer_profiles: needs Bambu Studio's BBL profiles under SCADBUDDY_SLICER_PROFILES_DIR (the app and test images ship them at /opt/slicer-profiles)",
     "requires_temporal: needs SCADBUDDY_TEST_TEMPORAL_ADDRESS, SCADBUDDY_TEST_TEMPORAL_DEV_SERVER (a temporal CLI) or a temporal CLI on PATH",
+    "agent_migrations: the app applies the agent's migrations at start, as in production (#5299); without it the tests' apps skip them (tests/conftest.py)",
 ]

@@ -147,6 +147,8 @@ class SettingsView(BaseModel):
     storefront_requests_enabled: bool = False
     #: The materials a storefront print may be made of, in the shop's order (#6258).
     storefront_materials: list[str] = Field(default_factory=lambda: ["PETG", "PLA"])
+    #: The most colour combinations one prepare of a listing queues (#6237).
+    storefront_prepare_cap: int = 256
     #: The storefront's mail (#5283): SMTP host, port, user, From and the TLS mode
     #: (`starttls`, `implicit` or `none`). The password is sealed apart
     #: (`GET /storefront/mail/password` says whether it is set).

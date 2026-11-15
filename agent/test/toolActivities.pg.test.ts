@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from '../src/db.js'
 import { PgApprovalRecords, PgSessionOwners } from '../src/temporal/toolActivities.js'
+import { SqlFlowRunReads } from './support/sqlFlowRunReads.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 
@@ -69,7 +70,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       await audited('d', 'denied', 'h-d')
       await record('q', 'answer', 'answered')
       await record('u', 'approval', 'approved') // no audit row: nothing binds it to a call
-      const approvals = new PgApprovalRecords(db.sql)
+      const approvals = new PgApprovalRecords(db.sql, new SqlFlowRunReads(db.sql))
       expect(await approvals.approved(id('a'), { inputHash: 'h-a' })).toBe(true)
       // #2088: only for the call it was given for, and never without the call's hash.
       expect(await approvals.approved(id('a'), { inputHash: 'h-other' })).toBe(false)
@@ -100,7 +101,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
                               outcome, detail, started_at, finished_at, duration_ms)
         VALUES ('approval', 'approved', 'http', 'browser', 'browser', 'You', ${session.id}, 'a', 'outward',
                 'h-a', '{}', ${id}, 'ok', '', now(), now(), 0)`
-      const approvals = new PgApprovalRecords(db.sql)
+      const approvals = new PgApprovalRecords(db.sql, new SqlFlowRunReads(db.sql))
       expect(await approvals.approved(id, { inputHash: 'h-a' })).toBe(true)
       expect(await approvals.lapsed(id, { inputHash: 'h-a' })).toBe(false)
       await db.sql`UPDATE flow_grants SET revoked_at = now(), revoked_by = 'browser'`

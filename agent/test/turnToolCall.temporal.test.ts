@@ -22,6 +22,7 @@ import { PgApprovalRecords, PgSessionOwners } from '../src/temporal/toolActiviti
 import { turnServers } from '../src/temporal/turnServers.js'
 import { listTurnTools, type ListedTools, turnToolActivity, type TurnToolsDeps } from '../src/temporal/turnTools.js'
 import { services } from './helpers/mcp.js'
+import { SqlFlowRunReads } from './support/sqlFlowRunReads.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
 import { type FakeMcp, startFakeMcp } from './support/fakeMcp.js'
 import { fixedCredentials } from './support/fixedCredentials.js'
@@ -126,7 +127,7 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`a turn's plug
       servers: turnServers({ remotePlugins }),
       hostQueue: host,
       clients: new SessionClients<ListedTools>(),
-      approvals: new PgApprovalRecords(db.sql),
+      approvals: new PgApprovalRecords(db.sql, new SqlFlowRunReads(db.sql)),
       audit: new AuditLog({ sql: db.sql, hashKey: Buffer.alloc(32, 5) }),
     }
     const listDeps = deps

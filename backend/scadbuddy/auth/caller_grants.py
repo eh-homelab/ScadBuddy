@@ -15,9 +15,10 @@ A change to what a caller reads or writes changes its list in the same PR;
 `tests/auth/test_caller_grants.py` runs each caller's stores as a role holding exactly
 its list.
 
-The `ai_*` tables are the agent's: its role creates and migrates them, so it owns them,
-and the agent grants what the API's role reads of them (`agent/src/db/grants.ts`). The
-lists here hold the backend's relations only.
+The `ai_*` tables are the agent's: its role created them, so it owns them, and the agent
+grants what the API's role reads of them (`agent/src/db/grants.ts`). Since #5299 D6 the API
+applies the agent's migrations (`render/agent_migrations.py`), so a table a later file
+makes is the API's role's. The lists here hold the backend's relations only.
 """
 
 from __future__ import annotations
@@ -38,19 +39,14 @@ Grants = Mapping[str, tuple[str, ...]]
 
 _READ = ("SELECT",)
 
-#: What the agent (`agent/`) touches of the backend's. Its gate reads ``flow_grants`` and
-#: ``flow_grant_uses`` under the grant row's share lock (``agent/src/gate/store.ts``
-#: `grantInput`, until the gate moves here, #5299 step 10). Its other reads (the event log,
-#: flow runs, their decisions and grants) go through the CRUD routes of areas ``events``
-#: and ``flows`` (`api/crud_agent.py`, #5299 D7), over SQL only while an older API pod
-#: lacks them; once that deploy is done, ``events``, ``workflow_runs`` and
-#: ``workflow_run_decisions`` are unused here and their revoke follows in its own PR. Its
-#: workspace files' `blob_refs` holds go through the CRUD routes too; `auth/revoke.py`
-#: `RETIRED_GRANTS` takes back the table it once held.
+#: What the agent (`agent/`) touches of the backend's: only what its gate reads under the
+#: grant row's share lock, ``flow_grants`` and ``flow_grant_uses`` (``agent/src/gate/store.ts``
+#: `grantInput`; ``FOR SHARE OF g`` needs UPDATE on ``flow_grants``), until the gate moves
+#: here (#5299 step 10). Its other reads (the event log, flow runs, their decisions and
+#: grants) go through the CRUD routes of areas ``events`` and ``flows`` (`api/crud_agent.py`,
+#: #5299 D7), and its workspace files' `blob_refs` holds through the CRUD routes too;
+#: `auth/revoke.py` `RETIRED_GRANTS` takes back the tables it once held.
 AGENT_GRANTS: Grants = {
-    "events": _READ,
-    "workflow_runs": _READ,
-    "workflow_run_decisions": _READ,
     "flow_grants": ("SELECT", "UPDATE"),
     "flow_grant_uses": _READ,
 }
