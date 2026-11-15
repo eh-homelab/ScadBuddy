@@ -30,9 +30,13 @@ share both tables (#1750).
 ``*_drop_legacy_print_links.sql`` (#1772) drops.
 
 ``print_imports`` holds what each import read (#4698): an archive ScadBuddy did not
-start, that a person linked to a model. Its ``print_links`` row has the subject
-``model:<slug>`` and ``matched_by`` ``import``, and both rows are written in one
-transaction (`PrintLinkStore.record_import`), only while no link names the archive.
+start, that a person linked to a model, or (#6394) to a native library file. Its
+``print_links`` row has the subject ``model:<slug>`` or ``library:<file id>`` (the
+import's ``subject``) and ``matched_by`` ``import``, and both rows are written in one
+transaction (`PrintLinkStore.record_import`), only while no link names the archive. An
+import's link owns its archive last, whatever its subject (`_OWNER_ORDER`), and a link of
+ScadBuddy's own print of the same library file takes its row over (`_TAKE_OVER_IMPORT`).
+A trashed library file forgets its imports (`forget_library_imports`).
 
 ``lan_print_archives`` holds the LAN start each archive became (#5661). It is keyed by
 the archive, has no subject column, and is created by
@@ -53,13 +57,13 @@ from collections.abc import AsyncIterator, Callable, Iterable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, Self
 
 from psycopg import AsyncConnection, Connection
 from psycopg.errors import LockNotAvailable
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from scadbuddy.bambuddy.subject import PrintSubject
 
@@ -109,10 +113,18 @@ class LinkedPrint(PrintLink):
 
 
 class PrintImport(BaseModel):
-    """What an import read (#4698): the model, the source the person chose, and the file."""
+    """What an import read (#4698): what it linked the print to, the source the person
+    chose, and the file."""
+
+    # `subject` is always set once validated, so a response always has it.
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
 
     archive_id: int
-    slug: str
+    #: What the print was imported onto, its link's subject (#6394): ``model:<slug>``, or
+    #: ``library:<file id>`` for a native library file. Made from ``slug`` when not given.
+    subject: str = ""
+    #: The model it was imported onto; None for an import onto a library file.
+    slug: str | None = None
     source: ImportSource
     #: The library file chosen, or the library copy a printer file was kept as.
     library_file_id: int | None = None
@@ -128,6 +140,17 @@ class PrintImport(BaseModel):
     created_model: bool = False
     #: Set by the database.
     imported_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def _target(self) -> Self:
+        if not self.subject:
+            if self.slug is None:
+                raise ValueError("an import names a model or a library file")
+            self.subject = PrintSubject.model(self.slug).key
+        target = PrintSubject.parse(self.subject)
+        if target.kind == "output" or target.slug != self.slug:
+            raise ValueError(f"{self.subject!r} is not the import's target")
+        return self
 
 
 class PrintSend(BaseModel):
@@ -288,16 +311,29 @@ class PendingLibraryPrint(BaseModel):
 #: A subject that is a library file's; every other is an output's.
 _LIBRARY = "subject LIKE 'library:%%'"
 
-#: A subject that is a model's: an imported print's (#4698).
-_MODEL = "subject LIKE 'model:%%'"
+#: An import's link (#4698), onto a model or (#6394) a library file.
+_IMPORT = "matched_by = 'import'"
 
 #: Which of an archive's links owns it: an output's before a library file's, both before
-#: an import's (#4698 review: ScadBuddy links its own prints lazily, so a run's link can
-#: come after an import and must still own the print), then the first seen, the lower
-#: subject on a tie. Every lookup of an owner orders by this, so the proxy's gate, the
-#: list and the detail can never name different owners (#609 review). The
-#: ``print_links_owner`` index is in this order.
-_OWNER_ORDER = f"({_MODEL}), ({_LIBRARY}), first_seen, subject, queue_item_id"
+#: an import's, whatever its subject (#4698 review: ScadBuddy links its own prints lazily,
+#: so a run's link can come after an import and must still own the print; #6394: a
+#: library file's import too), then the first seen, the lower subject on a tie. Every
+#: lookup of an owner orders by this, so the proxy's gate, the list and the detail can
+#: never name different owners (#609 review). The ``print_links_owner`` index is in this
+#: order.
+_OWNER_ORDER = f"({_IMPORT}), ({_LIBRARY}), first_seen, subject, queue_item_id"
+
+#: A link of ScadBuddy's own print of a library file whose archive a person imported onto
+#: that file first (#6394) takes the import's row over: the row's key is the same, and the
+#: print is ScadBuddy's own. Any other link already there is kept as it is.
+_TAKE_OVER_IMPORT = (
+    " ON CONFLICT (subject, archive_id) DO UPDATE SET matched_by = EXCLUDED.matched_by,"
+    " queue_item_id = EXCLUDED.queue_item_id,"
+    " plate_id = COALESCE(EXCLUDED.plate_id, print_links.plate_id),"
+    " printer_id = COALESCE(EXCLUDED.printer_id, print_links.printer_id),"
+    " name = COALESCE(EXCLUDED.name, print_links.name)"
+    " WHERE print_links.matched_by = 'import'"
+)
 
 #: One row per archive: its owner, by `_OWNER_ORDER` after ``archive_id``.
 _LINKED = "SELECT DISTINCT ON (archive_id) * FROM print_links"
@@ -366,7 +402,6 @@ def import_in(
     #4699, writes its own row in the same one): None once both rows are written, else
     the link that owns the archive already, and nothing is written. It takes the
     archive's import lock until that transaction ends."""
-    subject = PrintSubject.model(record.slug)
     conn.execute(
         "SELECT pg_advisory_xact_lock(%s, %s)",
         (IMPORT_LOCK_CLASS, record.archive_id % (2**31)),
@@ -377,10 +412,11 @@ def import_in(
     # A row left by a link forgotten since (a model deleted while its copy of
     # this row stayed) is replaced.
     conn.execute(
-        "INSERT INTO print_imports (archive_id, slug, source, library_file_id,"
+        "INSERT INTO print_imports (archive_id, subject, slug, source, library_file_id,"
         " printer_id, printer_path, filename, size, sha256, created_model, content_hash)"
-        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
-        " ON CONFLICT (archive_id) DO UPDATE SET slug = EXCLUDED.slug,"
+        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+        " ON CONFLICT (archive_id) DO UPDATE SET subject = EXCLUDED.subject,"
+        " slug = EXCLUDED.slug,"
         " source = EXCLUDED.source, library_file_id = EXCLUDED.library_file_id,"
         " printer_id = EXCLUDED.printer_id, printer_path = EXCLUDED.printer_path,"
         " filename = EXCLUDED.filename, size = EXCLUDED.size,"
@@ -389,6 +425,7 @@ def import_in(
         " imported_at = now()",
         (
             record.archive_id,
+            record.subject,
             record.slug,
             record.source,
             record.library_file_id,
@@ -405,9 +442,38 @@ def import_in(
         "INSERT INTO print_links"
         " (subject, archive_id, matched_by, plate_id, printer_id, name)"
         " VALUES (%s, %s, 'import', %s, %s, %s)",
-        (subject.key, record.archive_id, plate_id, printer_id, record.filename),
+        (record.subject, record.archive_id, plate_id, printer_id, record.filename),
     )
     return None
+
+
+def _forget_unlinked(conn: Connection[DictRow], archive_ids: Iterable[int]) -> None:
+    """Delete what ScadBuddy kept of each of ``archive_ids`` that no link names any more:
+    its attachments (#3047), its LAN start and its import."""
+    ids = sorted(set(archive_ids))
+    if not ids:
+        return
+    for table in ("print_attachments", "lan_print_archives", "print_imports"):
+        conn.execute(
+            f"DELETE FROM {table} AS a WHERE a.archive_id = ANY(%s) AND NOT"
+            " EXISTS (SELECT 1 FROM print_links l WHERE l.archive_id = a.archive_id)",
+            (ids,),
+        )
+
+
+def forget_library_imports(conn: Connection[DictRow], file_ids: Iterable[int]) -> None:
+    """Forget the imports onto these library files (#6394), in the caller's transaction:
+    the native library's trash calls it, as a model's delete forgets the imports onto
+    that model (`PrintLinkStore.delete_models`). ScadBuddy's own prints of the files
+    stay linked."""
+    keys = [PrintSubject.library(file_id).key for file_id in file_ids]
+    if not keys:
+        return
+    unlinked = conn.execute(
+        f"DELETE FROM print_links WHERE subject = ANY(%s) AND {_IMPORT} RETURNING archive_id",
+        (keys,),
+    ).fetchall()
+    _forget_unlinked(conn, (row["archive_id"] for row in unlinked))
 
 
 class PrintLinkStore:
@@ -476,7 +542,8 @@ class PrintLinkStore:
         plate_id: int | None = None,
         also: Callable[[Connection[DictRow]], None] | None = None,
     ) -> LinkedPrint | None:
-        """Link ``record.archive_id`` to its model (#4698), with ``record``: None once
+        """Link ``record.archive_id`` to its model (#4698) or its library file (#6394),
+        with ``record``: None once
         both rows are written. When a link names the archive already, nothing is written
         and that link (its owner) is returned. Imports of one archive are serialised, so
         two at once cannot both win. ``also`` runs in the same transaction once both rows
@@ -610,8 +677,7 @@ class PrintLinkStore:
             conn.execute(
                 "INSERT INTO print_links"
                 " (subject, archive_id, queue_item_id, plate_id, printer_id, matched_by)"
-                " VALUES (%s, %s, %s, %s, %s, %s)"
-                " ON CONFLICT (subject, archive_id) DO NOTHING",
+                " VALUES (%s, %s, %s, %s, %s, %s)" + _TAKE_OVER_IMPORT,
                 (
                     subject.key,
                     link.archive_id,
@@ -671,22 +737,7 @@ class PrintLinkStore:
             ).fetchall()
             conn.execute("DELETE FROM print_sends WHERE subject = ANY(%s)", (keys,))
             conn.execute("DELETE FROM print_reprints WHERE subject = ANY(%s)", (keys,))
-            if unlinked:
-                conn.execute(
-                    "DELETE FROM print_attachments AS a WHERE a.archive_id = ANY(%s) AND NOT"
-                    " EXISTS (SELECT 1 FROM print_links l WHERE l.archive_id = a.archive_id)",
-                    (sorted({row["archive_id"] for row in unlinked}),),
-                )
-                conn.execute(
-                    "DELETE FROM lan_print_archives AS a WHERE a.archive_id = ANY(%s) AND NOT"
-                    " EXISTS (SELECT 1 FROM print_links l WHERE l.archive_id = a.archive_id)",
-                    (sorted({row["archive_id"] for row in unlinked}),),
-                )
-                conn.execute(
-                    "DELETE FROM print_imports AS i WHERE i.archive_id = ANY(%s) AND NOT"
-                    " EXISTS (SELECT 1 FROM print_links l WHERE l.archive_id = i.archive_id)",
-                    (sorted({row["archive_id"] for row in unlinked}),),
-                )
+            _forget_unlinked(conn, (row["archive_id"] for row in unlinked))
 
     def _record_import(
         self,
@@ -704,7 +755,8 @@ class PrintLinkStore:
     def _import_of(self, archive_id: int) -> PrintImport | None:
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT archive_id, slug, source, library_file_id, printer_id, printer_path,"
+                "SELECT archive_id, subject, slug, source, library_file_id, printer_id,"
+                " printer_path,"
                 " filename, size, sha256, created_model, content_hash, imported_at"
                 " FROM print_imports WHERE archive_id = %s",
                 (archive_id,),
@@ -856,8 +908,7 @@ class PrintLinkStore:
                 "INSERT INTO print_links"
                 " (subject, archive_id, matched_by, queue_item_id, plate_id, printer_id, name)"
                 " SELECT subject, %s, 'queue_item', queue_item_id, plate_id, printer_id, %s"
-                f" FROM print_sends WHERE queue_item_id = %s AND {_UNLINKED}"
-                " ON CONFLICT (subject, archive_id) DO NOTHING",
+                f" FROM print_sends WHERE queue_item_id = %s AND {_UNLINKED}" + _TAKE_OVER_IMPORT,
                 (archive_id, name, queue_item_id),
             )
 

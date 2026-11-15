@@ -62,7 +62,7 @@ multi-colour rules, connecting Bambuddy and each feature.
 - **Inside Bambuddy**: one click adds ScadBuddy to Bambuddy's sidebar as an External
   Link that opens inside Bambuddy.
 - **Prints ScadBuddy did not start**: the Prints page's **Import print** links such a
-  print to a model by hand (#4698). The **print watcher** does it with no user step
+  print to a model, or to a file of ScadBuddy's own library (#6394), by hand (#4698). The **print watcher** does it with no user step
   (#4699). See [The print watcher](#the-print-watcher-4699).
 
 | | |

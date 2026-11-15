@@ -14,6 +14,12 @@ import { archiveImports, pastPrint, type PastPrint } from './orders/pastPrints'
 
 const SLICER_PROJECTS = new Set([9104])
 const LIBRARY_MATCHES: Record<number, { id: number; name: string }> = { 9104: { id: 501, name: 'benchy.3mf' } }
+/** #6394 — the files of ScadBuddy's own library the job's name suggests, by archive. */
+export const SUGGESTED_FILES: Record<number, { id: number; filename: string; folder_id: number | null }[]> = {
+  9104: [{ id: 1_000_000_501, filename: 'benchy_hull.3mf', folder_id: null }],
+}
+/** #6394 — the native library files an import may target. */
+const NATIVE_FILES = new Set([1_000_000_501, 1_000_000_502])
 
 /** The prints the imports added, so `reset` takes them out again. */
 const added: PrintDetail[] = []
@@ -46,6 +52,7 @@ function sourcesOf(archive: PastPrint, printer: boolean): FoundSource[] {
   return found
 }
 
+/** What an import linked the archive to: a model's slug, or `library:<file id>` (#6394). */
 function linkedSlug(archive: PastPrint): string | null {
   return archiveImports.get(archive.id) ?? null
 }
@@ -58,7 +65,7 @@ function suggested(archive: PastPrint): { slug: string; name: string }[] {
     .map((m) => ({ slug: m.slug, name: m.name }))
 }
 
-function importedPrint(archive: PastPrint, slug: string, record: ImportedPrint['imported']): PrintDetail {
+function importedPrint(archive: PastPrint, slug: string | null, record: ImportedPrint['imported']): PrintDetail {
   const base = prints.find((p) => p.status === 'completed') ?? prints[0]
   if (!base) throw new Error('the print fixtures are empty')
   return {
@@ -75,7 +82,7 @@ function importedPrint(archive: PastPrint, slug: string, record: ImportedPrint['
     provenance: null,
     files: [],
     imported: record,
-    links: { bambuddy_url: null, customize_url: `/m/${slug}` },
+    links: { bambuddy_url: null, customize_url: slug ? `/m/${slug}` : null },
   }
 }
 
@@ -85,8 +92,11 @@ export const handlers = [
     if (!archive) return problem(404, 'Not Found', `Bambuddy has no archive ${String(params['archiveId'])}`)
     const printer = new URL(request.url).searchParams.get('printer') === 'true'
     const slug = linkedSlug(archive)
+    const fileTarget = slug?.startsWith('library:') ? Number(slug.slice('library:'.length)) : null
     const linked =
-      slug !== null
+      fileTarget !== null
+        ? { subject: `library:${fileTarget}`, library_file_id: fileTarget }
+        : slug !== null
         ? { subject: `model:${slug}`, slug }
         : archive.output_id !== undefined
           ? { subject: `output:${archive.output_id}`, output_id: archive.output_id }
@@ -103,6 +113,7 @@ export const handlers = [
       imported: null,
       sources: linked ? [] : sourcesOf(archive, printer),
       suggested_models: suggested(archive),
+      suggested_library_files: SUGGESTED_FILES[archive.id] ?? [],
     } satisfies PrintSources)
   }),
 
@@ -110,18 +121,31 @@ export const handlers = [
     const archive = pastPrint(Number(params['archiveId']))
     if (!archive) return problem(404, 'Not Found', `Bambuddy has no archive ${String(params['archiveId'])}`)
     const body = (await request.json()) as PrintImportRequest
-    if ((body.slug == null) === (body.new_model == null)) {
-      return problem(422, 'Unprocessable Content', 'send `slug` or `new_model`, one of them')
+    if ([body.slug, body.new_model, body.library_file_id].filter((t) => t != null).length !== 1) {
+      return problem(422, 'Unprocessable Content', 'name exactly one of slug, new_model and library_file_id')
     }
     if (body.new_model && !request.headers.get('Idempotency-Key')) return problem(428, 'Precondition Required', 'send an Idempotency-Key')
-    const target = body.slug ?? (body.new_model?.name ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')
+    const fileId = body.library_file_id ?? null
+    const target =
+      fileId !== null
+        ? `library:${fileId}`
+        : (body.slug ?? (body.new_model?.name ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, ''))
+    const slug = fileId === null ? target : null
+    const answer = (record: ImportedPrint['imported'], created: boolean, madeNow: boolean): ImportedPrint => ({
+      archive_id: archive.id,
+      subject: fileId === null ? `model:${target}` : target,
+      slug,
+      library_file_id: fileId,
+      print_url: `/api/v1/prints/${archive.id}`,
+      created_model: created,
+      made_now: madeNow,
+      imported: record,
+    })
     const owner = linkedSlug(archive)
     if (owner !== null || archive.output_id !== undefined || archive.library_file_id !== undefined) {
       if (owner === target) {
         const print = prints.find((p) => p.archive_id === archive.id)
-        if (print?.imported) {
-          return HttpResponse.json({ archive_id: archive.id, slug: target, print_url: `/api/v1/prints/${archive.id}`, created_model: print.imported.created_model, made_now: false, imported: print.imported } satisfies ImportedPrint)
-        }
+        if (print?.imported) return HttpResponse.json(answer(print.imported, print.imported.created_model ?? false, false))
       }
       return problem(409, 'Conflict', `archive ${archive.id} is a print of another subject already`)
     }
@@ -149,12 +173,15 @@ export const handlers = [
       }
       addMockModel(model)
       created = true
+    } else if (fileId !== null) {
+      if (!NATIVE_FILES.has(fileId)) return problem(404, 'Not Found', `ScadBuddy's own library has no file ${fileId}`)
     } else if (!mockModels().some((m) => m.slug === target)) {
       return problem(404, 'Not Found', `no model '${target}'`)
     }
     const record: ImportedPrint['imported'] = {
       archive_id: archive.id,
-      slug: target,
+      subject: fileId === null ? `model:${target}` : target,
+      slug,
       source: source.kind,
       library_file_id: source.kind === 'printer' ? 601 : (source.library_file_id ?? null),
       printer_id: source.kind === 'printer' ? (archive.printer_id ?? null) : null,
@@ -164,15 +191,14 @@ export const handlers = [
       sha256: null,
       imported_at: new Date().toISOString(),
       created_model: created,
+      content_hash: null,
     }
     archiveImports.set(archive.id, target)
-    const print = importedPrint(archive, target, record)
+    const print = importedPrint(archive, slug, record)
+    if (fileId !== null) print.library_file_id = fileId
     prints.unshift(print)
     added.push(print)
-    return HttpResponse.json(
-      { archive_id: archive.id, slug: target, print_url: `/api/v1/prints/${archive.id}`, created_model: created, made_now: true, imported: record } satisfies ImportedPrint,
-      { status: 201 },
-    )
+    return HttpResponse.json(answer(record, created, true), { status: 201 })
   }),
 ]
 

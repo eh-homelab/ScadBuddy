@@ -15,6 +15,7 @@ from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
 
 from scadbuddy.bambuddy.models import LibraryPlate
+from scadbuddy.bambuddy.print_links import forget_library_imports
 
 
 class UnsetType(Enum):
@@ -341,7 +342,8 @@ class NativeLibraryStore:
         """The rows are locked by id first, as `delete_folder_tree` locks them: an UPDATE
         alone locks them in the order its scan meets them, and would deadlock with it.
         ``per_print`` trashes only those still marked (#4337): a file a person made theirs
-        since the caller read it (a move, a restore) stays."""
+        since the caller read it (a move, a restore) stays. A trashed file forgets the
+        prints imported onto it (#6394), in the same transaction."""
         only = " AND print_subject IS NOT NULL" if per_print else ""
         with self._pool.connection() as conn, conn.transaction():
             conn.execute(
@@ -355,6 +357,7 @@ class NativeLibraryStore:
                 f" RETURNING {_FILE_COLUMNS}".encode(),
                 (list(ids),),
             ).fetchall()
+            forget_library_imports(conn, [int(r["id"]) for r in rows])
         return [NativeFile.model_validate(r) for r in rows]
 
     def restore(self, ids: list[int]) -> list[int]:
@@ -566,7 +569,8 @@ class NativeLibraryStore:
 
     def delete_folder_tree(self, id: int) -> tuple[list[NativeFile], list[int]] | None:
         """Trash every live file in the folder and its subfolders, then delete the
-        folders deepest first, in one transaction; ``None`` when the folder is gone.
+        folders deepest first, in one transaction; ``None`` when the folder is gone. The
+        trashed files forget the prints imported onto them (#6394), as `trash` does.
 
         The subtree's folder rows are locked ``FOR UPDATE`` before the files are
         trashed, and an insert or move into a folder takes ``FOR KEY SHARE`` on it for its
@@ -603,6 +607,7 @@ class NativeLibraryStore:
                 f" RETURNING {_FILE_COLUMNS}".encode(),
                 (order,),
             ).fetchall()
+            forget_library_imports(conn, [int(r["id"]) for r in rows])
             for folder_id in order:
                 conn.execute("DELETE FROM library_folders WHERE id = %s", (folder_id,))
         files = sorted((NativeFile.model_validate(r) for r in rows), key=lambda f: f.id)
