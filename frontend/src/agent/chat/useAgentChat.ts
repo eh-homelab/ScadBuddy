@@ -48,6 +48,7 @@ const NOT_SENT = 'The assistant is unreachable and too much is waiting to be sen
 const QUEUED = 'The assistant is unreachable; your message will be sent once it reconnects.'
 const QUEUED_STOP = 'The assistant is unreachable; your stop goes first when it reconnects.'
 const QUEUED_TAKE_OVER = 'The assistant is unreachable; your take-over will be sent once it reconnects.'
+const QUEUED_QUEUE_CHANGE = 'The assistant is unreachable; your change to the queued message will be sent once it reconnects.'
 
 export interface AgentChat {
   state: ChatState
@@ -60,6 +61,10 @@ export interface AgentChat {
   /** #940 — answers the agent's question: one answer per question, in order. */
   answer: (sessionId: string, questionId: string, answers: string[]) => void
   interrupt: (sessionId: string) => void
+  /** #6386 — removes a queued message before it starts. */
+  removeQueued: (sessionId: string, id: string) => void
+  /** #6386 — gives a queued message new words before it starts. */
+  editQueued: (sessionId: string, id: string, text: string) => void
   /** Take over a session another principal controls (§6 handoff). */
   takeOver: (sessionId: string) => void
   /** Open a session to watch it live; null starts a fresh chat on the next send. */
@@ -208,6 +213,20 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
     [control],
   )
 
+  const removeQueued = useCallback(
+    (sessionId: string, id: string) => control(clientMessage({ type: 'queue.remove', sessionId, id }), QUEUED_QUEUE_CHANGE),
+    [control],
+  )
+
+  const editQueued = useCallback(
+    (sessionId: string, id: string, text: string) => {
+      const trimmed = text.trim()
+      if (!trimmed) return
+      control(clientMessage({ type: 'queue.edit', sessionId, id, text: trimmed }), QUEUED_QUEUE_CHANGE)
+    },
+    [control],
+  )
+
   const select = useCallback((sessionId: string | null) => {
     dispatch({ type: 'select', sessionId })
     // Offline, the reconnect's onOpen attaches whatever is on screen then.
@@ -216,5 +235,5 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
 
   const patch = useCallback((p: SessionPatch) => dispatch({ type: 'session-patched', patch: p }), [])
 
-  return { state, send, decide, answer, interrupt, takeOver, select, patch }
+  return { state, send, decide, answer, interrupt, removeQueued, editQueued, takeOver, select, patch }
 }

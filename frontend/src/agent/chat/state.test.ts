@@ -652,3 +652,26 @@ describe('workspace changes (#2329)', () => {
     ])
   })
 })
+
+describe('the queue (#6386)', () => {
+  const entry = (id: string) => ({ id, text: id, author: you, queuedAt: '2026-11-15T00:00:00.000Z' })
+  const queue = (version: number, ids: string[]) => server({ type: 'session.queue', sessionId: 's1', version, queue: ids.map(entry) })
+
+  it('takes the last session.queue, and moves an entry into the transcript once its user.turn arrives', () => {
+    const queued = run([queue(1, ['q1']), queue(2, ['q1', 'q2'])], started)
+    expect(queued.sessions.s1?.queued?.map((q) => q.id)).toEqual(['q1', 'q2'])
+    const begun = run([server({ type: 'user.turn', sessionId: 's1', turnId: 'q1', text: 'q1', author: you })], queued)
+    expect(begun.sessions.s1?.queued?.map((q) => q.id)).toEqual(['q2'])
+    expect(begun.sessions.s1?.items.at(-1)).toMatchObject({ kind: 'user', id: 'q1' })
+    // A queue event that still lists a started message does not bring it back.
+    expect(run([queue(3, ['q1', 'q2'])], begun).sessions.s1?.queued?.map((q) => q.id)).toEqual(['q2'])
+    expect(run([queue(4, [])], begun).sessions.s1?.queued).toEqual([])
+  })
+
+  it('clears the queue for a replay, which rebuilds it from the log', () => {
+    const queued = run([queue(1, ['q1'])], started)
+    const replaying = run([{ type: 'select', sessionId: 's1' }], queued)
+    expect(replaying.sessions.s1?.queued).toEqual([])
+    expect(run([queue(1, ['q1'])], replaying).sessions.s1?.queued?.map((q) => q.id)).toEqual(['q1'])
+  })
+})

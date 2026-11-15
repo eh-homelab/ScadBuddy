@@ -31,6 +31,8 @@ import {
   type ClientMessage,
   type Origin,
   type Owner,
+  QUEUE_MAX,
+  type QueuedEntry,
   type SentImage,
   type ServerEvent,
   type SessionMode,
@@ -120,6 +122,9 @@ interface MockSession extends SessionSummary {
   parentId?: string
   /** #1885 — when it was archived; the snapshot leaves it out, and a send is refused. */
   archivedAt?: string
+  /** #6386 — the messages sent while a turn ran, oldest first, and the queue's version. */
+  queue?: QueuedEntry[]
+  queueVersion?: number
 }
 
 /** Splits text into stream-sized pieces, the way `text_delta`s arrive. */
@@ -180,6 +185,22 @@ export function createMockAgentTransport({
 
   const money = (usd: number) => `$${usd.toFixed(2)}`
 
+  /** #6386 — the queue after a change, as the agent's workflow writes it. */
+  const emitQueue = (s: MockSession) => {
+    s.queueVersion = (s.queueVersion ?? 0) + 1
+    emit({ type: 'session.queue', sessionId: s.sessionId, version: s.queueVersion, queue: [...(s.queue ?? [])] })
+  }
+
+  /** #6386 — once a turn ends (done, failed or stopped), the queue's head runs as the next turn. */
+  const startQueued = (s: MockSession) => {
+    const head = s.queue?.shift()
+    if (!head) return
+    emit({ type: 'user.turn', sessionId: s.sessionId, turnId: head.id, text: head.text, author: head.author, ...(head.images ? { images: head.images } : {}) })
+    setStatus(s, 'running')
+    emitQueue(s)
+    play(s, followUp(s, head.text))
+  }
+
   const finish = (s: MockSession) => {
     s.turns += 1
     s.costUsd += COST_PER_TURN
@@ -192,7 +213,15 @@ export function createMockAgentTransport({
         code: 'error_max_budget_usd',
         message: `this chat used its ${money(s.budgetUsd)} budget (${money(s.costUsd)} spent)`,
       })
+      // A queued message the spent session cannot run is dropped, and said.
+      if (s.queue?.length) {
+        s.queue.shift()
+        emit({ type: 'error', sessionId: s.sessionId, code: 'queued_message_dropped', message: 'A queued message was not sent: the session has spent its budget.' })
+        emitQueue(s)
+      }
+      return
     }
+    startQueued(s)
   }
 
   const firstTurn = (s: MockSession): Array<() => void> => {
@@ -501,8 +530,21 @@ export function createMockAgentTransport({
           emit({ type: 'error', code: 'not_found', message: 'That session no longer exists.' })
           return
         }
-        if (s && (s.status === 'running' || s.status === 'waiting_approval' || s.status === 'waiting_input')) {
-          emit({ type: 'error', sessionId: s.sessionId, code: 'busy', message: 'A turn is already running in this session.' })
+        if (s && (s.status === 'running' || s.status === 'waiting_approval' || s.status === 'waiting_input') && s.owner.kind === 'browser') {
+          // #6386 — sent while a turn runs: it waits in the session's queue.
+          const queue = (s.queue ??= [])
+          if (queue.length >= QUEUE_MAX) {
+            deliver({ v: PROTOCOL_VERSION, type: 'error', sessionId: s.sessionId, code: 'queue_full', message: `the session's queue is full (${QUEUE_MAX} messages); wait for one to start, or remove one` })
+            return
+          }
+          queue.push({
+            id: nextId('turn'),
+            text: msg.text,
+            author: BROWSER_USER,
+            ...(msg.images?.length ? { images: uploadedPreviews(msg.images) } : {}),
+            queuedAt: new Date().toISOString(),
+          })
+          emitQueue(s)
           return
         }
         if (s?.archivedAt) {
@@ -614,6 +656,27 @@ export function createMockAgentTransport({
           s.asking = undefined
         }
         setStatus(s, 'idle')
+        // A Stop ends this turn only: the next queued message starts.
+        startQueued(s)
+        return
+      }
+      case 'queue.remove':
+      case 'queue.edit': {
+        const s = sessions.get(msg.sessionId)
+        const at = s?.queue?.findIndex((q) => q.id === msg.id) ?? -1
+        if (!s || at < 0) {
+          deliver({
+            v: PROTOCOL_VERSION,
+            type: 'error',
+            ...(s ? { sessionId: s.sessionId } : {}),
+            code: 'not_queued',
+            message: `message ${msg.id} is not waiting in the queue: it started, or was removed`,
+          })
+          return
+        }
+        if (msg.type === 'queue.remove') s.queue!.splice(at, 1)
+        else s.queue![at] = { ...s.queue![at]!, text: msg.text }
+        emitQueue(s)
         return
       }
       case 'session.handoff': {
