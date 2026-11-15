@@ -281,7 +281,7 @@ slicer is the only judge.
   most `MAX_PROCESS_VALUE_LENGTH` (16 Ki) characters, the whole map at most
   `MAX_PROCESS_OVERRIDES_BYTES` (256 KiB) as JSON, under Temporal's 2 MB payload limit
   ([defaults](https://docs.temporal.io/self-hosted-guide/defaults)),
-  so an oversized request is a 422 (`process_overrides.within_bounds`). A slot's
+  so an oversized request is a 422 (`process_overrides.within_bounds`). The extra keys of a slot's
   `part_settings` are bounded the same way.
 - **The order.** The plan's `process_overrides` (`print_run.py` `plan_run`) are the
   filament profiles' (#717), then the template's `print_settings`, then the named
@@ -300,7 +300,9 @@ slicer is the only judge.
   `prime_tower.prime_tower_warnings`) read the request's `process_overrides` too, as
   `_sequence_clearance` does for `print_sequence`: a support or tower key the request
   sets is left to `override_warnings`, and `enable_support` or `enable_prime_tower` set
-  to `"0"` leaves nothing else of that choice to warn about.
+  to `"0"` leaves nothing else of that choice to warn about. A `curr_bed_type` override
+  wins at the slice on both paths (`dispatch.slice_request`, `slicing/presets.py`
+  `build_presets`), so the plate warnings name it (`PrintRunRequest.plate_type`).
 - **Host-side settings are stripped.** "Allow everything" covers what the slicer does with
   the print, not commands or files on the machine that slices (the native slicer's pod,
   Bambuddy's slicer sidecar). `process_overrides.HOST_SIDE_KEYS` lists every option of

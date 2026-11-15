@@ -91,9 +91,11 @@ class PartSettings(BaseModel):
             return data
         # The part's own structure (its filament, name, mesh) is never a setting (#6291
         # review): `extruder` here would move it past the plan and the AMS mapping.
-        # Bounded as `process_overrides` is (#6291 review): the map goes into the run
-        # key, the history and the remembered choices.
-        kept = without_reserved(within_bounds(data), PART_STRUCTURE_KEYS, where="part_settings")
+        # The extra keys are bounded as `process_overrides` is (#6291 review): the map
+        # goes into the run key, the history and the remembered choices. The named
+        # fields are bounded by their own types.
+        within_bounds({key: value for key, value in data.items() if key not in cls.model_fields})
+        kept = without_reserved(data, PART_STRUCTURE_KEYS, where="part_settings")
         return without_host_side(kept, where="part_settings")
 
     top_shell_layers: ProcessScalar | None = None

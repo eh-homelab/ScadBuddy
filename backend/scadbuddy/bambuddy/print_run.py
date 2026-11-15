@@ -482,6 +482,13 @@ class PrintRunRequest(BaseModel):
         """``process_overrides`` as the plan takes them (#2998); empty for none."""
         return normalised_overrides(self.process_overrides) or {}
 
+    def plate_type(self) -> str:
+        """The plate the slice uses: a ``curr_bed_type`` override, which wins at the
+        slice on both paths (#2998, ``dispatch.slice_request``, ``build_presets``), else
+        the chosen ``bed_type``. The check's plate warnings name this one."""
+        asked = self.overrides().get("curr_bed_type")
+        return asked if isinstance(asked, str) and asked else self.choices.bed_type
+
     def asked_plates(self) -> list[int] | None:
         """The plates asked for, in plate order; ``None`` for every plate."""
         return asked_plates(self.plate_id, self.all_plates, self.plate_ids)
@@ -1430,7 +1437,7 @@ async def check_print(
             *rack_notes,
             *_listed(
                 plate_unlisted_warning(
-                    request.choices.bed_type, prepared.printer_model, prepared.printer_name
+                    request.plate_type(), prepared.printer_model, prepared.printer_name
                 )
             ),
             *(
@@ -1607,7 +1614,7 @@ async def _native_check(
             *rack_notes,
             *_listed(
                 plate_unlisted_warning(
-                    request.choices.bed_type, prepared.printer_model, prepared.printer_name
+                    request.plate_type(), prepared.printer_model, prepared.printer_name
                 )
             ),
             *(
@@ -3456,6 +3463,7 @@ async def plan_run(
         printer_status,
         printer_name=planned[0][1].printer_name,
         printer_model=prepared.printer_model,
+        plate_type=request.plate_type(),
     )
     hardware += high_flow_warnings(
         printer_status,
@@ -3812,8 +3820,10 @@ async def _hardware_warnings(
     *,
     printer_name: str | None,
     printer_model: str | None,
+    plate_type: str,
 ) -> list[FilamentWarning]:
     """The chosen nozzles and plate against what the printer reports (spec §4.4-4.5).
+    ``plate_type`` is the plate the slice uses (``PrintRunRequest.plate_type``).
 
     Advisory only: an offline printer's status and an unreadable archive list mean
     "unknown", which says nothing rather than failing the print. A native run has no
@@ -3833,8 +3843,8 @@ async def _hardware_warnings(
         nozzle_warning(size, installed)
         for size in dict.fromkeys(nozzle.size for nozzle in choices.nozzles)
     ]
-    found.append(plate_warning(choices.bed_type, last, printer_name))
-    found.append(plate_unlisted_warning(choices.bed_type, printer_model, printer_name))
+    found.append(plate_warning(plate_type, last, printer_name))
+    found.append(plate_unlisted_warning(plate_type, printer_model, printer_name))
     return [warning for warning in found if warning is not None]
 
 
