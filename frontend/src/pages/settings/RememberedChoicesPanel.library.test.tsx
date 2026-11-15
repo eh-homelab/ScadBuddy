@@ -64,6 +64,23 @@ describe('RememberedChoicesPanel · library files (#1754)', () => {
     expect(asked).toEqual(['?ids=89&ids=9999'])
   })
 
+  // #6218: on is the default, so only a remembered "off" is named.
+  it('names a remembered colour match that is off as "any colour"', async () => {
+    server.use(
+      http.get('/api/v1/settings/remembered', () =>
+        HttpResponse.json({
+          model_print_choices: {
+            'library:89': { tier: 'fine', force_colour_match: false },
+            'library:9999': { tier: 'draft', force_colour_match: true },
+          },
+        }),
+      ),
+    )
+    renderPage(<RememberedChoicesPanel targets={null} />)
+    expect(await screen.findByText('fine quality · any colour')).toBeInTheDocument()
+    expect(screen.getByText('draft quality')).toBeInTheDocument()
+  })
+
   it("falls back to the file's id when the names cannot be read", async () => {
     server.use(
       http.get('/api/v1/settings/remembered', () =>

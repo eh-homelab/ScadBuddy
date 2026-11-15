@@ -55,6 +55,16 @@ def test_a_files_choices_are_its_own(store: SettingsStore) -> None:
     assert store.library_choices(67) == ModelPrintChoices()
 
 
+def test_colour_match_is_remembered_and_nothing_is_none(store: SettingsStore) -> None:
+    """#6218: ``None`` is nothing remembered, which the dialog reads as on; off is kept."""
+    assert ModelPrintChoices().force_colour_match is None
+    store.set_library_choices(89, ModelPrintChoices(force_colour_match=False))
+    store.set_model_choices("gear", ModelPrintChoices(force_colour_match=True))
+
+    assert store.library_choices(89).force_colour_match is False
+    assert store.load().model_print_choices["gear"].force_colour_match is True
+
+
 def test_remembering_nothing_deletes_the_row(store: SettingsStore, pg_conninfo: str) -> None:
     store.set_library_choices(89, CHOSEN)
     store.set_library_choices(89, ModelPrintChoices())

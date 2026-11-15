@@ -86,7 +86,8 @@ export const settingsTools: Tool[] = [
     name: 'get_remembered_choices',
     label: 'Read remembered printer and spool choices',
     description:
-      'What the print dialog remembers (#322): per-model printer and spool choices, per-printer plates, ' +
+      'What the print dialog remembers (#322): per-model printer and spool choices (with `force_colour_match`, ' +
+      'null for the default, on, #6218), per-printer plates, ' +
       'the print options at each scope, and the project each model was last filed in (`model_projects`, keyed ' +
       'by model id, or "<model id>/<preset id>" with a preset, #1660). A Bambuddy library file\'s entries are ' +
       'keyed "library:<file id>" ' +

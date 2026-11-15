@@ -1,9 +1,11 @@
 import { screen, waitFor, within } from '@testing-library/react'
+import { http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
 import type { MediaView, StorefrontListingInput } from '../../api/types'
 import { GALLERY_SLUG } from '../../mocks/fixtures'
 import { refuseNextRepublish } from '../../mocks/features/storefront'
+import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { StorefrontPicture } from './StorefrontPicture'
 
@@ -52,6 +54,30 @@ describe('StorefrontPicture (#6213)', () => {
     expect([still.published, still.media_ids]).toEqual([false, [item.id]])
     // Nothing left to save.
     expect(within(dialog).getByRole('button', { name: 'Save' })).toBeDisabled()
+  })
+
+  it('says which listing it is saving while the others wait (#6290)', async () => {
+    const first = await api.createStorefrontListing(body('Coaster'))
+    await api.createStorefrontListing(body('Coaster set'))
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http.put(`/api/v1/storefront/listings/${first.id}/media`, async () => {
+        await gate
+        return undefined
+      }),
+    )
+    const { user, dialog } = await open(await image())
+    await within(dialog).findAllByRole('checkbox')
+    await user.click(within(dialog).getByRole('button', { name: 'Choose all' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+    expect(await within(dialog).findByText('Adding…')).toBeInTheDocument()
+    expect(within(dialog).queryByText('Added to the draft.')).toBeNull()
+    release()
+    await waitFor(() => expect(within(dialog).getAllByText('Added to the draft.')).toHaveLength(2))
+    expect(within(dialog).queryByText('Adding…')).toBeNull()
   })
 
   it('takes the image off a listing that shows it', async () => {
@@ -120,13 +146,14 @@ describe('StorefrontPicture (#6213)', () => {
     expect(await within(dialog).findByText(/still names a picture the design no longer has \(0123456789ab\)/)).toBeInTheDocument()
   })
 
-  it('names a video the listing already shows when it refuses the set', async () => {
+  it('keeps a video the listing already shows, and adds the picture after it (#6290)', async () => {
     const item = await image()
-    await api.createStorefrontListing(body('Coaster', ['d4e5f6a1b2c3']))
+    const listing = await api.createStorefrontListing(body('Coaster', ['d4e5f6a1b2c3']))
     const { user, dialog } = await open(item)
     await user.click(await within(dialog).findByRole('checkbox', { name: 'Show on Coaster' }))
     await user.click(within(dialog).getByRole('button', { name: 'Save' }))
-    expect(await within(dialog).findByText(/^Not saved: the listing also shows a video \(d4e5f6a1b2c3\)/)).toBeInTheDocument()
+    expect(await within(dialog).findByText('Added to the draft.')).toBeInTheDocument()
+    expect((await api.storefrontListing(listing.id)).media_ids).toEqual(['d4e5f6a1b2c3', item.id])
   })
 
   it('says when the design has more listings than the dialog shows', async () => {
