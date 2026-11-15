@@ -9,7 +9,7 @@ import { AGENT_CRUD, CRUD_READ_TIMEOUT_MS, CrudReadError } from './crudRead.js'
 // may still answer during a roll, so the SQL stays until every pod lists the areas.
 
 /** The areas of the small stores (backend api/crud_areas.py `CRUD_AREAS["agent"]`). */
-export const STORE_AREAS = ['activity-kinds', 'browser-origins', 'bridge-tabs', 'pairings', 'mcp-tokens'] as const
+export const STORE_AREAS = ['activity-kinds', 'browser-origins', 'bridge-tabs', 'pairings', 'mcp-tokens', 'notify'] as const
 export type StoreArea = (typeof STORE_AREAS)[number]
 
 /**

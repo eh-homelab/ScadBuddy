@@ -9,6 +9,8 @@ import { CrudSessionTabStore } from '../src/bridge/sessionTabs.js'
 import { CrudTabImageStore } from '../src/bridge/tabImages.js'
 import { CrudTabOwnerStore } from '../src/bridge/tabOwners.js'
 import { BrowserOrigins, CrudSessionOrigins } from '../src/browser/store.js'
+import { ChannelStore, CrudChannelRows } from '../src/notify/channels.js'
+import { CrudPushStore, SubscriptionTakenError } from '../src/notify/pushStore.js'
 import type { SessionImage } from '../src/sessions/blobs.js'
 
 // The agent's small stores through the API's CRUD routes (#5299 step 5), against a fake API
@@ -165,9 +167,90 @@ class FakeApi {
 
 const target = (api: FakeApi) => ({ baseUrl: BASE, fetch: api.fetch })
 
+/** The notify area's routes, in memory: the API seals; here the "sealed" values are kept as they came. */
+class FakeNotifyApi {
+  seen: Seen[] = []
+  vapid: { public_key: string; private_key: string } | undefined
+  subs = new Map<string, { id: string; owner: { kind: string; id: string; label: string }; p256dh: string; auth: string }>()
+  sent = new Set<string>()
+  channels = new Map<string, { id: string; kind: string; name: string; url: string; target: string | null; enabled: boolean; token: string | null; last_error: string | null }>()
+
+  readonly fetch: typeof fetch = async (input, init) => {
+    const url = new URL(String(input))
+    const method = init?.method ?? 'GET'
+    const b = typeof init?.body === 'string' ? (JSON.parse(init.body) as Record<string, unknown>) : {}
+    const path = url.pathname.slice(PREFIX.length)
+    this.seen.push({ method, path, body: b })
+    const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status, headers: { 'x-scadbuddy-crud': '1' } })
+    let m: RegExpMatchArray | null
+    if (path === '/push/vapid') {
+      if (method === 'POST') this.vapid ??= b as { public_key: string; private_key: string }
+      return json({ vapid: this.vapid ?? null })
+    }
+    if (path === '/push/subscriptions' && method === 'POST') {
+      const held = this.subs.get(b.endpoint as string)
+      const owner = b.owner as { kind: string; id: string; label: string }
+      if (held && held.owner.id !== owner.id) return json({ detail: 'this push endpoint is subscribed for someone else', reason: 'subscription-taken' }, 409)
+      const id = held?.id ?? randomUUID()
+      this.subs.set(b.endpoint as string, { id, owner, p256dh: b.p256dh as string, auth: b.auth as string })
+      return json({ id })
+    }
+    if (path === '/push/subscriptions') return json({ subscriptions: [...this.subs].map(([endpoint, s]) => ({ ...s, endpoint })) })
+    if (path === '/push/subscriptions/remove') return json({ done: this.subs.delete(b.endpoint as string) })
+    if (path === '/push/sent') {
+      const key = `${b.request_id}|${b.target}`
+      const claimed = !this.sent.has(key)
+      this.sent.add(key)
+      return json({ claimed })
+    }
+    const view = (c: NonNullable<ReturnType<typeof this.channels.get>>) => ({
+      id: c.id,
+      kind: c.kind,
+      name: c.name,
+      url: c.url,
+      target: c.target,
+      enabled: c.enabled,
+      has_token: c.token !== null,
+      token_last4: c.token ? c.token.slice(-4) : '',
+      last_error: c.last_error,
+      last_sent_at: null,
+    })
+    if (path === '/notify-channels' && method === 'GET') return json({ channels: [...this.channels.values()].map(view) })
+    if (path === '/notify-channels' && method === 'POST') {
+      const id = randomUUID()
+      this.channels.set(id, { id, kind: b.kind as string, name: b.name as string, url: b.url as string, target: (b.target as string) ?? null, enabled: b.enabled as boolean, token: (b.token as string) ?? null, last_error: null })
+      return json({ id }, 201)
+    }
+    if (path === '/notify-channels/open-enabled') {
+      return json({ channels: [...this.channels.values()].filter((c) => c.enabled).map((c) => ({ id: c.id, kind: c.kind, url: c.url, target: c.target, token: c.token })) })
+    }
+    if ((m = path.match(/^\/notify-channels\/([^/]+)$/))) {
+      const c = this.channels.get(m[1]!)
+      return json({ channel: c ? view(c) : null })
+    }
+    if ((m = path.match(/^\/notify-channels\/([^/]+)\/update$/))) {
+      const c = this.channels.get(m[1]!)
+      if (!c) return json({ done: false })
+      if (b.keep_token && (c.kind !== b.kind || c.url !== b.url)) return json({ detail: 'the channel changed since it was read', reason: 'channel-moved' }, 409)
+      Object.assign(c, { kind: b.kind, name: b.name, url: b.url, target: b.target, enabled: b.enabled, token: b.keep_token ? c.token : ((b.token as string) ?? null) })
+      return json({ done: true })
+    }
+    if ((m = path.match(/^\/notify-channels\/([^/]+)\/open$/))) {
+      const c = this.channels.get(m[1]!)
+      return json({ channel: c ? { id: c.id, kind: c.kind, url: c.url, target: c.target, token: c.token } : null })
+    }
+    if ((m = path.match(/^\/notify-channels\/([^/]+)\/record$/))) {
+      this.channels.get(m[1]!)!.last_error = (b.error as string | null) ?? null
+      return json({ done: true })
+    }
+    if ((m = path.match(/^\/notify-channels\/([^/]+)\/delete$/))) return json({ done: this.channels.delete(m[1]!) })
+    return json({ detail: `no route ${method} ${path}` }, 404)
+  }
+}
+
 describe('the small stores through CRUD routes (#5299 step 5)', () => {
   it('lists every small store area the backend serves', () => {
-    expect([...STORE_AREAS]).toEqual(['activity-kinds', 'browser-origins', 'bridge-tabs', 'pairings', 'mcp-tokens'])
+    expect([...STORE_AREAS]).toEqual(['activity-kinds', 'browser-origins', 'bridge-tabs', 'pairings', 'mcp-tokens', 'notify'])
   })
 
   it('upserts the activity kinds in one call', async () => {
@@ -289,6 +372,56 @@ describe('the small stores through CRUD routes (#5299 step 5)', () => {
     expect(await tokens.liveTier(record.id)).toBeNull()
     expect(await tokens.approvalGrant('not-a-uuid')).toBe(false)
     await expect(tokens.mint({ name: 'x', tier: 'read', approvalGrant: true })).rejects.toThrow(/outward/)
+  })
+
+  it('keeps Web Push records on the API with no KEK in this process', async () => {
+    const api = new FakeNotifyApi()
+    const push = new CrudPushStore({ baseUrl: BASE, fetch: api.fetch })
+    const first = await push.vapidKeys()
+    expect(first.publicKey).toHaveLength(65)
+    // Made here once, stored there: the next read is the stored pair.
+    expect((await push.vapidKeys()).privateKey.equals(first.privateKey)).toBe(true)
+    expect(api.seen.filter((s) => s.method === 'POST' && s.path === '/push/vapid')).toHaveLength(1)
+
+    const owner = { kind: 'browser', id: 'browser', label: 'You' } as const
+    const keys = { p256dh: Buffer.concat([Buffer.from([4]), Buffer.alloc(64, 7)]), auth: Buffer.alloc(16, 9) }
+    const id = await push.subscribe(owner, 'https://push.example/1', keys)
+    expect(await push.subscribe(owner, 'https://push.example/1', keys)).toBe(id)
+    await expect(push.subscribe({ kind: 'bearer', id: 'token:x', label: 'x' }, 'https://push.example/1', keys)).rejects.toBeInstanceOf(SubscriptionTakenError)
+    const [sub] = await push.subscriptions()
+    expect(sub?.keys.p256dh.equals(keys.p256dh) && sub.keys.auth.equals(keys.auth)).toBe(true)
+    expect(await push.claim('question:1', `push:${id}`)).toBe(true)
+    expect(await push.claim('question:1', `push:${id}`)).toBe(false)
+    expect(await push.unsubscribe('https://push.example/1')).toBe(true)
+  })
+
+  it('keeps notification channels on the API with no KEK in this process, once it serves area notify', async () => {
+    const api = new FakeNotifyApi()
+    let listed = false
+    const noSql = (() => {
+      throw new Error('SQL used')
+    }) as never
+    const resolve = () => Promise.resolve(['203.0.113.5'])
+    const channels = new ChannelStore(noSql, undefined, resolve, { crud: new CrudChannelRows({ baseUrl: BASE, fetch: api.fetch }), use: () => listed })
+    // No KEK and no area yet: the routes answer "unavailable".
+    expect(channels.available()).toBe(false)
+    listed = true
+    expect(channels.available()).toBe(true)
+
+    const id = await channels.create({ kind: 'home_assistant', name: 'HA', url: 'https://ha.example/', target: 'mobile_app_x', token: 'long-lived-token-1234' })
+    const [view] = await channels.list()
+    expect(view).toMatchObject({ id, url: 'https://ha.example', has_token: true, token_last4: '1234' })
+    // A rename keeps the token on the API: it is never sent back.
+    await channels.update(id, { name: 'Home' })
+    const rename = api.seen.find((s) => s.path.endsWith('/update'))!
+    expect(rename.body).toEqual({ kind: 'home_assistant', name: 'Home', url: 'https://ha.example', target: 'mobile_app_x', enabled: true, keep_token: true })
+    expect((await channels.open(id))?.token).toBe('long-lived-token-1234')
+    // Moving it needs a new token, as over SQL.
+    await expect(channels.update(id, { url: 'https://other.example' })).rejects.toThrow(/long-lived access token/)
+    expect((await channels.enabled()).map((c) => c.id)).toEqual([id])
+    await channels.record(id, 'HTTP 500')
+    expect((await channels.list())[0]?.last_error).toBe('HTTP 500')
+    expect(await channels.delete(id)).toBe(true)
   })
 
   it('picks the CRUD store per call once the area is listed', async () => {
