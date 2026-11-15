@@ -105,8 +105,29 @@ test.describe('the "Changed from" note (#352)', () => {
       // Inside the panel: a long name pushed its first letters off the left edge.
       expect(box.x).toBeGreaterThanOrEqual(picker.x)
       expect(box.x + box.width).toBeLessThanOrEqual(picker.x + picker.width)
-      // Above the buttons, on its own line.
-      expect(box.y + box.height).toBeLessThanOrEqual(update.y)
+      // Below the select and the buttons, on its own line (#1023).
+      expect(box.y).toBeGreaterThanOrEqual(update.y + update.height)
+    })
+  }
+})
+
+test.describe('the preset bar (#1023)', () => {
+  test.skip(
+    !!process.env.E2E_BASE_URL,
+    'msw-backed; the real stack is covered by real-backend.spec.ts',
+  )
+
+  for (const width of [1440, 1024, 390]) {
+    test(`is one row with no preset chosen at ${width}px`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 })
+      await page.goto('/m/name-keychain')
+      const select = await page.getByRole('combobox', { name: 'Preset' }).boundingBox()
+      const saveAs = await page.getByRole('button', { name: 'Save as preset…' }).boundingBox()
+      if (!select || !saveAs) throw new Error('not laid out')
+      // Save as preset sits beside the select, not on a row of its own under it.
+      expect(saveAs.y).toBeLessThan(select.y + select.height)
+      expect(saveAs.y + saveAs.height).toBeGreaterThan(select.y)
+      expect(saveAs.x).toBeGreaterThan(select.x)
     })
   }
 })
