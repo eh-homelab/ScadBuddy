@@ -2,7 +2,7 @@ import { useState, type FormEvent, type KeyboardEvent } from 'react'
 import { PencilIcon, XIcon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
-import type { QueuedEntry } from '../../agent/chat/protocol'
+import { MESSAGE_MAX, type QueuedEntry } from '../../agent/chat/protocol'
 import { SentImages } from './SentImages'
 import { Tip } from './Tip'
 
@@ -128,6 +128,7 @@ function QueuedMessage({
             aria-label="Queued message"
             value={draft}
             autoFocus
+            maxLength={MESSAGE_MAX}
             rows={2}
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={onKey}
