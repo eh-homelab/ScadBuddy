@@ -235,7 +235,7 @@ same way, `vite.config.ts`).
   `#needs-you` (`components/activity/NeedsYou.tsx`) lists it in full. Each new item is
   toasted and, while the page is hidden, notified (`needsYouNotices`). With every tab closed
   the agent pushes the grants and pairing requests too (`agent/src/notify/waiting.ts`, read
-  every 30 s, and pushed only in its first 24 h, so a swept claim never pushes it again), under the same notice ids (`run-grant:<grant id>`, `trigger-grant:<grant id>`,
+  every 30 s, and pushed only in its first 24 h, so a swept claim never pushes it again), under the same notice ids (`run-grant:<grant id>`, `trigger-grant:<grant id>:<requested_at, epoch s>`,
   `pairing:<id>`), so a push and the page's notification share one tag; a click opens
   `#needs-you` (`public/push-sw.js`). Tests build the same
   context with `src/test/needsYou.tsx` `NeedsYouHarness`; a Playwright test parks agent

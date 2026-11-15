@@ -1,4 +1,8 @@
 import { screen, waitFor, within } from '@testing-library/react'
+import { http, HttpResponse } from 'msw'
+import { api } from '../../api/client'
+import { reviewPath } from '../../lib/needsYou'
+import { server } from '../../mocks/server'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { respondRequests, setPendingAnswers, setPendingApprovals } from '../../mocks/features/pendingInput'
 import { setFlowRunGrant } from '../../mocks/features/flows'
@@ -42,6 +46,34 @@ describe('NeedsYouSection (#6399)', () => {
     const runGrant = item('Grant request')
     expect(runGrant).toHaveTextContent('Flow run swap, asked by')
     expect(item('Standing grant request')).toHaveTextContent('A trigger of swap')
+  })
+
+  it("lists the assistant's requests while the grant requests cannot be read, as the shell does", async () => {
+    server.use(http.get('/api/v1/flow-grant-requests', () => HttpResponse.json({ detail: 'down' }, { status: 500 })))
+    setPendingApprovals(1)
+    renderPage(
+      <NeedsYouHarness>
+        <NeedsYouSection />
+      </NeedsYouHarness>,
+    )
+    await waitFor(() => expect(items()).toHaveLength(1))
+    expect(item('Prepared action')).toBeInTheDocument()
+  })
+
+  it("opens the review a link names: the bell's Review for a standing grant", async () => {
+    const { triggers } = await api.flowGrantRequests()
+    const grant = triggers[0]!.grant!
+    // The key carries when it was asked for, as the agent's push does (an edit asks anew).
+    const key = `trigger-grant:${grant.id}:${Math.floor(Date.parse(grant.requested_at) / 1000)}`
+    renderPage(
+      <NeedsYouHarness>
+        <NeedsYouSection />
+      </NeedsYouHarness>,
+      { route: reviewPath(key) },
+    )
+    const standing = await waitFor(() => item('Standing grant request'))
+    expect(within(standing).getByRole('button', { name: 'Hide trigger' })).toHaveAttribute('aria-expanded', 'true')
+    expect(within(item('Grant request')).getByRole('button', { name: 'Review grant…' })).toHaveAttribute('aria-expanded', 'false')
   })
 
   it('approves through the respond route, and the answered request leaves', async () => {

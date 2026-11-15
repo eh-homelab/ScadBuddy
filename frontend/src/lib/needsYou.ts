@@ -31,6 +31,12 @@ export type NeedsYouItem =
 export const NEEDS_YOU_ID = 'needs-you'
 export const NEEDS_YOU_PATH = `/activity#${NEEDS_YOU_ID}`
 
+/** The query parameter that opens one item's review on Activity (the bell's trigger "Review"). */
+export const REVIEW_PARAM = 'review'
+
+/** Activity's "Needs you" with `key`'s review open. */
+export const reviewPath = (key: string) => `/activity?${REVIEW_PARAM}=${encodeURIComponent(key)}#${NEEDS_YOU_ID}`
+
 /** Every item, the oldest first; an item with no time of its own (a pairing) last. */
 export function needsYouItems(
   waiting: readonly WaitingEntry[],
@@ -50,8 +56,10 @@ export function needsYouItems(
     ...(grants?.triggers ?? []).map(
       (trigger): NeedsYouItem => ({
         kind: 'trigger-grant',
-        key: `trigger-grant:${trigger.grant?.id ?? trigger.id}`,
-        ...(trigger.grant ? { since: trigger.grant.created_at } : {}),
+        // An edit returns an approved grant to requested in place: its `requested_at` makes it
+        // a new request, with the id the agent's push names it by (`crud_agent_notify.py`).
+        key: trigger.grant ? `trigger-grant:${trigger.grant.id}:${Math.floor(Date.parse(trigger.grant.requested_at) / 1000)}` : `trigger-grant:${trigger.id}`,
+        ...(trigger.grant ? { since: trigger.grant.requested_at } : {}),
         trigger,
       }),
     ),

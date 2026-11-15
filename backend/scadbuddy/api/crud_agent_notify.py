@@ -363,6 +363,14 @@ async def push_sent(body: SentClaim, state: StateDep) -> Claimed:
 PUSH_WINDOW = timedelta(hours=24)
 
 
+def _epoch_s(at: datetime) -> int:
+    """Whole seconds since the epoch, floored: the page's ``Math.floor(Date.parse(at) / 1000)``."""
+    return (at - _EPOCH) // timedelta(seconds=1)
+
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
 class WaitingRequest(BaseModel):
     """A flow grant waiting for a person's decision, as a push names it: the id the page's
     own notification uses as its tag (frontend `lib/needsYou.ts`), never what it asks."""
@@ -381,8 +389,10 @@ class WaitingRequests(BaseModel):
 @router.get("/push/waiting", name="crud_agent_push_waiting")
 async def push_waiting(triggers: TriggersDep) -> WaitingRequests:
     """#6399: the flow grants waiting for a person (a run's and a trigger's standing grant),
-    which the agent pushes to a closed tab beside its own pending input. The same requests
-    as ``GET /api/v1/flow-grant-requests``, by id only."""
+    which the agent pushes to a closed tab beside its own pending input: those of
+    ``GET /api/v1/flow-grant-requests`` requested within ``PUSH_WINDOW``, by id only. A
+    standing grant's id carries its ``requested_at`` (epoch seconds), as the page's does, so
+    a grant an edit returned to ``requested`` is a new request with a claim of its own."""
     # Only those the agent still pushes, so older ones never crowd a new one out of the page.
     newer_than = datetime.now(UTC) - PUSH_WINDOW
     runs = await triggers.flows.store.requested_grants(GRANT_REQUESTS_MAX, newer_than)
@@ -393,8 +403,8 @@ async def push_waiting(triggers: TriggersDep) -> WaitingRequests:
             for grant, _ in runs
         ]
         + [
-            WaitingRequest(id=f"trigger-grant:{gid}", reason="grant", since=created)
-            for gid, created in standing
+            WaitingRequest(id=f"trigger-grant:{gid}:{_epoch_s(asked)}", reason="grant", since=asked)
+            for gid, asked in standing
         ]
     )
 

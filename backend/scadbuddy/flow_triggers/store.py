@@ -64,7 +64,7 @@ _TRIGGER = (
 )
 _GRANT = (
     "id, trigger_id, status, spec, requested_by, approved_by, approved_at, revoked_by,"
-    " revoked_at, expires_at, created_at, approval_id, used"
+    " revoked_at, expires_at, created_at, approval_id, used, requested_at"
 )
 #: The trigger's live grant first, else its newest.
 _CURRENT_GRANT = (
@@ -239,8 +239,9 @@ class TriggerStore:
         self, limit: int, newer_than: datetime
     ) -> list[tuple[str, datetime]]:
         """#6399: the ids of the standing grants that wait for a person's decision
-        (`requested`, not revoked), asked for after `newer_than`, and when each was, the
-        oldest first, at most `limit`: what Web Push tells a closed tab of."""
+        (`requested`, not revoked), asked for (`requested_at`, set again when an edit
+        returns one to `requested`) after `newer_than`, and when each was, the oldest
+        first, at most `limit`: what Web Push tells a closed tab of."""
         return await self._call(self._requested_grant_ids, limit, newer_than)
 
     async def current_grant(self, trigger_id: str) -> StandingGrant | None:
@@ -394,7 +395,9 @@ class TriggerStore:
             # seeded under the approval this ends.
             conn.execute(
                 "UPDATE flow_trigger_grants SET status = 'requested', approved_by = NULL,"
-                " approved_at = NULL, expires_at = NULL, approval_id = NULL WHERE trigger_id = %s"
+                " approved_at = NULL, expires_at = NULL, approval_id = NULL,"
+                # #6399: a new request, with a time of its own.
+                " requested_at = now() WHERE trigger_id = %s"
                 " AND status = 'approved' AND revoked_at IS NULL",
                 (trigger_id,),
             )
@@ -619,7 +622,7 @@ class TriggerStore:
     def _requested_grant_triggers(self, limit: int) -> list[Trigger]:
         with self._pool.connection() as conn:
             rows = conn.execute(
-                f"SELECT {_TRIGGER}, (SELECT min(g.created_at) FROM flow_trigger_grants g"
+                f"SELECT {_TRIGGER}, (SELECT min(g.requested_at) FROM flow_trigger_grants g"
                 " WHERE g.trigger_id = flow_triggers.id AND g.status = 'requested'"
                 " AND g.revoked_at IS NULL) AS requested_at FROM flow_triggers"
                 " WHERE EXISTS (SELECT 1 FROM flow_trigger_grants g"
@@ -633,11 +636,11 @@ class TriggerStore:
     def _requested_grant_ids(self, limit: int, newer_than: datetime) -> list[tuple[str, datetime]]:
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT id, created_at FROM flow_trigger_grants WHERE status = 'requested'"
-                " AND revoked_at IS NULL AND created_at > %s ORDER BY created_at, id LIMIT %s",
+                "SELECT id, requested_at FROM flow_trigger_grants WHERE status = 'requested'"
+                " AND revoked_at IS NULL AND requested_at > %s ORDER BY requested_at, id LIMIT %s",
                 (newer_than, limit),
             ).fetchall()
-        return [(str(row["id"]), row["created_at"]) for row in rows]
+        return [(str(row["id"]), row["requested_at"]) for row in rows]
 
     def _current_grant(self, trigger_id: str) -> StandingGrant | None:
         with self._pool.connection() as conn:

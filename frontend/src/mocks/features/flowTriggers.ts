@@ -36,6 +36,7 @@ function standing(id: string, fields: Partial<FlowStandingGrant>): FlowStandingG
     approved_at: at(0),
     expires_at: spec.expires_at,
     created_at: at(0),
+    requested_at: at(0),
     in_force: true,
     ...fields,
   }

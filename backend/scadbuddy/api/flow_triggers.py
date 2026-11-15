@@ -88,6 +88,9 @@ class StandingGrantView(BaseModel):
     revoked_at: datetime | None = None
     expires_at: datetime | None = None
     created_at: datetime
+    #: When it last started to wait for a person (#6399): its creation, or the trigger edit
+    #: that returned it to `requested`.
+    requested_at: datetime
     #: Approved, not revoked and not expired: each fire's run gets a grant from it.
     in_force: bool
 
@@ -263,7 +266,9 @@ def _grant_view(grant: StandingGrant | None) -> StandingGrantView | None:
     if grant is None:
         return None
     return StandingGrantView(
-        **grant.model_dump(exclude={"trigger_id"}), in_force=grant.in_force(datetime.now(UTC))
+        **grant.model_dump(exclude={"trigger_id", "requested_at"}),
+        requested_at=grant.requested_at or grant.created_at,
+        in_force=grant.in_force(datetime.now(UTC)),
     )
 
 

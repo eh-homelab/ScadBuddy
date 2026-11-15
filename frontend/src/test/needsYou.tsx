@@ -17,7 +17,8 @@ export function NeedsYouHarness({ children, openSession = null }: { children: Re
   }, [refreshAttention, refreshGrants])
   const value = useMemo<NeedsYou>(
     () => ({
-      items: counts && grants ? needsYouItems(counts.waiting ?? [], grants, []) : null,
+      // From whichever read has answered, as `AppShell` builds it.
+      items: counts || grants ? needsYouItems(counts?.waiting ?? [], grants, []) : null,
       refresh,
       openSession,
     }),

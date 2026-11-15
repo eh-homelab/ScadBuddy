@@ -1,5 +1,5 @@
 import { Suspense, lazy, useContext, useEffect, useRef, useState } from 'react'
-import { Link, useLocation } from 'react-router'
+import { Link, useLocation, useSearchParams } from 'react-router'
 import { api, ApiError } from '../../api/client'
 import { USER_ONLY } from '../../agent/dom'
 import { notTakenText } from '../../agent/pendingApprovals'
@@ -7,7 +7,7 @@ import { decisionBody, respond, RespondError } from '../../agent/respond'
 import { noticeTitle } from '../../agent/attentionNotifications'
 import { actorText, flowRunPath } from '../../lib/flows'
 import { timeAgo } from '../../lib/format'
-import { NEEDS_YOU_ID, NEEDS_YOU_PATH, NeedsYouContext, runName, type NeedsYouItem } from '../../lib/needsYou'
+import { NEEDS_YOU_ID, NeedsYouContext, REVIEW_PARAM, reviewPath, runName, type NeedsYouItem } from '../../lib/needsYou'
 import { traceAction } from '../../lib/traceAction'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -95,16 +95,19 @@ export function NeedsYouRow({
   compact = false,
   now,
   onLeave,
+  open = false,
 }: {
   item: NeedsYouItem
   compact?: boolean
   now: number
   /** A link in the row was followed (the bell closes). */
   onLeave?: () => void
+  /** Its review starts open (`REVIEW_PARAM` names it). */
+  open?: boolean
 }) {
   const ctx = useContext(NeedsYouContext)
   const [state, setState] = useState<RowState>({ kind: 'idle' })
-  const [reviewing, setReviewing] = useState(false)
+  const [reviewing, setReviewing] = useState(open)
   const refresh = () => ctx?.refresh()
   const headingId = `needs-you-${compact ? 'bell-' : ''}${item.key}`
 
@@ -206,7 +209,7 @@ export function NeedsYouRow({
         <>
           {compact ? (
             <Button asChild size="sm">
-              <Link to={NEEDS_YOU_PATH} onClick={onLeave}>
+              <Link to={reviewPath(item.key)} onClick={onLeave}>
                 Review
               </Link>
             </Button>
@@ -281,13 +284,15 @@ export function NeedsYouRow({
 export function NeedsYouList({ compact = false, onLeave }: { compact?: boolean; onLeave?: () => void }) {
   const ctx = useContext(NeedsYouContext)
   const now = useNow()
+  const [params] = useSearchParams()
+  const opened = compact ? null : params.get(REVIEW_PARAM)
   const items = ctx?.items ?? []
   if (items.length === 0) return null
   return (
     <ul className="flex flex-col gap-1.5">
       {items.map((item) => (
         <li key={item.key}>
-          <NeedsYouRow item={item} compact={compact} now={now} onLeave={onLeave} />
+          <NeedsYouRow item={item} compact={compact} now={now} onLeave={onLeave} open={item.key === opened} />
         </li>
       ))}
     </ul>

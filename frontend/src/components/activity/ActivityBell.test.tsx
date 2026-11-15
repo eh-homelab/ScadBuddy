@@ -375,6 +375,9 @@ describe('ActivityBell, what waits on you (#6399)', () => {
     expect(within(prepared).getByRole('button', { name: 'Deny' })).toBeInTheDocument()
     const grant = rows().find((r) => within(r).queryByRole('heading', { name: 'Grant request' }))!
     expect(within(grant).getByRole('link', { name: 'Review' })).toHaveAttribute('href', '/workflows/runs/run-ask')
+    // A standing grant's Review opens its own review on Activity.
+    const standing = rows().find((r) => within(r).queryByRole('heading', { name: 'Standing grant request' }))!
+    expect(within(standing).getByRole('link', { name: 'Review' })).toHaveAttribute('href', expect.stringMatching(/^\/activity\?review=trigger-grant%3A.+%3A\d+#needs-you$/))
     // The waiting requests come before the finished ones.
     const finishedHeading = screen.getByText('Finished since you last looked')
     expect(section.compareDocumentPosition(finishedHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()

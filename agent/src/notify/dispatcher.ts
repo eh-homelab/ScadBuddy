@@ -27,7 +27,8 @@ import { encryptPayload, vapidAuthorization } from './webPush.js'
 // #6399: the requests outside the agent's pending input that wait on a person (a flow run's
 // grant, a trigger's standing grant, an agent's pairing request) are pushed the same way, to
 // a person's subscriptions (`PERSON_KINDS`) and to the channels. Nothing in this process
-// hears them change, so a pass also runs every WAITING_POLL_MS, reading only them. Their notice
+// hears them change, so a pass also runs every WAITING_POLL_MS, reading only them, on the one
+// replica that claims the window. Their notice
 // ids are the page's own (frontend `lib/needsYou.ts`), so the page's notification and the push
 // share a tag. Such a request has no ceiling (a standing grant waits until a person decides it),
 // but a claim is kept SENT_KEEP_DAYS only: so one is pushed only while it is younger than
@@ -66,6 +67,9 @@ export const PERSON_KINDS: ReadonlySet<Owner['kind']> = new Set(['browser', 'oid
 
 /** How often a pass runs with no pending-input change, so a grant or pairing request is pushed. */
 export const WAITING_POLL_MS = 30_000
+/** The claim that makes one replica a timer window's poller (`ai_notifications_sent`, swept with the rest). */
+const WAITING_POLL_KEY = 'waiting-poll'
+const WAITING_POLL_TARGET = 'poll'
 
 /**
  * How long after it started a grant or pairing request may be pushed: shorter than the claims'
@@ -146,6 +150,12 @@ export class NotificationDispatcher {
 
   /** Sends what has not been sent yet to every subscription and every enabled channel. */
   async pass(scope: PassScope = 'all'): Promise<void> {
+    // A timer's pass runs on one replica per WAITING_POLL_MS window: the window's claim (the
+    // same once-across-replicas claim a send takes) is its lease, so N replicas make one read.
+    if (scope === 'waiting') {
+      if (this.#deps.store.available?.() === false) return
+      if (!(await this.#deps.store.claim(`${WAITING_POLL_KEY}:${Math.floor(Date.now() / WAITING_POLL_MS)}`, WAITING_POLL_TARGET))) return
+    }
     // A timer's pass with nothing young enough to push opens no subscription's keys.
     const waiting = await this.#waiting()
     if (scope === 'waiting' && waiting.length === 0) return

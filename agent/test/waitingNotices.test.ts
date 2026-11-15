@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { REQUEST_TTL_MS } from '../src/bridge/pairings.js'
-import { type AttentionNotice, attentionMessage, NotificationDispatcher, noticeTitle, WAITING_PUSH_WINDOW_MS } from '../src/notify/dispatcher.js'
+import { type AttentionNotice, attentionMessage, NotificationDispatcher, noticeTitle, WAITING_POLL_MS, WAITING_PUSH_WINDOW_MS } from '../src/notify/dispatcher.js'
 import { type PushRepo, type PushSubscriptionRow, SENT_KEEP_DAYS } from '../src/notify/pushStore.js'
 import { crudGrantRequests, pairingRequests, waitingNotices } from '../src/notify/waiting.js'
 import type { Owner } from '../src/sessions/protocol.js'
@@ -20,6 +20,8 @@ function recordingStore(subs: PushSubscriptionRow[]) {
     unsubscribe: () => Promise.resolve(true),
     subscriptions: () => Promise.resolve(subs),
     claim: (requestId, target) => {
+      // A timer window's lease: this replica polls.
+      if (requestId.startsWith('waiting-poll:')) return Promise.resolve(true)
       claims.push(`${requestId} -> ${target}`)
       // Claimed by "another replica": the send itself is not this test's.
       return Promise.resolve(false)
@@ -91,6 +93,25 @@ describe('waiting requests by Web Push (#6399)', () => {
     const old: AttentionNotice = { id: 'run-grant:g7', sessionId: null, reason: 'grant', since: Date.now() - 2 * 24 * 60 * 60_000 }
     await dispatcher(counting, [], () => Promise.resolve([old])).pass('waiting')
     expect(opened).toBe(0)
+  })
+
+  it("reads the waiting requests on one replica a timer window: another's claim of the window skips it", async () => {
+    const { store } = recordingStore([sub('b1', owner('browser', 'browser'))])
+    const leases: string[] = []
+    let reads = 0
+    const lost: PushRepo = {
+      ...store,
+      claim: (requestId, target) => {
+        leases.push(`${requestId} -> ${target}`)
+        return Promise.resolve(false)
+      },
+    }
+    await dispatcher(lost, [], () => {
+      reads += 1
+      return Promise.resolve([])
+    }).pass('waiting')
+    expect(reads).toBe(0)
+    expect(leases).toEqual([`waiting-poll:${Math.floor(Date.now() / WAITING_POLL_MS)} -> poll`])
   })
 
   it("still pushes the agent's own requests when the grants cannot be read", async () => {
