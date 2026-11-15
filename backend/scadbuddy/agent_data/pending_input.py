@@ -14,12 +14,13 @@ runs on (``temporal/toolActivities.ts`` `PgApprovalRecords`).
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from psycopg import Connection
 from psycopg.types.json import Jsonb
 
-from scadbuddy.agent_data import gate
+from scadbuddy.agent_data import audit_log, gate
 
 #: The most entries one list answers (the agent's ``LIMIT 500``).
 ENTRIES_MAX = 500
@@ -184,6 +185,33 @@ def run_checked(conn: Connection[Any], workflow_id: str, run_id: str) -> None:
     )
 
 
+def _audit_cancelled(conn: Connection[Any], row: dict[str, Any], reason: str) -> None:
+    """The sweep's ``approval`` row, as ``gate/sweep.ts`` ``auditCancelled`` records it."""
+    requested = (row["requested_by"] or {}).get("label")
+    detail = f"{row['tool']}: {reason} (requested by {'?' if requested is None else requested})"
+    audit_log.insert(
+        conn,
+        audit_log.Entry(
+            kind="approval",
+            action="cancelled",
+            surface="system",
+            actor_kind=gate.SYSTEM["kind"],
+            actor_id=gate.SYSTEM["id"],
+            actor_label=gate.SYSTEM["label"],
+            outcome="refused",
+            session_id=row["session_id"],
+            tool_use_id=gate._tool_use_id(row["request_id"]),
+            tier="outward",
+            input_hash=row["input_hash"],
+            input_summary=audit_log.cap(row["summary"], 1000),
+            request_id=audit_log.cap(row["request_id"], 500),
+            detail=audit_log.cap(detail, 500),
+            started_at=row["created_at"],
+            finished_at=datetime.now(UTC),
+        ),
+    )
+
+
 def cancel_orphans(
     conn: Connection[Any],
     *,
@@ -265,7 +293,7 @@ def cancel_orphans(
                 events.append(gate._event(status))
             gate._append(conn, logged, sid, events)
             if row["kind"] == "approval":
-                gate._audit(conn, row, "cancelled", gate.SYSTEM, reason)
+                _audit_cancelled(conn, row, reason)
             removed += 1
     return removed, logged
 

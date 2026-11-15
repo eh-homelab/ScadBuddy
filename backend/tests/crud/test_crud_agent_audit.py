@@ -14,6 +14,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from scadbuddy.agent_data.audit_log import cap
 from scadbuddy.api import crud_agent_audit
 from scadbuddy.render.agent_migrations import migrate_agent
 from tests.conftest import PgPool
@@ -160,3 +161,12 @@ def test_the_prune_deletes_only_past_the_retention(agent: Agent, tables: PgPool)
     assert [r["action"] for r in _sql(tables, "SELECT action FROM ai_audit")] == ["new"]
     # Days below the floor prune at the floor: a day.
     assert agent.post("/audit/prune", {"days": -5}) == {"deleted": 0}
+
+
+def test_a_cap_counts_utf16_units_and_keeps_a_pair_whole() -> None:
+    """``audit_log.cap`` is the agent's ``cap``: the API caps what it writes as the agent did."""
+    assert cap("abc", 3) == "abc"
+    assert cap("abcd", 3) == "ab…"
+    # The pair would be cut in half at the boundary: it goes whole, never as a lone half.
+    assert cap("a\U0001f600bc", 3) == "a…"
+    assert cap("ab\U0001f600", 4) == "ab\U0001f600"

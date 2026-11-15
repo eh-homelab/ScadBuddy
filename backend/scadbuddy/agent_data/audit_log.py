@@ -55,6 +55,18 @@ class Entry:
     cost_estimated_usd: float | None = None
 
 
+def cap(text: str, limit: int) -> str:
+    """The agent's ``audit/log.ts`` ``cap``: at most ``limit`` UTF-16 units, cut between code
+    points (a surrogate pair at the boundary goes whole), with ``…`` when cut."""
+    units = text.encode("utf-16-le", "surrogatepass")
+    if len(units) // 2 <= limit:
+        return text
+    kept = units[: 2 * (limit - 1)]
+    if kept and 0xD800 <= int.from_bytes(kept[-2:], "little") <= 0xDBFF:
+        kept = kept[:-2]
+    return kept.decode("utf-16-le", "surrogatepass") + "…"
+
+
 def _uuid_or_none(value: str | None) -> str | None:
     return value if value and gate._is_uuid(value) else None
 
