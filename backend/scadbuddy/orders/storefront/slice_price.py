@@ -32,7 +32,9 @@ import hashlib
 import json
 import logging
 import threading
+import time
 import uuid
+import weakref
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass
@@ -101,11 +103,26 @@ PROFILE_STALE: Final = "the shop slice profile names a spool the printer no long
 FILAMENT_GONE: Final = "a slot's filament is no longer in the price book"
 #: Every digest of a price key changes when this does.
 KEY_VERSION: Final = 1
+#: How long the live machine rate a key holds is read again only after: a page
+#: reads its price every `PENDING_RETRY` seconds while the slice runs, and each
+#: live read may ask Bambuddy for the printer's tasks.
+RATE_TTL: Final = 60.0
 #: The advisory lock every claim takes, so the capacity is counted once at a time.
 _CLAIM_LOCK: Final = "storefront_slice_prices"
 
 
 Status = Literal["running", "done", "failed"]
+
+
+class SliceUnavailableError(Exception):
+    """A passing failure of a variant's slice (a 5xx, 408 or 429): the operation
+    tries again, and the row stays ``running`` (#6370 review)."""
+
+
+def _passing(error: ApiError) -> bool:
+    """Whether ``error`` may pass: a 5xx, a 408 or a 429. Any other 4xx (the 0 g
+    ``sliced_plate``, a refused slice) comes back every time, so it is recorded."""
+    return error.status >= 500 or error.status in (408, 429)
 
 
 class PriceRow(BaseModel):
@@ -115,6 +132,8 @@ class PriceRow(BaseModel):
     model_sha256: str
     status: Status
     attempt: int
+    #: This claim's own key, which keys its operation: never reused (#6370 review).
+    claim_key: str | None = None
     operation_key: str | None = None
     currency: str | None = None
     unit_price_minor: int | None = None
@@ -134,14 +153,17 @@ class PriceRow(BaseModel):
 class Claim:
     """What :meth:`SlicePrices.claim` found: the row, and whether this claim made it
     ``running`` (the caller then starts its slice). With no row and not claimed, the
-    capacity is full."""
+    capacity is full. ``previous`` is the row as it was before this claim, which a
+    start that fails puts back (:meth:`SlicePrices.release`)."""
 
     row: PriceRow | None
     claimed: bool
+    previous: PriceRow | None = None
 
 
 _COLUMNS: Final = (
-    "price_key, model_sha256, status, attempt, operation_key, currency, unit_price_minor,"
+    "price_key, model_sha256, status, attempt, claim_key, operation_key, currency,"
+    " unit_price_minor,"
     " total_minor, unit_cost_minor, lines, print_seconds, grams, printer, failure,"
     " started_at, finished_at"
 )
@@ -194,47 +216,68 @@ class SlicePrices:
                 (now - LOST_AFTER, price_key),
             ).fetchone()["n"]
             if running >= limit:
-                return Claim(row, claimed=False)
+                # No room: the row (if any) does not stand, so the page waits.
+                return Claim(None, claimed=False)
             made = conn.execute(
-                "INSERT INTO storefront_slice_prices (price_key, model_sha256, status)"
-                " VALUES (%s, %s, 'running')"
+                "INSERT INTO storefront_slice_prices (price_key, model_sha256, status,"
+                " claim_key) VALUES (%s, %s, 'running', %s)"
                 " ON CONFLICT (price_key) DO UPDATE SET status = 'running',"
-                " attempt = storefront_slice_prices.attempt + 1, operation_key = NULL,"
+                " attempt = storefront_slice_prices.attempt + 1,"
+                " claim_key = EXCLUDED.claim_key, operation_key = NULL,"
                 " failure = NULL, started_at = clock_timestamp(), finished_at = NULL"
                 f" RETURNING {_COLUMNS}",
-                (price_key, model_sha256),
+                (price_key, model_sha256, uuid.uuid4().hex),
             ).fetchone()
         claimed = _row(made)
         assert claimed is not None
-        return Claim(claimed, claimed=True)
+        return Claim(claimed, claimed=True, previous=row)
 
-    def set_operation(self, price_key: str, attempt: int, operation_key: str) -> None:
+    def set_operation(self, price_key: str, claim_key: str, operation_key: str) -> None:
         with self._pool.connection() as conn:
             conn.execute(
                 "UPDATE storefront_slice_prices SET operation_key = %s"
-                " WHERE price_key = %s AND attempt = %s AND status = 'running'",
-                (operation_key, price_key, attempt),
+                " WHERE price_key = %s AND claim_key = %s AND status = 'running'",
+                (operation_key, price_key, claim_key),
             )
 
-    def drop(self, price_key: str, attempt: int) -> None:
-        """A claim whose slice never started: the row goes, so the next read claims it
-        again."""
+    def release(self, price_key: str, claim_key: str, previous: PriceRow | None) -> None:
+        """A claim whose slice never started: the row as it was before the claim, or
+        no row when the claim made it, so the next read claims it again. The next
+        claim makes a new ``claim_key``, so it never meets this claim's operation
+        (#6370 review)."""
         with self._pool.connection() as conn:
+            if previous is None:
+                conn.execute(
+                    "DELETE FROM storefront_slice_prices"
+                    " WHERE price_key = %s AND claim_key = %s AND status = 'running'",
+                    (price_key, claim_key),
+                )
+                return
             conn.execute(
-                "DELETE FROM storefront_slice_prices"
-                " WHERE price_key = %s AND attempt = %s AND status = 'running'",
-                (price_key, attempt),
+                "UPDATE storefront_slice_prices SET status = %s, claim_key = %s,"
+                " operation_key = %s, failure = %s, started_at = %s, finished_at = %s"
+                " WHERE price_key = %s AND claim_key = %s AND status = 'running'",
+                (
+                    previous.status,
+                    previous.claim_key,
+                    previous.operation_key,
+                    previous.failure,
+                    previous.started_at,
+                    previous.finished_at,
+                    price_key,
+                    claim_key,
+                ),
             )
 
-    def lost(self, price_key: str, attempt: int, failure: str) -> None:
+    def lost(self, price_key: str, claim_key: str, failure: str) -> None:
         """A ``running`` row whose operation ended and wrote nothing: failed, unless a
         later claim or the run itself has written it since."""
         with self._pool.connection() as conn:
             conn.execute(
                 "UPDATE storefront_slice_prices SET status = 'failed', failure = %s,"
                 " finished_at = clock_timestamp()"
-                " WHERE price_key = %s AND attempt = %s AND status = 'running'",
-                (failure[:1000], price_key, attempt),
+                " WHERE price_key = %s AND claim_key = %s AND status = 'running'",
+                (failure[:1000], price_key, claim_key),
             )
 
     def finish(
@@ -437,7 +480,9 @@ async def price_variant(run: SliceRun, variant: SliceVariant) -> PriceRow:
     written. A row that is no longer ``running`` (an earlier attempt finished it) is the
     answer as it is. No price, with the reason, when a profile spool is not offered on
     the printer now, a slot's filament is gone or archived, the slice fails, or a sliced
-    plate cannot be priced. Any other failure is raised, so the operation tries again."""
+    plate cannot be priced. A passing failure (:func:`_passing`) is raised as
+    :class:`SliceUnavailableError`, and any other failure as it is, so the operation
+    tries again and the row stays ``running``."""
     key = variant.price_key
     stood = await asyncio.to_thread(run.prices.get, key)
     if stood is not None and stood.status != "running":
@@ -486,6 +531,8 @@ async def price_variant(run: SliceRun, variant: SliceVariant) -> PriceRow:
     except QuoteError as error:
         return await _failed(run, variant, sliced_plate_problem(error).detail)
     except ApiError as error:
+        if _passing(error):
+            raise SliceUnavailableError(error.detail) from error
         return await _failed(run, variant, error.detail)
     return await asyncio.to_thread(
         run.prices.finish, key, variant.model_sha256, variant.currency, sliced
@@ -607,7 +654,7 @@ async def slice_estimate(
     currency, policy, _ = await asyncio.to_thread(orders.price_book.policy)
     # The live rate, as a back-office quote prices it: the key holds it and the run
     # prices with it, so a rate change is a new key (#6153).
-    rate = await orders.machine_rates.for_quote(profile.printer, None)
+    rate = await live_rate(orders.machine_rates, profile.printer)
     planned = plan_variant(
         settings=settings,
         reference=reference,
@@ -631,18 +678,27 @@ async def slice_estimate(
     if not claim.claimed:
         # Another read's slice of this variant, or no room yet: the page reads again.
         return pending(planned.key) if claim.row is None else answer_of(claim.row)
-    assert claim.row is not None
-    await _start(state, prices, planned, claim.row.attempt)
+    assert claim.row is not None and claim.row.claim_key is not None
+    await _start(state, prices, planned, claim.row.claim_key, claim.previous)
     return pending(planned.key)
 
 
-async def _start(state: AppState, prices: SlicePrices, planned: Planned, attempt: int) -> None:
-    """The variant's slice started as its operation, which this claim's attempt keys. A
-    start that fails gives the claim back, so the next read claims it again."""
+async def _start(
+    state: AppState,
+    prices: SlicePrices,
+    planned: Planned,
+    claim_key: str,
+    previous: PriceRow | None,
+) -> None:
+    """The variant's slice started as its operation, which this claim's own key keys.
+    A start that fails gives the claim back (:meth:`SlicePrices.release`), so the next
+    read claims it again; one whose answer says the operation may still run keeps the
+    row ``running``, so it still counts against the capacity, and `_settle_ended`
+    settles it once the operation ends."""
     # Here, not at the top: the API's operations import the components.
     from fastapi import Response
 
-    from scadbuddy.api.operations import run_operation
+    from scadbuddy.api.operations import may_still_run, run_operation
     from scadbuddy.operations.component import OPERATIONS
     from scadbuddy.operations.kinds import operation_key
 
@@ -650,9 +706,9 @@ async def _start(state: AppState, prices: SlicePrices, planned: Planned, attempt
     kind = ops.kinds[SLICE_PRICE_KIND]
     body = planned.variant.model_dump(mode="json")
     subject = subject_of(planned.key)
-    idempotency_key = f"{planned.key}-{attempt}"
+    idempotency_key = claim_key
     keyed = operation_key(kind.name, subject, body, idempotency_key, kind.unkeyed)
-    await asyncio.to_thread(prices.set_operation, planned.key, attempt, keyed)
+    await asyncio.to_thread(prices.set_operation, planned.key, claim_key, keyed)
     try:
         await run_operation(
             ops,
@@ -662,24 +718,52 @@ async def _start(state: AppState, prices: SlicePrices, planned: Planned, attempt
             request=body,
             idempotency_key=idempotency_key,
         )
+    except ApiError as error:
+        if may_still_run(error):
+            logger.warning("a storefront slice may have started: %s", error.detail)
+            return
+        logger.warning("a storefront slice was not started: %s", error.detail)
+        await asyncio.to_thread(prices.release, planned.key, claim_key, previous)
     except Exception:
         logger.warning("a storefront slice was not started", exc_info=True)
-        await asyncio.to_thread(prices.drop, planned.key, attempt)
+        await asyncio.to_thread(prices.release, planned.key, claim_key, previous)
 
 
 async def _settle_ended(state: AppState, prices: SlicePrices) -> None:
     """Every ``running`` row whose operation has ended without writing it (its last
-    attempt failed) is failed, so it holds no place in the capacity."""
+    attempt failed) is failed, so it holds no place in the capacity. One operation
+    read per running row: at most `storefront_slices_concurrent` rows run, and that
+    cap is small (1 by default), so the reads stay few."""
     from scadbuddy.operations.component import OPERATIONS
 
     ops = state.components.get(OPERATIONS)
     for row in await asyncio.to_thread(prices.running):
-        if row.operation_key is None:
+        if row.operation_key is None or row.claim_key is None:
             continue
         operation = await ops.store.find(row.operation_key)
         if operation is None or operation.status == "running":
             continue
         failure = operation.error.detail if operation.error is not None else None
         await asyncio.to_thread(
-            prices.lost, row.price_key, row.attempt, failure or "the slice ended with no price"
+            prices.lost, row.price_key, row.claim_key, failure or "the slice ended with no price"
         )
+
+
+#: The live rate each printer was last read at, per `MachineRates` (one per app).
+_rates: weakref.WeakKeyDictionary[Any, dict[str, tuple[float, MachineRateBreakdown | None]]] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+async def live_rate(rates: Any, printer: str) -> MachineRateBreakdown | None:
+    """``rates.for_quote(printer, None)``, read again only `RATE_TTL` after the last read
+    in this process (#6370 review): a page's re-reads while its slice runs ask Bambuddy
+    nothing. The key holds the value read, and the run prices with it."""
+    now = time.monotonic()
+    kept = _rates.setdefault(rates, {})
+    found = kept.get(printer)
+    if found is not None and now - found[0] < RATE_TTL:
+        return found[1]
+    rate: MachineRateBreakdown | None = await rates.for_quote(printer, None)
+    kept[printer] = (now, rate)
+    return rate

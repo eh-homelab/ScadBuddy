@@ -296,6 +296,10 @@ the customer's view.
   part volumes (`orders/pricing.py:160`), at the listing's colours, priced from the price
   book. It is shown as "about $X, confirmed after we check it", never as a quote. The
   common part moves out of the route into `orders/estimate.py`.
+  **As built (#6153):** the storefront no longer shows this estimate. A render's price
+  is a firm price from a slice through the back office's quote path, or "Working out
+  the price…" while it runs, or no number ("We price this design by hand"). See
+  [2026-11-13 §5.4](2026-11-13-storefront-customize-ux-design.md#54-price-from-a-slice).
 - **Add to order.** The CRUD service adds an item to the visitor's draft: `kind=model` with revision 1
   from the listing's commit and the inputs, or `kind=request` with the text and uploads.
   The storefront streams each upload to a CRUD route, which goes through

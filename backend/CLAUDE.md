@@ -1529,7 +1529,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`storefront_choices`; none remembered is Standard 0.4 mm). One row per variant in
   `storefront_slice_prices`, keyed by `price_key`: a sha256 of the render's 3MF content, the
   price-book filament per slot (id, material, cost), the profile, the choices, and the
-  book's policy and the live machine rate that prices it (`for_quote`, read once at the estimate read and carried to the run, `SliceVariant.machine_rate`). Any change is a new
+  book's policy and the live machine rate that prices it (`for_quote` through `live_rate`,
+  read again at most once a minute per process, `RATE_TTL`, and carried to the run,
+  `SliceVariant.machine_rate`). Any change is a new
   key, so an old price is never read again; the row holds no job id and no bytes, so it
   outlives the render prune. `GET …/renders/{job}/estimate` (`renders.py`
   `render_estimate`, `slice_estimate`) answers `StoreEstimate`: `source` `slice` with the
@@ -1541,7 +1543,14 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `storefront_slices_concurrent` `running` rows, under one advisory lock; a running row
   whose operation ended without writing it is failed at the next claim (`_settle_ended`),
   one past `LOST_AFTER` frees its place, and a failed one is tried again after
-  `RETRY_FAILED_AFTER` (1 h). Before it slices, the run checks each profile spool is still
+  `RETRY_FAILED_AFTER` (1 h); with no room, a read that cannot claim answers `pending`.
+  Each claim makes its own `claim_key`, which is the operation's `Idempotency-Key`, so a
+  later claim never meets an earlier claim's operation; a start that fails puts the row
+  back as it was before the claim (no row if the claim made it), and one whose answer says
+  the operation may still run (`api/operations.py` `may_still_run`) keeps it `running`
+  (#6370 review). Only deterministic refusals record `failed` (`QuoteError`, a 4xx such as
+  the 0 g `sliced_plate`, the stale profile, a gone filament); a 5xx, 408 or 429 is raised
+  as `SliceUnavailableError`, so the operation tries again. Before it slices, the run checks each profile spool is still
   offered on the printer (`api/storefront_slice.py` `offered_spools`: a loaded tray's
   negative id moves), and refuses with no price. The CRUD answer keeps `price_key`, `grams`
   and `print_seconds` for the shop and the checkout (`estimate.py` `SHOP_ONLY_FIELDS`); the

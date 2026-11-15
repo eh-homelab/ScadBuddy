@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Collection
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -13,16 +14,21 @@ import pytest
 from scadbuddy.bambuddy.filaments import FilamentPlan
 from scadbuddy.bambuddy.models import NozzleChoice, SlotChoice
 from scadbuddy.bambuddy.resolver import PrintChoices
+from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import ModelPrintChoices, StoredSettings
 from scadbuddy.orders.models import MachineRateBreakdown, PricingPolicy
-from scadbuddy.orders.quote import QuoteRun, SliceQuoteRequest, quote_run
+from scadbuddy.orders.quote import QuoteRun, SlicedPlate, SliceQuoteRequest, quote_run
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.orders.storefront.slice_price import (
     FILAMENT_GONE,
     PROFILE_STALE,
+    SLICE_PRICE_KIND,
     SlicePrices,
     SliceRun,
+    SliceUnavailableError,
     SliceVariant,
+    _start,
+    live_rate,
     plan_variant,
     price_key,
     price_variant,
@@ -338,3 +344,126 @@ def test_the_choices_are_the_dialogs_remembered_ones(shop: Shop) -> None:
     fresh = storefront_choices(StoredSettings(), "demo", "p-1")
     assert [(n.size, n.flow) for n in fresh.nozzles] == [("0.4", "standard")] * 2
     assert fresh.tier == "standard"
+
+
+class UnavailableSlicer(FakeSlicer):
+    """The slicer's file read answers a passing 503."""
+
+    async def fetch(self, sliced: SlicedPlate) -> bytes:
+        raise ApiError(503, "the content store is not there yet")
+
+
+async def test_a_passing_failure_is_tried_again_not_priced_by_hand(
+    shop: Shop, prices: SlicePrices
+) -> None:
+    """#6370 review: a 503 only means "try again later", so the run raises, the
+    operation tries again, and the row stays ``running``."""
+    key = "c" * 64
+    assert prices.claim(key, SHA, limit=1).claimed
+    slicer = UnavailableSlicer({1: sliced_plate(1, 3600, [10.0, 5.0])})
+    with pytest.raises(SliceUnavailableError):
+        await price_variant(slice_run(shop, prices, slicer), variant_of(shop, key))
+    row = prices.get(key)
+    assert row is not None and row.status == "running"
+
+
+def test_each_claim_has_its_own_key_and_a_failed_start_puts_the_row_back(
+    prices: SlicePrices,
+) -> None:
+    """#6370 review's sequence: attempt 1 fails, a claim an hour later fails to start,
+    and the next claim must not reuse attempt 1's operation key."""
+    key = "d" * 64
+    first = prices.claim(key, SHA, limit=1)
+    assert first.claimed and first.row is not None and first.row.claim_key is not None
+    prices.lost(key, first.row.claim_key, "attempt 1 failed")
+    with prices._pool.connection() as conn:
+        conn.execute(
+            "UPDATE storefront_slice_prices SET finished_at = finished_at - interval '2 hours'"
+        )
+    second = prices.claim(key, SHA, limit=1)
+    assert second.claimed and second.row is not None and second.row.claim_key is not None
+    assert second.previous is not None and second.previous.status == "failed"
+    assert second.row.claim_key != first.row.claim_key
+    # Its start fails: the failed row comes back as it was, not deleted.
+    prices.release(key, second.row.claim_key, second.previous)
+    back = prices.get(key)
+    assert back is not None and back.status == "failed"
+    assert (back.failure, back.finished_at) == (
+        second.previous.failure,
+        second.previous.finished_at,
+    )
+    third = prices.claim(key, SHA, limit=1)
+    assert third.claimed and third.row is not None
+    assert third.row.claim_key not in (first.row.claim_key, second.row.claim_key)
+    assert third.row.attempt > second.row.attempt
+    # A claim that made the row gives it back by deleting it.
+    fresh = prices.claim("e" * 64, SHA, limit=2)
+    assert fresh.claimed and fresh.previous is None and fresh.row is not None
+    assert fresh.row.claim_key is not None
+    prices.release("e" * 64, fresh.row.claim_key, None)
+    assert prices.get("e" * 64) is None
+
+
+def test_a_stale_failure_waits_for_room_instead_of_no_price(prices: SlicePrices) -> None:
+    """#6370 review: with the capacity full, a variant whose failure is past
+    `RETRY_FAILED_AFTER` waits for a place; it is not answered as no price."""
+    prices.fail("f" * 64, SHA, "the slice failed")
+    with prices._pool.connection() as conn:
+        conn.execute(
+            "UPDATE storefront_slice_prices SET finished_at = finished_at - interval '2 hours'"
+        )
+    assert prices.claim("0" * 64, SHA, limit=1).claimed
+    waiting = prices.claim("f" * 64, SHA, limit=1)
+    assert (waiting.claimed, waiting.row) == (False, None)
+
+
+async def test_the_live_rate_is_read_once_a_minute(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#6370 review: a page's re-reads while its slice runs ask for the rate once."""
+    asked: list[str | None] = []
+
+    class Rates:
+        async def for_quote(
+            self, printer: str | None, printer_id: int | None
+        ) -> MachineRateBreakdown | None:
+            asked.append(printer)
+            return RATE
+
+    rates = Rates()
+    assert await live_rate(rates, "p-1") == RATE
+    assert await live_rate(rates, "p-1") == RATE
+    assert asked == ["p-1"]
+    import scadbuddy.orders.storefront.slice_price as slice_price
+
+    monkeypatch.setattr(slice_price, "RATE_TTL", 0.0)
+    await live_rate(rates, "p-1")
+    assert asked == ["p-1", "p-1"]
+
+
+@pytest.mark.parametrize("may_have_started", [True, False])
+async def test_a_start_that_may_have_run_keeps_its_place(
+    shop: Shop, prices: SlicePrices, monkeypatch: pytest.MonkeyPatch, may_have_started: bool
+) -> None:
+    """#6370 review: a start whose answer says the operation may still run keeps the row
+    ``running``, so it counts against the capacity; one that surely did not start gives
+    the claim back."""
+    import scadbuddy.api.operations as api_operations
+    from scadbuddy.orders.storefront.slice_price import Planned
+
+    async def refused(*_args: Any, **_kwargs: Any) -> None:
+        raise ApiError(503, "Temporal did not answer", may_have_started=may_have_started)
+
+    monkeypatch.setattr(api_operations, "run_operation", refused)
+    key = "9" * 64
+    claim = prices.claim(key, SHA, limit=1)
+    assert claim.row is not None and claim.row.claim_key is not None
+    kind = SimpleNamespace(name=SLICE_PRICE_KIND, unkeyed=frozenset())
+    ops = SimpleNamespace(kinds={SLICE_PRICE_KIND: kind})
+    state: Any = SimpleNamespace(components=SimpleNamespace(get=lambda _name: ops))
+    planned = Planned(key=key, variant=variant_of(shop, key))
+    await _start(state, prices, planned, claim.row.claim_key, claim.previous)
+    row = prices.get(key)
+    if may_have_started:
+        assert row is not None and row.status == "running"
+        assert row.operation_key is not None
+    else:
+        assert row is None

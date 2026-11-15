@@ -105,7 +105,8 @@ function offeredMaterial(listing: Listing, material: string | null | undefined):
 /**
  * `/l/:id`: one listing to customize (spec §5.4). The visitor changes the parameters the
  * listing offers (`ListingView`, the same form the shop previews), sees the preview and
- * the rough price, and adds it to the order. Only the values the visitor set are sent;
+ * the firm price from a slice (#6153; or that it is being worked out, or priced by hand),
+ * and adds it to the order. Only the values the visitor set are sent;
  * every locked value and every default comes from the listing's published snapshot on the
  * shop's side, never from this page.
  *
@@ -147,7 +148,7 @@ export function CustomizePage({
   const [rendering, setRendering] = useState(false)
   const [renderError, setRenderError] = useState<string | null>(null)
   /**
-   * The rough price of the render `job` names, for the choices `key` (`choicesKey`). #6152:
+   * The price of the render `job` names (a slice's, pending, or none: #6153), for the choices `key` (`choicesKey`). #6152:
    * a pick of another filament of the same colour reuses the render, so the job alone does
    * not tell the price of one pick from that of the other.
    */

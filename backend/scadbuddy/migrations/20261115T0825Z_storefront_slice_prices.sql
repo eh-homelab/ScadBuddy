@@ -13,6 +13,9 @@ CREATE TABLE storefront_slice_prices (
   model_sha256 text NOT NULL,
   status text NOT NULL CHECK (status IN ('running', 'done', 'failed')),
   attempt integer NOT NULL DEFAULT 1,
+  -- Each claim's own key, which keys its operation, so a later claim never meets an
+  -- earlier claim's operation (#6370 review).
+  claim_key text,
   operation_key text,
   currency text,
   unit_price_minor bigint,

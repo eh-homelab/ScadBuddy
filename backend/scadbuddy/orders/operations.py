@@ -97,6 +97,7 @@ from scadbuddy.orders.storefront.slice_price import (
     RUN_ATTEMPTS,
     SLICE_PRICE_KIND,
     SliceRun,
+    SliceUnavailableError,
     SliceVariant,
     price_variant,
 )
@@ -154,6 +155,8 @@ QUOTE_DETERMINISTIC: tuple[type[Exception], ...] = (
 #: blob swept, while the run read it. The next attempt's ``ensure_output`` renders and
 #: saves the output again, and slices again.
 QUOTE_RETRYABLE: tuple[type[Exception], ...] = (OutputNotFoundError, BlobMissingError)
+#: A storefront slice also tries again after a passing failure (#6370 review).
+SLICE_RETRYABLE: tuple[type[Exception], ...] = (*QUOTE_RETRYABLE, SliceUnavailableError)
 
 
 def _slice_failed(plate_id: int, failure: str | None) -> ApiError:
@@ -1090,7 +1093,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         )
         try:
             row = await price_variant(run, SliceVariant.model_validate(request))
-        except QUOTE_RETRYABLE:
+        except SLICE_RETRYABLE:
             raise
         except QUOTE_DETERMINISTIC as error:
             # As a quote's: a bug is not tried again.
