@@ -204,11 +204,16 @@ def listing_values(
             raise InputOutsideListingError(name, "unknown")
         if name in asked:
             value = asked[name]
+            offered = colours
         elif (effective := effective_default(parameter, bound)) is not None:
             value = effective
+            # A colour default the visitor did not send is never refused for its
+            # material: `resolve_choice` moves it to the closest colour that the chosen
+            # material offers (#6258, #6302 review).
+            offered = {value.casefold()} if isinstance(value, str) else colours
         else:
             continue
-        reason = value_reason(parameter, bound, value, colours)
+        reason = value_reason(parameter, bound, value, offered)
         if reason is not None:
             raise InputOutsideListingError(name, reason)
         values[name] = value
@@ -292,6 +297,10 @@ def resolve_choice(
       this listing. A slot of ``slots`` (slot to filament id) fixes it to its filament's.
     - A print never mixes materials, so the material must also offer one of the choices
       of each colour parameter the visitor does not give.
+    - Of the materials that fit, the first that also offers the value (the listing's
+      default) of each colour parameter the visitor does not give wins. Only when none
+      does is it the first that fits (#6258 "otherwise use default", #6302 review). So a
+      listing the visitor does not touch renders as the shop set it.
     - Such a parameter keeps its value (the listing's default) when the material offers
       it, else takes the closest colour the material offers among its choices
       (`closest_colour.py`). It is never stored as a pick.
@@ -310,6 +319,8 @@ def resolve_choice(
     colours = {m: {f.colour.casefold() for f in each} for m, each in of.items()}
     given_parts: list[tuple[str, set[str]]] = []
     shop_parts: list[tuple[str, set[str]]] = []
+    #: The materials that offer each shop part's value as it is.
+    keeps: list[set[str]] = []
     for name, bound in listing.params.items():
         parameter = by_name.get(name)
         if parameter is None or parameter.type != "color":
@@ -320,6 +331,9 @@ def resolve_choice(
         else:
             choices = _choice_colours(bound)
             shop_parts.append((name, {m for m in order if choices is None or choices & colours[m]}))
+            keeps.append(
+                {m for m in order if isinstance(value, str) and value.casefold() in colours[m]}
+            )
     slot_parts: list[tuple[str, set[str]]] = []
     by_id = {f.id: f for f in offered}
     for slot, filament_id in sorted((slots or {}).items()):
@@ -333,6 +347,11 @@ def resolve_choice(
         return next((m for m in order if all(m in parts[n] for n in names)), None)
 
     chosen = fits(parts)
+    if chosen is not None:
+        chosen = next(
+            (m for m in order if all(m in parts[n] for n in parts) and all(m in k for k in keeps)),
+            chosen,
+        )
     if chosen is None and parts:
         kept = list(parts)
         for name in [n for n, _ in shop_parts + slot_parts + given_parts]:
@@ -362,7 +381,17 @@ def resolve_choice(
                 candidates.append(filament)
         # The target is a filament's colour when one has it: that filament's name and
         # alpha (#6258).
-        own = next((f for f in offered if f.colour.casefold() == value.casefold()), None)
+        # Any material's: the default may be of a material no longer allowed.
+        own = next(
+            (
+                filaments[f]
+                for f in listing.colours
+                if f in filaments
+                and not is_support(filaments[f].material)
+                and filaments[f].colour.casefold() == value.casefold()
+            ),
+            None,
+        )
         index = closest_colour(
             Swatch(
                 hex=value,

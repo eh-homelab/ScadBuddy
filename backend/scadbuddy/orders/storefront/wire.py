@@ -400,7 +400,8 @@ class PublicListing(BaseModel):
     colours: list[PublicFilament]
     #: The materials a print may be made of, in the shop's order (#6258): the listing's,
     #: else the shop's default (``storefront_materials``). A print is of one of them: the
-    #: first that offers every colour the visitor gives (`inputs.py` `resolve_choice`).
+    #: first that offers every colour the visitor gives, and of those the first that also
+    #: offers each untouched part's default (`inputs.py` `resolve_choice`, #6302 review).
     materials: list[str]
     media: list[PublicMedia]
     updated_at: datetime
@@ -471,6 +472,12 @@ class StoreRender(BaseModel):
     #: polling (#6120).
     preview_url: str | None
     error: str | None
+    #: The colour parameters' values the render takes, as the CRUD side settled them
+    #: (`inputs.py` `resolve_choice`): a colour the visitor did not set can move to the
+    #: closest colour of the material. The page shows these (#6258, #6302 review). Only
+    #: the start of a render answers them; a status read has null. Never the material:
+    #: the customer never sees one.
+    values: dict[str, ParamValue] | None = None
 
 
 # -- the visitor's draft (Task 8) ------------------------------------------------------

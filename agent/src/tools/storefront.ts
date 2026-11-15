@@ -3,7 +3,7 @@ import type { components } from '../api/schema.js'
 import { ok } from './call.js'
 import { outputId, slug } from './common.js'
 import { defineTool, json, type Tool, type ToolContext, ToolError } from './registry.js'
-import { colourProblems, defaultsFor, sellMedia, titleColours, withColourChoices, withoutWords } from './storefrontDraft.js'
+import { colourProblems, defaultsFor, draftMaterials, sellMedia, titleColours, withColourChoices, withoutWords } from './storefrontDraft.js'
 
 // #6131 (design 2026-11-13 §6) — the assistant's way onto the public storefront: draft a
 // listing from a saved output or a model with the Storefront page's smart defaults
@@ -126,8 +126,11 @@ export const storefrontTools: Tool[] = [
             ...withColourChoices(listing, schema, filaments),
             colours: listing.colours,
             media_ids: sellMedia(record.media ?? []),
-            // #6258: none of its own, so the shop's default (`storefront_materials`); the shop sets them in the back office.
-            materials: [],
+            // #6258, #6302 review: the materials of the filaments it offers, so a design of a material
+            // the shop's default (`storefront_materials`) leaves out still publishes. A listing's
+            // materials have no back-office control yet: they are set through the API, and an
+            // empty list means the shop's default.
+            materials: draftMaterials(listing.colours, filaments),
           },
         }),
         `draft a storefront listing of ${name}`,

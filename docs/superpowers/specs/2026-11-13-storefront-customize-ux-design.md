@@ -85,10 +85,14 @@ customize page "horrible". A Playwright walk on 2026-11-13 confirmed each point:
   filaments of those materials. `picks` goes from `RenderBody` and `AddListingItem`: a
   pick is the colour in `values`. `inputs.py` `resolve_choice` is the one rule the
   render, the estimate and the add use: the colours the request gives fix the material
-  (the first allowed one that offers each of them); a colour it does not give keeps the
-  listing's default when that material offers it, else takes the closest colour the
+  (the first allowed one that offers each of them, and of those the first that also
+  offers every untouched part's default, #6302 review); a colour it does not give keeps
+  the listing's default when that material offers it, else takes the closest colour the
   material offers (`closest_colour.py`, CIEDE2000 with alpha, pinned by
-  `test-fixtures/storefront/closest-colour.json`). Colours of no one material are 422
+  `test-fixtures/storefront/closest-colour.json`). A default the request does not give is
+  never refused for its material: it moves. The start of a render answers the colour
+  values it settled (`StoreRender.values`, never the material), and the page shows them
+  for the parts the visitor did not set. Colours of no one material are 422
   `listing_colours_clash` with `parts`. Each slot takes that material's filament of its
   colour. Publish refuses a listing filament of a material it does not allow (422
   `listing_material_not_allowed`; support filaments are not checked). The render row

@@ -208,6 +208,7 @@ def test_a_render_answers_what_the_preview_reads(crud: CrudCaller, listing: dict
         "colors",
         "preview_url",
         "error",
+        "values",
     }
     assert job["preview_url"] == f"/api/store/v1/renders/{job['id']}/preview.glb"
     assert job["colors"] == ["#FF0000"] and job["error"] is None
@@ -1292,6 +1293,47 @@ def test_colours_of_no_one_material_are_refused_with_the_parts(
     assert crud.post("/renders", json=alone, key=uuid.uuid4().hex).status_code == 202
 
 
+def test_a_render_answers_the_colours_it_settled(
+    client: TestClient,  # noqa: F811
+    crud: CrudCaller,
+    template: dict[str, Any],  # noqa: F811
+    dense_red: str,
+) -> None:
+    """#6302 review: the trim's default red is PLA only, and the visitor picks a blue that
+    is PETG only. The render is PETG, so the trim moves to PETG's blue, and the answer
+    says so (``values``), so the page shows what is printed. Never the material."""
+    petg_blue = _filament(client, "#0000FF", "30", "PETG")
+    listing = _two_colour_listing(client, template, [dense_red, petg_blue])
+    started = crud.post(
+        "/renders", json=render_body(listing, {"colour": "#0000FF"}), key=uuid.uuid4().hex
+    )
+    assert started.status_code == 202, started.text
+    assert started.json()["values"] == {"colour": "#0000FF", "trim": "#0000FF"}
+    assert "material" not in started.json()
+    # A listing the visitor does not touch renders its defaults.
+    bare = crud.post("/renders", json=render_body(listing, {}), key=uuid.uuid4().hex)
+    assert bare.status_code == 202, bare.text
+    assert bare.json()["values"] == {"colour": "#FF0000", "trim": "#FF0000"}
+
+
+def test_a_default_whose_material_the_shop_drops_still_renders(
+    client: TestClient,  # noqa: F811
+    crud: CrudCaller,
+    template: dict[str, Any],  # noqa: F811
+    dense_red: str,
+) -> None:
+    """#6302 review: the defaults are a PLA red, and ``storefront_materials`` then drops
+    PLA. A render that does not send those colours is 202, not 422: they move to the
+    closest PETG colour."""
+    petg_blue = _filament(client, "#0000FF", "30", "PETG")
+    listing = _two_colour_listing(client, template, [dense_red, petg_blue])
+    settings = client.put("/api/v1/settings", json={"storefront_materials": ["PETG"]})
+    assert settings.status_code == 200, settings.text
+    r = crud.post("/renders", json=render_body(listing, {}), key=uuid.uuid4().hex)
+    assert r.status_code == 202, r.text
+    assert r.json()["values"] == {"colour": "#0000FF", "trim": "#0000FF"}
+
+
 def test_add_to_order_refuses_a_slot_of_another_material(
     client: TestClient,  # noqa: F811
     crud: CrudCaller,
@@ -1376,3 +1418,36 @@ def test_publish_refuses_a_filament_of_a_material_not_allowed(
     )
     assert edited.status_code == 200, edited.text
     publish(client, made["id"])
+
+
+BACKFILL = (
+    Path(__file__).parents[2] / "scadbuddy/migrations/20261115T0346Z_listing_materials_backfill.sql"
+)
+
+
+def test_the_backfill_gives_an_old_listing_the_materials_it_offers(
+    client: TestClient,  # noqa: F811
+    crud: CrudCaller,
+    template: dict[str, Any],  # noqa: F811
+    dense_red: str,
+) -> None:
+    """#6302 review: a listing from before #6258 has no materials of its own. The
+    migration gives it the materials of its filaments, support left out, PETG and PLA
+    first, so no colour goes on deploy. A listing with materials is left alone."""
+    abs_blue = _filament(client, "#0000FF", "31", "ABS")
+    petg_red = _filament(client, "#FF0000", "32", "petg")
+    pva = _filament(client, "#FFFFFF", "33", "PVA")
+    colours = [abs_blue, dense_red, petg_red, pva]
+    old = create(client, listing_body(template, dense_red, colours=colours, materials=["ABS"]))
+    kept = create(
+        client, listing_body(template, dense_red, colours=colours, materials=["ABS", "PETG"])
+    )
+    with _state(crud.api).projection.pool.connection() as conn:
+        conn.execute("UPDATE storefront_listings SET materials = '{}' WHERE id = %s", (old["id"],))
+        conn.execute(BACKFILL.read_text(encoding="utf-8").encode())
+        rows = conn.execute(
+            "SELECT id, materials FROM storefront_listings WHERE id = ANY(%s)",
+            ([old["id"], kept["id"]],),
+        ).fetchall()
+    found = {row["id"]: row["materials"] for row in rows}
+    assert found == {old["id"]: ["petg", "PLA", "ABS"], kept["id"]: ["ABS", "PETG"]}

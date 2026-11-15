@@ -469,17 +469,26 @@ def test_the_given_colours_fix_the_first_material_that_offers_them(listing: List
     # PETG has no blue: PLA is the first material that has both.
     assert both.material == "PLA"
     assert (both.values["colour"], both.values["trim"]) == ("#FF0000", "#0000FF")
-    red = _resolve(two, {"colour": "#FF0000"}, PETG_FIRST)
+    red = _resolve(_two_colours(listing, PETG_RED, PLA_BLUE), {"colour": "#FF0000"}, PETG_FIRST)
     assert red.material == "PETG"
 
 
 def test_a_colour_not_given_moves_to_the_closest_in_the_material(listing: Listing) -> None:
-    """The trim was left alone: its default blue is not in PETG, so it takes PETG's
-    closest colour among its choices. It goes back to blue once PLA is the material."""
+    """The trim was left alone: its default blue is only PLA's, and the visitor's red is
+    only PETG's, so the trim takes PETG's closest colour among its choices."""
+    two = _two_colours(listing, PETG_RED, PLA_BLUE)
+    red = _resolve(two, {"colour": "#FF0000"}, PETG_FIRST)
+    assert red.material == "PETG"
+    assert red.values["trim"] == "#FF0000"
+
+
+def test_the_material_that_keeps_the_defaults_wins(listing: Listing) -> None:
+    """#6302 review: PETG and PLA both offer the visitor's red, and only PLA offers the
+    trim's default blue, so PLA wins over the first material and the trim keeps blue."""
     two = _two_colours(listing, PLA_RED, PETG_RED, PLA_BLUE)
     red = _resolve(two, {"colour": "#FF0000"}, PETG_FIRST)
-    assert red.values["trim"] == "#FF0000"
-    assert _resolve(two, {"colour": "#FF0000"}, ["PLA", "PETG"]).values["trim"] == "#0000FF"
+    assert red.material == "PLA"
+    assert red.values["trim"] == "#0000FF"
 
 
 def test_the_closest_colour_reads_each_filaments_alpha(listing: Listing) -> None:
@@ -506,15 +515,34 @@ def test_the_closest_colour_reads_each_filaments_alpha(listing: Listing) -> None
     assert resolved.values["trim"] == "#3030C0"
 
 
-def test_with_nothing_given_the_first_material_holds_and_defaults_move(
+def test_with_nothing_given_the_listing_renders_as_the_shop_set_it(
     listing: Listing,
 ) -> None:
+    """#6302 review: PETG is first but has no blue; PLA offers both defaults, so a bare
+    listing is PLA and keeps them. Only when no material keeps them do they move."""
     two = _two_colours(listing, PLA_RED, PETG_RED, PLA_BLUE)
     shop = _resolve(two, {}, PETG_FIRST)
-    assert shop.material == "PETG"
-    assert (shop.values["colour"], shop.values["trim"]) == ("#FF0000", "#FF0000")
+    assert shop.material == "PLA"
+    assert (shop.values["colour"], shop.values["trim"]) == ("#FF0000", "#0000FF")
+    split = _resolve(_two_colours(listing, PETG_RED, PLA_BLUE), {}, PETG_FIRST)
+    assert split.material == "PETG"
+    assert (split.values["colour"], split.values["trim"]) == ("#FF0000", "#FF0000")
     # A material the listing has no filament of is passed over.
     assert _resolve(_two_colours(listing, PLA_RED, PLA_BLUE), {}, PETG_FIRST).material == "PLA"
+
+
+def test_a_default_of_a_material_no_longer_allowed_moves_not_refused(listing: Listing) -> None:
+    """#6302 review: the trim's default blue is only PLA's, and the shop's materials now
+    leave PLA out. A visitor who does not send the trim is not refused for it: the trim
+    moves to the closest PETG colour."""
+    two = _two_colours(listing, PETG_RED, PLA_BLUE)
+    moved = _resolve(two, {}, ["PETG"])
+    assert moved.material == "PETG"
+    assert moved.values["trim"] == "#FF0000"
+    # A colour the visitor sends is still refused for its material.
+    with pytest.raises(InputOutsideListingError) as refused:
+        _resolve(two, {"trim": "#0000FF"}, ["PETG"])
+    assert (refused.value.name, refused.value.reason) == ("trim", "colour")
 
 
 def test_colours_of_no_one_material_clash(listing: Listing) -> None:
@@ -551,12 +579,15 @@ def test_the_slots_take_the_resolved_materials_filament_of_their_colour(
         1: PLA_BLUE,
         2: PLA_RED_TOO,
     }
-    petg = _resolve(two, {"colour": "#FF0000"}, PETG_FIRST)
+    # Red alone is PETG's once PLA has no red.
+    petg = _resolve(
+        _two_colours(listing, PVA_RED, PETG_RED, PLA_BLUE), {"colour": "#FF0000"}, PETG_FIRST
+    )
     assert slot_filaments({}, petg, ["#FF0000"]) == {0: PETG_RED}
 
 
 def test_a_print_never_mixes_materials(listing: Listing) -> None:
-    two = _two_colours(listing, PLA_RED, PETG_RED, PLA_BLUE)
+    two = _two_colours(listing, PETG_RED, PLA_BLUE)
     resolved = _resolve(two, {"colour": "#FF0000"}, PETG_FIRST)
     with pytest.raises(ColoursClashError) as refused:
         check_one_material(

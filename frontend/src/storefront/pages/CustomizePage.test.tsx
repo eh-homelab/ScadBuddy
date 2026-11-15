@@ -136,6 +136,24 @@ describe('CustomizePage', () => {
     expect(sent.every((body) => !('picks' in (body as object)))).toBe(true)
   })
 
+  it('shows the colour the shop settled for a part the visitor did not set (#6302 review)', async () => {
+    // The rim's default blue is PLA only. The visitor picks a rust that is PETG only, so the
+    // print is PETG and the shop moves the rim to its closest PETG colour, teal.
+    server.use(
+      http.post('/api/store/v1/renders', async ({ request }) => {
+        const body = (await request.json()) as { values: Record<string, string> }
+        const values = body.values.body_colour ? { body_colour: body.values.body_colour, rim_colour: '#1C8C8C' } : { body_colour: '#1B6CA8', rim_colour: '#1B6CA8' }
+        return HttpResponse.json({ ...RUNNING, values }, { status: 202 })
+      }),
+      http.get('/api/store/v1/renders/:id', () => HttpResponse.json(RUNNING)),
+    )
+    const { user } = show(CHARM_ID)
+    expect(await screen.findByRole('button', { name: /Rim colour Ocean blue/ })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Rust PETG' }))
+    expect(await screen.findByRole('button', { name: /Rim colour Teal/ })).toBeInTheDocument()
+  })
+
   it('says plainly when colours of no one material are set (#6258)', async () => {
     const { user } = show(CHARM_ID)
     await user.click(await screen.findByRole('button', { name: /Body colour/ }))

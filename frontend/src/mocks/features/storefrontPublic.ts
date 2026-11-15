@@ -288,7 +288,8 @@ export const handlers = [
   http.post(`${base}/renders`, async ({ request }) => {
     const missing = keyMissing(request)
     if (missing) return missing
-    const checked = outside((await request.json()) as Body)
+    const body = (await request.json()) as Body
+    const checked = outside(body)
     if (checked instanceof Response) return checked
     const id = next()
     const render: StoreRender = {
@@ -300,6 +301,15 @@ export const handlers = [
       colors: null,
       preview_url: null,
       error: null,
+      // #6302 review: the colours the render takes. The mock moves none: a part not given
+      // keeps the listing's default.
+      values: Object.fromEntries(
+        Object.entries(checked.params).flatMap(([name, param]) => {
+          if (param.kind !== 'choice' || !param.colour) return []
+          const value = body.values?.[name] ?? param.default
+          return typeof value === 'string' ? [[name, value]] : []
+        }),
+      ),
     }
     renders.set(id, { render, polls: 0 })
     return HttpResponse.json(render, { status: 202 })

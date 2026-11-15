@@ -139,6 +139,12 @@ export function CustomizePage({
   /** The last done render: the viewer keeps it on screen while a newer one runs. */
   const [shown, setShown] = useState<Shown>()
   const [rendering, setRendering] = useState(false)
+  /**
+   * #6302 review: the colour values the latest render reply says the print takes. A part the
+   * visitor did not set shows its colour from here (the shop may move it to the closest colour
+   * of the material), else the listing's default while no reply has come back.
+   */
+  const [settled, setSettled] = useState<Record<string, ParamValue>>()
   const [renderError, setRenderError] = useState<string | null>(null)
   /**
    * The rough price of the render `job` names, for the choices `key` (`choicesKey`): two
@@ -309,6 +315,7 @@ export function CustomizePage({
       const first = await store.startRender(body, renderKey.current.for(JSON.stringify(body)))
       renderKey.current.done()
       if (!live()) return
+      if (first.values) setSettled(first.values)
       setJob(onScreen(first))
       const done = await follow(first, live)
       if (!live() || done === null) return
@@ -366,6 +373,7 @@ export function CustomizePage({
       if (!alive.current) return
       setListing(fresh)
       setValues(keepOffered(fresh, values))
+      setSettled(undefined)
       setStale(false)
       setRenderError(null)
       setAddError(null)
@@ -409,7 +417,7 @@ export function CustomizePage({
         <Link className="sf-back" to="/">
           All designs
         </Link>
-        <ListingView listing={listing} values={values} onChange={setValue} />
+        <ListingView listing={listing} values={values} settled={settled} onChange={setValue} />
         {stale && (
           <div className="sf-panel sf-stale" role="status">
             <p>The shop has changed this design since you opened it.</p>

@@ -9,6 +9,8 @@ export interface ListingViewProps {
   listing: Listing
   /** Only the values the visitor set: a field with none shows the shop's choice. */
   values: ParamValues
+  /** The colour values the latest render took (`StoreRender.values`): what a part the visitor did not set shows. */
+  settled?: ParamValues
   onChange: (name: string, next: ParamValue | undefined) => void
   /** The title's heading level: 1 on the public page, 2 inside the back office's preview. */
   headingLevel?: 1 | 2
@@ -24,7 +26,7 @@ export interface ListingViewProps {
  * Everything the shop typed (title, description, captions, labels) renders as React text,
  * never as HTML (spec §5.8).
  */
-export function ListingView({ listing, values, onChange, headingLevel = 1 }: ListingViewProps) {
+export function ListingView({ listing, values, settled, onChange, headingLevel = 1 }: ListingViewProps) {
   const Heading: ElementType = headingLevel === 1 ? 'h1' : 'h2'
   const params = Object.entries(listing.params)
   return (
@@ -63,6 +65,7 @@ export function ListingView({ listing, values, onChange, headingLevel = 1 }: Lis
               key={name}
               param={param}
               value={values[name]}
+              settled={settled?.[name]}
               filaments={listing.colours}
               onChange={(next) => onChange(name, next)}
             />

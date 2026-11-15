@@ -76,6 +76,7 @@ from scadbuddy.orders.storefront.visitors import VisitorStore
 from scadbuddy.orders.storefront.wire import Listing, RenderBody, StoreRender
 from scadbuddy.render.job_models import Job, JobNotFoundError, QueueFullError
 from scadbuddy.render.jobs import SnapshotPendingError, SnapshotUnavailableError
+from scadbuddy.render.schema import ParamValue
 from scadbuddy.store.cache import materialize_result
 from scadbuddy.store.content import StoreFullError
 from scadbuddy.storefront.settings import STOREFRONT_PREFIX
@@ -408,6 +409,16 @@ def _is_colour(listing: Listing, name: str) -> bool:
     return any(p.name == name and p.type == "color" for p in listing.snapshot.schema_.parameters)
 
 
+def _colour_values(listing: Listing, choice: ResolvedChoice) -> dict[str, ParamValue]:
+    """The values the render takes of the colour parameters the listing offers, as
+    `resolve_choice` settled them: what the page shows (#6258, #6302 review)."""
+    return {
+        name: value
+        for name, value in choice.values.items()
+        if name in listing.params and _is_colour(listing, name)
+    }
+
+
 async def start_render(
     state: AppState, visitor_id: str, client: str, key: str, body: RenderBody
 ) -> StoreRender:
@@ -420,7 +431,8 @@ async def start_render(
     503 when the start keeps failing. A key seen before replays its row: the job the
     row names (410 ``render_expired`` when that job is gone; it is never submitted
     again), else the submit sent again, counted as a fresh one is when it runs on its own
-    and the row is free."""
+    and the row is free. The answer carries the colour values the render takes
+    (`StoreRender.values`, #6302 review)."""
     orders = _orders(state)
     runtime = await asyncio.to_thread(_runtime, state)
     listing, resolved, choice = await checked_choice(orders, body, runtime.storefront_materials)
@@ -486,7 +498,8 @@ async def start_render(
         if named is not None:
             try:
                 named_job = await asyncio.to_thread(state.render.store.read, named)
-                return await shown_render(state, named_job)
+                shown = await shown_render(state, named_job)
+                return shown.model_copy(update={"values": _colour_values(listing, choice)})
             except JobNotFoundError:
                 raise _expired() from None
     params = reference.inputs.get("params", {})
@@ -536,7 +549,8 @@ async def start_render(
             await _withdraw_limited(state, limits, job, row, key)
             raise _limited(error) from None
     await asyncio.to_thread(limits.attach, row, job.id)
-    return await shown_render(state, job)
+    shown = await shown_render(state, job)
+    return shown.model_copy(update={"values": _colour_values(listing, choice)})
 
 
 async def owned_render(state: AppState, visitor_id: str, job_id: str) -> OwnedRender:

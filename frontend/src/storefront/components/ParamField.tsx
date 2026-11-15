@@ -8,6 +8,12 @@ interface Props {
   param: PublicParam
   /** The visitor's value; undefined while the shop's own stands. */
   value: ParamValue | undefined
+  /**
+   * The colour the latest render took for this part while the visitor sets none, as the
+   * shop settled it (`StoreRender.values`): it can be the closest colour of the material
+   * the print is made of (#6258, #6302 review). Undefined until a render answers.
+   */
+  settled?: ParamValue
   filaments: readonly Filament[]
   onChange: (next: ParamValue | undefined) => void
 }
@@ -28,7 +34,7 @@ const INPUT =
  * with the theme's tokens only, so the back office's preview (StorefrontPage) shows the
  * same form in its own colours.
  */
-export function ParamField({ param, value, filaments, onChange }: Props) {
+export function ParamField({ param, value, settled, filaments, onChange }: Props) {
   const id = useId()
   const problem = valueProblem(param, value)
   const hintId = `${id}-hint`
@@ -39,9 +45,9 @@ export function ParamField({ param, value, filaments, onChange }: Props) {
     const offered = paramFilaments(param, filaments)
     // #6258: a pick is the colour in the values; the shop finds its filament.
     const current = typeof value === 'string' ? filamentOf(offered, value) : undefined
-    // While no colour is set the row shows the shop's colour, the default an unpicked render
-    // takes (#6144).
-    const start = startColour(param)
+    // While no colour is set the row shows the colour the latest render took (#6302 review),
+    // else the shop's colour, the default an unpicked render takes (#6144).
+    const start = typeof settled === 'string' ? settled : startColour(param)
     const fallback = start === undefined ? undefined : filamentOf(offered, start)
     return (
       <div className="min-w-0" aria-describedby={hintId}>
