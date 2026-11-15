@@ -599,7 +599,8 @@ export class PluginOAuth {
           const rotated = tokens.refreshToken !== undefined && tokens.refreshToken !== secret.refresh_token
           return { fail: new OAuthError(`its renewed token was not kept: the refresh took longer than its lease; ${rotated ? 'a new sign-in may be needed' : 'try again'}`, 409) }
         }
-        if (!kept) return { fail: new GrantError('it was signed in again or out since this run loaded it') }
+        // The API keeps a refresh only on the same grant, still connected (crud_agent_plugins.py).
+        if (!kept) return { fail: new GrantError('it was signed in again, out, or marked for a new sign-in since this run loaded it') }
         this.remember({ plugin, grant_id: grant, access_expires_at: tokens.expiresAt ?? null }, tokens.accessToken)
         return { header: bearer(tokens.accessToken) }
       },
