@@ -424,7 +424,12 @@ AAD, so a row either side seals opens on the other).
   sealed and opened on the API once it lists area `workspace` (#5299 step 7,
   [`backend/scadbuddy/api/crud_agent_workspace.py`](../../backend/scadbuddy/api/crud_agent_workspace.py)):
   the agent sends and gets plaintext and never holds a file key; until then it seals them
-  itself, as before. The agent still opens its plugin secrets and plugin sign-ins itself,
+  itself, as before. Its session images, the staged attachments and the saved HTTP bodies
+  go through the API's routes too once it lists areas `session-blobs`, `attachments` and
+  `http-bodies` (#5299 step 7,
+  [`backend/scadbuddy/api/crud_agent_blobs.py`](../../backend/scadbuddy/api/crud_agent_blobs.py)):
+  the same statements, the owner's caps under the owner's lock there, the bytes as the
+  bodies' bytes, never base64. The agent still opens its plugin secrets and plugin sign-ins itself,
   until the later steps of #5299.
 
 - **Envelope.** `sealSecret()` draws a random 32-byte data key per secret, seals the
@@ -1133,7 +1138,10 @@ an upload is refused with 429, so the route cannot fill the database. Every pane
 upload is the browser user's, so the cap covers all tabs together: drafts abandoned in
 several tabs can hold it for up to the TTL. Removing an image in the composer deletes
 its upload; a message the agent refuses after the composer has cleared leaves its
-uploads to expire. The bytes are plaintext, as in `ai_session_blobs`.
+uploads to expire. The bytes are plaintext, as in `ai_session_blobs`. Once the API lists
+area `attachments`, each of these runs on its CRUD routes
+([`agent/src/attachments/crudStore.ts`](../../agent/src/attachments/crudStore.ts); #5299
+step 7): the same owner checks, caps and lock, and the image's signature checked again there.
 
 **The turn.** The chat socket, and `sessions_send` for an MCP caller
 (`tools/imageRefs.ts`, where `attachment` is a member of #1906's reference union), read
