@@ -353,10 +353,11 @@ async def checked_choice(
     ``input_outside_listing`` (with ``name`` and ``reason``), 422
     ``listing_colours_clash`` (colours no one allowed material offers together, with
     ``parts``, `ColoursClashError`; only the visitor's colours and slots, never a locked
-    one), 409 ``listing_unavailable`` (the shop's locked colours alone share no allowed
-    material, `LockedColoursClashError`: a listing published before publish refused
-    that), 409 ``render_pending`` (with ``render_colours``,
-    colours given but no done render of the visitor's to take the slots from)."""
+    one), 409 ``listing_unavailable`` (no allowed material is printable,
+    `printable_materials`, `LockedColoursClashError`: a listing published before publish
+    refused that, or broken since by the materials or the price book), 409
+    ``render_pending`` (with ``render_colours``, colours given but no done render of the
+    visitor's to take the slots from)."""
     listing = await asyncio.to_thread(published_listing, orders.listings, body.listing_id)
     if listing.updated_at != body.listing_updated_at:
         raise problem(
@@ -389,8 +390,8 @@ async def checked_choice(
         # A print never mixes materials (#6152, always on since #6258).
         check_one_material(resolved.colours, choice, filaments)
     except LockedColoursClashError:
-        # Published before publish checked its locks: no visitor's colour can fix it,
-        # so the refusal names none (#6302 review).
+        # No material can print it (published before publish checked, or broken since):
+        # no visitor's colour can fix it, so the refusal names none (#6302 review).
         raise problem(
             status.HTTP_409_CONFLICT,
             "listing_unavailable",

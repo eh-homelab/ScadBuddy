@@ -1396,6 +1396,63 @@ def test_a_listing_whose_locks_clash_since_is_unavailable(
     assert r.status_code == 409, r.text
     assert r.json()["type"] == STOREFRONT_PROBLEMS + "listing_unavailable"
     assert "parts" not in r.json()
+    # Its card and page say so too: the same rule, from the live materials.
+    assert crud.get("/listings").json()["listings"][0]["available"] is False
+    assert crud.get(f"/listings/{listing['id']}").json()["available"] is False
+
+
+def test_publish_refuses_a_lock_of_one_material_and_choices_of_another(
+    client: TestClient,  # noqa: F811
+    template: dict[str, Any],  # noqa: F811
+) -> None:
+    """#6302 review: the colour is locked to black, which only PLA has; the trim is
+    offered only in PETG's white. No material prints both, so publish refuses it."""
+    pla_black = _filament(client, "#000000", "20")
+    petg_white = _filament(client, "#FFFFFF", "30", "PETG")
+    body = _two_colour_body(
+        client,
+        template,
+        [pla_black, petg_white],
+        params={"trim": {"kind": "choice", "choices": ["#FFFFFF"], "default": "#FFFFFF"}},
+        fixed={"colour": "#000000"},
+    )
+    listing = create(client, body)
+    refused = client.post(f"{LISTINGS}/{listing['id']}/publish")
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["type"] == STOREFRONT_PROBLEMS + "listing_locked_colours_unprintable"
+    assert refused.json()["names"] == ["colour"]
+
+
+def test_a_lock_and_choices_of_two_materials_since_are_unavailable(
+    client: TestClient,  # noqa: F811
+    crud: CrudCaller,
+    template: dict[str, Any],  # noqa: F811
+    dense_red: str,
+) -> None:
+    """#6302 review: the colour is locked to red (PLA and PETG); the trim is offered only
+    in PETG's blue. ``storefront_materials`` then drops PETG: PLA holds the lock but no
+    trim choice. Every render is 409 ``listing_unavailable``, never a clash that names
+    the trim, and the card and page say it cannot be ordered."""
+    petg_red = _filament(client, "#FF0000", "31", "PETG")
+    petg_blue = _filament(client, "#0000FF", "30", "PETG")
+    body = _two_colour_body(
+        client,
+        template,
+        [dense_red, petg_red, petg_blue],
+        params={"trim": {"kind": "choice", "choices": ["#0000FF"], "default": "#0000FF"}},
+    )
+    listing = publish(client, create(client, body)["id"])
+    assert crud.get("/listings").json()["listings"][0]["available"] is True
+    settings = client.put("/api/v1/settings", json={"storefront_materials": ["PLA"]})
+    assert settings.status_code == 200, settings.text
+    r = crud.post("/renders", json=render_body(listing, {}), key=uuid.uuid4().hex)
+    assert r.status_code == 409, r.text
+    assert r.json()["type"] == STOREFRONT_PROBLEMS + "listing_unavailable"
+    assert "parts" not in r.json()
+    assert crud.get("/listings").json()["listings"][0]["available"] is False
+    page = crud.get(f"/listings/{listing['id']}").json()
+    assert page["available"] is False
+    assert page["materials"] == ["PLA"] and page["colours"] == []
 
 
 def test_add_to_order_refuses_a_slot_of_another_material(

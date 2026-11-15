@@ -176,7 +176,8 @@ async def publish_listing(listing_id: str, orders: OrdersDep, state: StateDep) -
     the fault (``listing_param_unknown``, ``listing_bounds_outside_schema``,
     ``listing_fixed_invalid``, ``listing_default_invalid``, ``listing_colour_unknown``,
     ``listing_media_unknown``, ``listing_material_not_allowed``,
-    ``listing_locked_colours_unprintable``: no allowed material offers every locked colour,
+    ``listing_locked_colours_unprintable``: no allowed material offers every locked colour
+    and a choice of each offered colour,
     ``listing_reference``, ``listing_pipeline_unsupported``,
     ``listing_material_unsliceable``: the shop slice profile has no spool for a material
     of the listing's filaments, #6153); 409 ``listing_publishing``

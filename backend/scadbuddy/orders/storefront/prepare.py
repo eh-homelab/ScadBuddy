@@ -1,7 +1,8 @@
 """Every colour combination of a listing, rendered before a visitor asks (#6237).
 
-A print is made of one material (#6258), so the combinations are enumerated per allowed
-material: the listing's effective materials (`effective_materials`), in order. For one
+A print is made of one material (#6258), so the combinations are enumerated per
+printable material: of the listing's effective materials (`effective_materials`), in
+order, those `printable_materials` keeps (#6302 review). For one
 material, a combination is one value for each offered colour parameter of the published
 listing: the colours of its bound that the material's customer filaments have
 (`customer_filaments`: the listing filaments the price book still has, never a support
@@ -56,6 +57,7 @@ from scadbuddy.orders.storefront.inputs import (
     effective_materials,
     listing_reference,
     listing_values,
+    printable_materials,
     resolve_choice,
 )
 from scadbuddy.orders.storefront.listings import listing_not_found, problem
@@ -156,16 +158,18 @@ def not_started(run: RunState, states: Sequence[str | None]) -> int:
 def colour_choices(
     listing: Listing, filaments: Mapping[str, Filament], materials: Sequence[str]
 ) -> dict[str, dict[str, list[str]]]:
-    """For each of ``materials`` (the effective materials, in order, `effective_materials`):
+    """For each printable one of ``materials`` (the effective materials, in order,
+    `effective_materials`; `printable_materials`, #6302 review):
     each offered colour parameter of the published ``listing``, by name, with each spelling
     a visitor's page can send for it in that material, in the bound's order (casefolded,
     each colour once). The page sends a picked filament's own ``colour`` (`ParamField.tsx`),
     and a spelling is part of the render key, so a colour takes each of the material's
     filaments' spelling of it, once. The effective default comes first when no filament
     spells it so: it is what the page's first load renders (#6299 review)."""
+    # Only a printable material (#6302 review): another can only clash, or never renders.
     return {
         material: _material_choices(listing, customer_filaments(listing, filaments, [material]))
-        for material in dict.fromkeys(materials)
+        for material in printable_materials(listing, filaments, materials)
     }
 
 
@@ -241,7 +245,7 @@ def _build(
             except ColoursClashError:
                 continue
             except LockedColoursClashError:
-                # The shop's locks alone clash: no combination renders (#6302 review).
+                # No material can print it: no combination renders (#6302 review).
                 return []
             reference = listing_reference(listing, choice.values, {}, filaments=filaments).reference
             built.setdefault(reference.render_key, Combination(asked=asked, reference=reference))

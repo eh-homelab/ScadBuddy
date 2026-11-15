@@ -432,5 +432,8 @@ export function previewListing(
       return item ? [{ url: mediaUrl(item), kind: item.kind, caption: item.caption }] : []
     }),
     updated_at: '',
+    // The preview does not judge which materials are printable (#6302 review): publish
+    // refuses a listing none can print, and an empty colour still shows as gone.
+    available: true,
   }
 }

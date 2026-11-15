@@ -46,6 +46,7 @@ export const KEYCHAIN: Listing = {
   media: [],
   materials: SHOP_MATERIALS,
   updated_at: '2026-11-07T12:00:00Z',
+  available: true,
 }
 
 export const TAG: Listing = {
@@ -59,6 +60,7 @@ export const TAG: Listing = {
   media: [],
   materials: SHOP_MATERIALS,
   updated_at: '2026-11-07T12:00:00Z',
+  available: false,
 }
 
 export const CHARM_ID = 'l3'
@@ -95,6 +97,7 @@ export const CHARM: Listing = {
   media: [],
   materials: SHOP_MATERIALS,
   updated_at: '2026-11-07T12:00:00Z',
+  available: true,
 }
 
 const LISTINGS = [KEYCHAIN, TAG, CHARM]

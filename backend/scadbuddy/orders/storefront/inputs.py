@@ -17,7 +17,7 @@ library pins on the listing. It builds the same `Reference` as `orders/reference
 from __future__ import annotations
 
 import math
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -76,10 +76,12 @@ class ColoursClashError(ValueError):
 
 
 class LockedColoursClashError(ValueError):
-    """The shop's locked colours alone share no allowed material (#6302 review): the
-    listing cannot be printed in one material. Publish refuses such a listing
-    (``listing_locked_colours_unprintable``); one published before that check is
-    unavailable. ``names`` are the locked colour parameters."""
+    """No allowed material is printable (`printable_materials`, #6302 review): none
+    offers every colour the shop locked and a choice of each offered colour parameter, so
+    the listing cannot be printed in one material, whatever the visitor gives. Publish
+    refuses such a listing (``listing_locked_colours_unprintable``); one published before
+    that check, or broken since by the materials or the price book, is unavailable.
+    ``names`` are the locked colour parameters (none when no colour is locked)."""
 
     def __init__(self, names: list[str]) -> None:
         super().__init__(f"{', '.join(names)} share no allowed material")
@@ -108,6 +110,68 @@ def locked_colours(
         and isinstance(value := fixed.get(p.name), str)
         and not sets_support(p, shown_label(p.name, None, p.caption))
     }
+
+
+def printable_of(
+    schema: CustomizerSchema,
+    fixed: Mapping[str, ParamValue],
+    params: Mapping[str, ParamBound],
+    offered: Iterable[tuple[str, str]],
+    materials: Sequence[str],
+) -> list[str]:
+    """`printable_materials` from its parts: ``offered`` is each customer filament's
+    material and colour (support excluded). Publish asks it before a snapshot exists."""
+    colours: dict[str, set[str]] = {}
+    for material, colour in offered:
+        colours.setdefault(material_key(material), set()).add(colour.casefold())
+    wanted = {v.casefold() for v in locked_colours(schema, fixed, params).values()}
+    by_name = {p.name: p for p in schema.parameters}
+    parts = [
+        _choice_colours(bound)
+        for name, bound in params.items()
+        if (p := by_name.get(name)) is not None and p.type == "color"
+    ]
+    printable: list[str] = []
+    seen: set[str] = set()
+    for material in materials:
+        key = material_key(material)
+        if key in seen or key not in colours:
+            continue
+        seen.add(key)
+        if wanted <= colours[key] and all(c is None or c & colours[key] for c in parts):
+            printable.append(material)
+    return printable
+
+
+def printable_materials(
+    listing: Listing, filaments: Mapping[str, Filament], materials: Sequence[str]
+) -> list[str]:
+    """The one rule of which materials a print of ``listing`` can be made of (#6258,
+    #6302 review): of ``materials`` (the effective ones, in order, `effective_materials`),
+    each that offers, among the listing's customer filaments (`customer_filaments`), every
+    colour the shop locked that is not support (`locked_colours`) and at least one choice
+    of each offered colour parameter. The render (`resolve_choice`), publish
+    (``check_locked_colours``), the public listing and its card, and the prepare run all
+    use it. Empty with a colour to print: the listing cannot be made
+    (`LockedColoursClashError`)."""
+    snapshot = _snapshot(listing)
+    return printable_of(
+        snapshot.schema_,
+        snapshot.fixed,
+        listing.params,
+        ((f.material, f.colour) for f in customer_filaments(listing, filaments, materials)),
+        materials,
+    )
+
+
+def needs_material(listing: Listing) -> bool:
+    """Whether a print of ``listing`` takes a colour of a material: it offers a colour
+    parameter or locks a colour that is not support. One that does not prints with no
+    material of its own (the shop picks the slots)."""
+    snapshot = _snapshot(listing)
+    by_name = {p.name: p for p in snapshot.schema_.parameters}
+    offered = any((p := by_name.get(n)) is not None and p.type == "color" for n in listing.params)
+    return offered or bool(locked_colours(snapshot.schema_, snapshot.fixed, listing.params))
 
 
 def effective_materials(listing: Listing, shop: Sequence[str]) -> list[str]:
@@ -339,10 +403,10 @@ def resolve_choice(
     - The colour parameters the visitor gives (``given``, the names it sent) fix the
       material: the first of ``materials`` (in order) that offers each given colour on
       this listing. A slot of ``slots`` (slot to filament id) fixes it to its filament's.
-    - A print never mixes materials, so the material must also offer one of the choices
-      of each colour parameter the visitor does not give, and each colour the shop
-      locked that is not support (`locked_colours`, #6302 review). No allowed material
-      offers every locked colour: `LockedColoursClashError`, whatever the visitor gives.
+    - A print never mixes materials, so the material is one of `printable_materials`:
+      it offers each colour the shop locked that is not support and a choice of each
+      offered colour parameter (#6302 review). None is printable:
+      `LockedColoursClashError`, whatever the visitor gives.
     - Of the materials that fit, the first that also offers the value (the listing's
       default) of each colour parameter the visitor does not give wins. Only when none
       does is it the first that fits (#6258 "otherwise use default", #6302 review). So a
@@ -354,8 +418,8 @@ def resolve_choice(
     No material fits: `ColoursClashError`. Its ``parts`` are a smallest set of those
     parts that still clashes: each part in turn is left out while the rest still clash,
     the shop's parts first, then the slots, then the visitor's, so the refusal names the
-    visitor's own colours whenever they alone clash. A locked colour is never named: the
-    materials that lack one are left out first. A slot filament that is not a
+    visitor's own colours whenever they alone clash. A locked colour is never named: only
+    the printable materials are weighed. A slot filament that is not a
     customer filament of ``materials``: `InputOutsideListingError` (``colours.<slot>``)."""
     snapshot = _snapshot(listing)
     by_name = {p.name: p for p in snapshot.schema_.parameters}
@@ -363,15 +427,15 @@ def resolve_choice(
     of: dict[str, list[Filament]] = {}
     for filament in offered:
         of.setdefault(material_key(filament.material), []).append(filament)
-    order = [m for m in dict.fromkeys(material_key(m) for m in materials) if m in of]
     colours = {m: {f.colour.casefold() for f in each} for m, each in of.items()}
-    # The shop's locked colours fix the material too (#6302 review): a material that
-    # lacks one is never chosen, so the locked slots take that material's filaments.
-    locks = locked_colours(snapshot.schema_, snapshot.fixed, listing.params)
-    if locks:
-        order = [m for m in order if all(v.casefold() in colours[m] for v in locks.values())]
-        if not order:
-            raise LockedColoursClashError(list(locks))
+    # Only a printable material is ever chosen (#6302 review): one that offers each
+    # colour the shop locked, so the locked slots take its filaments, and a choice of
+    # each offered colour parameter. A visitor's clash is judged among those alone.
+    order = [material_key(m) for m in printable_materials(listing, filaments, materials)]
+    if not order and needs_material(listing):
+        raise LockedColoursClashError(
+            list(locked_colours(snapshot.schema_, snapshot.fixed, listing.params))
+        )
     given_parts: list[tuple[str, set[str]]] = []
     shop_parts: list[tuple[str, set[str]]] = []
     #: The materials that offer each shop part's value as it is.

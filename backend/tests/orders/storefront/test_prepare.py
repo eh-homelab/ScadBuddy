@@ -94,13 +94,12 @@ def visitor_key(
 
 def test_each_colour_is_taken_once_in_its_filaments_spelling() -> None:
     """The page sends a picked filament's own ``colour``, not the bound's spelling. The
-    listing has no PETG filament, so PETG offers no colour."""
+    listing has no PETG filament, so PETG is not printable and has no combination."""
     listing = a_listing(
         {"body": {"kind": "choice", "choices": ["#ff0000", "#FF0000", "#0000ff", "#0000FF"]}}
     )
     assert colour_choices(listing, FILAMENTS, SHOP) == {
         "PLA": {"body": ["#FF0000", "#0000FF"]},
-        "PETG": {"body": []},
     }
 
 
@@ -139,7 +138,6 @@ def test_a_colour_the_public_listing_does_not_offer_is_left_out() -> None:
     assert PETG_GREEN in book
     assert colour_choices(listing, book, SHOP) == {
         "PLA": {"body": ["#FF0000"]},
-        "PETG": {"body": []},
     }
 
 
@@ -154,7 +152,6 @@ def test_a_support_filament_is_never_a_combination() -> None:
     )
     assert colour_choices(listing, book, ["PLA", "PVA"]) == {
         "PLA": {"body": ["#FF0000"]},
-        "PVA": {"body": []},
     }
 
 

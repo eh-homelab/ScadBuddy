@@ -55,6 +55,16 @@ describe('ListingView', () => {
     expect(screen.queryByPlaceholderText("The shop's text")).toBeNull()
   })
 
+  it('says a design no material can print cannot be ordered (#6302 review)', () => {
+    // The shop's locked colours share no material with any choice: it answers `available`
+    // false, though the design offers no colour of its own.
+    const { size } = KEYCHAIN.params
+    if (!size) throw new Error('KEYCHAIN has no size')
+    const listing = { ...KEYCHAIN, params: { size }, available: false }
+    render(<ListingView listing={listing} values={{}} onChange={() => undefined} />)
+    expect(screen.getByText('This design cannot be ordered right now.')).toBeInTheDocument()
+  })
+
   it('says a design with no colour left cannot be ordered', () => {
     render(<ListingView listing={TAG} values={{}} onChange={() => undefined} headingLevel={2} />)
     expect(screen.getByRole('heading', { level: 2, name: 'Luggage tag' })).toBeInTheDocument()

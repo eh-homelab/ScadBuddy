@@ -31,6 +31,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable, Collection, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
@@ -57,6 +58,9 @@ from scadbuddy.orders.storefront.inputs import (
     effective_materials,
     locked_colours,
     material_key,
+    needs_material,
+    printable_materials,
+    printable_of,
     same_value,
     value_reason,
 )
@@ -852,28 +856,33 @@ def check_locked_colours(
     allowed: Sequence[str],
 ) -> None:
     """422 ``listing_locked_colours_unprintable`` (with ``names``, the locked colour
-    parameters) when no one of ``allowed`` offers every colour the shop locked
-    (`locked_colours`, ``fixed`` as `checked_fixed` answers it) among the listing's
-    customer filaments (``colours`` and ``materials``, by id): a print is made of one
-    material (#6258), and a render would refuse every visitor (#6302 review)."""
+    parameters) when none of ``allowed`` is printable (`printable_materials`, ``fixed``
+    as `checked_fixed` answers it, the listing's customer filaments from ``colours`` and
+    ``materials``, by id): none offers every colour the shop locked and a choice of each
+    offered colour parameter. So an offered parameter with no choice in a lock's
+    material causes it too. A print is made of one material (#6258), and a render would
+    refuse every visitor (#6302 review)."""
     locks = locked_colours(schema, fixed, body.params)
-    if not locks:
+    by_name = {p.name: p for p in schema.parameters}
+    offers_colour = any(
+        (p := by_name.get(n)) is not None and p.type == "color" for n in body.params
+    )
+    if not locks and not offers_colour:
         return
-    offered: dict[str, set[str]] = {}
-    for filament_id in body.colours:
-        material = materials.get(filament_id)
-        if material is None or is_support(material) or filament_id not in colours:
-            continue
-        offered.setdefault(material_key(material), set()).add(colours[filament_id].casefold())
-    wanted = {v.casefold() for v in locks.values()}
-    if any(wanted <= offered.get(material_key(m), set()) for m in allowed):
+    offered = [
+        (materials[f], colours[f])
+        for f in body.colours
+        if f in materials and f in colours and not is_support(materials[f])
+    ]
+    if printable_of(schema, fixed, body.params, offered, allowed):
         return
     names = list(locks)
     raise problem(
         status.HTTP_422_UNPROCESSABLE_CONTENT,
         "listing_locked_colours_unprintable",
-        f"no allowed material offers every locked colour ({', '.join(names)}); add those"
-        " colours in one material, or unlock one",
+        "no allowed material offers every locked colour"
+        + (f" ({', '.join(names)})" if names else "")
+        + " and a choice of each offered colour; add them in one material, or unlock one",
         names=names,
     )
 
@@ -1264,6 +1273,40 @@ def cursor_after(cursor: str) -> tuple[int, str]:
     return position, listing_id
 
 
+@dataclass(frozen=True)
+class _Offered:
+    """What a visitor of a published listing is offered (`_offered`)."""
+
+    #: The effective materials (`effective_materials`), in order.
+    materials: list[str]
+    #: Their customer filaments, in the listing's order (never support, #6152).
+    filaments: list[Filament]
+    params: dict[str, PublicParam]
+    #: Whether a render can be made: a printable material (or no colour to print), and
+    #: a colour left for every colour parameter (the page's `colourGone`).
+    available: bool
+
+
+def _offered(
+    listing: Listing, filaments: Mapping[str, Filament], shop_materials: Sequence[str]
+) -> _Offered:
+    """The public listing's materials, filaments and parameters. The filaments and the
+    choices come from the printable materials only (#6302 review): the same filaments
+    and live materials a render takes (`printable_materials` of `effective_materials`),
+    so a visitor never sees a colour that can only clash, and a listing no render can
+    make reads as unavailable. The materials stay the effective list."""
+    assert listing.snapshot is not None
+    by_name = {p.name: p for p in listing.snapshot.schema_.parameters}
+    effective = effective_materials(listing, shop_materials)
+    printable = printable_materials(listing, filaments, effective)
+    offered = customer_filaments(listing, filaments, printable)
+    colours = {f.colour.casefold() for f in offered}
+    params = {name: _public_param(name, b, by_name, colours) for name, b in listing.params.items()}
+    gone = any(isinstance(p, PublicChoice) and p.colour and not p.choices for p in params.values())
+    available = (bool(printable) or not needs_material(listing)) and not gone
+    return _Offered(materials=effective, filaments=offered, params=params, available=available)
+
+
 async def public_card(
     content: ContentStore,
     listing: Listing,
@@ -1271,20 +1314,10 @@ async def public_card(
     shop_materials: Sequence[str],
 ) -> PublicListingCard:
     """``listing`` as a card of the public list (#6154): its first picture as the one
-    presigned GET, and whether every colour it offers still has a filament a customer
-    may pick (`customer_filaments`: of an allowed material, never support, #6258)."""
+    presigned GET, and whether it can be ordered (`_offered`: a printable material, and a
+    filament a customer may pick for every colour it offers, #6258, #6302 review)."""
     assert listing.snapshot is not None
-    materials = effective_materials(listing, shop_materials)
-    colours = {f.colour.casefold() for f in customer_filaments(listing, filaments, materials)}
-    by_name = {p.name: p for p in listing.snapshot.schema_.parameters}
-    # As the page's `colourGone` (`frontend/src/storefront/params.ts`): a colour with no
-    # filament left cannot be ordered.
-    available = True
-    for name, bound in listing.params.items():
-        shown = _public_param(name, bound, by_name, colours)
-        if isinstance(shown, PublicChoice) and shown.colour and not shown.choices:
-            available = False
-            break
+    available = _offered(listing, filaments, shop_materials).available
     image = None
     for item in listing.media:
         if item.kind != "image":
@@ -1316,11 +1349,7 @@ async def public_listing(
     presigned GET of `PUBLIC_MEDIA_TTL`. A media file the index lost is left out, and
     logged."""
     assert listing.snapshot is not None
-    by_name = {p.name: p for p in listing.snapshot.schema_.parameters}
-    materials = effective_materials(listing, shop_materials)
-    # Never a support filament: support is the shop's choice (#6152).
-    offered = customer_filaments(listing, filaments, materials)
-    colours = {f.colour.casefold() for f in offered}
+    shown = _offered(listing, filaments, shop_materials)
     media: list[PublicMedia] = []
     for item in listing.media:
         url = await _media_url(content, listing.id, item.blob_key)
@@ -1330,9 +1359,7 @@ async def public_listing(
         id=listing.id,
         title=listing.title,
         description=listing.description,
-        params={
-            name: _public_param(name, b, by_name, colours) for name, b in listing.params.items()
-        },
+        params=shown.params,
         colours=[
             PublicFilament(
                 id=f.id,
@@ -1345,9 +1372,10 @@ async def public_listing(
                 subtype=f.subtype,
                 brand=f.brand,
             )
-            for f in offered
+            for f in shown.filaments
         ],
-        materials=materials,
+        materials=shown.materials,
+        available=shown.available,
         media=media,
         updated_at=listing.updated_at,
     )

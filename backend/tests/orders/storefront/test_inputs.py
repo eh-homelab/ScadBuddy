@@ -26,12 +26,14 @@ from scadbuddy.orders.storefront.inputs import (
     effective_materials,
     listing_reference,
     listing_values,
+    printable_materials,
     resolve_choice,
     slot_filaments,
 )
 from scadbuddy.orders.storefront.listings import (
     check_locked_colours,
     check_materials,
+    public_card,
     public_listing,
 )
 from scadbuddy.orders.storefront.renders import _filament_for
@@ -898,3 +900,82 @@ def test_a_material_with_stray_whitespace_is_still_its_material(listing: Listing
     assert [f.id for f in customer_filaments(shown, book, ["petg"])] == [PETG_RED]
     values = listing_values(shown, {"colour": "#FF0000"}, book, PETG_FIRST)
     assert resolve_choice(shown, values, ["colour"], book, PETG_FIRST).material == "PETG"
+
+
+# -- only printable materials count (#6302 review) --------------------------------------
+
+
+def _card(listing: Listing, filaments: dict[str, Filament], shop: list[str]) -> bool:
+    # No media, so the content store is never read.
+    card = asyncio.run(public_card(cast(ContentStore, None), listing, filaments, shop))
+    return card.available
+
+
+def _review_shape(listing: Listing) -> Listing:
+    """The review's case: the base is locked to black, which only PLA has; the text is
+    offered only in PETG colours."""
+    return _locked(
+        listing,
+        [PLA_BLACK, PETG_WHITE, PETG_GREEN],
+        {"base": "#000000"},
+        text={"kind": "choice", "choices": ["#FFFFFF", "#00FF00"]},
+    )
+
+
+def test_a_lock_and_an_offered_colour_of_two_materials_print_in_none(listing: Listing) -> None:
+    shown = _review_shape(listing)
+    assert printable_materials(shown, LOCKED, PETG_FIRST) == []
+    # Publish refuses it; one published before the rule cannot render, names no
+    # visitor's colour, and its card and page say it cannot be ordered.
+    colours = {f.id: f.colour for f in LOCKED.values()}
+    materials = {f.id: f.material for f in LOCKED.values()}
+    assert shown.snapshot is not None
+    with pytest.raises(ApiError) as refused:
+        check_locked_colours(
+            BASE_AND_TEXT, shown.snapshot.fixed, shown, colours, materials, PETG_FIRST
+        )
+    assert refused.value.type.endswith("listing_locked_colours_unprintable")
+    assert refused.value.extensions["names"] == ["base"]
+    values = listing_values(shown, {}, LOCKED, PETG_FIRST)
+    with pytest.raises(LockedColoursClashError) as clash:
+        resolve_choice(shown, values, (), LOCKED, PETG_FIRST)
+    assert clash.value.names == ["base"]
+    assert _card(shown, LOCKED, PETG_FIRST) is False
+    page = _public(shown, LOCKED, PETG_FIRST)
+    assert page.available is False
+    assert page.materials == PETG_FIRST and page.colours == []
+
+
+def test_only_the_printable_materials_colours_are_offered(listing: Listing) -> None:
+    """PETG has no black for the locked base, so only PLA prints: the text offers PLA's
+    white only, never PETG's green, and the page lists PLA's filaments only (its
+    materials stay the effective list)."""
+    shown = _locked(
+        listing,
+        [PLA_BLACK, PLA_WHITE, PETG_WHITE, PETG_GREEN],
+        {"base": "#000000"},
+        text={"kind": "choice", "choices": ["#FFFFFF", "#00FF00"]},
+    )
+    assert printable_materials(shown, LOCKED, PETG_FIRST) == ["PLA"]
+    page = _public(shown, LOCKED, PETG_FIRST)
+    assert page.available is True
+    assert page.materials == PETG_FIRST
+    assert [f.id for f in page.colours] == [PLA_BLACK, PLA_WHITE]
+    text = page.params["text"]
+    assert isinstance(text, PublicChoice) and text.choices == ["#FFFFFF"]
+    assert _card(shown, LOCKED, PETG_FIRST) is True
+
+
+NO_COLOURS = CustomizerSchema(
+    parameters=[Parameter(name="size", type="number", initial=2, min=1, max=5)]
+)
+
+
+def test_a_listing_with_no_colour_to_print_stays_available(listing: Listing) -> None:
+    """No colour offered and none locked: the shop picks the slots, so no material is
+    needed and the listing can be ordered."""
+    shown = _locked(listing, [], {}, NO_COLOURS, size={"kind": "number", "min": 1, "max": 5})
+    assert printable_materials(shown, LOCKED, PETG_FIRST) == []
+    assert _card(shown, LOCKED, PETG_FIRST) is True
+    values = listing_values(shown, {}, LOCKED, PETG_FIRST)
+    assert resolve_choice(shown, values, (), LOCKED, PETG_FIRST).material is None

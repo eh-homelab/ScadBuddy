@@ -53,8 +53,13 @@ export function colourGone(param: PublicParam): boolean {
   return param.kind === 'choice' && param.colour && param.choices.length === 0
 }
 
+/**
+ * Whether `listing` cannot be ordered: the shop says no material can print it (`available`
+ * false, #6302 review: its locked colours share no material with the offered ones), or a
+ * colour has no filament left.
+ */
 export function listingUnavailable(listing: Listing): boolean {
-  return Object.values(listing.params).some(colourGone)
+  return listing.available === false || Object.values(listing.params).some(colourGone)
 }
 
 /** The listing filament whose colour is `colour`, compared as the backend does (casefolded). */

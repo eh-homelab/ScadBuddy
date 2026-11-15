@@ -402,15 +402,21 @@ class PublicListing(BaseModel):
     description: str
     params: dict[str, PublicParam]
     #: The listing filaments a visitor may pick: never a support material (#6152), and
-    #: only of a material in ``materials`` (#6258).
+    #: only of a printable material in ``materials`` (#6258; `inputs.py`
+    #: `printable_materials`: each locked colour and a choice of each offered colour,
+    #: #6302 review). Each parameter's choices are of those materials only too.
     colours: list[PublicFilament]
     #: The materials a print may be made of, in the shop's order (#6258): the listing's,
-    #: else the shop's default (``storefront_materials``). A print is of one of them: the
-    #: first that offers every colour the visitor gives, and of those the first that also
-    #: offers each untouched part's default (`inputs.py` `resolve_choice`, #6302 review).
+    #: else the shop's default (``storefront_materials``). A print is of a printable one:
+    #: the first that offers every colour the visitor gives, and of those the first that
+    #: also offers each untouched part's default (`inputs.py` `resolve_choice`, #6302
+    #: review).
     materials: list[str]
     media: list[PublicMedia]
     updated_at: datetime
+    #: False when no render of it can be made: no material is printable, or a colour
+    #: parameter has no colour left (#6302 review). The card's ``available`` is the same.
+    available: bool = True
 
 
 class PublicListingCard(BaseModel):
@@ -422,7 +428,7 @@ class PublicListingCard(BaseModel):
     description: str
     #: The listing's first picture, as a presigned GET, if it has one.
     image: PublicMedia | None
-    #: False when a colour the customer must pick has no filament left (`colourGone`).
+    #: False when no render of it can be made (`PublicListing.available`, #6302 review).
     available: bool
 
 

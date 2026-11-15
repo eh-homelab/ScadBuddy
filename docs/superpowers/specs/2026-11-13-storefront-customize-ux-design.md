@@ -94,14 +94,18 @@ customize page "horrible". A Playwright walk on 2026-11-13 confirmed each point:
   values it settled (`StoreRender.values`, never the material), and the page shows them
   for the parts the visitor did not set, and only while the visitor's choices are the ones
   that start answered. Colours of no one material are 422
-  `listing_colours_clash` with `parts` (the visitor's colours and slots only). Each
-  colour the shop locked that is not support fixes the material too (#6302 review): a
-  material that lacks one is never chosen. Each slot takes that material's filament of its
-  colour. Publish refuses a listing filament of a material it does not allow (422
-  `listing_material_not_allowed`; support filaments are not checked), and locked colours
-  that no one allowed material offers together (422 `listing_locked_colours_unprintable`
-  with `names`); a listing published before that check renders as 409
-  `listing_unavailable`. Materials compare trimmed and casefolded. The render row
+  `listing_colours_clash` with `parts` (the visitor's colours and slots only). One rule
+  says which materials count (#6302 review): `inputs.py` `printable_materials`, the
+  allowed materials that offer each colour the shop locked (support aside) and a choice
+  of each offered colour parameter. The render chooses only among them, the public
+  listing and its card offer only their filaments and colours, and the prepare run
+  enumerates only them. Each slot takes the chosen material's filament of its colour.
+  Publish refuses a listing filament of a material it does not allow (422
+  `listing_material_not_allowed`; support filaments are not checked), and a listing with
+  no printable material (422 `listing_locked_colours_unprintable` with the locked
+  `names`). A listing that has none since (published before that check, or after the
+  materials or the price book changed) renders as 409 `listing_unavailable`, and its card
+  and page say `available: false`. Materials compare trimmed and casefolded. The render row
   keeps the resolved `material`, which the estimate prices by.
 
 ### 5.2 Colour picker (frontend, `storefront/components/ColourPicker.tsx`)

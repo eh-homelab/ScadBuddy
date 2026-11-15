@@ -1532,7 +1532,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `spool_links`), so a hand-set colour still finds its spools.
 - Prepared colour combinations (#6237): `orders/storefront/prepare.py`, routes `GET`/`POST
   /storefront/listings/{id}/prepare` (`api/storefront.py`). The combinations are enumerated
-  per allowed material (the listing's effective materials, in order, #6258): for one
+  per printable material (of the listing's effective materials, in order, #6258, those
+  `inputs.py` `printable_materials` keeps: each locked colour and a choice of each offered
+  colour, #6302 review): for one
   material, a combination is one colour per offered colour parameter (that material's
   customer filaments' colours, support excluded, in each spelling the page can send: each
   filament's own `colour`, as `ParamField.tsx` sends it, and the effective default when no
@@ -1540,7 +1542,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`listing_values`, `resolve_choice`, `listing_reference`), a colour at its effective
   default (same spelling) left out as the page leaves it out, so a visitor's render of the
   same picks has its render key and reuses the prepared job. A clash
-  (`ColoursClashError`) is left out, and the list is one combination per render key (the
+  (`ColoursClashError`) is left out; a listing no material can print
+  (`LockedColoursClashError`) has no combination. The list is one combination per render key (the
   first in material order); `count` is the number of keys. The list is built once per
   listing, price book and materials (a small in-process cache), so an index names one
   combination; above `ENUMERATION_LIMIT` (16384) picks it is not built and `count` is the

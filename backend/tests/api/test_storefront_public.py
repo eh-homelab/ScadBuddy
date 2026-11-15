@@ -252,7 +252,10 @@ def test_a_public_listing_shows_what_a_visitor_may_choose(
         # #6258: the materials a print may be made of, in the shop's order.
         "materials",
         "updated_at",
+        # #6302 review: False when no render of it can be made.
+        "available",
     }
+    assert listing["available"] is True
     [media] = listing["media"]
     assert media["kind"] == "image" and media["caption"] == ""
     # Presigned for an hour (moto's endpoint takes the query-string signature, whose
