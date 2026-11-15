@@ -190,8 +190,8 @@ async def publish_listing(listing_id: str, orders: OrdersDep, state: StateDep) -
     summary="A storefront listing's colour combinations and how far they are prepared",
 )
 async def get_prepare(listing_id: str, orders: OrdersDep, state: StateDep) -> PrepareProgress:
-    """How many colour combinations the published listing has (``count``: the product of
-    each offered colour parameter's colours; 0 with none), the cap
+    """How many colour combinations the published listing has (``count``: the render keys of
+    its combinations, each of one allowed material, #6258; 0 with no colour parameter), the cap
     (``storefront_prepare_cap``), and how many have a done (``ready``), an open
     (``rendering``) and a failed render (#6237). ``running`` is whether the listing's
     prepare run is open, and ``failed_to_start`` how many combinations its last run could
