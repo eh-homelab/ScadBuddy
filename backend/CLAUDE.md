@@ -257,8 +257,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
 - `backend/scadbuddy/flows/` — flow versions and runs (`store.py`: `workflow_definitions`,
   `workflow_runs`, the latter written only by the run's workflow), `agent_reads.py` (the
   agent's questions about the flow tables, read only, for `api/crud_agent.py` area `flows`,
-  #5299 D7: the queries the agent ran over SQL, which `agent/src/flows/backendReads.ts`
-  `SqlFlowRunReads` keeps a copy of until every API pod serves the routes), `typecheck.py` (a
+  #5299 D7: the queries the agent ran over SQL, of which the agent's tests keep a copy,
+  `agent/test/support/sqlFlowRunReads.ts`; the API revokes the agent's grants on
+  `workflow_runs` and `workflow_run_decisions`, `auth/revoke.py`), `typecheck.py` (a
   script's check at registration and at each start), `history.py` (a Reset's preview: the
   outward sends past a point, by activity id), `component.py` (`FLOWS`; runs the
   `projects` worker in-process with `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` or
