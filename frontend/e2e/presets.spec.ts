@@ -250,7 +250,7 @@ test.describe('a preset\'s details (#327)', () => {
     await expect(details.getByRole('listitem')).toHaveText(['small', 'zip pull'])
     await expect(details.locator('strong')).toHaveText('zip pull')
 
-    await choose(page, preset, 'Old engraving')
+    await chooseOldEngraving(page, preset)
     await expect(details).toHaveCount(0)
     await page.getByRole('button', { name: 'More for preset Old engraving' }).click()
     await page.getByRole('menuitem', { name: 'Edit details of preset Old engraving' }).click()
