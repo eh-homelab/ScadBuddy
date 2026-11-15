@@ -887,8 +887,10 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       const id = randomUUID()
       const hold = holdTurns()
       await send(env.client, id, message('t1'))
+      const turnRun = await runIdOf(id)
       await poll(() => turns.length, 1)
-      // The queue's write and the turn's end come back together: one workflow task holds both results.
+      // The queue's write and the turn's end come back together, often in one workflow task (the race;
+      // the recorded history queue_publish took it, so its replay pins the patch's branch).
       const both = held()
       queueChanged = async () => {
         await both.promise
@@ -908,6 +910,8 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       // The head left the queue: that change is written, the last write is the empty queue.
       await poll(() => queueWrites.at(-1)?.queue, [])
       expect(queueWrites.at(-1)?.version).toBe(2)
+      // The run that took QUEUE_PUBLISH_PATCH's branch, replayed as recorded.
+      await record('queue_publish', id, turnRun)
       await handleOf(id).signal('end')
       await handleOf(id).result()
     })
@@ -965,6 +969,8 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       await poll(() => turns.length, 1)
       // One message larger than the queue may hold.
       expect(await refusal(enqueue(id, queued('big', 'x'.repeat(600 * 1024))))).toBe('queue_full')
+      // Its size is UTF-8 bytes: 300 Ki two-byte characters are 600 KiB.
+      expect(await refusal(enqueue(id, queued('wide', 'é'.repeat(300 * 1024))))).toBe('queue_full')
       for (let i = 1; i <= 20; i++) await enqueue(id, queued(`q${i}`))
       expect(await refusal(enqueue(id, queued('q21')))).toBe('queue_full')
       expect(await queueOf(id)).toHaveLength(20)
@@ -1064,7 +1070,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       for (const [name, history] of Object.entries(recorded)) await writeFile(new URL(`${name}.json`, FIXTURES), `${historyToJSON(history)}\n`)
     }
     const names = (await readdir(FIXTURES)).filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -'.json'.length))
-    expect(names).toEqual(expect.arrayContaining(['turn', 'ended', 'park_respond', 'end_while_finishing', 'full_home', 'attention_tab', 'park_record', 'placement_moved', 'queue']))
+    expect(names).toEqual(expect.arrayContaining(['turn', 'ended', 'park_respond', 'end_while_finishing', 'full_home', 'attention_tab', 'park_record', 'placement_moved', 'queue', 'queue_publish']))
     const fixtures = await Promise.all(
       names.map(async (name) => ({
         workflowId: `fixture-${name}`,

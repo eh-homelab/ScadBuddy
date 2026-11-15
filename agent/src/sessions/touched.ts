@@ -612,10 +612,15 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
       ...ids(field(result, 'archive_ids')).map((id) => ({ type: 'print_archive' as const, id, action: 'modified' as const, before })),
     ]
   },
-  // #4698: the archive becomes a print of the model; a new model is created with it.
+  // #4698: the archive becomes a print of the model; a new model is created with it. #6394: or
+  // of a native library file, which gets the print.
   import_print: (input, result) => {
     const archive = bambuddyId(input.archive_id)
-    const touched: Touch[] = archive ? [{ type: 'print_archive', id: archive, action: 'modified' }] : []
+    const file = bambuddyId(field(result, 'library_file_id'))
+    const touched: Touch[] = [
+      ...(archive ? [{ type: 'print_archive' as const, id: archive, action: 'modified' as const }] : []),
+      ...(file ? [{ type: libraryFileType(file), id: file, action: 'modified' as const }] : []),
+    ]
     // A repeat (200, `made_now: false`) answers the stored `created_model`: only the import's own request made it.
     return field(result, 'created_model') === true && field(result, 'made_now') !== false
       ? [...touched, ...modelCreated(result)]

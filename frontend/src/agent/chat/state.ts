@@ -2,6 +2,7 @@ import type {
   Attention,
   Origin,
   Owner,
+  QueuedEntry,
   Question,
   Risk,
   SentImage,
@@ -148,6 +149,12 @@ export interface SessionState {
   offer?: HandoffOffer | null
   /** #2329 — how many `workspace.file` events arrived: the Files list reads again when it moves. */
   workspaceChanges?: number
+  /**
+   * #6386 — the messages waiting to run after the session's turn, oldest first: the last
+   * `session.queue` event's list (the log's order is the workflow's write order), less
+   * any that a `user.turn` has started since.
+   */
+  queued?: QueuedEntry[]
 }
 
 export type HandoffOffer = { to: Pick<Owner, 'kind' | 'label'> & { id?: string }; until: string }
@@ -300,6 +307,11 @@ function freshId(session: SessionState, prefix: string): string {
 
 const errorId = (session: SessionState) => freshId(session, 'error')
 
+/** #6386 — a queued message that started: it moves into the transcript. */
+function withoutQueued(session: SessionState, id: string): SessionState {
+  return session.queued?.some((q) => q.id === id) ? { ...session, queued: session.queued.filter((q) => q.id !== id) } : session
+}
+
 /** Without the respond errors about `id`, which a resolution has made stale (#1359). */
 function dropErrorsAbout(session: SessionState, id: string): SessionState {
   return session.items.some((i) => i.kind === 'error' && i.about === id)
@@ -375,11 +387,18 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
     case 'session.owner':
       return patchSession(state, event.sessionId, (s) => ({ ...s, owner: event.owner }))
 
+    case 'session.queue':
+      return patchSession(state, event.sessionId, (s) => ({
+        ...s,
+        // One the transcript already shows has started; its own queue event follows.
+        queued: event.queue.filter((q) => !s.items.some((i) => i.kind === 'user' && i.id === q.id)),
+      }))
+
     case 'user.turn':
       return patchSession(state, event.sessionId, (s) =>
         s.items.some((i) => i.kind === 'user' && i.id === event.turnId)
           ? s
-          : push(s, {
+          : push(withoutQueued(s, event.turnId), {
               kind: 'user',
               id: event.turnId,
               text: event.text,
@@ -512,11 +531,6 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
 
     case 'session.budget':
       return patchSession(state, event.sessionId, (s) => withBudget(s, event.costUsd, event.budgetUsd))
-
-    case 'session.queue':
-      // The panel does not show the queue yet (#6386); each queued message shows
-      // in the transcript when its turn starts, as a `user.turn`.
-      return state
 
     case 'memory':
       // Appended where it arrives: a retain that finished after its turn lands after
@@ -672,7 +686,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         ? patchSession(next, action.sessionId, (s) => ({
             ...s,
             items: [],
-            // Replayed from the log; the numbers stay for a log that has none.
+            // Replayed from the log, its queue too (#6386); the numbers stay for a log that has none.
+            queued: [],
             budgetSpent: false,
             sending: s.items.flatMap((i) => ((i.kind === 'approval' || i.kind === 'question') && i.state === 'sent' ? [i.id] : [])),
           }))

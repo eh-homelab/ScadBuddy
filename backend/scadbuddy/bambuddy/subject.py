@@ -3,7 +3,9 @@ Bambuddy's library, or (#4698) a model, for a print ScadBuddy did not start that
 imported onto that model. Every record of a print is keyed by its subject's ``key``
 (``output:<id>``, ``library:<file id>`` or ``model:<slug>``), so the kinds share one
 shape. An output and a library file differ only in how the 3MF to slice is obtained
-(``print_source``); a model subject is never printed by a run of ScadBuddy's.
+(``print_source``); a model subject is never printed by a run of ScadBuddy's. A person can
+also import a print onto a native library file (#6394): its link has the subject
+``library:<file id>`` and ``matched_by`` ``import`` (`print_links.py`).
 """
 
 from __future__ import annotations

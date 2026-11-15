@@ -306,6 +306,9 @@ export const QueuedEntrySchema = z.object({
 })
 export type QueuedEntry = z.infer<typeof QueuedEntrySchema>
 
+/** #6386 — how many messages a session's queue holds (agent `temporal/session/models.ts` QUEUE_MAX). */
+export const QUEUE_MAX = 20
+
 const v = z.literal(PROTOCOL_VERSION)
 const sessionId = z.string().min(1)
 

@@ -21,6 +21,7 @@ const file = (id: number, folderId: number | null): LibraryEntry => ({
   printable: true,
   has_thumbnail: false,
   is_external: false,
+  per_print: false,
   print_count: 0,
   sliced: false,
 })

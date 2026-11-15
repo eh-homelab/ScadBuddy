@@ -6,6 +6,7 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { describe, expect, it } from 'vitest'
 import { HTTP_TOOL_NAME, httpTierOf } from '../src/harness/httpRequest.js'
 import { event, type ServerEvent, type ServerEventType } from '../src/sessions/protocol.js'
+import { QUEUE_MAX } from '../src/temporal/session/models.js'
 import { INPUT_MAX, REDACTED, scrubForLog, SdkEventMapper, SUMMARY_MAX } from '../src/sessions/sdkEvents.js'
 import {
   ANSWER_MAX,
@@ -331,7 +332,8 @@ describe('the agent’s protocol mirror', () => {
       OPTIONS_MAX: panel.OPTIONS_MAX,
       QUESTION_TEXT_MAX: panel.QUESTION_TEXT_MAX,
       PREVIEW_MAX: panel.PREVIEW_MAX,
-    }).toEqual({ ANSWER_MAX, QUESTIONS_MAX, OPTIONS_MIN, OPTIONS_MAX, QUESTION_TEXT_MAX, PREVIEW_MAX })
+      QUEUE_MAX: panel.QUEUE_MAX,
+    }).toEqual({ ANSWER_MAX, QUESTIONS_MAX, OPTIONS_MIN, OPTIONS_MAX, QUESTION_TEXT_MAX, PREVIEW_MAX, QUEUE_MAX })
   })
 
   it('bounds a queued message\'s edit in the panel exactly where the agent does (#6386)', async () => {

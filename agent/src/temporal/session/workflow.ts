@@ -37,7 +37,7 @@ import {
   MESSAGE_MAX,
   type Message,
   NOT_QUEUED,
-  QUEUE_CHARS_MAX,
+  QUEUE_BYTES_MAX,
   QUEUE_FULL,
   QUEUE_MAX,
   type QueueAnswer,
@@ -124,7 +124,7 @@ import {
 // moves it. On `end` the workflow releases its place on `home`.
 //
 // The queue (#6386): a send while a turn runs is `queue_message`, appended here (FIFO, at most
-// QUEUE_MAX entries and QUEUE_CHARS_MAX of JSON) and answered with its place; `remove_queued` and
+// QUEUE_MAX entries and QUEUE_BYTES_MAX of JSON as UTF-8) and answered with its place; `remove_queued` and
 // `edit_queued` change an entry until it starts, and `queue` reads it. The turn's end starts the
 // head in its own transaction (`session.finish_turn`'s `next`), so the row never goes idle for a
 // later send to take first, and the run continues as new with that turn's message; a head queued
@@ -421,10 +421,10 @@ export async function AgentSession(started: SessionStart): Promise<void> {
   const queueState = (): QueueState => ({ version: queueVersion, queue: queue.map(queuedView) })
   /** The index of a queued entry that may still change (not the head being started). */
   const waiting = (id: string): number => (id === starting ? -1 : queue.findIndex((q) => q.turn_id === id))
-  const tooLarge = (entries: readonly QueuedMessage[]): boolean => JSON.stringify(entries).length > QUEUE_CHARS_MAX
+  const tooLarge = (entries: readonly QueuedMessage[]): boolean => new TextEncoder().encode(JSON.stringify(entries)).length > QUEUE_BYTES_MAX
   const full = () =>
     ApplicationFailure.nonRetryable(
-      `the session's queue is full (${QUEUE_MAX} messages, or ${QUEUE_CHARS_MAX / 1024} KiB); wait for one to start, or remove one`,
+      `the session's queue is full (${QUEUE_MAX} messages, or ${QUEUE_BYTES_MAX / 1024} KiB); wait for one to start, or remove one`,
       QUEUE_FULL,
     )
 

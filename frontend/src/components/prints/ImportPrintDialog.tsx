@@ -1,10 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import { ApiError, api } from '../../api/client'
-import type { ArchiveOutcome, AutoImport, FoundSource, ImportedPrint, PrintImportRequest } from '../../api/types'
+import type {
+  ArchiveOutcome,
+  AutoImport,
+  FoundSource,
+  ImportedPrint,
+  LibraryFileSuggestion,
+  PrintImportRequest,
+} from '../../api/types'
 import { modelPath } from '../../lib/deeplink'
 import { formatBytes, timeAgo } from '../../lib/format'
 import { useAsync } from '../../lib/useAsync'
+import { useDebounced } from '../../lib/useDebounced'
 import { PastPrintsPicker } from '../orders/PastPrintsPicker'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -44,6 +52,14 @@ function recordedSource(row: Pick<AutoImport, 'source' | 'library_file_id'>): st
   return null
 }
 
+/** ScadBuddy's own library ids start here (backend `print_library/ids.py` `NATIVE_ID_BASE`). */
+const NATIVE_ID_BASE = 1_000_000_000
+
+/** A library file in the library page, chosen. */
+function libraryFilePath(fileId: number): string {
+  return `/library?file=${fileId}`
+}
+
 function errorText(error: unknown): string {
   if (error instanceof ApiError) {
     const errors = (error.problem as { errors?: { msg?: string }[] }).errors
@@ -56,9 +72,10 @@ function errorText(error: unknown): string {
  * #4698 — "Import print": a Bambuddy archive that ScadBuddy did not print, linked to a
  * model so it shows on that model's Prints tab. Pick the archive (only the unlinked ones,
  * `scadbuddy_print`), then where its 3MF is (`GET /print-imports/{id}/sources`; one that
- * cannot be used says why, and the only usable one is chosen already), then the model: one
- * that exists (the suggested ones first) or a new mesh model made from the 3MF. The
- * printer's storage is read only after "Also look on the printer".
+ * cannot be used says why, and the only usable one is chosen already), then what it is a
+ * print of: a model that exists (the suggested ones first), a new mesh model made from the
+ * 3MF, or (#6394, on ScadBuddy's own library) a library file, the files whose name matches
+ * the job first. The printer's storage is read only after "Also look on the printer".
  *
  * With `start` (#4699, an Unsorted imports print) the dialog opens on that print, with
  * the source the watcher recorded chosen when it is listed and can be used.
@@ -99,27 +116,11 @@ export function ImportPrintDialog({
         <DialogHeader>
           <DialogTitle>Import print</DialogTitle>
           <DialogDescription>
-            Link a print that ScadBuddy did not start to a model. The print then shows on the model's Prints tab.
+            Link a print that ScadBuddy did not start to a model or a library file. The print then shows with it.
           </DialogDescription>
         </DialogHeader>
         {done ? (
-          <div className="flex flex-col gap-2 text-sm" data-testid="import-done">
-            <p>
-              The print is now a print of{' '}
-              <Link className="underline" to={modelPath(done.slug)}>
-                {done.slug}
-              </Link>
-              {done.created_model ? ', a new model made from its 3MF' : ''}.
-            </p>
-            <div className="flex gap-3">
-              <Link className="underline" to={`/prints/${done.archive_id}`}>
-                Open the print
-              </Link>
-              <Link className="underline" to={modelPath(done.slug, 'prints')}>
-                The model's prints
-              </Link>
-            </div>
-          </div>
+          <ImportDone done={done} />
         ) : archive === null ? (
           <PastPrintsPicker open={open} picked={null} onPick={setArchive} unlinkedOnly />
         ) : (
@@ -145,8 +146,46 @@ export function ImportPrintDialog({
   )
 }
 
+function ImportDone({ done }: { done: ImportedPrint }) {
+  const slug = done.slug
+  const fileId = done.library_file_id
+  return (
+    <div className="flex flex-col gap-2 text-sm" data-testid="import-done">
+      <p>
+        The print is now a print of{' '}
+        {slug ? (
+          <Link className="underline" to={modelPath(slug)}>
+            {slug}
+          </Link>
+        ) : fileId != null ? (
+          <Link className="underline" to={libraryFilePath(fileId)}>
+            library file {fileId}
+          </Link>
+        ) : (
+          done.subject
+        )}
+        {done.created_model ? ', a new model made from its 3MF' : ''}.
+      </p>
+      <div className="flex gap-3">
+        <Link className="underline" to={`/prints/${done.archive_id}`}>
+          Open the print
+        </Link>
+        {slug && (
+          <Link className="underline" to={modelPath(slug, 'prints')}>
+            The model's prints
+          </Link>
+        )}
+      </div>
+    </div>
+  )
+}
+
 const NEW = 'new'
 const EXISTING = 'existing'
+const FILE = 'file'
+
+/** How many library files a search shows. */
+const SEARCH_SHOWN = 8
 
 function ImportForm({
   archive,
@@ -168,6 +207,9 @@ function ImportForm({
   if (found.data && found.data !== last) setLast(found.data)
   const sources = found.data ?? last
   const models = useAsync(() => api.listModels(), [])
+  // #6394: a library file is a target only on ScadBuddy's own library.
+  const settings = useAsync(() => api.getSettings(), [])
+  const native = settings.data?.library_backend === 'native'
 
   const [picked, setPicked] = useState<string | null>(null)
   const recorded = preferred === null ? undefined : sources?.sources.find((s) => s.available && sourceKey(s) === preferred)
@@ -191,14 +233,26 @@ function ImportForm({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const suggestedFiles = useMemo(() => sources?.suggested_library_files ?? [], [sources])
+  const [pickedFile, setPickedFile] = useState<LibraryFileSuggestion | null>(null)
+  const file = pickedFile ?? suggestedFiles[0] ?? null
+
   const newBlocked = source?.sliced ?? false
-  const ready = source !== null && (mode === EXISTING ? slug !== '' : name.trim() !== '' && !newBlocked)
+  const ready =
+    source !== null &&
+    (mode === EXISTING ? slug !== '' : mode === FILE ? native && file !== null : name.trim() !== '' && !newBlocked)
 
   async function submit() {
     if (!source) return
+    const target: Pick<PrintImportRequest, 'slug' | 'new_model' | 'library_file_id'> =
+      mode === EXISTING
+        ? { slug }
+        : mode === FILE && file
+          ? { library_file_id: file.id }
+          : { new_model: { name: name.trim(), description: '' } }
     const body: PrintImportRequest = {
       source: { kind: source.kind, library_file_id: source.library_file_id ?? null, path: source.path ?? null },
-      ...(mode === EXISTING ? { slug } : { new_model: { name: name.trim(), description: '' } }),
+      ...target,
     }
     setBusy(true)
     setError(null)
@@ -237,6 +291,14 @@ function ImportForm({
               to{' '}
               <Link className="underline" to={modelPath(sources.linked.slug)}>
                 {sources.linked.slug}
+              </Link>
+            </>
+          ) : sources.linked.library_file_id != null ? (
+            <>
+              {' '}
+              to{' '}
+              <Link className="underline" to={libraryFilePath(sources.linked.library_file_id)}>
+                library file {sources.linked.library_file_id}
               </Link>
             </>
           ) : null}
@@ -292,8 +354,8 @@ function ImportForm({
           </fieldset>
 
           <fieldset className="flex flex-col gap-2">
-            <legend className="mb-1 text-sm font-medium">Which model is it a print of?</legend>
-            <RadioGroup aria-label="Model" value={mode} onValueChange={setMode} className="gap-2">
+            <legend className="mb-1 text-sm font-medium">What is it a print of?</legend>
+            <RadioGroup aria-label="Print of" value={mode} onValueChange={setMode} className="gap-2">
               <label className="flex items-start gap-2 text-sm">
                 <RadioGroupItem value={EXISTING} aria-label="A model that exists" className="mt-0.5" />
                 <span>A model that exists</span>
@@ -345,6 +407,15 @@ function ImportForm({
                   )}
                 </div>
               )}
+              {native && (
+                <>
+                  <label className="flex items-start gap-2 text-sm">
+                    <RadioGroupItem value={FILE} aria-label="A file in the library" className="mt-0.5" />
+                    <span>A file in the library</span>
+                  </label>
+                  {mode === FILE && <LibraryFileChoice suggested={suggestedFiles} chosen={file} onChoose={setPickedFile} />}
+                </>
+              )}
             </RadioGroup>
           </fieldset>
 
@@ -359,6 +430,81 @@ function ImportForm({
             </Button>
           </DialogFooter>
         </>
+      )}
+    </div>
+  )
+}
+
+/**
+ * #6394 — the library file a print is imported onto: the files whose name matches the job
+ * (`suggested_library_files`) first, then any file of ScadBuddy's own library found by name.
+ * Bambuddy's files and a run's per-print copies are not targets, so a search keeps only native
+ * ids, and not `per_print` ones.
+ */
+function LibraryFileChoice({
+  suggested,
+  chosen,
+  onChoose,
+}: {
+  suggested: LibraryFileSuggestion[]
+  chosen: LibraryFileSuggestion | null
+  onChoose: (file: LibraryFileSuggestion) => void
+}) {
+  const [query, setQuery] = useState('')
+  const q = useDebounced(query.trim(), 250)
+  const found = useAsync(
+    () => (q === '' ? Promise.resolve(null) : api.searchLibrary({ q, all: true })),
+    [q],
+  )
+  const hits = (found.data?.files ?? [])
+    // A run's per-print copy is never a target: its sweep trashes it (#6394 review).
+    .filter((hit) => hit.id >= NATIVE_ID_BASE && !hit.per_print)
+    .slice(0, SEARCH_SHOWN)
+    .map((hit): LibraryFileSuggestion => ({ id: hit.id, filename: hit.filename, folder_id: hit.folder_id ?? null }))
+  const choice = (file: LibraryFileSuggestion) => (
+    <Button
+      key={file.id}
+      type="button"
+      size="sm"
+      variant={file.id === chosen?.id ? 'secondary' : 'outline'}
+      aria-pressed={file.id === chosen?.id}
+      className="max-w-full justify-start truncate"
+      title={file.filename}
+      onClick={() => onChoose(file)}
+    >
+      {file.filename}
+    </Button>
+  )
+  return (
+    <div className="ml-6 flex min-w-0 flex-col gap-2">
+      {suggested.length > 0 && (
+        <div className="flex flex-wrap gap-1" role="group" aria-label="Suggested library files">
+          {suggested.map(choice)}
+        </div>
+      )}
+      <Label htmlFor="import-library-search">Find a file by name</Label>
+      <Input
+        id="import-library-search"
+        type="search"
+        value={query}
+        maxLength={200}
+        placeholder="benchy"
+        onChange={(e) => setQuery(e.target.value)}
+      />
+      {q !== '' &&
+        (found.error ? (
+          <span className="text-xs text-warn">Could not search the library: {errorText(found.error)}</span>
+        ) : !found.data ? (
+          <span className="text-xs text-muted-foreground">Searching the library…</span>
+        ) : hits.length === 0 ? (
+          <span className="text-xs text-muted-foreground">No library file has that name.</span>
+        ) : (
+          <div className="flex flex-wrap gap-1" role="group" aria-label="Library files found">
+            {hits.map(choice)}
+          </div>
+        ))}
+      {chosen === null && suggested.length === 0 && q === '' && (
+        <span className="text-xs text-muted-foreground">No file name matches the job. Find the file by its name.</span>
       )}
     </div>
   )

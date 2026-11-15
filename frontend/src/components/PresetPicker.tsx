@@ -636,7 +636,10 @@ export function PresetPicker({
 
   return (
     <div data-testid="preset-picker" className="flex flex-col gap-2 border-b px-3 py-2.5">
-      <div className="flex items-center gap-2">
+      {/* #1023 — one row: the actions sit after the select, so "Save as preset…" alone
+          no longer takes a row of its own. They wrap below only when the panel is too
+          narrow for the select's minimum width beside them. */}
+      <div data-testid="preset-bar" className="flex flex-wrap items-center gap-2">
         <Label htmlFor="preset-select" className="shrink-0 font-normal text-muted-foreground">
           Preset
         </Label>
@@ -645,7 +648,7 @@ export function PresetPicker({
           onValueChange={(id) => choose(id === NONE ? '' : id)}
           disabled={presetsState.loading && !presetsState.data}
         >
-          <SelectTrigger ref={trigger} id="preset-select" className="min-w-0 flex-1">
+          <SelectTrigger ref={trigger} id="preset-select" className="min-w-40 flex-1">
             <SelectValue placeholder={presets.length === 0 ? 'No presets yet' : 'Choose a preset…'} />
           </SelectTrigger>
           <SelectContent position="popper">
@@ -677,10 +680,64 @@ export function PresetPicker({
             )}
           </SelectContent>
         </Select>
+        <div className="ml-auto flex items-center gap-1.5">
+          {editable && modified && !pinned && (
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => void update()}
+              disabled={busy}
+              aria-label={`Update preset ${selected?.name ?? ''}`}
+            >
+              Update
+            </Button>
+          )}
+          <Button type="button" variant="outline" size="sm" onClick={openSaveAs} disabled={busy || pinned}>
+            Save as preset…
+          </Button>
+          {selected && (
+            // #3672 — the preset's own actions, in one menu beside Save as. Each dialog opens
+            // once the menu has closed and put the focus back on its button.
+            // The menu opened again: a status from an earlier Copy link may no longer hold.
+            <DropdownMenu modal={false} onOpenChange={(open) => open && setCopied(null)}>
+              <DropdownMenuTrigger asChild>
+                <Button type="button" variant="outline" size="icon-sm" disabled={busy} aria-label={`More for preset ${selected.name}`}>
+                  <MoreHorizontalIcon />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-auto min-w-44">
+                <DropdownMenuItem onSelect={() => void copyLink()} aria-label={`Copy link to preset ${selected.name}`}>
+                  Copy link
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => setTimeout(openDuplicate, 0)} aria-label={`Duplicate preset ${selected.name}`}>
+                  Duplicate
+                </DropdownMenuItem>
+                {editable && (
+                  <DropdownMenuItem onSelect={() => setTimeout(openDetails, 0)} aria-label={`Edit details of preset ${selected.name}`}>
+                    Edit details
+                  </DropdownMenuItem>
+                )}
+                {editable && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      variant="destructive"
+                      onSelect={() => setTimeout(() => setConfirmingDelete(true), 0)}
+                      aria-label={`Delete preset ${selected.name}`}
+                    >
+                      Delete
+                    </DropdownMenuItem>
+                  </>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
+        </div>
       </div>
 
-      {/* #352 — its own line above the buttons: beside them it wrapped word by word
-          into a narrow column, and a long name pushed it out of the panel.
+      {/* #352 — its own line, below the select's row and its buttons (#1023): beside the
+          buttons it wrapped word by word into a narrow column, and a long name pushed it
+          out of the panel.
           #351 — always in the page, so "Changed from …" is announced as it appears;
           out of the flow while empty, so it adds no gap. */}
       <Hint content={modified ? `Changed from ${selected?.name ?? ''}` : undefined}>
@@ -692,59 +749,6 @@ export function PresetPicker({
           {modified && <>Changed from {selected?.name}</>}
         </p>
       </Hint>
-      <div className="flex flex-wrap items-center justify-end gap-1.5">
-        {editable && modified && !pinned && (
-          <Button
-            type="button"
-            size="sm"
-            onClick={() => void update()}
-            disabled={busy}
-            aria-label={`Update preset ${selected?.name ?? ''}`}
-          >
-            Update
-          </Button>
-        )}
-        <Button type="button" variant="outline" size="sm" onClick={openSaveAs} disabled={busy || pinned}>
-          Save as preset…
-        </Button>
-        {selected && (
-          // #3672 — the preset's own actions, in one menu beside Save as. Each dialog opens
-          // once the menu has closed and put the focus back on its button.
-          // The menu opened again: a status from an earlier Copy link may no longer hold.
-          <DropdownMenu modal={false} onOpenChange={(open) => open && setCopied(null)}>
-            <DropdownMenuTrigger asChild>
-              <Button type="button" variant="outline" size="icon-sm" disabled={busy} aria-label={`More for preset ${selected.name}`}>
-                <MoreHorizontalIcon />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-auto min-w-44">
-              <DropdownMenuItem onSelect={() => void copyLink()} aria-label={`Copy link to preset ${selected.name}`}>
-                Copy link
-              </DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => setTimeout(openDuplicate, 0)} aria-label={`Duplicate preset ${selected.name}`}>
-                Duplicate
-              </DropdownMenuItem>
-              {editable && (
-                <DropdownMenuItem onSelect={() => setTimeout(openDetails, 0)} aria-label={`Edit details of preset ${selected.name}`}>
-                  Edit details
-                </DropdownMenuItem>
-              )}
-              {editable && (
-                <>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem
-                    variant="destructive"
-                    onSelect={() => setTimeout(() => setConfirmingDelete(true), 0)}
-                    aria-label={`Delete preset ${selected.name}`}
-                  >
-                    Delete
-                  </DropdownMenuItem>
-                </>
-              )}
-            </DropdownMenuContent>
-          </DropdownMenu>
-        )}
-      </div>
 
       {copied && copied.id === selected?.id && (
         <p role="status" data-testid="preset-link-copy" className="min-w-0 text-xs text-muted-foreground">

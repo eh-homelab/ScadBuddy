@@ -262,7 +262,8 @@ automatically (AI spec §2, D10).
 
 ## 9. Prints ScadBuddy did not start
 
-Import print (#4698) links such a print to a model by hand, and the print watcher
+Import print (#4698) links such a print to a model, or to a file of ScadBuddy's own library
+(#6394, `import_print` `library_file_id`), by hand, and the print watcher
 (#4699) does it with no user step (`README.md`, section "The print watcher (#4699)").
 The tools are in `agent/src/tools/prints.ts`.
 

@@ -13,7 +13,7 @@ runtime (``api/components.py``)."""
 
 import asyncio
 import logging
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Path, Response, status
@@ -81,20 +81,27 @@ async def _native(library: PrintLibraryDep) -> NativeLibrary | None:
     return await library.serving_native()
 
 
-def _model_name(catalogue: Catalogue, slug: str) -> str | None:
+def _raw_meta(catalogue: Catalogue, slug: str) -> dict[str, Any] | None:
     try:
-        name = catalogue.read_raw_meta(slug).get("name")
+        return catalogue.read_raw_meta(slug)
     except (InvalidModelMetaError, OSError):
         return None
+
+
+def _name_in(raw: dict[str, Any] | None, slug: str) -> str | None:
+    if raw is None:
+        return None
+    name = raw.get("name")
     return name if isinstance(name, str) and name else slug
 
 
-def _mesh_source_file(catalogue: Catalogue, slug: str) -> int | None:
-    """The native library file the model was made from, if it was."""
-    try:
-        source = catalogue.read_raw_meta(slug).get("mesh_source")
-    except (InvalidModelMetaError, OSError):
-        return None
+def _model_name(catalogue: Catalogue, slug: str) -> str | None:
+    return _name_in(_raw_meta(catalogue, slug), slug)
+
+
+def _mesh_source_in(raw: dict[str, Any] | None) -> int | None:
+    """The native library file a model's ``model.json`` says it was made from, if any."""
+    source = raw.get("mesh_source") if raw is not None else None
     if not isinstance(source, dict) or source.get("kind") != "bambuddy_library":
         return None
     file_id = source.get("file_id")
@@ -125,7 +132,8 @@ def _implied_for_file(
 ) -> list[Association]:
     """The models made from ``file`` (mine only: a built-in is never made from a library
     file), and the model of the output it is a copy of. Reads every model's
-    ``model.json``, as `Catalogue.library_pin_index` does."""
+    ``model.json`` once, as `Catalogue.library_pin_index` does, and names each model
+    found from that read."""
     implied: list[Association] = []
     if file.output_id is not None:
         try:
@@ -144,7 +152,10 @@ def _implied_for_file(
                 )
             )
     for slug in catalogue.slugs():
-        if not is_builtin(slug) and _mesh_source_file(catalogue, slug) == file.id:
+        if is_builtin(slug):
+            continue
+        raw = _raw_meta(catalogue, slug)
+        if _mesh_source_in(raw) == file.id:
             implied.append(
                 Association(
                     id=None,
@@ -152,6 +163,7 @@ def _implied_for_file(
                     library_file_name=file.name,
                     relation="source_of",
                     target=PrintSubject.model(slug).key,
+                    target_name=_name_in(raw, slug),
                     implied_by="mesh_source",
                 )
             )
@@ -164,7 +176,7 @@ def _implied_for_model(
     """The live file the model was made from, and every live copy of its outputs."""
     target = PrintSubject.model(slug).key
     implied: list[Association] = []
-    source = _mesh_source_file(catalogue, slug)
+    source = _mesh_source_in(_raw_meta(catalogue, slug))
     if source is not None:
         file = native.rows.file(source)
         if file is not None:
@@ -255,7 +267,8 @@ async def post_file_association(
     (#6395): ``output_of``, ``variant_of``, ``source_of`` or ``related_to`` a model
     (``model:<slug>``, which must exist) or another live file of ScadBuddy's own library
     (``library:<id>``). 201 with the new association; the same file, target and relation
-    again is 200 with the one already there, its ``note`` replaced. A file in the trash,
+    again is 200 with the one already there, its ``note`` replaced: it keeps its id,
+    ``created_at`` and ``created_by``, which name whoever first made it. A file in the trash,
     or one the library does not have, is a 404; a target that is not there, or the file
     itself, a 422. On Bambuddy's library, a 409 for a Bambuddy file's id; an id in
     ScadBuddy's own range is a 404 there, as every file route's is."""
