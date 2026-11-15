@@ -72,7 +72,12 @@ from scadbuddy.orders.quote import (
     sliced_plate_problem,
     sliced_slots,
 )
-from scadbuddy.orders.rendering import OutputsRead, Renders, output_for_reference
+from scadbuddy.orders.rendering import (
+    OutputsRead,
+    RenderedOutput,
+    Renders,
+    output_for_reference,
+)
 from scadbuddy.orders.storefront.slice_profile import (
     ProfileMissingMaterialError,
     StorefrontSliceProfile,
@@ -101,6 +106,10 @@ PENDING_RETRY: Final = 2
 #: Why a variant has no price, as its row records it.
 PROFILE_STALE: Final = "the shop slice profile names a spool the printer no longer offers"
 FILAMENT_GONE: Final = "a slot's filament is no longer in the price book"
+GEOMETRY_DIFFERS: Final = (
+    "the variant rendered to another 3MF than the one its key names, so its price would"
+    " not be for the design the visitor sees"
+)
 #: Every digest of a price key changes when this does.
 KEY_VERSION: Final = 1
 #: How long the live machine rate a key holds is read again only after: a page
@@ -472,6 +481,9 @@ class SliceRun:
     #: The spool ids the print dialog offers on a registry printer now, or None for a
     #: printer the registry does not hold (``api/storefront_slice.py`` ``offered_spools``).
     offered: Callable[[str], Awaitable[Collection[int] | None]]
+    #: The sha256 of the 3MF of the render job a rendered output was saved from, or
+    #: None when that cannot be read (#6370 review).
+    rendered_sha256: Callable[[RenderedOutput], Awaitable[str | None]]
     follow_every: float = FOLLOW_EVERY
 
 
@@ -479,7 +491,8 @@ async def price_variant(run: SliceRun, variant: SliceVariant) -> PriceRow:
     """The variant sliced and priced through :func:`slice_and_price`, and the price
     written. A row that is no longer ``running`` (an earlier attempt finished it) is the
     answer as it is. No price, with the reason, when a profile spool is not offered on
-    the printer now, a slot's filament is gone or archived, the slice fails, or a sliced
+    the printer now, a slot's filament is gone or archived, the render is of another 3MF
+    than the key's (`GEOMETRY_DIFFERS`), the slice fails, or a sliced
     plate cannot be priced. A passing failure (:func:`_passing`) is raised as
     :class:`SliceUnavailableError`, and any other failure as it is, so the operation
     tries again and the row stays ``running``."""
@@ -506,6 +519,10 @@ async def price_variant(run: SliceRun, variant: SliceVariant) -> PriceRow:
             saved_as=storefront_output_id(variant.reference.render_key),
             follow_every=run.follow_every,
         )
+        # Only the visitor's own geometry is priced (#6370 review): a render of another
+        # 3MF than the key's (the design moved under it) gets no firm price.
+        if await run.rendered_sha256(rendered) != variant.model_sha256:
+            return await _failed(run, variant, GEOMETRY_DIFFERS)
         subject = subject_of(key)
 
         async def machine_rate(

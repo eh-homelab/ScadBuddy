@@ -521,6 +521,23 @@ def test_the_price_is_a_slice_through_the_quote_path(
     assert output_id
 
 
+def test_a_render_of_the_listing_before_it_moved_has_no_price(
+    crud: CrudCaller, listing: dict[str, Any], sliced: type[FakeSlicer]
+) -> None:
+    """#6370 review: the shop moves the listing to another commit after the render. The
+    price would be of a design the visitor does not see, so there is none, and no slice
+    starts: the page renders again."""
+    job = render_until_done(crud, TOKEN_A, listing, {"width": 63})
+    with _state(crud.api).projection.pool.connection() as conn:
+        conn.execute(
+            "UPDATE storefront_listings SET commit = %s WHERE id = %s", ("f" * 40, listing["id"])
+        )
+    est = crud.get(f"/renders/{job['id']}/estimate")
+    assert est.status_code == 200, est.text
+    assert est.json()["source"] == "none" and est.json()["price_minor"] is None
+    assert sliced.started == []
+
+
 def test_two_reads_at_once_slice_once(
     crud: CrudCaller, listing: dict[str, Any], sliced: type[FakeSlicer]
 ) -> None:

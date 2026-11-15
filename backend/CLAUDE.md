@@ -1576,7 +1576,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `render_estimate`, `slice_estimate`) answers `StoreEstimate`: `source` `slice` with the
   price of one, `pending` (with `retry_after`) while the slice runs or waits, or `none`
   (no profile, no spool for a slot's material, a colour with no listing filament, files
-  lost, a failed slice). The read starts the slice, only for the render on screen, as the
+  lost, a failed slice, or a render whose slug or commit is no longer the listing's). A
+  price is only ever for the visitor's own geometry (#6370 review): the run checks that the
+  3MF it rendered is the one the key names (`SliceRun.rendered_sha256`, the render job's
+  3MF, not the stamped output's), else `GEOMETRY_DIFFERS` and no price. The read starts the slice, only for the render on screen, as the
   operation `storefront_slice_price` on the `library` queue (`orders/operations.py`,
   3 attempts, `QUOTE_TIMEOUT`); a re-read joins it. `SlicePrices.claim` admits at most
   `storefront_slices_concurrent` `running` rows, under one advisory lock; a running row

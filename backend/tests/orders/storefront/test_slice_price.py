@@ -18,9 +18,11 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import ModelPrintChoices, StoredSettings
 from scadbuddy.orders.models import MachineRateBreakdown, PricingPolicy
 from scadbuddy.orders.quote import QuoteRun, SlicedPlate, SliceQuoteRequest, quote_run
+from scadbuddy.orders.rendering import RenderedOutput
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.orders.storefront.slice_price import (
     FILAMENT_GONE,
+    GEOMETRY_DIFFERS,
     PROFILE_STALE,
     SLICE_PRICE_KIND,
     SlicePrices,
@@ -90,7 +92,11 @@ def slice_run(
     *,
     offered: Collection[int] | None = (9, 5),
     book: Book | None = None,
+    rendered: str | None = SHA,
 ) -> SliceRun:
+    async def rendered_sha256(_rendered: RenderedOutput) -> str | None:
+        return rendered
+
     async def create_output(body: dict[str, object]) -> dict[str, object]:
         return {"id": "out-sf", "colors": ["#ff0000", "#00ff00"]}
 
@@ -103,6 +109,7 @@ def slice_run(
         create_output=create_output,
         slicer=slicer,
         offered=offering(offered),
+        rendered_sha256=rendered_sha256,
         follow_every=0.0,
     )
 
@@ -467,3 +474,17 @@ async def test_a_start_that_may_have_run_keeps_its_place(
         assert row.operation_key is not None
     else:
         assert row is None
+
+
+@pytest.mark.parametrize("rendered", ["0" * 64, None], ids=["another-3mf", "unreadable"])
+async def test_a_render_of_another_3mf_than_the_key_gets_no_price(
+    shop: Shop, prices: SlicePrices, rendered: str | None
+) -> None:
+    """#6370 review: the run renders the variant again; when that render's 3MF is not the
+    one the key names (or cannot be read), no firm price is given and nothing is sliced."""
+    slicer = FakeSlicer({1: sliced_plate(1, 3600, [10.0, 5.0])})
+    row = await price_variant(
+        slice_run(shop, prices, slicer, rendered=rendered), variant_of(shop, "8" * 64)
+    )
+    assert (row.status, row.failure, row.total_minor) == ("failed", GEOMETRY_DIFFERS, None)
+    assert slicer.subjects == []

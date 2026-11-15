@@ -602,14 +602,19 @@ async def render_estimate(state: AppState, visitor_id: str, job_id: str) -> Stor
     """The firm price of the visitor's done render (#6153, `slice_price.py`
     `slice_estimate`). 404 ``render_not_found`` as `owned_job` says; 422
     ``estimate_unavailable`` for a job not done. ``pending`` while its files are fetched
-    (#6120) or its slice runs; ``none`` when the listing is gone, its files are lost, or
-    a colour of the render has no listing filament."""
+    (#6120) or its slice runs; ``none`` when the listing is gone, its files are lost, a
+    colour of the render has no listing filament, or the render is of another design
+    than the listing's now (its slug or commit moved since, #6370 review): the price
+    is never of a design the visitor does not see."""
     owned, job = await owned_job(state, visitor_id, job_id)
     if job.state != "done" or job.result is None:
         raise _unavailable("The price is ready once the render is done.")
     orders = _orders(state)
     listing = await asyncio.to_thread(orders.listings.get, owned.listing_id)
     if listing is None or listing.snapshot is None:
+        return NO_PRICE
+    if job.slug != listing.slug or job.model_version != listing.commit:
+        # The shop moved the listing since this render: the page renders again.
         return NO_PRICE
     if not await _fetch(state, job):
         return NO_PRICE if files_lost(job.id) else pending()

@@ -91,7 +91,7 @@ from scadbuddy.orders.quote import (
     reference_of,
     support_check,
 )
-from scadbuddy.orders.rendering import AttachTo, output_for_reference
+from scadbuddy.orders.rendering import AttachTo, RenderedOutput, output_for_reference
 from scadbuddy.orders.spools import item_plan
 from scadbuddy.orders.storefront.slice_price import (
     RUN_ATTEMPTS,
@@ -99,18 +99,19 @@ from scadbuddy.orders.storefront.slice_price import (
     SliceRun,
     SliceUnavailableError,
     SliceVariant,
+    model_digest,
     price_variant,
 )
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.hot_path import native_backends
-from scadbuddy.render.job_models import Job
+from scadbuddy.render.job_models import Job, JobNotFoundError
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.read_budget import budget_of
 from scadbuddy.render.runner import OpenSCADError, cached_schema
 from scadbuddy.render.schema import CustomizerSchema
 from scadbuddy.slicing.component import NO_CONTENT_STORE, SLICING
-from scadbuddy.store.cache import StaleBlobError
+from scadbuddy.store.cache import StaleBlobError, materialize_result
 from scadbuddy.store.content_models import BlobMissingError
 
 if TYPE_CHECKING:
@@ -1083,6 +1084,19 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             )
             return None if found is None else {spool.spool_id for spool in found}
 
+        async def rendered_sha256(rendered: RenderedOutput) -> str | None:
+            if rendered.job_id is None:
+                return None
+            try:
+                job = await asyncio.to_thread(core.render.store.read, rendered.job_id)
+            except JobNotFoundError:
+                return None
+            if job.result is None:
+                return None
+            await materialize_result(core.store.blobs, job.result)
+            path = core.paths.root / job.result.model_3mf
+            return await asyncio.to_thread(model_digest, job.id, path)
+
         run = SliceRun(
             prices=orders.slice_prices,
             filament=orders.store.filament,
@@ -1092,6 +1106,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             create_output=create_output,
             slicer=PreviewSlicer(core, components),
             offered=offered,
+            rendered_sha256=rendered_sha256,
         )
         try:
             row = await price_variant(run, SliceVariant.model_validate(request))
