@@ -8,6 +8,7 @@ import { seeThrough } from '../../lib/partOpacity'
 import { cameraFraming } from '../../lib/previewFrame'
 import { ErrorBoundary } from '../ErrorBoundary'
 import { Button } from '@/components/ui/button'
+import { WheelGate } from './WheelGate'
 
 type Props = {
   url: string
@@ -32,21 +33,23 @@ export function PlateScene({ url, colors, cutAt, onHeight, background }: Props) 
       onError={() => useLoader.clear(GLTFLoader, url)}
       fallback={(error, retry) => <PreviewFailure url={url} error={error} retry={retry} />}
     >
-      <Canvas
-        data-testid="plate-scene"
-        frameloop="demand"
-        gl={{ antialias: true, localClippingEnabled: true }}
-        camera={{ position: [210, 170, 230], fov: 35, near: 1, far: 4000 }}
-      >
-        <color attach="background" args={[background]} />
-        <hemisphereLight args={['#dbe6f5', '#1a202b', 1.1]} />
-        <directionalLight position={[180, 320, 140]} intensity={2.1} />
-        <directionalLight position={[-220, 140, -180]} intensity={0.7} />
-        <Suspense fallback={null}>
-          <PlateModel url={url} colors={colors} cutAt={cutAt} onHeight={onHeight} />
-        </Suspense>
-        <OrbitControls makeDefault enablePan minDistance={20} maxDistance={1200} />
-      </Canvas>
+      <WheelGate>
+        <Canvas
+          data-testid="plate-scene"
+          frameloop="demand"
+          gl={{ antialias: true, localClippingEnabled: true }}
+          camera={{ position: [210, 170, 230], fov: 35, near: 1, far: 4000 }}
+        >
+          <color attach="background" args={[background]} />
+          <hemisphereLight args={['#dbe6f5', '#1a202b', 1.1]} />
+          <directionalLight position={[180, 320, 140]} intensity={2.1} />
+          <directionalLight position={[-220, 140, -180]} intensity={0.7} />
+          <Suspense fallback={null}>
+            <PlateModel url={url} colors={colors} cutAt={cutAt} onHeight={onHeight} />
+          </Suspense>
+          <OrbitControls makeDefault enablePan minDistance={20} maxDistance={1200} />
+        </Canvas>
+      </WheelGate>
     </ErrorBoundary>
   )
 }

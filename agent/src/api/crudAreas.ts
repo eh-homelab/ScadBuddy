@@ -27,6 +27,12 @@ export const FORGET_AREAS = ['forget'] as const
 export const WORKSPACE_AREAS = ['workspace'] as const
 
 /**
+ * The areas of a session's images, the staged attachments and the saved http_request bodies
+ * (#5299 step 7; backend api/crud_agent_blobs.py; sessions/crudBlobs.ts, attachments/crudStore.ts).
+ */
+export const BLOB_AREAS = ['session-blobs', 'attachments', 'http-bodies'] as const
+
+/**
  * The areas of a session's background tasks (with a Monitor's events and a Workflow's journal)
  * and of the agent's command record, `ai_operations` (#5299 step 8; backend
  * api/crud_agent_tasks.py; background/store.ts, operations/store.ts).

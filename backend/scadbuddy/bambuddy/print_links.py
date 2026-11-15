@@ -439,6 +439,14 @@ class PrintLinkStore:
         ScadBuddy printed neither."""
         return await asyncio.to_thread(self._linked, archive_id)
 
+    async def known(self, archive_id: int) -> bool:
+        """Whether a ScadBuddy record names ``archive_id``: a link (:meth:`linked`), or an
+        order attempt that claims it (``order_item_fulfilments.archive_ids``, #4251: a
+        print queued in Bambuddy by hand and named on an order item). The media proxy's
+        gate (#305 plan §2.3); an archive only the print watcher's inbox lists is not
+        known."""
+        return await asyncio.to_thread(self._known, archive_id)
+
     async def page(
         self,
         *,
@@ -702,6 +710,16 @@ class PrintLinkStore:
                 (archive_id,),
             ).fetchone()
         return None if row is None else PrintImport.model_validate(dict(row))
+
+    def _known(self, archive_id: int) -> bool:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT EXISTS (SELECT 1 FROM print_links WHERE archive_id = %(a)s)"
+                " OR EXISTS (SELECT 1 FROM order_item_fulfilments WHERE %(a)s = ANY(archive_ids))"
+                " AS known",
+                {"a": archive_id},
+            ).fetchone()
+        return bool(row and row["known"])
 
     def _linked_among(self, archive_ids: list[int]) -> set[int]:
         with self._pool.connection() as conn:

@@ -77,6 +77,8 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
   let settings: () => Promise<typeof RUNTIME_DEFAULTS>
   let settingsRead: number
   let acquired: number
+  /** Each acquire_worker's `exclude`: the homes the turn was lost on. */
+  let excluded: string[][]
   let released: string[]
   /** The gate's activities (stubs): what describe_call and resolve_input wait on, and what each was sent. */
   let describeHold: Promise<void>
@@ -108,8 +110,9 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       await make(
         TASK_QUEUE,
         {
-          [ACQUIRE_WORKER_ACTIVITY]: async () => {
+          [ACQUIRE_WORKER_ACTIVITY]: async (input: { exclude?: string[] }) => {
             acquired++
+            excluded.push(input.exclude ?? [])
             return { hostQueue: HOST, identity: 'agent-session-test' }
           },
           [SESSION_FINISH_ACTIVITY]: async (args: FinishTurnInput) => finish(args),
@@ -158,6 +161,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     finished = []
     settingsRead = 0
     acquired = 0
+    excluded = []
     released = []
     describeHold = Promise.resolve()
     resolveHold = Promise.resolve()
@@ -665,6 +669,9 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     await send(env.client, id, message('t2'))
     await poll(() => finished.map((f) => f.outcome), ['done', 'failed'])
     expect(placed('t2')).toEqual([['0', undefined], ['1', 'restarted'], ['2', 'restarted']])
+    // A home cut off by another placement is alive: no acquire steers the turn away from it. Over
+    // both turns on purpose: t1's second acquire is the one that would name HOST.
+    expect(excluded.flat()).toEqual([])
     expect(finished[1]?.message).toBe('the turn could not be placed on a worker: another placement took the turn over (3 tries); send the message again')
     await handleOf(id).signal('end')
     await handleOf(id).result()

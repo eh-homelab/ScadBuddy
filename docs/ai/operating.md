@@ -1704,7 +1704,9 @@ call (`agent/src/access/live.ts`), so `off` refuses a call in a turn under way.
   #2511), never base64 in the result. A longer text body is saved in
   Postgres (`ai_session_http_bodies`, #2374), the 10 newest per session, so any replica pages it with `http_response_read`. That is up to
   10 × 20 MiB of plaintext `bytea` a session: size the database for it beside the other
-  per-session storage. The rows go with the session. A flow run's bodies stay on the
+  per-session storage. The rows go with the session; once the API lists area `http-bodies`
+  (#5299 step 7), they are written and read by range through its CRUD routes
+  ([`backend/scadbuddy/api/crud_agent_blobs.py`](../../backend/scadbuddy/api/crud_agent_blobs.py)). A flow run's bodies stay on the
   replica that ran the call, under `durable-turns/flow-<id>/http/`, removed by every
   pod's hourly sweep after 7 days (#2496); that sweep also clears a `durable-turns/<id>/`
   directory a pod left before #2374.

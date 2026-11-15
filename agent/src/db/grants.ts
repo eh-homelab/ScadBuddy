@@ -30,6 +30,9 @@ type Grants = Readonly<Record<string, readonly string[]>>
  * workspace files (#5299 step 7, `api/crud_agent_workspace.py`): their rows and shared bytes
  * (locked FOR KEY SHARE and FOR UPDATE, which need UPDATE), each write's `workspace.file`
  * events with the session's `event_seq` bump and its row lock (UPDATE on `ai_sessions`). And a
+ * session's images, read through its fork chain, a durable tool call's images, the staged
+ * attachments and the saved http_request bodies (#5299 step 7, `api/crud_agent_blobs.py`; a
+ * fenced write locks the session's row FOR SHARE). And a
  * session's background tasks, a Monitor's events, a Workflow's journal and child chats, and the
  * agent's command record with its activity row (#5299 step 8,
  * `api/crud_agent_tasks.py`; `ai_sessions` is read for a Workflow's open child chats). */
@@ -57,6 +60,10 @@ export const API_AI_GRANTS: Grants = {
   ai_session_files: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   ai_session_file_bytes: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   ai_session_events: ['SELECT', 'INSERT'],
+  ai_session_blobs: ['SELECT', 'INSERT'],
+  ai_session_tool_images: ['SELECT', 'INSERT', 'DELETE'],
+  ai_attachments: ['SELECT', 'INSERT', 'DELETE'],
+  ai_session_http_bodies: ['SELECT', 'INSERT', 'DELETE'],
   ai_background_tasks: ['SELECT', 'INSERT', 'UPDATE'],
   ai_background_events: ['SELECT', 'INSERT', 'UPDATE'],
   ai_workflow_calls: ['SELECT', 'INSERT'],

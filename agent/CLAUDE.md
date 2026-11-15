@@ -71,13 +71,21 @@ over the `WorkspaceFiles` interface `SessionFiles` also takes): the API seals, s
 each file and re-wraps principals' keys, a write's row, blob hold and `workspace.file` events
 are one transaction there (`WriteOptions.log`, `DeleteOptions.log`), and the reconcile is one
 transaction under `RECONCILE_LOCK`; this process sends and gets plaintext only.
+Areas `session-blobs`, `attachments` and `http-bodies` (#5299 step 7, `BLOB_AREAS`; backend
+`api/crud_agent_blobs.py`): a session's images (`src/sessions/crudBlobs.ts` `CrudSessionBlobs`
+behind the `SessionImages` interface; a durable tool call's images replaced whole, and a turn
+placement's write fenced by `TurnFence`, checked `FOR SHARE` in the API's transaction), the
+staged attachments (`src/attachments/crudStore.ts` `CrudAttachmentStore` behind `Attachments`)
+and the saved http_request bodies (`CrudHttpBodies`, read by range), each chosen per call by
+`gated` in `main.ts`; the bytes are multipart parts and answer bodies. `copyForkBlobs` stays
+SQL, in the forget's transaction, until #5299 step 9.
 A session's background tasks, a Monitor's events
 and a Workflow's journal and child chats (area `background-tasks`, `src/background/store.ts`
 `BackgroundTaskStore`'s `remote`, `CrudBackgroundTasks`) and the command record `ai_operations`
 (area `operations`, `src/operations/store.ts` `CrudOperations`; the API writes the operation's
 activity row in its transaction) are #5299 step 8 (`TASK_AREAS`, backend
 `api/crud_agent_tasks.py`); their bodies go through `crudRead.ts` `wellFormed`, since the API
-refuses a lone surrogate. These seven have a rolling-deploy fallback:
+refuses a lone surrogate. These ten have a rolling-deploy fallback:
 `src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` from the start with back-off
 (1 s doubling to 30 s) until every one is listed, and until then each stays on SQL, for an API
 pod older than the routes. The small stores (#5299 step 5, `src/api/crudStores.ts`
