@@ -17,7 +17,9 @@ activity reads the listing again, builds the combination at that index and submi
   was open already). The run waits until it settles.
 - ``settled``: the job is done already; the run goes to the next index at once.
 - ``failed``: the submit failed (not a full queue), or the step failed each attempt. The
-  run counts it in the memo ``failed_to_start`` and goes on.
+  run adds its index to the memo ``failed_to_start`` and goes on. `GET …/prepare` counts
+  the indices whose newest job is not done, so a later render of one clears it (#6299
+  review).
 - ``busy``: the render queue is full. The run waits and submits the same index again.
 - ``end``: no combination has that index, or the listing is not published any more.
 
@@ -45,8 +47,11 @@ SUBMIT_ACTIVITY = "prepare_listing_submit"
 SETTLED_ACTIVITY = "prepare_listing_settled"
 #: The workflow id's prefix: one run per listing.
 WORKFLOW_PREFIX = "prepare-listing:"
-#: The memo key of the submits that failed (not a full queue), which `GET …/prepare` shows.
+#: The memo key of the indices whose submit failed (not a full queue), which
+#: `GET …/prepare` reads. A run from before `FAILED_INDICES_PATCH` holds a count there.
 FAILED_MEMO = "failed_to_start"
+#: The memo holds the failed indices, not their count (#6299 review).
+FAILED_INDICES_PATCH = "prepare-failed-indices"
 #: The most prepared renders one run has open at once (#6299 review): a visitor's render
 #: and the shop's own find the render queue almost as it would be with no run.
 PREPARE_IN_FLIGHT = 2
@@ -88,11 +93,13 @@ class OpenJob(BaseModel):
 
 class PrepareListingStart(BaseModel):
     """What a run starts from: the listing, the next combination's index, the submits that
-    failed so far, and the jobs still open (a run continued as new carries them on)."""
+    failed so far (their count, and their indices), and the jobs still open (a run
+    continued as new carries them on)."""
 
     listing_id: str
     next_index: int = 0
     failed_to_start: int = 0
+    failed_indices: list[int] = []
     open_jobs: list[OpenJob] = []
 
 
@@ -126,6 +133,7 @@ class PrepareListing:
     async def run(self, start: PrepareListingStart) -> PrepareListingResult:
         index = start.next_index
         failed = start.failed_to_start
+        failed_indices = list(start.failed_indices)
         open_jobs = list(start.open_jobs)
         submitted = 0
         ended = False
@@ -149,12 +157,18 @@ class PrepareListing:
                     break
                 if answer.outcome == "busy":
                     break
+                asked = index
                 index += 1
                 submitted += 1
                 wait = POLL_FIRST
                 if answer.outcome == "failed":
                     failed += 1
-                    workflow.upsert_memo({FAILED_MEMO: failed})
+                    if workflow.patched(FAILED_INDICES_PATCH):
+                        # Each index once per run, so at most the cap of them.
+                        failed_indices.append(asked)
+                        workflow.upsert_memo({FAILED_MEMO: failed_indices})
+                    else:
+                        workflow.upsert_memo({FAILED_MEMO: failed})
                 elif answer.outcome == "open" and answer.job is not None:
                     open_jobs.append(answer.job)
             if ended and not open_jobs:
@@ -163,14 +177,17 @@ class PrepareListing:
                 submitted >= CONTINUE_EVERY
                 or workflow.info().get_current_history_length() > HISTORY_LIMIT
             ):
-                workflow.continue_as_new(
-                    PrepareListingStart(
-                        listing_id=start.listing_id,
-                        next_index=index,
-                        failed_to_start=failed,
-                        open_jobs=open_jobs,
-                    )
+                carried = PrepareListingStart(
+                    listing_id=start.listing_id,
+                    next_index=index,
+                    failed_to_start=failed,
+                    failed_indices=failed_indices,
+                    open_jobs=open_jobs,
                 )
+                if failed_indices and workflow.patched(FAILED_INDICES_PATCH):
+                    # The next run shows the failed indices from its start.
+                    workflow.continue_as_new(carried, memo={FAILED_MEMO: failed_indices})
+                workflow.continue_as_new(carried)
             if open_jobs:
                 still: list[OpenJob] = await workflow.execute_activity(
                     SETTLED_ACTIVITY,

@@ -194,9 +194,10 @@ async def get_prepare(listing_id: str, orders: OrdersDep, state: StateDep) -> Pr
     each offered colour parameter's colours; 0 with none), the cap
     (``storefront_prepare_cap``), and how many have a done (``ready``), an open
     (``rendering``) and a failed render (#6237). ``running`` is whether the listing's
-    prepare run is open, and ``failed_to_start`` how many of its submits failed (#6299
-    review); it is read only for a listing that can be prepared, and reads false when
-    Temporal does not answer. Over the cap only the count is computed. 404
+    prepare run is open, and ``failed_to_start`` how many combinations its last run could
+    not submit and that have no done render since (#6299 review). Both are read only for
+    a listing that can be prepared; when Temporal does not answer, ``running`` is false
+    and ``failed_to_start`` 0. Over the cap only the count is computed. 404
     ``listing_not_found``, 409 ``listing_not_published``."""
     return await progress(state, orders, listing_id)
 

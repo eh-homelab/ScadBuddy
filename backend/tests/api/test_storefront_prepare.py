@@ -5,14 +5,17 @@ combination reuses its job."""
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 from temporalio.service import RPCError, RPCStatusCode
 
+from scadbuddy.core.settings import Settings
 from scadbuddy.orders.storefront.prepare import RunState, TemporalPreparer
 from scadbuddy.storefront.wire import STOREFRONT_PROBLEMS
+from tests.api.conftest import set_fake_env
 from tests.api.test_storefront_listings import (  # noqa: F401  (fixtures)
     BOOK,
     LISTINGS,
@@ -163,6 +166,29 @@ def test_a_visitors_render_reuses_the_prepared_job(
     assert again.json() == {"count": 2, "started": True}
     wait_ready(client, two_colours, 2)
     assert job_ids(client, two_colours["slug"]) == prepared
+
+
+def test_prepare_again_renders_a_failed_combination_again(
+    client: TestClient,  # noqa: F811
+    two_colours: dict[str, Any],
+    settings: Settings,
+    tmp_path: Path,
+) -> None:
+    """#6299 review: each run makes its own claim, so a render that failed in one run is
+    rendered again by the next, not answered with the first run's failure."""
+    failing = tmp_path / "fail-blue"
+    failing.touch()
+    set_fake_env(
+        Path(settings.openscad).parent, "FAKE_FAIL_WHILE", {"arg": "0000FF", "file": str(failing)}
+    )
+    assert client.post(prepare_path(two_colours)).status_code == 200
+    first = wait_ready(client, two_colours, 2)
+    assert (first["ready"], first["failed"]) == (1, 1)
+    failing.unlink()
+    again = client.post(prepare_path(two_colours))
+    assert again.json() == {"count": 2, "started": True}
+    second = wait_ready(client, two_colours, 2)
+    assert (second["ready"], second["failed"]) == (2, 0)
 
 
 def test_a_visitors_render_during_the_run_has_the_default_priority(

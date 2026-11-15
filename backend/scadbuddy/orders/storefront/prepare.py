@@ -79,8 +79,8 @@ class PrepareProgress(BaseModel):
     cap, and of the combinations, how many have a done render (``ready``), a render in the
     queue or running (``rendering``) and a failed render (``failed``). Over the cap the
     three are 0: the combinations are not enumerated. ``running`` is whether the listing's
-    prepare run is open, and ``failed_to_start`` how many of its submits failed (the last
-    run's, #6299 review)."""
+    prepare run is open, and ``failed_to_start`` how many combinations the last run could
+    not submit and that have no done render since (#6299 review)."""
 
     count: int
     cap: int
@@ -109,10 +109,31 @@ class Combination:
 
 @dataclass(frozen=True)
 class RunState:
-    """The listing's prepare run: whether it is open, and its failed submits."""
+    """The listing's prepare run (its newest one): whether it is open, its run ids (None
+    with no run), and the indices of its failed submits. ``legacy_failed`` is the count a
+    run from before `FAILED_INDICES_PATCH` keeps instead."""
 
     running: bool
-    failed_to_start: int
+    run_id: str | None = None
+    first_run_id: str | None = None
+    failed_indices: tuple[int, ...] = ()
+    legacy_failed: int = 0
+
+
+def request_id(listing_id: str, run_id: str, render_key: str) -> str:
+    """The claim of one prepared render (#6299 review): one per run of the listing's
+    prepare workflow and key. A retry of one submit joins its claim; a new run, or one
+    continued as new, makes a new one, so a failed render is rendered again. Each index is
+    submitted once per run."""
+    return f"prepare:{listing_id}:{run_id}:{render_key}"
+
+
+def not_started(run: RunState, states: Sequence[str | None]) -> int:
+    """How many of the run's failed submits (``run.failed_indices``, indices into
+    ``states``, each combination's newest job state) have no done job yet."""
+    if run.legacy_failed:
+        return run.legacy_failed
+    return sum(1 for i in set(run.failed_indices) if i < len(states) and states[i] != "done")
 
 
 def colour_choices(listing: Listing, filaments: Mapping[str, Filament]) -> dict[str, list[str]]:
@@ -285,26 +306,35 @@ class TemporalPreparer:
         self.task_queue = task_queue
 
     async def run_state(self, listing_id: str) -> RunState:
-        """Whether the listing's run is open, and the failed submits of its last run (0
-        with no run). Raises `RPCError` when Temporal does not answer."""
+        """Whether the listing's run is open, its run ids, and the failed submits of its
+        last run (none with no run). Raises `RPCError` when Temporal does not answer."""
         try:
             described = await self.client.get_workflow_handle(workflow_id(listing_id)).describe()
         except RPCError as error:
             if execution_gone(error):
-                return RunState(running=False, failed_to_start=0)
+                return RunState(running=False)
             raise
         memo = await described.memo()
-        failed = memo.get(FAILED_MEMO, 0)
+        failed = memo.get(FAILED_MEMO)
+        info = described.raw_description.workflow_execution_info
         return RunState(
             running=described.status == WorkflowExecutionStatus.RUNNING,
-            failed_to_start=failed if isinstance(failed, int) else 0,
+            run_id=described.run_id,
+            first_run_id=info.first_run_id or None,
+            failed_indices=tuple(i for i in failed if isinstance(i, int))
+            if isinstance(failed, list)
+            else (),
+            legacy_failed=failed if isinstance(failed, int) else 0,
         )
 
     async def start(self, listing_id: str) -> bool:
         """Start the listing's run, or join the open one; True when this call started it.
-        A run that ended is started again: its submits reuse every done job."""
-        joined = (await self.run_state(listing_id)).running
-        await self.client.start_workflow(
+        A run that ended is started again: its submits reuse every done job. Whether it
+        started is read from the start's own answer (#6299 review): the run it names is not
+        the open run described before, so a run that ends between the two calls is never
+        taken as joined."""
+        before = await self.run_state(listing_id)
+        handle = await self.client.start_workflow(
             PREPARE_LISTING_WORKFLOW,
             PrepareListingStart(listing_id=listing_id),
             id=workflow_id(listing_id),
@@ -312,7 +342,14 @@ class TemporalPreparer:
             id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
             id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
         )
-        return not joined
+        if not before.running:
+            return True
+        # Joined: the answer names the open run, or (continued as new since) its chain.
+        same_run = handle.result_run_id is not None and handle.result_run_id == before.run_id
+        same_chain = (
+            before.first_run_id is not None and handle.first_execution_run_id == before.first_run_id
+        )
+        return not (same_run or same_chain)
 
 
 def preparer(state: AppState) -> TemporalPreparer:
@@ -345,7 +382,7 @@ async def progress(state: AppState, orders: OrdersComponent, listing_id: str) ->
         run = await preparer(state).run_state(listing_id)
     except RPCError:
         logger.warning("could not read the prepare run of listing %s", listing_id)
-        run = RunState(running=False, failed_to_start=0)
+        run = RunState(running=False)
 
     def read_states() -> tuple[list[str], dict[str, str]]:
         # Up to the cap of references and keys: off the event loop (#6299 review).
@@ -361,7 +398,7 @@ async def progress(state: AppState, orders: OrdersComponent, listing_id: str) ->
         rendering=seen.count("pending") + seen.count("running"),
         failed=seen.count("failed"),
         running=run.running,
-        failed_to_start=run.failed_to_start,
+        failed_to_start=not_started(run, seen),
     )
 
 
@@ -389,11 +426,14 @@ async def start_run(state: AppState, orders: OrdersComponent, listing_id: str) -
     return PrepareStarted(count=count, started=started)
 
 
-async def submit(state: AppState, orders: OrdersComponent, ask: SubmitAsk) -> Submitted:
+async def submit(
+    state: AppState, orders: OrdersComponent, ask: SubmitAsk, run_id: str
+) -> Submitted:
     """One step of the run: submit the combination at ``ask.index`` with
     ``reuse_finished``. A combination with an open job is left as it is (``open``), a done
     one answers ``settled``, and any other is rendered. ``end`` once the index is past the
-    last combination, or the listing is not published (or is over the cap) any more."""
+    last combination, or the listing is not published (or is over the cap) any more.
+    ``run_id`` is the prepare run's: it scopes the render's claim (`request_id`)."""
     try:
         listing, filaments, choices, cap = await asyncio.to_thread(
             _facts, state, orders, ask.listing_id
@@ -421,8 +461,9 @@ async def submit(state: AppState, orders: OrdersComponent, ask: SubmitAsk) -> Su
             model_version=reference.commit,
             inputs=reference.inputs,
             whole_inputs=listing.snapshot.pipeline,
-            # One claim per listing and key: a run started again joins the same claim.
-            request_id=f"prepare:{listing.id}:{reference.render_key}",
+            # One claim per run and key (#6299 review): a retry of this submit joins it,
+            # and "Prepare again" makes a new one, so a failed render is rendered again.
+            request_id=request_id(listing.id, run_id, reference.render_key),
             reuse_finished=True,
         )
     except QueueFullError:
@@ -455,7 +496,7 @@ def prepare_activities(state: AppState, orders: Callable[[], OrdersComponent]) -
 
     @activity.defn(name=SUBMIT_ACTIVITY)
     async def prepare_listing_submit(ask: SubmitAsk) -> Submitted:
-        return await submit(state, orders(), ask)
+        return await submit(state, orders(), ask, activity.info().workflow_run_id or "")
 
     @activity.defn(name=SETTLED_ACTIVITY)
     async def prepare_listing_settled(jobs: list[OpenJob]) -> list[OpenJob]:

@@ -18,8 +18,10 @@ function combinations(count: number): string {
  * "n of N ready", read again every `PREPARE_POLL_MS` while the run is open or a render is
  * in the queue. The run renders a few at a time, at the normal priority (#6299 review). It
  * shows nothing for a listing with no colour to choose. Over the cap it says the count and
- * the cap, and offers no start. Combinations whose render could not be started
- * (`failed_to_start`) are named, with a way to prepare again. `version` is the listing's
+ * the cap, and offers no start. Combinations whose render could not be started and is not
+ * ready since (`failed_to_start`) are named, with a way to prepare again; "Prepare again"
+ * also renders a failed combination again (#6299 review). A failed read does not stop the
+ * reads, and the next read that succeeds clears its error. `version` is the listing's
  * `updated_at`: a new publish reads it again.
  */
 export function PrepareColours({ listingId, version, pollMs = PREPARE_POLL_MS }: { listingId: string; version: string; pollMs?: number }) {

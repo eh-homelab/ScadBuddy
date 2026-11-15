@@ -5,16 +5,22 @@ visitor's page asks for it. The routes, and a visitor's reuse of a prepared rend
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from temporalio.client import WorkflowExecutionStatus
 
 from scadbuddy.orders.storefront.inputs import listing_reference, listing_values
 from scadbuddy.orders.storefront.prepare import (
+    RunState,
+    TemporalPreparer,
     colour_choices,
     combination_at,
     combination_count,
     combinations,
+    not_started,
+    request_id,
 )
 from scadbuddy.orders.storefront.wire import Listing, ListingSnapshot
 from scadbuddy.render.schema import CustomizerSchema, Parameter
@@ -183,3 +189,67 @@ def test_the_combination_at_an_index_is_the_one_in_the_run_order() -> None:
     every = list(combinations(listing, FILAMENTS, choices))
     assert len(every) == combination_count(choices) == 6
     assert [combination_at(listing, FILAMENTS, choices, i) for i in range(6)] == every
+
+
+def test_each_run_makes_its_own_claim() -> None:
+    """#6299 review: a retry in one run joins its claim; "Prepare again" is a new run, so a
+    failed render is rendered again rather than answered with the first run's outcome."""
+    one = request_id("listing-1", "run-a", "key")
+    assert one == request_id("listing-1", "run-a", "key")
+    assert one != request_id("listing-1", "run-b", "key")
+
+
+def test_a_failed_submit_rendered_since_is_not_counted() -> None:
+    run = RunState(running=False, failed_indices=(0, 2, 9))
+    # Index 0 was rendered since; 2 has a failed job; 9 is past the combinations.
+    assert not_started(run, ["done", "done", "failed"]) == 1
+    assert not_started(RunState(running=False, legacy_failed=3), ["done"]) == 3
+
+
+class _Client:
+    """A Temporal client whose run is ``open`` (or not) before the start, and whose start
+    answers ``answered`` (run id, first execution run id)."""
+
+    def __init__(self, open_run: bool, answered: tuple[str, str]) -> None:
+        self.open_run = open_run
+        self.answered = answered
+
+    def get_workflow_handle(self, _id: str) -> Any:
+        async def memo() -> dict[str, Any]:
+            return {}
+
+        async def describe() -> Any:
+            return SimpleNamespace(
+                status=WorkflowExecutionStatus.RUNNING
+                if self.open_run
+                else WorkflowExecutionStatus.COMPLETED,
+                run_id="run-a",
+                memo=memo,
+                raw_description=SimpleNamespace(
+                    workflow_execution_info=SimpleNamespace(first_run_id="first-a")
+                ),
+            )
+
+        return SimpleNamespace(describe=describe)
+
+    async def start_workflow(self, *_args: Any, **_kwargs: Any) -> Any:
+        run_id, first = self.answered
+        return SimpleNamespace(result_run_id=run_id, first_execution_run_id=first)
+
+
+@pytest.mark.parametrize(
+    ("open_run", "answered", "started"),
+    [
+        (False, ("run-b", "run-b"), True),
+        (True, ("run-a", "first-a"), False),
+        # Continued as new since the read: still the open run's chain.
+        (True, ("run-c", "first-a"), False),
+        # The open run ended between the read and the start: this start made a new run.
+        (True, ("run-d", "run-d"), True),
+    ],
+)
+async def test_started_is_read_from_the_starts_answer(
+    open_run: bool, answered: tuple[str, str], started: bool
+) -> None:
+    preparer = TemporalPreparer(_Client(open_run, answered), "library")  # type: ignore[arg-type]
+    assert await preparer.start("listing-1") is started

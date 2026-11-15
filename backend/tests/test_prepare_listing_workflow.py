@@ -119,7 +119,8 @@ async def test_a_failed_submit_shows_in_failed_to_start(client: Client, queue: s
             result = await asyncio.wait_for(handle.result(), 60)
         assert result.failed_to_start == 1
         state = await preparer.run_state(listing_id)
-        assert (state.running, state.failed_to_start) == (False, 1)
+        # The memo holds the failed index, not a count (#6299 review).
+        assert (state.running, state.failed_indices) == (False, (1,))
     finally:
         await terminate_open_workflows(client, queue)
 

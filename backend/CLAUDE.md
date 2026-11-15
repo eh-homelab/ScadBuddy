@@ -1495,9 +1495,15 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   key joins the prepared execution, so a lower priority would hold the visitor up) and keeps
   at most `PREPARE_IN_FLIGHT` (2) open, reading them with a backoff
   (`prepare_listing_settled`). A done job is skipped, a full queue waited out, a failed
-  submit counted in the memo `failed_to_start`; it continues as new every 50 submits. No
+  submit's index kept in the memo `failed_to_start` (a list; a run from before the patch
+  `prepare-failed-indices` keeps a count); it continues as new every 50 submits, carrying
+  the memo. Each render's claim (`request_id`) is `prepare:<listing>:<run id>:<key>`: a
+  retry of one submit joins it, a new run makes a new one, so "Prepare again" renders a
+  failed combination again (#6299 review). The POST's `started` comes from the start's own
+  answer (its run id against the open run's, or its chain's first run id). No
   table: the GET reads the newest `render_jobs` row of each render key, and the run's state
-  (`running`, `failed_to_start`) only when `0 < count <= cap`; a failed Temporal read gives
+  (`running`, and `failed_to_start`: how many of the memo's indices have no done job) only
+  when `0 < count <= cap`; a failed Temporal read gives
   `running: false`, not an error. Capped by `storefront_prepare_cap` (default 256; 422
   `listing_combinations_over_cap` with `count` and `cap`, `listing_no_colours`, 409
   `listing_not_published`). Prepared renders follow `job_ttl`; there is no keep mark.
