@@ -17,7 +17,7 @@ import type { Sql } from 'postgres'
 import type { Credential } from '../credentials.js'
 import { projectDirName } from '../harness/confine.js'
 import { RESTORED_EPSILON } from '../harness/fallback.js'
-import { claudeConfigDir } from '../harness/options.js'
+import { claudeConfigDir, scratchDir } from '../harness/options.js'
 import { Inbox } from '../harness/inbox.js'
 import { type HarnessRun, runHarness } from '../harness/run.js'
 import { type AppendFence, type PostgresSessionStore, transcriptExists } from './store.js'
@@ -655,7 +655,9 @@ export class WarmSessions {
     // refuses an id it has a file for ("Session ID … is already in use", exit 1; measured on the
     // bundled 0.3.314). An earlier process leaves one when its placement was cut off before any of
     // its appends landed, and the turn is placed here again (#6387). The table is the transcript.
-    if (!resume) await rm(path.join(claudeConfigDir(run.paths), 'projects', projectDirName(await realpath(run.cwd ?? process.cwd())), `${sessionId}.jsonl`), { force: true })
+    // A directory that is not there yet held no process, so there is no file to remove.
+    const ranIn = resume ? undefined : await realpath(run.cwd ?? scratchDir(run.paths)).catch(() => undefined)
+    if (ranIn !== undefined) await rm(path.join(claudeConfigDir(run.paths), 'projects', projectDirName(ranIn), `${sessionId}.jsonl`), { force: true })
     const query = this.start({
       ...run,
       credential,

@@ -1085,6 +1085,15 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     const { id, turn } = await startOn(a, 'do the slow thing')
     const run = await runningRun(id)
     await pollUntil(() => slowCalls, 1)
+    // After its message landed: a user entry is in the table, as the restart decision reads it
+    // (TurnHost #landed). The mirror's appends trail the call: CI, 2026-11-15, claimed before them,
+    // and the next placement sent the message again.
+    if (!nothingLanded) {
+      await pollUntil(
+        async () => Number((await db.sql<{ n: string }[]>`SELECT count(*)::text AS n FROM ai_session_entries WHERE session_id = ${id} AND subpath = '' AND entry_type = 'user'`)[0]!.n) > 0,
+        true,
+      )
+    }
     // Another placement claims the row, as a stray session_turn's claim does (TurnHost #claim).
     await db.sql`UPDATE ai_sessions SET turn_attempt = 'a-stray-placement' WHERE id = ${id}`
     // Its appends fenced before any landed: the table holds no transcript, while this replica's
