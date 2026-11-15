@@ -326,3 +326,6 @@ The Go and Rust commands and toolchain notes: `tools/go/CLAUDE.md`, `workers/rus
   on an idle machine is real.
 - Backend: `test_a_cancelled_slice_is_recorded_cancelled` can error with
   `httpx.ReadTimeout` on a slow runner (#6301). Re-run the shard.
+- Backend: `test_submit.py::test_a_slow_first_accept_is_retried_in_the_same_run`
+  (`assert 3 == 2`) is timing-sensitive under CI load. Re-run the failed jobs once
+  before you debug it.

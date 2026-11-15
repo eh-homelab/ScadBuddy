@@ -166,7 +166,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (the render route, an order's quote) a `done` job of the key whose refs still hold its
   result answers at once, its `reused_at` keeping it from the prune,
   `JobProjection.reuse_done`, #4870; a caller whose work follows the run, as the output
-  backfill's attach does, leaves it off), `projection.py` (`render_jobs` as a projection
+  backfill's attach does, leaves it off; a submit that joins an open `render-<key>` or
+  `piece-<key>` execution keeps that run's Temporal priority, not its own, so never start a
+  render at a low priority that another caller may join by key, #6299), `projection.py` (`render_jobs` as a projection
   the workflow writes in place through the `project` activity), `pg_store.py` (the
   backend's migrations); the render worker holds no database (#5298,
   `tests/test_render_worker_nodb.py`; the API revokes its old role `scadbuddy_render` at
@@ -812,6 +814,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   short statements on the API's role go on the shared `scadbuddy-rows` pool
   (`rows/component.py` `ROWS`). `tests/test_pg_pools.py` sums an API process's pools
   and fails on any new or bigger one; change it, and README "Running it", on purpose.
+- A dict read from a `jsonb` column (e.g. `storefront_listings.params`) has no key order:
+  Postgres stores the keys shortest first. Never show or answer its keys in that order;
+  order them by the template schema's parameters (#6302).
 - Activity (principal jobs, spec `2026-10-09-principal-jobs-design.md`): the `activity`
   table is one row per piece of background work, written by the sources (render, operation,
   print run, agent operation) through `ActivityIndex.upsert_in` (`backend/scadbuddy/activity/`:
