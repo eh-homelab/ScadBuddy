@@ -188,3 +188,21 @@ def test_the_price_book_reads_policy_and_filaments_together(
         rounding="to_major",
     )
     assert [f.id for f in now.filaments] == [made.id]
+
+
+def test_an_import_look_that_collides_names_the_record_in_its_own_transaction(
+    rows: OrderStore,
+) -> None:
+    """#6211 review: a look the import sets that collides with a record made earlier in
+    the same transaction names that record, and the transaction stays usable."""
+    kept = rows.insert_filament(PLA)
+    with rows.transaction() as conn:
+        made = rows.insert_filament(
+            PLA.model_copy(update={"colour": "#000000"}), conn=conn, colour_source="import"
+        )
+        with pytest.raises(FilamentExistsError) as raised:
+            rows.set_import_look(
+                conn, kept.id, look={"colour": "#000000"}, spool_colour="#000000", spool_ids=[1]
+            )
+        assert raised.value.existing_id == made.id
+        assert rows.filament(kept.id, conn=conn) is not None

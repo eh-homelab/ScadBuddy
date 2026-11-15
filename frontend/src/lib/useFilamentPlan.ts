@@ -70,6 +70,22 @@ export function useFilamentPlan(
   const chosenPlates = plateKey(plate)
   const latestPlate = useLatest(plate)
   const rememberedPlan = JSON.stringify(choices?.model_choices?.filament_plan ?? [])
+  /**
+   * #6218 — whether Bambuddy's queue waits for a tray of each slot's colour: what this
+   * model or file remembers, else on. The switch is reset only by a new source or by a
+   * read that remembers something else: while no read is in (`choices` is null, as
+   * during a refetch) it keeps the user's change, and so does a re-read of the same value.
+   */
+  const forceRead = choices === null ? undefined : (choices.model_choices?.force_colour_match ?? null)
+  const [forceColourMatch, setForceColourMatch] = useState(true)
+  const forceApplied = useRef<{ key: string | undefined; read: boolean | null } | null>(null)
+  useEffect(() => {
+    if (forceRead === undefined) return
+    const last = forceApplied.current
+    if (last && last.key === key && last.read === forceRead) return
+    forceApplied.current = { key, read: forceRead }
+    setForceColourMatch(forceRead ?? true)
+  }, [key, forceRead])
 
   /**
    * #1044 — every spool the plan has held for these choices, by slot. A plate change
@@ -184,5 +200,15 @@ export function useFilamentPlan(
 
   const retryFilaments = () => setRetries((n) => n + 1)
 
-  return { filaments, plan, setPlan, planChanged, filamentError, planReady, retryFilaments }
+  return {
+    filaments,
+    plan,
+    setPlan,
+    planChanged,
+    filamentError,
+    planReady,
+    retryFilaments,
+    forceColourMatch,
+    setForceColourMatch,
+  }
 }

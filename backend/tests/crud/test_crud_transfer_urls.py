@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import inspect
+import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -150,13 +151,29 @@ def _app(
     return app
 
 
-def _crud(app: FastAPI, caller: str = "print") -> CrudClient:
+class _Clock:
+    """The CRUD client's clock, moved only by its own sleeps: the retry budget counts the
+    backoffs, never how long a slow runner takes to answer a try (#6252)."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _crud(app: FastAPI, caller: str = "print", clock: _Clock | None = None) -> CrudClient:
     return CrudClient(
         INTERNAL,
         "print",
         ServiceAuth(_Token(f"sbsvc_{caller}")),
         transport=httpx.ASGITransport(app=app),
         unavailable_budget=0.5,
+        clock=time.monotonic if clock is None else clock,
+        sleep=asyncio.sleep if clock is None else clock.sleep,
     )
 
 
@@ -169,9 +186,10 @@ async def _ask(app: FastAPI, key: str, caller: str = "print") -> httpx.Response:
         )
 
 
-def _blobs(app: FastAPI, caller: str = "print") -> RemoteBlobs:
+def _blobs(app: FastAPI, caller: str = "print", clock: _Clock | None = None) -> RemoteBlobs:
     return RemoteBlobs(
-        _crud(app, caller), client=httpx.AsyncClient(transport=httpx.ASGITransport(app=app))
+        _crud(app, caller, clock),
+        client=httpx.AsyncClient(transport=httpx.ASGITransport(app=app)),
     )
 
 
@@ -254,13 +272,17 @@ async def test_remote_blobs_retries_store_unavailable_as_a_passing_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Unlike ``not_configured``, the client retries it within its budget, then raises
-    `CrudUnavailableError`, which the LAN upload's retry policy tries again."""
+    `CrudUnavailableError`, which the LAN upload's retry policy tries again. The budget
+    runs on a fake clock that only the backoffs move (0.25 s, then the 0.25 s left), so
+    the client makes three tries however long each one takes (#6252)."""
     monkeypatch.setattr(output_reader, "TRANSFER_URL_BUDGET", 0.5)
     content = _Content({}, failure=ClientError({"Error": {"Code": "SlowDown"}}, "HeadObject"))
+    clock = _Clock()
     with pytest.raises(CrudUnavailableError) as raised:
-        await _read(_blobs(_app(tmp_path, content)), KEY)
+        await _read(_blobs(_app(tmp_path, content), clock=clock), KEY)
     assert raised.value.problem["reason"] == STORE_UNAVAILABLE
-    assert len(content.asked) > 1
+    assert content.asked == [KEY] * 3
+    assert clock.now == 0.5
 
 
 def test_the_read_urls_wait_outlasts_a_slow_store_and_stays_bounded() -> None:

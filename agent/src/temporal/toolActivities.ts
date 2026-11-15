@@ -437,7 +437,9 @@ async function runAsActivity(
   const flow = flowOf(workflowExecution?.workflowId)
   if (flow === undefined) return runCall(tool, input, deps, lookup, toolUseId, undefined, undefined)
   // A flow run's call is no session's ToolCall, so it gets its `agent.tool/<name>` span here (#6123).
-  return flowCallSpan(tool.name, flowCallAttributes(tool.name, flow, toolUseId, context.info.taskQueue, tool.risk), (span) =>
+  // No declared tier here: the span takes the effective one once `runGated` knows it, so
+  // a call that fails before (its run gone) has no tier, as on the `turn:` path.
+  return flowCallSpan(tool.name, flowCallAttributes(tool.name, flow, toolUseId, context.info.taskQueue), (span) =>
     runCall(tool, input, deps, lookup, toolUseId, flow, span),
   )
 }
@@ -469,13 +471,12 @@ export function flowCallSpan<T>(tool: string, attributes: Attributes, run: (span
 }
 
 /** A flow run's `agent.tool/<name>` attributes: the run and its call, and the queue it ran on. */
-export function flowCallAttributes(tool: string, flow: string, toolUseId: string, taskQueue: string, tier?: string): Attributes {
+export function flowCallAttributes(tool: string, flow: string, toolUseId: string, taskQueue: string): Attributes {
   return {
     'scadbuddy.tool': tool,
     'scadbuddy.flow_run_id': flow,
     'scadbuddy.tool_use_id': toolUseId,
     'scadbuddy.task_queue': taskQueue,
-    ...(tier === undefined ? {} : { 'scadbuddy.tier': tier }),
   }
 }
 
@@ -507,10 +508,16 @@ async function runCall(
     heartbeat: (details) => context.heartbeat(details),
     span,
   })
-  span?.setAttribute('scadbuddy.outcome', run.outcome)
+  if (context.cancellationSignal.aborted || run.outcome !== 'ok') span?.setAttribute('scadbuddy.outcome', run.outcome)
   if (context.cancellationSignal.aborted) throw new CancelledFailure('the call was cancelled')
   if (run.outcome !== 'ok') throw ApplicationFailure.nonRetryable(failureText(run), TOOL_ERROR)
-  if (flow !== undefined) return flowResult(run.result.content, deps.flowBlobs ? { subject: `flow-${flow}`, blobs: deps.flowBlobs } : undefined)
+  // `ok` once the result is built, as the `turn:` path records it: a flow result that
+  // throws (its images not kept) is left to `flowCallSpan`, which reads it as `error`.
+  if (flow !== undefined) {
+    const result = await flowResult(run.result.content, deps.flowBlobs ? { subject: `flow-${flow}`, blobs: deps.flowBlobs } : undefined)
+    span?.setAttribute('scadbuddy.outcome', 'ok')
+    return result
+  }
   return resultText(run.result.content, session !== undefined && deps.blobs ? { session, blobs: deps.blobs, toolUseId } : undefined)
 }
 

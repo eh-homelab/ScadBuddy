@@ -231,6 +231,10 @@ def test_a_public_listing_shows_what_a_visitor_may_choose(
             "colour": "#FF0000",
             "colour_name": None,
             "material": "PLA",
+            # #6209: what the picker draws a clear or multi-colour filament with.
+            "alpha": 255,
+            "extra_colours": [],
+            "effect": None,
             "subtype": None,
             "brand": None,
         }

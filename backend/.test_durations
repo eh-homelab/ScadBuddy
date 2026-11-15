@@ -4880,7 +4880,7 @@
     "tests/bambuddy/test_filaments.py::test_colours_normalise_to_six_hex_digits[ZZZZZZ-None]": 0.0015990439999313821,
     "tests/bambuddy/test_filaments.py::test_colours_normalise_to_six_hex_digits[nope-None]": 0.0020216020002408186,
     "tests/bambuddy/test_filaments.py::test_filament_slots_of_a_native_file_never_ask_bambuddy": 0.010811891000003016,
-    "tests/bambuddy/test_filaments.py::test_force_colour_match_is_opt_in": 0.002757823999672837,
+    "tests/bambuddy/test_filaments.py::test_force_colour_match_is_on_by_default": 0.002757823999672837,
     "tests/bambuddy/test_filaments.py::test_gather_options_reads_every_source_once": 0.014535872999886124,
     "tests/bambuddy/test_filaments.py::test_known_grams_are_multiplied_by_the_copies": 0.0021673230000942567,
     "tests/bambuddy/test_filaments.py::test_loaded_spools_sort_ahead_of_the_shelf": 0.002385190000040893,

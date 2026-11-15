@@ -190,6 +190,20 @@ export function colourOpacity(value: string): number | null {
 }
 
 /**
+ * A colour value as a colour field keeps it (#6243 review): `colourHex`'s `#RRGGBB`, plus
+ * the alpha (`#RRGGBBAA`, upper case) when the value is a hex with one below FF, so a
+ * typed translucent colour keeps what the preview draws it with. Null when it is no colour.
+ */
+export function colourValue(value: string): string | null {
+  const colour = colourHex(value)
+  const opacity = colourOpacity(value)
+  if (colour === null || opacity === null || opacity >= 1) return colour
+  const digits = value.trim().slice(1)
+  const alpha = digits.length === 4 ? digits.slice(3).repeat(2) : digits.slice(6)
+  return `${colour}${alpha.toUpperCase()}`
+}
+
+/**
  * #921 — why a number field's value is outside the range the model declares, in the
  * field's own words, or null when it is inside (or the parameter is not a number).
  * The render would refuse it with a 422; the field says so before any request goes out.

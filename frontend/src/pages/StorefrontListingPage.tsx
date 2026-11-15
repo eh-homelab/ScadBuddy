@@ -37,10 +37,35 @@ interface Open {
    * changed in the editor clears it, so the new one's defaults fill in.
    */
   filled: boolean
+  /**
+   * #6290 — the fields the person edited in this opening. A value the page derives (the
+   * title from the first design, the smart defaults, the pictures) fills only a field not
+   * in here, so an answer that lands late never overwrites what was typed or cleared.
+   */
+  touched: readonly Field[]
   /** What "Sell on storefront" said to know before publishing (a version taken instead, a slow render). */
   notes: string[]
   /** #6213 — the pictures the public site shows now (`liveMedia`). */
   live: LivePictures
+}
+
+/** The draft's fields a derived value may fill (`Open.touched`). */
+type Field = 'title' | 'params' | 'colours' | 'media_ids'
+
+/**
+ * The fields `next` changes from `cur`, added to `touched`; a new template's own fields start
+ * untouched again. A change is told by reference: the editor builds a new `params`, `fixed`,
+ * `colours` or `media_ids` only for an edit of it, and keeps the others as they were.
+ */
+function touchedBy(touched: readonly Field[], cur: ListingDraft, next: ListingDraft): Field[] {
+  // The title and the ticked filaments outlive a design change (the price book does not change with the design).
+  const kept = next.slug === cur.slug ? touched : touched.filter((field) => field === 'title' || field === 'colours')
+  const changed: Field[] = []
+  if (next.title !== cur.title) changed.push('title')
+  if (next.slug === cur.slug && (next.params !== cur.params || next.fixed !== cur.fixed)) changed.push('params')
+  if (next.colours !== cur.colours) changed.push('colours')
+  if (next.slug === cur.slug && next.media_ids !== cur.media_ids) changed.push('media_ids')
+  return [...new Set([...kept, ...changed])]
 }
 
 /** How many listings were opened on this page: each opening's key is named by its number. */
@@ -54,7 +79,7 @@ function newKey(): symbol {
 
 /** A new listing: blank, or the one "Sell on storefront" filled in. */
 function fresh(sold?: SellListing): Open {
-  return { key: newKey(), id: null, updatedAt: null, published: false, draft: sold?.draft ?? emptyDraft(), saved: null, filled: sold !== undefined, notes: sold?.notes ?? [], live: null }
+  return { key: newKey(), id: null, updatedAt: null, published: false, draft: sold?.draft ?? emptyDraft(), saved: null, filled: sold !== undefined, touched: [], notes: sold?.notes ?? [], live: null }
 }
 
 /**
@@ -71,7 +96,7 @@ function liveMedia(listing: StorefrontListing): LivePictures {
 
 function opened(listing: StorefrontListing, key: symbol = newKey()): Open {
   const draft = draftOf(listing)
-  return { key, id: listing.id, updatedAt: listing.updated_at, published: listing.published, draft, saved: storedKey(listing), filled: true, notes: [], live: liveMedia(listing) }
+  return { key, id: listing.id, updatedAt: listing.updated_at, published: listing.published, draft, saved: storedKey(listing), filled: true, touched: [], notes: [], live: liveMedia(listing) }
 }
 
 function message(error: unknown): string {
@@ -126,6 +151,16 @@ export function StorefrontListingPage() {
    */
   const loaded = (schema.data !== undefined || schema.error !== undefined) && (book.data !== undefined || book.error !== undefined)
   const media = useMemo(() => models.data?.find((model) => model.slug === slug)?.media ?? [], [models.data, slug])
+  /**
+   * #6292 review — the listing has loaded, for "Colours on offer"'s one open-or-folded
+   * decision: the price book has answered, and the colours are as they will start: a saved or
+   * sold listing's at once, a new one's once its smart defaults are in, or once nothing will
+   * fill them (the design's settings failed, or there is no design to choose: the templates
+   * failed or there are none). A later design change does not undo it; the decision is made.
+   */
+  const coloursSettled =
+    Boolean(book.data || book.error) &&
+    (open?.filled === true || schema.error !== undefined || models.error !== undefined || models.data?.length === 0)
 
   /** The open listing's key now, which an answer that comes late compares against. */
   const openKey = useRef<symbol | null>(open?.key ?? null)
@@ -181,7 +216,9 @@ export function StorefrontListingPage() {
     if (!open || open.id !== null) return
     const first = models.data?.[0]
     if (!open.draft.slug && first) {
-      setOpen({ ...open, draft: { ...open.draft, slug: first.slug, title: open.draft.title || first.name } })
+      // A title the person typed or cleared stays (#6290); an untouched one takes the design's name.
+      const title = open.touched.includes('title') ? open.draft.title : open.draft.title || first.name
+      setOpen({ ...open, draft: { ...open.draft, slug: first.slug, title } })
     }
   }, [open, models.data])
   useEffect(() => {
@@ -189,11 +226,21 @@ export function StorefrontListingPage() {
     const current = versions.data.find((v) => v.current) ?? versions.data[0]
     if (current) setOpen({ ...open, draft: { ...open.draft, commit: current.commit } })
   }, [open, versions.data])
-  // #6131 — the smart defaults (design 2026-11-13 §4), once the price book has answered.
+  // #6131 — the smart defaults (design 2026-11-13 §4), once the price book and the
+  // templates (for the pictures) have answered; each fills only a field the person has not
+  // edited (#6290).
   useEffect(() => {
-    if (!open || open.filled || !schema.data || !(book.data || book.error)) return
-    setOpen({ ...open, filled: true, draft: { ...open.draft, ...defaultsFor(schema.data, filaments), media_ids: sellMedia(media) } })
-  }, [open, schema.data, book.data, book.error, filaments, media])
+    if (!open || open.filled || !schema.data || !(book.data || book.error) || !(models.data || models.error)) return
+    const defaults = defaultsFor(schema.data, filaments)
+    const keep = (field: Field) => open.touched.includes(field)
+    const draft = {
+      ...open.draft,
+      ...(keep('params') ? {} : { params: defaults.params, fixed: defaults.fixed }),
+      ...(keep('colours') ? {} : { colours: defaults.colours }),
+      ...(keep('media_ids') ? {} : { media_ids: sellMedia(media) }),
+    }
+    setOpen({ ...open, filled: true, draft })
+  }, [open, schema.data, book.data, book.error, models.data, models.error, filaments, media])
 
   // #6131 — "Sell on storefront" (`?sell=job:<id>` or `?sell=output:<id>`) fills the new
   // listing in. The parameter leaves the address once read, so a reload makes nothing twice.
@@ -258,7 +305,7 @@ export function StorefrontListingPage() {
     if (!open) return
     edited.current = true
     // Another template's defaults fill in once its schema loads.
-    setOpen({ ...open, draft: next, filled: open.filled && next.slug === open.draft.slug })
+    setOpen({ ...open, draft: next, filled: open.filled && next.slug === open.draft.slug, touched: touchedBy(open.touched, open.draft, next) })
   }
 
   /**
@@ -274,7 +321,8 @@ export function StorefrontListingPage() {
     whileOpen(key, (cur) => {
       if (cur.draft.media_ids.includes(id)) return cur
       edited.current = true
-      return { ...cur, draft: { ...cur.draft, media_ids: [...cur.draft.media_ids, id] } }
+      const touched: Field[] = cur.touched.includes('media_ids') ? [...cur.touched] : [...cur.touched, 'media_ids']
+      return { ...cur, touched, draft: { ...cur.draft, media_ids: [...cur.draft.media_ids, id] } }
     })
   }
 
@@ -446,11 +494,14 @@ export function StorefrontListingPage() {
                 models={models.data ?? []}
                 versions={versions.data}
                 schema={schema.data}
+                schemaState={schema.error ? 'failed' : 'loading'}
                 filaments={filaments}
                 media={media}
                 live={open.live}
                 mediaState={models.error ? 'failed' : models.data ? 'ready' : 'loading'}
                 onPictureUploaded={(model, id) => pictureUploaded(open.key, model, id)}
+                coloursSettled={coloursSettled}
+                bookState={book.error ? 'failed' : book.data ? 'ready' : 'loading'}
               />
             </section>
 

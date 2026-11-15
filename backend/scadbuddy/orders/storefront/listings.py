@@ -58,6 +58,7 @@ from scadbuddy.orders.storefront.inputs import (
     same_value,
     value_reason,
 )
+from scadbuddy.orders.storefront.slice_profile import StorefrontSliceProfile, missing_materials
 from scadbuddy.orders.storefront.wire import (
     SUPPORT_PARAM,
     ChoiceBound,
@@ -299,10 +300,10 @@ class ListingStore:
     def set_media(
         self, listing_id: str, media_ids: Sequence[str], *, expected_updated_at: datetime
     ) -> Listing:
-        """The listing's pictures set to ``media_ids`` (#6213), and nothing else: a
-        published listing stays published with what it last published until it is
-        published again. 409 ``listing_changed`` when it changed after
-        ``expected_updated_at`` was read, 404 when it is gone."""
+        """The listing's pictures set to ``media_ids`` (#6213), and nothing else: a published
+        listing stays published with what it last published until it is published again. 409
+        ``listing_changed`` when it changed after ``expected_updated_at`` was read, 404 when it
+        is gone."""
         with self.pool.connection() as conn, conn.transaction():
             row = conn.execute(
                 "UPDATE storefront_listings SET media_ids = %s, updated_at = clock_timestamp()"
@@ -618,7 +619,7 @@ class ListingStore:
         return {row["id"]: row["colour"] for row in rows}
 
     def filament_materials(self) -> dict[str, str]:
-        """Each price-book filament not archived, by id: its material (#6258)."""
+        """Each price-book filament not archived, by id: its material (#6153, #6258)."""
         with self.pool.connection() as conn:
             rows = conn.execute(
                 "SELECT id, material FROM filaments WHERE archived_at IS NULL"
@@ -945,6 +946,27 @@ async def _copy_media(
     return copied
 
 
+def check_sliceable(
+    profile: StorefrontSliceProfile | None,
+    listing: ListingInput,
+    materials: Mapping[str, str],
+) -> None:
+    """422 ``listing_material_unsliceable``, with ``materials``, when the shop slice
+    profile has no spool for a material of the listing's filaments (``materials``, by
+    filament id). A support material needs none, and with no profile nothing is checked:
+    the listing is then shown with no price (#6153)."""
+    missing = missing_materials(profile, (materials[f] for f in listing.colours if f in materials))
+    if missing:
+        raise problem(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "listing_material_unsliceable",
+            "the shop slice profile has no spool for "
+            + ", ".join(missing)
+            + ": add one in Settings → Storefront pricing",
+            materials=missing,
+        )
+
+
 async def publish(core: Core, store: ListingStore, listing_id: str) -> Listing:
     """The listing checked against its commit and published (see the module's notes).
     409 ``storefront_needs_s3`` unless the store is S3; 422 ``listing_param_unknown``,
@@ -952,7 +974,8 @@ async def publish(core: Core, store: ListingStore, listing_id: str) -> Listing:
     ``listing_default_invalid``, ``listing_colour_unknown``, ``listing_media_unknown``,
     ``listing_material_not_allowed`` (`check_materials`, #6258),
     ``listing_reference`` or ``listing_pipeline_unsupported`` for a listing its commit or
-    the price book does not back; 409 ``listing_changed`` when it was edited while it was
+    the price book does not back, ``listing_material_unsliceable`` for a material the shop
+    slice profile has no spool for (#6153); 409 ``listing_changed`` when it was edited while it was
     being published; 409 ``listing_publishing`` while another
     publish of it runs (it is refused, not queued); 503 ``listing_publish_busy`` while
     :data:`PUBLISH_LOCKS_MAX` other publishes run."""
@@ -978,12 +1001,11 @@ async def _publish(
     colours = await asyncio.to_thread(store.filament_colours)
     supports = await asyncio.to_thread(store.support_filaments)
     fixed = checked_fixed(facts.schema_, listing, colours, supports)
+    materials = await asyncio.to_thread(store.filament_materials)
     shop = (await asyncio.to_thread(core.settings_store.snapshot)).runtime.storefront_materials
-    check_materials(
-        listing,
-        await asyncio.to_thread(store.filament_materials),
-        effective_materials(listing, shop),
-    )
+    check_materials(listing, materials, effective_materials(listing, shop))
+    profile = (await asyncio.to_thread(core.settings_store.load)).storefront_slice_profile
+    check_sliceable(profile, listing, materials)
     refs = BlobRefs(core.projection.pool)
     try:
         key = await snapshots.ensure(listing.slug, listing.commit)
@@ -1001,10 +1023,15 @@ async def _publish(
         raise
 
 
-def _check_pictures(core: Core, slug: str, media_ids: Sequence[str]) -> None:
+def _check_pictures(
+    core: Core, slug: str, media_ids: Sequence[str], kept: Collection[str] = ()
+) -> None:
     """422 ``listing_media_duplicate`` for an id named twice, ``listing_media_unknown``
     for one the template does not have (or whose file is missing), and
-    ``listing_media_not_image`` for a video: the storefront shows images only (#6131)."""
+    ``listing_media_not_image`` for a video not in ``kept``. The store shows a listing's
+    video (publish takes one, as Save draft does), but this route adds images only; a
+    video the listing already shows is ``kept`` and stays, so a listing with one can
+    still have its pictures changed here (#6290)."""
     seen: set[str] = set()
     for media_id in media_ids:
         if media_id in seen:
@@ -1016,7 +1043,7 @@ def _check_pictures(core: Core, slug: str, media_ids: Sequence[str]) -> None:
             raise _unprocessable(
                 "listing_media_unknown", f"the template has no media {media_id!r}", name=media_id
             ) from None
-        if view.kind != "image":
+        if view.kind != "image" and media_id not in kept:
             raise _unprocessable(
                 "listing_media_not_image",
                 f"media {media_id!r} is a {view.kind}, not an image",
@@ -1033,22 +1060,25 @@ async def change_media(
     expected_updated_at: datetime,
 ) -> Listing:
     """The listing's pictures set to ``media_ids`` (#6213), each an image of its
-    template, in the order to show them. A draft stays a draft. A published listing is
-    published again at once, so it stays on the public site and shows the new pictures;
-    when that publish is refused, the pictures are kept and the public site shows what
-    was last published (the listing's ``media``, each with its ``media_id``) until the
-    next publish. Refusals: 404 ``listing_not_found``, 409 ``listing_changed``, the 422s
-    of `_check_pictures`, and those of `publish`. A refusal that comes after the pictures
-    were written says so with the extension ``pictures_saved: true`` (any failure of the
-    republish that is not a refusal is 500 ``listing_republish_failed`` with it), so a
-    client never has to guess whether its change landed."""
+    template or a video the listing already shows (#6290), in the order to show them. A
+    draft stays a draft. A published listing is published again at once, so it stays on
+    the public site and shows the new pictures; when that publish is refused, the
+    pictures are kept and the public site shows what was last published (the listing's
+    ``media``, each with its ``media_id``) until the next publish. Refusals: 404
+    ``listing_not_found``, 409 ``listing_changed``, the 422s of `_check_pictures`, and
+    those of `publish`. A refusal that comes after the pictures were written says so with
+    the extension ``pictures_saved: true`` (any failure of the republish that is not a
+    refusal is 500 ``listing_republish_failed`` with it), so a client never has to guess
+    whether its change landed."""
     listing = await asyncio.to_thread(store.get, listing_id)
     if listing is None:
         raise listing_not_found(listing_id)
     # The cheap check first: a stale read is refused before any media is read.
     if listing.updated_at != expected_updated_at:
         raise _changed(listing_id)
-    await asyncio.to_thread(_check_pictures, core, listing.slug, media_ids)
+    await asyncio.to_thread(
+        _check_pictures, core, listing.slug, media_ids, frozenset(listing.media_ids)
+    )
     changed = await asyncio.to_thread(
         store.set_media, listing_id, media_ids, expected_updated_at=expected_updated_at
     )
@@ -1271,6 +1301,9 @@ async def public_listing(
                 colour=f.colour,
                 colour_name=f.colour_name,
                 material=f.material,
+                alpha=f.alpha,
+                extra_colours=f.extra_colours,
+                effect=f.effect,
                 subtype=f.subtype,
                 brand=f.brand,
             )
