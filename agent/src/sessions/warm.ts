@@ -659,8 +659,16 @@ export class WarmSessions {
     const ranIn = resume ? undefined : await realpath(run.cwd ?? scratchDir(run.paths)).catch(() => undefined)
     if (ranIn !== undefined) {
       const stale = path.join(claudeConfigDir(run.paths), 'projects', projectDirName(ranIn), `${sessionId}.jsonl`)
-      // Removed only when there (the first turn of every session has none): said, so the case shows in the log.
-      if (await rm(stale).then(() => true, () => false)) this.log(`warm: session ${sessionId}: removed an earlier process's session file before a new start (#6387)`)
+      // Removed only when there (the first turn of every session has none): said, so the case shows
+      // in the log, as is a file that is there and cannot be removed (the start then fails on it).
+      const removed = await rm(stale).then(
+        () => true,
+        (err: NodeJS.ErrnoException) => {
+          if (err.code !== 'ENOENT') this.log(`warm: session ${sessionId}: an earlier process's session file could not be removed: ${err.message}`)
+          return false
+        },
+      )
+      if (removed) this.log(`warm: session ${sessionId}: removed an earlier process's session file before a new start (#6387)`)
     }
     const query = this.start({
       ...run,

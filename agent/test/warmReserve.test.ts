@@ -1,6 +1,12 @@
+import { randomUUID } from 'node:crypto'
+import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { Sql } from 'postgres'
 import { describe, expect, it, vi } from 'vitest'
+import { projectDirName } from '../src/harness/confine.js'
+import { claudeConfigDir } from '../src/harness/options.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import type { AssembledTurn } from '../src/sessions/turnRunner.js'
 import { TurnHost, type TurnHostDeps } from '../src/sessions/turnHost.js'
@@ -388,5 +394,71 @@ describe('WarmSessions.reserve and release', () => {
     await release({ sessionId: 'x' })
     expect(warm.reserve('y')).toBe('reserved')
     expect(warm.reserve('z')).toBe('reserved')
+  })
+})
+
+// A new process under the session's own id (no transcript to resume) refuses to start when this
+// replica's Claude Code config dir holds an earlier process's file of it ("Session ID … is
+// already in use", exit 1): one cut off before any of its appends landed leaves one (#6387).
+describe('a new start under the session`s own id (#6387)', () => {
+  async function setup(found: boolean) {
+    const stateDir = await mkdtemp(path.join(tmpdir(), 'moved-warm-'))
+    const cwd = await mkdtemp(path.join(tmpdir(), 'moved-cwd-'))
+    const log = vi.fn()
+    const started: HarnessRun[] = []
+    // `found`: whether the table holds a transcript to resume (transcriptExists).
+    const sql = (() => Promise.resolve([{ found, since: null }])) as unknown as Sql
+    const warm = new WarmSessions({
+      sql,
+      store: { lastOfType: () => Promise.resolve(null) },
+      maxEntries: 8,
+      idleMs: 600_000,
+      log,
+      start: (run: HarnessRun) => {
+        started.push(run)
+        return process()
+      },
+    })
+    const id = randomUUID()
+    const stale = path.join(claudeConfigDir({ stateDir }), 'projects', projectDirName(await realpath(cwd)), `${id}.jsonl`)
+    const turn = assembly()
+    turn.run = { paths: { stateDir }, cwd }
+    const removedLines = () => log.mock.calls.filter(([m]) => String(m).includes('removed an earlier process')).length
+    const cleanUp = () => Promise.all([rm(stateDir, { recursive: true }), rm(cwd, { recursive: true })])
+    return { warm, id, stale, turn, log, removedLines, started, cleanUp }
+  }
+  const exists = (file: string) => stat(file).then(() => true, () => false)
+
+  it('removes an earlier process`s file of the session before the start, and says so once', async () => {
+    const s = await setup(false)
+    await mkdir(path.dirname(s.stale), { recursive: true })
+    await writeFile(s.stale, '{"type":"user"}\n')
+    const { entry } = await s.warm.acquire(s.id, s.turn, credential, 1)
+    expect(await exists(s.stale)).toBe(false)
+    expect(s.started[0]?.sessionId).toBe(s.id)
+    expect(s.removedLines()).toBe(1)
+    s.warm.leave(entry)
+    await s.warm.close()
+    await s.cleanUp()
+  })
+
+  it('says nothing when there is no such file (a session`s first turn), and touches none on a resume', async () => {
+    const fresh = await setup(false)
+    const first = await fresh.warm.acquire(fresh.id, fresh.turn, credential, 1)
+    expect(fresh.log).not.toHaveBeenCalled()
+    fresh.warm.leave(first.entry)
+    await fresh.warm.close()
+    await fresh.cleanUp()
+
+    const resumed = await setup(true)
+    await mkdir(path.dirname(resumed.stale), { recursive: true })
+    await writeFile(resumed.stale, '{"type":"user"}\n')
+    const second = await resumed.warm.acquire(resumed.id, resumed.turn, credential, 1)
+    expect(resumed.started[0]?.resume).toBe(resumed.id)
+    expect(await exists(resumed.stale)).toBe(true)
+    expect(resumed.removedLines()).toBe(0)
+    resumed.warm.leave(second.entry)
+    await resumed.warm.close()
+    await resumed.cleanUp()
   })
 })
