@@ -11,6 +11,7 @@ import io
 import zipfile
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -885,6 +886,28 @@ def test_a_library_target_is_a_native_file_that_stands(
 
     assert bambuddy_id.status_code == 422
     assert (missing.status_code, gone.status_code) == (404, 404)
+    assert client.get(f"/api/v1/prints/{ARCHIVE}").status_code == 404
+
+
+@respx.mock
+def test_a_run_s_per_print_copy_is_never_a_target(native_api: TestClient, tmp_path: Path) -> None:
+    """#6394 review: the sweep trashes a per-print copy, and its trash would forget the
+    import and the print's attachments, so the import is refused up front."""
+    client = native_api
+    configure(client)
+    bambuddy()
+    path = _three_mf(tmp_path / "demo_elan.3mf")
+    assert client.portal is not None
+    with path.open("rb") as data:
+        copy: NativeFile = client.portal.call(
+            partial(_native(client).upload, path.name, data, None, print_subject="output:abc")
+        )
+
+    response = import_print(client, {"source": {"kind": "archive"}, "library_file_id": copy.id})
+
+    assert response.status_code == 422
+    assert "per-print copy" in response.json()["detail"]
+    assert sources(client)["suggested_library_files"] == []
     assert client.get(f"/api/v1/prints/{ARCHIVE}").status_code == 404
 
 

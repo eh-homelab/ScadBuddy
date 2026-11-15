@@ -682,12 +682,15 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   printer's storage only when asked) and reads the one chosen; `api/print_imports.py`
   links the archive to a model as a `print_links` row with the subject `model:<slug>` and
   `matched_by` `import`, beside its `print_imports` row (`PrintLinkStore.record_import`).
-  #6394: or to a native library file that stands (`library_file_id`, subject
-  `library:<id>`; `print_imports.subject` is the target, while `library_file_id` and
-  `source` stay where the 3MF was read from, and `slug` is NULL). The print watcher and
-  `slugs_by_hash` read model imports only. A link of ScadBuddy's own print of that file
-  takes the import's row over (`_TAKE_OVER_IMPORT`), and a trashed native file forgets its
-  imports (`print_library/store.py` `trash`, `forget_library_imports`).
+  #6394: or to a native library file that stands and is no run's per-print copy (a 422:
+  the sweep would trash it), checked again in the import's transaction
+  (`require_import_target`) (`library_file_id`, subject `library:<id>`;
+  `print_imports.subject` is the target, while `library_file_id` and `source` stay where
+  the 3MF was read from, and `slug` is NULL). The print watcher and `slugs_by_hash` read
+  model imports only. A link of ScadBuddy's own print of that file takes the import's row
+  over and forgets its `print_imports` row (`_TAKE_OVER_IMPORT`, `_take_over`), and a
+  trashed native file forgets its imports (`print_library/store.py` `trash`,
+  `forget_library_imports`).
   Both routes first run the link passes for the one archive (`linking.link_archive`), so a
   print ScadBuddy made is linked to its run and refused (409), never imported; a run's
   link found later still owns the print (`_OWNER_ORDER` puts every `import` link last). One import

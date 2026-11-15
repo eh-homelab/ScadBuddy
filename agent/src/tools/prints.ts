@@ -323,7 +323,8 @@ export const printHistoryTools: Tool[] = [
       '`{kind: archive}`, `{kind: archive_source}`, `{kind: library, library_file_id}` or `{kind: printer, path}`. ' +
       'Give exactly one target: a model that exists (`slug`), a new mesh model made from the 3MF ' +
       '(`new_model: {name}`; a sliced file has no meshes, so choose an unsliced one), or a file of ScadBuddy\'s ' +
-      'own library that is not in the trash (`library_file_id`, an id of 1000000000 or more; #6394). A `printer` ' +
+      'own library that is not in the trash and is not a print run\'s per-print copy, which the route refuses ' +
+      '(`library_file_id`, an id of 1000000000 or more; #6394). A `printer` ' +
       "source reads the file over FTP and keeps it in Bambuddy's library inbox, so that call waits for a person's " +
       'approval. Importing the same archive onto the same target again answers the first import; another target ' +
       'is refused, naming the owner.',

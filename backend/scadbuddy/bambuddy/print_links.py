@@ -325,15 +325,67 @@ _OWNER_ORDER = f"({_IMPORT}), ({_LIBRARY}), first_seen, subject, queue_item_id"
 
 #: A link of ScadBuddy's own print of a library file whose archive a person imported onto
 #: that file first (#6394) takes the import's row over: the row's key is the same, and the
-#: print is ScadBuddy's own. Any other link already there is kept as it is.
+#: print is ScadBuddy's own, so it keeps nothing of the import (its ``name`` is the send's,
+#: and its ``print_imports`` row goes, `_take_over`). Any other link already there is kept
+#: as it is.
 _TAKE_OVER_IMPORT = (
     " ON CONFLICT (subject, archive_id) DO UPDATE SET matched_by = EXCLUDED.matched_by,"
     " queue_item_id = EXCLUDED.queue_item_id,"
     " plate_id = COALESCE(EXCLUDED.plate_id, print_links.plate_id),"
     " printer_id = COALESCE(EXCLUDED.printer_id, print_links.printer_id),"
-    " name = COALESCE(EXCLUDED.name, print_links.name)"
+    " name = EXCLUDED.name"
     " WHERE print_links.matched_by = 'import'"
+    # `xmax` is non-zero on the row an upsert updated, zero on one it inserted.
+    " RETURNING subject, archive_id, xmax <> 0 AS took_over"
 )
+
+
+def _take_over(conn: Connection[DictRow], insert: str, params: Any) -> None:
+    """Run a link's ``insert`` (ending in `_TAKE_OVER_IMPORT`) and forget the import of
+    each archive whose import link it took over (#6394 review): a repeat import then
+    names ScadBuddy's own print as the owner, never answers the import."""
+    with conn.transaction():
+        rows = conn.execute(insert, params).fetchall()
+        for row in rows:
+            if row["took_over"]:
+                conn.execute(
+                    "DELETE FROM print_imports WHERE archive_id = %s AND subject = %s",
+                    (row["archive_id"], row["subject"]),
+                )
+
+
+class ImportTargetGoneError(LookupError):
+    """The library file an import names is not a file it can link to (#6394): trashed,
+    gone, or a run's per-print copy, whose sweep would trash it and forget the import."""
+
+    def __init__(self, file_id: int, reason: str) -> None:
+        super().__init__(f"library file {file_id} {reason}")
+        self.file_id = file_id
+        self.reason = reason
+
+
+#: Why a native file cannot be an import's target (`require_import_target`).
+PER_PRINT_COPY = (
+    "is a per-print copy a print run made, which ScadBuddy's sweep trashes: import onto"
+    " the file it was copied from"
+)
+NOT_STANDING = "is not a file of ScadBuddy's own library that stands"
+
+
+def require_import_target(conn: Connection[DictRow], file_id: int) -> None:
+    """Raise `ImportTargetGoneError` unless ``file_id`` is a live native file that no run
+    owns (#6394), read on the caller's connection. ``FOR SHARE`` holds the row until the
+    caller's transaction ends, so a trash (which locks it ``FOR UPDATE``) cannot come
+    between the check and the import's rows."""
+    row = conn.execute(
+        "SELECT print_subject FROM library_files WHERE id = %s AND deleted_at IS NULL FOR SHARE",
+        (file_id,),
+    ).fetchone()
+    if row is None:
+        raise ImportTargetGoneError(file_id, NOT_STANDING)
+    if row["print_subject"] is not None:
+        raise ImportTargetGoneError(file_id, PER_PRINT_COPY)
+
 
 #: One row per archive: its owner, by `_OWNER_ORDER` after ``archive_id``.
 _LINKED = "SELECT DISTINCT ON (archive_id) * FROM print_links"
@@ -401,7 +453,9 @@ def import_in(
     """`PrintLinkStore.record_import` in the caller's transaction (the automatic import,
     #4699, writes its own row in the same one): None once both rows are written, else
     the link that owns the archive already, and nothing is written. It takes the
-    archive's import lock until that transaction ends."""
+    archive's import lock until that transaction ends. An import onto a library file
+    checks again here that the file can be its target (`require_import_target`): the
+    route's check came before the source was read, which can take long."""
     conn.execute(
         "SELECT pg_advisory_xact_lock(%s, %s)",
         (IMPORT_LOCK_CLASS, record.archive_id % (2**31)),
@@ -409,6 +463,9 @@ def import_in(
     owner = owner_in(conn, record.archive_id)
     if owner is not None:
         return owner
+    file_id = PrintSubject.parse(record.subject).file_id
+    if file_id is not None:
+        require_import_target(conn, file_id)
     # A row left by a link forgotten since (a model deleted while its copy of
     # this row stayed) is replaced.
     conn.execute(
@@ -674,7 +731,8 @@ class PrintLinkStore:
 
     def _record(self, subject: PrintSubject, link: PrintLink) -> None:
         with self._pool.connection() as conn:
-            conn.execute(
+            _take_over(
+                conn,
                 "INSERT INTO print_links"
                 " (subject, archive_id, queue_item_id, plate_id, printer_id, matched_by)"
                 " VALUES (%s, %s, %s, %s, %s, %s)" + _TAKE_OVER_IMPORT,
@@ -904,7 +962,8 @@ class PrintLinkStore:
 
     def _link_library(self, queue_item_id: int, archive_id: int, name: str | None) -> None:
         with self._pool.connection() as conn:
-            conn.execute(
+            _take_over(
+                conn,
                 "INSERT INTO print_links"
                 " (subject, archive_id, matched_by, queue_item_id, plate_id, printer_id, name)"
                 " SELECT subject, %s, 'queue_item', queue_item_id, plate_id, printer_id, %s"

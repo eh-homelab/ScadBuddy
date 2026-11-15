@@ -282,6 +282,23 @@ describe('ImportPrintDialog', () => {
       expect(await within(dialog).findByTestId('import-done')).toHaveTextContent('library file 1000000502')
       expect(imported).toHaveBeenCalledWith(9105, expect.objectContaining({ library_file_id: 1_000_000_502 }))
     })
+
+    it("shows the route's refusal of a run's per-print copy", async () => {
+      nativeLibrary()
+      const refusal = 'library file 1000000501 is a per-print copy a print run made, which ScadBuddy\'s sweep trashes: import onto the file it was copied from'
+      server.use(
+        http.post('/api/v1/print-imports/9104', () =>
+          HttpResponse.json({ type: 'about:blank', title: 'Unprocessable Content', status: 422, detail: refusal }, { status: 422 }),
+        ),
+      )
+      const { dialog, user } = await openArchive(9104)
+      const sources = await within(dialog).findByRole('radiogroup', { name: 'Source' })
+      await user.click(within(sources).getByRole('radio', { name: /The archive's file/ }))
+      await user.click(await within(dialog).findByRole('radio', { name: 'A file in the library' }))
+      await user.click(within(dialog).getByRole('button', { name: 'Import' }))
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent('is a per-print copy')
+      expect(within(dialog).queryByTestId('import-done')).not.toBeInTheDocument()
+    })
   })
 
   it('follows a slow new model, then shows the import it made (#5992)', async () => {

@@ -59,7 +59,10 @@ from scadbuddy.bambuddy.print_import import (
 )
 from scadbuddy.bambuddy.print_links import (
     IMPORT_LOCK_WAIT_S,
+    NOT_STANDING,
+    PER_PRINT_COPY,
     ImportBusyError,
+    ImportTargetGoneError,
     LinkedPrint,
     PrintImport,
     PrintLinkStore,
@@ -327,7 +330,10 @@ async def _imported_onto(links: PrintLinkStore, owner: LinkedPrint, target: Prin
 
 async def _require_native_file(library: PrintLibrary, file_id: int) -> None:
     """The 404 unless ``file_id`` is a file of ScadBuddy's own library that stands (#6394):
-    a trashed file, or any file while that library does not serve, is not one."""
+    a trashed file, or any file while that library does not serve, is not one. A run's
+    per-print copy (``print_subject``) is a 422: the sweep trashes it, and its trash would
+    forget the import with the print's attachments (#6394 review). `import_in` checks
+    both again in the import's transaction."""
     native = await library.serving_native()
     found = (
         await asyncio.to_thread(native.rows.file, file_id)
@@ -335,11 +341,20 @@ async def _require_native_file(library: PrintLibrary, file_id: int) -> None:
         else None
     )
     if found is None:
-        raise ApiError(
-            status.HTTP_404_NOT_FOUND,
-            f"ScadBuddy's own library has no file {file_id}",
-            file_id=file_id,
-        )
+        raise _target_refused(ImportTargetGoneError(file_id, NOT_STANDING))
+    if found.print_subject is not None:
+        raise _target_refused(ImportTargetGoneError(file_id, PER_PRINT_COPY))
+
+
+def _target_refused(error: ImportTargetGoneError) -> ApiError:
+    """A library target `require_import_target` refused: 422 for a per-print copy, which
+    stands but is never a target, 404 for a file that does not stand."""
+    code = (
+        status.HTTP_422_UNPROCESSABLE_CONTENT
+        if error.reason == PER_PRINT_COPY
+        else status.HTTP_404_NOT_FOUND
+    )
+    return ApiError(code, str(error), file_id=error.file_id)
 
 
 @asynccontextmanager
@@ -627,7 +642,10 @@ async def import_print(
             content_hash=archive.content_hash,
             created_model=created,
         )
-        owner = await _record(links, auto_imports, client, record, archive, kept)
+        try:
+            owner = await _record(links, auto_imports, client, record, archive, kept)
+        except ImportTargetGoneError as error:
+            raise _target_refused(error) from None
     if owner is not None:
         # Only a run's link can come between the check above and the record (imports of
         # one archive wait on `import_lock`), and a run's print is its own.

@@ -10,7 +10,7 @@ ALTER TABLE print_imports DROP CONSTRAINT IF EXISTS print_imports_subject_check;
 ALTER TABLE print_imports ADD CONSTRAINT print_imports_subject_check
     CHECK (
         (subject ~ '^library:[0-9]+$' AND slug IS NULL)
-        OR (subject LIKE 'model:%' AND subject = 'model:' || slug)
+        OR (subject LIKE 'model:%' AND slug IS NOT NULL AND subject = 'model:' || slug)
     );
 
 -- An import's link is its archive's owner last, whatever its subject: a `library:` link
