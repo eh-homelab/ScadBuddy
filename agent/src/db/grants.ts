@@ -29,12 +29,14 @@ type Grants = Readonly<Record<string, readonly string[]>>
  * records and notification channels, which it seals, opens and re-wraps with the KEK. And the
  * workspace files (#5299 step 7, `api/crud_agent_workspace.py`): their rows and shared bytes
  * (locked FOR KEY SHARE and FOR UPDATE, which need UPDATE), each write's `workspace.file`
- * events with the session's `event_seq` bump and its row lock (UPDATE on `ai_sessions`). And
- * the plugin stores (#5299 step 5, `api/crud_agent_access.py`, `api/crud_agent_plugins.py`
- * and `api/crud_agent_packages.py`): the tool access, the tool listings, the upstream MCP
- * sessions, the remote plugins and their sign-ins (sealed, opened and re-wrapped with the
- * KEK) and the plugin packages. The leases of #5299 D3 are the API's own table
- * (`agent_leases`, a backend migration), so they need no grant here. */
+ * events with the session's `event_seq` bump and its row lock (UPDATE on `ai_sessions`). And a
+ * session's images, read through its fork chain, a durable tool call's images, the staged
+ * attachments and the saved http_request bodies (#5299 step 7, `api/crud_agent_blobs.py`; a
+ * fenced write locks the session's row FOR SHARE). And the plugin stores (#5299 step 5, `api/crud_agent_access.py`,
+ * `api/crud_agent_plugins.py` and `api/crud_agent_packages.py`): the tool access, the tool
+ * listings, the upstream MCP sessions, the remote plugins and their sign-ins (sealed, opened
+ * and re-wrapped with the KEK) and the plugin packages. The leases of #5299 D3 are the API's
+ * own table (`agent_leases`, a backend migration), so they need no grant here. */
 export const API_AI_GRANTS: Grants = {
   ai_payload_keys: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   ai_forgotten_subjects: ['SELECT', 'INSERT'],
@@ -59,6 +61,10 @@ export const API_AI_GRANTS: Grants = {
   ai_session_files: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   ai_session_file_bytes: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   ai_session_events: ['SELECT', 'INSERT'],
+  ai_session_blobs: ['SELECT', 'INSERT'],
+  ai_session_tool_images: ['SELECT', 'INSERT', 'DELETE'],
+  ai_attachments: ['SELECT', 'INSERT', 'DELETE'],
+  ai_session_http_bodies: ['SELECT', 'INSERT', 'DELETE'],
   ai_access: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   ai_tool_listings: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   ai_plugin_sessions: ['SELECT', 'INSERT', 'DELETE'],

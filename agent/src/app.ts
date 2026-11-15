@@ -3,7 +3,7 @@ import type { UpgradeWebSocket } from 'hono/ws'
 import { aiStatus, type AiStatus, type CredentialState } from './aiStatus.js'
 import type { AccessStore } from './access/store.js'
 import type { AuditRepo } from './audit/log.js'
-import type { AttachmentStore } from './attachments/store.js'
+import type { Attachments } from './attachments/store.js'
 import { auditWrites, RefusalCoalescer } from './audit/writes.js'
 import type { CredentialRepo, SettingsRepo } from './credentials.js'
 import type { Resolver } from './http/egress.js'
@@ -92,7 +92,7 @@ export interface AppDeps {
    * socket resolves the ids a message names (routes/chat.ts). Undefined
    * exactly when `sessions` is.
    */
-  attachments?: AttachmentStore | undefined
+  attachments?: Attachments | undefined
   /**
    * The signed-in sessions (#4975 phase 5, auth/browserSession.ts), read from the backend's
    * `auth_sessions_agent`; without it every request is the anonymous browser user.

@@ -8,7 +8,8 @@ answers it with a ``206`` and only those bytes, streamed back without buffering.
 Strictly read-only: ``GET`` and ``HEAD`` only. Of the browser's request only ``Range``
 and ``If-Range`` go to Bambuddy; of Bambuddy's answer only the media headers come back
 (`FORWARDED_HEADERS`), so neither its key nor its address reaches the browser. And only
-for an archive one of ScadBuddy's outputs printed (#306).
+for an archive a ScadBuddy record names (`require_known_archive`): a print link (#306),
+or an order attempt that claims it.
 """
 
 from __future__ import annotations
@@ -70,16 +71,30 @@ ArchiveIdPath = Annotated[int, Path(ge=1)]
 CARD_PHOTO_CACHE_ITEMS = 256
 
 
+def _not_scadbuddys(archive_id: int) -> ApiError:
+    return ApiError(
+        status.HTTP_404_NOT_FOUND,
+        f"archive {archive_id} is not a print of any ScadBuddy output",
+    )
+
+
 async def require_linked_archive(archive_id: ArchiveIdPath, links: PrintLinksDep) -> None:
-    """Refuse an archive ScadBuddy did not print, with a 404, so the proxy is not
-    a window onto all of Bambuddy's history (#305 plan §2.3). The check is the print
-    links (#306): an output's archive is linked once a progress read or a project
-    attach has seen it, a library file's once the prints list has (#976)."""
+    """Refuse an archive ScadBuddy did not print, with a 404 (#305 plan §2.3). The check
+    is the print links (#306): an output's archive is linked once a progress read or a
+    project attach has seen it, a library file's once the prints list has (#976). The
+    attachment writes take this one: they file into the print's own project."""
     if await links.linked(archive_id) is None:
-        raise ApiError(
-            status.HTTP_404_NOT_FOUND,
-            f"archive {archive_id} is not a print of any ScadBuddy output",
-        )
+        raise _not_scadbuddys(archive_id)
+
+
+async def require_known_archive(archive_id: ArchiveIdPath, links: PrintLinksDep) -> None:
+    """The media reads' gate: refuse, with a 404, an archive no ScadBuddy record names,
+    so the proxy is not a window onto all of Bambuddy's history (#305 plan §2.3). A link
+    names one, and so does an order attempt that claims it (`PrintLinkStore.known`): a
+    print queued in Bambuddy by hand and named on an order item has its photos read
+    here, as the order's own copy of them does."""
+    if not await links.known(archive_id):
+        raise _not_scadbuddys(archive_id)
 
 
 router = APIRouter(
@@ -87,7 +102,7 @@ router = APIRouter(
     tags=["prints"],
     default_response_class=StreamingResponse,
     responses=MEDIA_RESPONSES,
-    dependencies=[Depends(require_linked_archive)],
+    dependencies=[Depends(require_known_archive)],
 )
 
 

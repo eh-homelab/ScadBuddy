@@ -402,7 +402,10 @@ export type FieldDoc = { label: string; help?: string; env?: string }
 
 /**
  * The label and help of `name` from the backend's docs, and its env var when one seeds it.
- * A field the docs do not know (an older server) is labelled by its name.
+ * A field the docs do not know (an older server) is labelled by its name. So does every
+ * field when the answer has no `docs`: a test that serves `/api/v1/settings` by hand must
+ * spread the `settings` fixture or add `docs: settingDocs` (both `mocks/fixtures.ts`), or
+ * its lookups by label miss.
  */
 export function docOf(settings: Settings | undefined, name: string): FieldDoc {
   const doc = settings?.docs?.[name]

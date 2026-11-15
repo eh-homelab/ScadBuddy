@@ -312,7 +312,13 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   wrapped and opened here under the session's payload key (`payload_keys.py` `key_in`, no
   audit row: the key never leaves the API) or the KEK; each write's row, its blob's
   `blob_refs` hold and its `workspace.file` events in one transaction, the reconcile one
-  transaction under `RECONCILE_LOCK`, and `rewrap` at a rotation. `flows/forget.py` and `flows/images.py` run the same statements on the API's own
+  transaction under `RECONCILE_LOCK`, and `rewrap` at a rotation. `api/crud_agent_blobs.py`
+  (areas `session-blobs`, `attachments`, `http-bodies`, #5299 step 7) is the agent's
+  `sessions/blobs.ts`, `attachments/store.ts` and `sessions/httpBodies.ts` statement for
+  statement: an image's name and signature checked from its bytes, a tool call's images
+  replaced whole, a fenced write checked `FOR SHARE`, a fork's read through its chain, an
+  attachment's caps under its owner's lock, a saved body read by range (tests
+  `tests/crud/test_crud_agent_blobs.py`). `flows/forget.py` and `flows/images.py` run the same statements on the API's own
   tables, with no fallback for a database the agent never migrated (the API applies its files
   first, #5299 D6). Its tests make the agent's tables
   with the agent's own migration files (`render/agent_migrations.py` `migrate_agent`) and open
