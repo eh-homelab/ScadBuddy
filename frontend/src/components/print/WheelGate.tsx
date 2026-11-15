@@ -1,10 +1,14 @@
 import { useEffect, useRef, type ReactNode } from 'react'
 
-/** Whether something around `el` scrolls vertically: the wheel then belongs to it. */
+/**
+ * Whether something around `el` scrolls vertically: the wheel then belongs to it. Not past
+ * the dialog it is in: the page under a dialog is not what the wheel is for.
+ */
 function insideScroller(el: Element): boolean {
   for (let at = el.parentElement; at; at = at.parentElement) {
     const scrolls = at === document.scrollingElement || /auto|scroll/.test(getComputedStyle(at).overflowY)
     if (scrolls && at.scrollHeight > at.clientHeight) return true
+    if (at.getAttribute('role') === 'dialog') return false
   }
   return false
 }

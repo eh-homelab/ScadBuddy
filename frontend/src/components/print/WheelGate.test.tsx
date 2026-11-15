@@ -58,6 +58,26 @@ describe('WheelGate', () => {
     expect(onWheel).toHaveBeenCalledTimes(1)
   })
 
+  it('zooms with a plain wheel in a dialog whose body fits, over a page that scrolls', () => {
+    const onWheel = vi.fn()
+    const { getByTestId } = render(
+      <div data-testid="page" style={{ overflowY: 'auto' }}>
+        <div role="dialog">
+          <div data-testid="body" style={{ overflowY: 'auto' }}>
+            <WheelGate>
+              <Scene onWheel={onWheel} />
+            </WheelGate>
+          </div>
+        </div>
+      </div>,
+    )
+    const page = getByTestId('page')
+    Object.defineProperty(page, 'clientHeight', { value: 500 })
+    Object.defineProperty(page, 'scrollHeight', { value: 2000 })
+    getByTestId('scene').dispatchEvent(new WheelEvent('wheel', { deltaY: 100, bubbles: true, cancelable: true }))
+    expect(onWheel).toHaveBeenCalledTimes(1)
+  })
+
   it('zooms with a plain wheel where nothing around it scrolls', () => {
     const { onWheel, wheel } = setup({ room: 0 })
     wheel()
