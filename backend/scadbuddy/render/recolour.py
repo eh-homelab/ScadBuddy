@@ -13,7 +13,8 @@ from __future__ import annotations
 import io
 import json
 import zipfile
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from typing import BinaryIO
 
 from scadbuddy.render.bambu3mf import (
     PROJECT_SETTINGS_NAME,
@@ -21,13 +22,21 @@ from scadbuddy.render.bambu3mf import (
     laid_out_plates,
     rezipped,
 )
-from scadbuddy.render.geometry import MeshBudget, parts_from_3mf
-from scadbuddy.render.split import normalise_colour
+from scadbuddy.render.geometry import parts_from_3mf
+from scadbuddy.render.split import ColourPart, normalise_colour
 from scadbuddy.render.thumbnail import render_plate_thumbnails
+
+#: Reads the parts of the plates named from a 3MF, by plate index.
+PlatesReader = Callable[[BinaryIO, Sequence[int]], dict[int, list[ColourPart]]]
+
+
+def own_plates(archive: BinaryIO, plates: Sequence[int]) -> dict[int, list[ColourPart]]:
+    """The plates of a ScadBuddy 3MF (:func:`~scadbuddy.render.geometry.parts_from_3mf`)."""
+    return {index: parts_from_3mf(archive, index) for index in plates}
 
 
 def recolour_3mf(
-    payload: bytes, colours: Sequence[str], *, max_triangles: int | None = None
+    payload: bytes, colours: Sequence[str], *, read_plates: PlatesReader = own_plates
 ) -> bytes:
     """Return ``payload`` with ``filament_colour`` set to ``colours`` and every plate's
     cover images redrawn in them.
@@ -36,12 +45,13 @@ def recolour_3mf(
     raises :class:`ValueError`, since the extruder numbers of every part index into it.
     A file written without covers gets none. Written in the writer's policy, every entry
     it does not change copied as its compressed bytes (:func:`rezipped`, #3679). An
-    author's ``plate_no_light_<n>.png`` is replaced by the lit cover. With
-    ``max_triangles``, the meshes read for the covers, every plate's together, may hold
-    at most that many triangles, and three vertices for each, counted as parsed (one
-    :class:`~scadbuddy.render.geometry.MeshBudget`): past it,
-    :class:`TooManyTrianglesError`, raised as the parse reaches it, so an untrusted file
-    cannot make the read unbounded.
+    author's ``plate_no_light_<n>.png`` is replaced by the lit cover.
+
+    ``read_plates`` reads the covered plates' parts from the recoloured file. The default
+    reads ScadBuddy's own files. An author's file needs
+    :func:`~scadbuddy.render.objects3mf.read_plates_parts`, which reads build items,
+    multi-part objects and object-level extruders, within a read budget (#6170). A plate
+    with no parts keeps its covers.
     """
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         names = set(archive.namelist())
@@ -59,9 +69,9 @@ def recolour_3mf(
         # Read from the recoloured archive, in memory: that is what gives each part its
         # new colour through its extruder number.
         recoloured = io.BytesIO(rezipped(payload, changed))
-        budget = None if max_triangles is None else MeshBudget(max_triangles)
-        for index in covered:
-            parts = parts_from_3mf(recoloured, index, budget=budget)
+        for index, parts in read_plates(recoloured, covered).items():
+            if not parts:
+                continue
             drawn = render_plate_thumbnails(parts)
             changed.update(
                 zip(

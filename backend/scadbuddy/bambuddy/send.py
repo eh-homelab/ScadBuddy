@@ -44,7 +44,6 @@ from scadbuddy.render.bambu3mf import (
     FilamentMap,
     PartOverrides,
     PartSettingsUnwritableError,
-    TooManyTrianglesError,
     hint_painted_slots,
     layout_of,
     plate_origin,
@@ -53,7 +52,11 @@ from scadbuddy.render.bambu3mf import (
     state_nozzles,
     with_part_settings,
 )
-from scadbuddy.render.objects3mf import UnreadableObjectsError, plate_boxes
+from scadbuddy.render.objects3mf import (
+    UnreadableObjectsError,
+    plate_boxes,
+    read_plates_parts,
+)
 from scadbuddy.render.plate import DEFAULT_PLATE as FALLBACK_PLATE
 from scadbuddy.render.plate import (
     PRIME_TOWER_SIDE,
@@ -65,8 +68,9 @@ from scadbuddy.render.plate import (
     tower_reaches,
 )
 from scadbuddy.render.provenance import content_key
+from scadbuddy.render.read_budget import ReadBudget
 from scadbuddy.render.recolour import recolour_3mf
-from scadbuddy.render.split import normalise_colour
+from scadbuddy.render.split import ColourPart, normalise_colour
 
 logger = logging.getLogger(__name__)
 
@@ -469,20 +473,23 @@ COVER_MAX_TRIANGLES = MAX_MESH_TRIANGLES
 def _recoloured_covers(payload: bytes, colours: Sequence[str] | None) -> bytes:
     """An author's file with its covers redrawn in ``colours`` (:func:`recolour_3mf`):
     the slicer keeps the covers it is handed, so the author's colours would become the
-    sliced file's plate image, Bambuddy's job cover (#6170). A file whose plates do not
-    read back (still the author's, :func:`layout_of`), or whose meshes hold more than
-    :data:`COVER_MAX_TRIANGLES` (:class:`TooManyTrianglesError`), keeps its covers."""
+    sliced file's plate image, Bambuddy's job cover (#6170). The plates are read as a
+    library file's preview reads them (:func:`read_plates_parts`: build items, multi-part
+    objects, object-level extruders), all of them within one read budget of
+    :data:`COVER_MAX_TRIANGLES`. A file that does not read back (still the author's,
+    :func:`layout_of`), or that is past the budget
+    (:class:`~scadbuddy.render.objects3mf.OverBudgetError`), keeps its
+    covers."""
     if colours is None:
         return payload
+    budget = ReadBudget(max_triangles=COVER_MAX_TRIANGLES)
+
+    def read_plates(archive: BinaryIO, plates: Sequence[int]) -> dict[int, list[ColourPart]]:
+        return read_plates_parts(archive, plates, budget)
+
     try:
-        return recolour_3mf(payload, colours, max_triangles=COVER_MAX_TRIANGLES)
-    except (
-        TooManyTrianglesError,
-        LookupError,
-        ValueError,
-        ET.ParseError,
-        zipfile.BadZipFile,
-    ) as error:
+        return recolour_3mf(payload, colours, read_plates=read_plates)
+    except (LookupError, ValueError, ET.ParseError, zipfile.BadZipFile) as error:
         logger.warning(
             "the 3MF's covers could not be redrawn in the spools' colours",
             extra={"error": type(error).__name__},

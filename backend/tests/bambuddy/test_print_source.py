@@ -56,6 +56,7 @@ from scadbuddy.render.bambu3mf import (
     PROJECT_SETTINGS_NAME,
     ArchiveTooLargeError,
     PlateParts,
+    cover_names,
     layout_of,
     write_bambu_3mf,
     write_plates_3mf,
@@ -66,6 +67,7 @@ from scadbuddy.render.thumbnail import render_plate_thumbnails
 from tests.bambuddy.conftest import BASE_URL, recording
 from tests.bambuddy.test_ensure_copy import MemoryUploads
 from tests.conftest import read_png
+from tests.test_objects3mf import at, bambu_project
 
 API = f"{BASE_URL}/api/v1"
 
@@ -835,6 +837,48 @@ def test_an_authors_file_past_the_cover_budget_keeps_its_covers(
             assert after.read(name) == before.read(name), name
         settings = json.loads(after.read(PROJECT_SETTINGS_NAME))
     assert settings["filament_colour"] == ["#00C000", "#00C000"]
+
+
+def test_a_bambu_studio_projects_covers_draw_every_part_where_its_build_places_it() -> None:
+    """#6172 review: Bambu Studio keeps every part of an object in one object file and
+    places each object with its build item. Here one object is a base (the object's
+    filament 1) and a text part (filament 2), placed twice by the build. Each part is
+    drawn in its spool's colour, and both copies are drawn apart, not stacked."""
+    base = trimesh.creation.box(extents=(20, 10, 5))
+    base.apply_translation((10, 5, 2.5))
+    text = trimesh.creation.box(extents=(8, 4, 2))
+    text.apply_translation((10, 5, 6))
+    project = bambu_project(
+        items=[at(50, 50), at(150, 50)],
+        parts={1: (base, "normal_part", None), 2: (text, "normal_part", 2)},
+        colours=("#FF0000", "#FF00FF"),
+    )
+    author = ColourPart(1, "Author", "#FF0000", base)
+    covers = render_plate_thumbnails([author])
+    with zipfile.ZipFile(io.BytesIO(project)) as archive:
+        entries = [(name, archive.read(name)) for name in archive.namelist()]
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in entries:
+            archive.writestr(name, data)
+        for name, image in zip(
+            cover_names(1),
+            (covers.plate, covers.plate_small, covers.top, covers.pick),
+            strict=True,
+        ):
+            archive.writestr(name, image)
+
+    redrawn = send._recoloured_covers(buffer.getvalue(), ["#0000E0", "#00C000"])
+
+    plate = _rgb(redrawn, "Metadata/plate_1.png")
+    assert _hue_is(plate, 2)  # the base, in spool 1's blue
+    assert _hue_is(plate, 1)  # the text, in spool 2's green
+    assert not _hue_is(plate, 0)  # not the author's red or magenta
+    with zipfile.ZipFile(io.BytesIO(redrawn)) as archive:
+        top = read_png(archive.read("Metadata/top_1.png"))
+    rows, columns = (top[..., 3] == 255).nonzero()
+    # Two 20 x 10 bases 100 mm apart span 120 x 10 from above.
+    assert columns.max() - columns.min() > 6 * (rows.max() - rows.min())
 
 
 async def test_a_library_files_filament_step_reads_the_file_itself_until_a_copy_exists() -> None:

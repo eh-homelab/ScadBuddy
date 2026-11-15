@@ -39,7 +39,7 @@ import io
 import json
 import xml.etree.ElementTree as ET
 import zipfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
@@ -723,7 +723,37 @@ def read_plate_parts(
     :func:`read_objects` refuses; a plate the file lacks is
     :class:`~scadbuddy.render.geometry.NoSuchPlateError`."""
     spend = budget or ReadBudget()
-    return _opened(payload, spend, lambda archive: _read_plate(archive, plate, spend))
+
+    def read(archive: _Archive) -> PlateRead:
+        found = _read_plate(archive, plate, _plate_reader(archive, spend))
+        if not found.parts:
+            raise UnreadableObjectsError(
+                f"plate {plate} of the 3MF places no object with any geometry"
+            )
+        return found
+
+    return _opened(payload, spend, read)
+
+
+def read_plates_parts(
+    payload: bytes | BinaryIO, plates: Sequence[int], budget: ReadBudget | None = None
+) -> dict[int, list[ColourPart]]:
+    """The parts of each plate in ``plates``, as :func:`read_plate_parts` reads one, all
+    read within one ``budget`` together: what an author's covers are redrawn from
+    (#6170). A plate that places nothing has no parts."""
+    spend = budget or ReadBudget()
+
+    def read(archive: _Archive) -> dict[int, list[ColourPart]]:
+        reader = _plate_reader(archive, spend)
+        return {plate: _read_plate(archive, plate, reader).parts for plate in plates}
+
+    return _opened(payload, spend, read)
+
+
+def _plate_reader(archive: _Archive, budget: ReadBudget) -> _Reader:
+    return _Reader(
+        archive, _object_settings(_model_settings(archive)), _filament_colours(archive), budget
+    )
 
 
 def _plates(config: ET.Element | None) -> dict[int, set[tuple[str, int]]]:
@@ -742,12 +772,11 @@ def _plates(config: ET.Element | None) -> dict[int, set[tuple[str, int]]]:
     return plates
 
 
-def _read_plate(archive: _Archive, plate: int, budget: ReadBudget) -> PlateRead:
+def _read_plate(archive: _Archive, plate: int, reader: _Reader) -> PlateRead:
+    """The plate's parts, none when it places nothing: ``reader`` spends for them."""
     model = _root_model_name(archive)
     items = _build_items(archive, model)
-    config = _model_settings(archive)
-    reader = _Reader(archive, _object_settings(config), _filament_colours(archive), budget)
-    plates = _plates(config)
+    plates = _plates(_model_settings(archive))
     count = len(plates) or 1
     if (plates and plate not in plates) or (not plates and plate != 1):
         raise NoSuchPlateError(plate, count)
@@ -773,8 +802,6 @@ def _read_plate(archive: _Archive, plate: int, budget: ReadBudget) -> PlateRead:
         joined = meshes[0] if len(meshes) == 1 else trimesh.util.concatenate(meshes)
         if isinstance(joined, trimesh.Trimesh):
             found.append(ColourPart(index, f"Color {index}", colour, joined, _joined_paint(parts)))
-    if not found:
-        raise UnreadableObjectsError(f"plate {plate} of the 3MF places no object with any geometry")
     return PlateRead(found, count)
 
 
