@@ -19,6 +19,7 @@ import { TurnTrace } from '../telemetry/turn.js'
 import type { WaitForTab } from '../tools/registry.js'
 import type { SessionImages, SessionImage } from './blobs.js'
 import type { EventLog } from './eventLog.js'
+import type { SessionRows } from './rows.js'
 import type { ClaimedSession, TurnOutcome, TurnPrincipal } from './manager.js'
 import { event, type ServerEvent, type SessionStatus } from './protocol.js'
 import { scrubForLog, SdkEventMapper, ShownCalls, type TitleResolver } from './sdkEvents.js'
@@ -89,6 +90,8 @@ export function withNote(prompt: string | AsyncIterable<SDKUserMessage>, note: s
 
 /** What a turn's process needs besides the session: the manager's, shared by every turn on this replica. */
 export type TurnCoreDeps = {
+  /** The sessions' rows (rows.ts): a turn's claim as its placement reads it (turnHost.ts). */
+  rows: Pick<SessionRows, 'get'>
   runner: Pick<TurnRunner, 'assemble'>
   warm: WarmSessions
   events: Pick<EventLog, 'append' | 'committed'>

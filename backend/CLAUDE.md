@@ -331,7 +331,13 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `OperationStore` statement for statement, a task's create under the session's
   `bgtask:<session>` advisory lock; an operation's insert or end writes its `activity` row in
   the same transaction (`ActivityIndex.ingest_agent_operation_in`), and the bus's
-  `ai_operation.changed` stays only for an agent pod still on SQL.
+  `ai_operation.changed` stays only for an agent pod still on SQL. `sessions.py` is a
+  session's row as the agent's session manager reads and writes it and what its calls touched,
+  for `api/crud_agent_sessions.py` (areas `sessions`, `session-resources`, #5299 step 9): the
+  agent's `PgSessionRows` and `PgResourceRows` statement for statement, an insert counted under
+  the owner's `ai_sessions.start:<kind>:<id>` lock and a fork's checked under its parent's
+  payload-key lock, shared, so an agent pod still on SQL excludes it (tests
+  `tests/crud/test_crud_agent_sessions.py`).
 - The agent's small stores (#5299 step 5): `api/crud_agent_stores.py` (areas
   `activity-kinds`, `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`) and
   `api/crud_agent_notify.py` (area `notify`, sealed with the KEK under the agent's AAD), each

@@ -39,6 +39,12 @@ export const BLOB_AREAS = ['session-blobs', 'attachments', 'http-bodies'] as con
  */
 export const TASK_AREAS = ['background-tasks', 'operations'] as const
 
+/**
+ * The areas of the sessions' rows and of what their tool calls touched (#5299 step 9, part a;
+ * backend api/crud_agent_sessions.py; sessions/rows.ts, sessions/touched.ts).
+ */
+export const SESSION_AREAS = ['sessions', 'session-resources'] as const
+
 export type CrudAreasOptions = {
   fetch?: typeof fetch
   /** The areas the agent waits for. */

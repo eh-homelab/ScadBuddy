@@ -426,7 +426,7 @@ export class TurnHost {
     const parked = input.continuation?.kind === 'parked' ? input.continuation.calls : undefined
     // A parked continuation marks the transcript for itself: its outcome message goes in once.
     const mark = await this.#claim(id, turnId, attempt, parked?.length ? `${turnId}/${parked[0]!.requestId}` : turnId)
-    const claim = mark === undefined ? undefined : await runningDurableTurn(sql, id, turnId)
+    const claim = mark === undefined ? undefined : await runningDurableTurn(this.#deps.core.rows, id, turnId)
     if (mark === undefined || !claim) throw ApplicationFailure.nonRetryable(`session ${id} is not running turn ${turnId}`, SESSION_GONE)
     const { session, principal } = claim
     // §5.5: resumed with the restart message only once the turn's prompt is in the transcript;

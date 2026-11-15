@@ -1,8 +1,10 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import type { Sql } from 'postgres'
 import type { Risk } from '../tools/registry.js'
+import { crudRead, wellFormed } from '../api/crudRead.js'
 import { RECORD_WAIT_MS, waitAtMost } from '../db/bounded.js'
 import { unwrapUntrusted } from '../safety/untrusted.js'
+import { sessionPath } from './rows.js'
 
 // What a session touched (#931): every resource a session's tool calls
 // created, changed or deleted, one `ai_session_resources` row each
@@ -843,14 +845,105 @@ function bounded(value: string | null | undefined): string | null {
   return value == null ? null : cutBetweenCodePoints(value, ID_MAX)
 }
 
+/** A call's rows as `ai_session_resources` stores them (`SessionResources`). */
+export type ResourceRow = {
+  tool: string
+  resource_type: ResourceType
+  resource_id: string | null
+  action: ResourceAction
+  model_slug: string | null
+  before_id: string | null
+  after_id: string | null
+}
+
+/**
+ * Where `SessionResources` keeps the rows (#5299 step 9, part a): `PgResourceRows`, its own SQL,
+ * or `CrudResourceRows`, the API's routes (area `session-resources`, backend
+ * api/crud_agent_sessions.py), picked per call in main.ts once the area is listed.
+ */
+export interface ResourceRows {
+  /** One call's rows, at most MAX_TOUCHES_PER_CALL; throws for a session that is gone. */
+  insert(sessionId: string, rows: ResourceRow[]): Promise<void>
+  /** Everything the session touched, oldest first. */
+  list(sessionId: string): Promise<TouchedRecord[]>
+}
+
+export class PgResourceRows implements ResourceRows {
+  readonly #sql: Sql
+
+  constructor(sql: Sql) {
+    this.#sql = sql
+  }
+
+  async insert(sessionId: string, rows: ResourceRow[]): Promise<void> {
+    await this.#sql`INSERT INTO ai_session_resources ${this.#sql(rows.map((r) => ({ session_id: sessionId, ...r })))}`
+  }
+
+  async list(sessionId: string): Promise<TouchedRecord[]> {
+    const rows = await this.#sql<Row[]>`
+      SELECT resource_type, resource_id, action, model_slug, before_id, after_id, tool, at
+      FROM ai_session_resources WHERE session_id = ${sessionId}::uuid ORDER BY id`
+    return rows.map((r) => ({
+      type: r.resource_type,
+      id: r.resource_id,
+      action: r.action,
+      model: r.model_slug,
+      before: r.before_id,
+      after: r.after_id,
+      tool: r.tool,
+      at: r.at.toISOString(),
+    }))
+  }
+}
+
+type WireTouched = Omit<Row, 'at'> & { at: string }
+
+/** `PgResourceRows` over the API's CRUD routes (area `session-resources`). */
+export class CrudResourceRows implements ResourceRows {
+  readonly #base: string
+  readonly #fetch: typeof fetch
+
+  constructor(baseUrl: string, options: { fetch?: typeof fetch } = {}) {
+    this.#base = baseUrl
+    this.#fetch = options.fetch ?? globalThis.fetch
+  }
+
+  async insert(sessionId: string, rows: ResourceRow[]): Promise<void> {
+    const path = sessionPath(sessionId)
+    if (path === undefined) throw new Error(`session ${JSON.stringify(sessionId)} is not a session id`)
+    const { recorded } = await crudRead<{ recorded: boolean }>(this.#fetch, this.#base, `the resources of session ${sessionId}`, `${path}/resources`, {
+      method: 'POST',
+      body: wellFormed({ rows }),
+    })
+    if (!recorded) throw new Error(`session ${sessionId} is gone`)
+  }
+
+  async list(sessionId: string): Promise<TouchedRecord[]> {
+    // As the SQL's uuid cast refuses it: no session has such an id.
+    const path = sessionPath(sessionId)
+    if (path === undefined) return []
+    const { resources } = await crudRead<{ resources: WireTouched[] }>(this.#fetch, this.#base, `the resources of session ${sessionId}`, `${path}/resources`)
+    return resources.map((r) => ({
+      type: r.resource_type,
+      id: r.resource_id,
+      action: r.action,
+      model: r.model_slug,
+      before: r.before_id,
+      after: r.after_id,
+      tool: r.tool,
+      at: r.at,
+    }))
+  }
+}
+
 export class SessionResources implements TouchedSink {
-  private readonly sql: Sql
+  private readonly rows: ResourceRows
   private readonly onError: ((err: unknown) => void) | undefined
   private readonly waitMs: number
 
   /** `waitMs`: how long `record` waits for its rows before it lets the call go on (db/bounded.ts). */
-  constructor(sql: Sql, onError?: (err: unknown) => void, options: { waitMs?: number } = {}) {
-    this.sql = sql
+  constructor(rows: ResourceRows, onError?: (err: unknown) => void, options: { waitMs?: number } = {}) {
+    this.rows = rows
     this.onError = onError
     this.waitMs = options.waitMs ?? RECORD_WAIT_MS
   }
@@ -868,36 +961,25 @@ export class SessionResources implements TouchedSink {
         touches.length > MAX_TOUCHES_PER_CALL
           ? [...touches.slice(0, MAX_TOUCHES_PER_CALL - 1), { type: 'unclassified' as const, id: null, action: 'modified' as const }]
           : touches
-      const rows = kept.map((t) => ({
-        session_id: call.sessionId,
-        tool: call.tool.name,
-        resource_type: t.type,
-        resource_id: bounded(t.id),
-        action: t.action,
-        model_slug: bounded(t.model),
-        before_id: bounded(t.before),
-        after_id: bounded(t.after),
-      }))
-      await this.sql`INSERT INTO ai_session_resources ${this.sql(rows)}`
+      await this.rows.insert(
+        call.sessionId,
+        kept.map((t) => ({
+          tool: call.tool.name,
+          resource_type: t.type,
+          resource_id: bounded(t.id),
+          action: t.action,
+          model_slug: bounded(t.model),
+          before_id: bounded(t.before),
+          after_id: bounded(t.after),
+        })),
+      )
     } catch (err) {
       this.onError?.(err)
     }
   }
 
   /** Everything the session touched, oldest first. */
-  async list(sessionId: string): Promise<TouchedRecord[]> {
-    const rows = await this.sql<Row[]>`
-      SELECT resource_type, resource_id, action, model_slug, before_id, after_id, tool, at
-      FROM ai_session_resources WHERE session_id = ${sessionId}::uuid ORDER BY id`
-    return rows.map((r) => ({
-      type: r.resource_type,
-      id: r.resource_id,
-      action: r.action,
-      model: r.model_slug,
-      before: r.before_id,
-      after: r.after_id,
-      tool: r.tool,
-      at: r.at.toISOString(),
-    }))
+  list(sessionId: string): Promise<TouchedRecord[]> {
+    return this.rows.list(sessionId)
   }
 }

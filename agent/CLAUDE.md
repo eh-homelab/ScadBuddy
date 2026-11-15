@@ -85,7 +85,15 @@ and a Workflow's journal and child chats (area `background-tasks`, `src/backgrou
 (area `operations`, `src/operations/store.ts` `CrudOperations`; the API writes the operation's
 activity row in its transaction) are #5299 step 8 (`TASK_AREAS`, backend
 `api/crud_agent_tasks.py`); their bodies go through `crudRead.ts` `wellFormed`, since the API
-refuses a lone surrogate. These ten have a rolling-deploy fallback:
+refuses a lone surrogate. A session's row as the session manager reads and writes it (area
+`sessions`, `src/sessions/rows.ts` `SessionRows`: `PgSessionRows`, `CrudSessionRows`; one read of
+the whole row answers the record, a turn's claim and `poolRemainingUsd`, and an insert's owner
+limit and a fork's tombstone check run under their locks in the API's transaction) and what its
+calls touched (area `session-resources`, `src/sessions/touched.ts` `ResourceRows`) are #5299
+step 9, part a (`SESSION_AREAS`, backend `api/crud_agent_sessions.py`); a session id goes into a
+route's path only as a lowercase UUID, encoded (`rows.ts` `sessionPath`). A turn's claim, its end
+and an edit write the row with the event log, and stay on SQL until the event log moves. These
+twelve have a rolling-deploy fallback:
 `src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` from the start with back-off
 (1 s doubling to 30 s) until every one is listed, and until then each stays on SQL, for an API
 pod older than the routes. The small stores (#5299 step 5, `src/api/crudStores.ts`
