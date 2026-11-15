@@ -13,6 +13,7 @@ import respx
 from psycopg.types.json import Jsonb
 
 from scadbuddy.bambuddy.models import Spool as BbSpool
+from scadbuddy.filament import ledger
 from scadbuddy.filament.bambuddy_pull import pull, read_and_pull, scheduled_pull
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.component import Filament
@@ -326,8 +327,8 @@ def test_a_bb_scale_reading_is_the_anchor_when_newer(pg_pool: PgPool) -> None:
     assert len(f.spools.events(made)) == count
     weighed = [e for e in f.spools.events(made) if e.kind == "weighed"]
     assert [(e.source, e.ref_kind, e.grams_after, e.data["bb_gross_g"]) for e in weighed] == [
-        ("bb", "bb_scale", 950, 1200),
-        ("bb", "bb_scale", 650, 900),
+        ("scale", "bb_scale", 950, 1200),
+        ("scale", "bb_scale", 650, 900),
     ]
 
 
@@ -342,6 +343,36 @@ def test_a_bb_weighing_counts_on_a_locked_spool(pg_pool: PgPool) -> None:
     spool = f.spools.get(made)
     assert spool is not None
     assert (spool.weight_locked, spool.grams_left) == (True, 450)
+
+
+@pytest.mark.parametrize(("locked", "left"), [(False, 500), (True, 1000)])
+def test_a_bb_weighing_is_a_scale_reading(pg_pool: PgPool, locked: bool, left: float) -> None:
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb(updated_at=_bb_time(-3))], now=NOW).created_ids
+    if locked:
+        f.spools.update(made, SpoolPatch(weight_locked=True), actor="ann")
+    weighed = bb(
+        core_weight=250,
+        last_scale_weight=1250,
+        last_weighed_at=_bb_time(1),
+        updated_at=_bb_time(1),
+    )
+    pull(f, [weighed], now=NOW)
+    (event,) = [e for e in f.spools.events(made) if e.kind == "weighed"]
+    assert (event.source, event.grams_after) == ("scale", 1000)
+    # Spec 5.5: the newer AMS reading is the anchor, unless the weight lock is on.
+    with pg_pool.connection() as conn:
+        ledger.record(
+            conn,
+            made,
+            "ams_reading",
+            source="ams_remain",
+            absolute_g=500,
+            at=datetime.now(UTC) + timedelta(hours=2),
+        )
+    spool = f.spools.get(made)
+    assert spool is not None
+    assert spool.grams_left == left
 
 
 def test_a_bb_weighing_is_net_of_the_sb_insert_type(pg_pool: PgPool) -> None:

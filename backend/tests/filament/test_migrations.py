@@ -3,9 +3,11 @@ later stores rely on."""
 
 from __future__ import annotations
 
+import psycopg
 import pytest
 from psycopg import errors
 
+from scadbuddy.render.pg_store import MIGRATIONS, migrate
 from tests.conftest import PgPool
 
 pg = pytest.mark.requires_postgres
@@ -74,3 +76,47 @@ def test_the_filament_tables_and_seeds_exist(pg_pool: PgPool) -> None:
             conn.execute(brand.replace("Acme", "ACME"))
         conn.execute("UPDATE filament_brands SET archived_at = now() WHERE name = 'Acme'")
         conn.execute(brand.replace("Acme", "ACME"))
+
+
+@pg
+def test_capture_migration_makes_bb_weighings_scale(pg_conninfo: str) -> None:
+    # #6263: a Bambuddy weighing is a scale reading; older print estimates get data.job.
+    # Only the label changes: grams_left cannot tell `bb` from `scale`.
+    idx = next(i for i, m in enumerate(MIGRATIONS) if m.id.endswith("_filament_capture"))
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[:idx])
+        spool = conn.execute(_SPOOL).fetchone()
+        assert spool is not None
+        sid = spool[0]
+        ins = (
+            "INSERT INTO filament_spool_events"
+            " (spool_id, kind, source, ref_kind, ref_id, data) VALUES (%s, %s, %s, %s, %s, %s)"
+        )
+        rows = [
+            ("weighed", "bb", "bb_scale", "7/t1", "{}"),
+            ("weighed", "person", None, None, "{}"),
+            ("print_started", "print_estimate", "print_run", "r1/J/0", "{}"),
+            ("print_started", "print_estimate", "print_run", "r2/a/b/1", "{}"),
+            ("print_started", "print_estimate", "print_run", "r3/K/0", '{"job": "keep"}'),
+            ("print_started", "print_estimate", "print_run", "odd", "{}"),
+            ("print_started", "print_estimate", "other", "r4/L/0", "{}"),
+        ]
+        for kind, source, ref_kind, ref_id, data in rows:
+            conn.execute(ins, (sid, kind, source, ref_kind, ref_id, data))
+        assert migrate(conn)[0] == MIGRATIONS[idx].id
+        got = conn.execute(
+            "SELECT kind, source, ref_id, data ->> 'job' FROM filament_spool_events ORDER BY seq"
+        ).fetchall()
+        index = conn.execute(
+            "SELECT 1 FROM pg_indexes WHERE indexname = 'filament_spool_events_job'"
+        ).fetchone()
+    assert got == [
+        ("weighed", "scale", "7/t1", None),
+        ("weighed", "person", None, None),
+        ("print_started", "print_estimate", "r1/J/0", "J"),
+        ("print_started", "print_estimate", "r2/a/b/1", "a/b"),
+        ("print_started", "print_estimate", "r3/K/0", "keep"),
+        ("print_started", "print_estimate", "odd", None),
+        ("print_started", "print_estimate", "r4/L/0", None),
+    ]
+    assert index is not None

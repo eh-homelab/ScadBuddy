@@ -14,9 +14,9 @@ this order:
    change of what is left (``label_weight - weight_used``) is a ``bb`` absolute reading
    on the ``synced_from_bb`` event, unless the SB spool's weight is locked: that value
    is BB's own estimate, and the lock guards against estimates (§5.5), so it is recorded
-   in the event's data and never moves ``grams_left``. A BB weighing is a physical
-   reading and counts under the lock (`_book`). A BB unlock clears the lock only when a
-   pull set it (`_lock_from_bb`).
+   in the event's data and never moves ``grams_left``. A BB weighing is a
+   ``scale`` reading (#6263): it is physical, so it counts under the lock (`_book`).
+   A BB unlock clears the lock only when a pull set it (`_lock_from_bb`).
 2. Else an SB spool already is that spool: it holds the BB spool's ``tag_uid`` or
    ``tray_uuid`` through an open binding, or the BB record's `spool_record_links` row
    (provider ``bambuddy``) names it (a native spool migrated onto its physical spool's
@@ -531,8 +531,9 @@ def _core_g(conn: Conn, spool_id: UUID, bb: BbSpool) -> tuple[int | None, str | 
 
 def _book(conn: Conn, spool_id: UUID, bb: BbSpool, actor: str) -> bool:
     """BB's last weighing as a ``weighed`` event and its last drying as a ``dried`` one,
-    each once: ref ``bb_scale``/``bb_dried`` and ``<bb id>/<time>``, at BB's time, source
-    ``bb``. The weighing's reading is the scale's gross weight less the core
+    each once: ref ``bb_scale``/``bb_dried`` and ``<bb id>/<time>``, at BB's time. The
+    weighing has source ``scale`` (it is a scale reading, #6263), the drying ``bb``. The
+    weighing's reading is the scale's gross weight less the core
     (`_core_g`), the gross kept in ``data``; with no core weight known it books no
     reading. A weighing is a physical reading, so it counts under the weight lock, which
     guards against estimates (§5.5). The ledger's rule picks the anchor: the weighing wins
@@ -553,7 +554,7 @@ def _book(conn: Conn, spool_id: UUID, bb: BbSpool, actor: str) -> bool:
                 conn,
                 spool_id,
                 "weighed",
-                source="bb",
+                source="scale",
                 absolute_g=net,
                 at=bb.last_weighed_at,
                 ref_kind="bb_scale",
