@@ -27,6 +27,23 @@ describe('ListingView', () => {
     expect(screen.getByRole('button', { name: /Body colour/ })).toHaveAccessibleName('Body colour Ocean blue')
   })
 
+  it('draws a colour two materials share from the first allowed material’s filament (#6215)', async () => {
+    const listing: Listing = {
+      ...KEYCHAIN,
+      params: { body: { kind: 'choice', label: 'Body colour', group: '', colour: true, choices: ['#101010'], default: '#101010' } },
+      colours: [
+        { id: 'k1', colour: '#101010', colour_name: 'Black', material: 'PLA', effect: 'sparkle' },
+        { id: 'k2', colour: '#101010', colour_name: 'Black', material: 'PETG', effect: 'matte' },
+      ],
+      materials: ['PETG', 'PLA'],
+    }
+    render(<ListingView listing={listing} values={{}} onChange={() => undefined} />)
+    expect(screen.getByRole('button', { name: /Body colour/ })).toHaveAccessibleName('Body colour Black · Matte')
+    await userEvent.click(screen.getByRole('button', { name: /Body colour/ }))
+    expect(screen.getByRole('radio', { name: 'Black · Matte' })).toBeInTheDocument()
+    expect(document.body).not.toHaveTextContent(/PLA|PETG/)
+  })
+
   it('offers a switch as Yes and No, never the words true and false (#6141)', async () => {
     const onChange = vi.fn()
     const listing = {

@@ -2,7 +2,6 @@ import { useId, useRef, useState, type KeyboardEvent } from 'react'
 import { Popover, PopoverContent, PopoverTrigger } from '../../components/ui/popover'
 import { ToggleGroup, ToggleGroupItem } from '../../components/ui/toggle-group'
 import type { ColourSwatch } from '../colours'
-import { swatchBackground } from '../params'
 
 /** Past this many colours, the picker offers a search. */
 const SEARCH_FROM = 24
@@ -63,7 +62,7 @@ export function ColourPicker({ label, swatches, picked, shown, onChange }: Colou
           aria-labelledby={`${id}-label ${id}-value`}
           className="flex min-h-12 w-full items-center gap-3 rounded-[10px] border-[1.5px] border-input bg-background px-3.5 py-2 text-left"
         >
-          <span className="size-7 flex-none rounded-full border border-foreground/25" style={{ background: current ? swatchBackground(current.filament) : 'transparent' }} aria-hidden="true" />
+          <span className="size-7 flex-none rounded-full border border-foreground/25" style={current?.style} aria-hidden="true" />
           <span id={`${id}-value`} className="min-w-0 flex-1 [overflow-wrap:anywhere]">
             {current ? current.name : 'Choose a colour'}
           </span>
@@ -101,7 +100,7 @@ export function ColourPicker({ label, swatches, picked, shown, onChange }: Colou
                 aria-label={swatch.name}
                 className="flex h-auto min-w-0 flex-col items-center gap-1 rounded-md p-1 text-center text-xs font-normal whitespace-normal data-[state=on]:bg-transparent data-[state=on]:ring-2 data-[state=on]:ring-primary"
               >
-                <span className="size-10 rounded-full border border-foreground/25" style={{ background: swatchBackground(swatch.filament) }} aria-hidden="true" />
+                <span className="size-10 rounded-full border border-foreground/25" style={swatch.style} aria-hidden="true" />
                 <span className="w-full leading-tight [overflow-wrap:anywhere]">{swatch.name}</span>
               </ToggleGroupItem>
             ))}
