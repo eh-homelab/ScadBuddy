@@ -166,6 +166,12 @@ describe('a transcript over the CRUD routes', () => {
     expect(api.seen.at(-1)?.body).toEqual({ subpath: null })
   })
 
+  it('sends a subpath and a project key well-formed', async () => {
+    const api = new FakeApi()
+    await rows(api).append({ projectKey: 'p\ud800', sessionId: SESSION, subpath: 's\udc00' }, [{ type: 'x' }] as unknown as SessionStoreEntry[])
+    expect(api.seen[0]?.body).toMatchObject({ project_key: 'p\ufffd', subpath: 's\ufffd' })
+  })
+
   it('counts a tail past the uuids the route takes as moved, asking nothing', async () => {
     const api = new FakeApi()
     expect(await rows(api).moved(SESSION, '1', Array.from({ length: OWN_MAX + 1 }, (_, i) => `u${i}`))).toBe(true)

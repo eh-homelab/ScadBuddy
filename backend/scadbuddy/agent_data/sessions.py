@@ -380,8 +380,8 @@ def discard(conn: Connection[Any], session_id: str) -> bool:
 
 
 def record_resources(conn: Connection[Any], session_id: str, rows: list[dict[str, Any]]) -> bool:
-    """A call's rows (``touched.ts`` ``SessionResources.record``), in one statement; False when
-    the session is gone."""
+    """A call's rows (``touched.ts`` ``SessionResources.record``), in one transaction; False
+    when the session is gone."""
     with conn.transaction():
         standing = conn.execute(
             "SELECT 1 FROM ai_sessions WHERE id = %s FOR KEY SHARE", (session_id,)

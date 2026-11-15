@@ -1,6 +1,6 @@
 import type { EffortLevel } from '@anthropic-ai/claude-agent-sdk'
 import type { Sql } from 'postgres'
-import { CrudReadError, crudRead } from '../api/crudRead.js'
+import { CrudReadError, crudRead, wellFormed } from '../api/crudRead.js'
 import { isUuid } from '../harness/uuid.js'
 import { payloadKeyLock } from '../temporal/payloadCodec.js'
 import type { SessionRuntime } from './durable.js'
@@ -90,6 +90,9 @@ export type ListFilter = {
 
 /** A principal as a condition: its kind and id. */
 export type Who = Pick<Owner, 'kind' | 'id'>
+
+/** A row's title at most (backend api/crud_agent_sessions.py `TITLE_MAX`): a chain of forks adds ` (fork)` each. */
+export const ROW_TITLE_MAX = 4096
 
 /** A new row (manager.ts `insert`). */
 export type NewSessionRow = {
@@ -427,7 +430,8 @@ export class CrudSessionRows implements SessionRows {
   }
 
   #call<T>(step: string, path: string, body?: unknown): Promise<T> {
-    return crudRead<T>(this.#fetch, this.#base, step, path, body === undefined ? {} : { method: 'POST', body })
+    // Well-formed: a title cut between a pair's halves holds a lone surrogate, which the API refuses (crudRead.ts).
+    return crudRead<T>(this.#fetch, this.#base, step, path, body === undefined ? {} : { method: 'POST', body: wellFormed(body) })
   }
 
   /** The path of session `id`, or a throw: a write names a session the caller read. */

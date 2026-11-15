@@ -421,6 +421,9 @@ def test_the_list_filters(agent: Agent, tables: PgPool) -> None:
     assert ids(archived="include", with_file=True, accept=[".stl"]) == {b["id"]}
     assert ids(archived="include", with_file=True, accept=["model/*"]) == {b["id"]}
     assert ids(archived="include", with_file=True, accept=["image/png"]) == set()
+    # As many entries as a picker's 1000-character ``accept`` can hold (``.a,`` each).
+    many = [f".{n}" for n in range(333)] + [".stl"]
+    assert ids(archived="include", with_file=True, accept=many) == {b["id"]}
     assert ids(status="running") & {a["id"], b["id"]} == set()
     assert ids(origin="mcp") & {a["id"], b["id"]} == set()
     assert (
@@ -431,7 +434,7 @@ def test_the_list_filters(agent: Agent, tables: PgPool) -> None:
         )
         == 1
     )
-    for bad in ({"limit": 501}, {"search": "x" * 501}, {"accept": ["x"] * 65}, {"status": "lost"}):
+    for bad in ({"limit": 501}, {"search": "x" * 501}, {"accept": ["x"] * 501}, {"status": "lost"}):
         assert (
             agent.refused("POST", "/sessions/list", {"principal": None, **bad}).status_code == 422
         )

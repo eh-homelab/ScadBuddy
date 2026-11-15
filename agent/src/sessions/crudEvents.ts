@@ -1,4 +1,4 @@
-import { CrudReadError, crudRead } from '../api/crudRead.js'
+import { CrudReadError, crudRead, wellFormed } from '../api/crudRead.js'
 import { appendBatches } from './crudTranscripts.js'
 import { type EventRows, ForkParentGone, type LoggedEvent, type TurnEvents, type TurnFence } from './eventLog.js'
 import type { ServerEvent } from './protocol.js'
@@ -30,7 +30,8 @@ export class CrudEventRows implements EventRows {
 
   #call<T>(step: string, path: string, init: { body?: unknown; timeoutMs?: number } = {}): Promise<T> {
     return crudRead<T>(this.#fetch, this.#base, step, path, {
-      ...(init.body === undefined ? {} : { method: 'POST' as const, body: init.body }),
+      // Well-formed: the API refuses a lone surrogate, which postgres.js wrote as U+FFFD (crudRead.ts).
+      ...(init.body === undefined ? {} : { method: 'POST' as const, body: wellFormed(init.body) }),
       timeoutMs: init.timeoutMs ?? READ_TIMEOUT_MS,
     })
   }

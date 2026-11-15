@@ -1,5 +1,5 @@
 import type { SessionKey, SessionStoreEntry } from '@anthropic-ai/claude-agent-sdk'
-import { CrudReadError, crudRead } from '../api/crudRead.js'
+import { CrudReadError, crudRead, wellFormed } from '../api/crudRead.js'
 import { SubjectForgotten } from '../temporal/payloadCodec.js'
 import { sessionPath } from './rows.js'
 import type { AppendFence, TranscriptHead, TranscriptRows } from './store.js'
@@ -53,7 +53,8 @@ export class CrudTranscriptRows implements TranscriptRows {
   async #call<T>(step: string, path: string, init: { body?: unknown; timeoutMs?: number } = {}): Promise<T> {
     try {
       return await crudRead<T>(this.#fetch, this.#base, step, path, {
-        ...(init.body === undefined ? {} : { method: 'POST' as const, body: init.body }),
+        // Well-formed: the API refuses a lone surrogate, which postgres.js wrote as U+FFFD (crudRead.ts).
+        ...(init.body === undefined ? {} : { method: 'POST' as const, body: wellFormed(init.body) }),
         ...(init.timeoutMs === undefined ? {} : { timeoutMs: init.timeoutMs }),
       })
     } catch (error) {
