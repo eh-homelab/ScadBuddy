@@ -339,6 +339,16 @@ describe('OrdersPage views and memory (#6334)', () => {
     expect(JSON.parse(window.localStorage.getItem(ORDERS_MEMORY_KEY) ?? '{}')).toMatchObject({ hideDays: 90 })
   })
 
+  it("lists every order of a profit report row, however long ago it closed", async () => {
+    vi.setSystemTime(new Date('2026-12-15T12:00:00Z'))
+    // `rowLink`'s query: the orders accepted in October, in USD. ORDER_CLOSED closed on
+    // 2026-10-18, past the default 30 days.
+    renderPage(<OrdersPage />, { route: '/orders?accepted_from=2026-10-01T00%3A00%3A00Z&accepted_to=2026-11-01T00%3A00%3A00Z&currency=USD' })
+    expect(await screen.findByTestId(`order-row-${ORDER_CLOSED}`)).toBeInTheDocument()
+    expect(screen.getByTestId(`order-row-${ORDER_ACCEPTED}`)).toBeInTheDocument()
+    expect(screen.queryByTestId('orders-hidden-note')).toBeNull()
+  })
+
   it('opens the remembered view, and forgets it once remembering is off', async () => {
     window.localStorage.setItem(ORDERS_MEMORY_KEY, JSON.stringify({ hideDays: 30, remember: true, query: 'status=ready' }))
     const first = page()

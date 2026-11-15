@@ -122,7 +122,14 @@ export function OrderItemsTable({
     setSelectableWas(selectable)
     if (!selectable) setPicked(new Set())
   }
-  const chosen = selectable ? items.filter((item) => picked.has(item.id)) : []
+  const grouped = groupItems(items)
+  const [openGroups, setOpenGroups] = useState(() => readOrdersMemory().itemGroups)
+  const isOpen = (key: ItemGroupKey) => openGroups[key] ?? key === 'fulfilled'
+  const toggleGroup = (key: ItemGroupKey, open: boolean) => setOpenGroups(storeOrdersMemory({ itemGroups: { ...openGroups, [key]: open } }).itemGroups)
+  // #6334: a selection, and "Select all", take only the lines in view: a bulk action never
+  // reaches a line inside a closed group.
+  const shown = [...grouped.main, ...grouped.groups.filter((group) => isOpen(group.key)).flatMap((group) => group.items)]
+  const chosen = selectable ? shown.filter((item) => picked.has(item.id)) : []
   const pick = (ids: string[], on: boolean) => {
     const next = new Set(picked)
     for (const id of ids) {
@@ -131,21 +138,18 @@ export function OrderItemsTable({
     }
     setPicked(next)
   }
-  const grouped = groupItems(items)
-  const [openGroups, setOpenGroups] = useState(() => readOrdersMemory().itemGroups)
-  const toggleGroup = (key: ItemGroupKey, open: boolean) => setOpenGroups(storeOrdersMemory({ itemGroups: { ...openGroups, [key]: open } }).itemGroups)
   // Under its group's header, a cancelled line no longer says "not counted": the header does.
   const cancelledGrouped = grouped.groups.some((group) => group.key === 'cancelled')
   const columns: Column<OrderItemDetail>[] = []
   if (selectable && items.length > 0) {
-    const all = chosen.length === items.length
+    const all = shown.length > 0 && chosen.length === shown.length
     columns.push({
       key: 'select',
       header: (
         <Checkbox
           aria-label="Select all items"
           checked={all ? true : chosen.length > 0 ? 'indeterminate' : false}
-          onCheckedChange={() => pick(items.map((item) => item.id), !all)}
+          onCheckedChange={() => pick(shown.map((item) => item.id), !all)}
         />
       ),
       className: 'w-8',
@@ -299,7 +303,7 @@ export function OrderItemsTable({
           key: group.key,
           label: <GroupLabel kind={group.key} items={group.items} currency={currency} exponent={exponent} />,
           rows: group.items,
-          open: openGroups[group.key] ?? group.key === 'fulfilled',
+          open: isOpen(group.key),
           onToggle: (open) => toggleGroup(group.key, open),
           rowClassName: group.key === 'cancelled' ? '[&>td]:opacity-60' : '[&>td]:opacity-80',
         }),

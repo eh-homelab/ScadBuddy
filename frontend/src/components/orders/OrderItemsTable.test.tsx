@@ -988,6 +988,19 @@ describe('OrderItemsTable · groups (#6334)', () => {
     expect(screen.queryByTestId('order-item-it-done')).toBeNull()
   })
 
+  it('selects only the lines in view: never one inside a closed group', async () => {
+    addLine('it-hidden', 'cancelled', 'Rainbow')
+    addLine('it-live', 'approved', 'Owl')
+    const { user } = render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    await user.click(screen.getByRole('checkbox', { name: 'Select all items' }))
+    expect(screen.getByTestId('bulk-actions')).toHaveTextContent('2 selected')
+    // Opening the group shows its line unpicked, and Select all is no longer all.
+    await user.click(within(screen.getByTestId('row-group-cancelled')).getByRole('button'))
+    expect(within(row('it-hidden')).getByRole('checkbox', { name: 'Select Rainbow' })).not.toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Select all items' })).toHaveAttribute('aria-checked', 'mixed')
+  })
+
   it('keeps a long title in its own column', async () => {
     addLine('it-long', 'approved', 'Unicorn pencil cup holder – pink multicolour')
     render(ORDER_ACCEPTED)

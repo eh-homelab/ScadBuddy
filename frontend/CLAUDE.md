@@ -160,7 +160,8 @@ same way, `vite.config.ts`).
   `ORDER_VIEWS`, each a fixed set of URL filters; the active one is the one the URL holds)
   and its closed-order rule: a closed or cancelled order that ended more than N days ago is
   left out by the API's `ended_since` (`endedSince`, local midnight, so the list's key moves
-  once a day) unless `old=1`. N, "Remember my view" and the last view's query (never the
+  once a day) unless `old=1` or the query is a profit report row's (`isReportFiltered`: a
+  row's orders are mostly closed long ago, and its link lists them all). N, "Remember my view" and the last view's query (never the
   search or a profit report row's filters) live in `localStorage` (`ORDERS_MEMORY_KEY`); a
   visit to `/orders` with no query opens the remembered one. An order's items table puts
   the live lines first and the fulfilled and cancelled ones in groups after them

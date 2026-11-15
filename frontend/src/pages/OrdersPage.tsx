@@ -132,7 +132,7 @@ function OrderViews({ query, hideDays, onChange, onHideDays }: { query: OrdersQu
       </nav>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-muted-foreground" data-testid="order-view-rule">
         <span>{active ? active.rule : 'Your own filters.'}</span>
-        {query.old ? (
+        {isReportFiltered(query) ? null : query.old ? (
           <span className="flex items-center gap-1">
             Showing closed and cancelled orders of any age.
             <Button variant="link" size="sm" className="h-auto p-0 text-[12px]" onClick={() => onChange({ ...query, old: false })}>
@@ -179,7 +179,9 @@ export function OrdersPage() {
     if (params.size === 0) setParams(new URLSearchParams(restore), { replace: true })
   }, [restore, params, setParams])
   const urlQuery = parseOrdersQuery(shown)
-  const query: OrdersQuery = { ...urlQuery, ended_since: urlQuery.old ? '' : endedSince(memory.hideDays) }
+  // A profit report row's orders are its accepted ones over a period, mostly closed long
+  // ago: its link lists them all, so the N-day rule does not apply to it.
+  const query: OrdersQuery = { ...urlQuery, ended_since: urlQuery.old || isReportFiltered(urlQuery) ? '' : endedSince(memory.hideDays) }
   const key = `${toOrdersParams(query).toString()}#${query.ended_since}`
   const keep = memory.remember ? remembered(query) : null
   useEffect(() => {

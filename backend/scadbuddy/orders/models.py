@@ -441,7 +441,7 @@ class OrderFilter(BaseModel):
     #: Only orders with a source whose import is stuck (`IMPORT_STUCK`).
     import_stuck: bool = False
     #: A closed or cancelled order is left out when it ended (``closed_at``, else
-    #: ``cancelled_at``) before this; an open order is always kept (#6334).
+    #: ``cancelled_at``, else ``updated_at``) before this; an open order is always kept (#6334).
     ended_since: datetime | None = None
     #: Only orders the customer owes money on: an `open`, `pending` or `failed` payment
     #: request (#6334, the list's "Awaiting payment").

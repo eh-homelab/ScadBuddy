@@ -264,7 +264,8 @@ def test_order_list_pages_newest_first_by_cursor(rows: OrderStore) -> None:
 
 def test_order_list_hides_orders_ended_before_ended_since(rows: OrderStore, pool: PgPool) -> None:
     """#6334: `ended_since` leaves out a closed or cancelled order that ended before it,
-    timed by `closed_at`, else `cancelled_at`; an open order of any age stays."""
+    timed by `closed_at`, else `cancelled_at`, else `updated_at`; an open order of any age
+    stays."""
     customer = rows.insert_customer(
         display_name="Ada", company=None, notes="", tags=[], contacts=[], addresses=[]
     )

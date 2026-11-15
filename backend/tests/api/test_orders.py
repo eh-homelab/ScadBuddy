@@ -160,6 +160,9 @@ def test_the_list_hides_long_ended_orders_and_lists_the_owing(
     owing = client.get("/api/v1/orders", params={"owing": "true"}).json()["items"]
     assert [o["id"] for o in owing] == [owes["id"]]
     assert client.get("/api/v1/orders", params={"ended_since": "soon"}).status_code == 422
+    # A bound with no offset would be read in the session's time zone: refused.
+    naive = client.get("/api/v1/orders", params={"ended_since": "2026-02-01T00:00:00"})
+    assert naive.status_code == 422
 
 
 def test_patch_edits_notes_due_addresses_and_charges(client: TestClient) -> None:
