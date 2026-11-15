@@ -367,6 +367,13 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   live answers `live_check` and writes nothing, and the agent asks again naming the run it found
   running. Tests `tests/crud/test_crud_agent_gate.py`, `test_gate_vectors.py`; the agent's
   `test/gateBackend.pg.test.ts` checks the port writes what the agent's SQL writes.
+  `api/crud_agent_pending.py` (area `pending-input`) over `agent_data/pending_input.py` is the
+  rest of the gate's SQL statement for statement: the agent's `gate/projection.ts` reads, the
+  orphan sweep (`gate/sweep.ts`; each cancel one transaction with its events, the session's
+  `idle` and an approval's audit row), a durable turn's response read and its parked call's span
+  mark (only while the turn's `turn_attempt` and `durable_turn_id` hold the session, checked `FOR
+  SHARE` in the mark's transaction), and a call's recorded approval (`PgApprovalRecords`). Tests
+  `tests/crud/test_crud_agent_pending.py`.
 - `backend/scadbuddy/flow_triggers/` — runs started on a schedule or an event (#2484,
   spec 2026-10-11 §12): `store.py` (`flow_triggers`, their standing grants and fires),
   `fire.py` (the `flow_trigger_fire` activity on the `library` queue), `events.py` (the
