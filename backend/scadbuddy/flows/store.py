@@ -627,26 +627,27 @@ class FlowStore:
         return Grant.model_validate(row) if row else None
 
     def _requested_grants(self, limit: int) -> list[tuple[Grant, Run]]:
+        # The grants first, bounded by `limit`, then only their runs: `_RUN`'s columns are
+        # unqualified, so the runs are not joined into the same SELECT.
         with self._pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT {_GRANT} FROM flow_grants WHERE status = 'requested'"
+                " AND revoked_at IS NULL AND EXISTS (SELECT 1 FROM workflow_runs r"
+                " WHERE r.id = flow_grants.run_id AND NOT (r.status = ANY(%s)))"
+                " ORDER BY created_at, id LIMIT %s",
+                (sorted(TERMINAL), limit),
+            ).fetchall()
+            grants = [Grant.model_validate(row) for row in rows]
+            if not grants:
+                return []
             runs = {
                 row["id"]: Run.model_validate(row)
                 for row in conn.execute(
-                    f"SELECT {_RUN} FROM workflow_runs WHERE NOT (status = ANY(%s)) AND id IN"
-                    " (SELECT run_id FROM flow_grants"
-                    " WHERE status = 'requested' AND revoked_at IS NULL)",
-                    (sorted(TERMINAL),),
+                    f"SELECT {_RUN} FROM workflow_runs WHERE id = ANY(%s)",
+                    ([g.run_id for g in grants],),
                 ).fetchall()
             }
-            if not runs:
-                return []
-            rows = conn.execute(
-                f"SELECT {_GRANT} FROM flow_grants WHERE status = 'requested'"
-                " AND revoked_at IS NULL AND run_id = ANY(%s)"
-                " ORDER BY created_at, id LIMIT %s",
-                (list(runs), limit),
-            ).fetchall()
-        grants = [Grant.model_validate(row) for row in rows]
-        return [(grant, runs[grant.run_id]) for grant in grants]
+        return [(grant, runs[grant.run_id]) for grant in grants if grant.run_id in runs]
 
     def _locked_grant(self, conn: Connection[DictRow], run_id: str) -> Grant | None:
         row = conn.execute(

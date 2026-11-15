@@ -43,6 +43,7 @@ import {
   needsYouNotices,
   useGrantRequests,
   useNeedsYouToasts,
+  type NeedsYouSource,
   type NeedsYou,
 } from '../lib/needsYou'
 import { useAttentionNotifications } from '../agent/attentionNotifications'
@@ -207,17 +208,24 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   const [pairings, setPairings] = useState<readonly PairingEntry[]>(NO_PAIRINGS)
   const { grants, refresh: refreshGrants } = useGrantRequests()
   const waitingEntries = attention.counts?.waiting ?? NO_WAITING
-  // Known once each read that applies has answered: a reload must not announce what already waited.
-  const needsKnown = grants !== null && (!shown || attention.counts !== null)
+  // Built from whichever reads have answered, so a failing one hides none of the others; null
+  // until one has (unknown is not "nothing waits"). The toasts skip what waited at a source's
+  // first answer: a reload must not announce it again.
+  const agentKnown = !shown || attention.counts !== null
+  const grantsKnown = grants !== null
+  const needsSources = useMemo(
+    () => new Set<NeedsYouSource>(['pairings', ...(agentKnown ? (['agent'] as const) : []), ...(grantsKnown ? (['grants'] as const) : [])]),
+    [agentKnown, grantsKnown],
+  )
   const needsItems = useMemo(
-    () => (needsKnown ? needsYouItems(waitingEntries, grants, pairings) : null),
-    [needsKnown, waitingEntries, grants, pairings],
+    () => (agentKnown || grantsKnown ? needsYouItems(waitingEntries, grants, pairings) : null),
+    [agentKnown, grantsKnown, waitingEntries, grants, pairings],
   )
   const refreshNeeds = useCallback(() => {
     refreshAttention()
     refreshGrants()
   }, [refreshAttention, refreshGrants])
-  useNeedsYouToasts(needsItems)
+  useNeedsYouToasts(needsItems, needsSources)
   const mainElement = useRef<HTMLElement>(null)
   useAttentionTitle(needsItems === null ? attention.waiting : needsItems.length, !embedded, usePageTitle(mainElement))
   const [focusKey, setFocusKey] = useState(0)
@@ -255,11 +263,14 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   const openHandled = useCallback(() => setOpenRequest(null), [])
   // #815 — an OS notification for a pending request that opens while this page is hidden;
   // a click opens its session. Not when embedded: a cross-origin frame cannot ask for the permission.
-  const agentNotices = attention.counts?.notices ?? NO_NOTICES
-  const notices = useMemo(
-    () => (needsItems === null ? null : [...agentNotices, ...needsYouNotices(needsItems)]),
-    [agentNotices, needsItems],
+  // #6399 — one set per source, each known once its own read answered, so what waited at a
+  // source's first answer is never announced and a failing read holds up none of the others.
+  const agentNotices = agentKnown ? (attention.counts?.notices ?? NO_NOTICES) : null
+  const grantNotices = useMemo(
+    () => (grantsKnown ? needsYouNotices(needsYouItems(NO_WAITING, grants, NO_PAIRINGS)) : null),
+    [grantsKnown, grants],
   )
+  const pairingNotices = useMemo(() => needsYouNotices(needsYouItems(NO_WAITING, null, pairings)), [pairings])
   const navigate = useNavigate()
   const openNotice = useCallback(
     (sessionId: string | null, href?: string) => {
@@ -270,7 +281,9 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
     },
     [openPanel, navigate],
   )
-  useAttentionNotifications(notices, !embedded, openNotice)
+  useAttentionNotifications(agentNotices, !embedded, openNotice)
+  useAttentionNotifications(grantNotices, !embedded, openNotice)
+  useAttentionNotifications(pairingNotices, !embedded, openNotice)
   // #815 — and with every tab closed, through Web Push; its click opens the session here.
   useWebPush(shown && !embedded, openNotice)
   const opener = useMemo<AssistantOpener | null>(

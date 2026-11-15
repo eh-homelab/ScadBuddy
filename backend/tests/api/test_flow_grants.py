@@ -405,7 +405,13 @@ def test_the_grant_requests_list_a_requested_grant_until_it_is_decided(
     # The agent's Web Push reads the same request by its grant's id (#6399).
     waiting = "/api/v1/internal/crud/agent/push/waiting"
     assert client.get(waiting, headers=token(client)).json() == {
-        "requests": [{"id": f"run-grant:{request['grant']['id']}", "reason": "grant"}]
+        "requests": [
+            {
+                "id": f"run-grant:{request['grant']['id']}",
+                "reason": "grant",
+                "since": request["grant"]["created_at"],
+            }
+        ]
     }
     # Read as any flow read is: an agent sees the same list, and still cannot decide.
     assert client.get("/api/v1/flow-grant-requests", headers=AGENT).json()["runs"] == body["runs"]

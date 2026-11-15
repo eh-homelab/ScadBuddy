@@ -235,10 +235,10 @@ class TriggerStore:
         (`requested`, not revoked), the oldest request first, at most `limit`."""
         return await self._call(self._requested_grant_triggers, limit)
 
-    async def requested_grant_ids(self, limit: int) -> list[str]:
+    async def requested_grant_ids(self, limit: int) -> list[tuple[str, datetime]]:
         """#6399: the ids of the standing grants that wait for a person's decision
-        (`requested`, not revoked), the oldest first, at most `limit`: what Web Push tells
-        a closed tab of."""
+        (`requested`, not revoked) and when each was asked for, the oldest first, at most
+        `limit`: what Web Push tells a closed tab of."""
         return await self._call(self._requested_grant_ids, limit)
 
     async def current_grant(self, trigger_id: str) -> StandingGrant | None:
@@ -628,14 +628,14 @@ class TriggerStore:
             ).fetchall()
         return [Trigger.model_validate(row) for row in rows]
 
-    def _requested_grant_ids(self, limit: int) -> list[str]:
+    def _requested_grant_ids(self, limit: int) -> list[tuple[str, datetime]]:
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT id FROM flow_trigger_grants WHERE status = 'requested'"
+                "SELECT id, created_at FROM flow_trigger_grants WHERE status = 'requested'"
                 " AND revoked_at IS NULL ORDER BY created_at, id LIMIT %s",
                 (limit,),
             ).fetchall()
-        return [str(row["id"]) for row in rows]
+        return [(str(row["id"]), row["created_at"]) for row in rows]
 
     def _current_grant(self, trigger_id: str) -> StandingGrant | None:
         with self._pool.connection() as conn:

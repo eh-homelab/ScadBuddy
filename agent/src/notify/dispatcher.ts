@@ -27,14 +27,24 @@ import { encryptPayload, vapidAuthorization } from './webPush.js'
 // #6399: the requests outside the agent's pending input that wait on a person (a flow run's
 // grant, a trigger's standing grant, an agent's pairing request) are pushed the same way, to
 // a person's subscriptions (`PERSON_KINDS`) and to the channels. Nothing in this process
-// hears them change, so a pass also runs every WAITING_POLL_MS. Their notice ids are the
-// page's own (frontend `lib/needsYou.ts`), so the page's notification and the push share a tag.
+// hears them change, so a pass also runs every WAITING_POLL_MS, reading only them. Their notice
+// ids are the page's own (frontend `lib/needsYou.ts`), so the page's notification and the push
+// share a tag. Such a request has no ceiling (a standing grant waits until a person decides it),
+// but a claim is kept SENT_KEEP_DAYS only: so one is pushed only while it is younger than
+// WAITING_PUSH_WINDOW_MS, which is shorter. A claim made in that window outlives it, and once
+// the claim is swept the request is too old to be claimed again: one push per target, ever.
 
 /**
  * A request waiting on the user, as a push announces it. `reason` is an attention request's
  * own, `question` for a plain question, or `approval` for a parked call's decision.
  */
-export type AttentionNotice = { id: string; sessionId: string | null; reason: string }
+export type AttentionNotice = {
+  id: string
+  sessionId: string | null
+  reason: string
+  /** #6399: when a grant or pairing request started to wait (ms since the epoch); past WAITING_PUSH_WINDOW_MS it is not pushed. */
+  since?: number
+}
 
 /**
  * Every request in a pending-input page that waits on the person: approvals, plain questions
@@ -56,6 +66,13 @@ export const PERSON_KINDS: ReadonlySet<Owner['kind']> = new Set(['browser', 'oid
 
 /** How often a pass runs with no pending-input change, so a grant or pairing request is pushed. */
 export const WAITING_POLL_MS = 30_000
+
+/**
+ * How long after it started a grant or pairing request may be pushed: shorter than the claims'
+ * SENT_KEEP_DAYS (pushStore.ts, backend `crud_agent_notify.py`), so a swept claim is never
+ * claimed again.
+ */
+export const WAITING_PUSH_WINDOW_MS = 24 * 60 * 60_000
 
 /** The reasons whose request is answered on the Activity page's "Needs you", not in a session. */
 const NEEDS_YOU_REASONS: ReadonlySet<string> = new Set(['grant', 'pairing'])
@@ -96,34 +113,39 @@ export type NotificationDispatcherDeps = {
 
 type Vapid = Awaited<ReturnType<PushRepo['vapidKeys']>>
 
+/** What a pass reads: everything, or (a timer's wake) only the grant and pairing requests. */
+export type PassScope = 'all' | 'waiting'
+
 export class NotificationDispatcher {
   readonly #deps: NotificationDispatcherDeps
   #running: Promise<void> | undefined
-  #again = false
+  #again: PassScope | undefined
 
   constructor(deps: NotificationDispatcherDeps) {
     this.#deps = deps
   }
 
-  /** A pass now, or one more after the pass under way; never two at once in this process. */
-  wake(): void {
+  /**
+   * A pass now, or one more after the pass under way; never two at once in this process.
+   * `waiting` reads only the grant and pairing requests (the timer's wake): nothing else changed.
+   */
+  wake(scope: PassScope = 'all'): void {
     if (this.#running) {
-      this.#again = true
+      this.#again = this.#again === 'all' || scope === 'all' ? 'all' : 'waiting'
       return
     }
-    this.#running = this.pass()
+    this.#running = this.pass(scope)
       .catch((err: unknown) => this.#log(`web push: a pass failed (${(err as Error).message})`))
       .finally(() => {
         this.#running = undefined
-        if (this.#again) {
-          this.#again = false
-          this.wake()
-        }
+        const again = this.#again
+        this.#again = undefined
+        if (again) this.wake(again)
       })
   }
 
   /** Sends what has not been sent yet to every subscription and every enabled channel. */
-  async pass(): Promise<void> {
+  async pass(scope: PassScope = 'all'): Promise<void> {
     // With no KEK in this process, the records are reachable only once the API serves them (#5299 step 5).
     const subscriptions = this.#deps.store.available?.() === false ? [] : await this.#deps.store.subscriptions()
     const channelStore = this.#deps.channels?.available() === false ? undefined : this.#deps.channels
@@ -143,7 +165,8 @@ export class NotificationDispatcher {
     let hosts: readonly string[] | undefined
     let vapid: Promise<Vapid> | undefined
     for (const { owner, subs } of byOwner.values()) {
-      const notices = [...(await this.#deps.notices(owner)), ...(PERSON_KINDS.has(owner.kind) ? waiting : [])]
+      const own = scope === 'all' ? await this.#deps.notices(owner) : []
+      const notices = [...own, ...(PERSON_KINDS.has(owner.kind) ? waiting : [])]
       for (const notice of notices) {
         for (const sub of subs) {
           jobs.push({
@@ -160,7 +183,8 @@ export class NotificationDispatcher {
     }
     // Channels are the deployment's, set in Settings by the browser user: told what that user sees.
     if (channels.length > 0) {
-      for (const notice of [...(await this.#deps.notices(BROWSER_USER)), ...waiting]) {
+      const own = scope === 'all' ? await this.#deps.notices(BROWSER_USER) : []
+      for (const notice of [...own, ...waiting]) {
         for (const channel of channels) {
           jobs.push({ notice, target: `channel:${channel.id}`, run: () => this.#tell(channel, notice, deadline) })
         }
@@ -179,11 +203,15 @@ export class NotificationDispatcher {
     if (next < jobs.length) this.#log('notifications: a pass reached its deadline; the rest go on the next pass')
   }
 
-  /** The grants and pairing requests now; none when the read fails, so the agent's own still go. */
+  /**
+   * The grants and pairing requests now that are young enough to push (WAITING_PUSH_WINDOW_MS);
+   * none when the read fails, so the agent's own still go.
+   */
   async #waiting(): Promise<AttentionNotice[]> {
     if (!this.#deps.waiting) return []
     try {
-      return await this.#deps.waiting()
+      const oldest = Date.now() - WAITING_PUSH_WINDOW_MS
+      return (await this.#deps.waiting()).filter((n) => n.since !== undefined && n.since >= oldest)
     } catch (err) {
       this.#log(`notifications: the flow grants and pairing requests could not be read (${(err as Error).message})`)
       return []

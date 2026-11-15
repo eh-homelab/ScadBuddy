@@ -1312,7 +1312,7 @@ if (pushDispatcher && database) {
   pendingChanges?.subscribe(() => pushDispatcher.wake())
   void database.untilReady().then(() => pushDispatcher.wake())
   // Nothing here hears a flow grant or a pairing request change (#6399): a pass now and then.
-  setInterval(() => pushDispatcher.wake(), WAITING_POLL_MS).unref()
+  setInterval(() => pushDispatcher.wake('waiting'), WAITING_POLL_MS).unref()
 }
 
 const app = !role.http

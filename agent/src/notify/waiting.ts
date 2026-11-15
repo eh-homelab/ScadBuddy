@@ -1,5 +1,5 @@
 import { type CrudTarget, crudOf } from '../api/crudStores.js'
-import type { PairingStore } from '../bridge/pairings.js'
+import { type PairingStore, REQUEST_TTL_MS } from '../bridge/pairings.js'
 import type { AttentionNotice } from './dispatcher.js'
 
 // #6399: the requests that wait on a person outside the agent's pending input, for Web Push
@@ -14,14 +14,16 @@ export function crudGrantRequests(target: CrudTarget, available: () => boolean =
   const call = crudOf(target)
   return async () => {
     if (!available()) return []
-    const { requests } = await call<{ requests: { id: string; reason: string }[] }>('the flow grants waiting', '/push/waiting')
-    return requests.map((r) => ({ id: r.id, sessionId: null, reason: r.reason }))
+    const { requests } = await call<{ requests: { id: string; reason: string; since: string }[] }>('the flow grants waiting', '/push/waiting')
+    return requests.map((r) => ({ id: r.id, sessionId: null, reason: r.reason, since: Date.parse(r.since) }))
   }
 }
 
 /** The pairing requests waiting for a person to type their code. */
 export function pairingRequests(store: Pick<PairingStore, 'pending'>): () => Promise<AttentionNotice[]> {
-  return async () => (await store.pending()).map((p) => ({ id: `pairing:${p.id}`, sessionId: null, reason: 'pairing' }))
+  // A request started REQUEST_TTL_MS before it expires.
+  return async () =>
+    (await store.pending()).map((p) => ({ id: `pairing:${p.id}`, sessionId: null, reason: 'pairing', since: p.expiresAt.getTime() - REQUEST_TTL_MS }))
 }
 
 /** Every source's requests; a source that fails is left out, and the rest still go. */

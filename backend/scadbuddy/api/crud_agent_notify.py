@@ -364,6 +364,9 @@ class WaitingRequest(BaseModel):
 
     id: str
     reason: Literal["grant"]
+    #: When it started to wait: the agent pushes it only while it is young, so a swept claim
+    #: (``SENT_KEEP_DAYS``) is never claimed again.
+    since: datetime
 
 
 class WaitingRequests(BaseModel):
@@ -378,8 +381,14 @@ async def push_waiting(triggers: TriggersDep) -> WaitingRequests:
     runs = await triggers.flows.store.requested_grants(GRANT_REQUESTS_MAX)
     standing = await triggers.store.requested_grant_ids(GRANT_REQUESTS_MAX)
     return WaitingRequests(
-        requests=[WaitingRequest(id=f"run-grant:{grant.id}", reason="grant") for grant, _ in runs]
-        + [WaitingRequest(id=f"trigger-grant:{gid}", reason="grant") for gid in standing]
+        requests=[
+            WaitingRequest(id=f"run-grant:{grant.id}", reason="grant", since=grant.created_at)
+            for grant, _ in runs
+        ]
+        + [
+            WaitingRequest(id=f"trigger-grant:{gid}", reason="grant", since=created)
+            for gid, created in standing
+        ]
     )
 
 

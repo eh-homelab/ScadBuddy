@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { type AttentionNotice, attentionMessage, NotificationDispatcher, noticeTitle } from '../src/notify/dispatcher.js'
-import type { PushRepo, PushSubscriptionRow } from '../src/notify/pushStore.js'
+import { REQUEST_TTL_MS } from '../src/bridge/pairings.js'
+import { type AttentionNotice, attentionMessage, NotificationDispatcher, noticeTitle, WAITING_PUSH_WINDOW_MS } from '../src/notify/dispatcher.js'
+import { type PushRepo, type PushSubscriptionRow, SENT_KEEP_DAYS } from '../src/notify/pushStore.js'
 import { crudGrantRequests, pairingRequests, waitingNotices } from '../src/notify/waiting.js'
 import type { Owner } from '../src/sessions/protocol.js'
 
@@ -27,10 +28,19 @@ function recordingStore(subs: PushSubscriptionRow[]) {
   return { store, claims }
 }
 
-const dispatcher = (store: PushRepo, own: AttentionNotice[], waiting: () => Promise<AttentionNotice[]>, log: (m: string) => void = () => {}) =>
+const dispatcher = (
+  store: PushRepo,
+  own: AttentionNotice[],
+  waiting: () => Promise<AttentionNotice[]>,
+  log: (m: string) => void = () => {},
+  ownReads: Owner[] = [],
+) =>
   new NotificationDispatcher({
     store,
-    notices: () => Promise.resolve(own),
+    notices: (o) => {
+      ownReads.push(o)
+      return Promise.resolve(own)
+    },
     waiting,
     subject: 'https://scadbuddy.example',
     hosts: () => Promise.resolve([]),
@@ -40,10 +50,32 @@ const dispatcher = (store: PushRepo, own: AttentionNotice[], waiting: () => Prom
 describe('waiting requests by Web Push (#6399)', () => {
   it("pushes a grant and a pairing request to a person's subscriptions, never to an agent's", async () => {
     const { store, claims } = recordingStore([sub('b1', owner('browser', 'browser')), sub('o1', owner('oidc', 'ann')), sub('t1', owner('bearer', 'token:p1'))])
-    const grant: AttentionNotice = { id: 'run-grant:g1', sessionId: null, reason: 'grant' }
-    const pairing: AttentionNotice = { id: 'pairing:p1', sessionId: null, reason: 'pairing' }
+    const grant: AttentionNotice = { id: 'run-grant:g1', sessionId: null, reason: 'grant', since: Date.now() - 60_000 }
+    const pairing: AttentionNotice = { id: 'pairing:p1', sessionId: null, reason: 'pairing', since: Date.now() }
     await dispatcher(store, [], () => Promise.resolve([grant, pairing])).pass()
     expect(claims.sort()).toEqual(['pairing:p1 -> push:b1', 'pairing:p1 -> push:o1', 'run-grant:g1 -> push:b1', 'run-grant:g1 -> push:o1'])
+  })
+
+  it('never pushes a grant again once its claim is swept: a request past the push window is not pushed', async () => {
+    // A claim is kept SENT_KEEP_DAYS (2): a grant still waiting 3 days on must not be claimed again.
+    const { store, claims } = recordingStore([sub('b1', owner('browser', 'browser'))])
+    const day = 24 * 60 * 60_000
+    const old: AttentionNotice = { id: 'trigger-grant:g3', sessionId: null, reason: 'grant', since: Date.now() - 3 * day }
+    const fresh: AttentionNotice = { id: 'run-grant:g4', sessionId: null, reason: 'grant', since: Date.now() - 1000 }
+    const unknown: AttentionNotice = { id: 'run-grant:g5', sessionId: null, reason: 'grant' }
+    await dispatcher(store, [], () => Promise.resolve([old, fresh, unknown])).pass()
+    expect(claims).toEqual(['run-grant:g4 -> push:b1'])
+    expect(WAITING_PUSH_WINDOW_MS).toBeLessThan(SENT_KEEP_DAYS * day)
+  })
+
+  it("reads only the grants and pairing requests on the timer's wake, not every owner's pending input", async () => {
+    const { store, claims } = recordingStore([sub('b1', owner('browser', 'browser'))])
+    const reads: Owner[] = []
+    const own: AttentionNotice = { id: 'approval:a1', sessionId: 's', reason: 'approval' }
+    const grant: AttentionNotice = { id: 'run-grant:g6', sessionId: null, reason: 'grant', since: Date.now() }
+    await dispatcher(store, [own], () => Promise.resolve([grant]), () => {}, reads).pass('waiting')
+    expect(reads).toEqual([])
+    expect(claims).toEqual(['run-grant:g6 -> push:b1'])
   })
 
   it("still pushes the agent's own requests when the grants cannot be read", async () => {
@@ -59,16 +91,17 @@ describe('waiting requests by Web Push (#6399)', () => {
     const seen: string[] = []
     const fetch = (input: string | URL | Request) => {
       seen.push(String(input))
-      const body = JSON.stringify({ requests: [{ id: 'trigger-grant:g2', reason: 'grant' }] })
+      const body = JSON.stringify({ requests: [{ id: 'trigger-grant:g2', reason: 'grant', since: '2026-11-15T10:00:00Z' }] })
       return Promise.resolve(new Response(body, { status: 200, headers: { 'content-type': 'application/json', 'x-scadbuddy-crud': '1' } }))
     }
+    const expiresAt = new Date('2026-11-15T10:05:00Z')
     const read = waitingNotices([
       crudGrantRequests({ baseUrl: 'http://api.test', fetch: fetch as typeof globalThis.fetch }),
-      pairingRequests({ pending: () => Promise.resolve([{ id: 'p9', label: 'Claude Desktop', expiresAt: new Date() }]) }),
+      pairingRequests({ pending: () => Promise.resolve([{ id: 'p9', label: 'Claude Desktop', expiresAt }]) }),
     ])
     expect(await read()).toEqual([
-      { id: 'trigger-grant:g2', sessionId: null, reason: 'grant' },
-      { id: 'pairing:p9', sessionId: null, reason: 'pairing' },
+      { id: 'trigger-grant:g2', sessionId: null, reason: 'grant', since: Date.parse('2026-11-15T10:00:00Z') },
+      { id: 'pairing:p9', sessionId: null, reason: 'pairing', since: expiresAt.getTime() - REQUEST_TTL_MS },
     ])
     expect(seen).toEqual(['http://api.test/api/v1/internal/crud/agent/push/waiting'])
   })

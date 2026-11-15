@@ -314,7 +314,13 @@ def test_the_grant_requests_list_a_requested_standing_grant_until_it_is_decided(
     waiting = f"{CRUD_AGENT}/push/waiting"
     assert client.get(waiting).status_code in (401, 403)
     assert client.get(waiting, headers=token(client)).json() == {
-        "requests": [{"id": f"trigger-grant:{listed['grant']['id']}", "reason": "grant"}]
+        "requests": [
+            {
+                "id": f"trigger-grant:{listed['grant']['id']}",
+                "reason": "grant",
+                "since": listed["grant"]["created_at"],
+            }
+        ]
     }
     assert approve(client, asked["id"]).status_code == 200
     assert client.get("/api/v1/flow-grant-requests").json()["triggers"] == []

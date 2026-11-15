@@ -118,14 +118,22 @@ function toastDetail(item: NeedsYouItem): string {
 /** How long a "Needs you" toast stays; the bell keeps the request after it goes. */
 export const NEEDS_YOU_TOAST_MS = 30_000
 
+/** Where an item is read from; each answers on its own, so the list is built from those that have. */
+export type NeedsYouSource = 'agent' | 'grants' | 'pairings'
+
+export const sourceOf = (item: NeedsYouItem): NeedsYouSource =>
+  item.kind === 'agent' ? 'agent' : item.kind === 'pairing' ? 'pairings' : 'grants'
+
 /**
  * #6399 — a toast for each request that starts to wait while this page is open, of every kind
  * but an MCP client's prepared action (`pendingApprovals.ts` `useApprovalToasts` toasts those, with
- * Deny): what was waiting at the first read is the bell's to show, not announced again. "Review"
- * opens Activity's "Needs you"; the toast goes once its request no longer waits.
+ * Deny): what was waiting at a source's first answer is the bell's to show, not announced again,
+ * so an item is toasted only when its source (`known`) had answered before. "Review" opens
+ * Activity's "Needs you"; the toast goes once its request no longer waits.
  */
-export function useNeedsYouToasts(items: readonly NeedsYouItem[] | null): void {
-  const seen = useRef<Set<string> | null>(null)
+export function useNeedsYouToasts(items: readonly NeedsYouItem[] | null, known: ReadonlySet<NeedsYouSource>): void {
+  const seen = useRef(new Set<string>())
+  const knew = useRef<ReadonlySet<NeedsYouSource>>(new Set())
   const shown = useRef(new Map<string, number>())
   useEffect(() => {
     if (items === null) return
@@ -136,10 +144,11 @@ export function useNeedsYouToasts(items: readonly NeedsYouItem[] | null): void {
       shown.current.delete(key)
     }
     const before = seen.current
+    const answered = knew.current
     seen.current = keys
-    if (before === null) return
+    knew.current = known
     for (const item of items) {
-      if (before.has(item.key)) continue
+      if (before.has(item.key) || !answered.has(sourceOf(item))) continue
       if (item.kind === 'agent' && item.entry.kind === 'approval' && !item.entry.sessionId && !item.entry.run) continue
       const detail = toastDetail(item)
       shown.current.set(
@@ -152,7 +161,7 @@ export function useNeedsYouToasts(items: readonly NeedsYouItem[] | null): void {
         }),
       )
     }
-  }, [items])
+  }, [items, known])
   useEffect(() => {
     const live = shown.current
     return () => {
