@@ -38,7 +38,7 @@ from fastapi import Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from scadbuddy.agent_data import gate
-from scadbuddy.agent_data.gate_validate import RESPONSE_MAX, RespondRefused
+from scadbuddy.agent_data.gate_validate import RESPONSE_MAX, RespondRefused, response_bytes
 from scadbuddy.api.deps import StateDep
 from scadbuddy.crud.guard import crud_router
 from scadbuddy.flows.agent_reads import Pool
@@ -58,7 +58,9 @@ NAME_MAX = 1024
 TEXT_MAX = 64 * 1024
 #: The largest JSON of a question card, an attention request or an entry's record.
 CARD_JSON_MAX = 1024 * 1024
-#: The largest JSON of a response: the validator's cap, twice over for its escapes.
+#: The largest response, in UTF-8 bytes as the validator counts them (``response_bytes``):
+#: twice its cap, so one past the cap reaches the validator and is refused ``too_large``, as
+#: on the SQL path, and never a 422.
 RESPONSE_JSON_MAX = 2 * RESPONSE_MAX
 
 RequestId = Annotated[str, Field(min_length=1, max_length=REQUEST_ID_MAX)]
@@ -78,6 +80,12 @@ async def _in_conn[T](state: Any, fn: Callable[[Any], T]) -> T:
             return fn(conn)
 
     return await asyncio.to_thread(run)
+
+
+def _bounded_response(value: Any) -> Any:
+    if value is not None and response_bytes(value) > RESPONSE_JSON_MAX:
+        raise ValueError(f"a response is larger than {RESPONSE_JSON_MAX} bytes")
+    return value
 
 
 def _bounded(value: Any, limit: int, what: str) -> Any:
@@ -265,7 +273,7 @@ class Resolve(_Body):
     @field_validator("response")
     @classmethod
     def _response(cls, value: Any) -> Any:
-        return _bounded(value, RESPONSE_JSON_MAX, "a response")
+        return _bounded_response(value)
 
 
 class Resolved(BaseModel):
@@ -303,11 +311,13 @@ class Decide(_Body):
     role: Literal["browser", "grant", "owner", "parent", "run_grant"]
     check_live: bool = False
     live_run: Name | None = None
+    #: The agent's hash of the response as the person sent it (#3724), as a resolve sends it.
+    response_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     @field_validator("response")
     @classmethod
     def _response(cls, value: Any) -> Any:
-        return _bounded(value, RESPONSE_JSON_MAX, "a response")
+        return _bounded_response(value)
 
 
 class Refused(BaseModel):
@@ -348,6 +358,7 @@ async def decide_input(body: Decide, state: StateDep) -> DecideAnswer:
                 role=body.role,
                 live_run=body.live_run,
                 check_live=body.check_live,
+                digest=body.response_hash,
             )
         except RespondRefused as refusal:
             return DecideAnswer(refused=Refused(code=refusal.code, message=str(refusal)))

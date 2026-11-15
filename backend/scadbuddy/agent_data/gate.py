@@ -680,6 +680,7 @@ def decide_input(
     role: Role,
     live_run: str | None,
     check_live: bool,
+    digest: str | None = None,
 ) -> Decided | LiveCheck | Literal["workflow"]:
     """Decides a request whose row is its record (R5, the agent's ``decideInput``): under the
     row's lock the validator against the row's ``gate``, then the row removed and its
@@ -688,7 +689,8 @@ def decide_input(
     ``workflow`` when its workflow holds the entry (no ``gate``). With ``check_live`` the row's
     run must be ``live_run``, which the agent has just found running: otherwise the answer is
     ``LiveCheck`` and nothing is written, so a response the validator refuses costs no call to
-    Temporal, as before."""
+    Temporal, as before. ``digest`` is the agent's hash of the response as the person sent
+    it, before its strings were made well formed (#3724); without one, the hash of ``response``."""
     logged: list[Logged] = []
     with conn.transaction():
         _lock_session_of(conn, request_id)
@@ -722,7 +724,8 @@ def decide_input(
             outcome = "answered"
             recorded = {"answers": list(valid.answers)}
         conn.execute("DELETE FROM ai_pending_input WHERE request_id = %s", (request_id,))
-        _resolved(conn, logged, row, outcome, responder, recorded, None, response_hash(response))
+        digest = response_hash(response) if digest is None else digest
+        _resolved(conn, logged, row, outcome, responder, recorded, None, digest)
         return Decided(kind=row["kind"], outcome=outcome, logged=logged)
 
 

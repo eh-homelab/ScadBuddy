@@ -23,6 +23,7 @@ import {
   type ToolRun,
   type ToolServices,
 } from '../tools/registry.js'
+import type { ApprovalRoutes } from '../gate/crudPending.js'
 import { durableRequestId, flowRequestId, parseRequestId } from '../gate/ids.js'
 import { type ToolCallArgs, type ToolCallBlock, type ToolCallResult, toolCallActivity } from './toolCall.js'
 import { turnPrincipal } from '../tools/harness.js'
@@ -118,11 +119,17 @@ type Responder = { kind?: unknown; id?: unknown }
 export class PgApprovalRecords implements ApprovalRecords {
   readonly #sql: Sql
   readonly #grants: Pick<FlowRunReads, 'grantInForce'>
+  readonly #routes: { crud: ApprovalRoutes; use: () => boolean } | undefined
 
-  /** `grants`: the backend's `flow_grants`, through its CRUD routes (flows/backendReads.ts, #5299 D7). */
-  constructor(sql: Sql, grants: Pick<FlowRunReads, 'grantInForce'>) {
+  /**
+   * `grants`: the backend's `flow_grants`, through its CRUD routes (flows/backendReads.ts, #5299 D7).
+   * `routes`: the API's `pending-input` routes (gate/crudPending.ts, #5299 step 10), which the
+   * approval's read takes while `use()` holds; SQL otherwise.
+   */
+  constructor(sql: Sql, grants: Pick<FlowRunReads, 'grantInForce'>, routes?: { crud: ApprovalRoutes; use: () => boolean }) {
     this.#sql = sql
     this.#grants = grants
+    this.#routes = routes
   }
 
   async approved(requestId: string, call?: ApprovalBinding): Promise<boolean> {
@@ -137,6 +144,7 @@ export class PgApprovalRecords implements ApprovalRecords {
 
   async byPerson(requestId: string, call?: ApprovalBinding): Promise<boolean> {
     if (call === undefined) return false
+    if (this.#routes?.use()) return (await this.#routes.crud.approval(requestId, call.inputHash))?.kind === 'browser'
     const rows = await this.#sql`
       SELECT 1 FROM ai_input_responses r
       JOIN ai_audit a ON a.request_id = r.request_id AND a.kind = 'approval' AND a.action = 'approved'
@@ -149,7 +157,9 @@ export class PgApprovalRecords implements ApprovalRecords {
   async #approval(requestId: string, call?: ApprovalBinding): Promise<string | null | undefined> {
     // Without the call's hash nothing can be matched, so nothing is approved.
     if (call === undefined) return undefined
-    const [row] = await this.#sql<{ responder: Responder }[]>`
+    const [row] = this.#routes?.use()
+      ? await this.#routes.crud.approval(requestId, call.inputHash).then((responder) => (responder ? [{ responder }] : []))
+      : await this.#sql<{ responder: Responder }[]>`
       SELECT r.responder FROM ai_input_responses r
       JOIN ai_audit a ON a.request_id = r.request_id AND a.kind = 'approval' AND a.action = 'approved'
       WHERE r.request_id = ${requestId} AND r.kind = 'approval' AND r.outcome = 'approved'

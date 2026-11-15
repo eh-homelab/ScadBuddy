@@ -20,6 +20,7 @@ import { type AuditOutcome, type AuditSink, type AuditSurface, SYSTEM_ACTOR } fr
 import { type Span, SpanKind } from '@opentelemetry/api'
 import { linkTo, recordFailure, traceparentOf, tracer } from '../telemetry/trace.js'
 import { type WorkspaceFiles, type WorkspaceRef, withWorkspaceSize } from '../workspace/store.js'
+import type { ApprovalRoutes, NewApprovalRow } from './crudApprovals.js'
 
 // Approvals of outward tool calls (#258, spec §8.2: "Outward tools always need
 // a human approval in the ScadBuddy UI, in every auth mode"). Stored in
@@ -189,6 +190,12 @@ export type ApprovalServiceDeps = {
   audit?: AuditSink
   /** The workspace (#2329): a workspace upload's size is read from it for the card (`withWorkspaceSize`). */
   workspace?: WorkspaceFiles
+  /**
+   * The API's routes, area `approvals` (approvals/crudApprovals.ts, #5299 step 10), used while
+   * `use()` holds: a decision is written there with its events and its audit row in one
+   * transaction. The SQL here otherwise.
+   */
+  routes?: { crud: ApprovalRoutes; use: () => boolean } | undefined
 }
 
 /** The input-hash key, derived from the key-encryption key (HKDF-SHA256, its own label). */
@@ -214,7 +221,8 @@ export type ParkTrace = {
 
 export type GateTrace = { park(toolUseId: string, toolName: string): ParkTrace }
 
-type Row = {
+/** An `ai_approvals` row as COLUMNS reads it (approvals/crudApprovals.ts answers the same). */
+export type ApprovalRow = {
   id: string
   session_id: string | null
   turn_id: string | null
@@ -243,6 +251,7 @@ type Row = {
   decision_traceparent: string | null
   due: boolean
 }
+type Row = ApprovalRow
 
 const COLUMNS = `id, session_id, turn_id, tool_use_id, tool, input_summary, input_hash, tier,
   requested_by_kind, requested_by_id, requested_by_label, requested_tiers, created_at, expires_at, decision,
@@ -412,6 +421,11 @@ export class ApprovalService {
     this.hashKey = deps.hashKey ?? randomBytes(32)
   }
 
+  /** The API's routes while the area is listed; undefined while the SQL serves. */
+  private get crud(): ApprovalRoutes | undefined {
+    return this.deps.routes?.use() ? this.deps.routes.crud : undefined
+  }
+
   /** The input hash a decision binds to (see BINDING). */
   hash(tool: string, input: Record<string, unknown>): string {
     return inputHash(this.hashKey, tool, input)
@@ -427,12 +441,16 @@ export class ApprovalService {
 
   private async row(id: string): Promise<(ApprovalRecord & { due: boolean }) | undefined> {
     if (!isUuid(id)) return undefined
-    const [row] = await this.deps.sql.unsafe<Row[]>(`SELECT ${COLUMNS} FROM ai_approvals WHERE id = $1`, [id])
+    const crud = this.crud
+    const [row] = crud ? [await crud.row(id)].filter((r) => r !== undefined) : await this.deps.sql.unsafe<Row[]>(`SELECT ${COLUMNS} FROM ai_approvals WHERE id = $1`, [id])
     return row ? { ...record(row), due: row.due } : undefined
   }
 
   private async session(id: string): Promise<SessionAccess | undefined> {
-    const [row] = await this.deps.sql<
+    const crud = this.crud
+    const [row] = crud
+      ? [await crud.session(id)].filter((r) => r !== undefined)
+      : await this.deps.sql<
       {
         owner_kind: Owner['kind']
         owner_id: string
@@ -468,6 +486,8 @@ export class ApprovalService {
   async listVisiblePending(principal: Owner): Promise<ApprovalRecord[]> {
     if (principal.kind === 'browser' || (await this.hasGrant(principal))) return this.list(principal, { pending: true })
     await this.expireDue()
+    const crud = this.crud
+    if (crud) return (await crud.visiblePending(principal)).map(record)
     const rows = await this.deps.sql.unsafe<Row[]>(
       `SELECT ${COLUMNS} FROM ai_approvals a
        WHERE a.decision IS NULL AND (
@@ -521,6 +541,8 @@ export class ApprovalService {
       if (!session || !(everything || canSee(principal, session))) {
         throw new ApprovalError('not_found', `no session ${sessionId}`)
       }
+      const crud = this.crud
+      if (crud) return (await crud.list(sessionId, pending === true)).map(record)
       const rows = await this.deps.sql.unsafe<Row[]>(
         `SELECT ${COLUMNS} FROM ai_approvals WHERE session_id = $1 ${pending ? 'AND decision IS NULL' : ''}
          ORDER BY created_at, id LIMIT 500`,
@@ -529,6 +551,8 @@ export class ApprovalService {
       return rows.map(record)
     }
     if (!everything) throw new ApprovalError('invalid', 'name a session to list its approvals')
+    const crud = this.crud
+    if (crud) return (await crud.list(undefined, true)).map(record)
     const rows = await this.deps.sql.unsafe<Row[]>(
       `SELECT ${COLUMNS} FROM ai_approvals WHERE decision IS NULL ORDER BY created_at, id LIMIT 500`,
     )
@@ -536,6 +560,25 @@ export class ApprovalService {
   }
 
   // -- writes ------------------------------------------------------------------
+
+  /** A pending approval's row as the API's routes take it: its summary and hash made here. */
+  private async newRow(request: CreateApproval, summary: string): Promise<NewApprovalRow> {
+    const by = request.requestedBy
+    return {
+      id: randomUUID(),
+      session_id: request.sessionId,
+      turn_id: request.turnId,
+      tool_use_id: request.toolUseId,
+      tool: request.tool,
+      input_summary: summary,
+      input_hash: this.hash(request.tool, request.input),
+      tier: request.tier,
+      requested_by: { kind: by.kind, id: by.id, label: by.label },
+      requested_tiers: request.requestedTiers ? [...request.requestedTiers] : null,
+      expiry_s: await this.expirySeconds(),
+      traceparent: request.traceparent ?? null,
+    }
+  }
 
   /** The INSERT of a pending approval, on `db` (the pool, or a transaction). */
   private async insert(db: Sql | TransactionSql, request: CreateApproval, summary: string): Promise<Row | undefined> {
@@ -582,6 +625,13 @@ export class ApprovalService {
   async create(request: CreateApproval): Promise<ApprovalRecord> {
     const secrets = request.secrets ?? []
     const summary = await this.summary(request)
+    const crud = this.crud
+    if (crud) {
+      // The summary is scrubbed of the turn's secrets already, and the tool and its use id carry none.
+      const made = await crud.create(await this.newRow(request, summary))
+      for (const l of made.logged) this.deps.events.committed(l.session_id, l.events, l.seqs)
+      return record(made.approval)
+    }
     // The row and its `approval.required` commit together: a decision can only
     // see the row once it has committed, so its `approval.resolved` cannot be
     // logged before the event that asked for it.
@@ -625,6 +675,8 @@ export class ApprovalService {
     where: Pick<DecideOptions, 'clientIp' | 'surface'> = {},
   ): Promise<ApprovalRecord | undefined> {
     const ttl = decision === 'approved' ? await this.expirySeconds() : 0
+    const crud = this.crud
+    if (crud) return await this.settleOnApi(crud, id, decision, by, reason, ttl, where)
     // The decision and its `approval.resolved` commit together, so a watcher never sees
     // one without the other.
     let logged: { sessionId: string; events: ServerEvent[]; seqs: number[] } | undefined
@@ -684,6 +736,40 @@ export class ApprovalService {
     } finally {
       traced.span?.end()
     }
+  }
+
+  /**
+   * `settle` on the API: the decision, its span's context, its events and its audit row in one
+   * transaction there. The span is started from the row as read before, so the API writes its
+   * context with the decision; a decision that loses (another won, or it expired) never ends it,
+   * so it is never exported, and a lost race still leaves no span.
+   */
+  private async settleOnApi(
+    crud: ApprovalRoutes,
+    id: string,
+    decision: Decision,
+    by: Owner | undefined,
+    reason: string | null,
+    ttl: number,
+    where: Pick<DecideOptions, 'clientIp' | 'surface'>,
+  ): Promise<ApprovalRecord | undefined> {
+    const before = await crud.row(id)
+    if (!before || before.decision !== null) return undefined
+    const now = new Date().toISOString()
+    const span = decisionSpan({ ...record(before), decision, decidedAt: now }, by)
+    let settled
+    try {
+      settled = await crud.settle({ id, decision, by, reason, expiryS: ttl, traceparent: traceparentOf(span), surface: where.surface, clientIp: where.clientIp })
+    } catch (err) {
+      // Whether it was written is not known: the span says so.
+      recordFailure(span, err)
+      span.end()
+      throw err
+    }
+    if (!settled.approval) return undefined
+    span.end()
+    for (const l of settled.logged) this.deps.events.committed(l.session_id, l.events, l.seqs)
+    return record(settled.approval)
   }
 
   /** One `approval` row in the audit log (#258). */
@@ -803,12 +889,15 @@ export class ApprovalService {
     const failures: unknown[] = []
     let full = false
     for (let taken = 0; taken < pages; taken += 1) {
-      const due = await this.deps.sql.unsafe<{ id: string }[]>(
-        `SELECT id FROM ai_approvals
-         WHERE decision IS NULL AND expires_at <= now() AND NOT (id = ANY($1::uuid[]))
-         ORDER BY expires_at LIMIT $2`,
-        [tried, page],
-      )
+      const crud = this.crud
+      const due = crud
+        ? (await crud.due(tried, page)).map((id) => ({ id }))
+        : await this.deps.sql.unsafe<{ id: string }[]>(
+            `SELECT id FROM ai_approvals
+             WHERE decision IS NULL AND expires_at <= now() AND NOT (id = ANY($1::uuid[]))
+             ORDER BY expires_at LIMIT $2`,
+            [tried, page],
+          )
       for (const { id } of due) {
         tried.push(id)
         try {
@@ -831,6 +920,8 @@ export class ApprovalService {
 
   /** A principal's sessionless approvals still waiting for a decision, oldest first. */
   async listPrepared(by: Owner): Promise<ApprovalRecord[]> {
+    const crud = this.crud
+    if (crud) return (await crud.prepared(by)).map(record)
     const rows = await this.deps.sql.unsafe<Row[]>(
       `SELECT ${COLUMNS} FROM ai_approvals
        WHERE session_id IS NULL AND requested_by_kind = $1 AND requested_by_id = $2
@@ -854,6 +945,8 @@ export class ApprovalService {
   ): Promise<ApprovalRecord | undefined> {
     const summary = await this.summary(request)
     const by = request.requestedBy
+    const crud = this.crud
+    if (crud) return await this.createPreparedOnApi(crud, request, summary, bounds)
     // An eviction is a system cancellation: each evicted row gets its root
     // `agent.approval` span and `decision_traceparent` in this transaction, as
     // settle() gives one. The spans end once the transaction has settled.
@@ -907,6 +1000,50 @@ export class ApprovalService {
     }
   }
 
+  /**
+   * `createPrepared` on the API, under its lock there. An eviction's span is started here before
+   * the call, one for each of the asker's pending rows past its bound as last read, so the API
+   * writes each evicted row's context with its cancellation; the spans the API did not use are
+   * never ended, so never exported.
+   */
+  private async createPreparedOnApi(
+    crud: ApprovalRoutes,
+    request: Omit<CreateApproval, 'sessionId' | 'turnId'>,
+    summary: string,
+    bounds: { perPrincipal: number; total: number; evictReason: string },
+  ): Promise<ApprovalRecord | undefined> {
+    const own = await crud.prepared(request.requestedBy)
+    const spans = Array.from({ length: Math.max(own.length - bounds.perPrincipal + 1, 0) }, () =>
+      tracer().startSpan('agent.approval', { kind: SpanKind.INTERNAL, root: true }),
+    )
+    const traceparents = spans.map((span) => traceparentOf(span)).filter((t): t is string => t !== undefined)
+    let made
+    try {
+      made = await crud.createPrepared(await this.newRow({ ...request, sessionId: null, turnId: null }, summary), bounds, traceparents)
+    } catch (err) {
+      for (const span of spans) {
+        recordFailure(span, err)
+        span.end()
+      }
+      throw err
+    }
+    made.evicted.forEach((row, i) => {
+      const span = spans[i]
+      if (span === undefined) return
+      const evicted = record(row)
+      const waited = evicted.decidedAt ? (Date.parse(evicted.decidedAt) - Date.parse(evicted.createdAt)) / 1000 : 0
+      span.setAttributes({
+        'scadbuddy.approval_id': evicted.id,
+        'scadbuddy.tool': evicted.tool,
+        'scadbuddy.tier': evicted.tier,
+        'scadbuddy.outcome': 'cancelled',
+        'scadbuddy.wait_seconds': Math.max(waited, 0),
+      })
+      span.end()
+    })
+    return made.approval ? record(made.approval) : undefined
+  }
+
   /** Expires this one approval if it is pending and past its time. */
   async expireIfDue(id: string): Promise<void> {
     if ((await this.row(id))?.due) await this.expire(id)
@@ -920,6 +1057,11 @@ export class ApprovalService {
    */
   async consumePrepared(id: string, by: Owner, hash: string): Promise<ApprovalRecord | undefined> {
     if (!isUuid(id)) return undefined
+    const crud = this.crud
+    if (crud) {
+      const used = await crud.consume(id, by, hash)
+      return used ? record(used) : undefined
+    }
     const [row] = await this.deps.sql.unsafe<Row[]>(
       `UPDATE ai_approvals SET consumed_at = now()
        WHERE id = $1 AND session_id IS NULL AND requested_by_kind = $2 AND requested_by_id = $3

@@ -18,6 +18,7 @@ import { NOT_QUEUED, QUEUE_FULL, type QueueAnswer, type QueuedMessage, type Queu
 import { SessionBlobs, type SessionImages, sentImageBlobs } from './blobs.js'
 import { type DescribeSession, durableDescriber, endLostTurn, RUNNING_GRACE_MS, type RunningRow, TURN_STATUSES } from './durableSweep.js'
 import { cancelOrphanedEntries } from '../gate/sweep.js'
+import type { SweepRoutes } from '../gate/crudPending.js'
 import type { AuditSink } from '../audit/log.js'
 import type { EventLog } from './eventLog.js'
 import type { UserImage } from './images.js'
@@ -157,6 +158,8 @@ export type DurableTurnsDeps = {
   liveHosts?: () => Promise<ReadonlySet<string>>
   /** Where a Stop records the approvals it cancels on a session whose workflow is gone (#4018). */
   audit?: AuditSink | undefined
+  /** The API's `pending-input` routes, which a Stop's cancels take while `use()` holds (gate/sweep.ts, #5299 step 10). */
+  pendingRoutes?: { crud: SweepRoutes; use: () => boolean } | undefined
   /** How long send waits for the `send_message` Update to be accepted (default 10 s); past it the outcome is unknown and the claim is kept. */
   sendTimeoutMs?: number
   /** How long `cancel_input` may take (DurableGate, default 10 s). */
@@ -209,6 +212,7 @@ export class DurableTurns {
   readonly #sql: Sql
   readonly #events: EventLog
   readonly #audit: AuditSink | undefined
+  readonly #pendingRoutes: DurableTurnsDeps['pendingRoutes']
   readonly #gate: DurableGate
   readonly #blobs: SessionImages
   readonly #sessionQueue: string
@@ -224,6 +228,7 @@ export class DurableTurns {
     this.#sql = deps.sql
     this.#events = deps.events
     this.#audit = deps.audit
+    this.#pendingRoutes = deps.pendingRoutes
     this.#gate = new DurableGate(deps.client, deps.cancelTimeoutMs ? { cancelTimeoutMs: deps.cancelTimeoutMs } : {})
     this.#blobs = deps.blobs ?? new SessionBlobs(deps.sql)
     this.#sessionQueue = deps.sessionQueue ?? SESSION_QUEUE
@@ -700,7 +705,10 @@ export class DurableTurns {
     const ended = await endLostTurn(this.#sql, this.#events, row, state)
     // A parked turn's entries (#4018): no run will resolve them now, so they are cancelled here
     // rather than left for PendingInputSweep's next look, ten minutes or more away.
-    const cancelled = await cancelOrphanedEntries({ sql: this.#sql, events: this.#events, audit: this.#audit }, { sessionId: row.id })
+    const cancelled = await cancelOrphanedEntries(
+      { sql: this.#sql, events: this.#events, audit: this.#audit, routes: this.#pendingRoutes },
+      { sessionId: row.id },
+    )
     return ended || cancelled > 0
   }
 

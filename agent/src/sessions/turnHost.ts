@@ -20,6 +20,7 @@ import type { DecidedCall, DecidedRun } from '../temporal/toolActivities.js'
 import { NO_CAPACITY, PLACEMENT_MOVED, SESSION_GONE, SHUTTING_DOWN_FAILURE } from '../temporal/session/names.js'
 import { attentionGate, type HeldRow, replyOf, TAB_WAIT_CALL } from './attentionGate.js'
 import type { SessionImages } from './blobs.js'
+import type { TurnFence, TurnRoutes } from '../gate/crudPending.js'
 import { userPrompt } from './images.js'
 import { type ClaimedSession, runningDurableTurn, TAB_WAIT_S, type TurnOutcome, waitForTab } from './manager.js'
 import { scrubForLog } from './sdkEvents.js'
@@ -190,6 +191,11 @@ export type TurnHostDeps = {
   listen?: (channel: string, onNotify: (payload: string) => void) => void
   /** Tests only: how often a held call reads its row (INPUT_POLL_MS). */
   inputPollMs?: number
+  /**
+   * The API's `pending-input` routes (gate/crudPending.ts, #5299 step 10), used while `use()` holds:
+   * a held call's response read, and its span mark, fenced there by this placement. SQL otherwise.
+   */
+  pendingRoutes?: { crud: TurnRoutes; use: () => boolean } | undefined
   /** The calls in flight at a restart whose ToolCall finished, and whether each succeeded (activityProjection.ts `finishedToolCalls`); absent, none. */
   finishedCalls?: (sessionId: string, turnId: string) => Promise<FinishedCall[]>
   /** Runs a released turn's approved call once (toolActivities.ts `decidedCalls`); absent, the model is told it was not run. */
@@ -514,6 +520,7 @@ export class TurnHost {
         this.#gates({
           session,
           turnId,
+          attempt,
           control,
           stop: controller.signal,
           holds: parks,
@@ -721,6 +728,8 @@ export class TurnHost {
   #gates(turn: {
     session: ClaimedSession
     turnId: string
+    /** This placement of the turn: a trace mark lands only while it holds the session. */
+    attempt: string
     control: TurnControl
     stop: AbortSignal
     holds: Holds
@@ -732,7 +741,7 @@ export class TurnHost {
     sync: (when: SyncPoint) => Promise<unknown>
     endTurn: (why: string) => void
   }): TurnGates {
-    const { session, turnId, control, stop, holds, secrets, shown, trace, asks, sync, endTurn } = turn
+    const { session, turnId, attempt, control, stop, holds, secrets, shown, trace, asks, sync, endTurn } = turn
     const open = control.openInput
     if (!open) {
       return {
@@ -800,7 +809,7 @@ export class TurnHost {
             // Ended at once, as classic's park is (approvals/service.ts): a decision that lands
             // before the write below returns then finds the spans ended, never the resume's (#5045).
             traced.parked(rid)
-            void this.#traceEntry(rid, traced.traceparent)
+            void this.#traceEntry(rid, traced.traceparent, { sessionId: session.id, attempt, turnId })
           },
         })
       } catch (err) {
@@ -912,6 +921,8 @@ export class TurnHost {
   }
 
   async #row(requestId: string): Promise<Response | undefined> {
+    const routes = this.#deps.pendingRoutes
+    if (routes?.use()) return await routes.crud.response(requestId)
     const [row] = await this.#deps.sql<Response[]>`
       SELECT outcome, response, reason, responder, decision_traceparent FROM ai_input_responses WHERE request_id = ${requestId}`
     return row
@@ -922,8 +933,16 @@ export class TurnHost {
    * links to `ai_approvals.traceparent`. Best effort: an entry the write misses, or one decided
    * before it lands, is decided all the same, its decision a root.
    */
-  async #traceEntry(requestId: string, traceparent: string | undefined): Promise<void> {
+  async #traceEntry(requestId: string, traceparent: string | undefined, fence: TurnFence): Promise<void> {
     if (!traceparent) return
+    const routes = this.#deps.pendingRoutes
+    // On the API, only while this placement still holds the session (the turn fence, #5299 step 10).
+    if (routes?.use()) {
+      await routes.crud.markPark(requestId, traceparent, fence).catch((err: unknown) => {
+        this.#deps.core.stderr?.(`parked call ${requestId}: its span context was not recorded: ${describe(err)}\n`)
+      })
+      return
+    }
     await this.#deps.sql`UPDATE ai_pending_input SET traceparent = ${traceparent} WHERE request_id = ${requestId}`.catch((err: unknown) => {
       this.#deps.core.stderr?.(`parked call ${requestId}: its span context was not recorded: ${describe(err)}\n`)
     })
