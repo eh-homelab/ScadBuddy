@@ -82,7 +82,9 @@ CONTENT_TYPE_MAX = 16 * 1024
 #: The largest ``meta`` part (a saved body's holds its URL and content type), and what
 #: multipart framing may add.
 META_BYTES_MAX = 48 * 1024
-#: The largest offset a ranged read takes: Postgres's ``substring`` takes an ``int4``.
+#: The largest offset a ranged read takes: Postgres's ``substring`` takes an ``int4``. The
+#: agent's ``http_response_read`` takes the same bound (``agent/src/harness/httpRequest.ts``
+#: ``HttpReadInput``).
 OFFSET_MAX = 2**31 - 2
 FRAMING_BYTES_MAX = 16 * 1024
 
