@@ -288,8 +288,9 @@ end times and AMS readings per tick):
 - A BB clock behind SB's by more than a plate's length counts that plate twice
   until the next reading.
 - A reading taken in the middle of a plate hides the rest of that plate.
-- The rule assumes BB deducts `weight_used` when a print ends (§8.2); this is
-  not yet measured on a live BB.
+- Measured on the live BB on 2026-11-15 (§8.2): BB deducts `weight_used` in the
+  write that ends the print, at the usage row's `created_at`, which equals the
+  spool's `updated_at`.
 
 `native_spool_uses` (`20261101T1849Z_native_spool_uses.sql`) held a LAN print's
 sliced grams. Since #6261 the native store writes only the ledger, and the
@@ -449,6 +450,52 @@ else SB proposes a new type for a person to confirm.
   BB row's `updated_at`, and a native print's `print_ended` at its plate's start,
   so a plate that started before BB's write is inside BB's value and is not
   taken off again (`filament/ledger.py`, `filament/bambuddy_pull.py`).
+
+  Measured on 2026-11-15 (#6263), read-only, from the WSL host, against
+  `https://bambuddy.internal.nullreference.io` (BB) and
+  `https://scadbuddy.internal.nullreference.io` (SB), with `GET` requests only:
+  - From the probe of about 05:50 UTC (`GET /api/v1/inventory/usage?limit=60`,
+    `GET /api/v1/archives/?limit=40`, `GET /api/v1/inventory/spools`), reused
+    and not measured again. A usage row's `created_at` equals its spool's
+    `updated_at` to the microsecond (usage 457 and spool 31; usage 465 and
+    spool 103), so BB deducts in the write that moves `updated_at`. BB keeps one
+    usage row per spool per print, SB's own LAN prints included, and their
+    `print_name` is SB's `subtask_name` (`scadbuddy-ac13ac3c-p1`). A failed
+    print has usage rows with partial grams (usage 460: 23.4 g, `failed`).
+  - The archive window, at about 06:22 UTC. `GET /api/v1/inventory/usage?limit=500`
+    gave 435 rows; `GET /api/v1/archives/?limit=200` gave 200 archives, the
+    oldest `completed_at` 2026-09-27. For each of the 406 usage rows not older
+    than that archive, the script took the archive of the same `printer_id`
+    whose `completed_at` was nearest, inside `[created_at − 60 s, created_at + 60 s]`.
+    379 rows matched (138 archives); no row had a second archive in the window.
+    `completed_at − created_at`: min 0.085 s, median 0.698 s, max 17.390 s,
+    n 379; none was negative. By the row's status: `completed` n 274, median
+    0.49 s, max 9.18 s; `cancelled` n 60, max 10.72 s; `failed` n 47, max
+    17.39 s. All rows of one print share one `created_at`. 27 rows (12 prints:
+    15 `failed`, 7 `cancelled`, 5 `completed`) matched no archive: for 19 the
+    200 archives hold no archive of that name; for 5 the archive of that name
+    was printed again, so its `completed_at` is a later run's; for 3 the
+    nearest archive was more than 60 s away. Both times are BB's clock, so the
+    skew below does not enter the window. The window to match an archive is
+    therefore `[created_at, created_at + 17.4 s]` at the least; no archive
+    ended before its usage rows.
+  - The clock skew, at about 06:30 UTC. 120 alternating requests, 0.25 s
+    apart: `GET /api/v1/system/storage-usage` on BB and `GET /healthz` on SB,
+    both answered by `uvicorn` (the `Server` header). Each request recorded
+    the `Date` header and its send and receive times on the host's
+    `time.monotonic()`, not the wall clock. One SB answer that took 36 s was
+    dropped (n 119). Both servers drifted against the host's clock by the same
+    −0.073 s/s, so the WSL clock is the one that moves. A least-squares fit of
+    `Date − mid(send, receive)` with one common slope and one intercept per
+    server gives BB − SB = +0.011 s (residual sd 0.52 s). Each BB sample
+    against the mean of its two SB neighbours gives a mean of +0.019 s
+    (n 58, sd 0.62 s, standard error 0.08 s). `Date` has 1 s steps, and
+    uvicorn refreshes it about once a second (`Server.on_tick`, every 10
+    ticks of 0.1 s, in [uvicorn 0.53.0 `server.py`](https://github.com/Kludex/uvicorn/blob/0.53.0/uvicorn/server.py),
+    the version SB's `uv.lock` pins; BB's uvicorn version was not read), so one sample says little; the
+    expected bias is the same on both servers and cancels in the difference.
+    So the BB and SB clocks agree to within about 0.25 s. A second run of 120
+    stopped at a 60 s read timeout and is not used.
 - The sync runs in a worker and calls CRUD routes for SB data, with a service
   credential (§3).
 
