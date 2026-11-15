@@ -70,6 +70,10 @@ queue, template media's `template_media`) skip unless `SCADBUDDY_TEST_DATABASE_U
 points at a Postgres they can create schemas in, e.g.
 `docker run -d -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=scadbuddy_test -p 5432:5432
 postgres:18` and `SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test`.
+Without Docker, a native Postgres 18 works (`initdb`, then `pg_ctl -o "-p 55432"`). It needs
+`timezone='UTC'` in `postgresql.conf`, or a timezone test fails. A data directory on a long
+path also needs `unix_socket_directories=''`, with TCP only (measured 2026-11-14 on WSL2,
+Homebrew `postgresql@18`, #6322).
 Without it most of `tests/api` skips. CI runs them against a `postgres:18` service
 container. A `Settings` for an app that never starts uses `tests.conftest.UNUSED_DATABASE_URL`.
 Tests marked `requires_fixtures` (#2146) use the real MakerWorld 3MFs in
