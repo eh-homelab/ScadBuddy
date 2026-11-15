@@ -61,6 +61,8 @@ class Tools:
         #: How many of send_to_bambuddy's next attempts send no beat and outlast their
         #: heartbeat timeout, as one Temporal never delivered, or a replica that went (#6345).
         self.send_beatless = 0
+        #: An attempt of send_to_bambuddy after a beatless one refuses with this (#6345 review).
+        self.send_refusal: str | None = None
 
     def _record(self, name: str, args: dict[str, Any]) -> None:
         self.calls.append((name, activity.info().activity_id, args))
@@ -77,6 +79,8 @@ class Tools:
             if self.send_beatless > 0:
                 self.send_beatless -= 1
                 await _outlast_heartbeat()
+            elif self.send_refusal is not None:
+                raise ApplicationError(self.send_refusal, non_retryable=True)
             return "sent"
 
         @activity.defn(name="make_thing")
@@ -1243,6 +1247,24 @@ async def test_a_keyed_write_is_asked_once_more_only_once(
     await _approve(outward, run_id, call_id)
     run = await outward.finished(run_id)
     assert "send_to_bambuddy may have run" in (run.result or "")
+    assert len(served.calls) == 2
+
+
+async def test_a_keyed_write_whose_retry_is_refused_still_may_have_run(
+    outward: Outward, tools: tuple[Tools, str], agent: AgentTiers
+) -> None:
+    """#6345 review: the first attempt lost its beats and may have run, so the retry's
+    refusal reaches the script as "may have run", never as a call that did not run."""
+    served, queue = tools
+    agent.keyed.add("send_to_bambuddy")
+    served.send_beatless = 1
+    served.send_refusal = "the printer is busy"
+    run_id = await outward.run(script(*_CAUGHT_SEND), tools_queue=queue, agent_heartbeat_s=1)
+    call_id = await outward.approval(run_id)
+    await _approve(outward, run_id, call_id)
+    run = await outward.finished(run_id)
+    assert "send_to_bambuddy may have run" in (run.result or "")
+    assert "the printer is busy" in (run.result or "")
     assert len(served.calls) == 2
 
 

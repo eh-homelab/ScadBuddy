@@ -840,6 +840,9 @@ async def _call_tool(
     unregistered_waits = [] if pinned else list(UNREGISTERED_WAITS)
     # An agent tool's own call (not a turn tool's) may be asked once more when keyed (#6345).
     keyed_retry = activity is None
+    #: Set once a keyed call is asked again after its first attempt lost its beats: that
+    #: attempt may have run, so no later failure may say the call was not run.
+    beatless_first = ""
     while True:
         tries -= 1
         try:
@@ -870,7 +873,7 @@ async def _call_tool(
                     await workflow.sleep(unregistered_waits.pop(0))
                     tries += 1
                     continue
-                raise ToolFailedError(err.cause.message) from None
+                raise ToolFailedError(beatless_first + err.cause.message) from None
             # Only the last attempt's failure is known, as for the tier.
             if (
                 heartbeat is not None
@@ -888,6 +891,12 @@ async def _call_tool(
                         and await _keyed(name)
                     ):
                         keyed_retry = False
+                        beatless_first = (
+                            f"{name} may have run: its first attempt sent no heartbeat for "
+                            f"{heartbeat.seconds}s, and it was asked again under the same "
+                            "key. Check whether it did before calling it again. The second "
+                            "attempt: "
+                        )
                         tries += 1
                         continue
                     raise ToolFailedError(
@@ -919,10 +928,13 @@ async def _call_tool(
         again = (
             "Call it again; the new call needs approving again." if approved else "Call it again."
         )
-        raise ToolFailedError(
-            f"{name} was not run: no worker on the agent replica that holds its state "
-            f"picked it up in {start_s}s (the replica may be gone or busy). {again}"
-        ) from None
+        not_picked = (
+            f"no worker on the agent replica that holds its state picked it up in {start_s}s"
+            " (the replica may be gone or busy)."
+        )
+        if beatless_first:
+            raise ToolFailedError(beatless_first + not_picked) from None
+        raise ToolFailedError(f"{name} was not run: {not_picked} {again}") from None
 
 
 @agent.tool_defn()
