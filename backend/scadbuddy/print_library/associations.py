@@ -101,7 +101,8 @@ class AssociationStore:
         self, file_id: int, target: PrintSubject, relation: Relation, note: str, by: Actor
     ) -> tuple[Association, bool]:
         """The association, and whether it is new. One already there for the file,
-        target and relation keeps its id and takes ``note``. `TargetGoneError` when the
+        target and relation keeps its id, ``created_at`` and ``created_by`` (whoever
+        first made it) and takes ``note``. `TargetGoneError` when the
         file, or a target file, is not live."""
         target_file = target.file_id
         wanted = [file_id] if target_file is None else sorted({file_id, target_file})
