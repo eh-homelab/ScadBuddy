@@ -46,12 +46,15 @@ def test_warm_sandbox_runs_in_both_pools(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_a_sandbox_that_will_not_warm_is_logged_not_raised(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The worker still starts: a step it could not warm is the run's to fail, as before."""
-    monkeypatch.setattr(
-        monty_stepper.ScriptRun,
-        "start",
-        lambda self, **_: monty_stepper.Step(done=True, aborted=True, error="crashed"),
-    )
+    """The worker still starts: a step it could not warm is the run's to fail, as before.
+    A step the watchdog stopped is tried once more."""
+    starts: list[int] = []
+
+    def timed_out(self: monty_stepper.ScriptRun, **_: Any) -> monty_stepper.Step:
+        starts.append(1)
+        return monty_stepper.Step(done=True, aborted=True, timed_out=True, error="slow")
+
+    monkeypatch.setattr(monty_stepper.ScriptRun, "start", timed_out)
 
     def crashed(script: str, stubs: Any) -> str | None:
         # MontyCrashedError cannot be made outside Monty; any error takes the same path.
@@ -59,5 +62,20 @@ def test_a_sandbox_that_will_not_warm_is_logged_not_raised(
 
     monkeypatch.setattr(monty_stepper, "type_check", crashed)
     warm_sandbox()
-    assert "live pool did not warm: crashed" in caplog.text
-    assert "replay pool did not warm" in caplog.text
+    assert len(starts) == 2
+    assert "live pool did not warm (timed out: True): slow" in caplog.text
+    assert "the flow sandbox did not warm" in caplog.text
+
+
+def test_a_pool_that_cannot_start_does_not_stop_the_worker(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review of #6351: the live pool is built outside `ScriptRun`'s own handling, so a
+    `monty` process that cannot be spawned raises from `start`."""
+
+    def cannot_spawn(self: monty_stepper.ScriptRun, **_: Any) -> monty_stepper.Step:
+        raise OSError("Resource temporarily unavailable")
+
+    monkeypatch.setattr(monty_stepper.ScriptRun, "start", cannot_spawn)
+    warm_sandbox()
+    assert "the flow sandbox did not warm" in caplog.text
