@@ -1,9 +1,10 @@
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import type { QueuedEntry } from '../../agent/chat/protocol'
 import { QueuedMessages } from './QueuedMessages'
 
 const you = { kind: 'browser', id: 'browser', label: 'You' } as const
-const entries = [
+const entries: QueuedEntry[] = [
   { id: 'q1', text: 'Also make it blue', author: you, queuedAt: '2026-11-15T00:00:00.000Z' },
   { id: 'q2', text: 'And a hole for the ring', author: { kind: 'bearer', id: 'tok', label: 'Claude Desktop' }, queuedAt: '2026-11-15T00:00:01.000Z' },
 ]
