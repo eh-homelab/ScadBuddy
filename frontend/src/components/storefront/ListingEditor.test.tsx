@@ -187,6 +187,13 @@ describe('ListingEditor (#5282, #6131)', () => {
     fireEvent.change(screen.getByLabelText('Default of Text size'), { target: { value: '20' } })
     for (const value of ['2', '25']) fireEvent.change(screen.getByLabelText('To Text size'), { target: { value } })
     expect(last(seen).params['text_size']).toEqual({ kind: 'number', min: 6, max: 25, step: 0.5, default: 20 })
+
+    // A range that leaves out the person's 20 but takes the template's 14 drops theirs for the
+    // template's; the person's comes back once the range takes it again (#6402 review).
+    for (const value of ['1', '15']) fireEvent.change(screen.getByLabelText('To Text size'), { target: { value } })
+    expect(last(seen).params['text_size']).toEqual({ kind: 'number', min: 6, max: 15, step: 0.5 })
+    for (const value of ['2', '25']) fireEvent.change(screen.getByLabelText('To Text size'), { target: { value } })
+    expect(last(seen).params['text_size']).toEqual({ kind: 'number', min: 6, max: 25, step: 0.5, default: 20 })
   })
 
   it('names a starting value the bounds leave out (#6144)', async () => {
