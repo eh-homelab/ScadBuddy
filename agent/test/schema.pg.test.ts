@@ -43,6 +43,27 @@ describe.skipIf(!TEST_DATABASE_URL)(
       ])
     })
 
+    it('says how many reads it made only when it made more than one', async () => {
+      const once = awaitMigrations(db.sql, EXPECTED_MIGRATIONS, { attempts: 1, log })
+      await expect(once).rejects.toThrow(/migrations \(first \S+\) in ai_migrations; is the API/)
+      await expect(once).rejects.not.toThrow(/after 1 reads/)
+      await expect(awaitMigrations(db.sql, EXPECTED_MIGRATIONS, { attempts: 2, intervalMs: 1, log })).rejects.toThrow(
+        /after 2 reads of ai_migrations/,
+      )
+    })
+
+    it('waits on a ledger still keyed by position (before #491), which the API rewrites at its next start', async () => {
+      await db.sql`CREATE TABLE ai_migrations (version integer PRIMARY KEY, story text)`
+      await db.sql`INSERT INTO ai_migrations (version, story) VALUES (1, 'the first')`
+      await expect(awaitMigrations(db.sql, EXPECTED_MIGRATIONS, { attempts: 1, log })).rejects.toThrow(
+        MigrationsPendingError,
+      )
+      expect(lines).toEqual([
+        `waiting for the API to apply the agent's database migrations: ai_migrations is still keyed by ` +
+          `position (before #491), and the API's next start rewrites it`,
+      ])
+    })
+
     it('goes on once the API has applied the last file it expects', async () => {
       const last = MIGRATIONS[MIGRATIONS.length - 1]!
       await migrate(db.sql, MIGRATIONS.slice(0, -1))
@@ -67,7 +88,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       await awaitMigrations(db.sql, EXPECTED_MIGRATIONS, { attempts: 1, log })
     })
 
-    it("ready() reads the ledger once and fails fast; it says it is waiting once, and a later failure of another kind is not 'waiting'", async () => {
+    it('ready() reads the ledger once and fails fast; it says it is waiting once, and tells onMigrationError only of other failures', async () => {
       const errors: unknown[] = []
       const fast = connectDatabase(TEST_DATABASE_URL!, {
         searchPath: schema,
@@ -79,14 +100,21 @@ describe.skipIf(!TEST_DATABASE_URL)(
         expect(await fast.ready()).toBe(false)
         expect(await fast.ready()).toBe(false)
         expect(performance.now() - started).toBeLessThan(1_000)
-        expect(errors.map((e) => (e as Error).name)).toEqual(['MigrationsPendingError', 'MigrationsPendingError'])
+        // The wait's own line says it is waiting; a pending read is not an error to log each time.
+        expect(errors).toEqual([])
         expect(lines).toHaveLength(1)
         expect(fast.waitingForMigrations()).toBe(true)
-        // A ledger it cannot read (the positional one from before #491): not "waiting".
+        // A ledger still keyed by position (before #491) is waiting too: the API rewrites it.
         await db.sql`CREATE TABLE ai_migrations (version integer PRIMARY KEY)`
         expect(await fast.ready()).toBe(false)
-        expect((errors[2] as Error).name).not.toBe('MigrationsPendingError')
-        expect(fast.waitingForMigrations()).toBe(false)
+        expect(errors).toEqual([])
+        expect(fast.waitingForMigrations()).toBe(true)
+        // An edited migration is still told, so main.ts can stop.
+        await db.sql`DROP TABLE ai_migrations`
+        await migrate(db.sql)
+        await db.sql`UPDATE ai_migrations SET checksum = ${'0'.repeat(64)} WHERE id = ${EXPECTED_MIGRATIONS[0]!.id}`
+        expect(await fast.ready()).toBe(false)
+        expect(errors.map((e) => (e as Error).name)).toEqual(['MigrationChecksumError'])
       } finally {
         await fast.close()
       }
@@ -101,7 +129,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       })
       try {
         expect(await waiting.ready()).toBe(false)
-        expect(errors[0]).toBeInstanceOf(MigrationsPendingError)
+        expect(errors).toEqual([])
         expect(waiting.waitingForMigrations()).toBe(true)
         // Nothing made the agent's tables: it never migrates.
         expect(await db.sql`SELECT to_regclass('ai_sessions') AS t`).toEqual([{ t: null }])

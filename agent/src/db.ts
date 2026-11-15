@@ -1,6 +1,6 @@
 import postgres, { type ReservedSql, type Sql } from 'postgres'
 import { grantBackendRoles } from './db/grants.js'
-import { type AwaitMigrationsOptions, awaitMigrations } from './db/schema.js'
+import { type AwaitMigrationsOptions, awaitMigrations, MigrationsPendingError } from './db/schema.js'
 
 // The database is optional. With SCADBUDDY_DATABASE_URL unset the service still
 // starts and answers /healthz, but reports AI as disabled (spec §9, "No
@@ -159,7 +159,10 @@ export type ConnectOptions = {
   searchPath?: string
   /** `IDLE_TIMEOUT_SECONDS` unless set; tests shorten it. */
   idleTimeoutSeconds?: number
-  /** Where to report a failed `ready()` attempt (the error, never the URL). */
+  /**
+   * Where to report a failed `ready()` attempt (the error, never the URL). Not told of a
+   * MigrationsPendingError: the wait logs that once a wait itself.
+   */
   onMigrationError?: (err: unknown) => void
   /** How `ready()` reads `ai_migrations` (db/schema.ts): once an attempt unless `attempts` says otherwise. */
   awaitMigrations?: AwaitMigrationsOptions
@@ -283,7 +286,9 @@ export function connectDatabase(url: string, options: ConnectOptions = {}): Data
       console.error(`could not grant the backend's roles the ai_* tables: ${error instanceof Error ? error.message : String(error)}`)
     })
     await options.afterMigrate?.(sql)
-  }, options.onMigrationError)
+  }, (err) => {
+    if (!(err instanceof MigrationsPendingError)) options.onMigrationError?.(err)
+  })
   return {
     sql,
     ping,
