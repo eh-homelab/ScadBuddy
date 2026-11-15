@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
 import { useState } from 'react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
@@ -9,37 +9,22 @@ import { ListingView } from './ListingView'
 describe('ListingView', () => {
   it('shows each offered parameter, with the shop’s choice until the visitor sets one', async () => {
     const onChange = vi.fn()
-    const onPick = vi.fn()
-    render(<ListingView listing={KEYCHAIN} values={{}} onChange={onChange} onPick={onPick} />)
+    render(<ListingView listing={KEYCHAIN} values={{}} onChange={onChange} />)
     expect(screen.getByRole('heading', { level: 1, name: 'Name keychain' })).toBeInTheDocument()
     expect(screen.getByLabelText('Name')).toHaveValue('')
     await userEvent.type(screen.getByLabelText('Length (mm)'), '5')
     expect(onChange).toHaveBeenLastCalledWith('size', 5)
-    // #6152: a colour is a picker of filaments; a pick sets the value and names the filament.
+    // #6152: a colour is a picker of filaments; #6258: a pick is the colour in the values.
     await userEvent.click(screen.getByRole('button', { name: /Base colour/ }))
     await userEvent.click(screen.getByRole('radio', { name: 'Signal orange PLA' }))
     expect(onChange).toHaveBeenLastCalledWith('base_colour', '#E8532F')
-    expect(onPick).toHaveBeenLastCalledWith('base_colour', 'f-orange')
   })
 
-  it('shows one Material control for a one-material listing, and its colours only (#6152)', async () => {
-    const onMaterial = vi.fn()
-    const { rerender } = render(<ListingView listing={CHARM} values={{}} onChange={() => undefined} onMaterial={onMaterial} />)
-    const material = screen.getByRole('radiogroup', { name: 'Material' })
-    expect(within(material).getByRole('radio', { name: 'PLA' })).toHaveAttribute('aria-checked', 'true')
-    await userEvent.click(within(material).getByRole('radio', { name: 'PETG' }))
-    expect(onMaterial).toHaveBeenCalledWith('PETG')
-    rerender(<ListingView listing={CHARM} values={{}} onChange={() => undefined} material="PETG" onMaterial={onMaterial} />)
-    await userEvent.click(screen.getByRole('button', { name: /Body colour/ }))
-    expect(screen.getByRole('radio', { name: 'Teal PETG' })).toBeInTheDocument()
-    expect(screen.queryByRole('radio', { name: /Ocean blue/ })).toBeNull()
-  })
-
-  it('shows the shop’s colour of the material on a one-material row with no pick, never “Choose a colour” (#6152)', () => {
-    render(<ListingView listing={CHARM} values={{}} onChange={() => undefined} material="PETG" />)
-    // The start colour, Ocean blue, is PLA only: the nearest PETG colour is Teal.
-    expect(screen.getByRole('button', { name: /Body colour/ })).toHaveAccessibleName('Body colour Teal')
-    expect(screen.queryByText('Choose a colour')).toBeNull()
+  it('shows no Material control: one material is always on, and the shop resolves it (#6258)', () => {
+    render(<ListingView listing={CHARM} values={{}} onChange={() => undefined} />)
+    expect(screen.queryByRole('radiogroup', { name: 'Material' })).toBeNull()
+    // The shop's colour shows on a row with no colour set, never "Choose a colour".
+    expect(screen.getByRole('button', { name: /Body colour/ })).toHaveAccessibleName('Body colour Ocean blue')
   })
 
   it('offers a switch as Yes and No, never the words true and false (#6141)', async () => {
@@ -68,6 +53,16 @@ describe('ListingView', () => {
     expect(screen.getByLabelText('Name')).toHaveAttribute('placeholder', 'Stella')
     expect(screen.getByLabelText('Motto')).not.toHaveAttribute('placeholder')
     expect(screen.queryByPlaceholderText("The shop's text")).toBeNull()
+  })
+
+  it('says a design no material can print cannot be ordered (#6302 review)', () => {
+    // The shop's locked colours share no material with any choice: it answers `available`
+    // false, though the design offers no colour of its own.
+    const { size } = KEYCHAIN.params
+    if (!size) throw new Error('KEYCHAIN has no size')
+    const listing = { ...KEYCHAIN, params: { size }, available: false }
+    render(<ListingView listing={listing} values={{}} onChange={() => undefined} />)
+    expect(screen.getByText('This design cannot be ordered right now.')).toBeInTheDocument()
   })
 
   it('says a design with no colour left cannot be ordered', () => {

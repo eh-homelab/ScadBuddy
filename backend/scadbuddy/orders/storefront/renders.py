@@ -21,8 +21,9 @@ shows a render with a fixed text in place of its error, never the log.
 
 `render_estimate` is the rough price of a done render (plan point 4): its part volumes,
 analysed once per job into ``storefront_job_parts`` (plan point 5), each at the listing
-filament the visitor picked for its colour (``picks``, kept on the visitor's row, #6152),
-else the one it chose for its slot, else the first listing filament of that colour. The
+filament of its colour in the material the visitor's colours resolved to (``material``,
+kept on the visitor's row, #6258), else the one it chose for its slot, else the first
+listing filament of that colour. The
 analyses run on `ANALYSIS_WORKERS` threads shared by the process, at most `ANALYSIS_QUEUE`
 held at once, one per job (`_flights`):
 every request for a job awaits the same work, which records its own outcome, so a request
@@ -58,15 +59,17 @@ from scadbuddy.orders.estimate import part_volumes as part_volumes  # tests coun
 from scadbuddy.orders.models import Filament
 from scadbuddy.orders.reference import ResolvedReference
 from scadbuddy.orders.storefront.inputs import (
+    ColoursClashError,
     InputOutsideListingError,
-    MixedMaterialError,
-    PickColourClashError,
+    LockedColoursClashError,
+    ResolvedChoice,
     check_one_material,
-    checked_picks,
     customer_filaments,
+    effective_materials,
     listing_reference,
     listing_values,
-    slots_from_picks,
+    resolve_choice,
+    slot_filaments,
 )
 from scadbuddy.orders.storefront.limits import OwnedRender, RenderLimited, RenderLimits
 from scadbuddy.orders.storefront.listings import problem, published_listing
@@ -74,6 +77,7 @@ from scadbuddy.orders.storefront.visitors import VisitorStore
 from scadbuddy.orders.storefront.wire import Listing, RenderBody, StoreRender
 from scadbuddy.render.job_models import Job, JobNotFoundError, QueueFullError
 from scadbuddy.render.jobs import SnapshotPendingError, SnapshotUnavailableError
+from scadbuddy.render.schema import ParamValue
 from scadbuddy.store.cache import materialize_result
 from scadbuddy.store.content import StoreFullError
 from scadbuddy.storefront.settings import STOREFRONT_PREFIX
@@ -331,18 +335,29 @@ RenderColours = Callable[[str], Awaitable[Sequence[str] | None]]
 
 
 async def checked_choice(
-    orders: OrdersComponent, body: RenderBody, *, render_colours: RenderColours | None = None
-) -> tuple[Listing, ResolvedReference]:
-    """The published listing ``body`` names and the reference of ``body``'s values and
-    colours on it. With ``render_colours``, each slot ``body.colours`` lacks takes the
-    picked filament of the slot's colour in that render, else the first customer filament
-    of that colour (#6152, `slots_from_picks`). Refusals: 404 ``listing_not_found``, 409
+    orders: OrdersComponent,
+    body: RenderBody,
+    shop_materials: Sequence[str],
+    *,
+    render_colours: RenderColours | None = None,
+) -> tuple[Listing, ResolvedReference, ResolvedChoice]:
+    """The published listing ``body`` names, the reference of ``body``'s values and
+    colours on it, and what its colours resolve to (`inputs.py` `resolve_choice`, #6258):
+    the one material, among the listing's materials (else ``shop_materials``, the
+    ``storefront_materials`` setting), that the render, the estimate and the order line
+    all print in. Each colour the visitor leaves alone is settled in that material, so
+    the reference renders those values. With ``render_colours``, each slot
+    ``body.colours`` lacks takes that material's filament of the slot's colour in that
+    render (`slot_filaments`). Refusals: 404 ``listing_not_found``, 409
     ``listing_changed`` (the listing moved since the page read it), 422
-    ``input_outside_listing`` (with ``name`` and ``reason``; a pick is ``picks.<name>``),
-    422 ``listing_mixed_material`` (a ``one_material`` listing's colours of more than one
-    material), 422 ``pick_colour_clash`` (two picks of one colour that name two
-    filaments, with ``name``), 409 ``render_pending`` (with ``render_colours``, picks but
-    no done render of the visitor's to take the slots from)."""
+    ``input_outside_listing`` (with ``name`` and ``reason``), 422
+    ``listing_colours_clash`` (colours no one allowed material offers together, with
+    ``parts``, `ColoursClashError`; only the visitor's colours and slots, never a locked
+    one), 409 ``listing_unavailable`` (no allowed material is printable,
+    `printable_materials`, `LockedColoursClashError`: a listing published before publish
+    refused that, or broken since by the materials or the price book), 409
+    ``render_pending`` (with ``render_colours``, colours given but no done render of the
+    visitor's to take the slots from)."""
     listing = await asyncio.to_thread(published_listing, orders.listings, body.listing_id)
     if listing.updated_at != body.listing_updated_at:
         raise problem(
@@ -351,48 +366,44 @@ async def checked_choice(
             "This listing has changed. Load it again.",
         )
     filaments = await asyncio.to_thread(_filaments, orders)
+    materials = effective_materials(listing, shop_materials)
     try:
-        values = listing_values(listing, body.values, filaments)
-        picked = checked_picks(listing, values, body.picks, filaments)
-        check_one_material(listing, values, picked, filaments)
-        resolved = listing_reference(listing, values, body.colours, filaments=filaments)
+        values = listing_values(listing, body.values, filaments, materials)
+        choice = resolve_choice(
+            listing, values, body.values.keys(), filaments, materials, slots=body.colours
+        )
+        resolved = listing_reference(listing, choice.values, body.colours, filaments=filaments)
         if render_colours is not None:
             colours = await render_colours(resolved.reference.render_key)
-            if not colours and picked:
+            given = [name for name in body.values if name in values and _is_colour(listing, name)]
+            if not colours and given:
                 # The slots are known only from a done render; without them the order
-                # line would lose what the visitor picked (#6152).
+                # line would lose the visitor's colours (#6152, #6258).
                 raise problem(
                     status.HTTP_409_CONFLICT,
                     "render_pending",
                     "Your preview is still being made. Add it once it shows.",
                 )
             if colours:
-                # A colour left at the shop's choice takes the first customer filament of
-                # its colour, so the shop need not pick its slot by hand (#6152).
-                offered = customer_filaments(listing, filaments)
-                chosen = slots_from_picks(body.colours, picked, colours, offered)
-                resolved = listing_reference(listing, values, chosen, filaments=filaments)
-        # The final slot map counts too: a slot may name a filament no pick does.
-        check_one_material(
-            listing,
-            values,
-            picked,
-            filaments,
-            slots=[s.filament_id for s in resolved.colours if s.filament_id],
-        )
-    except MixedMaterialError:
+                chosen = slot_filaments(body.colours, choice, colours)
+                resolved = listing_reference(listing, choice.values, chosen, filaments=filaments)
+        # A print never mixes materials (#6152, always on since #6258).
+        check_one_material(resolved.colours, choice, filaments)
+    except LockedColoursClashError:
+        # No material can print it (published before publish checked, or broken since):
+        # no visitor's colour can fix it, so the refusal names none (#6302 review).
         raise problem(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "listing_mixed_material",
-            "Every colour of this design must be of one material. Pick colours of one material.",
+            status.HTTP_409_CONFLICT,
+            "listing_unavailable",
+            "This design can't be made right now. Please try again later.",
         ) from None
-    except PickColourClashError as error:
+    except ColoursClashError as error:
         raise problem(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "pick_colour_clash",
-            "Two of your colours are one colour of two filaments. A colour prints from one"
-            " filament: pick the same one for both.",
-            name=error.name,
+            "listing_colours_clash",
+            "Some of these colours can't go together: each print is made from one kind of"
+            " plastic. Change one of them.",
+            parts=error.parts,
         ) from None
     except InputOutsideListingError as error:
         raise problem(
@@ -402,7 +413,23 @@ async def checked_choice(
             name=error.name,
             reason=error.reason,
         ) from None
-    return listing, resolved
+    return listing, resolved, choice
+
+
+def _is_colour(listing: Listing, name: str) -> bool:
+    """Whether ``name`` is a ``// color`` parameter of the published ``listing``."""
+    assert listing.snapshot is not None
+    return any(p.name == name and p.type == "color" for p in listing.snapshot.schema_.parameters)
+
+
+def _colour_values(listing: Listing, choice: ResolvedChoice) -> dict[str, ParamValue]:
+    """The values the render takes of the colour parameters the listing offers, as
+    `resolve_choice` settled them: what the page shows (#6258, #6302 review)."""
+    return {
+        name: value
+        for name, value in choice.values.items()
+        if name in listing.params and _is_colour(listing, name)
+    }
 
 
 async def start_render(
@@ -417,13 +444,14 @@ async def start_render(
     503 when the start keeps failing. A key seen before replays its row: the job the
     row names (410 ``render_expired`` when that job is gone; it is never submitted
     again), else the submit sent again, counted as a fresh one is when it runs on its own
-    and the row is free."""
+    and the row is free. The answer carries the colour values the render takes
+    (`StoreRender.values`, #6302 review)."""
     orders = _orders(state)
-    listing, resolved = await checked_choice(orders, body)
+    runtime = await asyncio.to_thread(_runtime, state)
+    listing, resolved, choice = await checked_choice(orders, body, runtime.storefront_materials)
     reference = resolved.reference
     assert listing.snapshot is not None
     visitor = await asyncio.to_thread(VisitorStore(state.projection.pool).ensure, visitor_id)
-    runtime = await asyncio.to_thread(_runtime, state)
     limits = _limits(state)
     asked = {
         "visitor": visitor.id,
@@ -444,7 +472,7 @@ async def start_render(
                 listing_id=listing.id,
                 render_key=reference.render_key,
                 colours=body.colours,
-                picks=body.picks,
+                material=choice.material,
             )
             return Replay(200, {"row": row, "counted": False})
         row = limits.admit(
@@ -455,7 +483,7 @@ async def start_render(
             render_key=reference.render_key,
             settings=runtime,
             colours=body.colours,
-            picks=body.picks,
+            material=choice.material,
         )
         return Replay(200, {"row": row, "counted": True})
 
@@ -483,7 +511,8 @@ async def start_render(
         if named is not None:
             try:
                 named_job = await asyncio.to_thread(state.render.store.read, named)
-                return await shown_render(state, named_job)
+                shown = await shown_render(state, named_job)
+                return shown.model_copy(update={"values": _colour_values(listing, choice)})
             except JobNotFoundError:
                 raise _expired() from None
     params = reference.inputs.get("params", {})
@@ -533,7 +562,8 @@ async def start_render(
             await _withdraw_limited(state, limits, job, row, key)
             raise _limited(error) from None
     await asyncio.to_thread(limits.attach, row, job.id)
-    return await shown_render(state, job)
+    shown = await shown_render(state, job)
+    return shown.model_copy(update={"values": _colour_values(listing, choice)})
 
 
 async def owned_render(state: AppState, visitor_id: str, job_id: str) -> OwnedRender:
@@ -770,20 +800,18 @@ def _filament_for(
     filaments: Mapping[str, Filament],
     colours: Mapping[int, str],
     render_colours: list[str],
-    picks: Mapping[str, str] | None = None,
+    material: str | None = None,
 ) -> dict[str, Filament]:
-    """Each colour of the render, casefolded, to its filament: the listing filament the
-    visitor picked of that colour (#6152), else the one it chose for its slot, else the
-    first listing filament of that colour. A pick is never a support material
-    (`customer_filaments`), but the last fallback takes one: a locked support colour is a
-    slot of the render too, and the estimate prices it (#6152)."""
-    by_id = {f.id: f for f in customer_filaments(listing, filaments)}
+    """Each colour of the render, casefolded, to its filament: the first customer
+    filament of that colour in ``material``, the one the visitor's colours resolved to
+    (#6258), else the one it chose for its slot, else the first listing filament of that
+    colour. The last takes a support filament too: a locked support colour is a slot of
+    the render, and the estimate prices it (#6152)."""
     listed = [filaments[f] for f in listing.colours if f in filaments]
     chosen: dict[str, Filament] = {}
-    for filament_id in (picks or {}).values():
-        record = by_id.get(filament_id)
-        if record is not None:
-            chosen.setdefault(record.colour.casefold(), record)
+    if material is not None:
+        for picked in customer_filaments(listing, filaments, [material]):
+            chosen.setdefault(picked.colour.casefold(), picked)
     for slot, filament_id in sorted(colours.items()):
         if 0 <= slot < len(render_colours) and filament_id in listing.colours:
             record = filaments.get(filament_id)
@@ -811,7 +839,7 @@ async def render_estimate(state: AppState, visitor_id: str, job_id: str) -> Stor
     filaments = await asyncio.to_thread(_filaments, orders)
     currency, policy, factor = await asyncio.to_thread(orders.price_book.policy)
     by_colour = _filament_for(
-        listing, filaments, owned.colours, list(job.result.colors), owned.picks
+        listing, filaments, owned.colours, list(job.result.colors), owned.material
     )
     try:
         return rough_estimate(

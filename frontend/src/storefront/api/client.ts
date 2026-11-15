@@ -148,12 +148,10 @@ async function call<T>(path: string, { method = 'GET', json, form, key, turnstil
 export interface RenderInput {
   listing_id: string
   listing_updated_at: string
-  /** Only the parameters the listing offers: never a locked one (spec §5.4). */
+  /** Only the parameters the listing offers: never a locked one (spec §5.4). A colour is its value: the shop finds its filament (#6258). */
   values: Record<string, ParamValue>
   /** The listing filament for each colour slot of the render, by slot; the page sends none (#6152). */
   colours: Record<string, string>
-  /** The listing filament picked for each colour parameter, by name (#6152). */
-  picks: Record<string, string>
 }
 
 /** A submit of the cart the page shows: the edge's request body, from its spec. */

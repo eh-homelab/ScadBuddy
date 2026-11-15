@@ -62,6 +62,23 @@ export function offeredFilaments(colourValues: readonly unknown[], filaments: re
 }
 
 /**
+ * #6258, #6302 review: the materials a draft allows, so it can publish even when the design's
+ * material is not one the shop's default (`storefront_materials`) allows. They are the
+ * materials of the listing's filaments, casefolded, support left out: PETG, then PLA, then the
+ * rest by name (the order the backend's migration `20261115T0346Z_listing_materials_backfill.sql`
+ * gives existing listings).
+ */
+export function draftMaterials(colours: readonly string[], filaments: readonly Filament[]): string[] {
+  const found = new Map<string, string>()
+  for (const id of colours) {
+    const material = filaments.find((filament) => filament.id === id)?.material.trim()
+    if (material && !SUPPORT_MATERIAL.test(material) && !found.has(material.toLowerCase())) found.set(material.toLowerCase(), material)
+  }
+  const rank = (folded: string) => (folded === 'petg' ? 0 : folded === 'pla' ? 1 : 2)
+  return [...found.keys()].sort((a, b) => rank(a) - rank(b) || (a < b ? -1 : a > b ? 1 : 0)).map((folded) => found.get(folded) as string)
+}
+
+/**
  * The listing's parameters and filaments from the commit's schema and the values: free text
  * (at most the schema's `max_length`, capped at 200) and every colour are the customer's
  * (the owner: "why can't I specify colors"), the rest, support settings always (`isSupport`), is locked at its value. A colour is

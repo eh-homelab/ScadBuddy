@@ -175,7 +175,9 @@ async def publish_listing(listing_id: str, orders: OrdersDep, state: StateDep) -
     snapshot, the media). 409 ``storefront_needs_s3`` unless the store is S3; 422 names
     the fault (``listing_param_unknown``, ``listing_bounds_outside_schema``,
     ``listing_fixed_invalid``, ``listing_default_invalid``, ``listing_colour_unknown``,
-    ``listing_media_unknown``,
+    ``listing_media_unknown``, ``listing_material_not_allowed``,
+    ``listing_locked_colours_unprintable``: no allowed material offers every locked colour
+    and a choice of each offered colour,
     ``listing_reference``, ``listing_pipeline_unsupported``,
     ``listing_material_unsliceable``: the shop slice profile has no spool for a material
     of the listing's filaments, #6153); 409 ``listing_publishing``
@@ -190,8 +192,8 @@ async def publish_listing(listing_id: str, orders: OrdersDep, state: StateDep) -
     summary="A storefront listing's colour combinations and how far they are prepared",
 )
 async def get_prepare(listing_id: str, orders: OrdersDep, state: StateDep) -> PrepareProgress:
-    """How many colour combinations the published listing has (``count``: the product of
-    each offered colour parameter's colours; 0 with none), the cap
+    """How many colour combinations the published listing has (``count``: the render keys of
+    its combinations, each of one allowed material, #6258; 0 with no colour parameter), the cap
     (``storefront_prepare_cap``), and how many have a done (``ready``), an open
     (``rendering``) and a failed render (#6237). ``running`` is whether the listing's
     prepare run is open, and ``failed_to_start`` how many combinations its last run could

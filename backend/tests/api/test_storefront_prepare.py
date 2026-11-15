@@ -168,6 +168,46 @@ def test_a_visitors_render_reuses_the_prepared_job(
     assert job_ids(client, two_colours["slug"]) == prepared
 
 
+def test_a_visitors_render_of_either_material_reuses_the_prepared_job(
+    client: TestClient,  # noqa: F811
+    crud: CrudCaller,  # noqa: F811
+    template: dict[str, Any],  # noqa: F811
+    pla_red: str,  # noqa: F811
+    pla_blue: str,
+) -> None:
+    """#6258: the combinations are enumerated per material (the shop's PETG, then PLA)
+    and built as a visitor's render is, so each pick reuses a prepared job. Red is in
+    both materials, and is one combination."""
+    settings = client.put("/api/v1/settings", json={"storefront_render_concurrency": 20})
+    assert settings.status_code == 200, settings.text
+    filaments = []
+    for colour in ("#00FF00", "#FF0000"):
+        made = client.post(
+            f"{BOOK}/filaments", json={"material": "PETG", "colour": colour, "cost_per_kg": "20"}
+        )
+        assert made.status_code in (200, 201), made.text
+        filaments.append(made.json()["id"])
+    body = listing_body(
+        template,
+        pla_red,
+        colours=[pla_red, pla_blue, *filaments],
+        params={"colour": {"kind": "choice", "choices": ["#FF0000", "#0000FF", "#00FF00"]}},
+    )
+    listing = publish(client, create(client, body)["id"])
+    r = client.post(prepare_path(listing))
+    assert r.status_code == 200, r.text
+    assert r.json() == {"count": 3, "started": True}
+    settled = wait_ready(client, listing, 3)
+    assert (settled["ready"], settled["failed_to_start"]) == (3, 0)
+    prepared = job_ids(client, listing["slug"])
+    assert len(prepared) == 3
+    rendered = {
+        a_render(crud, TOKEN_A, listing, values)["id"]
+        for values in ({}, {"colour": "#0000FF"}, {"colour": "#00FF00"})
+    }
+    assert rendered == prepared
+
+
 def test_prepare_again_renders_a_failed_combination_again(
     client: TestClient,  # noqa: F811
     two_colours: dict[str, Any],

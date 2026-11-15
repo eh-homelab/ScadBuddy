@@ -883,6 +883,8 @@ class SettingsPatch(BaseModel):
     storefront_slices_concurrent: int | None = None
     storefront_draft_ttl_days: int | None = None
     storefront_requests_enabled: bool | None = None
+    #: The materials a storefront print may be made of, in order (#6258).
+    storefront_materials: list[str] | None = None
     #: The most colour combinations one prepare of a listing queues (#6237).
     storefront_prepare_cap: int | None = None
     #: The storefront's mail (#5283); the password is sealed apart, never a setting.

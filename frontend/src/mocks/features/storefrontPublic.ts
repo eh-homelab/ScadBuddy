@@ -24,6 +24,8 @@ import { advanceChecks, modelsOrderOf } from './storefrontModels'
 
 const base = '/api/store/v1'
 const PROBLEMS = 'https://scadbuddy.dev/problems/storefront/'
+/** The shop's default materials (`storefront_materials`), in its order (#6258). */
+const SHOP_MATERIALS = ['PETG', 'PLA']
 const STORAGE_KEY = 'sb-mock-storefront-draft'
 
 export const KEYCHAIN_ID = 'l1'
@@ -42,8 +44,9 @@ export const KEYCHAIN: Listing = {
   },
   colours: [BLUE, ORANGE],
   media: [],
-  one_material: false,
+  materials: SHOP_MATERIALS,
   updated_at: '2026-11-07T12:00:00Z',
+  available: true,
 }
 
 export const TAG: Listing = {
@@ -55,15 +58,19 @@ export const TAG: Listing = {
   },
   colours: [],
   media: [],
-  one_material: false,
+  materials: SHOP_MATERIALS,
   updated_at: '2026-11-07T12:00:00Z',
+  available: false,
 }
 
 export const CHARM_ID = 'l3'
 const PETG_TEAL = { id: 'f-petg-teal', colour: '#1C8C8C', colour_name: 'Teal', material: 'PETG' }
 const PETG_RUST = { id: 'f-petg-rust', colour: '#C0502A', colour_name: 'Rust', material: 'PETG' }
 
-/** #6152: a listing whose colours are of one material, which the visitor chooses once. */
+/**
+ * #6152, #6258: a listing in two materials. A print is of one: the first of the shop's
+ * order (PETG, then PLA) that has every colour the visitor sets.
+ */
 export const CHARM: Listing = {
   id: CHARM_ID,
   title: 'Bag charm',
@@ -88,8 +95,9 @@ export const CHARM: Listing = {
   },
   colours: [BLUE, ORANGE, PETG_TEAL, PETG_RUST],
   media: [],
-  one_material: true,
+  materials: SHOP_MATERIALS,
   updated_at: '2026-11-07T12:00:00Z',
+  available: true,
 }
 
 const LISTINGS = [KEYCHAIN, TAG, CHARM]
@@ -172,8 +180,6 @@ interface Body {
   listing_updated_at?: string
   values?: Record<string, unknown>
   colours?: Record<string, string>
-  /** The filament picked for each colour parameter (#6152). */
-  picks?: Record<string, string>
   quantity?: number
 }
 
@@ -188,26 +194,19 @@ function outside(body: Body): Response | Listing {
       return refused(422, 'input_outside_listing', 'This choice is not offered for this listing.')
     }
   }
-  // #6152: a pick is a listing filament of the parameter's value (`checked_picks`), and a
-  // `one_material` listing's picks share one material (`check_one_material`).
-  const materials = new Set<string>()
-  const byColour = new Map<string, string>()
-  for (const [name, id] of Object.entries(body.picks ?? {})) {
-    const filament = listing.colours.find((f) => f.id === id)
-    const value = body.values?.[name]
-    if (!filament || typeof value !== 'string' || filament.colour.toLowerCase() !== value.toLowerCase()) {
-      return refused(422, 'input_outside_listing', 'This choice is not offered for this listing.')
-    }
-    // Two picks of one colour name one filament (`checked_picks`, 422 `pick_colour_clash`).
-    const held = byColour.get(filament.colour.toLowerCase()) ?? filament.id
-    if (held !== filament.id) {
-      return refused(422, 'pick_colour_clash', 'Two of your colours are one colour of two filaments. A colour prints from one filament: pick the same one for both.')
-    }
-    byColour.set(filament.colour.toLowerCase(), filament.id)
-    materials.add(filament.material.toLowerCase())
-  }
-  if (listing.one_material && materials.size > 1) {
-    return refused(422, 'listing_mixed_material', 'Every colour of this design must be of one material. Pick colours of one material.')
+  // #6258: the colours given fix one material, the first of the listing's that has each
+  // (`inputs.py` `resolve_choice`); none is 422 `listing_colours_clash` with the parts.
+  const given = Object.entries(body.values ?? {}).filter(([name]) => {
+    const bound = listing.params[name]
+    return bound?.kind === 'choice' && bound.colour
+  })
+  const offers = (material: string, colour: unknown) =>
+    listing.colours.some((f) => f.material.toLowerCase() === material.toLowerCase() && f.colour.toLowerCase() === String(colour).toLowerCase())
+  if (given.length > 0 && !listing.materials.some((material) => given.every(([, colour]) => offers(material, colour)))) {
+    return problem(422, 'Unprocessable Content', "Some of these colours can't go together: each print is made from one kind of plastic. Change one of them.", {
+      type: PROBLEMS + 'listing_colours_clash',
+      parts: given.map(([name]) => name),
+    })
   }
   const archived = Object.values(listing.params).some((p) => p.kind === 'choice' && p.colour && p.choices.length === 0)
   if (archived) return refused(422, 'input_outside_listing', 'This choice is not offered for this listing.')
@@ -292,7 +291,8 @@ export const handlers = [
   http.post(`${base}/renders`, async ({ request }) => {
     const missing = keyMissing(request)
     if (missing) return missing
-    const checked = outside((await request.json()) as Body)
+    const body = (await request.json()) as Body
+    const checked = outside(body)
     if (checked instanceof Response) return checked
     const id = next()
     const render: StoreRender = {
@@ -304,6 +304,15 @@ export const handlers = [
       colors: null,
       preview_url: null,
       error: null,
+      // #6302 review: the colours the render takes. The mock moves none: a part not given
+      // keeps the listing's default.
+      values: Object.fromEntries(
+        Object.entries(checked.params).flatMap(([name, param]) => {
+          if (param.kind !== 'choice' || !param.colour) return []
+          const value = body.values?.[name] ?? param.default
+          return typeof value === 'string' ? [[name, value]] : []
+        }),
+      ),
     }
     renders.set(id, { render, polls: 0 })
     return HttpResponse.json(render, { status: 202 })
