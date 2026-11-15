@@ -149,6 +149,31 @@ async def test_a_stalled_data_dir_never_holds_healthz(
     assert await check.writable() is True
 
 
+async def test_a_data_dir_that_stalls_after_a_good_check_turns_not_writable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stalled = threading.Event()
+    release = threading.Event()
+
+    def access(path: object, mode: int) -> bool:
+        if stalled.is_set():
+            release.wait(10)
+        return True
+
+    monkeypatch.setattr(health, "STALLED_AFTER", 0.05)
+    monkeypatch.setattr(os, "access", access)
+    check = health.DataDirCheck(tmp_path, ttl=0)
+    try:
+        assert await check.writable() is True
+        stalled.set()
+        await asyncio.sleep(0.01)  # let the previous call's check finish
+        await check.writable()  # starts the check that stalls
+        await asyncio.sleep(0.1)
+        assert await check.writable() is False
+    finally:
+        release.set()
+
+
 async def test_the_data_dir_answer_is_reused_until_it_is_due(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

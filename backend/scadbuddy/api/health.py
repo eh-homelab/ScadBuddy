@@ -42,9 +42,11 @@ class Health(BaseModel):
 
 #: How long a data dir check answers `/healthz` before another starts (#6418).
 DATA_DIR_TTL = 30.0
-#: How long the very first `/healthz` waits for the first check: a check that takes
-#: longer answers "not writable" until it ends.
+#: How long the very first `/healthz` waits for the first check.
 FIRST_CHECK_WAIT = 2.0
+#: A check still running after this long answers "not writable" until it ends, however
+#: the last one ended: a stalled NAS is not a writable data dir.
+STALLED_AFTER = 5.0
 
 
 class DataDirCheck:
@@ -60,19 +62,25 @@ class DataDirCheck:
         self._lock = threading.Lock()
         self._checking: concurrent.futures.Future[None] | None = None
         self._at = float("-inf")
+        self._started = 0.0
         self._writable: bool | None = None
 
     async def writable(self) -> bool:
-        """The last answer. A due check starts in the background and is never waited
-        for, except the first, which is waited for up to FIRST_CHECK_WAIT."""
+        """The last answer, or False while a check has run STALLED_AFTER or longer. A
+        due check starts in the background and is never waited for, except the first,
+        which is waited for up to FIRST_CHECK_WAIT."""
         with self._lock:
             if self._checking is None and time.monotonic() - self._at >= self._ttl:
                 self._checking = concurrent.futures.Future()
+                self._started = time.monotonic()
                 threading.Thread(target=self._check, name="healthz-data-dir", daemon=True).start()
             checking = self._checking
         if self._writable is None and checking is not None:
             await asyncio.wait([asyncio.wrap_future(checking)], timeout=FIRST_CHECK_WAIT)
-        return bool(self._writable)
+        with self._lock:
+            if self._checking is not None and time.monotonic() - self._started >= STALLED_AFTER:
+                return False
+            return bool(self._writable)
 
     def _check(self) -> None:
         try:
