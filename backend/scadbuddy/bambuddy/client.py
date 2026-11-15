@@ -763,6 +763,13 @@ class BambuddyClient:
         Archived spools are excluded by default because the picker offers what can be
         printed with today; ``include_archived`` is Bambuddy's own query parameter.
         """
+        rows = await self.spool_rows(include_archived=include_archived)
+        return [Spool.model_validate(row) for row in rows]
+
+    async def spool_rows(self, *, include_archived: bool = False) -> list[Any]:
+        """`spools`' rows as Bambuddy sent them, not yet validated: a caller that takes
+        each row on its own (`filament/bambuddy_pull.py`) skips a malformed one rather than
+        losing them all."""
         what = "list the filament spools"
         response = await self._send(
             "GET",
@@ -772,7 +779,7 @@ class BambuddyClient:
             what=what,
             params={"include_archived": include_archived},
         )
-        return [Spool.model_validate(row) for row in self._rows(response, what=what)]
+        return self._rows(response, what=what)
 
     async def filament_catalog(self) -> list[CatalogFilament]:
         """``GET /api/v1/filament-catalog/`` — Bambuddy's filament catalogue, each entry

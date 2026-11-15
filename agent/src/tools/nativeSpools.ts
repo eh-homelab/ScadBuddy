@@ -3,7 +3,7 @@ import { ok } from './call.js'
 import { defineTool, json, ToolError, type Tool } from './registry.js'
 
 // ScadBuddy's own spool inventory (#4643, tier B of #3818): the records of the native
-// spool provider, `native_spools`, which the print dialog's tray overlay shows as provider
+// spool provider (backend `spools/native.py`), which the print dialog's tray overlay shows as provider
 // "native" beside Bambuddy's. Write tier: nothing leaves ScadBuddy.
 // Routes: backend/scadbuddy/api/native_spools.py.
 

@@ -81,7 +81,8 @@ def test_a_cost_finer_than_its_column_is_refused() -> None:
 
 
 def test_a_duplicate_identity_is_409(rows: OrderStore) -> None:
-    """The identity is material, subtype, brand and colour, in any case (Ruling 4)."""
+    """The identity is material, subtype, brand and colour, in any case (Ruling 4), and
+    alpha (#6261)."""
     made = rows.insert_filament(PLA)
     again = PLA.model_copy(
         update={"material": "pla", "subtype": "BASIC", "brand": "bambu", "colour": "#ffffff"}

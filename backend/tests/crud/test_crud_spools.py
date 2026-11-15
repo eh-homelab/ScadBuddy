@@ -420,9 +420,10 @@ async def test_natural_writes_sent_twice_leave_what_one_left(
     uses = [SpoolUse(slot_id=1, spool_id=spool.id, grams=12.5)]
     remote_native = RemoteNativeSpools(blocking)
     await asyncio.to_thread(remote_native.record_uses, RUN, "p1", uses)
-    once = _rows(store, "native_spool_uses")
+    once = _rows(store, "filament_spool_events")
     await asyncio.to_thread(remote_native.record_uses, RUN, "p1", uses)
-    assert _rows(store, "native_spool_uses") == once and len(once) == 1
+    assert _rows(store, "filament_spool_events") == once
+    assert [row["kind"] for row in once].count("print_started") == 1
 
 
 @pytest.mark.requires_postgres

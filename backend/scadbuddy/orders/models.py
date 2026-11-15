@@ -1027,7 +1027,8 @@ class DeliveredBody(BaseModel):
 
 class FilamentInput(BaseModel):
     """A filament record as a body carries it: what a kilogram costs (§5.1). Its
-    identity is material, subtype, brand and colour, upper-cased (Ruling 4)."""
+    identity is material, subtype, brand and colour, upper-cased (Ruling 4), and alpha
+    (#6261)."""
 
     model_config = ConfigDict(extra="forbid")
 

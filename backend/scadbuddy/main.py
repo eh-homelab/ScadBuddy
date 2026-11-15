@@ -90,6 +90,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.crud import idempotency
 from scadbuddy.crud import listener as crud_listener
+from scadbuddy.filament.component import FILAMENT
 from scadbuddy.flow_triggers.component import FLOW_TRIGGERS
 from scadbuddy.flow_triggers.events import listen_for_triggers
 from scadbuddy.flow_triggers.fire import TriggerFires, reconcile_trigger_schedules
@@ -143,7 +144,7 @@ from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.slicing.component import SLICING
 from scadbuddy.slicing.held_presets import HeldPresetStore, held_presets_activity
 from scadbuddy.slicing.start import stop_lost_native_slices, sweep_native_slices
-from scadbuddy.spools.activities import spool_activities
+from scadbuddy.spools.activities import filament_pull_activity, spool_activities
 from scadbuddy.spools.component import SPOOLS
 from scadbuddy.spools.native import NativeSpoolStore
 from scadbuddy.store import sweep_blobs
@@ -1634,6 +1635,7 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         # A run's next plate copy waits on the printer's report (#4541).
         reports=registry.reports,
         native_spools=NativeSpoolStore(state.settings_store.pool),
+        spools=state.components.get(SPOOLS),
     )
     auto_imports = state.components.get(AUTO_IMPORTS)
     activities = [
@@ -1804,6 +1806,8 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
         *_housekeeping_activities(state),
         *_preview_activities(state),
         *spool_activities(state.components.get(SPOOLS)),
+        # Bambuddy's spools pulled into ScadBuddy's own (#6261), on the spools' Schedule.
+        filament_pull_activity(state.components.get(FILAMENT), lambda: state.settings_store.load()),
         # Bambuddy's local presets kept for native runs (#4645), on the spools' Schedule.
         held_presets_activity(
             lambda: HeldPresetStore(state.projection.pool), lambda: state.settings_store.load()
