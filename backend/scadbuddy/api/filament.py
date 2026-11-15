@@ -631,11 +631,15 @@ async def move_spool(
         "ScadBuddy spool holds, or whose record a ScadBuddy spool is linked to, is linked; any "
         "other becomes a new spool, typed by `material_number`, else by brand, material, "
         "subtype, colour and label weight, else left to need a type. Never writes to Bambuddy. "
-        "Answers the counts and ids made, linked, changed and still needing a type, and the BB "
-        "spool ids it could not pull. 409 when no Bambuddy is configured; Bambuddy's own "
-        "errors as they come."
+        "An archived ScadBuddy spool is never restored or changed; it is listed as `archived`. "
+        "The ledger events name the caller. Answers the counts and ids made, linked, changed, "
+        "still needing a type and archived, the BB spool ids it could not pull, and the count "
+        "(and ids) of BB rows it could not read. 409 when no Bambuddy is configured; "
+        "Bambuddy's own errors as they come."
     ),
 )
-async def import_bambuddy(filament: FilamentDep, store: SettingsStoreDep) -> PullReport:
+async def import_bambuddy(
+    filament: FilamentDep, store: SettingsStoreDep, caller: CallerDep
+) -> PullReport:
     settings = await asyncio.to_thread(store.load)
-    return await read_and_pull(filament, settings)
+    return await read_and_pull(filament, settings, actor=actor(caller))

@@ -173,12 +173,22 @@ class FilamentSpoolStore:
     def update(self, spool_id: UUID, patch: m.SpoolPatch, *, actor: str) -> m.Spool | None:
         """The fields ``patch`` sends; ``None`` for no such spool. One ``edited`` event
         holds every field that changed, as ``[before, after]``; ``archived`` writes an
-        ``archived`` or ``restored`` event instead. A patch that would leave neither a type
-        nor a material is `SpoolTypelessError`, and the temperature ranges are checked on
-        the effective values after it."""
+        ``archived`` or ``restored`` event instead. Archiving closes the spool's open tag
+        binding (reason ``archived``, a ``tag_unbound`` event), as the native archive does
+        (`spools/native.py`); restoring binds nothing back. A patch that would leave neither
+        a type nor a material is `SpoolTypelessError`, and the temperature ranges are
+        checked on the effective values after it."""
         sent = [n for n in _WRITABLE if n in patch.model_fields_set]
         try:
             with self._pool.connection() as conn, conn.transaction():
+                if patch.archived:
+                    # The tag before the spool, as every writer of bindings takes them.
+                    conn.execute(
+                        "SELECT t.id FROM filament_tags t JOIN filament_tag_bindings b"
+                        " ON b.tag_id = t.id WHERE b.spool_id = %s AND b.unbound_at IS NULL"
+                        " ORDER BY t.id FOR UPDATE OF t",
+                        (spool_id,),
+                    )
                 current = conn.execute(
                     f"SELECT {_SPOOL_COLUMNS} FROM filament_spools WHERE id = %s FOR UPDATE",
                     (spool_id,),
@@ -441,6 +451,20 @@ class FilamentSpoolStore:
     def _archive(conn: Conn, current: Row, archived: bool, actor: str) -> None:
         if (current["archived_at"] is not None) == archived:
             return
+        if archived:
+            closed = conn.execute(
+                "UPDATE filament_tag_bindings SET unbound_at = now(), reason = 'archived'"
+                " WHERE spool_id = %s AND unbound_at IS NULL RETURNING tag_id",
+                (current["id"],),
+            ).fetchone()
+            if closed is not None:
+                ledger.record(
+                    conn,
+                    current["id"],
+                    "tag_unbound",
+                    actor=actor,
+                    data={"tag_id": closed["tag_id"], "reason": "archived"},
+                )
         conn.execute(
             "UPDATE filament_spools SET archived_at = CASE WHEN %s THEN now() END,"
             " updated_at = now() WHERE id = %s",

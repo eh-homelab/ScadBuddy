@@ -210,3 +210,22 @@ def test_a_bind_to_a_missing_spool_makes_no_tag(pg_pool: PgPool) -> None:
             "SELECT count(*) AS n FROM filament_tags WHERE tag_uid = 'CC03'"
         ).fetchone()
     assert row is not None and row["n"] == 0
+
+
+def test_archiving_a_spool_takes_its_tag_off_and_restoring_binds_nothing(
+    pg_pool: PgPool,
+) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    spool = _spool(store, pg_pool)
+    bound = store.bind_tag(spool, tag_uid="A1B2C3D4", kind="bambu_mifare", actor="ann")
+    assert bound is not None
+    store.archive(spool, True, actor="ann")
+    assert store.open_binding(spool) is None
+    unbound = [e for e in store.events(spool) if e.kind == "tag_unbound"]
+    assert [e.data for e in unbound] == [{"tag_id": str(bound.tag_id), "reason": "archived"}]
+    assert _kinds(store, spool)[-2:] == ["tag_unbound", "archived"]
+    store.archive(spool, False, actor="ann")
+    assert store.open_binding(spool) is None
+    # The tag is free for another spool.
+    other = _spool(store, pg_pool)
+    assert store.bind_tag(other, tag_uid="A1B2C3D4", kind="bambu_mifare", actor="ann")

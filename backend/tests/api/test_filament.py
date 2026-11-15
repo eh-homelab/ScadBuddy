@@ -319,6 +319,9 @@ def test_the_bambuddy_import_pulls_once_then_changes_nothing(client: TestClient)
     (spool_id,) = report["created_ids"]
     spool = client.get(f"/api/v1/filament/spools/{spool_id}").json()
     assert (spool["grams_left"], spool["rgba"]) == (750, "#00FF00FF")
+    # A person's import names the caller, not the Schedule's "bambuddy".
+    events = client.get(f"/api/v1/filament/spools/{spool_id}/events").json()
+    assert {e["actor"] for e in events} == {actor(ANONYMOUS)}
     again = client.post(IMPORT_BB).json()
     assert (again["created"], again["linked"], again["updated"]) == (0, 0, 0)
     assert route.call_count == 2

@@ -382,3 +382,122 @@ def test_a_bb_drying_is_a_dried_event_once(pg_pool: PgPool) -> None:
     spool = f.spools.get(made)
     assert spool is not None
     assert spool.last_dried_at == events[0].at
+
+
+def test_a_re_used_tag_of_an_archived_spool_makes_a_new_spool(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    old = f.spools.create(SpoolCreate(material_id=_pla(pg_pool)), actor="ann")
+    f.spools.bind_tag(old.id, tray_uuid=TRAY, kind="bambu_mifare", actor="ann")
+    f.spools.archive(old.id, True, actor="ann")
+    report = pull(f, [bb()], now=NOW)
+    assert (report.created, report.linked) == (1, 0)
+    (made,) = report.created_ids
+    binding = f.spools.open_binding(made)
+    assert binding is not None
+
+
+def test_an_archived_holder_with_an_open_binding_gives_up_its_tag(pg_pool: PgPool) -> None:
+    """A binding left open on an archived spool (written before archives closed them)."""
+    f = _filament(pg_pool)
+    old = f.spools.create(SpoolCreate(material_id=_pla(pg_pool)), actor="ann")
+    f.spools.bind_tag(old.id, tray_uuid=TRAY, kind="bambu_mifare", actor="ann")
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_spools SET archived_at = now() WHERE id = %s", (old.id,))
+    (made,) = pull(f, [bb()], now=NOW).created_ids
+    assert f.spools.open_binding(made) is not None
+    assert f.spools.open_binding(old.id) is None
+
+
+def test_an_archived_spool_the_record_link_names_is_left_alone(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    with pg_pool.connection() as conn:
+        physical = conn.execute(
+            "INSERT INTO physical_spools DEFAULT VALUES RETURNING id"
+        ).fetchone()
+        assert physical is not None
+        conn.execute(
+            "INSERT INTO filament_spools (id, material_id, archived_at) VALUES (%s, %s, now())",
+            (physical["id"], _pla(pg_pool)),
+        )
+        conn.execute(
+            "INSERT INTO spool_record_links (provider, record_id, physical_spool_id, linked_by)"
+            " VALUES ('bambuddy', '7', %s, 'rfid')",
+            (physical["id"],),
+        )
+    for _ in range(2):
+        report = pull(f, [bb(tray_uuid=None, tag_uid=None)], now=NOW)
+        assert (report.created, report.linked, report.archived) == (0, 0, 1)
+        assert report.archived_ids == [physical["id"]]
+    spool = f.spools.get(physical["id"])
+    assert spool is not None
+    assert spool.archived_at is not None
+    assert f.spools.events(physical["id"]) == []
+    assert len(f.spools.list(include_archived=True)) == 1
+
+
+def test_a_linked_spool_archived_in_sb_takes_nothing(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb(updated_at=_bb_time(-2))], now=NOW).created_ids
+    f.spools.archive(made, True, actor="ann")
+    count = len(f.spools.events(made))
+    report = pull(f, [bb(weight_used=500.0, updated_at=_bb_time(-1))], now=NOW)
+    assert (report.updated, report.archived_ids) == (0, [made])
+    assert len(f.spools.events(made)) == count
+
+
+def test_two_bb_spools_with_one_tag_give_the_second_none(
+    pg_pool: PgPool, caplog: pytest.LogCaptureFixture
+) -> None:
+    f = _filament(pg_pool)
+    report = pull(f, [bb(id=1), bb(id=2)], now=NOW)
+    first, second = report.created_ids
+    assert f.spools.open_binding(first) is not None
+    assert f.spools.open_binding(second) is None
+    assert "tag is on another spool; not moved" in caplog.text
+
+
+def test_a_failing_spool_is_listed_and_the_rest_go_on(
+    pg_pool: PgPool, caplog: pytest.LogCaptureFixture
+) -> None:
+    f = _filament(pg_pool)
+    backwards = bb(id=3, tray_uuid=None, tag_uid=None, nozzle_temp_min=250, nozzle_temp_max=200)
+    report = pull(f, [backwards, bb(id=4, tray_uuid=None, tag_uid=None)], now=NOW)
+    assert (report.failed_bb_ids, report.created) == ([3], 1)
+    assert len(f.spools.list()) == 1
+    assert "TypeTempError" in caplog.text
+
+
+def test_keys_bound_to_two_spools_keep_the_oldest_binding(
+    pg_pool: PgPool, caplog: pytest.LogCaptureFixture
+) -> None:
+    f = _filament(pg_pool)
+    older = f.spools.create(SpoolCreate(material_id=_pla(pg_pool)), actor="ann")
+    newer = f.spools.create(SpoolCreate(material_id=_pla(pg_pool)), actor="ann")
+    f.spools.bind_tag(older.id, tag_uid="AABBCCDD11223344", kind="bambu_mifare", actor="ann")
+    f.spools.bind_tag(newer.id, tray_uuid=TRAY, kind="bambu_mifare", actor="ann")
+    report = pull(f, [bb()], now=NOW)
+    assert report.linked_ids == [older.id]
+    assert "bound to two spools" in caplog.text
+    assert f.spools.open_binding(older.id) is not None
+    assert f.spools.open_binding(newer.id) is not None
+
+
+def test_the_pull_names_its_actor(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    (scheduled,) = pull(f, [bb(id=1, tray_uuid=None, tag_uid=None)], now=NOW).created_ids
+    (person,) = pull(f, [bb(id=2, tray_uuid=None, tag_uid=None)], now=NOW, actor="ann").created_ids
+    assert {e.actor for e in f.spools.events(scheduled)} == {"bambuddy"}
+    assert {e.actor for e in f.spools.events(person)} == {"ann"}
+
+
+async def test_a_malformed_bb_row_is_skipped_and_counted(
+    pg_pool: PgPool, caplog: pytest.LogCaptureFixture
+) -> None:
+    f = _filament(pg_pool)
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    rows = [bb().model_dump(mode="json"), {"id": 99, "material": None}, "nonsense"]
+    with respx.mock() as router:
+        router.get(f"{BB}/api/v1/inventory/spools").respond(json=rows)
+        report = await read_and_pull(f, settings)
+    assert (report.created, report.invalid, report.invalid_bb_ids) == (1, 2, [99])
+    assert "is not a spool; skipped" in caplog.text

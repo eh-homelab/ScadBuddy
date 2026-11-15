@@ -49,7 +49,7 @@ from uuid import UUID
 
 from psycopg import Connection
 from psycopg.rows import DictRow
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.models import Spool as BbSpool
@@ -103,18 +103,24 @@ Outcome = Literal["pulled", "skipped", "failed"]
 
 class PullReport(BaseModel):
     """What one pull did: how many SB spools it made, linked and changed, how many of
-    those it made or linked still need a type, with their ids; and the BB spools it could
-    not pull (each logged)."""
+    those it made or linked still need a type, and how many it left alone because they
+    are archived, with their ids; the BB spools it could not pull (each logged and rolled
+    back); and the BB rows it could not read (each logged), with their ids when the row
+    had one."""
 
     created: int = 0
     linked: int = 0
     updated: int = 0
     needs_type: int = 0
+    archived: int = 0
+    invalid: int = 0
     created_ids: list[UUID] = Field(default_factory=list)
     linked_ids: list[UUID] = Field(default_factory=list)
     updated_ids: list[UUID] = Field(default_factory=list)
     needs_type_ids: list[UUID] = Field(default_factory=list)
+    archived_ids: list[UUID] = Field(default_factory=list)
     failed_bb_ids: list[int] = Field(default_factory=list)
+    invalid_bb_ids: list[int] = Field(default_factory=list)
 
 
 def _text(value: str | None) -> str | None:
@@ -170,20 +176,24 @@ def _column_value(field: str, value: Any) -> Any:
     return Decimal(value) if field == "cost_per_kg" and value is not None else value
 
 
-def pull(store: Filament, spools: Sequence[BbSpool], *, now: datetime) -> PullReport:
+def pull(
+    store: Filament, spools: Sequence[BbSpool], *, now: datetime, actor: str = ACTOR
+) -> PullReport:
     """Pull ``spools`` (BB's ``GET /inventory/spools``) into ``store``, as the module
-    says. ``now`` is the link's time, and its ``bb_updated_at`` when BB sends none. One BB
-    spool that fails is rolled back, logged and listed; the rest go on."""
+    says. ``now`` is the link's time, and its ``bb_updated_at`` when BB sends none;
+    ``actor`` is who the events name (a person's import, else ``bambuddy``). One BB spool
+    that fails is rolled back, logged and listed; the rest go on."""
     report = PullReport()
     for bb in spools:
         try:
             with store.spools.transaction() as conn:
                 conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", (_LOCK, bb.id))
-                outcome = _one(conn, store, bb, now)
+                outcome = _one(conn, store, bb, now, actor)
         except Exception as error:
             logger.warning(
                 "could not pull a Bambuddy spool",
                 extra={"bb_spool_id": bb.id, "error": type(error).__name__},
+                exc_info=True,
             )
             report.failed_bb_ids.append(bb.id)
             continue
@@ -193,61 +203,91 @@ def pull(store: Filament, spools: Sequence[BbSpool], *, now: datetime) -> PullRe
         getattr(report, f"{what}_ids").append(spool_id)
         if typeless:
             report.needs_type_ids.append(spool_id)
-    for what in ("created", "linked", "updated", "needs_type"):
+    for what in ("created", "linked", "updated", "needs_type", "archived"):
         setattr(report, what, len(getattr(report, f"{what}_ids")))
     return report
 
 
-def _one(conn: Conn, store: Filament, bb: BbSpool, now: datetime) -> tuple[str, UUID, bool] | None:
+def _one(
+    conn: Conn, store: Filament, bb: BbSpool, now: datetime, actor: str
+) -> tuple[str, UUID, bool] | None:
+    """What came of one BB spool. An archived SB spool, linked or named by the BB
+    record's link, is left as it is: never restored, never written to (``archived``)."""
     link = conn.execute(
-        "SELECT spool_id, bb_updated_at FROM filament_bb_links WHERE bb_spool_id = %s",
+        "SELECT l.spool_id, l.bb_updated_at, s.archived_at IS NOT NULL AS archived"
+        " FROM filament_bb_links l JOIN filament_spools s ON s.id = l.spool_id"
+        " WHERE l.bb_spool_id = %s",
         (bb.id,),
     ).fetchone()
     if link is not None:
         spool_id: UUID = link["spool_id"]
-        changed = _update(conn, store, bb, spool_id, link["bb_updated_at"], now)
+        if link["archived"]:
+            return "archived", spool_id, False
+        changed = _update(conn, store, bb, spool_id, link["bb_updated_at"], now, actor)
         # BB may not move ``updated_at`` for a weighing: its events are booked anyway,
         # once each.
-        booked = _book(conn, spool_id, bb)
+        booked = _book(conn, spool_id, bb, actor)
         return ("updated", spool_id, False) if changed or booked else None
     after = snapshot(bb)
     held = _holder(conn, after, bb.id)
     if held is not None:
-        typeless = _link(conn, store, bb, held, after, now)
-        _book(conn, held, bb)
-        return "linked", held, typeless
-    made, typeless = _create(conn, store, bb, after, now)
-    _book(conn, made, bb)
+        held_id, archived = held
+        if archived:
+            return "archived", held_id, False
+        typeless = _link(conn, store, bb, held_id, after, now, actor)
+        _book(conn, held_id, bb, actor)
+        return "linked", held_id, typeless
+    made, typeless = _create(conn, store, bb, after, now, actor)
+    _book(conn, made, bb, actor)
     return "created", made, typeless
 
 
 # -- step 2: an SB spool that already is this BB spool ---------------------------------
 
 
-def _holder(conn: Conn, after: dict[str, Any], bb_id: int) -> UUID | None:
-    """The unlinked SB spool that holds the BB spool's tag, else the one its record link
-    names."""
-    uid, tray = after["tag_uid"], after["tray_uuid"]
-    if uid is not None or tray is not None:
-        row = conn.execute(
-            "SELECT b.spool_id FROM filament_tag_bindings b"
-            " JOIN filament_tags t ON t.id = b.tag_id"
-            " WHERE b.unbound_at IS NULL AND (t.tag_uid = %s OR t.tray_uuid = %s)"
-            " AND NOT EXISTS (SELECT 1 FROM filament_bb_links l WHERE l.spool_id = b.spool_id)"
-            " ORDER BY b.bound_at LIMIT 1",
-            (uid, tray),
-        ).fetchone()
-        if row is not None:
-            found: UUID = row["spool_id"]
-            return found
+def _tag_holders(conn: Conn, uid: str | None, tray: str | None) -> list[dict[str, Any]]:
+    """The open bindings of the tags BB's keys name, oldest first, each with its spool,
+    whether that spool is archived and whether it is linked to a BB spool. Two rows of
+    two spools are the keys naming two tags."""
+    if uid is None and tray is None:
+        return []
+    return conn.execute(
+        "SELECT b.spool_id, s.archived_at IS NOT NULL AS archived,"
+        " EXISTS (SELECT 1 FROM filament_bb_links l WHERE l.spool_id = b.spool_id) AS linked"
+        " FROM filament_tag_bindings b JOIN filament_tags t ON t.id = b.tag_id"
+        " JOIN filament_spools s ON s.id = b.spool_id"
+        " WHERE b.unbound_at IS NULL AND (t.tag_uid = %s OR t.tray_uuid = %s)"
+        " ORDER BY b.bound_at, b.id",
+        (uid, tray),
+    ).fetchall()
+
+
+def _holder(conn: Conn, after: dict[str, Any], bb_id: int) -> tuple[UUID, bool] | None:
+    """The SB spool that already is this BB spool, and whether it is archived: the
+    unlinked, unarchived spool with the oldest binding of the BB spool's tag (an archived
+    one's tag is free to re-use: a new spool takes it), else the spool the BB record's
+    link names, archived or not. Keys that name two spools are logged, and the oldest
+    binding is kept."""
+    live = [
+        h for h in _tag_holders(conn, after["tag_uid"], after["tray_uuid"]) if not h["archived"]
+    ]
+    if len({h["spool_id"] for h in live}) > 1:
+        logger.warning(
+            "a Bambuddy spool's tag keys are bound to two spools; the oldest binding is kept",
+            extra={"bb_spool_id": bb_id, "spools": [str(h["spool_id"]) for h in live]},
+        )
+    free = [h for h in live if not h["linked"]]
+    if free:
+        found: UUID = free[0]["spool_id"]
+        return found, False
     row = conn.execute(
-        "SELECT s.id FROM spool_record_links r JOIN filament_spools s"
-        " ON s.id = r.physical_spool_id"
+        "SELECT s.id, s.archived_at IS NOT NULL AS archived FROM spool_record_links r"
+        " JOIN filament_spools s ON s.id = r.physical_spool_id"
         " WHERE r.provider = 'bambuddy' AND r.record_id = %s"
         " AND NOT EXISTS (SELECT 1 FROM filament_bb_links l WHERE l.spool_id = s.id)",
         (str(bb_id),),
     ).fetchone()
-    return None if row is None else row["id"]
+    return None if row is None else (row["id"], row["archived"])
 
 
 def _link(
@@ -257,6 +297,7 @@ def _link(
     spool_id: UUID,
     after: dict[str, Any],
     now: datetime,
+    actor: str,
 ) -> bool:
     """Link the SB spool and keep what it has; a spool with no type takes the one BB's
     values match, and one with no weight BB's. True when it still needs a type."""
@@ -280,7 +321,7 @@ def _link(
     if current["grams_left"] is not None or current["weight_locked"]:
         reading = None
     _insert_link(conn, spool_id, bb, now)
-    _synced(conn, spool_id, bb, after, changes, reading, linked=True)
+    _synced(conn, spool_id, bb, after, changes, reading, actor, linked=True)
     FilamentSpoolStore.read(conn, spool_id, check=True)
     return type_id is None
 
@@ -289,7 +330,7 @@ def _link(
 
 
 def _create(
-    conn: Conn, store: Filament, bb: BbSpool, after: dict[str, Any], now: datetime
+    conn: Conn, store: Filament, bb: BbSpool, after: dict[str, Any], now: datetime, actor: str
 ) -> tuple[UUID, bool]:
     kind = _match(conn, store, after)
     values = _values(conn, after, after.keys() - _NOT_COLUMNS)
@@ -316,40 +357,37 @@ def _create(
         absolute_g=reading,
         ref_kind=REF_KIND,
         ref_id=str(bb.id),
-        actor=ACTOR,
+        actor=actor,
     )
-    _bind(conn, spool_id, after)
+    _bind(conn, spool_id, after, actor)
     _insert_link(conn, spool_id, bb, now)
     # A lock BB set is BB's to clear (`_lock_from_bb`).
     locked = {"weight_locked": [False, True]} if values.get("weight_locked") else {}
-    _synced(conn, spool_id, bb, after, locked, None)
+    _synced(conn, spool_id, bb, after, locked, None, actor)
     FilamentSpoolStore.read(conn, spool_id, check=True)
     return spool_id, kind is None
 
 
-def _bind(conn: Conn, spool_id: UUID, after: dict[str, Any]) -> None:
-    """Put BB's tag on the spool, unless another spool still holds it (one linked to
-    another BB spool, which step 2 did not take): a pull never takes a tag off a spool it
-    did not pull it for."""
+def _bind(conn: Conn, spool_id: UUID, after: dict[str, Any], actor: str) -> None:
+    """Put BB's tag on the spool, unless another unarchived spool still holds it (one
+    linked to another BB spool, which step 2 did not take): a pull never takes a tag off
+    a live spool it did not pull it for. An archived spool's tag is taken (re-use)."""
     uid, tray = after["tag_uid"], after["tray_uuid"]
     if uid is None and tray is None:
         return
-    held = conn.execute(
-        "SELECT b.spool_id FROM filament_tag_bindings b JOIN filament_tags t ON t.id = b.tag_id"
-        " WHERE b.unbound_at IS NULL AND b.spool_id <> %s"
-        " AND (t.tag_uid = %s OR t.tray_uuid = %s)",
-        (spool_id, uid, tray),
-    ).fetchone()
-    if held is not None:
+    held = [
+        h for h in _tag_holders(conn, uid, tray) if h["spool_id"] != spool_id and not h["archived"]
+    ]
+    if held:
         logger.warning(
             "a Bambuddy spool's tag is on another spool; not moved",
-            extra={"spool_id": str(spool_id), "holder": str(held["spool_id"])},
+            extra={"spool_id": str(spool_id), "holder": str(held[0]["spool_id"])},
         )
         return
     kind: m.TagKind = "bambu_mifare" if tray is not None else "other"
     try:
         with conn.transaction():
-            FilamentSpoolStore.bind_on(conn, spool_id, uid, tray, kind, False, ACTOR)
+            FilamentSpoolStore.bind_on(conn, spool_id, uid, tray, kind, False, actor)
     except TagKeysClashError:
         logger.warning(
             "a Bambuddy spool's tag keys name two tags; not bound",
@@ -367,13 +405,11 @@ def _update(
     spool_id: UUID,
     pulled_at: datetime | None,
     now: datetime,
+    actor: str,
 ) -> bool:
     """True when the SB spool took anything from BB."""
     if bb.updated_at is not None and pulled_at is not None and bb.updated_at <= pulled_at:
         return False
-    conn.execute("SELECT 1 FROM filament_spools WHERE id = %s FOR UPDATE", (spool_id,))
-    spool = FilamentSpoolStore.read(conn, spool_id)
-    assert spool is not None
     last = conn.execute(
         "SELECT data -> 'bb' AS bb FROM filament_spool_events"
         " WHERE spool_id = %s AND kind = 'synced_from_bb' AND data ? 'bb'"
@@ -382,6 +418,18 @@ def _update(
     ).fetchone()
     before: dict[str, Any] = (last["bb"] if last is not None else None) or {}
     after = snapshot(bb)
+    keys = (after["tag_uid"], after["tray_uuid"])
+    retag = keys != (before.get("tag_uid"), before.get("tray_uuid")) and keys != (None, None)
+    if retag:
+        # The tags before the spool, as every writer of bindings takes them (`bind_tag`).
+        conn.execute(
+            "SELECT id FROM filament_tags WHERE tag_uid = %s OR tray_uuid = %s"
+            " ORDER BY id FOR UPDATE",
+            keys,
+        )
+    conn.execute("SELECT 1 FROM filament_spools WHERE id = %s FOR UPDATE", (spool_id,))
+    spool = FilamentSpoolStore.read(conn, spool_id)
+    assert spool is not None
     conn.execute(
         "UPDATE filament_bb_links SET bb_updated_at = %s WHERE spool_id = %s",
         (bb.updated_at or now, spool_id),
@@ -422,8 +470,8 @@ def _update(
             " updated_at = now() WHERE id = %s",
             [*(changes[c][1] for c in columns), spool_id],
         )
-    if (after["tag_uid"], after["tray_uuid"]) != (before.get("tag_uid"), before.get("tray_uuid")):
-        _bind(conn, spool_id, after)
+    if retag:
+        _bind(conn, spool_id, after, actor)
     reading = after["remaining_g"]
     locked = bool(changes.get("weight_locked", [None, spool.weight_locked])[1])
     weight: str | None = None
@@ -431,7 +479,7 @@ def _update(
         reading = None
     elif locked:
         reading, weight = None, "locked"
-    _synced(conn, spool_id, bb, after, changes, reading, weight=weight)
+    _synced(conn, spool_id, bb, after, changes, reading, actor, weight=weight)
     FilamentSpoolStore.read(conn, spool_id, check=True)
     return True
 
@@ -474,7 +522,7 @@ def _core_g(conn: Conn, spool_id: UUID, bb: BbSpool) -> tuple[int | None, str | 
     return None, None
 
 
-def _book(conn: Conn, spool_id: UUID, bb: BbSpool) -> bool:
+def _book(conn: Conn, spool_id: UUID, bb: BbSpool, actor: str) -> bool:
     """BB's last weighing as a ``weighed`` event and its last drying as a ``dried`` one,
     each once: ref ``bb_scale``/``bb_dried`` and ``<bb id>/<time>``, at BB's time, source
     ``bb``. The weighing's reading is the scale's gross weight less the core
@@ -503,7 +551,7 @@ def _book(conn: Conn, spool_id: UUID, bb: BbSpool) -> bool:
                 at=bb.last_weighed_at,
                 ref_kind="bb_scale",
                 ref_id=f"{bb.id}/{bb.last_weighed_at.isoformat()}",
-                actor=ACTOR,
+                actor=actor,
                 data=data,
             )
             is not None
@@ -518,7 +566,7 @@ def _book(conn: Conn, spool_id: UUID, bb: BbSpool) -> bool:
                 at=bb.last_dried_at,
                 ref_kind="bb_dried",
                 ref_id=f"{bb.id}/{bb.last_dried_at.isoformat()}",
-                actor=ACTOR,
+                actor=actor,
             )
             is not None
         )
@@ -617,6 +665,7 @@ def _synced(
     after: dict[str, Any],
     changes: dict[str, list[Any]],
     reading: float | None,
+    actor: str,
     *,
     linked: bool = False,
     weight: str | None = None,
@@ -637,7 +686,7 @@ def _synced(
         absolute_g=reading,
         ref_kind=REF_KIND if stamp else None,
         ref_id=f"{bb.id}@{stamp}" if stamp else None,
-        actor=ACTOR,
+        actor=actor,
         data=data,
     )
 
@@ -645,17 +694,43 @@ def _synced(
 # -- reading Bambuddy ------------------------------------------------------------------
 
 
-async def read_and_pull(store: Filament, settings: StoredSettings) -> PullReport:
-    """Read BB's unarchived spools and pull them. BB not configured is `client_for`'s
-    409; BB's own errors are its client's."""
+def parse_rows(rows: Sequence[Any]) -> tuple[list[BbSpool], list[int | None]]:
+    """BB's spool rows, each validated on its own: the good ones, and the id (``None``
+    when it has no readable one) of each row that is not a spool, logged."""
+    good: list[BbSpool] = []
+    bad: list[int | None] = []
+    for row in rows:
+        try:
+            good.append(BbSpool.model_validate(row))
+        except ValidationError:
+            row_id = row.get("id") if isinstance(row, dict) else None
+            bad.append(row_id if isinstance(row_id, int) else None)
+            logger.warning(
+                "a Bambuddy spool row is not a spool; skipped",
+                extra={"bb_spool_id": bad[-1]},
+                exc_info=True,
+            )
+    return good, bad
+
+
+async def read_and_pull(
+    store: Filament, settings: StoredSettings, *, actor: str = ACTOR
+) -> PullReport:
+    """Read BB's unarchived spools and pull them; a malformed row is skipped and counted
+    as ``invalid``. BB not configured is `client_for`'s 409; BB's own errors are its
+    client's."""
     async with client_for(settings) as client:
-        spools = await client.spools()
-    return await asyncio.to_thread(pull, store, spools, now=datetime.now(UTC))
+        rows = await client.spool_rows()
+    spools, bad = parse_rows(rows)
+    report = await asyncio.to_thread(pull, store, spools, now=datetime.now(UTC), actor=actor)
+    report.invalid = len(bad)
+    report.invalid_bb_ids = [i for i in bad if i is not None]
+    return report
 
 
 async def scheduled_pull(store: Filament, load: Callable[[], StoredSettings]) -> Outcome:
     """The Schedule's pull (`SpoolRefresh`): ``skipped`` with no BB URL, ``failed`` when
-    BB or the store fails (logged by its type, never raised), else ``pulled``."""
+    BB or the store fails (logged, never raised), else ``pulled``."""
     settings = await asyncio.to_thread(load)
     if not settings.bambuddy_url:
         logger.info("no Bambuddy configured; its spools are not pulled")
@@ -663,10 +738,15 @@ async def scheduled_pull(store: Filament, load: Callable[[], StoredSettings]) ->
     try:
         report = await read_and_pull(store, settings)
     except Exception as error:
-        logger.warning("could not pull Bambuddy's spools", extra={"error": type(error).__name__})
-        return "failed"
-    if report.failed_bb_ids:
         logger.warning(
-            "some Bambuddy spools were not pulled", extra={"bb_spool_ids": report.failed_bb_ids}
+            "could not pull Bambuddy's spools",
+            extra={"error": type(error).__name__},
+            exc_info=True,
+        )
+        return "failed"
+    if report.failed_bb_ids or report.invalid:
+        logger.warning(
+            "some Bambuddy spools were not pulled",
+            extra={"bb_spool_ids": report.failed_bb_ids, "invalid": report.invalid},
         )
     return "pulled"
