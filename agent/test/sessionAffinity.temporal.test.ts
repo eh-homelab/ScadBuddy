@@ -1071,22 +1071,45 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     return { placed: turns.size, failed: events.filter((e) => turns.has(String(e.activityTaskFailedEventAttributes?.scheduledEventId))).length }
   }
 
-  it('a placement cut off mid-turn because another placement claimed the row is placed again, restarted, and the turn ends well: no failure shown (#6387)', async () => {
+  it.each([
+    ['after its message landed', false],
+    ['before any of its appends landed: the next process here starts anew under the session`s id', true],
+  ])('a placement cut off mid-turn because another placement claimed the row is placed again, and the turn ends well: no failure shown (%s) (#6387)', async (_when, nothingLanded) => {
     const hold = latch()
     slowGate = hold.promise
-    script = (r) => (conversation(r).includes(RESTARTED_PROMPT) ? { text: 'carried on' } : { toolUse: { name: 'mcp__stub__slow', input: { q: 'x' } } })
+    script = (r) =>
+      conversation(r).includes(RESTARTED_PROMPT) || (nothingLanded && fake.messageCalls().length > 1)
+        ? { text: 'carried on' }
+        : { toolUse: { name: 'mcp__stub__slow', input: { q: 'x' } } }
     const a = await replica('a')
     const { id, turn } = await startOn(a, 'do the slow thing')
     const run = await runningRun(id)
     await pollUntil(() => slowCalls, 1)
+    // After its message landed: a user entry is in the table, as the restart decision reads it
+    // (TurnHost #landed). The mirror's appends trail the call: CI, 2026-11-15, claimed before them,
+    // and the next placement sent the message again.
+    if (!nothingLanded) {
+      await pollUntil(
+        async () => Number((await db.sql<{ n: string }[]>`SELECT count(*)::text AS n FROM ai_session_entries WHERE session_id = ${id} AND subpath = '' AND entry_type = 'user'`)[0]!.n) > 0,
+        true,
+      )
+    }
     // Another placement claims the row, as a stray session_turn's claim does (TurnHost #claim).
     await db.sql`UPDATE ai_sessions SET turn_attempt = 'a-stray-placement' WHERE id = ${id}`
+    // Its appends fenced before any landed: the table holds no transcript, while this replica's
+    // Claude Code config dir still has the cut process's file of the session (CI, 2026-11-15:
+    // "Claude Code process exited with code 1", the id already in use).
+    if (nothingLanded) await db.sql`DELETE FROM ai_session_entries WHERE session_id = ${id}`
     expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
     await settled(id)
     hold.release()
-    // The cut placement failed once, and the workflow placed the turn again, which resumed it.
+    // The cut placement failed once, and the workflow placed the turn again, on the same replica.
     expect(await placements(id, run)).toEqual({ placed: 2, failed: 1 })
-    expect(conversation(fake.messageCalls().at(-1)!)).toContain(RESTARTED_PROMPT)
+    expect(a.acquired).toBe(2)
+    // It resumed the transcript, or, with none in the table, sent the message itself.
+    const last = conversation(fake.messageCalls().at(-1)!)
+    if (nothingLanded) expect(last).not.toContain(RESTARTED_PROMPT)
+    else expect(last).toContain(RESTARTED_PROMPT)
     expect(await said(a, id, 'carried on')).toBe(true)
     expect(await types(a, id)).not.toContain('error')
     expect((await db.sql<{ status: string }[]>`SELECT status FROM ai_sessions WHERE id = ${id}`)[0]?.status).toBe('idle')

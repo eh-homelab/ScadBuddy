@@ -184,7 +184,7 @@ describe('StorefrontPage (#5282, #6157)', () => {
     await expect(api.storefrontListings(new URLSearchParams({ limit: '201' }))).rejects.toMatchObject({ status: 422 })
     // Pydantic refuses these as integers; it takes spaces, a sign, `_` between digits and a
     // fraction of zeros.
-    for (const limit of ['1e2', '5.', '5.5', '_1', '1__0']) {
+    for (const limit of ['1e2', '5.', '.0', '5.5', '_1', '1_', '1__0', '1.0_0']) {
       await expect(api.storefrontListings(new URLSearchParams({ limit }))).rejects.toMatchObject({ status: 422 })
     }
     await expect(api.storefrontListings(new URLSearchParams({ offset: '0x10' }))).rejects.toMatchObject({ status: 422 })

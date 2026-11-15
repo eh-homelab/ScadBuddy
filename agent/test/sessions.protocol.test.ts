@@ -341,6 +341,11 @@ describe('the agent’s protocol mirror', () => {
     expect(panel.MESSAGE_MAX).toBe(MESSAGE_MAX)
   })
 
+  it('bounds a queued message\'s edit in the panel exactly where the agent does (#6386)', async () => {
+    const panel = (await frontendClientMessages()) as unknown as Record<string, number>
+    expect(panel.MESSAGE_MAX).toBe(MESSAGE_MAX)
+  })
+
   it('covers every server event type the panel declares', async () => {
     const here = path.dirname(fileURLToPath(import.meta.url))
     const source = await readFile(path.resolve(here, '../../frontend/src/agent/chat/protocol.ts'), 'utf8')

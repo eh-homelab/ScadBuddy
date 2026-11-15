@@ -114,7 +114,8 @@ import {
 // turn runs there, and a turn whose home has gone (a timeout, ShuttingDown, NoCapacity), or whose
 // placement another placement took the row from (PlacementMoved, PLACEMENT_MOVED_PATCH), is placed
 // again: acquire on the shared `agent-tools` (not one of the homes it was lost on while another
-// replica can take it, and the last placement unrestricted), then the turn on the new home,
+// replica can take it, and the last placement unrestricted; a PlacementMoved home answered and is
+// alive, so it is never one of them), then the turn on the new home,
 // resumed from its transcript (`restarted`), at most PLACEMENTS times, waiting PLACEMENT_BACKOFF
 // after each one that timed out (#6353). A home kept from an
 // earlier turn re-reserves as the turn arrives, and refuses NoCapacity when every slot there
@@ -603,7 +604,8 @@ export async function AgentSession(started: SessionStart): Promise<void> {
           lostPlacements++
           waitFirst = true
         }
-        if (home && !lost.includes(home)) lost.push(home)
+        // A home cut off by another placement (PlacementMoved) answered and is alive: never steered away from.
+        if (home && !lost.includes(home) && failureType(err) !== PLACEMENT_MOVED) lost.push(home)
         home = undefined
         // `restarted` after a refusal too (a full home, NoCapacity): it only asks the next worker to
         // read the transcript, and the turn's message, not landed there, is sent as itself (§5.5).
