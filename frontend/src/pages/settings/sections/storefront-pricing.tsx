@@ -120,6 +120,9 @@ function SliceProfileEditor() {
             setError('Choose the printer to slice for.')
             return
           }
+          // Until this printer's spools are read, the form shows none: saving then would
+          // drop every stored spool (#6255 review).
+          if (options.data === undefined) return
           // Only the materials the editor lists, and only spools this printer offers: a
           // spool the form does not show is never sent (#6255 review).
           const offeredIds = new Set(offered.map((spool) => String(spool.spool_id)))
@@ -173,7 +176,7 @@ function SliceProfileEditor() {
           </>
         )}
         <div className="flex flex-wrap items-center gap-2">
-          <Button type="submit" size="sm" disabled={busy || settings.data === undefined}>
+          <Button type="submit" size="sm" disabled={busy || settings.data === undefined || (printer !== null && options.data === undefined)}>
             Save slice profile
           </Button>
           <Button

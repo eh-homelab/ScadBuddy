@@ -82,4 +82,26 @@ describe('Settings → Storefront pricing (#6153)', () => {
     const profile = await screen.findByRole('region', { name: 'Shop slice profile' })
     expect(await within(profile).findByRole('alert')).toHaveTextContent('no printer gone')
   })
+
+  it('keeps Save off until the stored printer\'s spools are read', async () => {
+    setMockSettings({ ...mockSettings(), storefront_slice_profile: { printer: H2C, spools: { pla: 2 } } })
+    const real = api.storefrontSliceOptions.bind(api)
+    let release: () => void = () => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const options = vi.spyOn(api, 'storefrontSliceOptions').mockImplementation(async (printer) => {
+      if (printer !== undefined) await held
+      return real(printer)
+    })
+    renderSettingsSection(<StorefrontPricing />, { route })
+    const profile = await screen.findByRole('region', { name: 'Shop slice profile' })
+    const save = within(profile).getByRole('button', { name: 'Save slice profile' })
+    await waitFor(() => expect(options).toHaveBeenCalledWith(H2C))
+    expect(save).toBeDisabled()
+    release()
+    await within(profile).findByRole('combobox', { name: 'Spool for PLA' })
+    expect(save).toBeEnabled()
+    options.mockRestore()
+  })
 })

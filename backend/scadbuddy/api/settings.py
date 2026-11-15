@@ -48,6 +48,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import (
     APPLIES,
     BOOTSTRAP_FIELDS,
+    ENV_SEEDED,
     Applies,
     Settings,
     env_var,
@@ -549,6 +550,26 @@ async def _check_operation_retention(
         )
 
 
+def _pending(store: SettingsStore, patch: SettingsPatch) -> StoredSettings:
+    """The stored settings as ``patch`` leaves them, for a check that reads the connection
+    this same PUT sets or resets (#6255): a given field takes the patch's value, a reset
+    one the deployment's (the environment's, else the default)."""
+    stored = store.load()
+    fields = StoredSettings.model_fields
+    update: dict[str, Any] = {}
+    for name in patch.reset:
+        if name in fields:
+            update[name] = (
+                getattr(store.defaults, name)
+                if name in ENV_SEEDED
+                else fields[name].get_default(call_default_factory=True)
+            )
+    for name in patch.model_fields_set & fields.keys():
+        if name != "reset":
+            update[name] = getattr(patch, name)
+    return stored.model_copy(update=update)
+
+
 @router.put("/settings", response_model=SettingsView, summary="Update the settings")
 async def put_settings(
     patch: SettingsPatch,
@@ -572,10 +593,7 @@ async def put_settings(
     _print_watch_by_a_person(patch)
     patch = await asyncio.to_thread(_default_printer, patch, registry)
     if patch.storefront_slice_profile is not None:
-        # Checked against the connection this same PUT sets, not the stored one (#6255).
-        stored = store.load()
-        given = patch.model_fields_set & type(stored).model_fields.keys()
-        pending = stored.model_copy(update={name: getattr(patch, name) for name in given})
+        pending = await asyncio.to_thread(_pending, store, patch)
         await check_profile(patch.storefront_slice_profile, pending, registry, spools)
     if patch.operation_retention_seconds is not None:
         await _check_operation_retention(store, ops, patch.operation_retention_seconds)

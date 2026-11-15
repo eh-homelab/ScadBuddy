@@ -963,6 +963,27 @@ def test_profile_is_checked_against_the_connection_sent_beside_it(client: TestCl
     assert saved.json()["storefront_slice_profile"] == {"printer": printer, "spools": {"pla": 7}}
 
 
+@respx.mock
+def test_profile_is_checked_against_a_connection_reset_beside_it(client: TestClient) -> None:
+    """#6255 review: a PUT that resets the Bambuddy URL and sets the profile checks the
+    spools at the deployment's URL, not the stored one."""
+    printer = _profile_printer(client)
+    client.put("/api/v1/settings", json={"bambuddy_url": "https://stored.test"})
+    respx.get("https://stored.test/api/v1/inventory/spools").mock(
+        return_value=httpx.Response(200, json=[{"id": 7, "material": "PLA"}])
+    )
+    refused = client.put(
+        "/api/v1/settings",
+        json={
+            "reset": ["bambuddy_url"],
+            "storefront_slice_profile": {"printer": printer, "spools": {"PLA": 7}},
+        },
+    )
+    # The tests' deployment has no Bambuddy URL, so spool 7 cannot be read.
+    assert refused.status_code != 200, refused.text
+    assert client.get("/api/v1/settings").json()["storefront_slice_profile"] is None
+
+
 def test_profile_with_unknown_printer_is_422(client: TestClient) -> None:
     refused = client.put(
         "/api/v1/settings",
