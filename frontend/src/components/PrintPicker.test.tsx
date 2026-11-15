@@ -3450,6 +3450,8 @@ describe('PrintPicker · Remembered choices', () => {
       force_colour_match: true,
       // #5627 — no settings per colour changed: none remembered.
       part_settings: null,
+      // #2998 — no slicer settings set: none remembered.
+      process_overrides: null,
     })
   })
 

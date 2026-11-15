@@ -3,8 +3,10 @@ import { NOT_UP, transportKind } from './backendUp.js'
 import { AGENT_CRUD, CRUD_READ_TIMEOUT_MS, CrudReadError } from './crudRead.js'
 
 // The agent's small stores behind the API's CRUD routes (#5299 step 5; backend
-// api/crud_agent_stores.py): activity kinds, browser origins, session tabs, tab owners, tab
-// images, pairings and MCP tokens. Each store keeps its interface; its `Crud…` class is that
+// api/crud_agent_stores.py, crud_agent_notify.py, crud_agent_access.py, crud_agent_plugins.py
+// and crud_agent_packages.py): activity kinds, browser origins, session tabs, tab owners, tab
+// images, pairings, MCP tokens, Web Push and notification channels (`notify`), tool access and
+// listings, upstream MCP sessions, remote plugins and their sign-ins, and plugin packages. Each store keeps its interface; its `Crud…` class is that
 // interface over the routes, one route per method, and `gated` picks it per call once the API
 // lists the store's area (api/crudAreas.ts), the SQL store until then (#5299 D9). Old API pods
 // may still answer during a roll, so the SQL stays until every pod lists the areas.
@@ -111,7 +113,6 @@ export function crudOf(target: CrudTarget): <T>(step: string, path: string, init
   return (step, path, init) => crudJson(fetchImpl, target.baseUrl, step, path, init)
 }
 
-/** A query string of `params`, `?` first. */
 /** A UUID, as every id the agent's CRUD routes take in their path is. */
 export const UUID_SEGMENT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -138,6 +139,7 @@ export function chunks<T>(items: readonly T[], size: number): T[][] {
   return out
 }
 
+/** A query string of `params`, `?` first. */
 export function qs(params: Record<string, string>): string {
   return `?${new URLSearchParams(params).toString()}`
 }

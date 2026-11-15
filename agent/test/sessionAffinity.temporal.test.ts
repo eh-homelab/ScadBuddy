@@ -497,7 +497,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     pollUntil(() => env.client.workflow.getHandle(sessionWorkflowId(id)).query<string | null>('turn'), null)
   /** One run's history: the turn's run, never whichever run continued as new after it. */
   const historyTypes = async (id: string, runId: string) =>
-    (JSON.parse(historyToJSON(await env.client.workflow.getHandle(sessionWorkflowId(id), runId).fetchHistory())) as { events: { eventType: string; activityTaskTimedOutEventAttributes?: { failure?: { timeoutFailureInfo?: { timeoutType?: string } } } }[] }).events
+    (JSON.parse(historyToJSON(await env.client.workflow.getHandle(sessionWorkflowId(id), runId).fetchHistory())) as { events: { eventType: string; activityTaskTimedOutEventAttributes?: { failure?: { timeoutFailureInfo?: { timeoutType?: string } } }; timerStartedEventAttributes?: { startToFireTimeout?: string } }[] }).events
 
   it('the first turn acquires and later turns stay on home, on the warm process', async () => {
     const a = await replica('a')
@@ -684,6 +684,10 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     expect(performance.now() - began).toBeGreaterThanOrEqual(5_000)
     const timeouts = (await historyTypes(id, run)).filter((e) => e.eventType === 'EVENT_TYPE_ACTIVITY_TASK_TIMED_OUT')
     expect(timeouts.map((e) => e.activityTaskTimedOutEventAttributes?.failure?.timeoutFailureInfo?.timeoutType)).toEqual(['TIMEOUT_TYPE_SCHEDULE_TO_START'])
+    // The lost placement waits PLACEMENT_BACKOFF[0] before the next (#6353).
+    const timers = (await historyTypes(id, run)).filter((e) => e.eventType === 'EVENT_TYPE_TIMER_STARTED')
+    expect(timers.map((e) => String(e.timerStartedEventAttributes?.startToFireTimeout))).toEqual(['10s'])
+    expect(performance.now() - began).toBeGreaterThanOrEqual(15_000)
     expect(a.acquired + b.acquired).toBe(2)
     expect(b.acquired).toBe(1)
     expect(b.m.warm.size()).toBe(1)

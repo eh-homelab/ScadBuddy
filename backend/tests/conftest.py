@@ -510,7 +510,7 @@ if "%%LISTING%%" in text and out is not None and out.endswith(".param"):
                      {"name": "Square", "value": "square"}]},
     ]
     if "%%TWO_COLOURS%%" in text:
-        # A second colour a customer picks (#6152: one material across colours).
+        # A second colour a customer picks (#6152, #6258: one material per print).
         parameters.append(
             {"name": "trim", "type": "string", "initial": "#FF0000", "group": "Main"}
         )

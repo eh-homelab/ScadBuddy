@@ -8,10 +8,11 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from scadbuddy.api.flows import checker_unavailable
+from scadbuddy.api.flows import agent_tool_names, checker_unavailable
 from scadbuddy.flows.agent_tools import AgentToolsUnavailableError
 from scadbuddy.flows.component import FlowsDep
 from scadbuddy.flows.host_interface import HostInterface, host_interface
+from scadbuddy.flows.tool_names import unknown_tools
 from scadbuddy.flows.typecheck import CheckerUnavailableError, ScriptProblem, check_script
 
 router = APIRouter(tags=["flows"])
@@ -39,13 +40,16 @@ class ScriptCheckResult(BaseModel):
     response_model=ScriptCheckResult,
     summary="Type-check a flow script without registering it",
 )
-async def check_flow_script(body: ScriptCheck) -> ScriptCheckResult:
-    """The check `POST /workflows` runs before it registers a version, and nothing else:
-    no version, no commit."""
+async def check_flow_script(body: ScriptCheck, flows: FlowsDep) -> ScriptCheckResult:
+    """The checks `POST /workflows` runs before it registers a version, and nothing else:
+    no version, no commit. The tool names a script spells out are checked against the
+    agent's tools only once it type-checks (#6365), as a registration checks them."""
     try:
         problems = await check_script(body.script, body.inputs_schema)
     except CheckerUnavailableError:
         raise checker_unavailable() from None
+    if not problems:
+        problems = unknown_tools(body.script, await agent_tool_names(flows))
     return ScriptCheckResult(problems=problems)
 
 

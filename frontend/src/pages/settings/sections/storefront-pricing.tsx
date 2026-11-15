@@ -3,6 +3,7 @@ import { api } from '../../../api/client'
 import type { ProfileSpool } from '../../../api/types'
 import { useAsync } from '../../../lib/useAsync'
 import { refusalText } from '../../../components/orders/refusal'
+import { StorefrontMaterials } from '../../../components/settings/StorefrontMaterials'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -19,6 +20,7 @@ export const order = 45
 /**
  * #6153 — how the storefront slices a visitor's design to price it: the slices at once, and
  * the shop slice profile (a printer and a spool per material), which is saved on its own.
+ * #6258 — and the shop's default materials (`storefront_materials`), saved on their own.
  */
 export function Component() {
   const form = useBackendSettings(id, (s) => fieldsOf(id, s))
@@ -30,6 +32,8 @@ export function Component() {
       description="A visitor's design is sliced as the back office slices a quote: the template gives the support and process settings, and the print dialog's remembered choices give the rest. With no slice profile, the storefront shows no price, and the shop prices each line."
     >
       <RuntimeRows form={form} section={id} />
+      {/* #6258 — the shop's default materials, saved on their own. */}
+      <StorefrontMaterials />
       <SliceProfileEditor />
     </SavedSection>
   )

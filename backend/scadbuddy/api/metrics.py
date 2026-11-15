@@ -33,6 +33,9 @@ def refresh_asset_metrics(state: AppState) -> None:
 
 #: Seconds a local store walk answers the scraper for.
 STORE_USAGE_MAX_AGE = 60.0
+#: Seconds a walk of the piece cache answers the scraper for (#6354): it is a walk of
+#: the shared NFS volume in the API, 13 s or more.
+CACHE_BYTES_MAX_AGE = 300.0
 
 
 async def refresh_store_metrics(state: AppState) -> None:
@@ -48,9 +51,11 @@ async def refresh_store_metrics(state: AppState) -> None:
     health = await store_health(state.store)
     state.metrics.store_render_key_fallback.set(1 if health.render_key_fallback else 0)
     if isinstance(state.store.blobs, CachedBlobStore):
-        state.metrics.worker_cache_bytes.set(
-            await asyncio.to_thread(state.store.blobs.cached_bytes)
+        cached = await asyncio.to_thread(
+            state.store.blobs.cached_bytes, max_age=CACHE_BYTES_MAX_AGE
         )
+        if cached is not None:
+            state.metrics.worker_cache_bytes.set(cached)
 
 
 # Beside /healthz rather than under /api/v1: it is for the scraper, not the SPA, and

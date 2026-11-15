@@ -104,6 +104,25 @@ def test_a_templates_supports_apply_and_the_prints_choice_wins(
 
 
 @respx.mock
+def test_a_templates_list_support_value_goes_as_written(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    # #6291 review: a list is not shaped as a support choice, and is never dropped.
+    output_id = prepared(client, model)
+    declare_print_settings(
+        paths, model, {"enable_support": "1", "support_threshold_angle": ["20", "35"]}
+    )
+    sliced = routes()
+    preset_values(PRESET)
+
+    assert run_print(client, output_id, json=body()).status_code == 200
+    assert overrides(sliced) == {
+        "enable_support": "1",
+        "support_threshold_angle": ["20", "35"],
+    }
+
+
+@respx.mock
 def test_unreadable_preset_values_still_send_a_templates_supports(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:

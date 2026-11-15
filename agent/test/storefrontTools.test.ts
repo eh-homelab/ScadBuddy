@@ -6,7 +6,7 @@ import { tiersUpTo } from '../src/auth/principal.js'
 import type { components } from '../src/api/schema.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import type { Tool, ToolContext } from '../src/tools/registry.js'
-import { colourProblems, defaultsFor, titleColours, withColourChoices, withoutWords } from '../src/tools/storefrontDraft.js'
+import { colourProblems, defaultsFor, draftMaterials, titleColours, withColourChoices, withoutWords } from '../src/tools/storefrontDraft.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
 
 // #6131 (design 2026-11-13 §6) — the assistant's storefront tools: a draft (`write`) built
@@ -144,7 +144,7 @@ describe('storefront tools (#6131)', () => {
       fixed: owl.expected.fixed,
       colours: owl.expected.colours,
       media_ids: ['cover'],
-      one_material: false,
+      materials: ['PLA'],
     })
     expect(result).toMatchObject({
       listing_id: LISTING,
@@ -216,5 +216,14 @@ describe('colourProblems (#6144)', () => {
     expect(colourProblems(listing, owl.schema, owl.filaments)).toEqual([])
     const unlisted = { ...listing, params: { ...listing.params, body: { kind: 'choice' as const, choices: [], default: '#FF0000' } } }
     expect(colourProblems(unlisted, owl.schema, owl.filaments)).toEqual([{ name: 'body', label: 'Body', colour: '#FF0000' }])
+  })
+})
+
+describe('draftMaterials (#6302 review)', () => {
+  it('allows the materials the draft offers, support left out, PETG and PLA first', () => {
+    const made = (id: string, material: string): Filament => ({ ...(owl.filaments[0] as Filament), id, material })
+    const filaments = [made('abs', 'ABS'), made('pla', 'PLA'), made('pva', 'PVA'), made('petg', 'petg'), made('pla-2', 'pla')]
+    expect(draftMaterials(['abs', 'pla', 'pva', 'petg', 'pla-2'], filaments)).toEqual(['petg', 'PLA', 'ABS'])
+    expect(draftMaterials([], filaments)).toEqual([])
   })
 })

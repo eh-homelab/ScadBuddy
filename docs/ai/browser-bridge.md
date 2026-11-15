@@ -425,7 +425,9 @@ sequenceDiagram
   once it has the answer, so the history cannot be read again. No replica caches a bridge
   key (`PgPayloadKeys` reads it from the row each time), so no copy outlives the row in
   memory. A key that a cancelled call left is deleted by the hourly sweep
-  (`sweepBridgeKeys`, older than an hour). Without
+  (`sweepBridgeKeys`, older than an hour). Once the API lists the agent's CRUD area `forget`
+  (#5299 step 6), the API deletes both (`POST …/crud/agent/payload-keys/{subject}/drop` and
+  `…/payload-key-sweeps`, `backend/scadbuddy/api/crud_agent_forget.py`). Without
   the KEK no call goes through Temporal: it is refused (`no_browser`, naming
   `SCADBUDDY_SECRET_KEY_FILE`), and is never sent another way.
 - **Inline, capped:** a bridge payload is never kept in the payload store (only a

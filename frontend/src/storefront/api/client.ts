@@ -76,13 +76,16 @@ export class StoreError extends Error {
   readonly type: string | null
   /** Seconds to wait, from `Retry-After`; null when the edge sent none. */
   readonly retryAfter: number | null
+  /** The parts a `listing_colours_clash` names (#6258); empty for any other answer. */
+  readonly parts: readonly string[]
 
-  constructor(status: number, type: string | null, detail: string, retryAfter: number | null) {
+  constructor(status: number, type: string | null, detail: string, retryAfter: number | null, parts: readonly string[] = []) {
     super(detail)
     this.name = 'StoreError'
     this.status = status
     this.type = type
     this.retryAfter = retryAfter
+    this.parts = parts
   }
 
   /** The problem's slug: `render_limited` for `…/storefront/render_limited`. */
@@ -103,14 +106,16 @@ function retryAfter(response: Response): number | null {
 async function refusal(response: Response): Promise<StoreError> {
   let type: string | null = null
   let detail = FALLBACK
+  let parts: string[] = []
   try {
-    const body = (await response.json()) as { type?: unknown; detail?: unknown }
+    const body = (await response.json()) as { type?: unknown; detail?: unknown; parts?: unknown }
     if (typeof body.type === 'string') type = body.type
     if (typeof body.detail === 'string' && body.detail.trim()) detail = body.detail
+    if (Array.isArray(body.parts)) parts = body.parts.filter((part): part is string => typeof part === 'string')
   } catch {
     // Not JSON: the fallback text stands.
   }
-  return new StoreError(response.status, type, detail, retryAfter(response))
+  return new StoreError(response.status, type, detail, retryAfter(response), parts)
 }
 
 interface CallOptions {
@@ -148,12 +153,10 @@ async function call<T>(path: string, { method = 'GET', json, form, key, turnstil
 export interface RenderInput {
   listing_id: string
   listing_updated_at: string
-  /** Only the parameters the listing offers: never a locked one (spec §5.4). */
+  /** Only the parameters the listing offers: never a locked one (spec §5.4). A colour is its value: the shop finds its filament (#6258). */
   values: Record<string, ParamValue>
   /** The listing filament for each colour slot of the render, by slot; the page sends none (#6152). */
   colours: Record<string, string>
-  /** The listing filament picked for each colour parameter, by name (#6152). */
-  picks: Record<string, string>
 }
 
 /** A submit of the cart the page shows: the edge's request body, from its spec. */

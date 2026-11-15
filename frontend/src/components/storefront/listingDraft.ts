@@ -19,8 +19,11 @@ export interface ListingDraft {
   fixed: Record<string, ParamValue>
   colours: string[]
   media_ids: string[]
-  /** Every colour of an order is of one material (#6152). */
-  one_material: boolean
+  /**
+   * The materials a print may be made of, first preferred; empty is the shop's default
+   * (`storefront_materials`, #6258). The editor's "Materials allowed" sets them.
+   */
+  materials: string[]
 }
 
 /** The schema's own hidden group: never shown to a customer, so never offered. */
@@ -30,7 +33,7 @@ export const MAX_TEXT_LENGTH = 200
 const NUMBERS: ReadonlySet<string> = new Set(['number', 'integer', 'slider'])
 
 export function emptyDraft(slug = '', commit = ''): ListingDraft {
-  return { slug, commit, title: '', description: '', params: {}, fixed: {}, colours: [], media_ids: [], one_material: false }
+  return { slug, commit, title: '', description: '', params: {}, fixed: {}, colours: [], media_ids: [], materials: [] }
 }
 
 export function draftOf(listing: StorefrontListing): ListingDraft {
@@ -43,8 +46,67 @@ export function draftOf(listing: StorefrontListing): ListingDraft {
     fixed: listing.fixed,
     colours: listing.colours,
     media_ids: listing.media_ids,
-    one_material: listing.one_material,
+    // A listing stored before #6258 has none: the shop's default.
+    materials: (listing.materials as string[] | undefined) ?? [],
   }
+}
+
+/** The most materials a list holds (backend `core/settings.py` `MAX_MATERIALS`). */
+export const MAX_MATERIALS = 16
+
+/**
+ * A material as publish compares it: trimmed, case aside (backend `inputs.py`
+ * `material_key`, which casefolds; a price book's materials are plain ASCII names).
+ */
+export function materialKey(material: string): string {
+  return material.trim().toLowerCase()
+}
+
+/**
+ * #6258 — the materials a print of `draft` may be made of, first preferred: its own, else
+ * the shop's default (backend `inputs.py` `effective_materials`). Null while the shop's
+ * default is not read yet.
+ */
+export function effectiveMaterials(draft: ListingDraft, shop: readonly string[] | undefined): string[] | null {
+  // A draft stored before #6258 has no `materials`: the shop's default.
+  const own = (draft.materials as string[] | undefined) ?? []
+  if (own.length > 0) return own
+  return shop ? [...shop] : null
+}
+
+/**
+ * #6258 — the materials of the price book a customer may be given: each once (case aside,
+ * the first spelling kept), never a support material (`customerFilaments`), by name.
+ */
+export function priceBookMaterials(filaments: readonly Filament[]): string[] {
+  const found = new Map<string, string>()
+  for (const filament of customerFilaments(filaments)) {
+    const material = filament.material.trim()
+    if (material && !found.has(materialKey(material))) found.set(materialKey(material), material)
+  }
+  return [...found.values()].sort((a, b) => a.localeCompare(b))
+}
+
+/** What publish refused about a listing's materials, shown beside the control it concerns (#6258). */
+export type ListingRefusal =
+  /** 422 `listing_material_not_allowed`: the filament `filament` is of a material the listing does not allow. */
+  | { kind: 'material_not_allowed'; filament: string; detail: string }
+  /** 422 `listing_locked_colours_unprintable`: no allowed material has every locked colour (`names`) and a choice of each offered one. */
+  | { kind: 'locked_colours_unprintable'; names: string[]; detail: string }
+
+const STOREFRONT_PROBLEMS = 'https://scadbuddy.dev/problems/storefront/'
+
+/** The refusal `problem` is, when it is one of the two `ListingRefusal`s; else null. */
+export function listingRefusal(problem: { type?: string; detail?: string; title: string; [extension: string]: unknown }): ListingRefusal | null {
+  const detail = problem.detail ?? problem.title
+  if (problem.type === `${STOREFRONT_PROBLEMS}listing_material_not_allowed` && typeof problem['name'] === 'string') {
+    return { kind: 'material_not_allowed', filament: problem['name'], detail }
+  }
+  if (problem.type === `${STOREFRONT_PROBLEMS}listing_locked_colours_unprintable`) {
+    const names = Array.isArray(problem['names']) ? problem['names'].filter((name): name is string => typeof name === 'string') : []
+    return { kind: 'locked_colours_unprintable', names, detail }
+  }
+  return null
 }
 
 /** The parameters a listing can name: every one outside the hidden group. */
@@ -373,6 +435,8 @@ export function previewListing(
   filaments: readonly Filament[],
   media: readonly MediaView[],
   mediaUrl: (item: MediaView) => string,
+  /** The shop's default materials (`storefront_materials`), once read. */
+  shop?: readonly string[],
 ): PublicListing {
   const input = listingInput(draft, schema, filaments)
   const params: Record<string, PublicParam> = {}
@@ -422,11 +486,16 @@ export function previewListing(
           ]
         : []
     }),
-    one_material: draft.one_material,
+    // #6258: the listing's own, else the shop's default (`shop`, once read); empty until
+    // then. A draft stored before #6258 has none: the shop's default too.
+    materials: effectiveMaterials(draft, shop) ?? [],
     media: draft.media_ids.flatMap((id) => {
       const item = media.find((m) => m.id === id)
       return item ? [{ url: mediaUrl(item), kind: item.kind, caption: item.caption }] : []
     }),
     updated_at: '',
+    // The preview does not judge which materials are printable (#6302 review): publish
+    // refuses a listing none can print, and an empty colour still shows as gone.
+    available: true,
   }
 }

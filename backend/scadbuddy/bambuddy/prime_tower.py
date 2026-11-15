@@ -96,19 +96,36 @@ def prime_tower_overrides(choice: PrimeTowerChoice | None) -> dict[str, str]:
     return wanted
 
 
+def tower_wanted(
+    choice: PrimeTowerChoice | None, overrides: Mapping[str, object] | None = None
+) -> dict[str, str]:
+    """What ``choice`` sets that the request's ``process_overrides`` (#2998) leave to
+    it: a tower key the request sets wins at the slice and is judged as an override
+    (``override_warnings``), and ``enable_prime_tower`` overridden to ``"0"`` leaves no
+    tower to judge."""
+    overrides = overrides or {}
+    if overrides.get("enable_prime_tower") == "0":
+        return {}
+    return {
+        key: value for key, value in prime_tower_overrides(choice).items() if key not in overrides
+    }
+
+
 async def prime_tower_warnings(
     client: BambuddyClient | None,
     process: PresetRef | None,
     choice: PrimeTowerChoice | None,
     *,
     read: ReadPresetValues | None = None,
+    overrides: Mapping[str, object] | None = None,
 ) -> list[FilamentWarning]:
     """A warning naming each setting ``choice`` sends that the process preset has no
     value for, as supports warn (#1899). Never refuses, and the setting still goes.
+    A key the request's ``overrides`` set is not ``choice``'s (:func:`tower_wanted`).
 
     Nothing is said when the preset cannot be read: both keys are single values, so
     there is no shape to get wrong, and every Bambu preset has them."""
-    wanted = prime_tower_overrides(choice)
+    wanted = tower_wanted(choice, overrides)
     if not wanted or process is None:
         return []
     try:

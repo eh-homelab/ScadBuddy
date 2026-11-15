@@ -148,6 +148,17 @@ same way, `vite.config.ts`).
   `/storefront?listing=<id>` and `?sell=…` addresses redirect to it. Mocks
   `src/mocks/features/storefront.ts`; e2e `e2e/storefront-admin.spec.ts` seeds 2,000
   listings into the mock's `sessionStorage`.
+  Materials (#6258): the editor's "Materials allowed" is the listing's `materials`, first
+  preferred (`components/storefront/MaterialOrder.tsx`: up, down and remove buttons, the
+  moved row's button keeps the focus; "Add a material" offers the price book's customer
+  materials); empty shows "Shop default (…)" from `storefront_materials`, which Settings →
+  Storefront pricing's `components/settings/StorefrontMaterials.tsx` edits with the same
+  list. "Colours on offer" groups the price book's filaments by allowed material, in that
+  order, with "Offer all" and "Offer none", support filaments last; a ticked filament of a
+  material not allowed is named apart. A publish refused `listing_material_not_allowed` or
+  `listing_locked_colours_unprintable` (`listingDraft.ts` `listingRefusal`) is said beside
+  "Materials allowed" or "Colours on offer" until the next edit. The mock's publish checks
+  only the materials (`materialRefusal`).
   Pictures (#6213): the editor's `components/storefront/ListingPictures.tsx` lists every
   id of the draft's `media_ids` (a video, a missing file or an unknown id says so), orders,
   removes and adds a listing's images, uploads one into the template's media, and marks

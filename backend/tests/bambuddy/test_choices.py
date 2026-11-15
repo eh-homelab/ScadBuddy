@@ -14,9 +14,10 @@ from scadbuddy.bambuddy.choices import (
     plate_warning,
 )
 from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.filaments import FilamentPlan
 from scadbuddy.bambuddy.hardware import plate_unlisted_warning
 from scadbuddy.bambuddy.models import Archive, NozzleChoice, PrinterStatus
-from scadbuddy.bambuddy.print_run import PreparedPlates, _hardware_warnings
+from scadbuddy.bambuddy.print_run import PreparedPlates, PrintRunRequest, _hardware_warnings
 from scadbuddy.bambuddy.resolver import PrintChoices
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import StoredSettings
@@ -133,11 +134,29 @@ async def test_plan_runs_plate_check_takes_the_runs_printer_model() -> None:
             None,
             printer_name="x",
             printer_model=model,
+            plate_type=choices.bed_type,
         )
         return [warning.kind for warning in found]
 
     assert await kinds(None) == []
     assert await kinds("H2C") == ["plate-not-listed"]
+
+
+def test_a_bed_type_override_is_the_plate_the_check_names() -> None:
+    # #6291 review: a `curr_bed_type` override wins at the slice, so the check's plate
+    # warnings name it, not the chosen bed type.
+    choices = PrintChoices(nozzles=[NozzleChoice(size="0.4")], bed_type="Cool Plate")
+    plan = FilamentPlan(slots=[])
+    plain = PrintRunRequest(filament_plan=plan, choices=choices)
+    asked = plain.model_copy(update={"process_overrides": {"curr_bed_type": "Textured PEI Plate"}})
+
+    template = {"curr_bed_type": "Engineering Plate"}
+
+    assert plain.plate_type({}) == "Cool Plate"
+    # A template's `curr_bed_type` reaches the plan's overrides and wins at the slice.
+    assert plain.plate_type(template) == "Engineering Plate"
+    # The request's own override wins over the template's, as `plan_run` merges them.
+    assert asked.plate_type(template) == "Textured PEI Plate"
 
 
 def test_a_size_not_in_the_rack_warns() -> None:

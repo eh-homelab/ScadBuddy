@@ -378,14 +378,16 @@ def test_a_support_filament_is_no_customer_choice() -> None:
         checked_fixed(SCHEMA, body(colours=[RED], params=params), COLOURS, supports={RED})
 
 
-def test_one_material_is_kept(store: ListingStore) -> None:
-    """#6152: the switch is stored, and an edit replaces it."""
-    listing = store.create(body(one_material=True))
-    assert listing.one_material is True
-    edited = store.update(listing.id, body(), expected_updated_at=listing.updated_at)
-    assert edited.one_material is False
+def test_the_materials_are_kept_as_saved(store: ListingStore) -> None:
+    """#6258: the allowed materials are stored in their order, and an edit replaces them."""
+    listing = store.create(body(materials=["PLA", "PETG"]))
+    assert listing.materials == ["PLA", "PETG"]
     stored = store.get(listing.id)
-    assert stored is not None and stored.one_material is False
+    assert stored is not None and stored.materials == ["PLA", "PETG"]
+    edited = store.update(listing.id, body(), expected_updated_at=listing.updated_at)
+    assert edited.materials == []
+    stored = store.get(listing.id)
+    assert stored is not None and stored.materials == []
 
 
 def test_a_step_on_the_schemas_is_kept() -> None:

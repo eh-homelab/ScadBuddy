@@ -215,6 +215,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
 - `backend/scadbuddy/workflows/arrange.py` — Arrange's packer (spec 2026-09-27 §7): goals,
   quarter turns, filament signatures, every plate checked with `plate.fit_problem`;
   `Arrange` in `workflows/pipelines.py` runs a `kind='arrange'` row (`POST /outputs/arrange`).
+  It packs with `packing.py` `GAP_MM` (5 mm) and ignores Bambu's by-object clearance, so a
+  by-object plate fails "too close to others" (#6246). A template plate is one object with
+  colour parts (#6245), so by-object slicing does nothing useful on it: render each piece
+  alone and arrange the pieces, which makes each one its own object (#956).
 - `backend/scadbuddy/workflows/` — renders on Temporal (#424): `pipelines.py`
   (`TemplatePipeline`, its `RenderPiece` children, `RenderPreview`), `activities.py`
   (the render stages as activities, `WorkerDeps`), `client.py` (`connect`,
@@ -296,7 +300,15 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `ai_forgotten_subjects`), never the KEK; `audit.py` the `ai_audit` row each reveal
   (kind `credential`; a redaction's once per `REDACT_AUDIT_WINDOW`) and release (kind `payload_key`, once per subject and
   `RELEASE_AUDIT_WINDOW`) writes in its transaction; `rotation.py` the re-wrap of the credentials and payload
-  keys at the API's start (`main._rotate_agent_secrets`). Its tests make the agent's tables
+  keys at the API's start (`main._rotate_agent_secrets`). For `api/crud_agent_forget.py` (area
+  `forget`, #5299 step 6): `forget.py` a subject's tombstone, its flow images and its key in one
+  transaction under its lock (a session with forks refused, `ForksTakeRangesError`: the agent
+  copies their ranges itself until its sessions move here), a browser call's key dropped and the
+  hourly sweep of the keys no forget deletes; `flow_blobs.py` a flow run's images kept (sealed by
+  the agent, sent as multipart bytes; the tombstone check and `FLOW_IMAGES_MAX` under the lock)
+  and read. `flows/forget.py` and `flows/images.py` run the same statements on the API's own
+  tables, with no fallback for a database the agent never migrated (the API applies its files
+  first, #5299 D6). Its tests make the agent's tables
   with the agent's own migration files (`render/agent_migrations.py` `migrate_agent`) and open
   the credential vectors `tests/fixtures/secret-vectors.json`, a copy that
   `lint-codec-copies.sh` keeps equal to the agent's. `notify.py` re-wraps the agent's Web Push
@@ -631,10 +643,13 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`agent/src/tools/command.ts`: `create_print_project`, `import_makerworld_model`)
   answers `{status: "running", operation_id, next}` once its follow window ends, which a
   script follows with `get_operation`; version 2 read `folder_id` straight off
-  `create_print_project` and failed `'folder_id'`. A flow run's call carries no `callKey`
-  (`agent/src/temporal/toolActivities.ts` `runCall`), so each call of a write sends a
-  fresh `Idempotency-Key`: after `may have run` or `StartToClose` the script checks
-  state (`list_print_projects`) before it sends the write again. The import is the `makerworld_import` operation on the
+  `create_print_project` and failed `'folder_id'`. A flow run's call keys its commands on
+  its gate request id (`agent/src/temporal/toolActivities.ts` `runCall`, #6350), the same
+  on every attempt of that call; each `tool(...)` call the script makes is a new call with
+  a new key. A keyed tool (both of these) whose only attempt lost its heartbeat is asked
+  once more under that key (`workflows/flow_tools.py` `FLOW_KEYED_RETRY_PATCH`, #6345).
+  After `may have run` or `StartToClose` reaches the script, it checks state
+  (`list_print_projects`) before it sends the write again. The import is the `makerworld_import` operation on the
   `library` queue (`makerworld/operations.py`): Bambuddy downloads the 3MF (up to
   `MAKERWORLD_IMPORT_TIMEOUT`), then on `library_backend` native `makerworld/imports.py`
   copies it into the native library as a `bb_to_sb` copy does
@@ -1026,8 +1041,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   directory blob `quote-<sha256>` held by `blob_refs (order_item_quote, <quote id>)`
   before the quote's row exists, reads each plate with `read_sliced`, prices and records
   it (`Lifecycle.record_slice_quote`). The quote records its print setup (#4673, order operations spec §5): `choices`
-  (`quote.py` `print_setup`: printer, path, `PrintChoices`, and the `prime_tower`, `supports` and
-  `print_sequence` the body takes in `PrintRunRequest`'s shapes, which `operations.py`
+  (`quote.py` `print_setup`: printer, path, `PrintChoices`, the `prime_tower`, `supports`,
+  `print_sequence` and `process_overrides` (#2998) the body takes in `PrintRunRequest`'s shapes, which `operations.py`
   `preview_request` slices with) and `filament_plan`, null on a manual or archive quote.
   An item's print (`ItemPrintRequest`, `{}` included) takes every part of that setup and
   the spools it omits from the quote's (`printing.py` `QUOTED_SETUP`, `quoted_setup`;
@@ -1554,13 +1569,23 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   print's spools are matched the same way (`orders/spools.py` `_of`, the store's
   `spool_links`), so a hand-set colour still finds its spools.
 - Prepared colour combinations (#6237): `orders/storefront/prepare.py`, routes `GET`/`POST
-  /storefront/listings/{id}/prepare` (`api/storefront.py`). A combination is one colour per
-  offered colour parameter (the public listing's colours, in each spelling the page can
-  send: each offered filament's own `colour`, as `ParamField.tsx` sends it, and the effective
-  default when no filament spells it so, #6299 review); each is built by the visitor path's
-  `listing_values` and `listing_reference`, a colour at its effective default (same
-  spelling) left out as the page leaves it out, so a visitor's render reuses the prepared
-  job. The POST starts the workflow
+  /storefront/listings/{id}/prepare` (`api/storefront.py`). The combinations are enumerated
+  per printable material (of the listing's effective materials, in order, #6258, those
+  `inputs.py` `printable_materials` keeps: each locked colour and a choice of each offered
+  colour, #6302 review): for one
+  material, a combination is one colour per offered colour parameter (that material's
+  customer filaments' colours, support excluded, in each spelling the page can send: each
+  filament's own `colour`, as `ParamField.tsx` sends it, and the effective default when no
+  filament spells it so, #6299 review). Each is built by the visitor's render path
+  (`listing_values`, `resolve_choice`, `listing_reference`), a colour at its effective
+  default (same spelling) left out as the page leaves it out, so a visitor's render of the
+  same picks has its render key and reuses the prepared job. A clash
+  (`ColoursClashError`) is left out; a listing no material can print
+  (`LockedColoursClashError`) has no combination. The list is one combination per render key (the
+  first in material order); `count` is the number of keys. The list is built once per
+  listing, price book and materials (a small in-process cache), so an index names one
+  combination; above `ENUMERATION_LIMIT` (16384) picks it is not built and `count` is the
+  picks. The POST starts the workflow
   `PrepareListing` (`workflows/prepare_listing.py`, `library` queue, id
   `prepare-listing:<listing id>`, `USE_EXISTING`: a second POST joins it; AUTO_UPGRADE as
   `VersionedPrepareListing`) and answers at once (`{count, started}`). The run submits by

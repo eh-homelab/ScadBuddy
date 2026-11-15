@@ -15,7 +15,8 @@ import { SESSION_TURN_ACTIVITY } from './session/names.js'
 // `stop()` is the service's first shutdown step: the worker stops polling and its
 // running activities get `shutdownGraceMs` to finish before they are cancelled; one
 // that ignores the cancel is abandoned at `shutdownForceMs`, so stop() ends within the
-// pod's 30 s whatever an activity does (the SDK's `shutdownForceTime`).
+// pod's 60 s terminationGracePeriodSeconds whatever an activity does (the SDK's
+// `shutdownForceTime`).
 
 export type TemporalHealth = 'connecting' | 'ok' | 'unavailable'
 

@@ -9,8 +9,10 @@ import type {
   PresetRef,
   PrintChoices,
   PrintSequence,
+  ProcessOverrides,
 } from '../api/types'
 import { sentPartSettings } from './partSettings'
+import { sentOverrides } from './processOverrides'
 import type { PlateChoice } from './plateChoice'
 import { DEFAULT_NOZZLES, defaultsOf, refKey } from './printChoices'
 import { sourceApi, sourceKey, type PrintSource } from './printSource'
@@ -106,6 +108,12 @@ export function usePrintChoices(
    */
   const [printSequence, setPrintSequence] = useState<PrintSequence | null>(null)
   /**
+   * #2998 — any Bambu Studio process settings, by key: only what is changed. Remembered by
+   * subject with the other choices, so a fresh open seeds them from the read. A sliced file
+   * prints as it was sliced, so it takes none.
+   */
+  const [processOverrides, setProcessOverrides] = useState<Record<string, ProcessOverrides[string]>>({})
+  /**
    * #5627 — the slicer settings per filament slot, by slot id: only what is changed from
    * the slot's default (the process's value, or a template's for the slot). An output or a library file (#5628) takes them, and its open seeds them
    * from the quote's or the remembered ones. A sliced file prints as it was sliced, so it
@@ -162,10 +170,12 @@ export function usePrintChoices(
     const nextTier = nextProcess ? null : (last?.tier ?? 'standard')
     // A sliced file shows no Print sequence step, so a remembered one would be sent unseen.
     const nextSequence = next.sliced ? null : (last?.print_sequence ?? null)
+    const nextOverrides = next.sliced ? {} : (sentOverrides(last?.process_overrides) ?? {})
     setNozzles(nextNozzles)
     setTier(nextTier)
     setProcessName(nextProcess)
     setPrintSequence(nextSequence)
+    setProcessOverrides(nextOverrides)
     const seedSource = partSeedNow === undefined ? last?.part_settings : partSeedNow
     const seeds = next.sliced ? {} : (sentPartSettings(seedSource) ?? {})
     setPartSettings(seeds)
@@ -173,7 +183,13 @@ export function usePrintChoices(
     // A named process, a different flow per side and a print sequence (#4970) are
     // Advanced choices; opening in Simple would send them unseen. One flow for both is
     // Simple's own choice (#2166).
-    setAdvanced(nextProcess !== null || nextSequence !== null || !oneFlow(nextNozzles))
+    // #2998: so are slicer settings.
+    setAdvanced(
+      nextProcess !== null ||
+        nextSequence !== null ||
+        Object.keys(nextOverrides).length > 0 ||
+        !oneFlow(nextNozzles),
+    )
   }
   const reload = useCallback(() => {
     const current = latest.current
@@ -231,6 +247,7 @@ export function usePrintChoices(
     setOverrides({})
     setSides({})
     setPrintSequence(null)
+    setProcessOverrides({})
     setPartSettings({})
     setSeededParts({})
     seeded.current = false
@@ -264,6 +281,7 @@ export function usePrintChoices(
     setOverrides({})
     setSides({})
     setPrintSequence(null)
+    setProcessOverrides({})
     setPartSettings({})
     setSeededParts({})
     seeded.current = false
@@ -316,13 +334,15 @@ export function usePrintChoices(
     if (advanced) {
       defaulted.current = false
       // Back to Simple: a flow per side, named process, preset override, side chosen by
-      // hand or print sequence would be sent unseen. Simple's one flow is the first side's (#2166).
+      // hand, print sequence or slicer setting would be sent unseen. Simple's one flow is the
+      // first side's (#2166).
       setNozzles((current) => current.map((nozzle) => ({ ...nozzle, flow: current[0]?.flow ?? 'standard' })))
       setProcessName(null)
       setTier((current) => current ?? 'standard')
       setOverrides({})
       setSides({})
       setPrintSequence(null)
+      setProcessOverrides({})
     }
     setAdvanced(!advanced)
   }
@@ -372,6 +392,8 @@ export function usePrintChoices(
     setPlate,
     printSequence,
     setPrintSequence,
+    processOverrides,
+    setProcessOverrides,
     partSettings,
     setPartSettings,
     seededParts,
