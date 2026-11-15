@@ -14,7 +14,10 @@ from uuid import UUID
 
 from fastapi import APIRouter, Response, status
 
+from scadbuddy.api.filament import actor
+from scadbuddy.auth.component import CallerDep
 from scadbuddy.core.problems import ApiError
+from scadbuddy.filament.spools import SpoolInUseError
 from scadbuddy.spools.component import Spools, SpoolsDep
 from scadbuddy.spools.native import (
     NativeSpool,
@@ -66,10 +69,12 @@ async def list_native_spools(
         "is none) and the filament preset id. 409 when an unarchived spool carries the tag."
     ),
 )
-async def create_native_spool(spools: SpoolsDep, body: NativeSpoolCreate) -> NativeSpool:
+async def create_native_spool(
+    spools: SpoolsDep, caller: CallerDep, body: NativeSpoolCreate
+) -> NativeSpool:
     store = native_provider(spools).store
     try:
-        made = await asyncio.to_thread(store.create, body)
+        made = await asyncio.to_thread(store.create, body, actor=actor(caller))
     except NativeSpoolExistsError:
         raise _taken() from None
     await _refreshed(spools)
@@ -99,11 +104,11 @@ async def get_native_spool(spools: SpoolsDep, spool_id: UUID) -> NativeSpool:
     ),
 )
 async def patch_native_spool(
-    spools: SpoolsDep, spool_id: UUID, body: NativeSpoolPatch
+    spools: SpoolsDep, caller: CallerDep, spool_id: UUID, body: NativeSpoolPatch
 ) -> NativeSpool:
     store = native_provider(spools).store
     try:
-        changed = await asyncio.to_thread(store.update, spool_id, body)
+        changed = await asyncio.to_thread(store.update, spool_id, body, actor=actor(caller))
     except NativeSpoolExistsError:
         raise _taken() from None
     if changed is None:
@@ -117,10 +122,21 @@ async def patch_native_spool(
     status_code=status.HTTP_204_NO_CONTENT,
     response_class=Response,
     summary="Forget one of ScadBuddy's own spools",
-    description="Gone for good; archive it instead to keep its record. 404 for no such spool.",
+    description=(
+        "Gone for good; archive it instead to keep its record. 404 for no such spool, 409 "
+        "when a print has ended on it (its ledger keeps that print)."
+    ),
 )
 async def delete_native_spool(spools: SpoolsDep, spool_id: UUID) -> Response:
-    if not await asyncio.to_thread(native_provider(spools).store.delete, spool_id):
+    try:
+        deleted = await asyncio.to_thread(native_provider(spools).store.delete, spool_id)
+    except SpoolInUseError:
+        # Settings offers Delete on an archived spool only, so "archive it" says nothing.
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "the spool stays, archived: its ledger keeps a print that finished on it",
+        ) from None
+    if not deleted:
         raise _missing(spool_id)
     await _refreshed(spools)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

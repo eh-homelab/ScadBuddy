@@ -11,9 +11,10 @@ client of a stand-in API that answers fixed store settings and serves no job rou
 test of the worker that renders nothing. `threaded_render_crud` is a render worker's
 blocking client of the render routes served on a thread of their own, for a test that
 calls them from its event loop or a sync test; `threaded_render_index` is the worker's
-`RemoteBlobIndex` over it. `print_crud_app` serves the print routes over the API's
-settings store (and its run, outcome, operation and upload stores and its bus),
-`threaded_print_crud` is a blocking client of them on a thread of their own,
+`RemoteBlobIndex` over it, and `threaded_worker_index` its `WorkerViewIndex`.
+`print_crud_app` serves the print routes over the API's settings store (and its run,
+outcome, operation and upload stores and its bus), `threaded_print_crud` is a blocking
+client of them on a thread of their own,
 `served_print_crud` an async one on a local port, and `static_print_crud` is a print
 worker's client of a stand-in API that answers fixed settings. `FakeClock` is a
 client clock that moves only by the client's own waits, so a test's count of tries does
@@ -25,8 +26,9 @@ import base64
 import hashlib
 import threading
 import time
-from collections.abc import AsyncIterator, Iterator, Mapping
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -63,6 +65,7 @@ from scadbuddy.crud.client import CrudClient, CrudSyncClient
 from scadbuddy.crud.guard import CRUD_HEADERS
 from scadbuddy.crud.projects import RemoteFlowStore, RemotePayloadKeys
 from scadbuddy.crud.render import (
+    FORGETTABLE_PREFIXES,
     RemoteBlobIndex,
     RemoteBlobRefs,
     RemoteGeometryIndex,
@@ -94,7 +97,8 @@ from scadbuddy.spools.spool_providers import NativeProvider
 from scadbuddy.spools.store import SpoolStore
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.content import ContentStore
-from scadbuddy.store.index import Pool
+from scadbuddy.store.content_models import BlobRef, BlobStat
+from scadbuddy.store.index import BlobIndex, Pool
 from scadbuddy.workflows.flows_client import connect_flows
 from scadbuddy.workflows.payload_codec import Connect, PgPayloadKeys, payload_key_context
 
@@ -395,6 +399,142 @@ def threaded_render_index(pool: Pool) -> Iterator[RemoteBlobIndex]:
     its event loop, as `tests/store` calls the SQL one."""
     with threaded_render_crud(pool) as client:
         yield RemoteBlobIndex(client)
+
+
+#: The prefixes of the keys only the API writes in production (a print library file's,
+#: an upload's, a font's, a snapshot's, a slice's, a library file's object, an order
+#: attachment's, a customer's or request's file, a quote's, a listing's media, an agent
+#: workspace's). `WorkerViewIndex` writes these over SQL, as the API does.
+API_KEY_PREFIXES = (
+    "library-",
+    "asset-",
+    "font-",
+    "src-",
+    "slice-",
+    "lib3-",
+    "attachment-",
+    "customer-",
+    "request-file-",
+    "quote-",
+    "media-",
+    "workspace-",
+)
+
+
+class WorkerViewIndex:
+    """The blob index as the render worker's store sees it: a render job's own keys
+    (`api/crud_render.py` `RENDER_KEY`), its touches and every read it makes, through the
+    CRUD routes (`RemoteBlobIndex`). Over SQL only a write the API makes in production, of
+    a key with one of `API_KEY_PREFIXES`, so a shared store test that puts, say, a print
+    library file's key runs that write as the API does. Any other key is an
+    `AssertionError`: a test that means to exercise the worker uses a render-shaped key,
+    so its writes reach the routes (#5298 final review).
+    `tests/crud/test_crud_blob_index.py` tests the refusals."""
+
+    def __init__(self, remote: RemoteBlobIndex, sql: BlobIndex) -> None:
+        self.remote = remote
+        self.sql = sql
+
+    def _writer(self, *keys: str, kind: str | None = None) -> RemoteBlobIndex | BlobIndex:
+        if all(crud_render.RENDER_KEY.fullmatch(key) for key in keys) and kind in (
+            None,
+            crud_render.RENDER_KIND,
+        ):
+            return self.remote
+        if all(key.startswith(API_KEY_PREFIXES) for key in keys):
+            return self.sql
+        raise AssertionError(
+            f"{list(keys)!r} ({kind or 'any kind'}): neither a render job's piece nor a key"
+            " the API writes; use a render-shaped key (`tests.support.store.render_key`)"
+        )
+
+    @staticmethod
+    def _reads(key: str) -> bool:
+        return crud_render.HELD_KEY.fullmatch(key) is not None or key.startswith(
+            crud_render.READ_PREFIXES
+        )
+
+    def get(self, key: str) -> BlobStat | None:
+        return (self.remote if self._reads(key) else self.sql).get(key)
+
+    def by_sha(self, sha256: str, kind: str, backend: str) -> BlobRef | None:
+        index = self.remote if kind in crud_render.FOUND_KINDS else self.sql
+        return index.by_sha(sha256, kind, backend)
+
+    def put(
+        self,
+        key: str,
+        ref: BlobRef,
+        *,
+        slug: str | None,
+        meta: dict[str, Any],
+        reuse: bool = False,
+    ) -> BlobRef | None:
+        index = self._writer(key, kind=ref.kind)
+        return index.put(key, ref, slug=slug, meta=meta, reuse=reuse)
+
+    def swap(
+        self,
+        key: str,
+        ref: BlobRef,
+        *,
+        expected: str | None,
+        slug: str | None,
+        meta: dict[str, Any],
+        reuse: bool = False,
+    ) -> bool:
+        index = self._writer(key, kind=ref.kind)
+        return index.swap(key, ref, expected=expected, slug=slug, meta=meta, reuse=reuse)
+
+    def now(self) -> datetime:
+        return self.remote.now()
+
+    def mark(self, keys: Sequence[str], *, backend: str, cutoff: datetime, **meta: Any) -> None:
+        self._writer(*keys).mark(keys, backend=backend, cutoff=cutoff, **meta)
+
+    def touch(self, key: str) -> None:
+        touched = crud_render.HELD_KEY.fullmatch(key) or key.startswith(
+            crud_render.TOUCHED_PREFIXES
+        )
+        (self.remote if touched else self._writer(key)).touch(key)
+
+    def delete(self, key: str, *, backend: str | None = None) -> BlobStat | None:
+        # A forget (no backend) of a font's, snapshot's or library object's copy is the
+        # worker's: `…/forget-copy`.
+        forget = backend is None and key.startswith(FORGETTABLE_PREFIXES)
+        index = self.remote if forget else self._writer(key)
+        return index.delete(key, backend=backend)
+
+    def delete_if_stale(
+        self, key: str, cutoff: datetime, *, backend: str | None = None
+    ) -> BlobStat | None:
+        return self._writer(key).delete_if_stale(key, cutoff, backend=backend)
+
+    def shares_backend_id(self, backend: str, backend_id: str) -> bool:
+        return self.remote.shares_backend_id(backend, backend_id)
+
+    def recorded(self, backend: str, backend_id: str) -> bool:
+        return self.remote.recorded(backend, backend_id)
+
+    def stats(
+        self,
+        kinds: Sequence[str] | None,
+        slug: str | None = None,
+        *,
+        backend: str | None = None,
+    ) -> list[BlobStat]:
+        worker = kinds is not None and set(kinds) <= crud_render.READ_KINDS
+        return (self.remote if worker else self.sql).stats(kinds, slug, backend=backend)
+
+    def usage(self, backend: str) -> tuple[int, int, dict[str, int]]:
+        return self.remote.usage(backend)
+
+
+@contextmanager
+def threaded_worker_index(pool: Pool) -> Iterator[WorkerViewIndex]:
+    """`WorkerViewIndex` over `threaded_render_crud` and ``pool``."""
+    with threaded_render_index(pool) as remote:
+        yield WorkerViewIndex(remote, BlobIndex(pool))
 
 
 class FixedToken:

@@ -80,6 +80,10 @@ pnpm lint && pnpm typecheck && pnpm test && pnpm build
 docker build --target agent -t scadbuddy-agent:dev .   # checks the bundled Claude Code binary
 ```
 
+`pnpm exec tsc` and `pnpm exec vitest` skip `gen:api`: after a fetch of main, TS2820/TS2345
+errors that name an `Operation` or an API path in `src/tools/*.ts` mean `src/api/schema.d.ts` is
+stale. Run `pnpm gen:api`.
+
 Tests never call Anthropic. `test/run.test.ts` runs the bundled Claude Code binary
 against a local fake Anthropic endpoint; `test/pg.test.ts` needs
 `SCADBUDDY_TEST_DATABASE_URL` (e.g. `docker run -d -e POSTGRES_PASSWORD=postgres
@@ -297,7 +301,11 @@ opens every one and seals it again byte for byte).
     its own later events come after the cut), so forgetting a parent first copies each fork's
     range into it, the transcript under the fork's key (`copyForkRanges`, `inherited` rows),
     and refuses without the KEK when a fork takes transcript entries (`fork_cut` above 0; a
-    fork of a closed DurableSession takes none). A gated tool's activity runs only
+    fork of a closed DurableSession takes none). Every read through the fork chain stops at
+    the least cut below each ancestor (`LEAST(bound, cut)`: `eventLog.ts` `forkChain`,
+    `store.ts` `chainRows`, `blobs.ts` `getThroughChain`); a new chain read must do the same.
+    When it is made, a fork copies none of its parent's transcript, event or image rows; its workspace file rows
+    are copied, naming the same bytes (`SessionFiles.copy`). A gated tool's activity runs only
     with an `approved` `ai_input_responses` row for its own request id.
   - DurableSession, the retired Python turn (plan 2026-10-13 Steps 7.2 and 8.1, #4772): its
     open sessions were moved to AgentSession on 2026-11-01 (their conversations in
@@ -328,7 +336,11 @@ opens every one and seals it again byte for byte).
     `backend/tests/support/workspace_backend.py`). Only on `store_backend` local do they stay
     in Postgres, one `ai_session_file_bytes` row per sha256 that every file with those bytes
     names, so a fork shares them (#4212); on any other backend a write that cannot be sealed and stored is refused
-    `unavailable`, never kept in plaintext. Uploads take `workspace_path` + `workspace_sha256` instead of
+    `unavailable`, never kept in plaintext. Rows of `ai_session_file_bytes` are shared and swept: a
+    writer locks them `FOR KEY SHARE` first, inserts only the missing ones and locks again, in a
+    loop (`putBytes`, `copy`); `INSERT … ON CONFLICT DO NOTHING` takes no lock on the existing row,
+    and the table's CHECK (sha256 of the bytes) runs before the conflict check (`ExecInsert`,
+    [nodeModifyTable.c](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/executor/nodeModifyTable.c)). Uploads take `workspace_path` + `workspace_sha256` instead of
     inline content (`src/tools/workspaceUploads.ts`: binary streamed by
     `SessionFiles.chunks` into the multipart route, text decoded as UTF-8).
     The panel's Files (part 3) are `routes/sessionFiles.ts`

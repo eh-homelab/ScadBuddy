@@ -25,6 +25,9 @@ from tests.crud.crud_support import served_render_refs
 
 pytestmark = pytest.mark.requires_postgres
 
+#: Piece keys (`api/crud_render.py` `HELD_KEY`).
+P0, P1, P2 = "0" * 64, "1" * 64, "2" * 64
+
 
 @pytest.fixture
 def projection(pg_conninfo: str) -> Iterator[JobProjection]:
@@ -82,10 +85,10 @@ async def test_a_ref_sent_twice_writes_one_row(
     refs: RemoteBlobRefs, projection: JobProjection
 ) -> None:
     job = _job(projection)
-    await asyncio.to_thread(refs.add, "piece-1", "job", job.id)
-    await asyncio.to_thread(refs.add, "piece-1", "job", job.id)
-    await asyncio.to_thread(refs.add, "piece-2", "job", job.id)
-    assert _refs(projection) == [("piece-1", "job", job.id), ("piece-2", "job", job.id)]
+    await asyncio.to_thread(refs.add, P1, "job", job.id)
+    await asyncio.to_thread(refs.add, P1, "job", job.id)
+    await asyncio.to_thread(refs.add, P2, "job", job.id)
+    assert _refs(projection) == [(P1, "job", job.id), (P2, "job", job.id)]
 
 
 @pytest.mark.parametrize("holder_kind", ["output", "preset", "slice", "attempt"])
@@ -98,7 +101,7 @@ async def test_a_ref_for_any_holder_but_a_job_is_a_403(
     """A render credential pins blobs for its jobs only, and the refusal is final: no
     re-exchange, no retry inside the budget."""
     job = _job(projection)
-    await asyncio.to_thread(refs.add, "piece-0", "job", job.id)
+    await asyncio.to_thread(refs.add, P0, "job", job.id)
     # #5655: the refusal is judged by what the client did, not by the wall time, which a
     # loaded runner stretched past a 0.5 s budget. One request, no wait before another,
     # no credential refresh.
@@ -116,13 +119,52 @@ async def test_a_ref_for_any_holder_but_a_job_is_a_403(
     monkeypatch.setattr(client, "_sleep", waits.append)
     monkeypatch.setattr(client._auth, "refresh", refreshes.append)
     with pytest.raises(CrudRefusedError) as refused:
-        await asyncio.to_thread(refs.add, "piece-1", holder_kind, job.id)
+        await asyncio.to_thread(refs.add, P1, holder_kind, job.id)
     assert len(sent) == 1, sent
     assert waits == []
     assert refreshes == []
     assert refused.value.status == 403
     assert refused.value.problem.get("reason") == "holder-kind"
-    assert _refs(projection) == [("piece-0", "job", job.id)]
+    assert _refs(projection) == [(P0, "job", job.id)]
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "library-file-1",
+        "workspace-" + "a" * 64,
+        "customer-file-" + "a" * 64,
+        "request-file-" + "a" * 64,
+        "customer-preview-" + "a" * 64,
+        "listing-media-" + "a" * 64,
+        "slice-" + "a" * 64,
+        "asset-" + "a" * 64,
+        "font-dejavu",
+        "src-demo-abc",
+    ],
+)
+async def test_a_ref_of_a_key_no_render_job_holds_is_a_403(
+    refs: RemoteBlobRefs, projection: JobProjection, key: str
+) -> None:
+    """A render credential could otherwise keep a deleted customer's file, or any other
+    service's blob, from the sweep while its job's refs live (#5298 final review M1)."""
+    job = _job(projection)
+    with pytest.raises(CrudRefusedError) as refused:
+        await asyncio.to_thread(refs.add, key, "job", job.id)
+    assert refused.value.status == 403
+    assert refused.value.problem.get("reason") == "api-owned-key"
+    assert _refs(projection) == []
+
+
+@pytest.mark.parametrize(
+    "key", [P1, "act-" + "a" * 40, "output-" + "a" * 32 + "-0", "lib3-" + "a" * 48 + "-2"]
+)
+async def test_a_job_holds_its_pieces_and_the_library_objects_it_lays_out(
+    refs: RemoteBlobRefs, projection: JobProjection, key: str
+) -> None:
+    job = _job(projection)
+    await asyncio.to_thread(refs.add, key, "job", job.id)
+    assert _refs(projection) == [(key, "job", job.id)]
 
 
 async def test_a_ref_for_a_missing_job_is_a_404_and_writes_nothing(
@@ -135,7 +177,7 @@ async def test_a_ref_for_a_missing_job_is_a_404_and_writes_nothing(
             refs._client.request,
             "POST",
             f"{BASE}/blob-refs",
-            json={"key": "piece-1", "holder_kind": "job", "holder_id": "absent"},
+            json={"key": P1, "holder_kind": "job", "holder_id": "absent"},
         )
     assert refused.value.status == 404
     assert _refs(projection) == []
@@ -147,7 +189,7 @@ async def test_the_workers_ref_for_a_gone_job_is_dropped_not_raised(
     """The SQL write held a blob for any holder id, a pruned job's too, and the sweep
     then dropped the orphan ref. A ref for a job that is gone holds nothing, so the
     worker's render goes on without it."""
-    await asyncio.to_thread(refs.add, "piece-1", "job", "absent")
+    await asyncio.to_thread(refs.add, P1, "job", "absent")
     assert _refs(projection) == []
 
 
@@ -163,7 +205,7 @@ async def test_a_slow_route_makes_a_ref_raise_inside_the_project_attempt(
     monkeypatch.setattr(projection, "read", slow)
     started = time.monotonic()
     with pytest.raises(CrudUnavailableError):
-        await asyncio.to_thread(refs.add, "piece-1", "job", job.id)
+        await asyncio.to_thread(refs.add, P1, "job", job.id)
     assert time.monotonic() - started < PROJECT_TIMEOUT.total_seconds()
 
 

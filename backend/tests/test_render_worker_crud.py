@@ -57,6 +57,9 @@ from tests.crud.crud_support import served_render_crud, threaded_render_crud
 
 pytestmark = pytest.mark.requires_postgres
 
+#: Piece keys: the only keys the render credential stores (`api/crud_render.py`).
+PIECE_A, PIECE_B = "a" * 64, "b" * 64
+
 Pool = ConnectionPool[Connection[DictRow]]
 
 
@@ -103,8 +106,9 @@ def _defaults(tmp_path: Path) -> Settings:
 
 
 def test_the_full_key_is_hidden_once_a_render_key_is_stored(owner: Pool, tmp_path: Path) -> None:
-    """What the API's CRUD route releases to a render worker (#5298), read through the
-    `render_settings` view."""
+    """What the API reads for the CRUD route that answers a render worker (#5298),
+    through the `render_settings` view. The route withholds the fallback full key
+    (`tests/crud/test_crud_render_settings.py`)."""
     _put(owner, "store_backend", "bambuddy")
     _put(owner, "bambuddy_url", BASE_URL)
     _put(owner, "library_folder_id", 1)
@@ -320,11 +324,11 @@ async def _the_bambuddy_store_works(
 ) -> None:
     try:
         scope = BlobScope(slug="kit", title="Kit")
-        await content.put("piece", b"a", name="a.zip", scope=scope, key="piece-a")
-        await content.touch("piece-a")
-        await content.put("piece", b"b", name="b.zip", scope=scope, key="piece-b")
+        await content.put("piece", b"a", name="a.zip", scope=scope, key=PIECE_A)
+        await content.touch(PIECE_A)
+        await content.put("piece", b"b", name="b.zip", scope=scope, key=PIECE_B)
         # The object is gone from Bambuddy: its row is forgotten.
-        assert await content.stat("piece-a") is None
+        assert await content.stat(PIECE_A) is None
         assert read_back.call_count == len(commits.COMMIT_WAITS)
     finally:
         await backend.aclose()

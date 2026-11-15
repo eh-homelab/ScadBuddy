@@ -45,7 +45,7 @@ import zipfile
 from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
 from dataclasses import dataclass
-from typing import IO, Any
+from typing import IO, TYPE_CHECKING, Any
 
 import aiomqtt
 from fastapi import status
@@ -91,6 +91,7 @@ from scadbuddy.rack.usage import (
 from scadbuddy.render.bambu3mf import PROJECT_SETTINGS_NAME
 from scadbuddy.slicing.slice_info import plate_grams
 from scadbuddy.spools.native import NativeSpoolStore, spool_uses
+from scadbuddy.spools.spool_providers import recache
 from scadbuddy.workflows.print_activities import raised_as
 from scadbuddy.workflows.print_models import (
     FAILED,
@@ -107,6 +108,9 @@ from scadbuddy.workflows.print_models import (
     LanWaitInput,
     SlicedSource,
 )
+
+if TYPE_CHECKING:
+    from scadbuddy.spools.component import Spools
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +205,9 @@ class LanDeps:
     #: Where a start saves what it uses of ScadBuddy's own spools (#4643); ``None``
     #: saves nothing.
     native_spools: NativeSpoolStore | None = None
+    #: The spools whose native records a start re-caches once it saved its uses, so the
+    #: overlay shows the estimate taken off at start (#6261); ``None`` re-caches nothing.
+    spools: Spools | None = None
 
 
 class LanActivities:
@@ -360,7 +367,9 @@ class LanActivities:
 
     async def _save_uses(self, input: LanPrintInput) -> None:
         """What the start uses of ScadBuddy's own spools (#4643), under its run and its
-        ``subtask_name``, settled once the run's print settles
+        ``subtask_name``: an estimate the ledger takes off at once, then the native
+        records re-cached for the overlay (`spools.spool_providers.recache`, as the settle
+        does), settled once the run's print settles
         (`spools.spool_providers.native_use_hook`). Advisory, never raising."""
         run_id = input.uploaded.run_id
         uses = spool_uses(input.spools, input.uploaded.grams_by_slot)
@@ -374,6 +383,9 @@ class LanActivities:
                 "could not save what a LAN print uses of the native spools",
                 extra={"run_id": run_id, "error": type(error).__name__},
             )
+            return
+        if self.d.spools is not None:
+            await recache(self.d.spools)
 
     @staticmethod
     def _named(started: LanStarted, input: LanPrintInput) -> LanStarted:

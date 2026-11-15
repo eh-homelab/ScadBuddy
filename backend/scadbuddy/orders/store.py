@@ -136,7 +136,8 @@ class RowNotOwnedError(LookupError):
 
 class FilamentExistsError(ValueError):
     """A filament record with the same identity (material, subtype, brand and colour,
-    upper-cased; #4250 Ruling 4) is there already: the routes answer 409 naming it."""
+    upper-cased, #4250 Ruling 4, and alpha, #6261) is there already: the routes answer 409
+    naming it."""
 
     def __init__(self, existing_id: str) -> None:
         super().__init__("a filament with that material, subtype, brand and colour exists")
@@ -800,14 +801,23 @@ class OrderStore:
     # -- the price book's filaments (§5.1, #4250) -------------------------------------
 
     def existing_filament(
-        self, conn: Conn, material: str, subtype: str | None, brand: str | None, colour: str
+        self,
+        conn: Conn,
+        material: str,
+        subtype: str | None,
+        brand: str | None,
+        colour: str,
+        alpha: int | None = None,
     ) -> str | None:
+        """The record in the book of this identity (#6261: it holds the alpha); with no
+        ``alpha``, the most opaque record of the other four."""
         row = conn.execute(
             "SELECT id FROM filaments WHERE upper(material) = upper(%s)"
             " AND upper(coalesce(subtype, '')) = upper(coalesce(%s, ''))"
             " AND upper(coalesce(brand, '')) = upper(coalesce(%s, ''))"
-            " AND upper(colour) = upper(%s) AND archived_at IS NULL",
-            (material, subtype, brand, colour),
+            " AND upper(colour) = upper(%s) AND (%s::smallint IS NULL OR alpha = %s)"
+            " AND archived_at IS NULL ORDER BY alpha DESC, id LIMIT 1",
+            (material, subtype, brand, colour, alpha, alpha),
         ).fetchone()
         return None if row is None else str(row["id"])
 
@@ -853,15 +863,15 @@ class OrderStore:
                     values,
                 ).fetchone()
         except errors.UniqueViolation:
-            self._raise_exists(body.material, body.subtype, body.brand, body.colour)
+            self._raise_exists(body.material, body.subtype, body.brand, body.colour, body.alpha)
         assert row is not None
         return _filament_of(row)
 
     def _raise_exists(
-        self, material: str, subtype: str | None, brand: str | None, colour: str
+        self, material: str, subtype: str | None, brand: str | None, colour: str, alpha: int
     ) -> NoReturn:
         with self._pool.connection() as c:
-            existing = self.existing_filament(c, material, subtype, brand, colour)
+            existing = self.existing_filament(c, material, subtype, brand, colour, alpha)
         raise FilamentExistsError(existing or "")
 
     def update_filament(
@@ -922,7 +932,9 @@ class OrderStore:
             current = self.filament(filament_id)
             assert current is not None
             merged = current.model_copy(update=fields)
-            self._raise_exists(merged.material, merged.subtype, merged.brand, merged.colour)
+            self._raise_exists(
+                merged.material, merged.subtype, merged.brand, merged.colour, merged.alpha
+            )
         return None if row is None else _filament_of(row)
 
     def import_records(self, conn: Conn) -> list[ImportRecord]:
@@ -993,8 +1005,9 @@ class OrderStore:
             current = self.filament(filament_id, conn=conn)
             assert current is not None
             colour = str(look.get("colour", current.colour))
+            alpha = int(str(look.get("alpha", current.alpha)))
             existing = self.existing_filament(
-                conn, current.material, current.subtype, current.brand, colour
+                conn, current.material, current.subtype, current.brand, colour, alpha
             )
             raise FilamentExistsError(existing or "") from None
 
@@ -1022,7 +1035,9 @@ class OrderStore:
         except errors.UniqueViolation:
             current = self.filament(filament_id)
             assert current is not None
-            self._raise_exists(current.material, current.subtype, current.brand, current.colour)
+            self._raise_exists(
+                current.material, current.subtype, current.brand, current.colour, current.alpha
+            )
         return None if row is None else _filament_of(row)
 
     def filament(

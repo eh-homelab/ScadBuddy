@@ -39,17 +39,25 @@ service credential (PR #5211). The owner decided this on 2026-11-05.
   a pod that holds a database secret.
 - New data that crosses services goes through a CRUD route that requires a service
   credential from its first PR.
+- Retiring a caller's role goes in this order. First add it to `auth/revoke.py`
+  `RETIRED_ROLES` (the API revokes at every start) and deploy. On prod, check that it has
+  0 rows in `information_schema.role_table_grants`, owns 0 relations and has 0
+  `pg_stat_activity` sessions. Only then set `ensure: absent` in eh-homelab/clusters
+  `cnpg-cluster.yaml`, delete its `onepassworditem-*-db.yaml`, and archive the 1Password
+  item (#5298; how to read prod: `deploy/CLAUDE.md` "Prod checks").
 
-Today's code still breaks the rule: seven processes hold a Postgres secret (four once
-eh-homelab/clusters drops the render, print and projects workers', which they no longer
-use; the API revokes the roles `scadbuddy_render`, `scadbuddy_print` and
-`scadbuddy_projects` at every start, and the agent what it granted `scadbuddy_projects`,
-#5298), the agent
-and the API share tables through grants, and template Python runs in the render worker's
-pod. Do the work in this order: #5298 (the workers), #5299 (the agent), #5297 (authenticate
-`/api/v1/internal/*`, then `enforce`), #5296 (untrusted code out of pods with a database
-secret), then eh-homelab/clusters#3182 (the network). The evidence and the zones are in
-[docs/security/trust-boundaries.md](docs/security/trust-boundaries.md).
+Today's code still breaks the rule: four processes hold a Postgres secret (the API, the
+agent sidecar, the agent worker and agent-durable), and the agent and the API share
+tables through grants. The render, print and projects workers hold none: #5298 is done,
+and prod has no `scadbuddy_render`, `scadbuddy_print` or `scadbuddy_projects` role and no
+database secret in those pods (measured 2026-11-14, after eh-homelab/clusters#3555,
+#3566 and #3578). The API still revokes those roles at every start where they exist, and
+the agent what it granted `scadbuddy_projects`. Template Python still runs in the render
+worker's pod, which holds no database secret now but holds its `crud.render` credential,
+the S3 keys and the Bambuddy render key. Do the rest in this order: #5299 (the agent),
+#5297 (authenticate `/api/v1/internal/*`, then `enforce`), #5296 (untrusted code out of
+pods with a database secret: openscad and `openscad-lsp` still run in the API's), then eh-homelab/clusters#3182 (the network). The evidence and the zones
+are in [docs/security/trust-boundaries.md](docs/security/trust-boundaries.md).
 
 ## Commands (what CI runs)
 
@@ -126,9 +134,9 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
 
 ## Verified OpenSCAD facts (do not re-derive; re-measure if the base image moves)
 
-- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-11-02@sha256:…`
+- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-11-09@sha256:…`
   (tag plus index digest; the only stable release, 2021.01, has no Manifold). The
-  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.11.02). Bump
+  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.11.09). Bump
   deliberately: re-verify spec §3 against the new build, then change the tag,
   digest and `OPENSCAD_VERSION` in the same commit. The weekly `OpenSCAD Bump`
   workflow (`openscad-bump.yml`) opens that PR when a newer nightly exists; its CI
@@ -333,6 +341,9 @@ The Go and Rust commands and toolchain notes: `tools/go/CLAUDE.md`, `workers/rus
   on an idle machine is real.
 - Backend: `test_a_cancelled_slice_is_recorded_cancelled` can error with
   `httpx.ReadTimeout` on a slow runner (#6301). Re-run the shard.
+- Backend: `test_submit.py::test_a_slow_first_accept_is_retried_in_the_same_run`
+  (`assert 3 == 2`) is timing-sensitive under CI load. Re-run the failed jobs once
+  before you debug it.
 
 ## Prod gotchas
 
