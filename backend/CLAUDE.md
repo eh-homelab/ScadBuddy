@@ -1529,7 +1529,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`storefront_choices`; none remembered is Standard 0.4 mm). One row per variant in
   `storefront_slice_prices`, keyed by `price_key`: a sha256 of the render's 3MF content, the
   price-book filament per slot (id, material, cost), the profile, the choices, and the
-  book's policy and the profile printer's stored rate (`check_rate`). Any change is a new
+  book's policy and the live machine rate that prices it (`for_quote`, read once at the estimate read and carried to the run, `SliceVariant.machine_rate`). Any change is a new
   key, so an old price is never read again; the row holds no job id and no bytes, so it
   outlives the render prune. `GET …/renders/{job}/estimate` (`renders.py`
   `render_estimate`, `slice_estimate`) answers `StoreEstimate`: `source` `slice` with the

@@ -83,7 +83,6 @@ def slice_run(
     slicer: FakeSlicer,
     *,
     offered: Collection[int] | None = (9, 5),
-    machine_rate: FakeMachineRate | None = None,
     book: Book | None = None,
 ) -> SliceRun:
     async def create_output(body: dict[str, object]) -> dict[str, object]:
@@ -98,12 +97,13 @@ def slice_run(
         create_output=create_output,
         slicer=slicer,
         offered=offering(offered),
-        machine_rate=machine_rate,
         follow_every=0.0,
     )
 
 
-def variant_of(shop: Shop, key: str = "a" * 64) -> SliceVariant:
+def variant_of(
+    shop: Shop, key: str = "a" * 64, *, machine_rate: MachineRateBreakdown | None = None
+) -> SliceVariant:
     item = shop.get_item()
     assert item.reference is not None
     return SliceVariant(
@@ -120,6 +120,7 @@ def variant_of(shop: Shop, key: str = "a" * 64) -> SliceVariant:
         slot_filaments=[shop.pla, shop.petg],
         currency="USD",
         spools=[9, 5],
+        machine_rate=machine_rate,
     )
 
 
@@ -136,9 +137,7 @@ async def test_a_storefront_price_equals_the_back_office_quote_to_the_cent(
     quote = await quote_run(run, shop.order.id, shop.item.id, request, BY)
 
     slicer = FakeSlicer(files)
-    row = await price_variant(
-        slice_run(shop, prices, slicer, machine_rate=FakeMachineRate(RATE)), variant_of(shop)
-    )
+    row = await price_variant(slice_run(shop, prices, slicer), variant_of(shop, machine_rate=RATE))
     assert row.status == "done"
     assert row.total_minor == quote.total_minor
     assert row.unit_price_minor == quote.unit_price_minor
@@ -285,6 +284,42 @@ def test_a_variant_with_no_profile_or_no_spool_for_a_material_has_no_plan(shop: 
     # The profile names no support or process setting: the template's apply.
     assert planned.variant.slice.supports is None
     assert planned.variant.slice.part_settings is None
+
+
+async def test_a_live_rate_change_is_a_new_key_and_the_old_price_is_not_reused(
+    shop: Shop, prices: SlicePrices
+) -> None:
+    """#6153: the key holds the live rate that prices the slice, so a rate change gives a
+    new key, and the done row of the old rate is never the answer."""
+    item = shop.get_item()
+    assert item.reference is not None
+    pla = shop.rows.filament(shop.pla)
+    petg = shop.rows.filament(shop.petg)
+    assert pla is not None and petg is not None
+    settings = StoredSettings(storefront_slice_profile=PROFILE)
+    asked: dict[str, Any] = {
+        "settings": settings,
+        "reference": item.reference,
+        "model_sha256": SHA,
+        "filaments": [pla, petg],
+        "currency": "USD",
+        "policy": POLICY,
+    }
+    dearer = RATE.model_copy(update={"rate_per_hour": "5.00"})
+    old = plan_variant(**asked, machine_rate=RATE)
+    new = plan_variant(**asked, machine_rate=dearer)
+    assert old is not None and new is not None
+    assert old.key != new.key
+    assert new.variant.machine_rate == dearer
+    slicer = FakeSlicer({1: sliced_plate(1, 3600, [10.0, 5.0])})
+    run = slice_run(shop, prices, slicer)
+    first = await price_variant(run, old.variant)
+    assert first.status == "done"
+    assert prices.get(new.key) is None
+    second = await price_variant(run, new.variant)
+    assert len(slicer.subjects) == 2
+    assert second.total_minor is not None and first.total_minor is not None
+    assert second.total_minor > first.total_minor
 
 
 def test_the_choices_are_the_dialogs_remembered_ones(shop: Shop) -> None:

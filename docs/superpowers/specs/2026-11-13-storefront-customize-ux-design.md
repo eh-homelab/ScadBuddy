@@ -179,7 +179,7 @@ Design:
   slices, the run checks that the printer still offers each profile spool, else no price.
 - **One price per variant.** `storefront_slice_prices` holds one row per `price_key`: a
   sha256 of the render's 3MF content, the price-book filament per slot, the profile, the
-  choices, and the book's policy and the printer's stored machine rate. A change to any of
+  choices, and the book's policy and the printer's live machine rate (read once and carried to the slice, so the key and the price use one rate). A change to any of
   them is a new key. The row holds no job id and no bytes, so it outlives the render
   prune.
 - **Capacity.** The slice is the operation `storefront_slice_price` on the `library`

@@ -1087,7 +1087,6 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             create_output=create_output,
             slicer=PreviewSlicer(core, components),
             offered=offered,
-            machine_rate=orders.machine_rates.for_quote,
         )
         try:
             row = await price_variant(run, SliceVariant.model_validate(request))

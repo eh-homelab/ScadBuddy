@@ -51,10 +51,15 @@ from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.orders.currency import minor_exponent
 from scadbuddy.orders.estimate import StoreEstimate
 from scadbuddy.orders.lifecycle import QUOTE_TIMEOUT
-from scadbuddy.orders.models import Filament, PricingPolicy, QuoteLine, Reference
+from scadbuddy.orders.models import (
+    Filament,
+    MachineRateBreakdown,
+    PricingPolicy,
+    QuoteLine,
+    Reference,
+)
 from scadbuddy.orders.quote import (
     FOLLOW_EVERY,
-    MachineRate,
     PolicySource,
     PriceSlots,
     QuoteError,
@@ -329,8 +334,8 @@ def price_key(
 ) -> str:
     """The sha256 of everything a variant's price rests on (owner, 2026-11-14): the 3MF's
     content, each slot's price-book filament as it is priced, the profile, the dialog's
-    choices, and the price book's policy and the stored machine rate of the profile's
-    printer."""
+    choices, and the price book's policy and the machine rate that prices it (the live
+    rate of the profile's printer, `MachineRates.for_quote`, #6153)."""
     body = {
         "v": KEY_VERSION,
         "model": model_sha256,
@@ -391,6 +396,10 @@ class SliceVariant(BaseModel):
     currency: str
     #: The profile's spool of each slot, which the run checks the printer still offers.
     spools: list[int]
+    #: The machine rate the estimate read put in the key, which prices the slice: the
+    #: run never reads the rate again, so the key and the price use one rate (#6153).
+    #: None prices machine time at the book's rate.
+    machine_rate: MachineRateBreakdown | None = None
 
 
 def storefront_output_id(render_key: str) -> str:
@@ -420,7 +429,6 @@ class SliceRun:
     #: The spool ids the print dialog offers on a registry printer now, or None for a
     #: printer the registry does not hold (``api/storefront_slice.py`` ``offered_spools``).
     offered: Callable[[str], Awaitable[Collection[int] | None]]
-    machine_rate: MachineRate | None = None
     follow_every: float = FOLLOW_EVERY
 
 
@@ -455,6 +463,11 @@ async def price_variant(run: SliceRun, variant: SliceVariant) -> PriceRow:
         )
         subject = subject_of(key)
 
+        async def machine_rate(
+            _printer: str | None, _printer_id: int | None
+        ) -> MachineRateBreakdown | None:
+            return variant.machine_rate
+
         async def priced_for(plates: list[Any]) -> PriceSlots:
             sliced_slots(plates, range(len(filaments)))
             return PriceSlots(filaments=filaments, quantity=1)
@@ -465,7 +478,7 @@ async def price_variant(run: SliceRun, variant: SliceVariant) -> PriceRow:
             subject,
             variant.slice,
             book=run.book,
-            machine_rate=run.machine_rate,
+            machine_rate=machine_rate,
             currency=variant.currency,
             priced_for=priced_for,
             follow_every=run.follow_every,
@@ -505,7 +518,7 @@ def plan_variant(
     filaments: Sequence[Filament],
     currency: str,
     policy: PricingPolicy,
-    machine_rate: str | None,
+    machine_rate: MachineRateBreakdown | None,
 ) -> Planned | None:
     """The variant of ``reference``'s render with ``filaments`` on its slots (from 0),
     or None when it has no slice price: no shop slice profile, or a slot's material
@@ -525,7 +538,7 @@ def plan_variant(
         choices=choices,
         currency=currency,
         policy=policy,
-        machine_rate=machine_rate,
+        machine_rate=None if machine_rate is None else machine_rate.rate_per_hour,
     )
     return Planned(
         key=key,
@@ -537,6 +550,7 @@ def plan_variant(
             slot_filaments=[f.id for f in filaments],
             currency=currency,
             spools=[slot.spool_id for slot in request.filament_plan.slots],
+            machine_rate=machine_rate,
         ),
     )
 
@@ -591,7 +605,9 @@ async def slice_estimate(
     if profile is None:
         return NO_PRICE
     currency, policy, _ = await asyncio.to_thread(orders.price_book.policy)
-    rate = await asyncio.to_thread(orders.machine_rates.check_rate, profile.printer, None)
+    # The live rate, as a back-office quote prices it: the key holds it and the run
+    # prices with it, so a rate change is a new key (#6153).
+    rate = await orders.machine_rates.for_quote(profile.printer, None)
     planned = plan_variant(
         settings=settings,
         reference=reference,
