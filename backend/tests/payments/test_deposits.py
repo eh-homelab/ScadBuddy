@@ -38,7 +38,6 @@ pytestmark = pytest.mark.requires_postgres
 
 SAVINGS = "dVzbVMLjrxTnLjX4G66XUp5GLklm4oiZy88yK"
 SYNC = f"{SANDBOX}/transactions/sync"
-TODAY = datetime.now(UTC).date().isoformat()
 
 
 def transaction(tx_id: str, amount: float, text: str, **fields: Any) -> dict[str, Any]:
@@ -50,7 +49,9 @@ def transaction(tx_id: str, amount: float, text: str, **fields: Any) -> dict[str
             "amount": amount,
             "name": text,
             "original_description": text,
-            "date": TODAY,
+            # Read at each call: a constant set at import is yesterday for an order a
+            # shard makes after midnight UTC, and is then suggested for no order.
+            "date": datetime.now(UTC).date().isoformat(),
         }
     )
     found.update(fields)
