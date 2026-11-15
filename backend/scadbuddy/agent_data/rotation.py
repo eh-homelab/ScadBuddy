@@ -1,12 +1,12 @@
 """The KEKs the agent's secrets are opened with, and their rotation at the API's start
-(#5299 D5, step 4).
+(#5299 D5, steps 4 and 5).
 
 The API holds the KEK (``SCADBUDDY_SECRET_KEY_FILE``) and, during a rotation, the one
 before it (``SCADBUDDY_SECRET_KEY_PREVIOUS_FILE``). At start, after the migrations, the
-data keys of the Claude credentials and of the payload subjects sealed under the previous
-key are sealed again under the current one: what the agent did itself before
-(``agent/src/main.ts`` ``afterMigrate``). The agent still re-wraps its workspace file keys,
-plugin secrets, Web Push keys, notification channel tokens and plugin sign-ins, until the
+data keys of the Claude credentials, of the payload subjects, of the Web Push keys and of
+the notification channels' tokens sealed under the previous key are sealed again under the
+current one: what the agent did itself before (``agent/src/main.ts`` ``afterMigrate``). The
+agent still re-wraps its workspace file keys, plugin secrets and plugin sign-ins, until the
 steps of #5299 that move those tables (5 and 7).
 """
 
@@ -18,7 +18,7 @@ from typing import Any
 
 from psycopg import Connection
 
-from scadbuddy.agent_data import credentials, payload_keys
+from scadbuddy.agent_data import credentials, notify, payload_keys
 from scadbuddy.core.secrets import Kek, SecretKeyError
 from scadbuddy.library.settings_store import settings_kek
 
@@ -34,15 +34,17 @@ def kek_at(path: Path | None) -> Kek | None:
         return None
 
 
-def _tables(conn: Connection[Any]) -> tuple[bool, bool]:
+def _tables(conn: Connection[Any]) -> tuple[bool, bool, bool]:
     row = conn.execute(
         "SELECT to_regclass('ai_credentials') IS NOT NULL AS credentials,"
-        " to_regclass('ai_payload_keys') IS NOT NULL AS payload_keys"
+        " to_regclass('ai_payload_keys') IS NOT NULL AS payload_keys,"
+        " to_regclass('ai_notify_channels') IS NOT NULL"
+        " AND to_regclass('ai_push_subscriptions') IS NOT NULL AS notify"
     ).fetchone()
     if row is None:
-        return False, False
+        return False, False, False
     values = list(row.values()) if isinstance(row, dict) else list(row)
-    return bool(values[0]), bool(values[1])
+    return bool(values[0]), bool(values[1]), bool(values[2])
 
 
 def rotate(conn: Connection[Any], previous: Kek, current: Kek) -> dict[str, tuple[int, int]]:
@@ -51,13 +53,16 @@ def rotate(conn: Connection[Any], previous: Kek, current: Kek) -> dict[str, tupl
     out: dict[str, tuple[int, int]] = {}
     if previous.id == current.id:
         return out
-    has_credentials, has_keys = _tables(conn)
+    has_credentials, has_keys, has_notify = _tables(conn)
     if has_credentials:
         with conn.transaction():
             out["credentials"] = credentials.rewrap(conn, previous, current)
     if has_keys:
         with conn.transaction():
             out["payload_keys"] = payload_keys.rewrap(conn, previous, current)
+    if has_notify:
+        with conn.transaction():
+            out["notify"] = notify.rewrap(conn, previous, current)
     for table, (rewrapped, failed) in out.items():
         if rewrapped or failed:
             logger.info(

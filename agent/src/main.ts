@@ -1,8 +1,9 @@
 import { pendingInput } from './routes/pendingInput.js'
 import { pendingNotices, NotificationDispatcher } from './notify/dispatcher.js'
 import { pushHostsOf, SETTING_PUSH_HOSTS } from './notify/pushEgress.js'
-import { PushStore } from './notify/pushStore.js'
-import { ChannelStore } from './notify/channels.js'
+import { CrudPushStore, type PushRepo, PushStore } from './notify/pushStore.js'
+import { ChannelStore, CrudChannelRows } from './notify/channels.js'
+import type { Sql } from 'postgres'
 import { PendingChanges } from './gate/changes.js'
 import { ATTACHMENT_SWEEP_MS, AttachmentStore } from './attachments/store.js'
 import { serve, upgradeWebSocket } from '@hono/node-server'
@@ -17,12 +18,12 @@ import { AccessStore } from './access/store.js'
 import { createApp } from './app.js'
 import { mcpAuthSettings } from './auth/authenticate.js'
 import { OidcProvider, SettingsOidcConfigRepo } from './auth/oidc.js'
-import { approvalGrantCheck, FailClosedTokenStore, liveTokenTiers, PostgresTokenStore } from './auth/tokens.js'
+import { approvalGrantCheck, CrudTokenStore, FailClosedTokenStore, liveTokenTiers, PostgresTokenStore, type TokenStore } from './auth/tokens.js'
 import { ConfigError, loadConfig } from './config.js'
 import { type PolledQueue, queuesPolled, workerHealthApp } from './runtime/health.js'
 import { roleParts } from './runtime/role.js'
 import { inClusterApi, KubernetesSandboxes } from './sandbox/pods.js'
-import { BrowserOrigins } from './browser/store.js'
+import { BrowserOrigins, CrudSessionOrigins } from './browser/store.js'
 import { CredentialStore, CrudCredentials, CrudSettings, gatedCredentials, SettingsStore } from './credentials.js'
 import { CredentialPool } from './harness/fallback.js'
 import { managerAgents } from './background/workflowAgents.js'
@@ -62,6 +63,7 @@ import {
 } from './api/serviceCredential.js'
 import { untilBackendAnswers } from './api/backendUp.js'
 import { CrudAreas, SECRET_AREAS } from './api/crudAreas.js'
+import { gated, STORE_AREAS, type StoreArea } from './api/crudStores.js'
 import { CrudFlowRunReads } from './flows/backendReads.js'
 import { BrowserSessions } from './auth/browserSession.js'
 import { sealBackfill } from './sessions/sealBackfill.js'
@@ -72,11 +74,11 @@ import { AuditLog } from './audit/log.js'
 import { auditedTokenStore } from './audit/writes.js'
 import { TabHub } from './bridge/hub.js'
 import { hostTabs, TemporalTabRelay } from './bridge/relay.js'
-import { PostgresTabOwnerStore } from './bridge/tabOwners.js'
-import { PostgresSessionTabStore } from './bridge/sessionTabs.js'
-import { PostgresTabImageStore } from './bridge/tabImages.js'
+import { CrudTabOwnerStore, PostgresTabOwnerStore, type TabOwnerStore } from './bridge/tabOwners.js'
+import { CrudSessionTabStore, PostgresSessionTabStore, type SessionTabStore } from './bridge/sessionTabs.js'
+import { CrudTabImageStore, PostgresTabImageStore, type TabImageStore } from './bridge/tabImages.js'
 import { PgMcpSessionRelay } from './mcp/sessionRelay.js'
-import { PostgresPairingStore } from './bridge/pairings.js'
+import { CrudPairingStore, type PairingStore, PostgresPairingStore } from './bridge/pairings.js'
 import { CHAT_FRAME_MAX, startHeartbeat } from './routes/chat.js'
 import { storedModel } from './routes/model.js'
 import { followSessionEvents, SessionEventPublisher } from './sessions/busEvents.js'
@@ -131,7 +133,7 @@ import { Client, Connection } from '@temporalio/client'
 import { fileURLToPath } from 'node:url'
 import { AgentCommands } from './operations/run.js'
 import { OperationStore } from './operations/store.js'
-import { activityKindsOf, upsertActivityKinds } from './activity/kinds.js'
+import { activityKindsOf, crudUpsertActivityKinds, upsertActivityKinds } from './activity/kinds.js'
 import { packageKinds } from './plugins/packages/operations.js'
 import { operationActivities } from './temporal/operationActivities.js'
 import { PendingActionStore } from './tools/pending.js'
@@ -211,9 +213,10 @@ const database = config.databaseUrl
       },
       afterMigrate: async (sql) => {
         if (!previousKek?.ok || !kek.ok) return
-        // The Claude credentials and the payload keys are re-wrapped by the API at its start
-        // (#5299 D5, backend agent_data/rotation.py), which holds the KEK they are opened with. The
-        // rest is re-wrapped here until the steps of #5299 that move those tables.
+        // The Claude credentials, the payload keys, the Web Push keys and the notification
+        // channels' tokens are re-wrapped by the API at its start (#5299 D5 and step 5, backend
+        // agent_data/rotation.py), which holds the KEK they are opened with. The rest is
+        // re-wrapped here until the steps of #5299 that move those tables.
         const files = await rewrapWorkspaceKeys(sql, previousKek.kek, kek.kek)
         if (files.rewrapped || files.failed) {
           console.log(
@@ -226,20 +229,6 @@ const database = config.databaseUrl
           console.log(
             `secret key rotation: re-wrapped ${plugins.rewrapped} plugin secret(s)` +
               (plugins.failed ? `; ${plugins.failed} could not be opened with the previous key` : ''),
-          )
-        }
-        const push = await new PushStore(sql, kek.kek).rewrapFrom(previousKek.kek, kek.kek)
-        if (push.rewrapped || push.failed) {
-          console.log(
-            `secret key rotation: re-wrapped ${push.rewrapped} Web Push key(s)` +
-              (push.failed ? `; ${push.failed} could not be opened with the previous key` : ''),
-          )
-        }
-        const channels = await new ChannelStore(sql, kek.kek).rewrapFrom(previousKek.kek, kek.kek)
-        if (channels.rewrapped || channels.failed) {
-          console.log(
-            `secret key rotation: re-wrapped ${channels.rewrapped} notification channel token(s)` +
-              (channels.failed ? `; ${channels.failed} could not be opened with the previous key` : ''),
           )
         }
         const grants = await new PluginOAuth(sql).rewrapFrom(previousKek.kek, kek.kek)
@@ -275,8 +264,15 @@ const serviceCredential: CredentialSource | undefined =
 // than the routes needs during a rolling deploy. The API seals and opens them with the KEK, so
 // with those areas listed this process needs no KEK for them.
 const crudFetch = serviceCredential ? withServiceCredential(globalThis.fetch, serviceCredential, config.backendUrl) : globalThis.fetch
-const crudAreas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: SECRET_AREAS })
+const crudAreas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: [...SECRET_AREAS, ...STORE_AREAS] })
 crudAreas.start()
+// The small stores (#5299 step 5, api/crudStores.ts): each through its CRUD routes once the API
+// lists its area, over SQL until then.
+const crudTarget = { baseUrl: config.backendUrl, fetch: crudFetch }
+const storeArea = (area: StoreArea) => () => crudAreas.has(area)
+// The headless browser's approved origins (#982), over `sql` or through area `browser-origins`.
+const browserOriginsOn = (sql: Sql) =>
+  new BrowserOrigins(sql, settings, { crud: new CrudSessionOrigins(crudTarget), use: storeArea('browser-origins') })
 const credentials = database
   ? gatedCredentials(new CredentialStore(database.sql), new CrudCredentials(config.backendUrl, { fetch: crudFetch }), () => crudAreas.has('credentials'), kek)
   : undefined
@@ -354,7 +350,7 @@ const HOST_QUEUE = `${TASK_QUEUE}.${replicaIdentity()}`
 // call is refused.
 const tabRelay = database
   ? new TemporalTabRelay({
-      owners: new PostgresTabOwnerStore(database.sql),
+      owners: gated<TabOwnerStore>(new PostgresTabOwnerStore(database.sql), new CrudTabOwnerStore(crudTarget), storeArea('bridge-tabs')),
       hostQueue: HOST_QUEUE,
       ready: database.ready,
     })
@@ -398,14 +394,14 @@ const toolServices: ToolServices = {
 // /api/v1/ai/bridge, which the browser_* tools drive; MCP clients pair with
 // one through `ai_browser_pairings` (spec §8.5).
 const tabs = new TabHub({
-  pairings: database ? new PostgresPairingStore(database.sql) : undefined,
+  pairings: database ? gated<PairingStore>(new PostgresPairingStore(database.sql), new CrudPairingStore(crudTarget), storeArea('pairings')) : undefined,
   relay: tabRelay,
   // A durable session's browser_* calls run on whichever replica took the
   // activity, so the tab its chat socket paired is read from Postgres (#2086).
-  sessionTabs: database ? new PostgresSessionTabStore(database.sql) : undefined,
+  sessionTabs: database ? gated<SessionTabStore>(new PostgresSessionTabStore(database.sql), new CrudSessionTabStore(crudTarget), storeArea('bridge-tabs')) : undefined,
   // A browser_screenshot's image, stored by the replica holding the tab for the one
   // whose call asked (#254, bridge/tabImages.ts).
-  images: database ? new PostgresTabImageStore(database.sql) : undefined,
+  images: database ? gated<TabImageStore>(new PostgresTabImageStore(database.sql), new CrudTabImageStore(crudTarget), storeArea('bridge-tabs')) : undefined,
 })
 toolServices.browser = tabs
 // What each session touched (#931, sessions/touched.ts), from its tool calls, and the order
@@ -548,7 +544,9 @@ if (database && pluginPackages) {
 // One store for Settings (routes/mcpTokens.ts) and /mcp. Mint and revoke are
 // recorded in the audit log (#258), whichever of the two makes them.
 const tokens =
-  database && audit ? auditedTokenStore(new PostgresTokenStore(database.sql), audit) : new FailClosedTokenStore()
+  database && audit
+    ? auditedTokenStore(gated<TokenStore>(new PostgresTokenStore(database.sql), new CrudTokenStore(crudTarget), storeArea('mcp-tokens')), audit)
+    : new FailClosedTokenStore()
 
 // `session.*` on the event bus (#300, sessions/busEvents.ts): every event-log
 // append is announced on `scadbuddy_events`, and this replica's LISTEN
@@ -615,6 +613,7 @@ const sessions =
     ? new SessionManager({
         memory,
         sql: database.sql,
+        browserOrigins: browserOriginsOn(database.sql),
         flowReads,
         paths,
         ...(dataKeys ? { payloadKeys: dataKeys } : {}),
@@ -727,7 +726,11 @@ const commandKinds = pluginPackages ? packageKinds({ packages: pluginPackages, i
 if (role.http && database && commandKinds.length > 0) {
   void database
     .untilReady()
-    .then(() => upsertActivityKinds(database.sql, activityKindsOf(commandKinds)))
+    .then(() =>
+      crudAreas.has('activity-kinds')
+        ? crudUpsertActivityKinds(crudTarget, activityKindsOf(commandKinds))
+        : upsertActivityKinds(database.sql, activityKindsOf(commandKinds)),
+    )
     .catch((err: unknown) => console.error('activity kinds: could not record them:', (err as Error).message))
 }
 // Durable subjects' payloads are sealed per subject (spec §6.5): every client and worker
@@ -902,7 +905,7 @@ const turnToolDeps = temporal
         ...(durableRemotePlugins ? { remotePlugins: durableRemotePlugins } : {}),
         access: accessResolver,
         // The headless browser's lists (#982), as a classic turn's.
-        browserOrigins: new BrowserOrigins(temporal.sql, settings),
+        browserOrigins: browserOriginsOn(temporal.sql),
         credentialSecrets: durableCredentialSecrets,
         // This pod's own disk, as a classic turn's: the calls are pinned here (hostQueue).
         httpRequest: { saveRoot: path.join(paths.stateDir, DURABLE_TURNS_DIR), sql: temporal.sql, audit, ...(workspace ? { files: workspace } : {}) },
@@ -1222,11 +1225,21 @@ const commands =
 
 // Web Push (#815 §3, notify/): each request waiting on the person (an approval, a question
 // or an attention request) pushed once to every subscribed browser,
-// so a closed tab still alerts. Its keys are sealed under the KEK, so it needs one. A pass
-// runs on each pending-input change and once the database is ready.
-const pushStore = role.http && database && kek.ok ? new PushStore(database.sql, kek.kek) : undefined
+// so a closed tab still alerts. Its keys are sealed under the KEK: by the API once it lists area
+// `notify` (#5299 step 5), so with no KEK here push works from then on; by this process's KEK
+// before that. A pass runs on each pending-input change and once the database is ready.
+const pushCrud = new CrudPushStore(crudTarget)
+const pushStore: PushRepo | undefined =
+  role.http && database
+    ? kek.ok
+      ? gated<PushRepo>(new PushStore(database.sql, kek.kek), pushCrud, storeArea('notify'))
+      : Object.assign(pushCrud, { available: storeArea('notify') })
+    : undefined
 // The out-of-browser channels (#815, notify/channels.ts): their tokens are sealed too.
-const notifyChannels = role.http && database && kek.ok ? new ChannelStore(database.sql, kek.kek) : undefined
+const notifyChannels =
+  role.http && database
+    ? new ChannelStore(database.sql, kek.ok ? kek.kek : undefined, undefined, { crud: new CrudChannelRows(crudTarget), use: storeArea('notify') })
+    : undefined
 const pushDispatcher =
   pushStore && sessions
     ? new NotificationDispatcher({
@@ -1274,7 +1287,7 @@ const app = !role.http
   ...(sessions ? { approvals: sessions.approvals, sessions } : {}),
   ...(attachments ? { attachments } : {}),
   // The headless browser's lists and approvals (#982, routes/browserOrigins.ts).
-  ...(database ? { browserOrigins: new BrowserOrigins(database.sql, settings) } : {}),
+  ...(database ? { browserOrigins: browserOriginsOn(database.sql) } : {}),
   // The panel's Files (#2329, routes/sessionFiles.ts).
   ...(workspace ? { workspace } : {}),
   // A file picked from a workspace (#4703) is refused when it holds one of these: every saved

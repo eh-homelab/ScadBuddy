@@ -40,6 +40,9 @@ import psycopg
 from fastapi import status
 from pydantic import BaseModel, ConfigDict, Field
 
+from scadbuddy.agent_data.notify import VAPID_AAD
+from scadbuddy.agent_data.notify import channel_aad as _channel_aad
+from scadbuddy.agent_data.notify import subscription_aad as _subscription_aad
 from scadbuddy.api.deps import StateDep
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.secrets import (
@@ -63,7 +66,6 @@ CHANNEL_MOVED = "channel-moved"
 #: ``notify/pushStore.ts`` ``SUBSCRIPTIONS_PER_OWNER``, ``SENT_KEEP_DAYS``.
 SUBSCRIPTIONS_PER_OWNER = 5
 SENT_KEEP_DAYS = 2
-VAPID_AAD = "push-vapid:1"
 #: A P-256 public point (65 octets) as hex, a base64url text (a private key, a
 #: subscription's key), an endpoint, a channel's token.
 POINT_HEX = r"^04[0-9a-f]{128}$"
@@ -71,14 +73,6 @@ B64URL = r"^[A-Za-z0-9_-]+={0,2}$"
 ENDPOINT_MAX = 2048
 TOKEN_MAX = 4096
 ERROR_MAX = 500
-
-
-def _subscription_aad(sub_id: str, endpoint: str) -> str:
-    return f"push-subscription:{sub_id}:{endpoint}"
-
-
-def _channel_aad(channel_id: str, kind: str, url: str) -> str:
-    return f"notify-channel:{channel_id}:{kind}:{url}"
 
 
 def _last4(secret: str) -> str:
