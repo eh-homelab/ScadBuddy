@@ -411,11 +411,12 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
   }, [items])
 
   // A detached run ends when its quote shows on the item: a slice quote it did not have
-  // (one typed by hand meanwhile is not it).
+  // (one typed by hand meanwhile is not it). A landed render's run ends too when its item
+  // is gone (deleted meanwhile); its wait settles false.
   useEffect(() => {
     if (!items) return
     for (const [itemId, run] of runs) {
-      if (!run.detached) continue
+      if (!run.detached && !run.landed) continue
       const item = items.find((i) => i.id === itemId)
       const landed = run.stage === 'rendering' ? item?.output_id : item?.quotes.some((q) => q.source === 'slice' && !run.known.includes(q.id))
       if (!item || landed) dismiss(itemId)
