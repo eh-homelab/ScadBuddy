@@ -39,6 +39,14 @@ class AgentTools:
 
     async def tool_tiers(self) -> dict[str, str]:
         """Each tool a flow may call and is not disabled, at its effective tier."""
+        return {name: tier for name, tier, disabled in await self._tools() if not disabled}
+
+    async def tool_names(self) -> set[str]:
+        """Every tool the agent has for flows, disabled ones too: what a registration's
+        script may name (#6365). A disabled tool may be turned on again before a run."""
+        return {name for name, _tier, _disabled in await self._tools()}
+
+    async def _tools(self) -> list[tuple[str, str, bool]]:
         try:
             async with httpx.AsyncClient(timeout=_TIMEOUT, transport=self._transport) as client:
                 response = await client.get(self._url)
@@ -49,7 +57,7 @@ class AgentTools:
         tools = body.get("tools") if isinstance(body, dict) else None
         if not isinstance(tools, list):
             raise AgentToolsUnavailableError("the agent's answer lists no tools")
-        tiers: dict[str, str] = {}
+        listed: list[tuple[str, str, bool]] = []
         for entry in tools:
             if not isinstance(entry, dict):
                 raise AgentToolsUnavailableError("the agent's answer is not a tool list")
@@ -60,6 +68,5 @@ class AgentTools:
                 or not isinstance(disabled, bool)
             ):
                 raise AgentToolsUnavailableError("the agent's answer is not a tool list")
-            if not disabled:
-                tiers[name] = tier
-        return tiers
+            listed.append((name, tier, disabled))
+        return listed

@@ -852,7 +852,9 @@ async def _refresh_store_metrics(metrics: Metrics, store: StoreBundle, data: _Da
     health = await store_health(store)
     metrics.store_render_key_fallback.set(1 if health.render_key_fallback else 0)
     if isinstance(store.blobs, CachedBlobStore):
-        metrics.worker_cache_bytes.set(await asyncio.to_thread(store.blobs.cached_bytes))
+        cached = await asyncio.to_thread(store.blobs.cached_bytes)
+        if cached is not None:
+            metrics.worker_cache_bytes.set(cached)
 
 
 def _health_app(

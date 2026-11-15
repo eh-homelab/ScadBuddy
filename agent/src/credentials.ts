@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
+import { CrudReadError, crudRead } from './api/crudRead.js'
 import { type AuditContext, type AuditSink, SYSTEM_ACTOR } from './audit/log.js'
 import { isRuntimeKey, notifyRuntimeSettings } from './sessions/runtimeSettings.js'
 import { evictsWarmOnWrite, notifyWarmEvict } from './sessions/warmEvict.js'
@@ -92,19 +93,49 @@ export type CredentialEvent =
 /** The status before and after a recorded event; `recovered` when an expired cooldown was cleared by a success. */
 export type CredentialTransition = { before: CredentialStatus; after: CredentialStatus; recovered: boolean }
 
+/**
+ * The key that opens the stored credentials, by its id: the agent's own KEK (a `KekStatus` is
+ * one), or the API's once the credentials go through its CRUD routes (#5299 D5,
+ * `CrudCredentials`), where the agent may hold no KEK at all.
+ */
+export type OpenerStatus = { ok: true; kek: { readonly id: string } } | { ok: false; reason: string }
+
+/** What a plaintext is revealed for, on the API's audit row (#5299 D5). */
+export type RevealPurpose = 'turn' | 'redact' | 'test'
+/** The turn a reveal is for, which the API's audit row names (each a UUID; anything else is left out). */
+export type RevealIds = { sessionId?: string | undefined; turnId?: string | undefined }
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+function wireIds(ids: RevealIds): { session_id?: string; turn_id?: string } {
+  return {
+    ...(ids.sessionId && UUID_RE.test(ids.sessionId) ? { session_id: ids.sessionId } : {}),
+    ...(ids.turnId && UUID_RE.test(ids.turnId) ? { turn_id: ids.turnId } : {}),
+  }
+}
+
 /** The store as the routes, health and the harness see it; tests substitute an in-memory one. */
 export type CredentialRepo = {
   /** Every credential, in priority order. */
   list(): Promise<StoredCredential[]>
   /** One credential; the first by priority when `id` is omitted (the single-credential routes). */
   get(id?: string): Promise<StoredCredential | undefined>
-  reveal(kek: Kek, id?: string): Promise<Credential | undefined>
+  /**
+   * The credential decrypted. The SQL store opens it with `kek` (a SealError without one); the
+   * CRUD store asks the API, which opens it and audits the reveal (`purpose`), and ignores `kek`.
+   */
+  reveal(kek: Kek | undefined, id?: string, purpose?: RevealPurpose, ids?: RevealIds): Promise<Credential | undefined>
   /**
    * Every credential in priority order, with its secret decrypted where the
-   * key opens it (undefined where it does not), all from one read: each row's
-   * `epoch` is that of the secret beside it.
+   * key opens it (undefined where it does not, every one without a key), all
+   * from one read: each row's `epoch` is that of the secret beside it.
    */
-  revealAll(kek: Kek): Promise<{ stored: StoredCredential; credential: Credential | undefined }[]>
+  revealAll(kek: Kek | undefined, purpose?: RevealPurpose, ids?: RevealIds): Promise<{ stored: StoredCredential; credential: Credential | undefined }[]>
+  /**
+   * Who opens the secrets, when it is not the caller's own KEK: the API's key (the CRUD
+   * store). Left out, the caller's own `KekStatus` is the opener.
+   */
+  opener?(): Promise<OpenerStatus>
   /**
    * Saves `update` over a credential (the first by priority when `id` is
    * omitted; one is created when there is none). A new secret makes it
@@ -239,7 +270,9 @@ export function normaliseBaseUrl(raw: string): string {
   if (url.username || url.password) {
     throw new CredentialError('base_url must not carry credentials; put the token in secret', 400)
   }
-  if (url.search || url.hash) {
+  // A bare `?` or `#` leaves `search` and `hash` empty but stays in the URL: refused too, as the
+  // API refuses any `?` or `#` (backend agent_data/credentials.py `check_base_url`).
+  if (url.search || url.hash || url.href.includes('?') || url.href.includes('#')) {
     throw new CredentialError('base_url must not have a query or fragment', 400)
   }
   return url.toString().replace(/\/+$/, '')
@@ -368,13 +401,18 @@ export function credentialDisplayLabel(c: Labelled & Pick<StoredCredential, 'nam
   return `credential ${c.priority + 1} ${JSON.stringify(c.name)} (${credentialWhat(c)})`
 }
 
-/** Whether the mounted key opens `c`: sealed under it, in the current format. */
-export function opensWith(c: StoredCredential, kek: KekStatus): boolean {
+/** Whether the key that opens the credentials (`OpenerStatus`) opens `c`: sealed under it, in the current format. */
+export function opensWith(c: StoredCredential, kek: OpenerStatus): boolean {
   return kek.ok && !c.legacyFormat && c.kekId === kek.kek.id
 }
 
+/** The opener of `repo`'s secrets: the API's key for the CRUD store, else `own`, this process's KEK. */
+export async function openerOf(repo: Pick<CredentialRepo, 'opener'>, own: KekStatus): Promise<OpenerStatus> {
+  return repo.opener ? await repo.opener() : own
+}
+
 /** The soonest a cooling-down credential that the mounted key opens is usable again. */
-export function soonestRecovery(list: readonly StoredCredential[], kek: KekStatus): Date | undefined {
+export function soonestRecovery(list: readonly StoredCredential[], kek: OpenerStatus): Date | undefined {
   const times = list
     .filter((c) => c.status === 'cooling_down' && c.cooldown_until !== null && opensWith(c, kek))
     .map((c) => Date.parse(c.cooldown_until as string))
@@ -387,7 +425,7 @@ export function soonestRecovery(list: readonly StoredCredential[], kek: KekStatu
  */
 export function describeUnusable(
   list: readonly StoredCredential[],
-  kek: KekStatus,
+  kek: OpenerStatus,
   label: (c: StoredCredential) => string = credentialLabel,
 ): string {
   if (list.length === 0) return 'no Claude credential is configured'
@@ -461,12 +499,13 @@ export class CredentialStore implements CredentialRepo {
     return (await this.rows(this.sql, id))[0]
   }
 
-  async reveal(kek: Kek, id?: string): Promise<Credential | undefined> {
+  async reveal(kek: Kek | undefined, id?: string): Promise<Credential | undefined> {
     const [row] = await this.sql<Row[]>`
       SELECT id, kind, base_url, secret_sealed, dek_sealed, kek_id FROM ai_credentials
       ${id === undefined ? this.sql`` : this.sql`WHERE id = ${id}`}
       ORDER BY priority LIMIT 1`
     if (!row) return undefined
+    if (!kek) throw new SealError('no key-encryption key is mounted to open the credential')
     return openCredential(kek, {
       id: row.id,
       kind: row.kind,
@@ -475,7 +514,7 @@ export class CredentialStore implements CredentialRepo {
     })
   }
 
-  async revealAll(kek: Kek): Promise<{ stored: StoredCredential; credential: Credential | undefined }[]> {
+  async revealAll(kek: Kek | undefined): Promise<{ stored: StoredCredential; credential: Credential | undefined }[]> {
     const rows = await this.sql<Row[]>`
       SELECT id, priority, kind, name, base_url, last4, updated_at, kek_id, secret_sealed, dek_sealed,
              get_byte(secret_sealed, 0) AS seal_version,
@@ -485,7 +524,7 @@ export class CredentialStore implements CredentialRepo {
       FROM ai_credentials ORDER BY priority`
     return rows.map((row) => {
       const view = stored(row)
-      return { stored: view, credential: opensWith(view, { ok: true, kek }) ? tryOpen(kek, row) : undefined }
+      return { stored: view, credential: kek && opensWith(view, { ok: true, kek }) ? tryOpen(kek, row) : undefined }
     })
   }
 
@@ -656,6 +695,10 @@ export class CredentialStore implements CredentialRepo {
    * row that `previous` cannot open (altered, or v1) is left for the operator
    * and counted in `failed`; the update is conditional on `kek_id` so two pods
    * rotating at once do not overwrite each other's work.
+   *
+   * No longer run at the agent's start: the API re-wraps the credentials with the KEK it
+   * holds (#5299 step 4, backend `agent_data/rotation.py`). It goes with this SQL store
+   * (#5299 step 12).
    */
   async rewrapFrom(previous: Kek, current: Kek): Promise<RewrapResult> {
     const result: RewrapResult = { rewrapped: 0, failed: 0 }
@@ -701,15 +744,31 @@ export type SettingsRepo = {
   set(key: string, value: unknown, context: AuditContext): Promise<void>
 }
 
+/**
+ * Where `SettingsStore` reads and writes once the API serves area `settings` (#5299 step 4):
+ * its CRUD routes, chosen per call while `use()` holds (#5299 D9). The audit rows stay this
+ * store's own until the audit log moves (#5299 step 10).
+ */
+export type RemoteSettings = { crud: CrudSettings; use: () => boolean }
+
 export class SettingsStore {
   private readonly sql: Sql
   private readonly audit: AuditSink | undefined
-  constructor(sql: Sql, audit?: AuditSink) {
+  private readonly remote: RemoteSettings | undefined
+  constructor(sql: Sql, audit?: AuditSink, remote?: RemoteSettings) {
     this.sql = sql
     this.audit = audit
+    this.remote = remote
+  }
+
+  /** The CRUD routes while the API serves them; undefined for this store's own SQL. */
+  private crud(): CrudSettings | undefined {
+    return this.remote?.use() ? this.remote.crud : undefined
   }
 
   async get<T>(key: string): Promise<T | undefined> {
+    const crud = this.crud()
+    if (crud) return await crud.get<T>(key)
     const [row] = await this.sql<{ value: T }[]>`SELECT value FROM ai_settings WHERE key = ${key}`
     return row?.value
   }
@@ -718,8 +777,10 @@ export class SettingsStore {
   async set(key: string, value: unknown, context?: AuditContext): Promise<void> {
     const startedAt = new Date()
     let failure: unknown
+    const crud = this.crud()
     try {
-      await this.sql.begin(async (tx) => {
+      if (crud) await crud.write({ [key]: value }, null)
+      else await this.sql.begin(async (tx) => {
         await tx`
           INSERT INTO ai_settings (key, value) VALUES (${key}, ${tx.json(value as never)})
           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`
@@ -797,6 +858,8 @@ export class SettingsStore {
     values: Record<string, unknown>,
     check?: (current: { get<T>(key: string): Promise<T | undefined> }) => Promise<boolean>,
   ): Promise<boolean> {
+    const crud = this.crud()
+    if (crud) return check ? await crud.compareAndSet(values, check) : await crud.write(values, null)
     return await this.sql.begin(async (tx) => {
       if (check) {
         await tx`LOCK TABLE ai_settings IN SHARE ROW EXCLUSIVE MODE`
@@ -818,5 +881,271 @@ export class SettingsStore {
       if (Object.keys(values).some(isRuntimeKey)) await notifyRuntimeSettings(tx)
       return true
     })
+  }
+}
+
+// --- The CRUD routes (#5299 step 4, D5) ------------------------------------------------
+//
+// The credentials and settings behind the API's CRUD routes (backend api/crud_agent_secrets.py,
+// areas `credentials` and `settings`): the API seals and opens with the KEK, so these work with
+// no KEK in this process, and runs each write as one transaction, under the same table lock,
+// row lock and NOTIFYs as the SQL above. The agent uses them once `GET …/crud/agent/areas`
+// lists the area (api/crudAreas.ts), and the SQL until then (#5299 D9): `gatedCredentials`, and
+// `SettingsStore`'s `remote`.
+
+type WireStored = Omit<StoredCredential, 'kekId' | 'legacyFormat'> & { kek_id: string; legacy_format: boolean }
+type WireCredential = { kind: CredentialKind; base_url?: string | null; secret: string }
+
+function fromWire(row: WireStored): StoredCredential {
+  const { kek_id, legacy_format, ...rest } = row
+  return { ...rest, kekId: kek_id, legacyFormat: legacy_format }
+}
+
+function credentialFromWire(c: WireCredential): Credential {
+  if (c.kind === 'gateway') {
+    if (!c.base_url) throw new SealError('gateway credential has no base_url')
+    return { kind: 'gateway', baseUrl: c.base_url, secret: c.secret }
+  }
+  return { kind: c.kind, secret: c.secret }
+}
+
+/** The statuses a refusal of the credential store carries (`CredentialError`). */
+const REFUSAL_STATUSES = new Set([400, 404, 409, 503])
+
+/** A CRUD route's answer, with the store's own refusals as `CredentialError` and a sealed row as `SealError`. */
+async function credentialCall<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run()
+  } catch (err) {
+    if (err instanceof CrudReadError && err.fromRoute) {
+      if (err.reason === 'credential-sealed') throw new SealError(err.detail || 'the credential does not open')
+      if (err.reason === 'credential-refused' && err.status !== undefined && REFUSAL_STATUSES.has(err.status)) {
+        throw new CredentialError(err.detail, err.status as 400 | 404 | 409 | 503)
+      }
+      if (err.reason === 'kek-missing') throw new CredentialError(`no key-encryption key on the API: ${err.detail}`, 503)
+    }
+    throw err
+  }
+}
+
+/** How long `CrudCredentials` keeps the API's key status: a turn's set-up reads it with every list. */
+const OPENER_CACHE_MS = 10_000
+
+/** `ai_credentials` through the API's CRUD routes, area `credentials` (see above). */
+export class CrudCredentials implements CredentialRepo {
+  readonly #base: string
+  readonly #fetch: typeof fetch
+  #opener: { at: number; status: OpenerStatus } | undefined
+
+  constructor(baseUrl: string, options: { fetch?: typeof fetch } = {}) {
+    this.#base = baseUrl
+    this.#fetch = options.fetch ?? globalThis.fetch
+  }
+
+  #call<T>(step: string, path: string, body?: unknown): Promise<T> {
+    return credentialCall(() => crudRead<T>(this.#fetch, this.#base, step, path, body === undefined ? {} : { method: 'POST', body }))
+  }
+
+  async opener(): Promise<OpenerStatus> {
+    if (this.#opener && Date.now() - this.#opener.at < OPENER_CACHE_MS) return this.#opener.status
+    const key = await this.#call<{ ok: boolean; kek_id: string | null; reason: string | null }>("the API's key-encryption key", '/credentials/key')
+    const status: OpenerStatus =
+      key.ok && key.kek_id ? { ok: true, kek: { id: key.kek_id } } : { ok: false, reason: key.reason ?? 'the API has no key-encryption key' }
+    this.#opener = { at: Date.now(), status }
+    return status
+  }
+
+  async list(): Promise<StoredCredential[]> {
+    return (await this.#call<{ credentials: WireStored[] }>('the credentials', '/credentials')).credentials.map(fromWire)
+  }
+
+  async get(id?: string): Promise<StoredCredential | undefined> {
+    const query = id === undefined ? '' : `?${new URLSearchParams({ id }).toString()}`
+    const { credential } = await this.#call<{ credential: WireStored | null }>('a credential', `/credentials/one${query}`)
+    return credential ? fromWire(credential) : undefined
+  }
+
+  async reveal(_kek: Kek | undefined, id?: string, purpose: RevealPurpose = 'test', ids: RevealIds = {}): Promise<Credential | undefined> {
+    const { credential } = await this.#call<{ credential: WireCredential | null }>('a credential opened', '/credentials/reveal', {
+      ...(id === undefined ? {} : { id }),
+      purpose,
+      ...wireIds(ids),
+    })
+    return credential ? credentialFromWire(credential) : undefined
+  }
+
+  async revealAll(
+    _kek: Kek | undefined,
+    purpose: RevealPurpose = 'turn',
+    ids: RevealIds = {},
+  ): Promise<{ stored: StoredCredential; credential: Credential | undefined }[]> {
+    const { credentials } = await this.#call<{ credentials: { stored: WireStored; credential: WireCredential | null }[] }>(
+      'the credentials opened',
+      '/credentials/reveal',
+      { all: true, purpose, ...wireIds(ids) },
+    )
+    return credentials.map((row) => ({ stored: fromWire(row.stored), credential: row.credential ? credentialFromWire(row.credential) : undefined }))
+  }
+
+  /** A save as the API takes it: the base URL and name as this process normalises them (the AAD binds the URL as spelled here). */
+  #fields(update: CredentialUpdate): Record<string, unknown> {
+    const baseUrl = update.kind === 'gateway' && update.base_url ? normaliseBaseUrl(update.base_url) : update.base_url
+    return {
+      kind: update.kind,
+      ...(baseUrl ? { base_url: baseUrl } : {}),
+      ...(update.secret === undefined ? {} : { secret: update.secret }),
+      ...(update.name === undefined ? {} : { name: normaliseCredentialName(update.name) }),
+    }
+  }
+
+  async put(update: CredentialUpdate, _kek: Kek | undefined, id?: string): Promise<StoredCredential> {
+    const { credential } = await this.#call<{ credential: WireStored }>('a credential saved', '/credentials/save', {
+      ...(id === undefined ? {} : { id }),
+      update: this.#fields(update),
+    })
+    return fromWire(credential)
+  }
+
+  async create(update: CredentialUpdate, _kek: Kek | undefined): Promise<StoredCredential> {
+    if (update.secret === undefined) throw new CredentialError('secret is required for a new credential', 400)
+    const { credential } = await this.#call<{ credential: WireStored }>('a credential created', '/credentials', this.#fields(update))
+    return fromWire(credential)
+  }
+
+  async delete(id?: string): Promise<boolean> {
+    return (await this.#call<{ deleted: boolean }>('a credential deleted', '/credentials/delete', id === undefined ? {} : { id })).deleted
+  }
+
+  async reorder(ids: readonly string[]): Promise<StoredCredential[]> {
+    return (await this.#call<{ credentials: WireStored[] }>('the credentials ordered', '/credentials/order', { ids })).credentials.map(fromWire)
+  }
+
+  async reset(id: string): Promise<StoredCredential | undefined> {
+    const { credential } = await this.#call<{ credential: WireStored | null }>('a credential reset', '/credentials/reset', { id })
+    return credential ? fromWire(credential) : undefined
+  }
+
+  async rename(id: string, name: string | null): Promise<StoredCredential | undefined> {
+    const { credential } = await this.#call<{ credential: WireStored | null }>('a credential renamed', '/credentials/name', {
+      id,
+      name: normaliseCredentialName(name),
+    })
+    return credential ? fromWire(credential) : undefined
+  }
+
+  async record(id: string, epoch: number, event: CredentialEvent): Promise<CredentialTransition | undefined> {
+    const wire =
+      event.kind === 'cooling_down'
+        ? { kind: event.kind, reason: event.reason, until: event.until.toISOString(), ...(event.replacing ? { replacing: event.replacing.toISOString() } : {}) }
+        : event
+    const { transition } = await this.#call<{ transition: CredentialTransition | null }>('what a query learned', '/credentials/events', { id, epoch, event: wire })
+    return transition ?? undefined
+  }
+}
+
+/**
+ * `crud` once `useCrud()` holds (the API lists area `credentials`), `sql` until then, chosen per
+ * call (#5299 D9). Until then the opener is this process's own KEK (`own`).
+ */
+export function gatedCredentials(sql: CredentialRepo, crud: CrudCredentials, useCrud: () => boolean, own: KekStatus): CredentialRepo {
+  const pick = (): CredentialRepo => (useCrud() ? crud : sql)
+  return {
+    opener: () => (useCrud() ? crud.opener() : Promise.resolve(own)),
+    list: () => pick().list(),
+    get: (id) => pick().get(id),
+    reveal: (kek, id, purpose, ids) => pick().reveal(kek, id, purpose, ids),
+    revealAll: (kek, purpose, ids) => pick().revealAll(kek, purpose, ids),
+    put: (update, kek, id) => pick().put(update, kek, id),
+    create: (update, kek) => pick().create(update, kek),
+    delete: (id) => pick().delete(id),
+    reorder: (ids) => pick().reorder(ids),
+    reset: (id) => pick().reset(id),
+    rename: (id, name) => pick().rename(id, name),
+    record: (id, epoch, event) => pick().record(id, epoch, event),
+  }
+}
+
+/** A settings key as the agent read it, for a compare-and-set: `present` false for no row. */
+type Expected = { key: string; present: boolean; value?: unknown }
+
+/** How many times a compare-and-set reads again after another writer moved a key it read. */
+export const SETTINGS_CAS_TRIES = 5
+/** The most keys one `GET …/settings` takes (backend api/crud_agent_secrets.py `SETTINGS_MAX`). */
+export const SETTINGS_READ_MAX = 50
+
+/** `ai_settings` through the API's CRUD routes, area `settings` (see above). */
+export class CrudSettings {
+  readonly #base: string
+  readonly #fetch: typeof fetch
+
+  constructor(baseUrl: string, options: { fetch?: typeof fetch } = {}) {
+    this.#base = baseUrl
+    this.#fetch = options.fetch ?? globalThis.fetch
+  }
+
+  async get<T>(key: string): Promise<T | undefined> {
+    return (await this.getMany([key])).get(key) as T | undefined
+  }
+
+  /**
+   * The keys' values, one `GET …/settings` per SETTINGS_READ_MAX keys (the route's cap); a key
+   * with no row is absent from the map.
+   */
+  async getMany(keys: readonly string[]): Promise<Map<string, unknown>> {
+    const found = new Map<string, unknown>()
+    const unique = [...new Set(keys)]
+    for (let at = 0; at < unique.length; at += SETTINGS_READ_MAX) {
+      const params = new URLSearchParams(unique.slice(at, at + SETTINGS_READ_MAX).map((key): [string, string] => ['key', key]))
+      const { values } = await crudRead<{ values: Record<string, unknown> }>(this.#fetch, this.#base, 'settings', `/settings?${params.toString()}`)
+      for (const [key, value] of Object.entries(values)) found.set(key, value)
+    }
+    return found
+  }
+
+  /**
+   * Writes `values` in one transaction on the API, only while each of `expect` still holds (no
+   * check with null); whether it wrote. The API sends the NOTIFYs the keys need on commit, as
+   * `setMany`'s SQL does.
+   */
+  async write(values: Record<string, unknown>, expect: Expected[] | null): Promise<boolean> {
+    const keys = Object.keys(values)
+    const notify = { warm_evict: keys.some(evictsWarmOnWrite), runtime: keys.some(isRuntimeKey) }
+    const body = { values, ...(expect === null ? {} : { expect }), notify }
+    return (await crudRead<{ written: boolean }>(this.#fetch, this.#base, 'settings written', '/settings', { method: 'POST', body })).written
+  }
+
+  /**
+   * `setMany`'s compare-and-set: `check` runs over values read from the API, and the write goes
+   * through only while each value it read still holds, compared under the table's lock on the
+   * API. A writer in between means reading again, at most SETTINGS_CAS_TRIES times. Each try
+   * reads in one `GET …/settings` the keys it writes and every key an earlier try's check read;
+   * a key the check asks for beyond those is one more read, and is in the next try's batch.
+   */
+  async compareAndSet(
+    values: Record<string, unknown>,
+    check: (current: { get<T>(key: string): Promise<T | undefined> }) => Promise<boolean>,
+  ): Promise<boolean> {
+    const wanted = new Set(Object.keys(values))
+    for (let attempt = 0; attempt < SETTINGS_CAS_TRIES; attempt++) {
+      const batch = await this.getMany([...wanted])
+      const fetched = new Set(wanted)
+      const read = new Map<string, unknown>()
+      const current = {
+        get: async <T>(key: string): Promise<T | undefined> => {
+          if (!fetched.has(key)) {
+            const more = await this.getMany([key])
+            if (more.has(key)) batch.set(key, more.get(key))
+            fetched.add(key)
+            wanted.add(key)
+          }
+          read.set(key, batch.get(key))
+          return batch.get(key) as T | undefined
+        },
+      }
+      if (!(await check(current))) return false
+      const expect = [...read].map(([key, value]) => (value === undefined ? { key, present: false } : { key, present: true, value }))
+      if (await this.write(values, expect)) return true
+    }
+    throw new Error(`the settings ${Object.keys(values).join(', ')} kept changing; ${SETTINGS_CAS_TRIES} tries to write them failed`)
   }
 }

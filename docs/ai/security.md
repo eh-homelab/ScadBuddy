@@ -385,7 +385,32 @@ drive sessions over `/mcp`. What bounds them:
 ## Envelope encryption and AAD binding
 
 Spec §9. The implementation is in [`agent/src/secrets.ts`](../../agent/src/secrets.ts)
-and [`agent/src/credentials.ts`](../../agent/src/credentials.ts).
+and [`agent/src/credentials.ts`](../../agent/src/credentials.ts), and for the Claude
+credentials and the payload data keys, in the CRUD service too
+([`backend/scadbuddy/agent_data/`](../../backend/scadbuddy/agent_data/), the same format and
+AAD, so a row either side seals opens on the other).
+
+- **Where they are opened (#5299 step 4, D5; #5342).** Once the API lists the agent's CRUD
+  areas `credentials` and `payload-keys`
+  ([`backend/scadbuddy/api/crud_agent_secrets.py`](../../backend/scadbuddy/api/crud_agent_secrets.py)),
+  the API seals and opens the Claude credentials with the KEK, and the agent never opens
+  one. A turn's credentials come from `POST …/crud/agent/credentials/reveal` (purpose
+  `turn`; `redact` for the scrubbing of tool output, `test` for a connection test), a
+  subject's payload data key from `POST …/crud/agent/payload-keys/{subject}`, never the
+  KEK. Each answers the `agent` service credential only, writes its `ai_audit` row in the
+  same transaction (principal `service:agent`, never the secret), and is `no-store`. A
+  reveal's row is kind `credential`, action `reveal.<purpose>`: one per call, but
+  `reveal.redact` (every tool call's redaction, which the agent also keeps 10 s,
+  `plugins/secrets.ts` `SAVED_SECRETS_CACHE_MS`) once in 10 minutes
+  (`api/crud_agent_secrets.py` `REDACT_AUDIT_WINDOW`). A payload
+  key's is kind `payload_key`: `payload_key.create` and a refusal every time, and
+  `payload_key.release` once per subject in 10 minutes (`agent_data/payload_keys.py`
+  `RELEASE_AUDIT_WINDOW`), since the agent asks at transcript-read rate. A
+  payload key is made there under the subject's advisory lock, never for a subject in
+  `ai_forgotten_subjects`. The agent keeps a released key 30 s at most, as before. Until the
+  API lists the areas (a rolling deploy), the agent opens them with its own KEK as before.
+  It still opens its plugin secrets, Web Push and channel keys, plugin sign-ins and
+  workspace file keys itself, until the later steps of #5299.
 
 - **Envelope.** `sealSecret()` draws a random 32-byte data key per secret, seals the
   secret under it with AES-256-GCM, then seals the data key under the KEK (the key file,
@@ -422,8 +447,9 @@ and [`agent/src/credentials.ts`](../../agent/src/credentials.ts).
 - **Wrong key vs. tampering.** `openSecret()` compares `kek_id` first, so "wrong key"
   is reported as such. Anything else that fails authentication raises `SealError`,
   which never carries plaintext.
-- **Rotation** re-wraps data keys only (`rewrap()`, `CredentialStore.rewrapFrom()`).
-  See [operating.md](operating.md#33-rotating-it).
+- **Rotation** re-wraps data keys only (`rewrap()`). The API re-wraps the Claude
+  credentials and the payload keys at its start (`agent_data/rotation.py`), the agent the
+  rest. See [operating.md](operating.md#33-rotating-it).
 - **Plaintext in memory.** The Buffers the module creates are zeroed after use. JS
   strings cannot be zeroed, and the header states it: "Zeroing the Buffers shortens the
   exposure; it does not remove it."
@@ -1341,7 +1367,8 @@ From the merged code and PR bodies:
    started (the comment on `sessions` in `main.ts`). ScadBuddy's own plugin is
    loaded into each of those turns (#896, see [Plugin vetting](#plugin-vetting)).
 8. **Rotation leaves unopenable rows** as they are, and counts them in the log
-   (`rewrapFrom()`).
+   (the API's `agent_data/rotation.py` for the Claude credentials and payload keys,
+   `rewrapFrom()` for the rest).
 9. **Write-tier calls are not gated, so injected content can drive one.** Tiers put
    `update_source` and other `write` tools in the tier that runs without a human,
    because a write is reversible through the model's git history (spec §8.1). The

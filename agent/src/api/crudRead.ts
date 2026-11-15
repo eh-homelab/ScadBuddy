@@ -7,6 +7,8 @@ import { NOT_UP, transportKind } from './backendUp.js'
 // (backend auth/revoke.py `RETIRED_GRANTS`), but the agent still connects as the database
 // owner, so nothing in Postgres stops such SQL until #5299 step 12 removes its database URL;
 // until then test/retiredTables.test.ts fails on agent SQL that names one.
+// Its settings, credentials and payload keys (#5299 step 4) wait for their areas
+// (api/crudAreas.ts).
 
 export const AGENT_CRUD = '/api/v1/internal/crud/agent'
 /** How long one read of a CRUD route may take. */
@@ -17,17 +19,28 @@ export class CrudReadError extends Error {
   override name = 'CrudReadError'
   /** The answer's status, when there was one. */
   readonly status: number | undefined
+  /** Whether the answer was the route's own (`X-ScadBuddy-Crud: 1`), not a proxy's. */
+  readonly fromRoute: boolean
+  /** The route's own problem: its `detail` ('' without one) and `reason`, when it gave one. */
+  readonly detail: string
+  readonly reason: string | undefined
 
-  constructor(message: string, status?: number) {
+  constructor(message: string, status?: number, fromRoute = false, problem: { detail?: string; reason?: string } = {}) {
     super(message)
     this.status = status
+    this.fromRoute = fromRoute
+    this.detail = problem.detail ?? ''
+    this.reason = problem.reason
   }
 }
 
-/** The `detail` of a problem response, or ''. */
-async function detailOf(response: Response): Promise<string> {
-  const body = (await response.json().catch(() => undefined)) as { detail?: unknown } | undefined
-  return typeof body?.detail === 'string' ? body.detail : ''
+/** The `detail` and `reason` of a problem response. */
+async function problemOf(response: Response): Promise<{ detail: string; reason?: string }> {
+  const body = (await response.json().catch(() => undefined)) as { detail?: unknown; reason?: unknown } | undefined
+  return {
+    detail: typeof body?.detail === 'string' ? body.detail : '',
+    ...(typeof body?.reason === 'string' ? { reason: body.reason } : {}),
+  }
 }
 
 /**
@@ -55,8 +68,9 @@ export async function crudRead<T>(
   }
   const crud = response.headers.get('x-scadbuddy-crud') === '1'
   if (response.ok && crud) return (await response.json()) as T
-  const detail = crud ? await detailOf(response) : ''
+  const problem = crud ? await problemOf(response) : { detail: '' }
   if (!crud) await response.body?.cancel()
   const who = crud ? 'the backend refused' : 'no CRUD route answered'
-  throw new CrudReadError(`${who} ${step} (HTTP ${response.status}${detail ? `: ${detail}` : ''})`, response.status)
+  const detail = problem.detail
+  throw new CrudReadError(`${who} ${step} (HTTP ${response.status}${detail ? `: ${detail}` : ''})`, response.status, crud, problem)
 }

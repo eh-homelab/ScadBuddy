@@ -3,6 +3,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Sql } from 'postgres'
+import { CrudReadError, crudRead } from '../api/crudRead.js'
 import { KEK_BYTES, type Kek, openBytes, type RandomSource, SealError, sealBytes } from '../secrets.js'
 
 // The payload codec of durable subjects (spec 2026-10-01 §6.5, plan 5c Ruling 11). Every
@@ -157,29 +158,24 @@ export class PgPayloadKeys implements PayloadKeys {
   readonly #sql: Sql
   readonly #kek: Kek
   readonly #previous: Kek | undefined
-  readonly #cacheMs: number
-  readonly #cacheMax: number
-  readonly #cache = new Map<string, { key: Buffer; until: number }>()
+  readonly #cache: KeyCache
 
   constructor(sql: Sql, kek: Kek, options: PgPayloadKeysOptions = {}) {
     this.#sql = sql
     this.#kek = kek
     this.#previous = options.previous
-    this.#cacheMs = options.cacheMs ?? 30_000
-    this.#cacheMax = options.cacheMax ?? 1000
+    this.#cache = new KeyCache(options.cacheMs ?? 30_000, options.cacheMax ?? 1000)
   }
 
   /** Drops a subject's cached key (forgetSubject, before it deletes the row). */
   forget(subject: string): void {
-    this.#cache.get(subject)?.key.fill(0)
-    this.#cache.delete(subject)
+    this.#cache.forget(subject)
   }
 
   async keyFor(subject: string, create: boolean, options: KeyForOptions = {}): Promise<Buffer> {
     const standing = options.onlyForStandingSession === true
     const cached = this.#cache.get(subject)
-    if (cached && cached.until > Date.now()) return Buffer.from(cached.key)
-    if (cached) this.forget(subject)
+    if (cached) return cached
     let [row] = await this.#sql<{ dek_sealed: Buffer; kek_id: string }[]>`
       SELECT dek_sealed, kek_id FROM ai_payload_keys WHERE subject = ${subject}`
     if (!row && create) {
@@ -208,7 +204,39 @@ export class PgPayloadKeys implements PayloadKeys {
     if (!row) throw new SubjectForgotten(`the payloads of ${subject} cannot be decoded: its key was deleted`)
     const kek = row.kek_id === this.#kek.id ? this.#kek : row.kek_id === this.#previous?.id ? this.#previous : undefined
     if (!kek) throw new SealError(`the payload key of ${subject} was sealed with key ${row.kek_id}, which is not mounted`)
-    const key = openBytes(kek.key, row.dek_sealed, payloadKeyContext(subject))
+    return this.#cache.keep(subject, openBytes(kek.key, row.dek_sealed, payloadKeyContext(subject)))
+  }
+}
+
+/** A subject's cached data keys, dropped one at a time (forgetSubject, a browser call's end). */
+export type ForgetsKeys = { forget(subject: string): void }
+
+/** The data keys this process holds, 30 s each at most (`cacheMs`), shared by both key sources below. */
+class KeyCache implements ForgetsKeys {
+  readonly #cacheMs: number
+  readonly #cacheMax: number
+  readonly #cache = new Map<string, { key: Buffer; until: number }>()
+
+  constructor(cacheMs: number, cacheMax: number) {
+    this.#cacheMs = cacheMs
+    this.#cacheMax = cacheMax
+  }
+
+  forget(subject: string): void {
+    this.#cache.get(subject)?.key.fill(0)
+    this.#cache.delete(subject)
+  }
+
+  /** A copy of the subject's live key, or undefined. */
+  get(subject: string): Buffer | undefined {
+    const cached = this.#cache.get(subject)
+    if (cached && cached.until > Date.now()) return Buffer.from(cached.key)
+    if (cached) this.forget(subject)
+    return undefined
+  }
+
+  /** Keeps `key` (never a browser call's) and answers a copy of it. */
+  keep(subject: string, key: Buffer): Buffer {
     // Never cached for a browser call (`bridge-<uuid>`): its caller deletes the key once it has the
     // answer (dropPayloadKey), and a copy cached on the owner's or the workflow's replica would
     // outlive that by up to `cacheMs`.
@@ -226,6 +254,74 @@ export class PgPayloadKeys implements PayloadKeys {
   }
 }
 
+/** The API has no route for the key, or no KEK to open it with: the call is retried, never sent unsealed. */
+export class PayloadKeyUnavailable extends Error {
+  override name = 'PayloadKeyUnavailable'
+}
+
+/**
+ * A subject's data key released by the API (#5299 D5, #5342): `POST …/crud/agent/payload-keys/
+ * {subject}` (backend api/crud_agent_secrets.py, area `payload-keys`) opens it with the KEK, and
+ * with `create` makes it first, under the subject's lock and never for a forgotten subject, in
+ * its own transaction, and audits the release. This process holds no KEK for it; it keeps the
+ * key 30 s at most, as `PgPayloadKeys` does.
+ */
+export class CrudPayloadKeys implements PayloadKeys, ForgetsKeys {
+  readonly #base: string
+  readonly #fetch: typeof fetch
+  readonly #cache: KeyCache
+
+  constructor(baseUrl: string, options: { fetch?: typeof fetch; cacheMs?: number; cacheMax?: number } = {}) {
+    this.#base = baseUrl
+    this.#fetch = options.fetch ?? globalThis.fetch
+    this.#cache = new KeyCache(options.cacheMs ?? 30_000, options.cacheMax ?? 1000)
+  }
+
+  forget(subject: string): void {
+    this.#cache.forget(subject)
+  }
+
+  async keyFor(subject: string, create: boolean, options: KeyForOptions = {}): Promise<Buffer> {
+    const cached = this.#cache.get(subject)
+    if (cached) return cached
+    let answer: { data_key: string }
+    try {
+      answer = await crudRead<{ data_key: string }>(this.#fetch, this.#base, `the payload key of ${subject}`, `/payload-keys/${encodeURIComponent(subject)}`, {
+        method: 'POST',
+        body: { create, ...(options.onlyForStandingSession ? { only_for_standing_session: true } : {}) },
+      })
+    } catch (err) {
+      if (err instanceof CrudReadError && err.fromRoute && err.status === 410) {
+        throw new SubjectForgotten(`the payloads of ${subject} cannot be decoded: its key was deleted`)
+      }
+      if (err instanceof CrudReadError && err.fromRoute && err.reason === 'key-not-held') throw new SealError(err.detail)
+      throw err
+    }
+    const key = Buffer.from(answer.data_key, 'base64')
+    if (key.length !== KEK_BYTES) throw new SealError(`the payload key of ${subject} the API released is not ${KEK_BYTES} bytes`)
+    return this.#cache.keep(subject, key)
+  }
+}
+
+/**
+ * `crud` once `useCrud()` holds (the API lists area `payload-keys`), `pg` (this process's own KEK)
+ * until then, chosen per call (#5299 D9). With no KEK here and no route yet, a key is
+ * PayloadKeyUnavailable: the Temporal call that needs it is retried, never sent unsealed.
+ */
+export function gatedPayloadKeys(pg: PgPayloadKeys | undefined, crud: CrudPayloadKeys, useCrud: () => boolean): PayloadKeys & ForgetsKeys {
+  return {
+    forget: (subject) => {
+      pg?.forget(subject)
+      crud.forget(subject)
+    },
+    keyFor: (subject, create, options) => {
+      if (useCrud()) return crud.keyFor(subject, create, options)
+      if (pg) return pg.keyFor(subject, create, options)
+      return Promise.reject(new PayloadKeyUnavailable(`no key-encryption key here, and the API does not release payload keys yet (${subject})`))
+    },
+  }
+}
+
 /** How old a browser call's key is before `sweepBridgeKeys` deletes it: far past the longest call. */
 export const BRIDGE_KEY_MAX_AGE_S = 3600
 
@@ -234,7 +330,7 @@ export const BRIDGE_KEY_MAX_AGE_S = 3600
  * call's (`bridge-<uuid>`) once its caller has the answer. No tombstone: nothing takes the
  * id again. `keys` drops this process's cached copy first.
  */
-export async function dropPayloadKey(sql: Sql, keys: PgPayloadKeys | undefined, subject: string): Promise<void> {
+export async function dropPayloadKey(sql: Sql, keys: ForgetsKeys | undefined, subject: string): Promise<void> {
   keys?.forget(subject)
   await sql.begin(async (tx) => {
     await tx`SELECT pg_advisory_xact_lock(hashtext(${payloadKeyLock(subject)}))`
@@ -424,7 +520,11 @@ function storedPayload(ref: { subject: string; digest: string }, data: Uint8Arra
   return { metadata: { encoding: encoder.encode(SUBJECT_ENCODING), [SUBJECT_METADATA]: encoder.encode(ref.subject) }, data }
 }
 
-/** Re-wraps every payload key sealed under `previous` to `current` (key rotation, main.ts). */
+/**
+ * Re-wraps every payload key sealed under `previous` to `current`. No longer run at the agent's
+ * start: the API re-wraps the payload keys (#5299 step 4, backend `agent_data/rotation.py`). It
+ * goes with `PgPayloadKeys` (#5299 step 12).
+ */
 export async function rewrapPayloadKeys(sql: Sql, previous: Kek, current: Kek): Promise<{ rewrapped: number; failed: number }> {
   const result = { rewrapped: 0, failed: 0 }
   const rows = await sql<{ subject: string; dek_sealed: Buffer }[]>`

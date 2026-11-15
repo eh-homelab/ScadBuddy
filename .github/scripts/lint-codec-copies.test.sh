@@ -16,7 +16,9 @@ copy() {
     agent-durable/src/scadbuddy_durable/codec.py \
     backend/scadbuddy/workflows/payload_codec.py \
     backend/tests/fixtures/payload-vectors.json \
-    backend/tests/fixtures/subject-vectors.json; do
+    backend/tests/fixtures/subject-vectors.json \
+    agent/test/fixtures/secret-vectors.json \
+    backend/tests/fixtures/secret-vectors.json; do
     mkdir -p "$work/r/$(dirname "$f")"
     cp "$root/$f" "$work/r/$f"
   done
