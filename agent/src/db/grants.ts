@@ -24,7 +24,12 @@ type Grants = Readonly<Record<string, readonly string[]>>
  * it serves over its CRUD routes (#5299 step 5, `api/crud_agent_stores.py` and
  * `api/crud_agent_notify.py`): the activity kinds, the browser's approved origins, the
  * session tabs, tab owners and tab images, the pairings, the MCP tokens, and the Web Push
- * records and notification channels, which it seals, opens and re-wraps with the KEK. */
+ * records and notification channels, which it seals, opens and re-wraps with the KEK. And
+ * the plugin stores (#5299 step 5, `api/crud_agent_access.py`, `api/crud_agent_plugins.py`
+ * and `api/crud_agent_packages.py`): the tool access, the tool listings, the upstream MCP
+ * sessions, the remote plugins and their sign-ins (sealed, opened and re-wrapped with the
+ * KEK) and the plugin packages. The leases of #5299 D3 are the API's own table
+ * (`agent_leases`, a backend migration), so they need no grant here. */
 export const API_AI_GRANTS: Grants = {
   ai_payload_keys: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   ai_forgotten_subjects: ['SELECT', 'INSERT'],
@@ -45,6 +50,13 @@ export const API_AI_GRANTS: Grants = {
   ai_push_subscriptions: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   ai_notifications_sent: ['SELECT', 'INSERT', 'DELETE'],
   ai_notify_channels: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  ai_access: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  ai_tool_listings: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  ai_plugin_sessions: ['SELECT', 'INSERT', 'DELETE'],
+  ai_plugins: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  ai_plugin_oauth: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  ai_plugin_oauth_flows: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  ai_plugin_packages: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
 }
 
 /** The projects worker's role: it holds no database (ScadBuddy#5298), so the agent takes back

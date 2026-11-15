@@ -73,7 +73,25 @@ clock) and `notify` (`notify/pushStore.ts` `CrudPushStore`, `notify/channels.ts`
 `CrudChannelRows` through `ChannelStore`'s `remote`: the API seals and opens the VAPID key,
 the subscriptions' keys and the channels' tokens, and re-wraps them at a rotation). With no
 KEK here Web Push and the channels work once `notify` is listed (`available`); the test is
-`test/crudStores.test.ts`. A route's
+`test/crudStores.test.ts`. The plugin stores take the same fallback (#5299 step 5, backend
+`api/crud_agent_access.py`, `api/crud_agent_plugins.py`, `api/crud_agent_packages.py`): area
+`access` (`access/store.ts` `AccessStore`'s `remote`, `CrudAccessRows`: the model is checked
+and the audit row written here, the API runs the write with its warm eviction; and
+`access/listings.ts` `ToolListings`'s `remote`, `CrudToolListings`: a connection test holds
+the lease `tool-listing:<source>` on the API, `api/crudStores.ts` `CrudLeases`, renewed every
+30 s, in place of the session advisory lock, and its listing is stored only while the lease
+holds, else 409 `lease-lost`), `plugin-sessions` (`plugins/pluginSessions.ts`
+`CrudPluginSessions`, a `PluginSessionRows`, the sweep's ledger too), `plugins`
+(`plugins/registry.ts` `CrudPluginStore`, `plugins/oauthStore.ts` `PluginOAuth`'s `remote`,
+`CrudOAuthRows`: the API seals and opens the header secrets and the sign-ins with its KEK,
+and a token refresh holds the lease `plugin-oauth:<plugin>`) and `plugin-packages`
+(`plugins/packages/store.ts` `CrudPackageStore`: the API runs each write with its prune and
+warm eviction). With no KEK here the plugins and their sign-ins work once `plugins` is listed;
+the tests are `test/crudAccess.test.ts`, `test/crudPlugins.test.ts` and
+`test/crudPackages.test.ts`. During a roll an agent pod on SQL still takes the old advisory
+lock, and the API's lease acquire tries that lock too, so a lease is `busy` while such a pod
+tests the plugin; such a pod does not read the lease, so it can start a test while a lease
+holds (two tests of one plugin at once, the last listing kept; backend `agent_data/leases.py`). A route's
 answer counts only with `X-ScadBuddy-Crud: 1`; any other failure takes the read's existing
 error path (a lookup failure the activity retries, a 500, a resync). A session's successful `order_item_revision_add` (or
 `_after_acceptance`) is an `ai_session_order_costs` row (`src/sessions/orderCosts.ts`
@@ -414,7 +432,7 @@ opens every one and seals it again byte for byte).
     instead (#780, `src/plugins/oauth.ts`, `oauthStore.ts`, `ai_plugin_oauth`): only
     Settings starts discovery (`POST …/:name/oauth/start`, then the browser's
     `/api/v1/ai/plugin-oauth/authorize` and `/callback`, `routes/pluginOAuth.ts`), the
-    tokens stay sealed in the agent, and the forwarder asks the plugin's `oauth` token
+    tokens stay sealed (opened by the API once it lists area `plugins`, #5299 step 5) and never reach Claude Code, and the forwarder asks the plugin's `oauth` token
     source for each request's header; a refused refresh marks the grant for "Sign in again". Claude Code renames tool-name characters outside
     `[A-Za-z0-9_-]` to `_` (`harnessToolName`); only such names take a tier, and
     colliding tools are hidden. Unlisted plugin tools are `outward`.

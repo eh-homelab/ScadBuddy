@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { NOT_UP, transportKind } from './backendUp.js'
 import { AGENT_CRUD, CRUD_READ_TIMEOUT_MS, CrudReadError } from './crudRead.js'
 
@@ -9,7 +10,18 @@ import { AGENT_CRUD, CRUD_READ_TIMEOUT_MS, CrudReadError } from './crudRead.js'
 // may still answer during a roll, so the SQL stays until every pod lists the areas.
 
 /** The areas of the small stores (backend api/crud_areas.py `CRUD_AREAS["agent"]`). */
-export const STORE_AREAS = ['activity-kinds', 'browser-origins', 'bridge-tabs', 'pairings', 'mcp-tokens', 'notify'] as const
+export const STORE_AREAS = [
+  'activity-kinds',
+  'browser-origins',
+  'bridge-tabs',
+  'pairings',
+  'mcp-tokens',
+  'notify',
+  'access',
+  'plugin-sessions',
+  'plugins',
+  'plugin-packages',
+] as const
 export type StoreArea = (typeof STORE_AREAS)[number]
 
 /**
@@ -36,7 +48,7 @@ async function problemOf(response: Response): Promise<{ detail: string; reason?:
 }
 
 export type CrudCallInit = {
-  method?: 'GET' | 'POST' | 'PUT'
+  method?: 'GET' | 'POST' | 'PUT' | 'DELETE'
   /** A JSON body, or bytes sent as they are with `contentType`. */
   body?: unknown
   bytes?: Buffer
@@ -49,7 +61,7 @@ export type CrudCallInit = {
 /**
  * One call of the agent's CRUD route `path` (under `AGENT_CRUD`): the route's own answer (only
  * one with `X-ScadBuddy-Crud: 1` counts), or CrudReadError, as `crudRead` (api/crudRead.ts)
- * answers, for a call it cannot make: a PUT, bytes either way, a 204, or an abort signal.
+ * answers, for a call it cannot make: a PUT or a DELETE, bytes either way, a 204, or an abort signal.
  */
 export async function crudCall(fetchImpl: typeof fetch, baseUrl: string, step: string, path: string, init: CrudCallInit = {}): Promise<Response> {
   const timeout = AbortSignal.timeout(init.timeoutMs ?? CRUD_READ_TIMEOUT_MS)
@@ -102,4 +114,99 @@ export function crudOf(target: CrudTarget): <T>(step: string, path: string, init
 /** A query string of `params`, `?` first. */
 export function qs(params: Record<string, string>): string {
   return `?${new URLSearchParams(params).toString()}`
+}
+
+/** The route's reasons for a lease another holder keeps, and for one this holder lost. */
+export const LEASE_BUSY = 'busy'
+export const LEASE_LOST = 'lease-lost'
+/** How long a lease holds without a renew, and how often its holder renews it (backend agent_data/leases.py). */
+export const LEASE_TTL_S = 120
+export const LEASE_RENEW_MS = 30_000
+
+/** A lease held: its key and the holder's own token. */
+export type HeldLease = { key: string; token: string }
+
+/**
+ * The agent's leases through the API's CRUD routes (#5299 D3; backend api/crud_agent_access.py,
+ * `…/leases/{key}`): a lock held across work that is not the database's, as a row with an
+ * expiry, since a process with no database cannot hold a session advisory lock.
+ */
+export class CrudLeases {
+  readonly #fetch: typeof fetch
+  readonly #baseUrl: string
+
+  constructor(target: CrudTarget) {
+    this.#fetch = target.fetch ?? globalThis.fetch
+    this.#baseUrl = target.baseUrl
+  }
+
+  #path(key: string): string {
+    return `/leases/${encodeURIComponent(key)}`
+  }
+
+  /** The lease, or `busy` when another holder keeps it (for all of `waitS` on the API). */
+  async acquire(key: string, options: { ttlS?: number; waitS?: number } = {}): Promise<HeldLease | 'busy'> {
+    const token = randomUUID()
+    const body = { token, ttl_s: options.ttlS ?? LEASE_TTL_S, wait_s: options.waitS ?? 0 }
+    try {
+      await crudJson(this.#fetch, this.#baseUrl, 'a lease taken', this.#path(key), {
+        body,
+        timeoutMs: CRUD_READ_TIMEOUT_MS + (options.waitS ?? 0) * 1000,
+      })
+    } catch (err) {
+      if (err instanceof CrudReadError && err.fromRoute && err.reason === LEASE_BUSY) return 'busy'
+      // An answer lost on the way back may have granted it: the token is this call's own.
+      await this.release({ key, token }).catch(() => undefined)
+      throw err
+    }
+    return { key, token }
+  }
+
+  /** Whether the lease still holds. */
+  async renew(lease: HeldLease, ttlS = LEASE_TTL_S): Promise<boolean> {
+    try {
+      await crudJson(this.#fetch, this.#baseUrl, 'a lease renewed', this.#path(lease.key), {
+        method: 'PUT',
+        body: { token: lease.token, ttl_s: ttlS },
+      })
+      return true
+    } catch (err) {
+      if (err instanceof CrudReadError && err.fromRoute && err.reason === LEASE_LOST) return false
+      throw err
+    }
+  }
+
+  async release(lease: HeldLease): Promise<void> {
+    await crudCall(this.#fetch, this.#baseUrl, 'a lease released', `${this.#path(lease.key)}${qs({ token: lease.token })}`, {
+      method: 'DELETE',
+    })
+  }
+
+  /**
+   * Runs `fn` holding `key`'s lease, renewed every `LEASE_RENEW_MS` and released at the end,
+   * however `fn` ends. `busy`: another holder keeps it, and `fn` did not run. A renew or a
+   * release that fails is logged: the lease then frees itself at its expiry, and a write
+   * that names a lost lease is refused (`lease-lost`).
+   */
+  async holding<T>(key: string, fn: (lease: HeldLease) => Promise<T>, options: { waitS?: number } = {}): Promise<{ value: T } | 'busy'> {
+    const lease = await this.acquire(key, options)
+    if (lease === 'busy') return 'busy'
+    const timer = setInterval(() => {
+      void this.renew(lease).then(
+        (held) => {
+          if (!held) console.error(`lease ${key} was lost before its work ended`)
+        },
+        (err: unknown) => console.error(`lease ${key}: the renew failed: ${err instanceof Error ? err.message : String(err)}`),
+      )
+    }, LEASE_RENEW_MS)
+    timer.unref()
+    try {
+      return { value: await fn(lease) }
+    } finally {
+      clearInterval(timer)
+      await this.release(lease).catch((err: unknown) =>
+        console.error(`lease ${key}: the release failed: ${err instanceof Error ? err.message : String(err)}`),
+      )
+    }
+  }
 }

@@ -125,7 +125,8 @@ export function pluginView(plugin: PluginSummary, kek: KekStatus): PluginView {
     enabled: plugin.enabled,
     tool_prefix: toolPrefix(plugin.name),
     auth: plugin.auth_header === null ? null : { header: plugin.auth_header, last4: plugin.secret_last4 ?? '' },
-    usable: plugin.kekId === null || (kek.ok && kek.kek.id === plugin.kekId),
+    // Through the API's routes, its key opens the secret (#5299 step 5); over SQL, this process's.
+    usable: plugin.opens ?? (plugin.kekId === null || (kek.ok && kek.kek.id === plugin.kekId)),
     problem: reservedNameProblem(plugin.name),
     tool_tiers: plugin.tool_tiers,
     disabled_tools: plugin.disabled_tools,

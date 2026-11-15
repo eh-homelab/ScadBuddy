@@ -420,9 +420,16 @@ AAD, so a row either side seals opens on the other).
   [`backend/scadbuddy/api/crud_agent_notify.py`](../../backend/scadbuddy/api/crud_agent_notify.py)):
   the agent gets the VAPID private key, a subscription's keys and a channel's token only
   from the routes that send with them, and with no KEK of its own Web Push and the
-  channels work from then on. The API re-wraps them at a rotation. The agent still opens
-  its plugin secrets, plugin sign-ins and workspace file keys itself, until the later
-  steps of #5299.
+  channels work from then on. The API re-wraps them at a rotation. So it is for the remote
+  plugins' header secrets and their OAuth sign-ins once the API lists area `plugins`
+  (#5299 step 5,
+  [`backend/scadbuddy/api/crud_agent_plugins.py`](../../backend/scadbuddy/api/crud_agent_plugins.py)):
+  the API seals a header value or a sign-in's tokens under the agent's own AAD, and opens
+  them only for the routes that load a plugin for a turn or a test, refresh a token, and
+  list the secrets the tools redact. A token refresh holds the lease
+  `plugin-oauth:<plugin>` on the API (#5299 D3) in place of the grant row's lock, and the
+  refreshed tokens are stored only while that lease holds. The agent still opens its
+  workspace file keys itself, until a later step of #5299.
 
 - **Envelope.** `sealSecret()` draws a random 32-byte data key per secret, seals the
   secret under it with AES-256-GCM, then seals the data key under the KEK (the key file,

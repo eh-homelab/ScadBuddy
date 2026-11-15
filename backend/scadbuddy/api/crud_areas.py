@@ -60,7 +60,17 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: bearer tokens by their hashes; its ``notify`` area is ``…/agent/push/*`` and
 #: ``…/agent/notify-channels`` and every route under it, the Web Push records and the
 #: notification channels, sealed and opened with the API's KEK
-#: (`api/crud_agent_notify.py`).
+#: (`api/crud_agent_notify.py`). Its plugin stores (#5299 step 5): its ``access`` area is
+#: ``…/agent/access/*`` and ``…/agent/tool-listings/*``, the tool access and the listings
+#: a connection test stores, and ``…/agent/leases/{key}``, the leases the agent holds
+#: across a connection test and a sign-in's token refresh (#5299 D3,
+#: `api/crud_agent_access.py`); its ``plugin-sessions`` area is ``…/agent/plugin-sessions``
+#: and every route under it, the upstream MCP sessions its forwarders hold; its ``plugins``
+#: area is ``…/agent/plugins`` and ``…/agent/plugin-oauth`` and every route under them, the
+#: remote plugins and their sign-ins, sealed and opened with the API's KEK
+#: (`api/crud_agent_plugins.py`); its ``plugin-packages`` area is
+#: ``…/agent/plugin-packages`` and every route under it, the installed packages' pins
+#: (`api/crud_agent_packages.py`).
 CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "projects": ["flows", "operations", "payload-keys"],
     "render": ["settings", "jobs", "refs", "blob-index", "store-folders", "assets", "libraries"],
@@ -107,6 +117,10 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "pairings",
         "mcp-tokens",
         "notify",
+        "access",
+        "plugin-sessions",
+        "plugins",
+        "plugin-packages",
     ],
     "intake": ["sources"],
 }
