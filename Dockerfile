@@ -563,11 +563,12 @@ RUN [ "$TARGETARCH" = amd64 ] \
 # libgtk-3-0t64 libwebkit2gtk-4.1-0 libgstreamer1.0-0
 # libgstreamer-plugins-base1.0-0 libegl1 libosmesa6), these six leave
 # `LD_LIBRARY_PATH=/opt/bambu-studio/bin ldd /opt/bambu-studio/bin/bambu-studio
-# | grep 'not found'` empty and slice a MakerWorld 3MF headless with its plate
-# thumbnail rendered. libegl1 is load-bearing although ldd does not name it:
+# | grep 'not found'` empty and slice a MakerWorld 3MF headless. The headless CLI
+# draws no plate thumbnail (its GLFW is Wayland-only); it copies the input's (#6170).
+# libegl1 is load-bearing although ldd does not name it:
 # with libEGL.so* removed the CLI exits 127. Dropped: libglu1-mesa (nothing
 # names libGLU) and libosmesa6 (the binary only dlopens libOSMesa, and the same
-# slice with libOSMesa.so* removed still wrote plate_1.png). Measured 2026-10-17
+# slice with libOSMesa.so* removed still wrote plate_1.png, the copied one). Measured 2026-10-17
 # on this base. tini reaps what a killed slice leaves behind, as in `runtime`.
 # hadolint ignore=DL3008
 RUN apt-get update \
