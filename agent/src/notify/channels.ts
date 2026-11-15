@@ -3,7 +3,9 @@ import type { Sql } from 'postgres'
 import { assertHostAllowed, EgressError, isPrivateAddress, type Resolver, systemResolver } from '../http/egress.js'
 import { isLoopbackPeer } from '../http/origins.js'
 import { pinnedFetch } from '../http/pinned.js'
-import { type Envelope, type Kek, last4, openSecret, rewrap, SealError, sealSecret } from '../secrets.js'
+import { CrudReadError } from '../api/crudRead.js'
+import { type CrudTarget, crudOf, segment, UUID_SEGMENT } from '../api/crudStores.js'
+import { type Envelope, type Kek, last4, openSecret, sealSecret } from '../secrets.js'
 
 // #815 §3, out of the browser: an ntfy topic or a Home Assistant notify service, set in
 // Settings (routes/notifyChannels.ts; the agent has no tool for them, so it cannot add a
@@ -90,26 +92,56 @@ const TOKEN_MAX = 4096
 /** A channel with its token opened, for a send. */
 export type OpenChannel = { id: string; kind: ChannelKind; url: string; target: string | null; token: string | undefined }
 
+/** A channel's fields as `ChannelStore` checked them. */
+export type CheckedChannel = { kind: ChannelKind; name: string; url: string; target: string | null; token: string | null }
+
+/**
+ * Where `ChannelStore` keeps the channels while `use()` holds: the API's CRUD routes (area
+ * `notify`, #5299 step 5), which seal and open the tokens with the API's KEK.
+ */
+export type RemoteChannels = { crud: CrudChannelRows; use: () => boolean }
+
 export class ChannelStore {
   readonly #sql: Sql
-  readonly #kek: Kek
+  readonly #kek: Kek | undefined
   readonly #resolve: Resolver
+  readonly #remote: RemoteChannels | undefined
 
-  constructor(sql: Sql, kek: Kek, resolve: Resolver = systemResolver) {
+  /** Without `kek` the channels are reachable only through `remote`, once it is in use. */
+  constructor(sql: Sql, kek: Kek | undefined, resolve: Resolver = systemResolver, remote?: RemoteChannels) {
     this.#sql = sql
     this.#kek = kek
     this.#resolve = resolve
+    this.#remote = remote
+  }
+
+  /** Whether the channels can be read and written now: with this process's KEK, or through the API. */
+  available(): boolean {
+    return this.#kek !== undefined || this.#remote?.use() === true
+  }
+
+  #crud(): CrudChannelRows | undefined {
+    return this.#remote?.use() ? this.#remote.crud : undefined
+  }
+
+  #key(): Kek {
+    if (!this.#kek) throw new ChannelError('the notification channels need SCADBUDDY_SECRET_KEY_FILE, or the API to serve them')
+    return this.#kek
   }
 
   async list(): Promise<ChannelView[]> {
+    const crud = this.#crud()
+    if (crud) return crud.list()
     const rows = await this.#sql<Row[]>`SELECT * FROM ai_notify_channels ORDER BY created_at, id`
     return rows.map(view)
   }
 
   async create(input: ChannelInput): Promise<string> {
-    const id = randomUUID()
     const checked = await this.#check(input)
-    const sealed = checked.token ? sealSecret(this.#kek, checked.token, aad(id, checked.kind, checked.url)) : undefined
+    const crud = this.#crud()
+    if (crud) return crud.create(checked, input.enabled ?? true)
+    const id = randomUUID()
+    const sealed = checked.token ? sealSecret(this.#key(), checked.token, aad(id, checked.kind, checked.url)) : undefined
     await this.#sql`
       INSERT INTO ai_notify_channels (id, kind, name, url, target, enabled, secret_sealed, dek_sealed, kek_id, token_last4)
       VALUES (${id}, ${checked.kind}, ${checked.name}, ${checked.url}, ${checked.target}, ${input.enabled ?? true},
@@ -122,6 +154,8 @@ export class ChannelStore {
    * either drops it unless the patch gives one; `token: null` drops it too.
    */
   async update(id: string, patch: ChannelPatch): Promise<void> {
+    const crud = this.#crud()
+    if (crud) return this.#updateThrough(crud, id, patch)
     const [row] = await this.#sql<Row[]>`SELECT * FROM ai_notify_channels WHERE id = ${id}`
     if (!row) throw new ChannelError(`no channel ${id}`, 404)
     const kind = patch.kind ?? row.kind
@@ -137,7 +171,7 @@ export class ChannelStore {
       target: patch.target === undefined ? row.target : patch.target,
       token: token ?? null,
     })
-    const sealed = checked.token ? sealSecret(this.#kek, checked.token, aad(id, checked.kind, checked.url)) : undefined
+    const sealed = checked.token ? sealSecret(this.#key(), checked.token, aad(id, checked.kind, checked.url)) : undefined
     await this.#sql`
       UPDATE ai_notify_channels SET kind = ${checked.kind}, name = ${checked.name}, url = ${checked.url}, target = ${checked.target},
              enabled = ${patch.enabled ?? row.enabled},
@@ -146,18 +180,37 @@ export class ChannelStore {
        WHERE id = ${id}`
   }
 
+  /** `update` through the API: the token kept there, sealed, while the kind and URL stand. */
+  async #updateThrough(crud: CrudChannelRows, id: string, patch: ChannelPatch): Promise<void> {
+    const row = await crud.view(id)
+    if (!row) throw new ChannelError(`no channel ${id}`, 404)
+    const kind = patch.kind ?? row.kind
+    const url = patch.url ?? row.url
+    const moved = kind !== row.kind || url !== row.url
+    const keep = patch.token === undefined && !moved && row.has_token
+    const fields = { kind, name: patch.name ?? row.name, url, target: patch.target === undefined ? row.target : patch.target }
+    const checked = await this.#check({ ...fields, token: typeof patch.token === 'string' ? patch.token : null }, keep)
+    if (!(await crud.update(id, checked, patch.enabled ?? row.enabled, keep))) throw new ChannelError(`no channel ${id}`, 404)
+  }
+
   async delete(id: string): Promise<boolean> {
+    const crud = this.#crud()
+    if (crud) return crud.delete(id)
     return (await this.#sql`DELETE FROM ai_notify_channels WHERE id = ${id}`).count > 0
   }
 
   /** One channel with its token, or undefined. A token this KEK cannot open is a ChannelError. */
   async open(id: string): Promise<OpenChannel | undefined> {
+    const crud = this.#crud()
+    if (crud) return crud.open(id)
     const [row] = await this.#sql<Row[]>`SELECT * FROM ai_notify_channels WHERE id = ${id}`
     return row ? this.#openRow(row) : undefined
   }
 
   /** The enabled channels whose tokens this KEK opens. */
   async enabled(): Promise<OpenChannel[]> {
+    const crud = this.#crud()
+    if (crud) return crud.enabled()
     const rows = await this.#sql<Row[]>`SELECT * FROM ai_notify_channels WHERE enabled ORDER BY created_at, id`
     return rows.flatMap((row) => {
       try {
@@ -170,6 +223,8 @@ export class ChannelStore {
 
   /** What the last send said: null when it went through. */
   async record(id: string, error: string | null): Promise<void> {
+    const crud = this.#crud()
+    if (crud) return crud.record(id, error)
     if (error === null) await this.#sql`UPDATE ai_notify_channels SET last_error = NULL, last_sent_at = now() WHERE id = ${id}`
     else await this.#sql`UPDATE ai_notify_channels SET last_error = ${error.slice(0, 500)} WHERE id = ${id}`
   }
@@ -202,36 +257,16 @@ export class ChannelStore {
     if (response.status < 200 || response.status >= 300) throw new ChannelError(`HTTP ${response.status}`)
   }
 
-  /** Key rotation (spec §9): each channel token's data key, re-sealed under `current`. */
-  async rewrapFrom(previous: Kek, current: Kek): Promise<{ rewrapped: number; failed: number }> {
-    const result = { rewrapped: 0, failed: 0 }
-    if (previous.id === current.id) return result
-    const rows = await this.#sql<Row[]>`SELECT * FROM ai_notify_channels WHERE kek_id = ${previous.id}`
-    for (const row of rows) {
-      let next: Envelope
-      try {
-        next = rewrap(previous, current, envelope(row), aad(row.id, row.kind, row.url))
-      } catch (err) {
-        if (!(err instanceof SealError)) throw err
-        result.failed++
-        continue
-      }
-      const updated = await this.#sql`
-        UPDATE ai_notify_channels SET dek_sealed = ${next.dekSealed}, kek_id = ${next.kekId} WHERE id = ${row.id} AND kek_id = ${previous.id}`
-      result.rewrapped += updated.count
-    }
-    return result
-  }
-
   #open(row: Row): string {
-    return openSecret(this.#kek, envelope(row), aad(row.id, row.kind, row.url))
+    return openSecret(this.#key(), envelope(row), aad(row.id, row.kind, row.url))
   }
 
   #openRow(row: Row): OpenChannel {
     return { id: row.id, kind: row.kind, url: row.url, target: row.target, token: row.secret_sealed ? this.#open(row) : undefined }
   }
 
-  async #check(input: ChannelInput): Promise<{ kind: ChannelKind; name: string; url: string; target: string | null; token: string | null }> {
+  /** `keepToken`: the channel keeps the token it holds (checked when it was entered), so `input.token` is none. */
+  async #check(input: ChannelInput, keepToken = false): Promise<CheckedChannel> {
     if (!CHANNEL_KINDS.includes(input.kind)) throw new ChannelError(`kind must be one of ${CHANNEL_KINDS.join(', ')}`)
     const name = input.name.trim()
     if (name.length < 1 || name.length > 100) throw new ChannelError('name must be 1 to 100 characters')
@@ -254,7 +289,7 @@ export class ChannelStore {
     if (input.kind === 'home_assistant') {
       target = input.target ?? ''
       if (!SERVICE.test(target)) throw new ChannelError('target must be a Home Assistant notify service name, such as mobile_app_pixel')
-      if (token === null) throw new ChannelError('Home Assistant needs a long-lived access token')
+      if (token === null && !keepToken) throw new ChannelError('Home Assistant needs a long-lived access token')
     }
     try {
       await allowedUrl(text, this.#resolve)
@@ -294,4 +329,89 @@ async function allowedUrl(url: string, resolve: Resolver): Promise<string[]> {
     throw new EgressError(`url must be https: plain http is allowed only to loopback or private addresses, and ${parsed.hostname} is not`)
   }
   return addresses
+}
+
+/** The route's reason for a channel moved under an update that kept its token (backend api/crud_agent_notify.py). */
+const CHANNEL_MOVED = 'channel-moved'
+
+/**
+ * The channels' rows through the API's CRUD routes, area `notify` (#5299 step 5; backend
+ * api/crud_agent_notify.py): the API seals a token with its KEK under this file's AAD, and
+ * opens it only for a send (`open`, `enabled`). `ChannelStore` still checks each channel, its
+ * URL's egress rules included, and sends.
+ */
+export class CrudChannelRows {
+  readonly #call: ReturnType<typeof crudOf>
+
+  constructor(target: CrudTarget) {
+    this.#call = crudOf(target)
+  }
+
+  async list(): Promise<ChannelView[]> {
+    return (await this.#call<{ channels: ChannelView[] }>('the notification channels', '/notify-channels')).channels.map(viewOfWire)
+  }
+
+  async view(id: string): Promise<ChannelView | undefined> {
+    if (!UUID.test(id)) return undefined
+    const { channel } = await this.#call<{ channel: ChannelView | null }>('a notification channel', `/notify-channels/${segment(id, UUID_SEGMENT, 'a channel id')}`)
+    return channel ? viewOfWire(channel) : undefined
+  }
+
+  async create(checked: CheckedChannel, enabled: boolean): Promise<string> {
+    const body = { ...fieldsOf(checked), enabled, ...(checked.token ? { token: checked.token } : {}) }
+    return (await this.#call<{ id: string }>('a notification channel created', '/notify-channels', { body })).id
+  }
+
+  /** Whether the channel was there. `keepToken`: it keeps its sealed token. */
+  async update(id: string, checked: CheckedChannel, enabled: boolean, keepToken: boolean): Promise<boolean> {
+    if (!UUID.test(id)) return false
+    const body = { ...fieldsOf(checked), enabled, ...(keepToken ? { keep_token: true } : checked.token ? { token: checked.token } : {}) }
+    try {
+      return (await this.#call<{ done: boolean }>('a notification channel changed', `/notify-channels/${segment(id, UUID_SEGMENT, 'a channel id')}/update`, { body })).done
+    } catch (err) {
+      if (err instanceof CrudReadError && err.fromRoute && err.reason === CHANNEL_MOVED) throw new ChannelError(err.detail)
+      throw err
+    }
+  }
+
+  async delete(id: string): Promise<boolean> {
+    if (!UUID.test(id)) return false
+    return (await this.#call<{ done: boolean }>('a notification channel deleted', `/notify-channels/${segment(id, UUID_SEGMENT, 'a channel id')}/delete`, { method: 'POST' })).done
+  }
+
+  async open(id: string): Promise<OpenChannel | undefined> {
+    if (!UUID.test(id)) return undefined
+    try {
+      const { channel } = await this.#call<{ channel: OpenChannel | null }>('a notification channel opened', `/notify-channels/${segment(id, UUID_SEGMENT, 'a channel id')}/open`, { method: 'POST' })
+      return channel ? { ...channel, token: channel.token ?? undefined } : undefined
+    } catch (err) {
+      // A token the API's key does not open, as the SQL store's SealError.
+      if (err instanceof CrudReadError && err.fromRoute && err.status === 409) throw new ChannelError(err.detail)
+      throw err
+    }
+  }
+
+  async enabled(): Promise<OpenChannel[]> {
+    const { channels } = await this.#call<{ channels: (Omit<OpenChannel, 'token'> & { token: string | null })[] }>(
+      'the enabled notification channels',
+      '/notify-channels/open-enabled',
+      { method: 'POST' },
+    )
+    return channels.map((c) => ({ ...c, token: c.token ?? undefined }))
+  }
+
+  async record(id: string, error: string | null): Promise<void> {
+    await this.#call('a notification sent', `/notify-channels/${segment(id, UUID_SEGMENT, 'a channel id')}/record`, { body: { error } })
+  }
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+function fieldsOf(checked: CheckedChannel): { kind: ChannelKind; name: string; url: string; target: string | null } {
+  return { kind: checked.kind, name: checked.name, url: checked.url, target: checked.target }
+}
+
+/** A view as the SQL store answers it: the send time to the millisecond. */
+function viewOfWire(v: ChannelView): ChannelView {
+  return { ...v, last_sent_at: v.last_sent_at === null ? null : new Date(v.last_sent_at).toISOString() }
 }

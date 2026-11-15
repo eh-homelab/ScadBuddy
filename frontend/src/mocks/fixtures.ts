@@ -1051,6 +1051,7 @@ export const settingsDefaults = {
   storefront_slices_concurrent: 1,
   storefront_draft_ttl_days: 30,
   storefront_requests_enabled: false,
+  storefront_materials: ['PETG', 'PLA'],
   storefront_prepare_cap: 256,
   // #5283 — the storefront's mail; the password is sealed apart (`/storefront/mail/password`).
   storefront_mail_host: null,

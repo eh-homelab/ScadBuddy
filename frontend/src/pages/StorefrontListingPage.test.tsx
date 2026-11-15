@@ -195,6 +195,43 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     expect(screen.queryByText('Published')).toBeNull()
   })
 
+  it('says beside the materials that publish refused a colour of a material the listing does not allow (#6258)', async () => {
+    const { user } = renderStorefront()
+    await within(await screen.findByTestId('listing-preview')).findByLabelText('Name on the tag')
+    const allowed = screen.getByRole('group', { name: 'Materials allowed' })
+    // The shop's default until the listing chooses its own.
+    expect(await within(allowed).findByText('Shop default (PETG, PLA)')).toBeInTheDocument()
+    await user.click(within(allowed).getByRole('button', { name: 'Choose for this listing' }))
+    await user.click(within(allowed).getByRole('button', { name: 'Remove PETG' }))
+    await user.click(screen.getByRole('button', { name: 'Publish' }))
+    expect(await within(allowed).findByRole('alert')).toHaveTextContent('Not published: PETG Black is PETG, which this listing does not allow.')
+    expect(screen.getAllByRole('alert')[0]).toHaveTextContent('See “Materials allowed” below.')
+    expect(screen.queryByText('Published')).toBeNull()
+    // The edit that fixes it clears the message; the next publish goes through.
+    await user.click(within(screen.getByTestId('materials-not-allowed')).getByRole('button', { name: 'Allow PETG' }))
+    expect(within(allowed).queryByRole('alert')).toBeNull()
+    await user.click(screen.getByRole('button', { name: 'Publish' }))
+    expect(await screen.findByText('Published')).toBeInTheDocument()
+    const [saved] = await stored()
+    expect(saved?.materials).toEqual(['PLA', 'PETG'])
+  })
+
+  it('says beside the colours that publish found no material to print the locked colours in (#6258)', async () => {
+    server.use(
+      http.post('/api/v1/storefront/listings/:id/publish', () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/storefront/listing_locked_colours_unprintable', title: 'Unprocessable Content', status: 422, detail: 'no allowed material offers every locked colour', names: ['text_color'] },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const { user } = renderStorefront()
+    await within(await screen.findByTestId('listing-preview')).findByLabelText('Name on the tag')
+    await user.click(screen.getByRole('button', { name: 'Publish' }))
+    const colours = screen.getByRole('group', { name: 'Colours on offer' })
+    expect(await within(colours).findByRole('alert')).toHaveTextContent('Not published: no allowed material has the locked colour of Text')
+  })
+
   it('says why an edit of a listing changed elsewhere is refused', async () => {
     const listing = await seed('Mine')
     const { user } = renderStorefront(`/storefront/listings/${listing.id}`)

@@ -91,7 +91,9 @@ def _pool(state: Any) -> Pool:
 
 
 def _keks(state: Any) -> tuple[Kek | None, Kek | None]:
-    """The current and previous KEK, read once per process (``kek_at``), never per request."""
+    """The current and previous KEK. A key once read is kept, so no request reads it again;
+    a file that could not be read is tried again on a later call, at most every few seconds
+    (``kek_at``)."""
     return kek_at(state.settings.secret_key_file), kek_at(state.settings.secret_key_previous_file)
 
 

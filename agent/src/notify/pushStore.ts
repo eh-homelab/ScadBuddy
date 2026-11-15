@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import type { Sql } from 'postgres'
-import { type Envelope, type Kek, openSecret, rewrap, SealError, sealSecret } from '../secrets.js'
+import { CrudReadError } from '../api/crudRead.js'
+import { type CrudTarget, crudOf } from '../api/crudStores.js'
+import { type Envelope, type Kek, openSecret, SealError, sealSecret } from '../secrets.js'
 import type { Owner } from '../sessions/protocol.js'
 import { type EcKeys, generateEcKeys, type Subscriber } from './webPush.js'
 
@@ -31,6 +33,14 @@ export class SubscriptionTakenError extends Error {
 
 /** How long a "told" row is kept: past any entry's 86 400 s ceiling (ai_pending_input). */
 export const SENT_KEEP_DAYS = 2
+
+/**
+ * The push records as the routes and the dispatcher use them: `PushStore` over SQL with this
+ * process's KEK, or `CrudPushStore` through the API's CRUD routes (area `notify`, #5299 step 5),
+ * where the API seals and opens. `available` says whether the store can be used now (with no
+ * KEK here, only once the API serves the area); left out, always.
+ */
+export type PushRepo = Pick<PushStore, 'vapidKeys' | 'subscribe' | 'unsubscribe' | 'subscriptions' | 'claim'> & { available?(): boolean }
 
 export class PushStore {
   readonly #sql: Sql
@@ -140,36 +150,63 @@ export class PushStore {
     return rows.length > 0
   }
 
-  /** Key rotation (spec §9): the VAPID key's and every subscription's data key, re-sealed under `current`. */
-  async rewrapFrom(previous: Kek, current: Kek): Promise<{ rewrapped: number; failed: number }> {
-    const result = { rewrapped: 0, failed: 0 }
-    if (previous.id === current.id) return result
-    const vapid = await this.#sql<Sealed[]>`SELECT secret_sealed, dek_sealed, kek_id FROM ai_push_vapid WHERE kek_id = ${previous.id}`
-    const subs = await this.#sql<(Sealed & { id: string; endpoint: string })[]>`
-      SELECT id, endpoint, secret_sealed, dek_sealed, kek_id FROM ai_push_subscriptions WHERE kek_id = ${previous.id}`
-    const next = (row: Sealed, aad: string): Envelope | undefined => {
-      try {
-        return rewrap(previous, current, envelope(row), aad)
-      } catch (err) {
-        if (!(err instanceof SealError)) throw err
-        result.failed++
-        return undefined
-      }
+}
+
+/** The route's reason for an endpoint another person subscribed (backend api/crud_agent_notify.py). */
+const SUBSCRIPTION_TAKEN = 'subscription-taken'
+
+/**
+ * The push records through the API's CRUD routes, area `notify` (#5299 step 5; backend
+ * api/crud_agent_notify.py): the API seals the keys with its KEK under this file's AAD, so this
+ * process needs none. The VAPID pair is still made here (the first stored wins), and the private
+ * key comes back from the API for each pass's signing.
+ */
+export class CrudPushStore implements PushRepo {
+  readonly #call: ReturnType<typeof crudOf>
+
+  constructor(target: CrudTarget) {
+    this.#call = crudOf(target)
+  }
+
+  async vapidKeys(): Promise<EcKeys> {
+    type Answer = { vapid: { public_key: string; private_key: string } | null }
+    const keys = (a: Answer) => (a.vapid ? { publicKey: Buffer.from(a.vapid.public_key, 'hex'), privateKey: Buffer.from(a.vapid.private_key, 'base64url') } : undefined)
+    const found = keys(await this.#call<Answer>('the VAPID key', '/push/vapid'))
+    if (found) return found
+    const made = generateEcKeys()
+    const body = { public_key: made.publicKey.toString('hex'), private_key: made.privateKey.toString('base64url') }
+    return keys(await this.#call<Answer>('the VAPID key stored', '/push/vapid', { body }))!
+  }
+
+  async subscribe(owner: Owner, endpoint: string, keys: Subscriber): Promise<string> {
+    const body = { owner, endpoint, p256dh: keys.p256dh.toString('base64url'), auth: keys.auth.toString('base64url') }
+    try {
+      return (await this.#call<{ id: string }>('a push subscription', '/push/subscriptions', { body })).id
+    } catch (err) {
+      if (err instanceof CrudReadError && err.fromRoute && err.reason === SUBSCRIPTION_TAKEN) throw new SubscriptionTakenError()
+      throw err
     }
-    for (const row of vapid) {
-      const e = next(row, VAPID_AAD)
-      if (!e) continue
-      const updated = await this.#sql`
-        UPDATE ai_push_vapid SET dek_sealed = ${e.dekSealed}, kek_id = ${e.kekId} WHERE id = 1 AND kek_id = ${previous.id}`
-      result.rewrapped += updated.count
-    }
-    for (const row of subs) {
-      const e = next(row, subscriptionAad(row.id, row.endpoint))
-      if (!e) continue
-      const updated = await this.#sql`
-        UPDATE ai_push_subscriptions SET dek_sealed = ${e.dekSealed}, kek_id = ${e.kekId} WHERE id = ${row.id} AND kek_id = ${previous.id}`
-      result.rewrapped += updated.count
-    }
-    return result
+  }
+
+  async unsubscribe(endpoint: string, owner?: Owner): Promise<boolean> {
+    const body = { endpoint, ...(owner ? { owner } : {}) }
+    return (await this.#call<{ done: boolean }>('a push subscription removed', '/push/subscriptions/remove', { body })).done
+  }
+
+  async subscriptions(): Promise<PushSubscriptionRow[]> {
+    const { subscriptions } = await this.#call<{ subscriptions: { id: string; owner: Owner; endpoint: string; p256dh: string; auth: string }[] }>(
+      'the push subscriptions',
+      '/push/subscriptions',
+    )
+    return subscriptions.map((s) => ({
+      id: s.id,
+      owner: s.owner,
+      endpoint: s.endpoint,
+      keys: { p256dh: Buffer.from(s.p256dh, 'base64url'), auth: Buffer.from(s.auth, 'base64url') },
+    }))
+  }
+
+  async claim(requestId: string, target: string): Promise<boolean> {
+    return (await this.#call<{ claimed: boolean }>('a notification claimed', '/push/sent', { body: { request_id: requestId, target } })).claimed
   }
 }

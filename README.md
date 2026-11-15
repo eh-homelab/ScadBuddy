@@ -2412,11 +2412,15 @@ holds the manifest (spec §12).
   user, network, mount and PID namespaces, no `/proc`, no capabilities, no new privileges,
   a seccomp filter) and exits 3 at start, logging why, when any step is refused. A container
   runtime's default seccomp profile refuses `unshare(CLONE_NEWUSER)`, so the sandbox's pod
-  runs with the seccomp and AppArmor profiles `Unconfined`
-  ([Kubernetes: seccomp](https://kubernetes.io/docs/tutorials/security/seccomp/),
-  [AppArmor](https://kubernetes.io/docs/tutorials/security/apparmor/)), its pod only, until
-  the nodes can carry a `Localhost` profile that allows exactly that call; the worker's pod
-  keeps `RuntimeDefault`. While the sandbox is down, busy or refusing, each check fails and
+  runs with the seccomp profile `Unconfined`
+  ([Kubernetes: seccomp](https://kubernetes.io/docs/tutorials/security/seccomp/)), its pod
+  only. On a node with `kernel.apparmor_restrict_unprivileged_userns=1` (Ubuntu 24.04's
+  default) an AppArmor-unconfined pod gets no capabilities in its user namespace, and the
+  sandbox exits 3 ("the user namespace's id maps: Permission denied"). So the pod runs under
+  a `Localhost` AppArmor profile, `scadbuddy-intake-sandbox` (`unconfined` plus `userns,`),
+  that the nodes must have loaded ([AppArmor: unprivileged user namespace restrictions](https://gitlab.com/apparmor/apparmor/-/wikis/unprivileged_userns_restriction);
+  in prod, eh-homelab/clusters `applications/scadbuddy/apparmor-loader.yaml`). The worker's
+  pod keeps `RuntimeDefault`. While the sandbox is down, busy or refusing, each check fails and
   the worker counts it in `scadbuddy_intake_sandbox_failed_total` by `reason`
   (`unauthorized`, `busy`, `unreachable`, `timeout`, `transport`, `check-timeout`,
   `crashed`, `status`, `bad-answer`; `/metrics` on port 9090). Alert on it and on the

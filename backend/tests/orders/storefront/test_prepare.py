@@ -5,13 +5,16 @@ visitor's page asks for it. The routes, and a visitor's reuse of a prepared rend
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from temporalio.client import WorkflowExecutionStatus
 
-from scadbuddy.orders.storefront.inputs import listing_reference, listing_values
+from scadbuddy.orders.models import Filament
+from scadbuddy.orders.storefront import prepare
+from scadbuddy.orders.storefront.inputs import listing_reference, listing_values, resolve_choice
 from scadbuddy.orders.storefront.prepare import (
     RunState,
     TemporalPreparer,
@@ -31,6 +34,7 @@ from tests.orders.storefront.test_inputs import (
     PETG_GREEN,
     PLA_BLUE,
     PLA_RED,
+    SHOP,
     filament,
 )
 
@@ -75,12 +79,28 @@ def a_listing(params: dict[str, Any], colours: list[str] | None = None) -> Listi
 BOTH = {"kind": "choice", "choices": ["#ff0000", "#0000FF"]}
 
 
+def visitor_key(
+    listing: Listing,
+    asked: dict[str, Any],
+    book: dict[str, Filament],
+    materials: list[str] = SHOP,
+) -> str:
+    """The render key of a visitor's render that sends ``asked`` (`renders.py`
+    `checked_choice`)."""
+    values = listing_values(listing, asked, book, materials)
+    choice = resolve_choice(listing, values, asked.keys(), book, materials)
+    return listing_reference(listing, choice.values, {}, filaments=book).reference.render_key
+
+
 def test_each_colour_is_taken_once_in_its_filaments_spelling() -> None:
-    """The page sends a picked filament's own ``colour``, not the bound's spelling."""
+    """The page sends a picked filament's own ``colour``, not the bound's spelling. The
+    listing has no PETG filament, so PETG is not printable and has no combination."""
     listing = a_listing(
         {"body": {"kind": "choice", "choices": ["#ff0000", "#FF0000", "#0000ff", "#0000FF"]}}
     )
-    assert colour_choices(listing, FILAMENTS) == {"body": ["#FF0000", "#0000FF"]}
+    assert colour_choices(listing, FILAMENTS, SHOP) == {
+        "PLA": {"body": ["#FF0000", "#0000FF"]},
+    }
 
 
 def test_two_filaments_of_one_colour_in_two_cases_are_each_prepared() -> None:
@@ -90,31 +110,22 @@ def test_two_filaments_of_one_colour_in_two_cases_are_each_prepared() -> None:
         {"trim": {"kind": "choice", "choices": ["#FF0000", "#0000FF"]}},
         colours=[PLA_RED, "pla-red-lower", PLA_BLUE],
     )
-    choices = colour_choices(listing, book)
     # The default (#0000FF) is the blue filament's spelling, so it is not added again.
-    assert choices == {"trim": ["#FF0000", "#ff0000", "#0000FF"]}
-    prepared = {c.reference.render_key for c in combinations(listing, book, choices)}
+    assert colour_choices(listing, book, SHOP)["PLA"] == {"trim": ["#FF0000", "#ff0000", "#0000FF"]}
+    prepared = {c.reference.render_key for c in combinations(listing, book, SHOP)}
     for picked in ("pla-red", "pla-red-lower", "pla-blue"):
-        visitor = listing_reference(
-            listing,
-            listing_values(listing, {"trim": book[picked].colour}, book),
-            {},
-            filaments=book,
-        )
-        assert visitor.reference.render_key in prepared
+        assert visitor_key(listing, {"trim": book[picked].colour}, book) in prepared
 
 
 def test_a_default_no_filament_spells_so_is_prepared_too() -> None:
     """The page's first load renders the default in its own spelling."""
     listing = a_listing({"body": {**BOTH, "default": "#ff0000"}})
-    choices = colour_choices(listing, FILAMENTS)
-    assert choices == {"body": ["#ff0000", "#FF0000", "#0000FF"]}
-    every = list(combinations(listing, FILAMENTS, choices))
+    assert colour_choices(listing, FILAMENTS, SHOP)["PLA"] == {
+        "body": ["#ff0000", "#FF0000", "#0000FF"]
+    }
+    every = combinations(listing, FILAMENTS, SHOP)
     assert [c.asked for c in every] == [{}, {"body": "#FF0000"}, {"body": "#0000FF"}]
-    first_load = listing_reference(
-        listing, listing_values(listing, {}, FILAMENTS), {}, filaments=FILAMENTS
-    )
-    assert every[0].reference.render_key == first_load.reference.render_key
+    assert every[0].reference.render_key == visitor_key(listing, {}, FILAMENTS)
 
 
 def test_a_colour_the_public_listing_does_not_offer_is_left_out() -> None:
@@ -125,33 +136,37 @@ def test_a_colour_the_public_listing_does_not_offer_is_left_out() -> None:
         colours=[PLA_RED, PLA_BLUE],
     )
     assert PETG_GREEN in book
-    assert colour_choices(listing, book) == {"body": ["#FF0000"]}
+    assert colour_choices(listing, book, SHOP) == {
+        "PLA": {"body": ["#FF0000"]},
+    }
 
 
 def test_a_support_filament_is_never_a_combination() -> None:
-    """#6152: support is the shop's choice, so its colour is never prepared."""
+    """#6152: support is the shop's choice, so its colour is never prepared, even when
+    its material is in the list."""
     pva = FILAMENTS[PETG_GREEN].model_copy(update={"material": "PVA"})
     book = {**FILAMENTS, PETG_GREEN: pva}
     listing = a_listing(
         {"body": {"kind": "choice", "choices": ["#ff0000", "#00FF00"]}},
         colours=[PLA_RED, PETG_GREEN],
     )
-    assert colour_choices(listing, book) == {"body": ["#FF0000"]}
+    assert colour_choices(listing, book, ["PLA", "PVA"]) == {
+        "PLA": {"body": ["#FF0000"]},
+    }
 
 
-def test_the_count_is_the_product_of_the_colour_parameters() -> None:
+def test_the_count_is_the_render_keys_of_the_colour_parameters() -> None:
     listing = a_listing(
         {"body": BOTH, "trim": BOTH, "width": {"kind": "number", "min": 20, "max": 80}}
     )
-    choices = colour_choices(listing, FILAMENTS)
-    assert set(choices) == {"body", "trim"}
-    assert combination_count(choices) == 4
-    assert len(list(combinations(listing, FILAMENTS, choices))) == 4
+    assert set(colour_choices(listing, FILAMENTS, SHOP)["PLA"]) == {"body", "trim"}
+    assert combination_count(listing, FILAMENTS, SHOP) == 4
+    assert len(combinations(listing, FILAMENTS, SHOP)) == 4
 
 
 def test_no_colour_parameter_is_no_combination() -> None:
     listing = a_listing({"width": {"kind": "number", "min": 20, "max": 80}})
-    assert combination_count(colour_choices(listing, FILAMENTS)) == 0
+    assert combination_count(listing, FILAMENTS, SHOP) == 0
 
 
 @pytest.mark.parametrize("default", [None, "#FF0000"])
@@ -160,35 +175,115 @@ def test_a_colour_at_its_default_is_not_asked(default: str | None) -> None:
     for nothing: its render key is the page's first render's."""
     body = {**BOTH, "default": default}
     listing = a_listing({"body": body, "width": {"kind": "number", "min": 20, "max": 80}})
-    every = list(combinations(listing, FILAMENTS, colour_choices(listing, FILAMENTS)))
+    every = combinations(listing, FILAMENTS, SHOP)
     assert [c.asked for c in every] == [{}, {"body": "#0000FF"}]
-    first_load = listing_reference(
-        listing, listing_values(listing, {}, FILAMENTS), {}, filaments=FILAMENTS
-    )
-    assert every[0].reference.render_key == first_load.reference.render_key
+    assert every[0].reference.render_key == visitor_key(listing, {}, FILAMENTS)
 
 
 def test_a_picked_colour_has_the_render_key_of_a_visitors_pick() -> None:
     listing = a_listing({"body": BOTH, "trim": BOTH})
-    every = list(combinations(listing, FILAMENTS, colour_choices(listing, FILAMENTS)))
+    every = combinations(listing, FILAMENTS, SHOP)
     for combination in every:
-        visitor = listing_reference(
-            listing, listing_values(listing, combination.asked, FILAMENTS), {}, filaments=FILAMENTS
+        assert combination.reference.render_key == visitor_key(
+            listing, combination.asked, FILAMENTS
         )
-        assert combination.reference.render_key == visitor.reference.render_key
     assert len({c.reference.render_key for c in every}) == 4
     # Every other parameter stays at its default.
     assert all(c.reference.inputs["params"]["width"] == 50 for c in every)
 
 
 def test_the_combination_at_an_index_is_the_one_in_the_run_order() -> None:
-    """The prepare run asks for each combination by its index (#6299 review)."""
+    """The prepare run asks for each combination by its index (#6299 review). Green is
+    PETG and the trim has no PETG colour, so green is in no combination (#6258)."""
     three = {"kind": "choice", "choices": ["#ff0000", "#0000FF", "#00FF00"]}
     listing = a_listing({"body": three, "trim": BOTH}, colours=[PLA_RED, PLA_BLUE, PETG_GREEN])
-    choices = colour_choices(listing, FILAMENTS)
-    every = list(combinations(listing, FILAMENTS, choices))
-    assert len(every) == combination_count(choices) == 6
-    assert [combination_at(listing, FILAMENTS, choices, i) for i in range(6)] == every
+    every = combinations(listing, FILAMENTS, SHOP)
+    assert len(every) == combination_count(listing, FILAMENTS, SHOP) == 4
+    assert [combination_at(listing, FILAMENTS, SHOP, i) for i in range(4)] == every
+    assert all(c.reference.inputs["params"]["body"] != "#00FF00" for c in every)
+
+
+#: Red in PLA and PETG, blue in PLA only, green in PETG only.
+MIXED = {
+    PLA_RED: filament(PLA_RED, "#FF0000"),
+    PLA_BLUE: filament(PLA_BLUE, "#0000FF"),
+    "petg-red": filament("petg-red", "#FF0000", "PETG"),
+    PETG_GREEN: filament(PETG_GREEN, "#00FF00", "PETG"),
+}
+THREE = {"kind": "choice", "choices": ["#FF0000", "#0000FF", "#00FF00"]}
+
+
+def mixed_listing() -> Listing:
+    return a_listing(
+        {"body": THREE, "trim": THREE}, colours=[PLA_RED, PLA_BLUE, "petg-red", PETG_GREEN]
+    )
+
+
+def test_a_combination_keeps_to_one_material() -> None:
+    """#6258: a print is made of one material, so no combination mixes the PLA-only blue
+    with the PETG-only green. PLA makes 4 (red and blue on each part), PETG 4 (red and
+    green); red on both is one render in either material, so 7."""
+    listing = mixed_listing()
+    every = combinations(listing, MIXED, SHOP)
+    pairs = [
+        (c.reference.inputs["params"]["body"], c.reference.inputs["params"]["trim"]) for c in every
+    ]
+    assert sorted(pairs) == sorted(
+        [
+            ("#FF0000", "#0000FF"),
+            ("#FF0000", "#FF0000"),
+            ("#0000FF", "#FF0000"),
+            ("#0000FF", "#0000FF"),
+            ("#FF0000", "#00FF00"),
+            ("#00FF00", "#FF0000"),
+            ("#00FF00", "#00FF00"),
+        ]
+    )
+    assert combination_count(listing, MIXED, SHOP) == 7
+    assert len({c.reference.render_key for c in every}) == 7
+    for combination in every:
+        assert combination.reference.render_key == visitor_key(listing, combination.asked, MIXED)
+
+
+def test_every_visitor_pick_of_one_material_is_prepared() -> None:
+    """Each pick a visitor can make renders a prepared key: green with the trim left at
+    its PLA-only blue default moves the trim to a PETG colour (`resolve_choice`)."""
+    listing = mixed_listing()
+    prepared = {c.reference.render_key for c in combinations(listing, MIXED, SHOP)}
+    for asked in (
+        {},
+        {"body": "#00FF00"},
+        {"trim": "#00FF00"},
+        {"body": "#0000FF"},
+        {"body": "#00FF00", "trim": "#FF0000"},
+    ):
+        assert visitor_key(listing, asked, MIXED) in prepared
+
+
+def test_the_material_order_is_the_combination_order() -> None:
+    """The effective materials' order is the run's order: after red and red, PLA first
+    takes red and blue, PETG first red and green."""
+    listing = mixed_listing()
+
+    def second(materials: list[str]) -> tuple[str, str]:
+        params = combinations(listing, MIXED, materials)[1].reference.inputs["params"]
+        return params["body"], params["trim"]
+
+    assert second(["PLA", "PETG"]) == ("#FF0000", "#0000FF")
+    assert second(["PETG", "PLA"]) == ("#FF0000", "#00FF00")
+    assert combination_count(listing, MIXED, ["PETG", "PLA"]) == 7
+
+
+def test_a_listing_of_too_many_picks_is_not_enumerated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Over `ENUMERATION_LIMIT` picks the count is the picks, over any cap."""
+    monkeypatch.setattr(prepare, "ENUMERATION_LIMIT", 7)
+    monkeypatch.setattr(prepare, "_BUILT", OrderedDict())
+    listing = a_listing({"body": THREE, "trim": BOTH}, colours=[PLA_RED, PLA_BLUE, "petg-red"])
+    book = {k: MIXED[k] for k in (PLA_RED, PLA_BLUE, "petg-red")}
+    # PLA: 2 body x 2 trim; PETG: 1 body x 1 trim, so 5 picks: enumerated.
+    assert combination_count(listing, book, SHOP) == 4
+    assert combination_count(mixed_listing(), MIXED, SHOP) == 8
+    assert combinations(mixed_listing(), MIXED, SHOP) == []
 
 
 def test_each_run_makes_its_own_claim() -> None:
