@@ -9,7 +9,8 @@ ledger is never deleted (`SpoolInUseError`); it is archived.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from typing import Any
 from uuid import UUID
 
@@ -260,12 +261,14 @@ class FilamentSpoolStore:
         if uid is None and tray is None:
             raise TagUnnamedError()
         try:
-            return self._bind(spool_id, uid, tray, kind, override, actor)
+            with self._pool.connection() as conn, conn.transaction():
+                return self.bind_on(conn, spool_id, uid, tray, kind, override, actor)
         except _NoSpoolError:
             return None
 
-    def _bind(
-        self,
+    @staticmethod
+    def bind_on(
+        conn: Conn,
         spool_id: UUID,
         uid: str | None,
         tray: str | None,
@@ -273,61 +276,77 @@ class FilamentSpoolStore:
         override: bool,
         actor: str,
     ) -> m.TagBinding:
-        with self._pool.connection() as conn, conn.transaction():
-            if (
-                conn.execute("SELECT 1 FROM filament_spools WHERE id = %s", (spool_id,)).fetchone()
-                is None
-            ):
-                raise _NoSpoolError()
-            tag_id = self._tag(conn, uid, tray, kind)
-            holder = conn.execute(
-                "SELECT spool_id FROM filament_tag_bindings"
-                " WHERE tag_id = %s AND unbound_at IS NULL",
-                (tag_id,),
-            ).fetchone()
-            wanted = {spool_id} | ({holder["spool_id"]} if holder else set())
-            locked = conn.execute(
-                "SELECT id FROM filament_spools WHERE id = ANY(%s) ORDER BY id FOR UPDATE",
-                (list(wanted),),
-            ).fetchall()
-            if spool_id not in {row["id"] for row in locked}:
-                # Deleted since the first look: roll back the tag this may have made.
-                raise _NoSpoolError()
-            held = conn.execute(
-                f"SELECT {_BINDING_COLUMNS} FROM filament_tag_bindings"
-                " WHERE tag_id = %s AND spool_id = %s AND unbound_at IS NULL",
-                (tag_id, spool_id),
-            ).fetchone()
-            if held is not None:
-                return m.TagBinding.model_validate(held)
-            closed = conn.execute(
-                "UPDATE filament_tag_bindings SET unbound_at = now(), reason = 'rebound'"
-                " WHERE unbound_at IS NULL AND (tag_id = %s OR spool_id = %s)"
-                " RETURNING tag_id, spool_id",
-                (tag_id, spool_id),
-            ).fetchall()
-            for old in closed:
-                ledger.record(
-                    conn,
-                    old["spool_id"],
-                    "tag_unbound",
-                    actor=actor,
-                    data={"tag_id": old["tag_id"], "reason": "rebound"},
-                )
-            row = conn.execute(
-                "INSERT INTO filament_tag_bindings (tag_id, spool_id, override)"
-                f" VALUES (%s, %s, %s) RETURNING {_BINDING_COLUMNS}",
-                (tag_id, spool_id, override),
-            ).fetchone()
-            assert row is not None
+        """`bind_tag` on ``conn``'s transaction, its keys already cleaned; `_NoSpoolError`
+        when the spool does not exist, which the caller rolls back on."""
+        if (
+            conn.execute("SELECT 1 FROM filament_spools WHERE id = %s", (spool_id,)).fetchone()
+            is None
+        ):
+            raise _NoSpoolError()
+        tag_id = FilamentSpoolStore._tag(conn, uid, tray, kind)
+        holder = conn.execute(
+            "SELECT spool_id FROM filament_tag_bindings WHERE tag_id = %s AND unbound_at IS NULL",
+            (tag_id,),
+        ).fetchone()
+        wanted = {spool_id} | ({holder["spool_id"]} if holder else set())
+        locked = conn.execute(
+            "SELECT id FROM filament_spools WHERE id = ANY(%s) ORDER BY id FOR UPDATE",
+            (list(wanted),),
+        ).fetchall()
+        if spool_id not in {row["id"] for row in locked}:
+            # Deleted since the first look: roll back the tag this may have made.
+            raise _NoSpoolError()
+        held = conn.execute(
+            f"SELECT {_BINDING_COLUMNS} FROM filament_tag_bindings"
+            " WHERE tag_id = %s AND spool_id = %s AND unbound_at IS NULL",
+            (tag_id, spool_id),
+        ).fetchone()
+        if held is not None:
+            return m.TagBinding.model_validate(held)
+        closed = conn.execute(
+            "UPDATE filament_tag_bindings SET unbound_at = now(), reason = 'rebound'"
+            " WHERE unbound_at IS NULL AND (tag_id = %s OR spool_id = %s)"
+            " RETURNING tag_id, spool_id",
+            (tag_id, spool_id),
+        ).fetchall()
+        for old in closed:
             ledger.record(
                 conn,
-                spool_id,
-                "tag_bound",
+                old["spool_id"],
+                "tag_unbound",
                 actor=actor,
-                data={"tag_id": tag_id, "override": override},
+                data={"tag_id": old["tag_id"], "reason": "rebound"},
             )
+        row = conn.execute(
+            "INSERT INTO filament_tag_bindings (tag_id, spool_id, override)"
+            f" VALUES (%s, %s, %s) RETURNING {_BINDING_COLUMNS}",
+            (tag_id, spool_id, override),
+        ).fetchone()
+        assert row is not None
+        ledger.record(
+            conn,
+            spool_id,
+            "tag_bound",
+            actor=actor,
+            data={"tag_id": tag_id, "override": override},
+        )
         return m.TagBinding.model_validate(row)
+
+    @contextmanager
+    def transaction(self) -> Iterator[Conn]:
+        """A connection in a transaction, for a caller that writes a spool, its tags and
+        its events as one (`filament/bambuddy_pull.py`)."""
+        with self._pool.connection() as conn, conn.transaction():
+            yield conn
+
+    @staticmethod
+    def read(conn: Conn, spool_id: UUID, *, check: bool = False) -> m.Spool | None:
+        """The spool with its effective values, on ``conn``; with ``check``, a backwards
+        effective temperature range is `TypeTempError`."""
+        spool = FilamentSpoolStore._spool(conn, spool_id)
+        if check and spool is not None:
+            _check_temps(spool.effective)
+        return spool
 
     def unbind_tag(self, tag_id: UUID, *, actor: str) -> m.TagBinding | None:
         """Take a tag off its spool, with a ``tag_unbound`` event; ``None`` when the tag

@@ -533,4 +533,23 @@ export const filamentTools: Tool[] = [
         ),
       ),
   }),
+
+  defineTool({
+    name: 'filament_bambuddy_import',
+    label: "Import Bambuddy's spools",
+    description:
+      "Pull Bambuddy's unarchived spools into ScadBuddy's own inventory once (the spool refresh Schedule also " +
+      'does this). A linked spool takes what Bambuddy changed since the last pull, unless ScadBuddy changed that ' +
+      'field later. A Bambuddy spool whose tag or record a ScadBuddy spool already holds is linked. Any other ' +
+      'becomes a new spool, typed by `material_number`, else by brand, material, subtype, colour and label weight, ' +
+      'else left needing a type. Returns the counts and ids created, linked, updated and still needing a type. ' +
+      '409 when no Bambuddy is configured. Reads Bambuddy, writes ScadBuddy only.',
+    input: z.object({}),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/bambuddy/import'],
+    summarize: () => "Import Bambuddy's spools",
+    handler: async (_input, { backend }) =>
+      json(await ok(backend.POST('/api/v1/filament/bambuddy/import'), "import Bambuddy's spools")),
+  }),
 ]

@@ -1,6 +1,7 @@
 """The spool refresh's activities (#3818 tier A, plan 2026-10-18 Task 6b), on the
 ``library`` worker (`main._run_library_worker`): the providers' names, then each
-provider's refresh as an activity of its own, then what the printers' trays show. The
+provider's refresh as an activity of its own, then what the printers' trays show, and
+last Bambuddy's spools pulled into ScadBuddy's own (`filament_pull_activity`, #6261). The
 print dialog reads only what they wrote (`SpoolStore.overlay`); nothing in it starts,
 signals or waits on a refresh.
 """
@@ -15,8 +16,16 @@ from typing import Any, Literal
 
 from temporalio import activity
 
+from scadbuddy.filament.bambuddy_pull import scheduled_pull
+from scadbuddy.filament.component import Filament
+from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.spools.component import Spools
-from scadbuddy.workflows.spool_refresh import LIST_ACTIVITY, PROVIDER_ACTIVITY, SEEN_ACTIVITY
+from scadbuddy.workflows.spool_refresh import (
+    FILAMENT_PULL_ACTIVITY,
+    LIST_ACTIVITY,
+    PROVIDER_ACTIVITY,
+    SEEN_ACTIVITY,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,3 +94,18 @@ def spool_activities(spools: Spools) -> list[Callable[..., Any]]:
             raise
 
     return [spool_providers_list, spool_provider_refresh, spool_trays_seen]
+
+
+def filament_pull_activity(
+    filament: Filament, load: Callable[[], StoredSettings]
+) -> Callable[[], Any]:
+    """``filament_bambuddy_pull``: Bambuddy's spools into ScadBuddy's own
+    (`filament/bambuddy_pull.py`). It runs on the ``library`` worker, in the API process,
+    which holds the store (`main._run_library_worker`), so it writes it directly. With no
+    Bambuddy, or Bambuddy down, it logs and returns, so the run never fails on it."""
+
+    @activity.defn(name=FILAMENT_PULL_ACTIVITY)
+    async def filament_bambuddy_pull() -> str:
+        return await scheduled_pull(filament, load)
+
+    return filament_bambuddy_pull

@@ -1,8 +1,9 @@
 """`/api/v1/filament` (#6261, epic #6260): ScadBuddy's own filament inventory. This
 module holds the catalogs a spool type or a spool picks from (plain reads and writes
 over `filament/catalog.py`), the spool types (`filament/types.py`), and the spools,
-their tags and their ledger (`filament/spools.py`, `filament/ledger.py`). Nothing here
-reaches Bambuddy."""
+their tags and their ledger (`filament/spools.py`, `filament/ledger.py`). Only the import
+(`POST /filament/bambuddy/import`, `filament/bambuddy_pull.py`) reaches Bambuddy, and it
+only reads."""
 
 from __future__ import annotations
 
@@ -13,10 +14,12 @@ from uuid import UUID
 from fastapi import APIRouter, Body, Response, status
 from pydantic import BaseModel, ValidationError
 
+from scadbuddy.api.deps import SettingsStoreDep
 from scadbuddy.auth.component import CallerDep
 from scadbuddy.auth.models import Caller, Person, PersonalToken, Service
 from scadbuddy.core.problems import ApiError
 from scadbuddy.filament import models as m
+from scadbuddy.filament.bambuddy_pull import PullReport, read_and_pull
 from scadbuddy.filament.catalog import (
     CATALOGS,
     CatalogExistsError,
@@ -614,3 +617,25 @@ async def move_spool(
     if moved is None:
         raise _no_spool(spool_id)
     return moved
+
+
+@router.post(
+    "/bambuddy/import",
+    response_model=PullReport,
+    summary="Import Bambuddy's spools",
+    description=(
+        "Read Bambuddy's unarchived spools and pull them into ScadBuddy's own, once (the spool "
+        "refresh Schedule does the same). A BB spool already linked takes the fields BB changed "
+        "since the last pull, unless ScadBuddy changed that field later; a change of what is "
+        "left is a `bb` reading unless the spool's weight is locked. A BB spool whose tag a "
+        "ScadBuddy spool holds, or whose record a ScadBuddy spool is linked to, is linked; any "
+        "other becomes a new spool, typed by `material_number`, else by brand, material, "
+        "subtype, colour and label weight, else left to need a type. Never writes to Bambuddy. "
+        "Answers the counts and ids made, linked, changed and still needing a type, and the BB "
+        "spool ids it could not pull. 409 when no Bambuddy is configured; Bambuddy's own "
+        "errors as they come."
+    ),
+)
+async def import_bambuddy(filament: FilamentDep, store: SettingsStoreDep) -> PullReport:
+    settings = await asyncio.to_thread(store.load)
+    return await read_and_pull(filament, settings)

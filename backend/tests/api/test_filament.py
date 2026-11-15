@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import httpx
 import psycopg
 import pytest
+import respx
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.filament import actor
 from scadbuddy.auth.models import ANONYMOUS, AuthSession, Person, PersonalToken, Service
+from tests.api.test_send import API, configure
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -287,3 +290,35 @@ def test_one_person_is_one_actor_by_session_or_token() -> None:
     assert actor(PersonalToken(token_id="t", principal=principal, scope="write")) == principal
     assert actor(Service(caller="agent", scopes=frozenset())) == "service:agent"
     assert actor(ANONYMOUS) == "anonymous"
+
+
+IMPORT_BB = "/api/v1/filament/bambuddy/import"
+
+
+def test_the_bambuddy_import_needs_bambuddy(client: TestClient) -> None:
+    refused = client.post(IMPORT_BB)
+    assert refused.status_code == 409, refused.text
+
+
+@respx.mock
+def test_the_bambuddy_import_pulls_once_then_changes_nothing(client: TestClient) -> None:
+    configure(client)
+    bb = {
+        "id": 41,
+        "material": "PLA",
+        "rgba": "00FF00",
+        "label_weight": 1000,
+        "weight_used": 250.0,
+        "updated_at": "2026-11-14T10:00:00",
+    }
+    route = respx.get(f"{API}/inventory/spools").mock(return_value=httpx.Response(200, json=[bb]))
+    first = client.post(IMPORT_BB)
+    assert first.status_code == 200, first.text
+    report = first.json()
+    assert (report["created"], report["needs_type"]) == (1, 1)
+    (spool_id,) = report["created_ids"]
+    spool = client.get(f"/api/v1/filament/spools/{spool_id}").json()
+    assert (spool["grams_left"], spool["rgba"]) == (750, "#00FF00FF")
+    again = client.post(IMPORT_BB).json()
+    assert (again["created"], again["linked"], again["updated"]) == (0, 0, 0)
+    assert route.call_count == 2

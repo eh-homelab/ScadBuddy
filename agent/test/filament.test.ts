@@ -314,4 +314,30 @@ describe('filament location tools', () => {
     expect((await runTool(tool('filament_spool_move'), out, ctx())).isError).toBeFalsy()
     expect(bodies).toEqual([{ location_id: ROW }, { location_id: null }])
   })
+
+  it("imports Bambuddy's spools and says what it did", async () => {
+    expect(tool('filament_bambuddy_import').risk).toBe('write')
+    expect(tool('filament_bambuddy_import').gated).toBe(false)
+    const report = { created: 1, linked: 0, updated: 0, needs_type: 1, created_ids: [ROW] }
+    let calls = 0
+    server.use(
+      http.post(`${BACKEND}/api/v1/filament/bambuddy/import`, () => {
+        calls += 1
+        return HttpResponse.json(report)
+      }),
+    )
+    const imported = await runTool(tool('filament_bambuddy_import'), {}, ctx())
+    expect(firstText(imported)).toEqual(report)
+    expect(calls).toBe(1)
+  })
+
+  it('says when no Bambuddy is configured', async () => {
+    server.use(
+      http.post(`${BACKEND}/api/v1/filament/bambuddy/import`, () =>
+        HttpResponse.json({ detail: 'Bambuddy is not configured' }, { status: 409 }),
+      ),
+    )
+    const refused = await runTool(tool('filament_bambuddy_import'), {}, ctx())
+    expect(refused.isError).toBe(true)
+  })
 })

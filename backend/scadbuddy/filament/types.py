@@ -251,32 +251,48 @@ class SpoolTypeStore:
         subtype: str | None,
         rgba: str,
         label_weight_g: int,
+        conn: Conn | None = None,
     ) -> m.SpoolType | None:
         """The unarchived type a product description names. ``code`` alone decides when
         given (case-insensitive); else brand, material and subtype are catalog names (any
         case; none matches a type with none), ``rgba`` is compared with its alpha (six
-        digits are opaque) and ``label_weight_g`` exactly."""
-        with self._pool.connection() as conn:
-            if code is not None:
-                row = conn.execute(
-                    f"SELECT {_TYPE_COLUMNS} FROM filament_spool_types"
-                    " WHERE upper(code) = upper(%s) AND archived_at IS NULL",
-                    (code,),
-                ).fetchone()
-            else:
-                columns = ", ".join(f"t.{c}" for c in m.SpoolType.model_fields)
-                row = conn.execute(
-                    f"SELECT {columns} FROM filament_spool_types t"
-                    " JOIN filament_materials mat ON mat.id = t.material_id"
-                    " LEFT JOIN filament_subtypes sub ON sub.id = t.subtype_id"
-                    " LEFT JOIN filament_brands b ON b.id = t.brand_id"
-                    " WHERE t.archived_at IS NULL AND upper(mat.name) = upper(%s)"
-                    " AND upper(coalesce(sub.name, '')) = upper(coalesce(%s, ''))"
-                    " AND upper(coalesce(b.name, '')) = upper(coalesce(%s, ''))"
-                    " AND t.rgba = %s AND t.label_weight_g = %s"
-                    " ORDER BY t.created_at, t.id LIMIT 1",
-                    (material, subtype, brand, normalise_rgba(rgba), label_weight_g),
-                ).fetchone()
+        digits are opaque) and ``label_weight_g`` exactly. On ``conn`` when given (a caller
+        in its own transaction, `filament/bambuddy_pull.py`), else on a pooled one."""
+        if conn is not None:
+            return self._match(conn, code, brand, material, subtype, rgba, label_weight_g)
+        with self._pool.connection() as pooled:
+            return self._match(pooled, code, brand, material, subtype, rgba, label_weight_g)
+
+    @staticmethod
+    def _match(
+        conn: Conn,
+        code: str | None,
+        brand: str | None,
+        material: str,
+        subtype: str | None,
+        rgba: str,
+        label_weight_g: int,
+    ) -> m.SpoolType | None:
+        if code is not None:
+            row = conn.execute(
+                f"SELECT {_TYPE_COLUMNS} FROM filament_spool_types"
+                " WHERE upper(code) = upper(%s) AND archived_at IS NULL",
+                (code,),
+            ).fetchone()
+        else:
+            columns = ", ".join(f"t.{c}" for c in m.SpoolType.model_fields)
+            row = conn.execute(
+                f"SELECT {columns} FROM filament_spool_types t"
+                " JOIN filament_materials mat ON mat.id = t.material_id"
+                " LEFT JOIN filament_subtypes sub ON sub.id = t.subtype_id"
+                " LEFT JOIN filament_brands b ON b.id = t.brand_id"
+                " WHERE t.archived_at IS NULL AND upper(mat.name) = upper(%s)"
+                " AND upper(coalesce(sub.name, '')) = upper(coalesce(%s, ''))"
+                " AND upper(coalesce(b.name, '')) = upper(coalesce(%s, ''))"
+                " AND t.rgba = %s AND t.label_weight_g = %s"
+                " ORDER BY t.created_at, t.id LIMIT 1",
+                (material, subtype, brand, normalise_rgba(rgba), label_weight_g),
+            ).fetchone()
         return None if row is None else m.SpoolType.model_validate(row)
 
     # -- internals --------------------------------------------------------------------
