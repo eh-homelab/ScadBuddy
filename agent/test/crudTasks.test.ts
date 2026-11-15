@@ -259,6 +259,25 @@ describe("a session's background tasks through the CRUD routes", () => {
     },
   )
 
+  it.each(['wf_0a1b2c3d', '', 'bash_1', '0000ABCD', '0000abcd0'])(
+    'throws on a write that inserts for %j, which names no task, as the SQL did on the foreign key (#6374 review)',
+    async (id) => {
+      // The route refuses an id that is not 8 hex characters (422); the client sends it as it is.
+      const paths: string[] = []
+      const refusing: typeof fetch = async (input) => {
+        paths.push(new URL(new Request(input).url).pathname.slice(PREFIX.length))
+        return new Response(JSON.stringify({ detail: 'task_id' }), { status: 422, headers: { 'x-scadbuddy-crud': '1' } })
+      }
+      const tasks = new BackgroundTaskStore(noSql, { crud: new CrudBackgroundTasks(BASE, { fetch: refusing }), use: () => true })
+      await expect(tasks.appendEvent(id, 'x')).rejects.toThrow()
+      await expect(tasks.appendNotice(id, 'x')).rejects.toThrow()
+      await expect(tasks.journal(id, KEY, 0, { result: 'x', ok: true })).rejects.toThrow()
+      await expect(tasks.recordChild(id, '5d1c0e8a-0f6b-4c1e-9b1a-2f6a1c3d4e5f')).rejects.toThrow()
+      const at = `/background-tasks/${encodeURIComponent(id)}`
+      expect(paths).toEqual([`${at}/events`, `${at}/events`, `${at}/calls`, `${at}/children`])
+    },
+  )
+
   it.each([{ task_id: 'wf_0a1b2c3d' }, { shell_id: 'bash_1' }, {}])(
     "answers TaskStop %j with Claude Code's No task found, not a backend error (#6374 review)",
     async (input) => {
