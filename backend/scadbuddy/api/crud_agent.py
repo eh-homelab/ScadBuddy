@@ -45,13 +45,14 @@ A request id or a grant id is a query parameter, never a path segment: it is fre
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import Path, Query, Response, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from scadbuddy.api.deps import SettingsStoreDep, StateDep
 from scadbuddy.api.internal_workspace import WORKSPACE_BLOB_KEY_PATTERN
@@ -64,6 +65,7 @@ from scadbuddy.orders.lifecycle import UsdRate
 from scadbuddy.orders.models import Actor, CostEntry
 
 router = crud_router("agent")
+logger = logging.getLogger(__name__)
 
 #: The ``blob_refs.holder_kind`` of a workspace file (`api/internal_workspace.py`).
 WORKSPACE_HOLDER = "ai_session_file"
@@ -251,7 +253,9 @@ def _event_log_head(pool: agent_reads.Pool) -> EventLogHead:
 
 
 def _event_log_gap(pool: agent_reads.Pool, after: int, limit: int) -> EventLogGap:
-    with pool.connection() as conn:
+    # One transaction: `now()` is its start, before the rows are read, as the agent's SQL
+    # read of the gap had it (`pgListener.ts` GUARD).
+    with pool.connection() as conn, conn.transaction():
         rows = conn.execute(
             "SELECT seq, event_id, payload, logged_at FROM events"
             " WHERE seq > %s ORDER BY seq DESC LIMIT %s",
@@ -384,6 +388,27 @@ class RunStep(_Answer):
     session_id: str | None
 
 
+def _kept(model: type[BaseModel], entries: list[dict[str, Any]], run_id: str) -> list[Any]:
+    """The entries ``model`` takes; a malformed one is logged and left out, so one bad entry
+    of a run's projection never fails the whole answer (the agent's SQL read passed it on)."""
+    kept: list[Any] = []
+    for entry in entries:
+        try:
+            kept.append(model.model_validate(entry))
+        except ValidationError:
+            logger.warning("left out a malformed %s of flow run %s", model.__name__, run_id)
+    return kept
+
+
+def _run_entries(row: dict[str, Any], calls: str = "waiting_on") -> dict[str, Any]:
+    """``row`` with its parked calls (under ``calls``) and steps each checked by `_kept`."""
+    return {
+        **row,
+        calls: _kept(WaitingCall, row[calls], row["id"]),
+        "steps": _kept(RunStep, row["steps"], row["id"]),
+    }
+
+
 class RequestedGrant(_Answer):
     id: str
     created_at: datetime
@@ -410,7 +435,9 @@ class QueueRunAnswer(_Answer):
 @router.get("/flow-runs/{run_id}/queue", name="crud_agent_flow_run_queue")
 async def flow_run_queue(run_id: RunId, state: StateDep) -> QueueRunAnswer:
     found = await asyncio.to_thread(agent_reads.run_queue, state.settings_store.pool, run_id)
-    return QueueRunAnswer(run=None if found is None else QueueRun.model_validate(found))
+    return QueueRunAnswer(
+        run=None if found is None else QueueRun.model_validate(_run_entries(found))
+    )
 
 
 class RunSteps(_Answer):
@@ -421,7 +448,7 @@ class RunSteps(_Answer):
 @router.get("/flow-runs/{run_id}/steps", name="crud_agent_flow_run_steps")
 async def flow_run_steps(run_id: RunId, state: StateDep) -> RunSteps:
     steps = await asyncio.to_thread(agent_reads.run_steps, state.settings_store.pool, run_id)
-    return RunSteps.model_validate({"steps": steps})
+    return RunSteps(steps=_kept(RunStep, steps, run_id))
 
 
 class WaitingRun(_Answer):
@@ -443,7 +470,7 @@ class WaitingRuns(_Answer):
 @router.get("/flow-runs/waiting", name="crud_agent_flow_runs_waiting")
 async def flow_runs_waiting(state: StateDep) -> WaitingRuns:
     runs = await asyncio.to_thread(agent_reads.waiting_runs, state.settings_store.pool)
-    return WaitingRuns.model_validate({"runs": runs})
+    return WaitingRuns.model_validate({"runs": [_run_entries(run) for run in runs]})
 
 
 class ParentHopRun(_Answer):
@@ -484,7 +511,9 @@ async def flow_parent_hop_approvals(
         agent_reads.parent_hop_approvals, state.settings_store.pool, after, limit
     )
     runs = [
-        ParentHopRun.model_validate({k: v for k, v in row.items() if k != "updated_at"})
+        ParentHopRun.model_validate(
+            _run_entries({k: v for k, v in row.items() if k != "updated_at"}, "calls")
+        )
         for row in rows
     ]
     last = rows[-1] if len(rows) == limit else None

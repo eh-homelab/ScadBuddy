@@ -600,14 +600,28 @@ class ModelColours(BaseModel):
     filaments: list[PublicFilament]
 
 
-@router.get("/models/colours", name="crud_storefront_model_colours")
+@router.get(
+    "/models/colours",
+    name="crud_storefront_model_colours",
+    # The listing picker's finish and maker (#6152) are not the form's: it keeps its four
+    # fields (`storefront/routes.py` `FILAMENT_FIELDS`).
+    response_model_exclude={"filaments": {"__all__": {"subtype", "brand"}}},
+)
 async def model_colours(orders: OrdersDep, _visitor: Visitor, _client: StoreClient) -> ModelColours:
     """The filaments a customer may ask for on an own-model request; the request takes at
     most `MAX_COLOUR_CHOICES` of their ids (`model_requests._checked_colours`)."""
     filaments = await asyncio.to_thread(_filaments, orders)
     return ModelColours(
         filaments=[
-            PublicFilament(id=f.id, colour=f.colour, colour_name=f.colour_name, material=f.material)
+            PublicFilament(
+                id=f.id,
+                colour=f.colour,
+                colour_name=f.colour_name,
+                material=f.material,
+                alpha=f.alpha,
+                extra_colours=f.extra_colours,
+                effect=f.effect,
+            )
             for f in filaments.values()
         ]
     )

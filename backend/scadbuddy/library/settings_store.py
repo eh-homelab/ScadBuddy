@@ -94,6 +94,7 @@ from scadbuddy.library.asset_fetch import DEFAULT_ASSET_FETCH_DOMAINS, normalise
 from scadbuddy.library.catalogue import PrintSequence
 from scadbuddy.orders.message_models import MessagingBinding
 from scadbuddy.orders.money import DepositRule, ShippingOption
+from scadbuddy.orders.storefront.slice_profile import StorefrontSliceProfile
 from scadbuddy.render.pg_store import MIGRATION_LOCK, migrate
 
 logger = logging.getLogger(__name__)
@@ -309,9 +310,11 @@ class ModelPrintChoices(BaseModel):
     the template's or the process's. ``part_settings`` are its slicer settings per
     filament slot (#5627, ``bambuddy/part_settings.py``), a model's or a library file's
     (#5628). Kept per model or file only, never at the print options' global or printer
-    scope, since a slot number means one file's colour. All default to "nothing remembered", so
-    a settings file written before them still loads; an empty ``nozzles`` means the
-    dialog's default.
+    scope, since a slot number means one file's colour. ``force_colour_match`` is the
+    spool step's "Wait for the right colour" (#6218), kept beside the spools it applies
+    to; ``None`` is nothing remembered, which the dialog and the agent read as on. All
+    default to "nothing remembered", so a settings file written before them still loads;
+    an empty ``nozzles`` means the dialog's default.
     """
 
     printer_id: int | None = None
@@ -323,6 +326,7 @@ class ModelPrintChoices(BaseModel):
     process_name: str | None = Field(default=None, max_length=200)
     print_sequence: PrintSequence | None = None
     part_settings: PartSettingsMap | None = None
+    force_colour_match: bool | None = None
 
     @field_validator("part_settings")
     @classmethod
@@ -484,6 +488,9 @@ class StoredSettings(BambuddyIds):
     #: The messaging plugin tool bound to "customer messages" (#5660); ``None`` is none,
     #: so `order_notify_customer` only composes. No secret: the plugin's stay in the agent.
     orders_customer_messaging: MessagingBinding | None = None
+    #: The shop slice profile (#6153): the printer and a spool per material a storefront
+    #: variant is sliced with. ``None`` slices nothing, so no visitor sees a price.
+    storefront_slice_profile: StorefrontSliceProfile | None = None
 
     #: Options scope (a model slug, or ``library:<file id>``, #1754) -> what the picker
     #: chose, set one at a time (:meth:`SettingsStore.set_model_choices`,
@@ -611,6 +618,19 @@ class StoredSettings(BambuddyIds):
             return MessagingBinding.model_validate(value)
         except ValidationError:
             logger.warning("unreadable messaging binding")
+            return None
+
+    @field_validator("storefront_slice_profile", mode="before")
+    @classmethod
+    def _readable_profile(cls, value: Any) -> Any:
+        """A profile this version cannot read (#6153) is none, so it cannot stop the
+        settings loading; the storefront then shows no price."""
+        if value is None:
+            return None
+        try:
+            return StorefrontSliceProfile.model_validate(value)
+        except ValidationError:
+            logger.warning("unreadable storefront slice profile")
             return None
 
     @field_validator("model_print_choices", mode="before")
@@ -783,6 +803,8 @@ class SettingsPatch(BaseModel):
     storefront_payment_instructions: str | None = Field(default=None, max_length=2000)
     #: ``null`` unbinds the messaging plugin (#5660).
     orders_customer_messaging: MessagingBinding | None = None
+    #: ``null`` removes the shop slice profile (#6153).
+    storefront_slice_profile: StorefrontSliceProfile | None = None
 
     # -- the runtime settings (#322), each env-seeded ---------------------------------
     render_timeout: float | None = None
@@ -843,6 +865,7 @@ class SettingsPatch(BaseModel):
     storefront_renders_per_minute: int | None = None
     storefront_renders_per_day: int | None = None
     storefront_render_concurrency: int | None = None
+    storefront_slices_concurrent: int | None = None
     storefront_draft_ttl_days: int | None = None
     storefront_requests_enabled: bool | None = None
     #: The storefront's mail (#5283); the password is sealed apart, never a setting.

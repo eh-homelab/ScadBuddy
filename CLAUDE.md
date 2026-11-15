@@ -286,6 +286,9 @@ The Go and Rust commands and toolchain notes: `tools/go/CLAUDE.md`, `workers/rus
   the links in `docs/`, `README.md`, this file, every per-directory `CLAUDE.md` and every `SKILL.md` still resolve.
 - Required checks on `main`: **`CI Summary`** and **`claude-review`** (the ruleset
   lives in eh-homelab/clusters, so renaming either job breaks the gate silently).
+  A script that reads the gate: `claude-review` is a commit status (`gh pr view --json
+  statusCheckRollup` gives it `.state`, not `.conclusion`), and the gate's outstanding
+  findings are in the PR comment marked `<!-- merge-gate-sticky -->`.
 - `claude-review` is a merge gate: the review runs after CI and sorts its findings into
   `## Blocking` and `## Non-blocking`; a classifier passes only when every Blocking
   finding in the review for *this* commit is fixed or tracked in an open `pr-feedback`
@@ -321,3 +324,5 @@ The Go and Rust commands and toolchain notes: `tools/go/CLAUDE.md`, `workers/rus
 - Frontend vitest tests can time out when the machine is under heavy load (e.g.
   several builds or agents at once). Re-run before debugging; a failure that repeats
   on an idle machine is real.
+- Backend: `test_a_cancelled_slice_is_recorded_cancelled` can error with
+  `httpx.ReadTimeout` on a slow runner (#6301). Re-run the shard.

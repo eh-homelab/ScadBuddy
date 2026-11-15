@@ -84,6 +84,33 @@ describe('CrudAreas', () => {
     expect(logs[0]).toContain('no CRUD route answered its areas (HTTP 404)')
   })
 
+  it("names a refused credential, apart from waiting for an older pod (#6234 review)", async () => {
+    const logs: string[] = []
+    let status = 404
+    const fetchAreas: typeof fetch = async () => new Response('', { status, headers: status === 404 ? {} : { 'x-scadbuddy-crud': '1' } })
+    const areas = new CrudAreas(BASE, { fetch: fetchAreas, wanted: READ_AREAS, log: (m) => logs.push(m) })
+    await areas.refresh()
+    status = 401
+    await areas.refresh()
+    await areas.refresh()
+    expect(logs).toHaveLength(2)
+    expect(logs[1]).toContain("the backend refused the agent's service credential (HTTP 401)")
+  })
+
+  it("keeps a proxy's 401 apart from the route's, and logs a varying detail once", async () => {
+    const logs: string[] = []
+    let answer = (): Response => new Response('', { status: 401 })
+    const areas = new CrudAreas(BASE, { fetch: async () => answer(), wanted: READ_AREAS, log: (m) => logs.push(m) })
+    await areas.refresh()
+    expect(logs[0]).toContain('no CRUD route answered its areas (HTTP 401)')
+    expect(logs[0]).not.toContain('service credential')
+    let n = 0
+    answer = () => new Response(JSON.stringify({ detail: `request ${n++}` }), { status: 503, headers: { 'x-scadbuddy-crud': '1' } })
+    for (let i = 0; i < 5; i++) await areas.refresh()
+    expect(logs).toHaveLength(2)
+    expect(logs[1]).toContain('HTTP 503: request 0')
+  })
+
   it('reads again with back-off from the start until they are listed', async () => {
     let calls = 0
     const fetchAreas = api([

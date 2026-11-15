@@ -32,6 +32,8 @@ interface RunInput {
   plan: SlotChoice[]
   /** Whether `plan` differs from the suggestion, so it is worth remembering (#78). */
   planChanged: boolean
+  /** #6218 — Bambuddy's queue waits for each slot's colour; remembered with the spools. */
+  forceColourMatch?: boolean
   /** `null` leaves the quantity to the remembered options (#124). */
   copies: number | null
   /**
@@ -92,6 +94,7 @@ export function printRunBody({
   printerId,
   registryPrinter = null,
   plan,
+  forceColourMatch = true,
   printChoices,
   copies,
   plate,
@@ -110,6 +113,8 @@ export function printRunBody({
   /** #3823 — sent as `printer`, beside `printer_id`, so a backend of either age reads it. */
   registryPrinter?: string | null
   plan: SlotChoice[]
+  /** #6218 — sent as the plan's `force_colour_match`; on unless switched off. */
+  forceColourMatch?: boolean
   printChoices: NonNullable<ReturnType<typeof printChoicesOf>>
   copies: number | null
   plate: PlateChoice
@@ -127,7 +132,7 @@ export function printRunBody({
   return {
     ...(registryPrinter ? { printer: registryPrinter } : {}),
     printer_id: printerId,
-    filament_plan: { slots: plan, force_colour_match: false },
+    filament_plan: { slots: plan, force_colour_match: forceColourMatch },
     choices: printChoices,
     ...(copies === null ? {} : { copies }),
     ...plateFields(plate),
@@ -154,6 +159,7 @@ export function useRunPrint({
   selection,
   plan,
   planChanged,
+  forceColourMatch = true,
   copies,
   projectId,
   folderId = null,
@@ -206,6 +212,7 @@ export function useRunPrint({
     processName,
     bedType,
     plan,
+    forceColourMatch,
     overrides,
     printerId,
     platesKey,
@@ -223,9 +230,10 @@ export function useRunPrint({
 
   /**
    * #78 / spec §7 — what this model reopens on next time: the printer, the nozzles,
-   * tier and process, the print sequence (#4970), the settings per slot (#5627), and the
-   * spools where they differ from the suggestion (re-sending the suggestion is not a
-   * choice). Best effort, and only once the print has started.
+   * tier and process, the print sequence (#4970), the settings per slot (#5627), whether
+   * the queue waits for each slot's colour (#6218), and the spools where they differ from
+   * the suggestion (re-sending the suggestion is not a choice). Best effort, and only
+   * once the print has started.
    */
   function rememberChoices() {
     const last = choices?.model_choices
@@ -239,6 +247,7 @@ export function useRunPrint({
       tier,
       process_name: processName,
       print_sequence: printSequence,
+      force_colour_match: forceColourMatch,
     }
     const before = {
       printer_id: last?.printer_id ?? null,
@@ -248,6 +257,8 @@ export function useRunPrint({
       tier: last?.tier ?? null,
       process_name: last?.process_name ?? null,
       print_sequence: last?.print_sequence ?? null,
+      // Nothing remembered reads as on (#6218), so the default alone writes nothing.
+      force_colour_match: last?.force_colour_match ?? true,
     }
     // #5627: the settings per slot compared by what they set, not by key order.
     if (JSON.stringify(next) === JSON.stringify(before) && samePartSettings(partSettings, last?.part_settings)) return
@@ -280,6 +291,7 @@ export function useRunPrint({
           printerId,
           registryPrinter,
           plan,
+          forceColourMatch,
           printChoices,
           copies,
           plate,

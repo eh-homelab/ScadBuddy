@@ -354,7 +354,7 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     // A new listing mounts with none ticked, so the list is open until the defaults land.
     expect(await screen.findByRole('switch', { name: 'Customer can change Plate' })).toBeChecked()
     const colours = screen.getByRole('group', { name: 'Colours on offer' })
-    await waitFor(() => expect(within(colours).queryByRole('checkbox')).toBeNull())
+    await waitFor(() => expect(within(colours).queryByRole('list')).toBeNull())
     expect(colours).toHaveTextContent(/\d+ ticked \(/)
   })
 
@@ -375,7 +375,7 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     release()
     const colours = screen.getByRole('group', { name: 'Colours on offer' })
     await waitFor(() => expect(colours).toHaveTextContent(/1 ticked \(PLA /))
-    expect(within(colours).queryByRole('checkbox')).toBeNull()
+    expect(within(colours).queryByRole('list')).toBeNull()
   })
 
   describe('says what the price book holds once it has answered, whatever the defaults do (#6292 review)', () => {

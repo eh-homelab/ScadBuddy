@@ -122,8 +122,15 @@ function PlateModel({ url, colors, cutAt, onHeight }: Omit<Props, 'background'>)
         const own = material.clone() as THREE.MeshStandardMaterial
         own.userData.designColor = designColorOf(mesh, own)
         own.side = THREE.DoubleSide
-        // A translucent filament's part draws see-through, as in the Customize preview.
-        if (opacity < 1) seeThrough(own, opacity)
+        if (opacity < 1) {
+          // A translucent filament's part draws see-through, as in the Customize preview
+          // and the covers: its front faces only, one layer over what is behind it. So
+          // the Layers view's cut (`cutAt`) shows no inner wall of such a part, where an
+          // opaque part's `DoubleSide` does. That is on purpose: back faces would blend
+          // in as a second layer and draw it more opaque than the preview (#6289 review).
+          own.side = THREE.FrontSide
+          seeThrough(own, opacity)
+        }
         return own
       })
       mesh.material = Array.isArray(mesh.material) ? owned : owned[0]!

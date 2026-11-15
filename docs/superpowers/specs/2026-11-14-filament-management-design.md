@@ -1,6 +1,6 @@
 # Filament management in ScadBuddy
 
-Date: 2026-11-14. Status: draft for the owner's approval.
+Date: 2026-11-14. Status: approved by the owner on 2026-11-14. Epic: #6260.
 
 ## 1. Intent
 
@@ -564,23 +564,24 @@ Every item needs an SB equivalent:
 
 ## 12. Phases
 
-Each phase ships as its own PRs under one epic issue.
+Epic: [#6260](https://github.com/eh-homelab/ScadBuddy/issues/6260). Each sub-issue ships as its own PRs. "After" lists the issues
+that block it (GitHub's blocked-by links hold the same graph).
 
-1. Data model (§5.1-5.6, without purchasing), editable catalogs, Filament
-   section, spool edit page,
-   migration of `native_spools` and `physical_spools`, Settings clean-up.
-   Also in phase 1: a one-time **BB import** and a scheduled **BB→SB pull**
-   (§8.1 matching), so SB's spools are complete and current from the first day.
-   The print dialog, orders and agent tools switch to SB spools in the same
-   phase; the provider overlay is removed. The price book editor moves to
-   Filament → Types: cost per kg is on the type, and the price book view keeps
-   the existing `filaments` ids so quotes and job cost keep working.
-2. Capture from events (§6).
-3. RFID: tags, bindings, overrides, NTAG through SpoolBuddy (§7).
-4. Sync engine: SB→BB push and two-way (§8).
-5. Purchasing and the invoice import flow (§5.8, §9), the `filament` skill.
-6. AMS weight sync and scale input in the UI; location sensors; metrics and
-   the Grafana panel (§5.7); parity sweep against §11.
+| Phase | Issue | Builds | After |
+|---|---|---|---|
+| 1 | [#6261](https://github.com/eh-homelab/ScadBuddy/issues/6261) | Data model: catalogs, types, instances, RGBA, tags, ledger, locations (§5.1-5.6); migration of `native_spools`, `physical_spools` and `native_spool_uses`; one-time BB import and scheduled BB→SB pull (§8.1); the price book as a view over types that keeps the `filaments` ids | - |
+| 1 | [#6262](https://github.com/eh-homelab/ScadBuddy/issues/6262) | Filament section, spool edit page, Settings clean-up (§10); the print dialog, orders and agent tools read SB spools, and the provider overlay is removed | [#6261](https://github.com/eh-homelab/ScadBuddy/issues/6261) |
+| 2 | [#6263](https://github.com/eh-homelab/ScadBuddy/issues/6263) | Capture from tray changes and prints (§6) | [#6261](https://github.com/eh-homelab/ScadBuddy/issues/6261) |
+| 3 | [#6264](https://github.com/eh-homelab/ScadBuddy/issues/6264) | RFID: tags, bindings, overrides, NTAG through SpoolBuddy (§7) | [#6261](https://github.com/eh-homelab/ScadBuddy/issues/6261) |
+| 4 | [#6265](https://github.com/eh-homelab/ScadBuddy/issues/6265) | Sync engine: SB→BB push and two-way (§8) | [#6261](https://github.com/eh-homelab/ScadBuddy/issues/6261), [#6264](https://github.com/eh-homelab/ScadBuddy/issues/6264) |
+| 5 | [#6266](https://github.com/eh-homelab/ScadBuddy/issues/6266) | Suppliers, supplier products, price sheets, invoices (§5.8) | [#6261](https://github.com/eh-homelab/ScadBuddy/issues/6261) |
+| 5 | [#6267](https://github.com/eh-homelab/ScadBuddy/issues/6267) | Invoice import flow, profile-fetch worker, `filament` plugin skill (§9) | [#6266](https://github.com/eh-homelab/ScadBuddy/issues/6266) |
+| 6 | [#6268](https://github.com/eh-homelab/ScadBuddy/issues/6268) | AMS weight sync, scale input, location sensors (§6, §5.6) | [#6263](https://github.com/eh-homelab/ScadBuddy/issues/6263) |
+| 6 | [#6269](https://github.com/eh-homelab/ScadBuddy/issues/6269) | History timeline, metrics, Grafana panel (§5.7) | [#6263](https://github.com/eh-homelab/ScadBuddy/issues/6263) |
+| 6 | [#6270](https://github.com/eh-homelab/ScadBuddy/issues/6270) | Parity sweep against §11 | all of the above |
+
+[#6209](https://github.com/eh-homelab/ScadBuddy/issues/6209) (the price book keeps alpha, colour stops and effect) is a sub-issue
+of the epic; [#6261](https://github.com/eh-homelab/ScadBuddy/issues/6261)'s RGBA rule covers it.
 
 ## 13. Left to the builder
 

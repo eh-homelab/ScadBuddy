@@ -17,8 +17,14 @@ function filament(id: string, colour: string, colour_name: string): Filament {
     brand: null,
     colour_name,
     colour,
+    alpha: 255,
+    extra_colours: [],
+    effect: null,
+    colour_source: 'manual',
+    spool_linked: false,
     cost_per_kg: '20',
     density_g_cm3: '1.24',
+    density_profile: null,
     archived_at: null,
     created_at: '2026-11-01T00:00:00Z',
     updated_at: '2026-11-01T00:00:00Z',
@@ -78,10 +84,10 @@ describe('ListingEditor (#5282, #6131)', () => {
   it('folds the colours on offer to a count after the settings, and opens them (#6290)', async () => {
     const { user } = renderPage(<Harness seen={[]} />)
     const colours = screen.getByRole('group', { name: 'Colours on offer' })
-    expect(within(colours).queryByRole('checkbox')).toBeNull()
+    expect(within(colours).queryByRole('list')).toBeNull()
     expect(colours).toHaveTextContent(/: \d+ ticked \(/)
     await user.click(within(colours).getByRole('button', { name: 'Show all 3 filaments' }))
-    expect(within(colours).getAllByRole('checkbox')).toHaveLength(3)
+    expect(within(colours).getAllByRole('listitem')).toHaveLength(3)
     // After the settings in the page.
     const settings = screen.getByRole('region', { name: 'Settings' })
     expect(settings.compareDocumentPosition(colours) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
@@ -108,11 +114,11 @@ describe('ListingEditor (#5282, #6131)', () => {
     }
     const { user } = renderPage(<Untouched />)
     const colours = screen.getByRole('group', { name: 'Colours on offer' })
-    expect(within(colours).getAllByRole('checkbox')).toHaveLength(3)
+    expect(within(colours).getAllByRole('listitem')).toHaveLength(3)
     await user.click(within(colours).getByRole('checkbox', { name: 'PLA Red' }))
     await user.click(within(colours).getByRole('checkbox', { name: 'PLA Ocean' }))
     // Still open under the person's hand.
-    expect(within(colours).getAllByRole('checkbox')).toHaveLength(3)
+    expect(within(colours).getAllByRole('listitem')).toHaveLength(3)
     expect(last(seen).colours).toEqual(['f1', 'f2'])
   })
 
@@ -125,7 +131,7 @@ describe('ListingEditor (#5282, #6131)', () => {
     // The book and the defaults land: ticked, so it folds.
     rerender(<ListingEditor {...props} draft={{ ...draft, colours: ['f1'] }} filaments={[RED, BLUE]} coloursSettled={true} />)
     const colours = screen.getByRole('group', { name: 'Colours on offer' })
-    expect(within(colours).queryByRole('checkbox')).toBeNull()
+    expect(within(colours).queryByRole('list')).toBeNull()
     expect(colours).toHaveTextContent('1 ticked (PLA Red)')
   })
 

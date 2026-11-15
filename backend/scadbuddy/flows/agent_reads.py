@@ -52,22 +52,24 @@ def _text(value: Any) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _objects(raw: Any) -> list[dict[str, Any]]:
+    """The JSON objects of a list; none when ``raw`` is not a list. Anything else in it is
+    no entry (the route checks each object's fields, `api/crud_agent.py` `_kept`)."""
+    return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+
+
 def waiting_entry(raw: Any) -> dict[str, Any]:
     """A parked call's fields the agent reads."""
     entry = {name: raw.get(name) for name in WAITING_FIELDS}
     entry["proposed"] = raw.get("proposed") is True
     hops = raw.get("hops")
-    entry["hops"] = [
-        {name: h.get(name) for name in HOP_FIELDS} for h in (hops if isinstance(hops, list) else [])
-    ]
+    entry["hops"] = [{name: h.get(name) for name in HOP_FIELDS} for h in _objects(hops)]
     return entry
 
 
 def steps_of(raw: Any) -> list[dict[str, Any]]:
     """A run's steps, the fields the agent reads; none when ``steps`` is not a list."""
-    return [
-        {name: s.get(name) for name in STEP_FIELDS} for s in (raw if isinstance(raw, list) else [])
-    ]
+    return [{name: s.get(name) for name in STEP_FIELDS} for s in _objects(raw)]
 
 
 def run_starter(pool: Pool, run_id: str, execution: str) -> dict[str, Any] | None:
@@ -140,7 +142,7 @@ def _run_fields(row: DictRow) -> dict[str, Any]:
         "status": row["status"],
         "workflow_run_id": row["workflow_run_id"],
         "starter_session": _text(by.get("session")),
-        "waiting_on": [waiting_entry(w) for w in waiting],
+        "waiting_on": [waiting_entry(w) for w in _objects(waiting)],
         "steps": steps_of(row["steps"]),
     }
 
@@ -218,7 +220,7 @@ def parent_hop_approvals(
                 "workflow_run_id": row["workflow_run_id"],
                 "session": _text(by.get("session")),
                 "principal": _text(by.get("principal")),
-                "calls": [waiting_entry(w) for w in row["calls"]],
+                "calls": [waiting_entry(w) for w in _objects(row["calls"])],
                 "steps": steps_of(row["steps"]),
                 "updated_at": row["updated_at"],
             }

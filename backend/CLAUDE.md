@@ -116,6 +116,12 @@ but an api module after a non-api module that itself follows an api module loses
 `tests/api/conftest.py`: `uv run --frozen pytest tests/api/test_health.py
 tests/test_config.py tests/api/test_jobs.py` errors at setup of `test_jobs.py`'s tests
 with `fixture 'client' not found`. Put the `tests/api/` paths together.
+A test's result must not depend on runner speed or the date. A retry budget gets an
+injected clock (`CrudClient(clock=..., sleep=...)`, a fake `sleep` that advances it):
+on the real clock a slow runner spent a 0.5 s budget in one try (#6252, #6294). A
+"today" is read at each call, never at import: a shard that loads before midnight UTC
+and makes orders after it dated every fake deposit a day early (#6307). A shard builds
+in about 4 minutes and tests in 25 to 36; `backend-pytest`'s limit is 55 (#6288).
 Renders run on Temporal, and `SCADBUDDY_TEMPORAL_ADDRESS` is required (#546), like
 `SCADBUDDY_DATABASE_URL`; `python -m scadbuddy.worker` is the worker (or
 `SCADBUDDY_TEMPORAL_WORKER_INPROCESS=true` for a one-process dev run). A `Settings` for
@@ -133,8 +139,13 @@ would be joined by the next test that renders it. The dev server's store is a SQ
 file (on `/dev/shm` when it has room): in memory it was lost mid-session under load.
 Backend schema changes are new files in `backend/scadbuddy/migrations/`
 (`<yyyymmdd>T<hhmm>Z_<slug>.sql`, UTC; never edit a merged one); the settings tables are
-`20260928T0840Z_settings.sql`. The only place a real `openscad` exists is the image:
+`20260928T0840Z_settings.sql`. A one-off fix of named rows belongs in a migration only when
+no route can make it and the new code would act wrongly on those rows before it ran; guard
+each row by its id and the values it must still have, so the file is a no-op elsewhere
+(`20261114T1607Z_filaments_alpha_effect.sql`, #6209). Otherwise make it through the API. The only place a real `openscad` exists is the image:
 `docker build --target test -t scadbuddy:test . && docker run --rm scadbuddy:test`.
+A retry or deadline test drives `CrudClient(clock=..., sleep=...)` with a fake clock that
+only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
 
 
 ## Layout
@@ -529,6 +540,22 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `SCADBUDDY_SERVICE_TOKEN_FILE` or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`; it refuses to
   start without the KEK or a proof, and ignores `SCADBUDDY_DATABASE_URL` with a warning
   (`core/settings.py` `NoDatabaseSettings`).
+- MakerWorld import (#6119, #1254): `api/makerworld.py` (`/makerworld/status`, `/resolve`,
+  `/import`) calls Bambuddy's own MakerWorld routes with the API's key
+  (`BambuddyClient.makerworld_*`; Bambuddy's 400 for a link it refuses is a 422). The
+  assistant imports only through these routes (agent `get_makerworld_status`,
+  `resolve_makerworld_url`, `import_makerworld_model`): the agent worker has no route to
+  Bambuddy and never holds its key. The `makerworld-import` flow (stored in the
+  database, not in this repo) still posts to Bambuddy's `/api/v1/makerworld/import`
+  directly until its `import_one` is changed to call `import_makerworld_model`. The import is the `makerworld_import` operation on the
+  `library` queue (`makerworld/operations.py`): Bambuddy downloads the 3MF (up to
+  `MAKERWORLD_IMPORT_TIMEOUT`), then on `library_backend` native `makerworld/imports.py`
+  copies it into the native library as a `bb_to_sb` copy does
+  (`print_library/copy.py` `copy_file_to_native`: skipped for bytes it holds), so
+  `library_file_id` is the id the order and print routes take. `folder_id` is a native
+  folder (refused 422 on `bambuddy`); `bambuddy_folder_id` is Bambuddy's, such as a print
+  project's `folder_id`. A resolve on native maps Bambuddy's earlier imports to native
+  files by SHA-256.
 - Import print (#4698): `bambuddy/print_import.py` finds every place an archive's 3MF can
   be (the archive's file and slicer project, Bambuddy library files by name and hash, the
   printer's storage only when asked) and reads the one chosen; `api/print_imports.py`
@@ -1392,6 +1419,39 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   by a subtype's name. A density read Bambuddy refuses leaves the density
   empty and fails nothing. `filaments.density_profile` keeps where it came from; a
   person's density clears it. An estimate reads only the record's own density.
+  A record's whole colour (#6209, migration `20261114T1607Z_filaments_alpha_effect.sql`):
+  `colour` stays `#RRGGBB` (the render splits parts by it; a clear filament is its RGB with
+  `alpha` 0), beside `alpha`, `extra_colours` (at most 8 stops) and `effect` (Bambuddy's
+  `effect_type` set), all on `Filament` and the storefront's `PublicFilament`.
+  `colour_source` is `import` or `manual`: a look sent by a person that differs from the
+  record's makes it `manual`, and the import never sets a `manual` record's look;
+  `colour_source: "import"` in a PATCH hands it back; the editor's "Use spool colour"
+  sends it only for a record an import linked to spools (`Filament.spool_linked`:
+  `spool_colour` or `spool_ids` set). The import matches only a record of
+  the group's material, subtype and brand: by its link to the group's spools (`spool_ids`),
+  else by the spools' RGB (`spool_colour`, then `colour`), never by a colour a person set, so
+  it makes no duplicate, and a spool whose material was corrected is another filament's
+  (`spool_import.py` `_matches`, in three passes over every group, so the groups' order
+  never decides: a record linked to a group whose RGB its spools had, then a record linked
+  to any group's spools, then a record by colour (`_by_colour`); a spool link always wins
+  over a colour. `_movers` picks the matched `import` records whose colour changes and
+  whose new RGB no staying record of their names holds (a record held back stays too,
+  until none changes); the import parks them out of the identity index
+  (`OrderStore.park_filaments`, `archived_at` set inside its transaction) and puts each
+  back with its new colour (`set_import_look` `unpark`), so a chain or a swap of colours
+  settles in one import. A matched record held back keeps its whole look with
+  `colour_taken`. The matched groups are written before the new ones, and a new group
+  whose RGB is another record's colour is skipped `colour_taken`). The migration sets no
+  link (`spool_colour` NULL, `spool_ids` empty) on every existing record but two: the two
+  prod stand-ins for clear spools (ids and colours pinned in it) get `colour_source`
+  `manual` and `spool_colour` `#000000`, so the import finds them by their spools'
+  `#000000`. The next import links every other record by its own `colour`. Until that
+  first import after the deploy, a record with no link is found only by its own colour:
+  change its colour by hand before then, and the import makes a second record of its
+  spools' colour. So run "Import from spools" once after the deploy, before any colour
+  edit (#6211 review). An item
+  print's spools are matched the same way (`orders/spools.py` `_of`, the store's
+  `spool_links`), so a hand-set colour still finds its spools.
 - A customer's own models (#6133, spec 2026-11-13; migration
   `20261113T1547Z_storefront_customer_models.sql`): `orders/storefront/model_requests.py`,
   CRUD area `models`, the edge's `POST /api/store/v1/uploads` and `…/draft/models`. The files
