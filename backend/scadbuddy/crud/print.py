@@ -742,8 +742,9 @@ _refuse(RemoteUploadStore, "BambuddyUploadStore", API_ONLY)
 #: The `PrintLinkStore` methods only the API calls: the prints list and detail
 #: (`api/print_history.py`, its library linking pass `linking.link_library_prints`
 #: among them), the jobs' badges (`api/printing.py`, `api/farm.py`), an output's
-#: delete, and Import print (#4698: `api/print_imports.py`, the farm's unlinked marks, a
-#: print's import record and a model's delete). The print worker has no route for them
+#: delete, Import print (#4698: `api/print_imports.py`, the farm's unlinked marks, a
+#: print's import record and a model's delete) and the media reads' gate (``known``,
+#: `api/prints.py` `require_known_archive`). The print worker has no route for them
 #: (#5298 Task 28).
 LINKS_API_ONLY = (
     "page",
@@ -758,6 +759,7 @@ LINKS_API_ONLY = (
     "linked_among",
     "import_of",
     "import_lock",
+    "known",
 )
 #: The `PrintLinkStore` methods that only call others of its own, each of which the
 #: worker sends over a route: ``output_for`` (``linked``), ``linked_queue_items``

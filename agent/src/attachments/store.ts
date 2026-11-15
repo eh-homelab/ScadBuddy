@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Sql } from 'postgres'
 import { z } from 'zod'
-import { type SessionImage, SessionBlobs, sessionImage } from '../sessions/blobs.js'
+import { type SessionImage, SessionBlobs, type SessionImages, sessionImage } from '../sessions/blobs.js'
 import { type ImageMediaType, IMAGES_MAX, type PreviewMediaType, type UserImage } from '../sessions/images.js'
 import type { Owner } from '../sessions/protocol.js'
 
@@ -24,6 +24,10 @@ import type { Owner } from '../sessions/protocol.js'
 // the upload route (sessions/images.ts UserImageSchema: type, signature, caps)
 // before they are stored. Nothing here logs the bytes, and an error never
 // quotes them.
+//
+// Once the API lists area `attachments` (#5299 step 7), `CrudAttachmentStore` (crudStore.ts)
+// runs each method on the API's CRUD routes instead (backend api/crud_agent_blobs.py): the
+// same statements, the per-owner lock and caps in the API's transaction.
 
 /** How long an attachment waits to be sent. */
 export const ATTACHMENT_TTL_MS = 60 * 60 * 1000
@@ -83,12 +87,33 @@ type Row = {
 
 const lockKey = (owner: Pick<Owner, 'kind' | 'id'>) => `scadbuddy:ai_attachments:${owner.kind}:${owner.id}`
 
-export class AttachmentStore {
+/** The staged attachments: `AttachmentStore` over SQL, `CrudAttachmentStore` over the API's routes. */
+export interface Attachments {
+  put(owner: Owner, image: UserImage): Promise<AttachmentView>
+  resolve(owner: Owner, refs: readonly AttachmentRef[]): Promise<ResolvedAttachment[]>
+  claim(sessionId: string, owner: Owner, attachments: readonly ResolvedAttachment[]): Promise<void>
+  remove(owner: Owner, id: string): Promise<boolean>
+  sweep(): Promise<number>
+  startSweeper(everyMs: number, options?: { log?: (message: string) => void }): () => void
+}
+
+/** Runs `sweep` every `everyMs`; the returned function stops it. */
+export function startAttachmentSweeper(sweep: () => Promise<number>, everyMs: number, options: { log?: (message: string) => void } = {}): () => void {
+  const timer = setInterval(() => {
+    sweep().catch((err: unknown) => {
+      options.log?.(`attachments: sweep failed: ${err instanceof Error ? err.message : String(err)}`)
+    })
+  }, everyMs)
+  timer.unref()
+  return () => clearInterval(timer)
+}
+
+export class AttachmentStore implements Attachments {
   private readonly sql: Sql
-  private readonly blobs: SessionBlobs
+  private readonly blobs: SessionImages
   private readonly limits: AttachmentLimits
 
-  constructor(sql: Sql, options: { blobs?: SessionBlobs; limits?: Partial<AttachmentLimits> } = {}) {
+  constructor(sql: Sql, options: { blobs?: SessionImages; limits?: Partial<AttachmentLimits> } = {}) {
     this.sql = sql
     this.blobs = options.blobs ?? new SessionBlobs(sql)
     this.limits = { ttlMs: ATTACHMENT_TTL_MS, rowsMax: OWNER_ROWS_MAX, bytesMax: OWNER_BYTES_MAX, ...options.limits }
@@ -181,12 +206,6 @@ export class AttachmentStore {
 
   /** Sweeps every `everyMs`; the returned function stops it. */
   startSweeper(everyMs: number, options: { log?: (message: string) => void } = {}): () => void {
-    const timer = setInterval(() => {
-      this.sweep().catch((err: unknown) => {
-        options.log?.(`attachments: sweep failed: ${err instanceof Error ? err.message : String(err)}`)
-      })
-    }, everyMs)
-    timer.unref()
-    return () => clearInterval(timer)
+    return startAttachmentSweeper(() => this.sweep(), everyMs, options)
   }
 }

@@ -17,7 +17,7 @@ import {
   httpTierOf,
   type SavedBodies,
 } from '../harness/httpRequest.js'
-import { PgHttpBodies } from '../sessions/httpBodies.js'
+import { type HttpBodiesFor, pgHttpBodies } from '../sessions/httpBodies.js'
 import type { HttpLimits } from '../harness/httpRequest.js'
 import type { Resolver } from '../http/egress.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
@@ -116,6 +116,8 @@ export type TurnServerDeps = {
         limits?: Partial<HttpLimits>
         /** The sessions' workspaces, where `save_to_workspace` stores a body (#2496), as a classic turn's. */
         files?: WorkspaceFiles | undefined
+        /** A session's saved bodies (`PgHttpBodies` on `sql` when omitted). */
+        bodies?: HttpBodiesFor | undefined
       }
     | undefined
   /** The enabled plugin packages (`loadPackagesForRun`, as a turn's): their MCP servers offered as turn tools. */
@@ -202,7 +204,7 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
         const saveDir = path.join(http.saveRoot, context.session, 'http')
         await mkdir(saveDir, { recursive: true })
         saved = dirBodies(saveDir)
-      } else saved = new PgHttpBodies(http.sql, context.session)
+      } else saved = (http.bodies ?? pgHttpBodies(http.sql))(context.session)
       servers.push({
         name: HTTP_SERVER,
         connect: () =>

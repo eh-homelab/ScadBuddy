@@ -40,7 +40,12 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: `api/crud_agent_forget.py`). Its ``workspace`` area is every ``…/agent/workspace/*`` route:
 #: the workspace files, sealed and opened on the API, their blobs' holds and their events
 #: written in each write's transaction, a fork's copy, the move to blobs, the sweep and the
-#: reconcile (#5299 step 7; `api/crud_agent_workspace.py`). The print ``uploads``
+#: reconcile (#5299 step 7; `api/crud_agent_workspace.py`). Its ``session-blobs`` area is
+#: ``…/agent/session-blobs``, a session's images and a durable tool call's, read through a
+#: fork's chain; its ``attachments`` area is ``…/agent/attachments`` and every route under
+#: it, the images the panel stages before a turn sends them; its ``http-bodies`` area is
+#: ``…/agent/http-bodies`` and every route under it, a session's saved HTTP bodies read by
+#: range (#5299 step 7; `api/crud_agent_blobs.py`). The print ``uploads``
 #: area also covers ``…/print/slices`` and ``…/print/slice-starts`` (#5298 Task 25). Its
 #: ``previews`` area also covers ``…/print/project-targets``, ``…/print/folderless`` and
 #: ``…/print/destination-touches`` (#5298 Task 26). Its ``copy-leases`` area is
@@ -117,6 +122,9 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "mcp-tokens",
         "notify",
         "workspace",
+        "session-blobs",
+        "attachments",
+        "http-bodies",
     ],
     "intake": ["sources"],
 }

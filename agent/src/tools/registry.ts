@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import type { AttachmentStore } from '../attachments/store.js'
+import type { Attachments } from '../attachments/store.js'
 import type { StoredBlob } from '../sessions/blobs.js'
 import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
@@ -105,7 +105,7 @@ export type ToolServices = {
   /** The sessions the `sessions_*` tools act on (tools/sessions.ts, #300); none without a database. */
   sessions?: SessionManager | undefined
   /** Uploaded images `sessions_send` may name (#1941, attachments/store.ts); none without a database. */
-  attachments?: AttachmentStore | undefined
+  attachments?: Attachments | undefined
   /**
    * The assistant's workspace (#2329, workspace/store.ts): the session's files, or
    * the principal's own outside a session. The workspace_* tools refuse without it.
