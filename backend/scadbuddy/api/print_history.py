@@ -2,8 +2,9 @@
 
 A print is one Bambuddy archive linked to one of ScadBuddy's outputs (#306), to a
 Bambuddy library file ScadBuddy printed (#976), or to a model or (#6394) a native library
-file a person imported it onto (#4698, `api/print_imports.py`), keyed by the archive's id. The list is
-driven by those links (``print_links``, keyed by print subject since #1750), so an
+file a person imported it onto (#4698, `api/print_imports.py`), keyed by the archive's id.
+The list is driven by those links (``print_links``, keyed by print subject since
+#1750), so an
 archive printed from anywhere else is never listed: this is ScadBuddy's print history,
 not a copy of Bambuddy's. A library file's print has no
 template, parameters or files of ScadBuddy's: only the archive's. Bambuddy stays the source of
