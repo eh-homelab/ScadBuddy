@@ -148,19 +148,14 @@ describe('CustomizePage', () => {
   })
 
   it('says the preview must show before an add, with a retry, when the preview fails (#6152 review)', async () => {
-    let fail = false
+    // A colour the visitor set (saved), so the first render is the one that fails.
+    window.localStorage.setItem('scadbuddy.storefront.customize.l1', JSON.stringify({ v: 1, values: { base_colour: '#E8532F' }, quantity: 1 }))
     server.use(
       http.post('/api/store/v1/renders', () =>
-        fail
-          ? HttpResponse.json({ type: `${PROBLEMS}render_queue_full`, status: 503, detail: 'busy' }, { status: 503, headers: { 'Retry-After': '120' } })
-          : HttpResponse.json(DONE),
+        HttpResponse.json({ type: `${PROBLEMS}render_queue_full`, status: 503, detail: 'busy' }, { status: 503, headers: { 'Retry-After': '120' } }),
       ),
     )
-    const { user } = show()
-    await waitFor(() => expect(screen.getByTestId('preview')).toHaveAttribute('data-status', 'done'))
-    fail = true
-    await user.click(screen.getByRole('button', { name: /Base colour/ }))
-    await user.click(await screen.findByRole('radio', { name: 'Signal orange PLA' }))
+    show()
     expect(await screen.findByText('You can add it once its preview shows. Its preview could not be made: try again.')).toBeInTheDocument()
     expect(screen.queryByText('You can add it once its preview shows.')).toBeNull()
     expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument()
