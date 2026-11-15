@@ -636,9 +636,11 @@ export function PresetPicker({
 
   return (
     <div data-testid="preset-picker" className="flex flex-col gap-2 border-b px-3 py-2.5">
-      {/* #1023 — one row: the actions sit after the select, so "Save as preset…" alone
-          no longer takes a row of its own. They wrap below only when the panel is too
-          narrow for the select's minimum width beside them. */}
+      {/* #1023 — the actions sit after the select, so with no preset chosen "Save as
+          preset…" no longer takes a row of its own. They wrap below, together, when the
+          panel is too narrow for the select's minimum width beside them: in the
+          customizer's panel that is once a preset is chosen and its menu joins them
+          (e2e/presets.spec.ts checks the select stays put and they keep one row). */}
       <div data-testid="preset-bar" className="flex flex-wrap items-center gap-2">
         <Label htmlFor="preset-select" className="shrink-0 font-normal text-muted-foreground">
           Preset

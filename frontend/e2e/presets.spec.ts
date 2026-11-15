@@ -129,6 +129,35 @@ test.describe('the preset bar (#1023)', () => {
       expect(saveAs.y + saveAs.height).toBeGreaterThan(select.y)
       expect(saveAs.x).toBeGreaterThan(select.x)
     })
+
+    test(`keeps the select in place, and the buttons on one row, when a preset is chosen and edited at ${width}px`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height: 900 })
+      await page.goto('/m/name-keychain')
+      const combobox = page.getByRole('combobox', { name: 'Preset' })
+      const unchosen = await combobox.boundingBox()
+      await choose(page, combobox, 'Old engraving')
+      const saveAsButton = page.getByRole('button', { name: 'Save as preset…' })
+      const chosen = await combobox.boundingBox()
+      const before = await saveAsButton.boundingBox()
+      const more = await page.getByRole('button', { name: 'More for preset Old engraving' }).boundingBox()
+      if (!unchosen || !chosen || !before || !more) throw new Error('not laid out')
+      // The select does not move down when a preset is chosen. The panel is too narrow
+      // for the select, Save as and the preset's menu side by side, so the buttons wrap
+      // to one row under it, together.
+      expect(chosen.y).toBe(unchosen.y)
+      expect(more.y).toBe(before.y)
+
+      await page.getByRole('textbox', { name: 'Name on the tag' }).fill('Someone else')
+      await expect(page.getByRole('button', { name: 'Update' })).toBeVisible()
+      const after = await saveAsButton.boundingBox()
+      const update = await page.getByRole('button', { name: 'Update' }).boundingBox()
+      if (!after || !update) throw new Error('not laid out')
+      // Update appearing joins that row: nothing moves to another one.
+      expect(after.y).toBe(before.y)
+      expect(update.y).toBe(before.y)
+    })
   }
 })
 
