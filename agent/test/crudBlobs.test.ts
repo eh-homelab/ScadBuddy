@@ -192,6 +192,26 @@ describe('CrudAttachmentStore', () => {
     expect(await store.remove(owner, again.id)).toBe(false)
   })
 
+  it('asks for no preview of an attachment whose image is gone', async () => {
+    const api = new FakeApi()
+    const store = new CrudAttachmentStore(BASE, new CrudSessionBlobs(BASE, { fetch: api.fetch }), { fetch: api.fetch })
+    const view = await store.put(owner, userImage)
+    const resolve = api.fetch
+    // The row is listed, but its image read answers 404, as for one that expired between the reads.
+    const gone: typeof fetch = async (input, init) => {
+      const url = new URL(new Request(input, init).url)
+      if (url.pathname.endsWith('/image')) {
+        api.seen.push({ method: 'GET', path: url.pathname.slice(PREFIX.length), query: url.searchParams, parts: [] })
+        return new Response(JSON.stringify({ detail: 'gone' }), { status: 404, headers: { 'x-scadbuddy-crud': '1' } })
+      }
+      return resolve(input, init)
+    }
+    const expired = new CrudAttachmentStore(BASE, new CrudSessionBlobs(BASE, { fetch: gone }), { fetch: gone })
+    await expect(expired.resolve(owner, [{ kind: 'attachment', id: view.id }])).rejects.toMatchObject({ code: 'not_found' })
+    expect(api.seen.filter((s) => s.path.endsWith('/preview'))).toEqual([])
+    expect(api.seen.filter((s) => s.path.endsWith('/image'))).toHaveLength(1)
+  })
+
   it("reads another owner's attachment as unknown, and refuses past the caps", async () => {
     const api = new FakeApi()
     const store = new CrudAttachmentStore(BASE, new CrudSessionBlobs(BASE, { fetch: api.fetch }), { fetch: api.fetch })
