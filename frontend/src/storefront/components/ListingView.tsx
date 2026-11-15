@@ -78,6 +78,7 @@ export function ListingView({ listing, values, settled, onChange, headingLevel =
               value={values[name]}
               shown={settled?.[name] ?? plan.shown[name]}
               filaments={listing.colours}
+              materials={listing.materials}
               onChange={(next) => onChange(name, next)}
             />
           ))}

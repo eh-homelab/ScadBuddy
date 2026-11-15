@@ -14,8 +14,8 @@ import { event } from './sessions/protocol.js'
 import { getConnInfo } from '@hono/node-server/conninfo'
 import { backendReachable, createBackendClient } from './api/backend.js'
 import { AccessResolver } from './access/resolver.js'
-import { ToolListings } from './access/listings.js'
-import { AccessStore } from './access/store.js'
+import { CrudToolListings, ToolListings } from './access/listings.js'
+import { AccessStore, CrudAccessRows } from './access/store.js'
 import { createApp } from './app.js'
 import { mcpAuthSettings } from './auth/authenticate.js'
 import { OidcProvider, SettingsOidcConfigRepo } from './auth/oidc.js'
@@ -44,14 +44,21 @@ import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
 import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
 import { startCredentialGateway, stopCredentialGateway } from './gateway/server.js'
-import { endOwnSessions, PluginSessions, replicaIdentity, runPluginSessionSweep, startMark } from './plugins/pluginSessions.js'
+import {
+  CrudPluginSessions,
+  endOwnSessions,
+  type PluginSessionRows,
+  PluginSessions,
+  replicaIdentity,
+  runPluginSessionSweep,
+} from './plugins/pluginSessions.js'
 import { GitFetcher } from './plugins/packages/git.js'
 import { loadPackagesForRun, PackageInstaller, packageLoadCheck, verifiedReview, warmPackages } from './plugins/packages/install.js'
 import { reviewsByHash } from './access/packageProvider.js'
-import { PackageStore } from './plugins/packages/store.js'
+import { CrudPackageStore, type PackageRepo, PackageStore } from './plugins/packages/store.js'
 import { BuiltInTools } from './plugins/builtInTools.js'
-import { PluginOAuth } from './plugins/oauthStore.js'
-import { loadEnabledPlugins, PluginStore } from './plugins/registry.js'
+import { CrudOAuthRows, PluginOAuth } from './plugins/oauthStore.js'
+import { CrudPluginStore, loadEnabledPlugins, PluginStore, type PluginStoreLike } from './plugins/registry.js'
 import { toolSecrets } from './plugins/secrets.js'
 import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
@@ -203,15 +210,15 @@ if (!kek.ok) console.error(`secret key: ${kek.detail ?? kek.reason}; saving Clau
 
 // Rotation (spec §9, "Rotating it re-wraps the data keys only"): mount the new
 // key as SCADBUDDY_SECRET_KEY_FILE and the old one as
-// SCADBUDDY_SECRET_KEY_PREVIOUS_FILE; once migrations have applied, every row
-// sealed under the old key is re-wrapped under the new one: the Claude credentials
-// and payload keys by the API, which needs both keys mounted too (#5299 D5), the
-// rest here. Then drop the old.
+// SCADBUDDY_SECRET_KEY_PREVIOUS_FILE, here and on the API. The API re-wraps every row
+// sealed under the old key at its start (#5299 D5, steps 5 and 7, backend
+// agent_data/rotation.py); this process re-wraps nothing, and opens with the old key only
+// what its SQL fallbacks read before then. Then drop the old.
 const previousKek = config.previousSecretKeyFile
   ? await loadKek(config.previousSecretKeyFile, 'SCADBUDDY_SECRET_KEY_PREVIOUS_FILE')
   : undefined
 if (previousKek && !previousKek.ok) {
-  console.error(`previous secret key: ${previousKek.detail ?? previousKek.reason}; nothing will be re-wrapped`)
+  console.error(`previous secret key: ${previousKek.detail ?? previousKek.reason}; rows sealed under it will not open here`)
 }
 
 const database = config.databaseUrl
@@ -220,28 +227,6 @@ const database = config.databaseUrl
         console.error('the database is not ready:', (err as Error).message)
         // An edited migration is not a transient failure: stop, visibly.
         if (err instanceof MigrationChecksumError) process.exit(1)
-      },
-      afterMigrate: async (sql) => {
-        if (!previousKek?.ok || !kek.ok) return
-        // The Claude credentials, the payload keys, the Web Push keys, the notification
-        // channels' tokens and the workspace's file keys are re-wrapped by the API at its start
-        // (#5299 D5 and steps 5 and 7, backend agent_data/rotation.py), which holds the KEK they
-        // are opened with. The rest is re-wrapped here until the steps of #5299 that move those
-        // tables.
-        const plugins = await new PluginStore(sql).rewrapFrom(previousKek.kek, kek.kek)
-        if (plugins.rewrapped || plugins.failed) {
-          console.log(
-            `secret key rotation: re-wrapped ${plugins.rewrapped} plugin secret(s)` +
-              (plugins.failed ? `; ${plugins.failed} could not be opened with the previous key` : ''),
-          )
-        }
-        const grants = await new PluginOAuth(sql).rewrapFrom(previousKek.kek, kek.kek)
-        if (grants.rewrapped || grants.failed) {
-          console.log(
-            `secret key rotation: re-wrapped ${grants.rewrapped} plugin sign-in(s)` +
-              (grants.failed ? `; ${grants.failed} could not be opened with the previous key` : ''),
-          )
-        }
       },
     })
   : undefined
@@ -329,20 +314,38 @@ const oidcRepo = settings
   ? new SettingsOidcConfigRepo(settings, (detail) => console.error(`mcp auth: ${detail}`))
   : undefined
 const oidcProvider = new OidcProvider()
-const access = database ? new AccessStore(database.sql, audit) : undefined
+// Through area `access` (#5299 step 5) once the API lists it: the API runs each write's
+// transaction with its warm eviction, and a connection test holds a lease row there (#5299 D3).
+const access = database ? new AccessStore(database.sql, audit, { crud: new CrudAccessRows(crudTarget), use: storeArea('access') }) : undefined
 // What each remote source last listed (#2171): a good connection test stores it.
-const listings = database ? new ToolListings(database.sql, database.locks) : undefined
+const listings = database
+  ? new ToolListings(database.sql, database.locks, { crud: new CrudToolListings(crudTarget), use: storeArea('access') })
+  : undefined
 // Each item's effective access, read at each call (#2171): the turns' http_request and own-plugin switches.
 const accessResolver = new AccessResolver(access)
 // OAuth sign-in for remote plugins (#780): the forwarder asks it for each request's token.
-const pluginOAuth = database ? new PluginOAuth(database.sql) : undefined
-const plugins = database ? new PluginStore(database.sql, pluginOAuth ? { oauth: pluginOAuth } : {}) : undefined
+// Through area `plugins` once the API lists it (#5299 step 5): the API seals and opens the
+// header secrets and the sign-ins with its KEK, so neither needs one here from then on.
+const pluginOAuth = database
+  ? new PluginOAuth(database.sql, { remote: { crud: new CrudOAuthRows(crudTarget), use: storeArea('plugins') } })
+  : undefined
+const plugins = database
+  ? gated<PluginStoreLike>(
+      new PluginStore(database.sql, pluginOAuth ? { oauth: pluginOAuth } : {}),
+      new CrudPluginStore(crudTarget, pluginOAuth ? { oauth: pluginOAuth } : {}),
+      storeArea('plugins'),
+    )
+  : undefined
 // ScadBuddy's own tool sets as plugins (#1953): their overrides, in ai_access (#2171).
 const builtInTools = new BuiltInTools(access)
 // Plugin traffic (connection tests, and each session turn's enabled plugins)
 // goes through this loopback forwarder (plugins/forwarder.ts).
+// The upstream sessions' ledger, through area `plugin-sessions` once the API lists it.
+const pluginSessionRows = database
+  ? gated<PluginSessionRows>(new PluginSessions(database.sql), new CrudPluginSessions(crudTarget), storeArea('plugin-sessions'))
+  : undefined
 const pluginForwarder = await PluginForwarder.start({
-  ...(database ? { sessions: new PluginSessions(database.sql) } : {}),
+  ...(pluginSessionRows ? { sessions: pluginSessionRows } : {}),
   log: (message) => console.error(message),
 })
 // Every Claude Code process reaches the model through this loopback gateway, which holds the
@@ -350,7 +353,7 @@ const pluginForwarder = await PluginForwarder.start({
 await startCredentialGateway()
 // The database's clock the moment it is ready, before a turn can record a session: the pass at
 // start ends only this replica's rows older than it (plugins/pluginSessions.ts `endOwnSessions`).
-const pluginSessionMark = database ? database.untilReady().then(() => startMark(database.sql)) : undefined
+const pluginSessionMark = database && pluginSessionRows ? database.untilReady().then(() => pluginSessionRows.mark()) : undefined
 const backend = createBackendClient(
   config.backendUrl,
   globalThis.fetch,
@@ -559,7 +562,9 @@ const stopWorkspaceSweep = !role.http ? undefined : workspace?.startSweeper(WORK
 // files under <state dir>/plugins are a cache, rebuilt from the pin and
 // verified against its content hash before each load (plugins/packages/).
 // Each session turn loads the enabled ones (`packagePlugins` below).
-const pluginPackages = database ? new PackageStore(database.sql) : undefined
+const pluginPackages = database
+  ? gated<PackageRepo>(new PackageStore(database.sql), new CrudPackageStore(crudTarget), storeArea('plugin-packages'))
+  : undefined
 const packageInstaller = new PackageInstaller({ fetcher: new GitFetcher(), cacheRoot: pluginCacheDir(paths) })
 // Settings → Tools & plugins (#4757): an older stored review's items read from the cached copy
 // (read only), once per content hash; and what a turn would make of the enabled packages.
@@ -1275,7 +1280,7 @@ const stopOrphanSweep =
 // agent-tools (plugins/pluginSessions.ts); skipped, and logged, when Temporal cannot say who polls.
 const PLUGIN_SESSION_SWEEP_MS = 5 * 60_000
 const stopPluginSessionSweep =
-  database && plugins
+  database && plugins && pluginSessionRows
     ? (() => {
         const deps = { plugins, kek: kek.ok ? kek.kek : undefined, log: (message: string) => console.error(message) }
         let ownEnded = false
@@ -1284,10 +1289,10 @@ const stopPluginSessionSweep =
           // Once, first: what this hostname's previous incarnation left; nothing of this one's is live yet.
           if (!ownEnded) {
             const mark = await pluginSessionMark
-            if (mark) await endOwnSessions(database.sql, replicaIdentity(), deps, mark)
+            if (mark) await endOwnSessions(pluginSessionRows, replicaIdentity(), deps, mark)
             ownEnded = mark !== undefined
           }
-          await runPluginSessionSweep({ sql: database.sql, client: temporalClient, ...deps })
+          await runPluginSessionSweep({ ledger: pluginSessionRows, client: temporalClient, ...deps })
         }
         const run = () => void sweep().catch((err: unknown) => console.error('plugin session sweep failed:', (err as Error).message))
         run()

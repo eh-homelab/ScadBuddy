@@ -343,6 +343,23 @@ class SubmitInput(BaseModel):
     account_id: str | None = None
 
 
+@dataclass(frozen=True)
+class FirmLine:
+    """A storefront cart line's firm price at checkout (#6153): the storefront's slice
+    price of the line's variant, which the CRUD side read by the variant's key
+    (``orders/storefront/line_prices.py``), never from the browser. One unit's lines and
+    prices; the quote is for the item's quantity."""
+
+    lines: tuple[QuoteLine, ...]
+    unit_cost_minor: Money
+    unit_price_minor: Money
+    currency: str
+    printer: str | None = None
+    #: The slice's plates (`Plate` as JSON), which job cost reads; empty when the slice's
+    #: seconds or grams are not known, so they read as unknown, never as zero.
+    plates: tuple[dict[str, Any], ...] = ()
+
+
 class OrderEdit(BaseModel):
     """`PATCH /orders/{id}`: notes and the due date in any open state; the addresses
     and the typed charges, replaced whole (the auto tax row stays, ``_typed``), while
@@ -906,6 +923,7 @@ class Lifecycle:
         *,
         cart_of: str | None = None,
         conn: Conn | None = None,
+        firm: Mapping[str, FirmLine] | None = None,
     ) -> tuple[Order, str]:
         """The visitor's cart submitted as an order (#5283, spec §5.5), in one transaction
         under the order's lock (``conn``'s, as a savepoint, when given; the caller tells
@@ -923,15 +941,22 @@ class Lifecycle:
            (``orders_currency``): a cart holds no amount, so one made before the shop
            changed its currency is submitted in the new one;
         3. sets the shipping option (`_shipping_option`: `shipping_address_required` for
-           one that ships with no address), which
+           one that ships with no address), and records a `storefront` quote of each
+           line ``firm`` prices (by item id, `_firm_quotes`, #6153), which
         4. recomputes the auto tax;
-        5. applies the deposit policy (`_deposit_policy`; a deposit request opened here
-           queues no `payment_requested` mail, since no link exists yet: the order link's
-           mail leads to the page that shows it). An anonymous submit's customer is new, so
-           a ``first_order`` rule always applies to it, even when the email has ordered
-           before; the shop can change the deposit before it accepts (§8). Step 2 gave the
-           cart the shop's currency, so no rule is skipped for its currency;
-        6. stamps ``submitted_at``;
+        5. applies the deposit policy (`_deposit_policy`), unless every line is firm (the
+           customer then pays the whole total at once, step 6, #6153). A deposit request
+           opened here queues no `payment_requested` mail, since no link exists yet: the
+           order link's mail leads to the page that shows it. An anonymous submit's
+           customer is new, so a ``first_order`` rule always applies to it, even when
+           the email has ordered before; the shop can change the deposit before it
+           accepts (§8). Step 2 gave the cart the shop's currency, so no rule is
+           skipped for its currency;
+        6. stamps ``submitted_at``; when every open item has a firm quote, accepts each
+           quote and the order as the customer (`_accepted_by_the_last`), which opens the
+           balance request: the customer pays the firm total with no check by the shop
+           (#6153). Otherwise the order waits for the shop's check, and nothing is asked
+           of the customer but the deposit;
         7. makes the order link and queues its `order_link` mail to ``body.email``
            (`issue_link`, the back office's `send_customer_link` path too);
         8. with an account, attaches the order to it (`attach_order`), so it is in the
@@ -982,9 +1007,18 @@ class Lifecycle:
             )
             self._event(tx, order, customer, "order.customer_set")
             order = self._shipping_option(tx, order, customer, option_id, rules)
-            self._deposit_policy(tx, order, customer, rules)
+            order, quoted = self._firm_quotes(tx, order, customer, firm or {})
+            if quoted is None:
+                # An order the customer pays at once, in full, asks no deposit (#6153).
+                self._deposit_policy(tx, order, customer, rules)
             order = self.store.stamp_submitted(tx, order.id)
             self._event(tx, order, customer, "order.submitted", account_id=body.account_id)
+            if quoted is not None:
+                # Every line is firm (#6153): the customer's checkout accepts the prices
+                # it showed, and the order goes to payment.
+                for item, quote in quoted:
+                    order, _, _ = self._accept_quote(tx, order, item, quote, customer)
+                order = self._accepted_by_the_last(tx, order, customer)
             token = issue_link(tx, self.kek, order.id, order.label, email)
             if body.account_id is not None:
                 attach_order(tx, body.account_id, order.id)
@@ -992,6 +1026,38 @@ class Lifecycle:
         if conn is None:
             self._told(_Change(order))
         return order, token
+
+    def _firm_quotes(
+        self, conn: Conn, order: Order, by: Actor, firm: Mapping[str, FirmLine]
+    ) -> tuple[Order, list[tuple[OrderItem, Quote]] | None]:
+        """A `storefront` quote of each open model item that ``firm`` prices in the
+        order's currency (#6153), for the item's quantity and its current revision: the
+        item is `quoted`. The order as it then stands, and each item with its quote when
+        every open item has one, else None (the shop prices the others by hand). A line
+        ``firm`` does not name, a request among them, has no quote."""
+        items = [i for i in self.store.items(order.id, conn=conn) if i.status != "cancelled"]
+        quoted: list[tuple[OrderItem, Quote]] = []
+        for item in items:
+            line = firm.get(item.id)
+            if line is None or item.kind != "model" or line.currency != order.currency:
+                continue
+            quote = self.store.insert_quote(
+                conn,
+                item.id,
+                source="storefront",
+                lines=line.lines,
+                unit_cost_minor=line.unit_cost_minor,
+                unit_price_minor=line.unit_price_minor,
+                quantity=item.quantity,
+                created_by=by,
+                revision_id=item.current_revision_id,
+                printer=line.printer,
+                plates=line.plates,
+            )
+            change = self._recorded(conn, order, item, quote, by)
+            order = change.order
+            quoted.append((item, quote))
+        return order, quoted if items and len(quoted) == len(items) else None
 
     def customer_link(self, order_id: str) -> LinkState:
         """The state of the order's newest customer link (spec §5.2), never its token. A
@@ -1752,16 +1818,19 @@ class Lifecycle:
     # edit does not raise a quantity (`balance_unpaid`). A back-office order with no
     # request ships as it always did.
 
-    def _open_balance(self, conn: Conn, order: Order, by: Actor, *, reopened: bool = False) -> None:
+    def _open_balance(
+        self, conn: Conn, order: Order, by: Actor, *, reopened: bool = False, always: bool = False
+    ) -> None:
         """At acceptance, when the order has a deposit or a payment request that is not
-        cancelled, leaves one open request asking for what is not paid yet. A lone open
+        cancelled (or ``always``: a storefront customer's accept, #6153), leaves one open
+        request asking for what is not paid yet. A lone open
         `balance` request that already asks for it is kept. Otherwise every open or failed
         request is cancelled and a `balance` request for the rest opens on the default
         provider. ``reopened``: a cancelled order back past `quoted`, whose cancel ended
         every request, so any request at all says it asked for money."""
         found = payments.requests_for_order(conn, order.id)
         asked = bool(found) if reopened else any(r.status != "cancelled" for r in found)
-        if order.deposit_minor is None and not asked:
+        if order.deposit_minor is None and not asked and not always:
             return
         due = totals_of(self.store, conn, order.id).balance_minor
         live = [r for r in found if r.status in ("open", "failed")]
@@ -2831,8 +2900,10 @@ class Lifecycle:
         self._told(_Change(accepted))
         return accepted
 
-    def _accept_order(self, conn: Conn, order: Order, by: Actor) -> Order:
-        """`accept_order` in the caller's transaction, under its lock of ``order``."""
+    def _accept_order(self, conn: Conn, order: Order, by: Actor, *, balance: bool = False) -> Order:
+        """`accept_order` in the caller's transaction, under its lock of ``order``.
+        ``balance`` opens the balance request even when the order asked for no money
+        before (`_open_balance`)."""
         check_submitted(order)
         if order.status not in OPEN_FOR_EDITS:
             raise LifecycleError("order_not_acceptable", f"order {order.label} is {order.status}")
@@ -2867,7 +2938,7 @@ class Lifecycle:
         )
         accepted = self.store.set_order_status(conn, order.id, "accepted")
         self._event(conn, order, by, "order.status", from_status=order.status, to="accepted")
-        self._open_balance(conn, order, by)
+        self._open_balance(conn, order, by, always=balance)
         return accepted
 
     def _no_pending_purchase(self, conn: Conn, order: Order) -> None:
@@ -4590,7 +4661,8 @@ class Lifecycle:
 
     def _accepted_by_the_last(self, conn: Conn, order: Order, by: Actor) -> Order:
         """§6.2, decision 11: on a storefront order the accept that leaves every open item
-        `approved` accepts the order, in its transaction and as ``by``; any other order
+        `approved` accepts the order, in its transaction and as ``by``, and opens its
+        balance request even with no deposit (#6153); any other order
         waits for the shop's `accept_order`. When `accept_order` refuses (a payment in
         flight, a hold), the accept still commits: the order accept is skipped, in a
         savepoint, and the audit row ``order.accept_skipped`` names the refusal."""
@@ -4601,7 +4673,9 @@ class Lifecycle:
             return order
         try:
             with self.store.transaction(conn):
-                return self._accept_order(conn, order, by)
+                # The customer pays the rest once the order is accepted (decision 11,
+                # #6153): its balance request opens with no deposit asked before.
+                return self._accept_order(conn, order, by, balance=True)
         except LifecycleError as refusal:
             # The item's accept stands (a pending capture can last days); the shop
             # accepts the order once what refused it is gone.

@@ -369,7 +369,7 @@ as unset (`present()`).
 
 | Variable | Default | Read by | Meaning |
 |---|---|---|---|
-| `SCADBUDDY_DATABASE_URL` | unset → AI disabled | `loadConfig()` | Postgres URL, shared with the backend (#241). It must be `postgres://` or `postgresql://`; anything else is a `ConfigError` at start. The URL is not echoed in the error because it normally carries the password. With it unset the service still runs, and `/healthz` reports `"ai": "disabled (no database)"`. Each replica opens up to 4 connections in its shared pool, about 4 more of its own for plugin connection-test locks (briefly more while a failed lock connection is replaced) (`TEST_LOCK_CONNECTIONS` in [`agent/src/db.ts`](../../agent/src/db.ts), #4994) and one `LISTEN` connection: `AGENT_DB_CONNECTIONS`, 9, is what to count when sizing Postgres `max_connections`. The pool and the lock connections close after 60 s idle (`IDLE_TIMEOUT_SECONDS`, #5226), and show in `pg_stat_activity` as `scadbuddy-agent` (the listener as `scadbuddy-agent-listener`). |
+| `SCADBUDDY_DATABASE_URL` | unset → AI disabled | `loadConfig()` | Postgres URL, shared with the backend (#241). It must be `postgres://` or `postgresql://`; anything else is a `ConfigError` at start. The URL is not echoed in the error because it normally carries the password. With it unset the service still runs, and `/healthz` reports `"ai": "disabled (no database)"`. Each replica opens up to 4 connections in its shared pool, about 4 more of its own for plugin connection-test locks (briefly more while a failed lock connection is replaced) (`TEST_LOCK_CONNECTIONS` in [`agent/src/db.ts`](../../agent/src/db.ts), #4994) and one `LISTEN` connection: `AGENT_DB_CONNECTIONS`, 9, is what to count when sizing Postgres `max_connections`. Once the API lists the agent's CRUD area `access` (#5299 step 5), a connection test holds a lease row of the API's `agent_leases` (key `tool-listing:<source>`, through `…/crud/agent/leases/{key}`, #5299 D3) in place of the lock connection. The pool and the lock connections close after 60 s idle (`IDLE_TIMEOUT_SECONDS`, #5226), and show in `pg_stat_activity` as `scadbuddy-agent` (the listener as `scadbuddy-agent-listener`). |
 | `SCADBUDDY_BACKEND_URL` | `http://127.0.0.1:8080` | `loadConfig()` | Where the backend listens. Must be `http(s)`. Trailing slashes are stripped. `/healthz` probes `GET {url}/healthz` with a 2 s timeout (`backendReachable()`, [`agent/src/api/backend.ts`](../../agent/src/api/backend.ts)). |
 | `SCADBUDDY_SECRET_KEY_FILE` | unset → credentials cannot be saved | `loadKek()` in [`agent/src/secrets.ts`](../../agent/src/secrets.ts) | Path of the key-encryption key (KEK) file. See §3. |
 | `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` | unset | `main.ts`, `loadKek()` | The old KEK during a rotation. See §3.3. |
@@ -445,10 +445,10 @@ kubectl -n scadbuddy create secret generic scadbuddy-agent-kek \
   payload keys: the API seals and opens them
   ([`backend/scadbuddy/api/crud_agent_secrets.py`](../../backend/scadbuddy/api/crud_agent_secrets.py)),
   and the agent asks it whether it holds a key (`GET …/crud/agent/credentials/key`). The
-  agent's own file still opens its plugin secrets, Web Push and channel keys, plugin
-  sign-ins, and its workspace file keys while the API does not list area `workspace`
-  (#5299 step 7), until the later steps of #5299. Mount the same key
-  in both.
+  agent's own file still opens the Web Push and channel keys (area `notify`), the plugins'
+  header secrets and their sign-ins (area `plugins`, #5299 step 5) and its workspace file
+  keys (area `workspace`, #5299 step 7) only while the API does not list their areas yet,
+  until the later steps of #5299. Mount the same key in both.
 - **Keep a copy.** Each stored row records the KEK's id (the first 16 hex characters of
   SHA-256 over the key; `kekFromBase64()`). A credential sealed under a lost key cannot
   be opened. `/healthz` then reports "stored credential was sealed with a different
@@ -477,15 +477,15 @@ key, and they stop opening once the old key's mount is removed.
 3. Each one re-wraps its own tables at its start. Only the data key of a row whose
    `kek_id` is the old key's is sealed again under the new key:
    - The API, after its migrations: `ai_credentials` (the Claude credentials),
-     `ai_payload_keys` (the durable payload keys), and `ai_push_vapid`,
+     `ai_payload_keys` (the durable payload keys), `ai_push_vapid`,
      `ai_push_subscriptions` and `ai_notify_channels` (the Web Push keys and the
-     notification channels' tokens, #5299 step 5), and `ai_session_files` (the workspace's
-     principal file keys, #5299 step 7). The log line reads
-     `secret key rotation: re-wrapped the agent's credentials` (or `payload_keys`,
-     `notify`, or `session_files`), with the counts.
-   - The agent, once migrations have applied (the `afterMigrate` hook of
-     `connectDatabase()`): `ai_plugins` (plugin secrets) and `ai_plugin_oauth` (plugin
-     sign-ins). The later steps of #5299 move these to the API too.
+     notification channels' tokens, #5299 step 5), `ai_plugins` and `ai_plugin_oauth`
+     (the plugins' header secrets and sign-ins, #5299 step 5; the sign-ins under way in
+     `ai_plugin_oauth_flows` that the old key sealed are deleted, as before), and
+     `ai_session_files` (the workspace's principal file keys, #5299 step 7). The log line
+     reads `secret key rotation: re-wrapped the agent's credentials` (or `payload_keys`,
+     `notify`, `plugins` or `session_files`), with the counts.
+   - The agent re-wraps nothing itself any more.
 
    The sealed secret and `updated_at` are not touched. Each `UPDATE` is conditional on
    `kek_id`, so two pods rotating at once do not overwrite each other.
@@ -2102,6 +2102,9 @@ How the agent does it
    the resource, the issuer, the token endpoint and the client id. The forwarder asks
    for a token on every request and refreshes it shortly before it expires. The
    refresh runs under the row's lock, so replicas never spend one refresh token twice.
+   Once the API lists the agent's CRUD area `plugins` (#5299 step 5), the API seals and
+   opens them, and the refresh runs under the lease `plugin-oauth:<plugin>` on the API
+   (#5299 D3) in place of the row's lock.
    Claude Code, the browser and every route see only the sign-in's state.
 6. **Failure.** A refused refresh, or a server that refuses a renewed token, marks the
    sign-in `error` and the card shows **Sign in again**. Until then, turns run without

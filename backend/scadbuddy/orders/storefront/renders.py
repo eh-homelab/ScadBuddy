@@ -618,14 +618,39 @@ async def render_estimate(state: AppState, visitor_id: str, job_id: str) -> Stor
         return NO_PRICE
     if not await _fetch(state, job):
         return NO_PRICE if files_lost(job.id) else pending()
-    filaments = await asyncio.to_thread(_filaments, orders)
-    by_colour = _filament_for(
-        listing, filaments, owned.colours, list(job.result.colors), owned.material
+    digest, slots = await variant_of(state, listing, job, owned.colours, owned.material)
+    return await slice_estimate(
+        state,
+        reference=reference_of(listing, job),
+        model_sha256=digest,
+        filaments=slots,
     )
+
+
+async def variant_of(
+    state: AppState,
+    listing: Listing,
+    job: Job,
+    colours: Mapping[int, str],
+    material: str | None,
+) -> tuple[str, list[Filament] | None]:
+    """What the price of the done ``job`` (its files fetched, `_fetch`) rests on
+    (#6153): the sha256 of its 3MF, and the price-book filament of each slot of the
+    render (`_filament_for`, from ``colours`` and ``material``), or None when a slot's
+    colour has no listing filament. The estimate and a cart line's add both read it."""
+    assert job.result is not None
+    filaments = await asyncio.to_thread(_filaments, _orders(state))
+    by_colour = _filament_for(listing, filaments, colours, list(job.result.colors), material)
     slots = [by_colour.get(colour.casefold()) for colour in job.result.colors]
     digest = await asyncio.to_thread(model_digest, job.id, state.paths.root / job.result.model_3mf)
+    return digest, None if None in slots else [slot for slot in slots if slot is not None]
+
+
+def reference_of(listing: Listing, job: Job) -> Reference:
+    """The reference of ``job``, a render of the published ``listing``."""
     snapshot = listing.snapshot
-    reference = Reference(
+    assert snapshot is not None
+    return Reference(
         slug=listing.slug,
         commit=listing.commit,
         inputs=job.inputs,
@@ -635,9 +660,9 @@ async def render_estimate(state: AppState, visitor_id: str, job_id: str) -> Stor
             listing.slug, job.inputs, listing.commit, pipeline=snapshot.pipeline
         ),
     )
-    return await slice_estimate(
-        state,
-        reference=reference,
-        model_sha256=digest,
-        filaments=None if None in slots else [slot for slot in slots if slot is not None],
-    )
+
+
+async def fetch_files(state: AppState, job: Job) -> bool:
+    """`_fetch`: whether the done ``job``'s files are in this process's cache, after a
+    wait of at most `READY_WAIT`."""
+    return await _fetch(state, job)
