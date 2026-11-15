@@ -20,9 +20,15 @@ from typing import Annotated, Final, Literal
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from scadbuddy.library.libraries import ModelLibrary
-from scadbuddy.library.media import MediaKind
+from scadbuddy.library.media import MEDIA_ID_PATTERN, MediaKind
 from scadbuddy.orders.customer_links import MAX_LINK_CHARS
-from scadbuddy.orders.models import ChargeKind, ItemKind, OrderStatus, SubmitAddress
+from scadbuddy.orders.models import (
+    ChargeKind,
+    FilamentEffect,
+    ItemKind,
+    OrderStatus,
+    SubmitAddress,
+)
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import JobState, PlateInfo
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
@@ -65,6 +71,18 @@ MAX_LABEL_LENGTH = 200
 #: customer's (#6137).
 #: ASCII digits only, as the preview's copy (`params.ts` `EXTRUDER_NOTE`) reads them.
 EXTRUDER_NOTE: Final = re.compile(r"\s*\(\s*extruder\s*[0-9]+\s*\)", re.IGNORECASE)
+#: A support material: the shop's choice, never the customer's (#6152, owner rule
+#: 2026-11-13). The shop slice profile needs no spool for it (#6153). The page's copy
+#: is `frontend/src/storefront/params.ts` `SUPPORT_MATERIAL`, the agent's
+#: `agent/src/tools/storefrontDraft.ts` `SUPPORT_MATERIAL`: change all together.
+SUPPORT_MATERIAL: Final = re.compile(r"support|pva|bvoh|hips", re.IGNORECASE)
+#: A parameter that sets support: the shop may lock it, never offer it (#6152).
+SUPPORT_PARAM: Final = re.compile(r"support|interface", re.IGNORECASE)
+
+
+def is_support(material: str) -> bool:
+    """Whether ``material`` is a support material (`SUPPORT_MATERIAL`)."""
+    return SUPPORT_MATERIAL.search(material) is not None
 
 
 def shown_label(name: str, label: str | None, caption: str | None) -> str:
@@ -90,6 +108,10 @@ class _Bound(BaseModel):
         ]
         | None
     ) = None
+    #: The value a render takes while the customer picks none, in place of the template's
+    #: own default (#6144). Publish refuses one outside the bound; for a colour, one that
+    #: is not a listing filament's colour.
+    default: ParamValue | None = None
 
 
 class NumberBound(_Bound):
@@ -147,6 +169,9 @@ class ListingMedia(BaseModel):
     kind: MediaKind
     media_type: str
     caption: str
+    #: The template media id it was copied from (#6213); None for a listing published
+    #: before it was kept.
+    media_id: str | None = None
 
 
 class ListingInput(BaseModel):
@@ -164,6 +189,10 @@ class ListingInput(BaseModel):
     colours: list[str] = Field(default_factory=list)
     #: Ids of the template's media (``template_media``), in the order to show them.
     media_ids: list[str] = Field(default_factory=list)
+    #: Every colour of an order is of one material (#6152): each pick, the filament of
+    #: each offered colour left at its default, and every slot filament share one; else
+    #: 422 ``listing_mixed_material``.
+    one_material: bool = False
 
 
 class Listing(ListingInput):
@@ -187,6 +216,23 @@ class ListingUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     listing: ListingInput
+    updated_at: datetime
+
+
+#: How many pictures ``PUT …/listings/{id}/media`` takes (#6213).
+LISTING_MEDIA_MAX = 50
+
+
+class ListingMediaUpdate(BaseModel):
+    """``PUT …/listings/{id}/media`` (#6213): the listing's pictures, ids of its
+    template's images (and any video the listing already shows, #6290) in the order to
+    show them, and the ``updated_at`` that was read."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    media_ids: list[Annotated[str, StringConstraints(pattern=MEDIA_ID_PATTERN)]] = Field(
+        max_length=LISTING_MEDIA_MAX
+    )
     updated_at: datetime
 
 
@@ -240,6 +286,9 @@ class ListingRow(BaseModel):
     published: bool
     #: The first media id the listing shows, for the row's picture; None for none.
     media_id: str | None
+    #: Every media id the listing shows, in order (#6213): a model media's "Storefront…"
+    #: dialog sets them with the row's ``updated_at`` and reads no listing whole.
+    media_ids: list[str]
     published_at: datetime | None
     updated_at: datetime
 
@@ -283,15 +332,17 @@ class PublicNumber(NumberBound, _Shown):
 
 class PublicChoice(ChoiceBound, _Shown):
     label: str
-    #: A colour's choices are the listing filaments the price book still has, so none
+    #: A colour's choices are the listing filaments the price book still has and a
+    #: customer may pick (never a support material, `customer_filaments`, #6152), so none
     #: may be left.
     choices: list[ParamValue]
 
 
 class PublicText(TextBound, _Shown):
     label: str
-    #: The template's default text, which the design uses when the field is left blank
-    #: (#6137); null when it has none.
+    #: The value a render takes when the field is left blank (`effective_default`: the
+    #: listing's default, else the template's, #6137, #6144); null when it has none or it
+    #: is blank.
     placeholder: str | None = None
 
 
@@ -302,9 +353,23 @@ class PublicFilament(BaseModel):
     """A filament a visitor may pick: never its price."""
 
     id: str
+    #: ``#RRGGBB``: what a render splits parts by. A clear filament is its RGB with
+    #: ``alpha`` below 255 (#6209).
     colour: str
     colour_name: str | None
     material: str
+    #: The ``rgba`` alpha byte (255 opaque), the multi-colour stops (``#RRGGBB`` or
+    #: ``#RRGGBBAA``, at most 8) and Bambuddy's swatch effect, for the picker's swatch.
+    #: The backend always sends all three. They have defaults (``alpha`` null reads as
+    #: 255) so a caller that builds one without them, as the storefront's own tests do,
+    #: still type-checks: a single opaque colour with no effect.
+    alpha: int | None = None
+    extra_colours: list[str] = Field(default_factory=list)
+    effect: FilamentEffect | None = None
+    #: The finish ("Matte", "Silk", "Translucent") and the maker: what tells two filaments
+    #: of one colour name apart (#6152).
+    subtype: str | None = None
+    brand: str | None = None
 
 
 class PublicMedia(BaseModel):
@@ -323,7 +388,10 @@ class PublicListing(BaseModel):
     title: str
     description: str
     params: dict[str, PublicParam]
+    #: The listing filaments a visitor may pick: never a support material (#6152).
     colours: list[PublicFilament]
+    #: Every pick must share one material (#6152).
+    one_material: bool = False
     media: list[PublicMedia]
     updated_at: datetime
 
@@ -371,6 +439,13 @@ class RenderBody(BaseModel):
     values: dict[str, ParamValue] = Field(default_factory=dict, max_length=200)
     #: The listing filament the visitor chose for each colour slot of the render.
     colours: dict[ColourSlotIndex, str] = Field(default_factory=dict, max_length=64)
+    #: The listing filament the visitor picked for each offered colour parameter, by
+    #: parameter name (#6152). Its colour must be the parameter's value. The CRUD side
+    #: maps picks to the render's slots by colour, so the page never guesses a slot.
+    picks: dict[
+        Annotated[str, StringConstraints(max_length=200)],
+        Annotated[str, StringConstraints(max_length=200)],
+    ] = Field(default_factory=dict, max_length=200)
 
 
 class StoreRender(BaseModel):

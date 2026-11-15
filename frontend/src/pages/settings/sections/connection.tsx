@@ -263,8 +263,9 @@ export function Component() {
             data-testid="render-key-fallback"
             className="mt-1.5 rounded-lg bg-warn/10 px-2.5 py-2 text-xs ring-1 ring-warn/50"
           >
-            Render workers hold the full Bambuddy key; template code can print. Create a key with only
-            Manage Library in Bambuddy and paste it above as the render key.
+            No render key is saved. Render workers get no Bambuddy key, so their renders on the Bambuddy
+            store fail; a worker inside the API process uses the full key, and template code can print.
+            Create a key with only Manage Library in Bambuddy and paste it above as the render key.
           </p>
         )}
       </FieldRow>

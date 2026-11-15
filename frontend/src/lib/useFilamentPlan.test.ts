@@ -55,6 +55,29 @@ describe('useFilamentPlan', () => {
     }
   })
 
+  it('keeps a switched colour match through a refetch, and takes a new remembered value (#6218)', async () => {
+    const remembering = (force: boolean | null): ChoicesView => ({
+      ...choicesView,
+      model_choices: { ...choicesView.model_choices, printer_id: null, filament_plan: [], force_colour_match: force },
+    })
+    const { result, rerender } = renderHook(
+      ({ choices }: { choices: ChoicesView | null }) => useFilamentPlan(OUTPUT, choices, [1]),
+      { initialProps: { choices: remembering(null) as ChoicesView | null } },
+    )
+    await waitFor(() => expect(result.current.forceColourMatch).toBe(true))
+    act(() => result.current.setForceColourMatch(false))
+
+    // A refetch empties the choices for a moment, then reads the same value again.
+    rerender({ choices: null })
+    expect(result.current.forceColourMatch).toBe(false)
+    rerender({ choices: remembering(null) })
+    expect(result.current.forceColourMatch).toBe(false)
+
+    // A read that remembers something else resets it.
+    rerender({ choices: remembering(true) })
+    await waitFor(() => expect(result.current.forceColourMatch).toBe(true))
+  })
+
   it('seeds plate 1 from the filaments the choices read already carried, no extra fetch', async () => {
     const { result } = renderHook(() => useFilamentPlan(OUTPUT, choicesView, [1]))
     await waitFor(() => expect(result.current.filaments).not.toBeNull())

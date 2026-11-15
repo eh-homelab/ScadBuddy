@@ -509,12 +509,16 @@ export type PaymentCreate = Defaulted<Schemas['PaymentCreate'], 'notes' | 'metho
  * way an order reaches its customer at a fixed price. */
 export type DepositRule = Schemas['DepositRule']
 export type ShippingOption = Schemas['ShippingOption']
+/** #6153 — the shop slice profile: a printer and a spool per material. */
+export type StorefrontSliceProfile = Schemas['StorefrontSliceProfile']
+export type ProfileOptions = Schemas['ProfileOptions']
+export type ProfileSpool = Schemas['ProfileSpool']
 /** Orders phase 2 (#4250, spec 2026-10-18 §5): the price book, the slice quote and the
  * rough estimate. Rates are decimal strings; `minor_exponent` is the minor unit's decimal
  * places, the backend's (ISO 4217) and never `Intl`'s. */
 export type QuoteLine = Schemas['QuoteLine']
 export type Filament = Schemas['Filament']
-export type FilamentInput = Defaulted<Schemas['FilamentInput'], 'subtype' | 'brand' | 'colour_name' | 'density_g_cm3'>
+export type FilamentInput = Defaulted<Schemas['FilamentInput'], 'subtype' | 'brand' | 'colour_name' | 'density_g_cm3' | 'alpha'>
 export type FilamentPatch = Partial<Schemas['FilamentPatch']>
 /** #4625 (order operations spec 2026-11-07 §6) — a registry printer's machine rate: its
  * inputs (null with no profile) and the rate they give now, with each part of the sum. */
@@ -530,7 +534,10 @@ export type MachineRateInputs = {
 /** #5282 (spec 2026-11-02 §5.3) — a storefront listing, as the back office's Storefront page edits it. */
 /** Every field is always sent: the ones the spec marks optional have defaults. */
 export type StorefrontListing = Required<Schemas['Listing']>
-export type StorefrontListingInput = Defaulted<Schemas['ListingInput'], 'description' | 'params' | 'fixed' | 'colours' | 'media_ids'>
+export type StorefrontListingInput = Defaulted<
+  Schemas['ListingInput'],
+  'description' | 'params' | 'fixed' | 'colours' | 'media_ids' | 'one_material'
+>
 export type ListingBound = Schemas['NumberBound'] | Schemas['ChoiceBound'] | Schemas['TextBound']
 /** #6157 — one row of the back office's list, and a page of them. */
 export type StorefrontListingRow = Schemas['ListingRow']

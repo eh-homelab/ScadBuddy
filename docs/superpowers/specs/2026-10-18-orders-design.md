@@ -580,7 +580,7 @@ every quote; the filaments in a table of their own with an editor beside them):
   `archived_at`. This is the price of a filament, not a spool: `_filament_key`'s
   grouping (material, subtype, brand, colour; `bambuddy/farm.py:187-206`) is the
   identity, so with Bambuddy configured a record is matched to its spools by that key
-  (§8.3).
+  (§8.3; as built, #6209: by the record's link to its spools first, see §8.3).
 - `pricing_policy`: `machine_rate_per_hour` (decimal, may be 0), `setup_fee` (per
   plate, decimal), `labour_per_item` (decimal), `markup_percent` (decimal), `rounding`
   (`to_minor_unit`, the default: each line rounds as §3.6 says and the unit price is
@@ -658,7 +658,9 @@ any print.
 `filament_plan.slots` (F7) when it starts, on the printer it runs on:
 
 - With Bambuddy configured, a slot's spool is the one loaded on that printer whose
-  `_filament_key` is the slot's filament's (§5.1); with none loaded, the unarchived
+  `_filament_key` is the slot's filament's (§5.1; as built, #6209: by the record's link
+  to its spools first, then the spools' colour at the last import, then the record's own
+  colour, see "As built, the spools"); with none loaded, the unarchived
   spool of that filament on the shelf with the most grams left, as the print dialog's
   spool-first choice makes it (`bambuddy/filaments.py` `_display_order`). A spool
   loaded in another printer is never taken: using it means unloading it there, which
@@ -749,8 +751,9 @@ queue paths (plan 2026-11-03 "Not in this plan").
 **As built, the spools (#4251, plan 2026-11-03 Ruling 4).** `orders/spools.py`, run in
 `order_item_print`'s check, so a refusal writes nothing and the filled plan is recorded with
 the check, which keys a retry's run as its first try's. A slot's filament is matched to
-spools by the spool import's identity (§8.3): material, subtype, brand and `#RRGGBB`,
-upper-cased. The run's printer is the request's `printer_id`, else its registry printer's
+spools as the spool import matches them (§8.3, as built #6209): the same material, subtype
+and brand, upper-cased, and the record's link to the spool (`spool_ids`), else the spools'
+`#RRGGBB` at the last import (`spool_colour`), else the record's own `colour`. The run's printer is the request's `printer_id`, else its registry printer's
 Bambuddy id. A spool named only by its colour's name is never taken. On the native path,
 and for a slot the item names no filament for, the plan stays as the request gave it.
 
@@ -1237,7 +1240,8 @@ Agent tools `order_attempt_archives` (read) and `order_attempt_copy` (write).
 
 The price book's filament records can be **imported from spools**: `POST
 /orders/price-book/import-spools` reads the inventory (`inventory_view`), groups by
-`_filament_key`, and makes or updates one filament record per group with the spools'
+`_filament_key`, and makes or updates one filament record per group (as built, #6209: a
+group finds its record by the link to its spools first, see below) with the spools'
 `cost_per_kg` (the most recent spool's, with the spread shown when they differ) and
 the colour. It is an import, run on click: the book never reads Bambuddy at quote
 time, so a quote is the same with Bambuddy down.
@@ -1250,6 +1254,17 @@ catalogue (`orders/density.py`). `POST /orders/price-book/fill-densities` does t
 every record with no density, and a record added by hand with no density takes it too.
 `filaments.density_profile` keeps where each density came from. A density read Bambuddy
 refuses gives no density and fails nothing.
+
+**As built (#6209).** A record keeps the spools' whole colour: `colour` stays `#RRGGBB`
+(the render splits parts by it), beside `alpha`, `extra_colours` and `effect` from the
+spool's `rgba`, `extra_colors` and `effect_type`. `colour_source` says who set them: the
+import sets them again only while it is `import`; a person's change makes it `manual`. The
+import matches only a record of the group's material, subtype and brand: by its link to
+the group's spools (`spool_ids`, a record linked to several groups going to the group with
+its spools' RGB; a link always wins over a colour, whatever the groups' order), else by the
+spools' `#RRGGBB` at the last import (`spool_colour`), else by its own `colour`, so a colour
+a person set makes no second record. An item print's spools
+are matched the same way (`orders/spools.py`).
 
 ### 8.4 Printers
 

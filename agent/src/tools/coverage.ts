@@ -7,6 +7,10 @@ import type { Operation } from './registry.js'
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
+    operation: 'GET /api/v1/storefront/slice-profile/options',
+    reason: "The printers and spools the Storefront settings control offers for the shop's slice profile (#6153). The assistant reads the profile through get_settings; the shop sets it in Settings, Storefront pricing.",
+  },
+  {
     operation: 'GET /api/v1/storefront/listings',
     reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); the assistant drafts and publishes through storefront_listing_draft and storefront_listing_publish (#6131).",
   },
@@ -25,6 +29,10 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
     operation: 'POST /api/v1/storefront/listings/{listing_id}/move',
     reason: "The Storefront page's \"Move to top\" and \"Move to position…\" (#6157); an agent tool follows with #5283.",
+  },
+  {
+    operation: 'PUT /api/v1/storefront/listings/{listing_id}/media',
+    reason: "The Storefront page's pictures and a model media's \"Storefront…\" dialog (#6213); an agent tool follows with #5283.",
   },
   {
     operation: 'POST /api/v1/storefront/listings/{listing_id}/unpublish',

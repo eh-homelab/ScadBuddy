@@ -11,6 +11,7 @@ import {
 } from '../../lib/mediaFiles'
 import { ArrowDownIcon, ArrowUpIcon, ImagePlusIcon, StarIcon, Trash2Icon, UploadIcon } from 'lucide-react'
 import { WorkspacePickButton } from '../workspace/WorkspaceFilePicker'
+import { StorefrontPicture } from '../storefront/StorefrontPicture'
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -172,7 +173,7 @@ export function MediaManager({ model: initial, onChanged }: Props) {
     const row = sectionRef.current?.querySelector(`li[data-media-id="${target.id}"]`)
     if (!row) return
     const buttons = Array.from(row.querySelectorAll('button')).filter((button) => !button.disabled)
-    const named = (name: string) => buttons.find((button) => button.textContent === name)
+    const named = (name: string) => buttons.find((button) => button.textContent?.trim() === name)
     const next =
       named(target.action) ?? ROW_ACTIONS.map(named).find(Boolean) ?? buttons[0]
     next?.focus()
@@ -326,6 +327,12 @@ export function MediaManager({ model: initial, onChanged }: Props) {
                         </TooltipTrigger>
                         <TooltipContent>Shipped with the template; it cannot be changed</TooltipContent>
                       </Tooltip>
+                    )}
+                    {/* #6213 — which of the template's storefront listings show this image. */}
+                    {item.kind === 'image' && !item.missing && (
+                      <span className="ml-auto">
+                        <StorefrontPicture slug={slug} item={item} />
+                      </span>
                     )}
                   </div>
                   {item.missing ? (

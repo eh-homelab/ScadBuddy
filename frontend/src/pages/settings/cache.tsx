@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { api, ApiError } from '../../api/client'
 import type { Settings } from '../../api/types'
+import { setAppLinks } from '../../lib/appLinks'
 import { setBambuddyLinks } from '../../lib/bambuddyLinks'
 import { useSubscription } from '../../lib/realtime'
 import { useAsync } from '../../lib/useAsync'
@@ -286,6 +287,7 @@ export function SettingsCacheProvider({ children }: { children: ReactNode }) {
         // What is cached, not this answer: a late answer is only patched in (#4803).
         const next = cacheWrite(sent, answer, written)
         setBambuddyLinks(next)
+        setAppLinks(next)
         const seeded = typeof names === 'function' ? names(next) : names
         // A section that unmounted meanwhile has nothing left to seed.
         for (const [seeder, since] of begun) if (seeders.current.has(seeder)) seeder.seed(seeded, since)

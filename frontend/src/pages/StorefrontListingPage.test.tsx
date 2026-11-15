@@ -1,10 +1,10 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { Route, Routes, useLocation, useNavigate } from 'react-router'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
-import type { StorefrontListing } from '../api/types'
-import { resetMockState } from '../mocks/handlers'
+import type { MediaView, StorefrontListing } from '../api/types'
+import { resetMockState, setMockMedia } from '../mocks/handlers'
 import { keychainSchema, versionIds } from '../mocks/fixtures'
 import { FILAMENT_PETG, FILAMENT_PLA } from '../mocks/features/orders/state'
 import { server } from '../mocks/server'
@@ -26,7 +26,7 @@ async function stored(): Promise<StorefrontListing[]> {
 }
 
 /** Requests of `method` to `path` wait until the returned function is called, then fall through. */
-function hold(method: 'post' | 'put' | 'delete', path: string): () => void {
+function hold(method: 'get' | 'post' | 'put' | 'delete', path: string): () => void {
   let release: () => void = () => undefined
   const gate = new Promise<void>((resolve) => {
     release = resolve
@@ -80,6 +80,7 @@ function renderStorefront(route = '/storefront/listings/new', extra?: React.Reac
 
 describe('StorefrontListingPage (#5282, #6157)', () => {
   beforeEach(() => resetMockState())
+  afterEach(() => vi.restoreAllMocks())
 
   it('starts a new listing with the smart defaults, and previews the customer view', async () => {
     const { user } = renderStorefront()
@@ -87,7 +88,6 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     const preview = await screen.findByTestId('listing-preview')
     expect(await within(preview).findByLabelText('Name on the tag')).toBeInTheDocument()
     expect(within(preview).queryByLabelText('Text size')).toBeNull()
-    await user.click(screen.getByRole('button', { name: /^Show all/ }))
     await user.click(screen.getByRole('switch', { name: 'Customer can change Text size' }))
     expect(await within(preview).findByLabelText('Text size')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Publish' }))
@@ -95,8 +95,8 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
 
     const [saved] = await stored()
     expect(saved?.published).toBe(true)
-    expect(saved?.params['text_size']).toEqual({ kind: 'number', min: 6, max: 28, step: 0.5 })
-    expect(saved?.params['name']).toEqual({ kind: 'text', max_length: 20 })
+    expect(saved?.params['text_size']).toEqual({ kind: 'number', min: 6, max: 28, step: 0.5, label: null, default: null })
+    expect(saved?.params['name']).toEqual({ kind: 'text', max_length: 20, label: null, default: null })
     expect(saved?.fixed['thickness']).toBe(5.2)
     expect(saved?.title).toBe('Name Keychain')
     // The template's picture is shown.
@@ -164,6 +164,7 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     expect(await screen.findByRole('switch', { name: 'Customer can change Plate' })).toBeChecked()
     expect(screen.getByRole('switch', { name: 'Customer can change Text' })).toBeChecked()
     // No filament is the keychain's colours, so every priced one is on offer, of any material.
+    await user.click(within(screen.getByRole('group', { name: 'Colours on offer' })).getByRole('button', { name: /^Show all/ }))
     expect(screen.getByRole('checkbox', { name: 'PLA Sunflower Yellow' })).toBeChecked()
     expect(screen.getByRole('checkbox', { name: 'PETG Black' })).toBeChecked()
     // Locking is the person's choice.
@@ -172,7 +173,8 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     await waitFor(async () => expect(await stored()).toHaveLength(1))
     const [saved] = await stored()
     expect(saved?.colours).toEqual([FILAMENT_PLA, FILAMENT_PETG])
-    expect(saved?.params['body_color']).toEqual({ kind: 'choice', choices: ['#F9D72C', '#1E1E1E'] })
+    // Stored as the backend stores it: an unset label and default are null.
+    expect(saved?.params['body_color']).toEqual({ kind: 'choice', choices: ['#F9D72C', '#1E1E1E'], label: null, default: null })
     expect(saved?.fixed['text_color']).toBe('#E8532F')
   })
 
@@ -244,6 +246,7 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     const seen = recordRequests()
     const { user } = renderStorefront()
     await screen.findByRole('switch', { name: 'Customer can change Plate' })
+    await user.click(within(screen.getByRole('group', { name: 'Colours on offer' })).getByRole('button', { name: /^Show all/ }))
     await user.click(await screen.findByRole('checkbox', { name: 'PLA Sunflower Yellow' }))
     await user.click(screen.getByRole('checkbox', { name: 'PETG Black' }))
     await user.click(screen.getByRole('button', { name: 'Save draft' }))
@@ -294,7 +297,6 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     await user.click(await screen.findByRole('button', { name: 'Change' }))
     await user.click(await screen.findByRole('combobox', { name: 'Version' }))
     await user.click(await screen.findByRole('option', { name: /Update name-keychain metadata/ }))
-    await user.click(await screen.findByRole('button', { name: /^Show all/ }))
     await waitFor(() => expect(screen.queryByRole('group', { name: /Text size/ })).toBeNull())
     await user.click(screen.getByRole('button', { name: 'Save draft' }))
     await waitFor(async () => expect((await stored())[0]?.commit).toBe(older))
@@ -307,6 +309,9 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     const listing = await seed('Linked')
     const { user } = renderStorefront('/storefront/listings/new', <GoTo to={`/storefront/listings/${listing.id}`} />)
     const title = await screen.findByLabelText('Title')
+    // The design's name fills the untouched title first; clearing an empty field is no
+    // edit, so without this wait the name could land between the clear and the typing.
+    await waitFor(() => expect(title).toHaveValue('Name Keychain'))
     await user.clear(title)
     await user.type(title, 'Mine')
     await user.click(screen.getByRole('button', { name: 'Go' }))
@@ -318,6 +323,145 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     await user.click(screen.getByRole('button', { name: 'Go' }))
     await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Leave without saving' }))
     await waitFor(() => expect(screen.getByLabelText('Title')).toHaveValue('Linked'))
+  })
+
+  it('keeps a title typed before the templates answer (#6290)', async () => {
+    const release = hold('get', '/api/v1/models')
+    const { user } = renderStorefront()
+    const title = await screen.findByLabelText('Title')
+    await user.type(title, 'Mine')
+    release()
+    // The first template is chosen once the list answers; the typed title stays.
+    expect(await screen.findByTestId('listing-design')).toHaveTextContent('Name Keychain')
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'Customer can change Plate' })).toBeChecked())
+    expect(screen.getByLabelText('Title')).toHaveValue('Mine')
+  })
+
+  it('keeps a title cleared before the templates answer (#6290)', async () => {
+    const release = hold('get', '/api/v1/models')
+    const { user } = renderStorefront()
+    const title = await screen.findByLabelText('Title')
+    await user.type(title, 'x')
+    await user.clear(title)
+    release()
+    expect(await screen.findByTestId('listing-design')).toHaveTextContent('Name Keychain')
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'Customer can change Plate' })).toBeChecked())
+    expect(screen.getByLabelText('Title')).toHaveValue('')
+  })
+
+  it('folds the colours on offer once the smart defaults tick some (#6292 review)', async () => {
+    renderStorefront()
+    // A new listing mounts with none ticked, so the list is open until the defaults land.
+    expect(await screen.findByRole('switch', { name: 'Customer can change Plate' })).toBeChecked()
+    const colours = screen.getByRole('group', { name: 'Colours on offer' })
+    await waitFor(() => expect(within(colours).queryByRole('list')).toBeNull())
+    expect(colours).toHaveTextContent(/\d+ ticked \(/)
+  })
+
+  it('folds the colours on offer of a saved listing when the price book answers late (#6292 review)', async () => {
+    const listing = await api.createStorefrontListing({ slug: KEYCHAIN, commit: COMMIT, title: 'Tag', colours: [FILAMENT_PLA] })
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http.get('/api/v1/orders/price-book', async () => {
+        await gate
+        return undefined
+      }),
+    )
+    renderStorefront(`/storefront/listings/${listing.id}`)
+    expect(await screen.findByLabelText('Title')).toHaveValue('Tag')
+    release()
+    const colours = screen.getByRole('group', { name: 'Colours on offer' })
+    await waitFor(() => expect(colours).toHaveTextContent(/1 ticked \(PLA /))
+    expect(within(colours).queryByRole('list')).toBeNull()
+  })
+
+  describe('says what the price book holds once it has answered, whatever the defaults do (#6292 review)', () => {
+    const PRICE_BOOK = '/api/v1/orders/price-book'
+    const SCHEMA = '/api/v1/models/:slug/versions/:commit/schema'
+    async function emptyBook() {
+      const book = await api.priceBook()
+      server.use(http.get(PRICE_BOOK, () => HttpResponse.json({ ...book, filaments: [] })))
+    }
+    const colours = () => screen.getByRole('group', { name: 'Colours on offer' })
+
+    it('when the design’s settings fail', async () => {
+      await emptyBook()
+      server.use(http.get(SCHEMA, () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
+      renderStorefront()
+      expect(await screen.findByText(/^The design’s settings could not be read\./)).toBeInTheDocument()
+      await waitFor(() => expect(colours()).toHaveTextContent('The price book has no filaments yet.'))
+      expect(within(colours()).getByRole('link', { name: 'Add one' })).toBeInTheDocument()
+      expect(screen.queryByText('Loading the design’s settings…')).toBeNull()
+    })
+
+    it('when there is no design to choose', async () => {
+      await emptyBook()
+      server.use(http.get('/api/v1/models', () => HttpResponse.json([])))
+      renderStorefront()
+      await waitFor(() => expect(colours()).toHaveTextContent('The price book has no filaments yet.'))
+    })
+
+    it('while a design change waits for its settings', async () => {
+      await emptyBook()
+      const { user } = renderStorefront()
+      expect(await screen.findByTestId('listing-design')).toHaveTextContent('Name Keychain')
+      await waitFor(() => expect(screen.queryByText('Loading the design’s settings…')).toBeNull())
+      release = hold('get', SCHEMA)
+      await user.click(screen.getByRole('button', { name: 'Change' }))
+      await user.click(screen.getByRole('combobox', { name: 'Design' }))
+      await user.click(await screen.findByRole('option', { name: /Coaster/ }))
+      // The new design's defaults wait on its settings, which are held.
+      expect(screen.getByRole('combobox', { name: 'Design' })).toHaveTextContent(/Coaster/)
+      expect(colours()).toHaveTextContent('The price book has no filaments yet.')
+      expect(colours()).not.toHaveTextContent('Reading the price book')
+    })
+
+    it('when the price book fails', async () => {
+      server.use(http.get(PRICE_BOOK, () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
+      renderStorefront()
+      await waitFor(() => expect(colours()).toHaveTextContent('The price book could not be read'))
+      expect(colours()).not.toHaveTextContent('Reading the price book')
+    })
+
+    let release: () => void = () => undefined
+    afterEach(() => release())
+  })
+
+  it('keeps the ticked filaments across a design change (#6292 review)', async () => {
+    const { user } = renderStorefront()
+    expect(await screen.findByRole('switch', { name: 'Customer can change Plate' })).toBeChecked()
+    const group = () => screen.getByRole('group', { name: 'Colours on offer' })
+    await user.click(within(group()).getByRole('button', { name: /^Show all/ }))
+    // Only PLA Sunflower Yellow ticked, by hand.
+    await user.click(within(group()).getByRole('checkbox', { name: 'PETG Black' }))
+    await user.click(screen.getByRole('button', { name: 'Change' }))
+    await user.click(screen.getByRole('combobox', { name: 'Design' }))
+    await user.click(await screen.findByRole('option', { name: /Coaster/ }))
+    await waitFor(() => expect(screen.queryByText('Loading the design’s settings…')).toBeNull())
+    expect(within(group()).getByRole('checkbox', { name: 'PLA Sunflower Yellow' })).toBeChecked()
+    expect(within(group()).getByRole('checkbox', { name: 'PETG Black' })).not.toBeChecked()
+  })
+
+  it('says nothing is unsaved when a saved listing opens (#6290)', async () => {
+    // Stored with an offered colour, an offered number and an offered text: each bound's
+    // unset label and default come back null, as the backend answers them.
+    const listing = await api.createStorefrontListing({
+      slug: KEYCHAIN,
+      commit: COMMIT,
+      title: 'Tag',
+      colours: [FILAMENT_PLA, FILAMENT_PETG],
+      params: { body_color: { kind: 'choice', choices: ['#F9D72C', '#1E1E1E'] }, text_size: { kind: 'number', min: 6, max: 28 }, name: { kind: 'text', max_length: 20 } },
+      fixed: { text_color: '#E8532F' },
+    })
+    expect((await api.storefrontListing(listing.id)).params['text_size']).toMatchObject({ label: null, default: null, step: null })
+    renderStorefront(`/storefront/listings/${listing.id}`)
+    expect(await screen.findByLabelText('Title')).toHaveValue('Tag')
+    expect(await screen.findByRole('switch', { name: 'Customer can change Plate' })).toBeChecked()
+    await waitFor(() => expect(screen.queryByText('Loading the design’s settings…')).toBeNull())
+    expect(screen.queryByText('Unsaved changes')).toBeNull()
   })
 
   it('keeps an edited saved listing when its design’s settings fail to load (#6140 review)', async () => {
@@ -402,6 +546,7 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
       const problems = await screen.findByTestId('colour-problems')
       expect(problems).toHaveTextContent('Plate is #1B6CA8')
       expect(problems).toHaveTextContent('Text is #E8532F')
+      await user.click(within(screen.getByRole('group', { name: 'Colours on offer' })).getByRole('button', { name: /^Show all/ }))
       expect(screen.getByRole('checkbox', { name: 'PLA Sunflower Yellow' })).toBeChecked()
       expect(screen.getByRole('checkbox', { name: 'PETG Black' })).not.toBeChecked()
       expect(seen.filter((r) => r.startsWith('POST /api/v1/storefront/listings'))).toEqual([])
@@ -417,7 +562,7 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
 
       const [saved] = await stored()
       expect(saved?.commit).toBe(versionIds.edited)
-      expect(saved?.params).toEqual({ name: { kind: 'text', max_length: 20 } })
+      expect(saved?.params).toEqual({ name: { kind: 'text', max_length: 20, label: null, default: null } })
       expect(saved?.fixed).toMatchObject({ text_size: 20, body_color: '#F9D72C', text_color: '#1E1E1E', thickness: 5.2 })
       expect(saved?.colours).toEqual([FILAMENT_PLA, FILAMENT_PETG])
       expect(saved?.media_ids).toEqual(['thumbnail'])
@@ -503,5 +648,62 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
       renderStorefront(`/storefront?listing=${listing.id}`)
       expect(await screen.findByLabelText('Title')).toHaveValue('From the assistant')
     })
+  })
+
+  it('lists every picture the listing holds, so what it shows is what Save draft sends (#6213)', async () => {
+    const keychain = (await api.getModel(KEYCHAIN)).media ?? []
+    const video: MediaView = { id: 'd4e5f6a1b2c3', file: 'd4e5f6a1b2c3.mp4', kind: 'video', caption: 'Clip', poster: null, missing: false, readonly: false, content_type: 'video/mp4', size: 24 }
+    setMockMedia(KEYCHAIN, [...keychain, video])
+    const listing = await api.createStorefrontListing({ slug: KEYCHAIN, commit: COMMIT, title: 'Tag', media_ids: [video.id, 'thumbnail', '0123456789ab'] })
+    const { user } = renderStorefront(`/storefront/listings/${listing.id}`)
+
+    await waitFor(() => expect(screen.getAllByTestId('listing-picture').map((row) => row.textContent)).toEqual([
+      expect.stringContaining('A video'),
+      expect.stringContaining('thumbnail.png'),
+      expect.stringContaining('Not in the design’s media'),
+    ]))
+    await user.click(screen.getByRole('button', { name: 'Remove Clip' }))
+    await user.click(screen.getByRole('button', { name: 'Remove 0123456789ab' }))
+    await user.click(screen.getByRole('button', { name: 'Save draft' }))
+    await waitFor(async () => expect((await api.storefrontListing(listing.id)).media_ids).toEqual(['thumbnail']))
+    expect(screen.getAllByTestId('listing-picture')).toHaveLength(1)
+  })
+
+  it('keeps the edits made while a picture uploads, and adds the picture to them (#6213)', async () => {
+    const listing = await api.createStorefrontListing({ slug: KEYCHAIN, commit: COMMIT, title: 'Tag', media_ids: ['thumbnail'] })
+    let finish: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => (finish = resolve))
+    vi.spyOn(api, 'uploadMedia').mockImplementation(async (slug) => {
+      await gate
+      const model = await api.getModel(slug)
+      const added: MediaView = { id: 'f6a1b2c3d4e5', file: 'f6a1b2c3d4e5.png', kind: 'image', caption: '', poster: null, missing: false, readonly: false, content_type: 'image/png', size: 8 }
+      return { ...model, media: [...(model.media ?? []), added] }
+    })
+    const { user } = renderStorefront(`/storefront/listings/${listing.id}`)
+    const title = await screen.findByLabelText('Title')
+    await user.upload(screen.getByLabelText('Upload a picture'), new File(['png'], 'new.png', { type: 'image/png' }))
+    expect(await screen.findByText(/Uploading new\.png/)).toBeInTheDocument()
+
+    // While it uploads: the title changes and the old picture is taken out.
+    await user.clear(title)
+    await user.type(title, 'Name tag')
+    await user.click(screen.getByRole('button', { name: /^Remove / }))
+    finish()
+
+    await waitFor(() => expect(screen.getAllByTestId('listing-picture')).toHaveLength(1))
+    expect(screen.getByLabelText('Title')).toHaveValue('Name tag')
+    expect(within(screen.getByTestId('listing-picture')).getByRole('img')).toHaveAttribute('src', expect.stringContaining('f6a1b2c3d4e5'))
+  })
+
+  it('marks the pictures the public site shows as live (#6213)', async () => {
+    const listing = await api.createStorefrontListing({ slug: KEYCHAIN, commit: COMMIT, title: 'Tag', media_ids: ['thumbnail'] })
+    await api.publishStorefrontListing(listing.id)
+    const { user } = renderStorefront(`/storefront/listings/${listing.id}`)
+    const [row] = await screen.findAllByTestId('listing-picture')
+    expect(within(row!).getByText('Live')).toBeInTheDocument()
+    // Taken out of the draft, it is offered to add back.
+    await user.click(within(row!).getByRole('button', { name: /^Remove / }))
+    expect(screen.queryByTestId('listing-picture')).toBeNull()
+    expect(screen.getByRole('button', { name: /^Add / })).toBeInTheDocument()
   })
 })

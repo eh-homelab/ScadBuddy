@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import { AppLink } from '../../components/AppLink'
 import { type ImageBase, safeHttpUrl, safeImageSrc } from '../../lib/safeUrl'
 import { parseBlocks } from './markdownBlocks'
 
@@ -9,7 +10,8 @@ import { parseBlocks } from './markdownBlocks'
  * Markdown renderer to reuse and a full one is a lot of bundle for chat text.
  *
  * It builds React elements — never HTML strings — so model output cannot inject
- * markup, links render only for http(s) URLs (`safeHttpUrl`), and images only for
+ * markup, links render only for http(s) URLs (`safeHttpUrl`; one to ScadBuddy's own
+ * origin is shown on the host the user is on, `AppLink`, #6232), and images only for
  * ScadBuddy's own API paths and inline `data:` images (`safeImageSrc`), so a render
  * view the agent checked can be shown while untrusted text never makes the browser
  * fetch another host; any other image is its alt text. Given a `base` (the model a
@@ -136,9 +138,9 @@ function inline(text: string, base: ImageBase | undefined): ReactNode[] {
       const href = safeHttpUrl(m[6])
       out.push(
         href ? (
-          <a key={key} href={href} target="_blank" rel="noreferrer noopener" className="text-primary underline">
+          <AppLink key={key} href={href} target="_blank" rel="noreferrer noopener" className="text-primary underline">
             {m[5]}
-          </a>
+          </AppLink>
         ) : (
           <span key={key}>{m[5]}</span>
         ),

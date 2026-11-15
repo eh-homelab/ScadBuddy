@@ -1,4 +1,5 @@
 import type { Sql } from 'postgres'
+import { type FlowRunReads, SqlFlowRunReads } from '../flows/backendReads.js'
 import type { Owner } from '../sessions/protocol.js'
 
 // A flow run's tool calls (#1057, plan 2026-10-09-durable-phase-6-flows.md Task D1):
@@ -12,7 +13,8 @@ import type { Owner } from '../sessions/protocol.js'
 // by the backend (flows/approval_hash.py), and it must equal the hash of the call being
 // run. A person's approval of a print_output call that names a registry printer binds to
 // the arguments plus the printer_id the row links (flows/print_binding.py, #4445). Both
-// tables are the backend's; this reads them and never writes.
+// tables are the backend's; the agent asks it over its CRUD routes (flows/backendReads.ts,
+// #5299 D7) and never writes them.
 
 // Lowercase only, as the backend's run ids (uuid4) and the codec's subjects are.
 const FLOW_WORKFLOW = /^flow-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/
@@ -52,9 +54,6 @@ export interface FlowRuns {
   byPerson?(requestId: string, inputHash?: string): Promise<boolean>
 }
 
-/** `started_by` as the backend writes it (core/authorship.py `current_author()`). */
-type StartedBy = { kind?: unknown; principal?: unknown; session?: unknown }
-
 function decoded(header: string): string {
   // The backend keeps the author header as sent: tools/authorship.ts percent-encodes it.
   try {
@@ -75,9 +74,12 @@ function ownerOfPrincipal(id: string): Owner | undefined {
 
 export class PgFlowRuns implements FlowRuns {
   readonly #sql: Sql
+  readonly #reads: FlowRunReads
 
-  constructor(sql: Sql) {
+  /** `reads`: the backend's flow tables (flows/backendReads.ts); its SQL on `sql` by default. */
+  constructor(sql: Sql, reads?: FlowRunReads) {
     this.#sql = sql
+    this.#reads = reads ?? new SqlFlowRunReads(sql)
   }
 
   async startedBy(runId: string, execution: string): Promise<Owner | undefined> {
@@ -85,15 +87,11 @@ export class PgFlowRuns implements FlowRuns {
     // UPDATE while it starts the new execution, and opens it only after: the lock waits
     // for that, or the new execution's first call reads the old closed row and is
     // refused. It is taken by id alone, as a row a WHERE filters out is never waited on.
-    // FOR SHARE needs UPDATE on workflow_runs, not only SELECT: a role narrowed to
-    // SELECT would fail every flow tool call here. Every call also waits behind a
-    // writer's FOR UPDATE on the row (_project, _reset_run), which is held only briefly.
-    const [row] = await this.#sql<{ started_by: StartedBy; open: boolean; unrecorded: boolean }[]>`
-      SELECT started_by,
-             status IN ('running', 'waiting') AND NOT (${execution} = ANY(superseded_run_ids)) AS open,
-             workflow_run_id IS DISTINCT FROM ${execution} AND NOT (${execution} = ANY(superseded_run_ids)) AS unrecorded
-        FROM workflow_runs WHERE id = ${runId}
-         FOR SHARE`
+    // The backend's route takes it in its own transaction (#5299 D7); the SQL fallback for an
+    // older API pod takes it on the agent's role, where FOR SHARE needs UPDATE on
+    // workflow_runs, not only SELECT. Every call also waits behind a writer's FOR UPDATE on
+    // the row (_project, _reset_run), which is held only briefly.
+    const row = await this.#reads.starter(runId, execution)
     if (row && !row.open && row.unrecorded) {
       // Closed, and this execution is neither the row's nor one a Reset replaced: a Reset
       // that started it and has not committed yet (_reset_run's "landed although this
@@ -123,49 +121,21 @@ export class PgFlowRuns implements FlowRuns {
 
   async approved(requestId: string, inputHash?: string): Promise<boolean> {
     if (inputHash === undefined) return false
-    const rows = await this.#sql`
-      SELECT 1 FROM workflow_run_decisions d
-      WHERE d.request_id = ${requestId} AND d.kind = 'approval' AND d.outcome = 'approved'
-        AND d.input_hash = ${inputHash}
-        -- A run grant's approval holds only while the grant is in force (#2481).
-        AND (d.responder NOT LIKE 'grant:%' OR EXISTS (
-          SELECT 1 FROM flow_grants g
-          WHERE 'grant:' || g.id = d.responder AND g.status = 'approved'
-            AND g.revoked_at IS NULL AND now() < g.expires_at))`
-    return rows.length > 0
+    return (await this.#reads.decisions(requestId, inputHash)).approved
   }
 
   async approvedUnresolved(requestId: string, inputHash?: string): Promise<boolean> {
     if (inputHash === undefined) return false
-    const rows = await this.#sql`
-      SELECT 1 FROM workflow_run_decisions d
-      WHERE d.request_id = ${requestId} AND d.kind = 'approval' AND d.outcome = 'approved'
-        AND d.input_hash = ${inputHash}
-        AND (d.responder LIKE 'grant:%' OR d.response ? 'narrowed_by')
-        AND (d.responder NOT LIKE 'grant:%' OR EXISTS (
-          SELECT 1 FROM flow_grants g
-          WHERE 'grant:' || g.id = d.responder AND g.status = 'approved'
-            AND g.revoked_at IS NULL AND now() < g.expires_at))`
-    return rows.length > 0
+    return (await this.#reads.decisions(requestId, inputHash)).approvedUnresolved
   }
 
   async byPerson(requestId: string, inputHash?: string): Promise<boolean> {
     if (inputHash === undefined) return false
-    const rows = await this.#sql`
-      SELECT 1 FROM workflow_run_decisions d
-      WHERE d.request_id = ${requestId} AND d.kind = 'approval' AND d.outcome = 'approved'
-        AND d.input_hash = ${inputHash} AND d.responder = 'browser'`
-    return rows.length > 0
+    return (await this.#reads.decisions(requestId, inputHash)).byPerson
   }
 
   async lapsed(requestId: string, inputHash?: string): Promise<boolean> {
     if (inputHash === undefined) return false
-    const rows = await this.#sql`
-      SELECT 1 FROM workflow_run_decisions d
-      JOIN flow_grants g ON 'grant:' || g.id = d.responder
-      WHERE d.request_id = ${requestId} AND d.kind = 'approval' AND d.outcome = 'approved'
-        AND d.input_hash = ${inputHash}
-        AND (g.status <> 'approved' OR g.revoked_at IS NOT NULL OR g.expires_at IS NULL OR now() >= g.expires_at)`
-    return rows.length > 0
+    return (await this.#reads.decisions(requestId, inputHash)).lapsed
   }
 }

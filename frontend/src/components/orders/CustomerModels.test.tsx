@@ -139,6 +139,19 @@ describe("CustomerModels, the customer's models panel (#6133)", () => {
     expect(await within(await row(SOURCE_MANUAL)).findByText(/A paid model/)).toBeInTheDocument()
   })
 
+  it('gives each open decline form its own reason field', async () => {
+    const { user } = renderPage(<Host />)
+    const manual = await row(SOURCE_MANUAL)
+    const makerworld = await row(SOURCE_MAKERWORLD)
+    await user.click(within(manual).getByRole('button', { name: 'Decline' }))
+    await user.click(within(makerworld).getByRole('button', { name: 'Decline' }))
+    const first = within(manual).getByLabelText('Why the shop declines it')
+    const second = within(makerworld).getByLabelText('Why the shop declines it')
+    expect(first).not.toBe(second)
+    expect(manual).toContainElement(first)
+    expect(makerworld).toContainElement(second)
+  })
+
   it('records what the shop paid for a thing to buy, changes it, and marks another not needed', async () => {
     const { user } = renderPage(<Host />)
     const purchase = await row(SOURCE_PURCHASE)

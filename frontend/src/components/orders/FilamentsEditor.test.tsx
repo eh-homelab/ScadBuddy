@@ -111,6 +111,40 @@ describe('FilamentsEditor (#4250)', () => {
     expect([made.density_g_cm3, made.density_profile]).toEqual(['1.26', 'Bambu PLA Basic @base (spool preset GFA00)'])
   })
 
+  // #6209 — a clear filament is drawn over a checkerboard, with its 8-digit hex, never as
+  // black; a colour set by hand says so, and once an import links it to its spools it can
+  // be handed back to the spool import.
+  it('draws a clear filament as translucent and keeps a colour set by hand', async () => {
+    const clear = await api.createFilament({ material: 'PETG', brand: 'Insignia', colour_name: 'Clear', colour: '#000000', alpha: 0, effect: 'translucent', cost_per_kg: '15.91', density_g_cm3: '1.25' })
+    const { user } = renderPage(<FilamentsEditor />)
+    const row = await screen.findByTestId(`filament-${clear.id}`)
+    expect(within(row).getByText('#00000000')).toBeInTheDocument()
+    expect(within(row).getByText('translucent, set by hand')).toBeInTheDocument()
+    expect(within(row).getByTestId('filament-swatch').style.backgroundImage).toContain('repeating-conic-gradient')
+    expect(within(screen.getByTestId(`filament-${FILAMENT_PLA}`)).queryByText(/[0-9A-F]{8}$/)).toBeNull()
+
+    // Linked to no spool yet: the button would recolour nothing. The import links it
+    // (its spools' RGB is its colour) and keeps its hand-set look.
+    expect(within(row).queryByRole('button', { name: /^Use the spool colour/ })).toBeNull()
+    await user.click(screen.getByRole('button', { name: 'Import from spools' }))
+    await within(screen.getByTestId(`filament-${clear.id}`)).findByRole('button', { name: /^Use the spool colour/ })
+
+    await user.click(within(screen.getByTestId(`filament-${clear.id}`)).getByRole('button', { name: 'Edit' }))
+    const edit = screen.getByRole('form', { name: 'Edit filament' })
+    expect(within(edit).getByLabelText('Colour')).toHaveValue('#00000000')
+    await user.clear(within(edit).getByLabelText('Colour'))
+    await user.type(within(edit).getByLabelText('Colour'), '#E3ECEF80')
+    await user.click(within(edit).getByRole('button', { name: 'Save filament' }))
+    await waitFor(async () => {
+      const saved = (await api.priceBook()).filaments.find((f) => f.id === clear.id)
+      expect([saved?.colour, saved?.alpha]).toEqual(['#E3ECEF', 128])
+    })
+
+    await user.click(within(screen.getByTestId(`filament-${clear.id}`)).getByRole('button', { name: /^Use the spool colour/ }))
+    await waitFor(async () => expect((await api.priceBook()).filaments.find((f) => f.id === clear.id)?.colour_source).toBe('import'))
+    expect(within(screen.getByTestId(`filament-${clear.id}`)).queryByRole('button', { name: /^Use the spool colour/ })).toBeNull()
+  })
+
   it('offers no import without Bambuddy', async () => {
     setMockSettings({ ...mockSettings(), bambuddy_url: null })
     renderPage(<FilamentsEditor />)

@@ -2762,10 +2762,11 @@ class Lifecycle:
         check (`intake.start_checks`). A file already ``checking`` is returned as it is, so
         the caller starts its check again (a running one is joined). Refusals: 404
         ``source_not_found``; 409 ``source_not_failed`` for any other check,
-        ``source_not_staged`` once its staged copy is gone, ``order_cancelled`` or
-        ``order_closed``."""
+        ``source_not_staged`` once its staged copy is gone, ``order_not_submitted`` on a
+        cart (the back office never acts on one), ``order_cancelled`` or ``order_closed``."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            check_submitted(order)
             self._not_ended(order)
             source = self._item_source(conn, order, source_id)
             if source.kind != "file" or source.check_status not in ("failed", "checking"):
@@ -2789,10 +2790,12 @@ class Lifecycle:
     def retry_import(self, order_id: str, source_id: str, by: Actor) -> OrderItemSource:
         """ "Retry import" on a stuck file (`IMPORT_STUCK`): audit row ``source.import_retry``
         only; the caller sends the file's watcher ``retry``, which runs the import again.
-        Refusals: 404 ``source_not_found``; 409 ``import_not_stuck`` unless the source
-        reads stuck and its staged file is still there."""
+        Refusals: 404 ``source_not_found``; 409 ``order_not_submitted`` on a cart, and
+        ``import_not_stuck`` unless the source reads stuck and its staged file is still
+        there."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            check_submitted(order)
             source = self._item_source(conn, order, source_id)
             if not source.import_stuck or not source.staged:
                 raise LifecycleError(

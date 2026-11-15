@@ -6,10 +6,13 @@ These notes cover `agent/`; paths are repo-relative; the root CLAUDE.md has the 
 
 The rule is in the root CLAUDE.md, "Database access (#5295)". Today the agent sidecar and
 the agent workers connect as the database owner (`SCADBUDDY_DATABASE_URL`), keep the
-`ai_*` tables, and run SQL on backend tables (`events`, `workflow_runs`,
-`workflow_run_decisions`, `flow_grants`, `flow_grant_uses`;
-`backend/scadbuddy/auth/caller_grants.py` `AGENT_GRANTS`). The workspace files' `blob_refs`
-holds go through CRUD routes (#5299, below), no longer a trigger. `src/db/grants.ts`
+`ai_*` tables, and run SQL on two backend tables in the gate's transaction (`flow_grants`,
+`flow_grant_uses`: `src/gate/store.ts` `grantInput`, under the grant row's share lock, until
+the gate moves to the CRUD service, #5299 step 10; `backend/scadbuddy/auth/caller_grants.py`
+`AGENT_GRANTS`). The agent's other reads of backend tables (the event log, flow runs, their
+decisions and grants) go through CRUD routes (#5299 D7, below), over SQL only while the API
+does not list their areas yet. The workspace files' `blob_refs` holds go through CRUD routes
+(#5299, below), no longer a trigger. `src/db/grants.ts`
 grants the API's role its `ai_*` reads and writes, and revokes what it once granted the
 projects worker's role `scadbuddy_projects` (#5298; the worker holds no database).
 Claude Code, and any plugin package approved with `allow_refused`, runs in the same pod
@@ -33,7 +36,18 @@ is tried again at the next call and logged once as "waiting for the backend". Wi
 
 The agent's own CRUD routes (`/api/v1/internal/crud/agent/`, class `crud.agent`, #5330): the
 holds of the workspace files' blobs (`workspace-blob-refs`, #5299; see the workspace under
-"Layout"), and the assistant's spend on an order. A session's successful `order_item_revision_add` (or
+"Layout"), the assistant's spend on an order, and its reads of the backend's tables (#5299
+D7): area `events` (the LISTEN gap replay's head and gap, `src/events/eventLogReads.ts`, used
+by `pgListener.ts`) and area `flows` (a run's starter, its decision checks, a grant in force,
+a run's queue and steps, the waiting runs, the parent-hop approvals and which of them still
+wait: `src/flows/backendReads.ts` `CrudFlowRunReads`, used by `temporal/flowRuns.ts`,
+`flows/queue.ts`, `flows/escalations.ts` and `temporal/toolActivities.ts`
+`PgApprovalRecords`). `src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` from
+the start with back-off (1 s doubling to 30 s) until both are listed; until then each read
+stays on SQL (`SqlFlowRunReads`, the listener's own connection), the rolling deploy's
+fallback for an API pod older than the routes. A route's answer counts only with
+`X-ScadBuddy-Crud: 1`; any other failure takes the read's existing error path (a lookup
+failure the activity retries, a 500, a resync). A session's successful `order_item_revision_add` (or
 `_after_acceptance`) is an `ai_session_order_costs` row (`src/sessions/orderCosts.ts`
 `OrderCosts`, a `TouchedSink` beside `SessionResources`); each turn's end
 (`temporal/session/finishActivity.ts`, a retry too, not awaited: it never holds up the next
@@ -65,6 +79,10 @@ pnpm install --frozen-lockfile
 pnpm lint && pnpm typecheck && pnpm test && pnpm build
 docker build --target agent -t scadbuddy-agent:dev .   # checks the bundled Claude Code binary
 ```
+
+`pnpm exec tsc` and `pnpm exec vitest` skip `gen:api`: after a fetch of main, TS2820/TS2345
+errors that name an `Operation` or an API path in `src/tools/*.ts` mean `src/api/schema.d.ts` is
+stale. Run `pnpm gen:api`.
 
 Tests never call Anthropic. `test/run.test.ts` runs the bundled Claude Code binary
 against a local fake Anthropic endpoint; `test/pg.test.ts` needs
@@ -154,7 +172,10 @@ opens every one and seals it again byte for byte).
   `agent.turn.spawn` (`warm.outcome`), `agent.turn.release`, the turn's span of each call with
   `scadbuddy.eager` (above), and each ToolCall's
   `agent.tool/<name>` with `scadbuddy.task_queue`, which `deploy/grafana/scadbuddy-agent.json`
-  charts; and a browser call to another replica's tab, `agent.bridge.call` (`bridge/relay.ts`),
+  charts; a flow run's call (a `flow-<id>` workflow's ScadBuddy tool or `turn:` activity) has the
+  same `agent.tool/<name>` span, with `scadbuddy.flow_run_id`, `scadbuddy.tool_use_id`,
+  `scadbuddy.tier` (once known), `scadbuddy.outcome` and `scadbuddy.task_queue` (#6123; a call that
+  throws before it names an outcome reads `error`, `flowCallSpan`); and a browser call to another replica's tab, `agent.bridge.call` (`bridge/relay.ts`),
   whose `scadbuddy.bridge.task_timeouts` counts its BridgeCall's workflow tasks that timed out
   (Temporal started them and never delivered them, #5939), read from the history (once the workflow
   closes) for an aborted call and for one that took at least `BRIDGE_WORKFLOW_TASK_TIMEOUT_MS`,
@@ -289,7 +310,11 @@ opens every one and seals it again byte for byte).
     its own later events come after the cut), so forgetting a parent first copies each fork's
     range into it, the transcript under the fork's key (`copyForkRanges`, `inherited` rows),
     and refuses without the KEK when a fork takes transcript entries (`fork_cut` above 0; a
-    fork of a closed DurableSession takes none). A gated tool's activity runs only
+    fork of a closed DurableSession takes none). Every read through the fork chain stops at
+    the least cut below each ancestor (`LEAST(bound, cut)`: `eventLog.ts` `forkChain`,
+    `store.ts` `chainRows`, `blobs.ts` `getThroughChain`); a new chain read must do the same.
+    When it is made, a fork copies none of its parent's transcript, event or image rows; its workspace file rows
+    are copied, naming the same bytes (`SessionFiles.copy`). A gated tool's activity runs only
     with an `approved` `ai_input_responses` row for its own request id.
   - DurableSession, the retired Python turn (plan 2026-10-13 Steps 7.2 and 8.1, #4772): its
     open sessions were moved to AgentSession on 2026-11-01 (their conversations in
@@ -320,7 +345,11 @@ opens every one and seals it again byte for byte).
     `backend/tests/support/workspace_backend.py`). Only on `store_backend` local do they stay
     in Postgres, one `ai_session_file_bytes` row per sha256 that every file with those bytes
     names, so a fork shares them (#4212); on any other backend a write that cannot be sealed and stored is refused
-    `unavailable`, never kept in plaintext. Uploads take `workspace_path` + `workspace_sha256` instead of
+    `unavailable`, never kept in plaintext. Rows of `ai_session_file_bytes` are shared and swept: a
+    writer locks them `FOR KEY SHARE` first, inserts only the missing ones and locks again, in a
+    loop (`putBytes`, `copy`); `INSERT … ON CONFLICT DO NOTHING` takes no lock on the existing row,
+    and the table's CHECK (sha256 of the bytes) runs before the conflict check (`ExecInsert`,
+    [nodeModifyTable.c](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/executor/nodeModifyTable.c)). Uploads take `workspace_path` + `workspace_sha256` instead of
     inline content (`src/tools/workspaceUploads.ts`: binary streamed by
     `SessionFiles.chunks` into the multipart route, text decoded as UTF-8).
     The panel's Files (part 3) are `routes/sessionFiles.ts`

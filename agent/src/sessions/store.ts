@@ -326,31 +326,51 @@ function firstRows(segments: Segment[], n: number): Segment[] {
   return out
 }
 
+/** A row of `chainRows`: a session on the chain (its link) and one of its main-transcript rows, if any. */
+export type ChainRow = EntryRow & { owner: string; cut: number | null; depth: number; inherited: boolean | null }
+
+/**
+ * The fork chain of `sessionId` with the main-transcript rows `segmentsOf` builds its load
+ * from, in one statement; empty for an id that is no uuid.
+ */
+export async function chainRows(sql: Sql | TransactionSql, sessionId: string): Promise<ChainRow[]> {
+  // From the session up to the first ancestor that is no fork. Links are only ever made to an
+  // existing session at an insert and only ever cleared, so the chain has no cycle. A session's
+  // links come with no row (`id` NULL) when it has no entries of its own. An ancestor's rows
+  // are read only up to `bound`, the least cut below it (LEAST skips the session's own NULL):
+  // a load takes no more than that of the ancestor's transcript, and its rows come first in
+  // it, so none past its fork point is read (#4212): the index `ai_session_entries_load`, in that
+  // order, lets the limit stop the scan. `LIMIT NULL` is no limit.
+  return isUuid(sessionId)
+    ? sql<ChainRow[]>`
+        WITH RECURSIVE chain (id, parent, cut, depth, bound) AS (
+          SELECT id, fork_parent_id, fork_cut, 0, NULL::bigint FROM ai_sessions WHERE id = ${sessionId}::uuid
+          UNION ALL
+          SELECT s.id, s.fork_parent_id, s.fork_cut, c.depth + 1, LEAST(c.bound, c.cut)
+          FROM ai_sessions s JOIN chain c ON s.id = c.parent
+        )
+        SELECT c.id::text AS owner, c.cut, c.depth, e.id::text AS id, e.uuid, e.entry, e.sealed, e.inherited
+        FROM chain c LEFT JOIN LATERAL (
+          SELECT id, uuid, entry, sealed, inherited FROM ai_session_entries
+          WHERE session_id = c.id::text AND subpath = ''
+          ORDER BY inherited DESC, id
+          LIMIT c.bound
+        ) e ON true
+        ORDER BY c.depth, e.inherited DESC, e.id`
+    : []
+}
+
 /**
  * The rows of `sessionId`'s main transcript, in the order it loads: its inherited rows (a
  * forgotten parent's range, copied in), then its parent's transcript through the cut, then
- * its own; for a fork of a fork, the parent's is built the same way from its own parent. One
- * statement however long the chain, its links and every row of the sessions on it, so it is one
- * snapshot even in a READ COMMITTED transaction (forgetSubject's): a copy committed meanwhile is
- * read either as the link or as the rows, never both (#5062). Only the rows a load takes are
- * opened (`openSegments`).
+ * its own; for a fork of a fork, the parent's is built the same way from its own parent. Read
+ * by `chainRows`, one statement however long the chain: its links and, for each session on
+ * it, the rows up to its bound. So it is one snapshot even in a READ COMMITTED transaction
+ * (forgetSubject's): a copy committed meanwhile is read either as the link or as the rows,
+ * never both (#5062). Only the rows a load takes are opened (`openSegments`).
  */
 async function segmentsOf(sql: Sql | TransactionSql, sessionId: string): Promise<Segment[]> {
-  type ChainRow = EntryRow & { owner: string; cut: number | null; depth: number; inherited: boolean | null }
-  // From the session up to the first ancestor that is no fork. Links are only ever made to an
-  // existing session at an insert and only ever cleared, so the chain has no cycle. A session's
-  // links come with no row (`id` NULL) when it has no entries of its own.
-  const joined = isUuid(sessionId)
-    ? await sql<ChainRow[]>`
-        WITH RECURSIVE chain (id, parent, cut, depth) AS (
-          SELECT id, fork_parent_id, fork_cut, 0 FROM ai_sessions WHERE id = ${sessionId}::uuid
-          UNION ALL
-          SELECT s.id, s.fork_parent_id, s.fork_cut, c.depth + 1 FROM ai_sessions s JOIN chain c ON s.id = c.parent
-        )
-        SELECT c.id::text AS owner, c.cut, c.depth, e.id::text AS id, e.uuid, e.entry, e.sealed, e.inherited
-        FROM chain c LEFT JOIN ai_session_entries e ON e.session_id = c.id::text AND e.subpath = ''
-        ORDER BY c.depth, e.inherited DESC, e.id`
-    : []
+  const joined = await chainRows(sql, sessionId)
   const chain: { id: string; cut: number | null }[] = []
   for (const row of joined) if (chain.at(-1)?.id !== row.owner) chain.push({ id: row.owner, cut: row.cut })
   let rows = joined.filter((row) => row.id !== null)

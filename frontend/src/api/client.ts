@@ -300,6 +300,7 @@ import type {
   VirtualPrinterCreate,
   VirtualPrinterUpdate,
   VirtualPrinterDiagnostic,
+  ProfileOptions,
 } from './types'
 import type {
   McpAuthSetting,
@@ -2843,6 +2844,15 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ listing: body, updated_at: updatedAt }),
     }),
+  /**
+   * #6213 — the listing's pictures (ids of its template's images, in order), nothing else
+   * changed. A draft stays a draft; a published listing is published again and stays live.
+   */
+  setStorefrontListingMedia: (id: string, mediaIds: string[], updatedAt: string) =>
+    request<StorefrontListing>(`/storefront/listings/${seg(id)}/media`, {
+      method: 'PUT',
+      body: JSON.stringify({ media_ids: mediaIds, updated_at: updatedAt }),
+    }),
   publishStorefrontListing: (id: string) =>
     request<StorefrontListing>(`/storefront/listings/${seg(id)}/publish`, { method: 'POST' }),
   unpublishStorefrontListing: (id: string) =>
@@ -3285,6 +3295,10 @@ export const api = {
     settingsInFlight = undefined
     return request<Settings>('/settings', { method: 'PUT', body: JSON.stringify(body) })
   },
+
+  /** #6153 — the price book's materials, and the spools the print dialog offers on `printer`. */
+  storefrontSliceOptions: (printer?: string) =>
+    request<ProfileOptions>(`/storefront/slice-profile/options${printer ? `?printer=${encodeURIComponent(printer)}` : ''}`),
 
   getPrintOptions: () => request<PrintOptionsState>('/settings/print-options'),
 

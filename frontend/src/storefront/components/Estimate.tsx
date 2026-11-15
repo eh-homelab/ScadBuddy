@@ -5,7 +5,8 @@ import type { StoreEstimate } from '../api/client'
  * The rough price of a render (spec §5.4): always an estimate, never a quote. It says so in
  * the one line the visitor reads. A render with a part the shop could not measure (an
  * open mesh, #6155), or no filament at all, has no honest rough price: the page then says
- * the shop prices it, never the price book's floor as if it were the design's.
+ * the shop prices it, never the price book's floor as if it were the design's. The grams
+ * stay the shop's detail: the visitor reads only the price (owner, 2026-11-14).
  */
 export function Estimate({ estimate }: { estimate: StoreEstimate }) {
   const grams = Number(estimate.grams)
@@ -21,7 +22,6 @@ export function Estimate({ estimate }: { estimate: StoreEstimate }) {
   return (
     <div className="sf-estimate" role="status">
       <p className="sf-estimate-price">{`about ${price}, confirmed after we check it`}</p>
-      <p className="sf-estimate-note">For one, from about {grams.toFixed(1)} g of filament.</p>
     </div>
   )
 }

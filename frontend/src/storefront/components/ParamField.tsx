@@ -1,7 +1,8 @@
 import { useId, useState } from 'react'
 import { ToggleGroup, ToggleGroupItem } from '../../components/ui/toggle-group'
 import type { Filament, ParamValue, PublicParam } from '../api/client'
-import { colourGone, filamentName, filamentOf, parseNumber, textLength, valueProblem, valueText } from '../params'
+import { colourGone, filamentOf, nearestFilament, paramFilaments, parseNumber, startColour, textLength, valueProblem, valueText } from '../params'
+import { ColourPicker } from './ColourPicker'
 
 interface Props {
   param: PublicParam
@@ -9,6 +10,11 @@ interface Props {
   value: ParamValue | undefined
   filaments: readonly Filament[]
   onChange: (next: ParamValue | undefined) => void
+  /** A colour parameter's picked filament, by id (#6152). */
+  pick?: string
+  onPick?: (next: string | undefined) => void
+  /** With the listing's `one_material`: the one material a colour may be of. */
+  material?: string | null
 }
 
 const LABEL = 'mb-1.5 block p-0 font-semibold'
@@ -19,20 +25,54 @@ const INPUT =
 
 /**
  * One parameter a listing offers. A field the visitor has not touched says the shop's
- * choice stands, and sends nothing (spec §5.4: the CRUD side fills it in); only a text
- * field shows the design's default, as its placeholder (#6137). Labels are the listing's
+ * choice stands, and sends nothing (spec §5.4: the CRUD side fills it in). The default an
+ * unpicked render takes (the listing's, else the design's) shows as a text or number
+ * field's placeholder, and as a choice's pick (#6137, #6144). Labels are the listing's
  * own or the template's caption without its extruder note (`shown_label`), and choices
  * are the shop's values, a switch's as Yes or No (`valueText`); all are shown as text. Styled
  * with the theme's tokens only, so the back office's preview (StorefrontPage) shows the
  * same form in its own colours.
  */
-export function ParamField({ param, value, filaments, onChange }: Props) {
+export function ParamField({ param, value, filaments, onChange, pick, onPick, material = null }: Props) {
   const id = useId()
   const problem = valueProblem(param, value)
   const hintId = `${id}-hint`
 
-  if (param.kind === 'choice') {
+  if (param.kind === 'choice' && param.colour) {
+    // #6152: a colour is a filament, picked in a grid of swatches; the value is its colour.
     const gone = colourGone(param)
+    const offered = paramFilaments(param, filaments, material)
+    const current = typeof value === 'string' ? filamentOf(offered, value) : undefined
+    // While no pick is set the row shows the shop's colour, the default an unpicked render
+    // takes (#6144). On a `one_material` listing it shows the colour `settleMaterial`
+    // sends: the shop's colour, else the nearest of the shown material, else its first (#6152).
+    const start = startColour(param)
+    const shop = start === undefined ? undefined : filamentOf(offered, start)
+    const fallback = material === null ? shop : (shop ?? (start === undefined ? offered[0] : nearestFilament(start, offered)))
+    return (
+      <div className="min-w-0" aria-describedby={hintId}>
+        <ColourPicker
+          label={param.label}
+          filaments={offered}
+          fallback={fallback}
+          value={pick ?? current?.id}
+          onChange={(next) => {
+            onChange(next?.colour)
+            onPick?.(next?.id)
+          }}
+        />
+        <p id={hintId} className={gone ? BAD : HINT}>
+          {gone
+            ? 'No colour is available for this right now.'
+            : value === undefined
+              ? "The shop's choice, unless you pick one."
+              : 'Pick “Use the shop’s choice” to go back to it.'}
+        </p>
+      </div>
+    )
+  }
+
+  if (param.kind === 'choice') {
     return (
       <fieldset className="m-0 min-w-0 border-0 p-0" aria-describedby={hintId}>
         <legend className={LABEL}>{param.label}</legend>
@@ -41,13 +81,13 @@ export function ParamField({ param, value, filaments, onChange }: Props) {
           spacing={2}
           className="w-full flex-wrap"
           aria-label={param.label}
-          value={value === undefined ? '' : String(param.choices.findIndex((choice) => choice === value))}
+          // The shop's default shows as picked until the visitor picks (#6144).
+          value={picked(param, value)}
           // Choosing the one picked again empties the group: back to the shop's choice.
           onValueChange={(picked) => onChange(picked === '' ? undefined : param.choices[Number(picked)])}
         >
           {param.choices.map((choice, index) => {
-            const filament = param.colour && typeof choice === 'string' ? filamentOf(filaments, choice) : undefined
-            const name = filament ? filamentName(filament) : valueText(choice)
+            const name = valueText(choice)
             return (
               <ToggleGroupItem
                 key={String(choice)}
@@ -56,20 +96,13 @@ export function ParamField({ param, value, filaments, onChange }: Props) {
                 variant="outline"
                 className="h-auto min-h-11 max-w-full rounded-full px-3.5 py-1.5 text-left whitespace-normal [overflow-wrap:anywhere] data-[state=on]:border-primary data-[state=on]:ring-1 data-[state=on]:ring-primary"
               >
-                {param.colour && typeof choice === 'string' && (
-                  <span className="size-5 flex-none rounded-full border border-foreground/25" style={{ background: choice }} />
-                )}
                 <span>{name}</span>
               </ToggleGroupItem>
             )
           })}
         </ToggleGroup>
-        <p id={hintId} className={gone ? BAD : HINT}>
-          {gone
-            ? 'No colour is available for this right now.'
-            : value === undefined
-              ? "The shop's choice, unless you pick one."
-              : 'Tap it again to go back to the shop’s choice.'}
+        <p id={hintId} className={HINT}>
+          {value === undefined ? "The shop's choice, unless you pick one." : 'Tap it again to go back to the shop’s choice.'}
         </p>
       </fieldset>
     )
@@ -132,7 +165,7 @@ function NumberInput({
       type="text"
       inputMode={param.min < 0 ? 'text' : 'decimal'}
       value={text}
-      placeholder={`${param.min} to ${param.max}`}
+      placeholder={param.default != null ? String(param.default) : `${param.min} to ${param.max}`}
       aria-describedby={hintId}
       aria-invalid={problem ? true : undefined}
       onChange={(event) => {
@@ -143,3 +176,16 @@ function NumberInput({
     />
   )
 }
+
+/** Whether `choice` is `value`: a colour in any case, as the backend compares it. */
+function sameChoice(colour: boolean, choice: ParamValue, value: ParamValue | null | undefined): boolean {
+  if (colour && typeof choice === 'string' && typeof value === 'string') return choice.toLowerCase() === value.toLowerCase()
+  return choice === value
+}
+
+/** The toggle group's value: the index of the choice on screen, or '' for none. */
+function picked(param: Extract<PublicParam, { kind: 'choice' }>, value: ParamValue | undefined): string {
+  const index = param.choices.findIndex((choice) => sameChoice(param.colour, choice, value ?? param.default))
+  return index < 0 ? '' : String(index)
+}
+

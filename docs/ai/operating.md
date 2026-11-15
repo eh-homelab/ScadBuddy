@@ -927,11 +927,18 @@ The agent owns its `ai_*` tables (spec §9); the API applies their migrations
 The agent's migration advisory lock key is "SCADAGNT", distinct from the backend's
 "SCADBDDY" (`AGENT_MIGRATION_LOCK` in `backend/scadbuddy/render/agent_migrations.py`).
 
-The agent also reads the backend's flow tables, which the backend migrates. Its
-database role needs `UPDATE` on `workflow_runs`, not only `SELECT`: every flow tool call
-reads its run `FOR SHARE` (`PgFlowRuns.startedBy`, `agent/src/temporal/flowRuns.ts`), and
-Postgres requires `UPDATE` for that lock. A role narrowed to `SELECT` fails every flow
-tool call, as a lookup error the activity retries until it gives up.
+The agent also reads the backend's flow tables, which the backend migrates. It asks the
+backend over its CRUD routes (`/api/v1/internal/crud/agent/`, area `flows`,
+`agent/src/flows/backendReads.ts`, #5299) once `GET …/crud/agent/areas` lists the area,
+and reads them over SQL only until then, while an API pod older than the routes answers.
+Over SQL its database role needs `UPDATE` on `workflow_runs`, not only `SELECT`: every
+flow tool call reads its run `FOR SHARE` (`PgFlowRuns.startedBy`,
+`agent/src/temporal/flowRuns.ts`), and Postgres requires `UPDATE` for that lock. A role
+narrowed to `SELECT` fails every flow tool call, as a lookup error the activity retries
+until it gives up. Through the route the backend takes that lock itself. The gate's grant
+check (`agent/src/gate/store.ts` `grantInput`) still reads `flow_grants` and
+`flow_grant_uses` over SQL, under the grant row's share lock, so the role keeps `UPDATE`
+on `flow_grants`.
 
 ## 8. Per-query limits
 

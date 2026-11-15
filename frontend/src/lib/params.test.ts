@@ -11,6 +11,7 @@ import {
   extrudersOf,
   extrudersIn,
   colourHex,
+  colourValue,
   outOfRange,
   paramLabel,
   rangeProblem,
@@ -256,6 +257,12 @@ describe('rangeProblem (#921)', () => {
     expect(colourHex('red')).toBe('#FF0000')
     expect(colourHex('#abc')).toBe('#AABBCC')
     expect(colourHex('#RREEDD')).toBeNull()
+    // #6243 review: the field keeps a translucent colour's alpha, and drops only FF.
+    expect(colourValue('#ff000080')).toBe('#FF000080')
+    expect(colourValue('#f008')).toBe('#FF000088')
+    expect(colourValue('#FF0000FF')).toBe('#FF0000')
+    expect(colourValue('red')).toBe('#FF0000')
+    expect(colourValue('#RREEDD')).toBeNull()
     // The renderer needs the `#`: a bare hex reads as an unknown name there.
     for (const bare of ['FF0000', 'add', 'f00']) {
       expect(colourHex(bare)).toBeNull()

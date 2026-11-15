@@ -47,11 +47,10 @@ Read from the code on 2026-11-13 (`origin/main` f7a7f39d2):
   colours of the listing's price-book filaments, case-insensitively, else 422
   `listing_colour_unknown` (`backend/scadbuddy/orders/storefront/listings.py` `checked_fixed`,
   `_check_colour`).
-- A visitor who does not set an offered parameter gets the schema's default, checked against
-  the listing's bound (`orders/storefront/inputs.py` `listing_values`). A listing has no
-  per-listing default for an offered parameter. So an offered parameter starts at the
-  template's default for the customer, never at the shop's current value, and an offered
-  colour's default must be one of the listing's filaments.
+- A visitor who does not set an offered parameter gets the listing's `default`, else the
+  template's (`effective_default`, #6144), checked against the listing's bound
+  (`orders/storefront/inputs.py` `listing_values`). An offered colour's default must be one
+  of the listing's filaments.
 - Saving a published listing unpublishes it (`ListingStore.update`; `api/storefront.py`
   `update_listing`).
 - A render job records `slug`, `params`, `model_version` (the commit), `started_at` and
@@ -127,14 +126,14 @@ filaments into the parameters and filaments, and `sellMedia` picks the pictures:
   colour one of the colour values is, compared case aside as publish compares them; every
   priced filament of any material when no value matches one. The filaments the values name
   come first.
-- A customer who picks no colour gets the template's default (§2), and publish and the
+- A customer who picks no colour gets the listing's default, else the template's (§2), and publish and the
   customer's render refuse a colour that no listing filament has. Such a colour, locked or
   an offered one's default (`colourProblems`), is named at the top of the editor ("Plate is
   #1B6CA8"), with a picker of the price book's filaments, nearest colour first, and a link to
   add one to the price book (Settings → Printing → Orders). Choosing a filament adds it and
-  locks the colour at it (`fixColour`): a listing cannot set an offered colour's default yet,
-  so locking is the fix until it can. "The current value as the customer's default" waits
-  for that backend field, filed by the storefront's own work. The note stays, live, until
+  locks the colour at it (`fixColour`): the backend field for an offered colour's
+  default exists (#6144), and only the editor control to set it is still to come; until it
+  comes, locking is the fix. The note stays, live, until
   every colour has a filament. Publish stays possible, and the server's refusal names the
   parameter if the person goes on anyway.
 - Render time: when the job (or the output's job) took more than 100 s, a note: "This design
@@ -149,14 +148,19 @@ test and the assistant's tool test (§6) both read it.
   1. A "Design" line at the top ("Name Keychain version c3d4e5f (current)"), with "Change"
      opening the design and version pickers.
   2. "Product": title, description, pictures.
-  3. "What the customer chooses": the offered parameters, each with its bounds ("From", "To",
-     "Step"; "Most characters"), and "Colours on offer".
-  4. "Set by you": folded to one line that lists each locked value ("Text size 14, …"), with
-     "Show all N" to open the rows. Most products need none of them changed.
+  3. "Settings": every parameter, once, in the design's order (#6290). An offered one shows
+     its bounds ("From", "To", "Step"; "Most characters"); a locked one shows its value. A
+     switch never moves a row: the first build split them into "What the customer chooses"
+     and a folded "Set by you", and turning a switch off moved the row out of sight.
+  4. "Colours on offer": folded to the count and names of the ticked filaments, with
+     "Show all N filaments" to open the list. When a listing has loaded (the price book has
+     answered, and a new listing's smart defaults are in), it opens if no colour is ticked and
+     is folded otherwise. After that it stays as the person leaves it: it never folds while
+     they tick colours. Opening another listing decides again.
 - No variable names beside the captions (the name stays in the row's tooltip).
 - Each parameter row has one switch, "Customer can change", instead of two radio buttons. A
   switch that cannot be turned on says why ("A customer cannot choose a typeface.", "Tick a
-  colour on offer first.").
+  colour on offer below first.").
 - "Publish" (saves and publishes) and "Save draft" sit at the top of the listing, above the
   editor. While a published listing has unsaved changes the page says "Saving a draft takes
   this listing off the store until you publish it again."
@@ -179,7 +183,7 @@ So "put the navy owl on the store" is: find the output, draft, then publish afte
 ## 7. Out of scope
 
 - Pipeline templates (publish refuses them, `listing_pipeline_unsupported`): #5701.
-- A per-listing default for an offered parameter (needs a backend and storefront change).
+- The editor control to set an offered parameter's default (the backend field is #6144).
 - Adding the output's render as a model picture from the editor (Generate → Rendered image…
   already adds one to the model's media).
 - Prices: the storefront prices each order from its quote, not the listing.

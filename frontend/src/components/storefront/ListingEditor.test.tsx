@@ -5,7 +5,7 @@ import type { CustomizerSchema, Filament, Param } from '../../api/types'
 import { keychainSchema } from '../../mocks/fixtures'
 import { renderPage } from '../../test/utils'
 import { ListingEditor } from './ListingEditor'
-import { defaultsFor, emptyDraft, listingInput, previewListing, unsaveable, type ListingDraft } from './listingDraft'
+import { defaultsFor, emptyDraft, listingInput, previewListing, shownParams, unsaveable, type ListingDraft } from './listingDraft'
 
 const COMMIT = 'a'.repeat(40)
 
@@ -17,8 +17,14 @@ function filament(id: string, colour: string, colour_name: string): Filament {
     brand: null,
     colour_name,
     colour,
+    alpha: 255,
+    extra_colours: [],
+    effect: null,
+    colour_source: 'manual',
+    spool_linked: false,
     cost_per_kg: '20',
     density_g_cm3: '1.24',
+    density_profile: null,
     archived_at: null,
     created_at: '2026-11-01T00:00:00Z',
     updated_at: '2026-11-01T00:00:00Z',
@@ -54,23 +60,84 @@ function last(seen: ListingDraft[]): ListingDraft {
 }
 
 describe('ListingEditor (#5282, #6131)', () => {
-  it('puts what the customer chooses apart from what the shop sets, folded to one line', async () => {
+  it('lists every setting once, in the design’s order, and a switch never moves it (#6290)', async () => {
     const { user } = renderPage(<Harness seen={[]} />)
-    const chooses = screen.getByRole('region', { name: 'What the customer chooses' })
-    expect(within(chooses).getAllByTestId('listing-param').map((row) => row.querySelector('[title]')?.textContent)).toEqual(['Name on the tag', 'Plate', 'Text'])
-    const set = screen.getByRole('region', { name: 'Set by you' })
-    expect(set).toHaveTextContent('Text size 14, ')
-    expect(within(set).queryByRole('group', { name: 'Text size' })).toBeNull()
-    await user.click(within(set).getByRole('button', { name: 'Show all 8' }))
-    expect(within(set).getByRole('group', { name: 'Text size' })).toBeInTheDocument()
+    const settings = screen.getByRole('region', { name: 'Settings' })
+    const names = () => within(settings).getAllByTestId('listing-param').map((row) => row.querySelector('[title]')?.textContent)
+    const order = shownParams(keychainSchema).map((param) => param.caption || param.name)
+    expect(names()).toEqual(order)
+    // A locked setting shows its value in place; no section hides it.
+    expect(within(settings).getByRole('group', { name: 'Text size' })).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'Set by you' })).toBeNull()
+
+    const at = order.indexOf('Name on the tag')
+    await user.click(screen.getByRole('switch', { name: 'Customer can change Name on the tag' }))
+    expect(names()).toEqual(order)
+    expect(within(within(settings).getAllByTestId('listing-param')[at]!).getByLabelText('Value of Name on the tag')).toHaveValue('Reagan')
+    await user.click(screen.getByRole('switch', { name: 'Customer can change Name on the tag' }))
+    expect(names()).toEqual(order)
+    expect(within(within(settings).getAllByTestId('listing-param')[at]!).queryByLabelText('Value of Name on the tag')).toBeNull()
     // No variable names beside the captions.
     expect(screen.queryByText('text_size')).not.toBeInTheDocument()
+  })
+
+  it('folds the colours on offer to a count after the settings, and opens them (#6290)', async () => {
+    const { user } = renderPage(<Harness seen={[]} />)
+    const colours = screen.getByRole('group', { name: 'Colours on offer' })
+    expect(within(colours).queryByRole('list')).toBeNull()
+    expect(colours).toHaveTextContent(/: \d+ ticked \(/)
+    await user.click(within(colours).getByRole('button', { name: 'Show all 3 filaments' }))
+    expect(within(colours).getAllByRole('listitem')).toHaveLength(3)
+    // After the settings in the page.
+    const settings = screen.getByRole('region', { name: 'Settings' })
+    expect(settings.compareDocumentPosition(colours) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('opens the colours on offer when none is ticked, and keeps them open while colours are ticked (#6292 review)', async () => {
+    const seen: ListingDraft[] = []
+    function Untouched() {
+      const [draft, setDraft] = useState<ListingDraft>({ ...emptyDraft('name-keychain', COMMIT), title: 'Tag' })
+      return (
+        <ListingEditor
+          draft={draft}
+          onChange={(next) => {
+            seen.push(next)
+            setDraft(next)
+          }}
+          models={[]}
+          versions={[]}
+          schema={keychainSchema}
+          filaments={[RED, BLUE, CORAL]}
+          media={[]}
+        />
+      )
+    }
+    const { user } = renderPage(<Untouched />)
+    const colours = screen.getByRole('group', { name: 'Colours on offer' })
+    expect(within(colours).getAllByRole('listitem')).toHaveLength(3)
+    await user.click(within(colours).getByRole('checkbox', { name: 'PLA Red' }))
+    await user.click(within(colours).getByRole('checkbox', { name: 'PLA Ocean' }))
+    // Still open under the person's hand.
+    expect(within(colours).getAllByRole('listitem')).toHaveLength(3)
+    expect(last(seen).colours).toEqual(['f1', 'f2'])
+  })
+
+  it('decides whether the colours start open only once the listing has loaded (#6292 review)', () => {
+    const draft: ListingDraft = { ...emptyDraft('name-keychain', COMMIT), title: 'Tag' }
+    const props = { onChange: () => undefined, models: [], versions: [], schema: keychainSchema, media: [] }
+    // Loading: no filaments yet, so it says so rather than "no filaments".
+    const { rerender } = renderPage(<ListingEditor {...props} draft={draft} filaments={[]} coloursSettled={false} bookState="loading" />)
+    expect(screen.getByRole('group', { name: 'Colours on offer' })).toHaveTextContent('Reading the price book…')
+    // The book and the defaults land: ticked, so it folds.
+    rerender(<ListingEditor {...props} draft={{ ...draft, colours: ['f1'] }} filaments={[RED, BLUE]} coloursSettled={true} />)
+    const colours = screen.getByRole('group', { name: 'Colours on offer' })
+    expect(within(colours).queryByRole('list')).toBeNull()
+    expect(colours).toHaveTextContent('1 ticked (PLA Red)')
   })
 
   it('lets the customer change a locked parameter, and narrows its bounds', async () => {
     const seen: ListingDraft[] = []
     const { user } = renderPage(<Harness seen={seen} />)
-    await user.click(screen.getByRole('button', { name: /^Show all/ }))
     await user.click(screen.getByRole('switch', { name: 'Customer can change Margin around the text' }))
     expect(last(seen).params['padding']).toEqual({ kind: 'number', min: 6, max: 6, step: null })
     expect(last(seen).fixed['padding']).toBeUndefined()
@@ -87,8 +154,7 @@ describe('ListingEditor (#5282, #6131)', () => {
   })
 
   it('says why a typeface is never the customer’s', async () => {
-    const { user } = renderPage(<Harness seen={[]} />)
-    await user.click(screen.getByRole('button', { name: /^Show all/ }))
+    renderPage(<Harness seen={[]} />)
     expect(screen.getByRole('switch', { name: 'Customer can change Typeface' })).toBeDisabled()
     expect(screen.getByText('A customer cannot choose a typeface.')).toBeInTheDocument()
   })
@@ -99,24 +165,34 @@ describe('ListingEditor (#5282, #6131)', () => {
       parameters: [...(keychainSchema.parameters ?? []), { name: 'support_colour', type: 'color', group: 'Supports', caption: 'Support material', initial: '#E8532F' }],
     }
     const seen: ListingDraft[] = []
-    const { user } = renderPage(<Harness seen={seen} schema={schema} />)
-    await user.click(screen.getByRole('button', { name: /^Show all/ }))
+    renderPage(<Harness seen={seen} schema={schema} />)
     expect(screen.getByRole('switch', { name: 'Customer can change Support material' })).toBeDisabled()
     expect(screen.getByText('Support settings are yours: a customer never sees them.')).toBeInTheDocument()
   })
 
-  it('marks the filament a support colour alone uses as not offered (#6140 review)', () => {
+  it('marks the filament a support colour alone uses as not offered (#6140 review)', async () => {
+    const schema: CustomizerSchema = {
+      ...keychainSchema,
+      parameters: [...(keychainSchema.parameters ?? []), { name: 'support_colour', type: 'color', group: 'Supports', caption: 'Support material', initial: '#F5F5DC' }],
+    }
+    const pva = { ...filament('f-pva', '#F5F5DC', 'Natural'), material: 'PVA' }
+    const { user } = renderPage(<Harness seen={[]} schema={schema} filaments={[RED, BLUE, CORAL, pva]} />)
+    const colours = screen.getByRole('group', { name: 'Colours on offer' })
+    await user.click(within(colours).getByRole('button', { name: /^Show all/ }))
+    // The smart defaults put it on the listing, so publish takes the locked support colour.
+    expect(within(colours).getByRole('checkbox', { name: 'PVA Natural' })).toBeChecked()
+    expect(within(colours).getByText('PVA Natural').closest('label')).toHaveTextContent('(for supports only, not offered)')
+    expect(within(colours).getByText('PLA Ocean').closest('label')).not.toHaveTextContent('for supports only')
+  })
+
+  it('marks a support-only filament in the folded names too (#6292 review)', () => {
     const schema: CustomizerSchema = {
       ...keychainSchema,
       parameters: [...(keychainSchema.parameters ?? []), { name: 'support_colour', type: 'color', group: 'Supports', caption: 'Support material', initial: '#F5F5DC' }],
     }
     const pva = { ...filament('f-pva', '#F5F5DC', 'Natural'), material: 'PVA' }
     renderPage(<Harness seen={[]} schema={schema} filaments={[RED, BLUE, CORAL, pva]} />)
-    const colours = screen.getByRole('group', { name: 'Colours on offer' })
-    // The smart defaults put it on the listing, so publish takes the locked support colour.
-    expect(within(colours).getByRole('checkbox', { name: 'PVA Natural' })).toBeChecked()
-    expect(within(colours).getByText('PVA Natural').closest('label')).toHaveTextContent('(for supports only, not offered)')
-    expect(within(colours).getByText('PLA Ocean').closest('label')).not.toHaveTextContent('for supports only')
+    expect(screen.getByRole('group', { name: 'Colours on offer' })).toHaveTextContent('PVA Natural, for supports only')
   })
 
   it('does not offer a colour while the only ticked filament is for supports only (#6140 review)', async () => {
@@ -126,10 +202,9 @@ describe('ListingEditor (#5282, #6131)', () => {
     }
     const pva = { ...filament('f-pva', '#F5F5DC', 'Natural'), material: 'PVA' }
     const draft: ListingDraft = { ...emptyDraft('name-keychain', COMMIT), title: 'Tag', colours: [pva.id], fixed: { body_color: '#1B6CA8', text_color: '#E8532F' } }
-    const { user } = renderPage(<ListingEditor draft={draft} onChange={() => undefined} models={[]} versions={[]} schema={schema} filaments={[RED, pva]} media={[]} />)
-    await user.click(screen.getByRole('button', { name: /^Show all/ }))
+    renderPage(<ListingEditor draft={draft} onChange={() => undefined} models={[]} versions={[]} schema={schema} filaments={[RED, pva]} media={[]} />)
     expect(screen.getByRole('switch', { name: 'Customer can change Plate' })).toBeDisabled()
-    expect(screen.getAllByText('Tick a colour on offer first.').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Tick a colour on offer below first.').length).toBeGreaterThan(0)
   })
 
   it('names an offered parameter with nothing to choose by its caption', () => {
@@ -183,15 +258,15 @@ describe('ListingEditor (#5282, #6131)', () => {
     expect(screen.getByTestId('listing-design')).toBeInTheDocument()
   })
 
-  it('keeps an offered colour’s own label when it is saved (#6137)', () => {
+  it('keeps an offered colour’s own label and default when it is saved (#6137, #6144)', () => {
     const draft: ListingDraft = {
       ...emptyDraft('name-keychain', COMMIT),
       title: 'Tag',
       colours: [RED.id],
-      params: { body_color: { kind: 'choice', choices: [], label: 'Colour of the letters' } },
+      params: { body_color: { kind: 'choice', choices: [], label: 'Colour of the letters', default: '#FF0000' } },
     }
     expect(listingInput(draft, keychainSchema, [RED]).params).toEqual({
-      body_color: { kind: 'choice', choices: ['#FF0000'], label: 'Colour of the letters' },
+      body_color: { kind: 'choice', choices: ['#FF0000'], label: 'Colour of the letters', default: '#FF0000' },
     })
   })
 
@@ -220,6 +295,55 @@ describe('ListingEditor (#5282, #6131)', () => {
     expect(shown.line).toMatchObject({ label: 'Name', placeholder: 'Your name' })
   })
 
+  it('previews the default an unpicked render takes, as the public page does (#6144)', () => {
+    const schema: CustomizerSchema = {
+      ...keychainSchema,
+      parameters: [
+        { ...keychainSchema.parameters!.find((p) => p.name === 'body_color')!, initial: '#ff0000' },
+        { name: 'shape', type: 'select', initial: 'round', caption: 'Shape', group: 'Plate', options: [{ name: 'round', value: 'round' }, { name: 'square', value: 'square' }] } as Param,
+        { name: 'size', type: 'slider', initial: 40, caption: 'Size', group: 'Plate', min: 20, max: 80, step: 1 } as Param,
+        { name: 'line', type: 'string', initial: 'Your name', caption: 'Name', group: 'Text', max_length: 20 } as Param,
+      ],
+    }
+    const draft: ListingDraft = {
+      ...emptyDraft('name-keychain', COMMIT),
+      title: 'Tag',
+      colours: [RED.id],
+      params: {
+        body_color: { kind: 'choice', choices: [] },
+        shape: { kind: 'choice', choices: ['round', 'square'] },
+        size: { kind: 'number', min: 20, max: 80, step: 1 },
+        line: { kind: 'text', max_length: 20, default: 'Ada' },
+      },
+    }
+    const shown = previewListing(draft, schema, [RED], [], () => '').params
+    expect(shown.body_color!.default).toBe('#ff0000')
+    expect(shown.shape!.default).toBe('round')
+    expect(shown.size!.default).toBe(40)
+    expect(shown.line).toMatchObject({ default: 'Ada', placeholder: 'Ada' })
+    const elsewhere = previewListing({ ...draft, colours: [] }, schema, [RED], [], () => '').params
+    expect(elsewhere.body_color!.default).toBeNull()
+    // A choice default outside its choices (a listing saved before #6144) shows none.
+    const stale = previewListing({ ...draft, params: { ...draft.params, shape: { kind: 'choice', choices: ['square'] } } }, schema, [RED], [], () => '').params
+    expect(stale.shape!.default).toBeNull()
+  })
+
+  it('previews no number default outside its range or off its step, as the public page does (#6144)', () => {
+    const schema: CustomizerSchema = {
+      ...keychainSchema,
+      parameters: [{ name: 'size', type: 'slider', initial: 50, caption: 'Size', group: 'Plate', min: 20, max: 80, step: 1 } as Param],
+    }
+    const draft = (size: ListingDraft['params'][string]): ListingDraft => ({ ...emptyDraft('name-keychain', COMMIT), title: 'Tag', params: { size } })
+    const shown = (size: ListingDraft['params'][string]) => previewListing(draft(size), schema, [], [], () => '').params.size!.default
+    // A listing saved before #6144: the template's 50 on a 60 to 80 field.
+    expect(shown({ kind: 'number', min: 60, max: 80, step: 1 })).toBeNull()
+    expect(shown({ kind: 'number', min: 20, max: 80, step: 1, default: 85 })).toBeNull()
+    expect(shown({ kind: 'number', min: 20, max: 80, step: 1, default: 30.5 })).toBeNull()
+    // With no step of its own, the schema's applies, as the backend checks it.
+    expect(shown({ kind: 'number', min: 20, max: 80, default: 30.5 })).toBeNull()
+    expect(shown({ kind: 'number', min: 20, max: 80, step: 1, default: 30 })).toBe(30)
+  })
+
   it('locks a numeric select at one of its options, as a number', async () => {
     const seen: ListingDraft[] = []
     const holeSide = (keychainSchema.parameters ?? []).find((p) => p.name === 'hole_side') as Param
@@ -234,7 +358,6 @@ describe('ListingEditor (#5282, #6131)', () => {
       ],
     }
     const { user } = renderPage(<Harness seen={seen} schema={{ ...keychainSchema, parameters: [...(keychainSchema.parameters ?? []), lines] }} />)
-    await user.click(screen.getByRole('button', { name: /^Show all/ }))
     await user.click(screen.getByRole('combobox', { name: 'Value of Lines' }))
     await user.click(await screen.findByRole('option', { name: 'Two' }))
     expect(last(seen).fixed['lines']).toBe(2)
@@ -243,7 +366,6 @@ describe('ListingEditor (#5282, #6131)', () => {
   it('locks a switch on or off', async () => {
     const seen: ListingDraft[] = []
     const { user } = renderPage(<Harness seen={seen} />)
-    await user.click(screen.getByRole('button', { name: /^Show all/ }))
     const value = screen.getByRole('switch', { name: 'Value of Keyring hole' })
     expect(value).toBeChecked()
     await user.click(value)

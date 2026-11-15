@@ -7,6 +7,7 @@ import numpy as np
 import trimesh
 from pydantic import BaseModel
 
+from scadbuddy.render.colours import stored_alpha
 from scadbuddy.render.split import ColourPart, painted_pieces
 
 # OpenSCAD is Z-up, glTF (and three.js) are Y-up.
@@ -29,6 +30,10 @@ class BoundingBox(BaseModel):
 #: The mesh extra holding a part's sRGB hex. ``baseColorFactor`` is linear, and
 #: trimesh stores it in 8 bits, so the darks cannot be read back from it (#1319).
 COLOUR_EXTRA = "scadbuddy_colour"
+#: The mesh extra holding a translucent part's alpha byte (`ColourPart.alpha`), only
+#: below 255. The material stays opaque: the viewer reads this one value
+#: (`frontend/src/lib/glbColor.ts` `designOpacityOf`), as the covers do.
+ALPHA_EXTRA = "scadbuddy_alpha"
 
 
 def _srgb_to_linear(channel: float) -> float:
@@ -84,6 +89,8 @@ def write_glb(parts: Sequence[ColourPart], out_path: Path) -> BoundingBox:
         mesh = part.mesh.copy()
         mesh.apply_transform(Z_UP_TO_Y_UP)
         mesh.metadata[COLOUR_EXTRA] = part.colour
+        if part.alpha < 255:
+            mesh.metadata[ALPHA_EXTRA] = part.alpha
         mesh.visual = trimesh.visual.TextureVisuals(
             material=trimesh.visual.material.PBRMaterial(
                 name=part.name,
@@ -130,5 +137,13 @@ def read_glb(path: Path) -> list[ColourPart]:
             continue
         mesh = geometry.copy()
         mesh.apply_transform(y_up_to_z_up @ transform)
-        parts.append(ColourPart(index, str(geometry_name), _colour_of(geometry), mesh))
+        parts.append(
+            ColourPart(
+                index,
+                str(geometry_name),
+                _colour_of(geometry),
+                mesh,
+                alpha=stored_alpha(geometry.metadata.get(ALPHA_EXTRA)),
+            )
+        )
     return parts

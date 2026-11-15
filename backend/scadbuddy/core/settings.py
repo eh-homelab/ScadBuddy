@@ -228,6 +228,10 @@ class Settings(BaseSettings):
     storefront_renders_per_minute: int = Field(default=3, ge=1, le=60)
     storefront_renders_per_day: int = Field(default=30, ge=1, le=10000)
     storefront_render_concurrency: int = Field(default=2, ge=1, le=50)
+    # SCADBUDDY_STOREFRONT_SLICES_CONCURRENT: the storefront's slices that run at once,
+    # shop-wide (#6153); the rest wait. Nothing reads it until the storefront prices a
+    # design from a slice (#6153 PR A).
+    storefront_slices_concurrent: int = Field(default=1, ge=1, le=4)
     storefront_draft_ttl_days: int = Field(default=30, ge=1, le=365)
     storefront_requests_enabled: bool = False
     # The storefront's mail (#5283, spec 2026-11-02 §5.7), sent only by the CRUD service
@@ -503,12 +507,15 @@ class Settings(BaseSettings):
     # SCADBUDDY_SECRET_KEY_FILE: the key-encryption key the agent uses too (#602): 32
     # random bytes, base64 (`openssl rand -base64 32`). With it the `SECRET_FIELDS` are
     # sealed at rest (`core/secrets.py`); unset, they stay plaintext, with a warning at
-    # start. Every process that reads them (the API and both workers) needs the same file.
+    # start. Only the API reads the settings' sealed values: the render and print workers
+    # read theirs, already opened, from its CRUD routes (#5298). The projects worker
+    # reads the same file for its flows' sealed payloads.
     secret_key_file: Path | None = None
     # SCADBUDDY_SECRET_KEY_PREVIOUS_FILE: during a rotation, the KEK before it (the
     # agent's variable of the same name). Tried after the current key only where a value
-    # sealed before the rotation may still be in flight: a virtual printer's access code
-    # sealed by the API and opened by the print worker's run (#4888).
+    # sealed before the rotation may still be in flight: a virtual printer's access code,
+    # which the API seals and, for a print worker's run, opens again
+    # (`printers/component.py`, #4888, #5298).
     secret_key_previous_file: Path | None = None
 
     @field_validator("database_url")
@@ -1065,6 +1072,7 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "storefront_renders_per_minute": "live",
         "storefront_renders_per_day": "live",
         "storefront_render_concurrency": "live",
+        "storefront_slices_concurrent": "live",
         "storefront_draft_ttl_days": "live",
         "storefront_requests_enabled": "live",
         # Read from the store by each send of the storefront's mail (#5283).
