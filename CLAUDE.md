@@ -290,6 +290,7 @@ The Go and Rust commands and toolchain notes: `tools/go/CLAUDE.md`, `workers/rus
 
 ## PR conventions
 
+- Print and slicer settings: never add an allowlist of keys or a named field per setting. Any Bambu Studio key goes through one generic `process_overrides` (decision on #2998). A new print or quote option is also a remembered choice with a toggle (#6219).
 - Conventional-commit titles (`feat(scope):`, `fix(scope):`, `docs:`, `ci:` …);
   Release Drafter labels and groups PRs by title. Body links the issue: `Fixes #N`.
 - Agent-authored changes and docs cite their sources (#259): every external fact gets

@@ -198,6 +198,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
 - `backend/scadbuddy/workflows/arrange.py` — Arrange's packer (spec 2026-09-27 §7): goals,
   quarter turns, filament signatures, every plate checked with `plate.fit_problem`;
   `Arrange` in `workflows/pipelines.py` runs a `kind='arrange'` row (`POST /outputs/arrange`).
+  It packs with `packing.py` `GAP_MM` (5 mm) and ignores Bambu's by-object clearance, so a
+  by-object plate fails "too close to others" (#6246). A template plate is one object with
+  colour parts (#6245), so by-object slicing does nothing useful on it: render each piece
+  alone and arrange the pieces, which makes each one its own object (#956).
 - `backend/scadbuddy/workflows/` — renders on Temporal (#424): `pipelines.py`
   (`TemplatePipeline`, its `RenderPiece` children, `RenderPreview`), `activities.py`
   (the render stages as activities, `WorkerDeps`), `client.py` (`connect`,
