@@ -1,4 +1,5 @@
 import type { Sql, TransactionSql } from 'postgres'
+import { CrudReadError } from '../api/crudRead.js'
 import type { EventLog } from '../sessions/eventLog.js'
 import type { GateRoutes, Logged } from './crudStore.js'
 import type { InputEntry, InputOutcome, Owner, ServerEvent } from '../sessions/protocol.js'
@@ -480,7 +481,14 @@ export async function openInput(db: GateDb, args: OpenInput): Promise<boolean> {
 export async function grantInput(db: GateDb, args: GrantInput): Promise<boolean> {
   // The check, the response row and its audit row are one transaction on the API (#5299 step 10).
   if (!db.crud) throw new Error("the run grant's check runs on the API (#5299 step 10), and the gate has no route to it")
-  return await db.crud.grant(args)
+  try {
+    return await db.crud.grant(args)
+  } catch (err) {
+    // An API older than this agent (a roll that reached the agent first) has no such route: the
+    // call is not granted and parks for a person, as any call the grant does not cover.
+    if (err instanceof CrudReadError && !err.fromRoute && err.status === 404) return false
+    throw err
+  }
 }
 
 /**

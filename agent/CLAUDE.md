@@ -127,8 +127,10 @@ builds the session events, writes them with the rows, the status, the audit row 
 `scadbuddy_input` NOTIFY in one transaction, and answers them (`logged`), which the store hands
 to `EventLog.committed`. `decideInput` runs the validator on the API; with `live` the API first
 answers the row's run (`live_check`), writing nothing, and the store asks Temporal, then asks
-again naming the run it found. `grantInput` always calls the API (no SQL fallback: it reads the
-backend's `flow_grants`). A request id goes in the body or the query, never the path, and one
+again naming the run it found; it sends its hash of the response as the person sent it, as a
+resolve does (#3724). `grantInput` always calls the API (no SQL fallback: it reads the
+backend's `flow_grants`); an API with no such route yet (an agent that rolled first) answers no
+grant, so the call parks for a person. A request id goes in the body or the query, never the path, and one
 over `REQUEST_ID_MAX` is answered as never asked with no call. Tests `test/crudGate.test.ts` and
 `test/gateBackend.pg.test.ts` (the API's port writes the same rows and events as the SQL; it
 runs `backend/` with `uv`, as the agent-durable parity test does). Area `pending-input`
