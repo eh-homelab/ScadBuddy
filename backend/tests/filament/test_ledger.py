@@ -475,11 +475,43 @@ _RULE_CASES: dict[str, list[SpoolEvent]] = {
 
 @pg
 @pytest.mark.parametrize("case", list(_RULE_CASES))
-def test_the_fast_path_matches_the_full_walk_on_the_rule_cases(pg_pool: PgPool, case: str) -> None:
+def test_the_fast_path_matches_the_full_walk_on_the_rule_cases(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
     """Booked one by one, each event leaves what the full walk gives, also when it
     sits on top of the history (the fast path)."""
     spool = _spool(pg_pool, label_weight_g=1000)
+    reads = _counting(monkeypatch)
+    fast: set[int] = set()
     with pg_pool.connection() as conn:
-        for event in _RULE_CASES[case]:
+        for i, event in enumerate(_RULE_CASES[case]):
+            reads.clear()
             _book(conn, spool, event)
+            if not reads:
+                fast.add(i)
             _assert_full_path_agrees(conn, spool)
+    # The cases built to land on top take the fast path there.
+    assert _ON_TOP.get(case, set()) <= fast
+
+
+#: The bookings of a rule case that land on top of its history (by index).
+_ON_TOP: dict[str, set[int]] = {
+    "plate_end_then_reading": {2},
+    "printing_reading": {2, 3},
+    "bb_reading_holds_usage_ahead": {2},
+    "anchors_then_subtracts": {2},
+    "ams_older_than_weighing": {1},
+}
+
+
+@pg
+def test_a_negative_reading_on_top_leaves_zero(pg_pool: PgPool) -> None:
+    """`record` takes any float (only the API's `Grams` is ``ge=0``); the fast path
+    floors a negative reading at zero, as the walk does."""
+    spool = _spool(pg_pool, label_weight_g=1000)
+    with pg_pool.connection() as conn:
+        record(conn, spool, "weighed", source="scale", absolute_g=500, at=T0)
+        at = T0 + timedelta(minutes=1)
+        record(conn, spool, "weighed", source="person", absolute_g=-5, at=at)
+        assert _derived(conn, spool)["grams_left"] == 0
+        _assert_full_path_agrees(conn, spool)
