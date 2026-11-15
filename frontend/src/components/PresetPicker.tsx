@@ -639,7 +639,7 @@ export function PresetPicker({
       {/* #1023 — one row: the actions sit after the select, so "Save as preset…" alone
           no longer takes a row of its own. They wrap below only when the panel is too
           narrow for the select's minimum width beside them. */}
-      <div className="flex flex-wrap items-center gap-2">
+      <div data-testid="preset-bar" className="flex flex-wrap items-center gap-2">
         <Label htmlFor="preset-select" className="shrink-0 font-normal text-muted-foreground">
           Preset
         </Label>
@@ -735,8 +735,9 @@ export function PresetPicker({
         </div>
       </div>
 
-      {/* #352 — its own line above the buttons: beside them it wrapped word by word
-          into a narrow column, and a long name pushed it out of the panel.
+      {/* #352 — its own line, below the select's row and its buttons (#1023): beside the
+          buttons it wrapped word by word into a narrow column, and a long name pushed it
+          out of the panel.
           #351 — always in the page, so "Changed from …" is announced as it appears;
           out of the flow while empty, so it adds no gap. */}
       <Hint content={modified ? `Changed from ${selected?.name ?? ''}` : undefined}>

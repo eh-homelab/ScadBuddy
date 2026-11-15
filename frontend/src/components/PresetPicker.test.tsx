@@ -413,13 +413,14 @@ describe('PresetPicker', () => {
     const { user } = render()
     const select = await picker()
     const saveAs = screen.getByRole('button', { name: 'Save as preset…' })
-    const row = select.parentElement
-    expect(row?.contains(saveAs)).toBe(true)
+    const row = screen.getByTestId('preset-bar')
+    expect(row.contains(select)).toBe(true)
+    expect(row.contains(saveAs)).toBe(true)
     // Picked and changed, the preset's actions join the same row.
     await selectOption(user, select, 'Mum')
     await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'my')
-    expect(row?.contains(screen.getByRole('button', { name: /^Update preset / }))).toBe(true)
-    expect(row?.contains(screen.getByRole('button', { name: 'More for preset Mum' }))).toBe(true)
+    expect(row.contains(screen.getByRole('button', { name: /^Update preset / }))).toBe(true)
+    expect(row.contains(screen.getByRole('button', { name: 'More for preset Mum' }))).toBe(true)
   })
 
   it('offers neither Update nor Delete on a preset the template ships', async () => {
