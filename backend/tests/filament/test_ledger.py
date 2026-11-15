@@ -127,14 +127,25 @@ def test_bb_usage_and_sb_end_of_one_plate_count_once() -> None:
     assert _left(events) == 759
 
 
-def test_a_bb_reading_holds_its_own_usage_row() -> None:
-    def bb_reading(minute: int) -> SpoolEvent:
-        return _event(minute, "synced_from_bb", "bb", grams_after=500, ref_kind="bb_spool")
+def _bb_reading(minute: int) -> SpoolEvent:
+    return _event(minute, "synced_from_bb", "bb", grams_after=500, ref_kind="bb_spool")
 
-    ahead = [_sb(5, "print_ended", -38), _bb(10, -41), bb_reading(10)]
+
+def test_a_bb_reading_holds_its_own_usage_row() -> None:
+    ahead = [_sb(5, "print_ended", -38), _bb(10, -41), _bb_reading(10)]
     assert _left(ahead) == 500
-    behind = [_sb(2, "print_ended", -38), _bb(2, -41), bb_reading(10)]
+    behind = [_sb(2, "print_ended", -38), _bb(2, -41), _bb_reading(10)]
     assert _left(behind) == 500
+
+
+def test_a_bb_reading_given_before_its_usage_row_holds_it() -> None:
+    events = [_sb(5, "print_ended", -38), _bb_reading(10), _bb(10, -41)]
+    assert _left(events) == 500
+
+
+def test_a_bb_reading_holds_a_pair_whose_sb_end_is_later() -> None:
+    events = [_bb(2, -41), _bb_reading(2), _sb(5, "print_ended", -38)]
+    assert _left(events) == 500
 
 
 def test_an_ams_reading_after_the_sb_end_holds_a_pair_whose_bb_time_is_later() -> None:
@@ -153,6 +164,20 @@ def test_a_failed_plate_takes_bbs_partial_grams() -> None:
         _bb(2, -23.4),
     ]
     assert _left(events) == pytest.approx(576.6)
+
+
+def test_a_failed_plate_counts_bbs_grams_by_sbs_end() -> None:
+    events = [
+        _sb(0, "print_started", -40),
+        _bb(1, -23.4),
+        _event(2, "ams_reading", "ams_remain", data={"remain_pct": 60}),
+        _sb(3, "print_ended", 0, data={"basis": "not_applied", "job": "J"}),
+    ]
+    assert _left(events) == pytest.approx(576.6)
+
+
+def test_a_non_string_job_falls_back_to_the_ref_id() -> None:
+    assert job_of(_sb(1, "print_ended", -38, ref="run1/J/2", data={"job": None})) == "J"
 
 
 def test_one_spool_in_two_slots_is_one_bb_row() -> None:

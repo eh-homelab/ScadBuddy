@@ -16,11 +16,12 @@ The order is when things physically happened (§8.2, "Consumption is counted onc
 event that names its time (``at``) keeps it: a BB weighing or drying at BB's time, BB's
 state (``synced_from_bb``) at the BB row's ``updated_at``, a BB usage row at its
 ``created_at``, a print's ``print_started`` when the printer takes the plate and its
-``print_ended`` at the report that shows the plate's timed end. An event with no ``at``
-is booked now: the clock's time, but never earlier than a microsecond after the spool's
-newest event, so a clock that steps back (WSL's does) cannot put an event before the one
-it follows. That guard only moves an event booked now, never a named time, so it never
-pushes a physical time past a newer anchor. Three rules (#6263, spec §5.5):
+``print_ended`` at the report that shows the plate's timed end (from Task 5 of #6263;
+until then `spools/native.py` `settle_uses_in` books it at the plate's start). An event
+with no ``at`` is booked now: the clock's time, but never earlier than a microsecond
+after the spool's newest event, so a clock that steps back (WSL's does) cannot put an
+event before the one it follows. That guard only moves an event booked now, never a
+named time, so it never pushes a physical time past a newer anchor. Three rules (#6263, spec §5.5):
 
 1. At one instant every delta comes before every reading, and events of one kind keep
    the order they are given in (`events` gives them in insert order, ``seq``). A reading
