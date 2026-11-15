@@ -431,3 +431,9 @@ def test_an_insert_prunes_operations_past_the_retention(agent: Agent, tables: Pg
     _sql(tables, "UPDATE ai_operations SET finished_at = now() - interval '2 hours'")
     agent.post("/operations", _operation("new", workflow_id="agent-op-new", retention_seconds=3600))
     assert _sql(tables, "SELECT id FROM ai_operations") == [{"id": "new"}]
+
+
+def test_a_retention_under_an_hour_is_refused(agent: Agent, tables: PgPool) -> None:
+    assert agent.status("POST", "/operations", _operation("x", retention_seconds=60)) == 422
+    assert agent.status("POST", "/operations", _operation("x", retention_seconds=0)) == 422
+    assert _sql(tables, "SELECT id FROM ai_operations") == []

@@ -29,8 +29,11 @@ Area ``operations``, ``ai_operations``:
 - ``POST …/operations/{id}/finish``: its end.
 
 An inserted or ended operation's ``activity`` row is written in the same transaction (the
-API's own table, ``activity/index.py`` ``ingest_agent_operation_in``). All natural writes,
-safe to send again: no ``Idempotency-Key``.
+API's own table, ``activity/index.py`` ``ingest_agent_operation_in``). No route takes an
+``Idempotency-Key``. A task's state writes, ``delivered``, the journal, a child, and an
+operation's insert and end are natural writes, safe to send again. ``POST …/background-tasks``
+makes a new task each time, and ``POST …/events`` without ``notice`` adds a row each time,
+as the agent's SQL did: the agent sends neither again after a lost answer.
 """
 
 from __future__ import annotations
@@ -449,7 +452,7 @@ class NewOperation(BaseModel):
     workflow_run_id: str = Field(min_length=1, max_length=NAME_MAX)
     actor: Actor | None = None
     retention_seconds: int = Field(
-        default=operations.OPERATION_RETENTION_SECONDS, ge=0, le=10 * 365 * 86400
+        default=operations.OPERATION_RETENTION_SECONDS, ge=3600, le=10 * 365 * 86400
     )
 
 

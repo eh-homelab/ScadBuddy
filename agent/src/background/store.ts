@@ -461,6 +461,8 @@ export class CrudBackgroundTasks {
   }
 
   async journal(taskId: string, key: string, occurrence: number, entry: { result: unknown; ok: boolean; childId?: string | undefined }): Promise<void> {
+    // JSON has no undefined, so an undefined result is sent, and kept, as null: `{"value": null}`
+    // where the SQL kept `{}`. A replay reads `.value` from either as nothing (null, or undefined).
     const body = { key, occurrence, result: entry.result ?? null, ok: entry.ok, child_id: entry.childId ?? null }
     await this.#post("a Workflow's call journalled", `/${encodeURIComponent(taskId)}/calls`, body)
   }
