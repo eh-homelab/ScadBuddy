@@ -330,6 +330,20 @@ const fromWire = (w: WireTask): BackgroundTask => ({
 })
 
 /** `BackgroundTaskStore`'s methods over the backend's CRUD routes (`…/crud/agent/background-tasks`), one transaction each. */
+/** A task's id as the table's CHECK has it (`randomBytes(4)` in hex). */
+const TASK_ID = /^[0-9a-f]{8}$/
+
+/**
+ * Whether `id` can name a task. The routes refuse any other id (422), where the SQL found no row:
+ * a model's or a browser's id (a Workflow's `wf_<id>`, a shell id, none at all) reads as no task
+ * here too, so `TaskStop` still answers "No task found" and the panel's cancel 404, without a call.
+ * A write that inserts (an event, a journal row, a child) is left to the route: on SQL it failed
+ * too, on the foreign key.
+ */
+function isTaskId(id: string): boolean {
+  return TASK_ID.test(id)
+}
+
 export class CrudBackgroundTasks {
   readonly #base: string
   readonly #fetch: typeof fetch
@@ -362,6 +376,7 @@ export class CrudBackgroundTasks {
   }
 
   async get(id: string): Promise<BackgroundTask | undefined> {
+    if (!isTaskId(id)) return undefined
     const { task } = await this.#get<{ task: WireTask | null }>('a background task', `/${encodeURIComponent(id)}`)
     return task ? fromWire(task) : undefined
   }
@@ -378,14 +393,17 @@ export class CrudBackgroundTasks {
   }
 
   async scheduled(id: string, nextAt: Date): Promise<void> {
+    if (!isTaskId(id)) return
     await this.#post('a background task scheduled', `/${encodeURIComponent(id)}/scheduled`, { at: nextAt.toISOString() })
   }
 
   async fired(id: string, at: Date): Promise<void> {
+    if (!isTaskId(id)) return
     await this.#post('a background task fired', `/${encodeURIComponent(id)}/fired`, { at: at.toISOString() })
   }
 
   async finish(id: string, state: Exclude<TaskState, 'active'>, detail?: string): Promise<boolean> {
+    if (!isTaskId(id)) return false
     const body = { state, detail: detail ?? null }
     return (await this.#post<{ finished: boolean }>('a background task ended', `/${encodeURIComponent(id)}/finish`, body)).finished
   }
@@ -401,6 +419,7 @@ export class CrudBackgroundTasks {
   }
 
   async pendingEvents(taskId: string, maxChars = DELIVER_MAX_CHARS): Promise<{ seq: string; text: string }[]> {
+    if (!isTaskId(taskId)) return []
     const params = new URLSearchParams({ max_chars: String(maxChars) })
     const { events } = await this.#get<{ events: { seq: string; text: string }[] }>(
       "a monitor's pending events",
@@ -411,23 +430,28 @@ export class CrudBackgroundTasks {
 
   /** How many events a task has; only those not yet sent to its session with `pending`. */
   async eventCount(taskId: string, options: { pending?: boolean } = {}): Promise<number> {
+    if (!isTaskId(taskId)) return 0
     const query = options.pending ? '?pending=true' : ''
     return (await this.#get<{ count: number }>("a monitor's event count", `/${encodeURIComponent(taskId)}/events/count${query}`)).count
   }
 
   async delivered(taskId: string, upTo: string): Promise<void> {
+    if (!isTaskId(taskId)) return
     await this.#post("a monitor's events delivered", `/${encodeURIComponent(taskId)}/events/delivered`, { up_to: upTo })
   }
 
   async setSpec(id: string, spec: Record<string, unknown>): Promise<void> {
+    if (!isTaskId(id)) return
     await this.#post("a background task's spec", `/${encodeURIComponent(id)}/spec`, { spec })
   }
 
   async progress(id: string, detail: string): Promise<void> {
+    if (!isTaskId(id)) return
     await this.#post("a background task's progress", `/${encodeURIComponent(id)}/progress`, { detail })
   }
 
   async journalled(taskId: string, key: string, occurrence: number): Promise<{ result: unknown; ok: boolean } | undefined> {
+    if (!isTaskId(taskId)) return undefined
     const params = new URLSearchParams({ key, occurrence: String(occurrence) })
     const { call } = await this.#get<{ call: { result: unknown; ok: boolean } | null }>(
       "a Workflow's journalled call",
@@ -446,6 +470,7 @@ export class CrudBackgroundTasks {
   }
 
   async openChildren(taskId: string): Promise<string[]> {
+    if (!isTaskId(taskId)) return []
     return (await this.#get<{ children: string[] }>("a Workflow's open child chats", `/${encodeURIComponent(taskId)}/children/open`)).children
   }
 }

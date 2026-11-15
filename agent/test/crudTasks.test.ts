@@ -2,7 +2,9 @@ import type { Sql } from 'postgres'
 import { describe, expect, it } from 'vitest'
 import { CrudAreas, TASK_AREAS } from '../src/api/crudAreas.js'
 import { CrudReadError, wellFormed } from '../src/api/crudRead.js'
+import { BackgroundTasks, type TaskRunner } from '../src/background/service.js'
 import { BackgroundTaskStore, CrudBackgroundTasks, NOTICE_MAX_CHARS } from '../src/background/store.js'
+import { type BackgroundContext, taskStop } from '../src/builtins/background.js'
 import { CrudOperations, OperationStore } from '../src/operations/store.js'
 
 // A session's background tasks and the agent's command record through the API's CRUD routes
@@ -235,6 +237,41 @@ describe("a session's background tasks through the CRUD routes", () => {
     ])
   })
 
+  it.each(['wf_0a1b2c3d', '', 'bash_1', '0000ABCD', '0000abcd0'])(
+    'reads %j, which names no task, as no task, with no call (#6374 review)',
+    async (id) => {
+      // As the SQL found no row: TaskStop's "No task found" and the panel's 404 stand.
+      const api = new FakeApi()
+      const tasks = store(api, { on: true })
+      expect(await tasks.get(id)).toBeUndefined()
+      expect(await tasks.finish(id, 'cancelled', 'cancelled by You')).toBe(false)
+      expect(await tasks.pendingEvents(id)).toEqual([])
+      expect(await tasks.eventCount(id)).toBe(0)
+      expect(await tasks.pendingCount(id)).toBe(0)
+      expect(await tasks.journalled(id, KEY, 0)).toBeUndefined()
+      expect(await tasks.openChildren(id)).toEqual([])
+      await tasks.scheduled(id, new Date())
+      await tasks.fired(id, new Date())
+      await tasks.progress(id, 'x')
+      await tasks.setSpec(id, {})
+      await tasks.delivered(id, '1')
+      expect(api.seen).toEqual([])
+    },
+  )
+
+  it.each([{ task_id: 'wf_0a1b2c3d' }, { shell_id: 'bash_1' }, {}])(
+    "answers TaskStop %j with Claude Code's No task found, not a backend error (#6374 review)",
+    async (input) => {
+      const api = new FakeApi()
+      const runner: TaskRunner = { start: async () => undefined, cancel: async () => {}, terminate: async () => {} }
+      const tasks = new BackgroundTasks({ store: store(api, { on: true }), runner })
+      const ctx = { tasks, sessionId: SESSION } as unknown as BackgroundContext
+      const id = 'task_id' in input ? input.task_id : 'shell_id' in input ? input.shell_id : ''
+      expect(await taskStop(ctx, input)).toMatchObject({ isError: true, text: `No task found with ID: ${id}` })
+      expect(api.seen).toEqual([])
+    },
+  )
+
   it('refuses an answer that is not the route\'s', async () => {
     const api = new FakeApi()
     api.notCrud = true
@@ -317,5 +354,10 @@ describe('wellFormed', () => {
       c: true,
       d: '😀',
     })
+  })
+
+  it("replaces lone surrogates in an object's keys too (#6374 review)", () => {
+    // A spec or a journalled result from the model can carry one in a key.
+    expect(wellFormed({ 'k \ud83d': { '\udc00': 1 }, '😀': 2 })).toEqual({ 'k �': { '�': 1 }, '😀': 2 })
   })
 })
