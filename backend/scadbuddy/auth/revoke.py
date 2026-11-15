@@ -46,9 +46,18 @@ def revoke_retired(conn: Connection[Any]) -> list[str]:
 #: listed here. The agent's `blob_refs`: its workspace files are held through the CRUD
 #: routes (`api/crud_agent.py`, #5299), no longer by its trigger. Its `events`,
 #: `workflow_runs` and `workflow_run_decisions`: it reads the event log, flow runs and their
-#: decisions through the CRUD routes of areas ``events`` and ``flows`` (#5299 D7).
+#: decisions through the CRUD routes of areas ``events`` and ``flows`` (#5299 D7). Its
+#: ``flow_grants`` and ``flow_grant_uses``: its gate's grant check runs on the API, area
+#: ``gate`` (`api/crud_agent_gate.py`, #5299 step 10).
 RETIRED_GRANTS: Mapping[str, tuple[str, ...]] = {
-    "scadbuddy_agent": ("blob_refs", "events", "workflow_runs", "workflow_run_decisions")
+    "scadbuddy_agent": (
+        "blob_refs",
+        "events",
+        "workflow_runs",
+        "workflow_run_decisions",
+        "flow_grants",
+        "flow_grant_uses",
+    )
 }
 
 

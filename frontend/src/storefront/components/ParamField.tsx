@@ -17,6 +17,8 @@ interface Props {
    */
   shown?: ParamValue
   filaments: readonly Filament[]
+  /** The listing's allowed materials, first preferred: which filament draws a shared colour's swatch (#6215). */
+  materials?: readonly string[]
   onChange: (next: ParamValue | undefined) => void
 }
 
@@ -36,7 +38,7 @@ const INPUT =
  * with the theme's tokens only, so the back office's preview (StorefrontPage) shows the
  * same form in its own colours.
  */
-export function ParamField({ param, value, shown, filaments, onChange }: Props) {
+export function ParamField({ param, value, shown, filaments, materials, onChange }: Props) {
   const id = useId()
   const problem = valueProblem(param, value)
   const hintId = `${id}-hint`
@@ -52,7 +54,7 @@ export function ParamField({ param, value, shown, filaments, onChange }: Props) 
       <div className="min-w-0" aria-describedby={hintId}>
         <ColourPicker
           label={param.label}
-          swatches={colourSwatches(param, filaments)}
+          swatches={colourSwatches(param, filaments, materials)}
           picked={value !== undefined}
           shown={row}
           onChange={(next) => onChange(next?.colour)}

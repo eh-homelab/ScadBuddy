@@ -609,6 +609,35 @@ fieldset.sf-field {
   color: var(--sf-ink-soft);
   font-variant-numeric: tabular-nums;
 }
+.sf-item-price {
+  margin: 6px 0 0;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.sf-item-each {
+  font-weight: 400;
+  color: var(--sf-ink-soft);
+}
+.sf-item-price-by-hand {
+  font-weight: 400;
+  color: var(--sf-ink-soft);
+}
+.sf-checkout-note {
+  max-width: 44rem;
+  margin: 14px 0 0;
+  padding: 14px 20px;
+  border-radius: 12px;
+  background: var(--sf-signal);
+}
+.sf-checkout-note .sf-hint {
+  margin: 2px 0 0;
+}
+.sf-checkout-total {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
 .sf-values {
   display: grid;
   gap: 4px;

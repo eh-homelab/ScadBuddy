@@ -269,7 +269,7 @@ async function orderOf(request: Request): Promise<CustomerOrder | Response> {
 }
 
 export function ensureDraft(): Draft {
-  draft ??= { id: 'draft-1', currency: 'USD', minor_exponent: 2, items: [], shipping_options: SHIPPING }
+  draft ??= { id: 'draft-1', currency: 'USD', minor_exponent: 2, items: [], shipping_options: SHIPPING, pay_now: false }
   return draft
 }
 
@@ -364,6 +364,8 @@ export const handlers = [
       attachments: [],
       sources: [],
       own_model: false,
+      // The mocks slice nothing: every line is priced by hand (#6153).
+      price: 'by_hand',
     })
     save()
     return HttpResponse.json(current)
@@ -392,7 +394,7 @@ export const handlers = [
     if (!option) return refused(422, 'shipping_option_id', 'Choose how your order reaches you.')
     if (option.ships && !body.address) return refused(409, 'shipping_address_required', 'This way of shipping needs your address.')
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(body.email)) return refused(422, 'email_invalid', 'Give one email address, such as ada@example.com.')
-    const submitted = { id: draft.id, number: `ORD-2026-${++orders}`, email: body.email }
+    const submitted = { id: draft.id, number: `ORD-2026-${++orders}`, email: body.email, pay_now: false }
     draft = null
     save()
     return HttpResponse.json(submitted)
@@ -462,6 +464,8 @@ export const handlers = [
       attachments: files.map((file) => ({ filename: file.name, kind: 'image', url: `/mock-files/${encodeURIComponent(file.name)}` })),
       sources: [],
       own_model: false,
+      // The mocks slice nothing: every line is priced by hand (#6153).
+      price: 'by_hand',
     })
     save()
     return HttpResponse.json(current)

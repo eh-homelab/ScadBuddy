@@ -148,6 +148,8 @@ def test_a_replayed_submit_makes_one_order_one_number_and_one_mail(
         "id": draft["id"],
         "number": order.number,
         "email": "ada@example.com",
+        # The line has no firm price (#6153): the shop checks the order first.
+        "pay_now": False,
     }
     assert order.number is not None and order.number.endswith("-1")
     assert rows(api, "SELECT last FROM order_numbers") == [{"last": 1}]

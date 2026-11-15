@@ -15,6 +15,7 @@ import {
   type PluginRepo,
   type PluginSummary,
   type RemotePlugin,
+  PLUGIN_NAME_RE,
   reservedNameProblem,
   toolPrefix,
 } from '../plugins/registry.js'
@@ -125,7 +126,8 @@ export function pluginView(plugin: PluginSummary, kek: KekStatus): PluginView {
     enabled: plugin.enabled,
     tool_prefix: toolPrefix(plugin.name),
     auth: plugin.auth_header === null ? null : { header: plugin.auth_header, last4: plugin.secret_last4 ?? '' },
-    usable: plugin.kekId === null || (kek.ok && kek.kek.id === plugin.kekId),
+    // Through the API's routes, its key opens the secret (#5299 step 5); over SQL, this process's.
+    usable: plugin.opens ?? (plugin.kekId === null || (kek.ok && kek.kek.id === plugin.kekId)),
     problem: reservedNameProblem(plugin.name),
     tool_tiers: plugin.tool_tiers,
     disabled_tools: plugin.disabled_tools,
@@ -327,6 +329,8 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
     const name = c.req.param('name')
     if (builtIn(name)) return isBuiltIn(c, name, 'signed out: it runs inside the agent')
     if (!deps.pluginOAuth) return c.json({ detail: NO_DATABASE }, 503)
+    // No plugin has a name outside the rule, so none is signed in; and such a name never reaches a route path.
+    if (!PLUGIN_NAME_RE.test(name)) return c.json({ detail: `plugin "${name}" is not signed in` }, 404)
     if (!(await deps.pluginOAuth.forget(name))) return c.json({ detail: `plugin "${name}" is not signed in` }, 404)
     return c.body(null, 204)
   })

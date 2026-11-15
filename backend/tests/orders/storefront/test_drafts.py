@@ -235,6 +235,10 @@ def test_add_to_order_makes_revision_one(
             # A customer's own files and links (#6133): none on a listing's item.
             "sources": [],
             "own_model": False,
+            # No render was priced (#6153): the shop prices the line by hand.
+            "price": "by_hand",
+            "unit_price_minor": None,
+            "total_minor": None,
         }
     ]
 

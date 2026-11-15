@@ -332,6 +332,13 @@ ships. It:
 4. stamps `orders.submitted_at`, which moves the order into the shop's queue,
 5. emails the order link.
 
+**As built (#6153):** each line is priced again at submit by its variant's slice price.
+When every line has a firm price, the submit also accepts those prices and the order as
+the customer, and opens the balance request, so the customer pays at once with no
+check by the shop. Otherwise the order waits for the shop's check, and the customer pays
+once, after the shop prices the other lines. See
+[2026-11-13 §5.6](2026-11-13-storefront-customize-ux-design.md#56-slice-path).
+
 A submitted order stays `draft` in `OrderStatus`; "submitted" is `submitted_at`, not a new
 status, so `derive` and `_settle_open` are untouched. Before submit the customer can edit
 anything; after it, only answer revisions, accept quotes, pay and cancel while nothing is

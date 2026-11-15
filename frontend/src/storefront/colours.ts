@@ -1,3 +1,5 @@
+import type { CSSProperties } from 'react'
+import { displayHex, swatchStyle } from '../lib/filamentSwatch'
 import type { Filament, Listing, ParamValue, PublicParam } from './api/client'
 import { closestColour, type Swatch } from './closestColour'
 import { customerFilaments, paramFilaments, startColour } from './params'
@@ -36,8 +38,10 @@ export interface ColourSwatch {
   colour: string
   /** What the customer reads: the colour's name, never its material. */
   name: string
-  /** The first filament of the colour, which draws the swatch. */
+  /** The filament that draws the swatch: of the first allowed material that offers the colour. */
   filament: Filament
+  /** The swatch's background, from the filament's effect, alpha and extra colours (#6215). */
+  style: CSSProperties
 }
 
 /** The words of the listing's materials, which a name or a finish never shows. */
@@ -48,13 +52,28 @@ function materialWords(filaments: readonly Filament[]): RegExp | null {
   return new RegExp(`\\b(?:${escaped.join('|')})\\b`, 'gi')
 }
 
+/** A filament's alpha byte: null or missing reads as opaque (255), never as 00. */
+const alphaOf = (filament: Filament) => filament.alpha ?? 255
+
+/** An effect as a finish word: "dual-color" is "Dual-color". */
+const effectWord = (effect: string) => effect.charAt(0).toUpperCase() + effect.slice(1)
+
 /**
  * The swatches of colour part `param`: one per colour, in the listing's order. A swatch is
- * named by its colour's name and finish ("Blue · Matte"), else its hex. Two of one such
- * name are told apart by their brand, else by their hex (#6152). No name or finish shows a
+ * named by its colour's name and finish ("Blue · Matte"), else its hex. The finish is the
+ * filament's effect, else its subtype. Two of one such name are told apart by their brand,
+ * else by their hex. The hex shows the alpha when it is below FF ("#FFFFFF80"), so a clear
+ * filament and its opaque twin read apart (#6152, #6215). No name or finish shows a
  * material word (#6258).
+ *
+ * `materials` is the listing's allowed materials, in the shop's order. When two filaments
+ * of these materials share a colour, the swatch is one, and the filament of the first
+ * material that offers the colour draws it. The shop takes that material first when the
+ * visitor picks the colour alone (`colourPlan`), so the swatch shows the most likely
+ * plastic. If their effects differ, that first filament wins (#6215). With no list (the
+ * back office's preview of a draft), the colours' own order applies.
  */
-export function colourSwatches(param: PublicParam, filaments: readonly Filament[]): ColourSwatch[] {
+export function colourSwatches(param: PublicParam, filaments: readonly Filament[], materials?: readonly string[]): ColourSwatch[] {
   const offered = paramFilaments(param, filaments)
   const strip = materialWords(filaments)
   const plain = (text: string | null | undefined) =>
@@ -62,24 +81,38 @@ export function colourSwatches(param: PublicParam, filaments: readonly Filament[
       .split(/\s+/)
       .filter(Boolean)
       .join(' ')
+  const rank = new Map((materials ?? []).map(fold).map((material, index) => [material, index] as const))
+  const rankOf = (filament: Filament) => rank.get(fold(filament.material)) ?? rank.size
   const byKey = new Map<string, Filament>()
-  for (const filament of offered) if (!byKey.has(fold(filament.colour))) byKey.set(fold(filament.colour), filament)
+  for (const filament of offered) {
+    const key = fold(filament.colour)
+    const seen = byKey.get(key)
+    if (!seen || rankOf(filament) < rankOf(seen)) byKey.set(key, filament)
+  }
   const first = [...byKey.entries()].map(([key, filament]) => {
-    const name = plain(filament.colour_name) || filament.colour.toUpperCase()
-    const finish = plain(filament.subtype)
-    return { key, filament, base: finish && !fold(name).includes(fold(finish)) ? `${name} · ${finish}` : name }
+    const hex = displayHex(filament.colour, alphaOf(filament))
+    const name = plain(filament.colour_name) || hex
+    const finish = plain(filament.effect ? effectWord(filament.effect) : filament.subtype)
+    return { key, filament, hex, base: finish && !fold(name).includes(fold(finish)) ? `${name} · ${finish}` : name }
   })
   const count = (keys: string[]) => keys.reduce((seen, k) => seen.set(k, (seen.get(k) ?? 0) + 1), new Map<string, number>())
   const names = count(first.map((each) => fold(each.base)))
   const withBrand = count(first.map((each) => fold(`${each.base}\u0000${each.filament.brand ?? ''}`)))
-  return first.map(({ key, filament, base }) => {
+  return first.map(({ key, filament, hex, base }) => {
     let name = base
     if ((names.get(fold(base)) ?? 0) > 1 && filament.colour_name) {
       const brand = filament.brand?.trim()
       if (brand && (withBrand.get(fold(`${base}\u0000${brand}`)) ?? 0) < 2) name = `${base} (${brand})`
-      else name = `${base} ${filament.colour.toUpperCase()}`
+      else name = `${base} ${hex}`
     }
-    return { key, colour: filament.colour, name, filament }
+    const style = swatchStyle({
+      colour: filament.colour,
+      alpha: alphaOf(filament),
+      extra_colours: filament.extra_colours,
+      effect: filament.effect,
+      subtype: filament.subtype,
+    })
+    return { key, colour: filament.colour, name, filament, style }
   })
 }
 

@@ -190,19 +190,27 @@ def test_a_table_dropped_from_a_callers_list_is_taken_back_at_start(
     assert revoke_tables(conn, f"absent_{role}", ("blob_refs",)) == []
 
 
-def test_the_agent_keeps_only_the_gates_tables(
+def test_the_agent_keeps_no_backend_table(
     conn: Conn, role: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """#5299: the agent reads the event log, flow runs and their decisions through the CRUD
-    routes (`api/crud_agent.py`), so the start takes those tables back; it keeps what the
-    gate's `grantInput` reads under the grant row's share lock (step 10)."""
+    routes (`api/crud_agent.py`, D7), and its gate's grant check runs on the API
+    (`api/crud_agent_gate.py`, step 10), so the start takes every one of those tables back."""
     assert RETIRED_GRANTS == {
-        "scadbuddy_agent": ("blob_refs", "events", "workflow_runs", "workflow_run_decisions")
+        "scadbuddy_agent": (
+            "blob_refs",
+            "events",
+            "workflow_runs",
+            "workflow_run_decisions",
+            "flow_grants",
+            "flow_grant_uses",
+        )
     }
-    assert AGENT_GRANTS == {"flow_grants": ("SELECT", "UPDATE"), "flow_grant_uses": ("SELECT",)}
+    assert AGENT_GRANTS == {}
     # The role as an older API left it: the five tables of #5299 D7's list.
     before = {
-        **AGENT_GRANTS,
+        "flow_grants": ("SELECT", "UPDATE"),
+        "flow_grant_uses": ("SELECT",),
         "events": ("SELECT",),
         "workflow_runs": ("SELECT",),
         "workflow_run_decisions": ("SELECT",),
@@ -213,14 +221,10 @@ def test_the_agent_keeps_only_the_gates_tables(
         "scadbuddy.auth.revoke.RETIRED_GRANTS", {role: RETIRED_GRANTS["scadbuddy_agent"]}
     )
     assert revoke_retired(conn) == [role]
-    assert _held(conn, role)["relations"] == {"flow_grants", "flow_grant_uses"}
-    granted = conn.execute(
-        "SELECT a.privilege_type AS p FROM pg_class c, aclexplode(c.relacl) a"
-        " WHERE c.relnamespace = current_schema()::regnamespace AND c.relname = 'flow_grants'"
-        " AND a.grantee = %s::regrole ORDER BY 1",
-        (role,),
-    ).fetchall()
-    assert [row["p"] for row in granted] == ["SELECT", "UPDATE"]
+    assert revoke_retired(conn) == []
+    held = _held(conn, role)
+    assert held["relations"] == set()
+    assert held["schema"]
 
 
 def test_a_missing_role_is_no_op(conn: Conn) -> None:
