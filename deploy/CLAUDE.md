@@ -16,6 +16,16 @@ These notes cover `deploy/`; paths are repo-relative; the root `CLAUDE.md` has t
   service emits (`lint-dashboard.sh` checks both, in every file); a span named at run
   time (a server span, `bambuddy.<op>`, Temporal's) is matched by attribute instead.
 
+## Prod checks
+- kubectl context `primary`, namespace `bambuddy`. Postgres is pod `scadbuddy-db-1`,
+  container `postgres`
+  (`kubectl -n bambuddy exec scadbuddy-db-1 -c postgres -- psql -U postgres -d scadbuddy -tAc …`).
+  Read only whether a secret is set, never its value.
+- A merged eh-homelab/clusters change is live only once Argo's `scadbuddy` app has
+  `.status.operationState.phase` `Succeeded` with `.syncResult.revision` at or after the
+  merge. While another sync is running (an API rollout), the change is applied on the next
+  one (2026-11-14, clusters#3578).
+
 ## See also
 
 - Metrics series come from `backend/scadbuddy/core/metrics.py`: see `backend/CLAUDE.md`.

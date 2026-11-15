@@ -39,6 +39,12 @@ service credential (PR #5211). The owner decided this on 2026-11-05.
   a pod that holds a database secret.
 - New data that crosses services goes through a CRUD route that requires a service
   credential from its first PR.
+- Retiring a caller's role goes in this order. First add it to `auth/revoke.py`
+  `RETIRED_ROLES` (the API revokes at every start) and deploy. On prod, check that it has
+  0 rows in `information_schema.role_table_grants`, owns 0 relations and has 0
+  `pg_stat_activity` sessions. Only then set `ensure: absent` in eh-homelab/clusters
+  `cnpg-cluster.yaml`, delete its `onepassworditem-*-db.yaml`, and archive the 1Password
+  item (#5298; how to read prod: `deploy/CLAUDE.md` "Prod checks").
 
 Today's code still breaks the rule: seven processes hold a Postgres secret (four once
 eh-homelab/clusters drops the render, print and projects workers', which they no longer
