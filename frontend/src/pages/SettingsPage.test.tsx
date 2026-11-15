@@ -454,6 +454,12 @@ describe('SettingsPage section links (#1307, #2345, #2346)', () => {
       // Measured while it was folded, the section had no box; laid out, it has one, and
       // the section nav's resize follow-up scrolls the pane there.
       tops['mcp-auth-mode'] = 7000
+      // The waits above may together move the fake clock past SETTLE_MS; say so here
+      // rather than as a scroll of 0 below (#6415).
+      expect(
+        observers.some((observer) => !observer.disconnected),
+        'the follow-up settled before the resize',
+      ).toBe(true)
       act(() => {
         for (const observer of observers) if (!observer.disconnected) observer.fire()
       })
