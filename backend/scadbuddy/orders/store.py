@@ -1271,6 +1271,18 @@ class OrderStore:
                 " AND s.status_reason = %s)",
                 IMPORT_STUCK,
             )
+        if filters.ended_since is not None:
+            add(
+                "NOT (o.status IN ('closed', 'cancelled')"
+                " AND COALESCE(o.closed_at, o.cancelled_at, o.updated_at) < %s)",
+                filters.ended_since,
+            )
+        if filters.owing:
+            # Index `payment_requests_order`.
+            add(
+                "EXISTS (SELECT 1 FROM payment_requests r WHERE r.order_id = o.id"
+                " AND r.status IN ('open', 'pending', 'failed'))"
+            )
         if filters.status:
             add("o.status = ANY(%s)", list(filters.status))
         if filters.customer_id is not None:

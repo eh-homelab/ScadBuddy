@@ -203,6 +203,8 @@ LIST_PARAMS = frozenset(
         "own_model",
         "purchase_pending",
         "import_stuck",
+        "ended_since",
+        "owing",
         "cursor",
         "limit",
     }
@@ -731,6 +733,8 @@ async def list_orders(
     own_model: bool = False,
     purchase_pending: bool = False,
     import_stuck: bool = False,
+    ended_since: datetime | None = None,
+    owing: bool = False,
     cursor: str | None = None,
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
 ) -> OrderPage:
@@ -750,7 +754,10 @@ async def list_orders(
     them. A cart has no ``number`` and no ``customer_id`` (both null). ``own_model=true``
     lists only orders with a customer's own-model request, ``purchase_pending=true`` only
     those with a thing to buy not yet priced, and ``import_stuck=true`` only those with a
-    file whose import is stuck (#6133, spec 2026-11-13 §11)."""
+    file whose import is stuck (#6133, spec 2026-11-13 §11). ``ended_since`` leaves out
+    the closed and cancelled orders that ended (``closed_at``, else ``cancelled_at``) before
+    it, keeping every open one; ``owing=true`` lists only orders with an ``open``,
+    ``pending`` or ``failed`` payment request (#6334)."""
     _no_nul(request)
     _unknown(request, LIST_PARAMS)
     try:
@@ -776,6 +783,8 @@ async def list_orders(
         own_model=own_model,
         purchase_pending=purchase_pending,
         import_stuck=import_stuck,
+        ended_since=ended_since,
+        owing=owing,
     )
     if cursor is not None:
         try:
