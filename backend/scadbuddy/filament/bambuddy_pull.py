@@ -12,9 +12,11 @@ this order:
    ``updated_at`` keeps SB's value. A value BB no longer has never clears SB's, and the
    fields BB does not have (note, location, bed temperatures ...) are never touched. A
    change of what is left (``label_weight - weight_used``) is a ``bb`` absolute reading
-   on the ``synced_from_bb`` event, unless the SB spool's weight is locked: then it is
-   recorded in the event's data and never moves ``grams_left``, as an ``ams_remain``
-   reading is not under the lock (`filament/ledger.py`).
+   on the ``synced_from_bb`` event, unless the SB spool's weight is locked: that value
+   is BB's own estimate, and the lock guards against estimates (§5.5), so it is recorded
+   in the event's data and never moves ``grams_left``. A BB weighing is a physical
+   reading and counts under the lock (`_book`). A BB unlock clears the lock only when a
+   pull set it (`_lock_from_bb`).
 2. Else an SB spool already is that spool: it holds the BB spool's ``tag_uid`` or
    ``tray_uuid`` through an open binding, or the BB record's `spool_record_links` row
    (provider ``bambuddy``) names it (a native spool migrated onto its physical spool's
@@ -128,6 +130,10 @@ def _rgba(value: str | None) -> str | None:
 
 
 def _colours(value: str | None) -> list[str] | None:
+    """BB's ``extra_colors``: comma-separated hex, 6 or 8 digits each, lower case with no
+    ``#`` as BB stores it (``normalize_extra_colors``, ``backend/app/schemas/spool.py``
+    lines 42-66 at https://github.com/maziggy/bambuddy/tree/1aa7bce166682fde929fec0d535bdaaa22685aad).
+    Spaces and ``;`` are taken as commas too. One bad token drops the field."""
     parts = [p for p in (value or "").replace(";", ",").replace(" ", ",").split(",") if p]
     colours = [_rgba(p) for p in parts]
     if not colours or any(c is None for c in colours):
@@ -444,31 +450,61 @@ def _lock_from_bb(conn: Conn, spool_id: UUID) -> bool:
     return row is not None and row["kind"] == "synced_from_bb"
 
 
+#: Bambuddy's ``last_scale_weight`` is the gross weight on the scale, spool core included
+#: ("Last gross weight from scale (g)", ``backend/app/models/spool.py`` line 43), and its
+#: scale route takes the spool's ``core_weight`` off it for the filament left
+#: (``backend/app/api/routes/spoolbuddy.py`` lines 1249-1251), both at
+#: https://github.com/maziggy/bambuddy/tree/1aa7bce166682fde929fec0d535bdaaa22685aad.
+
+
+def _core_g(conn: Conn, spool_id: UUID, bb: BbSpool) -> tuple[int | None, str | None]:
+    """The empty spool's weight and where it came from: the SB spool's effective insert
+    type, else BB's own ``core_weight``; ``(None, None)`` when neither has one."""
+    row = conn.execute(
+        "SELECT i.empty_weight_g FROM filament_spools s"
+        " LEFT JOIN filament_spool_types t ON t.id = s.type_id"
+        " LEFT JOIN filament_insert_types i ON i.id = coalesce(s.insert_type_id, t.insert_type_id)"
+        " WHERE s.id = %s",
+        (spool_id,),
+    ).fetchone()
+    if row is not None and row["empty_weight_g"] is not None:
+        return int(row["empty_weight_g"]), "insert_type"
+    if bb.core_weight > 0:
+        return bb.core_weight, "bb"
+    return None, None
+
+
 def _book(conn: Conn, spool_id: UUID, bb: BbSpool) -> bool:
-    """BB's last weighing as a ``weighed`` event (source ``bb``, its scale weight as the
-    reading, at its time) and its last drying as a ``dried`` one, each once: ref
-    ``bb_scale``/``bb_dried`` and ``<bb id>/<time>``. The ledger's rule picks the anchor:
-    the weighing wins when it is the newest reading. On a locked spool the weighing keeps
-    its grams in ``data`` only, as any ``bb`` reading does. True when either is new."""
+    """BB's last weighing as a ``weighed`` event and its last drying as a ``dried`` one,
+    each once: ref ``bb_scale``/``bb_dried`` and ``<bb id>/<time>``, at BB's time, source
+    ``bb``. The weighing's reading is the scale's gross weight less the core
+    (`_core_g`), the gross kept in ``data``; with no core weight known it books no
+    reading. A weighing is a physical reading, so it counts under the weight lock, which
+    guards against estimates (§5.5). The ledger's rule picks the anchor: the weighing wins
+    when it is the newest reading. True when either is new."""
     booked = False
     if bb.last_weighed_at is not None and bb.last_scale_weight is not None:
-        row = conn.execute(
-            "SELECT weight_locked FROM filament_spools WHERE id = %s", (spool_id,)
-        ).fetchone()
-        locked = row is not None and row["weight_locked"]
-        grams = float(bb.last_scale_weight)
+        gross = float(bb.last_scale_weight)
+        core, came_from = _core_g(conn, spool_id, bb)
+        data: dict[str, Any] = {"bb_gross_g": gross}
+        net: float | None = None
+        if core is None:
+            data["skipped"] = "no_core_weight"
+        else:
+            net = max(gross - core, 0.0)
+            data |= {"core_g": core, "core_from": came_from}
         booked |= (
             ledger.record(
                 conn,
                 spool_id,
                 "weighed",
                 source="bb",
-                absolute_g=None if locked else grams,
+                absolute_g=net,
                 at=bb.last_weighed_at,
                 ref_kind="bb_scale",
                 ref_id=f"{bb.id}/{bb.last_weighed_at.isoformat()}",
                 actor=ACTOR,
-                data={"bb_scale_g": grams, "skipped": "locked"} if locked else {},
+                data=data,
             )
             is not None
         )

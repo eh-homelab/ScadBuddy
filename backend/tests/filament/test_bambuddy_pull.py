@@ -16,7 +16,13 @@ from scadbuddy.filament.bambuddy_pull import pull, read_and_pull, scheduled_pull
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.locations import LocationStore
-from scadbuddy.filament.models import Material, SpoolCreate, SpoolPatch, SpoolTypeCreate
+from scadbuddy.filament.models import (
+    InsertTypeCreate,
+    Material,
+    SpoolCreate,
+    SpoolPatch,
+    SpoolTypeCreate,
+)
 from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.filament.types import SpoolTypeStore
 from scadbuddy.library.settings_store import StoredSettings
@@ -290,15 +296,23 @@ def test_a_bb_lock_is_cleared_by_a_bb_unlock(pg_pool: PgPool) -> None:
 
 
 def test_a_bb_scale_reading_is_the_anchor_when_newer(pg_pool: PgPool) -> None:
+    """BB's scale weight is gross; the reading is net of BB's ``core_weight``."""
     f = _filament(pg_pool)
-    old = bb(last_scale_weight=950, last_weighed_at=_bb_time(-5), updated_at=_bb_time(-5))
+    old = bb(
+        core_weight=250,
+        last_scale_weight=1200,
+        last_weighed_at=_bb_time(-5),
+        updated_at=_bb_time(-5),
+    )
     (made,) = pull(f, [old], now=NOW).created_ids
     first = f.spools.get(made)
     assert first is not None
     # The weighing is older than the pull's own reading of what is left.
     assert first.grams_left == 900
     assert first.last_weighed_g == 950
-    newer = bb(last_scale_weight=650, last_weighed_at=_bb_time(1), updated_at=_bb_time(1))
+    newer = bb(
+        core_weight=250, last_scale_weight=900, last_weighed_at=_bb_time(1), updated_at=_bb_time(1)
+    )
     assert pull(f, [newer], now=NOW).updated_ids == [made]
     spool = f.spools.get(made)
     assert spool is not None
@@ -308,10 +322,54 @@ def test_a_bb_scale_reading_is_the_anchor_when_newer(pg_pool: PgPool) -> None:
     assert (again.created, again.linked, again.updated) == (0, 0, 0)
     assert len(f.spools.events(made)) == count
     weighed = [e for e in f.spools.events(made) if e.kind == "weighed"]
-    assert [(e.source, e.ref_kind, e.grams_after) for e in weighed] == [
-        ("bb", "bb_scale", 950),
-        ("bb", "bb_scale", 650),
+    assert [(e.source, e.ref_kind, e.grams_after, e.data["bb_gross_g"]) for e in weighed] == [
+        ("bb", "bb_scale", 950, 1200),
+        ("bb", "bb_scale", 650, 900),
     ]
+
+
+def test_a_bb_weighing_counts_on_a_locked_spool(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb(updated_at=_bb_time(-3))], now=NOW).created_ids
+    f.spools.update(made, SpoolPatch(weight_locked=True), actor="ann")
+    weighed = bb(
+        core_weight=250, last_scale_weight=700, last_weighed_at=_bb_time(1), updated_at=_bb_time(1)
+    )
+    pull(f, [weighed], now=NOW)
+    spool = f.spools.get(made)
+    assert spool is not None
+    assert (spool.weight_locked, spool.grams_left) == (True, 450)
+
+
+def test_a_bb_weighing_is_net_of_the_sb_insert_type(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb(updated_at=_bb_time(-3))], now=NOW).created_ids
+    insert = f.catalog.create(
+        "insert-types", InsertTypeCreate(name="Cardboard", empty_weight_g=200)
+    ).model_dump()
+    f.spools.update(made, SpoolPatch(insert_type_id=insert["id"]), actor="ann")
+    weighed = bb(
+        core_weight=250, last_scale_weight=700, last_weighed_at=_bb_time(1), updated_at=_bb_time(1)
+    )
+    pull(f, [weighed], now=NOW)
+    spool = f.spools.get(made)
+    assert spool is not None
+    assert spool.grams_left == 500
+
+
+def test_a_bb_weighing_with_no_core_weight_books_no_reading(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    weighed = bb(core_weight=0, last_scale_weight=700, last_weighed_at=_bb_time(1))
+    (made,) = pull(f, [weighed], now=NOW).created_ids
+    spool = f.spools.get(made)
+    assert spool is not None
+    assert spool.grams_left == 900
+    (event,) = [e for e in f.spools.events(made) if e.kind == "weighed"]
+    assert (event.grams_after, event.data["bb_gross_g"], event.data["skipped"]) == (
+        None,
+        700,
+        "no_core_weight",
+    )
 
 
 def test_a_bb_drying_is_a_dried_event_once(pg_pool: PgPool) -> None:

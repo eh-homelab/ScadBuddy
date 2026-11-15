@@ -1098,9 +1098,12 @@ class Spool(BambuddyModel):
     #: What ScadBuddy's import reads (#6261, spec §8.1): the product code ScadBuddy's
     #: spool type keeps as ``code``, the second and further colours (comma-separated hex,
     #: as the colour of the spool), the effect, Bambuddy's spool catalog entry of the
-    #: core, when the row last changed, the last scale reading, the last drying and the
-    #: weight lock. Bambuddy's times are naive UTC (``created_at``/``updated_at`` in
-    #: ``tests/bambuddy/recordings/inventory-spools.json``); these read as UTC.
+    #: core, when the row last changed, the last scale reading (gross, the core included:
+    #: ``backend/app/models/spool.py`` line 43 at
+    #: https://github.com/maziggy/bambuddy/tree/1aa7bce166682fde929fec0d535bdaaa22685aad),
+    #: the last drying and the weight lock. Bambuddy's times are naive UTC
+    #: (``created_at``/``updated_at`` in ``tests/bambuddy/recordings/inventory-spools.json``);
+    #: these read as UTC.
     material_number: str | None = None
     extra_colors: str | None = None
     effect_type: str | None = None
