@@ -104,10 +104,12 @@ const SUPPORT_MATERIAL = /support|pva|bvoh|hips/i
  * #6258 — the backend's 422 `listing_material_not_allowed` (`orders/storefront/listings.py`
  * `check_materials`), or null: a listing filament of a material neither the listing's
  * `materials` nor, when it names none, the shop's `storefront_materials` allows. The mock
- * does not check the locked colours (`check_locked_colours`): it has no schema.
+ * does not check the locked colours (`check_locked_colours`): it has no schema. A row a
+ * test seeded without `materials` (or one kept in `sessionStorage` from before #6258) has none.
  */
 function materialRefusal(listing: StorefrontListing) {
-  const allowed = new Set((listing.materials.length > 0 ? listing.materials : (mockSettings().storefront_materials ?? [])).map((m) => m.trim().toLowerCase()))
+  const own = (listing as Partial<StorefrontListing>).materials ?? []
+  const allowed = new Set((own.length > 0 ? own : (mockSettings().storefront_materials ?? [])).map((m) => m.trim().toLowerCase()))
   for (const id of listing.colours) {
     const material = orders.state.filaments.find((f) => f.id === id)?.material
     if (material === undefined || SUPPORT_MATERIAL.test(material) || allowed.has(material.trim().toLowerCase())) continue
