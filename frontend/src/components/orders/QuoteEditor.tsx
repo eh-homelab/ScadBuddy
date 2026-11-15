@@ -84,7 +84,7 @@ function QuoteMachineRate({ rate }: { rate: MachineRateBreakdown }) {
  */
 function SetupFacts({ orderId, itemId, quote, changes }: { orderId: string; itemId: string; quote: Quote; changes: string[] }) {
   const [missing, setMissing] = useState<ReadonlySet<number>>(new Set())
-  if (quote.source === 'manual') return null
+  if (quote.source === 'manual' || quote.source === 'storefront') return null
   const stats = setupStats(quote)
   const plates = quote.sliced_blob_key ? setupPlates(quote).filter((plate) => !missing.has(plate)) : []
   return (
@@ -280,7 +280,7 @@ export function QuoteEditor({
               <span className="flex flex-wrap items-center gap-2">
                 <span className="sb-num">{formatMoney(quote.unit_price_minor, currency, exponent)} × {quote.quantity} = {formatMoney(quote.total_minor, currency, exponent)}</span>
                 <span className="text-muted-foreground">
-                  {quote.source === 'slice' ? 'From a slice' : quote.source === 'archive' ? 'From a past print' : (quote.lines[0]?.label ?? quote.source)}
+                  {quote.source === 'slice' ? 'From a slice' : quote.source === 'archive' ? 'From a past print' : quote.source === 'storefront' ? 'From the storefront' : (quote.lines[0]?.label ?? quote.source)}
                   {quote.sliced_sha256 ? <span className="font-mono text-xs"> · {quote.sliced_sha256.slice(0, 12)}</span> : null}
                 </span>
                 <span className="text-xs text-muted-foreground">

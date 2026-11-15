@@ -178,7 +178,7 @@ class FakeApi {
       if (m[2] === 'refreshed') {
         this.beforeRefreshed?.()
         if (this.leases.get(refreshLease(m[1]!)) !== b.lease_token) return this.#json({ detail: 'lost', reason: 'lease-lost' }, 409)
-        if (!grant || grant.grant_id !== b.grant) return this.#json({ stored: false })
+        if (!grant || grant.grant_id !== b.grant || grant.status !== 'connected') return this.#json({ stored: false })
         Object.assign(grant, { secret: b.secret, has_refresh: b.has_refresh, access_expires_at: b.access_expires_at })
         return this.#json({ stored: true })
       }
@@ -304,6 +304,14 @@ describe('the remote plugins and their sign-ins through CRUD routes (#5299 step 
     await expect(other.source('github', mcp.url, grant.grant_id, undefined).header()).rejects.toThrow(/a new sign-in may be needed/)
     api.beforeRefreshed = undefined
     api.leases.clear()
+
+    // Another replica marks the grant while this one refreshes: the API keeps the mark. (The
+    // step above spent the stored refresh token; the provider takes it again here.)
+    auth.refresh.add(api.grants.get('github')!.secret.refresh_token!)
+    api.beforeRefreshed = () => Object.assign(api.grants.get('github')!, { status: 'error' })
+    await expect(other.source('github', mcp.url, grant.grant_id, undefined).header()).rejects.toThrow(/marked for a new sign-in/)
+    api.beforeRefreshed = undefined
+    Object.assign(api.grants.get('github')!, { status: 'connected' })
 
     // A revoked refresh marks the grant on the API: sign in again.
     auth.revokeAll()

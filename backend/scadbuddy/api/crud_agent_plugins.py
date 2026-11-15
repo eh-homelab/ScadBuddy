@@ -944,7 +944,8 @@ class GrantRefreshed(_Body):
 async def oauth_grant_refreshed(plugin: PathName, body: GrantRefreshed, state: StateDep) -> Stored:
     """A refreshed sign-in, kept only while the caller holds the refresh lease (else 409
     ``lease-lost``: another replica may spend the refresh token) and the grant is still
-    the one it refreshed. False: the grant was replaced or removed since."""
+    the one it refreshed and connected, as the SQL path's refresh requires. False: the grant
+    was replaced, removed or marked for a new sign-in since."""
     kek = _need_kek(state)
 
     def run(conn: psycopg.Connection[Any]) -> bool:
@@ -956,7 +957,8 @@ async def oauth_grant_refreshed(plugin: PathName, body: GrantRefreshed, state: S
             )
         row = conn.execute(
             "SELECT plugin, plugin_url, resource, issuer, token_endpoint, client_id"
-            " FROM ai_plugin_oauth WHERE plugin = %s AND grant_id = %s FOR UPDATE",
+            " FROM ai_plugin_oauth WHERE plugin = %s AND grant_id = %s AND status = 'connected'"
+            " FOR UPDATE",
             (plugin, body.grant),
         ).fetchone()
         if row is None:

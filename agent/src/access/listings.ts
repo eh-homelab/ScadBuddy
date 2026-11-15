@@ -1,6 +1,6 @@
 import type { Sql, TransactionSql } from 'postgres'
 import { type LockClient, type LockLease, TEST_LOCK_CONNECTIONS } from '../db.js'
-import { chunks, type CrudTarget, crudOf, CrudLeases, type HeldLease, SOURCES_PER_CALL } from '../api/crudStores.js'
+import { chunks, type CrudTarget, crudOf, CrudLeases, CrudPathError, type HeldLease, SOURCES_PER_CALL } from '../api/crudStores.js'
 import { CrudReadError } from '../api/crudRead.js'
 import { z } from 'zod'
 import { packageServerSource, remoteSource } from './model.js'
@@ -411,8 +411,8 @@ export class CrudToolListings {
   /**
    * `fn` under `key`'s lease (`CrudLeases.hold`); `full` when this replica already runs
    * TEST_LOCK_CONNECTIONS tests, as on the SQL path; `unreachable` when the acquire got no
-   * answer of the route's own. In both `fn` did not run. A 4xx the route answered (a key it
-   * refuses) is thrown as it is.
+   * answer of the route's own. In both `fn` did not run. A key refused here (`CrudPathError`)
+   * or a 4xx the route answered (a key it refuses) is thrown as it is.
    */
   async leased<T>(key: string, fn: (lease: HeldLease) => Promise<T>): Promise<{ value: T } | 'busy' | 'full' | 'unreachable'> {
     if (crudTests >= TEST_LOCK_CONNECTIONS) return 'full'
@@ -422,6 +422,7 @@ export class CrudToolListings {
       try {
         lease = await this.#leases.acquire(key)
       } catch (err) {
+        if (err instanceof CrudPathError) throw err
         if (err instanceof CrudReadError && err.fromRoute && err.status !== undefined && err.status >= 400 && err.status < 500) throw err
         console.error(`plugin test lease: ${message(err)}`)
         return 'unreachable'

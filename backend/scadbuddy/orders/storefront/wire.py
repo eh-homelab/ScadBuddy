@@ -578,6 +578,13 @@ class DraftItem(BaseModel):
     sources: list[DraftSource] = Field(default_factory=list)
     #: Whether the request is a "print my own model" request (#6133), not a design one.
     own_model: bool = False
+    #: ``firm`` when the line has a firm price from a slice (#6153): ``unit_price_minor``
+    #: each, ``total_minor`` for the quantity, in the draft's currency. ``by_hand`` when
+    #: it has none: the page shows no number, and the shop prices the line. The server
+    #: read the price by the variant's key; it never takes one from the browser.
+    price: Literal["firm", "by_hand"] = "by_hand"
+    unit_price_minor: int | None = None
+    total_minor: int | None = None
 
 
 class UploadSlotAsk(BaseModel):
@@ -656,6 +663,10 @@ class DraftView(BaseModel):
     #: which the submit gives the cart), from which the visitor picks one at submit (#5283,
     #: spec §9); one that ``ships`` needs an address.
     shipping_options: list[PublicShippingOption] = Field(default_factory=list)
+    #: Whether every item has a firm price (#6153): the checkout then goes straight to
+    #: payment. Otherwise the shop checks the order first, and the customer pays once,
+    #: after the shop prices the other lines.
+    pay_now: bool = False
 
 
 class PublicShippingOption(BaseModel):
@@ -688,6 +699,10 @@ class SubmittedOrder(BaseModel):
     id: str
     number: str
     email: str
+    #: Whether the order went straight to payment (#6153): every line had a firm price,
+    #: so the order is accepted and its payment request is open. False: the shop checks
+    #: the order and prices the other lines first.
+    pay_now: bool = False
 
 
 # -- the customer's order page (#5283, spec §5.6) ------------------------------------------

@@ -358,6 +358,11 @@ def test_a_refresh_is_kept_only_under_its_lease(
         " VALUES ('plugin-oauth:docs', %s, now() + interval '1 minute')",
         (lease,),
     )
+    # A grant another replica marked for a new sign-in keeps its mark, not the new tokens.
+    db.execute("UPDATE ai_plugin_oauth SET status = 'error' WHERE plugin = 'docs'")
+    marked = client.post(f"{BASE}/plugin-oauth/grants/docs/refreshed", json=body, headers=agent)
+    assert marked.json() == {"stored": False}
+    db.execute("UPDATE ai_plugin_oauth SET status = 'connected' WHERE plugin = 'docs'")
     kept = client.post(f"{BASE}/plugin-oauth/grants/docs/refreshed", json=body, headers=agent)
     assert kept.json() == {"stored": True}
     again = client.post(

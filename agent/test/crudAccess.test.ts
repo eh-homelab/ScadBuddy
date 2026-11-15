@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { CrudToolListings, listingLeaseKey, ToolListings } from '../src/access/listings.js'
 import { AccessStore, CrudAccessRows } from '../src/access/store.js'
 import { CrudReadError } from '../src/api/crudRead.js'
-import { SOURCES_PER_CALL } from '../src/api/crudStores.js'
+import { CrudPathError, SOURCES_PER_CALL } from '../src/api/crudStores.js'
 import type { AccessRow } from '../src/access/model.js'
 import type { AuditEntry } from '../src/audit/log.js'
 import { type LockClient, TEST_LOCK_CONNECTIONS } from '../src/db.js'
@@ -209,6 +209,11 @@ describe('the plugin stores through CRUD routes (#5299 step 5)', () => {
     expect((err as CrudReadError).status).toBe(422)
     const failing = new ToolListings(noSql, noLocks, { crud: new CrudToolListings({ baseUrl: BASE, fetch: answering(503) }), use: () => true })
     expect(await failing.exclusive('files', async () => (ran = true))).toBe('unreachable')
+    // A key refused here, before any call, is thrown too, never reported unreachable.
+    const api = new FakeApi()
+    const local = new ToolListings(noSql, noLocks, { crud: new CrudToolListings(target(api)), use: () => true })
+    await expect(local.exclusive('../files', async () => (ran = true))).rejects.toBeInstanceOf(CrudPathError)
+    expect(api.seen).toEqual([])
     expect(ran).toBe(false)
   })
 

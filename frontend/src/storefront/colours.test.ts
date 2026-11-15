@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Filament, Listing } from './api/client'
+import { swatchStyle } from '../lib/filamentSwatch'
 import { clashText, colourPlan, colourSwatches } from './colours'
 
 const BLUE = '#1B6CA8'
@@ -8,7 +9,7 @@ const TEAL = '#1C8C8C'
 const RUST = '#C0502A'
 const BLACK = '#101010'
 
-const f = (id: string, colour: string, colour_name: string, material: string, extra: Partial<Filament> = {}): Filament => ({ id, colour, colour_name, material, ...extra })
+const f = (id: string, colour: string, colour_name: string | null, material: string, extra: Partial<Filament> = {}): Filament => ({ id, colour, colour_name, material, ...extra })
 
 const CHOICES = [BLUE, ORANGE, TEAL, RUST, BLACK]
 const part = (label: string, start: string) => ({ kind: 'choice' as const, label, group: '', colour: true, choices: CHOICES, default: start })
@@ -67,6 +68,69 @@ describe('colour swatches (#6258)', () => {
       'Black #111111',
       'Translucent Clear',
     ])
+  })
+})
+
+describe('swatches drawn from the filament (#6215)', () => {
+  const body = (filaments: readonly Filament[]) => ({ kind: 'choice' as const, label: 'Body', group: '', colour: true, choices: [...new Set(filaments.map((each) => each.colour))] })
+  const swatches = (filaments: readonly Filament[], materials?: readonly string[]) => colourSwatches(body(filaments), filaments, materials)
+
+  it('draws a sparkle, wood or gradient filament with its effect', () => {
+    const filaments = [
+      f('s', '#202020', 'Night', 'PLA', { effect: 'sparkle' }),
+      f('w', '#8B5A2B', 'Oak', 'PLA', { effect: 'wood' }),
+      f('g', '#FF0000', 'Sunset', 'PLA', { effect: 'gradient', extra_colours: ['#FF0000', '#FFCC00'] }),
+    ]
+    const drawn = swatches(filaments)
+    for (const [index, filament] of filaments.entries()) expect(drawn[index]!.style).toEqual(swatchStyle({ ...filament, alpha: 255 }))
+    expect(drawn[0]!.style.backgroundImage).toContain('radial-gradient')
+    expect(drawn[1]!.style.backgroundImage).toContain('repeating-linear-gradient(90deg')
+  })
+
+  it('draws the stops of a multi-colour filament', () => {
+    const [swatch] = swatches([f('m', '#FF0000', 'Rainbow', 'PLA', { effect: 'multicolor', extra_colours: ['#FF0000', '#00FF00', '#0000FF'] })])
+    expect(swatch!.style.backgroundImage).toMatch(/conic-gradient\(from 0deg, #FF0000 .*#00FF00 .*#0000FF /)
+  })
+
+  it('tells a translucent filament from its opaque twin, by swatch and by label', () => {
+    const [clear] = swatches([f('c', '#FFFFFF', null, 'PETG', { alpha: 128 })])
+    const [solid] = swatches([f('o', '#FFFFFF', null, 'PETG', { alpha: 255 })])
+    expect(clear!.name).toBe('#FFFFFF80')
+    expect(solid!.name).toBe('#FFFFFF')
+    expect(clear!.style.backgroundImage).toContain('#FFFFFF80')
+    expect(clear!.style).not.toEqual(solid!.style)
+    // A null alpha reads as opaque, never as alpha 00.
+    const [unset] = swatches([f('n', '#FFFFFF', null, 'PETG', { alpha: null })])
+    expect(unset!.name).toBe('#FFFFFF')
+    expect(unset!.style).toEqual(solid!.style)
+  })
+
+  it('names the finish from the effect when it has one, else from the subtype', () => {
+    const filaments = [
+      f('a', '#C0C0C0', 'Silver', 'PLA', { effect: 'silk', subtype: 'Basic' }),
+      f('b', '#FFFFFF', 'White', 'PETG', { effect: 'translucent', alpha: 100 }),
+      f('c', '#000000', 'Black', 'PLA', { subtype: 'Matte' }),
+      f('d', '#FF00FF', 'Pink', 'PLA', { effect: 'dual-color', extra_colours: ['#FF00FF', '#00FFFF'] }),
+    ]
+    expect(swatches(filaments).map((swatch) => swatch.name)).toEqual(['Silver · Silk', 'White · Translucent', 'Black · Matte', 'Pink · Dual-color'])
+  })
+
+  it('takes the filament of the first allowed material when two share a colour', () => {
+    const filaments = [f('k1', BLACK, 'Black', 'PLA', { effect: 'sparkle' }), f('k2', BLACK, 'Black', 'PETG', { effect: 'matte' })]
+    const [petg] = swatches(filaments, ['PETG', 'PLA'])
+    expect(petg!.filament.id).toBe('k2')
+    expect(petg!.name).toBe('Black · Matte')
+    expect(petg!.style).toEqual(swatchStyle({ colour: BLACK, alpha: 255, effect: 'matte' }))
+    // No list (a back-office preview of a draft): the colours' own order.
+    expect(swatches(filaments)[0]!.filament.id).toBe('k1')
+  })
+
+  it('never names a material, from an effect, a subtype or a colour name', () => {
+    const filaments = [
+      f('a', '#C0C0C0', 'PLA Silk Silver', 'PLA', { effect: 'silk', subtype: 'PLA Silk' }),
+      f('b', '#FFFFFF', 'PETG Clear', 'PETG', { effect: 'translucent', alpha: 90, subtype: 'PETG Translucent' }),
+    ]
+    for (const swatch of swatches(filaments, ['PLA', 'PETG'])) expect(swatch.name).not.toMatch(/PLA|PETG/)
   })
 })
 

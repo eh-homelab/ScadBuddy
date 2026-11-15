@@ -118,29 +118,3 @@ const SUPPORT_MATERIAL = /support|pva|bvoh|hips/i
 export function customerFilaments<T extends { material: string }>(filaments: readonly T[]): T[] {
   return filaments.filter((filament) => !SUPPORT_MATERIAL.test(filament.material))
 }
-
-/** How a filament looks beyond its hex, from its finish and name (#6152). */
-export type Finish = 'translucent' | 'silk' | 'multi' | 'solid'
-
-export function filamentFinish(filament: Filament): Finish {
-  const text = `${filament.subtype ?? ''} ${filament.colour_name ?? ''}`
-  if (/rainbow|tri.?colou?r|dual|multi|gradient/i.test(text)) return 'multi'
-  if (/translucent|transparent|clear/i.test(text)) return 'translucent'
-  if (/silk|metallic|shimmer/i.test(text)) return 'silk'
-  return 'solid'
-}
-
-/** The swatch's CSS background for `filament`: its hex, drawn as its finish looks. */
-export function swatchBackground(filament: Filament): string {
-  const colour = filament.colour
-  switch (filamentFinish(filament)) {
-    case 'translucent':
-      return `linear-gradient(${colour}99, ${colour}99), repeating-conic-gradient(#ccc 0 25%, #fff 0 50%) 50% / 10px 10px`
-    case 'silk':
-      return `linear-gradient(135deg, ${colour} 30%, #ffffffb3 50%, ${colour} 70%)`
-    case 'multi':
-      return `conic-gradient(${colour}, #e8532f, #f2c14e, #1c8c8c, #1b6ca8, ${colour})`
-    default:
-      return colour
-  }
-}
