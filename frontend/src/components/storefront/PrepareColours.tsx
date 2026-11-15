@@ -24,19 +24,29 @@ function combinations(count: number): string {
  */
 export function PrepareColours({ listingId, version, pollMs = PREPARE_POLL_MS }: { listingId: string; version: string; pollMs?: number }) {
   const [progress, setProgress] = useState<ListingPrepareProgress | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  // A failed read and a failed start are kept apart: a later read that succeeds clears
+  // only the read's error (#6299 review).
+  const [readError, setReadError] = useState<string | null>(null)
+  const [startError, setStartError] = useState<string | null>(null)
   const [confirming, setConfirming] = useState(false)
   const [busy, setBusy] = useState(false)
   const [reads, setReads] = useState(0)
+  // Counts the reads that finished, with an answer or a failure: each one schedules the next.
+  const [settled, setSettled] = useState(0)
 
   useEffect(() => {
     let live = true
     api.storefrontListingPrepare(listingId).then(
       (read) => {
-        if (live) setProgress(read)
+        if (!live) return
+        setProgress(read)
+        setReadError(null)
+        setSettled((n) => n + 1)
       },
       (failure: unknown) => {
-        if (live) setError(failure instanceof ApiError ? failure.detail : 'The colour combinations could not be read.')
+        if (!live) return
+        setReadError(failure instanceof ApiError ? failure.detail : 'The colour combinations could not be read.')
+        setSettled((n) => n + 1)
       },
     )
     return () => {
@@ -45,20 +55,24 @@ export function PrepareColours({ listingId, version, pollMs = PREPARE_POLL_MS }:
   }, [listingId, version, reads])
 
   const running = progress !== null && (progress.running || progress.rendering > 0)
+  // #6299 review: one failed read does not stop the polling; the next read is set after
+  // each read that finished.
   useEffect(() => {
     if (!running) return
     const timer = setTimeout(() => setReads((n) => n + 1), pollMs)
     return () => clearTimeout(timer)
-  }, [running, progress, pollMs])
+  }, [running, settled, pollMs])
+
+  const error = startError ?? readError
 
   async function start() {
     setConfirming(false)
     setBusy(true)
-    setError(null)
+    setStartError(null)
     try {
       await api.prepareStorefrontListing(listingId)
     } catch (failure) {
-      setError(failure instanceof ApiError ? failure.detail : 'The renders could not be started.')
+      setStartError(failure instanceof ApiError ? failure.detail : 'The renders could not be started.')
     } finally {
       setBusy(false)
       setReads((n) => n + 1)

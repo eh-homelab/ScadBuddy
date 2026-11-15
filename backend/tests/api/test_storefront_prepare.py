@@ -9,7 +9,9 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from temporalio.service import RPCError, RPCStatusCode
 
+from scadbuddy.orders.storefront.prepare import RunState, TemporalPreparer
 from scadbuddy.storefront.wire import STOREFRONT_PROBLEMS
 from tests.api.test_storefront_listings import (  # noqa: F401  (fixtures)
     BOOK,
@@ -108,6 +110,33 @@ def test_the_count_is_shown_before_the_run(
         "running": False,
         "failed_to_start": 0,
     }
+
+
+def test_a_failed_run_read_is_not_an_error(
+    client: TestClient,  # noqa: F811
+    template: dict[str, Any],  # noqa: F811
+    pla_red: str,  # noqa: F811
+    two_colours: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6299 review: while Temporal does not answer, the run reads as not running, and a
+    listing with no colour to prepare never asks Temporal."""
+    asked: list[str] = []
+
+    async def down(self: TemporalPreparer, listing_id: str) -> RunState:
+        asked.append(listing_id)
+        raise RPCError("connection refused", RPCStatusCode.UNAVAILABLE, b"")
+
+    monkeypatch.setattr(TemporalPreparer, "run_state", down)
+    r = client.get(prepare_path(two_colours))
+    assert r.status_code == 200, r.text
+    assert (r.json()["count"], r.json()["running"]) == (2, False)
+    assert asked == [two_colours["id"]]
+    plain = publish(client, create(client, listing_body(template, pla_red))["id"])
+    r = client.get(prepare_path(plain))
+    assert r.status_code == 200, r.text
+    assert r.json()["count"] == 0
+    assert asked == [two_colours["id"]]
 
 
 def test_a_visitors_render_reuses_the_prepared_job(

@@ -2,8 +2,8 @@
 
 A combination is one value for each offered colour parameter of a published listing:
 the colours of its bound that the public listing offers (`public_listing`: the listing
-filaments the price book still has, never a support filament, #6152), each colour once
-whatever its case. Every other offered parameter stays at its effective default
+filaments the price book still has, never a support filament, #6152), in each spelling
+the page can send (`colour_choices`). Every other offered parameter stays at its effective default
 (`effective_default`). A visitor's page sends only the values the visitor set, so a
 colour at its effective default is left out of what a combination asks, exactly as the
 page leaves it out on its first load.
@@ -42,12 +42,13 @@ from temporalio.service import RPCError
 from scadbuddy.core.problems import ApiError
 from scadbuddy.orders.models import Filament, Reference
 from scadbuddy.orders.storefront.inputs import (
+    customer_filaments,
     effective_default,
     listing_reference,
     listing_values,
 )
 from scadbuddy.orders.storefront.listings import listing_not_found, problem
-from scadbuddy.orders.storefront.wire import ChoiceBound, Listing, is_support
+from scadbuddy.orders.storefront.wire import ChoiceBound, Listing
 from scadbuddy.render.job_models import QueueFullError
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.workflows.commands import execution_gone
@@ -115,29 +116,41 @@ class RunState:
 
 
 def colour_choices(listing: Listing, filaments: Mapping[str, Filament]) -> dict[str, list[str]]:
-    """Each offered colour parameter of the published ``listing``, by name: the colours of
-    its bound that the public listing offers, in the bound's order, each once (casefolded)."""
+    """Each offered colour parameter of the published ``listing``, by name: each spelling
+    a visitor's page can send for it, in the bound's order (casefolded, each colour once).
+    The page sends a picked filament's own ``colour`` (`ParamField.tsx`), and a spelling is
+    part of the render key, so a colour takes each offered filament's spelling of it, once.
+    The effective default comes first when no filament spells it so: it is what the page's
+    first load renders (#6299 review)."""
     assert listing.snapshot is not None
     by_name = {p.name: p for p in listing.snapshot.schema_.parameters}
-    offered = {
-        filaments[f].colour.casefold()
-        for f in listing.colours
-        if f in filaments and not is_support(filaments[f].material)
-    }
+    spellings: dict[str, list[str]] = {}
+    for filament in customer_filaments(listing, filaments):
+        same = spellings.setdefault(filament.colour.casefold(), [])
+        if filament.colour not in same:
+            same.append(filament.colour)
     choices: dict[str, list[str]] = {}
     for name, bound in listing.params.items():
         parameter = by_name.get(name)
         if parameter is None or parameter.type != "color" or not isinstance(bound, ChoiceBound):
             continue
+        start = effective_default(parameter, bound)
         seen: set[str] = set()
         kept: list[str] = []
         for choice in bound.choices:
             if not isinstance(choice, str):
                 continue
             folded = choice.casefold()
-            if folded in offered and folded not in seen:
-                seen.add(folded)
-                kept.append(choice)
+            if folded not in spellings or folded in seen:
+                continue
+            seen.add(folded)
+            if (
+                isinstance(start, str)
+                and start.casefold() == folded
+                and start not in spellings[folded]
+            ):
+                kept.append(start)
+            kept += spellings[folded]
         choices[name] = kept
     return choices
 
@@ -151,19 +164,16 @@ def _asker(
     listing: Listing, filaments: Mapping[str, Filament], names: Sequence[str]
 ) -> Callable[[Sequence[str]], Combination]:
     """The combination of one colour per name in ``names``, as a visitor's page asks for
-    it: a colour equal (casefolded) to its effective default is left out."""
+    it: a colour that is its effective default, in the same spelling, is left out."""
     assert listing.snapshot is not None
     by_name = {p.name: p for p in listing.snapshot.schema_.parameters}
-    defaults: dict[str, str | None] = {}
-    for name in names:
-        start = effective_default(by_name[name], listing.params[name])
-        defaults[name] = start.casefold() if isinstance(start, str) else None
+    defaults = {name: effective_default(by_name[name], listing.params[name]) for name in names}
 
     def ask(picked: Sequence[str]) -> Combination:
         asked: dict[str, ParamValue] = {
             name: value
             for name, value in zip(names, picked, strict=True)
-            if value.casefold() != defaults[name]
+            if value != defaults[name]
         }
         values = listing_values(listing, asked, filaments)
         resolved = listing_reference(listing, values, {}, filaments=filaments)
@@ -315,14 +325,11 @@ def preparer(state: AppState) -> TemporalPreparer:
 
 async def progress(state: AppState, orders: OrdersComponent, listing_id: str) -> PrepareProgress:
     """The listing's combinations, how far their renders are, and its run's state. 404
-    ``listing_not_found``, 409 ``listing_not_published``, 503 ``render_unavailable`` when
-    Temporal does not answer. A listing with no colour parameter answers a ``count`` of 0."""
+    ``listing_not_found``, 409 ``listing_not_published``. A listing with no colour
+    parameter answers a ``count`` of 0. The run's state is read only for a listing that
+    can be prepared (``0 < count <= cap``); when Temporal does not answer, the run reads as
+    not running, so one failed read never fails the whole panel (#6299 review)."""
     listing, filaments, choices, cap = await asyncio.to_thread(_facts, state, orders, listing_id)
-    try:
-        run = await preparer(state).run_state(listing_id)
-    except RPCError:
-        logger.warning("could not read the prepare run of listing %s", listing_id)
-        raise _unavailable() from None
     count = combination_count(choices)
     if count == 0 or count > cap:
         return PrepareProgress(
@@ -331,11 +338,21 @@ async def progress(state: AppState, orders: OrdersComponent, listing_id: str) ->
             ready=0,
             rendering=0,
             failed=0,
-            running=run.running,
-            failed_to_start=run.failed_to_start,
+            running=False,
+            failed_to_start=0,
         )
-    keys = [c.reference.render_key for c in combinations(listing, filaments, choices)]
-    states = await asyncio.to_thread(job_states, state, listing.slug, keys)
+    try:
+        run = await preparer(state).run_state(listing_id)
+    except RPCError:
+        logger.warning("could not read the prepare run of listing %s", listing_id)
+        run = RunState(running=False, failed_to_start=0)
+
+    def read_states() -> tuple[list[str], dict[str, str]]:
+        # Up to the cap of references and keys: off the event loop (#6299 review).
+        keys = [c.reference.render_key for c in combinations(listing, filaments, choices)]
+        return keys, job_states(state, listing.slug, keys)
+
+    keys, states = await asyncio.to_thread(read_states)
     seen = [states.get(key) for key in keys]
     return PrepareProgress(
         count=count,

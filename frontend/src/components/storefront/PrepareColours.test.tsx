@@ -1,9 +1,11 @@
 import { screen, waitFor } from '@testing-library/react'
+import { HttpResponse, http } from 'msw'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { api } from '../../api/client'
 import type { StorefrontListing } from '../../api/types'
 import { failNextPrepareStarts, setPrepareCap } from '../../mocks/features/storefront'
 import { resetMockState } from '../../mocks/handlers'
+import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { PrepareColours } from './PrepareColours'
 
@@ -37,6 +39,25 @@ describe('PrepareColours (#6237)', () => {
     await waitFor(() => expect(screen.getByText('(6 of 6 ready)')).toBeInTheDocument())
     expect(screen.getByRole('progressbar', { name: 'Colour combinations ready' })).toHaveAttribute('aria-valuenow', '6')
     expect(screen.queryByRole('button', { name: /Prepare/ })).not.toBeInTheDocument()
+  })
+
+  it('keeps reading after one read fails during a run, and clears its error (#6299 review)', async () => {
+    const listing = await published({ body: COLOURS, trim: { kind: 'choice', choices: ['#FF0000', '#0000FF'] } })
+    const { user } = show(listing)
+    await user.click(await screen.findByRole('button', { name: 'Prepare every colour combination' }))
+    await user.click(await screen.findByRole('button', { name: 'Prepare' }))
+    await screen.findByRole('progressbar', { name: 'Colour combinations ready' })
+    // One read during the run fails; the next ones answer again.
+    server.use(
+      http.get(
+        `/api/v1/storefront/listings/${listing.id}/prepare`,
+        () => HttpResponse.json({ type: 'render_unavailable', detail: 'The shop could not read these renders.' }, { status: 503 }),
+        { once: true },
+      ),
+    )
+    expect(await screen.findByRole('alert')).toHaveTextContent('The shop could not read these renders.')
+    await waitFor(() => expect(screen.getByText('(6 of 6 ready)')).toBeInTheDocument())
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
   it('names the renders that could not be started, and offers to prepare again (#6299 review)', async () => {

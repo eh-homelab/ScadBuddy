@@ -1454,11 +1454,12 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `spool_links`), so a hand-set colour still finds its spools.
 - Prepared colour combinations (#6237): `orders/storefront/prepare.py`, routes `GET`/`POST
   /storefront/listings/{id}/prepare` (`api/storefront.py`). A combination is one colour per
-  offered colour parameter (the public listing's colours, each once whatever its case, and
-  the public listing offers each colour once too, the first spelling kept: `listings.py`
-  `_public_param`); each is built by the visitor path's `listing_values` and
-  `listing_reference`, a colour at its effective default left out as the page leaves it
-  out, so a visitor's render reuses the prepared job. The POST starts the workflow
+  offered colour parameter (the public listing's colours, in each spelling the page can
+  send: each offered filament's own `colour`, as `ParamField.tsx` sends it, and the effective
+  default when no filament spells it so, #6299 review); each is built by the visitor path's
+  `listing_values` and `listing_reference`, a colour at its effective default (same
+  spelling) left out as the page leaves it out, so a visitor's render reuses the prepared
+  job. The POST starts the workflow
   `PrepareListing` (`workflows/prepare_listing.py`, `library` queue, id
   `prepare-listing:<listing id>`, `USE_EXISTING`: a second POST joins it; AUTO_UPGRADE as
   `VersionedPrepareListing`) and answers at once (`{count, started}`). The run submits by
@@ -1469,7 +1470,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`prepare_listing_settled`). A done job is skipped, a full queue waited out, a failed
   submit counted in the memo `failed_to_start`; it continues as new every 50 submits. No
   table: the GET reads the newest `render_jobs` row of each render key, and the run's state
-  (`running`, `failed_to_start`). Capped by `storefront_prepare_cap` (default 256; 422
+  (`running`, `failed_to_start`) only when `0 < count <= cap`; a failed Temporal read gives
+  `running: false`, not an error. Capped by `storefront_prepare_cap` (default 256; 422
   `listing_combinations_over_cap` with `count` and `cap`, `listing_no_colours`, 409
   `listing_not_published`). Prepared renders follow `job_ttl`; there is no keep mark.
 - A customer's own models (#6133, spec 2026-11-13; migration

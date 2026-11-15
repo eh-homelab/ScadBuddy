@@ -25,6 +25,7 @@ from tests.orders.storefront.test_inputs import (
     PETG_GREEN,
     PLA_BLUE,
     PLA_RED,
+    filament,
 )
 
 SCHEMA = CustomizerSchema(
@@ -68,11 +69,46 @@ def a_listing(params: dict[str, Any], colours: list[str] | None = None) -> Listi
 BOTH = {"kind": "choice", "choices": ["#ff0000", "#0000FF"]}
 
 
-def test_each_colour_is_taken_once_whatever_its_case() -> None:
+def test_each_colour_is_taken_once_in_its_filaments_spelling() -> None:
+    """The page sends a picked filament's own ``colour``, not the bound's spelling."""
     listing = a_listing(
         {"body": {"kind": "choice", "choices": ["#ff0000", "#FF0000", "#0000ff", "#0000FF"]}}
     )
-    assert colour_choices(listing, FILAMENTS) == {"body": ["#ff0000", "#0000ff"]}
+    assert colour_choices(listing, FILAMENTS) == {"body": ["#FF0000", "#0000FF"]}
+
+
+def test_two_filaments_of_one_colour_in_two_cases_are_each_prepared() -> None:
+    """#6299 review: a visitor's pick of either filament reuses a prepared job."""
+    book = {**FILAMENTS, "pla-red-lower": filament("pla-red-lower", "#ff0000")}
+    listing = a_listing(
+        {"trim": {"kind": "choice", "choices": ["#FF0000", "#0000FF"]}},
+        colours=[PLA_RED, "pla-red-lower", PLA_BLUE],
+    )
+    choices = colour_choices(listing, book)
+    # The default (#0000FF) is the blue filament's spelling, so it is not added again.
+    assert choices == {"trim": ["#FF0000", "#ff0000", "#0000FF"]}
+    prepared = {c.reference.render_key for c in combinations(listing, book, choices)}
+    for picked in ("pla-red", "pla-red-lower", "pla-blue"):
+        visitor = listing_reference(
+            listing,
+            listing_values(listing, {"trim": book[picked].colour}, book),
+            {},
+            filaments=book,
+        )
+        assert visitor.reference.render_key in prepared
+
+
+def test_a_default_no_filament_spells_so_is_prepared_too() -> None:
+    """The page's first load renders the default in its own spelling."""
+    listing = a_listing({"body": {**BOTH, "default": "#ff0000"}})
+    choices = colour_choices(listing, FILAMENTS)
+    assert choices == {"body": ["#ff0000", "#FF0000", "#0000FF"]}
+    every = list(combinations(listing, FILAMENTS, choices))
+    assert [c.asked for c in every] == [{}, {"body": "#FF0000"}, {"body": "#0000FF"}]
+    first_load = listing_reference(
+        listing, listing_values(listing, {}, FILAMENTS), {}, filaments=FILAMENTS
+    )
+    assert every[0].reference.render_key == first_load.reference.render_key
 
 
 def test_a_colour_the_public_listing_does_not_offer_is_left_out() -> None:
@@ -83,7 +119,7 @@ def test_a_colour_the_public_listing_does_not_offer_is_left_out() -> None:
         colours=[PLA_RED, PLA_BLUE],
     )
     assert PETG_GREEN in book
-    assert colour_choices(listing, book) == {"body": ["#ff0000"]}
+    assert colour_choices(listing, book) == {"body": ["#FF0000"]}
 
 
 def test_a_support_filament_is_never_a_combination() -> None:
@@ -94,7 +130,7 @@ def test_a_support_filament_is_never_a_combination() -> None:
         {"body": {"kind": "choice", "choices": ["#ff0000", "#00FF00"]}},
         colours=[PLA_RED, PETG_GREEN],
     )
-    assert colour_choices(listing, book) == {"body": ["#ff0000"]}
+    assert colour_choices(listing, book) == {"body": ["#FF0000"]}
 
 
 def test_the_count_is_the_product_of_the_colour_parameters() -> None:

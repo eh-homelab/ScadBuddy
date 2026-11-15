@@ -156,7 +156,8 @@ same way, `vite.config.ts`).
   Prepared colours (#6237): `components/storefront/PrepareColours.tsx`, under a published
   listing's actions, shows the count (`GET …/prepare`), confirms, starts (`POST …/prepare`)
   and shows "n of N ready", read again while the run is open (`running`) or renders are in
-  the queue; renders that could not be started (`failed_to_start`) are named, with "Prepare
+  the queue (a failed read does not stop the reads; the next good one clears its error, a
+  failed start's message stays, #6299 review); renders that could not be started (`failed_to_start`) are named, with "Prepare
   again"; over the cap it says the count and the cap. Mocks in
   `src/mocks/features/storefront.ts` (`setPrepareCap`, `failNextPrepareStarts`).
 

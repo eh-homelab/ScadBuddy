@@ -1128,8 +1128,9 @@ def _public_param(
     if isinstance(bound, TextBound):
         fields["placeholder"] = start if isinstance(start, str) and start.strip() else None
     if isinstance(bound, ChoiceBound) and shown["colour"]:
-        # Each colour once, the first spelling kept (#6299 review): two spellings of one
-        # colour are two render keys, and only the first one is prepared (#6237).
+        # Each colour once, the first spelling kept (#6299 review). The page picks a
+        # filament and sends its own spelling, so the prepare run (#6237) takes each
+        # filament's spelling, not this one.
         kept: dict[str, str] = {}
         for c in bound.choices:
             if isinstance(c, str) and c.casefold() in colours:
