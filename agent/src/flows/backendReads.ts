@@ -2,9 +2,11 @@ import { crudRead } from '../api/crudRead.js'
 
 // The agent's questions about the backend's flow tables (#5299 D7): `workflow_runs`,
 // `workflow_run_decisions` and `flow_grants`. The backend answers each over a CRUD route of
-// area `flows` (backend api/crud_agent.py, flows/agent_reads.py). The agent runs no SQL on
-// `workflow_runs` or `workflow_run_decisions`: the API takes back its grants on them at every
-// start (backend auth/revoke.py `RETIRED_GRANTS`).
+// area `flows` (backend api/crud_agent.py, flows/agent_reads.py), and the agent runs no SQL on
+// `workflow_runs` or `workflow_run_decisions`. The API takes back its role's grants on them at
+// every start (backend auth/revoke.py `RETIRED_GRANTS`), but the agent still connects as the
+// database owner, so that binds nothing until #5299 step 12; until then the guard is
+// test/retiredTables.test.ts.
 //
 // The gate's own read of `flow_grants` and `flow_grant_uses` (gate/store.ts `grantInput`) is not
 // here: it holds the grant row's share lock across the agent's own writes, and moves with the

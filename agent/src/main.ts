@@ -327,8 +327,8 @@ const backend = createBackendClient(
 )
 
 // #5299 D7: the agent's reads of the backend's tables (the event log, flow runs, their
-// decisions and grants) go through the backend's CRUD routes (areas `events` and `flows`);
-// the API takes back the agent's grants on the event log, flow runs and decisions.
+// decisions and grants) go only through the backend's CRUD routes (areas `events` and
+// `flows`), with no SQL fallback (test/retiredTables.test.ts).
 const crudFetch = serviceCredential ? withServiceCredential(globalThis.fetch, serviceCredential, config.backendUrl) : globalThis.fetch
 const flowReads = new CrudFlowRunReads(config.backendUrl, { fetch: crudFetch })
 

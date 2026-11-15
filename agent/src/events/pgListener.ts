@@ -24,7 +24,7 @@ import type { EventLogReads, LoggedRow } from './eventLogReads.js'
 // cannot be read (pruned, not migrated yet, a different schema), followers are
 // told to resync instead: re-read what they follow. The log is read through the
 // backend's CRUD routes (eventLogReads.ts, #5299 D7), which read the database's
-// clock; this connection only LISTENs (the API took back the agent's grant on `events`).
+// clock; this connection only LISTENs and runs no SQL on `events`.
 //
 // The place is advanced lazily: every `checkIntervalMs` the listener reads
 // max(seq) and adopts the value it read on the PREVIOUS check. An event that
