@@ -39,7 +39,10 @@ export function sameOverrides(
 
 /**
  * `settings` with `key` set to the typed `text`: blank, or the text the setting already
- * prints with (`baseline`), is unset, so only a change is sent.
+ * prints with (`baseline`), is unset, so only a change is sent. Over a list baseline (a
+ * per-extruder option), text with commas is sent as a list, so the backend sets each
+ * position on its own (`slicing/presets.py` `apply_overrides`); one value with no comma
+ * stays a string, which sets every position.
  */
 export function withText<T extends Record<string, unknown>>(
   settings: T | undefined,
@@ -49,7 +52,7 @@ export function withText<T extends Record<string, unknown>>(
 ): T {
   const next: Record<string, unknown> = { ...(settings ?? {}) }
   if (text === null || text === '' || (baseline !== undefined && text === settingText(baseline))) delete next[key]
-  else next[key] = text
+  else next[key] = Array.isArray(baseline) && text.includes(',') ? text.split(',').map((item) => item.trim()) : text
   return next as T
 }
 

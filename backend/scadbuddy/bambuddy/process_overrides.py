@@ -2,11 +2,13 @@
 
 ``process_overrides`` is one generic field, ``{<Bambu Studio process key>: value}``. The
 owner's decision on #2998 (2026-11-14): every key is allowed, with no allowlist, and no
-check refuses a key or a value. The slicer is the only judge: a slice it refuses fails
-the run, and a failure whose text names one of the overrides is a 422 that names the key
-(:func:`named_key`, ``workflows/problems.py`` ``setting_refused``). The named fields
-(``prime_tower``, ``supports``, ``print_sequence``) stay as shorthands for the same keys;
-an explicit override wins over them and over the template's ``print_settings``.
+check refuses a real key or value (the map's bounds, :data:`MAX_PROCESS_OVERRIDES` and
+:data:`MAX_PROCESS_VALUE_LENGTH`, are past any real setting). The slicer is the only
+judge: a slice it refuses fails the run, and a failure whose text names one of the
+overrides is a 422 that names the key (:func:`named_key`, ``workflows/problems.py``
+``setting_refused``). The named fields (``prime_tower``, ``supports``,
+``print_sequence``) stay as shorthands for the same keys; an explicit override wins over
+them and over the template's ``print_settings``.
 
 A value is taken as JSON gives it (a string, a number, a boolean, or a list of them for
 a per-extruder option) and sent in the shape a Bambu process preset stores it
@@ -42,15 +44,31 @@ from pydantic import Field, StrictBool, StrictFloat, StrictInt, StrictStr
 
 from scadbuddy.bambuddy.models import ProcessValue
 
+#: The most keys one ``process_overrides`` holds. Every key is stored in the run key,
+#: the workflow history, a quote's ``choices`` and the remembered choices, so the map is
+#: bounded; the bound is far past any real preset (a Bambu process preset flattens to a
+#: few hundred keys), so it never refuses a real setting.
+MAX_PROCESS_OVERRIDES = 2000
+#: The longest one string value, or one item of a list, in characters (16 Ki): longer
+#: than any real Bambu Studio value, custom G-code included.
+MAX_PROCESS_VALUE_LENGTH = 16 * 1024
+
 #: One value as JSON gives it. Strict, so ``true`` stays a boolean (``"1"``) and is
 #: never read as the number 1, and ``"5"`` stays the string the caller wrote.
-ProcessScalar = StrictBool | StrictInt | StrictFloat | StrictStr
+ProcessScalar = (
+    StrictBool
+    | StrictInt
+    | StrictFloat
+    | Annotated[StrictStr, Field(max_length=MAX_PROCESS_VALUE_LENGTH)]
+)
 #: A setting's value: one value, or a list for a per-extruder-variant option.
 ProcessInput = ProcessScalar | list[ProcessScalar]
 #: A Bambu Studio process key: any non-empty name.
 ProcessKey = Annotated[str, Field(min_length=1, max_length=200)]
 #: What a request's ``process_overrides`` holds.
-ProcessOverrides = dict[ProcessKey, ProcessInput]
+ProcessOverrides = Annotated[
+    dict[ProcessKey, ProcessInput], Field(max_length=MAX_PROCESS_OVERRIDES)
+]
 
 logger = logging.getLogger(__name__)
 

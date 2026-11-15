@@ -81,6 +81,18 @@ def wanted_settings(
     return {key: wanted[key] for key in SUPPORT_KEYS if key in wanted}
 
 
+def without_overridden(
+    wanted: Mapping[str, str], overrides: Mapping[str, ProcessValue]
+) -> dict[str, str]:
+    """``wanted`` less the support keys the request's ``process_overrides`` set (#2998):
+    an explicit override wins at the slice, and ``override_warnings`` judges it, so it
+    is neither shaped nor warned about as a support choice. With ``enable_support``
+    overridden to ``"0"``, no support setting is wanted at all."""
+    if overrides.get("enable_support") == "0":
+        return {}
+    return {key: value for key, value in wanted.items() if key not in overrides}
+
+
 def _not_applied(message: str) -> FilamentWarning:
     return FilamentWarning(kind="supports-not-applied", message=message)
 

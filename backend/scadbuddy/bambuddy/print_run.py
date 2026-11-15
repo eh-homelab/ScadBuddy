@@ -162,6 +162,7 @@ from scadbuddy.bambuddy.supports import (
     SupportsChoice,
     support_overrides,
     wanted_settings,
+    without_overridden,
 )
 from scadbuddy.bambuddy.trays import (
     colour_word,
@@ -1461,12 +1462,19 @@ async def check_print(
                 await support_overrides(
                     client,
                     process,
-                    wanted_settings(source.print_settings, request.supports),
+                    without_overridden(
+                        wanted_settings(source.print_settings, request.supports),
+                        request.overrides(),
+                    ),
                     read=read,
                 )
             )[1],
             # #3628: and of a prime tower setting the preset has no value for.
-            *(await prime_tower_warnings(client, process, request.prime_tower, read=read)),
+            *(
+                await prime_tower_warnings(
+                    client, process, request.prime_tower, read=read, overrides=request.overrides()
+                )
+            ),
             # #2998: and of a process override the preset has no value for.
             *(await _override_warnings(request, process, read)),
         ],
@@ -1615,11 +1623,18 @@ async def _native_check(
                 await support_overrides(
                     None,
                     process,
-                    wanted_settings(source.print_settings, request.supports),
+                    without_overridden(
+                        wanted_settings(source.print_settings, request.supports),
+                        request.overrides(),
+                    ),
                     read=read,
                 )
             )[1],
-            *(await prime_tower_warnings(None, process, request.prime_tower, read=read)),
+            *(
+                await prime_tower_warnings(
+                    None, process, request.prime_tower, read=read, overrides=request.overrides()
+                )
+            ),
             *(await _override_warnings(request, process, read)),
         ],
         rack=rack_view,
@@ -3227,11 +3242,19 @@ async def plan_run(
     )
     # Never refused (#1899): a support setting that cannot be shaped is left out.
     supports, support_warnings = await support_overrides(
-        client, process, wanted_settings(source.print_settings, request.supports), read=read
+        client,
+        process,
+        without_overridden(
+            wanted_settings(source.print_settings, request.supports),
+            request.overrides(),
+        ),
+        read=read,
     )
     # Nor a prime tower setting (#3628): it is sent, with a warning when the preset lacks it.
     # No second round trip: `read` (values_for) answers again what supports just read.
-    tower_warnings = await prime_tower_warnings(client, process, request.prime_tower, read=read)
+    tower_warnings = await prime_tower_warnings(
+        client, process, request.prime_tower, read=read, overrides=request.overrides()
+    )
     # #2998: nor any process override; a key the preset lacks is said, and sent.
     tower_warnings += await _override_warnings(request, process, read)
     tower_dropped = template_keys_dropped(request.prime_tower)

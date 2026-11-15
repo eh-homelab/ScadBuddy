@@ -1610,10 +1610,13 @@ def set_part_settings(model_settings: str, overrides: PartOverrides) -> str:
             open_tag, inner, close = found.open_tag[:-2].rstrip() + ">", "\n", "  </part>"
         else:
             open_tag, inner, close = found.open_tag, found.inner, found.close
-        keys = "|".join(re.escape(key) for key, _ in settings)
+        # Each key as it is written below (`quoteattr`), so a key with `&`, `<` or `"`
+        # is matched again and replaced; the value in either quote `quoteattr` uses.
+        keys = "|".join(re.escape(quoteattr(key)) for key, _ in settings)
         # It starts only where a run of blanks starts, so a long run is scanned once.
         inner = re.sub(
-            rf'(?<![ \t])[ \t]*+<metadata key="(?:{keys})" value="[^"]*+"\s*+/>[ \t]*+\r?\n?',
+            rf"(?<![ \t])[ \t]*+<metadata key=(?:{keys}) value=(?:\"[^\"]*+\"|'[^']*+')"
+            r"\s*+/>[ \t]*+\r?\n?",
             "",
             inner,
         )

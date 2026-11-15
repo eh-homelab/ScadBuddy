@@ -6,15 +6,19 @@ slicer judges each; its refusal comes back as a 422 naming the key."""
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 from temporalio.contrib.pydantic import pydantic_data_converter
 
 from scadbuddy.bambuddy.dispatch import SlicePlan, slice_request
 from scadbuddy.bambuddy.filaments import FilamentPlan
-from scadbuddy.bambuddy.models import PresetRef
+from scadbuddy.bambuddy.models import PresetRef, PresetValues
 from scadbuddy.bambuddy.part_settings import PartSettings, overrides_of
+from scadbuddy.bambuddy.prime_tower import PrimeTowerChoice, prime_tower_warnings
 from scadbuddy.bambuddy.print_run import PrintRunRequest, PrintRunResult, _override_warnings
 from scadbuddy.bambuddy.process_overrides import (
     HOST_SIDE_KEYS,
+    MAX_PROCESS_OVERRIDES,
+    MAX_PROCESS_VALUE_LENGTH,
     is_host_side,
     named_key,
     normalised_overrides,
@@ -23,6 +27,12 @@ from scadbuddy.bambuddy.process_overrides import (
 )
 from scadbuddy.bambuddy.resolver import NozzleChoice, PrintChoices
 from scadbuddy.bambuddy.runs import PrintRunError, run_key
+from scadbuddy.bambuddy.supports import (
+    SupportsChoice,
+    support_overrides,
+    wanted_settings,
+    without_overridden,
+)
 from scadbuddy.library.catalogue import meta_from_raw
 from scadbuddy.library.settings_store import ModelPrintChoices
 from scadbuddy.orders.printing import QUOTED_SETUP, setup_differences
@@ -119,6 +129,25 @@ def test_the_result_records_them_for_the_print_record() -> None:
 def test_normalised_overrides_of_none_is_none() -> None:
     assert normalised_overrides(None) is None
     assert normalised_overrides({}) is None
+
+
+def test_the_map_and_each_value_are_bounded_past_any_real_setting() -> None:
+    # #2998 review: stored in the run key, the history, a quote and the remembered
+    # choices, so bounded, but generously: a real key or value is never refused.
+    longest = "x" * MAX_PROCESS_VALUE_LENGTH
+    most = {f"key_{n}": "1" for n in range(MAX_PROCESS_OVERRIDES)}
+    assert request(process_overrides=most).overrides() == normalised_overrides(most)
+    assert request(process_overrides={"a": longest, "b": [longest, "1"]}).overrides() == {
+        "a": longest,
+        "b": [longest, "1"],
+    }
+    for past in (
+        {**most, "one_more": "1"},
+        {"a": longest + "x"},
+        {"b": ["1", longest + "x"]},
+    ):
+        with pytest.raises(ValidationError):
+            request(process_overrides=past)
 
 
 # ── warnings, never refusals ──────────────────────────────────────────────────────
@@ -274,6 +303,56 @@ async def test_the_check_says_what_was_dropped() -> None:
 
     assert warning.kind == "host-setting-dropped"
     assert "post_process (runs a command on the machine that slices)" in warning.message
+
+
+# ── the shorthands' own warnings read the overrides (#2998 review) ───────────────
+
+
+async def _empty_preset(_: PresetRef) -> PresetValues:
+    # A read preset with none of the tower or support keys: each one sent is said.
+    return PresetValues(resolved=True, values={})
+
+
+async def test_an_overridden_tower_changes_what_the_tower_check_says() -> None:
+    process = PresetRef(source="local", id="7")
+    choice = PrimeTowerChoice(enabled=True, no_sparse_layers=True)
+
+    [said] = await prime_tower_warnings(None, process, choice, read=_empty_preset)
+    assert "enable_prime_tower" in said.message and "wipe_tower_no_sparse_layers" in said.message
+
+    # The override wins at the slice, so the tower choice's key is judged as one.
+    [said] = await prime_tower_warnings(
+        None,
+        process,
+        choice,
+        read=_empty_preset,
+        overrides={"wipe_tower_no_sparse_layers": "0"},
+    )
+    assert "enable_prime_tower" in said.message
+    assert "wipe_tower_no_sparse_layers" not in said.message
+    # With the tower overridden off, there is no tower to warn about.
+    assert (
+        await prime_tower_warnings(
+            None, process, choice, read=_empty_preset, overrides={"enable_prime_tower": "0"}
+        )
+        == []
+    )
+
+
+async def test_overridden_supports_change_what_the_support_check_says() -> None:
+    process = PresetRef(source="local", id="7")
+    wanted = wanted_settings({}, SupportsChoice(enabled=True, threshold_angle=40))
+
+    assert "support_threshold_angle" in wanted
+    assert without_overridden(wanted, {"support_threshold_angle": "20"}) == {
+        "enable_support": "1",
+        "support_type": "tree(auto)",
+    }
+    assert without_overridden(wanted, {"enable_support": "0"}) == {}
+    sent, said = await support_overrides(
+        None, process, without_overridden(wanted, {"enable_support": "0"}), read=_empty_preset
+    )
+    assert sent == {} and said == []
 
 
 def test_remembered_and_quoted_overrides_drop_them() -> None:

@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
-import { sameOverrides, sentOverrides, settingText } from '../../lib/processOverrides'
+import { sameOverrides, sentOverrides, settingText, withText } from '../../lib/processOverrides'
 import { SHOWN_ROWS, SlicerSettingsEditor } from './SlicerSettingsEditor'
 
 // #2998 — the generic "Slicer settings" list: every key of the process, searchable, with
@@ -86,5 +86,17 @@ describe('processOverrides (#2998)', () => {
     expect(sentOverrides({})).toBeNull()
     expect(sameOverrides({ a: 1 }, { a: '1' })).toBe(true)
     expect(sameOverrides({ a: '1' }, null)).toBe(false)
+  })
+
+  it('sends a list over a list baseline, so each extruder variant gets its own value', () => {
+    const baseline = ['150', '200']
+    // Shown as `150,200`; the edit to `150,250` goes as a list, never one joined string.
+    expect(withText({}, 'outer_wall_speed', '150, 250', baseline)).toEqual({ outer_wall_speed: ['150', '250'] })
+    // One value with no comma stays a string, which sets every position.
+    expect(withText({}, 'outer_wall_speed', '180', baseline)).toEqual({ outer_wall_speed: '180' })
+    // The baseline's own text is no change.
+    expect(withText({ outer_wall_speed: '1' }, 'outer_wall_speed', '150,200', baseline)).toEqual({})
+    // Over a single value, commas are the value's own.
+    expect(withText({}, 'wall_sequence', 'a,b', 'x')).toEqual({ wall_sequence: 'a,b' })
   })
 })

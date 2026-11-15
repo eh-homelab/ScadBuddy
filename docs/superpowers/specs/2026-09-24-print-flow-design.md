@@ -264,7 +264,7 @@ as they were at render time, and they go two places:
 
 Every Bambu Studio process setting can be set on a print, through one generic field.
 The owner decided on 2026-11-14 (#2998) that every setting is allowed by default: no
-allowlist, no named field per setting, and no check that refuses a key or a value. The
+allowlist, no named field per setting, and no check that refuses a real key or value. The
 slicer is the only judge.
 
 - **The field.** `process_overrides: {<Bambu Studio process key>: value}` on the print
@@ -274,7 +274,11 @@ slicer is the only judge.
   per-extruder option), and is kept as a Bambu config stores it
   (`bambuddy/process_overrides.py` `normalised_overrides`: `true` is `"1"`, `0.2` is
   `"0.2"`, keys sorted; an empty map is no field, so a run's key is the one it had
-  before).
+  before). The map is bounded because it is stored in the run key, the workflow
+  history, a quote's `choices` and the remembered choices, but far past any real
+  setting, so no real key or value is refused: at most `MAX_PROCESS_OVERRIDES` (2000)
+  keys, each key 1 to 200 characters, and each string value, or each item of a list, at
+  most `MAX_PROCESS_VALUE_LENGTH` (16 Ki) characters.
 - **The order.** The plan's `process_overrides` (`print_run.py` `plan_run`) are the
   filament profiles' (#717), then the template's `print_settings`, then the named
   shorthands (`supports`, `prime_tower`, `print_sequence`), then the request's
@@ -287,7 +291,12 @@ slicer is the only judge.
   binary; neither the image nor the repo holds them as data. So the only check is
   against the resolved process preset's own values: a key it has no value for, or a
   list over one value, is a `process-override-unchecked` warning on the dialog's check
-  and the run (`process_overrides.override_warnings`), never a refusal.
+  and the run (`process_overrides.override_warnings`), never a refusal. The supports'
+  and the prime tower's own warnings (`supports.support_overrides`,
+  `prime_tower.prime_tower_warnings`) read the request's `process_overrides` too, as
+  `_sequence_clearance` does for `print_sequence`: a support or tower key the request
+  sets is left to `override_warnings`, and `enable_support` or `enable_prime_tower` set
+  to `"0"` leaves nothing else of that choice to warn about.
 - **Host-side settings are stripped.** "Allow everything" covers what the slicer does with
   the print, not commands or files on the machine that slices (the native slicer's pod,
   Bambuddy's slicer sidecar). `process_overrides.HOST_SIDE_KEYS` lists every option of
@@ -304,11 +313,15 @@ slicer is the only judge.
   `host-setting-dropped` warning. Custom G-code (`*_gcode`) stays allowed: it changes
   what the printer does and runs nothing on our servers.
 - **The slicer's refusal.** A slice that fails is the run's failure, as before. When its
-  text names one of the plan's overrides as a whole word, the run's error is a 422,
+  status is at least 400, its text names the slice or the slicer (`slice`, `slicer` or
+  `slicing` as a word), and that text names one of the request's own `process_overrides`
+  as a whole word, the run's error is a 422,
   `https://scadbuddy.dev/problems/slicer-setting-refused`, with the key as the extension
   `key` (`workflows/problems.py` `setting_refused`, from `PrintRunWorkflow._slice`). The
   wording of Bambuddy's and Bambu Studio's refusals has not been measured, so a refusal
-  that does not name the key stays the plain slice failure.
+  that does not name the key stays the plain slice failure. The plan's other keys (the
+  filament profiles', the template's `print_settings` and the shorthands') are not
+  matched.
 - **The run key and the record.** `process_overrides` is part of `run_key` when sent.
   The run's result records them (`PrintRunResult.process_overrides`), and
   `GET /prints/{archive_id}` lists them, so a reprint sends the same.

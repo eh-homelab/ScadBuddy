@@ -10,6 +10,7 @@ import zipfile
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
+from xml.sax.saxutils import quoteattr
 
 import pytest
 import trimesh
@@ -243,6 +244,17 @@ def test_each_printed_part_of_a_slot_gets_its_settings() -> None:
         '   <metadata key="name" value="Color 2"/>\n'
         '   <metadata key="ironing_type" value="top"/>\n  </part>',
     )
+
+
+@pytest.mark.parametrize("key", ["a&b", "a<b", 'a"b'])
+def test_a_key_that_needs_escaping_is_replaced_again(key: str) -> None:
+    # #2998 review: no key is refused, so one `quoteattr` escapes is matched as written.
+    once = set_part_settings(SETTINGS, ((1, ((key, "1"),)),))
+    value = '2"'
+    twice = set_part_settings(once, ((1, ((key, value),)),))
+    assert twice.count(quoteattr(key)) == 1
+    assert f"<metadata key={quoteattr(key)} value={quoteattr(value)}/>" in twice
+    assert printed_part_slots(twice) == {1, 2}
 
 
 def test_a_slot_no_part_prints_with_changes_nothing() -> None:
