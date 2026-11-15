@@ -421,7 +421,8 @@ export async function AgentSession(started: SessionStart): Promise<void> {
           lostPlacements++
           waitFirst = true
         }
-        if (home && !lost.includes(home)) lost.push(home)
+        // A home cut off by another placement (PlacementMoved) answered and is alive: never steered away from.
+        if (home && !lost.includes(home) && failureType(err) !== PLACEMENT_MOVED) lost.push(home)
         home = undefined
         // `restarted` after a refusal too (a full home, NoCapacity): it only asks the next worker to
         // read the transcript, and the turn's message, not landed there, is sent as itself (§5.5).
