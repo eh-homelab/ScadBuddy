@@ -20,6 +20,12 @@ export const SECRET_AREAS = ['settings', 'credentials', 'payload-keys'] as const
  */
 export const FORGET_AREAS = ['forget'] as const
 
+/**
+ * The area of the workspace files, which the API keeps, seals and opens (#5299 step 7; backend
+ * api/crud_agent_workspace.py; workspace/crudStore.ts).
+ */
+export const WORKSPACE_AREAS = ['workspace'] as const
+
 export type CrudAreasOptions = {
   fetch?: typeof fetch
   /** The areas the agent waits for. */

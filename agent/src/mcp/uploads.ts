@@ -8,7 +8,7 @@ import { requestFacts } from '../routes/guard.js'
 import {
   guessMediaType,
   mediaTypeOfName,
-  type SessionFiles,
+  type WorkspaceFiles,
   sniffImage,
   WorkspaceError,
   type WorkspaceFileInfo,
@@ -67,7 +67,7 @@ const STATUS_OF: Record<WorkspaceError['code'], 400 | 404 | 409 | 413 | 503> = {
 }
 
 export type McpUploadDeps = {
-  workspace: SessionFiles | undefined
+  workspace: WorkspaceFiles | undefined
   audit?: AuditSink | undefined
   /** The configured auth, or fail-closed bearer when it cannot be read (mcp/http.ts `resolveAuth`). */
   resolveAuth: () => Promise<{ settings: McpAuthSettings; tokens: TokenStore }>

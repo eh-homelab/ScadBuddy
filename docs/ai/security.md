@@ -409,8 +409,10 @@ AAD, so a row either side seals opens on the other).
   payload key is made there under the subject's advisory lock, never for a subject in
   `ai_forgotten_subjects`. The agent keeps a released key 30 s at most, as before. Until the
   API lists the areas (a rolling deploy), the agent opens them with its own KEK as before.
-  It still opens its plugin secrets, Web Push and channel keys, plugin sign-ins and
-  workspace file keys itself, until the later steps of #5299.
+  It still opens its plugin secrets, Web Push and channel keys and plugin sign-ins itself,
+  until the later steps of #5299. Its workspace files are sealed and opened on the API once
+  it lists area `workspace` (#5299 step 7, `api/crud_agent_workspace.py`): the agent sends and
+  gets plaintext and never holds a file key; until then it seals them itself, as before.
 
 - **Envelope.** `sealSecret()` draws a random 32-byte data key per secret, seals the
   secret under it with AES-256-GCM, then seals the data key under the KEK (the key file,

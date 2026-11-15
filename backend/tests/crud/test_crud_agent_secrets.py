@@ -739,8 +739,16 @@ def test_rotation_rewraps_credentials_and_payload_keys(tables: PgPool, tmp_path:
         (f"flow-{uuid.uuid4()}", OLD.id),
     )
     with tables.connection() as conn:
-        assert rotate(conn, OLD, KEK) == {"credentials": (1, 1), "payload_keys": (1, 1)}
-        assert rotate(conn, OLD, KEK) == {"credentials": (0, 1), "payload_keys": (0, 1)}
+        assert rotate(conn, OLD, KEK) == {
+            "credentials": (1, 1),
+            "payload_keys": (1, 1),
+            "session_files": (0, 0),
+        }
+        assert rotate(conn, OLD, KEK) == {
+            "credentials": (0, 1),
+            "payload_keys": (0, 1),
+            "session_files": (0, 0),
+        }
         assert rotate(conn, KEK, KEK) == {}
     app = _app(tables, tmp_path, kek=KEK_B64)
     with TestClient(app) as client:

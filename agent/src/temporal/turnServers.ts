@@ -25,7 +25,7 @@ import type { LoadedPackage, PackagesForRun } from '../plugins/packages/install.
 import { type PackageServers, serverAccess } from '../plugins/packages/mcp.js'
 import { pluginTierResolver } from '../plugins/registry.js'
 import { browserGuard, type BrowserOriginsAccess } from '../browser/guard.js'
-import type { SessionFiles } from '../workspace/store.js'
+import type { WorkspaceFiles } from '../workspace/store.js'
 import { localPackageServers, switchedOffServer } from './packageServers.js'
 import { connectHttp, connectInProcess, type TurnContext, type TurnServer, type TurnServers } from './turnTools.js'
 
@@ -115,7 +115,7 @@ export type TurnServerDeps = {
         resolve?: Resolver
         limits?: Partial<HttpLimits>
         /** The sessions' workspaces, where `save_to_workspace` stores a body (#2496), as a classic turn's. */
-        files?: SessionFiles | undefined
+        files?: WorkspaceFiles | undefined
       }
     | undefined
   /** The enabled plugin packages (`loadPackagesForRun`, as a turn's): their MCP servers offered as turn tools. */

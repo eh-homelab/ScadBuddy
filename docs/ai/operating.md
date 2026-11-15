@@ -1717,6 +1717,21 @@ the pod's disk, so every replica, every session and `/mcp` see the same
 files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), tools in
 [`agent/src/tools/workspace.ts`](../../agent/src/tools/workspace.ts)).
 
+- Who keeps them (#5299 step 7): the API, once it lists area `workspace` (`GET
+  …/crud/agent/areas`). Its routes `/api/v1/internal/crud/agent/workspace/*`
+  ([`backend/scadbuddy/api/crud_agent_workspace.py`](../../backend/scadbuddy/api/crud_agent_workspace.py),
+  the `crud.agent` credential; the agent's
+  [`agent/src/workspace/crudStore.ts`](../../agent/src/workspace/crudStore.ts)) take and give
+  plaintext and seal, store and open each file on the API, with its KEK and the session's
+  payload key, in the format below, so either side opens what the other sealed. A write's
+  row, its blob's hold and its `workspace.file` events are one transaction there, so no hold
+  waits for a release, and the API re-wraps principals' file keys at a rotation
+  (`agent_data/rotation.py`). The reconcile is one transaction on the API too, under
+  `RECONCILE_LOCK` as a transaction lock, which an agent pod still on SQL takes as a session
+  lock: never two at once. A workspace and a path go in the query or the body, never in a
+  route's path. A file is at most `workspace_file_max_bytes` and, whatever that setting says,
+  100 MiB (the Settings form's ceiling, `FILE_BYTES_CEILING`). Until the API lists the area
+  (a rolling deploy) the agent does all of the below itself, over SQL.
 - Where the bytes are (#4789): a blob of the backend's content store (`store_backend` s3
   or bambuddy), `workspace-<sha256 of the sealed bytes>`. The agent reads which store the
   backend runs on from its `/healthz` (`store.backend`), and asks its hidden
