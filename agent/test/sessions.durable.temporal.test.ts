@@ -348,7 +348,9 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
         const { session } = await m.start(browser, { origin: 'chat', title: 't' })
         const turn = await m.send(session.id, browser, 'hello')
         // No worker polls `queue`: each send is admitted but never answered, so it waits out its deadline.
-        await new Promise((r) => setTimeout(r, 2_000))
+        await expect.poll(() => spy.mock.calls.length, { timeout: 15_000 }).toBe(sends)
+        // And no more after it: one re-send at most.
+        await new Promise((r) => setTimeout(r, 1_500))
         expect(spy).toHaveBeenCalledTimes(sends)
         expect(spy.mock.calls.map(([, opts]) => (opts as { updateId?: string }).updateId)).toEqual(Array(sends).fill(turn.turnId))
         expect((await m.get(session.id, browser)).status).toBe('running')
@@ -357,6 +359,29 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
       }
     }, 30_000)
   }
+
+  it('sends nothing again when the turn ended while its workflow was described (#6353 review)', async () => {
+    // The workflow took the first Update after all, finished the turn (releasing the row) and
+    // continued as new by the time it is described: between turns again, on a run that would
+    // not dedupe the old update id. The row is read after the describe, so nothing is sent.
+    const queue = `durable-resend-${randomUUID()}`
+    let sessionId = ''
+    const describe: DescribeSession = async () => {
+      await db.sql`UPDATE ai_sessions SET status = 'idle', durable_turn_id = NULL WHERE id = ${sessionId}`
+      return 'between_turns'
+    }
+    const m = await durableManager({ sendTimeoutMs: 500, sessionQueue: queue, resendAfterMs: 200, describe })
+    const spy = vi.spyOn(env.client.workflow, 'executeUpdateWithStart')
+    try {
+      const { session } = await m.start(browser, { origin: 'chat', title: 't' })
+      sessionId = session.id
+      await m.send(session.id, browser, 'hello')
+      await new Promise((r) => setTimeout(r, 2_000))
+      expect(spy).toHaveBeenCalledTimes(1)
+    } finally {
+      spy.mockRestore()
+    }
+  }, 30_000)
 
   it('sends nothing again once the row no longer holds the unanswered turn (#6353)', async () => {
     const queue = `durable-resend-${randomUUID()}`

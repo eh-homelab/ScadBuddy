@@ -95,7 +95,7 @@ import {
 // again: acquire on the shared `agent-tools` (not one of the homes it was lost on while another
 // replica can take it, and the last placement unrestricted), then the turn on the new home,
 // resumed from its transcript (`restarted`), at most PLACEMENTS times, waiting PLACEMENT_BACKOFF
-// after each one lost (#6353). A home kept from an
+// after each one that timed out (#6353). A home kept from an
 // earlier turn re-reserves as the turn arrives, and refuses NoCapacity when every slot there
 // runs a turn: that move is free, once per turn (FULL_HOME_PATCH). Each placement carries
 // its attempt id (run id and cycle), so a cut-off one still running stops. An interrupt never
@@ -129,11 +129,11 @@ const END_WHILE_FINISHING_PATCH = 'agent-session-end-while-finishing'
 /** A kept home that is full when the turn arrives moves the turn at no cost to its placements, once (#3443). */
 const FULL_HOME_PATCH = 'agent-session-full-home'
 /**
- * A turn lost on its worker waits before it is placed again (#6353): PLACEMENT_BACKOFF[0]
- * before the second placement, [1] before the third. On 2026-11-15 a stalled Temporal matching
+ * A placement that timed out (schedule-to-start, heartbeat) waits before the turn is placed
+ * again (#6353): PLACEMENT_BACKOFF[0] after the first such timeout, [1] after the next. On 2026-11-15 a stalled Temporal matching
  * service (task delivery lost, eh-homelab/clusters#3618) spent all three placements in about a
- * minute, on replicas that were alive (03:21:55 to 03:22:59), and the turn failed. The free move
- * off a full kept home does not wait: nothing was lost.
+ * minute, on replicas that were alive (03:21:55 to 03:22:59), and the turn failed. A refusal
+ * (NoCapacity, ShuttingDown) does not wait: a live replica answered it.
  */
 const PLACEMENT_BACKOFF_PATCH = 'agent-session-placement-backoff'
 const PLACEMENT_BACKOFF = ['10s', '30s'] as const
@@ -332,7 +332,7 @@ export async function AgentSession(started: SessionStart): Promise<void> {
     /** The homes this turn was lost on: acquire_worker places it elsewhere while it can. */
     const lost: string[] = []
     let placements = PLACEMENTS
-    /** How many placements were lost on their worker so far: each waits before the next (#6353). */
+    /** How many placements timed out so far: each waits before the next (#6353). */
     let lostPlacements = 0
     let waitFirst = false
     for (let cycle = 0; cycle < placements; cycle++) {
@@ -389,7 +389,9 @@ export async function AgentSession(started: SessionStart): Promise<void> {
         // re-reserves there, TurnHost.run): nothing ran, and its place was never this turn's, so
         // the move costs no placement. Only the first cycle's home is kept, so this happens once.
         if (kept && failureType(err) === NO_CAPACITY && patched(FULL_HOME_PATCH)) placements++
-        else {
+        else if ((err instanceof ActivityFailure ? err.cause : err) instanceof TimeoutFailure) {
+          // A timeout (schedule-to-start, heartbeat) is what delivery loss looks like; a refusal
+          // (NoCapacity, ShuttingDown) is a live replica's answer, and the next is tried at once.
           lostPlacements++
           waitFirst = true
         }
