@@ -483,17 +483,18 @@ The rules the walk adds to #6261's (spec §5.5, as Task 1A wrote it):
 - Produces in `bambuddy_usage.py`:
   - `ARCHIVE_BEFORE: timedelta` and `ARCHIVE_AFTER: timedelta`, set from Task 1 Step 3: an archive matches when `completed_at − created_at` is in `[−ARCHIVE_BEFORE, ARCHIVE_AFTER]`. Each bound covers the widest offset seen plus 2 s, and `ARCHIVE_BEFORE` is 0 when no negative offset was seen. Cite Task 1's paragraph.
   - `@dataclass UsageReport(booked: int = 0, unlinked: int = 0)`.
-  - `unbooked(conn, ids: Sequence[int]) -> set[int]`: the usage ids that no `BB_USAGE` event names.
+  - `unbooked(conn, rows: Sequence[SpoolUsage]) -> set[int]`: the ids of the rows that would book (the rules below) and that no `BB_USAGE` event names yet. It shares its link query and its check with `book_usage`.
   - `match_archive(row: SpoolUsage, archives: Sequence[Archive]) -> int | None`: the archive of the same BB printer in that window, the nearest one, with `as_utc(archive.completed_at)`.
-  - `book_usage(conn, rows: Sequence[SpoolUsage], archives: Sequence[Archive], *, actor: str) -> UsageReport`. For each row with `weight_used > 0`:
+  - `book_usage(conn, rows: Sequence[SpoolUsage], archives: Sequence[Archive], *, actor: str) -> UsageReport`. For each row with `weight_used > 0`, each in its own savepoint (a failing row is logged and skipped):
     - The SB spool is found through `filament_bb_links.bb_spool_id`. With no link, the row is `unlinked` and skipped.
+    - A row whose SB spool is archived is skipped and counted neither booked nor unlinked.
     - A row whose `created_at` is not later than the spool's first `bb_spool` event is skipped. It lies inside the anchor the link made.
     - Otherwise, `ledger.record(kind="print_ended", source="print_actual", delta_g=-weight_used, ref_kind=ledger.BB_USAGE, ref_id=str(row.id), at=row.created_at, printer=<SB printer whose bambuddy_printer_id is row.printer_id, else None>, actor=actor, data={"job": print_name, "basis": "bb_usage", "bb_usage_id", "bb_spool_id", "bb_status": status, "bb_archive_id": match_archive(...)})`.
 - `read_and_pull`: within one `client_for`, read `spool_rows()` first, then
   `spool_usage()`, back to back. This order matters: a deduction between the two reads
   then shows in the usage rows, never only in a spool's value. After the rebase onto
-  #6262, `spool_catalog()` comes next (preflight D10). When `unbooked(...)` is not empty,
-  also read `archives(limit=50)`. Each optional read fails alone. Then run `pull(...)`,
+  #6262, `spool_catalog()` comes next (preflight D10). When `unbooked(...)` is not empty
+  (its own failure is logged and reads no archives), also read `archives(limit=50)`. Each optional read fails alone. Then run `pull(...)`,
   then `book_usage(...)` in one `store.spools.transaction()`. Set the report's
   `usage_booked` and `usage_unlinked`, and log `usage_booked` per pull (preflight C15). A
   failure of the usage read or its booking is logged and leaves the spool pull's report
@@ -696,3 +697,4 @@ test. If one is missing or differs, stop and report.
 - Task 4: the backfill equals `ledger.job_of` for a subtask that contains `/` (`run/a/b/slot` gives `a/b`); `split_part(ref_id, '/', 2)` would cut it to `a`. It also treats a non-string `data.job` as absent, as `job_of` does.
 - Task 7: a usage row with no `print_name` is booked with `data.job` null. SB's own plates always carry a subtask name with the run id, so a nameless row is never an SB plate and pairs with nothing. Cost if wrong: an SB plate whose BB row lost its name counts twice.
 - Task 7 (controller ruling, review round 1): a usage row whose SB spool is archived is not booked and is counted neither booked nor unlinked, the same as the pull, which never writes to an archived spool. Cost if wrong: a spool restored from the archive misses the grams of the prints BB booked while it was archived, until its next reading.
+- Task 7 (re-review): `unbooked` runs before `pull()`, so a spool first linked in this pull has no link yet and its rows do not trigger the archive read; `book_usage`, after `pull()`, can then book such a row with `bb_archive_id` null. Accepted: only the archive id is lost, not grams, and the next pull cannot recover it because the row is booked.
