@@ -37,19 +37,14 @@ logger = logging.getLogger(__name__)
 
 Grants = Mapping[str, tuple[str, ...]]
 
-_READ = ("SELECT",)
-
-#: What the agent (`agent/`) touches of the backend's: only what its gate reads under the
-#: grant row's share lock, ``flow_grants`` and ``flow_grant_uses`` (``agent/src/gate/store.ts``
-#: `grantInput`; ``FOR SHARE OF g`` needs UPDATE on ``flow_grants``), until the gate moves
-#: here (#5299 step 10). Its other reads (the event log, flow runs, their decisions and
-#: grants) go through the CRUD routes of areas ``events`` and ``flows`` (`api/crud_agent.py`,
-#: #5299 D7), and its workspace files' `blob_refs` holds through the CRUD routes too;
-#: `auth/revoke.py` `RETIRED_GRANTS` takes back the tables it once held.
-AGENT_GRANTS: Grants = {
-    "flow_grants": ("SELECT", "UPDATE"),
-    "flow_grant_uses": _READ,
-}
+#: What the agent (`agent/`) touches of the backend's: nothing. Its gate's grant check, which
+#: read ``flow_grants`` and ``flow_grant_uses`` under the grant row's share lock, runs on the
+#: API (`api/crud_agent_gate.py`, area ``gate``, #5299 step 10); its other reads (the event
+#: log, flow runs, their decisions and grants) go through the CRUD routes of areas ``events``
+#: and ``flows`` (`api/crud_agent.py`, #5299 D7), and its workspace files' `blob_refs` holds
+#: through the CRUD routes too; `auth/revoke.py` `RETIRED_GRANTS` takes back the tables it
+#: once held.
+AGENT_GRANTS: Grants = {}
 
 GRANTS: Mapping[ServiceCaller, Grants] = {"agent": AGENT_GRANTS}
 

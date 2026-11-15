@@ -250,7 +250,7 @@ class FakeNotifyApi {
 
 describe('the small stores through CRUD routes (#5299 step 5)', () => {
   it('lists every small store area the backend serves', () => {
-    expect([...STORE_AREAS]).toEqual(['activity-kinds', 'browser-origins', 'bridge-tabs', 'pairings', 'mcp-tokens', 'notify'])
+    expect([...STORE_AREAS]).toEqual(['activity-kinds', 'browser-origins', 'bridge-tabs', 'pairings', 'mcp-tokens', 'notify', 'access', 'plugin-sessions', 'plugins', 'plugin-packages'])
   })
 
   it('upserts the activity kinds in one call', async () => {

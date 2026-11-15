@@ -231,7 +231,27 @@ Design:
   and the page reads again.
 - **Answer.** `StoreEstimate` is `source` `slice` (with the price), `pending` (with
   `retry_after`) or `none`. Its `price_key`, `grams` and `print_seconds` are the shop's,
-  and the edge does not send them on. Checkout at the cached price is PR B.
+  and the edge does not send them on.
+- **Checkout at the cached price (#6153 PR B, the owner's rulings of 2026-11-14).** The
+  server never takes a price from the browser. When the visitor adds a line, the CRUD
+  side makes the variant's `price_key` the same way as the estimate (the render's 3MF
+  sha256, the price-book filament per slot, the profile, the book and the live machine
+  rate) and reads its `done` row (`orders/storefront/line_prices.py`). The line keeps
+  what the key was made from in `storefront_item_prices`, with the price it showed.
+  The cart shows each line's firm price, or "The shop prices this by hand" and no
+  number. At checkout each line is priced again by a fresh key. A price that changed,
+  came or went is 409 `prices_changed`: the page loads the cart again and shows the new
+  prices before the customer pays. A line whose key has no `done` row now (a book or
+  rate change with no new slice, or a listing that moved to another design) has no firm
+  price: the cart then says the shop prices it, and the next submit goes to the shop's
+  check. When every line is firm, the submit asks no deposit, records a `storefront`
+  quote of each line (with the slice's seconds and grams for job cost; a fact the slice
+  row does not have is unknown, never zero), accepts them and the order as the
+  customer, and opens the balance request: the customer pays the firm total with no
+  check by the shop (`pay_now`). Otherwise the firm lines get their quotes, unaccepted,
+  and the order waits for the shop's check. The shop prices the other lines, the
+  customer accepts them, and the last accept opens one balance request for the whole
+  total. A mixed cart is never charged a part.
 
 This is the largest part; it ships last (PR D), after #6148.
 

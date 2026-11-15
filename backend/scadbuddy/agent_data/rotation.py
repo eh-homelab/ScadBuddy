@@ -1,14 +1,14 @@
 """The KEKs the agent's secrets are opened with, and their rotation at the API's start
-(#5299 D5, steps 4 and 5).
+(#5299 D5, steps 4, 5 and 7).
 
 The API holds the KEK (``SCADBUDDY_SECRET_KEY_FILE``) and, during a rotation, the one
 before it (``SCADBUDDY_SECRET_KEY_PREVIOUS_FILE``). At start, after the migrations, the
-data keys of the Claude credentials, of the payload subjects, of the Web Push keys and of
-the notification channels' tokens sealed under the previous key are sealed again under the
-current one: what the agent did itself before (``agent/src/main.ts`` ``afterMigrate``); and
-the workspace's principal file keys (#5299 step 7, ``workspace.py``). The agent still
-re-wraps its plugin secrets and plugin sign-ins, until the steps of #5299 that move those
-tables.
+data keys of the Claude credentials, of the payload subjects, of the Web Push keys, of
+the notification channels' tokens, of the remote plugins' header values and of their
+sign-ins sealed under the previous key are sealed again under the current one: what the
+agent did itself before (``agent/src/main.ts`` ``afterMigrate``); and the workspace's
+principal file keys (#5299 step 7, ``workspace.py``). The agent re-wraps nothing itself
+any more.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from typing import Any
 
 from psycopg import Connection
 
-from scadbuddy.agent_data import credentials, notify, payload_keys, workspace
+from scadbuddy.agent_data import credentials, notify, payload_keys, plugins, workspace
 from scadbuddy.core.secrets import Kek, SecretKeyError
 from scadbuddy.library.settings_store import settings_kek
 
@@ -72,18 +72,19 @@ def kek_at(path: Path | None) -> Kek | None:
     return key
 
 
-def _tables(conn: Connection[Any]) -> tuple[bool, bool, bool, bool]:
+def _tables(conn: Connection[Any]) -> tuple[bool, bool, bool, bool, bool]:
     row = conn.execute(
         "SELECT to_regclass('ai_credentials') IS NOT NULL AS credentials,"
         " to_regclass('ai_payload_keys') IS NOT NULL AS payload_keys,"
         " to_regclass('ai_notify_channels') IS NOT NULL"
         " AND to_regclass('ai_push_subscriptions') IS NOT NULL AS notify,"
+        " to_regclass('ai_plugin_oauth') IS NOT NULL AS plugins,"
         " to_regclass('ai_session_files') IS NOT NULL AS session_files"
     ).fetchone()
     if row is None:
-        return False, False, False, False
+        return False, False, False, False, False
     values = list(row.values()) if isinstance(row, dict) else list(row)
-    return bool(values[0]), bool(values[1]), bool(values[2]), bool(values[3])
+    return bool(values[0]), bool(values[1]), bool(values[2]), bool(values[3]), bool(values[4])
 
 
 def rotate(conn: Connection[Any], previous: Kek, current: Kek) -> dict[str, tuple[int, int]]:
@@ -92,7 +93,7 @@ def rotate(conn: Connection[Any], previous: Kek, current: Kek) -> dict[str, tupl
     out: dict[str, tuple[int, int]] = {}
     if previous.id == current.id:
         return out
-    has_credentials, has_keys, has_notify, has_files = _tables(conn)
+    has_credentials, has_keys, has_notify, has_plugins, has_files = _tables(conn)
     if has_credentials:
         with conn.transaction():
             out["credentials"] = credentials.rewrap(conn, previous, current)
@@ -102,6 +103,9 @@ def rotate(conn: Connection[Any], previous: Kek, current: Kek) -> dict[str, tupl
     if has_notify:
         with conn.transaction():
             out["notify"] = notify.rewrap(conn, previous, current)
+    if has_plugins:
+        with conn.transaction():
+            out["plugins"] = plugins.rewrap(conn, previous, current)
     if has_files:
         with conn.transaction():
             out["session_files"] = workspace.rewrap(conn, previous, current)
