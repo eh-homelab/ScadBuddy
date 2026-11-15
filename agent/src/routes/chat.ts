@@ -491,7 +491,8 @@ export class ChatConnection {
           }
           // Before the turn starts, so its first browser_* call already finds this tab.
           this.pairTab(id)
-          await otelContext.with(parent, () => this.sessions.send(id, this.principal, message.text, { context, ...images }))
+          // While a turn runs, the message waits in the session's queue (#6386): its `session.queue` event says so.
+          await otelContext.with(parent, () => this.sessions.send(id, this.principal, message.text, { context, ...images, queue: true }))
           await this.claim(id, attached)
           return
         }
@@ -515,6 +516,13 @@ export class ChatConnection {
           return
         case 'session.interrupt':
           await this.sessions.interrupt(message.sessionId, this.principal)
+          return
+        // The queue's change reaches the panel as the session's `session.queue` event.
+        case 'queue.remove':
+          await this.sessions.removeQueued(message.sessionId, this.principal, message.id)
+          return
+        case 'queue.edit':
+          await this.sessions.editQueued(message.sessionId, this.principal, message.id, message.text)
           return
         case 'session.handoff':
           await this.sessions.handoff(message.sessionId, this.principal, this.principal)

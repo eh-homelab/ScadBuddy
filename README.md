@@ -2088,9 +2088,10 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   | Route | |
   |---|---|
   | `GET /api/v1/ai/status` | unguarded, like `/healthz`: `{available, state, ai, reason?}`, what the UI's gate reads |
-  | `GET /api/v1/ai/chat` (WebSocket) | the assistant panel's protocol (`frontend/src/agent/chat/protocol.ts`) both ways: start or continue a chat, attach (replay then follow), approve or deny, interrupt, take over |
-  | `GET/POST /api/v1/ai/sessions`, `GET …/{id}` | list, start (`{prompt?, title?}`; `429` past 10 new sessions a minute per owner, counted with the socket's), one |
-  | `POST …/{id}/messages`, `…/interrupt`, `…/handoff` | send a turn (`{text}`; `409` while one runs), stop it, take the session over |
+  | `GET /api/v1/ai/chat` (WebSocket) | the assistant panel's protocol (`frontend/src/agent/chat/protocol.ts`) both ways: start or continue a chat, attach (replay then follow), approve or deny, interrupt, take over, remove or edit a queued message (#6386) |
+  | `GET/POST /api/v1/ai/sessions`, `GET …/{id}` | list, start (`{prompt?, title?}`; `429` past 10 new sessions a minute per owner, counted with the socket's), one (with its `queue`) |
+  | `POST …/{id}/messages`, `…/interrupt`, `…/handoff` | send a turn (`{text}`; while one runs it is queued to run after it, `{turn_id, queued, position}`, and `409 queue_full` past 20 queued messages, #6386), stop the running turn (the queue stays), take the session over |
+  | `GET …/{id}/queue`, `DELETE`/`PATCH …/{id}/queue/{turn_id}` | the messages queued to run after the turn (`{version, queue}`); remove one, or give it new words (`{text}`), before it starts. Owner-only (`403`); `409 not_queued` once it started or went (#6386) |
   | `GET …/{id}/events` | Server-Sent Events: the session's panel events from `Last-Event-ID` (a reconnect) or else `?after=`, then live |
   | `PATCH …/{id}` | `{title?, done?: true}` → `{session}`: rename a session or mark it done (#795). Owner-only (`403`); done is refused while a turn runs and on a durable session (`409`) |
   | `POST …/{id}/fork` | `{title?, up_to?}` → `201 {session}`: a new session with the transcript so far, or through the reply `up_to` names (an `assistant.text.done` event's `messageId`, #793), and a budget of its own (the panel's Fork, "Fork from here" and "Continue in a new chat", #790); counted like a start (`429`); `409` before the session has a transcript; audited. Through the `sessions_fork` tool, the fork instead spends from the parent's budget: the parent and all its forks share one budget, and a spent one's fork is refused (`409`, #823) |

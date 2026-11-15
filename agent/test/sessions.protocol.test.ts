@@ -296,6 +296,21 @@ describe('the agent’s protocol mirror', () => {
     event({ type: 'credential.fallback', sessionId: S, from: 'credential 1 "Work" (API key …abcd)', to: 'credential 2 (OAuth token …wxyz)', outcome: 'rate_limited', until: '2026-10-09T01:00:00.000Z' }),
     event({ type: 'credential.fallback', sessionId: S, from: 'credential 1 (API key …abcd)', to: 'credential 2 (OAuth token …wxyz)', outcome: 'refused' }),
     event({ type: 'memory', sessionId: S, turnId: S, action: 'recall', bank: 'b', outcome: 'ok', count: 3 }),
+    // #6386: the queue after a change, an entry with a sent image by name.
+    event({
+      type: 'session.queue',
+      sessionId: S,
+      version: 2,
+      queue: [
+        {
+          id: 'q1',
+          text: 'and a lid',
+          author: { kind: 'browser', id: 'browser', label: 'You' },
+          images: [{ name: `${'a'.repeat(64)}.png`, mediaType: 'image/png', preview: { name: `${'b'.repeat(64)}.webp`, mediaType: 'image/webp' } }],
+          queuedAt: '2026-11-15T00:00:00.000Z',
+        },
+      ],
+    }),
     event({ type: 'memory', sessionId: S, turnId: S, action: 'retain', bank: 'b', outcome: 'timeout', detail: 'timed out' }),
   ]
 

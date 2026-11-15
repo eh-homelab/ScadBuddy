@@ -681,6 +681,8 @@ export function resultJson(result: CallToolResult): unknown {
 export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'sessions_start',
   'sessions_send',
+  'sessions_queue_remove',
+  'sessions_queue_edit',
   'sessions_fork',
   'sessions_interrupt',
   'sessions_handoff',
