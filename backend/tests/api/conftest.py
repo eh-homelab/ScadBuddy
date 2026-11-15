@@ -5,7 +5,7 @@ import os
 import time
 import uuid
 import zipfile
-from collections.abc import Iterator
+from collections.abc import Container, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -190,11 +190,26 @@ class FakeAgentTools:
     def __init__(self) -> None:
         self.tiers: dict[str, str] = {}
         self.down = False
+        #: The tools a registered script may name (#6365); None: every name, so a test
+        #: that registers a script is not refused for a tool it does not list in `tiers`.
+        self.names: set[str] | None = None
 
     async def tool_tiers(self) -> dict[str, str]:
         if self.down:
             raise AgentToolsUnavailableError("connection refused")
         return dict(self.tiers)
+
+    async def tool_names(self) -> Container[str]:
+        if self.down:
+            raise AgentToolsUnavailableError("connection refused")
+        return _Every() if self.names is None else set(self.names)
+
+
+class _Every:
+    """Holds every name: an agent that has whatever tool a test's script names."""
+
+    def __contains__(self, _name: object) -> bool:
+        return True
 
 
 @pytest.fixture(autouse=True)
@@ -204,7 +219,11 @@ def agent_tools(monkeypatch: pytest.MonkeyPatch) -> FakeAgentTools:
     async def tool_tiers(_self: AgentTools) -> dict[str, str]:
         return await fake.tool_tiers()
 
+    async def tool_names(_self: AgentTools) -> Container[str]:
+        return await fake.tool_names()
+
     monkeypatch.setattr(AgentTools, "tool_tiers", tool_tiers)
+    monkeypatch.setattr(AgentTools, "tool_names", tool_names)
     return fake
 
 

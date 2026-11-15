@@ -62,6 +62,10 @@ class AgentTiers:
         """As `flows.agent_tools.AgentTools.tool_tiers`: the enabled tools."""
         return {n: t for n, t in self.tiers.items() if n not in self.disabled}
 
+    async def tool_names(self) -> set[str]:
+        """As `flows.agent_tools.AgentTools.tool_names`: every tool, disabled ones too."""
+        return set(self.tiers)
+
 
 class Keys:
     """A subject's data key derived from its name: the codec runs, the key table is not
