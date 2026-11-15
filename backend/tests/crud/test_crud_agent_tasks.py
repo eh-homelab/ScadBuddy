@@ -332,6 +332,21 @@ def test_a_workflows_journal_keeps_the_first_write(agent: Agent, tables: PgPool)
     }
 
 
+def test_a_journal_row_the_agents_sql_kept_as_empty_reads_as_null(
+    agent: Agent, tables: PgPool
+) -> None:
+    session = _session(tables)
+    task_id = agent.post("/background-tasks", _new(session, kind="workflow"))["task"]["id"]
+    _sql(
+        tables,
+        "INSERT INTO ai_workflow_calls (task_id, call_key, occurrence, result, ok)"
+        " VALUES (%s, %s, 0, '{}', true)",
+        (task_id, KEY),
+    )
+    path = f"/background-tasks/{task_id}/calls"
+    assert agent.get(path, key=KEY, occurrence=0)["call"] == {"result": None, "ok": True}
+
+
 def test_a_workflows_open_children_are_those_no_journal_names(agent: Agent, tables: PgPool) -> None:
     session = _session(tables)
     task_id = agent.post("/background-tasks", _new(session, kind="workflow"))["task"]["id"]

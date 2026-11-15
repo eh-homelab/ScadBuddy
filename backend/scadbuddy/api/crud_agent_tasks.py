@@ -372,8 +372,11 @@ async def task_call(
     occurrence: Annotated[int, Query(ge=0, le=2**31 - 1)],
 ) -> OneCall:
     row = await _in_conn(state, lambda conn: background.journalled(conn, task_id, key, occurrence))
-    # Kept as {value}, so a null result is a row too.
-    return OneCall(call=None if row is None else Call(result=row["result"]["value"], ok=row["ok"]))
+    # Kept as {value}, so a null result is a row too. The agent's SQL kept an undefined result
+    # as `{}`, which reads as null.
+    return OneCall(
+        call=None if row is None else Call(result=row["result"].get("value"), ok=row["ok"])
+    )
 
 
 @router.post("/background-tasks/{task_id}/calls", name="crud_agent_background_task_journal")
