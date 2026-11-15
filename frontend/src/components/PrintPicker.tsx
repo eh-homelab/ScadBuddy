@@ -1402,6 +1402,8 @@ export function PrintPicker({
     // #6218: the seed's colour match, as it was chosen or quoted. A seed made before
     // #6218 (an item quoted, or a batch step saved, then) carries the dialog's old fixed
     // `false`, so it opens with the switch off, as it was quoted; the user may switch it on.
+    // This runs after the choices read settles; a later re-read of the same remembered
+    // value keeps the seeded flag (`useFilamentPlan` resets only on a new source or value).
     if (typeof seededPlan?.force_colour_match === 'boolean') setForceColourMatch(seededPlan.force_colour_match)
     const inventory = new Set((filaments.spools ?? []).map((spool) => spool.spool_id))
     setPlan((current) =>
