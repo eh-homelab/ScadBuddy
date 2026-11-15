@@ -137,3 +137,15 @@ SELECT coalesce(l.physical_spool_id, u.spool_id),
             ELSE '{"basis": "not_applied"}'::jsonb END
 FROM native_spool_uses u
 LEFT JOIN spool_record_links l ON l.provider = 'native' AND l.record_id = u.spool_id::text;
+
+-- A native record linked to a physical spool is now that spool's id. Its cached copy and
+-- its link take the new id, so the overlay keeps a person's tray link until the next
+-- refresh rewrites the cache (`SpoolStore.replace_records`). Last: the copies above
+-- look the links up by the old id.
+UPDATE spool_provider_records r
+SET record_id = l.physical_spool_id::text,
+    snapshot = jsonb_set(r.snapshot, '{record_id}', to_jsonb(l.physical_spool_id::text))
+FROM spool_record_links l
+WHERE r.provider = 'native' AND l.provider = 'native' AND l.record_id = r.record_id;
+
+UPDATE spool_record_links SET record_id = physical_spool_id::text WHERE provider = 'native';

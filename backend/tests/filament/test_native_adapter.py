@@ -148,3 +148,35 @@ def test_a_spool_that_printed_is_not_deleted(pg_pool: PgPool) -> None:
     with pytest.raises(SpoolInUseError):
         native.delete(made.id)
     assert native.get(made.id) is not None
+
+
+def test_a_restore_refuses_a_tag_another_spool_now_holds(pg_pool: PgPool) -> None:
+    native, spools = NativeSpoolStore(pg_pool), FilamentSpoolStore(pg_pool)
+    first = native.create(NativeSpoolCreate(material="PLA", tray_uuid=TRAY))
+    native.update(first.id, NativeSpoolPatch(archived=True))
+    second = native.create(NativeSpoolCreate(material="PLA", tray_uuid=TRAY))
+    with pytest.raises(NativeSpoolExistsError):
+        native.update(first.id, NativeSpoolPatch(archived=False))
+    kept = native.get(first.id)
+    assert kept is not None and kept.archived_at is not None
+    binding = spools.open_binding(second.id)
+    assert binding is not None and native.get(second.id).tray_uuid == TRAY  # type: ignore[union-attr]
+
+
+def test_a_slot_sent_again_with_another_spool_books_once(pg_pool: PgPool) -> None:
+    native, spools = NativeSpoolStore(pg_pool), FilamentSpoolStore(pg_pool)
+    red = native.create(NativeSpoolCreate(material="PLA", remaining_g=100))
+    blue = native.create(NativeSpoolCreate(material="PLA", remaining_g=100))
+    native.record_uses(RUN, "a", [SpoolUse(slot_id=1, spool_id=red.id, grams=10)])
+    native.record_uses(RUN, "a", [SpoolUse(slot_id=1, spool_id=blue.id, grams=10)])
+    assert ("print_started", f"{RUN}/a/1") in _kinds(spools, red.id)
+    assert [kind for kind, _ in _kinds(spools, blue.id)] == ["created"]
+    assert native.get(blue.id).remaining_g == 100  # type: ignore[union-attr]
+
+
+def test_a_null_remaining_patch_writes_no_event(pg_pool: PgPool) -> None:
+    native, spools = NativeSpoolStore(pg_pool), FilamentSpoolStore(pg_pool)
+    made = native.create(NativeSpoolCreate(material="PLA", remaining_g=100))
+    patched = native.update(made.id, NativeSpoolPatch(remaining_g=None))
+    assert patched is not None and patched.remaining_g == 100
+    assert [e.kind for e in spools.events(made.id)] == ["created"]

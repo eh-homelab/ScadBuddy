@@ -34,6 +34,8 @@ _SPOOL_COLUMNS = ", ".join(_SPOOL_FIELDS)
 _TYPE_COLUMNS = ", ".join(m.SpoolType.model_fields)
 _TAG_COLUMNS = ", ".join(m.Tag.model_fields)
 _BINDING_COLUMNS = ", ".join(m.TagBinding.model_fields)
+#: The events that keep a spool from being deleted: it printed.
+_USED: tuple[m.EventKind, ...] = ("print_started", "print_ended")
 #: What a create or a patch may write to a column of its own.
 _WRITABLE = frozenset(m.SpoolPatch.model_fields) - {"archived"}
 
@@ -211,10 +213,11 @@ class FilamentSpoolStore:
         spool. Nothing is written when it is already so."""
         return self.update(spool_id, m.SpoolPatch(archived=archived), actor=actor)
 
-    def delete(self, spool_id: UUID) -> bool:
+    def delete(self, spool_id: UUID, *, refusing: Iterable[m.EventKind] = _USED) -> bool:
         """Remove a spool that never printed, with its events, tag bindings and Bambuddy
-        link; ``False`` for no such spool. `SpoolInUseError` when its ledger holds a
-        ``print_started`` or ``print_ended`` event."""
+        link; ``False`` for no such spool. `SpoolInUseError` when its ledger holds an
+        event of a kind in ``refusing`` (a ``print_started`` or ``print_ended`` one; the
+        native API's delete refuses ``print_ended`` only, `spools/native.py`)."""
         with self._pool.connection() as conn, conn.transaction():
             found = conn.execute(
                 "SELECT 1 FROM filament_spools WHERE id = %s FOR UPDATE", (spool_id,)
@@ -223,8 +226,8 @@ class FilamentSpoolStore:
                 return False
             used = conn.execute(
                 "SELECT 1 FROM filament_spool_events WHERE spool_id = %s"
-                " AND kind IN ('print_started', 'print_ended') LIMIT 1",
-                (spool_id,),
+                " AND kind = ANY(%s) LIMIT 1",
+                (spool_id, list(refusing)),
             ).fetchone()
             if used is not None:
                 raise SpoolInUseError()

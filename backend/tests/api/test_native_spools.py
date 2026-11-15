@@ -19,7 +19,7 @@ URL = "/api/v1/native-spools"
 
 def _cached(client: TestClient) -> dict[str, dict[str, Any]]:
     state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
-    with state.components.get(SPOOLS).store._pool.connection() as conn:
+    with state.components.get(SPOOLS).store.pool.connection() as conn:
         rows = conn.execute(
             "SELECT record_id, snapshot FROM spool_provider_records WHERE provider = 'native'"
         ).fetchall()
@@ -78,7 +78,7 @@ def test_what_no_spool_has_is_refused(client: TestClient) -> None:
 def test_a_spool_a_print_ended_on_is_not_deleted(client: TestClient) -> None:
     spool = client.post(URL, json={"material": "PLA", "remaining_g": 100}).json()
     state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
-    with state.components.get(SPOOLS).store._pool.connection() as conn:
+    with state.components.get(SPOOLS).store.pool.connection() as conn:
         conn.execute(
             "INSERT INTO filament_spool_events (spool_id, kind, source, delta_g, ref_kind, ref_id)"
             " VALUES (%s, 'print_ended', 'print_actual', -5, 'print_run', 'r/p/1')",

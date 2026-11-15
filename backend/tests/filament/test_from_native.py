@@ -145,3 +145,47 @@ def test_native_spools_uses_and_tags_are_copied(pg_conninfo: str) -> None:
             "SELECT grams_left FROM filament_spools WHERE id = %s", (live[0],)
         ).fetchone()
         assert left == {"grams_left": 597}
+
+
+@pg
+def test_a_linked_native_record_keeps_its_cache_and_link_under_its_new_id(
+    pg_conninfo: str,
+) -> None:
+    """A native record linked to a physical spool becomes that spool: its cached copy and
+    its (person's) link take the physical id, the id the native provider now reports."""
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[: _index("filament_from_native")])
+        native = conn.execute(
+            "INSERT INTO native_spools (material, remaining_g) VALUES ('PLA', 10) RETURNING id"
+        ).fetchone()
+        alone = conn.execute(
+            "INSERT INTO native_spools (material, remaining_g) VALUES ('PLA', 20) RETURNING id"
+        ).fetchone()
+        physical = conn.execute(
+            "INSERT INTO physical_spools DEFAULT VALUES RETURNING id"
+        ).fetchone()
+        assert native and alone and physical
+        conn.execute(
+            "INSERT INTO spool_record_links (provider, record_id, physical_spool_id, linked_by)"
+            " VALUES ('native', %s, %s, 'manual')",
+            (str(native[0]), physical[0]),
+        )
+        for record in (native[0], alone[0]):
+            conn.execute(
+                "INSERT INTO spool_provider_records (provider, record_id, snapshot, refreshed_at)"
+                " VALUES ('native', %s, jsonb_build_object('record_id', %s::text), now())",
+                (str(record), str(record)),
+            )
+        migrate(conn)
+
+        links = conn.execute(
+            "SELECT record_id, physical_spool_id, linked_by FROM spool_record_links"
+        ).fetchall()
+        assert links == [(str(physical[0]), physical[0], "manual")]
+        cached = conn.execute(
+            "SELECT record_id, snapshot->>'record_id' FROM spool_provider_records"
+            " ORDER BY record_id"
+        ).fetchall()
+        assert sorted(cached) == sorted([(str(physical[0]),) * 2, (str(alone[0]),) * 2])
+        ids = {row[0] for row in conn.execute("SELECT id FROM filament_spools").fetchall()}
+        assert ids == {physical[0], alone[0]}

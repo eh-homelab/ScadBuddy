@@ -28,7 +28,7 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 from scadbuddy.filament import ledger
 from scadbuddy.filament.colour import normalise_rgba
-from scadbuddy.filament.spools import SpoolInUseError
+from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.spools.models import SpoolSnapshot, clean_tag_uid, clean_tray_uuid
 
 if TYPE_CHECKING:
@@ -219,6 +219,12 @@ def _shown(conn: Conn, spool_id: UUID) -> DictRow | None:
 
 #: A native field and the `filament_spools` column it is kept in.
 _COLUMN_OF = {"name": "colour_name", "label_weight_g": "label_weight_g", "note": "note"}
+
+
+def _like_prefix(text: str) -> str:
+    """A ``LIKE`` pattern for the strings that start with ``text``."""
+    escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"{escaped}%"
 
 
 def _ref(run_id: str, subtask_name: str, slot_id: int) -> str:
@@ -471,12 +477,19 @@ class NativeSpoolStore:
         archiving = "archived" in sent and patch.archived is not None
         try:
             with self._pool.connection() as conn, conn.transaction():
-                shown = _shown(conn, spool_id)
-                keys = (None, None) if shown is None else (shown["tag_uid"], shown["tray_uuid"])
-                uid = patch.tag_uid if "tag_uid" in sent else keys[0]
-                tray = patch.tray_uuid if "tray_uuid" in sent else keys[1]
-                if tags_sent or archiving:
-                    _lock_tags(conn, [None if shown is None else shown["tag_id"]], uid, tray)
+                # Tags before the spool, always: lock the tags the shown binding and the
+                # sent keys name, then look again, until what is locked is what is shown.
+                locked: set[UUID] | None = None
+                while True:
+                    shown = _shown(conn, spool_id)
+                    keys = (None, None) if shown is None else (shown["tag_uid"], shown["tray_uuid"])
+                    uid = patch.tag_uid if "tag_uid" in sent else keys[0]
+                    tray = patch.tray_uuid if "tray_uuid" in sent else keys[1]
+                    wanted = set() if shown is None else {shown["tag_id"]}
+                    if not (tags_sent or archiving) or (locked is not None and wanted <= locked):
+                        break
+                    _lock_tags(conn, wanted, uid, tray)
+                    locked = (locked or set()) | wanted
                 current = conn.execute(
                     "SELECT * FROM filament_spools WHERE id = %s FOR UPDATE", (spool_id,)
                 ).fetchone()
@@ -510,23 +523,7 @@ class NativeSpoolStore:
         bindings, presets and Bambuddy link; ``False`` when there was none. A spool with
         a ``print_ended`` event is `SpoolInUseError`: archive it instead. Its cached copy
         goes at the provider's next refresh, as an archived one's does."""
-        with self._pool.connection() as conn, conn.transaction():
-            found = conn.execute(
-                "SELECT 1 FROM filament_spools WHERE id = %s FOR UPDATE", (spool_id,)
-            ).fetchone()
-            if found is None:
-                return False
-            ended = conn.execute(
-                "SELECT 1 FROM filament_spool_events WHERE spool_id = %s"
-                " AND kind = 'print_ended' LIMIT 1",
-                (spool_id,),
-            ).fetchone()
-            if ended is not None:
-                raise SpoolInUseError()
-            for table in ("filament_spool_events", "filament_tag_bindings", "filament_bb_links"):
-                conn.execute(f"DELETE FROM {table} WHERE spool_id = %s", (spool_id,))
-            conn.execute("DELETE FROM filament_spools WHERE id = %s", (spool_id,))
-        return True
+        return FilamentSpoolStore(self._pool).delete(spool_id, refusing=("print_ended",))
 
     # -- what native prints use ------------------------------------------------------
 
@@ -580,13 +577,14 @@ class NativeSpoolStore:
         """`settle_uses` on ``conn``, in its caller's transaction: the CRUD route runs it
         there whole, row locks included, with its ledger row (#5298, plans D5, D6)."""
         prefix = f"{run_id}/"
+        # By `filament_spool_events_print_ref`: a prefix match, the run id escaped.
         pending = conn.execute(
             "SELECT e.spool_id, e.ref_id, e.delta_g FROM filament_spool_events e"
             " WHERE e.kind = 'print_started' AND e.ref_kind = 'print_run'"
-            " AND left(e.ref_id, %s) = %s AND NOT EXISTS (SELECT 1 FROM filament_spool_events d"
+            " AND e.ref_id LIKE %s AND NOT EXISTS (SELECT 1 FROM filament_spool_events d"
             " WHERE d.spool_id = e.spool_id AND d.kind = 'print_ended'"
             " AND d.ref_kind = 'print_run' AND d.ref_id = e.ref_id)",
-            (len(prefix), prefix),
+            (_like_prefix(prefix),),
         ).fetchall()
         if not pending:
             return set()
