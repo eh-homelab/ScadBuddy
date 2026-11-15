@@ -46,7 +46,8 @@ export function draftOf(listing: StorefrontListing): ListingDraft {
     fixed: listing.fixed,
     colours: listing.colours,
     media_ids: listing.media_ids,
-    materials: listing.materials,
+    // A listing stored before #6258 has none: the shop's default.
+    materials: listing.materials ?? [],
   }
 }
 

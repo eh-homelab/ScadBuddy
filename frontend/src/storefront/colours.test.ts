@@ -92,6 +92,10 @@ describe('colour plan (#6258)', () => {
     expect(plan.shown).toEqual({ body_colour: RUST, rim_colour: TEAL, loop_colour: BLACK })
   })
 
+  it('still moves untouched parts in the back office’s preview, which sends no materials', () => {
+    expect(colourPlan({ ...LISTING, materials: [] }, { body_colour: RUST }).shown.rim_colour).toBe(TEAL)
+  })
+
   it('never moves a colour the visitor set', () => {
     // Orange is PLA only and teal PETG only: no material fits. The shop answers 422
     // `listing_colours_clash`; the page keeps both picks and the untouched default.

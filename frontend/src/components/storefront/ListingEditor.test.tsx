@@ -1,11 +1,12 @@
 import { fireEvent, screen, within } from '@testing-library/react'
 import { useState, type ComponentProps } from 'react'
 import { describe, expect, it } from 'vitest'
-import type { CustomizerSchema, Filament, Param } from '../../api/types'
+import type { CustomizerSchema, Filament, Param, StorefrontListing } from '../../api/types'
 import { keychainSchema } from '../../mocks/fixtures'
 import { renderPage } from '../../test/utils'
 import { ListingEditor } from './ListingEditor'
-import { defaultsFor, emptyDraft, listingInput, previewListing, shownParams, unsaveable, type ListingDraft } from './listingDraft'
+import { ListingView } from '../../storefront/components/ListingView'
+import { defaultsFor, draftOf, emptyDraft, listingInput, previewListing, shownParams, unsaveable, type ListingDraft } from './listingDraft'
 
 const COMMIT = 'a'.repeat(40)
 
@@ -370,5 +371,28 @@ describe('ListingEditor (#5282, #6131)', () => {
     expect(value).toBeChecked()
     await user.click(value)
     expect(last(seen).fixed['keyring_hole']).toBe(false)
+  })
+})
+
+describe('the editor’s preview (#6258)', () => {
+  it('renders a listing stored with no materials, with the colour cascade', () => {
+    // A listing stored before #6258 (as the mocks' seeded ones) has no `materials`.
+    const stored = {
+      id: 'old',
+      slug: 'name-keychain',
+      commit: COMMIT,
+      title: 'Old tag',
+      description: '',
+      params: {},
+      fixed: {},
+      colours: [RED.id, BLUE.id, CORAL.id],
+      media_ids: [],
+    } as unknown as StorefrontListing
+    const draft = { ...draftOf(stored), ...defaultsFor(keychainSchema, [RED, BLUE, CORAL]) }
+    const listing = previewListing(draft, keychainSchema, [RED, BLUE, CORAL], [], () => '')
+    renderPage(<ListingView listing={listing} values={{}} onChange={() => undefined} headingLevel={2} />)
+    expect(screen.getByRole('heading', { level: 2, name: 'Old tag' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Plate/ })).toHaveAccessibleName('Plate Ocean')
+    expect(draftOf(stored).materials).toEqual([])
   })
 })

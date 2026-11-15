@@ -128,7 +128,10 @@ export function colourPlan(listing: Listing, values: Readonly<Record<string, Par
   const offered = customerFilaments(listing.colours)
   const of = new Map<string, Filament[]>()
   for (const filament of offered) of.set(fold(filament.material), [...(of.get(fold(filament.material)) ?? []), filament])
-  const order = [...new Set(listing.materials.map(fold))].filter((material) => of.has(material))
+  // The shop always sends the effective list. Only the back office's preview of a listing
+  // that keeps the shop's default sends none: it takes the materials in the colours' order.
+  const allowed = listing.materials.length > 0 ? listing.materials : offered.map((filament) => filament.material)
+  const order = [...new Set(allowed.map(fold))].filter((material) => of.has(material))
   const offers = (material: string, colour: string) => (of.get(material) ?? []).some((f) => fold(f.colour) === fold(colour))
 
   const given: [string, string][] = []
