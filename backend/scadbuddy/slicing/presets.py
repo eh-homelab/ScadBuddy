@@ -345,7 +345,9 @@ async def build_presets(
     process = apply_overrides(
         process, without_host_side(plan.process_overrides, where="slice plan")
     )
-    if plan.bed_type:
+    # A `curr_bed_type` the plan's overrides set wins, as every explicit override does
+    # (#2998), and as `dispatch.slice_request` sends it to Bambuddy.
+    if plan.bed_type and "curr_bed_type" not in plan.process_overrides:
         process["curr_bed_type"] = plan.bed_type
     # No print-host credential reaches a slicer file, whichever tree or document it came
     # from, nor any setting that acts on the machine that slices: `post_process` would run

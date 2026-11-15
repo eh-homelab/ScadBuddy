@@ -278,7 +278,11 @@ slicer is the only judge.
   history, a quote's `choices` and the remembered choices, but far past any real
   setting, so no real key or value is refused: at most `MAX_PROCESS_OVERRIDES` (2000)
   keys, each key 1 to 200 characters, and each string value, or each item of a list, at
-  most `MAX_PROCESS_VALUE_LENGTH` (16 Ki) characters.
+  most `MAX_PROCESS_VALUE_LENGTH` (16 Ki) characters, the whole map at most
+  `MAX_PROCESS_OVERRIDES_BYTES` (256 KiB) as JSON, under Temporal's 2 MB payload limit
+  ([defaults](https://docs.temporal.io/self-hosted-guide/defaults)),
+  so an oversized request is a 422 (`process_overrides.within_bounds`). A slot's
+  `part_settings` are bounded the same way.
 - **The order.** The plan's `process_overrides` (`print_run.py` `plan_run`) are the
   filament profiles' (#717), then the template's `print_settings`, then the named
   shorthands (`supports`, `prime_tower`, `print_sequence`), then the request's

@@ -3390,7 +3390,9 @@ async def plan_run(
                 **{
                     k: v
                     for k, v in source.print_settings.items()
-                    if k not in SUPPORT_KEYS and k not in tower_dropped
+                    # A support key the template set as a list is not `supports`' (it
+                    # shapes single values only), so it goes as written (#2998).
+                    if (k not in SUPPORT_KEYS or isinstance(v, list)) and k not in tower_dropped
                 },
                 **supports,
                 **prime_tower_overrides(request.prime_tower),

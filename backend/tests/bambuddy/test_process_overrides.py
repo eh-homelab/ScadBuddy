@@ -17,7 +17,9 @@ from scadbuddy.bambuddy.prime_tower import PrimeTowerChoice, prime_tower_warning
 from scadbuddy.bambuddy.print_run import PrintRunRequest, PrintRunResult, _override_warnings
 from scadbuddy.bambuddy.process_overrides import (
     HOST_SIDE_KEYS,
+    MAX_PROCESS_KEY_LENGTH,
     MAX_PROCESS_OVERRIDES,
+    MAX_PROCESS_OVERRIDES_BYTES,
     MAX_PROCESS_VALUE_LENGTH,
     is_host_side,
     named_key,
@@ -381,6 +383,43 @@ def test_a_bambuddy_slice_request_drops_them_whatever_built_the_plan() -> None:
     )
 
     assert slice_request(plan, 1).process_overrides == {"wall_loops": "3"}
+
+
+def test_a_bed_type_override_is_the_bambuddy_slices_bed_type() -> None:
+    # As on the native path (`build_presets`): the explicit override wins.
+    plan = SlicePlan(
+        printer_preset=PresetRef(source="cloud", id="GM"),
+        process_preset=PresetRef(source="cloud", id="GP"),
+        filament_presets=[],
+        filament_colours=[],
+        bed_type="Textured PEI Plate",
+        process_overrides={"curr_bed_type": "Cool Plate"},
+    )
+
+    assert slice_request(plan, 1).bed_type == "Cool Plate"
+    assert slice_request(plan.model_copy(update={"process_overrides": {}}), 1).bed_type == (
+        "Textured PEI Plate"
+    )
+
+
+def test_the_settings_weigh_at_most_their_byte_bound() -> None:
+    # #6291 review: past Temporal's payload limit the start would fail with no 422.
+    value = "x" * MAX_PROCESS_VALUE_LENGTH
+    keys = MAX_PROCESS_OVERRIDES_BYTES // MAX_PROCESS_VALUE_LENGTH
+    with pytest.raises(ValidationError, match="weigh"):
+        request(process_overrides={f"k{n}": value for n in range(keys)})
+    assert request(process_overrides={f"k{n}": value for n in range(keys - 1)}).overrides()
+
+
+def test_part_settings_are_bounded_as_process_overrides_are() -> None:
+    PartSettings.model_validate({"k" * MAX_PROCESS_KEY_LENGTH: "1"})
+    for past in (
+        {"k" * (MAX_PROCESS_KEY_LENGTH + 1): "1"},
+        {f"key_{n}": "1" for n in range(MAX_PROCESS_OVERRIDES + 1)},
+        {"a": ["x" * (MAX_PROCESS_VALUE_LENGTH + 1)]},
+    ):
+        with pytest.raises(ValidationError):
+            PartSettings.model_validate(past)
 
 
 # ── part settings take any key too ────────────────────────────────────────────────

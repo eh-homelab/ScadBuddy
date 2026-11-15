@@ -30,6 +30,7 @@ from scadbuddy.bambuddy.process_overrides import (
     ProcessScalar,
     joined_text,
     scalar_text,
+    within_bounds,
     without_host_side,
     without_reserved,
 )
@@ -90,7 +91,9 @@ class PartSettings(BaseModel):
             return data
         # The part's own structure (its filament, name, mesh) is never a setting (#6291
         # review): `extruder` here would move it past the plan and the AMS mapping.
-        kept = without_reserved(data, PART_STRUCTURE_KEYS, where="part_settings")
+        # Bounded as `process_overrides` is (#6291 review): the map goes into the run
+        # key, the history and the remembered choices.
+        kept = without_reserved(within_bounds(data), PART_STRUCTURE_KEYS, where="part_settings")
         return without_host_side(kept, where="part_settings")
 
     top_shell_layers: ProcessScalar | None = None

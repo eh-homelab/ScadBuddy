@@ -963,8 +963,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   directory blob `quote-<sha256>` held by `blob_refs (order_item_quote, <quote id>)`
   before the quote's row exists, reads each plate with `read_sliced`, prices and records
   it (`Lifecycle.record_slice_quote`). The quote records its print setup (#4673, order operations spec §5): `choices`
-  (`quote.py` `print_setup`: printer, path, `PrintChoices`, and the `prime_tower`, `supports` and
-  `print_sequence` the body takes in `PrintRunRequest`'s shapes, which `operations.py`
+  (`quote.py` `print_setup`: printer, path, `PrintChoices`, the `prime_tower`, `supports`,
+  `print_sequence` and `process_overrides` (#2998) the body takes in `PrintRunRequest`'s shapes, which `operations.py`
   `preview_request` slices with) and `filament_plan`, null on a manual or archive quote.
   An item's print (`ItemPrintRequest`, `{}` included) takes every part of that setup and
   the spools it omits from the quote's (`printing.py` `QUOTED_SETUP`, `quoted_setup`;

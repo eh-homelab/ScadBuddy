@@ -35,12 +35,13 @@ what the printer does and runs nothing on our servers.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from collections.abc import Iterable, Mapping
 from typing import Annotated, Any
 
-from pydantic import Field, StrictBool, StrictFloat, StrictInt, StrictStr
+from pydantic import AfterValidator, Field, StrictBool, StrictFloat, StrictInt, StrictStr
 
 from scadbuddy.bambuddy.models import ProcessValue
 
@@ -63,11 +64,37 @@ ProcessScalar = (
 )
 #: A setting's value: one value, or a list for a per-extruder-variant option.
 ProcessInput = ProcessScalar | list[ProcessScalar]
+#: The longest key, in characters.
+MAX_PROCESS_KEY_LENGTH = 200
+#: The most one map of settings may weigh as compact JSON (UTF-8). Past a real one (a
+#: whole Bambu process preset flattens to about 80 KB), and well under Temporal's 2 MB
+#: (https://docs.temporal.io/self-hosted-guide/defaults, "Blob size limit")
+#: payload limit, so an oversized request is a 422 here, never an opaque failure at
+#: the workflow's start.
+MAX_PROCESS_OVERRIDES_BYTES = 256 * 1024
+
+
+def within_bounds[M: Mapping[str, Any]](value: M) -> M:
+    """``value``, once it has at most :data:`MAX_PROCESS_OVERRIDES` keys, each of 1 to
+    :data:`MAX_PROCESS_KEY_LENGTH` characters, and weighs at most
+    :data:`MAX_PROCESS_OVERRIDES_BYTES` as JSON; else a ``ValueError`` (a 422)."""
+    if len(value) > MAX_PROCESS_OVERRIDES:
+        raise ValueError(f"at most {MAX_PROCESS_OVERRIDES} settings")
+    if any(not 0 < len(key) <= MAX_PROCESS_KEY_LENGTH for key in value):
+        raise ValueError(f"each key is 1 to {MAX_PROCESS_KEY_LENGTH} characters")
+    size = len(json.dumps(value, separators=(",", ":"), ensure_ascii=False, default=str).encode())
+    if size > MAX_PROCESS_OVERRIDES_BYTES:
+        raise ValueError(f"the settings weigh {size} bytes; at most {MAX_PROCESS_OVERRIDES_BYTES}")
+    return value
+
+
 #: A Bambu Studio process key: any non-empty name.
-ProcessKey = Annotated[str, Field(min_length=1, max_length=200)]
+ProcessKey = Annotated[str, Field(min_length=1, max_length=MAX_PROCESS_KEY_LENGTH)]
 #: What a request's ``process_overrides`` holds.
 ProcessOverrides = Annotated[
-    dict[ProcessKey, ProcessInput], Field(max_length=MAX_PROCESS_OVERRIDES)
+    dict[ProcessKey, ProcessInput],
+    Field(max_length=MAX_PROCESS_OVERRIDES),
+    AfterValidator(within_bounds),
 ]
 
 logger = logging.getLogger(__name__)

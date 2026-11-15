@@ -63,7 +63,8 @@ def wanted_settings(
     template: Mapping[str, ProcessValue], choice: SupportsChoice | None
 ) -> dict[str, str]:
     """The support settings a print asks for: the template's, then the print's own."""
-    # A support key is one value; a list (#2998) is left to the overrides, which carry it.
+    # A support key is one value; a template's list (#2998) is not shaped here, and
+    # `print_run.plan_run` sends it as the template wrote it, under any choice made here.
     wanted = {key: value for key in SUPPORT_KEYS if isinstance(value := template.get(key), str)}
     if choice is None:
         return wanted

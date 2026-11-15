@@ -181,6 +181,15 @@ async def test_build_presets_writes_the_plate_type(profiles: Profiles, plan: Sli
     assert json.loads(files.process)["curr_bed_type"] == "Textured PEI Plate"
 
 
+async def test_a_bed_type_override_wins_over_the_plate_type(
+    profiles: Profiles, plan: SlicePlan
+) -> None:
+    # #2998: an explicit override wins, as `dispatch.slice_request` sends it to Bambuddy.
+    asked = plan.model_copy(update={"process_overrides": {"curr_bed_type": "Cool Plate"}})
+    files = await build_presets(asked, profiles, None)
+    assert json.loads(files.process)["curr_bed_type"] == "Cool Plate"
+
+
 async def test_build_presets_applies_the_overrides(profiles: Profiles, plan: SlicePlan) -> None:
     overridden = plan.model_copy(
         update={"process_overrides": {"wall_loops": "5", "outer_wall_speed": "120"}}

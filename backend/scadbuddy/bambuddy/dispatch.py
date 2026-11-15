@@ -241,12 +241,15 @@ def slice_request(plan: SlicePlan, plate_id: int) -> SliceRequest:
     (``process_overrides.HOST_SIDE_KEYS``) is dropped here too, whatever built the plan:
     Bambuddy writes the overrides into the process its slicer sidecar runs (#2998)."""
     overrides = without_host_side(plan.process_overrides, where="Bambuddy slice request")
+    # A `curr_bed_type` override wins over the plan's plate type (#2998), as on the
+    # native path (`slicing/presets.py` `build_presets`), so it goes as the bed type too.
+    bed_type = overrides.get("curr_bed_type")
     return SliceRequest(
         printer_preset=plan.printer_preset,
         process_preset=plan.process_preset,
         filament_presets=plan.filament_presets,
         filament_colours=plan.filament_colours,
-        bed_type=plan.bed_type,
+        bed_type=bed_type if isinstance(bed_type, str) and bed_type else plan.bed_type,
         plate=0 if plan.whole_file else plate_id,
         process_overrides=overrides or None,
     )
