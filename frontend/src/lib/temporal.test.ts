@@ -6,7 +6,7 @@ import { temporalWorkflowUrl } from './temporal'
 function settings(ui: string | null, namespace: string | null): Settings {
   const bootstrap = (fixture.bootstrap ?? []).filter((entry) => entry.name !== 'temporal_namespace')
   if (namespace !== null) {
-    bootstrap.push({ name: 'temporal_namespace', env_var: 'SCADBUDDY_TEMPORAL_NAMESPACE', value: namespace, source: 'env', reason: '' })
+    bootstrap.push({ name: 'temporal_namespace', env_var: 'SCADBUDDY_TEMPORAL_NAMESPACE', value: namespace, source: 'env', reason: '', title: 'Temporal namespace', description: '' })
   }
   return { ...fixture, temporal_ui_url: ui, bootstrap } as Settings
 }

@@ -546,7 +546,7 @@ jobs:
         with:
           node-version: "24"
 
-      # The webServer's `pnpm build` runs typecheck, which runs `pnpm gen:api`.
+      # `pnpm gen:api` (below, and the webServer's `pnpm build` again) exports the spec with uv.
       - name: Set up uv
         uses: astral-sh/setup-uv@v10.3.3
         with:
@@ -573,6 +573,12 @@ jobs:
       - name: Install Playwright browsers
         timeout-minutes: 5
         run: pnpm exec playwright install chromium
+
+      # #887: `--list` loads every spec, and two import src/mocks/fixtures.ts, which
+      # imports the generated src/api/settingDocs.json. So the spec is exported and
+      # the generated files written before it, not only by the webServer's build.
+      - name: Generate the API files
+        run: pnpm gen:api
 
       # `--list` needs no server. Its last line is "Total: N tests in M files".
       - name: Count this shard's tests
@@ -1180,6 +1186,21 @@ jobs:
         if: ${{ needs.layout.outputs.app == 'true' && needs.layout.outputs.e2e == 'true' }}
         working-directory: frontend
         run: pnpm install --frozen-lockfile
+
+      # #887: Playwright loads every spec, and two import src/mocks/fixtures.ts,
+      # which imports the generated src/api/settingDocs.json; nothing else here
+      # runs `pnpm gen:api`, so it is run here, with uv for the spec's export.
+      - name: Set up uv
+        if: ${{ needs.layout.outputs.app == 'true' && needs.layout.outputs.e2e == 'true' }}
+        uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Generate the API files
+        if: ${{ needs.layout.outputs.app == 'true' && needs.layout.outputs.e2e == 'true' }}
+        working-directory: frontend
+        run: pnpm gen:api
 
       # No `--with-deps`: see the frontend-e2e job (#4882).
       - name: Install Playwright browsers

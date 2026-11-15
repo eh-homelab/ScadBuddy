@@ -24,7 +24,10 @@ import type {
   PrintProgress,
   PrintSummary,
   Settings,
+  BootstrapValue,
 } from '../api/types'
+// Node's loader (Playwright's) needs the attribute; Vite takes it too.
+import settingDocsJson from '../api/settingDocs.json' with { type: 'json' }
 
 /**
  * `group` carries a default on the wire, so the generated type makes it required —
@@ -1132,6 +1135,19 @@ export const settingsApplies: NonNullable<Settings['applies']> = {
 /** `asset_fetch.py` `DEFAULT_ASSET_FETCH_DOMAINS`: what a stored `null` resolves to. */
 export const DEFAULT_ASSET_FETCH_DOMAINS = ['game-icons.net', 'github.com', 'raw.githubusercontent.com', 'openmoji.org', 'api.iconify.design']
 
+/** #887 — every setting's label and help, as the backend's spec has them (`pnpm gen:api`). */
+export const settingDocs: Settings['docs'] = settingDocsJson
+
+/** A bootstrap row with its title and description from the docs, as `_bootstrap` gives them. */
+export function bootstrapRow(row: Omit<BootstrapValue, 'title' | 'description'>): BootstrapValue {
+  const doc = settingDocs[row.name]
+  return { ...row, title: doc?.title ?? row.name, description: doc?.description ?? '' }
+}
+
+function bootstrapRows(rows: Omit<BootstrapValue, 'title' | 'description'>[]): BootstrapValue[] {
+  return rows.map(bootstrapRow)
+}
+
 export const settings: Settings = {
   ...settingsDefaults,
   bambuddy_url: 'https://bambuddy.internal.nullreference.io',
@@ -1176,7 +1192,8 @@ export const settings: Settings = {
   },
   applies: settingsApplies,
   restart_required: [],
-  bootstrap: [
+  docs: settingDocs,
+  bootstrap: bootstrapRows([
     {
       name: 'data_dir',
       env_var: 'SCADBUDDY_DATA_DIR',
@@ -1230,7 +1247,7 @@ export const settings: Settings = {
       source: 'default',
       reason: 'Paired with the Temporal address; set with it by the deployment.',
     },
-  ],
+  ]),
   about: { version: 'v0.42.0', revision: 'abc1234', openscad_version: 'OpenSCAD version 2026.09.28' },
 }
 

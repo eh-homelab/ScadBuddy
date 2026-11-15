@@ -36,7 +36,7 @@ import { harnessToolName, toolPrefix } from '../plugins/registry.js'
 import type { CheckedPlugin } from '../plugins/registry.js'
 import { withSpan } from '../telemetry/trace.js'
 import { TurnTrace } from '../telemetry/turn.js'
-import type { SessionFiles } from '../workspace/store.js'
+import type { WorkspaceFiles } from '../workspace/store.js'
 import { directoryNote } from './directoryNote.js'
 import type { EventLog } from './eventLog.js'
 import type { ClaimedSession, SessionManagerDeps, SessionRecord, TurnPrincipal } from './manager.js'
@@ -93,7 +93,7 @@ export type TurnRunnerDeps = Pick<
   store: SessionStore & Pick<PostgresSessionStore, 'exists' | 'lastCwd'>
   events: Pick<EventLog, 'append'>
   /** The workspace http_request's `save_to_workspace` writes to (#2329). */
-  files: SessionFiles
+  files: WorkspaceFiles
 }
 
 /** Everything fixed at spawn that decides whether a warm process may serve a turn (spec §5.3 "Reuse rule"). */

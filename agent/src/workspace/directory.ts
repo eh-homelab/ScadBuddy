@@ -4,7 +4,7 @@ import { chmod, lstat, mkdir, open, readdir, realpath, rm, stat, utimes } from '
 import path from 'node:path'
 import type { Sql } from 'postgres'
 import { isUuid } from '../harness/uuid.js'
-import { sha256, type SessionFiles, WORKSPACE_PATH_MAX, WorkspaceError, type WorkspaceErrorCode, WORKSPACE_MAX_FILES, type WorkspaceRef } from './store.js'
+import { sha256, type WorkspaceFiles, WORKSPACE_PATH_MAX, WorkspaceError, type WorkspaceErrorCode, WORKSPACE_MAX_FILES, type WorkspaceRef } from './store.js'
 
 // A session's working directory, Claude Code's `cwd` (plan 2026-10-13 Step 9.5, #4773 R3,
 // decision Q5 as built): `<root>/<session id>/`, where root is SCADBUDDY_SESSION_DIR (a capped
@@ -440,7 +440,7 @@ async function ensureDir(dir: string): Promise<void> {
 }
 
 export class SessionDirectory {
-  readonly #files: Pick<SessionFiles, 'list' | 'read' | 'write' | 'delete' | 'limits' | 'fileCount' | 'maxFiles'>
+  readonly #files: Pick<WorkspaceFiles, 'list' | 'read' | 'write' | 'delete' | 'limits' | 'fileCount' | 'maxFiles'>
   readonly #root: string
   /** Each session's operations on its directory, one at a time: a sweep or an eviction never runs into a placement. */
   readonly #chains = new Map<string, Promise<unknown>>()
@@ -462,7 +462,7 @@ export class SessionDirectory {
   readonly #warm: (sessionId: string) => boolean
 
   constructor(
-    files: Pick<SessionFiles, 'list' | 'read' | 'write' | 'delete' | 'limits' | 'fileCount' | 'maxFiles'>,
+    files: Pick<WorkspaceFiles, 'list' | 'read' | 'write' | 'delete' | 'limits' | 'fileCount' | 'maxFiles'>,
     root: string,
     options: {
       sql?: Sql | undefined
