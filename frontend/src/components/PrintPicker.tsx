@@ -244,7 +244,7 @@ interface Props {
    * #1294 — the model's own slicer defaults (`print_settings`), shown read-only for an
    * output. A library file has none of ScadBuddy's.
    */
-  printSettings?: Record<string, string> | undefined
+  printSettings?: Record<string, string | string[]> | undefined
   /**
    * #2288 — History's Queue: the same dialog with "Wait for a manual start" ticked, so
    * the print waits in Bambuddy's queue rather than starting. It can be unticked.
@@ -321,7 +321,7 @@ const NO_TOPICS: readonly string[] = []
  * The backend accepts only these two spellings (`PrintSequence`, `library/catalogue.py`),
  * so any other value is unknown.
  */
-function templateSequence(settings: Record<string, string> | undefined): PrintSequence | null {
+function templateSequence(settings: Record<string, string | string[]> | undefined): PrintSequence | null {
   const value = settings?.['print_sequence']
   return value === 'by layer' || value === 'by object' ? value : null
 }

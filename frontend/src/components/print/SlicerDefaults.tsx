@@ -2,7 +2,7 @@ import { Card, CardContent } from '@/components/ui/card'
 
 type Props = {
   /** The template's `print_settings`: Bambu Studio process keys and values. */
-  settings: Record<string, string> | undefined
+  settings: Record<string, string | string[]> | undefined
   /** Keys this print sets itself in a step above (#2112): listed, but marked as not applying. */
   overridden?: readonly string[]
 }
@@ -38,7 +38,10 @@ const SWITCHES = new Set([
   'support_on_build_plate_only',
 ])
 
-function valueOf(key: string, value: string): string {
+function valueOf(key: string, raw: string | string[]): string {
+  // A per-extruder key holds a list (#2998); show its values in order.
+  if (Array.isArray(raw)) return raw.map((one) => valueOf(key, one)).join(', ')
+  const value = raw
   if (SWITCHES.has(key) && (value === '0' || value === '1')) return value === '1' ? 'On' : 'Off'
   if (MILLIMETRES.has(key)) return `${value} mm`
   if (DEGREES.has(key)) return `${value}°`
