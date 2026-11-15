@@ -164,7 +164,7 @@ export function schemaBound(param: Param): ListingBound {
 }
 
 /** Whether `a` and `b` are one colour, as publish compares them: case aside. */
-function sameColour(a: ParamValue | null | undefined, b: ParamValue | null | undefined): boolean {
+export function sameColour(a: ParamValue | null | undefined, b: ParamValue | null | undefined): boolean {
   return typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase()
 }
 

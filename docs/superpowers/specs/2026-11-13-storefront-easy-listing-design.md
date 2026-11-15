@@ -143,7 +143,10 @@ filaments into the parameters and filaments, and `sellMedia` picks the pictures:
   for a colour whose template default no colour on offer has starts at the value the person
   was looking at, else the first colour on offer; bounds narrowed past the starting value
   move it to the nearest value they allow (a number in the range and on the step, the first
-  choice left). A value the bounds leave out is named under the control. "Use the
+  choice left). Each bound change fits again from the person's own choice, or the template's
+  when they made none, never from a value an earlier change forced, so typing "12" through
+  "1" leaves no starting value behind (`ListingEditor.tsx` `ParamRow` `refit`). A value the
+  bounds leave out is named under the control. "Use the
   template's" drops the listing's own default when the template's fits again.
 - Render time: when the job (or the output's job) took more than 100 s, a note: "This design
   took N s to render. The store's preview and price give up after about 100 s" (#6120).
