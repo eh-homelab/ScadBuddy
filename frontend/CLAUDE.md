@@ -22,9 +22,10 @@ that each shard ran what it selected, as `backend-pytest-split` does.
 `/api/v1/ai/*` to a real agent with a credential pointed at a fake Anthropic endpoint
 (its header lists the script `E2E_AGENT_SCRIPTED=1` expects; `pnpm preview` routes the
 same way, `vite.config.ts`).
-- `pnpm exec tsc -p tsconfig.app.json --noEmit` - the quick typecheck. Playwright's web
-  server runs `pnpm build`, which typechecks first, so one type error in a test also
-  fails all three `frontend-e2e` shards (#6238).
+- `pnpm exec tsc -p tsconfig.app.json --noEmit` - the quick typecheck. It skips
+  `pretypecheck`, so run `pnpm gen:api` once first, or `src/api/schema.d.ts` is missing.
+  Playwright's web server runs `pnpm build`, which typechecks first, so one type error in
+  a test also fails all three `frontend-e2e` shards (#6238).
 - No prettier here; eslint is the only lint and format check.
 - Shared test helpers go in `src/test/` (e.g. `src/test/appLinks.ts`), not copied per file.
 - The pending-input stream (`lib/pendingChanges.ts`) opens in a passive effect after the
