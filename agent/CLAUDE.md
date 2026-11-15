@@ -95,7 +95,7 @@ limit and a fork's tombstone check run under their locks in the API's transactio
 calls touched (area `session-resources`, `src/sessions/touched.ts` `ResourceRows`) are #5299
 step 9, part a (`SESSION_AREAS`, backend `api/crud_agent_sessions.py`); a session id goes into a
 route's path only as a lowercase UUID, encoded (`rows.ts` `sessionPath`). A turn's claim, its end
-and an edit write the row with their events in one transaction, and stay on SQL until part c. A
+and an edit write the row with their events in one transaction, and stay on SQL until #6449. A
 session's transcript (area `transcripts`, part b, backend `api/crud_agent_transcripts.py`;
 `src/sessions/store.ts` `TranscriptRows`: `PgTranscriptRows`, and `src/sessions/crudTranscripts.ts`
 `CrudTranscriptRows`) is sealed and opened by the API under the session's data key with the
@@ -113,7 +113,7 @@ in one snapshot, an inherited event addressed to the session here), a flow's tur
 `EventLog` keeps its followers, wakes and 1 s polls (D4) over either. An append in a caller's own
 transaction (`append(…, tx)`: approvals, edits, a turn's end, the durable sweep, the workspace,
 and the gate until the API lists area `gate`) stays `appendEventsIn` on SQL until that caller
-moves. These fifteen have a
+moves (#6449). These fifteen have a
 rolling-deploy fallback:
 `src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` from the start with back-off
 (1 s doubling to 30 s) until every one is listed, and until then each stays on SQL, for an API
