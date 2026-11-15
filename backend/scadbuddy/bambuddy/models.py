@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import (
@@ -1095,6 +1095,28 @@ class Spool(BambuddyModel):
     #: was made with (#6136; ``SpoolKProfileResponse`` in Bambuddy's
     #: ``backend/app/schemas/spool.py`` at v1.3.2b1-daily.20261113).
     k_profiles: list[SpoolKProfile] = Field(default_factory=list)
+    #: What ScadBuddy's import reads (#6261, spec §8.1): the product code ScadBuddy's
+    #: spool type keeps as ``code`` (beside ``extra_colors`` and ``effect_type`` above),
+    #: Bambuddy's spool catalog entry of the core, when the row last changed, the last
+    #: scale reading (gross, the core included: ``backend/app/models/spool.py`` line 43 at
+    #: https://github.com/maziggy/bambuddy/tree/1aa7bce166682fde929fec0d535bdaaa22685aad),
+    #: the last drying and the weight lock. Bambuddy's times are naive UTC
+    #: (``created_at``/``updated_at`` in ``tests/bambuddy/recordings/inventory-spools.json``);
+    #: these read as UTC.
+    material_number: str | None = None
+    core_weight_catalog_id: int | None = None
+    updated_at: datetime | None = None
+    last_scale_weight: int | None = None
+    last_weighed_at: datetime | None = None
+    last_dried_at: datetime | None = None
+    weight_locked: bool = False
+
+    @field_validator("updated_at", "last_weighed_at", "last_dried_at")
+    @classmethod
+    def _utc(cls, value: datetime | None) -> datetime | None:
+        if value is None or value.tzinfo is not None:
+            return value
+        return value.replace(tzinfo=UTC)
 
     @property
     def remaining_g(self) -> float:

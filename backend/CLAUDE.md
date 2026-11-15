@@ -22,13 +22,17 @@ opens access codes, and a virtual printer's sealed code). The projects and rende
 and the agent revoke what the projects worker's old role `scadbuddy_projects` held at
 every start (`auth/revoke.py`, `agent/src/db/grants.ts` `revokeRole`), and the API what
 the render worker's old role `scadbuddy_render` held (#5298 Task 22). The render
-worker also holds no KEK and runs only on a remote store (plan D11). Template `pipeline/`
+worker also holds no KEK and runs only on a remote store (plan D11). Its blob-index
+routes take an allowlist (`api/crud_render.py` `RENDER_KEY`, `HELD_KEY`): it writes only
+a render job's own `piece` keys, and its settings route never releases the full Bambuddy
+key (`withheld`; with no render key saved the worker gets none). Template `pipeline/`
 Python runs in the render worker's pod, and openscad and `openscad-lsp` run in the API's
 pod.
 
 Under the rule the API becomes the CRUD service: the only process with SQL access, and
-nothing untrusted in its pod. Each worker becomes an HTTP client of it, with a service
-credential, and loses its database secret, role and grant list (#5298). The `ai_*` reads
+nothing untrusted in its pod. Each worker is now an HTTP client of it, with a service
+credential, and has lost its database secret, role and grant list (#5298, done: prod has
+no worker role or worker database secret since 2026-11-14). The `ai_*` reads
 become routes (#5299). Every `/api/v1/internal/*` route requires a service credential, and
 the API moves to `enforce` (#5297). Template Python and openscad move to a pod without a
 database secret (#5296). Never add a worker table grant, a cross-service table read or a
@@ -170,7 +174,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (the render route, an order's quote) a `done` job of the key whose refs still hold its
   result answers at once, its `reused_at` keeping it from the prune,
   `JobProjection.reuse_done`, #4870; a caller whose work follows the run, as the output
-  backfill's attach does, leaves it off), `projection.py` (`render_jobs` as a projection
+  backfill's attach does, leaves it off; a submit that joins an open `render-<key>` or
+  `piece-<key>` execution keeps that run's Temporal priority, not its own, so never start a
+  render at a low priority that another caller may join by key, #6299), `projection.py` (`render_jobs` as a projection
   the workflow writes in place through the `project` activity), `pg_store.py` (the
   backend's migrations); the render worker holds no database (#5298,
   `tests/test_render_worker_nodb.py`; the API revokes its old role `scadbuddy_render` at
@@ -405,11 +411,12 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   native run passes `client=None` (`bambuddy/client.py` `maybe_client`), reads printer
   state from the LAN report (`printers/reports.py`), and its filaments are the loaded
   trays plus the physical-spool overlay of cached provider records (`spools/`, refreshed
-  off the path): Bambuddy's inventory and ScadBuddy's own (`native_spools`,
-  `spools/native.py`, provider `native` in `spools/spool_providers.py`, routes
-  `api/native_spools.py`, #4643; each write re-caches it at once; a LAN start saves its
-  slots' grams in `native_spool_uses`, taken off once the run settles with that start
-  `done`, `native_use_hook`; the editor is Settings' `components/settings/NativeSpools.tsx`).
+  off the path): Bambuddy's inventory and ScadBuddy's own (`spools/native.py` over the
+  `filament_*` tables since #6261, provider `native` in `spools/spool_providers.py`,
+  routes `api/native_spools.py`, #4643; each write re-caches it at once; a LAN start
+  books its slots' grams as `print_started` estimates in `filament_spool_events`, and the
+  run's settle books each start's `print_ended` actual (`done`) or 0, `native_use_hook`;
+  the editor is Settings' `components/settings/NativeSpools.tsx`).
   `printers/ams_mapping.py` computes `ams_mapping`/`ams_mapping2` from the
   plan's trays and `printers/nozzle_mapping.py` an H2C rack print's `nozzle_mapping`
   (measured values in the spec's §2); `printers/lan.py` is the FTPS upload and MQTT
@@ -468,6 +475,17 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   the stored setting `lan_require_plate_clear`, behind `PLATE_CLEAR_PATCH`), shown from
   `PrintProgress.lan_run` and `PrinterNow.lan_run` by `components/print/LanRunControls.tsx`,
   and the agent's `stop_print_run` and `confirm_plate_clear`.
+- `backend/scadbuddy/filament/` — the filament data model (#6261, epic #6260, spec
+  2026-11-14): `catalog.py` (configurable catalogs, no code enums), `types.py`
+  (`effective()`: spool → type → subtype → material, the one resolver; a type links its
+  price-book row by identity, alpha included, and never rewrites a found row), `spools.py`
+  (instances and tag bindings; every writer locks the tag before the spool; archive closes
+  the open binding), `ledger.py` (`filament_spool_events`, the one source of grams left:
+  the newest absolute reading, then the deltas after it; events carry their physical time,
+  ordered by `(at, seq)`; a time-less event gets a clock-step guard because the WSL clock
+  steps back), `locations.py` (a spool moves only through `move()`; AMS trays are keyed by
+  printer, AMS and tray, never by name), `bambuddy_pull.py` (import and the scheduled pull,
+  read-only toward Bambuddy). Colour is `#RRGGBBAA` (`colour.py`). Routes: `api/filament.py`.
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
   Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),
   `BlobRefs` (`refs.py`, the `blob_refs` table that keeps a blob alive) and `sweep_blobs`
@@ -816,6 +834,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   short statements on the API's role go on the shared `scadbuddy-rows` pool
   (`rows/component.py` `ROWS`). `tests/test_pg_pools.py` sums an API process's pools
   and fails on any new or bigger one; change it, and README "Running it", on purpose.
+- A dict read from a `jsonb` column (e.g. `storefront_listings.params`) has no key order:
+  Postgres stores the keys shortest first. Never show or answer its keys in that order;
+  order them by the template schema's parameters (#6302).
 - Activity (principal jobs, spec `2026-10-09-principal-jobs-design.md`): the `activity`
   table is one row per piece of background work, written by the sources (render, operation,
   print run, agent operation) through `ActivityIndex.upsert_in` (`backend/scadbuddy/activity/`:
@@ -1426,7 +1447,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   A record's whole colour (#6209, migration `20261114T1607Z_filaments_alpha_effect.sql`):
   `colour` stays `#RRGGBB` (the render splits parts by it; a clear filament is its RGB with
   `alpha` 0), beside `alpha`, `extra_colours` (at most 8 stops) and `effect` (Bambuddy's
-  `effect_type` set), all on `Filament` and the storefront's `PublicFilament`.
+  `effect_type` set), all on `Filament` and the storefront's `PublicFilament`. The
+  identity index holds `alpha` too (#6261, `20261115T0154Z_filaments_identity_alpha.sql`):
+  a spool type's book row (`filament/types.py` `_link_price_book`) is one per alpha.
   `colour_source` is `import` or `manual`: a look sent by a person that differs from the
   record's makes it `manual`, and the import never sets a `manual` record's look;
   `colour_source: "import"` in a PATCH hands it back; the editor's "Use spool colour"

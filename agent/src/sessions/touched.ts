@@ -699,10 +699,25 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   // tray_spool_links; the spool and its providers' records are unchanged).
   'link_tray_spool',
   'unlink_tray_spool',
-  // ScadBuddy's own spools (#4643, native_spools) are no recorded resource kind: the
+  // ScadBuddy's own spools (#4643, filament_spools rows since #6261) are no recorded resource kind: the
   // shelf lists them, and the overlay's cached copy follows each write.
   'native_spool_upsert',
   'native_spool_delete',
+  // The filament inventory (#6261: catalogs, types, spools, tags, the ledger, locations)
+  // is no recorded resource kind either; each spool's ledger is its own history.
+  'filament_catalog_upsert',
+  'filament_type_upsert',
+  'filament_type_set_presets',
+  'filament_type_set_k_values',
+  'filament_spool_upsert',
+  'filament_spool_archive',
+  'filament_spool_delete',
+  'filament_spool_bind_tag',
+  'filament_tag_unbind',
+  'filament_spool_add_event',
+  'filament_location_upsert',
+  'filament_spool_move',
+  'filament_bambuddy_import',
   // A re-pin's dry run (#1914): the pin and the history stay as they were. The candidate's
   // checkout is a cache on the volume, swept at boot when nothing pins it.
   'check_library_candidate',

@@ -304,7 +304,7 @@ opens every one and seals it again byte for byte).
     fork of a closed DurableSession takes none). Every read through the fork chain stops at
     the least cut below each ancestor (`LEAST(bound, cut)`: `eventLog.ts` `forkChain`,
     `store.ts` `chainRows`, `blobs.ts` `getThroughChain`); a new chain read must do the same.
-    A fork never copies its parent's transcript, event or image rows; its workspace file rows
+    When it is made, a fork copies none of its parent's transcript, event or image rows; its workspace file rows
     are copied, naming the same bytes (`SessionFiles.copy`). A gated tool's activity runs only
     with an `approved` `ai_input_responses` row for its own request id.
   - DurableSession, the retired Python turn (plan 2026-10-13 Steps 7.2 and 8.1, #4772): its

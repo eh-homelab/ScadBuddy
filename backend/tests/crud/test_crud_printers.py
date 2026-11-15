@@ -24,6 +24,7 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from scadbuddy.api.crud_areas import CRUD_AREAS
+from scadbuddy.api.crud_print import REPORT_ROUTE
 from scadbuddy.auth.service_auth import ServiceAuth
 from scadbuddy.auth.service_credentials import ServiceCredentialStore
 from scadbuddy.core.secrets import SealError
@@ -407,6 +408,49 @@ def test_a_report_put_sent_again_with_its_key_answers_the_same_end(
     with pytest.raises(CrudRefusedError) as refused:
         crud.request("PUT", url, json=body)
     assert refused.value.status == 428
+
+
+def _report_ledger(store: PrinterReportStore) -> int:
+    with store.pool.connection() as conn:
+        row = conn.execute(
+            "SELECT count(*) AS n FROM crud_requests WHERE route = %s", (REPORT_ROUTE,)
+        ).fetchone()
+    assert row is not None
+    return int(row["n"])
+
+
+@pytest.mark.requires_postgres
+def test_only_a_report_write_that_ends_or_starts_a_print_keeps_a_ledger_row(
+    crud: CrudSyncClient, printers: PrinterStore, reports: PrinterReportStore
+) -> None:
+    """#5298 final review M2: a plain heartbeat write keeps no idempotency row (one a
+    second per printer), and its resend still answers as it did; a write that ends or
+    starts a print keeps one, and its resend answers the same end or start."""
+    pid = _lan_printer(printers)
+    url = f"{BASE}/reports/{pid}"
+    start = datetime.now(UTC)
+    nothing = {"ended": None, "started": None}
+
+    def put(report: dict[str, Any], at: datetime, key: str) -> Any:
+        body = {"report": report, "seen_at": at.isoformat()}
+        return crud.request("PUT", url, json=body, idempotency_key=key).json()
+
+    begun = put(_report("RUNNING"), start, "start")
+    assert begun == {"ended": None, "started": "plate_1"}
+    assert _report_ledger(reports) == 1
+    for second in range(1, 6):
+        at = start + timedelta(seconds=second)
+        assert put(_report("RUNNING"), at, f"beat-{second}") == nothing
+        assert put(_report("RUNNING"), at, f"beat-{second}") == nothing  # its resend
+    assert _report_ledger(reports) == 1
+    assert put(_report("RUNNING"), start, "start") == begun  # the start's resend
+    end = start + timedelta(seconds=10)
+    ended = put(_report("FINISH"), end, "end")
+    assert ended == {"ended": {"subtask_name": "plate_1", "timed": True}, "started": None}
+    assert _report_ledger(reports) == 2
+    assert put(_report("FINISH"), end, "end") == ended
+    assert _report_ledger(reports) == 2
+    assert reports.get(pid) == (_report("FINISH"), end)
 
 
 @pytest.mark.requires_postgres
