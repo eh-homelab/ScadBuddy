@@ -200,10 +200,12 @@ step() { yq ".jobs[].steps[] | select(.id == \"$1\") | $2" "$workflow"; }
   || fail "the wait-more step's script differs from the wait step's"
 [ "$(step wait-more .if)" = "steps.wait.outputs.outcome == 'timeout'" ] \
   || fail "wait-more must run only after the first round timed out"
+# shellcheck disable=SC2016 # the workflow's own expression, matched literally
 [ "$(step wait-more '.env.GH_TOKEN')" = '${{ steps.watch-token-more.outputs.token }}' ] \
   || fail "wait-more must watch with its own token"
 [ "$(step watch-token-more .if)" = "steps.wait.outputs.outcome == 'timeout'" ] \
   || fail "the second token must be minted only after a timeout"
+# shellcheck disable=SC2016 # the workflow's own expression, matched literally
 grep -qF 'WAIT_OUTCOME: ${{ steps.wait-more.outputs.outcome || steps.wait.outputs.outcome }}' "$workflow" \
   || fail "the PR step must read the last round's outcome"
 
