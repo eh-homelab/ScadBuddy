@@ -1024,7 +1024,8 @@ def test_the_storefront_settings_have_their_defaults(settings: Settings) -> None
         s.storefront_render_concurrency,
         s.storefront_draft_ttl_days,
         s.storefront_requests_enabled,
-    ) == (3, 30, 2, 30, False)
+        s.storefront_prepare_cap,
+    ) == (3, 30, 2, 30, False, 256)
 
 
 def test_the_storefront_settings_are_stored(settings: Settings) -> None:

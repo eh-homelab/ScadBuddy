@@ -156,7 +156,26 @@ same way, `vite.config.ts`).
   dialog has "Storefront…" per image (`components/storefront/StorefrontPicture.tsx`),
   which sets the image on each listing of that template through `PUT
   /storefront/listings/{id}/media`; a published listing is published again at once.
+  Prepared colours (#6237): `components/storefront/PrepareColours.tsx`, under a published
+  listing's actions, shows the count (`GET …/prepare`), confirms, starts (`POST …/prepare`)
+  and shows "n of N ready", read again while the run is open (`running`) or renders are in
+  the queue (a failed read does not stop the reads; the next good one clears its error, a
+  failed start's message stays, #6299 review); renders that could not be started (`failed_to_start`) are named, with "Prepare
+  again"; over the cap it says the count and the cap. Mocks in
+  `src/mocks/features/storefront.ts` (`setPrepareCap`, `failNextPrepareStarts`).
 
+- The order lists (#6334): `pages/OrdersPage.tsx`'s views (`lib/orderViews.ts`
+  `ORDER_VIEWS`, each a fixed set of URL filters; the active one is the one the URL holds)
+  and its closed-order rule: a closed or cancelled order that ended more than N days ago is
+  left out by the API's `ended_since` (`endedSince`, local midnight, so the list's key moves
+  once a day) unless `old=1` or the query is a profit report row's (`isReportFiltered`: a
+  row's orders are mostly closed long ago, and its link lists them all). N, "Remember my view" and the last view's query (never the
+  search or a profit report row's filters) live in `localStorage` (`ORDERS_MEMORY_KEY`); a
+  visit to `/orders` with no query opens the remembered one. An order's items table puts
+  the live lines first and the fulfilled and cancelled ones in groups after them
+  (`components/orders/itemGroups.ts`, `DataTable` `groups`), each group's state remembered
+  there too. A unit test of the list pins `Date` (`vi.useFakeTimers({ toFake: ['Date'] })`)
+  and the e2e `page.clock.setFixedTime`, so the mocks' closed order stays on its side of N.
 - Customer messages (#5660): Settings → Orders' `components/settings/CustomerMessaging.tsx`
   (bind, check, test send, unbind) and the order page's `components/orders/OrderMessages.tsx`
   ("Mark sent", "Send again" through a preview). The list and "Mark sent" go through the

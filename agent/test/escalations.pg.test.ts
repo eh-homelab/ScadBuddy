@@ -9,6 +9,7 @@ import { PendingProjection } from '../src/gate/projection.js'
 import type { RespondArgs } from '../src/gate/durable.js'
 import { pendingInput, respond, RespondError } from '../src/routes/pendingInput.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
+import { SqlFlowRunReads } from './support/sqlFlowRunReads.js'
 import { manager, tempPaths } from './support/sessions.js'
 
 // The starter session's answer to a child's call outside the run's grant (#2482, spec
@@ -40,7 +41,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalations${TEST_DATABASE_URL ? '' : ` (sk
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     sent = []
-    escalations = new Escalations({ sql: db.sql, durable: () => durable })
+    escalations = new Escalations({ sql: db.sql, reads: new SqlFlowRunReads(db.sql), durable: () => durable })
     parent = await session('bearer', TOKEN)
     child = await session('flow', `flow:${RUN}`)
   })
@@ -117,7 +118,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalations${TEST_DATABASE_URL ? '' : ` (sk
         return { kind: 'approval', outcome: 'denied' }
       },
     }
-    escalations = new Escalations({ sql: db.sql, durable: () => racing })
+    escalations = new Escalations({ sql: db.sql, reads: new SqlFlowRunReads(db.sql), durable: () => racing })
     expect((await escalations.respond({ principal: OWNER, session: parent }, id, 'deny', {})).outcome).toBe('denied')
     expect(swept).toBe(0)
     expect((await row(id))?.hop).toBe('parent')
@@ -133,7 +134,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalations${TEST_DATABASE_URL ? '' : ` (sk
         throw new Error('temporal is down')
       },
     }
-    escalations = new Escalations({ sql: db.sql, durable: () => down })
+    escalations = new Escalations({ sql: db.sql, reads: new SqlFlowRunReads(db.sql), durable: () => down })
     await expect(escalations.respond({ principal: OWNER, session: parent }, id, 'deny', {})).rejects.toThrow('temporal is down')
     const after = await row(id)
     expect(after?.hop).toBe('parent')
@@ -269,6 +270,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalations${TEST_DATABASE_URL ? '' : ` (sk
   it('a deny whose Update timed out keeps its claim for the lease to end, never the passed deadline (#3518)', async () => {
     const id = await park()
     const timedOut = new Escalations({
+      reads: new SqlFlowRunReads(db.sql),
       sql: db.sql,
       durable: () => ({ respond: async () => Promise.reject(new DurableUnavailable("the session's worker is not answering")) }),
     })
@@ -295,6 +297,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalations${TEST_DATABASE_URL ? '' : ` (sk
     const before = (await row(id))?.hop_until
     sent = []
     const failing = new Escalations({
+      reads: new SqlFlowRunReads(db.sql),
       sql: db.sql,
       durable: () => ({ respond: async () => Promise.reject(new Error('temporal is down')) }),
     })

@@ -32,7 +32,7 @@ import { BackgroundTasks } from './background/service.js'
 import { BackgroundTaskStore } from './background/store.js'
 import { runCronPasses, temporalTaskRunner } from './background/temporal.js'
 import { connectDatabase } from './db.js'
-import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js'
+import { MigrationChecksumError } from './db/schema.js'
 import { CrudEventLogReads } from './events/eventLogReads.js'
 import { PgEventListener } from './events/pgListener.js'
 import { DEFAULT_STATE_DIR, pluginCacheDir } from './harness/options.js'
@@ -61,8 +61,8 @@ import {
   withServiceCredential,
 } from './api/serviceCredential.js'
 import { untilBackendAnswers } from './api/backendUp.js'
-import { CrudAreas, READ_AREAS, SECRET_AREAS } from './api/crudAreas.js'
-import { CrudFlowRunReads, gatedFlowRunReads, SqlFlowRunReads } from './flows/backendReads.js'
+import { CrudAreas, SECRET_AREAS } from './api/crudAreas.js'
+import { CrudFlowRunReads } from './flows/backendReads.js'
 import { BrowserSessions } from './auth/browserSession.js'
 import { sealBackfill } from './sessions/sealBackfill.js'
 import { ApprovalActions } from './approvals/mcp.js'
@@ -205,9 +205,9 @@ if (previousKek && !previousKek.ok) {
 const database = config.databaseUrl
   ? connectDatabase(config.databaseUrl, {
       onMigrationError: (err) => {
-        console.error('database migrations failed:', (err as Error).message)
-        // An edited migration or an unreadable ledger is not a transient failure: stop, visibly.
-        if (err instanceof MigrationChecksumError || err instanceof MigrationLedgerError) process.exit(1)
+        console.error('the database is not ready:', (err as Error).message)
+        // An edited migration is not a transient failure: stop, visibly.
+        if (err instanceof MigrationChecksumError) process.exit(1)
       },
       afterMigrate: async (sql) => {
         if (!previousKek?.ok || !kek.ok) return
@@ -269,14 +269,13 @@ const serviceCredential: CredentialSource | undefined =
         ...(credentialView ? { fallback: credentialView } : {}),
       })
     : credentialView
-// #5299 D7: the agent's reads of the backend's tables (the event log, flow runs, their
-// decisions and grants) go through the backend's CRUD routes once the API lists their areas,
-// read from the start and again with back-off until it does (api/crudAreas.ts); over SQL until
-// then, as an API pod older than the routes needs during a rolling deploy. So do its settings, its
-// Claude credentials and its payload data keys (#5299 step 4, D5): the API seals and opens them
-// with the KEK, so with those areas listed this process needs no KEK for them.
+// The agent's settings, its Claude credentials and its payload data keys (#5299 step 4, D5) go
+// through the backend's CRUD routes once the API lists their areas, read from the start and
+// again with back-off until it does (api/crudAreas.ts); over SQL until then, as an API pod older
+// than the routes needs during a rolling deploy. The API seals and opens them with the KEK, so
+// with those areas listed this process needs no KEK for them.
 const crudFetch = serviceCredential ? withServiceCredential(globalThis.fetch, serviceCredential, config.backendUrl) : globalThis.fetch
-const crudAreas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: [...READ_AREAS, ...SECRET_AREAS] })
+const crudAreas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: SECRET_AREAS })
 crudAreas.start()
 const credentials = database
   ? gatedCredentials(new CredentialStore(database.sql), new CrudCredentials(config.backendUrl, { fetch: crudFetch }), () => crudAreas.has('credentials'), kek)
@@ -325,22 +324,22 @@ const pluginForwarder = await PluginForwarder.start({
 await startCredentialGateway()
 // The database's clock the moment it is ready, before a turn can record a session: the pass at
 // start ends only this replica's rows older than it (plugins/pluginSessions.ts `endOwnSessions`).
-const pluginSessionMark = database ? database.ready().then((ok) => (ok ? startMark(database.sql) : undefined)) : undefined
+const pluginSessionMark = database ? database.untilReady().then(() => startMark(database.sql)) : undefined
 const backend = createBackendClient(
   config.backendUrl,
   globalThis.fetch,
   serviceCredential ? serviceCredentialMiddleware(serviceCredential) : undefined,
 )
 
-const crudEventLog = new CrudEventLogReads(config.backendUrl, { fetch: crudFetch })
-const flowReads = database
-  ? gatedFlowRunReads(new SqlFlowRunReads(database.sql), new CrudFlowRunReads(config.backendUrl, { fetch: crudFetch }), () => crudAreas.has('flows'))
-  : undefined
+// #5299 D7: the agent's reads of the backend's tables (the event log, flow runs, their
+// decisions and grants) go only through the backend's CRUD routes (areas `events` and `flows`);
+// the API takes back the agent's grants on the event log, flow runs and decisions.
+const flowReads = new CrudFlowRunReads(config.backendUrl, { fetch: crudFetch })
 
 // The event bus (spec §7, #264): LISTEN on `scadbuddy_events` on a connection
 // of its own, retried in the background, feeding MCP resource subscriptions.
 const events = config.databaseUrl
-  ? new PgEventListener(config.databaseUrl, { eventLog: () => (crudAreas.has('events') ? crudEventLog : undefined) })
+  ? new PgEventListener(config.databaseUrl, { eventLog: new CrudEventLogReads(config.backendUrl, { fetch: crudFetch }) })
   : undefined
 // The pending-input tables' change ticks (#815, gate/changes.ts), for the badge's stream.
 const pendingChanges = events ? new PendingChanges(events) : undefined
@@ -484,7 +483,7 @@ const workspaceBytesStatus = workspace
       return workspaceBytes.status
     }
   : undefined
-// Once migrations have applied and the backend answers: say where the files go (once, the cause
+// Once migrations have applied (however long the API takes, `untilReady`) and the backend answers: say where the files go (once, the cause
 // when refused), and move the files written before #4789 (or while the backend kept no blobs) to
 // blobs; what is left is retried at the next start. The API pod's sidecar can start before the
 // backend container answers (#5868): until /healthz answers this waits with back-off
@@ -492,9 +491,8 @@ const workspaceBytesStatus = workspace
 // answer for another reason (#5889); writes and reads ask the backend each time and need no wait.
 if (role.http && database && workspace && workspaceBytesStatus) {
   void database
-    .ready()
-    .then(async (ready) => {
-      if (!ready) return
+    .untilReady()
+    .then(async () => {
       await untilBackendAnswers(() => workspaceBlobStore.backend(), {
         kind: (err) => (err instanceof WorkspaceBlobError ? err.unreachableKind : undefined),
         log: (message) => console.log(`workspace files: ${message}`),
@@ -538,12 +536,8 @@ const packagesLoadCheck = pluginPackages ? packageLoadCheck(pluginPackages, pack
 // turn does not wait on a whole repository's fetch (#4217).
 if (database && pluginPackages) {
   void database
-    .ready()
-    .then(async (ok) => {
-      if (!ok) {
-        console.warn('plugin package warm-up skipped: the database is not ready; the first turn fetches instead')
-        return
-      }
+    .untilReady()
+    .then(async () => {
       for (const problem of await warmPackages(pluginPackages, packageInstaller)) {
         console.warn('plugin package warm-up:', problem)
       }
@@ -588,9 +582,8 @@ if (database && !dataKeys) console.warn('sessions: no secret key, so no session 
 // Seals the transcripts written before sealing, in the background once migrations have applied; a failure is retried at the next start.
 if (role.http && database && dataKeys) {
   void database
-    .ready()
-    .then(async (ready) => {
-      if (!ready) return
+    .untilReady()
+    .then(async () => {
       const { sealed, deleted } = await sealBackfill(database.sql, dataKeys)
       if (sealed || deleted) console.log(`session transcripts: sealed ${sealed} row(s); deleted ${deleted} of forgotten sessions`)
     })
@@ -733,10 +726,8 @@ const commandKinds = pluginPackages ? packageKinds({ packages: pluginPackages, i
 // The agent's activity kinds are its command kinds (spec 2026-10-09 §4), read by the backend.
 if (role.http && database && commandKinds.length > 0) {
   void database
-    .ready()
-    .then(async (ok) => {
-      if (ok) await upsertActivityKinds(database.sql, activityKindsOf(commandKinds))
-    })
+    .untilReady()
+    .then(() => upsertActivityKinds(database.sql, activityKindsOf(commandKinds)))
     .catch((err: unknown) => console.error('activity kinds: could not record them:', (err as Error).message))
 }
 // Durable subjects' payloads are sealed per subject (spec §6.5): every client and worker
@@ -1251,7 +1242,7 @@ const pushDispatcher =
     : undefined
 if (pushDispatcher && database) {
   pendingChanges?.subscribe(() => pushDispatcher.wake())
-  void database.ready().then((ok) => ok && pushDispatcher.wake())
+  void database.untilReady().then(() => pushDispatcher.wake())
 }
 
 const app = !role.http
@@ -1321,7 +1312,7 @@ const app = !role.http
     tools: ALL_TOOLS,
     resources,
     services: toolServices,
-    // Tokens live in `ai_mcp_tokens` (db/migrations/20260928T0734Z_mcp_tokens.sql).
+    // Tokens live in `ai_mcp_tokens` (backend/scadbuddy/migrations_agent/20260928T0734Z_mcp_tokens.sql).
     // Without a database /mcp answers 503 before auth (app.ts), and the
     // fail-closed store only makes sure nothing could verify anyway.
     tokens,
@@ -1393,7 +1384,6 @@ async function stop(): Promise<void> {
   stopTabHosting?.()
   stopSweeper?.()
   stopEscalationSweeper?.()
-  crudAreas.stop()
   stopOrphanSweep?.()
   stopPluginSessionSweep?.()
   stopDurableSweep?.()

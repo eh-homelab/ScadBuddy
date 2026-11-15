@@ -145,6 +145,8 @@ class SettingsView(BaseModel):
     storefront_slices_concurrent: int = 1
     storefront_draft_ttl_days: int = 30
     storefront_requests_enabled: bool = False
+    #: The most colour combinations one prepare of a listing queues (#6237).
+    storefront_prepare_cap: int = 256
     #: The storefront's mail (#5283): SMTP host, port, user, From and the TLS mode
     #: (`starttls`, `implicit` or `none`). The password is sealed apart
     #: (`GET /storefront/mail/password` says whether it is set).

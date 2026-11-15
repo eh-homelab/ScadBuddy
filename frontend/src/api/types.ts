@@ -538,6 +538,9 @@ export type StorefrontListingInput = Defaulted<
   Schemas['ListingInput'],
   'description' | 'params' | 'fixed' | 'colours' | 'media_ids' | 'one_material'
 >
+/** #6237 — a listing's colour combinations and how far their renders are; a prepare's answer. */
+export type ListingPrepareProgress = Schemas['PrepareProgress']
+export type ListingPrepareStarted = Schemas['PrepareStarted']
 export type ListingBound = Schemas['NumberBound'] | Schemas['ChoiceBound'] | Schemas['TextBound']
 /** #6157 — one row of the back office's list, and a page of them. */
 export type StorefrontListingRow = Schemas['ListingRow']

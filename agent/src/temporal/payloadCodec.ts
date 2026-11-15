@@ -3,7 +3,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Sql } from 'postgres'
-import { CrudReadError, crudRead } from '../api/crudAreas.js'
+import { CrudReadError, crudRead } from '../api/crudRead.js'
 import { KEK_BYTES, type Kek, openBytes, type RandomSource, SealError, sealBytes } from '../secrets.js'
 
 // The payload codec of durable subjects (spec 2026-10-01 §6.5, plan 5c Ruling 11). Every

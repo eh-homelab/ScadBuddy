@@ -21,6 +21,7 @@ import { redact } from '../src/secrets.js'
 import { PgApprovalRecords, PgSessionOwners, type ToolActivityDeps, toolCallActivities } from '../src/temporal/toolActivities.js'
 import { toolCallWorkflowId } from '../src/temporal/toolCall.js'
 import { services } from './helpers/mcp.js'
+import { SqlFlowRunReads } from './support/sqlFlowRunReads.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
 import { fixedCredentials } from './support/fixedCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -156,7 +157,7 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`a turn's tool
     deps = {
       services: services(),
       sessions: new PgSessionOwners(db.sql),
-      approvals: new PgApprovalRecords(db.sql),
+      approvals: new PgApprovalRecords(db.sql, new SqlFlowRunReads(db.sql)),
       audit: new AuditLog({ sql: db.sql, hashKey: Buffer.alloc(32, 5) }),
     }
   })

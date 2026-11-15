@@ -37,6 +37,7 @@ import { AgentWorker, workerIdentity } from '../src/temporal/worker.js'
 import { createHarnessServer } from '../src/tools/projections.js'
 import { defineTool, idempotencyKey, text } from '../src/tools/registry.js'
 import { services } from './helpers/mcp.js'
+import { SqlFlowRunReads } from './support/sqlFlowRunReads.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
 import { fixedCredentials } from './support/fixedCredentials.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
@@ -192,7 +193,7 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
     const runCall = decidedCalls([ship], {
       services: services(),
       sessions: new PgSessionOwners(pool.sql),
-      approvals: new PgApprovalRecords(pool.sql),
+      approvals: new PgApprovalRecords(pool.sql, new SqlFlowRunReads(pool.sql)),
       audit,
     })
     const turnHost = new TurnHost({

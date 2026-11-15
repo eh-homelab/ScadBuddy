@@ -202,6 +202,7 @@ def test_every_library_workflow_names_its_versioning_behavior() -> None:
         "SliceWorkflow": VersioningBehavior.AUTO_UPGRADE,
         "SpoolRefresh": VersioningBehavior.AUTO_UPGRADE,
         "StagedFile": VersioningBehavior.AUTO_UPGRADE,
+        "PrepareListing": VersioningBehavior.AUTO_UPGRADE,
     }
 
 

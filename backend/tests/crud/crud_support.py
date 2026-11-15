@@ -101,9 +101,8 @@ from scadbuddy.store.content_models import BlobRef, BlobStat
 from scadbuddy.store.index import BlobIndex, Pool
 from scadbuddy.workflows.flows_client import connect_flows
 from scadbuddy.workflows.payload_codec import Connect, PgPayloadKeys, payload_key_context
+from tests.support.agent_tables import AGENT_KEY_MIGRATIONS
 
-#: The agent's migrations that make `ai_payload_keys` and `ai_forgotten_subjects`.
-AGENT_MIGRATIONS = Path(__file__).resolve().parent.parent / "fixtures" / "agent-migrations"
 #: The KEK of the API and the worker in a test.
 TEST_KEK = kek_from_base64(base64.b64encode(b"\x5a" * 32).decode())
 
@@ -137,7 +136,7 @@ def agent_key_tables(store: FlowStore) -> Connect:
     with psycopg.connect(conninfo, autocommit=True) as conn:
         made = conn.execute("SELECT to_regclass('ai_payload_keys')").fetchone()
         if made is None or made[0] is None:
-            for sql in sorted(AGENT_MIGRATIONS.glob("*.sql")):
+            for sql in AGENT_KEY_MIGRATIONS:
                 conn.execute(sql.read_text().encode())
 
     @asynccontextmanager

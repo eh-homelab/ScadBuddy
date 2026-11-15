@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import type { UpgradeWebSocket } from 'hono/ws'
 import type { Sql } from 'postgres'
 import { describe, expect, it } from 'vitest'
-import { SECRET_AREAS } from '../src/api/crudAreas.js'
+import { CrudAreas, SECRET_AREAS } from '../src/api/crudAreas.js'
 import { aiStatus } from '../src/aiStatus.js'
 import { createApp } from '../src/app.js'
 import type { AuditEntry, AuditRepo } from '../src/audit/log.js'
@@ -224,6 +224,70 @@ const setup = () => {
 describe('the step 4 areas', () => {
   it('are the API agent areas the agent waits for', () => {
     expect([...SECRET_AREAS]).toEqual(['settings', 'credentials', 'payload-keys'])
+  })
+})
+
+// The rolling deploy's switch from SQL once the API lists the areas (#5299 D9).
+describe('CrudAreas', () => {
+  const areasApi =
+    (answer: () => Response): typeof fetch =>
+    async () =>
+      answer()
+  const listing = (areas: string[]) => () => new Response(JSON.stringify({ areas }), { headers: { 'x-scadbuddy-crud': '1' } })
+
+  it('waits, logging once, until the API lists every area, then holds it', async () => {
+    const logs: string[] = []
+    let listed: string[] = ['events']
+    const areas = new CrudAreas(BASE, { fetch: areasApi(() => listing(listed)()), wanted: SECRET_AREAS, log: (m) => logs.push(m) })
+    expect(await areas.refresh()).toBe(false)
+    expect(await areas.refresh()).toBe(false)
+    expect(logs).toEqual([
+      "CRUD areas: waiting for the backend's agent areas (missing settings, credentials, payload-keys); reading over SQL until it lists them",
+    ])
+    listed = ['settings']
+    expect(await areas.refresh()).toBe(false)
+    expect([areas.has('settings'), areas.has('credentials'), areas.complete]).toEqual([true, false, false])
+    listed = ['settings', 'credentials', 'payload-keys']
+    expect(await areas.refresh()).toBe(true)
+    expect(logs.at(-1)).toBe("CRUD areas: the agent reads settings, credentials, payload-keys through the backend's CRUD routes")
+    // Listed once, for good: an older pod answering later does not take it back.
+    listed = []
+    await areas.refresh()
+    expect(areas.has('credentials')).toBe(true)
+  })
+
+  it("names the route's refused credential apart from a proxy's 401 or an older pod's 404", async () => {
+    const logs: string[] = []
+    let answer = (): Response => new Response('', { status: 404 })
+    const areas = new CrudAreas(BASE, { fetch: areasApi(() => answer()), wanted: SECRET_AREAS, log: (m) => logs.push(m) })
+    await areas.refresh()
+    expect(logs[0]).toContain('no CRUD route answered its areas (HTTP 404)')
+    answer = () => new Response('', { status: 401 })
+    await areas.refresh()
+    expect(logs[1]).toContain('no CRUD route answered its areas (HTTP 401)')
+    answer = () => new Response('', { status: 401, headers: { 'x-scadbuddy-crud': '1' } })
+    await areas.refresh()
+    await areas.refresh()
+    expect(logs).toHaveLength(3)
+    expect(logs[2]).toContain("the backend refused the agent's service credential (HTTP 401)")
+  })
+
+  it('reads again with back-off from the start until they are listed', async () => {
+    let calls = 0
+    const areas = new CrudAreas(BASE, {
+      fetch: areasApi(() => listing(++calls >= 3 ? [...SECRET_AREAS] : [])()),
+      wanted: SECRET_AREAS,
+      log: () => {},
+      firstMs: 1,
+      maxMs: 4,
+    })
+    areas.start()
+    for (let i = 0; i < 200 && !areas.complete; i++) await new Promise((r) => setTimeout(r, 5))
+    expect(areas.complete).toBe(true)
+    const after = calls
+    await new Promise((r) => setTimeout(r, 30))
+    expect(calls).toBe(after)
+    areas.stop()
   })
 })
 

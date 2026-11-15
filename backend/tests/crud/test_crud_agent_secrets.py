@@ -40,6 +40,7 @@ from scadbuddy.auth.service_credentials import (
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.secrets import Kek, kek_from_base64, open_bytes, seal_bytes, seal_secret
+from scadbuddy.render.agent_migrations import migrate_agent
 from scadbuddy.workflows.payload_codec import payload_key_context, payload_key_lock
 from tests.conftest import PgPool
 from tests.crud.crud_support import _NoSessions, _Noted
@@ -47,21 +48,18 @@ from tests.crud.crud_support import _NoSessions, _Noted
 pytestmark = pytest.mark.requires_postgres
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
-MIGRATIONS = FIXTURES / "agent-secret-migrations"
 VECTORS = FIXTURES / "secret-vectors.json"
 BASE = "/api/v1/internal/crud/agent"
 KEK_B64 = base64.b64encode(b"\x31" * 32).decode()
 OLD_B64 = base64.b64encode(b"\x32" * 32).decode()
 KEK = kek_from_base64(KEK_B64)
 OLD = kek_from_base64(OLD_B64)
-SESSION_TABLE = "CREATE TABLE IF NOT EXISTS ai_sessions (id uuid PRIMARY KEY)"
 
 
 def _agent_tables(pool: PgPool) -> None:
+    # The agent's own migration files, as the API applies them at its start (#5299 D6).
     with pool.connection() as conn:
-        for sql in sorted(MIGRATIONS.glob("*.sql")):
-            conn.execute(sql.read_text().encode())
-        conn.execute(SESSION_TABLE)
+        migrate_agent(conn)
 
 
 def _app(pool: PgPool, tmp_path: Path, *, kek: str | None, previous: str | None = None) -> FastAPI:
@@ -619,7 +617,13 @@ def test_a_standing_session_key_needs_its_row(agent: Agent, tables: PgPool) -> N
     subject = f"session-{session}"
     standing = {"create": True, "only_for_standing_session": True}
     assert agent.post(f"/payload-keys/{subject}", standing).status_code == 410
-    _sql(tables, "INSERT INTO ai_sessions (id) VALUES (%s)", (session,))
+    _sql(
+        tables,
+        "INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind,"
+        " creator_id, status, max_turns, budget_usd) VALUES (%s, 'chat', 'browser', 'browser',"
+        " 'You', 'browser', 'browser', 'running', 10, 1)",
+        (session,),
+    )
     assert len(_key(agent.post(f"/payload-keys/{subject}", standing))) == 32
 
 
