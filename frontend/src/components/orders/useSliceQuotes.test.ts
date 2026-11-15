@@ -544,9 +544,30 @@ describe('useSliceQuotes · an item’s render (#6324)', () => {
     await act(async () => {
       await expect(rendered).resolves.toBe(false)
     })
-    expect(result.current.runs.get('item-1')).toMatchObject({ stage: 'rendering', error: null, detached: true })
+    expect(result.current.runs.get('item-1')).toMatchObject({ stage: 'rendering', error: null, landed: true, detached: true })
     // A later read that shows the output ends it.
     rerender({ items: [{ ...before[0]!, output_id: 'o'.repeat(32) }] })
     await waitFor(() => expect(result.current.runs.has('item-1')).toBe(false))
+  })
+
+  it('lets a landed render whose read never comes be dismissed, settling false', async () => {
+    vi.spyOn(api, 'renderItem').mockResolvedValue({} as never)
+    vi.spyOn(api, 'runningQuotes').mockResolvedValue({ items: [] } as never)
+    vi.spyOn(api, 'failedQuotes').mockResolvedValue(new Map())
+    // Its read was superseded by a newer one that failed: neither `failed` nor new items come.
+    const onQuoted = vi.fn()
+    const before = [{ id: 'item-1', order_id: 'order-1', output_id: null, quotes: [], created_at: '2026-10-26T10:00:00Z' }] as unknown as OrderItemDetail[]
+    const { result, rerender } = renderHook(({ items }) => useSliceQuotes('order-1', items, onQuoted), { initialProps: { items: before } })
+    let rendered!: Promise<boolean>
+    act(() => {
+      rendered = result.current.render('item-1', [])
+    })
+    await waitFor(() => expect(result.current.runs.get('item-1')).toMatchObject({ landed: true, error: null }))
+    act(() => result.current.dismiss('item-1'))
+    await expect(rendered).resolves.toBe(false)
+    expect(result.current.runs.has('item-1')).toBe(false)
+    // A read that shows the output later opens nothing and brings no run back.
+    rerender({ items: [{ ...before[0]!, output_id: 'o'.repeat(32) }] })
+    expect(result.current.runs.has('item-1')).toBe(false)
   })
 })

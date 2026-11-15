@@ -130,13 +130,7 @@ export function OrderPage() {
     // Replaced, so the hash form becomes the search form and Back leaves the order.
     setSearch(next, { replace: true })
   }
-  // `failed` hears a failed read of the order (a landed render then stops holding Slice…).
-  const slices = useSliceQuotes(id, view.data?.items, (failed) => {
-    view.refresh(undefined, failed)
-    events.refresh()
-    costs.refresh()
-    orderParts.refresh()
-  })
+  const slices = useSliceQuotes(id, view.data?.items, readOrder)
   const loaded = view.data !== undefined
   // A link to an item the order does not have names nothing: it leaves the address bar.
   const dead = openItem !== null && view.data !== undefined && !view.data.items.some((i) => i.id === openItem)
@@ -178,7 +172,12 @@ export function OrderPage() {
   const [pickerBusy, setPickerBusy] = useState(false)
 
   function reload() {
-    view.refresh()
+    readOrder()
+  }
+
+  /** `failed` hears a failed read of the order (a landed render then stops holding Slice…). */
+  function readOrder(failed?: () => void) {
+    view.refresh(undefined, failed)
     events.refresh()
     costs.refresh()
     orderParts.refresh()

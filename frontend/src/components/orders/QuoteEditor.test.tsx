@@ -188,6 +188,31 @@ describe('QuoteEditor · a quote from a slice (#4250)', () => {
     expect(screen.getByTestId('quote-from-slice')).toBeDisabled()
   })
 
+  it.each([
+    [false, /The render finished\. Reading the order again for its output/],
+    [true, /The render finished, but the order could not be read again/],
+  ])('a landed render (read failed: %s) says so and offers Stop waiting (#6324)', async (detached, text) => {
+    const draft = { ...item(ITEM_DRAFT, ORDER_DRAFT, 'draft'), output_id: null }
+    const dismiss = vi.fn()
+    const { user } = renderPage(
+      <QuoteEditor
+        orderId={ORDER_DRAFT}
+        itemId={ITEM_DRAFT}
+        currency="USD"
+        exponent={2}
+        quotes={[]}
+        editable
+        onChanged={vi.fn()}
+        item={draft}
+        slice={{ run: { startedAt: Date.now(), error: null, known: [], stage: 'rendering', landed: true, detached }, start: vi.fn(), render: vi.fn(), dismiss }}
+      />,
+    )
+    expect(screen.getByTestId('quote-running')).toHaveTextContent(text)
+    expect(screen.getByTestId('quote-from-slice')).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Stop waiting' }))
+    expect(dismiss).toHaveBeenCalledTimes(1)
+  })
+
   it('offers Slice… for a design with no output, and says why only when there is no design (#6324)', async () => {
     const render = vi.fn<() => Promise<boolean>>().mockResolvedValue(false)
     const editor = (fields: Partial<OrderItem>) => (

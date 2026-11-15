@@ -26,6 +26,12 @@ export interface SliceQuoteRun {
    * render keeps it, so its error reads as the render's.
    */
   stage?: 'rendering'
+  /**
+   * Set once the render answered and its output is the item's, while the page waits for the
+   * order's read to show it. The person can always stop waiting: a read that never comes
+   * (failed, or superseded by one that failed) holds nothing.
+   */
+  landed?: boolean
 }
 
 export type SliceQuoteRuns = ReadonlyMap<string, SliceQuoteRun>
@@ -173,7 +179,14 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
     [orderId, update],
   )
 
-  const dismiss = useCallback((itemId: string) => update(orderId, itemId, null), [orderId, update])
+  const dismiss = useCallback(
+    (itemId: string) => {
+      // A landed render's wait ends too: its promise settles false, so no dialog opens later.
+      rendered.current.get(itemId)?.(false)
+      update(orderId, itemId, null)
+    },
+    [orderId, update],
+  )
 
   /**
    * #6324 — "Slice…" on an item with a design and no output: its render first, shown as this
@@ -193,14 +206,17 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
             () => {
               if (current.current !== orderId) return done(false)
               // The run stays `rendering` until the reload shows the output, so Slice… stays
-              // held and no second render starts in between.
+              // held and no second render starts in between; `landed` lets the person stop
+              // waiting whatever becomes of the read.
+              const landed: SliceQuoteRun = { ...run, landed: true }
               const settle = (ok: boolean) => {
                 if (rendered.current.get(itemId) !== settle) return
                 rendered.current.delete(itemId)
-                update(orderId, itemId, ok ? null : { ...run, detached: true })
+                update(orderId, itemId, ok ? null : { ...landed, detached: true })
                 done(ok)
               }
               rendered.current.set(itemId, settle)
+              update(orderId, itemId, landed)
               // A realtime frame may have read the output in before this answer landed.
               if (seen.current.items?.find((i) => i.id === itemId)?.output_id) return settle(true)
               quoted.current(() => settle(false))
