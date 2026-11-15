@@ -1,7 +1,9 @@
 import { Client, Connection } from '@temporalio/client'
 import { loadConfig } from './config.js'
 import { connectDatabase } from './db.js'
-import { forgetSubject } from './sessions/forget.js'
+import { CrudAreas, FORGET_AREAS } from './api/crudAreas.js'
+import { type CredentialSource, ExchangeCredential, ServiceCredential, withServiceCredential } from './api/serviceCredential.js'
+import { CrudSubjectKeys, forgetSubject } from './sessions/forget.js'
 import path from 'node:path'
 import { DEFAULT_STATE_DIR } from './harness/options.js'
 import { loadKek } from './secrets.js'
@@ -47,7 +49,18 @@ try {
   if (!kek.ok) console.error(`forget-subject: ${kek.reason}; a session with forks cannot be forgotten`)
   if (previous && !previous.ok) console.error(`forget-subject: ${previous.reason}; a key wrapped under the previous key cannot be opened`)
   const keys = kek.ok ? new PgPayloadKeys(database.sql, kek.kek, { previous: previous?.ok ? previous.kek : undefined }) : undefined
-  const done = await forgetSubject({ sql: database.sql, client, keys, payloads, turnDirs, sessionDirs }, subject)
+  // The tombstone, the key and a flow run's images through the API's CRUD route once it lists area
+  // `forget` (#5299 step 6), with the agent's service credential as main.ts gets it; over SQL otherwise.
+  const view = new ServiceCredential(database.sql, kek.ok ? kek.kek : undefined)
+  const proofFile = config.serviceTokenFile ?? config.serviceBootstrapFile
+  const credential: CredentialSource =
+    proofFile !== undefined
+      ? new ExchangeCredential({ backendUrl: config.backendUrl, proofFile, proof: config.serviceTokenFile !== undefined ? 'k8s' : 'bootstrap', fallback: view })
+      : view
+  const crudFetch = withServiceCredential(globalThis.fetch, credential, config.backendUrl)
+  const areas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: FORGET_AREAS, log: (m) => console.error(`forget-subject: ${m}`) })
+  const crud = (await areas.refresh()) ? new CrudSubjectKeys(config.backendUrl, { fetch: crudFetch }) : undefined
+  const done = await forgetSubject({ sql: database.sql, client, keys, payloads, turnDirs, sessionDirs, crud }, subject)
   console.log(JSON.stringify({ subject, ...done }))
 } finally {
   await connection?.close()

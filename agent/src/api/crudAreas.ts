@@ -15,6 +15,12 @@ import { CrudReadError, crudRead } from './crudRead.js'
 export const SECRET_AREAS = ['settings', 'credentials', 'payload-keys'] as const
 
 /**
+ * The area of forgetting a subject (its tombstone, key and flow images), the key deletes no
+ * forget makes, and a flow run's images (#5299 step 6; backend api/crud_agent_forget.py).
+ */
+export const FORGET_AREAS = ['forget'] as const
+
+/**
  * The areas of a session's background tasks (with a Monitor's events and a Workflow's journal)
  * and of the agent's command record, `ai_operations` (#5299 step 8; backend
  * api/crud_agent_tasks.py; background/store.ts, operations/store.ts).

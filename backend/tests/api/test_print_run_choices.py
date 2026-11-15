@@ -200,7 +200,7 @@ def test_choices_slice_with_derived_presets_and_queue_without_a_pipeline(
     assert all("/slicer-pipelines" not in str(call.request.url) for call in respx.calls)
 
 
-def declare_print_settings(paths: DataPaths, model: str, settings: dict[str, str]) -> None:
+def declare_print_settings(paths: DataPaths, model: str, settings: dict[str, Any]) -> None:
     """Give ``model``'s model.json the ``print_settings`` (#770)."""
     meta = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))
     meta["print_settings"] = settings
@@ -252,6 +252,47 @@ def test_the_dialogs_print_sequence_goes_over_the_templates(
     assert slice_body["process_overrides"] == {
         "enable_prime_tower": "1",
         "print_sequence": "by object",
+    }
+
+
+@respx.mock
+def test_process_overrides_go_over_the_template_and_the_shorthands(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#2998: any key, as JSON gives it, sent in Bambu's string shape, over the
+    template's defaults and over the print's own ``print_sequence``."""
+    output_id = prepared(client, model)
+    declare_print_settings(paths, model, {"enable_prime_tower": "1", "print_sequence": "by layer"})
+    upload_route()
+    run_routes()
+    sliced = slice_routes()
+    queue_route()
+    # The overrides are checked against the process preset's values, for warnings only.
+    respx.get(f"{API}/slicer/preset-values").mock(
+        return_value=httpx.Response(200, json={"resolved": True, "values": {}})
+    )
+
+    response = run_print(
+        client,
+        output_id,
+        json={
+            **body(),
+            "print_sequence": "by object",
+            "process_overrides": {
+                "print_sequence": "by layer",
+                "enable_prime_tower": False,
+                "skirt_loops": 0,
+                "a_key_scadbuddy_never_heard_of": 0.25,
+            },
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert json.loads(sliced.calls.last.request.content)["process_overrides"] == {
+        "a_key_scadbuddy_never_heard_of": "0.25",
+        "enable_prime_tower": "0",
+        "print_sequence": "by layer",
+        "skirt_loops": "0",
     }
 
 
@@ -319,11 +360,13 @@ def test_a_template_without_print_settings_sends_no_overrides(
 
 
 @respx.mock
-def test_an_unknown_print_setting_is_refused_before_anything_is_sliced(
+def test_a_print_setting_no_slicer_takes_is_refused_before_anything_is_sliced(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
+    """#2998: any key and any string, number or list is taken; an object is no
+    setting's value, so the model.json is refused."""
     output_id = prepared(client, model)
-    declare_print_settings(paths, model, {"infill": "15%"})
+    declare_print_settings(paths, model, {"infill": {"density": "15%"}})
     upload_route()
     run_routes()
     sliced = slice_routes()
@@ -331,7 +374,7 @@ def test_an_unknown_print_setting_is_refused_before_anything_is_sliced(
     response = run_print(client, output_id, json=body())
 
     assert response.status_code == 409
-    assert "'infill' is not a print setting" in response.json()["detail"]
+    assert "print_settings.infill" in response.json()["detail"]
     assert not sliced.called
 
 

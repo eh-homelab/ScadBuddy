@@ -52,7 +52,8 @@ name: Deploy (reusable)
 #      what it runs cannot be checked.
 #   3. Open ONE PR, "deploy(scadbuddy): <version>", on the fixed branch
 #      `deploy/scadbuddy`, and arm `gh pr merge --auto --squash`. A newer deploy
-#      first waits up to 45 minutes for an older open one to land (#5168); it
+#      first waits up to 90 minutes, in two 45 minute rounds, for an older open
+#      one to land (#5168, #6368); it
 #      closes that PR and replaces the branch only when it cannot land (checks
 #      failed, a conflict, auto-merge off) or is still open after the wait.
 #      The clusters ruleset (CI Summary + claude-review) is the safety net; the
@@ -153,8 +154,9 @@ jobs:
     name: Pin ${{ inputs.version }} in clusters
     runs-on: ubuntu-latest
     # The agent wait below can take up to 10 of these, the open deploy PR's
-    # 45, the agent-durable one 20, the slicer 10.
-    timeout-minutes: 95
+    # 45 (90 when the first round times out, #6368), the agent-durable one
+    # 20, the slicer 10.
+    timeout-minutes: 140
     # The one place the two callers can race: this job waits for the open
     # deploy PR, closes it if it cannot land, replaces the `deploy/scadbuddy`
     # branch and opens a new PR. Job-level, so deploy-release's image wait and
@@ -251,8 +253,8 @@ jobs:
       # (clusters' CI, whose job is CI Summary, and whatever else runs on
       # that commit, of any event). It stops waiting when the PR is gone
       # (merged, or closed by hand), and gives up on one that cannot land or
-      # is still open after WAIT_SECONDS; the next step then supersedes it
-      # as before. WAIT_SECONDS stays well inside the watch token's hour: a
+      # is still open after WAIT_SECONDS, which gets one more round below
+      # (#6368); the PR step then supersedes it as before. WAIT_SECONDS stays well inside the watch token's hour: a
       # read after it expires would fail. Meanwhile the concurrency group
       # keeps only the newest request pending, so a burst deploys its first
       # and its last build, and prod moves at every PR cycle.
@@ -302,7 +304,78 @@ jobs:
           done
           case "$outcome" in
             none)     echo "no open deploy PR (or it has landed)" ;;
-            *)        echo "::warning::deploy PR #${pr:-?} will be superseded: ${outcome}" ;;
+            *)        echo "::warning::stopped waiting for deploy PR #${pr:-?}: ${outcome}" ;;
+          esac
+          echo "outcome=$outcome" >> "$GITHUB_OUTPUT"
+
+      # A second round when the first timed out on a PR that can still land
+      # (#6368). Prime node image cache alone took 30 to 56 min on
+      # 2026-11-15 under node IO contention, so the 45 min round closed PRs
+      # about to merge: clusters#3620 went green at 07:25:05 and was closed
+      # at 07:25:30, #3623 timed out the same way, and prod stayed on one
+      # build for hours. Its own token, as the first round's: one token's
+      # hour cannot cover both. The script is the first round's, character
+      # for character (deploy-wait.test.sh checks it).
+      - name: Mint an App token to watch the open deploy PR again
+        id: watch-token-more
+        if: steps.wait.outputs.outcome == 'timeout'
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.RUNNER_APP_ID }}
+          private-key: ${{ secrets.RUNNER_APP_PRIVATE_KEY }}
+          owner: eh-homelab
+          repositories: clusters
+          permission-pull-requests: read
+          permission-actions: read
+
+      - name: Wait one more round for the open deploy PR
+        id: wait-more
+        if: steps.wait.outputs.outcome == 'timeout'
+        env:
+          GH_TOKEN: ${{ steps.watch-token-more.outputs.token }}
+          GH_REPO: ${{ env.CLUSTERS_REPO }}
+          WAIT_SECONDS: "2700"
+          POLL_SECONDS: "30"
+        run: |
+          set -euo pipefail
+          start=$SECONDS
+          outcome=""
+          pr=""
+          while :; do
+            # Checked before any read, so no read runs past the deadline.
+            if [ $((SECONDS - start)) -ge "$WAIT_SECONDS" ]; then outcome=timeout; break; fi
+            # A failed read (a 5xx, say) is retried, never a failed deploy.
+            if ! open=$(gh pr list --head "$DEPLOY_BRANCH" --state open --json number --jq '.[0].number // empty'); then
+              sleep "$POLL_SECONDS"; continue
+            fi
+            if [ -z "$open" ]; then outcome=none; break; fi
+            pr=$open
+            # Merged or closed since the list: look again.
+            view=$(gh pr view "$pr" --json autoMergeRequest,mergeStateStatus,headRefOid \
+              --jq '[(.autoMergeRequest != null), .mergeStateStatus, .headRefOid] | @tsv') \
+              || { sleep "$POLL_SECONDS"; continue; }
+            IFS=$'\t' read -r armed state head <<< "$view"
+            if [ "$armed" != true ]; then outcome=unarmed; break; fi
+            if [ "$state" = DIRTY ]; then outcome=conflict; break; fi
+            # BEHIND waits: clusters' ruleset does not require an up-to-date
+            # branch (strict_required_status_checks_policy false, 2026-11-03).
+            # A run still going, or none started yet, means "keep waiting";
+            # a success too, until the merge. Only each workflow's newest run
+            # counts, so a duplicate cancelled by its newer run does not.
+            # Skipped runs (another event's trigger that did nothing) are
+            # dropped first, so they never hide an earlier failure.
+            # A failed read is not a failure.
+            failed=$(gh run list --commit "$head" --json workflowName,conclusion,createdAt \
+              --jq 'map(select(.conclusion != "skipped")) | group_by(.workflowName) | map(max_by(.createdAt))
+                | map(select(.conclusion | IN("failure", "cancelled", "timed_out", "startup_failure"))) | length' \
+              || true)
+            if [ "${failed:-0}" != 0 ]; then outcome=failed; break; fi
+            echo "$(date -u +%H:%M:%S) waiting for #${pr} (${state}) to land"
+            sleep "$POLL_SECONDS"
+          done
+          case "$outcome" in
+            none)     echo "no open deploy PR (or it has landed)" ;;
+            *)        echo "::warning::stopped waiting for deploy PR #${pr:-?}: ${outcome}" ;;
           esac
           echo "outcome=$outcome" >> "$GITHUB_OUTPUT"
 
@@ -875,7 +948,7 @@ jobs:
           SOURCE_URL: ${{ inputs.source_url }}
           KIND: ${{ inputs.source_kind }}
           FILES: ${{ steps.edit.outputs.files }}
-          WAIT_OUTCOME: ${{ steps.wait.outputs.outcome }}
+          WAIT_OUTCOME: ${{ steps.wait-more.outputs.outcome || steps.wait.outputs.outcome }}
           DASHBOARD: ${{ steps.edit.outputs.dashboard }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |

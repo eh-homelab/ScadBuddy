@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 from fastapi import status
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
+from scadbuddy.bambuddy.models import ProcessValue
 from scadbuddy.bambuddy.stages import Stage
 from scadbuddy.core.paths import BUILTIN_PREFIX, DataPaths
 from scadbuddy.core.problems import ApiError
@@ -461,7 +462,7 @@ class OutputStore:
         files_dir: Path | None = None,
         arranged_from: Sequence[str] = (),
         output_id: str | None = None,
-        print_settings: Mapping[str, str] | None = None,
+        print_settings: Mapping[str, ProcessValue] | None = None,
     ) -> OutputMeta:
         """Save the job's output ``index`` (a pipeline job's `ctx.output`, §5.2), or its
         one result for a job without outputs. ``files_dir`` holds that output's extra

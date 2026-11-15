@@ -25,6 +25,7 @@ from xml.sax.saxutils import escape
 
 from pydantic import BaseModel, Field, ValidationError
 
+from scadbuddy.bambuddy.models import ProcessValue
 from scadbuddy.core.paths import MODEL_META_NAME, RENDERS_DIR_NAME
 from scadbuddy.library.catalogue import README_NAME, THUMBNAIL_NAME
 from scadbuddy.library.deeplink import EDIT_NOTE
@@ -137,19 +138,30 @@ def _stamped_root_model(xml: str, provenance: Provenance) -> str:
     return xml[: tag.start()] + opening + "\n" + "\n".join(entries) + rest
 
 
-def with_print_settings(project_settings: bytes, print_settings: Mapping[str, str]) -> bytes:
+def with_print_settings(
+    project_settings: bytes, print_settings: Mapping[str, ProcessValue]
+) -> bytes:
     """``project_settings.config`` with a template's ``print_settings`` (#770) over the
     process, listed in ``different_settings_to_system`` (the process's edits first, then
     one entry per filament and one for the printer, as Bambu Studio saves a project), so
     Bambu Studio shows them as changes to the system preset. Every other key stays.
 
     Each value takes the shape the project already stores its key in, as the print path
-    does with the process preset: on an H2C some keys are one entry per extruder variant,
-    and a bare value would collapse that list."""
+    does with the process preset (``slicing/presets.py`` ``apply_overrides``): on an H2C
+    some keys are one entry per extruder variant, and a bare value would collapse that
+    list. A string over a list sets every position; a list over a list sets the positions
+    it names and keeps the rest (#2998); a list over anything else is written whole."""
     settings = json.loads(project_settings)
     for key, value in print_settings.items():
         current = settings.get(key)
-        settings[key] = [value] * len(current) if isinstance(current, list) and current else value
+        if isinstance(value, str):
+            settings[key] = (
+                [value] * len(current) if isinstance(current, list) and current else value
+            )
+        elif isinstance(current, list):
+            settings[key] = [*value, *current[len(value) :]]
+        else:
+            settings[key] = list(value)
     filaments = len(settings.get("filament_settings_id") or [])
     settings["different_settings_to_system"] = [";".join(print_settings), *[""] * filaments, ""]
     return (json.dumps(settings, indent=4) + "\n").encode("utf-8")
@@ -158,7 +170,7 @@ def with_print_settings(project_settings: bytes, print_settings: Mapping[str, st
 def stamp(
     path: Path,
     provenance: Provenance,
-    print_settings: Mapping[str, str] | None = None,
+    print_settings: Mapping[str, ProcessValue] | None = None,
     *,
     source: Path | None = None,
 ) -> None:

@@ -89,6 +89,8 @@ const SETUP: [string, (choices: Record<string, unknown>) => unknown][] = [
   ['prime tower', (c) => c['prime_tower']],
   ['supports', (c) => c['supports']],
   ['print sequence', (c) => c['print_sequence']],
+  // #2998: any slicer setting by key.
+  ['slicer settings', (c) => c['process_overrides']],
 ]
 
 /**

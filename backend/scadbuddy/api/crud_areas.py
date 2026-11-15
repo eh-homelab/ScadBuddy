@@ -32,7 +32,12 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: opened on the API, a reveal audited; its ``payload-keys`` area is
 #: ``…/agent/payload-keys/{subject}``, a subject's data key released (made first under the
 #: subject's lock, never for a forgotten one) and audited, never the KEK (#5299 D5,
-#: #5342; `api/crud_agent_secrets.py`). Its ``background-tasks`` area is
+#: #5342; `api/crud_agent_secrets.py`); its ``forget`` area is
+#: ``…/agent/forgotten-subjects/{subject}``, ``…/payload-keys/{subject}/drop``,
+#: ``…/payload-key-sweeps`` and ``…/flow-blobs/{subject}`` with its ``/{name}``: a subject's
+#: tombstone with its key and flow images, a browser call's key dropped, the keys no forget
+#: deletes swept, and a flow run's images kept and read (#5299 step 6;
+#: `api/crud_agent_forget.py`). Its ``background-tasks`` area is
 #: ``…/agent/background-tasks`` and every route under it, a session's background tasks, a
 #: Monitor's events and a Workflow's journal and child chats; its ``operations`` area is
 #: ``…/agent/operations`` and every route under it, ``ai_operations`` with its activity row
@@ -94,6 +99,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "settings",
         "credentials",
         "payload-keys",
+        "forget",
         "background-tasks",
         "operations",
     ],

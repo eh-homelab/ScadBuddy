@@ -187,8 +187,11 @@ def run_key(output_id: str, request: PrintRunRequest) -> str:
         "printer",
         "path",
         "part_settings",
+        "process_overrides",
     )
     exclude = {name for name in optional if getattr(request, name) is None}
+    # #2998: what validation dropped never keys a run; the request slices without it.
+    exclude.add("dropped_settings")
     if request.printer_id is not None:
         exclude.add("printer")
     # #717: no profiles is the key from before the field existed.

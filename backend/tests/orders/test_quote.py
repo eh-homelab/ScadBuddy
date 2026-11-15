@@ -711,6 +711,7 @@ async def test_the_quote_records_its_whole_print_setup(shop: Shop, tmp_path: Pat
                 "on_build_plate_only": None,
             },
             "print_sequence": "by object",
+            "process_overrides": None,
         }
         assert recorded.filament_plan == request.filament_plan.model_dump(mode="json")
 

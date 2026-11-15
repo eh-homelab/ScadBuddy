@@ -516,6 +516,22 @@ def test_a_print_setting_takes_the_shape_the_project_stores_it_in() -> None:
     assert settings["enable_support"] == "1"
 
 
+def test_a_listed_print_setting_is_written_position_by_position() -> None:
+    """#2998 review: a template's list sets the positions it names and keeps the rest,
+    never one joined string copied into every position."""
+    project = json.dumps(
+        {"outer_wall_speed": ["200", "500", "500"], "filament_settings_id": []}
+    ).encode()
+
+    settings = json.loads(
+        with_print_settings(project, {"outer_wall_speed": ["150", "200"], "skirt_loops": ["1"]})
+    )
+
+    assert settings["outer_wall_speed"] == ["150", "200", "500"]
+    assert settings["skirt_loops"] == ["1"]
+    assert settings["different_settings_to_system"][0] == "outer_wall_speed;skirt_loops"
+
+
 def test_print_settings_list_one_entry_per_filament_of_a_multi_filament_project() -> None:
     """#2869: ``different_settings_to_system`` is the process's edits, then one empty
     entry per ``filament_settings_id``, then the printer's, however many filaments."""
