@@ -153,7 +153,9 @@ Test `test/crudApprovals.test.ts`. Area `questions` (backend `api/crud_agent_que
 events and audit row in one transaction on the API), the attention count (read only while this
 process holds the lease `attention-rate`, which the API grants only while no SQL-path pod holds
 `ATTENTION_RATE_LOCK`; a busy lease is tried again until the rate lock's wait, and a lost lease,
-a busy one past the wait or an API error refuses the request, never lets it through), and a turn's
+a busy one past the wait or an API error refuses the request, never lets it through; the lease
+is taken for 15 s, so a holder that dies blocks the limit no longer; an SQL-path pod does not read
+the lease, so during a roll it can count while a lease holds), and a turn's
 `done` post: the facts are read through the API, the summary is written here with the turn's
 secrets redacted, and the post lands only while the turn's `turn_attempt` and `durable_turn_id`
 hold the session, with its cap, the summaries it replaces, its events and its audit rows in one

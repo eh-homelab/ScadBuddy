@@ -7,8 +7,10 @@ lands without them: a summary's dismissal (``answer``), and a turn's ``done`` po
 which writes only while the turn's placement holds the session (``turn_attempt`` and
 ``durable_turn_id``, read ``FOR UPDATE`` first) and the session is still the browser user's. The
 attention rate limit's count (``attention_count``) is read only while its caller holds the lease
-``attention-rate`` (``agent_data/leases.py``), so two requests at the limit cannot both pass;
-without the lease it refuses, never counts.
+``attention-rate`` (``agent_data/leases.py``), so two API-path requests at the limit cannot both
+pass; without the lease it refuses, never counts. During a roll an agent pod still on SQL takes
+``ATTENTION_RATE_LOCK`` and does not read the lease, so it can count while a lease is held: the
+acquire's try-lock only makes a lease ``busy`` while such a pod counts.
 
 The summary's text is the agent's: it reads the facts here (``done_facts``), redacts the turn's
 secrets and writes the text, which never leaves the agent with a secret in it.
@@ -119,6 +121,8 @@ def _question_audit(
             tool_use_id=tool_use_id,
             tier="read",
             input_hash=input_hash,
+            # The agent's SQL path wrote safeDetail(detail, []): redact with no secrets changes
+            # nothing, so that is cap(detail, 500), the same text.
             detail=audit_log.cap(detail, 500),
             started_at=started_at,
             finished_at=datetime.now(UTC),

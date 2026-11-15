@@ -22,8 +22,11 @@ import type { AwayWindow, DoneTouch } from './doneSummary.js'
 
 /** The lease the attention count is read under (backend `ATTENTION_LEASE`). */
 export const ATTENTION_LEASE = 'attention-rate'
-/** How long the lease is taken for: past one holder's open, and freed by its release before that. */
-const ATTENTION_LEASE_TTL_S = 60
+/**
+ * How long the lease is taken for: past one holder's open (`OPEN_WAIT_MS`, 10 s), and freed by its
+ * release before that. A holder that dies or fails its release blocks the limit for at most this long.
+ */
+const ATTENTION_LEASE_TTL_S = 15
 
 /** A summary row by id, as the respond route checks a response against it. */
 export type QuestionRow = {
