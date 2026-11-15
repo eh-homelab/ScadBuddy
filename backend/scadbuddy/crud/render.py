@@ -111,6 +111,11 @@ NOT_HOLDER = "not-holder"
 #: A take's wait for its answer: the route's `LEASE_LOCK_WAIT` (2 s) and a pool wait
 #: (`tests/crud/test_crud_library_leases.py` checks that the two agree).
 TAKE_TIMEOUT = 2.0 + PROJECT_POOL_TIMEOUT
+#: A ``forget-copy``'s wait for its answer: longer than the API's read of a library
+#: object whole (`api/crud_render.py` `FORGET_READ_TIMEOUT`, 60 s), so the worker hears
+#: whether the row was dropped instead of a read timeout
+#: (`tests/crud/test_crud_render_allowlist.py` checks that the two agree).
+FORGET_TIMEOUT = 75.0
 #: A problem's RFC 9457 members; every other member is an extension of the `ApiError`.
 _PROBLEM_MEMBERS = frozenset({"type", "title", "status", "detail", "instance"})
 #: How many activity attempts `WriteKeys` counts writes for at once; the oldest is
@@ -474,7 +479,9 @@ class RemoteBlobIndex:
         if backend is None and key.startswith(FORGETTABLE_PREFIXES):
             try:
                 response = self._client.request(
-                    "POST", f"{BASE}/blob-index/{_part(key)}/forget-copy"
+                    "POST",
+                    f"{BASE}/blob-index/{_part(key)}/forget-copy",
+                    timeout=FORGET_TIMEOUT,
                 )
             except CrudRefusedError as error:
                 if error.status != 409 or error.problem.get("reason") != COPY_INTACT:

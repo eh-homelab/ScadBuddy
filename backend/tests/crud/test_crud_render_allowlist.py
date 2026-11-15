@@ -284,3 +284,26 @@ def test_the_cooldowns_record_stays_bounded(monkeypatch: pytest.MonkeyPatch) -> 
         assert not crud_render._recently_checked(f"lib3-{n}", float(n))
     assert len(crud_render._LAST_CHECKED) <= 4
     assert crud_render._recently_checked("lib3-9", 9.5)
+
+
+def test_a_forget_copy_waits_longer_than_the_apis_whole_read() -> None:
+    """The worker's forget-copy outlasts the API's read of a library object, so a slow
+    read answers the worker instead of timing it out (#6228 review)."""
+    from scadbuddy.crud import render as crud_worker
+
+    calls: list[dict[str, Any]] = []
+
+    class _Response:
+        def json(self) -> None:
+            return None
+
+    class _Client:
+        def request(self, method: str, path: str, **kwargs: Any) -> _Response:
+            calls.append({"method": method, "path": path, **kwargs})
+            return _Response()
+
+    index = crud_worker.RemoteBlobIndex(cast(Any, _Client()))
+    assert index.delete("lib3-" + "a" * 48 + "-0") is None
+    assert calls[0]["path"].endswith("/forget-copy")
+    assert calls[0]["timeout"] == crud_worker.FORGET_TIMEOUT
+    assert crud_worker.FORGET_TIMEOUT > crud_render.FORGET_READ_TIMEOUT
