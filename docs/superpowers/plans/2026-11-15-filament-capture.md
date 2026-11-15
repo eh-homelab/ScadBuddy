@@ -688,3 +688,8 @@ test. If one is missing or differs, stop and report.
 - [ ] **Step 4: Open the PR** `feat(filament): capture tray changes and print ends (#6263)`. The body says `Closes #6263`, carries the session marker and the footer, and says this: the first pull after deploy books up to 200 historic BB usage rows on linked spools, and paired historic plates then take BB's grams instead of SB's sliced grams (preflight C15). Shepherd it to green and a clean review.
 
 ## Decisions made while building (#6263)
+
+- Task 1 (measured 2026-11-15, spec §8.2): an archive ends 0.085 to 17.4 s after its usage rows (n 379), never before. Task 7 matches an archive inside `[created_at, created_at + 30 s]` (`ARCHIVE_BEFORE = 0`, `ARCHIVE_AFTER = 30 s`), not the planned 10 s. Cost if wrong: a slower failure leaves `bb_archive_id` null; the plate's grams still count.
+- Task 1: BB and SB clocks agree within about 0.25 s (BB − SB +0.011 s). Booked times are not corrected for skew.
+- Task 1 kept its clock-skew step (Date headers, read-only), although the controller first asked to re-measure only the window: issue item 6 needs the skew, and the earlier probe had one sample.
+- The owner judged the earlier local exposure of the BB API key acceptable and chose not to rotate it (2026-11-15).
