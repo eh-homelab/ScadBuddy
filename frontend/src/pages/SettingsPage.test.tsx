@@ -428,6 +428,10 @@ describe('SettingsPage section links (#1307, #2345, #2346)', () => {
     const tops: Record<string, number> = {}
     const { scrolls, restore } = stubLayout(tops)
     const observers = stubResizeObserver()
+    // The follow-up stops at SETTLE_MS. On the wall clock a loaded run (8 s here) passed
+    // it before the resize below, and the pane stayed at 0 (#6385). So only the test
+    // moves time, in steps well short of it (stepUntil).
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     try {
       renderPage(
         <>
@@ -436,10 +440,12 @@ describe('SettingsPage section links (#1307, #2345, #2346)', () => {
         </>,
         { route: '/settings#assistant-mcp' },
       )
-      await seeded()
+      await stepUntil(() =>
+        expect(screen.getByLabelText('Bambuddy URL')).toHaveValue('https://bambuddy.internal.nullreference.io'),
+      )
       // The old anchor of the one long page lands on its section in the MCP access area.
-      await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent('/settings/mcp#mcp-auth-mode'))
-      await waitFor(() =>
+      await stepUntil(() => expect(screen.getByTestId('where')).toHaveTextContent('/settings/mcp#mcp-auth-mode'))
+      await stepUntil(() =>
         expect(within(region('Auth mode')).getByRole('button', { name: 'Auth mode' })).toHaveAttribute(
           'aria-expanded',
           'true',
@@ -453,6 +459,7 @@ describe('SettingsPage section links (#1307, #2345, #2346)', () => {
       })
       expect(scrolls.at(-1)).toBe(6992)
     } finally {
+      vi.useRealTimers()
       restore()
       vi.unstubAllGlobals()
       localStorage.clear()
