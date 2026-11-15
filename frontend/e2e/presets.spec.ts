@@ -92,6 +92,9 @@ test.describe('the "Changed from" note (#352)', () => {
       await page.setViewportSize({ width, height: 900 })
       await page.goto('/m/name-keychain')
       await choose(page, page.getByRole('combobox', { name: 'Preset' }), 'Old engraving')
+      // The pick applies once its migration answers ("Old engraving" names a dropped
+      // parameter): typing before that is overwritten by the preset's values (#6434).
+      await expect(page.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Ada')
       await page.getByRole('textbox', { name: 'Name on the tag' }).fill('Someone else')
 
       const note = page.getByTestId('preset-modified')
@@ -138,6 +141,9 @@ test.describe('the preset bar (#1023)', () => {
       const combobox = page.getByRole('combobox', { name: 'Preset' })
       const unchosen = await combobox.boundingBox()
       await choose(page, combobox, 'Old engraving')
+      // The pick applies once its migration answers ("Old engraving" names a dropped
+      // parameter): typing before that is overwritten by the preset's values (#6434).
+      await expect(page.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Ada')
       const saveAsButton = page.getByRole('button', { name: 'Save as preset…' })
       const chosen = await combobox.boundingBox()
       const before = await saveAsButton.boundingBox()
