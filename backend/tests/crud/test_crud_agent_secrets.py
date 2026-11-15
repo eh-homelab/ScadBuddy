@@ -27,6 +27,7 @@ from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
 from scadbuddy.agent_data import credentials as store
+from scadbuddy.agent_data import payload_keys
 from scadbuddy.agent_data.rotation import rotate
 from scadbuddy.api import crud_agent_secrets, crud_areas
 from scadbuddy.auth.check import auth_check
@@ -200,8 +201,11 @@ def test_settings_refuse_a_bad_key_or_body(agent: Agent) -> None:
     assert agent.get("/settings", key=["has space"]).status_code == 422
     assert agent.post("/settings", {"values": {}}).status_code == 422
     assert agent.post("/settings", {"values": {"k": 1}, "extra": 1}).status_code == 422
-    big = {"values": {"k": "x" * (crud_agent_secrets.SETTING_VALUE_MAX + 1)}}
+    over = "x" * (crud_agent_secrets.SETTING_VALUE_MAX + 1)
+    big = {"values": {"k": over}}
     assert agent.post("/settings", big).status_code == 422
+    big_expect = {"values": {"k": 1}, "expect": [{"key": "k", "present": True, "value": over}]}
+    assert agent.post("/settings", big_expect).status_code == 422
 
 
 def test_a_compare_and_set_writes_only_what_was_read(agent: Agent) -> None:
@@ -542,7 +546,9 @@ def _key(answer: Any) -> bytes:
     return base64.b64decode(answer.json()["data_key"])
 
 
-def test_a_key_is_made_once_and_released_audited(agent: Agent, tables: PgPool) -> None:
+def test_a_key_is_made_once_and_released_audited_once_a_window(
+    agent: Agent, tables: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
     subject = f"session-{uuid.uuid4()}"
     missing = agent.post(f"/payload-keys/{subject}", {})
     assert (missing.status_code, missing.json()["reason"]) == (410, "subject-forgotten")
@@ -555,14 +561,22 @@ def test_a_key_is_made_once_and_released_audited(agent: Agent, tables: PgPool) -
     )
     assert row["kek_id"] == KEK.id
     assert open_bytes(KEK.key, bytes(row["dek_sealed"]), payload_key_context(subject)) == made
+    # Its own kind; the made key's row stands for the releases inside the window.
     audit = _audit(tables)
-    assert [(a["action"], a["outcome"], a["detail"]) for a in audit] == [
-        ("payload_key.release", "refused", f"{subject}: no key"),
-        ("payload_key.create", "ok", subject),
-        ("payload_key.release", "ok", subject),
-        ("payload_key.release", "ok", subject),
+    assert [(a["kind"], a["action"], a["outcome"], a["detail"]) for a in audit] == [
+        ("payload_key", "payload_key.release", "refused", f"{subject}: no key"),
+        ("payload_key", "payload_key.create", "ok", subject),
     ]
     assert {a["session_id"] for a in audit} == {subject.removeprefix("session-")}
+    # Past the window (none here: ai_audit is append-only, so no row can be made older)
+    # each release writes its row again.
+    monkeypatch.setattr(payload_keys, "RELEASE_AUDIT_WINDOW", "0 seconds")
+    _key(agent.post(f"/payload-keys/{subject}", {}))
+    _key(agent.post(f"/payload-keys/{subject}", {}))
+    assert [(a["action"], a["outcome"]) for a in _audit(tables)][2:] == [
+        ("payload_key.release", "ok"),
+        ("payload_key.release", "ok"),
+    ]
 
 
 def test_flow_and_bridge_subjects_and_bad_ones(agent: Agent) -> None:

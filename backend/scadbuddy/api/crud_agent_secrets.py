@@ -45,7 +45,7 @@ from typing import Annotated, Any, Literal, TypeVar
 from uuid import UUID
 
 from fastapi import Path, Query, status
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 from scadbuddy.agent_data import audit, payload_keys
 from scadbuddy.agent_data import credentials as store
@@ -133,6 +133,12 @@ class ExpectedSetting(BaseModel):
     #: False when the agent read no row for the key.
     present: bool
     value: Any = None
+
+    @field_validator("value")
+    @classmethod
+    def _value_bounded(cls, value: Any, info: ValidationInfo) -> Any:
+        _bounded({info.data.get("key", "expect"): value})
+        return value
 
 
 class SettingsNotify(BaseModel):
@@ -453,6 +459,7 @@ def _reveal(conn: Any, body: RevealAsk, kek: Kek) -> Revealed | SealError:
             count = sum(1 for r in out if r.credential is not None)
             audit.record(
                 conn,
+                "credential",
                 action,
                 "ok",
                 f"opened {count} of {len(out)} credential(s)",
@@ -461,15 +468,22 @@ def _reveal(conn: Any, body: RevealAsk, kek: Kek) -> Revealed | SealError:
             return Revealed(credentials=out)
         found = store.sealed_rows(conn, body.id)
         if not found:
-            audit.record(conn, action, "refused", "no such credential", **body.ids())
+            audit.record(conn, "credential", action, "refused", "no such credential", **body.ids())
             return Revealed(credential=None)
         row = found[0]
         try:
             opened_one = _opened(store.open_row(kek, row))
         except SealError as err:
-            audit.record(conn, action, "error", f"{store.label(row)} did not open", **body.ids())
+            audit.record(
+                conn,
+                "credential",
+                action,
+                "error",
+                f"{store.label(row)} did not open",
+                **body.ids(),
+            )
             return err
-        audit.record(conn, action, "ok", store.label(row), **body.ids())
+        audit.record(conn, "credential", action, "ok", store.label(row), **body.ids())
         return Revealed(credential=opened_one)
 
 

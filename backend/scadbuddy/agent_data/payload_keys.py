@@ -8,8 +8,10 @@ first, in one transaction: under the subject's advisory lock, which ``forgetSubj
 also takes, and never for a subject in ``ai_forgotten_subjects``, so the tombstone check
 never reads from before a forget that is committing and a forgotten subject never gets a
 key again. With ``standing`` a session's key is made only while its ``ai_sessions`` row
-stands (the workspace's sealing, #4789). Each release writes its ``ai_audit`` row in the
-same transaction (``audit.py``).
+stands (the workspace's sealing, #4789). A release writes its ``ai_audit`` row (kind
+``payload_key``, ``audit.py``) in the same transaction: a key made, or none to give, every
+time; a key released, once per subject in ``RELEASE_AUDIT_WINDOW``, since the agent asks at
+transcript-read rate (its 30 s cache aside) and a row per read would bury the log.
 
 The agent keeps what it is given for 30 s at most (``agent/src/temporal/payloadCodec.ts``
 ``CrudPayloadKeys``), which is how long a forgotten subject can still be opened there.
@@ -32,6 +34,8 @@ SUBJECT_PATTERN = (
     r"^(session|flow|bridge)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
 _SESSION = re.compile(r"^session-(.+)$")
+#: How long one ``payload_key.release`` row stands for every later release of its subject.
+RELEASE_AUDIT_WINDOW = "10 minutes"
 
 
 class KeyNotHeldError(Exception):
@@ -88,7 +92,12 @@ def release(
             row = _row(conn, subject)
         if row is None:
             audit.record(
-                conn, "payload_key.release", "refused", f"{subject}: no key", session_id=session_id
+                conn,
+                "payload_key",
+                "payload_key.release",
+                "refused",
+                f"{subject}: no key",
+                session_id=session_id,
             )
             return None
         dek_sealed, kek_id = row
@@ -104,14 +113,34 @@ def release(
             key = open_bytes(opener.key, dek_sealed, payload_key_context(subject))
         except SealError:
             raise KeyNotHeldError(f"the payload key of {subject} does not open") from None
-        audit.record(
-            conn,
-            "payload_key.create" if made else "payload_key.release",
-            "ok",
-            subject,
-            session_id=session_id,
-        )
+        if made or not _released_lately(conn, subject):
+            audit.record(
+                conn,
+                "payload_key",
+                "payload_key.create" if made else "payload_key.release",
+                "ok",
+                subject,
+                session_id=session_id,
+            )
     return key
+
+
+def _released_lately(conn: Connection[Any], subject: str) -> bool:
+    """Whether the subject's key was released (or made) inside the window. Under a lock of
+    its own per subject, so two releases at once write one row; never the subject's own
+    lock, which a forget holds."""
+    conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtext(%s))", (f"scadbuddy:payload_key_audit:{subject}",)
+    )
+    return (
+        conn.execute(
+            "SELECT 1 FROM ai_audit WHERE kind = 'payload_key' AND detail = %s"
+            " AND action IN ('payload_key.release', 'payload_key.create') AND outcome = 'ok'"
+            " AND at > now() - %s::interval LIMIT 1",
+            (subject, RELEASE_AUDIT_WINDOW),
+        ).fetchone()
+        is not None
+    )
 
 
 def rewrap(conn: Connection[Any], previous: Kek, current: Kek) -> tuple[int, int]:

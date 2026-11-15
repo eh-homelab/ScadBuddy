@@ -4,7 +4,8 @@
 a Claude credential and a release of a payload data key each write one row, in the same
 transaction as the read, so no secret leaves the API without its row. The row never holds
 the secret: ``detail`` names the credential by kind and last four characters, or the
-subject.
+subject. A payload key's release is written once per subject and window
+(``payload_keys.py`` ``RELEASE_AUDIT_WINDOW``).
 """
 
 from __future__ import annotations
@@ -13,9 +14,9 @@ from typing import Any, Literal
 
 from psycopg import Connection
 
-#: The kind of these rows: the agent's ``credential`` kind (a dedicated kind needs a
-#: migration of the agent's table, which moves to the backend with #5299 step 2).
-KIND = "credential"
+#: The kinds of these rows: a credential's reveal is ``credential``, a payload data key's
+#: release ``payload_key`` (``migrations_agent/20261115T0736Z_audit_payload_key_kind.sql``).
+Kind = Literal["credential", "payload_key"]
 #: Who asked: the agent service's credential.
 PRINCIPAL = ("service", "agent", "agent service")
 #: The longest ``detail`` written, as the agent caps it (`audit/log.ts` ``DETAIL_MAX``).
@@ -26,6 +27,7 @@ Outcome = Literal["ok", "error", "refused"]
 
 def record(
     conn: Connection[Any],
+    kind: Kind,
     action: str,
     outcome: Outcome,
     detail: str,
@@ -34,15 +36,15 @@ def record(
     turn_id: str | None = None,
 ) -> None:
     """One row, on ``conn`` (inside the caller's transaction)."""
-    kind, principal, label = PRINCIPAL
+    principal_kind, principal, label = PRINCIPAL
     conn.execute(
         "INSERT INTO ai_audit (kind, action, surface, principal_kind, principal_id,"
         " principal_label, session_id, turn_id, outcome, detail, started_at, finished_at)"
         " VALUES (%s, %s, 'system', %s, %s, %s, %s, %s, %s, %s, now(), now())",
         (
-            KIND,
-            action,
             kind,
+            action,
+            principal_kind,
             principal,
             label,
             session_id,

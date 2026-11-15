@@ -397,9 +397,12 @@ AAD, so a row either side seals opens on the other).
   one. A turn's credentials come from `POST …/crud/agent/credentials/reveal` (purpose
   `turn`; `redact` for the scrubbing of tool output, `test` for a connection test), a
   subject's payload data key from `POST …/crud/agent/payload-keys/{subject}`, never the
-  KEK. Each answers the `agent` service credential only, writes an `ai_audit` row (kind
-  `credential`, action `reveal.<purpose>` or `payload_key.release`/`.create`, principal
-  `service:agent`, never the secret) in the same transaction, and is `no-store`. A
+  KEK. Each answers the `agent` service credential only, writes its `ai_audit` row in the
+  same transaction (principal `service:agent`, never the secret), and is `no-store`. A
+  reveal's row is kind `credential`, action `reveal.<purpose>`, one per call. A payload
+  key's is kind `payload_key`: `payload_key.create` and a refusal every time, and
+  `payload_key.release` once per subject in 10 minutes (`agent_data/payload_keys.py`
+  `RELEASE_AUDIT_WINDOW`), since the agent asks at transcript-read rate. A
   payload key is made there under the subject's advisory lock, never for a subject in
   `ai_forgotten_subjects`. The agent keeps a released key 30 s at most, as before. Until the
   API lists the areas (a rolling deploy), the agent opens them with its own KEK as before.

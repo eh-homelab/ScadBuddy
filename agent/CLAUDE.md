@@ -54,7 +54,8 @@ area `credentials` (`CrudCredentials`, `gatedCredentials`: the API seals and ope
 KEK, the routes and the turn's pool read the API's key through the repo's `opener`, and a turn's
 credentials come from `…/credentials/reveal`, audited per call) and area `payload-keys`
 (`src/temporal/payloadCodec.ts` `CrudPayloadKeys`, `gatedPayloadKeys`: a subject's data key,
-made under the subject's lock and never for a forgotten subject, audited, cached 30 s here).
+made under the subject's lock and never for a forgotten subject, audited as kind `payload_key`
+(a release once per subject in 10 minutes), cached 30 s here).
 None needs a KEK in this process once listed. These three have a rolling-deploy fallback:
 `src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` from the start with back-off
 (1 s doubling to 30 s) until every one is listed, and until then each stays on SQL, for an API
