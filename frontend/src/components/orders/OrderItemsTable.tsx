@@ -350,7 +350,7 @@ function ItemStatus({ item, run }: { item: OrderItemDetail; run: SliceQuoteRun |
       )}
       {running && (
         <span className="text-[11px] text-muted-foreground" data-testid={`item-quoting-${item.id}`}>
-          <span>Quoting…</span> since <When at={running.startedAt} /> ({elapsed(running.startedAt, now)})
+          <span>{running.stage === 'rendering' ? 'Rendering…' : 'Quoting…'}</span> since <When at={running.startedAt} /> ({elapsed(running.startedAt, now)})
         </span>
       )}
       {run?.error && (

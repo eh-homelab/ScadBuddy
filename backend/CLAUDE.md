@@ -929,7 +929,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `QUOTE_TIMEOUT`), its steps `quote.py`: the check writes nothing; the run writes the
   body's filaments onto the item (`update_item`'s `filaments`, a repin only when a slot
   changes), renders and saves an output through `output_create`'s run when the item has
-  none matching, slices every plate through `bambuddy/preview.py` `start_preview_plates`
+  none matching (`ensure_output` over `rendering.py` `output_for_reference`, #6324: a
+  `Reference` to its output, no item needed; given one, `AttachTo` sets it on the item with
+  no new revision and no quote dropped), slices every plate through `bambuddy/preview.py` `start_preview_plates`
   (the dialog's background slice, either slicer), keeps each plate's sliced file as the
   directory blob `quote-<sha256>` held by `blob_refs (order_item_quote, <quote id>)`
   before the quote's row exists, reads each plate with `read_sliced`, prices and records
@@ -968,6 +970,13 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`components/orders/FilamentsEditor.tsx`), `PrintPicker`'s `quote` mode with
   `QuoteFilaments` ("Slice…" in `QuoteEditor`), and the estimate in
   `AddToOrderDialog`; mocks `src/mocks/features/orders/priceBook.ts`.
+  An item's render (#6324, order operations spec §5 "#6324, as built"): the
+  `order_item_render` kind of `operations.py` on the `library` queue (`POST
+  /orders/{id}/items/{item}/render`, subject `order_item:<id>`, check `render_check`, the
+  quote's refusals; the output saved under `render_output_id`, one per operation), which
+  renders the item's reference and sets the output on it. "Slice…" on an item with a design
+  and no output starts it, then opens the print dialog on the new output (`useSliceQuotes`
+  `render`, the run's `stage` `rendering`); the agent's `order_item_quote` needs none.
   Attachments (#4251, spec §6.2 "As built"): any file on an order, a line item or a print attempt,
   `order_attachments` (subject `order:<id>` / `order_item:<id>` / `order_item_fulfilment:<id>`, an attempt's file listed
   under its item through `attempt_item_id`; `POST …/fulfilments/{f}/attachments`; typed by its bytes in

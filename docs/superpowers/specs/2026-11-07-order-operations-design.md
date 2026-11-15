@@ -264,6 +264,17 @@ main (#5315, #5337, #5347), and #5280 is closed. scadify reviewed §5 against th
   render made a colour slot names the way out (`RENDERED_SUPPORT_HINT`), and the
   pre-revision price-book check counts only the carried pins still in the book (#5761
   review).
+- #6324, as built: "Slice…" on an item with a design and no output (every storefront item)
+  is one press. The print dialog reads its choices, filaments and plates from an output
+  (`/print/outputs/{id}/…`), so the press first starts `POST …/items/{item}/render`, the
+  `order_item_render` operation on the `library` queue: `orders/rendering.py`
+  `output_for_reference` renders the item's reference (its commit, inputs, libraries and
+  colours) through `RenderService.submit` with `reuse_finished`, so a finished render of
+  its key is reused, saves the output and sets it on the item. That is not a design
+  change: the item keeps its revision and its quotes. The row and the drawer show the run
+  as "Rendering" until the dialog opens on the new output; a failed render is the run's
+  error, where a failed slice quote shows (`quote-error`). The owner's ruling
+  (2026-11-15): "Slice should just render if it needs; don't make another step."
 
 ## 6. A derived machine rate (#4625)
 

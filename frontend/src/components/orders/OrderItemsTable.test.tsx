@@ -261,6 +261,38 @@ describe('OrderItemsTable · unit price', () => {
     expect(within(drawer).getByTestId('quote-from-slice')).toBeDisabled()
   })
 
+  it('shows an item still rendering for Slice… after a reload, and offers no second (#6324)', async () => {
+    const at = new Date().toISOString()
+    const subject = `order_item:${ITEM_DRAFT}`
+    const draft = state.items.find((i) => i.id === ITEM_DRAFT)
+    if (draft) draft.output_id = null
+    seedOperation({ id: 'op-rendering', kind: 'order_item_render', subject, status: 'running', created_at: at })
+    seedActivity([
+      {
+        id: 'operation:op-rendering',
+        kind: 'operation.order_item_render',
+        principal: 'browser',
+        session: null,
+        via_tool: null,
+        subject,
+        status: 'running',
+        title: `Order item render ${subject}`,
+        parent_id: null,
+        detail: {},
+        created_at: at,
+        updated_at: at,
+        finished_at: null,
+      },
+    ])
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    expect(await within(row(ITEM_DRAFT)).findByText('Rendering…')).toBeInTheDocument()
+    await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Name Keychain' }))
+    const drawer = await screen.findByRole('dialog', { name: 'Name Keychain' })
+    expect(within(drawer).getByTestId('quote-running')).toHaveTextContent(/Rendering the design/)
+    expect(within(drawer).getByTestId('quote-from-slice')).toBeDisabled()
+  })
+
   it('clears a picked-up quote once it lands, reloads once, and never follows it again (#4736 review)', async () => {
     const at = new Date().toISOString()
     const subject = `order_item:${ITEM_DRAFT}`

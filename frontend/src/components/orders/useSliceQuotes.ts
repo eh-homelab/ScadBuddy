@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, ApiError, mayHaveRun } from '../../api/client'
+import { api, ApiError, mayHaveRun, RENDER_KIND } from '../../api/client'
 import type { Activity, ActivityPage, OrderItemDetail, SliceQuoteRequest } from '../../api/types'
 import { refusalText } from './refusal'
 
@@ -19,6 +19,12 @@ export interface SliceQuoteRun {
   detached?: boolean
   /** The item's quote ids as it started. */
   known: readonly string[]
+  /**
+   * #6324 — `rendering` while "Slice…" renders an item that has a design and no output (the
+   * `order_item_render` operation), before the print dialog opens on the new output; left out
+   * while the quote slices. A detached render ends once the item shows an output.
+   */
+  stage?: 'rendering'
 }
 
 export type SliceQuoteRuns = ReadonlyMap<string, SliceQuoteRun>
@@ -160,6 +166,36 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
 
   const dismiss = useCallback((itemId: string) => update(orderId, itemId, null), [orderId, update])
 
+  /**
+   * #6324 — "Slice…" on an item with a design and no output: its render first, shown as this
+   * item's run at the `rendering` stage, and the order read again once it lands. Settles true
+   * once the output is the item's, so the caller opens the print dialog on it; false when it
+   * failed (the run shows why, where a failed quote does) or may still be running (detached).
+   */
+  const render = useCallback(
+    (itemId: string, known: readonly string[]) =>
+      new Promise<boolean>((done) => {
+        const run: SliceQuoteRun = { startedAt: Date.now(), error: null, known, stage: 'rendering' }
+        const followedSet = followed.current
+        update(orderId, itemId, run)
+        api
+          .renderItem(orderId, itemId, (operation) => followedSet.add(operation.id), follows.current.signal)
+          .then(
+            () => {
+              update(orderId, itemId, null)
+              if (current.current === orderId) quoted.current()
+              done(true)
+            },
+            (cause: unknown) => {
+              if (mayHaveRun(cause)) update(orderId, itemId, { ...run, detached: true })
+              else update(orderId, itemId, { ...run, error: refusalText(cause), finishedAt: Date.now() })
+              done(false)
+            },
+          )
+      }),
+    [orderId, update],
+  )
+
   // Each time this order's items are read (the page's first read, and every reload, so a
   // quote started in another tab shows too): the quotes of them still running, which this
   // page does not follow yet, followed as `start` follows its own. Best effort: without the
@@ -198,7 +234,12 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
         if (seen.current.runs.has(itemId) || followedSet.has(operationId)) continue
         followedSet.add(operationId)
         const started = row.created_at ? Date.parse(row.created_at) : NaN
-        const run: SliceQuoteRun = { startedAt: Number.isNaN(started) ? Date.now() : started, error: null, known: item.quotes.map((q) => q.id) }
+        const run: SliceQuoteRun = {
+          startedAt: Number.isNaN(started) ? Date.now() : started,
+          error: null,
+          known: item.quotes.map((q) => q.id),
+          ...(row.kind === RENDER_KIND ? { stage: 'rendering' as const } : {}),
+        }
         // Shown only once its operation reads as running: one that already ended behind a
         // stale row is no run of this page's. Its failure, if it failed, goes to the probe,
         // and shows when it is the item's newest.
@@ -317,9 +358,10 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
     for (const [itemId, run] of runs) {
       if (!run.detached) continue
       const item = items.find((i) => i.id === itemId)
-      if (!item || item.quotes.some((q) => q.source === 'slice' && !run.known.includes(q.id))) dismiss(itemId)
+      const landed = run.stage === 'rendering' ? item?.output_id : item?.quotes.some((q) => q.source === 'slice' && !run.known.includes(q.id))
+      if (!item || landed) dismiss(itemId)
     }
   }, [items, runs, dismiss])
 
-  return { runs: runs as SliceQuoteRuns, start, dismiss }
+  return { runs: runs as SliceQuoteRuns, start, render, dismiss }
 }

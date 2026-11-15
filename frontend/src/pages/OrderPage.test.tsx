@@ -405,6 +405,39 @@ describe('OrderPage (#4249)', () => {
       await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent(new RegExp(`^/orders/${ORDER_DRAFT}$`)))
     })
   })
+
+  // #6324 — an item with a design and no render (a storefront item): one Slice… press renders
+  // it, then the print dialog opens by itself on the new output.
+  describe('Slice… of an item with a design and no output (#6324)', () => {
+    const unrendered = (name = 'Reagan') => {
+      const draft = state.items.find((i) => i.id === ITEM_DRAFT)!
+      draft.output_id = null
+      draft.reference = { ...draft.reference!, inputs: { params: { name }, v: 1 } }
+    }
+
+    it('renders the design, then opens the dialog on its output', async () => {
+      unrendered()
+      const renderItem = vi.spyOn(api, 'renderItem')
+      const { user } = render(ORDER_DRAFT, `?item=${ITEM_DRAFT}`)
+      const drawer = await screen.findByRole('dialog', { name: 'Name Keychain' })
+      const button = await within(drawer).findByTestId('quote-from-slice')
+      expect(button).toBeEnabled()
+      expect(within(drawer).queryByText(/add a design/)).toBeNull()
+      await user.click(button)
+      expect(await screen.findByRole('dialog', { name: 'Quote from a slice' })).toBeInTheDocument()
+      expect(renderItem).toHaveBeenCalledTimes(1)
+      expect(state.items.find((i) => i.id === ITEM_DRAFT)?.output_id).not.toBeNull()
+    })
+
+    it('shows a failed render where a failed slice quote shows, and opens no dialog', async () => {
+      unrendered('fail')
+      const { user } = render(ORDER_DRAFT, `?item=${ITEM_DRAFT}`)
+      const drawer = await screen.findByRole('dialog', { name: 'Name Keychain' })
+      await user.click(await within(drawer).findByTestId('quote-from-slice'))
+      expect(await within(drawer).findByTestId('quote-error')).toHaveTextContent('openscad exited 1')
+      expect(screen.queryByRole('dialog', { name: 'Quote from a slice' })).toBeNull()
+    })
+  })
 })
 
 describe('OrderPage payment requests (#4957)', () => {
