@@ -314,13 +314,17 @@ def full_store_client(settings: Settings, s3: S3Settings) -> Iterator[TestClient
 
 @respx.mock
 def test_a_copy_into_a_full_store_says_to_make_room(full_store_client: TestClient) -> None:
-    respx.post(f"{API}/makerworld/import").mock(return_value=Response(200, json=_imported()))
+    route = respx.post(f"{API}/makerworld/import").mock(
+        return_value=Response(200, json=_imported())
+    )
     _bambuddy_file()
     answer = full_store_client.post(
         "/api/v1/makerworld/import", json={"model_id": 123}, headers=press()
     )
     assert answer.status_code == 507, answer.text
     assert "Make room in the blob store, then import again" in answer.json()["detail"]
+    # Bambuddy imported once; the full store does not make the route import again.
+    assert route.call_count == 1
 
 
 @respx.mock
