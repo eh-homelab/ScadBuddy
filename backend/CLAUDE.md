@@ -74,11 +74,20 @@ queue, template media's `template_media`) skip unless `SCADBUDDY_TEST_DATABASE_U
 points at a Postgres they can create schemas in, e.g.
 `docker run -d -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=scadbuddy_test -p 5432:5432
 postgres:18` and `SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test`.
-Without Docker, a native Postgres 18 works (`initdb`, then `pg_ctl -o "-p 55432"`). It needs
-`timezone='UTC'` in `postgresql.conf`, or a timezone test fails. A data directory on a long
-path also needs `unix_socket_directories=''`, with TCP only (measured 2026-11-14 on WSL2,
-Homebrew `postgresql@18`, #6322).
-Without it most of `tests/api` skips. CI runs them against a `postgres:18` service
+Without Docker, a native Postgres 18 works:
+
+```bash
+initdb -D "$PGDATA" -U postgres --auth=trust
+pg_ctl -D "$PGDATA" -o "-p 55432 -c timezone=UTC -c unix_socket_directories=''" start
+createdb -h 127.0.0.1 -p 55432 -U postgres scadbuddy_test
+# SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:55432/scadbuddy_test
+```
+
+`timezone='UTC'` is required, or a timezone test fails. TCP only
+(`unix_socket_directories=''`) is needed when the data directory is on a long path.
+Measured on 2026-11-14 on WSL2 with Homebrew `postgresql@18` (#6322): the `timezone` and
+long-path findings. The commands above are that recipe written out in full, not re-run as one script.
+Without `SCADBUDDY_TEST_DATABASE_URL` most of `tests/api` skips. CI runs them against a `postgres:18` service
 container. A `Settings` for an app that never starts uses `tests.conftest.UNUSED_DATABASE_URL`.
 Tests marked `requires_fixtures` (#2146) use the real MakerWorld 3MFs in
 `test-fixtures/makerworld/` (Git LFS, ~290 MB; `git lfs pull --include "test-fixtures/**"`;

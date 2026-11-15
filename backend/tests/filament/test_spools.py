@@ -21,6 +21,7 @@ from scadbuddy.filament.models import (
 )
 from scadbuddy.filament.spools import (
     FilamentSpoolStore,
+    SpoolBambuddyLinkedError,
     SpoolInUseError,
     SpoolTypelessError,
     TagUnnamedError,
@@ -128,6 +129,20 @@ def test_rebinding_a_tag_moves_it(pg_pool: PgPool) -> None:
     assert _kinds(store, b)[-1] == "tag_unbound"
     with pytest.raises(TagUnnamedError):
         store.bind_tag(a, tag_uid="0000", kind="other", actor="ann")
+
+
+def test_a_bambuddy_linked_spool_is_not_deleted(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    linked = _spool(store, pg_pool)
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO filament_bb_links (spool_id, bb_spool_id, bb_updated_at, linked_at)"
+            " VALUES (%s, 7, now(), now())",
+            (linked,),
+        )
+    with pytest.raises(SpoolBambuddyLinkedError):
+        store.delete(linked)
+    assert store.get(linked) is not None
 
 
 def test_a_spool_with_prints_is_not_deleted_but_one_without_is(pg_pool: PgPool) -> None:

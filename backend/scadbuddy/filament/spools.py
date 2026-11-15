@@ -48,6 +48,16 @@ class SpoolInUseError(ValueError):
         super().__init__("the spool has prints in its ledger; archive it instead")
 
 
+class SpoolBambuddyLinkedError(ValueError):
+    """The spool is linked to a Bambuddy spool: archive it instead."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "the spool is linked to Bambuddy and the next pull would bring it back;"
+            " archive it instead"
+        )
+
+
 class SpoolTypelessError(ValueError):
     """A spool would name neither a type nor a material."""
 
@@ -225,10 +235,11 @@ class FilamentSpoolStore:
         return self.update(spool_id, m.SpoolPatch(archived=archived), actor=actor)
 
     def delete(self, spool_id: UUID, *, refusing: Iterable[m.EventKind] = _USED) -> bool:
-        """Remove a spool that never printed, with its events, tag bindings and Bambuddy
-        link; ``False`` for no such spool. `SpoolInUseError` when its ledger holds an
-        event of a kind in ``refusing`` (a ``print_started`` or ``print_ended`` one; the
-        native API's delete refuses ``print_ended`` only, `spools/native.py`)."""
+        """Remove a spool that never printed, with its events and tag bindings; ``False``
+        for no such spool. `SpoolBambuddyLinkedError` when a Bambuddy link names it (the
+        next pull would make it again). `SpoolInUseError` when its ledger holds an event
+        of a kind in ``refusing`` (a ``print_started`` or ``print_ended`` one; the native
+        API's delete refuses ``print_ended`` only, `spools/native.py`)."""
         with self._pool.connection() as conn, conn.transaction():
             found = conn.execute(
                 "SELECT 1 FROM filament_spools WHERE id = %s FOR UPDATE", (spool_id,)
@@ -242,7 +253,11 @@ class FilamentSpoolStore:
             ).fetchone()
             if used is not None:
                 raise SpoolInUseError()
-            for table in ("filament_spool_events", "filament_tag_bindings", "filament_bb_links"):
+            if conn.execute(
+                "SELECT 1 FROM filament_bb_links WHERE spool_id = %s", (spool_id,)
+            ).fetchone():
+                raise SpoolBambuddyLinkedError()
+            for table in ("filament_spool_events", "filament_tag_bindings"):
                 conn.execute(f"DELETE FROM {table} WHERE spool_id = %s", (spool_id,))
             conn.execute("DELETE FROM filament_spools WHERE id = %s", (spool_id,))
         return True
