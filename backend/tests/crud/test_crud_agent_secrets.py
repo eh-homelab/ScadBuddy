@@ -552,21 +552,27 @@ def test_a_key_file_that_failed_to_read_is_read_again(tmp_path: Path) -> None:
     assert rotation.kek_at(path) == KEK
 
 
-def test_a_window_row_never_waits_on_another_writer(tables: PgPool) -> None:
+def test_a_window_row_never_waits_and_never_stands_for_an_uncommitted_one(
+    tables: PgPool,
+) -> None:
     args: tuple[audit.Kind, tuple[str, ...], str] = ("credential", ("reveal.redact",), "10 minutes")
     with tables.connection() as holder, tables.connection() as other:
         holder.autocommit = False
         assert audit.recorded_lately(holder, *args) is False
-        # The holder writes its row in its open transaction; the other caller, with no row
-        # it can see and the lock taken, writes none and does not wait for the lock.
+        audit.record(holder, "credential", "reveal.redact", "ok", "opened 1 of 1 credential(s)")
+        # The holder's row is not committed and its lock is taken: the other caller does not
+        # wait for the lock, and writes its own row.
         other.execute("SET lock_timeout = '1s'")
         started = time.monotonic()
-        assert audit.recorded_lately(other, *args) is True
+        assert audit.recorded_lately(other, *args) is False
         assert time.monotonic() - started < 1
+        audit.record(other, "credential", "reveal.redact", "ok", "opened 1 of 1 credential(s)")
+        # The holder rolls back: the reveal is still audited, by the other caller's row.
         holder.rollback()
         holder.autocommit = True
+    assert [a["action"] for a in _audit(tables)] == ["reveal.redact"]
     with tables.connection() as conn:
-        assert audit.recorded_lately(conn, *args) is False
+        assert audit.recorded_lately(conn, *args) is True
 
 
 def test_the_key_files_are_read_once_not_per_request(

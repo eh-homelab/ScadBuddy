@@ -70,11 +70,13 @@ def recorded_lately(
     detail: str | None = None,
 ) -> bool:
     """Whether an ``ok`` row of ``kind`` with one of ``actions`` (and ``detail``, when
-    given) was written inside ``window`` (a Postgres interval), so the caller writes none.
+    given) and committed inside ``window`` (a Postgres interval), so the caller writes none.
     A row in the window answers at once, with no lock. Without one the caller tries an
-    advisory lock of its own per kind, actions and detail, in its transaction: when another
-    caller holds it, that caller is writing the row, so this one answers True and never
-    waits; with the lock it reads again, so two calls at once write one row."""
+    advisory lock of its own per kind, actions and detail, in its transaction; with the
+    lock it reads again, so two calls at once write one row. When another caller holds the
+    lock this one never waits and answers False, so it writes a row too: the holder may
+    still roll back, and only a committed row may stand for a reveal (an extra row in the
+    window costs nothing)."""
     if _in_window(conn, kind, actions, window, detail):
         return True
     got = conn.execute(
@@ -83,7 +85,7 @@ def recorded_lately(
     ).fetchone()
     held = got["got"] if isinstance(got, dict) else got[0] if got else False
     if not held:
-        return True
+        return False
     return _in_window(conn, kind, actions, window, detail)
 
 
