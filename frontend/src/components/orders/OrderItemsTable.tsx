@@ -130,7 +130,7 @@ export function OrderItemsTable({
     // A closed group's lines leave the selection, so they come back unpicked.
     if (!open) {
       const leaving = new Set(grouped.groups.find((group) => group.key === key)?.items.map((item) => item.id))
-      setPicked(new Set([...picked].filter((id) => !leaving.has(id))))
+      setPicked((was) => new Set([...was].filter((id) => !leaving.has(id))))
     }
   }
   // #6334: a selection, and "Select all", take only the lines in view: a bulk action never

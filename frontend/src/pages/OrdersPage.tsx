@@ -94,11 +94,10 @@ function LowStock({ parts }: { parts: InventoryPart[] }) {
   )
 }
 
-/** The query this browser remembers: the URL's, less the search and a profit report row's filters. */
+/** The query this browser remembers: the URL's, less the search. A profit report row's query is never stored (`keep`). */
 function remembered(query: OrdersQuery): string {
   const params = toOrdersParams(query)
   params.delete('q')
-  for (const key of REPORT_KEYS) params.delete(key)
   return params.toString()
 }
 
@@ -343,7 +342,7 @@ export function OrdersPage() {
             <Switch
               size="sm"
               checked={memory.remember}
-              onCheckedChange={(remember) => setMemory(storeOrdersMemory({ remember, query: remember ? remembered(query) : '' }))}
+              onCheckedChange={(remember) => setMemory(storeOrdersMemory({ remember, query: !remember ? '' : isReportFiltered(query) ? memory.query : remembered(query) }))}
             />
             Remember my view
           </label>
