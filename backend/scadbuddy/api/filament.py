@@ -125,8 +125,8 @@ async def list_catalog(
     description=(
         "The fields depend on the kind (every one takes `name` and `sort_order`; materials "
         "add print and drying defaults and handling flags, colours an `rgba`). 404 for an "
-        "unknown kind, 409 when an unarchived row has the name, 422 for a bad field or a "
-        "row it points at that does not exist."
+        "unknown kind, 409 when an unarchived row has the name, 422 for a bad field, a "
+        "row it points at that does not exist, or a minimum temperature above its maximum."
     ),
 )
 async def create_catalog_row(
@@ -136,7 +136,7 @@ async def create_catalog_row(
     parsed = _body(spec.create, body)
     try:
         made = await asyncio.to_thread(filament.catalog.create, kind, parsed)
-    except (CatalogExistsError, CatalogRefError) as exc:
+    except (CatalogExistsError, CatalogRefError, TypeTempError) as exc:
         raise _refused(exc) from None
     return _row(made, kind, UUID(int=0))
 
@@ -148,7 +148,8 @@ async def create_catalog_row(
     description=(
         "Only the fields sent change; `null` clears a nullable one. `archived: true` takes "
         "the row off the lists and frees its name, `false` puts it back. 404 for an unknown "
-        "kind or row, 409 when another unarchived row has the name, 422 for a bad field."
+        "kind or row, 409 when another unarchived row has the name, 422 for a bad field or a "
+        "minimum temperature above its maximum."
     ),
 )
 async def patch_catalog_row(
@@ -158,7 +159,7 @@ async def patch_catalog_row(
     parsed = _body(spec.patch, body)
     try:
         changed = await asyncio.to_thread(filament.catalog.update, kind, row_id, parsed)
-    except (CatalogExistsError, CatalogRefError) as exc:
+    except (CatalogExistsError, CatalogRefError, TypeTempError) as exc:
         raise _refused(exc) from None
     return _row(changed, kind, row_id)
 
@@ -205,8 +206,8 @@ async def list_types(filament: FilamentDep, include_archived: bool = False) -> l
     description=(
         "A type has a `code`, a material, an `rgba` (`#RRGGBB` or `#RRGGBBAA`, stored with "
         "its alpha), a `label_weight_g` and optional print values a spool inherits. With a "
-        "`cost_per_kg` it also writes the price book row of its material, subtype, brand "
-        "and colour (`filament_id`); two types that differ only in alpha share one row "
+        "`cost_per_kg` it also writes the price book row of its material, subtype, brand, "
+        "colour and alpha (`filament_id`), which takes its stops and effect when it is new "
         "(#6209). 409 when an unarchived type has the code, 422 for a bad field, a row it "
         "points at that does not exist, or a minimum temperature above its maximum."
     ),

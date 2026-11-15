@@ -4,11 +4,13 @@ all nine, keyed by kind; a `CatalogSpec` names a kind's table and models.
 
 "Removing" a row archives it (``archived_at``), which frees its name; an archived row
 stays readable by id and by the rows that point at it. Uniqueness is the tables' own
-partial indexes, so a clash surfaces as `CatalogExistsError`.
+partial indexes, so a clash surfaces as `CatalogExistsError`. A material's or subtype's
+temperature range is never backwards (`TypeTempError`), as a type's is.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
@@ -70,6 +72,24 @@ class CatalogRefError(ValueError):
         super().__init__("a row this one points at does not exist")
 
 
+class TypeTempError(ValueError):
+    """A temperature range whose minimum is above its maximum (a type's, a spool's, a
+    material's or a subtype's)."""
+
+
+#: The catalogs whose rows have print temperatures.
+_TEMPS = frozenset({"materials", "subtypes"})
+_TEMP_COLUMNS = ("nozzle_temp_min", "nozzle_temp_max", "bed_temp_min", "bed_temp_max")
+
+
+def check_temps(values: Mapping[str, Any]) -> None:
+    """`TypeTempError` when a nozzle or bed minimum is above its maximum."""
+    for kind in ("nozzle", "bed"):
+        low, high = values.get(f"{kind}_temp_min"), values.get(f"{kind}_temp_max")
+        if low is not None and high is not None and low > high:
+            raise TypeTempError(f"{kind}_temp_min is above {kind}_temp_max")
+
+
 class UnknownCatalogError(KeyError):
     """No catalog of that kind."""
 
@@ -114,6 +134,8 @@ class CatalogStore:
     def create(self, kind: str, body: BaseModel) -> BaseModel:
         spec = _spec(kind)
         data = body.model_dump()
+        if kind in _TEMPS:
+            check_temps(data)
         names = list(data)
         try:
             with self._pool.connection() as conn:
@@ -130,7 +152,9 @@ class CatalogStore:
         return spec.out.model_validate(row)
 
     def update(self, kind: str, row_id: UUID, patch: BaseModel) -> BaseModel | None:
-        """The fields ``patch`` sends (``archived`` included); ``None`` for no such row."""
+        """The fields ``patch`` sends (``archived`` included); ``None`` for no such row.
+        `TypeTempError` when a material's or subtype's temperature range would be
+        backwards."""
         spec = _spec(kind)
         sent = [n for n in type(patch).model_fields if n in patch.model_fields_set]
         columns = [n for n in sent if n != "archived"]
@@ -143,7 +167,15 @@ class CatalogStore:
             )
         sets.append("updated_at = now()")
         try:
-            with self._pool.connection() as conn:
+            with self._pool.connection() as conn, conn.transaction():
+                if kind in _TEMPS and set(columns) & set(_TEMP_COLUMNS):
+                    current = conn.execute(
+                        f"SELECT {', '.join(_TEMP_COLUMNS)} FROM {spec.table}"
+                        " WHERE id = %s FOR UPDATE",
+                        (row_id,),
+                    ).fetchone()
+                    if current is not None:
+                        check_temps(current | dict(zip(columns, values, strict=True)))
                 row = conn.execute(
                     f"UPDATE {spec.table} SET {', '.join(sets)} WHERE id = %s"
                     f" RETURNING {_columns(spec)}",

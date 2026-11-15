@@ -11,6 +11,21 @@ or ``person`` reading and the spool's weight is not locked. A delta is the ``del
 of a ``print_actual`` event, or of a ``print_estimate`` event while no ``print_ended``
 event has its ``ref_id``: a print's actual replaces its estimate, and a print that ended
 with no actual known (``delta_g`` null) drops its estimate.
+
+The order is when things physically happened, so a print two sources both booked is
+counted once (§8.2, "Consumption is counted once"). An event that names its time (``at``)
+keeps it: a BB weighing or drying at BB's time, BB's state (``synced_from_bb``) at the BB
+row's ``updated_at``, a print's ``print_ended`` at its plate's start (`spools/native.py`
+`settle_uses_in`). A reading taken after a plate started is therefore read as holding that
+plate, and the plate's actual is not taken off it again. An event with no ``at`` is
+booked now: the clock's time, but never earlier than a microsecond after the spool's
+newest event, so a clock that steps back (WSL's does) cannot put an event before the one
+it follows. That guard only moves an event booked now, never a named time, so it never
+pushes a physical time past a newer anchor. Two events of one time keep the order they
+were booked in (``seq``), as a pull's ``created`` and ``synced_from_bb`` at one BB time.
+
+`refresh_derived` reads a spool's whole history for each event. That is cheap at a few
+events a print; #6263's AMS readings, one per tick, will need an incremental path.
 """
 
 from __future__ import annotations
@@ -54,12 +69,16 @@ def record(
     data: dict[str, Any] | None = None,
 ) -> m.SpoolEvent | None:
     """Write one event and refresh the spool's derived columns, on ``conn``'s
-    transaction. ``absolute_g`` is a reading (``grams_after``); ``grams_before`` is the
-    spool's ``grams_left`` before the event. ``None`` when an event with the spool,
-    ``ref_kind``, ``ref_id`` and ``kind`` is already recorded: a retry books nothing.
-    With no ``at`` the event takes the clock's time, but never earlier than a microsecond
-    after the spool's newest event: the events of one transaction keep their order, and
-    a clock that steps back cannot put an event before the one it follows."""
+    transaction. The spool's row is locked first, so two writers of one spool take it in
+    turn and each reads the other's events. ``absolute_g`` is a reading
+    (``grams_after``); ``grams_before`` is the spool's ``grams_left`` when the event is
+    booked, also for an event that names an earlier time. ``None`` when an event with
+    the spool, ``ref_kind``, ``ref_id`` and ``kind`` is already recorded (a retry books
+    nothing). ``at`` is when it physically happened; with none the event is booked
+    now, by the module's rule."""
+    # Before the insert, whose foreign key would take a KEY SHARE lock that
+    # `refresh_derived`'s FOR UPDATE then has to upgrade: two writers deadlock there.
+    conn.execute("SELECT 1 FROM filament_spools WHERE id = %s FOR UPDATE", (spool_id,))
     row = conn.execute(
         "INSERT INTO filament_spool_events (spool_id, at, kind, source, printer_id, ams_id,"
         " tray_id, grams_before, grams_after, delta_g, ref_kind, ref_id, actor, data)"
@@ -137,9 +156,9 @@ def grams_left(
 
 
 def events(conn: Conn, spool_id: UUID) -> list[m.SpoolEvent]:
-    """A spool's events, oldest first."""
+    """A spool's events, oldest first; two of one time in the order they were booked."""
     rows = conn.execute(
-        f"SELECT {_COLUMNS} FROM filament_spool_events WHERE spool_id = %s ORDER BY at, id",
+        f"SELECT {_COLUMNS} FROM filament_spool_events WHERE spool_id = %s ORDER BY at, seq",
         (spool_id,),
     ).fetchall()
     return [m.SpoolEvent.model_validate(row) for row in rows]
@@ -147,8 +166,9 @@ def events(conn: Conn, spool_id: UUID) -> list[m.SpoolEvent]:
 
 def refresh_derived(conn: Conn, spool_id: UUID) -> None:
     """Recompute the spool's ``grams_left`` and ``last_*`` columns from its events. The
-    label weight is the spool's own, else its type's. The spool's row is locked first, so
-    two transactions that each record an event read each other's in turn."""
+    label weight is the spool's own, else its type's. The spool's row is locked (`record`
+    has locked it already), so two transactions that each record an event read each
+    other's in turn."""
     spool = conn.execute(
         "SELECT s.weight_locked, coalesce(s.label_weight_g, t.label_weight_g) AS label_weight_g"
         " FROM filament_spools s LEFT JOIN filament_spool_types t ON t.id = s.type_id"

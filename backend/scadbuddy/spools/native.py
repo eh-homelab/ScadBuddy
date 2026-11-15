@@ -130,7 +130,8 @@ class NativeSpool(BaseModel):
 
 
 class SpoolUse(BaseModel):
-    """What one slot of a LAN start uses of a native spool (``native_spool_uses``)."""
+    """What one slot of a LAN start uses of a native spool: its ``print_started``
+    estimate in ``filament_spool_events`` (`NativeSpoolStore.record_uses`)."""
 
     slot_id: int
     spool_id: UUID
@@ -282,7 +283,7 @@ def _set_preset(conn: Conn, spool_id: UUID, preset: str | None) -> None:
     )
 
 
-def _close_open(conn: Conn, spool_id: UUID, reason: str) -> None:
+def _close_open(conn: Conn, spool_id: UUID, reason: str, actor: str) -> None:
     """Close the spool's open binding, if it has one, with a ``tag_unbound`` event."""
     closed = conn.execute(
         "UPDATE filament_tag_bindings SET unbound_at = now(), reason = %s"
@@ -294,7 +295,7 @@ def _close_open(conn: Conn, spool_id: UUID, reason: str) -> None:
             conn,
             spool_id,
             "tag_unbound",
-            actor=ACTOR,
+            actor=actor,
             data={"tag_id": closed["tag_id"], "reason": reason},
         )
 
@@ -309,7 +310,9 @@ def _lock_tags(conn: Conn, ids: Iterable[UUID | None], uid: str | None, tray: st
     )
 
 
-def _set_tag(conn: Conn, spool_id: UUID, uid: str | None, tray: str | None, *, open_: bool) -> None:
+def _set_tag(
+    conn: Conn, spool_id: UUID, uid: str | None, tray: str | None, *, open_: bool, actor: str
+) -> None:
     """Give the spool the tag ``uid``/``tray`` names, as the native record's two keys did.
     With ``open_`` the binding is open (`NativeSpoolExistsError` when another spool holds
     the tag); an archived spool gets a closed one (reason ``archived``), which it shows.
@@ -321,7 +324,7 @@ def _set_tag(conn: Conn, spool_id: UUID, uid: str | None, tray: str | None, *, o
         if shown is None:
             return
         if shown["unbound_at"] is None:
-            _close_open(conn, spool_id, "unbound")
+            _close_open(conn, spool_id, "unbound", actor)
         else:
             conn.execute(
                 "UPDATE filament_tag_bindings SET reason = 'unbound' WHERE id = %s", (shown["id"],)
@@ -375,20 +378,20 @@ def _set_tag(conn: Conn, spool_id: UUID, uid: str | None, tray: str | None, *, o
         ).fetchone()
         assert made is not None
         tag_id = made["id"]
-    _close_open(conn, spool_id, "rebound")
+    _close_open(conn, spool_id, "rebound", actor)
     conn.execute(
         "INSERT INTO filament_tag_bindings (tag_id, spool_id, unbound_at, reason)"
         " VALUES (%s, %s, CASE WHEN %s THEN NULL ELSE now() END,"
         " CASE WHEN %s THEN NULL ELSE 'archived' END)",
         (tag_id, spool_id, open_, open_),
     )
-    ledger.record(conn, spool_id, "tag_bound", actor=ACTOR, data={"tag_id": tag_id})
+    ledger.record(conn, spool_id, "tag_bound", actor=actor, data={"tag_id": tag_id})
     if not open_:
         ledger.record(
             conn,
             spool_id,
             "tag_unbound",
-            actor=ACTOR,
+            actor=actor,
             data={"tag_id": tag_id, "reason": "archived"},
         )
 
@@ -429,9 +432,10 @@ class NativeSpoolStore:
         with self._pool.connection() as conn:
             return self._read(conn, spool_id)
 
-    def create(self, spool: NativeSpoolCreate) -> NativeSpool:
+    def create(self, spool: NativeSpoolCreate, *, actor: str = ACTOR) -> NativeSpool:
         """A new spool with its ``created`` event (``remaining_g``, when sent, is its
-        reading); an unknown material or brand joins its catalog."""
+        reading); an unknown material or brand joins its catalog. ``actor`` is who the
+        events name (the route's caller)."""
         try:
             with self._pool.connection() as conn, conn.transaction():
                 row = conn.execute(
@@ -454,19 +458,22 @@ class NativeSpoolStore:
                     "created",
                     source="person" if spool.remaining_g is not None else None,
                     absolute_g=spool.remaining_g,
-                    actor=ACTOR,
+                    actor=actor,
                 )
                 if spool.preset is not None:
                     _set_preset(conn, spool_id, spool.preset)
-                _set_tag(conn, spool_id, spool.tag_uid, spool.tray_uuid, open_=True)
+                _set_tag(conn, spool_id, spool.tag_uid, spool.tray_uuid, open_=True, actor=actor)
                 made = self._read(conn, spool_id)
         except errors.UniqueViolation:
             raise NativeSpoolExistsError() from None
         assert made is not None
         return made
 
-    def update(self, spool_id: UUID, patch: NativeSpoolPatch) -> NativeSpool | None:
-        """The fields ``patch`` sends; ``None`` for no such spool. The fields kept on the
+    def update(
+        self, spool_id: UUID, patch: NativeSpoolPatch, *, actor: str = ACTOR
+    ) -> NativeSpool | None:
+        """The fields ``patch`` sends, its events naming ``actor``; ``None`` for no such
+        spool. The fields kept on the
         spool's row write one ``edited`` event; ``remaining_g`` is a person's reading (a
         ``weighed`` event; ``null`` leaves the ledger's value); ``archived`` writes
         ``archived`` (the tag goes off, as the migration leaves an archived spool) or
@@ -495,22 +502,22 @@ class NativeSpoolStore:
                 ).fetchone()
                 if current is None:
                     return None
-                self._edit(conn, current, patch)
+                self._edit(conn, current, patch, actor)
                 was_archived = current["archived_at"] is not None
                 archived = patch.archived if archiving else was_archived
                 if archived != was_archived:
                     if archived:
-                        _close_open(conn, spool_id, "archived")
+                        _close_open(conn, spool_id, "archived", actor)
                     conn.execute(
                         "UPDATE filament_spools SET archived_at = CASE WHEN %s THEN now() END"
                         " WHERE id = %s",
                         (archived, spool_id),
                     )
                     ledger.record(
-                        conn, spool_id, "archived" if archived else "restored", actor=ACTOR
+                        conn, spool_id, "archived" if archived else "restored", actor=actor
                     )
                 if tags_sent or (was_archived and not archived):
-                    _set_tag(conn, spool_id, uid, tray, open_=not archived)
+                    _set_tag(conn, spool_id, uid, tray, open_=not archived, actor=actor)
                 conn.execute(
                     "UPDATE filament_spools SET updated_at = now() WHERE id = %s", (spool_id,)
                 )
@@ -521,7 +528,8 @@ class NativeSpoolStore:
     def delete(self, spool_id: UUID) -> bool:
         """Forget a spool no print has ended on, with its open estimates, events, tag
         bindings, presets and Bambuddy link; ``False`` when there was none. A spool with
-        a ``print_ended`` event is `SpoolInUseError`: archive it instead. Its cached copy
+        a ``print_ended`` event is `SpoolInUseError`: it stays, archived, since its ledger
+        keeps a finished print. Its cached copy
         goes at the provider's next refresh, as an archived one's does."""
         return FilamentSpoolStore(self._pool).delete(spool_id, refusing=("print_ended",))
 
@@ -566,9 +574,12 @@ class NativeSpoolStore:
         (``print_runs.result.lan``, as the follow's progress reads them). A start that
         ended ``done`` books its sliced grams as the actual (``print_ended``,
         ``print_actual``, ``data.basis`` ``sliced``); every other start books 0 (``basis``
-        ``not_applied``), which drops its estimate. Each use is settled once: the ledger
-        keeps one ``print_ended`` per ``ref_id``. The spools whose weight changed, or that
-        a done start took grams off (a spool whose weight is not kept takes none)."""
+        ``not_applied``), which drops its estimate. A ``print_ended`` is booked at its
+        ``print_started``'s time, so a reading after the plate started (a BB pull between
+        two plates, or before the settle) is not taken off again. Each use is settled
+        once: the ledger keeps one ``print_ended`` per ``ref_id``. The spools whose weight
+        changed, or that a done start took grams off (a spool whose weight is not kept
+        takes none)."""
         with self._pool.connection() as conn, conn.transaction():
             return self.settle_uses_in(conn, run_id, stages)
 
@@ -579,7 +590,7 @@ class NativeSpoolStore:
         prefix = f"{run_id}/"
         # By `filament_spool_events_print_ref`: a prefix match, the run id escaped.
         pending = conn.execute(
-            "SELECT e.spool_id, e.ref_id, e.delta_g FROM filament_spool_events e"
+            "SELECT e.spool_id, e.ref_id, e.delta_g, e.at FROM filament_spool_events e"
             " WHERE e.kind = 'print_started' AND e.ref_kind = 'print_run'"
             " AND e.ref_id LIKE %s AND NOT EXISTS (SELECT 1 FROM filament_spool_events d"
             " WHERE d.spool_id = e.spool_id AND d.kind = 'print_ended'"
@@ -620,6 +631,10 @@ class NativeSpoolStore:
                 ref_kind="print_run",
                 ref_id=use["ref_id"],
                 actor=ACTOR,
+                # At the plate's start: no end time is kept per plate (`LanStarted` has
+                # none), and a reading taken after the start is read as holding the
+                # plate, as BB's is once BB deducts it (`ledger.py`).
+                at=use["at"],
                 data={"basis": "sliced" if applied else "not_applied"},
             )
             if ended is not None and applied and before.get(use["spool_id"]) is not None:
@@ -640,7 +655,7 @@ class NativeSpoolStore:
         return None if row is None else NativeSpool.model_validate(row)
 
     @staticmethod
-    def _edit(conn: Conn, current: Mapping[str, Any], patch: NativeSpoolPatch) -> None:
+    def _edit(conn: Conn, current: Mapping[str, Any], patch: NativeSpoolPatch, actor: str) -> None:
         """The sent fields kept on the spool's row and its ``*`` preset, as one ``edited``
         event of ``[before, after]`` per change; then ``remaining_g`` as a reading."""
         sent = patch.model_fields_set
@@ -679,7 +694,7 @@ class NativeSpoolStore:
                 _set_preset(conn, spool_id, patch.preset)
                 changes["preset"] = [old, patch.preset]
         if changes:
-            ledger.record(conn, spool_id, "edited", actor=ACTOR, data={"changes": changes})
+            ledger.record(conn, spool_id, "edited", actor=actor, data={"changes": changes})
         if "remaining_g" in sent and patch.remaining_g is not None:
             ledger.record(
                 conn,
@@ -687,5 +702,5 @@ class NativeSpoolStore:
                 "weighed",
                 source="person",
                 absolute_g=patch.remaining_g,
-                actor=ACTOR,
+                actor=actor,
             )

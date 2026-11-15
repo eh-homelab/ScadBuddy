@@ -1423,7 +1423,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   A record's whole colour (#6209, migration `20261114T1607Z_filaments_alpha_effect.sql`):
   `colour` stays `#RRGGBB` (the render splits parts by it; a clear filament is its RGB with
   `alpha` 0), beside `alpha`, `extra_colours` (at most 8 stops) and `effect` (Bambuddy's
-  `effect_type` set), all on `Filament` and the storefront's `PublicFilament`.
+  `effect_type` set), all on `Filament` and the storefront's `PublicFilament`. The
+  identity index holds `alpha` too (#6261, `20261115T0154Z_filaments_identity_alpha.sql`):
+  a spool type's book row (`filament/types.py` `_link_price_book`) is one per alpha.
   `colour_source` is `import` or `manual`: a look sent by a person that differs from the
   record's makes it `manual`, and the import never sets a `manual` record's look;
   `colour_source: "import"` in a PATCH hands it back; the editor's "Use spool colour"

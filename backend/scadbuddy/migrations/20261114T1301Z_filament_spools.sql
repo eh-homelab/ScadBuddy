@@ -158,9 +158,12 @@ CREATE UNIQUE INDEX filament_tag_bindings_open_spool ON filament_tag_bindings (s
 -- The ledger: one row per thing that happened to a spool. No cascade: a spool with
 -- events is archived, never deleted. `printer_id` is a plain uuid so that deleting a
 -- printer leaves the record whole. A row with a `ref_id` (a print run, a sync) is
--- recorded once per `kind`, so a retried activity cannot book grams twice.
+-- recorded once per `kind`, so a retried activity cannot book grams twice. `at` is when
+-- it physically happened, and `seq` the order it was booked in, which orders two events
+-- of one time (`filament/ledger.py`).
 CREATE TABLE filament_spool_events (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    seq bigint GENERATED ALWAYS AS IDENTITY,
     spool_id uuid NOT NULL REFERENCES filament_spools (id),
     at timestamptz NOT NULL DEFAULT now(),
     kind text NOT NULL CHECK (kind IN (

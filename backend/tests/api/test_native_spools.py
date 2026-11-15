@@ -87,4 +87,21 @@ def test_a_spool_a_print_ended_on_is_not_deleted(client: TestClient) -> None:
     path = f"{URL}/{spool['id']}"
     refused = client.delete(path)
     assert refused.status_code == 409, refused.text
+    assert "archive it" not in refused.json()["detail"]
+    assert "finished" in refused.json()["detail"]
     assert client.get(path).status_code == 200
+
+
+def test_the_routes_name_their_caller_in_the_ledger(client: TestClient) -> None:
+    spool = client.post(URL, json={"material": "PLA", "remaining_g": 100}).json()
+    client.patch(f"{URL}/{spool['id']}", json={"remaining_g": 90, "name": "x"})
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    with state.components.get(SPOOLS).store.pool.connection() as conn:
+        actors = {
+            row["actor"]
+            for row in conn.execute(
+                "SELECT actor FROM filament_spool_events WHERE spool_id = %s", (spool["id"],)
+            ).fetchall()
+        }
+    assert len(actors) == 1
+    assert actors != {"native"}

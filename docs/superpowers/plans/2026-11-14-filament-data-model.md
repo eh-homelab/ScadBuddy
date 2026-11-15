@@ -59,10 +59,13 @@ msw tests).
   `spool_presets` / `spool_k_values`.
 - **Material defaults:** a type's nullable value falls back to its subtype's,
   then its material's (spec §5.1). Resolution is one function, `effective()`.
-- **Price book colour stays `#RRGGBB` here.** `filaments.colour` is read by
-  quotes and the storefront; making it RGBA is #6209, which builds on this
-  plan. The type keeps the full RGBA. This PR changes the spec's §12 note on
-  #6209 to say so.
+- **Price book colour stays `#RRGGBB`, with its alpha beside it.** #6209
+  landed in #6211 before this plan: `filaments.colour` stays `#RRGGBB` (quotes
+  and the storefront read it) beside `alpha`, `extra_colours` and `effect`
+  (`20261114T1607Z_filaments_alpha_effect.sql`). A type's book row takes the
+  type's alpha, stops and effect, and the book's identity holds the alpha, so an
+  opaque and a translucent type of one hue get two rows. This PR changes the
+  spec's §12 note on #6209 to say so.
 - **Native spools:** the tables `native_spools` and `native_spool_uses` are
   copied into the new tables and no longer written. `NativeSpoolStore` keeps its
   public signatures and reads and writes the new tables. Dropping the old tables
@@ -339,5 +342,5 @@ Rules (spec §5.3, §5.5):
 ### Task 10: Whole-branch check and PR
 
 - [ ] Run `uv run --frozen pytest tests/filament tests/spools tests/api/test_native_spools.py tests/api/test_filament.py tests/crud/test_crud_spools.py tests/orders tests/test_pg_migrations.py tests/test_spool_refresh_replay.py tests/api/test_openapi.py tests/api/test_routes.py`, ruff, mypy; `cd agent && pnpm test && pnpm typecheck`.
-- [ ] In `docs/superpowers/specs/2026-11-14-filament-management-design.md` §12, change the #6209 sentence to: "#6209 (the price book keeps alpha, colour stops and effect) is a sub-issue of the epic; it builds on #6261, whose types keep the full RGBA."
+- [ ] In `docs/superpowers/specs/2026-11-14-filament-management-design.md` §12, change the #6209 sentence to: "#6209 (the price book keeps alpha, colour stops and effect) landed in #6211 before #6261; #6261's types write the book's alpha, stops and effect from it."
 - [ ] Open the PR: `feat(filament): spool types, instances, catalogs and ledger (#6261)`, body `Closes #6261`, the session marker, and the footer. Shepherd it.

@@ -309,6 +309,16 @@ def import_spools(
                 if current.colour_source == "import" and not keep_look
                 else {}
             )
+            if "alpha" in look and any(
+                r.id != record.id
+                and _names(r.material, r.subtype, r.brand) == group_names
+                and r.colour.upper() == str(look.get("colour", current.colour)).upper()
+                and r.alpha == look["alpha"]
+                for r in records
+            ):
+                # Another record of its names has that colour and alpha (a type's, #6261):
+                # this one keeps its own alpha, as the identity index needs.
+                del look["alpha"]
             store.set_import_look(
                 conn,
                 record.id,

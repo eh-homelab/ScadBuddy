@@ -53,6 +53,21 @@ def test_a_bad_body_is_422(client: TestClient) -> None:
     assert bad_ref.status_code == 422, bad_ref.text
 
 
+def test_a_backwards_temperature_range_on_a_material_or_subtype_is_422(
+    client: TestClient,
+) -> None:
+    for kind in ("materials", "subtypes"):
+        body = {"name": f"Hot {kind}", "nozzle_temp_min": 250, "nozzle_temp_max": 200}
+        backwards = client.post(f"{URL}/{kind}", json=body)
+        assert backwards.status_code == 422, backwards.text
+        assert "nozzle_temp_min is above nozzle_temp_max" in backwards.text
+        made = client.post(f"{URL}/{kind}", json={"name": f"Bed {kind}", "bed_temp_min": 50})
+        assert made.status_code == 201, made.text
+        path = f"{URL}/{kind}/{made.json()['id']}"
+        assert client.patch(path, json={"bed_temp_max": 40}).status_code == 422
+        assert client.patch(path, json={"bed_temp_max": 60}).json()["bed_temp_max"] == 60
+
+
 TYPES = "/api/v1/filament/types"
 
 

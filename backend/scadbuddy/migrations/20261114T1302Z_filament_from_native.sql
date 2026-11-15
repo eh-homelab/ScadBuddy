@@ -89,6 +89,13 @@ BEGIN
             ) THEN
                 INSERT INTO filament_tag_bindings (tag_id, spool_id, bound_at)
                 VALUES (v_tag, v_spool, n.created_at);
+            ELSIF n.archived_at IS NOT NULL THEN
+                -- An archived spool keeps its tag as a closed binding, as an archive
+                -- closes one (`filament/spools.py` `_archive`, `spools/native.py`).
+                INSERT INTO filament_tag_bindings
+                    (tag_id, spool_id, bound_at, unbound_at, reason)
+                VALUES (v_tag, v_spool, least(n.created_at, n.archived_at), n.archived_at,
+                        'archived');
             END IF;
             v_tag := NULL;
         END IF;

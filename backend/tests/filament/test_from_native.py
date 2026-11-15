@@ -116,6 +116,14 @@ def test_native_spools_uses_and_tags_are_copied(pg_conninfo: str) -> None:
             " JOIN filament_tags t ON t.id = b.tag_id WHERE b.unbound_at IS NULL"
         ).fetchall()
         assert bound == [("TRAY1", live[0])]
+        # The archived spool keeps its tag as a closed binding, as an archive leaves one.
+        closed = conn.execute(
+            "SELECT t.tag_uid, b.spool_id, b.unbound_at, b.reason FROM filament_tag_bindings b"
+            " JOIN filament_tags t ON t.id = b.tag_id WHERE b.unbound_at IS NOT NULL"
+        ).fetchall()
+        assert [(c[0], c[1], c[2].isoformat()[:10], c[3]) for c in closed] == [
+            ("UID2", old[0], "2026-11-05", "archived")
+        ]
 
         created = conn.execute(
             "SELECT spool_id, source, grams_after, at FROM filament_spool_events"

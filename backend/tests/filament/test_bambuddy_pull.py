@@ -10,6 +10,7 @@ from uuid import UUID
 
 import pytest
 import respx
+from psycopg.types.json import Jsonb
 
 from scadbuddy.bambuddy.models import Spool as BbSpool
 from scadbuddy.filament.bambuddy_pull import pull, read_and_pull, scheduled_pull
@@ -26,6 +27,7 @@ from scadbuddy.filament.models import (
 from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.filament.types import SpoolTypeStore
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.spools.native import NativeSpoolStore, SpoolUse
 from tests.conftest import PgPool
 
 pytestmark = pytest.mark.requires_postgres
@@ -99,10 +101,11 @@ def test_a_new_bb_spool_becomes_an_sb_spool(pg_pool: PgPool) -> None:
     assert spool.label_weight_g is None
     binding = f.spools.open_binding(spool.id)
     assert binding is not None
+    # BB's state sits at BB's ``updated_at``, before the binding the pull made now.
     assert _bb_events(f, spool.id) == [
         ("created", "bb", 900),
-        ("tag_bound", None, None),
         ("synced_from_bb", None, None),
+        ("tag_bound", None, None),
     ]
 
 
@@ -195,7 +198,7 @@ def test_a_second_pull_changes_nothing(pg_pool: PgPool) -> None:
 def test_a_bb_weight_change_is_a_bb_reading(pg_pool: PgPool) -> None:
     f = _filament(pg_pool)
     (made,) = pull(f, [bb()], now=NOW).created_ids
-    report = pull(f, [bb(weight_used=300.0, updated_at="2026-11-14T11:00:00")], now=NOW)
+    report = pull(f, [bb(weight_used=300.0, updated_at=_bb_time(1))], now=NOW)
     assert (report.updated, report.updated_ids) == (1, [made])
     spool = f.spools.get(made)
     assert spool is not None
@@ -207,7 +210,7 @@ def test_a_locked_spool_takes_no_bb_reading(pg_pool: PgPool) -> None:
     f = _filament(pg_pool)
     (made,) = pull(f, [bb()], now=NOW).created_ids
     f.spools.update(made, SpoolPatch(weight_locked=True), actor="ann")
-    report = pull(f, [bb(weight_used=300.0, updated_at="2026-11-14T11:00:00")], now=NOW)
+    report = pull(f, [bb(weight_used=300.0, updated_at=_bb_time(1))], now=NOW)
     assert report.updated == 1
     spool = f.spools.get(made)
     assert spool is not None
@@ -501,3 +504,56 @@ async def test_a_malformed_bb_row_is_skipped_and_counted(
         report = await read_and_pull(f, settings)
     assert (report.created, report.invalid, report.invalid_bb_ids) == (1, 2, [99])
     assert "is not a spool; skipped" in caplog.text
+
+
+# -- a print SB and BB both book is counted once (§8.2) ------------------------------
+
+RUN = "run-6261"
+
+
+def _lan_run(pool: PgPool, *names: str) -> None:
+    starts = [{"subtask_name": n, "started_at": "2026-11-14T12:00:00Z"} for n in names]
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_runs (id, output_id, idempotency_key, status, result)"
+            " VALUES (%s, 'out', 'k', 'succeeded', %s)",
+            (RUN, Jsonb({"lan": starts})),
+        )
+
+
+def _now_in_bb() -> str:
+    """Bambuddy's time for now (naive UTC), after every event booked so far."""
+    return datetime.now(UTC).replace(tzinfo=None).isoformat()
+
+
+def test_a_pull_between_two_plates_counts_each_plate_once(pg_pool: PgPool) -> None:
+    """BB deducts plate ``a`` as it ends; a pull then anchors on a value that holds it,
+    and the run's settle at its end takes off plate ``b`` only."""
+    f = _filament(pg_pool)
+    native = NativeSpoolStore(pg_pool)
+    (made,) = pull(f, [bb(updated_at=_bb_time(-3))], now=NOW).created_ids
+    _lan_run(pg_pool, "a", "b")
+    native.record_uses(RUN, "a", [SpoolUse(slot_id=1, spool_id=made, grams=50)])
+    # Plate a ends, BB takes its 50 g off, and the pull reads that before plate b.
+    pull(f, [bb(weight_used=150.0, updated_at=_now_in_bb())], now=NOW)
+    native.record_uses(RUN, "b", [SpoolUse(slot_id=1, spool_id=made, grams=30)])
+    native.settle_uses(RUN, ["done", "done"])
+    spool = f.spools.get(made)
+    assert spool is not None
+    assert spool.grams_left == 1000 - 150 - 30
+
+
+def test_a_bb_update_before_the_settle_counts_the_plate_once(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    native = NativeSpoolStore(pg_pool)
+    (made,) = pull(f, [bb(updated_at=_bb_time(-3))], now=NOW).created_ids
+    _lan_run(pg_pool, "a")
+    native.record_uses(RUN, "a", [SpoolUse(slot_id=1, spool_id=made, grams=50)])
+    pull(f, [bb(weight_used=150.0, updated_at=_now_in_bb())], now=NOW)
+    native.settle_uses(RUN, ["done"])
+    spool = f.spools.get(made)
+    assert spool is not None
+    assert spool.grams_left == 850
+    # BB's next write, after a later plate, still anchors.
+    pull(f, [bb(weight_used=200.0, updated_at=_now_in_bb())], now=NOW)
+    assert f.spools.get(made).grams_left == 800  # type: ignore[union-attr]

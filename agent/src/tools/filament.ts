@@ -131,8 +131,8 @@ export const filamentTools: Tool[] = [
       'Add a spool type (no `type_id`), or edit one: only the `fields` given change, and `null` clears a ' +
       'nullable one. A new type needs `code`, `material_id`, `rgba` (`#RRGGBB` or `#RRGGBBAA`) and ' +
       '`label_weight_g`; ids come from filament_catalog_list. With a `cost_per_kg` it also keeps the price ' +
-      'book row of its material, subtype, brand and colour in step; types that differ only in alpha share one ' +
-      'row. `archived: true` takes a type off the lists and frees its code. 409 when an unarchived type has the ' +
+      'book row of its material, subtype, brand, colour and alpha in step; a new row takes its stops and effect. ' +
+      '`archived: true` takes a type off the lists and frees its code. 409 when an unarchived type has the ' +
       'code; 422 when a minimum temperature is above its maximum. Only what the user says. Writes ScadBuddy only.',
     input: z.object({
       type_id: z.string().uuid().optional().describe("A type's `id`; omit to add"),

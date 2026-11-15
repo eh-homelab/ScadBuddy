@@ -90,8 +90,47 @@ def test_an_unpriced_type_makes_no_price_book_row(pg_pool: PgPool) -> None:
 def test_a_type_joins_an_existing_price_book_row(pg_pool: PgPool) -> None:
     store = SpoolTypeStore(pg_pool)
     first = store.create(_body(pg_pool, cost_per_kg="10"))
-    second = store.create(_body(pg_pool, code="OTHER", rgba="#FFFFFF80", cost_per_kg="12"))
+    second = store.create(_body(pg_pool, code="OTHER", rgba="#ffffff", cost_per_kg="12"))
     assert second.filament_id == first.filament_id
+
+
+@pg
+def test_a_translucent_type_makes_a_translucent_book_row(pg_pool: PgPool) -> None:
+    """The book row keeps the type's alpha, stops and effect (#6209 landed in #6211)."""
+    rows = [r.model_dump() for r in CatalogStore(pg_pool).list("effects")]
+    effect = next(r["id"] for r in rows if r["name"] == "Dual Color")
+    made = SpoolTypeStore(pg_pool).create(
+        _body(
+            pg_pool,
+            rgba="#FFFFFF80",
+            extra_colours=["#FF0000", "#00FF00"],
+            effect_id=effect,
+            cost_per_kg="10",
+        )
+    )
+    book = OrderStore(pg_pool).filament(made.filament_id or "")
+    assert book is not None
+    assert (book.colour, book.alpha, book.extra_colours, book.effect) == (
+        "#FFFFFF",
+        0x80,
+        ["#FF0000FF", "#00FF00FF"],
+        "dual-color",
+    )
+
+
+@pg
+def test_an_opaque_and_a_translucent_type_of_one_hue_get_two_rows(pg_pool: PgPool) -> None:
+    store = SpoolTypeStore(pg_pool)
+    orders = OrderStore(pg_pool)
+    solid = store.create(_body(pg_pool, cost_per_kg="10"))
+    clear = store.create(_body(pg_pool, code="CLEAR", rgba="#FFFFFF80", cost_per_kg="12"))
+    assert solid.filament_id is not None
+    assert clear.filament_id is not None
+    assert clear.filament_id != solid.filament_id
+    books = [orders.filament(solid.filament_id), orders.filament(clear.filament_id)]
+    assert [b.alpha if b is not None else None for b in books] == [0xFF, 0x80]
+    again = store.create(_body(pg_pool, code="CLEAR2", rgba="#FFFFFF80", cost_per_kg="12"))
+    assert again.filament_id == clear.filament_id
 
 
 @pg
@@ -206,7 +245,7 @@ def test_changing_a_type_colour_never_rewrites_a_shared_row(pg_pool: PgPool) -> 
     store = SpoolTypeStore(pg_pool)
     orders = OrderStore(pg_pool)
     a = store.create(_body(pg_pool, code="A", rgba="#FFFFFFFF", cost_per_kg="10"))
-    b = store.create(_body(pg_pool, code="B", rgba="#FFFFFF80", cost_per_kg="10"))
+    b = store.create(_body(pg_pool, code="B", rgba="#FFFFFF", cost_per_kg="10"))
     assert a.filament_id == b.filament_id
     shared = a.filament_id
     assert shared is not None

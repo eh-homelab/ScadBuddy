@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast, get_args
 from uuid import UUID
 
 from psycopg import Connection, errors
@@ -19,9 +19,16 @@ from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.filament import models as m
-from scadbuddy.filament.catalog import CatalogExistsError, CatalogRefError
+from scadbuddy.filament.catalog import (
+    CatalogExistsError,
+    CatalogRefError,
+    check_temps,
+)
+from scadbuddy.filament.catalog import (
+    TypeTempError as TypeTempError,
+)
 from scadbuddy.filament.colour import normalise_rgba
-from scadbuddy.orders.models import FilamentInput, FilamentPatch
+from scadbuddy.orders.models import FilamentEffect, FilamentInput, FilamentPatch
 from scadbuddy.orders.store import OrderStore
 
 Conn = Connection[DictRow]
@@ -44,10 +51,6 @@ OVERRIDABLE: tuple[str, ...] = tuple(m.EffectiveValues.model_fields)
 _INHERITED: frozenset[str] = frozenset(
     {"density_g_cm3", "nozzle_temp_min", "nozzle_temp_max", "bed_temp_min", "bed_temp_max"}
 )
-
-
-class TypeTempError(ValueError):
-    """A temperature range whose minimum is above its maximum."""
 
 
 class TypeRowsDuplicateError(ValueError):
@@ -80,13 +83,6 @@ def effective(
 def overridden(spool_row: Row) -> list[str]:
     """The overridable fields the spool sets itself."""
     return [field for field in OVERRIDABLE if spool_row.get(field) is not None]
-
-
-def _check_temps(values: Row) -> None:
-    for kind in ("nozzle", "bed"):
-        low, high = values.get(f"{kind}_temp_min"), values.get(f"{kind}_temp_max")
-        if low is not None and high is not None and low > high:
-            raise TypeTempError(f"{kind}_temp_min is above {kind}_temp_max")
 
 
 class SpoolTypeStore:
@@ -130,7 +126,7 @@ class SpoolTypeStore:
 
     def create(self, body: m.SpoolTypeCreate) -> m.SpoolType:
         data = body.model_dump()
-        _check_temps(data)
+        check_temps(data)
         names = list(data)
         try:
             with self._orders.transaction() as conn:
@@ -165,7 +161,7 @@ class SpoolTypeStore:
                 current = self._row(conn, type_id, lock=True)
                 if current is None:
                     return None
-                _check_temps(current | {n: getattr(patch, n) for n in columns})
+                check_temps(current | {n: getattr(patch, n) for n in columns})
                 row = conn.execute(
                     f"UPDATE filament_spool_types SET {', '.join(sets)} WHERE id = %s"
                     f" RETURNING {_TYPE_COLUMNS}",
@@ -308,28 +304,31 @@ class SpoolTypeStore:
     def _link_price_book(self, conn: Conn, row: dict[str, Any], *, changed: bool) -> dict[str, Any]:
         """Write the type's price book row in the same transaction, and ``filament_id``.
 
-        Its identity is the type's material, subtype and brand names and the first seven
-        characters of its ``rgba`` (the book's colours are ``#RRGGBB``). The row is found
-        by that identity, else inserted: a book row's identity is never rewritten, since
-        another type, or a person, may hold it. A row found keeps its label and takes the
-        type's cost. Two types that differ only in alpha therefore share one book row
-        until the book is RGBA (#6209). Nothing is written when ``changed`` is false (a
-        patch that touched neither cost nor identity, an archive), when the type has no
-        ``cost_per_kg`` (it keeps its ``filament_id``), and the book row of an archived
-        type stays live, for the quotes that price with it."""
+        Its identity is the type's material, subtype and brand names, the ``#RRGGBB`` of
+        its ``rgba`` and its alpha byte: #6209 landed in #6211 before this work, so the
+        book keeps ``colour`` ``#RRGGBB`` beside ``alpha``, ``extra_colours`` and
+        ``effect``, and an opaque and a translucent type of one hue get two rows. The row
+        is found by that identity, else inserted with the type's alpha, colour stops and
+        effect: a book row's identity and look are never rewritten, since another type,
+        or a person, may hold it. A row found keeps its label and takes the type's cost.
+        Nothing is written when ``changed`` is false (a patch that touched neither cost
+        nor identity, an archive), when the type has no ``cost_per_kg`` (it keeps its
+        ``filament_id``), and the book row of an archived type stays live, for the quotes
+        that price with it."""
         if not changed or row["cost_per_kg"] is None:
             return row
         names = conn.execute(
             "SELECT (SELECT name FROM filament_materials WHERE id = %s) AS material,"
             " (SELECT name FROM filament_subtypes WHERE id = %s) AS subtype,"
-            " (SELECT name FROM filament_brands WHERE id = %s) AS brand",
-            (row["material_id"], row["subtype_id"], row["brand_id"]),
+            " (SELECT name FROM filament_brands WHERE id = %s) AS brand,"
+            " (SELECT name FROM filament_effects WHERE id = %s) AS effect",
+            (row["material_id"], row["subtype_id"], row["brand_id"], row["effect_id"]),
         ).fetchone()
         assert names is not None
-        colour = row["rgba"][:7]
+        colour, alpha = row["rgba"][:7], int(row["rgba"][7:9], 16)
         cost = f"{row['cost_per_kg']:.4f}"
         target = self._orders.existing_filament(
-            conn, names["material"], names["subtype"], names["brand"], colour
+            conn, names["material"], names["subtype"], names["brand"], colour, alpha
         )
         if target is None:
             target = self._orders.insert_filament(
@@ -340,6 +339,9 @@ class SpoolTypeStore:
                     colour_name=row["colour_name"],
                     colour=colour,
                     cost_per_kg=cost,
+                    alpha=alpha,
+                    extra_colours=(row["extra_colours"] or [])[:8],
+                    effect=_book_effect(names["effect"]),
                 ),
                 conn=conn,
             ).id
@@ -357,6 +359,15 @@ class SpoolTypeStore:
         ).fetchone()
         assert linked is not None
         return linked
+
+
+def _book_effect(name: str | None) -> FilamentEffect | None:
+    """The price book's ``effect`` for an effect catalog name (``Dual Color`` is
+    ``dual-color``); ``None`` for a name the book has no value for."""
+    if name is None:
+        return None
+    value = name.strip().lower().replace(" ", "-")
+    return cast("FilamentEffect", value) if value in get_args(FilamentEffect) else None
 
 
 #: The K value tables and the column of what each value belongs to.

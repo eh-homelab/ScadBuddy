@@ -32,9 +32,15 @@ Catalog names from BB (material, subtype, brand, category, effect) resolve by th
 case name, and are added when missing. BB's ``core_weight_catalog_id`` names a BB spool
 catalog entry that has no SB insert type yet, so the insert type is not pulled.
 
-A pulled weight is an absolute reading taken at the pull, so a print both SB and BB
-booked is counted once: BB's value already holds it, and SB's ``print_actual`` before the
-reading is under the new anchor (§8.2, "Consumption is counted once").
+A pulled weight is an absolute reading at the BB row's ``updated_at``, not at the pull:
+BB's state is as of its last write (the ``created`` and every ``synced_from_bb`` event
+take that time; with none sent, the pull's). SB books a native print's ``print_ended`` at
+its plate's start (`spools/native.py` `settle_uses_in`), so a plate that started before
+BB's write is under BB's anchor and is not taken off again, and one that started after is
+(§8.2, "Consumption is counted once"; the rule is `ledger.py`'s). That holds when BB
+deducts a plate as it ends, which it does per plate. It does not hold when BB's row moved
+during a plate for another reason (an edit in BB): that plate is then not taken off, until
+BB's next write, at its end, anchors again. BB's clock and SB's are compared as they are.
 """
 
 from __future__ import annotations
@@ -358,6 +364,7 @@ def _create(
         ref_kind=REF_KIND,
         ref_id=str(bb.id),
         actor=actor,
+        at=bb.updated_at,
     )
     _bind(conn, spool_id, after, actor)
     _insert_link(conn, spool_id, bb, now)
@@ -413,7 +420,7 @@ def _update(
     last = conn.execute(
         "SELECT data -> 'bb' AS bb FROM filament_spool_events"
         " WHERE spool_id = %s AND kind = 'synced_from_bb' AND data ? 'bb'"
-        " ORDER BY at DESC, id DESC LIMIT 1",
+        " ORDER BY at DESC, seq DESC LIMIT 1",
         (spool_id,),
     ).fetchone()
     before: dict[str, Any] = (last["bb"] if last is not None else None) or {}
@@ -492,7 +499,7 @@ def _lock_from_bb(conn: Conn, spool_id: UUID) -> bool:
         "SELECT kind FROM filament_spool_events WHERE spool_id = %s"
         " AND kind IN ('edited', 'synced_from_bb')"
         " AND jsonb_typeof(data -> 'changes') = 'object' AND data -> 'changes' ? 'weight_locked'"
-        " ORDER BY at DESC, id DESC LIMIT 1",
+        " ORDER BY at DESC, seq DESC LIMIT 1",
         (spool_id,),
     ).fetchone()
     return row is not None and row["kind"] == "synced_from_bb"
@@ -670,8 +677,8 @@ def _synced(
     linked: bool = False,
     weight: str | None = None,
 ) -> None:
-    """The ``synced_from_bb`` event: what BB said (the next pull's ``before``), what
-    changed, and a ``bb`` reading when ``reading`` is set."""
+    """The ``synced_from_bb`` event, at BB's ``updated_at``: what BB said (the next
+    pull's ``before``), what changed, and a ``bb`` reading when ``reading`` is set."""
     data: dict[str, Any] = {"bb_spool_id": bb.id, "bb": after, "changes": changes}
     if linked:
         data["linked"] = True
@@ -687,6 +694,8 @@ def _synced(
         ref_kind=REF_KIND if stamp else None,
         ref_id=f"{bb.id}@{stamp}" if stamp else None,
         actor=actor,
+        # BB's state as of its last write, so the reading sits where it happened.
+        at=bb.updated_at,
         data=data,
     )
 
