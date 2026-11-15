@@ -2417,8 +2417,8 @@ holds the manifest (spec §12).
   only. On a node with `kernel.apparmor_restrict_unprivileged_userns=1` (Ubuntu 24.04's
   default) an AppArmor-unconfined pod gets no capabilities in its user namespace, and the
   sandbox exits 3 ("the user namespace's id maps: Permission denied"). So the pod runs under
-  a `Localhost` AppArmor profile, `unconfined` plus `userns,`, that the nodes must have
-  loaded ([AppArmor: unprivileged user namespace restrictions](https://gitlab.com/apparmor/apparmor/-/wikis/unprivileged_userns_restriction);
+  a `Localhost` AppArmor profile, `scadbuddy-intake-sandbox` (`unconfined` plus `userns,`),
+  that the nodes must have loaded ([AppArmor: unprivileged user namespace restrictions](https://gitlab.com/apparmor/apparmor/-/wikis/unprivileged_userns_restriction);
   in prod, eh-homelab/clusters `applications/scadbuddy/apparmor-loader.yaml`). The worker's
   pod keeps `RuntimeDefault`. While the sandbox is down, busy or refusing, each check fails and
   the worker counts it in `scadbuddy_intake_sandbox_failed_total` by `reason`
