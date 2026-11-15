@@ -46,9 +46,11 @@ export const TASK_AREAS = ['background-tasks', 'operations'] as const
  * `pending-input`: the projection's reads, the orphan sweep's cancels, a durable turn's response
  * read and its fenced span mark, and a call's recorded approval (backend
  * api/crud_agent_pending.py; gate/crudPending.ts). `audit`: the audit log's rows written, listed
- * and pruned (backend api/crud_agent_audit.py; audit/crudAudit.ts).
+ * and pruned (backend api/crud_agent_audit.py; audit/crudAudit.ts). `approvals`: the classic
+ * approvals, each decision written once with its events and audit row (backend
+ * api/crud_agent_approvals.py; approvals/crudApprovals.ts).
  */
-export const GATE_AREAS = ['gate', 'pending-input', 'audit'] as const
+export const GATE_AREAS = ['gate', 'pending-input', 'audit', 'approvals'] as const
 
 export type CrudAreasOptions = {
   fetch?: typeof fetch

@@ -71,6 +71,7 @@ import {
 } from './api/serviceCredential.js'
 import { untilBackendAnswers } from './api/backendUp.js'
 import { BLOB_AREAS, CrudAreas, FORGET_AREAS, GATE_AREAS, SECRET_AREAS, TASK_AREAS, WORKSPACE_AREAS } from './api/crudAreas.js'
+import { CrudApprovals } from './approvals/crudApprovals.js'
 import { CrudAudit } from './audit/crudAudit.js'
 import { CrudPending } from './gate/crudPending.js'
 import { CrudGate } from './gate/crudStore.js'
@@ -650,6 +651,7 @@ const sessions =
         memory,
         sql: database.sql,
         pendingRoutes,
+        approvalRoutes: { crud: new CrudApprovals(crudTarget), use: () => crudAreas.has('approvals') },
         blobs: sessionImages(database.sql),
         httpBodies: httpBodies(database.sql),
         browserOrigins: browserOriginsOn(database.sql),

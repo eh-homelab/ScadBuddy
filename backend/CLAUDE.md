@@ -378,6 +378,12 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `audit/log.ts` `AuditLog`: a row written (a tool call's approver copied from `ai_approvals` or
   its request's `approved` response in the same statement), a page listed, and the prune, the one
   DELETE the table's trigger lets through. Tests `tests/crud/test_crud_agent_audit.py`.
+  `api/crud_agent_approvals.py` (area `approvals`) over `agent_data/approvals.py` is the agent's
+  `approvals/service.ts` `ApprovalService` SQL: its reads, a pending approval made (with its
+  session events), a decision written once (the guarded UPDATE, the span's context the agent
+  sends, the session events and the `approval` audit row in one transaction), a prepared action
+  used once by its asker for its input hash, and an MCP prepare's bounds under its advisory lock.
+  Who may see or decide stays the agent's check. Tests `tests/crud/test_crud_agent_approvals.py`.
 - `backend/scadbuddy/flow_triggers/` — runs started on a schedule or an event (#2484,
   spec 2026-10-11 §12): `store.py` (`flow_triggers`, their standing grants and fires),
   `fire.py` (the `flow_trigger_fire` activity on the `library` queue), `events.py` (the
