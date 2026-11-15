@@ -326,13 +326,16 @@ The Go and Rust commands and toolchain notes: `tools/go/CLAUDE.md`, `workers/rus
 - Never commit `backend/openapi.json` or either `schema.d.ts`. An API change shows up
   as the `freshness` job's diff comment on the PR, not in the PR's own diff.
 
-## Known flakes and prod gotchas
+## Known flakes
 
 - Frontend vitest tests can time out when the machine is under heavy load (e.g.
   several builds or agents at once). Re-run before debugging; a failure that repeats
   on an idle machine is real.
 - Backend: `test_a_cancelled_slice_is_recorded_cancelled` can error with
   `httpx.ReadTimeout` on a slow runner (#6301). Re-run the shard.
+
+## Prod gotchas
+
 - A merged eh-homelab/clusters change that never reaches prod: check the `scadbuddy` Argo
   CD app's `status.history[-1].deployedAt` and its PostSync hook Jobs (`kubectl -n
   bambuddy get jobs`). A Job stuck in deletion with `argocd.argoproj.io/hook-finalizer`
