@@ -6,7 +6,7 @@ import type { ModelSummary, StorefrontListing, StorefrontListingInput } from '..
 import { ListingEditor } from '../components/storefront/ListingEditor'
 import { PrepareColours } from '../components/storefront/PrepareColours'
 import type { LivePictures } from '../components/storefront/ListingPictures'
-import { defaultsFor, draftOf, emptyDraft, listingInput, previewListing, savedKey, sellMedia, storedKey, unsaveable, type ListingDraft } from '../components/storefront/listingDraft'
+import { defaultsFor, draftOf, emptyDraft, listingInput, listingRefusal, previewListing, savedKey, sellMedia, storedKey, unsaveable, type ListingDraft, type ListingRefusal } from '../components/storefront/listingDraft'
 import { sellListing, type SellListing } from '../components/storefront/sellSource'
 import { ListingView, type ParamValues } from '../storefront/components/ListingView'
 import type { ParamValue } from '../storefront/api/client'
@@ -132,10 +132,15 @@ export function StorefrontListingPage() {
     latestModels.current = models.data
   }, [models.data])
   const book = useAsync(() => api.priceBook(), [])
+  /** #6258 — the shop's default materials, shown for a listing that names none. */
+  const settings = useAsync(() => api.getSettings(), [])
+  const shopMaterials = settings.data?.storefront_materials
   const [open, setOpen] = useState<Open | null>(() => (routeId === 'new' ? fresh() : null))
   const [loadError, setLoadError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  /** #6258 — what the last publish refused about the materials, shown beside its control until the next edit. */
+  const [refusal, setRefusal] = useState<ListingRefusal | null>(null)
   // The customer's form starts empty, as on the public page: each field shows the shop's choice.
   const [values, setValues] = useState<ParamValues>({})
 
@@ -298,13 +303,15 @@ export function StorefrontListingPage() {
   }, [open, schema.data])
 
   const preview = useMemo(
-    () => (draft ? previewListing(draft, schema.data, filaments, media, (item) => api.mediaUrl(slug, item)) : null),
-    [draft, schema.data, filaments, media, slug],
+    () => (draft ? previewListing(draft, schema.data, filaments, media, (item) => api.mediaUrl(slug, item), shopMaterials) : null),
+    [draft, schema.data, filaments, media, slug, shopMaterials],
   )
 
   function changed(next: ListingDraft) {
     if (!open) return
     edited.current = true
+    // The edit may be the fix: what publish refused is said again only by the next publish.
+    setRefusal(null)
     // Another template's defaults fill in once its schema loads.
     setOpen({ ...open, draft: next, filled: open.filled && next.slug === open.draft.slug, touched: touchedBy(open.touched, open.draft, next) })
   }
@@ -330,10 +337,20 @@ export function StorefrontListingPage() {
   async function act(run: () => Promise<void>) {
     setBusy(true)
     setError(null)
+    setRefusal(null)
     try {
       await run()
     } catch (caught) {
-      setError(message(caught))
+      // #6258 — a refusal about the materials is said beside its control; the alert points there.
+      const refused = caught instanceof ApiError ? listingRefusal(caught.problem) : null
+      setRefusal(refused)
+      setError(
+        refused === null
+          ? message(caught)
+          : refused.kind === 'material_not_allowed'
+            ? 'Not published: a colour on offer is of a material this listing does not allow. See “Materials allowed” below.'
+            : 'Not published: no allowed material can print these colours. See “Colours on offer” below.',
+      )
     } finally {
       setBusy(false)
     }
@@ -504,6 +521,8 @@ export function StorefrontListingPage() {
                 onPictureUploaded={(model, id) => pictureUploaded(open.key, model, id)}
                 coloursSettled={coloursSettled}
                 bookState={book.error ? 'failed' : book.data ? 'ready' : 'loading'}
+                shopMaterials={shopMaterials}
+                refusal={refusal}
               />
             </section>
 

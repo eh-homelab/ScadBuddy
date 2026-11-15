@@ -629,10 +629,13 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`agent/src/tools/command.ts`: `create_print_project`, `import_makerworld_model`)
   answers `{status: "running", operation_id, next}` once its follow window ends, which a
   script follows with `get_operation`; version 2 read `folder_id` straight off
-  `create_print_project` and failed `'folder_id'`. A flow run's call carries no `callKey`
-  (`agent/src/temporal/toolActivities.ts` `runCall`), so each call of a write sends a
-  fresh `Idempotency-Key`: after `may have run` or `StartToClose` the script checks
-  state (`list_print_projects`) before it sends the write again. The import is the `makerworld_import` operation on the
+  `create_print_project` and failed `'folder_id'`. A flow run's call keys its commands on
+  its gate request id (`agent/src/temporal/toolActivities.ts` `runCall`, #6350), the same
+  on every attempt of that call; each `tool(...)` call the script makes is a new call with
+  a new key. A keyed tool (both of these) whose only attempt lost its heartbeat is asked
+  once more under that key (`workflows/flow_tools.py` `FLOW_KEYED_RETRY_PATCH`, #6345).
+  After `may have run` or `StartToClose` reaches the script, it checks state
+  (`list_print_projects`) before it sends the write again. The import is the `makerworld_import` operation on the
   `library` queue (`makerworld/operations.py`): Bambuddy downloads the 3MF (up to
   `MAKERWORLD_IMPORT_TIMEOUT`), then on `library_backend` native `makerworld/imports.py`
   copies it into the native library as a `bb_to_sb` copy does

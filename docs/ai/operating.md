@@ -88,8 +88,10 @@ covers the same ground more briefly.
   `_TOOL_TIMEOUT`, plus the retries' backoff), not 90 s; one whose last attempt ends on
   its 120 s start-to-close instead takes no fallback and fails there. A flow's tool
   calls have no such fallback: one slower than 30 s that lands on an old replica times
-  out, a read up to three times and a write at once, and the script sees the error
-  (`flow_session_check` retries without limit).
+  out, a read up to three times and a write at once, except a `keyed` write (one whose
+  commands carry an Idempotency-Key), which is asked once more under the same key
+  (#6345, backend `workflows/flow_tools.py` FLOW_KEYED_RETRY_PATCH); the script sees
+  the error (`flow_session_check` retries without limit).
 - **Browser calls across a rollout of #4780.** Since #4780 a browser_* call for a tab on
   another replica is a `BridgeCall` workflow, whose one activity runs
   on the queue of the replica that holds the tab (`ai_tab_owners`;

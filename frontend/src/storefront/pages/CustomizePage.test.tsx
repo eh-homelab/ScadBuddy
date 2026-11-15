@@ -109,7 +109,7 @@ describe('CustomizePage', () => {
     const { user } = show()
     const picker = await screen.findByRole('button', { name: /Base colour/ })
     await user.click(picker)
-    await user.click(await screen.findByRole('radio', { name: 'Signal orange PLA' }))
+    await user.click(await screen.findByRole('radio', { name: 'Signal orange' }))
     // A colour set waits for its preview: the shop fills the render's slots from it.
     await waitFor(() => expect(screen.getByRole('button', { name: 'Add to order' })).toBeEnabled())
     await user.click(screen.getByRole('button', { name: 'Add to order' }))
@@ -130,62 +130,68 @@ describe('CustomizePage', () => {
     expect(screen.queryByRole('radiogroup', { name: 'Material' })).toBeNull()
     expect(sent[0]).toEqual(expect.objectContaining({ values: {} }))
     await user.click(screen.getByRole('button', { name: /Body colour/ }))
-    await user.click(await screen.findByRole('radio', { name: 'Rust PETG' }))
+    await user.click(await screen.findByRole('radio', { name: 'Rust' }))
     await waitFor(() => expect(sent.at(-1)).toEqual(expect.objectContaining({ values: { body_colour: '#C0502A' } })))
     server.events.removeAllListeners()
     expect(sent.every((body) => !('picks' in (body as object)))).toBe(true)
   })
 
-  it('shows the colour the shop settled for a part the visitor did not set (#6302 review)', async () => {
+  it('moves an untouched part at once, then shows the colour the shop settled for it (#6258)', async () => {
     // The rim's default blue is PLA only. The visitor picks a rust that is PETG only, so the
-    // print is PETG and the shop moves the rim to its closest PETG colour, teal.
+    // print is PETG. The page predicts the rim's closest PETG colour, teal, at once. The
+    // shop's reply settles it to rust here, and the reply wins.
+    let hold: (() => void) | undefined
     server.use(
       http.post('/api/store/v1/renders', async ({ request }) => {
         const body = (await request.json()) as { values: Record<string, string> }
-        const values = body.values.body_colour ? { body_colour: body.values.body_colour, rim_colour: '#1C8C8C' } : { body_colour: '#1B6CA8', rim_colour: '#1B6CA8' }
-        return HttpResponse.json({ ...RUNNING, values }, { status: 202 })
+        if (body.values.body_colour === undefined) return HttpResponse.json({ ...RUNNING, values: { body_colour: '#1B6CA8', rim_colour: '#1B6CA8' } }, { status: 202 })
+        await new Promise<void>((resolve) => { hold = resolve })
+        return HttpResponse.json({ ...RUNNING, values: { body_colour: body.values.body_colour, rim_colour: '#C0502A' } }, { status: 202 })
       }),
       http.get('/api/store/v1/renders/:id', () => HttpResponse.json(RUNNING)),
     )
     const { user } = show(CHARM_ID)
     expect(await screen.findByRole('button', { name: /Rim colour Ocean blue/ })).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: /Body colour/ }))
-    await user.click(await screen.findByRole('radio', { name: 'Rust PETG' }))
-    expect(await screen.findByRole('button', { name: /Rim colour Teal/ })).toBeInTheDocument()
+    await user.click(await screen.findByRole('radio', { name: 'Rust' }))
+    expect(screen.getByRole('button', { name: /Rim colour Teal/ })).toBeInTheDocument()
+    await waitFor(() => expect(hold).toBeDefined())
+    hold?.()
+    expect(await screen.findByRole('button', { name: /Rim colour Rust/ })).toBeInTheDocument()
   })
 
-  it('shows the listing default while the start of changed choices has not answered (#6302 review)', async () => {
-    // The first pick settles the rim to teal. The next pick's start does not answer yet, so
-    // the rim shows the listing's default, not the last reply's teal.
+  it('shows its own prediction, not the last reply, while the start of changed choices has not answered (#6302 review)', async () => {
+    // The first pick's reply settles the rim to rust. The next pick's start does not answer
+    // yet, so the rim shows the page's prediction (teal), not the last reply's rust.
     let hold: (() => void) | undefined
     server.use(
       http.post('/api/store/v1/renders', async ({ request }) => {
         const body = (await request.json()) as { values: Record<string, string> }
-        if (body.values.body_colour === '#C0502A') return HttpResponse.json({ ...RUNNING, values: { body_colour: '#C0502A', rim_colour: '#1C8C8C' } }, { status: 202 })
+        if (body.values.body_colour === '#C0502A') return HttpResponse.json({ ...RUNNING, values: { body_colour: '#C0502A', rim_colour: '#C0502A' } }, { status: 202 })
         if (body.values.body_colour === undefined) return HttpResponse.json({ ...RUNNING, values: { body_colour: '#1B6CA8', rim_colour: '#1B6CA8' } }, { status: 202 })
         await new Promise<void>((resolve) => { hold = resolve })
-        return HttpResponse.json({ ...RUNNING, values: { body_colour: body.values.body_colour, rim_colour: '#1C8C8C' } }, { status: 202 })
+        return HttpResponse.json({ ...RUNNING, values: { body_colour: body.values.body_colour, rim_colour: '#C0502A' } }, { status: 202 })
       }),
       http.get('/api/store/v1/renders/:id', () => HttpResponse.json(RUNNING)),
     )
     const { user } = show(CHARM_ID)
     await user.click(await screen.findByRole('button', { name: /Body colour/ }))
-    await user.click(await screen.findByRole('radio', { name: 'Rust PETG' }))
-    expect(await screen.findByRole('button', { name: /Rim colour Teal/ })).toBeInTheDocument()
+    await user.click(await screen.findByRole('radio', { name: 'Rust' }))
+    expect(await screen.findByRole('button', { name: /Rim colour Rust/ })).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: /Body colour/ }))
-    await user.click(await screen.findByRole('radio', { name: 'Teal PETG' }))
-    expect(await screen.findByRole('button', { name: /Rim colour Ocean blue/ })).toBeInTheDocument()
+    await user.click(await screen.findByRole('radio', { name: 'Teal' }))
+    expect(screen.getByRole('button', { name: /Rim colour Teal/ })).toBeInTheDocument()
     await waitFor(() => expect(hold).toBeDefined())
-    expect(screen.getByRole('button', { name: /Rim colour Ocean blue/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Rim colour Teal/ })).toBeInTheDocument()
     hold?.()
-    expect(await screen.findByRole('button', { name: /Rim colour Teal/ })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /Rim colour Rust/ })).toBeInTheDocument()
   })
 
-  it('shows the listing default again once a render start is refused (#6302 review)', async () => {
+  it('shows its own prediction again once a render start is refused (#6302 review)', async () => {
     server.use(
       http.post('/api/store/v1/renders', async ({ request }) => {
         const body = (await request.json()) as { values: Record<string, string> }
-        if (body.values.body_colour === '#C0502A') return HttpResponse.json({ ...RUNNING, values: { body_colour: '#C0502A', rim_colour: '#1C8C8C' } }, { status: 202 })
+        if (body.values.body_colour === '#C0502A') return HttpResponse.json({ ...RUNNING, values: { body_colour: '#C0502A', rim_colour: '#C0502A' } }, { status: 202 })
         if (body.values.body_colour === undefined) return HttpResponse.json({ ...RUNNING, values: { body_colour: '#1B6CA8', rim_colour: '#1B6CA8' } }, { status: 202 })
         return HttpResponse.json(
           { type: PROBLEMS + 'listing_colours_clash', title: 'Unprocessable Content', status: 422, detail: 'No.', parts: ['body_colour'] },
@@ -196,22 +202,27 @@ describe('CustomizePage', () => {
     )
     const { user } = show(CHARM_ID)
     await user.click(await screen.findByRole('button', { name: /Body colour/ }))
-    await user.click(await screen.findByRole('radio', { name: 'Rust PETG' }))
-    expect(await screen.findByRole('button', { name: /Rim colour Teal/ })).toBeInTheDocument()
+    await user.click(await screen.findByRole('radio', { name: 'Rust' }))
+    expect(await screen.findByRole('button', { name: /Rim colour Rust/ })).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: /Body colour/ }))
-    await user.click(await screen.findByRole('radio', { name: 'Teal PETG' }))
-    expect(await screen.findByRole('button', { name: /Rim colour Ocean blue/ })).toBeInTheDocument()
+    await user.click(await screen.findByRole('radio', { name: 'Teal' }))
+    await screen.findByText(/can't go/)
+    expect(screen.getByRole('button', { name: /Rim colour Teal/ })).toBeInTheDocument()
   })
 
-  it('says plainly when colours of no one material are set (#6258)', async () => {
+  it('says plainly which picks clash when they need two materials, and moves neither (#6258)', async () => {
     const { user } = show(CHARM_ID)
     await user.click(await screen.findByRole('button', { name: /Body colour/ }))
-    await user.click(await screen.findByRole('radio', { name: 'Signal orange PLA' }))
+    await user.click(await screen.findByRole('radio', { name: 'Signal orange' }))
     await user.click(screen.getByRole('button', { name: /Rim colour/ }))
-    await user.click(await screen.findByRole('radio', { name: 'Teal PETG' }))
+    await user.click(await screen.findByRole('radio', { name: 'Teal' }))
     expect(
-      await screen.findByText("Some colours can't go together. Each print is made from one kind of plastic, and a few colours only come in one kind. Change one of them."),
+      await screen.findByText(
+        "The body colour and the rim colour can't go together. Each print is made from one kind of plastic, and a few colours only come in one kind. Change one of them.",
+      ),
     ).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Body colour/ })).toHaveAccessibleName('Body colour Signal orange')
+    expect(screen.getByRole('button', { name: /Rim colour/ })).toHaveAccessibleName('Rim colour Teal')
   })
 
   it('says the preview must show before an add, with a retry, when the preview fails (#6152 review)', async () => {
