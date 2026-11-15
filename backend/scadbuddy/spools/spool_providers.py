@@ -1,16 +1,18 @@
 """ScadBuddy's own inventory as a spool provider (#4643, tier B of #3818; plan 2026-10-18
 D1 names it the second provider, after Bambuddy's, `bambuddy/spool_providers.py`).
 
-Its records are ``native_spools`` (`spools/native.py`), which a person keeps; the refresh
+Its records are ScadBuddy's own spools (`spools/native.py`, over the ``filament_*``
+tables since #6261), which a person keeps; the refresh
 (`workflows/spool_refresh.py`) copies the unarchived ones into ``spool_provider_records``
 as every provider's are, and a write through ``/api/v1/native-spools`` refreshes it at
 once (`api/native_spools.py`), so the overlay never shows an edit late. It reads
 Postgres only: a shop with no Bambuddy has shelf spools and remaining grams with it.
 
 A native print takes what it used off these records (#4643 part 2): each LAN start
-saves its slots' grams against the native record the overlay put in each tray
-(`native.spool_uses`, ``lan_print``), and :func:`native_use_hook`, a read hook of the
-print follow, settles them once the run's print settles, then re-caches the records.
+books its slots' grams against the native record the overlay put in each tray
+(`native.spool_uses`, ``lan_print``) as an estimate that comes off at once, and re-caches
+the records; :func:`native_use_hook`, a read hook of the print follow, settles them once
+the run's print settles, then re-caches the records.
 
 It is first (priority 10, Bambuddy's is 100): a tray's remaining weight is the first
 fresh record's (`SpoolProvider.priority`), and the shop's own count is the one it keeps.
@@ -93,10 +95,12 @@ async def recache(spools: Spools) -> None:
 
 
 def native_use_hook(spools: Spools) -> ReadHook:
-    """The print follow's read hook for what a native print used (#4643): once a LAN
-    run's print has settled, each of its starts that ended ``done`` takes its grams off
-    its native spools (`NativeSpoolStore.settle_uses`), once whichever reader settles it
-    first, and the records are re-cached for the overlay. Advisory: a failure is logged,
+    """The print follow's read hook for what a native print used (#4643): a start's
+    estimate came off its native spools as it started (`NativeSpoolStore.record_uses`);
+    once a LAN run's print has settled, the settle books each start's ``print_ended``
+    actual (its sliced grams when it ended ``done``, else 0, which drops the estimate;
+    `NativeSpoolStore.settle_uses`), once whichever reader settles it first, and the
+    records are re-cached for the overlay. Advisory: a failure is logged,
     never raised into the follow. Reads and writes ScadBuddy's Postgres only: on the print
     worker through the API's CRUD routes (`crud/print.py` `RemoteNativeSpools`, #5298)."""
 

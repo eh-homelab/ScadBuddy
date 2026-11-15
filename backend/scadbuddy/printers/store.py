@@ -25,7 +25,9 @@ that every foreign key to ``printers`` is listed), in one of two forms:
   ``(printer_id, ams_id, tray_id)``) is registered this way with
   ``spools.store.repoint_tray_links``, in which ``into``'s link wins (#4190). A bare
   hook is accepted too, for a reference with no column to name: Task 8's print-run
-  activity facet is one (`_repoint_run_activity`).
+  activity facet is one (`_repoint_run_activity`). The filament inventory's AMS tray
+  places and K values (#6261) are registered with hooks in `filament/locations.py` and
+  `filament/types.py`.
 
 A table that names a printer also carries ``REFERENCES printers (id) ON DELETE
 CASCADE`` (``tray_spool_links``: 20261019T0304Z), so a delete takes its rows with it
@@ -158,6 +160,22 @@ def _repoint_tray_links(conn: Connection[DictRow], merged: str, into: str) -> No
     from scadbuddy.spools.store import repoint_tray_links
 
     repoint_tray_links(conn, uuid.UUID(merged), uuid.UUID(into))
+
+
+def _repoint_filament_locations(conn: Connection[DictRow], merged: str, into: str) -> None:
+    # Imported here, as `spools` is: the filament inventory is a feature of its own.
+    from scadbuddy.filament.locations import repoint_printer_locations
+
+    repoint_printer_locations(conn, uuid.UUID(merged), uuid.UUID(into))
+
+
+def _repoint_k_values(table: str) -> RepointHook:
+    def repoint(conn: Connection[DictRow], merged: str, into: str) -> None:
+        from scadbuddy.filament.types import repoint_k_values
+
+        repoint_k_values(conn, table, uuid.UUID(merged), uuid.UUID(into))
+
+    return repoint
 
 
 def _repoint_run_activity(conn: Connection[DictRow], merged: str, into: str) -> None:
@@ -303,6 +321,19 @@ PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
     # #4699 phase 4: the LAN-only printer a print the watcher recorded ran on, and its
     # job key (#6045).
     PrinterReference("print_lan_imports", "printer", repoint=_repoint_lan_imports),
+    # #6261: a printer's AMS tray places (``into``'s wins a tray both have; the gone
+    # one's spools move there) and its K values (``into``'s wins a key both have).
+    PrinterReference("filament_locations", "printer_id", repoint=_repoint_filament_locations),
+    PrinterReference(
+        "filament_spool_type_k_values",
+        "printer_id",
+        repoint=_repoint_k_values("filament_spool_type_k_values"),
+    ),
+    PrinterReference(
+        "filament_spool_k_values",
+        "printer_id",
+        repoint=_repoint_k_values("filament_spool_k_values"),
+    ),
     _repoint_run_activity,
     # #4971: the default printer and the registry-keyed settings map entries; #4699: the
     # registry ids in the print watcher's skip list.

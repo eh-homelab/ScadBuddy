@@ -24,6 +24,8 @@ that each shard ran what it selected, as `backend-pytest-split` does.
 same way, `vite.config.ts`).
 - `pnpm exec tsc -p tsconfig.app.json --noEmit` - the quick typecheck. It skips
   `pretypecheck`, so run `pnpm gen:api` once first, or `src/api/schema.d.ts` is missing.
+  Run it again after a merge or rebase onto main: a stale `schema.d.ts` gives type errors
+  about fields the merge added or removed.
   Playwright's web server runs `pnpm build`, which typechecks first, so one type error in
   a test also fails all three `frontend-e2e` shards (#6238).
 - No prettier here; eslint is the only lint and format check.

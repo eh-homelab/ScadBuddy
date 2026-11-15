@@ -373,7 +373,7 @@
       "id": 18,
       "type": "timeseries",
       "title": "Render key fallback",
-      "description": "1 while render workers hold the full Bambuddy key (spec 2026-09-27 §9).",
+      "description": "1 while no render key is saved and the API's store holds the full Bambuddy key (spec 2026-09-27 §9). Standalone render workers never get it, so their renders on the Bambuddy store fail until a render key is saved.",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "gridPos": { "x": 16, "y": 35, "w": 8, "h": 8 },
       "fieldConfig": { "defaults": { "min": 0, "max": 1 }, "overrides": [] },
