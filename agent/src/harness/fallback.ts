@@ -7,6 +7,7 @@ import {
   credentialDisplayLabel,
   credentialLabel,
   describeUnusable,
+  openerOf,
   soonestRecovery,
 } from '../credentials.js'
 import { type KekStatus, redact } from '../secrets.js'
@@ -591,11 +592,14 @@ export class CredentialPool implements CredentialSource {
    * runs on, which a cooldown does not end); a disabled one is never listed.
    */
   async candidates(options: { includeCooling?: boolean } = {}): Promise<PooledCredential[]> {
-    const kek = this.kek
+    // The key that opens them: this process's KEK, or the API's once the credentials go through
+    // its CRUD routes (#5299 D5), where this process may hold none.
+    const kek = await openerOf(this.repo, this.kek)
     if (!kek.ok) throw new NoUsableCredentialError(`no key-encryption key: ${kek.reason}`, undefined)
-    // One SELECT for every row, its state, epoch and sealed secret together:
-    // the epoch recorded against is always that of the secret the turn runs on.
-    const rows = await this.repo.revealAll(kek.kek)
+    // One read of every row, its state, epoch and sealed secret together (one transaction on the
+    // API, which audits the reveal): the epoch recorded against is always that of the secret the
+    // turn runs on.
+    const rows = await this.repo.revealAll(this.kek.ok ? this.kek.kek : undefined, 'turn')
     const list = rows.map((r) => r.stored)
     const out: PooledCredential[] = []
     for (const { stored: c, credential } of rows) {

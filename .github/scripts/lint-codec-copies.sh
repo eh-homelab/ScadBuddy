@@ -20,6 +20,8 @@ same() {
 }
 same agent/test/fixtures/payload-vectors.json backend/tests/fixtures/payload-vectors.json
 same agent/test/fixtures/subject-vectors.json backend/tests/fixtures/subject-vectors.json
+# The agent's credential vectors, which the API opens behind its CRUD routes (#5299 step 4).
+same agent/test/fixtures/secret-vectors.json backend/tests/fixtures/secret-vectors.json
 
 if ! python3 - "$root" <<'PY'
 import ast

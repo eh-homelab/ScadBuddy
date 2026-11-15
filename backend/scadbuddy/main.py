@@ -28,6 +28,8 @@ from scadbuddy.activity.index import (
     ACTIVITY_REPAIR_WINDOW_DEFAULT,
     ACTIVITY_TTL_DEFAULT,
 )
+from scadbuddy.agent_data.rotation import kek_at
+from scadbuddy.agent_data.rotation import rotate as rotate_agent_secrets
 from scadbuddy.api import (
     health,
     internal_blobs,
@@ -1200,6 +1202,25 @@ def _grant_and_rotate_at_start(state: AppState) -> None:
         logger.exception("could not issue the service credentials")
 
 
+def _rotate_agent_secrets(state: AppState) -> None:
+    """#5299 D5: with the previous KEK mounted, the agent's Claude credentials and payload
+    keys sealed under it are sealed again under the current one (`agent_data/rotation.py`),
+    as the agent did at its own start. Logged, never fatal."""
+    current = kek_at(state.settings.secret_key_file)
+    previous = kek_at(state.settings.secret_key_previous_file)
+    if state.settings.secret_key_previous_file is not None and previous is None:
+        logger.warning(
+            "the previous secret key cannot be read; the agent's secrets are not re-wrapped"
+        )
+    if current is None or previous is None:
+        return
+    try:
+        with state.settings_store.pool.connection() as conn:
+            rotate_agent_secrets(conn, previous, current)
+    except Exception:
+        logger.exception("could not re-wrap the agent's secrets under the current key")
+
+
 def _prune_crud_requests(state: AppState) -> None:
     with state.settings_store.pool.connection() as conn:
         idempotency.prune(conn)
@@ -2018,6 +2039,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise
     # #4975 phase 4: the service credentials, before any caller reads its own.
     await asyncio.to_thread(_grant_and_rotate_at_start, state)
+    # #5299 D5: a KEK rotation re-wraps the agent's credentials and payload keys here.
+    await asyncio.to_thread(_rotate_agent_secrets, state)
     # #4975 phase 8 (spec 2026-11-01 §9.1): `enforce` without a usable login stops here.
     if state.settings.auth_mode == "enforce":
         auth = state.components.get(AUTH)
