@@ -94,8 +94,12 @@ function LowStock({ parts }: { parts: InventoryPart[] }) {
   )
 }
 
-/** The query this browser remembers: the URL's, less the search. A profit report row's query is never stored (`keep`). */
-function remembered(query: OrdersQuery): string {
+/**
+ * The query this browser remembers: the URL's, less the search; null for a profit report
+ * row's query, which is a visit of its own and never replaces the remembered view.
+ */
+function remembered(query: OrdersQuery): string | null {
+  if (isReportFiltered(query)) return null
   const params = toOrdersParams(query)
   params.delete('q')
   return params.toString()
@@ -182,8 +186,8 @@ export function OrdersPage() {
   // ago: its link lists them all, so the N-day rule does not apply to it.
   const query: OrdersQuery = { ...urlQuery, ended_since: urlQuery.old || isReportFiltered(urlQuery) ? '' : endedSince(memory.hideDays) }
   const key = `${toOrdersParams(query).toString()}#${query.ended_since}`
-  // A profit report row's link is a visit of its own: it never replaces the remembered view.
-  const keep = memory.remember && !isReportFiltered(urlQuery) ? remembered(query) : null
+  // Null on a profit report row's link (`remembered`), so the effect stores nothing.
+  const keep = memory.remember ? remembered(query) : null
   useEffect(() => {
     if (keep !== null && restore === null) setMemory(storeOrdersMemory({ query: keep }))
   }, [keep, restore])
@@ -342,7 +346,7 @@ export function OrdersPage() {
             <Switch
               size="sm"
               checked={memory.remember}
-              onCheckedChange={(remember) => setMemory(storeOrdersMemory({ remember, query: !remember ? '' : isReportFiltered(query) ? memory.query : remembered(query) }))}
+              onCheckedChange={(remember) => setMemory(storeOrdersMemory({ remember, query: remember ? (remembered(query) ?? memory.query) : '' }))}
             />
             Remember my view
           </label>
