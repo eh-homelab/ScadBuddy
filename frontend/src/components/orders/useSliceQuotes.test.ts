@@ -509,4 +509,44 @@ describe('useSliceQuotes · an item’s render (#6324)', () => {
     await expect(rendered).resolves.toBe(true)
     expect(result.current.runs.has('item-1')).toBe(false)
   })
+
+  it('settles true at once when the items already show the output as the render lands', async () => {
+    const landed = deferred<never>()
+    vi.spyOn(api, 'renderItem').mockReturnValue(landed.promise)
+    vi.spyOn(api, 'runningQuotes').mockResolvedValue({ items: [] } as never)
+    vi.spyOn(api, 'failedQuotes').mockResolvedValue(new Map())
+    const onQuoted = vi.fn()
+    const before = [{ id: 'item-1', order_id: 'order-1', output_id: null, quotes: [], created_at: '2026-10-26T10:00:00Z' }] as unknown as OrderItemDetail[]
+    const { result, rerender } = renderHook(({ items }) => useSliceQuotes('order-1', items, onQuoted), { initialProps: { items: before } })
+    let rendered!: Promise<boolean>
+    act(() => {
+      rendered = result.current.render('item-1', [])
+    })
+    // A realtime frame's read shows the output before the render's answer lands.
+    rerender({ items: [{ ...before[0]!, output_id: 'o'.repeat(32) }] })
+    await act(async () => landed.resolve({} as never))
+    await expect(rendered).resolves.toBe(true)
+    expect(result.current.runs.has('item-1')).toBe(false)
+  })
+
+  it('detaches the run and settles false when the reload after a landed render fails', async () => {
+    vi.spyOn(api, 'renderItem').mockResolvedValue({} as never)
+    vi.spyOn(api, 'runningQuotes').mockResolvedValue({ items: [] } as never)
+    vi.spyOn(api, 'failedQuotes').mockResolvedValue(new Map())
+    // The order's read fails: the items never change.
+    const onQuoted = vi.fn((failed?: () => void) => failed?.())
+    const before = [{ id: 'item-1', order_id: 'order-1', output_id: null, quotes: [], created_at: '2026-10-26T10:00:00Z' }] as unknown as OrderItemDetail[]
+    const { result, rerender } = renderHook(({ items }) => useSliceQuotes('order-1', items, onQuoted), { initialProps: { items: before } })
+    let rendered!: Promise<boolean>
+    act(() => {
+      rendered = result.current.render('item-1', [])
+    })
+    await act(async () => {
+      await expect(rendered).resolves.toBe(false)
+    })
+    expect(result.current.runs.get('item-1')).toMatchObject({ stage: 'rendering', error: null, detached: true })
+    // A later read that shows the output ends it.
+    rerender({ items: [{ ...before[0]!, output_id: 'o'.repeat(32) }] })
+    await waitFor(() => expect(result.current.runs.has('item-1')).toBe(false))
+  })
 })
