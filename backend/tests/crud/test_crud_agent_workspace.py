@@ -459,6 +459,34 @@ def test_a_fork_rewraps_the_parent_keys_and_holds_the_same_blob(
     assert blobs.read(f"session:{child}", "a.bin").content == b"sealed"
 
 
+def test_a_fork_copies_the_parent_as_it_is_under_the_lock(
+    blobs: Agent, tables: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent, child = _session(tables), _session(tables)
+    blobs.write(f"session:{parent}", "a.bin", b"kept")
+    blobs.write(f"session:{parent}", "b.bin", b"deleted meanwhile")
+    wrap = ws.wrap_key
+    calls: list[str] = []
+
+    def wrap_then_delete(*args: Any, **kwargs: Any) -> Any:
+        # The parent's b.bin goes between the wrap and the copy's lock, on another connection.
+        if not calls:
+            _sql(tables, "DELETE FROM ai_session_files WHERE path = 'b.bin'")
+        calls.append(args[2])
+        return wrap(*args, **kwargs)
+
+    monkeypatch.setattr(ws, "wrap_key", wrap_then_delete)
+    copied = blobs.post("/workspace/copies", {"from_session": parent, "to_session": child})
+    assert copied.json() == {"copied": 1}
+    rows = _sql(
+        tables, "SELECT path FROM ai_session_files WHERE workspace = %s", (f"session:{child}",)
+    )
+    assert [r["path"] for r in rows] == ["a.bin"]
+    assert {path for _, path in _holds(tables) if path.startswith(f"session:{child}")} == {
+        f"session:{child}/a.bin"
+    }
+
+
 def test_a_session_gone_gets_no_key_and_no_file(blobs: Agent, tables: PgPool) -> None:
     sid = str(uuid.uuid4())
     refused = blobs.write(f"session:{sid}", "a", b"x")

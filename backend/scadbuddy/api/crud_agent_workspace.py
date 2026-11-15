@@ -384,7 +384,9 @@ class WriteMeta(BaseModel):
     expected_sha256: Sha | None = None
     #: ``workspace.file`` events of the workspace's session, logged in the write's
     #: transaction, as JSON text.
-    events: list[str] = Field(default_factory=list, max_length=ws.EVENTS_MAX)
+    events: list[Annotated[str, Field(max_length=ws.EVENT_BYTES_MAX)]] = Field(
+        default_factory=list, max_length=ws.EVENTS_MAX
+    )
 
 
 class Written(BaseModel):

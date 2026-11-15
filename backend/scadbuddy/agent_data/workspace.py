@@ -727,24 +727,59 @@ def copy(conn: Connection[Any], from_session: str, to_session: str, keks: Keks) 
     parent's blob, its file key wrapped again for the child, held in the same
     transaction; a row kept in Postgres names the parent's bytes row. Every file key is
     wrapped first (what can fail: no KEK, a forgotten parent), then every row is written in
-    one transaction. How many rows the child got."""
-    source, target = f"session:{from_session}", f"session:{to_session}"
-    rows = (
+    one transaction under the parent's write lock, once the parent's blob rows are still
+    the ones wrapped: a write to the parent between the two is wrapped again, at most
+    ``COPY_ATTEMPTS`` times, then refused ``conflict``. How many rows the child got."""
+    source = f"session:{from_session}"
+    wrapped: dict[str, tuple[dict[str, Any], bytes]] = {}
+    for _ in range(COPY_ATTEMPTS):
+        rows = _blob_rows_of(conn, source)
+        for row in rows:
+            kept = wrapped.get(row["path"])
+            if kept is not None and kept[0]["blob_key"] == row["blob_key"]:
+                continue
+            file_key = unwrap_key(
+                conn, source, row["path"], row["blob_key"], bytes(row["key_sealed"]), None, keks
+            )
+            sealed, _ = wrap_key(
+                conn, f"session:{to_session}", row["path"], row["blob_key"], file_key, keks
+            )
+            wrapped[row["path"]] = (row, sealed)
+        for gone in set(wrapped) - {r["path"] for r in rows}:
+            del wrapped[gone]
+        written = _copy_rows(conn, from_session, to_session, wrapped)
+        if written is not None:
+            return written
+    raise WorkspaceRefusedError(
+        "conflict", "the parent's files kept changing while the fork copied them; try again"
+    )
+
+
+#: How many times a fork's copy wraps again what changed in its parent meanwhile.
+COPY_ATTEMPTS = 3
+
+
+def _blob_rows_of(conn: Connection[Any], workspace: str) -> list[dict[str, Any]]:
+    return list(
         _cur(conn)
         .execute(
             f"SELECT {_INFO}, blob_key, key_sealed FROM ai_session_files"
             " WHERE workspace = %s AND blob_key IS NOT NULL",
-            (source,),
+            (workspace,),
         )
         .fetchall()
     )
-    wrapped: list[tuple[dict[str, Any], bytes]] = []
-    for row in rows:
-        file_key = unwrap_key(
-            conn, source, row["path"], row["blob_key"], bytes(row["key_sealed"]), None, keks
-        )
-        sealed, _ = wrap_key(conn, target, row["path"], row["blob_key"], file_key, keks)
-        wrapped.append((row, sealed))
+
+
+def _copy_rows(
+    conn: Connection[Any],
+    from_session: str,
+    to_session: str,
+    wrapped: dict[str, tuple[dict[str, Any], bytes]],
+) -> int | None:
+    """The fork's rows, in one transaction under the parent's write lock; None, and nothing
+    written, when the parent's blob rows are no longer those ``wrapped`` names."""
+    source, target = f"session:{from_session}", f"session:{to_session}"
     written: int = 0
     with conn.transaction():
         cur = _cur(conn)
@@ -753,6 +788,9 @@ def copy(conn: Connection[Any], from_session: str, to_session: str, keks: Keks) 
             "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
             (f"scadbuddy:ai_session_files:{source}",),
         )
+        now = {r["path"]: r["blob_key"] for r in _blob_rows_of(conn, source)}
+        if now != {path: row["blob_key"] for path, (row, _) in wrapped.items()}:
+            return None
         # Every bytes row the child will name is locked FOR KEY SHARE until this commits
         # (``store.ts`` ``copy``): lock what is there, put the bytes of the parent's inline
         # rows that are not, and lock again until all are held.
@@ -795,7 +833,7 @@ def copy(conn: Connection[Any], from_session: str, to_session: str, keks: Keks) 
             " ON CONFLICT (workspace, path) DO NOTHING",
             (target, to_session, source),
         ).rowcount
-        for row, sealed in wrapped:
+        for row, sealed in wrapped.values():
             inserted = cur.execute(
                 "INSERT INTO ai_session_files (workspace, session_id, path, media_type,"
                 " blob_key, key_sealed, sha256, size, source, created_at, updated_at)"
@@ -924,7 +962,7 @@ def reconcile(conn: Connection[Any], grace_s: int) -> tuple[int, int] | None:
 
 def rewrap(conn: Connection[Any], previous: Kek, current: Kek) -> tuple[int, int]:
     """Key rotation: every principal file key sealed under ``previous`` sealed again under
-    ``current`` (the agent's ``rewrapWorkspaceKeys``). (re-wrapped, failed)."""
+    ``current``, as the agent did at its start before #5299 step 7. (re-wrapped, failed)."""
     if previous.id == current.id:
         return 0, 0
     rows = (

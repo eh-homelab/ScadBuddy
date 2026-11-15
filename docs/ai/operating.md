@@ -444,7 +444,8 @@ kubectl -n scadbuddy create secret generic scadbuddy-agent-kek \
   ([`backend/scadbuddy/api/crud_agent_secrets.py`](../../backend/scadbuddy/api/crud_agent_secrets.py)),
   and the agent asks it whether it holds a key (`GET …/crud/agent/credentials/key`). The
   agent's own file still opens its plugin secrets, Web Push and channel keys, plugin
-  sign-ins and workspace file keys, until the later steps of #5299. Mount the same key
+  sign-ins, and its workspace file keys while the API does not list area `workspace`
+  (#5299 step 7), until the later steps of #5299. Mount the same key
   in both.
 - **Keep a copy.** Each stored row records the KEK's id (the first 16 hex characters of
   SHA-256 over the key; `kekFromBase64()`). A credential sealed under a lost key cannot
@@ -476,13 +477,13 @@ key, and they stop opening once the old key's mount is removed.
    - The API, after its migrations: `ai_credentials` (the Claude credentials),
      `ai_payload_keys` (the durable payload keys), and `ai_push_vapid`,
      `ai_push_subscriptions` and `ai_notify_channels` (the Web Push keys and the
-     notification channels' tokens, #5299 step 5). The log line reads
-     `secret key rotation: re-wrapped the agent's credentials` (or `payload_keys`, or
-     `notify`), with the counts.
+     notification channels' tokens, #5299 step 5), and `ai_session_files` (the workspace's
+     principal file keys, #5299 step 7). The log line reads
+     `secret key rotation: re-wrapped the agent's credentials` (or `payload_keys`,
+     `notify`, or `session_files`), with the counts.
    - The agent, once migrations have applied (the `afterMigrate` hook of
-     `connectDatabase()`): `ai_session_files` (workspace file keys), `ai_plugins` (plugin
-     secrets) and `ai_plugin_oauth` (plugin sign-ins). The later steps of #5299 move these
-     to the API too.
+     `connectDatabase()`): `ai_plugins` (plugin secrets) and `ai_plugin_oauth` (plugin
+     sign-ins). The later steps of #5299 move these to the API too.
 
    The sealed secret and `updated_at` are not touched. Each `UPDATE` is conditional on
    `kek_id`, so two pods rotating at once do not overwrite each other.
