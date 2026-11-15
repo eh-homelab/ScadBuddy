@@ -473,15 +473,16 @@ key, and they stop opening once the old key's mount is removed.
    containers**, then restart them.
 3. Each one re-wraps its own tables at its start. Only the data key of a row whose
    `kek_id` is the old key's is sealed again under the new key:
-   - The API, after its migrations: `ai_credentials` (the Claude credentials) and
-     `ai_payload_keys` (the durable payload keys). The log line reads
-     `secret key rotation: re-wrapped the agent's credentials` (or `payload_keys`), with
-     the counts.
+   - The API, after its migrations: `ai_credentials` (the Claude credentials),
+     `ai_payload_keys` (the durable payload keys), and `ai_push_vapid`,
+     `ai_push_subscriptions` and `ai_notify_channels` (the Web Push keys and the
+     notification channels' tokens, #5299 step 5). The log line reads
+     `secret key rotation: re-wrapped the agent's credentials` (or `payload_keys`, or
+     `notify`), with the counts.
    - The agent, once migrations have applied (the `afterMigrate` hook of
      `connectDatabase()`): `ai_session_files` (workspace file keys), `ai_plugins` (plugin
-     secrets), `ai_push_vapid` and `ai_push_subscriptions` (Web Push keys),
-     `ai_notify_channels` (notification channel tokens) and `ai_plugin_oauth` (plugin
-     sign-ins). The later steps of #5299 move these to the API too.
+     secrets) and `ai_plugin_oauth` (plugin sign-ins). The later steps of #5299 move these
+     to the API too.
 
    The sealed secret and `updated_at` are not touched. Each `UPDATE` is conditional on
    `kek_id`, so two pods rotating at once do not overwrite each other.
@@ -2120,8 +2121,11 @@ approve:
   on. The agent pushes each request once to every subscribed browser of someone who may see
   it. A push carries the request's id, its session's id and its reason, never the message.
   The VAPID key is made on first use and sealed under the KEK (`ai_push_vapid`).
-  Subscriptions (`ai_push_subscriptions`) are sealed under the KEK too, so Web Push needs
-  `SCADBUDDY_SECRET_KEY_FILE`, and rotation re-wraps both. A subscription's endpoint comes
+  Subscriptions (`ai_push_subscriptions`) are sealed under the KEK too, and rotation
+  re-wraps both. Once the API lists the agent's CRUD area `notify` (#5299 step 5), the API
+  seals and opens them with its own KEK, so the agent needs none for Web Push or the
+  notification channels; before that, Web Push needs `SCADBUDDY_SECRET_KEY_FILE` in the
+  agent. A subscription's endpoint comes
   from the browser, so it is checked strictly
   ([`agent/src/notify/pushEgress.ts`](../../agent/src/notify/pushEgress.ts)), when it is
   stored and again at every push. It must use https, and its host must be on the push-service

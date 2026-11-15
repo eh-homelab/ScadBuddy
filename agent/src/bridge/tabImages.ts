@@ -1,6 +1,7 @@
 import type { Sql } from 'postgres'
-import type { ImageMediaType } from '../sessions/images.js'
-import type { SessionImage } from '../sessions/blobs.js'
+import { type CrudTarget, crudCall, segment } from '../api/crudStores.js'
+import { type ImageMediaType, IMAGE_MEDIA_TYPES } from '../sessions/images.js'
+import { BLOB_NAME, type SessionImage } from '../sessions/blobs.js'
 
 // The images a tab answers with (`browser_screenshot`, #254), between the replica that
 // holds the tab's socket and the one whose call asked for it (bridge/relay.ts, #4780).
@@ -87,5 +88,45 @@ export class PostgresTabImageStore implements TabImageStore {
     } finally {
       signal?.removeEventListener('abort', onAbort)
     }
+  }
+}
+
+/**
+ * `ai_tab_images` through the API's CRUD routes, area `bridge-tabs` (#5299 step 5, D8): the
+ * bytes are the request's and the answer's body, never JSON; the API checks the name against
+ * them again.
+ */
+export class CrudTabImageStore implements TabImageStore {
+  readonly #fetch: typeof fetch
+  readonly #base: string
+
+  constructor(target: CrudTarget) {
+    this.#fetch = target.fetch ?? globalThis.fetch
+    this.#base = target.baseUrl
+  }
+
+  async put(image: SessionImage): Promise<void> {
+    const response = await crudCall(this.#fetch, this.#base, "a tab's image stored", `/tab-images/${segment(image.name, BLOB_NAME, "a tab's image name")}`, {
+      method: 'PUT',
+      bytes: image.bytes,
+      contentType: image.mediaType,
+    })
+    await response.body?.cancel()
+  }
+
+  async take(name: string, signal?: AbortSignal): Promise<StoredTabImage | undefined> {
+    // A name that is no blob's names no image, as the SQL store answers it.
+    if (!BLOB_NAME.test(name)) return undefined
+    const response = await crudCall(this.#fetch, this.#base, "a tab's image", `/tab-images/${segment(name, BLOB_NAME, "a tab's image name")}/take`, {
+      method: 'POST',
+      signal,
+    })
+    if (response.status === 204) return undefined
+    const mediaType = (response.headers.get('content-type') ?? '').split(';')[0]!.trim()
+    if (!(IMAGE_MEDIA_TYPES as readonly string[]).includes(mediaType)) {
+      await response.body?.cancel()
+      throw new Error(`a tab's image came back as ${JSON.stringify(mediaType)}, not an image type`)
+    }
+    return { mediaType: mediaType as ImageMediaType, bytes: Buffer.from(await response.arrayBuffer()) }
   }
 }

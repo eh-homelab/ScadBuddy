@@ -311,7 +311,16 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   first, #5299 D6). Its tests make the agent's tables
   with the agent's own migration files (`render/agent_migrations.py` `migrate_agent`) and open
   the credential vectors `tests/fixtures/secret-vectors.json`, a copy that
-  `lint-codec-copies.sh` keeps equal to the agent's.
+  `lint-codec-copies.sh` keeps equal to the agent's. `notify.py` re-wraps the agent's Web Push
+  keys and notification channels' tokens (#5299 step 5) in the same rotation.
+- The agent's small stores (#5299 step 5): `api/crud_agent_stores.py` (areas
+  `activity-kinds`, `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`) and
+  `api/crud_agent_notify.py` (area `notify`, sealed with the KEK under the agent's AAD), each
+  route one method of the agent's store and its SQL, a transaction as one transaction: the
+  pairing request's advisory lock, the accept's `FOR UPDATE` with the code hash compared in
+  constant time, a push subscription under its endpoint row's lock. A tab image's bytes are
+  the request's and the answer's body, checked against its sha256 name. Tests
+  `tests/api/test_crud_agent_stores.py`, `test_crud_agent_notify.py`.
 - `backend/scadbuddy/flow_triggers/` — runs started on a schedule or an event (#2484,
   spec 2026-10-11 §12): `store.py` (`flow_triggers`, their standing grants and fires),
   `fire.py` (the `flow_trigger_fire` activity on the `library` queue), `events.py` (the
