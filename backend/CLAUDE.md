@@ -986,8 +986,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   no new revision and no quote dropped), slices every plate through `bambuddy/preview.py` `start_preview_plates`
   (the dialog's background slice, either slicer), keeps each plate's sliced file as the
   directory blob `quote-<sha256>` held by `blob_refs (order_item_quote, <quote id>)`
-  before the quote's row exists, reads each plate with `read_sliced`, prices and records
-  it (`Lifecycle.record_slice_quote`). The quote records its print setup (#4673, order operations spec §5): `choices`
+  before the quote's row exists, reads each plate with `read_sliced` and prices it (these
+  steps are `quote.py` `slice_and_price`, the one slice and price, which a storefront price
+  runs too, #6153), then records it (`Lifecycle.record_slice_quote`). The quote records its print setup (#4673, order operations spec §5): `choices`
   (`quote.py` `print_setup`: printer, path, `PrintChoices`, and the `prime_tower`, `supports` and
   `print_sequence` the body takes in `PrintRunRequest`'s shapes, which `operations.py`
   `preview_request` slices with) and `filament_plan`, null on a manual or archive quote.
@@ -1515,6 +1516,37 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   edit (#6211 review). An item
   print's spools are matched the same way (`orders/spools.py` `_of`, the store's
   `spool_links`), so a hand-set colour still finds its spools.
+- A storefront render's price (#6153, spec 2026-11-13 §5.4, §5.6): `orders/storefront/slice_price.py`,
+  migration `20261115T0825Z_storefront_slice_prices.sql`. The price is firm, and it comes
+  from a slice through the back office's quote path: `quote.py` `slice_and_price` (the same
+  slice, `read_plate` and `price_plates` a quote uses, at the book's policy and the profile
+  printer's machine rate, `MachineRates.for_quote`), never a second formula
+  (`test_slice_price.py` checks a storefront price equals a quote to the cent). The variant
+  is rendered to an output by `rendering.py` `output_for_reference` (saved as
+  `storefront_output_id(render_key)`) and sliced by `operations.py` `PreviewSlicer`, so the
+  template gives the support and process settings. The shop slice profile gives only the
+  printer and a spool per material, and the model's remembered dialog choices the rest
+  (`storefront_choices`; none remembered is Standard 0.4 mm). One row per variant in
+  `storefront_slice_prices`, keyed by `price_key`: a sha256 of the render's 3MF content, the
+  price-book filament per slot (id, material, cost), the profile, the choices, and the
+  book's policy and the profile printer's stored rate (`check_rate`). Any change is a new
+  key, so an old price is never read again; the row holds no job id and no bytes, so it
+  outlives the render prune. `GET …/renders/{job}/estimate` (`renders.py`
+  `render_estimate`, `slice_estimate`) answers `StoreEstimate`: `source` `slice` with the
+  price of one, `pending` (with `retry_after`) while the slice runs or waits, or `none`
+  (no profile, no spool for a slot's material, a colour with no listing filament, files
+  lost, a failed slice). The read starts the slice, only for the render on screen, as the
+  operation `storefront_slice_price` on the `library` queue (`orders/operations.py`,
+  3 attempts, `QUOTE_TIMEOUT`); a re-read joins it. `SlicePrices.claim` admits at most
+  `storefront_slices_concurrent` `running` rows, under one advisory lock; a running row
+  whose operation ended without writing it is failed at the next claim (`_settle_ended`),
+  one past `LOST_AFTER` frees its place, and a failed one is tried again after
+  `RETRY_FAILED_AFTER` (1 h). Before it slices, the run checks each profile spool is still
+  offered on the printer (`api/storefront_slice.py` `offered_spools`: a loaded tray's
+  negative id moves), and refuses with no price. The CRUD answer keeps `price_key`, `grams`
+  and `print_seconds` for the shop and the checkout (`estimate.py` `SHOP_ONLY_FIELDS`); the
+  edge sends only `routes.py` `ESTIMATE_FIELDS`. The volume analysis (`storefront_job_parts`)
+  is no longer read; `rough_estimate` stays for the back office.
 - Prepared colour combinations (#6237): `orders/storefront/prepare.py`, routes `GET`/`POST
   /storefront/listings/{id}/prepare` (`api/storefront.py`). A combination is one colour per
   offered colour parameter (the public listing's colours, in each spelling the page can
