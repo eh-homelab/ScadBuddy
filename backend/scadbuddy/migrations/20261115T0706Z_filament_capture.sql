@@ -10,9 +10,9 @@
 --    (fewer than three parts), is left alone.
 -- 3. A Bambuddy weighing (ref kind `bb_scale`) is a scale reading: its source changes
 --    from `bb` to `scale`. This is a label change only. No `grams_left` changes,
---    because `grams_left` is computed from the reading and the ledger cannot tell
---    `bb` from `scale` there; `last_weighed_*` and the unique index (which does not
---    include the source) stay as they are.
+--    because the walk gives the same anchor for a weighing labelled `bb` or `scale`;
+--    `last_weighed_*` and the unique index (which does not include the source) stay
+--    as they are.
 -- Each statement is guarded, so a second run changes nothing.
 
 CREATE INDEX IF NOT EXISTS filament_spool_events_job

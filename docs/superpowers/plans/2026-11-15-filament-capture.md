@@ -457,7 +457,7 @@ The rules the walk adds to #6261's (spec §5.5, as Task 1A wrote it):
 **Interfaces:**
 - Produces, in one file:
   - the index `filament_spool_events_job ON filament_spool_events ((data ->> 'job')) WHERE kind = 'print_started' AND ref_kind = 'print_run'` (Task 5's `open_for_job` repeats both predicates and the exact expression);
-  - the backfill `UPDATE filament_spool_events SET data = data || jsonb_build_object('job', split_part(ref_id, '/', 2)) WHERE kind = 'print_started' AND ref_kind = 'print_run' AND NOT data ? 'job'` (preflight A11, C20);
+  - the backfill `UPDATE filament_spool_events SET data = data || jsonb_build_object('job', regexp_replace(ref_id, '^[^/]*/(.*)/[^/]*$', '\1')) WHERE kind = 'print_started' AND ref_kind = 'print_run' AND jsonb_typeof(data -> 'job') IS DISTINCT FROM 'string' AND ref_id ~ '^[^/]*/.*/[^/]*$'` (preflight A11, C20);
   - `UPDATE filament_spool_events SET source = 'scale' WHERE kind = 'weighed' AND ref_kind = 'bb_scale' AND source = 'bb'`.
   - A header comment that says why no `grams_left` changes: `grams_left` cannot tell `bb` from `scale` (preflight C1, C14).
 
@@ -693,3 +693,4 @@ test. If one is missing or differs, stop and report.
 - Task 1: BB and SB clocks agree within about 0.25 s (BB − SB +0.011 s). Booked times are not corrected for skew.
 - Task 1 kept its clock-skew step (Date headers, read-only), although the controller first asked to re-measure only the window: issue item 6 needs the skew, and the earlier probe had one sample.
 - The owner judged the earlier local exposure of the BB API key acceptable and chose not to rotate it (2026-11-15).
+- Task 4: the backfill equals `ledger.job_of` for a subtask that contains `/` (`run/a/b/slot` gives `a/b`); `split_part(ref_id, '/', 2)` would cut it to `a`. It also treats a non-string `data.job` as absent, as `job_of` does.

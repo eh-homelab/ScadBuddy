@@ -98,6 +98,8 @@ def test_capture_migration_makes_bb_weighings_scale(pg_conninfo: str) -> None:
             ("print_started", "print_estimate", "print_run", "r1/J/0", "{}"),
             ("print_started", "print_estimate", "print_run", "r2/a/b/1", "{}"),
             ("print_started", "print_estimate", "print_run", "r3/K/0", '{"job": "keep"}'),
+            ("print_started", "print_estimate", "print_run", "r5/M/0", '{"job": 5}'),
+            ("print_started", "print_estimate", "print_run", "a//b", "{}"),
             ("print_started", "print_estimate", "print_run", "odd", "{}"),
             ("print_started", "print_estimate", "other", "r4/L/0", "{}"),
         ]
@@ -116,6 +118,8 @@ def test_capture_migration_makes_bb_weighings_scale(pg_conninfo: str) -> None:
         ("print_started", "print_estimate", "r1/J/0", "J"),
         ("print_started", "print_estimate", "r2/a/b/1", "a/b"),
         ("print_started", "print_estimate", "r3/K/0", "keep"),
+        ("print_started", "print_estimate", "r5/M/0", "M"),
+        ("print_started", "print_estimate", "a//b", ""),
         ("print_started", "print_estimate", "odd", None),
         ("print_started", "print_estimate", "r4/L/0", None),
     ]

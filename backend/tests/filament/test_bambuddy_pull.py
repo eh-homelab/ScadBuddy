@@ -345,6 +345,19 @@ def test_a_bb_weighing_counts_on_a_locked_spool(pg_pool: PgPool) -> None:
     assert (spool.weight_locked, spool.grams_left) == (True, 450)
 
 
+def test_a_lock_after_the_weighing_keeps_the_scale_anchor(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb(updated_at=_bb_time(-3))], now=NOW).created_ids
+    weighed = bb(
+        core_weight=250, last_scale_weight=700, last_weighed_at=_bb_time(1), updated_at=_bb_time(1)
+    )
+    pull(f, [weighed], now=NOW)
+    f.spools.update(made, SpoolPatch(weight_locked=True), actor="ann")
+    spool = f.spools.get(made)
+    assert spool is not None
+    assert (spool.weight_locked, spool.grams_left) == (True, 450)
+
+
 @pytest.mark.parametrize(("locked", "left"), [(False, 500), (True, 1000)])
 def test_a_bb_weighing_is_a_scale_reading(pg_pool: PgPool, locked: bool, left: float) -> None:
     f = _filament(pg_pool)
