@@ -139,7 +139,9 @@ reads (`SessionManager.projection` is `gated`), the orphan sweep and a Stop's ca
 audit row in it), `TurnHost`'s held-call read and its parked call's span mark (fenced on the API:
 it lands only while the turn's `turn_attempt` and `durable_turn_id` hold the session, read `FOR
 SHARE` in the mark's transaction), and `PgApprovalRecords`' approval read. Test
-`test/crudPending.test.ts`. A route's
+`test/crudPending.test.ts`. Area `audit` (backend `api/crud_agent_audit.py`,
+`src/audit/crudAudit.ts`) takes `AuditLog`'s write, list and prune; a write the API refuses or
+never answers goes to `onError`, as a failed SQL write did. Test `test/crudAudit.test.ts`. A route's
 answer counts only with `X-ScadBuddy-Crud: 1`; any other failure takes the read's existing
 error path (a lookup failure the activity retries, a 500, a resync). A session's successful `order_item_revision_add` (or
 `_after_acceptance`) is an `ai_session_order_costs` row (`src/sessions/orderCosts.ts`

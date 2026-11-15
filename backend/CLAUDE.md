@@ -374,6 +374,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   mark (only while the turn's `turn_attempt` and `durable_turn_id` hold the session, checked `FOR
   SHARE` in the mark's transaction), and a call's recorded approval (`PgApprovalRecords`). Tests
   `tests/crud/test_crud_agent_pending.py`.
+  `api/crud_agent_audit.py` (area `audit`) over `agent_data/audit_log.py` is the agent's
+  `audit/log.ts` `AuditLog`: a row written (a tool call's approver copied from `ai_approvals` or
+  its request's `approved` response in the same statement), a page listed, and the prune, the one
+  DELETE the table's trigger lets through. Tests `tests/crud/test_crud_agent_audit.py`.
 - `backend/scadbuddy/flow_triggers/` — runs started on a schedule or an event (#2484,
   spec 2026-10-11 §12): `store.py` (`flow_triggers`, their standing grants and fires),
   `fire.py` (the `flow_trigger_fire` activity on the `library` queue), `events.py` (the

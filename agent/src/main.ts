@@ -71,6 +71,7 @@ import {
 } from './api/serviceCredential.js'
 import { untilBackendAnswers } from './api/backendUp.js'
 import { BLOB_AREAS, CrudAreas, FORGET_AREAS, GATE_AREAS, SECRET_AREAS, TASK_AREAS, WORKSPACE_AREAS } from './api/crudAreas.js'
+import { CrudAudit } from './audit/crudAudit.js'
 import { CrudPending } from './gate/crudPending.js'
 import { CrudGate } from './gate/crudStore.js'
 import { gated, STORE_AREAS, type StoreArea } from './api/crudStores.js'
@@ -286,6 +287,8 @@ const audit = database
       sql: database.sql,
       settings: (): SettingsStore | undefined => settings,
       ...(kek.ok ? { hashKey: approvalHashKey(kek.kek) } : {}),
+      // #5299 step 10: the API's `audit` routes once it lists the area.
+      routes: { crud: new CrudAudit(crudTarget), use: () => crudAreas.has('audit') },
       onError: (err, entry) =>
         console.error(`audit log: could not record ${entry.kind} ${entry.action}:`, (err as Error).message),
     })

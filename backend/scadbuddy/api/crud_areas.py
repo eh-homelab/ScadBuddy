@@ -96,6 +96,8 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: read, a parked call's and a decision's span written, the first only while the durable turn's
 #: placement holds the session, the orphan sweep's cancels (each with its events, status and
 #: audit row in its transaction), and a call's recorded approval (`api/crud_agent_pending.py`).
+#: Its ``audit`` area is ``…/agent/audit/*``: the audit log's rows written, listed and pruned
+#: (`api/crud_agent_audit.py`).
 CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "projects": ["flows", "operations", "payload-keys"],
     "render": ["settings", "jobs", "refs", "blob-index", "store-folders", "assets", "libraries"],
@@ -155,6 +157,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "operations",
         "gate",
         "pending-input",
+        "audit",
     ],
     "intake": ["sources"],
 }

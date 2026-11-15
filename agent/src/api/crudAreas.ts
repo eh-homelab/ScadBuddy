@@ -45,9 +45,10 @@ export const TASK_AREAS = ['background-tasks', 'operations'] as const
  * gate/crudStore.ts); a run grant's check goes through its route whether or not it is listed.
  * `pending-input`: the projection's reads, the orphan sweep's cancels, a durable turn's response
  * read and its fenced span mark, and a call's recorded approval (backend
- * api/crud_agent_pending.py; gate/crudPending.ts).
+ * api/crud_agent_pending.py; gate/crudPending.ts). `audit`: the audit log's rows written, listed
+ * and pruned (backend api/crud_agent_audit.py; audit/crudAudit.ts).
  */
-export const GATE_AREAS = ['gate', 'pending-input'] as const
+export const GATE_AREAS = ['gate', 'pending-input', 'audit'] as const
 
 export type CrudAreasOptions = {
   fetch?: typeof fetch
