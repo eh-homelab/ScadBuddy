@@ -13,14 +13,13 @@ import type {
   SessionStore,
   SessionStoreEntry,
 } from '@anthropic-ai/claude-agent-sdk'
-import type { Sql } from 'postgres'
 import type { Credential } from '../credentials.js'
 import { projectDirName } from '../harness/confine.js'
 import { RESTORED_EPSILON } from '../harness/fallback.js'
 import { claudeConfigDir, scratchDir } from '../harness/options.js'
 import { Inbox } from '../harness/inbox.js'
 import { type HarnessRun, runHarness } from '../harness/run.js'
-import { type AppendFence, type PostgresSessionStore, transcriptExists } from './store.js'
+import type { AppendFence, PostgresSessionStore } from './store.js'
 import type { AssembledTurn, FingerprintParts } from './turnRunner.js'
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json }
@@ -88,9 +87,8 @@ export type WarmEntry = {
 export type WarmTurn = { entry: WarmEntry; outcome: WarmOutcome; reason?: RecycleReason }
 
 export type WarmSessionsDeps = {
-  sql: Sql
-  /** The transcript store: its last `cost-state` is the baseline a resume restores. */
-  store: Pick<PostgresSessionStore, 'lastOfType'>
+  /** The transcript store: its last `cost-state` is the baseline a resume restores; its head and tail say whether to resume and whether the process is still current. */
+  store: Pick<PostgresSessionStore, 'lastOfType' | 'head' | 'moved'>
   /** `warm_max_per_replica` (D3): past it the least recently used idle entry goes. */
   maxEntries: number
   /** `warm_idle_seconds`, in ms: an entry idle this long goes. */
@@ -622,12 +620,8 @@ export class WarmSessions {
     for (let attempt = 0; attempt < 3; attempt++) {
       const pending = mirror.pending
       await pending
-      const other = await this.deps.sql<{ uuid: string }[]>`
-        SELECT uuid FROM ai_session_entries
-        WHERE session_id = ${slot.entry.sessionId} AND subpath = '' AND uuid IS NOT NULL AND NOT inherited
-          AND id > ${mirror.since ?? '0'}::bigint AND NOT (uuid = ANY(${[...mirror.own]}::text[]))
-        LIMIT 1`
-      if (mirror.pending === pending) return other.length > 0
+      const other = await this.deps.store.moved(slot.entry.sessionId, mirror.since, [...mirror.own])
+      if (mirror.pending === pending) return other
     }
     return true
   }
@@ -638,14 +632,9 @@ export class WarmSessions {
     // what the process loads through it (`onLoaded`); without one, from the
     // table's last `cost-state`.
     // A fork with no row of its own yet resumes too: from its parent's, through the cut (store.ts).
-    const [[row], resume] = await Promise.all([
-      this.deps.sql<{ since: string | null }[]>`
-        SELECT (SELECT max(id) FROM ai_session_entries
-          WHERE session_id = ${sessionId} AND subpath = '' AND uuid IS NOT NULL AND NOT inherited)::text AS since`,
-      transcriptExists(this.deps.sql, sessionId),
-    ])
+    const { exists: resume, since } = await this.deps.store.head(sessionId)
     const mirror = turn.run.sessionStore
-      ? new MirroredTranscript(turn.run.sessionStore, sessionId, row?.since ?? null, this.log)
+      ? new MirroredTranscript(turn.run.sessionStore, sessionId, since, this.log)
       : undefined
     const costState = resume && !mirror ? await this.deps.store.lastOfType({ projectKey: '', sessionId }, 'cost-state') : null
     const carriedUsd = costStateUsd(costState === null ? null : JSON.stringify(costState), this.log)

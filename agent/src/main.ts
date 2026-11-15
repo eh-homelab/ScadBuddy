@@ -91,6 +91,8 @@ import { shutdownTelemetry, traceListener } from './telemetry/runtime.js'
 import { harnessTools } from './tools/harness.js'
 import { CrudResourceRows, PgResourceRows, type ResourceRows, SessionResources } from './sessions/touched.js'
 import { CrudSessionRows, PgSessionRows, type SessionRows } from './sessions/rows.js'
+import { CrudTranscriptRows } from './sessions/crudTranscripts.js'
+import { PgTranscriptRows, type TranscriptRows } from './sessions/store.js'
 import { crudCostPoster, OrderCosts, touchedSinks } from './sessions/orderCosts.js'
 import { ALL_TOOLS } from './tools/index.js'
 import { CrudFlowBlobs, gatedFlowBlobs, PgFlowBlobs } from './temporal/flowBlobs.js'
@@ -119,6 +121,7 @@ import {
   FilePayloadStore,
   CrudPayloadKeys,
   gatedPayloadKeys,
+  type PayloadKeys,
   PgPayloadKeys,
   subjectDataConverter,
 } from './temporal/payloadCodec.js'
@@ -286,6 +289,11 @@ const crudSessionRows = new CrudSessionRows(config.backendUrl, { fetch: crudFetc
 const sessionRows = (sql: Sql): SessionRows => gated<SessionRows>(new PgSessionRows(sql), crudSessionRows, () => crudAreas.has('sessions'))
 const crudResourceRows = new CrudResourceRows(config.backendUrl, { fetch: crudFetch })
 const resourceRows = (sql: Sql): ResourceRows => gated<ResourceRows>(new PgResourceRows(sql), crudResourceRows, () => crudAreas.has('session-resources'))
+// The transcripts (#5299 step 9, part b, backend api/crud_agent_transcripts.py): sealed and opened
+// here with the sessions' data keys over SQL until the API lists area `transcripts`, and by the API after.
+const crudTranscripts = new CrudTranscriptRows(config.backendUrl, { fetch: crudFetch })
+const transcriptRows = (sql: Sql, keys: PayloadKeys | undefined): TranscriptRows =>
+  gated<TranscriptRows>(new PgTranscriptRows(sql, keys), crudTranscripts, () => crudAreas.has('transcripts'))
 // The headless browser's approved origins (#982), over `sql` or through area `browser-origins`.
 const browserOriginsOn = (sql: Sql) =>
   new BrowserOrigins(sql, settings, { crud: new CrudSessionOrigins(crudTarget), use: storeArea('browser-origins') })
@@ -605,7 +613,7 @@ if (backgroundClient && backgroundTasks) {
 // The approval routes and the expiry sweep also serve approvals left pending
 // by a restart.
 const runtime = await readStartSettings({ database, settings }, console.log)
-if (database && !dataKeys) console.warn('sessions: no secret key, so no session transcript can be written; sessions cannot run')
+if (database && !dataKeys) console.warn('sessions: no secret key, so no session transcript can be written until the API lists area `transcripts`')
 // Seals the transcripts written before sealing, in the background once migrations have applied; a failure is retried at the next start.
 if (role.http && database && dataKeys) {
   void database
@@ -644,6 +652,7 @@ const sessions =
         sql: database.sql,
         rows: sessionRows(database.sql),
         resourceRows: resourceRows(database.sql),
+        transcripts: transcriptRows(database.sql, dataKeys),
         blobs: sessionImages(database.sql),
         httpBodies: httpBodies(database.sql),
         browserOrigins: browserOriginsOn(database.sql),

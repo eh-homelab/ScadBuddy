@@ -1153,7 +1153,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       expect(await describe_(session.id)).toEqual({ type: SESSION_WORKFLOW, taskQueue: SESSION_QUEUE })
       expect(turns.map((t) => t.message?.text)).toEqual(['make me a bracket', 'and a lid'])
       // The turn is a stub here; that a placement resumes from the transcript is warm.ts's
-      // (`transcriptExists`), whichever run placed it, as turnHost.pg.test.ts shows.
+      // (the store's `head`), whichever run placed it, as turnHost.pg.test.ts shows.
     })
 
     it('refuses `closed` a send to a session still recorded as DurableSession, and starts no workflow (plan Step 8.1)', async () => {

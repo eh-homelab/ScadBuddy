@@ -60,7 +60,7 @@ import { SessionFiles, type WorkspaceFiles } from '../workspace/store.js'
 import { SessionEdits } from './edits.js'
 import { forkEventCut, transcriptCut } from './forkPoint.js'
 import type { TitleResolver } from './sdkEvents.js'
-import { PostgresSessionStore } from './store.js'
+import { PostgresSessionStore, type TranscriptRows } from './store.js'
 import type { UserImage } from './images.js'
 import { PgResourceRows, type ResourceRows, SessionResources, type TouchedRecord } from './touched.js'
 import { type ListFilter, PgSessionRows, type SessionRow, type SessionRows, type TurnRow } from './rows.js'
@@ -661,6 +661,8 @@ export type SessionManagerDeps = {
   rows?: SessionRows
   /** Where what a session's calls touched is kept (`PgResourceRows` on `sql` when omitted; gated in main.ts). */
   resourceRows?: ResourceRows
+  /** Where the transcripts' rows are kept (`PgTranscriptRows` on `sql` with `payloadKeys` when omitted; gated in main.ts, #5299 step 9). */
+  transcripts?: TranscriptRows
   /** The backend's flow tables, through its CRUD routes (flows/backendReads.ts, #5299 D7). */
   flowReads: FlowRunReads
   paths: HarnessPaths
@@ -935,7 +937,10 @@ export class SessionManager {
 
   constructor(deps: SessionManagerDeps) {
     this.deps = deps
-    this.store = new PostgresSessionStore(deps.sql, deps.payloadKeys ? { keys: deps.payloadKeys } : {})
+    this.store = new PostgresSessionStore(deps.sql, {
+      ...(deps.payloadKeys ? { keys: deps.payloadKeys } : {}),
+      ...(deps.transcripts ? { rows: deps.transcripts } : {}),
+    })
     this.rows = deps.rows ?? new PgSessionRows(deps.sql)
     this.touched = new SessionResources(deps.resourceRows ?? new PgResourceRows(deps.sql))
     this.blobs = deps.blobs ?? new SessionBlobs(deps.sql)
@@ -956,7 +961,6 @@ export class SessionManager {
     this.questions = new QuestionService({ sql: deps.sql, events: this.events, ...(deps.audit ? { audit: deps.audit } : {}) })
     this.projection = new PendingProjection(deps.sql)
     this.warm = new WarmSessions({
-      sql: deps.sql,
       store: this.store,
       maxEntries: deps.warm?.maxEntries ?? DEFAULT_WARM_MAX_ENTRIES,
       idleMs: deps.warm?.idleMs ?? DEFAULT_WARM_IDLE_MS,
@@ -986,6 +990,7 @@ export class SessionManager {
     this.runner = new TurnRunner({ ...deps, rows: this.rows, store: this.store, events: this.events, files: this.files })
     this.turnCore = {
       rows: this.rows,
+      transcripts: this.store,
       runner: this.runner,
       warm: this.warm,
       events: this.events,

@@ -92,8 +92,16 @@ limit and a fork's tombstone check run under their locks in the API's transactio
 calls touched (area `session-resources`, `src/sessions/touched.ts` `ResourceRows`) are #5299
 step 9, part a (`SESSION_AREAS`, backend `api/crud_agent_sessions.py`); a session id goes into a
 route's path only as a lowercase UUID, encoded (`rows.ts` `sessionPath`). A turn's claim, its end
-and an edit write the row with the event log, and stay on SQL until the event log moves. These
-twelve have a rolling-deploy fallback:
+and an edit write the row with the event log, and stay on SQL until the event log moves. A
+session's transcript (area `transcripts`, part b, backend `api/crud_agent_transcripts.py`;
+`src/sessions/store.ts` `TranscriptRows`: `PgTranscriptRows`, and `src/sessions/crudTranscripts.ts`
+`CrudTranscriptRows`) is sealed and opened by the API under the session's data key with the
+agent's AAD, so its entries travel as their JSON text; an append is one route per batch
+(`appendBatches`: at most 1000 entries and about 30 MiB), each batch its own transaction with the
+tombstone check and the turn's fence (`AppendFence`, `{ attempt, turnId }`, checked `FOR SHARE`),
+and a fork's transcript, its head, its tail check (`moved`) and whether a user entry landed are
+each one read in one snapshot on the API. `PostgresSessionStore` keeps the per-session append order
+over either. These thirteen have a rolling-deploy fallback:
 `src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` from the start with back-off
 (1 s doubling to 30 s) until every one is listed, and until then each stays on SQL, for an API
 pod older than the routes. The small stores (#5299 step 5, `src/api/crudStores.ts`

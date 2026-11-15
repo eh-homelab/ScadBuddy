@@ -67,7 +67,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(`the warm ca
     expect(await db.ready()).toBe(true)
     store = new PostgresSessionStore(db.sql, { keys: testPayloadKeys(db.sql) })
     scripted = scriptedRunner(() => ({ reply: 'ok', costUsd: 0.02 }))
-    warm = new WarmSessions({ sql: db.sql, store, maxEntries: 8, idleMs: 600_000, start: scripted.runner })
+    warm = new WarmSessions({ store, maxEntries: 8, idleMs: 600_000, start: scripted.runner })
     stops = []
   })
   afterEach(async () => {
