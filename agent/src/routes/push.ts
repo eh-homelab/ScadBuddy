@@ -7,7 +7,7 @@ import { EgressError, type Resolver, systemResolver } from '../http/egress.js'
 import type { OriginPolicy } from '../http/origins.js'
 import type { NotificationDispatcher } from '../notify/dispatcher.js'
 import { checkPushEndpoint, DEFAULT_PUSH_HOSTS, isHostPattern, PUSH_HOSTS_MAX, pushHostsOf, SETTING_PUSH_HOSTS } from '../notify/pushEgress.js'
-import { type PushStore, SubscriptionTakenError } from '../notify/pushStore.js'
+import { type PushRepo, SubscriptionTakenError } from '../notify/pushStore.js'
 import { jsonBodyLimit, type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
 
@@ -31,8 +31,8 @@ export const PUSH_SUBSCRIPTION_PATH = '/api/v1/ai/push/subscription'
 export const PUSH_SERVICES_PATH = '/api/v1/ai/settings/push-services'
 
 export type PushRouteDeps = {
-  /** Undefined without the database or the KEK: there is nowhere to keep the keys sealed. */
-  push: { store: PushStore; dispatcher: NotificationDispatcher } | undefined
+  /** Undefined without the database. With no KEK here the keys are sealed by the API, once it serves area `notify` (`available`). */
+  push: { store: PushRepo; dispatcher: NotificationDispatcher } | undefined
   /** Where the allowlist is kept; undefined without the database. */
   settings: SettingsRepo | undefined
   ready: () => Promise<boolean>
@@ -43,12 +43,12 @@ export type PushRouteDeps = {
 
 declare module '../app.js' {
   interface AppDeps {
-    /** Web Push (#815, notify/): left out without the database or the KEK. */
-    push?: { store: PushStore; dispatcher: NotificationDispatcher } | undefined
+    /** Web Push (#815, notify/): left out without the database; with no KEK, through the API once it serves area `notify`. */
+    push?: { store: PushRepo; dispatcher: NotificationDispatcher } | undefined
   }
 }
 
-const UNAVAILABLE = 'Web Push needs the database and SCADBUDDY_SECRET_KEY_FILE (its keys are kept sealed)'
+const UNAVAILABLE = 'Web Push needs the database, and SCADBUDDY_SECRET_KEY_FILE or an API that seals its keys (CRUD area notify)'
 const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
 const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
 const WHAT = 'push notification settings'
@@ -78,7 +78,7 @@ const problemOf = (err: unknown) =>
 
 export function registerPushRoutes(app: Hono, deps: PushRouteDeps): void {
   async function push(): Promise<NonNullable<PushRouteDeps['push']> | string> {
-    if (!deps.push) return UNAVAILABLE
+    if (!deps.push || deps.push.store.available?.() === false) return UNAVAILABLE
     return (await deps.ready()) ? deps.push : NOT_READY
   }
   async function settings(): Promise<SettingsRepo | string> {

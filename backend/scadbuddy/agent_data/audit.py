@@ -57,6 +57,10 @@ def record(
     )
 
 
+def _window_lock(kind: str, actions: tuple[str, ...], detail: str | None) -> str:
+    return f"scadbuddy:agent_audit:{kind}:{','.join(actions)}:{detail or ''}"
+
+
 def recorded_lately(
     conn: Connection[Any],
     kind: Kind,
@@ -66,13 +70,28 @@ def recorded_lately(
     detail: str | None = None,
 ) -> bool:
     """Whether an ``ok`` row of ``kind`` with one of ``actions`` (and ``detail``, when
-    given) was written inside ``window`` (a Postgres interval). Under an advisory lock of
-    its own per kind, actions and detail, in the caller's transaction, so two calls at once
-    write one row."""
-    conn.execute(
-        "SELECT pg_advisory_xact_lock(hashtext(%s))",
-        (f"scadbuddy:agent_audit:{kind}:{','.join(actions)}:{detail or ''}",),
-    )
+    given) and committed inside ``window`` (a Postgres interval), so the caller writes none.
+    A row in the window answers at once, with no lock. Without one the caller tries an
+    advisory lock of its own per kind, actions and detail, in its transaction; with the
+    lock it reads again, so two calls at once write one row. When another caller holds the
+    lock this one never waits and answers False, so it writes a row too: the holder may
+    still roll back, and only a committed row may stand for a reveal (an extra row in the
+    window costs nothing)."""
+    if _in_window(conn, kind, actions, window, detail):
+        return True
+    got = conn.execute(
+        "SELECT pg_try_advisory_xact_lock(hashtext(%s)) AS got",
+        (_window_lock(kind, actions, detail),),
+    ).fetchone()
+    held = got["got"] if isinstance(got, dict) else got[0] if got else False
+    if not held:
+        return False
+    return _in_window(conn, kind, actions, window, detail)
+
+
+def _in_window(
+    conn: Connection[Any], kind: str, actions: tuple[str, ...], window: str, detail: str | None
+) -> bool:
     return (
         conn.execute(
             "SELECT 1 FROM ai_audit WHERE kind = %s AND action = ANY(%s) AND outcome = 'ok'"

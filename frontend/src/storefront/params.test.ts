@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { CHARM, KEYCHAIN } from '../mocks/features/storefrontPublic'
-import { startColour, filamentFinish, filamentLabels, keepOffered, paramFilaments, parseNumber, shownLabel, swatchBackground, valueText } from './params'
+import { startColour, filamentFinish, keepOffered, paramFilaments, parseNumber, shownLabel, swatchBackground, valueText } from './params'
 
 describe('parseNumber', () => {
   it.each([
@@ -83,27 +83,6 @@ describe('filament names and finishes (#6152)', () => {
     material: extra.material ?? 'PLA',
     subtype: extra.subtype ?? null,
     brand: extra.brand ?? null,
-  })
-
-  it('names the finish, then the brand, then the hex to tell filaments apart', () => {
-    const labels = filamentLabels([
-      f('a', '#0047BB', 'Blue', { subtype: 'Matte' }),
-      f('b', '#1B6CA8', 'Blue', { subtype: 'Silk' }),
-      f('c', '#0000FF', 'Blue', { brand: 'Inland' }),
-      f('d', '#0011FF', 'Blue', { brand: 'Bambu' }),
-      f('e', '#000000', 'Black'),
-      f('g', '#111111', 'Black'),
-      f('h', '#FFFFFF', 'Translucent Clear', { subtype: 'Translucent', material: 'PETG' }),
-    ])
-    expect([...labels.values()]).toEqual([
-      'Blue · Matte',
-      'Blue · Silk',
-      'Blue (Inland)',
-      'Blue (Bambu)',
-      'Black #000000',
-      'Black #111111',
-      'Translucent Clear',
-    ])
   })
 
   it('draws translucent, silk and multi-colour filaments apart from a solid one', () => {

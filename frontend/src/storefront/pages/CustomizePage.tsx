@@ -13,6 +13,7 @@ import {
 } from '../api/client'
 import { Estimate } from '../components/Estimate'
 import { ListingView } from '../components/ListingView'
+import { clashText } from '../colours'
 import { clearChoices, loadChoices, saveChoices } from '../customizeState'
 import { useDraftChanged } from '../draftCount'
 import { keepOffered, listingUnavailable, valueProblem } from '../params'
@@ -63,15 +64,14 @@ function inSeconds(error: StoreError): string {
   return error.retryAfter === 1 ? 'in 1 second' : `in ${error.retryAfter} seconds`
 }
 
-/** What a visitor reads when a render or an add is refused. */
-function refusalText(error: unknown): string {
+/** What a visitor reads when a render or an add of `listing` is refused. */
+function refusalText(error: unknown, listing: Listing | undefined): string {
   if (!(error instanceof StoreError)) return errorText(error)
   if (error.slug === 'render_limited') return `You have made a lot of previews. Try again ${inSeconds(error)}.`
   if (error.slug === 'render_queue_full') return `The shop is busy making other previews. Try again ${inSeconds(error)}.`
   if (error.slug === 'rate_limited') return `Your connection has sent a lot of requests. Try again ${inSeconds(error)}.`
-  // #6258: the colours given share no allowed material (the issue's page copy).
-  if (error.slug === 'listing_colours_clash')
-    return "Some colours can't go together. Each print is made from one kind of plastic, and a few colours only come in one kind. Change one of them."
+  // #6258: the colours given share no allowed material: the text names the parts.
+  if (error.slug === 'listing_colours_clash') return clashText(listing, error.parts)
   return errorText(error)
 }
 
@@ -142,10 +142,11 @@ export function CustomizePage({
   /**
    * #6302 review: the colour values the latest render reply says the print takes. A part the
    * visitor did not set shows its colour from here (the shop may move it to the closest colour
-   * of the material), else the listing's default while no reply has come back or after a
-   * start the shop refused. It is kept with the choices it answered (`key`), and shown only
-   * while they are the choices on screen: after the visitor changes a value, the untouched
-   * parts show the listing's default until the next start answers.
+   * of the material). While no reply has come back, or after a start the shop refused, the
+   * part shows the page's own prediction (`colours.ts` `colourPlan`, #6258). It is kept with
+   * the choices it answered (`key`), and shown only while they are the choices on screen:
+   * after the visitor changes a value, the untouched parts show the prediction until the next
+   * start answers.
    */
   const [settled, setSettled] = useState<{ key: string; values: Record<string, ParamValue> }>()
   const [renderError, setRenderError] = useState<string | null>(null)
@@ -321,7 +322,7 @@ export function CustomizePage({
       renderKey.current.done()
       if (!live()) return
       // The colours this start settled, kept with its choices: until it answered, the parts
-      // the visitor did not set showed the listing's default (#6302 review).
+      // the visitor did not set showed the page's prediction (#6258, #6302 review).
       if (first.values) setSettled({ key, values: first.values })
       setJob(onScreen(first))
       const done = await follow(first, live)
@@ -336,10 +337,10 @@ export function CustomizePage({
     } catch (caught) {
       if (!live()) return
       // A start refused or failed settled nothing: the parts the visitor did not set show
-      // the listing's defaults again (#6302 review).
+      // the page's prediction again (#6258, #6302 review).
       if (!begun) setSettled(undefined)
       if (changedListing(caught)) setStale(true)
-      setRenderError(refusalText(caught))
+      setRenderError(refusalText(caught, listing))
       if (retryable(caught) && !retry) {
         const after = Math.min((caught.retryAfter ?? 60) * 1000, RETRY_RENDER_CAP_MS)
         setTimeout(() => {
@@ -369,7 +370,7 @@ export function CustomizePage({
       setAdded(true)
     } catch (caught) {
       if (changedListing(caught)) setStale(true)
-      setAddError(refusalText(caught))
+      setAddError(refusalText(caught, listing))
     } finally {
       setAdding(false)
     }

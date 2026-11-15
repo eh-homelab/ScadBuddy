@@ -15,7 +15,7 @@ import { TASK_QUEUE } from '../temporal/names.js'
 import { liveHostQueues } from '../temporal/session/affinity.js'
 import { SESSION_QUEUE, SESSION_WORKFLOW } from '../temporal/session/names.js'
 import { SessionBlobs, sentImageBlobs } from './blobs.js'
-import { type DescribeSession, durableDescriber, endLostTurn, RUNNING_GRACE_MS, type RunningRow } from './durableSweep.js'
+import { type DescribeSession, durableDescriber, endLostTurn, RUNNING_GRACE_MS, type RunningRow, TURN_STATUSES } from './durableSweep.js'
 import { cancelOrphanedEntries } from '../gate/sweep.js'
 import type { AuditSink } from '../audit/log.js'
 import type { EventLog } from './eventLog.js'
@@ -149,7 +149,20 @@ export type DurableTurnsDeps = {
   cancelTimeoutMs?: number
   /** Tests only: how Stop describes a gone workflow (default durableDescriber). */
   describe?: DescribeSession
+  /** How long after an unanswered send its Update is sent once more (default RESEND_AFTER_MS). */
+  resendAfterMs?: number
 }
+
+/**
+ * An unanswered send's Update is sent once more after this long (#6353), when the workflow
+ * holds no turn and then the row still holds this one (read in that order: `#resend`). On 2026-11-15 a stalled Temporal matching
+ * service (eh-homelab/clusters#3618) timed out the workflow task that carried a send's Update;
+ * the next task completed without it, and two minutes later the sweep ended the turn with "send
+ * it again", the person's job though the same Update could be sent again safely: its id is the
+ * turn id, which Temporal dedupes within the run. Well inside RUNNING_GRACE_MS, so the re-send
+ * and its own deadline end before the sweep looks at the row.
+ */
+export const RESEND_AFTER_MS = 30_000
 
 const wire = (o: Pick<Owner, 'kind' | 'id'> & { label?: string }): WireOwner => ({ kind: o.kind, id: o.id, label: o.label ?? '' })
 
@@ -175,6 +188,7 @@ export class DurableTurns {
   readonly #sendTimeoutMs: number
   #ready: { until: number; why: string | undefined } | undefined
   readonly #describe: DescribeSession
+  readonly #resendAfterMs: number
 
   constructor(deps: DurableTurnsDeps) {
     this.#client = deps.client
@@ -188,6 +202,7 @@ export class DurableTurns {
     this.#liveHosts = deps.liveHosts ?? (() => liveHostQueues(deps.client))
     this.#sendTimeoutMs = deps.sendTimeoutMs ?? 10_000
     this.#describe = deps.describe ?? durableDescriber(deps.client)
+    this.#resendAfterMs = deps.resendAfterMs ?? RESEND_AFTER_MS
   }
 
   /**
@@ -308,7 +323,10 @@ export class DurableTurns {
       seq = seqs.at(-1) ?? 0
       await this.#sendMessage(session, turn, sent)
     } catch (err) {
-      if (err instanceof OutcomeUnknown) return this.#turn(id, turn.turnId, seq)
+      if (err instanceof OutcomeUnknown) {
+        this.#resendLater(session, turn, sent)
+        return this.#turn(id, turn.turnId, seq)
+      }
       // The refusal is what the caller hears, whatever the give-back meets.
       await this.#giveBack(id, claimed.prior_status).catch(() => {
         console.warn(`durable send: session ${id}'s claim could not be given back`)
@@ -316,6 +334,36 @@ export class DurableTurns {
       throw err
     }
     return this.#turn(id, turn.turnId, seq)
+  }
+
+  /**
+   * The same Update once more, RESEND_AFTER_MS after a send whose outcome is unknown (#6353):
+   * only when the workflow holds no turn (between turns, or not found: the start was lost too)
+   * and, read after that, the row still holds this one. Whatever it meets is left to the sweep, which ends the turn
+   * as before when the workflow still holds none past RUNNING_GRACE_MS. Payload-free warnings.
+   */
+  #resendLater(session: SessionRecord, turn: DurableTurn, sent: readonly SentImage[]): void {
+    const timer = setTimeout(() => {
+      this.#resend(session, turn, sent).catch(() => {
+        console.warn(`durable send: session ${session.id}'s unanswered message could not be sent again`)
+      })
+    }, this.#resendAfterMs)
+    timer.unref()
+  }
+
+  async #resend(session: SessionRecord, turn: DurableTurn, sent: readonly SentImage[]): Promise<void> {
+    // The workflow first, then the row. Read the other way round, the workflow could take the
+    // first Update, finish the turn and continue as new in between, and the re-send would reach
+    // the new run, which does not dedupe the old run's update id: the message would run twice.
+    // This way a turn that ended after the describe has released the row (finish_turn writes it
+    // before the workflow continues as new), so the read finds it gone and nothing is sent.
+    const state = await this.#describe(sessionWorkflowId(session.id))
+    if (state !== 'between_turns' && state !== 'not_found') return
+    const [held] = await this.#sql`
+      SELECT 1 FROM ai_sessions
+      WHERE id = ${session.id} AND durable_turn_id = ${turn.turnId} AND status IN ${this.#sql(TURN_STATUSES)}`
+    if (!held) return
+    await this.#sendMessage(session, turn, sent)
   }
 
   #turn(id: string, turnId: string, seq: number): Turn {

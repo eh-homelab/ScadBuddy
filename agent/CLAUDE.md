@@ -68,7 +68,20 @@ sent as multipart bytes, the tombstone check and the cap in the API's transactio
 These four have a rolling-deploy fallback:
 `src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` from the start with back-off
 (1 s doubling to 30 s) until every one is listed, and until then each stays on SQL, for an API
-pod older than the routes. A route's
+pod older than the routes. The small stores (#5299 step 5, `src/api/crudStores.ts`
+`STORE_AREAS`, backend `api/crud_agent_stores.py` and `api/crud_agent_notify.py`) take the same
+fallback, chosen per call by `gated` (a store's SQL class until its area is listed, its `Crud…`
+class after): area `activity-kinds` (`activity/kinds.ts` `crudUpsertActivityKinds`),
+`browser-origins` (`browser/store.ts` `BrowserOrigins`'s `remote`, `CrudSessionOrigins`),
+`bridge-tabs` (`CrudSessionTabStore`, `CrudTabOwnerStore`, `CrudTabImageStore`: an image's bytes
+are the body either way, `crudCall`), `pairings` (`CrudPairingStore`: only the code's hash
+leaves this process; the API holds the advisory lock and the `FOR UPDATE`), `mcp-tokens`
+(`CrudTokenStore`: a mint and a verify send the token's hash only, expiry by the database's
+clock) and `notify` (`notify/pushStore.ts` `CrudPushStore`, `notify/channels.ts`
+`CrudChannelRows` through `ChannelStore`'s `remote`: the API seals and opens the VAPID key,
+the subscriptions' keys and the channels' tokens, and re-wraps them at a rotation). With no
+KEK here Web Push and the channels work once `notify` is listed (`available`); the test is
+`test/crudStores.test.ts`. A route's
 answer counts only with `X-ScadBuddy-Crud: 1`; any other failure takes the read's existing
 error path (a lookup failure the activity retries, a 500, a resync). A session's successful `order_item_revision_add` (or
 `_after_acceptance`) is an `ai_session_order_costs` row (`src/sessions/orderCosts.ts`

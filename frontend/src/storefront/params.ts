@@ -62,16 +62,6 @@ export function listingUnavailable(listing: Listing): boolean {
   return listing.available === false || Object.values(listing.params).some(colourGone)
 }
 
-/** The listing filament whose colour is `colour`, compared as the backend does (casefolded). */
-export function filamentOf(filaments: readonly Filament[], colour: string): Filament | undefined {
-  const wanted = colour.toLowerCase()
-  return filaments.find((filament) => filament.colour.toLowerCase() === wanted)
-}
-
-export function filamentName(filament: Filament): string {
-  return filament.colour_name ? `${filament.colour_name} ${filament.material}` : `${filament.material} ${filament.colour}`
-}
-
 /**
  * #6152 — of `filaments`, those a customer may pick for colour parameter `param`: its
  * choices' colours, never a support material.
@@ -127,34 +117,6 @@ const SUPPORT_MATERIAL = /support|pva|bvoh|hips/i
 /** Of `filaments`, those a customer may pick: never a support material. */
 export function customerFilaments<T extends { material: string }>(filaments: readonly T[]): T[] {
   return filaments.filter((filament) => !SUPPORT_MATERIAL.test(filament.material))
-}
-
-/** A filament's name with its finish: "Blue · Matte"; the hex when it has no name. */
-function finishedName(filament: Filament): string {
-  const name = filament.colour_name?.trim() || filament.colour.toUpperCase()
-  const subtype = filament.subtype?.trim()
-  return subtype && !name.toLowerCase().includes(subtype.toLowerCase()) ? `${name} · ${subtype}` : name
-}
-
-/**
- * What the customer reads for each of `filaments`, by id: its colour's name and finish
- * (else its hex). Two of one such name and material are told apart by their brand, else
- * by their hex (#6152).
- */
-export function filamentLabels(filaments: readonly Filament[]): Map<string, string> {
-  const key = (filament: Filament, extra = '') => `${finishedName(filament).toLowerCase()}\u0000${filament.material.toLowerCase()}\u0000${extra}`
-  const count = (keys: string[]) => keys.reduce((seen, k) => seen.set(k, (seen.get(k) ?? 0) + 1), new Map<string, number>())
-  const byName = count(filaments.map((filament) => key(filament)))
-  const byBrand = count(filaments.map((filament) => key(filament, filament.brand?.trim().toLowerCase() ?? '')))
-  return new Map(
-    filaments.map((filament) => {
-      const name = finishedName(filament)
-      if ((byName.get(key(filament)) ?? 0) < 2 || !filament.colour_name) return [filament.id, name]
-      const brand = filament.brand?.trim()
-      if (brand && (byBrand.get(key(filament, brand.toLowerCase())) ?? 0) < 2) return [filament.id, `${name} (${brand})`]
-      return [filament.id, `${name} ${filament.colour.toUpperCase()}`]
-    }),
-  )
 }
 
 /** How a filament looks beyond its hex, from its finish and name (#6152). */

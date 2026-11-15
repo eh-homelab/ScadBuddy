@@ -117,7 +117,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
   })
 
   async function durableManager(
-    options: { cancelTimeoutMs?: number; sendTimeoutMs?: number; sessionQueue?: string } = {},
+    options: { cancelTimeoutMs?: number; sendTimeoutMs?: number; sessionQueue?: string; resendAfterMs?: number; describe?: DescribeSession } = {},
   ): Promise<SessionManager> {
     const m = manager({
       sql: db.sql,
@@ -133,6 +133,8 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
       sessionQueue: options.sessionQueue ?? QUEUE,
       ...(options.cancelTimeoutMs ? { cancelTimeoutMs: options.cancelTimeoutMs } : {}),
       ...(options.sendTimeoutMs ? { sendTimeoutMs: options.sendTimeoutMs } : {}),
+      ...(options.resendAfterMs ? { resendAfterMs: options.resendAfterMs } : {}),
+      ...(options.describe ? { describe: options.describe } : {}),
     })
     return m
   }
@@ -329,6 +331,74 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
       expect(await turn.done).toEqual({ kind: 'result', subtype: 'success', costUsd: 0.1, turns: 1 })
     })
   }, 60_000)
+
+  // #6353: a send whose Update went unanswered is sent once more, under the same update id,
+  // while the row holds the turn and the workflow holds none; never when the workflow holds a turn.
+  for (const [state, sends] of [
+    ['between_turns', 2],
+    ['not_found', 2],
+    ['open', 1],
+    ['closed', 1],
+  ] as const) {
+    it(`sends an unanswered message once more when its workflow is ${state}: ${sends} send(s) (#6353)`, async () => {
+      const queue = `durable-resend-${randomUUID()}`
+      const m = await durableManager({ sendTimeoutMs: 500, sessionQueue: queue, resendAfterMs: 200, describe: async () => state })
+      const spy = vi.spyOn(env.client.workflow, 'executeUpdateWithStart')
+      try {
+        const { session } = await m.start(browser, { origin: 'chat', title: 't' })
+        const turn = await m.send(session.id, browser, 'hello')
+        // No worker polls `queue`: each send is admitted but never answered, so it waits out its deadline.
+        await expect.poll(() => spy.mock.calls.length, { timeout: 15_000 }).toBe(sends)
+        // And no more after it: one re-send at most.
+        await new Promise((r) => setTimeout(r, 1_500))
+        expect(spy).toHaveBeenCalledTimes(sends)
+        expect(spy.mock.calls.map(([, opts]) => (opts as { updateId?: string }).updateId)).toEqual(Array(sends).fill(turn.turnId))
+        expect((await m.get(session.id, browser)).status).toBe('running')
+      } finally {
+        spy.mockRestore()
+      }
+    }, 30_000)
+  }
+
+  it('sends nothing again when the turn ended while its workflow was described (#6353 review)', async () => {
+    // The workflow took the first Update after all, finished the turn (releasing the row) and
+    // continued as new by the time it is described: between turns again, on a run that would
+    // not dedupe the old update id. The row is read after the describe, so nothing is sent.
+    const queue = `durable-resend-${randomUUID()}`
+    let sessionId = ''
+    const describe: DescribeSession = async () => {
+      await db.sql`UPDATE ai_sessions SET status = 'idle', durable_turn_id = NULL WHERE id = ${sessionId}`
+      return 'between_turns'
+    }
+    const m = await durableManager({ sendTimeoutMs: 500, sessionQueue: queue, resendAfterMs: 200, describe })
+    const spy = vi.spyOn(env.client.workflow, 'executeUpdateWithStart')
+    try {
+      const { session } = await m.start(browser, { origin: 'chat', title: 't' })
+      sessionId = session.id
+      await m.send(session.id, browser, 'hello')
+      await new Promise((r) => setTimeout(r, 2_000))
+      expect(spy).toHaveBeenCalledTimes(1)
+    } finally {
+      spy.mockRestore()
+    }
+  }, 30_000)
+
+  it('sends nothing again once the row no longer holds the unanswered turn (#6353)', async () => {
+    const queue = `durable-resend-${randomUUID()}`
+    // Room for the send itself, which can take seconds on a loaded runner, before the re-send is due.
+    const m = await durableManager({ sendTimeoutMs: 500, sessionQueue: queue, resendAfterMs: 8_000, describe: async () => 'between_turns' })
+    const spy = vi.spyOn(env.client.workflow, 'executeUpdateWithStart')
+    try {
+      const { session } = await m.start(browser, { origin: 'chat', title: 't' })
+      await m.send(session.id, browser, 'hello')
+      // The sweep (or a Stop) ended the turn before the re-send was due.
+      await db.sql`UPDATE ai_sessions SET status = 'idle', durable_turn_id = NULL WHERE id = ${session.id}`
+      await new Promise((r) => setTimeout(r, 10_000))
+      expect(spy).toHaveBeenCalledTimes(1)
+    } finally {
+      spy.mockRestore()
+    }
+  }, 30_000)
 
   it('gives back the status the row had before the claim, so a refused send keeps `failed`', async () => {
     const m = await durableManager()

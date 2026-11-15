@@ -537,12 +537,19 @@ credential and from other customers' files (`intake_worker/hardening.py`, `confi
   checked. Each failed call is counted, `scadbuddy_intake_sandbox_failed_total` by
   `reason`. A 503 busy or a refused connection is tried again for up to 60 s.
 - Pod security. Both pods run as non-root with a read-only root and no token automount.
-  The sandbox's pod runs with the seccomp and AppArmor profiles `Unconfined`, which the
-  launcher's `unshare(CLONE_NEWUSER)` needs, since a runtime's default profile refuses it
-  ([Kubernetes: seccomp](https://kubernetes.io/docs/tutorials/security/seccomp/),
-  [AppArmor](https://kubernetes.io/docs/tutorials/security/apparmor/)). That is the
-  sandbox's pod only, and only until the nodes can carry a `Localhost` profile that allows
-  that call; the launcher's own seccomp filter still binds the parser. The worker's pod
+  The sandbox's pod runs with the seccomp profile `Unconfined`, which the launcher's
+  `unshare(CLONE_NEWUSER)` needs, since a runtime's default profile refuses it
+  ([Kubernetes: seccomp](https://kubernetes.io/docs/tutorials/security/seccomp/)). Its
+  AppArmor profile is a `Localhost` one, `scadbuddy-intake-sandbox`: `unconfined` plus
+  `userns,`. The prod nodes are Ubuntu 24.04 with
+  `kernel.apparmor_restrict_unprivileged_userns=1`, where an AppArmor-unconfined pod keeps
+  no capabilities in its new user namespace and the launcher could not write its id maps
+  (`EACCES`, measured in prod on 2026-11-15;
+  [AppArmor wiki](https://gitlab.com/apparmor/apparmor/-/wikis/unprivileged_userns_restriction)).
+  eh-homelab/clusters `applications/scadbuddy/apparmor-loader.yaml` loads it on every node.
+  That is the sandbox's pod only, and the seccomp part lasts until the nodes carry a
+  `Localhost` seccomp profile that allows that call; the launcher's own seccomp filter
+  still binds the parser. The worker's pod
   keeps `RuntimeDefault`. Only the worker is on the Temporal frontend's allowlist.
 - Each parse starts through a small launcher, `confine.py` (standard library only, run
   with `-I -S`, so it is single-threaded), which confines itself and then `execv`s the
@@ -623,8 +630,9 @@ credential and from other customers' files (`intake_worker/hardening.py`, `confi
 
 - A kernel bug reachable from the parser's allowed syscalls escapes everything above;
   only a sandboxed kernel (gVisor, Kata) removes that. The sandbox's pod runs `Unconfined`
-  by the runtime's seccomp and AppArmor, so the launcher's own filter is the only syscall
-  filter on the parser until a `Localhost` profile replaces `Unconfined`.
+  by the runtime's seccomp, and its AppArmor profile adds no rule beyond `userns,`, so the
+  launcher's own filter is the only syscall filter on the parser until a `Localhost`
+  seccomp profile replaces `Unconfined`.
 - A parser that escaped through such a bug runs as the sandbox's user in the sandbox's
   pod. That pod holds no ServiceAccount token, no proof and no secret but the RPC token
   (which reaches only the sandbox itself), and by the isolation rule no other
@@ -638,10 +646,10 @@ credential and from other customers' files (`intake_worker/hardening.py`, `confi
   forged verdict mislabels at most the files that pod checks until it restarts.
 - The parser's memory and time are capped (`RLIMIT_AS` 4 GiB, 5 minutes); the pod's memory
   limit bounds the rest.
-- On Ubuntu 24.04 hosts, `kernel.apparmor_restrict_unprivileged_userns` may refuse the
-  launcher's namespace inside a container unless its AppArmor profile allows it; the
-  sandbox then refuses to start, which is safe and visible. Not yet measured on the
-  cluster's nodes.
+- On a node where the `scadbuddy-intake-sandbox` AppArmor profile is not loaded, the
+  sandbox's container is not created, and the kubelet retries it. Under a profile without
+  `userns,`, the nodes' `kernel.apparmor_restrict_unprivileged_userns=1` makes the sandbox
+  exit 3 at start (measured in prod on 2026-11-15). Both are safe and visible.
 
 With `unsafe-local` (development, tests) the worker starts the launcher itself, without
 `--strict`.
@@ -960,8 +968,9 @@ store credential, read-only root, a memory limit, its egress policy), the
 `scadbuddy-intake-sandbox` Deployment and its Service (`python -m
 scadbuddy.intake_worker.sandbox`, no ServiceAccount token, its own `emptyDir`, the
 Secret `scadbuddy-intake-sandbox-rpc` mounted outside `/var/run/secrets/` in it and in the
-worker, a NetworkPolicy check that fails without its policy, seccomp and AppArmor
-`Unconfined` on its pod only, ingress from the worker's pods only, no egress; §7, "The
+worker, a NetworkPolicy check that fails without its policy, seccomp `Unconfined` and the
+`Localhost` AppArmor profile `scadbuddy-intake-sandbox` (`unconfined` plus `userns,`,
+loaded on each node by `applications/scadbuddy/apparmor-loader.yaml`) on its pod only, ingress from the worker's pods only, no egress; §7, "The
 child's sandbox"), and the bucket's CORS rule (§6.4).
 
 ## 13. Phases, one PR each

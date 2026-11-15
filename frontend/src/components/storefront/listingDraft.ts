@@ -46,7 +46,8 @@ export function draftOf(listing: StorefrontListing): ListingDraft {
     fixed: listing.fixed,
     colours: listing.colours,
     media_ids: listing.media_ids,
-    materials: listing.materials,
+    // A listing stored before #6258 has none: the shop's default.
+    materials: (listing.materials as string[] | undefined) ?? [],
   }
 }
 
@@ -67,7 +68,9 @@ export function materialKey(material: string): string {
  * default is not read yet.
  */
 export function effectiveMaterials(draft: ListingDraft, shop: readonly string[] | undefined): string[] | null {
-  if (draft.materials.length > 0) return draft.materials
+  // A draft stored before #6258 has no `materials`: the shop's default.
+  const own = (draft.materials as string[] | undefined) ?? []
+  if (own.length > 0) return own
   return shop ? [...shop] : null
 }
 
@@ -483,8 +486,9 @@ export function previewListing(
           ]
         : []
     }),
-    // #6258: the listing's own, else the shop's default (`shop`, once read).
-    materials: effectiveMaterials(draft, shop) ?? draft.materials,
+    // #6258: the listing's own, else the shop's default (`shop`, once read); empty until
+    // then. A draft stored before #6258 has none: the shop's default too.
+    materials: effectiveMaterials(draft, shop) ?? [],
     media: draft.media_ids.flatMap((id) => {
       const item = media.find((m) => m.id === id)
       return item ? [{ url: mediaUrl(item), kind: item.kind, caption: item.caption }] : []

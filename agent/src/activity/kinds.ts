@@ -1,4 +1,5 @@
 import type { Sql } from 'postgres'
+import { type CrudTarget, crudOf } from '../api/crudStores.js'
 
 export type ActivityKindDecl = {
   key: string
@@ -17,6 +18,11 @@ export async function upsertActivityKinds(sql: Sql, kinds: ActivityKindDecl[]): 
     }
     await tx`UPDATE ai_activity_kinds SET retired_at = now() WHERE retired_at IS NULL AND key <> ALL(${kinds.map((k) => k.key)})`
   })
+}
+
+/** `upsertActivityKinds` through the API's CRUD route, area `activity-kinds` (#5299 step 5): one transaction there. */
+export async function crudUpsertActivityKinds(target: CrudTarget, kinds: ActivityKindDecl[]): Promise<void> {
+  await crudOf(target)('the activity kinds', '/activity-kinds', { body: { kinds } })
 }
 
 export function activityKindsOf(kinds: readonly { name: string; label?: string }[]): ActivityKindDecl[] {
