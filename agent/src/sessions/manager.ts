@@ -46,6 +46,7 @@ import {
   event,
   type Origin,
   type Owner,
+  type QueuedEntry,
   ownerSeenBy,
   publicLabel,
   sameOwner,
@@ -378,6 +379,10 @@ export type SessionErrorCode =
   | 'unavailable'
   /** The session is archived (#1885): read-only until it is unarchived. */
   | 'archived'
+  /** The session's queue holds as many messages as it may (#6386). */
+  | 'queue_full'
+  /** A queued message that is no longer waiting: it started, or was removed (#6386). */
+  | 'not_queued'
 
 type SessionErrorStatus = 400 | 403 | 404 | 409 | 429 | 503
 
@@ -392,6 +397,8 @@ const STATUS_OF: Record<SessionErrorCode, SessionErrorStatus> = {
   rate_limited: 429,
   unavailable: 503,
   archived: 409,
+  queue_full: 409,
+  not_queued: 409,
 }
 
 /**
@@ -543,7 +550,8 @@ export type TurnOutcome =
   /** Another replica took the claim over after this one's lease ran out. */
   | { kind: 'lost_claim' }
 
-export type Turn = { turnId: string; done: Promise<TurnOutcome> }
+/** `queued`: the message waits in the session's queue (#6386), at `position` (1 is next); `done` settles once it has run. */
+export type Turn = { turnId: string; done: Promise<TurnOutcome>; queued?: { position: number } }
 
 
 export type StartOptions = {
@@ -600,6 +608,12 @@ export type SendOptions = {
   flow?: FlowTurn
   /** Sent from a session that keeps no background tasks (#5870): this turn is offered none either (`turn_flow`). */
   withoutBackground?: boolean
+  /**
+   * While a turn runs, queue the message to run after it instead of refusing it `busy` (#6386):
+   * a person's send (the panel, the REST route) and `sessions_send`. Flow runs and background
+   * tasks wait for an idle session instead, as before.
+   */
+  queue?: boolean
 }
 
 /** Who a turn's in-process tools act for, beyond the session's owner (SendOptions.tiers). */
@@ -1455,9 +1469,45 @@ export class SessionManager {
       ...(options.tiers ? { tiers: options.tiers } : {}),
       ...(options.flow ? { flow: options.flow } : {}),
       ...(options.withoutBackground ? { withoutBackground: true } : {}),
+      ...(options.context ? { context: options.context } : {}),
+      ...(options.queue ? { queue: true } : {}),
     })
     if (!turn) throw await this.whyNotClaimed(id, principal, before)
     return turn
+  }
+
+  /** The messages waiting in a session's queue (#6386), for whoever may see the session. */
+  async queued(id: string, principal: Owner): Promise<{ version: number; queue: QueuedEntry[] }> {
+    const session = await this.get(id, principal)
+    return this.durableTurns ? this.durableTurns.queue(session) : { version: 0, queue: [] }
+  }
+
+  /** Removes a queued message before it starts (#6386): only a principal that may send to the session. */
+  async removeQueued(id: string, principal: Owner, entryId: string): Promise<{ version: number; queue: QueuedEntry[] }> {
+    const session = await this.mayQueue(id, principal)
+    return this.durableOrRefuse().removeQueued(session, entryId)
+  }
+
+  /** Replaces a queued message's words before it starts (#6386): only a principal that may send to the session. */
+  async editQueued(id: string, principal: Owner, entryId: string, text: string): Promise<{ version: number; queue: QueuedEntry[] }> {
+    const words = text.trim()
+    if (!words) throw new SessionError('invalid', 'the message is empty')
+    const session = await this.mayQueue(id, principal)
+    return this.durableOrRefuse().editQueued(session, entryId, words)
+  }
+
+  /** The session, when `principal` may send to it, as `send` checks (its owner, not archived, not done); else why not. */
+  private async mayQueue(id: string, principal: Owner): Promise<SessionRecord> {
+    const session = await this.get(id, principal)
+    if (session.archivedAt !== null) throw archivedError(id)
+    if (!sameOwner(principal, session.owner)) {
+      throw new SessionError(
+        'forbidden',
+        `session ${id} is controlled by ${ownerSeenBy(principal, session.owner).label}; only its owner can change its queue`,
+      )
+    }
+    if (session.status === 'done') throw new SessionError('closed', `session ${id} is done`)
+    return session
   }
 
   /** The durable dispatch, or `unavailable` when this service has none (no Temporal or no key). */

@@ -29,6 +29,8 @@ describe('the sessions_* tools', () => {
       sessions_start: 'write',
       sessions_send: 'write',
       sessions_fork: 'write',
+      sessions_queue_remove: 'write',
+      sessions_queue_edit: 'write',
       sessions_interrupt: 'write',
       sessions_handoff: 'write',
       sessions_accept_handoff: 'write',

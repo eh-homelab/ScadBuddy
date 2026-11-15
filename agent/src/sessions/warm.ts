@@ -653,11 +653,23 @@ export class WarmSessions {
     const { resume: _resume, sessionId: _sessionId, ...run } = turn.run
     // A new process under the session's own id finds no file of an earlier one here: Claude Code
     // refuses an id it has a file for ("Session ID … is already in use", exit 1; measured on the
-    // bundled 0.3.314). An earlier process leaves one when its placement was cut off before any of
-    // its appends landed, and the turn is placed here again (#6387). The table is the transcript.
-    // A directory that is not there yet held no process, so there is no file to remove.
+    // Claude Code 2.1.314 the SDK 0.3.314 bundles). An earlier process leaves one when its placement
+    // was cut off before any of its appends landed, and the turn is placed here again (#6387). The
+    // table is the transcript. A directory that is not there yet held no process, so no file.
     const ranIn = resume ? undefined : await realpath(run.cwd ?? scratchDir(run.paths)).catch(() => undefined)
-    if (ranIn !== undefined) await rm(path.join(claudeConfigDir(run.paths), 'projects', projectDirName(ranIn), `${sessionId}.jsonl`), { force: true })
+    if (ranIn !== undefined) {
+      const stale = path.join(claudeConfigDir(run.paths), 'projects', projectDirName(ranIn), `${sessionId}.jsonl`)
+      // Removed only when there (the first turn of every session has none): said, so the case shows
+      // in the log, as is a file that is there and cannot be removed (the start then fails on it).
+      const removed = await rm(stale).then(
+        () => true,
+        (err: NodeJS.ErrnoException) => {
+          if (err.code !== 'ENOENT') this.log(`warm: session ${sessionId}: an earlier process's session file could not be removed: ${err.message}`)
+          return false
+        },
+      )
+      if (removed) this.log(`warm: session ${sessionId}: removed an earlier process's session file before a new start (#6387)`)
+    }
     const query = this.start({
       ...run,
       credential,

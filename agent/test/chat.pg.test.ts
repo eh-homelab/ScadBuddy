@@ -136,6 +136,38 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`ChatConnect
     expect(out.filter((e) => e.type?.startsWith('input.'))).toEqual([])
   })
 
+  it('queues a message sent while a turn runs, and edits and removes one through the socket (#6386)', async () => {
+    // The first turn runs until it is stopped; the queued ones answer at once.
+    let turnsRun = 0
+    const { runner } = scriptedRunner(() => (turnsRun++ === 0 ? { hang: true } : { reply: 'ok' }))
+    m = manager({ sql: db.sql, paths: await tempPaths(), run: runner, pollMs: 20 })
+    const out: { type: string; code?: string; version?: number; queue?: { id: string; text: string }[]; text?: string }[] = []
+    const connection = new ChatConnection(m, (e) => out.push(e as never))
+    await connection.open()
+    const { clientMessage } = await frontendClientMessages()
+    const { session } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
+    await connection.receive(JSON.stringify(clientMessage({ type: 'session.attach', sessionId: session.id })))
+    await expect.poll(async () => (await m.get(session.id, browser)).turnActive, { timeout: 20_000 }).toBe(true)
+    const sendFrame = (text: string) => connection.receive(JSON.stringify(clientMessage({ type: 'user.message', sessionId: session.id, text, context: { route: '/' } })))
+    await sendFrame('and a lid')
+    await sendFrame('and a hinge')
+    const lastQueue = () => out.filter((e) => e.type === 'session.queue').at(-1)?.queue?.map((q) => q.text)
+    await expect.poll(lastQueue, { timeout: 20_000 }).toEqual(['and a lid', 'and a hinge'])
+    const [lid, hinge] = (await m.queued(session.id, browser)).queue.map((q) => q.id)
+    await connection.receive(JSON.stringify(clientMessage({ type: 'queue.edit', sessionId: session.id, id: hinge!, text: 'and two hinges' })))
+    await expect.poll(lastQueue, { timeout: 20_000 }).toEqual(['and a lid', 'and two hinges'])
+    await connection.receive(JSON.stringify(clientMessage({ type: 'queue.remove', sessionId: session.id, id: lid! })))
+    await expect.poll(lastQueue, { timeout: 20_000 }).toEqual(['and two hinges'])
+    // Removed already: refused in the session, as any refusal is.
+    await connection.receive(JSON.stringify(clientMessage({ type: 'queue.remove', sessionId: session.id, id: lid! })))
+    expect(out.filter((e) => e.type === 'error').map((e) => e.code)).toEqual(['not_queued'])
+    // A Stop ends the running turn only: the queued one runs next, and moves into the transcript.
+    await m.interrupt(session.id, browser)
+    await expect.poll(() => out.filter((e) => e.type === 'user.turn').map((e) => e.text), { timeout: 20_000 }).toEqual(['make a box', 'and two hinges'])
+    await expect.poll(lastQueue, { timeout: 20_000 }).toEqual([])
+    connection.close()
+  })
+
   it('answers a send to a spent session with its numbers, then the refusal (#790)', async () => {
     const { session } = await m.start(browser, { origin: 'chat' })
     await db.sql`UPDATE ai_sessions SET cost_usd = 1.0160000001 WHERE id = ${session.id}`

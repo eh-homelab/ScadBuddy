@@ -535,6 +535,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   over the watch's `printer_reports`) waits out each print before the next starts, and
   `print_lan_update` rewrites the result (`PrintRunResult.lan_waiting`, `lan_stopped`).
   A change to what a native run reads must keep `e2e-stack/`'s recorder pass at zero.
+  A native file's associations (#6395): `print_library/associations.py` (`RELATIONS`, the
+  one list; `library_file_associations`), routes `api/library_associations.py`, which adds
+  the implied ones read live (a model's `mesh_source`, an output's copy). A trashed file's
+  rows are hidden, not deleted (a restore shows them again); a purge deletes them by FK, and
+  a model's delete (`api/models.py` `delete_template`) deletes the model's.
   Copies between the two libraries (#5355): `print_library/copy.py` (the plan's walk,
   the batch, the ``library`` queue activities), `copy_models.py`, `copy_store.py`
   (`library_copies`, `library_copy_files`), `workflows/library_copy.py` (`LibraryCopy`,

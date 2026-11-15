@@ -116,7 +116,21 @@ export function defaultsFor(schema: Schema, filaments: readonly Filament[], valu
     .filter((param) => param.type === 'color' && isSupport(param))
     .flatMap((param) => filamentOf(valueOf(param), priced) ?? [])
     .filter((filament) => !offered.includes(filament))
-  return { params, fixed, colours: [...offered, ...new Set(support)].map((filament) => filament.id) }
+  const colours = [...offered, ...new Set(support)].map((filament) => filament.id)
+  // #6144: an offered colour whose template default no colour on offer has starts at the value
+  // given, else the first colour on offer, so publish takes it (the page's `fittedDefault`).
+  const chosen = withColourChoices({ params, fixed, colours }, schema, filaments).params
+  for (const param of shown) {
+    const bound = chosen[param.name]
+    const own = params[param.name]
+    if (!own || param.type !== 'color' || bound?.kind !== 'choice') continue
+    const pickable = bound.choices
+    if (pickable.some((colour) => sameColour(colour, param.initial))) continue
+    const value = valueOf(param)
+    const start = pickable.find((colour) => sameColour(colour, value)) !== undefined ? value : pickable[0]
+    if (start !== undefined) params[param.name] = { ...own, default: start }
+  }
+  return { params, fixed, colours }
 }
 
 /**
@@ -183,7 +197,15 @@ export function withColourChoices(listing: ListingDefaults, schema: Schema, fila
     .map((filament) => filament.colour)
     .filter((colour) => !supportOnly.some((support) => sameColour(support, colour)))
   for (const name of Object.keys(params)) {
-    if (byName.get(name)?.type === 'color') params[name] = { kind: 'choice', choices: colours }
+    // A colour's choices are the filaments'; its own label (#6137) and default (#6144) stay.
+    const bound = params[name]
+    if (byName.get(name)?.type === 'color')
+      params[name] = {
+        kind: 'choice',
+        choices: colours,
+        ...(bound?.label ? { label: bound.label } : {}),
+        ...(bound?.default != null ? { default: bound.default } : {}),
+      }
   }
   return { params, fixed }
 }

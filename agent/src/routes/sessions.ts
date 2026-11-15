@@ -38,7 +38,8 @@ import { ready, type RouteModule } from './module.js'
 //   POST /api/v1/ai/sessions                      {title?, prompt?} → 201 {session, turn_id?};
 //                                                 429 past the owner's new-session limit
 //                                                 (sessions/manager.ts MAX_NEW_SESSIONS)
-//   GET  /api/v1/ai/sessions/:id                  one session
+//   GET  /api/v1/ai/sessions/:id                  one session, with `queue`: the messages queued to
+//                                                 run after its turn, oldest first (#6386)
 //   GET  /api/v1/ai/sessions/:id/resources        {resources}: what its tool calls created,
 //                                                 changed or deleted, oldest first (#931,
 //                                                 sessions/touched.ts)
@@ -47,7 +48,16 @@ import { ready, type RouteModule } from './module.js'
 //                                                 name its tool.result or user.turn event gives;
 //                                                 404 for any other name. Never a path:
 //                                                 the name is looked up in ai_session_blobs
-//   POST /api/v1/ai/sessions/:id/messages         {text} → 202 {turn_id}; 409 while a turn runs
+//   POST /api/v1/ai/sessions/:id/messages         {text} → 202 {turn_id, queued?, position?}; while a
+//                                                 turn runs the message is queued to run after it
+//                                                 (#6386; `position` 1 is next); 409 `queue_full`
+//                                                 past the queue's cap
+//   GET  /api/v1/ai/sessions/:id/queue            {version, queue}: the queued messages (#6386)
+//   DELETE /api/v1/ai/sessions/:id/queue/:entry   → {version, queue}: remove a queued message before it
+//                                                 starts; owner-only (403); 409 `not_queued` once it
+//                                                 started or went
+//   PATCH /api/v1/ai/sessions/:id/queue/:entry    {text} → {version, queue}: new words for a queued
+//                                                 message before it starts; as DELETE
 //   GET  /api/v1/ai/sessions/:id/events           Server-Sent Events: the panel-protocol
 //                                                 events, replayed from `Last-Event-ID`
 //                                                 (a reconnect) or else `?after=`, then
@@ -155,6 +165,8 @@ const StartBody = z.strictObject({
   mode: z.enum(SESSION_MODES).optional(),
 })
 const SendBody = z.strictObject({ text: z.string().min(1).max(MESSAGE_MAX) })
+/** A queued message's new words (#6386). */
+const EditQueuedBody = z.strictObject({ text: z.string().min(1).max(MESSAGE_MAX) })
 /** `up_to`: a reply's panel message id (`assistant.text.done`'s `messageId`), #793. */
 const ForkBody = z.strictObject({
   title: z.string().max(200).optional(),
@@ -326,7 +338,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   app.get(
     `${base}/:id`,
-    route('read', async (c, sessions) => c.json(sessionView(await sessions.get(idOf(c), browserUser(c)), browserUser(c)))),
+    // With the messages queued to run after its turn (#6386).
+    route('read', async (c, sessions) => {
+      const session = await sessions.get(idOf(c), browserUser(c))
+      return c.json({ ...sessionView(session, browserUser(c)), queue: (await sessions.queued(session.id, browserUser(c))).queue })
+    }),
   )
 
   app.get(
@@ -377,8 +393,31 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     route('write', async (c, sessions) => {
       const body = await jsonBody(c, SendBody, undefined)
       if (!body.ok) return body.response
-      const turn = await sessions.send(idOf(c), browserUser(c), body.value.text)
-      return c.json({ turn_id: turn.turnId }, 202)
+      // While a turn runs, the message waits in the session's queue (#6386).
+      const turn = await sessions.send(idOf(c), browserUser(c), body.value.text, { queue: true })
+      return c.json({ turn_id: turn.turnId, ...(turn.queued ? { queued: true, position: turn.queued.position } : {}) }, 202)
+    }),
+  )
+
+  // The session's queue (#6386): what waits to run after its turn, removed or edited until it starts.
+  app.get(
+    `${base}/:id/queue`,
+    route('read', async (c, sessions) => c.json(await sessions.queued(idOf(c), browserUser(c)))),
+  )
+
+  app.delete(
+    `${base}/:id/queue/:entry`,
+    limit,
+    route('write', async (c, sessions) => c.json(await sessions.removeQueued(idOf(c), browserUser(c), c.req.param('entry') ?? ''))),
+  )
+
+  app.patch(
+    `${base}/:id/queue/:entry`,
+    limit,
+    route('write', async (c, sessions) => {
+      const body = await jsonBody(c, EditQueuedBody, undefined)
+      if (!body.ok) return body.response
+      return c.json(await sessions.editQueued(idOf(c), browserUser(c), c.req.param('entry') ?? '', body.value.text))
     }),
   )
 

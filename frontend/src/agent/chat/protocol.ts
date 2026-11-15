@@ -107,6 +107,8 @@ export const OPTIONS_MIN = 2
 export const OPTIONS_MAX = 4
 export const QUESTION_TEXT_MAX = 2_000
 export const PREVIEW_MAX = 20_000
+/** The agent's bound on a queued message's edited words (`src/sessions/clientProtocol.ts` `MESSAGE_MAX`, #6386). */
+export const MESSAGE_MAX = 32_000
 
 /**
  * #940 — one question the agent asks the user (Claude Code's AskUserQuestion). The user
@@ -291,6 +293,19 @@ export function blobUrl(sessionId: string, name: string): string {
   return `/api/v1/ai/sessions/${encodeURIComponent(sessionId)}/blobs/${encodeURIComponent(name)}`
 }
 
+/**
+ * #6386 — a message waiting in a session's queue: its id is the turn id it runs as, `text`
+ * the user's words (never the page context).
+ */
+export const QueuedEntrySchema = z.object({
+  id: z.string().min(1),
+  text: z.string(),
+  author: OwnerSchema,
+  images: z.array(SentImageSchema).optional(),
+  queuedAt: z.string(),
+})
+export type QueuedEntry = z.infer<typeof QueuedEntrySchema>
+
 const v = z.literal(PROTOCOL_VERSION)
 const sessionId = z.string().min(1)
 
@@ -430,6 +445,12 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     reconnected: z.literal(true).optional(),
   }),
   z.object({ v, type: z.literal('session.status'), sessionId, status: SessionStatusSchema }),
+  /**
+   * #6386 — the messages that wait to run after the session's turn, oldest first, after
+   * each change (queued, removed, edited, started or dropped). The log's last one is the
+   * queue; `version` grows with each change. Images by name only, as `user.turn` names them.
+   */
+  z.object({ v, type: z.literal('session.queue'), sessionId, version: z.number().int().min(0), queue: z.array(QueuedEntrySchema) }),
   z.object({
     v,
     type: z.literal('session.result'),
@@ -556,6 +577,9 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     answers: z.array(z.string().min(1).max(ANSWER_MAX)).min(1).max(QUESTIONS_MAX),
   }),
   z.object({ v, type: z.literal('session.interrupt'), sessionId }),
+  /** #6386 — remove a queued message, or give it new words, before it starts. */
+  z.object({ v, type: z.literal('queue.remove'), sessionId, id: z.string().min(1).max(200) }),
+  z.object({ v, type: z.literal('queue.edit'), sessionId, id: z.string().min(1).max(200), text: z.string().min(1).max(MESSAGE_MAX) }),
   z.object({ v, type: z.literal('session.handoff'), sessionId }),
   /** Watch a session: the server replays its transcript as events, then streams live. */
   z.object({ v, type: z.literal('session.attach'), sessionId }),
