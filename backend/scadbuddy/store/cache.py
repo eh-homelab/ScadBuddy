@@ -88,6 +88,10 @@ class CachedBlobStore:
         #: Held by the one eviction pass that runs at a time, whatever started it (a
         #: write's trim or the periodic pass): another finds it held and skips.
         self._evicting = threading.Lock()
+        #: Held by the one `cached_bytes` walk that runs at a time (#6354), and the last
+        #: walk's (monotonic time, total).
+        self._walking = threading.Lock()
+        self._walked: tuple[float, int] | None = None
 
     # --- phase 1's BlobStore, over the local cache ---------------------------
 
@@ -213,9 +217,26 @@ class CachedBlobStore:
         except Exception:
             logger.exception("could not evict the piece cache")
 
-    def cached_bytes(self) -> int:
-        cached = self.local.keys()  # a list of blob keys, not a dict view
-        return sum(_size(self.local.root / key) for key in cached)
+    def cached_bytes(self, *, max_age: float = 0) -> int | None:
+        """The bytes in the cache: a walk of every file in it. A walk at most `max_age`
+        seconds old answers instead, and a call while another walks answers the last
+        total, or None before the first (#6354). In the API the cache is on the shared
+        `/data` NFS volume, where one walk took 13 s (19,340 files, 2026-11-15): the
+        `/metrics` scrape, every 30 s from each of two Prometheus replicas with a 10 s
+        timeout, started one each time, and on a slow node they piled up until the
+        default executor had no thread for `/healthz` and liveness killed the pod."""
+        walked = self._walked
+        if walked is not None and max_age and time.monotonic() - walked[0] < max_age:
+            return walked[1]
+        if not self._walking.acquire(blocking=False):
+            return walked[1] if walked is not None else None
+        try:
+            cached = self.local.keys()  # a list of blob keys, not a dict view
+            total = sum(_size(self.local.root / key) for key in cached)
+            self._walked = (time.monotonic(), total)
+            return total
+        finally:
+            self._walking.release()
 
     def evict(self, *, now: float | None = None) -> list[str]:
         """Least recently used first, down to `max_bytes`: any directory not touched

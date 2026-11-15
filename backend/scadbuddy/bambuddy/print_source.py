@@ -38,7 +38,7 @@ from scadbuddy.bambuddy.filaments3mf import (
     UnreadableFilamentsError,
     read_filaments,
 )
-from scadbuddy.bambuddy.models import FilamentRequirements, LibraryFile
+from scadbuddy.bambuddy.models import FilamentRequirements, LibraryFile, ProcessValue
 from scadbuddy.bambuddy.nozzle_plan import NozzlePlan
 from scadbuddy.bambuddy.options import options_scope
 from scadbuddy.bambuddy.part_settings import PartSettingsMap
@@ -122,7 +122,7 @@ class PrintSource(Protocol):
         ...
 
     @property
-    def print_settings(self) -> dict[str, str]:
+    def print_settings(self) -> dict[str, ProcessValue]:
         """The template's default slicer settings (#770), the slice's process
         overrides; none for a file ScadBuddy did not render."""
         ...
@@ -800,7 +800,7 @@ class OutputSource(PrintPipeline):
     store: OutputFiles
     meta: OutputMeta
     #: The template's ``print_settings`` as they are now (``Catalogue.print_settings``).
-    print_settings: dict[str, str] = field(default_factory=dict)
+    print_settings: dict[str, ProcessValue] = field(default_factory=dict)
     #: The template's settings per slot as they are now (#5626, ``OutputNaming``), under
     #: the request's ``part_settings`` (``print_run.run_part_settings``).
     part_settings: PartSettingsMap | None = None
@@ -1132,7 +1132,7 @@ class LibrarySource(PrintPipeline):
         return options_scope(self.subject, None)
 
     @property
-    def print_settings(self) -> dict[str, str]:
+    def print_settings(self) -> dict[str, ProcessValue]:
         return {}
 
     @property

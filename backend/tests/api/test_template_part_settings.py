@@ -65,14 +65,16 @@ MISDECLARED = [
         "lable_color",
         id="part_print_settings",
     ),
-    pytest.param("print_settings", {"infill": "15%"}, "infill", id="print_settings"),
+    # #2998: any key and any value a Bambu config stores is taken now; a JSON object is
+    # still no setting's value.
+    pytest.param("print_settings", {"infill": {"density": "15%"}}, "infill", id="print_settings"),
 ]
 
 
 def misdeclare(paths: DataPaths, model: str, field: str, value: object) -> None:
     """Give ``model`` a ``field`` of ``value`` that the model.json load refuses: a
     ``part_print_settings`` key that is no colour parameter, or a ``print_settings``
-    key that is no print setting."""
+    value that no setting takes (a JSON object)."""
     meta = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))
     meta[field] = value
     paths.model_meta(model).write_text(json.dumps(meta), encoding="utf-8")

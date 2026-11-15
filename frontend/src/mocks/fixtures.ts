@@ -1786,6 +1786,8 @@ function printOf(
     imported: null,
     // The summary's own fields went in above; these are the detail's, a disjoint set.
     ...detail,
+    // #2998: the run's process settings; none here.
+    process_overrides: detail.process_overrides ?? null,
   }
 }
 

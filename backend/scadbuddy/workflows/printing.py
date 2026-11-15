@@ -48,6 +48,7 @@ from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
 with workflow.unsafe.imports_passed_through():
     from scadbuddy.bambuddy.dispatch import QueueOutcome, SliceStarted
+    from scadbuddy.bambuddy.models import ProcessValue
     from scadbuddy.bambuddy.print_run import PlannedRun, PlatePlan, PrintRunResult, QueuedPlate
     from scadbuddy.bambuddy.runs import PrintRun, PrintRunError
     from scadbuddy.bambuddy.subject import PrintSubject
@@ -98,7 +99,7 @@ with workflow.unsafe.imports_passed_through():
         SucceedInput,
         lan_sequence_id,
     )
-    from scadbuddy.workflows.problems import problem_of
+    from scadbuddy.workflows.problems import problem_of, setting_refused
     from scadbuddy.workflows.slicing import SLICE_RETRY, SLICE_ROUND, SLICE_TIMEOUT
 
 #: The reads and the insert: a Bambuddy blip is retried, a refusal is not.
@@ -593,6 +594,9 @@ class PrintRunWorkflow(_PlateStarts):
         #: Whether ``print_start_enqueue`` wrote the row's column and the run then
         #: stopped before that POST: its record clears the column (review #1316 (8) 2).
         self.enqueue_unstarted = False
+        #: The request's own ``process_overrides`` (#2998): the only keys a failed slice
+        #: is matched against (`_slice`), never the template's or the shorthands'.
+        self.requested_overrides: dict[str, ProcessValue] = {}
 
     @workflow.update(name=ACCEPTED_UPDATE)
     async def accepted(self) -> AcceptAnswer:
@@ -606,6 +610,7 @@ class PrintRunWorkflow(_PlateStarts):
     @workflow.run
     async def run(self, input: PrintRunInput) -> PrintRun:
         self.search_attributes = input.search_attributes
+        self.requested_overrides = input.request.overrides()
         self._upsert(kind="print", subject=input.subject, status="accepting")
         # The execution's start on the server's clock, not a time the route stamped on
         # its own host: pods' clocks differ (review #1061 3).
@@ -705,6 +710,27 @@ class PrintRunWorkflow(_PlateStarts):
         await workflow.wait_condition(workflow.all_handlers_finished)
 
     async def _slice(
+        self, planned: PlannedRun, plate: PlatePlan, subject: str
+    ) -> tuple[SliceStarted | NativeSliced, int]:
+        """:meth:`_slice_plate`, with a slicer's failure whose text names one of the
+        request's own process overrides answered as a 422 naming that key (#2998,
+        ``problems.setting_refused``). The template's settings, the filament profiles'
+        and the shorthands' keys are not matched: the user did not type them. Only the
+        failure's problem changes; the commands are the same, so a history replays as
+        before."""
+        try:
+            return await self._slice_plate(planned, plate, subject)
+        except (ActivityError, ApplicationError) as error:
+            if is_cancelled_exception(error) or not self.requested_overrides:
+                raise
+            refused = setting_refused(problem_of(error), self.requested_overrides)
+            if refused is None:
+                raise
+            raise ApplicationError(
+                refused.detail, refused, type=FAILED, non_retryable=True
+            ) from None
+
+    async def _slice_plate(
         self, planned: PlannedRun, plate: PlatePlan, subject: str
     ) -> tuple[SliceStarted | NativeSliced, int]:
         """Slice one plate: its job and the sliced file; on the native slicer, the

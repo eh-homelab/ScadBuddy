@@ -46,6 +46,9 @@ function describeChoices(choices: ModelPrintChoices, printerName: (id: number | 
   if (choices.tier) parts.push(`${choices.tier} quality`)
   if (choices.process_name) parts.push(choices.process_name)
   if (choices.print_sequence) parts.push(choices.print_sequence)
+  // #2998 — the slicer settings set by key.
+  const settings = Object.keys(choices.process_overrides ?? {}).length
+  if (settings) parts.push(`${settings} slicer ${settings === 1 ? 'setting' : 'settings'}`)
   const spools = choices.filament_plan?.length ?? 0
   if (spools) parts.push(`${spools} ${spools === 1 ? 'spool' : 'spools'}`)
   if (choices.nozzles?.length) parts.push(`nozzles ${choices.nozzles.map((n) => n.size).join(' / ')} mm`)
