@@ -33,6 +33,7 @@ from scadbuddy.filament.locations import (
     MoveTargetError,
 )
 from scadbuddy.filament.spools import (
+    SpoolBambuddyLinkedError,
     SpoolInUseError,
     SpoolTypelessError,
     TagKeysClashError,
@@ -89,6 +90,7 @@ def _refused(exc: ValueError) -> ApiError:
             CatalogExistsError
             | FilamentExistsError
             | SpoolInUseError
+            | SpoolBambuddyLinkedError
             | TagKeysClashError
             | LocationExistsError
             | LocationCycleError,
@@ -306,6 +308,7 @@ _SPOOL_REFUSED = (
     TypeTempError,
     SpoolTypelessError,
     SpoolInUseError,
+    SpoolBambuddyLinkedError,
     TagUnnamedError,
     TagKeysClashError,
 )
@@ -408,9 +411,9 @@ async def patch_spool(
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Delete a spool",
     description=(
-        "Only a spool that never printed: its ledger, tag bindings and Bambuddy link go "
-        "with it. 404 for no such spool, 409 when its ledger holds a print; archive it "
-        "instead."
+        "Only a spool that never printed and has no Bambuddy link: its ledger and tag "
+        "bindings go with it. 404 for no such spool, 409 when its ledger holds a print or "
+        "Bambuddy links it (the next pull would make it again); archive it instead."
     ),
 )
 async def delete_spool(filament: FilamentDep, spool_id: UUID) -> Response:
