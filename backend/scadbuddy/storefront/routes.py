@@ -185,10 +185,11 @@ async def render_status(job_id: str, crud: Crud, visitor_id: Visitor, client: Cl
     return await crud.render_status(_job(job_id), visitor_id=visitor_id, client=client)
 
 
-#: The fields of an estimate a visitor reads (`orders/estimate.py` `StoreEstimate`): the
-#: edge sends on these only, so no cost, markup or rate reaches a visitor.
+#: The fields of a price a visitor reads (`orders/estimate.py` `StoreEstimate`): the edge
+#: sends on these only, so no cost, markup, rate, grams, print time or cache key reaches a
+#: visitor (#6153; owner, 2026-11-14: the page shows only the price).
 ESTIMATE_FIELDS: Final = frozenset(
-    {"estimate", "price_minor", "currency", "minor_exponent", "grams", "parts", "unknown_parts"}
+    {"source", "price_minor", "currency", "minor_exponent", "retry_after"}
 )
 
 

@@ -697,6 +697,9 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   // #2686: a library folder is no recorded resource kind.
   'create_library_folder',
   'update_library_folder',
+  // #6395: nor is a library file's association (the file and the model are unchanged).
+  'associate_library_file',
+  'remove_association',
   // #3818: a tray's spool link is no recorded resource kind either (ScadBuddy's
   // tray_spool_links; the spool and its providers' records are unchanged).
   'link_tray_spool',

@@ -106,7 +106,8 @@ function setsColour(listing: Listing, values: Record<string, ParamValue>): boole
 /**
  * `/l/:id`: one listing to customize (spec §5.4). The visitor changes the parameters the
  * listing offers (`ListingView`, the same form the shop previews), sees the preview and
- * the rough price, and adds it to the order. Only the values the visitor set are sent;
+ * the firm price from a slice (#6153; or that it is being worked out, or priced by hand),
+ * and adds it to the order. Only the values the visitor set are sent;
  * every locked value and every default comes from the listing's published snapshot on the
  * shop's side, never from this page.
  *
@@ -151,8 +152,9 @@ export function CustomizePage({
   const [settled, setSettled] = useState<{ key: string; values: Record<string, ParamValue> }>()
   const [renderError, setRenderError] = useState<string | null>(null)
   /**
-   * The rough price of the render `job` names, for the choices `key` (`choicesKey`): two
-   * listings of one design can share a render, so the job alone does not tell the price.
+   * The price of the render `job` names (a slice's, pending, or none: #6153), for the
+   * choices `key` (`choicesKey`): two listings of one design can share a render, so the
+   * job alone does not tell the price.
    */
   const [estimate, setEstimate] = useState<{ job: string; key: string; estimate: StoreEstimate }>()
   const [quantity, setQuantity] = useState(1)
@@ -284,16 +286,29 @@ export function CustomizePage({
   }
 
   /**
-   * The rough price of a done render. While the shop works it out it answers 429
-   * `estimate_pending` with a `Retry-After` (#6120); that, and any other passing failure (a
-   * 5xx, the network), waits and reads again, backing off, until the time limit.
+   * The price of a done render (#6153). While the shop's slice works it out, the answer is
+   * `pending`: the page shows that (`onPending`) and reads again after its `retry_after`. A
+   * passing failure (a 5xx, the network) waits and reads again too, backing off. Past the
+   * time limit a price still pending is shown as none: the shop prices it by hand.
    */
-  const estimateOf = async (job: string, live: () => boolean): Promise<StoreEstimate | null> => {
+  const estimateOf = async (
+    job: string,
+    live: () => boolean,
+    onPending: (pending: StoreEstimate) => void,
+  ): Promise<StoreEstimate | null> => {
     const began = now()
     let delay = timing.firstMs
     for (;;) {
       try {
-        return await store.estimate(job)
+        const read = await store.estimate(job)
+        if (read.source !== 'pending') return read
+        if (!live()) return null
+        onPending(read)
+        const left = began + timing.limitMs - now()
+        if (left <= 0) return { ...read, source: 'none', retry_after: null }
+        await wait(Math.min(Math.max(delay, Math.min((read.retry_after ?? 0) * 1000, RETRY_CAP_MS)), left))
+        if (!live()) return null
+        delay = Math.min(delay * 2, timing.maxMs)
       } catch (caught) {
         if (!passing(caught)) throw caught
         const left = began + timing.limitMs - now()
@@ -332,8 +347,8 @@ export function CustomizePage({
         return
       }
       setShown({ job: done, key })
-      const rough = await estimateOf(done.id, live)
-      if (rough && live()) setEstimate({ job: done.id, key, estimate: rough })
+      const price = await estimateOf(done.id, live, (pending) => setEstimate({ job: done.id, key, estimate: pending }))
+      if (price && live()) setEstimate({ job: done.id, key, estimate: price })
     } catch (caught) {
       if (!live()) return
       // A start refused or failed settled nothing: the parts the visitor did not set show

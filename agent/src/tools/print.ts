@@ -59,6 +59,12 @@ export const libraryFileId = z
 /** The two sources a print tool takes, exactly one of them per call. */
 export const sourceShape = { output_id: outputId.optional(), library_file_id: libraryFileId.optional() }
 
+/**
+ * #6395 — the backend's `print_library/associations.py` `RELATIONS`, which is the one list;
+ * `test/libraryAssociations.test.ts` fails when this copy differs from the API's spec.
+ */
+export const ASSOCIATION_RELATIONS = ['output_of', 'variant_of', 'source_of', 'related_to'] as const
+
 export const ONE_SOURCE = 'name one source: output_id or library_file_id'
 
 /** A print tool's input: `shape` plus its source, refused at parse time unless it names exactly one. */
@@ -1305,6 +1311,111 @@ export const printTools: Tool[] = [
           ctx.backend.POST('/api/v1/print/library/rename', { body: { file_id, filename }, headers }),
         ),
       ),
+  }),
+
+  // #6395 — a native library file's associations with a model or another file. ScadBuddy's
+  // own records, re-settable: `write`, as remember_model_print_choices is.
+  defineTool({
+    name: 'associate_library_file',
+    label: 'Associate a library file',
+    description:
+      "Record how a file in ScadBuddy's own library relates to a model or to another library file, said from the " +
+      "file's side: the file is an `output_of` the target (a fixed or scaled copy of a model's print), a `variant_of` " +
+      'it (a PETG-supports copy of another file), the `source_of` it, or `related_to` it (instructions for a model). ' +
+      '`target` is `model:<slug>` (the model must exist) or `library:<file id>` (a live file of the native library). ' +
+      'The same file, target and relation again keeps the association and replaces its note. To associate any other ' +
+      '3MF, upload it with upload_library_file first. Only on library_backend=native.',
+    input: z.object({
+      file_id: libraryFileId.describe("A native library file's `id` (list_library)"),
+      target: z
+        .string()
+        .regex(/^(model:(builtin:)?[a-z0-9][a-z0-9-]*|library:[1-9][0-9]*)$/, 'must be model:<slug> or library:<file id>')
+        .max(200)
+        .describe('`model:<slug>` or `library:<file id>`'),
+      relation: z.enum(ASSOCIATION_RELATIONS),
+      note: z.string().max(500).optional(),
+    }),
+    risk: 'write',
+    routes: ['POST /api/v1/print/library/{file_id}/associations'],
+    summarize: ({ file_id, target, relation }) => `Associate library file ${file_id}: ${relation} ${target}`,
+    handler: async ({ file_id, target, relation, note }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/print/library/{file_id}/associations', {
+            params: { path: { file_id } },
+            body: { target, relation, note: note ?? '' },
+          }),
+          `associate library file ${file_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'list_associations',
+    label: 'List associations',
+    description:
+      "What a native library file (`file_id`) or a model (`slug`) is associated with. A file's list has its own " +
+      'associations and those of other files naming it as their target; a model\'s has the files naming it. Each ' +
+      "`relation` is said from `library_file_id`'s side (that file is an `output_of` the `target`). An implied one " +
+      "(`id` null, `implied_by` set) is read live and cannot be removed: a model made from the file (its mesh source) " +
+      "lists the file as `source_of` it, and a copy of a model's output as `output_of` it. Empty on Bambuddy's library." +
+      PAGED,
+    input: z
+      .object({
+        file_id: libraryFileId.optional().describe("A native library file's `id` (list_library)"),
+        slug: slug.optional(),
+        ...pageInput,
+      })
+      .refine((o) => (o.file_id === undefined) !== (o.slug === undefined), { message: 'name one: file_id or slug' }),
+    risk: 'read',
+    source: 'library file names, model names and notes that anyone with access to ScadBuddy can write',
+    routes: ['GET /api/v1/print/library/{file_id}/associations', 'GET /api/v1/models/{slug}/associations'],
+    handler: async (args, { backend }) => {
+      const { file_id, slug: model } = args
+      let found
+      if (file_id !== undefined) {
+        found = await ok(
+          backend.GET('/api/v1/print/library/{file_id}/associations', { params: { path: { file_id } } }),
+          `list library file ${file_id}'s associations`,
+        )
+      } else if (model !== undefined) {
+        found = await ok(
+          backend.GET('/api/v1/models/{slug}/associations', { params: { path: { slug: model } } }),
+          `list model ${model}'s associations`,
+        )
+      } else {
+        throw new ToolError('name one: file_id or slug')
+      }
+      // An implied one has no id: what it is read from, its file and its target name it.
+      const { items, ...rest } = page(
+        found.associations,
+        args,
+        (a) => a.id ?? `${a.implied_by}:${a.library_file_id}:${a.target}:${a.relation}`,
+        'list_associations',
+      )
+      return json({ associations: items, ...rest })
+    },
+  }),
+
+  defineTool({
+    name: 'remove_association',
+    label: 'Remove an association',
+    description:
+      "Remove a stored association of a native library file, by the `id` list_associations gives it. An implied one " +
+      '(`id` null) cannot be removed. associate_library_file adds it again.',
+    input: z.object({ association_id: z.string().uuid().describe('An association `id` from list_associations') }),
+    risk: 'write',
+    routes: ['DELETE /api/v1/print/library/associations/{association_id}'],
+    summarize: ({ association_id }) => `Remove association ${association_id}`,
+    handler: async ({ association_id }, { backend }) => {
+      await ok(
+        backend.DELETE('/api/v1/print/library/associations/{association_id}', {
+          params: { path: { association_id } },
+        }),
+        `remove association ${association_id}`,
+      )
+      return json({ removed: association_id })
+    },
   }),
 
   // ── write: preferences the print dialog remembers (ScadBuddy-local, re-settable) ──

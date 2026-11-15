@@ -883,6 +883,35 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       await handleOf(id).result()
     })
 
+    it('writes the queue change made in the activation where the last write ended: the started head leaves the written queue', async () => {
+      const id = randomUUID()
+      const hold = holdTurns()
+      await send(env.client, id, message('t1'))
+      await poll(() => turns.length, 1)
+      // The queue's write and the turn's end come back together: one workflow task holds both results.
+      const both = held()
+      queueChanged = async () => {
+        await both.promise
+        return true
+      }
+      finish = async (args) => {
+        finished.push(args)
+        await both.promise
+        return args.next ? { written: true, next: 'started' } : true
+      }
+      await enqueue(id, queued('q1'))
+      await poll(() => queueWrites.length, 1)
+      hold.release()
+      await poll(() => finished.length, 1)
+      both.release()
+      await poll(() => turns.map((t) => t.turnId), ['t1', 'q1'])
+      // The head left the queue: that change is written, the last write is the empty queue.
+      await poll(() => queueWrites.at(-1)?.queue, [])
+      expect(queueWrites.at(-1)?.version).toBe(2)
+      await handleOf(id).signal('end')
+      await handleOf(id).result()
+    })
+
     it('a Stop ends the running turn only: the queued messages stay, and the next one starts', async () => {
       const id = randomUUID()
       runTurn = async (input) => {

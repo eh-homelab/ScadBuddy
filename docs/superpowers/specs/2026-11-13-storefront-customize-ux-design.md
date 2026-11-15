@@ -154,6 +154,14 @@ Backend detail is in §5.6 (filled from the slice path map). The page shows
 shows "Working out the price…". If the slice fails, it falls back to the volume
 estimate and says "rough".
 
+**As built (#6153 PR A), by the owner's decisions of 2026-11-14 on #6153:** the slice
+price is firm, so the page shows "$X for one" and nothing else: no "about", no
+"confirmed after we check it", no grams and no print time. While the slice runs or
+waits it shows "Working out the price…". With no slice price (the slice failed, the
+shop has no slice profile, or a spool of the profile is no longer offered) it shows no
+number and no volume estimate: "We price this design by hand". A price still pending
+at the page's time limit is shown the same way.
+
 ### 5.5 Keeping choices (frontend, `storefront/customizeState.ts`)
 
 - `localStorage` key `scadbuddy.storefront.customize.<listingId>`, JSON
@@ -198,6 +206,32 @@ Design:
    `source: "slice" | "volume"` and `print_seconds`. Until the slice is done, or if it
    fails, the volume estimate is shown, marked rough.
 6. **Retention.** Slices are swept with their render rows.
+
+**As built (#6153 PR A).** The owner's decisions of 2026-11-14 replace points 1 to 6:
+
+- **One pricing path.** The price is `orders/quote.py` `slice_and_price`, which a
+  back-office quote runs too: the variant rendered to an output
+  (`rendering.py` `output_for_reference`), sliced by the print dialog's background slice
+  (`PreviewSlicer`, the native slicer or Bambuddy's, as a quote routes it), each plate read
+  with `read_plate`, and priced with `price_plates` at the book's policy and the machine
+  rate of the profile's printer. No new subject kind, and no second formula.
+- **Profile.** The shop slice profile (#6255) names only the printer and a spool per
+  material. Support and process settings come from the template, as in the back office;
+  the nozzles, tier and process from the model's remembered dialog choices (else
+  Standard 0.4 mm), and the plate from the one remembered on the printer. Before it
+  slices, the run checks that the printer still offers each profile spool, else no price.
+- **One price per variant.** `storefront_slice_prices` holds one row per `price_key`: a
+  sha256 of the render's 3MF content, the price-book filament per slot, the profile, the
+  choices, and the book's policy and the printer's live machine rate (read once and carried to the slice, so the key and the price use one rate). A change to any of
+  them is a new key. The row holds no job id and no bytes, so it outlives the render
+  prune.
+- **Capacity.** The slice is the operation `storefront_slice_price` on the `library`
+  queue. The estimate read of the render on screen starts it; a re-read joins it. At most
+  `storefront_slices_concurrent` (default 1, live) run at once; the rest answer pending,
+  and the page reads again.
+- **Answer.** `StoreEstimate` is `source` `slice` (with the price), `pending` (with
+  `retry_after`) or `none`. Its `price_key`, `grams` and `print_seconds` are the shop's,
+  and the edge does not send them on. Checkout at the cached price is PR B.
 
 This is the largest part; it ships last (PR D), after #6148.
 

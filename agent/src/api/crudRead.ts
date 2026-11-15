@@ -35,6 +35,20 @@ export class CrudReadError extends Error {
   }
 }
 
+/**
+ * `value` with every string well-formed, an object's keys included, for a CRUD route's body. A string cut between the
+ * halves of a pair (`slice(0, 500)`) holds a lone surrogate, which JSON escapes and the API
+ * refuses as no Unicode (422); Postgres.js wrote one as U+FFFD over SQL, and so does this.
+ */
+export function wellFormed(value: unknown): unknown {
+  if (typeof value === 'string') return value.toWellFormed()
+  if (Array.isArray(value)) return value.map(wellFormed)
+  if (value && typeof value === 'object' && !(value instanceof Date)) {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([k, v]) => [k.toWellFormed(), wellFormed(v)]))
+  }
+  return value
+}
+
 /** The `detail` and `reason` of a problem response. */
 async function problemOf(response: Response): Promise<{ detail: string; reason?: string }> {
   const body = (await response.json().catch(() => undefined)) as { detail?: unknown; reason?: unknown } | undefined

@@ -12,6 +12,7 @@ import { DeleteModelButton } from '../components/DeleteModelButton'
 import { DuplicatedFrom, DuplicateModelButton } from '../components/DuplicateModelButton'
 import { EditDetailsButton } from '../components/EditDetailsButton'
 import { ReadmeButton } from '../components/readme/ReadmeButton'
+import { RelatedButton } from '../components/library/RelatedAssociations'
 import { MediaButton } from '../components/media/MediaButton'
 import { FlyoutHeader, FullscreenButton, ParametersButton } from '../components/FullscreenControls'
 import { ModelLibrariesButton } from '../components/ModelLibrariesButton'
@@ -1364,6 +1365,8 @@ export function CustomizePage() {
             <MediaButton model={modelState.data} onChanged={modelState.setData} />
           )}
           {modelState.data?.has_readme && <ReadmeButton slug={slug} />}
+          {/* #6395 — associations are kept by ScadBuddy's own library only. */}
+          {origin && settings?.library_backend === 'native' && <RelatedButton slug={slug} />}
           {origin && (
             <DuplicateModelButton slug={slug} name={displayName} />
           )}

@@ -209,11 +209,11 @@ def test_the_storefront_estimate_type_follows_what_the_edge_sends(
 ) -> None:
     import scadbuddy.storefront.routes as edge_routes
 
-    monkeypatch.setattr(edge_routes, "ESTIMATE_FIELDS", frozenset({"estimate", "price_minor"}))
+    monkeypatch.setattr(edge_routes, "ESTIMATE_FIELDS", frozenset({"source", "price_minor"}))
     spec = json.loads(export_storefront(tmp_path / "storefront.json").read_text(encoding="utf-8"))
     schema = spec["components"]["schemas"]["StoreEstimate"]
-    assert set(schema["properties"]) == {"estimate", "price_minor"}
-    assert set(schema.get("required", [])) <= {"estimate", "price_minor"}
+    assert set(schema["properties"]) == {"source", "price_minor"}
+    assert set(schema.get("required", [])) <= {"source", "price_minor"}
 
 
 def test_an_account_orders_status_is_the_order_status_enum(tmp_path: Path) -> None:

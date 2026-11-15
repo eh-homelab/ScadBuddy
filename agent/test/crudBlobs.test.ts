@@ -155,6 +155,20 @@ describe('CrudSessionBlobs', () => {
     api.fenced = false
     expect(await blobs.putIf(SESSION, [image(1)], { attempt: 'run:2', turnId: 't' })).toBe(false)
   })
+
+  it('sends a fenced write of more images than one write takes in fenced batches, and stops at a refusal', async () => {
+    const api = new FakeApi()
+    const blobs = new CrudSessionBlobs(BASE, { fetch: api.fetch })
+    const many = Array.from({ length: IMAGES_PER_WRITE + 2 }, (_, i) => image(i))
+    expect(await blobs.putIf(SESSION, many, { attempt: 'run:1', turnId: 't' })).toBe(true)
+    expect(api.seen.map((s) => [s.parts.length, s.meta?.fence])).toEqual([
+      [IMAGES_PER_WRITE, { attempt: 'run:1', turn_id: 't' }],
+      [2, { attempt: 'run:1', turn_id: 't' }],
+    ])
+    api.fenced = false
+    expect(await blobs.putIf(SESSION, many, { attempt: 'run:1', turnId: 't' })).toBe(false)
+    expect(api.seen).toHaveLength(3)
+  })
 })
 
 describe('CrudAttachmentStore', () => {

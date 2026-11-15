@@ -55,6 +55,9 @@ import type {
   CatalogueLibrary,
   DependencyReport,
   LibraryFileEntry,
+  Association,
+  AssociationRequest,
+  Associations,
   LibraryFileObjects,
   LibraryCopyResult,
   LibraryCopyRequest,
@@ -3058,6 +3061,14 @@ export const api = {
   libraryThumbnailUrl: (fileId: number) => `${API_BASE}/print/library/${fileId}/thumbnail`,
   /** #5321 — one library file by id, whatever its type, with its folder's path. */
   getLibraryFile: (fileId: number) => request<LibraryFileEntry>(`/print/library/${fileId}`),
+  /** #6395 — a library file's associations, both ways, with the implied ones (`id` null). */
+  getLibraryAssociations: (fileId: number) => request<Associations>(`/print/library/${fileId}/associations`),
+  /** #6395 — the library files associated with a model, with the implied ones. */
+  getModelAssociations: (slug: string) => request<Associations>(`/models/${seg(slug)}/associations`),
+  /** #6395 — the file is `relation` the target, said from the file's side. */
+  associateLibraryFile: (fileId: number, body: AssociationRequest) =>
+    request<Association>(`/print/library/${fileId}/associations`, { method: 'POST', body: JSON.stringify(body) }),
+  removeAssociation: (id: string) => request<void>(`/print/library/associations/${seg(id)}`, { method: 'DELETE' }),
   /** #1031 — the library file itself, always served as a download. */
   libraryFileUrl: (fileId: number) => `${API_BASE}/print/library/${fileId}/file`,
 
