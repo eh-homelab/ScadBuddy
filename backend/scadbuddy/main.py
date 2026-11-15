@@ -1194,6 +1194,10 @@ def _rotate_agent_secrets(state: AppState) -> None:
     as the agent did at its own start. Logged, never fatal."""
     current = kek_at(state.settings.secret_key_file)
     previous = kek_at(state.settings.secret_key_previous_file)
+    if state.settings.secret_key_previous_file is not None and previous is None:
+        logger.warning(
+            "the previous secret key cannot be read; the agent's secrets are not re-wrapped"
+        )
     if current is None or previous is None:
         return
     try:

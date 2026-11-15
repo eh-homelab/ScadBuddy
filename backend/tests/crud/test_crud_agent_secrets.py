@@ -659,20 +659,27 @@ def test_two_creates_at_once_make_one_key(app: FastAPI) -> None:
 # --- rotation ---------------------------------------------------------------------------
 
 
-def _seal_credential(kek: Kek, pool: PgPool) -> str:
+def _seal_credential(kek: Kek, pool: PgPool, priority: int = 0) -> str:
     row_id = str(uuid.uuid4())
     envelope = seal_secret(kek, API_KEY, store.credential_aad(row_id, "anthropic_api_key", None))
     _sql(
         pool,
         "INSERT INTO ai_credentials (id, priority, kind, secret_sealed, dek_sealed, kek_id, last4)"
-        " VALUES (%s, 0, 'anthropic_api_key', %s, %s, %s, '1234')",
-        (row_id, envelope.secret_sealed, envelope.dek_sealed, envelope.kek_id),
+        " VALUES (%s, %s, 'anthropic_api_key', %s, %s, %s, '1234')",
+        (row_id, priority, envelope.secret_sealed, envelope.dek_sealed, envelope.kek_id),
     )
     return row_id
 
 
 def test_rotation_rewraps_credentials_and_payload_keys(tables: PgPool, tmp_path: Path) -> None:
     _seal_credential(OLD, tables)
+    # A v1 row (#354) is left as it is, and counted.
+    legacy = _seal_credential(OLD, tables, priority=1)
+    _sql(
+        tables,
+        "UPDATE ai_credentials SET secret_sealed = set_byte(secret_sealed, 0, 1) WHERE id = %s",
+        (legacy,),
+    )
     subject = f"session-{uuid.uuid4()}"
     dek = b"\x55" * 32
     _sql(
@@ -686,8 +693,9 @@ def test_rotation_rewraps_credentials_and_payload_keys(tables: PgPool, tmp_path:
         (f"flow-{uuid.uuid4()}", OLD.id),
     )
     with tables.connection() as conn:
-        assert rotate(conn, OLD, KEK) == {"credentials": (1, 0), "payload_keys": (1, 1)}
-        assert rotate(conn, OLD, KEK) == {"credentials": (0, 0), "payload_keys": (0, 1)}
+        assert rotate(conn, OLD, KEK) == {"credentials": (1, 1), "payload_keys": (1, 1)}
+        assert rotate(conn, OLD, KEK) == {"credentials": (0, 1), "payload_keys": (0, 1)}
+        assert rotate(conn, KEK, KEK) == {}
     app = _app(tables, tmp_path, kek=KEK_B64)
     with TestClient(app) as client:
         agent = Agent(client, _token(app))

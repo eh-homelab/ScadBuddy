@@ -100,7 +100,9 @@ def check_name(raw: str | None) -> str | None:
     name = raw.strip()
     if not name:
         return None
-    if name != raw or len(name) > NAME_MAX:
+    if name != raw:
+        raise CredentialRefusedError("name must be trimmed: no leading or trailing space", 400)
+    if len(name) > NAME_MAX:
         raise CredentialRefusedError(f"name must be at most {NAME_MAX} characters", 400)
     if any(unicodedata.category(c) in {"Cc", "Cf", "Zl", "Zp"} for c in name):
         raise CredentialRefusedError(
