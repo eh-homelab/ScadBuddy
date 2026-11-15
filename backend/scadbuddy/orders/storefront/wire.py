@@ -17,14 +17,36 @@ import re
 from datetime import datetime
 from typing import Annotated, Final, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+from pydantic.json_schema import SkipJsonSchema
 
+from scadbuddy.core.settings import unique_materials
 from scadbuddy.library.libraries import ModelLibrary
-from scadbuddy.library.media import MediaKind
-from scadbuddy.orders.models import ItemKind, OrderStatus, SubmitAddress
+from scadbuddy.library.media import MEDIA_ID_PATTERN, MediaKind
+from scadbuddy.orders.customer_links import MAX_LINK_CHARS
+from scadbuddy.orders.models import (
+    ChargeKind,
+    FilamentEffect,
+    ItemKind,
+    OrderStatus,
+    SubmitAddress,
+)
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import JobState, PlateInfo
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
+from scadbuddy.storefront.wire import LISTINGS_MAX_PAGE as LISTINGS_MAX_PAGE
+from scadbuddy.storefront.wire import LISTINGS_MAX_QUERY as LISTINGS_MAX_QUERY
+from scadbuddy.storefront.wire import LISTINGS_QUERY_PATTERN as LISTINGS_QUERY_PATTERN
+from scadbuddy.storefront.wire import (
+    MAX_COLOUR_CHOICES,
+    MAX_LINK_NOTE,
+    MAX_MODEL_FILE_BYTES,
+    MAX_MODEL_FILES,
+    MAX_PRINT_LINKS,
+    MAX_PURCHASE_LINKS,
+    MAX_REQUEST_TEXT,
+    MAX_UPLOAD_NAME,
+)
 from scadbuddy.storefront.wire import (
     MAX_REQUEST_FILE_BYTES as MAX_REQUEST_FILE_BYTES,
 )
@@ -34,6 +56,10 @@ from scadbuddy.storefront.wire import (
 from scadbuddy.storefront.wire import (
     REQUEST_KINDS as REQUEST_KINDS,
 )
+
+#: The most units of a "print my own model" request: a listing item's own cap
+#: (`AddListingItem`).
+MAX_ITEM_QUANTITY = 100
 
 #: A commit of the models repository, whole: a listing never pins a short id.
 LISTING_COMMIT = r"^[0-9a-f]{40}$"
@@ -47,6 +73,18 @@ MAX_LABEL_LENGTH = 200
 #: customer's (#6137).
 #: ASCII digits only, as the preview's copy (`params.ts` `EXTRUDER_NOTE`) reads them.
 EXTRUDER_NOTE: Final = re.compile(r"\s*\(\s*extruder\s*[0-9]+\s*\)", re.IGNORECASE)
+#: A support material: the shop's choice, never the customer's (#6152, owner rule
+#: 2026-11-13). The shop slice profile needs no spool for it (#6153). The page's copy
+#: is `frontend/src/storefront/params.ts` `SUPPORT_MATERIAL`, the agent's
+#: `agent/src/tools/storefrontDraft.ts` `SUPPORT_MATERIAL`: change all together.
+SUPPORT_MATERIAL: Final = re.compile(r"support|pva|bvoh|hips", re.IGNORECASE)
+#: A parameter that sets support: the shop may lock it, never offer it (#6152).
+SUPPORT_PARAM: Final = re.compile(r"support|interface", re.IGNORECASE)
+
+
+def is_support(material: str) -> bool:
+    """Whether ``material`` is a support material (`SUPPORT_MATERIAL`)."""
+    return SUPPORT_MATERIAL.search(material) is not None
 
 
 def shown_label(name: str, label: str | None, caption: str | None) -> str:
@@ -72,6 +110,10 @@ class _Bound(BaseModel):
         ]
         | None
     ) = None
+    #: The value a render takes while the customer picks none, in place of the template's
+    #: own default (#6144). Publish refuses one outside the bound; for a colour, one that
+    #: is not a listing filament's colour.
+    default: ParamValue | None = None
 
 
 class NumberBound(_Bound):
@@ -129,6 +171,9 @@ class ListingMedia(BaseModel):
     kind: MediaKind
     media_type: str
     caption: str
+    #: The template media id it was copied from (#6213); None for a listing published
+    #: before it was kept.
+    media_id: str | None = None
 
 
 class ListingInput(BaseModel):
@@ -146,6 +191,21 @@ class ListingInput(BaseModel):
     colours: list[str] = Field(default_factory=list)
     #: Ids of the template's media (``template_media``), in the order to show them.
     media_ids: list[str] = Field(default_factory=list)
+    #: The materials a print of this listing may be made of, in the shop's order of
+    #: preference (#6258). Compared casefolded, at most `MAX_MATERIALS`, repeats dropped
+    #: (`unique_materials`). Empty is the shop's default (``storefront_materials``). A
+    #: print is always of one material (`inputs.py` `resolve_choice`).
+    materials: list[str] = Field(default_factory=list)
+    #: Accepted and ignored for one release (#6302 review): the back office and the
+    #: agent built before #6258 still send ``one_material`` on every save, and a body
+    #: that refused it would fail that save. It is never dumped, answered or in the
+    #: spec. A later PR drops it with the ``one_material`` and ``picks`` columns (#6258).
+    one_material: SkipJsonSchema[bool] = Field(default=False, exclude=True)
+
+    @field_validator("materials")
+    @classmethod
+    def _materials(cls, value: list[str]) -> list[str]:
+        return unique_materials(value, "materials")
 
 
 class Listing(ListingInput):
@@ -172,6 +232,23 @@ class ListingUpdate(BaseModel):
     updated_at: datetime
 
 
+#: How many pictures ``PUT …/listings/{id}/media`` takes (#6213).
+LISTING_MEDIA_MAX = 50
+
+
+class ListingMediaUpdate(BaseModel):
+    """``PUT …/listings/{id}/media`` (#6213): the listing's pictures, ids of its
+    template's images (and any video the listing already shows, #6290) in the order to
+    show them, and the ``updated_at`` that was read."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    media_ids: list[Annotated[str, StringConstraints(pattern=MEDIA_ID_PATTERN)]] = Field(
+        max_length=LISTING_MEDIA_MAX
+    )
+    updated_at: datetime
+
+
 class ListingOrder(BaseModel):
     """``PUT …/listings/order``: every listing's id, in the order to show them."""
 
@@ -180,7 +257,76 @@ class ListingOrder(BaseModel):
     ids: list[str]
 
 
-# -- the public site's view (Task 6) --------------------------------------------------
+#: How many rows one page of ``GET …/listings`` holds at most, and by default (#6157).
+LISTING_PAGE_MAX = 200
+LISTING_PAGE_DEFAULT = 50
+#: The furthest a page may start: far past any shop, well inside Postgres's bigint.
+LISTING_OFFSET_MAX = 1_000_000
+
+type ListingSort = Literal["position", "title", "slug", "updated"]
+type ListingStatus = Literal["published", "draft"]
+
+
+class ListingQuery(BaseModel):
+    """``GET …/listings``'s query (#6157): a search, filters, a sort and a page."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Matches the title or the template's slug, case-insensitive, anywhere in it.
+    q: str = Field(default="", max_length=200)
+    status: ListingStatus | None = None
+    #: Templates; a listing of any of them.
+    slug: list[str] = Field(default_factory=list, max_length=100)
+    #: Price-book materials (``PLA``); a listing whose colours include a filament of any.
+    material: list[str] = Field(default_factory=list, max_length=50)
+    sort: ListingSort = "position"
+    dir: Literal["asc", "desc"] = "asc"
+    limit: int = Field(default=LISTING_PAGE_DEFAULT, ge=1, le=LISTING_PAGE_MAX)
+    #: Bounded so a huge offset is a 422, never a bigint overflow in Postgres.
+    offset: int = Field(default=0, ge=0, le=LISTING_OFFSET_MAX)
+
+
+class ListingRow(BaseModel):
+    """One row of the back office's list: what the table shows, never the bounds or
+    the snapshot."""
+
+    id: str
+    slug: str
+    commit: str
+    title: str
+    #: The listing's place in the shop's order, from 1.
+    place: int
+    published: bool
+    #: The first media id the listing shows, for the row's picture; None for none.
+    media_id: str | None
+    #: Every media id the listing shows, in order (#6213): a model media's "Storefront…"
+    #: dialog sets them with the row's ``updated_at`` and reads no listing whole.
+    media_ids: list[str]
+    published_at: datetime | None
+    updated_at: datetime
+
+
+class ListingPage(BaseModel):
+    """A page of ``GET …/listings``: its rows, how many match in all (``total``), and how
+    many listings the shop has (``places``: the last place a move can name)."""
+
+    items: list[ListingRow]
+    total: int
+    places: int
+    limit: int
+    offset: int
+
+
+class ListingMove(BaseModel):
+    """``POST …/listings/{id}/move``: the place to put the listing at, from 1. A place
+    past the end puts it last."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    place: int = Field(ge=1)
+
+
+# -- the public site's view (Task 6)--------------------------------------------------
 
 
 class _Shown(BaseModel):
@@ -199,15 +345,17 @@ class PublicNumber(NumberBound, _Shown):
 
 class PublicChoice(ChoiceBound, _Shown):
     label: str
-    #: A colour's choices are the listing filaments the price book still has, so none
+    #: A colour's choices are the listing filaments the price book still has and a
+    #: customer may pick (never a support material, `customer_filaments`, #6152), so none
     #: may be left.
     choices: list[ParamValue]
 
 
 class PublicText(TextBound, _Shown):
     label: str
-    #: The template's default text, which the design uses when the field is left blank
-    #: (#6137); null when it has none.
+    #: The value a render takes when the field is left blank (`effective_default`: the
+    #: listing's default, else the template's, #6137, #6144); null when it has none or it
+    #: is blank.
     placeholder: str | None = None
 
 
@@ -218,9 +366,23 @@ class PublicFilament(BaseModel):
     """A filament a visitor may pick: never its price."""
 
     id: str
+    #: ``#RRGGBB``: what a render splits parts by. A clear filament is its RGB with
+    #: ``alpha`` below 255 (#6209).
     colour: str
     colour_name: str | None
     material: str
+    #: The ``rgba`` alpha byte (255 opaque), the multi-colour stops (``#RRGGBB`` or
+    #: ``#RRGGBBAA``, at most 8) and Bambuddy's swatch effect, for the picker's swatch.
+    #: The backend always sends all three. They have defaults (``alpha`` null reads as
+    #: 255) so a caller that builds one without them, as the storefront's own tests do,
+    #: still type-checks: a single opaque colour with no effect.
+    alpha: int | None = None
+    extra_colours: list[str] = Field(default_factory=list)
+    effect: FilamentEffect | None = None
+    #: The finish ("Matte", "Silk", "Translucent") and the maker: what tells two filaments
+    #: of one colour name apart (#6152).
+    subtype: str | None = None
+    brand: str | None = None
 
 
 class PublicMedia(BaseModel):
@@ -239,13 +401,43 @@ class PublicListing(BaseModel):
     title: str
     description: str
     params: dict[str, PublicParam]
+    #: The listing filaments a visitor may pick: never a support material (#6152), and
+    #: only of a printable material in ``materials`` (#6258; `inputs.py`
+    #: `printable_materials`: each locked colour and a choice of each offered colour,
+    #: #6302 review). Each parameter's choices are of those materials only too.
     colours: list[PublicFilament]
+    #: The materials a print may be made of, in the shop's order (#6258): the listing's,
+    #: else the shop's default (``storefront_materials``). A print is of a printable one:
+    #: the first that offers every colour the visitor gives, and of those the first that
+    #: also offers each untouched part's default (`inputs.py` `resolve_choice`, #6302
+    #: review).
+    materials: list[str]
     media: list[PublicMedia]
     updated_at: datetime
+    #: False when no render of it can be made: no material is printable, or a colour
+    #: parameter has no colour left (#6302 review). The card's ``available`` is the same.
+    available: bool = True
+
+
+class PublicListingCard(BaseModel):
+    """One listing in the public list (#6154): what a card shows, and no more. The page
+    reads the whole listing (`PublicListing`) only when the visitor opens it."""
+
+    id: str
+    title: str
+    description: str
+    #: The listing's first picture, as a presigned GET, if it has one.
+    image: PublicMedia | None
+    #: False when no render of it can be made (`PublicListing.available`, #6302 review).
+    available: bool
 
 
 class PublicListings(BaseModel):
-    listings: list[PublicListing]
+    """One page of the published listings, in the shop's order."""
+
+    listings: list[PublicListingCard]
+    #: The next page's ``cursor``; null on the last page.
+    next_cursor: str | None
     #: Whether "Ask for a design" is on (``storefront_requests_enabled``).
     requests_enabled: bool
 
@@ -268,8 +460,22 @@ class RenderBody(BaseModel):
     #: The listing's ``updated_at`` as the page read it: another is 409 ``listing_changed``.
     listing_updated_at: datetime
     values: dict[str, ParamValue] = Field(default_factory=dict, max_length=200)
-    #: The listing filament the visitor chose for each colour slot of the render.
+    #: The listing filament the visitor chose for each colour slot of the render. It
+    #: must be of the material the colours resolve to (`inputs.py` `resolve_choice`).
+    #: A colour the visitor picks is its value in ``values`` (#6258): the CRUD side
+    #: finds its filament.
     colours: dict[ColourSlotIndex, str] = Field(default_factory=dict, max_length=64)
+    #: Accepted and ignored for one release (#6302 review): a page loaded before #6258
+    #: still sends ``picks`` (``{}`` when nothing is picked), and a body that refused it
+    #: would fail that page's every preview and add. It is never dumped (so a request
+    #: key's record does not hold it) and not in the spec. A later PR drops it with the
+    #: ``one_material`` and ``picks`` columns (#6258).
+    picks: SkipJsonSchema[
+        dict[
+            Annotated[str, StringConstraints(max_length=200)],
+            Annotated[str, StringConstraints(max_length=200)],
+        ]
+    ] = Field(default_factory=dict, max_length=200, exclude=True)
 
 
 class StoreRender(BaseModel):
@@ -284,9 +490,17 @@ class StoreRender(BaseModel):
     plates: list[PlateInfo]
     bbox_mm: BoundingBox | None
     colors: list[str] | None
-    #: The edge's path of the preview, once the render is done.
+    #: The edge's path of the preview, once the render is done and its files are in the
+    #: API's cache (`renders.py` `shown_render`); null until then, so the page keeps
+    #: polling (#6120).
     preview_url: str | None
     error: str | None
+    #: The colour parameters' values the render takes, as the CRUD side settled them
+    #: (`inputs.py` `resolve_choice`): a colour the visitor did not set can move to the
+    #: closest colour of the material. The page shows these (#6258, #6302 review). Only
+    #: the start of a render answers them; a status read has null. Never the material:
+    #: the customer never sees one.
+    values: dict[str, ParamValue] | None = None
 
 
 # -- the visitor's draft (Task 8) ------------------------------------------------------
@@ -315,6 +529,36 @@ class DraftAttachment(BaseModel):
     url: str
 
 
+SourceKind = Literal["file", "link"]
+SourcePurpose = Literal["print", "purchase"]
+CheckStatus = Literal["checking", "ready", "refused", "failed"]
+SourceStatus = Literal[
+    "open", "imported", "manual", "declined", "pending", "recorded", "not_needed"
+]
+
+
+class DraftSource(BaseModel):
+    """A file or a link of a request item, as its customer reads it. A link is text only:
+    the page shows it escaped, never as an anchor (spec 2026-11-13 §9.3). A file's check
+    (``checking``, ``ready``, ``refused`` with ``check_reason``, ``failed``) is the intake
+    worker's (§7)."""
+
+    id: str
+    kind: SourceKind
+    purpose: SourcePurpose
+    filename: str | None = None
+    size: int | None = None
+    url: str | None = None
+    note: str = ""
+    check_status: CheckStatus | None = None
+    check_reason: str | None = None
+    status: SourceStatus
+    #: The edge's path of a checked file's preview (`storefront/wire.py`
+    #: `draft_preview_path`), which the visitor's own cookie reads; None until the check
+    #: stored one. Never a presigned URL (spec 2026-11-13 §7, "Serving the preview").
+    preview_url: str | None = None
+
+
 class DraftItem(BaseModel):
     """An item of the visitor's draft. ``inputs`` are a model item's parameter values
     (``labels`` names each as the page shows it), ``notes`` a request's text; each is None
@@ -330,6 +574,75 @@ class DraftItem(BaseModel):
     labels: dict[str, str] = Field(default_factory=dict)
     notes: str | None
     attachments: list[DraftAttachment]
+    #: A request's files and links (#6133): its models, and the things to buy.
+    sources: list[DraftSource] = Field(default_factory=list)
+    #: Whether the request is a "print my own model" request (#6133), not a design one.
+    own_model: bool = False
+
+
+class UploadSlotAsk(BaseModel):
+    """One file the visitor will upload (#6133, spec 2026-11-13 §6.2): its name, its exact
+    size in bytes and its type. The store refuses a body of any other size or type."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    filename: str = Field(min_length=1, max_length=MAX_UPLOAD_NAME)
+    size: int = Field(ge=1, le=MAX_MODEL_FILE_BYTES)
+    media_type: Literal["model/stl", "model/3mf"]
+
+
+class UploadSlotsBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    files: list[UploadSlotAsk] = Field(min_length=1, max_length=MAX_MODEL_FILES)
+
+
+class UploadSlot(BaseModel):
+    """Where the browser PUTs one file: ``url`` with ``headers``, until ``expires_at``.
+    The URL carries a signature: it is the visitor's alone and is never logged."""
+
+    id: str
+    filename: str
+    url: str
+    headers: dict[str, str]
+    expires_at: datetime
+
+
+class UploadSlots(BaseModel):
+    uploads: list[UploadSlot]
+
+
+class LinkAsk(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = Field(min_length=1, max_length=MAX_LINK_CHARS)
+    purpose: SourcePurpose = "print"
+    note: str = Field(default="", max_length=MAX_LINK_NOTE)
+
+
+class ColourAsk(BaseModel):
+    """The colours the visitor asked for: the shop's choice, or price book filaments by
+    id."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    shop_choice: bool = True
+    filaments: list[str] = Field(default_factory=list, max_length=MAX_COLOUR_CHOICES)
+
+
+class ModelRequestBody(BaseModel):
+    """A "print my own model" request (#6133, spec 2026-11-13 §6.3): the upload slots the
+    browser filled, the links, one quantity, the colours and a note."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    uploads: list[str] = Field(default_factory=list, max_length=MAX_MODEL_FILES)
+    links: list[LinkAsk] = Field(
+        default_factory=list, max_length=MAX_PRINT_LINKS + MAX_PURCHASE_LINKS
+    )
+    quantity: int = Field(default=1, ge=1, le=MAX_ITEM_QUANTITY)
+    colours: ColourAsk = Field(default_factory=ColourAsk)
+    note: str = Field(default="", max_length=MAX_REQUEST_TEXT)
 
 
 class DraftView(BaseModel):
@@ -434,6 +747,37 @@ class CustomerQuote(BaseModel):
     can_accept: bool
 
 
+class CustomerSource(BaseModel):
+    """A file or a link of a request item, as its customer reads it (#6133, spec 2026-11-13
+    §10.5). ``url`` is text only: the page shows it escaped, never as an anchor.
+    ``amount_minor`` is a recorded purchase's (the customer pays it as a charge).
+    ``preview_url`` is the edge's route that serves a checked file's preview to this
+    order's reader (`storefront/wire.py` `order_preview_path`), never a presigned URL.
+    ``customer_reason`` is the source's reason only when ScadBuddy wrote it for the
+    customer (`model_requests.ENDED`); an import's refusal and a person's reason stay the
+    shop's."""
+
+    kind: SourceKind
+    purpose: SourcePurpose
+    filename: str | None
+    url: str | None
+    note: str
+    status: SourceStatus
+    amount_minor: int | None
+    shop_note: str
+    preview_url: str | None
+    customer_reason: str | None
+
+
+class CustomerCharge(BaseModel):
+    """A line the customer pays besides the items (spec 2026-11-13 §10.5): shipping, a
+    discount, a fee, tax, a thing bought for the project and its handling fee."""
+
+    kind: ChargeKind
+    label: str
+    amount_minor: int
+
+
 class CustomerItem(BaseModel):
     id: str
     title: str
@@ -442,6 +786,8 @@ class CustomerItem(BaseModel):
     status: str
     revisions: list[CustomerRevision]
     quote: CustomerQuote | None
+    #: A request item's files and links (#6133); empty on every other item.
+    sources: list[CustomerSource] = Field(default_factory=list)
 
 
 class CustomerPayment(BaseModel):
@@ -485,6 +831,8 @@ class CustomerOrderView(BaseModel):
     #: open request has no provider, and the shop has saved some.
     payment_instructions: str | None
     shipments: list[CustomerShipment]
+    #: The order's charges, by kind and position (#6133, spec 2026-11-13 §10.5).
+    charges: list[CustomerCharge] = Field(default_factory=list)
 
 
 class RevisionAnswerBody(BaseModel):

@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api import flow_script
 from scadbuddy.api.components import getter_for
+from scadbuddy.core.problems import ApiError
 from scadbuddy.flows.agent_tools import AgentToolsUnavailableError
 from scadbuddy.flows.component import FLOWS
 from scadbuddy.workflows.flow_tools import HOST_FUNCTIONS
@@ -151,3 +152,41 @@ def test_no_schema_or_a_bad_one_completes_no_inputs(client: TestClient, schema: 
     body = response.json()
     assert [f["name"] for f in body["functions"]] == [t.__name__ for t in HOST_FUNCTIONS]
     assert "FlowInputs" not in [t["name"] for t in body["types"]]
+
+
+def test_a_tool_the_agent_lacks_is_a_problem_by_line(client: TestClient) -> None:
+    """#6365: a script that names a tool the agent does not have (not deployed yet) is
+    refused as a registration refuses it, not left to fail its run."""
+    response = client.post(
+        "/api/v1/workflow-script/check",
+        json={"script": script("await tool('list_models', {})", "await tool('nope', {})")},
+    )
+    assert response.status_code == 200, response.text
+    problems = response.json()["problems"]
+    assert [(p["line"], p["message"].split(":")[0]) for p in problems] == [
+        (4, "there is no tool 'nope'")
+    ]
+
+
+def test_a_disabled_tool_may_still_be_named(client: TestClient, agent: AgentTiers) -> None:
+    agent.disabled.add("send_to_bambuddy")
+    response = client.post(
+        "/api/v1/workflow-script/check",
+        json={"script": script("await tool('send_to_bambuddy', {'output_id': 'o1'})")},
+    )
+    assert response.json() == {"problems": []}
+
+
+def test_the_check_is_refused_when_the_agent_does_not_answer(
+    client: TestClient, agent: AgentTiers, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def down() -> set[str]:
+        raise AgentToolsUnavailableError("connection refused")
+
+    monkeypatch.setattr(agent, "tool_names", down)
+    # This bare app has no problem handler: the route's refusal arrives as raised.
+    with pytest.raises(ApiError) as refused:
+        client.post(
+            "/api/v1/workflow-script/check", json={"script": script("await tool('nope', {})")}
+        )
+    assert refused.value.status == 503

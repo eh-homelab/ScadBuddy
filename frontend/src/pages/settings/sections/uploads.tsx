@@ -4,10 +4,11 @@ import { Textarea } from '@/components/ui/textarea'
 import { formatBytes } from '../../../lib/format'
 import { useAsync } from '../../../lib/useAsync'
 import { FieldRow } from '../controls'
+import { docOf } from '../fields'
 import { RuntimeRows, SavedSection } from '../formParts'
 import type { AreaId } from '../registry'
 import { useBackendSettings } from '../useBackendSettings'
-import { FETCH_NOWHERE, fieldsOf, ofLimit } from '../values'
+import { fieldsOf, ofLimit } from '../values'
 
 export const id = 'uploads'
 export const area: AreaId = 'library'
@@ -23,8 +24,7 @@ export function Component() {
     <SavedSection form={form} id={id} title={title}>
       <FieldRow
         id="asset-fetch-domains"
-        label="Fetch assets from"
-        help={`The domains an SVG, PNG, STL, 3MF or OBJ may be fetched from by URL (the assistant's fetch_asset), a domain a line; each takes its subdomains, and every redirect must stay on the list. Empty restores the defaults; "${FETCH_NOWHERE}" allows none.`}
+        {...docOf(form.settings, 'asset_fetch_domains')}
         error={errors.asset_fetch_domains}
       >
         <Textarea

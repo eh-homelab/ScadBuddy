@@ -88,8 +88,10 @@ covers the same ground more briefly.
   `_TOOL_TIMEOUT`, plus the retries' backoff), not 90 s; one whose last attempt ends on
   its 120 s start-to-close instead takes no fallback and fails there. A flow's tool
   calls have no such fallback: one slower than 30 s that lands on an old replica times
-  out, a read up to three times and a write at once, and the script sees the error
-  (`flow_session_check` retries without limit).
+  out, a read up to three times and a write at once, except a `keyed` write (one whose
+  commands carry an Idempotency-Key), which is asked once more under the same key
+  (#6345, backend `workflows/flow_tools.py` FLOW_KEYED_RETRY_PATCH); the script sees
+  the error (`flow_session_check` retries without limit).
 - **Browser calls across a rollout of #4780.** Since #4780 a browser_* call for a tab on
   another replica is a `BridgeCall` workflow, whose one activity runs
   on the queue of the replica that holds the tab (`ai_tab_owners`;
@@ -437,7 +439,16 @@ kubectl -n scadbuddy create secret generic scadbuddy-agent-kek \
 - Saving a credential then fails with `503`, "no key-encryption key is configured"
   (`planPut()` in [`agent/src/credentials.ts`](../../agent/src/credentials.ts)).
   `/healthz` reports `"ai": "disabled (no key-encryption key: …)"` (`aiStatus()` in
-  [`agent/src/app.ts`](../../agent/src/app.ts)).
+  [`agent/src/aiStatus.ts`](../../agent/src/aiStatus.ts)).
+- Once the API lists the agent's CRUD areas `credentials` and `payload-keys` (#5299
+  step 4), the API's key is the one that counts for the Claude credentials and the
+  payload keys: the API seals and opens them
+  ([`backend/scadbuddy/api/crud_agent_secrets.py`](../../backend/scadbuddy/api/crud_agent_secrets.py)),
+  and the agent asks it whether it holds a key (`GET …/crud/agent/credentials/key`). The
+  agent's own file still opens its plugin secrets, Web Push and channel keys, plugin
+  sign-ins, and its workspace file keys while the API does not list area `workspace`
+  (#5299 step 7), until the later steps of #5299. Mount the same key
+  in both.
 - **Keep a copy.** Each stored row records the KEK's id (the first 16 hex characters of
   SHA-256 over the key; `kekFromBase64()`). A credential sealed under a lost key cannot
   be opened. `/healthz` then reports "stored credential was sealed with a different
@@ -446,23 +457,44 @@ kubectl -n scadbuddy create secret generic scadbuddy-agent-kek \
 ### 3.3 Rotating it
 
 Spec §9: "Rotating it re-wraps the data keys only." The procedure comes from the
-comment above `previousKek` in `main.ts` and from `CredentialStore.rewrapFrom()` in
-`credentials.ts`:
+comment above `previousKek` in `main.ts` and from
+[`backend/scadbuddy/agent_data/rotation.py`](../../backend/scadbuddy/agent_data/rotation.py)
+(`main._rotate_agent_secrets` calls it).
+
+In normal running no container sets `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`: in
+eh-homelab/clusters' `scadbuddy.yaml` neither the API container nor the agent sidecar
+sets it (the API container at line 471, the agent at 652), and the comment at line 651 says it is added only during a rotation (read on clusters main,
+2026-11-15). Since #5299 step 4 the API re-wraps the Claude credentials and the payload
+keys, so a rotation sets the previous key on the API container as well as on the agent's
+containers (the sidecar and the `scadbuddy-agent-worker` Deployment). A rotation that
+sets it on the agent alone leaves `ai_credentials` and `ai_payload_keys` under the old
+key, and they stop opening once the old key's mount is removed.
 
 1. Generate a new key file (§3.1).
 2. Mount the **new** key as `SCADBUDDY_SECRET_KEY_FILE` and the **old** one as
-   `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`, then restart.
-3. Once migrations have applied (the `afterMigrate` hook of `connectDatabase()`),
-   every row whose `kek_id` is the old key's has its data key re-sealed under the new
-   key. The sealed secret and `updated_at` are not touched. The `UPDATE` is
-   conditional on `kek_id`, so two pods rotating at once do not overwrite each other.
-   The log line reads `secret key rotation: re-wrapped N credential(s) from key <old> to <new>`.
+   `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` on the **API container and the agent's
+   containers**, then restart them.
+3. Each one re-wraps its own tables at its start. Only the data key of a row whose
+   `kek_id` is the old key's is sealed again under the new key:
+   - The API, after its migrations: `ai_credentials` (the Claude credentials),
+     `ai_payload_keys` (the durable payload keys), and `ai_push_vapid`,
+     `ai_push_subscriptions` and `ai_notify_channels` (the Web Push keys and the
+     notification channels' tokens, #5299 step 5), and `ai_session_files` (the workspace's
+     principal file keys, #5299 step 7). The log line reads
+     `secret key rotation: re-wrapped the agent's credentials` (or `payload_keys`,
+     `notify`, or `session_files`), with the counts.
+   - The agent, once migrations have applied (the `afterMigrate` hook of
+     `connectDatabase()`): `ai_plugins` (plugin secrets) and `ai_plugin_oauth` (plugin
+     sign-ins). The later steps of #5299 move these to the API too.
+
+   The sealed secret and `updated_at` are not touched. Each `UPDATE` is conditional on
+   `kek_id`, so two pods rotating at once do not overwrite each other.
 4. A row the old key cannot open (altered, or in the v1 format) is left as it is and
    counted as `failed` in the same log line.
-5. Remove the previous-key mount and restart again.
+5. Remove the previous-key mounts from every container and restart again.
 
 If the previous file cannot be loaded, the log says so and nothing is re-wrapped
-(`main.ts`).
+(`main.ts`, and the API's start).
 
 ## 4. Setting up the Claude credential
 
@@ -677,7 +709,10 @@ In an `api` process, `temporal` reports its own `agent-tools.<hostname>` worker.
   | `disabled (no database)` | `SCADBUDDY_DATABASE_URL` unset |
   | `unavailable (database unreachable)` | Ping failed, or the credential read threw |
   | `unavailable (database migrations failed)` | `ready()` returned false |
+  | `unavailable (waiting for the API to apply the database migrations)` | `ai_migrations` lacks a file this build expects: the API has not migrated yet (#5299) |
   | `unavailable (database timed out)` | `ready()` or the credential read took longer than 2 s (`DEFAULT_HEALTH_TIMEOUT_MS`) |
+  | `unavailable (the API did not answer for its key-encryption key)` | Once the API serves area `credentials` (#5299 step 4): `GET …/crud/agent/credentials/key` failed |
+  | `unavailable (the API timed out answering for its key-encryption key)` | That read took longer than 2 s |
   | `disabled (no key-encryption key: <reason>)` | See §3.2 |
   | `disabled (no Claude credential)` | No row saved |
   | `unavailable (stored credential was sealed with a different key-encryption key)` | The row's `kek_id` does not match the mounted key |
@@ -688,15 +723,18 @@ In an `api` process, `temporal` reports its own `agent-tools.<hostname>` worker.
   ([`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)). That test is the only
   reader of `ai` today; no backend or frontend code on `main` reads it (the `AiStatus`
   comment in `agent/src/app.ts`).
-- **Migrations** (one file each in `agent/src/db/migrations/`, applied by
-  `agent/src/db/migrations.ts`) run in the background at start
-  (`void database?.ready()` in `main.ts`). They run under a transaction-scoped advisory
-  lock with `lock_timeout` 10 s and `statement_timeout` 60 s
-  (`DEFAULT_LOCK_TIMEOUT_MS`, `DEFAULT_STATEMENT_TIMEOUT_MS`). A failure is retried on
-  the next `ready()` call. An already-applied migration whose SQL was edited fails its
-  recorded sha256 check (`MigrationChecksumError`), and `main.ts` exits 1 on it. So
-  does a ledger still keyed by position (before #491) that holds a row main never had
-  (`MigrationLedgerError`): that database ran an unmerged branch's migration.
+- **Migrations** (one file each in `backend/scadbuddy/migrations_agent/`) are the
+  API's to apply, at its start, after its own (#5299 D6;
+  `backend/scadbuddy/render/agent_migrations.py`), under the transaction-scoped advisory
+  lock the agent used to take, with `lock_timeout` 10 s and `statement_timeout` 60 s. An
+  already-applied migration whose SQL was edited, or a ledger still keyed by position
+  (before #491) that holds a row main never had, stops the API's start. The agent's
+  `ready()` is true once `ai_migrations` holds every file in
+  `agent/src/db/expected-migrations.json` (`agent/src/db/schema.ts`; one read a call, so
+  a route fails fast while the API is behind). Its start work waits for `untilReady()`
+  (`agent/src/db.ts`: `ready()` again 1 s apart, doubling to 30 s), and it logs
+  `waiting for the API to apply the agent's database migrations` once a wait. A row recorded with other SQL than the agent expects
+  (`MigrationChecksumError`) makes `main.ts` exit 1.
 
 ## 6. Origin allowlist and trusted proxies
 
@@ -826,9 +864,10 @@ logged as `mcp auth: ai_settings.mcp_oidc is not a valid OIDC configuration`.
 
 ## 7. Database tables
 
-The agent owns and migrates its `ai_*` tables (spec §9;
-[`agent/src/db/migrations/`](../../agent/src/db/migrations/), applied by
-[`agent/src/db/migrations.ts`](../../agent/src/db/migrations.ts)):
+The agent owns its `ai_*` tables (spec §9); the API applies their migrations
+([`backend/scadbuddy/migrations_agent/`](../../backend/scadbuddy/migrations_agent/), by
+[`backend/scadbuddy/render/agent_migrations.py`](../../backend/scadbuddy/render/agent_migrations.py),
+#5299):
 
 - `ai_migrations`: the ledger, one row per applied file (its id is the file name
   without `.sql`), with a checksum each. `version` and `story` are set only for the
@@ -905,21 +944,38 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   an `/mcp` caller outside a session, swept 24 h after its last write) and `path`, with
   the media type, sha256, size and `source`, and the bytes: a sealed blob of the
   backend's store (`blob_key`, `key_sealed`, #4789, `20261027T0114Z_session_files_blobs.sql`)
-  or, where the backend keeps no blobs, `data`. `SessionFiles` in
+  or, where the backend keeps no blobs, a row of `ai_session_file_bytes` it names
+  (`bytes_sha256`), or `data` for a row an older agent wrote. `SessionFiles` in
   [`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts).
+
+- `ai_session_file_bytes`: a workspace file's bytes where the backend keeps no blobs
+  (`store_backend` local; #4212, `20261114T1609Z_session_file_bytes.sql`), one row per
+  sha256 (a CHECK makes the key the hash of the bytes), named by every `ai_session_files`
+  row with those bytes, a fork's included, through a foreign key. A row no file names is
+  deleted after a write or delete, on the sweep, and when its session is forgotten.
 
 - `ai_plugin_packages`: installed Claude plugin packages (#297,
   `20260928T0750Z_plugin_packages.sql`): the source, the pinned commit, the content
   hash, the review, the approval and the enabled flag. See §9.
 
-The migration advisory lock key is "SCADAGNT", distinct from the backend's "SCADBDDY"
-(the comment on `MIGRATION_LOCK` in `migrations.ts`).
+The agent's migration advisory lock key is "SCADAGNT", distinct from the backend's
+"SCADBDDY" (`AGENT_MIGRATION_LOCK` in `backend/scadbuddy/render/agent_migrations.py`).
 
-The agent also reads the backend's flow tables, which the backend migrates. Its
-database role needs `UPDATE` on `workflow_runs`, not only `SELECT`: every flow tool call
-reads its run `FOR SHARE` (`PgFlowRuns.startedBy`, `agent/src/temporal/flowRuns.ts`), and
-Postgres requires `UPDATE` for that lock. A role narrowed to `SELECT` fails every flow
-tool call, as a lookup error the activity retries until it gives up.
+The agent also reads the backend's flow tables, which the backend migrates. It asks the
+backend over its CRUD routes (`/api/v1/internal/crud/agent/`, area `flows`,
+`agent/src/flows/backendReads.ts`, #5299), and never over SQL. The API takes back the
+grants of its role `scadbuddy_agent` on `events`, `workflow_runs` and
+`workflow_run_decisions` at every start (`backend/scadbuddy/auth/revoke.py`
+`RETIRED_GRANTS`), but the agent still connects as the database owner, so that revoke binds
+nothing until #5299 step 12 removes the agent's database URL. Until then the guard is
+`agent/test/retiredTables.test.ts`, which fails on agent SQL that names one of those tables.
+Every flow tool call reads its run
+`FOR SHARE` (`PgFlowRuns.startedBy`, `agent/src/temporal/flowRuns.ts`); the backend's
+route takes that lock in its own transaction. The gate's grant check
+(`agent/src/gate/store.ts` `grantInput`) still reads `flow_grants` and `flow_grant_uses`
+over SQL, under the grant row's share lock, so the role keeps `SELECT` on both and
+`UPDATE` on `flow_grants` (Postgres requires `UPDATE` for `FOR SHARE`), until the gate
+moves to the CRUD service (#5299 step 10).
 
 ## 8. Per-query limits
 
@@ -1543,7 +1599,7 @@ can use ([spec §4](../superpowers/specs/2026-10-18-settings-and-tool-access-des
   user writes later counts in either direction.
 - `on` is also allowed on a single item, but only in `package:*` sources and in
   `builtin:own-plugin` (its skills, subagents and hooks). The table's CHECK enforces this
-  (`agent/src/db/migrations/20261026T2200Z_access.sql`).
+  (`backend/scadbuddy/migrations_agent/20261026T2200Z_access.sql`).
 - A source's switch folds onto its items when they are read: while it is off, each reads
   `access: off` with a reason, and `own_access` keeps the item's own choice, which its
   select shows and edits and Reset resets (`switched` in `agent/src/access/capabilities.ts`).
@@ -1556,7 +1612,7 @@ can use ([spec §4](../superpowers/specs/2026-10-18-settings-and-tool-access-des
 - The old keys no longer decide. These are `ai_settings` `builtin_tools.scadbuddy`,
   `scadbuddy_plugin_enabled`, `http_request_enabled` and `printer_camera_enabled`, and
   `ai_plugins` `enabled`, `tool_tiers` and `disabled_tools`. Migration
-  `agent/src/db/migrations/20261026T2200Z_access.sql` made the table.
+  `backend/scadbuddy/migrations_agent/20261026T2200Z_access.sql` made the table.
   `20261026T2201Z_access_copy.sql` copied the old values into it (`updated_by` is
   `migration:2171`). `20261030T1020Z_access_drop_mirrors.sql` (#4828) dropped the two mirror
   triggers and deleted the four `ai_settings` keys (and the stray `builtin_tools.claude`). The agent writes `ai_access` only.
@@ -1566,9 +1622,9 @@ can use ([spec §4](../superpowers/specs/2026-10-18-settings-and-tool-access-des
   reads the deleted keys as absent, which means on. Rolling back to a build that names the
   dropped columns (any build before #4828) is not supported either: its plugin reads and writes
   fail. Build `sha-7626da9` and later are safe. The copied `migration:2171` rows stay.
-  See [`20261026T2201Z_access_copy.sql`](../../agent/src/db/migrations/20261026T2201Z_access_copy.sql),
-  [`20261030T1020Z_access_drop_mirrors.sql`](../../agent/src/db/migrations/20261030T1020Z_access_drop_mirrors.sql)
-  and [`20261101T1527Z_access_drop_columns.sql`](../../agent/src/db/migrations/20261101T1527Z_access_drop_columns.sql).
+  See [`20261026T2201Z_access_copy.sql`](../../backend/scadbuddy/migrations_agent/20261026T2201Z_access_copy.sql),
+  [`20261030T1020Z_access_drop_mirrors.sql`](../../backend/scadbuddy/migrations_agent/20261030T1020Z_access_drop_mirrors.sql)
+  and [`20261101T1527Z_access_drop_columns.sql`](../../backend/scadbuddy/migrations_agent/20261101T1527Z_access_drop_columns.sql).
 - The printer camera is the access of `get_printer_camera` (`builtin:scadbuddy`): `off`
   replaces the old switch (spec §4.2, #1911). The old route `/api/v1/ai/settings/printer-camera`
   is gone (#4828): change it in Settings → Tools & plugins, or with
@@ -1648,7 +1704,9 @@ call (`agent/src/access/live.ts`), so `off` refuses a call in a turn under way.
   #2511), never base64 in the result. A longer text body is saved in
   Postgres (`ai_session_http_bodies`, #2374), the 10 newest per session, so any replica pages it with `http_response_read`. That is up to
   10 × 20 MiB of plaintext `bytea` a session: size the database for it beside the other
-  per-session storage. The rows go with the session. A flow run's bodies stay on the
+  per-session storage. The rows go with the session; once the API lists area `http-bodies`
+  (#5299 step 7), they are written and read by range through its CRUD routes
+  ([`backend/scadbuddy/api/crud_agent_blobs.py`](../../backend/scadbuddy/api/crud_agent_blobs.py)). A flow run's bodies stay on the
   replica that ran the call, under `durable-turns/flow-<id>/http/`, removed by every
   pod's hourly sweep after 7 days (#2496); that sweep also clears a `durable-turns/<id>/`
   directory a pod left before #2374.
@@ -1665,6 +1723,21 @@ the pod's disk, so every replica, every session and `/mcp` see the same
 files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), tools in
 [`agent/src/tools/workspace.ts`](../../agent/src/tools/workspace.ts)).
 
+- Who keeps them (#5299 step 7): the API, once it lists area `workspace` (`GET
+  …/crud/agent/areas`). Its routes `/api/v1/internal/crud/agent/workspace/*`
+  ([`backend/scadbuddy/api/crud_agent_workspace.py`](../../backend/scadbuddy/api/crud_agent_workspace.py),
+  the `crud.agent` credential; the agent's
+  [`agent/src/workspace/crudStore.ts`](../../agent/src/workspace/crudStore.ts)) take and give
+  plaintext and seal, store and open each file on the API, with its KEK and the session's
+  payload key, in the format below, so either side opens what the other sealed. A write's
+  row, its blob's hold and its `workspace.file` events are one transaction there, so no hold
+  waits for a release, and the API re-wraps principals' file keys at a rotation
+  (`agent_data/rotation.py`). The reconcile is one transaction on the API too, under
+  `RECONCILE_LOCK` as a transaction lock, which an agent pod still on SQL takes as a session
+  lock: never two at once. A workspace and a path go in the query or the body, never in a
+  route's path. A file is at most `workspace_file_max_bytes` and, whatever that setting says,
+  100 MiB (the Settings form's ceiling, `FILE_BYTES_CEILING`). Until the API lists the area
+  (a rolling deploy) the agent does all of the below itself, over SQL.
 - Where the bytes are (#4789): a blob of the backend's content store (`store_backend` s3
   or bambuddy), `workspace-<sha256 of the sealed bytes>`. The agent reads which store the
   backend runs on from its `/healthz` (`store.backend`), and asks its hidden
@@ -1675,9 +1748,12 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   wrapped under the session's data key (`ai_payload_keys`), or under the KEK for a
   principal's file (re-wrapped at a rotation). A fork's row names the parent's blob with
   the key wrapped again for the child: no bytes are copied. At start the agent moves rows
-  still in `data` to blobs (`SessionFiles.moveToBlobs`); a later migration drops `data`.
+  still in Postgres to blobs (`SessionFiles.moveToBlobs`); a later migration drops `data`.
 - Only on `store_backend` local (no content store; the routes answer 404) do the bytes
-  stay in `data`, in plaintext, as before. On any other backend a write is refused
+  stay in Postgres, in plaintext: one row of `ai_session_file_bytes` per sha256, which
+  every file with those bytes names (`bytes_sha256`). A fork's row names the parent's, so
+  here too no bytes are copied (#4212), save a row an older agent kept inline whose bytes do not match its sha256, which is copied inline; a row no file names any more is deleted after a
+  write or delete, on the sweep, and when its session is forgotten. On any other backend a write is refused
   (`unavailable`, HTTP 503 on the panel's Files routes) and nothing is kept in plaintext
   when the agent has no `SCADBUDDY_SECRET_KEY_FILE`, when the backend cannot mint the URLs
   (no `SCADBUDDY_API_INTERNAL_URL` or KEK: its routes answer 503 saying which), when the
@@ -1697,7 +1773,7 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
 - Rows of both kinds read back only between blob backends (s3 and bambuddy, through
   `/store/migrate`). After a switch back to `store_backend` local the backend's URL route
   answers 404, so every file already in the blob store cannot be read (`unavailable`)
-  until the backend is on a blob store again; new writes go to `data`. `workspace_files`
+  until the backend is on a blob store again; new writes go to `ai_session_file_bytes`. `workspace_files`
   then carries `unreadable_files`, the count of such rows (also when writes are refused).
   Do not switch a deployment that holds workspace blobs back to local.
 - The holder: each row's blob is held `(ai_session_file, <workspace>/<path>)` in the
@@ -2065,8 +2141,11 @@ approve:
   on. The agent pushes each request once to every subscribed browser of someone who may see
   it. A push carries the request's id, its session's id and its reason, never the message.
   The VAPID key is made on first use and sealed under the KEK (`ai_push_vapid`).
-  Subscriptions (`ai_push_subscriptions`) are sealed under the KEK too, so Web Push needs
-  `SCADBUDDY_SECRET_KEY_FILE`, and rotation re-wraps both. A subscription's endpoint comes
+  Subscriptions (`ai_push_subscriptions`) are sealed under the KEK too, and rotation
+  re-wraps both. Once the API lists the agent's CRUD area `notify` (#5299 step 5), the API
+  seals and opens them with its own KEK, so the agent needs none for Web Push or the
+  notification channels; before that, Web Push needs `SCADBUDDY_SECRET_KEY_FILE` in the
+  agent. A subscription's endpoint comes
   from the browser, so it is checked strictly
   ([`agent/src/notify/pushEgress.ts`](../../agent/src/notify/pushEgress.ts)), when it is
   stored and again at every push. It must use https, and its host must be on the push-service

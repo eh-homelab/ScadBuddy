@@ -1,3 +1,4 @@
+import { SpanStatusCode } from '@opentelemetry/api'
 import { ApplicationFailure, CancelledFailure } from '@temporalio/common'
 import { MockActivityEnvironment } from '@temporalio/testing'
 import { createHash } from 'node:crypto'
@@ -10,7 +11,7 @@ import { unwrapUntrusted } from '../src/safety/untrusted.js'
 import type { Owner } from '../src/sessions/protocol.js'
 import type { TouchedCall } from '../src/sessions/touched.js'
 import type { FlowRuns } from '../src/temporal/flowRuns.js'
-import { BACKEND_UNAVAILABLE, decidedCalls, DESCRIBE_CALL_ACTIVITY, FLOW_IMAGES_FULL, gateActivities, TOOL_IMAGES_TOOL, toolActivities, type ToolActivityDeps } from '../src/temporal/toolActivities.js'
+import { BACKEND_UNAVAILABLE, decidedCalls, DESCRIBE_CALL_ACTIVITY, FLOW_IMAGES_FULL, flowCallSpan, gateActivities, TOOL_IMAGES_TOOL, toolActivities, type ToolActivityDeps } from '../src/temporal/toolActivities.js'
 import { AUTHOR_SESSION_HEADER } from '../src/tools/authorship.js'
 import { browserTools } from '../src/tools/browser.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
@@ -20,6 +21,7 @@ import { defineTool, json, runToolWithOutcome, ToolError, type Tool, type ToolCo
 import { BACKEND, services } from './helpers/mcp.js'
 import { AccessResolver } from '../src/access/resolver.js'
 import { memoryAccess } from './support/memoryAccess.js'
+import { exportedText, flushTracing, resetTracing, testTracing } from './support/tracing.js'
 
 // Every tool as an activity on `agent-tools` (spec 2026-10-01 §6.3, #1055), run in
 // @temporalio/testing's MockActivityEnvironment (spec §8).
@@ -383,6 +385,90 @@ describe('flow runs in tool activities', () => {
     expect(h.touched).toEqual([])
   })
 
+  // #6345: every attempt of one flow call sends one Idempotency-Key, so a retry after a lost
+  // heartbeat re-attaches to the first attempt's operation instead of starting a second one.
+  it('keys every attempt of a flow call on its request id, and each call on its own', async () => {
+    const keys: (string | undefined)[] = []
+    const keyed = defineTool({
+      name: 'keyed',
+      label: 'keyed',
+      description: 'records its key',
+      input: z.object({}),
+      risk: 'read',
+      routes: [],
+      handler: async (_args, ctx) => {
+        keys.push(ctx.callKey)
+        return json({ ok: true })
+      },
+    })
+    const h = harness({ flows: flowRuns() }, [keyed])
+    await env(FLOW, 'tool-call_1').run(h.activities.keyed!, {})
+    await env(FLOW, 'tool-call_1').run(h.activities.keyed!, {})
+    await env(FLOW, 'tool-call_2').run(h.activities.keyed!, {})
+    expect(keys).toEqual([`flow:${RUN}:run-1:call_1`, `flow:${RUN}:run-1:call_1`, `flow:${RUN}:run-1:call_2`])
+  })
+
+  // #6123 item 3: a flow's call is no session's ToolCall, yet it is traced as one is.
+  it("traces each call as agent.tool/<name>, naming the run, its tier and outcome, its error scrubbed", async () => {
+    const spans = testTracing()
+    await resetTracing()
+    const h = harness({ flows: flowRuns() })
+    await env(FLOW, 'tool-call_1').run(h.activities.whoami!, {})
+    await failure(env(FLOW, 'tool-call_2').run(h.activities.boom!, {}))
+    await failure(env(FLOW, 'tool-call_3').run(h.activities.send!, { to: 'printer' }))
+    await flushTracing()
+    const named = (name: string) => spans.getFinishedSpans().find((s) => s.name === `agent.tool/${name}`)
+    expect(named('whoami')?.attributes).toMatchObject({
+      'scadbuddy.tool': 'whoami',
+      'scadbuddy.tier': 'read',
+      'scadbuddy.outcome': 'ok',
+      'scadbuddy.task_queue': 'agent-tools',
+      'scadbuddy.flow_run_id': RUN,
+      'scadbuddy.tool_use_id': 'call_1',
+    })
+    expect(named('whoami')?.status.code).not.toBe(SpanStatusCode.ERROR)
+    // Its backend request is a child of the call's span, as a session's call's is.
+    const request = spans.getFinishedSpans().find((s) => s.name.startsWith('GET '))
+    expect(request?.parentSpanContext?.spanId).toBe(named('whoami')?.spanContext().spanId)
+    expect(named('boom')?.attributes['scadbuddy.outcome']).toBe('error')
+    expect(named('boom')?.status.code).toBe(SpanStatusCode.ERROR)
+    expect(named('send')?.attributes).toMatchObject({ 'scadbuddy.tier': 'outward', 'scadbuddy.outcome': 'refused' })
+    expect(named('send')?.status.code).toBe(SpanStatusCode.ERROR)
+    // The tool's own error text is the call's, never the span's.
+    expect(exportedText(spans)).not.toContain('it broke')
+    expect(exportedText(spans)).not.toContain('needs an approval')
+  })
+
+  // #6295 review: a call whose run is gone has no tier, as on the `turn:` path.
+  it('gives a flow call whose run is gone the outcome error and no tier', async () => {
+    const spans = testTracing()
+    await resetTracing()
+    const h = harness({ flows: { ...flowRuns(), startedBy: async () => undefined } })
+    await failure(env(FLOW, 'tool-call_1').run(h.activities.whoami!, {}))
+    await flushTracing()
+    const span = spans.getFinishedSpans().find((s) => s.name === 'agent.tool/whoami')
+    expect(span?.attributes['scadbuddy.outcome']).toBe('error')
+    expect(span?.attributes).not.toHaveProperty('scadbuddy.tier')
+  })
+
+  // #6126 review: a call that throws before it names an outcome (its run gone, an unknown
+  // server) still reads one; a refusal keeps its own.
+  it('gives a call that throws before naming an outcome the outcome error', async () => {
+    const spans = testTracing()
+    await resetTracing()
+    await expect(flowCallSpan('early', {}, async () => Promise.reject(new Error('gone')))).rejects.toThrow('gone')
+    await expect(
+      flowCallSpan('refused', {}, async (span) => {
+        span.setAttribute('scadbuddy.outcome', 'refused')
+        throw new Error('no')
+      }),
+    ).rejects.toThrow('no')
+    await flushTracing()
+    const named = (name: string) => spans.getFinishedSpans().find((s) => s.name === `agent.tool/${name}`)
+    expect(named('early')?.attributes['scadbuddy.outcome']).toBe('error')
+    expect(named('refused')?.attributes['scadbuddy.outcome']).toBe('refused')
+  })
+
   it('refuses a gated call with no approval recorded for it, and runs it once one is', async () => {
     const asked: string[] = []
     const h = harness({ flows: flowRuns(BROWSER, asked) })
@@ -522,6 +608,17 @@ describe('flow runs in tool activities', () => {
     expect([...flowBlobs.rows.keys()]).toEqual([`${FLOW}/${PNG_NAME}`])
     expect(JSON.stringify(out)).not.toContain(PNG)
     expect(JSON.stringify(out)).not.toContain(PNG.slice(0, 16))
+  })
+
+  // #6295 review: `ok` is set only once the result is built.
+  it('gives a flow call whose images cannot be kept the outcome error, not ok', async () => {
+    const spans = testTracing()
+    await resetTracing()
+    const flowBlobs = { ...memoryFlowBlobs(), put: async () => Promise.reject(new Error('store away')) }
+    await expect(env(FLOW, 'tool-call_1').run(harness({ flows: flowRuns(), flowBlobs }, [pic]).activities.pic!, {})).rejects.toThrow('store away')
+    await flushTracing()
+    const span = spans.getFinishedSpans().find((s) => s.name === 'agent.tool/pic')
+    expect(span?.attributes['scadbuddy.outcome']).toBe('error')
   })
 
   it("says so, with no pointer, for an image past the run's cap (#2578)", async () => {

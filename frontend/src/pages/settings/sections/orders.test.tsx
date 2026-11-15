@@ -182,3 +182,29 @@ describe('the storefront bot check (#5283)', () => {
     put.mockRestore()
   })
 })
+
+describe('Orders, the handling fee on bought items (#6133)', () => {
+  it('saves the flat fee and the percent, and shows the server refusing a percent past 100', async () => {
+    const { user } = renderSettingsSection(<Orders />, { route: '/settings/printing' })
+    await seeded()
+    const orders = region('Orders')
+    const flat = () => within(orders).getByLabelText('Handling fee per bought item, minor units')
+    const percent = () => within(orders).getByLabelText('Handling fee on bought items, percent')
+    expect(flat()).toHaveDisplayValue('0')
+    expect(percent()).toHaveValue('0')
+
+    await user.clear(percent())
+    await enter(user, percent(), '150')
+    await user.click(within(orders).getByRole('button', { name: 'Save Orders' }))
+    await within(orders).findByRole('alert')
+    expect(mockSettings().orders_purchase_fee_percent).toBe('0')
+
+    await user.clear(flat())
+    await enter(user, flat(), '150')
+    await user.clear(percent())
+    await enter(user, percent(), '7.50')
+    await user.click(within(orders).getByRole('button', { name: 'Save Orders' }))
+    await waitFor(() => expect(mockSettings().orders_purchase_fee_percent).toBe('7.50'))
+    expect(mockSettings().orders_purchase_fee_flat_minor).toBe(150)
+  })
+})

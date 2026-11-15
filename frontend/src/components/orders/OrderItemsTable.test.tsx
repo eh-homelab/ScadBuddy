@@ -11,6 +11,8 @@ import { OrderPage } from '../../pages/OrderPage'
 import { renderPage } from '../../test/utils'
 import { LOCKED_TEXT, REVISED_TEXT } from './itemActions'
 import { QUANTITY_HINT } from './quantity'
+import type { OrderItemDetail } from '../../api/types'
+import { ORDERS_MEMORY_KEY, resetOrdersMemory } from '../../lib/orderViews'
 
 function render(id: string) {
   return renderPage(
@@ -261,6 +263,38 @@ describe('OrderItemsTable · unit price', () => {
     expect(within(drawer).getByTestId('quote-from-slice')).toBeDisabled()
   })
 
+  it('shows an item still rendering for Slice… after a reload, and offers no second (#6324)', async () => {
+    const at = new Date().toISOString()
+    const subject = `order_item:${ITEM_DRAFT}`
+    const draft = state.items.find((i) => i.id === ITEM_DRAFT)
+    if (draft) draft.output_id = null
+    seedOperation({ id: 'op-rendering', kind: 'order_item_render', subject, status: 'running', created_at: at })
+    seedActivity([
+      {
+        id: 'operation:op-rendering',
+        kind: 'operation.order_item_render',
+        principal: 'browser',
+        session: null,
+        via_tool: null,
+        subject,
+        status: 'running',
+        title: `Order item render ${subject}`,
+        parent_id: null,
+        detail: {},
+        created_at: at,
+        updated_at: at,
+        finished_at: null,
+      },
+    ])
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    expect(await within(row(ITEM_DRAFT)).findByText('Rendering…')).toBeInTheDocument()
+    await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Name Keychain' }))
+    const drawer = await screen.findByRole('dialog', { name: 'Name Keychain' })
+    expect(within(drawer).getByTestId('quote-running')).toHaveTextContent(/Rendering the design/)
+    expect(within(drawer).getByTestId('quote-from-slice')).toBeDisabled()
+  })
+
   it('clears a picked-up quote once it lands, reloads once, and never follows it again (#4736 review)', async () => {
     const at = new Date().toISOString()
     const subject = `order_item:${ITEM_DRAFT}`
@@ -358,6 +392,61 @@ describe('OrderItemsTable · times (#5554)', () => {
     const drawer = await screen.findByRole('dialog', { name: 'Name Keychain' })
     expect(within(drawer).getByTestId('quote-error')).toHaveTextContent('No printer takes this plate.')
     expect(within(drawer).getByTestId('quote-error-times')).toHaveTextContent(/Started Oct 30, 09:04.*ended Oct 30, 09:06/)
+  })
+
+  // #6324 review: a render that succeeds makes no quote, so the item's output answers a failed one.
+  const failedRender = (id: string, created: string, finished: string) => {
+    const subject = `order_item:${ITEM_DRAFT}`
+    seedOperation({
+      id,
+      kind: 'order_item_render',
+      subject,
+      status: 'failed',
+      created_at: created,
+      finished_at: finished,
+      error: { type: 'about:blank', title: 'Conflict', status: 409, detail: 'the render of name-keychain, job j1, is failed' },
+    })
+    return { id: `operation:${id}`, kind: 'operation.order_item_render', principal: 'browser', session: null, via_tool: null, subject, title: `Order item render ${subject}`, parent_id: null, detail: {}, created_at: created, updated_at: finished }
+  }
+
+  it('shows a failed render while the item has no output, and none once it has one (#6324)', async () => {
+    const row0 = failedRender('op-render-failed', '2026-10-30T13:04:00Z', '2026-10-30T13:06:00Z')
+    seedActivity([{ ...row0, status: 'failed', finished_at: row0.updated_at }])
+    const draft = state.items.find((i) => i.id === ITEM_DRAFT)!
+    draft.output_id = null
+    const first = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    expect(await within(row(ITEM_DRAFT)).findByTestId(`item-quote-failed-${ITEM_DRAFT}`)).toHaveAttribute('title', expect.stringContaining('is failed'))
+    first.unmount()
+
+    // Rendered since (the item has an output), with no quote made: the old failure is not shown,
+    // and its operation is not even read.
+    draft.output_id = 'a'.repeat(32)
+    const failures = vi.spyOn(api, 'failedQuotes')
+    const follow = vi.spyOn(api, 'followQuote')
+    render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    await waitFor(() => expect(failures).toHaveBeenCalled())
+    await act(async () => {
+      await failures.mock.results[0]?.value
+    })
+    expect(follow).not.toHaveBeenCalled()
+    expect(within(row(ITEM_DRAFT)).queryByTestId(`item-quote-failed-${ITEM_DRAFT}`)).toBeNull()
+  })
+
+  it('shows no failed render behind a stale running row once the item has an output (#6324)', async () => {
+    const row0 = failedRender('op-render-stale', new Date(Date.now() - 60_000).toISOString(), new Date().toISOString())
+    // The row stayed `running` after its operation failed, as a swallowed write leaves it.
+    seedActivity([{ ...row0, status: 'running', finished_at: null }])
+    const failures = vi.spyOn(api, 'failedQuotes')
+    render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    // The stale row's follow found the failure; the item's failures are read only after it.
+    await waitFor(() => expect(failures).toHaveBeenCalled())
+    await act(async () => {
+      await failures.mock.results[0]?.value
+    })
+    expect(within(row(ITEM_DRAFT)).queryByTestId(`item-quote-failed-${ITEM_DRAFT}`)).toBeNull()
   })
 })
 
@@ -942,5 +1031,89 @@ describe('OrderItemsTable · a storefront order (#5283)', () => {
     await waitFor(() => expect(quotesOfDraft().some((q) => q.unit_price_minor === 1250)).toBe(true))
     expect(quotesOfDraft().some((q) => q.accepted)).toBe(false)
     expect(accepted).not.toHaveBeenCalled()
+  })
+})
+
+// #6334 — the live lines first; the fulfilled and the cancelled ones in groups after them.
+describe('OrderItemsTable · groups (#6334)', () => {
+  beforeEach(() => {
+    resetMockState()
+    window.localStorage.clear()
+    resetOrdersMemory()
+  })
+
+  /** Copies of the accepted order's approved line, at $15.00 a unit, in `status`. */
+  function addLine(id: string, status: OrderItemDetail['status'], title: string) {
+    const base = state.items.find((i) => i.id === ITEM_APPROVED)!
+    state.items.unshift({ ...base, id, status, title })
+    const quote = state.quotes.find((q) => q.order_item_id === ITEM_APPROVED)!
+    state.quotes.push({ ...quote, id: `q-${id}`, order_item_id: id })
+  }
+  const order = () => within(screen.getByRole('table', { name: 'Line items' })).getAllByRole('row').map((r) => r.getAttribute('data-testid')).filter((id) => id && id !== 'custom-item-row')
+
+  it('lists live lines first, fulfilled open after them, cancelled closed with the sum it leaves out', async () => {
+    addLine('it-cancel-1', 'cancelled', 'Unicorn pencil cup holder – pink multicolour with a long name')
+    addLine('it-done', 'fulfilled', 'Owl')
+    addLine('it-cancel-2', 'cancelled', 'Rainbow')
+    const { user } = render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    expect(order()).toEqual([`order-item-${ITEM_APPROVED}`, 'row-group-fulfilled', 'order-item-it-done', 'row-group-cancelled'])
+    const cancelled = screen.getByTestId('row-group-cancelled')
+    expect(cancelled).toHaveTextContent('2 cancelled lines, not counted in the total ($60.00)')
+    expect(screen.getByTestId('row-group-fulfilled')).toHaveTextContent('1 fulfilled line')
+
+    await user.click(within(cancelled).getByRole('button', { expanded: false }))
+    expect(order().slice(-2)).toEqual(['order-item-it-cancel-2', 'order-item-it-cancel-1'])
+    // The header says "not counted"; each line shows its struck total only.
+    expect(within(row('it-cancel-1')).queryByText('not counted')).toBeNull()
+    expect(within(row('it-cancel-1')).getByLabelText('$30.00, not counted')).toBeInTheDocument()
+    expect(row('it-cancel-1').className).toContain('opacity-60')
+    // The open group is remembered.
+    expect(JSON.parse(window.localStorage.getItem(ORDERS_MEMORY_KEY) ?? '{}').itemGroups).toEqual({ fulfilled: true, cancelled: true })
+
+    await user.click(within(screen.getByTestId('row-group-fulfilled')).getByRole('button', { expanded: true }))
+    expect(screen.queryByTestId('order-item-it-done')).toBeNull()
+  })
+
+  it('selects only the lines in view: never one inside a closed group', async () => {
+    addLine('it-hidden', 'cancelled', 'Rainbow')
+    addLine('it-live', 'approved', 'Owl')
+    const { user } = render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    await user.click(screen.getByRole('checkbox', { name: 'Select all items' }))
+    expect(screen.getByTestId('bulk-actions')).toHaveTextContent('2 selected')
+    // Opening the group shows its line unpicked, and Select all is no longer all.
+    await user.click(within(screen.getByTestId('row-group-cancelled')).getByRole('button'))
+    expect(within(row('it-hidden')).getByRole('checkbox', { name: 'Select Rainbow' })).not.toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Select all items' })).toHaveAttribute('aria-checked', 'mixed')
+    // Picked inside the open group, then the group closed and opened: unpicked again.
+    await user.click(within(row('it-hidden')).getByRole('checkbox', { name: 'Select Rainbow' }))
+    const toggle = within(screen.getByTestId('row-group-cancelled')).getByRole('button')
+    await user.click(toggle)
+    await user.click(toggle)
+    expect(within(row('it-hidden')).getByRole('checkbox', { name: 'Select Rainbow' })).not.toBeChecked()
+  })
+
+  it('keeps a long title in its own column', async () => {
+    addLine('it-long', 'approved', 'Unicorn pencil cup holder – pink multicolour')
+    render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    const cells = within(row('it-long')).getAllByRole('cell')
+    const title = cells.find((cell) => cell.textContent?.includes('Unicorn'))!
+    expect(title.className).toContain('min-w-48')
+    const button = within(title).getByRole('button', { name: 'Unicorn pencil cup holder – pink multicolour' })
+    // The base button's shrink-0 kept the title one line wide and ran it under the status.
+    expect(button.className).toMatch(/(^| )shrink( |$)/)
+    expect(button.className).not.toMatch(/(^| )shrink-0( |$)/)
+    expect(button.className).toContain('[overflow-wrap:anywhere]')
+  })
+
+  it('lists every line plainly when none is live', async () => {
+    const approved = state.items.find((i) => i.id === ITEM_APPROVED)!
+    approved.status = 'cancelled'
+    render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    expect(screen.queryByTestId('row-group-cancelled')).toBeNull()
+    expect(within(row(ITEM_APPROVED)).getByText('not counted')).toBeInTheDocument()
   })
 })

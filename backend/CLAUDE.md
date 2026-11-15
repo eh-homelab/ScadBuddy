@@ -12,23 +12,27 @@ These notes cover `backend/`; paths are repo-relative; the root CLAUDE.md has th
 The rule is in the root CLAUDE.md, "Database access (#5295)". Today the API connects as the
 database owner and runs SQL on the agent's `ai_*` tables. The agent's grant list is
 `auth/caller_grants.py` `AGENT_GRANTS`. The print worker holds no Postgres pool (#5298
-Task 31): every store it uses goes through CRUD routes, and its list (`PRINT_GRANTS`) is
-empty; its role `scadbuddy_print` keeps what it held until #5298 Task 35 revokes it. It
-holds no KEK either (#5298 Task 33): it exchanges its proof only (`exchange_source`, no
+Task 31): every store it uses goes through CRUD routes, it has no grant list, and the API
+revokes what its old role `scadbuddy_print` held at every start (`auth/revoke.py`, #5298
+Task 35). It holds no KEK either (#5298 Task 33): it exchanges its proof only (`exchange_source`, no
 view fallback), refuses to start without one, and ignores `SCADBUDDY_DATABASE_URL` with a
 warning; the API opens every sealed value it needs (area `access-codes`: whether the API
 opens access codes, and a virtual printer's sealed code). The projects and render workers have no database client
-(#5298): they reach their data through CRUD routes. The projects worker has no grant
-list, and the API and the agent revoke what its old role `scadbuddy_projects` held at
-every start (`auth/revoke.py`, `agent/src/db/grants.ts` `revokeRole`); `RENDER_GRANTS`
-(`render/worker_role.py`) is empty until #5298 Task 22 revokes its role. The render
-worker also holds no KEK and runs only on a remote store (plan D11). Template `pipeline/`
+(#5298): they reach their data through CRUD routes. Neither has a grant list. The API
+and the agent revoke what the projects worker's old role `scadbuddy_projects` held at
+every start (`auth/revoke.py`, `agent/src/db/grants.ts` `revokeRole`), and the API what
+the render worker's old role `scadbuddy_render` held (#5298 Task 22). The render
+worker also holds no KEK and runs only on a remote store (plan D11). Its blob-index
+routes take an allowlist (`api/crud_render.py` `RENDER_KEY`, `HELD_KEY`): it writes only
+a render job's own `piece` keys, and its settings route never releases the full Bambuddy
+key (`withheld`; with no render key saved the worker gets none). Template `pipeline/`
 Python runs in the render worker's pod, and openscad and `openscad-lsp` run in the API's
 pod.
 
 Under the rule the API becomes the CRUD service: the only process with SQL access, and
-nothing untrusted in its pod. Each worker becomes an HTTP client of it, with a service
-credential, and loses its database secret, role and grant list (#5298). The `ai_*` reads
+nothing untrusted in its pod. Each worker is now an HTTP client of it, with a service
+credential, and has lost its database secret, role and grant list (#5298, done: prod has
+no worker role or worker database secret since 2026-11-14). The `ai_*` reads
 become routes (#5299). Every `/api/v1/internal/*` route requires a service credential, and
 the API moves to `enforce` (#5297). Template Python and openscad move to a pod without a
 database secret (#5296). Never add a worker table grant, a cross-service table read or a
@@ -70,7 +74,20 @@ queue, template media's `template_media`) skip unless `SCADBUDDY_TEST_DATABASE_U
 points at a Postgres they can create schemas in, e.g.
 `docker run -d -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=scadbuddy_test -p 5432:5432
 postgres:18` and `SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test`.
-Without it most of `tests/api` skips. CI runs them against a `postgres:18` service
+Without Docker, a native Postgres 18 works:
+
+```bash
+initdb -D "$PGDATA" -U postgres --auth=trust
+pg_ctl -D "$PGDATA" -o "-p 55432 -c timezone=UTC -c unix_socket_directories=''" start
+createdb -h 127.0.0.1 -p 55432 -U postgres scadbuddy_test
+# SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:55432/scadbuddy_test
+```
+
+`timezone='UTC'` is required, or a timezone test fails. TCP only
+(`unix_socket_directories=''`) is needed when the data directory is on a long path.
+Measured on 2026-11-14 on WSL2 with Homebrew `postgresql@18` (#6322): the `timezone` and
+long-path findings. The commands above are that recipe written out in full, not re-run as one script.
+Without `SCADBUDDY_TEST_DATABASE_URL` most of `tests/api` skips. CI runs them against a `postgres:18` service
 container. A `Settings` for an app that never starts uses `tests.conftest.UNUSED_DATABASE_URL`.
 Tests marked `requires_fixtures` (#2146) use the real MakerWorld 3MFs in
 `test-fixtures/makerworld/` (Git LFS, ~290 MB; `git lfs pull --include "test-fixtures/**"`;
@@ -116,6 +133,12 @@ but an api module after a non-api module that itself follows an api module loses
 `tests/api/conftest.py`: `uv run --frozen pytest tests/api/test_health.py
 tests/test_config.py tests/api/test_jobs.py` errors at setup of `test_jobs.py`'s tests
 with `fixture 'client' not found`. Put the `tests/api/` paths together.
+A test's result must not depend on runner speed or the date. A retry budget gets an
+injected clock (`CrudClient(clock=..., sleep=...)`, a fake `sleep` that advances it):
+on the real clock a slow runner spent a 0.5 s budget in one try (#6252, #6294). A
+"today" is read at each call, never at import: a shard that loads before midnight UTC
+and makes orders after it dated every fake deposit a day early (#6307). A shard builds
+in about 4 minutes and tests in 25 to 36; `backend-pytest`'s limit is 55 (#6288).
 Renders run on Temporal, and `SCADBUDDY_TEMPORAL_ADDRESS` is required (#546), like
 `SCADBUDDY_DATABASE_URL`; `python -m scadbuddy.worker` is the worker (or
 `SCADBUDDY_TEMPORAL_WORKER_INPROCESS=true` for a one-process dev run). A `Settings` for
@@ -133,8 +156,13 @@ would be joined by the next test that renders it. The dev server's store is a SQ
 file (on `/dev/shm` when it has room): in memory it was lost mid-session under load.
 Backend schema changes are new files in `backend/scadbuddy/migrations/`
 (`<yyyymmdd>T<hhmm>Z_<slug>.sql`, UTC; never edit a merged one); the settings tables are
-`20260928T0840Z_settings.sql`. The only place a real `openscad` exists is the image:
+`20260928T0840Z_settings.sql`. A one-off fix of named rows belongs in a migration only when
+no route can make it and the new code would act wrongly on those rows before it ran; guard
+each row by its id and the values it must still have, so the file is a no-op elsewhere
+(`20261114T1607Z_filaments_alpha_effect.sql`, #6209). Otherwise make it through the API. The only place a real `openscad` exists is the image:
 `docker build --target test -t scadbuddy:test . && docker run --rm scadbuddy:test`.
+A retry or deadline test drives `CrudClient(clock=..., sleep=...)` with a fake clock that
+only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
 
 
 ## Layout
@@ -155,13 +183,23 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   (the render route, an order's quote) a `done` job of the key whose refs still hold its
   result answers at once, its `reused_at` keeping it from the prune,
   `JobProjection.reuse_done`, #4870; a caller whose work follows the run, as the output
-  backfill's attach does, leaves it off), `projection.py` (`render_jobs` as a projection
+  backfill's attach does, leaves it off; a submit that joins an open `render-<key>` or
+  `piece-<key>` execution keeps that run's Temporal priority, not its own, so never start a
+  render at a low priority that another caller may join by key, #6299), `projection.py` (`render_jobs` as a projection
   the workflow writes in place through the `project` activity), `pg_store.py` (the
-  backend's migrations), `worker_role.py` (#601: `RENDER_GRANTS`, now empty, which the
-  API grants the unused role `scadbuddy_render` at start until #5298 Task 22 revokes it,
-  and `grant_role`, which every caller's list goes through; the render worker holds no
-  database, #5298, `tests/test_render_worker_nodb.py`: it reads the store settings and
-  writes its job rows, their events and activity rows, their blob refs, the piece geometry, the blob index, its uploads' `assets` rows (`library/assets.py` `RemoteAssetStore`, the files on its own volume) and its library leases, pin holds and install slots (`RemoteCheckoutLeases`, `RemoteInstallSlots`, under the API's `REMOVAL_LOCK`) only through the API's CRUD routes, `crud/render.py`, where the API also finds the Bambuddy store's folders for it). The legacy in-process queue, its file and Postgres stores
+  backend's migrations), `agent_migrations.py` (the agent's, which the API applies at
+  start after the backend's, `main._migrate_agent_at_start`; root CLAUDE.md "Migrations
+  (#491)"; a test's app skips them unless the test is marked `agent_migrations`,
+  `tests/conftest.py`; a table or other object an agent migration creates belongs to the
+  role the API connects as, not the agent's. Prod's API and agent connect as one role, so
+  nothing changes there; with a role per caller, the agent could not use what a later file
+  makes (nothing grants it: `agent/src/db/grants.ts` grants only from the agent's own
+  tables to the API's role), so such a deployment keeps the API and the agent on one role
+  until the agent's data moves behind CRUD routes (#5299)); the render worker holds no database (#5298,
+  `tests/test_render_worker_nodb.py`; the API revokes its old role `scadbuddy_render` at
+  every start, `auth/revoke.py`, and every caller's grant list goes through
+  `auth/caller_grants.py` `grant_role`): it reads the store settings and
+  writes its job rows, their events and activity rows, their blob refs, the piece geometry, the blob index, its uploads' `assets` rows (`library/assets.py` `RemoteAssetStore`, the files on its own volume) and its library leases, pin holds and install slots (`RemoteCheckoutLeases`, `RemoteInstallSlots`, under the API's `REMOVAL_LOCK`) only through the API's CRUD routes, `crud/render.py`, where the API also finds the Bambuddy store's folders for it. The legacy in-process queue, its file and Postgres stores
   and its `.renders/<key>` cache are gone (#546): the Temporal path's cache is the blob
   store's piece (`piece.json`), and nothing writes or prunes `models/<slug>/.renders/`
   any more (it stays hidden and git-ignored for volumes that still hold one).
@@ -177,6 +215,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
 - `backend/scadbuddy/workflows/arrange.py` — Arrange's packer (spec 2026-09-27 §7): goals,
   quarter turns, filament signatures, every plate checked with `plate.fit_problem`;
   `Arrange` in `workflows/pipelines.py` runs a `kind='arrange'` row (`POST /outputs/arrange`).
+  It packs with `packing.py` `GAP_MM` (5 mm) and ignores Bambu's by-object clearance, so a
+  by-object plate fails "too close to others" (#6246). A template plate is one object with
+  colour parts (#6245), so by-object slicing does nothing useful on it: render each piece
+  alone and arrange the pieces, which makes each one its own object (#956).
 - `backend/scadbuddy/workflows/` — renders on Temporal (#424): `pipelines.py`
   (`TemplatePipeline`, its `RenderPiece` children, `RenderPreview`), `activities.py`
   (the render stages as activities, `WorkerDeps`), `client.py` (`connect`,
@@ -202,7 +244,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   activity in its `SWEEPS`, never a loop in the API. The preview backfill (#1054): `previews.py`
   (`PreviewBackfill`, `ensure_preview_schedule`), the pass over every model for missing
   default-render previews, on its own hourly Schedule on the same queue; the per-change
-  requests stay in-process (`render/previews.py` `PreviewScheduler`).
+  requests stay in-process (`render/previews.py` `PreviewScheduler`). A customer's staged
+  file (#6133): `staged_file.py` (`StagedFile`, one watcher per upload on the same queue,
+  started by the presign route, not a sweep; "A customer's own models" below).
   Generic commands (#1053): `operation.py` (`OperationWorkflow`: check, insert, run,
   finish; a kind its worker does not register fails the workflow task until a build that
   has it is current, #4139, told by `registered.py` `RegisteredActivities`),
@@ -232,7 +276,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   that has it (`project.offers_host_functions`). A flow's payloads are sealed per run
   (`payload_codec.py`, `flows_client.py`), so flows need `SCADBUDDY_SECRET_KEY_FILE`.
 - `backend/scadbuddy/flows/` — flow versions and runs (`store.py`: `workflow_definitions`,
-  `workflow_runs`, the latter written only by the run's workflow), `typecheck.py` (a
+  `workflow_runs`, the latter written only by the run's workflow), `agent_reads.py` (the
+  agent's questions about the flow tables, read only, for `api/crud_agent.py` area `flows`,
+  #5299 D7: the queries the agent ran over SQL, of which the agent's tests keep a copy,
+  `agent/test/support/sqlFlowRunReads.ts`; the API revokes the agent's grants on
+  `workflow_runs` and `workflow_run_decisions`, `auth/revoke.py`), `typecheck.py` (a
   script's check at registration and at each start), `history.py` (a Reset's preview: the
   outward sends past a point, by activity id), `component.py` (`FLOWS`; runs the
   `projects` worker in-process with `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` or
@@ -241,6 +289,57 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   sweep for runs whose execution closed). Routes `api/flows.py`. An outward call's
   approval timeout resolves from the run, its flow, then `flow_approval_timeout_seconds`
   (0 is never).
+- `backend/scadbuddy/agent_data/` — the agent's settings, Claude credentials and payload data
+  keys behind the CRUD service (#5299 step 4, D5; #5342), for `api/crud_agent_secrets.py`
+  (class `crud.agent`, areas `settings`, `credentials`, `payload-keys`): `credentials.py` is
+  `agent/src/credentials.ts` `CredentialStore` statement for statement (the AAD, the table
+  lock, the `FOR UPDATE` health write, the warm-evict NOTIFY), sealed and opened here with the
+  KEK; `settings.py` a write with the NOTIFYs in its transaction and, with `expect`, a
+  compare-and-set under the table's lock; `payload_keys.py` a subject's data key released
+  (made first under the subject's advisory lock, never for a subject in
+  `ai_forgotten_subjects`), never the KEK; `audit.py` the `ai_audit` row each reveal
+  (kind `credential`; a redaction's once per `REDACT_AUDIT_WINDOW`) and release (kind `payload_key`, once per subject and
+  `RELEASE_AUDIT_WINDOW`) writes in its transaction; `rotation.py` the re-wrap of the credentials and payload
+  keys at the API's start (`main._rotate_agent_secrets`). For `api/crud_agent_forget.py` (area
+  `forget`, #5299 step 6): `forget.py` a subject's tombstone, its flow images and its key in one
+  transaction under its lock (a session with forks refused, `ForksTakeRangesError`: the agent
+  copies their ranges itself until its sessions move here), a browser call's key dropped and the
+  hourly sweep of the keys no forget deletes; `flow_blobs.py` a flow run's images kept (sealed by
+  the agent, sent as multipart bytes; the tombstone check and `FLOW_IMAGES_MAX` under the lock)
+  and read. For `api/crud_agent_workspace.py` (area `workspace`, #5299 step 7): `workspace.py`
+  is the agent's `workspace/store.ts` `SessionFiles` on the API, with the sealing
+  (`seal_file`, `open_file`: the agent's `workspace/sealing.ts` format) and the file keys
+  wrapped and opened here under the session's payload key (`payload_keys.py` `key_in`, no
+  audit row: the key never leaves the API) or the KEK; each write's row, its blob's
+  `blob_refs` hold and its `workspace.file` events in one transaction, the reconcile one
+  transaction under `RECONCILE_LOCK`, and `rewrap` at a rotation. `api/crud_agent_blobs.py`
+  (areas `session-blobs`, `attachments`, `http-bodies`, #5299 step 7) is the agent's
+  `sessions/blobs.ts`, `attachments/store.ts` and `sessions/httpBodies.ts` statement for
+  statement: an image's name and signature checked from its bytes, a tool call's images
+  replaced whole, a fenced write checked `FOR SHARE`, a fork's read through its chain, an
+  attachment's caps under its owner's lock, a saved body read by range (tests
+  `tests/crud/test_crud_agent_blobs.py`). `flows/forget.py` and `flows/images.py` run the same statements on the API's own
+  tables, with no fallback for a database the agent never migrated (the API applies its files
+  first, #5299 D6). Its tests make the agent's tables
+  with the agent's own migration files (`render/agent_migrations.py` `migrate_agent`) and open
+  the credential vectors `tests/fixtures/secret-vectors.json`, a copy that
+  `lint-codec-copies.sh` keeps equal to the agent's. `notify.py` re-wraps the agent's Web Push
+  keys and notification channels' tokens (#5299 step 5) in the same rotation. `background.py` and `operations.py` are
+  the agent's background tasks (with a Monitor's events, a Workflow's journal and child chats)
+  and its command record `ai_operations`, for `api/crud_agent_tasks.py` (areas
+  `background-tasks`, `operations`, #5299 step 8): the agent's `BackgroundTaskStore` and
+  `OperationStore` statement for statement, a task's create under the session's
+  `bgtask:<session>` advisory lock; an operation's insert or end writes its `activity` row in
+  the same transaction (`ActivityIndex.ingest_agent_operation_in`), and the bus's
+  `ai_operation.changed` stays only for an agent pod still on SQL.
+- The agent's small stores (#5299 step 5): `api/crud_agent_stores.py` (areas
+  `activity-kinds`, `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`) and
+  `api/crud_agent_notify.py` (area `notify`, sealed with the KEK under the agent's AAD), each
+  route one method of the agent's store and its SQL, a transaction as one transaction: the
+  pairing request's advisory lock, the accept's `FOR UPDATE` with the code hash compared in
+  constant time, a push subscription under its endpoint row's lock. A tab image's bytes are
+  the request's and the answer's body, checked against its sha256 name. Tests
+  `tests/api/test_crud_agent_stores.py`, `test_crud_agent_notify.py`.
 - `backend/scadbuddy/flow_triggers/` — runs started on a schedule or an event (#2484,
   spec 2026-10-11 §12): `store.py` (`flow_triggers`, their standing grants and fires),
   `fire.py` (the `flow_trigger_fire` activity on the `library` queue), `events.py` (the
@@ -354,6 +453,15 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   and presets, which the dialog and the run share; the dialog's Reslice gives a
   completed slice a new row of its own, `reslice_of`, #4433; the lost-row repair), `preview.py` (the
   dialog's reads under `?slicer=native`) and `component.py` (`SLICING`).
+  What a native slice keeps of a file: `--load-settings` (ScadBuddy's process preset)
+  replaces the file's own process keys, `enable_support`, `support_filament` and
+  `support_interface_filament` among them; the supports option passes only enable, type and
+  build-plate-only (`supports.py` `SCALAR_KEYS`). An author layout (`render/bambu3mf.py`
+  `layout_of`: a `print_settings_id` other than ScadBuddy's placeholder) keeps its placement
+  and scale, and its tower unless the target's extruders cannot reach it
+  (`towers_within_reach`, in `bambuddy/send.py` `_laid_out_for`). A sliced file, another
+  slicer's, or one past the caps (`layout_of` `as_is`) prints as it is. The headless CLI
+  draws no plate covers (its GLFW is Wayland-only) and copies the input's (#6170).
   `workflows/slicing.py` is `SliceWorkflow` on the `library` queue (activities in
   `workflows/slicing_activities.py`, the run's `slice_run` and `print_sliced_upload`
   among them); the print worker only starts it. `api/internal_blobs.py` is the hidden
@@ -385,11 +493,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   native run passes `client=None` (`bambuddy/client.py` `maybe_client`), reads printer
   state from the LAN report (`printers/reports.py`), and its filaments are the loaded
   trays plus the physical-spool overlay of cached provider records (`spools/`, refreshed
-  off the path): Bambuddy's inventory and ScadBuddy's own (`native_spools`,
-  `spools/native.py`, provider `native` in `spools/spool_providers.py`, routes
-  `api/native_spools.py`, #4643; each write re-caches it at once; a LAN start saves its
-  slots' grams in `native_spool_uses`, taken off once the run settles with that start
-  `done`, `native_use_hook`; the editor is Settings' `components/settings/NativeSpools.tsx`).
+  off the path): Bambuddy's inventory and ScadBuddy's own (`spools/native.py` over the
+  `filament_*` tables since #6261, provider `native` in `spools/spool_providers.py`,
+  routes `api/native_spools.py`, #4643; each write re-caches it at once; a LAN start
+  books its slots' grams as `print_started` estimates in `filament_spool_events`, and the
+  run's settle books each start's `print_ended` actual (`done`) or 0, `native_use_hook`;
+  the editor is Settings' `components/settings/NativeSpools.tsx`).
   `printers/ams_mapping.py` computes `ams_mapping`/`ams_mapping2` from the
   plan's trays and `printers/nozzle_mapping.py` an H2C rack print's `nozzle_mapping`
   (measured values in the spec's §2); `printers/lan.py` is the FTPS upload and MQTT
@@ -419,6 +528,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   over the watch's `printer_reports`) waits out each print before the next starts, and
   `print_lan_update` rewrites the result (`PrintRunResult.lan_waiting`, `lan_stopped`).
   A change to what a native run reads must keep `e2e-stack/`'s recorder pass at zero.
+  A native file's associations (#6395): `print_library/associations.py` (`RELATIONS`, the
+  one list; `library_file_associations`), routes `api/library_associations.py`, which adds
+  the implied ones read live (a model's `mesh_source`, an output's copy). A trashed file's
+  rows are hidden, not deleted (a restore shows them again); a purge deletes them by FK, and
+  a model's delete (`api/models.py` `delete_template`) deletes the model's.
   Copies between the two libraries (#5355): `print_library/copy.py` (the plan's walk,
   the batch, the ``library`` queue activities), `copy_models.py`, `copy_store.py`
   (`library_copies`, `library_copy_files`), `workflows/library_copy.py` (`LibraryCopy`,
@@ -448,6 +562,17 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   the stored setting `lan_require_plate_clear`, behind `PLATE_CLEAR_PATCH`), shown from
   `PrintProgress.lan_run` and `PrinterNow.lan_run` by `components/print/LanRunControls.tsx`,
   and the agent's `stop_print_run` and `confirm_plate_clear`.
+- `backend/scadbuddy/filament/` — the filament data model (#6261, epic #6260, spec
+  2026-11-14): `catalog.py` (configurable catalogs, no code enums), `types.py`
+  (`effective()`: spool → type → subtype → material, the one resolver; a type links its
+  price-book row by identity, alpha included, and never rewrites a found row), `spools.py`
+  (instances and tag bindings; every writer locks the tag before the spool; archive closes
+  the open binding), `ledger.py` (`filament_spool_events`, the one source of grams left:
+  the newest absolute reading, then the deltas after it; events carry their physical time,
+  ordered by `(at, seq)`; a time-less event gets a clock-step guard because the WSL clock
+  steps back), `locations.py` (a spool moves only through `move()`; AMS trays are keyed by
+  printer, AMS and tray, never by name), `bambuddy_pull.py` (import and the scheduled pull,
+  read-only toward Bambuddy). Colour is `#RRGGBBAA` (`colour.py`). Routes: `api/filament.py`.
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
   Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),
   `BlobRefs` (`refs.py`, the `blob_refs` table that keeps a blob alive) and `sweep_blobs`
@@ -524,14 +649,52 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `SCADBUDDY_SERVICE_TOKEN_FILE` or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`; it refuses to
   start without the KEK or a proof, and ignores `SCADBUDDY_DATABASE_URL` with a warning
   (`core/settings.py` `NoDatabaseSettings`).
+- MakerWorld import (#6119, #1254): `api/makerworld.py` (`/makerworld/status`, `/resolve`,
+  `/import`) calls Bambuddy's own MakerWorld routes with the API's key
+  (`BambuddyClient.makerworld_*`; Bambuddy's 400 for a link it refuses is a 422). The
+  assistant imports only through these routes (agent `get_makerworld_status`,
+  `resolve_makerworld_url`, `import_makerworld_model`): the agent worker has no route to
+  Bambuddy and never holds its key. The `makerworld-import` flow is not in this repo:
+  its versions are prod's `data/flows/makerworld-import/flow.py`, written only through
+  the API's `/workflows` routes (`POST /workflows` registers a version; restore and
+  delete commit too), never from this repo. Since version 2 its `import_one` calls `resolve_makerworld_url`,
+  `create_print_project` and `import_makerworld_model` (#6340). A command tool
+  (`agent/src/tools/command.ts`: `create_print_project`, `import_makerworld_model`)
+  answers `{status: "running", operation_id, next}` once its follow window ends, which a
+  script follows with `get_operation`; version 2 read `folder_id` straight off
+  `create_print_project` and failed `'folder_id'`. A flow run's call keys its commands on
+  its gate request id (`agent/src/temporal/toolActivities.ts` `runCall`, #6350), the same
+  on every attempt of that call; each `tool(...)` call the script makes is a new call with
+  a new key. A keyed tool (both of these) whose only attempt lost its heartbeat is asked
+  once more under that key (`workflows/flow_tools.py` `FLOW_KEYED_RETRY_PATCH`, #6345).
+  After `may have run` or `StartToClose` reaches the script, it checks state
+  (`list_print_projects`) before it sends the write again. The import is the `makerworld_import` operation on the
+  `library` queue (`makerworld/operations.py`): Bambuddy downloads the 3MF (up to
+  `MAKERWORLD_IMPORT_TIMEOUT`), then on `library_backend` native `makerworld/imports.py`
+  copies it into the native library as a `bb_to_sb` copy does
+  (`print_library/copy.py` `copy_file_to_native`: skipped for bytes it holds), so
+  `library_file_id` is the id the order and print routes take. `folder_id` is a native
+  folder (refused 422 on `bambuddy`); `bambuddy_folder_id` is Bambuddy's, such as a print
+  project's `folder_id`. A resolve on native maps Bambuddy's earlier imports to native
+  files by SHA-256.
 - Import print (#4698): `bambuddy/print_import.py` finds every place an archive's 3MF can
   be (the archive's file and slicer project, Bambuddy library files by name and hash, the
   printer's storage only when asked) and reads the one chosen; `api/print_imports.py`
   links the archive to a model as a `print_links` row with the subject `model:<slug>` and
   `matched_by` `import`, beside its `print_imports` row (`PrintLinkStore.record_import`).
+  #6394: or to a native library file that stands and is no run's per-print copy (a 422:
+  the sweep would trash it), checked again in the import's transaction
+  (`require_import_target`) (`library_file_id`, subject `library:<id>`;
+  `print_imports.subject` is the target, while `library_file_id` and `source` stay where
+  the 3MF was read from, and `slug` is NULL). The print watcher and `slugs_by_hash` read
+  model imports only. A link of ScadBuddy's own print of that file takes the import's row
+  over and forgets its `print_imports` row (`_TAKE_OVER_IMPORT`, `_take_over`). A native
+  file purged from the trash forgets its imports (`print_library/store.py`
+  `purge_trashed`, `forget_library_imports`); a file only trashed keeps them, so a
+  restore loses nothing.
   Both routes first run the link passes for the one archive (`linking.link_archive`), so a
   print ScadBuddy made is linked to its run and refused (409), never imported; a run's
-  link found later still owns the print (`_OWNER_ORDER` puts `model:` last). One import
+  link found later still owns the print (`_OWNER_ORDER` puts every `import` link last). One import
   of an archive runs at a time (`PrintLinkStore.import_lock`); one that waits past
   `IMPORT_LOCK_WAIT_S` (30 s) is a 409 to send again. Every owner lookup (`archive_origin`,
   `archive_run_plates`) orders as `_OWNER_ORDER` does.
@@ -780,6 +943,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   short statements on the API's role go on the shared `scadbuddy-rows` pool
   (`rows/component.py` `ROWS`). `tests/test_pg_pools.py` sums an API process's pools
   and fails on any new or bigger one; change it, and README "Running it", on purpose.
+- A dict read from a `jsonb` column (e.g. `storefront_listings.params`) has no key order:
+  Postgres stores the keys shortest first. Never show or answer its keys in that order;
+  order them by the template schema's parameters (#6302).
 - Activity (principal jobs, spec `2026-10-09-principal-jobs-design.md`): the `activity`
   table is one row per piece of background work, written by the sources (render, operation,
   print run, agent operation) through `ActivityIndex.upsert_in` (`backend/scadbuddy/activity/`:
@@ -817,7 +983,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `mocks/features/activity.ts`.
 - `backend/scadbuddy/orders/` — orders phase 1 (#4249, epic #4248, spec
   `2026-10-18-orders-design.md`, plan `2026-10-19-orders-phase-1-customers-and-orders.md`):
-  customers, orders and line items as ScadBuddy's own records. `component.py` `ORDERS`
+  customers, orders and line items as ScadBuddy's own records. A library-file item has no
+  design revisions (409 "it has no design revisions"): to change one after acceptance, add
+  a new item (`POST …/{order_id}/items/after-acceptance`, the agent's
+  `order_item_add_after_acceptance`) and cancel the old one. An item made with
+  `archive_id` is a library-file item from a copy of the archive's file
+  (`origin_archive_ids`); its archive quote needs the archive `completed`. `component.py` `ORDERS`
   (`OrdersComponent`: `store` over the shared `scadbuddy-rows` pool (`rows/component.py`),
   opened on first use, `lifecycle` over the core's bus; `OrdersDep`), `models.py` (the wire and row shapes; money is integer minor
   units, `*_minor`), `store.py` (`OrderStore`, plain CRUD per table; `transaction()` and
@@ -897,13 +1068,16 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `QUOTE_TIMEOUT`), its steps `quote.py`: the check writes nothing; the run writes the
   body's filaments onto the item (`update_item`'s `filaments`, a repin only when a slot
   changes), renders and saves an output through `output_create`'s run when the item has
-  none matching, slices every plate through `bambuddy/preview.py` `start_preview_plates`
+  none matching (`ensure_output` over `rendering.py` `output_for_reference`, #6324: a
+  `Reference` to its output, no item needed; given one, `AttachTo` sets it on the item with
+  no new revision and no quote dropped), slices every plate through `bambuddy/preview.py` `start_preview_plates`
   (the dialog's background slice, either slicer), keeps each plate's sliced file as the
   directory blob `quote-<sha256>` held by `blob_refs (order_item_quote, <quote id>)`
-  before the quote's row exists, reads each plate with `read_sliced`, prices and records
-  it (`Lifecycle.record_slice_quote`). The quote records its print setup (#4673, order operations spec §5): `choices`
-  (`quote.py` `print_setup`: printer, path, `PrintChoices`, and the `prime_tower`, `supports` and
-  `print_sequence` the body takes in `PrintRunRequest`'s shapes, which `operations.py`
+  before the quote's row exists, reads each plate with `read_sliced` and prices it (these
+  steps are `quote.py` `slice_and_price`, the one slice and price, which a storefront price
+  runs too, #6153), then records it (`Lifecycle.record_slice_quote`). The quote records its print setup (#4673, order operations spec §5): `choices`
+  (`quote.py` `print_setup`: printer, path, `PrintChoices`, the `prime_tower`, `supports`,
+  `print_sequence` and `process_overrides` (#2998) the body takes in `PrintRunRequest`'s shapes, which `operations.py`
   `preview_request` slices with) and `filament_plan`, null on a manual or archive quote.
   An item's print (`ItemPrintRequest`, `{}` included) takes every part of that setup and
   the spools it omits from the quote's (`printing.py` `QUOTED_SETUP`, `quoted_setup`;
@@ -936,6 +1110,13 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   (`components/orders/FilamentsEditor.tsx`), `PrintPicker`'s `quote` mode with
   `QuoteFilaments` ("Slice…" in `QuoteEditor`), and the estimate in
   `AddToOrderDialog`; mocks `src/mocks/features/orders/priceBook.ts`.
+  An item's render (#6324, order operations spec §5 "#6324, as built"): the
+  `order_item_render` kind of `operations.py` on the `library` queue (`POST
+  /orders/{id}/items/{item}/render`, subject `order_item:<id>`, check `render_check`, the
+  quote's refusals; the output saved under `render_output_id`, one per operation), which
+  renders the item's reference and sets the output on it. "Slice…" on an item with a design
+  and no output starts it, then opens the print dialog on the new output (`useSliceQuotes`
+  `render`, the run's `stage` `rendering`); the agent's `order_item_quote` needs none.
   Attachments (#4251, spec §6.2 "As built"): any file on an order, a line item or a print attempt,
   `order_attachments` (subject `order:<id>` / `order_item:<id>` / `order_item_fulfilment:<id>`, an attempt's file listed
   under its item through `attempt_item_id`; `POST …/fulfilments/{f}/attachments`; typed by its bytes in
@@ -997,7 +1178,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   seen since; one transaction per cart, `FOR UPDATE SKIP LOCKED`, checked again under the
   order's and the visitor's locks (`claim_idle_draft`) before its attachments go through
   `delete_attachment`, then the order), then the visitors idle as long with no order and
-  the `storefront_renders` rows past a day (`VisitorStore.sweep`), 200 of each a run. A cancelled order reopened past `quoted`
+  the `storefront_renders` rows past a day (`VisitorStore.sweep`), 200 of each a run, then
+  the backstop of a customer's staged files (#6133, `staged_files.sweep_staged`). A cancelled order reopened past `quoted`
   that had asked for money gets its balance request again (`_open_balance(reopened=True)`),
   and an accepted order whose deposit paid the whole total opens one once its balance is
   above zero (`_regate_balance`, from `_retax`; never after the shop cancelled the balance
@@ -1018,7 +1200,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   sent back as read (marked by `auto` or its `id`, whatever the amount) is dropped and
   the auto row is kept and recomputed (`Lifecycle._typed`); any other `tax` charge,
   whatever its label, is typed, and a charge's `shipping_option_id` is kept when
-  sent. `OrdersComponent.rules` reads only its five settings (`SettingsStore.read`, one
+  sent. A charges replace also keeps the `purchase` and `handling` rows and drops a body's
+  (#6133, `store.py` `LIFECYCLE_CHARGES`; the browser's `ChargesEditor` shows them
+  read-only and never sends them, and the mock's `typedCharges` drops them). `OrdersComponent.rules` reads only its seven
+  settings (`SettingsStore.read`, one
   query, no secret unsealed), and `_retax` writes nothing at 0 percent with no auto row.
   `PUT …/shipping-option` (`set_shipping_option`, `{option_id}`, null
   for none) writes the order's one `shipping` charge from Settings → Orders'
@@ -1375,6 +1560,294 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   the running `bambuddy_url`; `NotLinked` without one); the quote's Bambuddy slice calls
   live there too. `POST /orders/price-book/import-spools` (`orders/spool_import.py`) makes
   or updates filament records from the spools, on click only (`PriceBook.spool_import`).
+  A record with no density gets one there, from a manual add sent with no density, and
+  from `POST …/price-book/fill-densities` (#6136, `orders/density.py`): the spools' preset id (`slicer_filament`, a K-profile's
+  `setting_id`, the AMS tray's `tray_info_idx`), that preset's density (Bambuddy's local
+  preset, else the image's Bambu Studio preset), else Bambuddy's filament catalogue
+  (only entries whose name holds each word of the spool's subtype); no preset is found
+  by a subtype's name. A density read Bambuddy refuses leaves the density
+  empty and fails nothing. `filaments.density_profile` keeps where it came from; a
+  person's density clears it. An estimate reads only the record's own density.
+  A record's whole colour (#6209, migration `20261114T1607Z_filaments_alpha_effect.sql`):
+  `colour` stays `#RRGGBB` (the render splits parts by it; a clear filament is its RGB with
+  `alpha` 0), beside `alpha`, `extra_colours` (at most 8 stops) and `effect` (Bambuddy's
+  `effect_type` set), all on `Filament` and the storefront's `PublicFilament`. The
+  identity index holds `alpha` too (#6261, `20261115T0154Z_filaments_identity_alpha.sql`):
+  a spool type's book row (`filament/types.py` `_link_price_book`) is one per alpha.
+  `colour_source` is `import` or `manual`: a look sent by a person that differs from the
+  record's makes it `manual`, and the import never sets a `manual` record's look;
+  `colour_source: "import"` in a PATCH hands it back; the editor's "Use spool colour"
+  sends it only for a record an import linked to spools (`Filament.spool_linked`:
+  `spool_colour` or `spool_ids` set). The import matches only a record of
+  the group's material, subtype and brand: by its link to the group's spools (`spool_ids`),
+  else by the spools' RGB (`spool_colour`, then `colour`), never by a colour a person set, so
+  it makes no duplicate, and a spool whose material was corrected is another filament's
+  (`spool_import.py` `_matches`, in three passes over every group, so the groups' order
+  never decides: a record linked to a group whose RGB its spools had, then a record linked
+  to any group's spools, then a record by colour (`_by_colour`); a spool link always wins
+  over a colour. `_movers` picks the matched `import` records whose colour changes and
+  whose new RGB no staying record of their names holds (a record held back stays too,
+  until none changes); the import parks them out of the identity index
+  (`OrderStore.park_filaments`, `archived_at` set inside its transaction) and puts each
+  back with its new colour (`set_import_look` `unpark`), so a chain or a swap of colours
+  settles in one import. A matched record held back keeps its whole look with
+  `colour_taken`. The matched groups are written before the new ones, and a new group
+  whose RGB is another record's colour is skipped `colour_taken`). The migration sets no
+  link (`spool_colour` NULL, `spool_ids` empty) on every existing record but two: the two
+  prod stand-ins for clear spools (ids and colours pinned in it) get `colour_source`
+  `manual` and `spool_colour` `#000000`, so the import finds them by their spools'
+  `#000000`. The next import links every other record by its own `colour`. Until that
+  first import after the deploy, a record with no link is found only by its own colour:
+  change its colour by hand before then, and the import makes a second record of its
+  spools' colour. So run "Import from spools" once after the deploy, before any colour
+  edit (#6211 review). An item
+  print's spools are matched the same way (`orders/spools.py` `_of`, the store's
+  `spool_links`), so a hand-set colour still finds its spools.
+- A storefront render's price (#6153, spec 2026-11-13 §5.4, §5.6): `orders/storefront/slice_price.py`,
+  migration `20261115T0825Z_storefront_slice_prices.sql`. The price is firm, and it comes
+  from a slice through the back office's quote path: `quote.py` `slice_and_price` (the same
+  slice, `read_plate` and `price_plates` a quote uses, at the book's policy and the profile
+  printer's machine rate, `MachineRates.for_quote`), never a second formula
+  (`test_slice_price.py` checks a storefront price equals a quote to the cent). The variant
+  is rendered to an output by `rendering.py` `output_for_reference` (saved as
+  `storefront_output_id(render_key)`) and sliced by `operations.py` `PreviewSlicer`, so the
+  template gives the support and process settings. The shop slice profile gives only the
+  printer and a spool per material, and the model's remembered dialog choices the rest
+  (`storefront_choices`; none remembered is Standard 0.4 mm). One row per variant in
+  `storefront_slice_prices`, keyed by `price_key`: a sha256 of the render's 3MF content, the
+  price-book filament per slot (id, material, cost), the profile, the choices, and the
+  book's policy and the live machine rate that prices it (`for_quote` through `live_rate`,
+  read again at most once a minute per process, `RATE_TTL`, and carried to the run,
+  `SliceVariant.machine_rate`). Any change is a new
+  key, so an old price is never read again; the row holds no job id and no bytes, so it
+  outlives the render prune. `GET …/renders/{job}/estimate` (`renders.py`
+  `render_estimate`, `slice_estimate`) answers `StoreEstimate`: `source` `slice` with the
+  price of one, `pending` (with `retry_after`) while the slice runs or waits, or `none`
+  (no profile, no spool for a slot's material, a colour with no listing filament, files
+  lost, a failed slice, or a render whose slug or commit is no longer the listing's). A
+  price is only ever for the visitor's own geometry (#6370 review): the run checks that the
+  3MF it rendered is the one the key names (`SliceRun.rendered_sha256`, the render job's
+  3MF, not the stamped output's), else `GEOMETRY_DIFFERS` and no price. The read starts the slice, only for the render on screen, as the
+  operation `storefront_slice_price` on the `library` queue (`orders/operations.py`,
+  3 attempts, `QUOTE_TIMEOUT`); a re-read joins it. `SlicePrices.claim` admits at most
+  `storefront_slices_concurrent` `running` rows, under one advisory lock; a running row
+  whose operation ended without writing it is failed at the next claim (`_settle_ended`),
+  one past `LOST_AFTER` frees its place, and a failed one is tried again after
+  `RETRY_FAILED_AFTER` (1 h); with no room, a read that cannot claim answers `pending`.
+  Each claim makes its own `claim_key`, which is the operation's `Idempotency-Key`, so a
+  later claim never meets an earlier claim's operation; a start that fails puts the row
+  back as it was before the claim (no row if the claim made it), and one whose answer says
+  the operation may still run (`api/operations.py` `may_still_run`) keeps it `running`
+  (#6370 review). Only deterministic refusals record `failed` (`QuoteError`, a 4xx such as
+  the 0 g `sliced_plate`, the stale profile, a gone filament); a 5xx, 408 or 429 is raised
+  as `SliceUnavailableError`, so the operation tries again. Before it slices, the run checks each profile spool is still
+  offered on the printer (`api/storefront_slice.py` `offered_spools`: a loaded tray's
+  negative id moves), and refuses with no price. The CRUD answer keeps `price_key`, `grams`
+  and `print_seconds` for the shop and the checkout (`estimate.py` `SHOP_ONLY_FIELDS`); the
+  edge sends only `routes.py` `ESTIMATE_FIELDS`. The volume analysis (`storefront_job_parts`)
+  is no longer read; `rough_estimate` stays for the back office.
+- Prepared colour combinations (#6237): `orders/storefront/prepare.py`, routes `GET`/`POST
+  /storefront/listings/{id}/prepare` (`api/storefront.py`). The combinations are enumerated
+  per printable material (of the listing's effective materials, in order, #6258, those
+  `inputs.py` `printable_materials` keeps: each locked colour and a choice of each offered
+  colour, #6302 review): for one
+  material, a combination is one colour per offered colour parameter (that material's
+  customer filaments' colours, support excluded, in each spelling the page can send: each
+  filament's own `colour`, as `ParamField.tsx` sends it, and the effective default when no
+  filament spells it so, #6299 review). Each is built by the visitor's render path
+  (`listing_values`, `resolve_choice`, `listing_reference`), a colour at its effective
+  default (same spelling) left out as the page leaves it out, so a visitor's render of the
+  same picks has its render key and reuses the prepared job. A clash
+  (`ColoursClashError`) is left out; a listing no material can print
+  (`LockedColoursClashError`) has no combination. The list is one combination per render key (the
+  first in material order); `count` is the number of keys. The list is built once per
+  listing, price book and materials (a small in-process cache), so an index names one
+  combination; above `ENUMERATION_LIMIT` (16384) picks it is not built and `count` is the
+  picks. The POST starts the workflow
+  `PrepareListing` (`workflows/prepare_listing.py`, `library` queue, id
+  `prepare-listing:<listing id>`, `USE_EXISTING`: a second POST joins it; AUTO_UPGRADE as
+  `VersionedPrepareListing`) and answers at once (`{count, started}`). The run submits by
+  index (activity `prepare_listing_submit`, `RenderService.submit_answer(...,
+  reuse_finished=True)` at the default priority, #6299 review: a visitor's render of the same
+  key joins the prepared execution, so a lower priority would hold the visitor up) and keeps
+  at most `PREPARE_IN_FLIGHT` (2) open, reading them with a backoff
+  (`prepare_listing_settled`). A done job is skipped, a full queue waited out, a failed
+  submit's index kept in the memo `failed_to_start` (a list; a run from before the patch
+  `prepare-failed-indices` keeps a count); it continues as new every 50 submits, carrying
+  the memo. Each render's claim (`request_id`) is `prepare:<listing>:<run id>:<key>`: a
+  retry of one submit joins it, a new run makes a new one, so "Prepare again" renders a
+  failed combination again (#6299 review). The POST's `started` comes from the start's own
+  answer (its run id against the open run's, or its chain's first run id). No
+  table: the GET reads the newest `render_jobs` row of each render key, and the run's state
+  (`running`, and `failed_to_start`: how many of the memo's indices have no done job) only
+  when `0 < count <= cap`; a failed Temporal read gives
+  `running: false`, not an error. Capped by `storefront_prepare_cap` (default 256; 422
+  `listing_combinations_over_cap` with `count` and `cap`, `listing_no_colours`, 409
+  `listing_not_published`). Prepared renders follow `job_ttl`; there is no keep mark.
+- A customer's own models (#6133, spec 2026-11-13; migration
+  `20261113T1547Z_storefront_customer_models.sql`): `orders/storefront/model_requests.py`,
+  CRUD area `models`, the edge's `POST /api/store/v1/uploads` and `…/draft/models`. The files
+  never pass through ScadBuddy (#5295): `presign_uploads` writes one `storefront_uploads` row
+  per file and answers a presigned PUT of `<prefix>/staging/<id>` (`store/s3.py`
+  `presign_put`, a Signature V4 client of its own so `content-length;content-type` are
+  signed, 15 minutes); the browser PUTs straight to the bucket. `add_model_request` claims the
+  uploads (each the visitor's and unclaimed, frozen by a server-side copy with a SHA-256
+  checksum to `<prefix>/staging/<id>.<nonce>.frozen`, a nonce per claim attempt, which no
+  presigned URL names, whose `HEAD` must be exactly its declared size; its key, ETag and
+  SHA-256 kept in `storefront_uploads.frozen_key`, `frozen_etag`, `frozen_sha256`; a losing
+  or refused attempt deletes its copies, `_drop_losers`; the writable original
+  deleted after the commit; no byte read; the check and the import read only the copy) and adds a `request` item, its `order_item_model_requests` row (the colours asked
+  for) and its `order_item_sources` (files `checking`; links as text only, typed by
+  `orders/customer_links.py`: `makerworld` `open`, any other print link `manual`, a purchase
+  `pending`), in one transaction. Caps (`storefront/wire.py`): 256 MiB a file, 20 files, 10
+  print links, 5 purchase links, 1 GiB a request. The edge's presign takes the design
+  requests' `UploadAllowance` and Turnstile action `model`, and so does the edge's
+  `…/draft/models` when it names no upload (links only); both are 404 `requests_disabled`
+  while requests are off; the page's CSP names the bucket
+  in `connect-src` from `GET …/uploads/config` (`storefront/upload_origin.py`
+  `UploadOrigin`, a bare origin only). The S3 store is required (503 `storefront_needs_s3`).
+  Each upload has a watcher, the workflow `StagedFile` (`workflows/staged_file.py`, `library`
+  queue, id `staged-file:<upload id>`, AUTO_UPGRADE as `VersionedStagedFile`, so a change to
+  its commands goes behind `workflow.patched`), which owns the file's life. The presign
+  starts it before it answers any URL (`staged_files.watch`; a failed start is 503
+  `uploads_unavailable`, no URL, the new rows dropped). Its one activity,
+  `staged_file_step` (`orders/storefront/staged_files.py` `step`), reads the file's state
+  under the order's lock and cleans it up when due, in the same transaction, then deletes
+  the object and its preview: a slot never claimed `UNCLAIMED_GRACE` (1 h) past its URL's
+  expiry, a claim whose line is gone, a claimed file of a cart not submitted `STAGING_TTL`
+  (72 h) after its claim (its source reads `refused`, `EXPIRED`), a declined file, and a
+  file of a submitted order cancelled or closed `ENDED_GRACE` (30 days) before (#6164; its
+  source reads `declined`, `ENDED`; a reopen within the grace clears `cancelled_at` and
+  `closed_at`, so the file waits again). A live submitted order's file has no deadline. The routes signal it after their commits
+  (`staged_files.poke`: `claimed`, `unclaimed`, `submitted`; an order's cancel and close
+  `closed`, its reopen `retry`), but the database is the truth,
+  so a lost signal costs time, never a file; the step retries with no limit.
+  `sweep_staged` (in the storefront drafts sweep) is only the backstop: a staging object no
+  row names past `ORPHAN_AGE` (1 day) is deleted, and a row that old whose watcher is not
+  running gets one started again, and a file source still `checking` past `CHECK_STALE`
+  (1 h) whose check is not running gets its check started again, each counted in
+  `scadbuddy_staged_files_repaired`. A pass checks at most 1000 rows and 1000 waiting sources (`SWEEP_PASS_BATCHES`)
+  and the next goes on from there.
+  The check (#6133 PR 2, spec §7) runs in the intake worker, `python -m
+  scadbuddy.intake_worker` (`intake_worker/`), which holds no database secret or KEK and
+  refuses to start with one (`settings.py` `FORBIDDEN_ENV`); its worker process imports no
+  database code (`tests/intake_worker/test_worker.py`). The claim starts one
+  `CustomerFileCheck` per file source on `temporal_task_queue_customer_files`
+  (`orders/storefront/intake.py` `start_checks`, best effort; the backstop above). Its
+  activity reads the staged file through the CRUD routes of caller `intake` (area
+  `sources`, `api/crud_intake.py`: a presigned GET, a presigned PUT of the preview, the
+  verdict; the GET is of the frozen copy, `If-Match` its ETag), checks it in a child process
+  (`child.py`: `RLIMIT_AS`, non-dumpable, started by its launcher `confine.py`: non-dumpable,
+  new user, network, mount and PID namespaces (the parser forked as PID 1 with
+  `PR_SET_PDEATHSIG`, `/proc` under a tmpfs), the spool under a tmpfs with the box bind-mounted inside it,
+  `PR_SET_NO_NEW_PRIVS`, a seccomp filter, then `execv` as a non-root uid, which clears every
+  capability; a timeout, its own process group; `check.py`: the kind by content, the zip's
+  directory, the read within the read budget) and posts `ready`, `refused` or, once its
+  attempts are spent, `failed`. The worker is non-dumpable from its start (`hardening.py`).
+  `SCADBUDDY_INTAKE_SANDBOX` is required (no default): `true` runs the child in the intake
+  sandbox, a Deployment of its own (`python -m scadbuddy.intake_worker.sandbox`, `sandbox.py`;
+  no ServiceAccount token, proof or secret but the RPC token, its own `emptyDir`, nothing
+  shared with the worker's pod; it exits 2 with any file under `/var/run/secrets/`,
+  `SECRETS_DIR`),
+  never in the worker's, and needs `SCADBUDDY_INTAKE_SANDBOX_URL` (a plain `http://` URL of
+  its Service); only the dev-only `unsafe-local` runs it in the worker's container. The
+  worker hands each file over HTTP (`POST /check` on `SCADBUDDY_INTAKE_SANDBOX_PORT`,
+  default 8090; the body the file, the request JSON in `X-Intake-Request`; the answer
+  binary-framed: `X-Intake-Verdict-Bytes` bytes of verdict JSON, then the preview PNG; the
+  wire format and every cap in `runner.py`'s docstring). Each check carries the RPC token,
+  `Authorization: Bearer <token>`: both processes read it from
+  `SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE` (`runner.read_token`; the Secret
+  `scadbuddy-intake-sandbox-rpc`, mounted outside `/var/run/secrets/`) and refuse to start
+  without a file, with an empty one or a token under 32 bytes. It authorizes calls to the
+  sandbox only, so it is the one secret the sandbox may hold. The sandbox compares it with
+  `hmac.compare_digest` and answers 401 before it reads the body, then closes. A request's
+  head and whole body arrive within `sandbox.REQUEST_DEADLINE` (60 s) or the sandbox drops
+  it and frees the slot. Its NetworkPolicy admits only the worker's pods, and the worker
+  reads every answer as untrusted (`runner._read_answer`: the echoed `X-Intake-Id`, each length within
+  its cap, the verdict validated by `parse_verdict`, the PNG signature and `IHDR` checked).
+  The sandbox fails closed: it runs the launcher with `--strict` (a refused step is exit
+  126, no parse) and exits 3 at start when its probe is refused (`probe_isolation`); the
+  worker counts failed calls, `scadbuddy_intake_sandbox_failed_total` by `reason`, on its
+  `/metrics`. One tenant per pod: the worker and the sandbox each run one check at a time,
+  fixed (a second request is 503, which the worker tries again for up to `BUSY_WAIT`), and
+  the sandbox kills any process of an earlier check before the next (it is the child
+  subreaper; one that survives makes it exit 4); scale with replicas. Each check gets a
+  fresh `box/` (0700, the upload made `O_EXCL | O_NOFOLLOW`), removed after it; a client
+  that goes away, or the timeout, kills the child's group. The RPC tests are
+  `tests/intake_worker/test_sandbox.py`. The
+  API stores the preview as opaque bytes, `customer-preview-<sha256 of the preview's bytes>`
+  (never the worker's reported hash), held by the source
+  (`blob_refs` holder `order_item_source`; the trigger of
+  `20261114T0603Z_intake_worker.sql` drops it with the source). The worker is not
+  versioned: a change to `intake_worker/workflow.py`'s commands goes behind
+  `workflow.patched`.
+  `S3ContentBackend.sweep_unrecorded` never touches `staging/`.
+  Purchases, the handling fee and the gate (#6133 PR 3, spec §10; migration
+  `20261114T1156Z_order_purchase_charges.sql`): `ChargeKind` gains `purchase` and
+  `handling`; `order_charges.purchase_link_id` (UNIQUE, FK to `order_item_sources`) is
+  set exactly on a `purchase` row (`order_charges_purchase_link`), and an order has at
+  most one `handling` row (`order_charges_handling`). Only the lifecycle writes them:
+  `Lifecycle.record_purchase` (one transaction under the order's lock: a cost entry on
+  the link's item, kind `material` or `other`, source `purchase:<source id>`; a
+  `purchase` charge of the same amount labelled `purchase_label`; the source
+  `recorded` with both ids; `_rehandle` and `_retax`; the audit row `purchase.recorded`;
+  a second record of a recorded link with the same amount and cost kind writes nothing,
+  one that differs is `purchase_recorded`), `update_purchase` (the entry and
+  the charge together, `purchase.updated`) and `decline_purchase` (both removed, the
+  source `not_needed` with `shop_note`, `purchase.declined`; a second decline writes
+  nothing). All three work only while `draft` or `quoted` (`purchase_locked`), never on
+  a cart; record refuses a `not_needed` link (`purchase_not_pending`), update one not
+  recorded (`purchase_not_recorded`). A cost entry with a `purchase:` source is neither
+  removed nor added by hand (`purchase_cost_linked`), and its item's delete is
+  `item_has_entries`, whose text names the decline. The handling fee is
+  `money.handling_minor`: Settings → Orders' `orders_purchase_fee_flat_minor` per
+  recorded purchase (only for an order in `orders_currency`) plus
+  `orders_purchase_fee_percent` (0 to 100, two decimals) of their sum, rounded half up
+  once, the row removed at 0; both settings are env-seeded and live, and neither the
+  purchases nor the fee are in the auto tax's base. A change to either setting reprices
+  no order by itself: an order's `handling` row follows it at that order's next record,
+  update or decline. The gate `_no_pending_purchase`
+  (`purchase_pending`, 409, the problem's `sources` and `items` name the pending links)
+  counts only links of items not `cancelled` (`store.py` `pending_purchases`; a reopen
+  brings the link back) and refuses `_accept_quote` (every caller), `_accept_order` (so `_accepted_by_the_last`
+  writes `order.accept_skipped`) and a `balance` payment request; a `deposit` request
+  is not gated. The customer's order view offers no accept while one is pending, and
+  no answer to a `together` item's design, whose accept accepts the quote too
+  (`order_page.py` `_Rows.purchase_pending`). Routes `api/order_purchases.py`: `GET
+  /orders/{id}/purchases`, `POST …/purchases/{source}/record` (201, 200 for a repeat),
+  `PATCH …/purchases/{source}`, `POST …/purchases/{source}/decline`, the three writes
+  each under `_run_linked`; no `Idempotency-Key` (the `purchase:` source and the link's state make
+  a repeat safe). Agent `order_purchases` (read), `order_purchase_record`,
+  `order_purchase_update`, `order_purchase_decline` (write). A design request takes up
+  to `MAX_PURCHASE_LINKS` things to buy too: the multipart part `purchase_links`, a JSON
+  list of `{url, note}` that both sides read with `storefront/uploads.py`
+  `checked_purchase_links` (`too_many_links`, `link_invalid` with `index`, also for a
+  lone surrogate, `draft_body_invalid`); the CRUD side holds each link to `checked_link` and stores it
+  as a `pending` `manual` purchase source (`model_requests.checked_purchase_links`,
+  `insert_links`).
+  The UI's routes (#6133 PR 4, spec §4.3, §7 "Serving the preview", §10.5, §11): a
+  preview is served only by a route that sends `storefront/wire.py` `PREVIEW_HEADERS`
+  (`image/png`, `inline`, `nosniff`, `private, no-cache`), never a presigned URL; the
+  CRUD side reads it (`intake.read_preview`, capped at `MAX_PREVIEW_BYTES`) and the edge
+  streams it (`routes.py` `_relayed_preview`, any refusal a 404 with no body). The cart's
+  is `GET …/draft/sources/{id}/preview` (the visitor's unsubmitted cart only,
+  `intake.draft_preview`); the order page's is `POST …/order/sources/{id}/preview` with the
+  reader in the body (`order_page.preview`). `GET …/models/colours` lists the price book's
+  filaments with no price (the edge keeps `FILAMENT_FIELDS`). Submit refuses a cart with a
+  refused or expired file, 409 `model_file_refused` with `sources` (`submit.py`
+  `_no_refused_file`). The customer's view gains `charges` and `items[].sources`
+  (`CustomerSource`; `customer_reason` only for `ENDED`, `order_page.CUSTOMER_REASONS`). The
+  back office: `api/order_sources.py` (`…/sources/{source}/preview`, `/download` (a
+  presigned GET of the frozen copy, 5 minutes, an attachment), `/check`
+  (`Lifecycle.recheck_source`, then `intake.start_checks`), `/decline`
+  (`Lifecycle.decline_source`, then `poke` `declined`) and `/retry-import`
+  (`Lifecycle.retry_import`, then `poke` `retry`); no `Idempotency-Key`, a repeat writes
+  nothing). `GET /orders/{id}` adds `sources` (`OrderItemSource`, `OrderStore.item_sources`,
+  with `import_stuck` and the reason `models.py` `IMPORT_STUCK`, an hour past the submit)
+  and `model_requests`; `GET /orders` takes `own_model`, `purchase_pending` and
+  `import_stuck`. Agent `order_item_source_decline`, `order_item_source_check_again`,
+  `order_item_source_retry_import` (write); the preview and download are the page's
+  (`coverage.ts`).
 - Storefront accounts (#5283, spec 2026-11-02 §5.2): `orders/storefront/accounts.py`, a
   passwordless sign-in on the caller's connection (migration `…_storefront_accounts.sql`).
   - `request_code` makes a sixteen-character code from `CODE_ALPHABET` (Crockford's

@@ -17,7 +17,8 @@ PROBLEMS = "https://scadbuddy.dev/problems/orders/"
 def refused(error: LifecycleError) -> ApiError:
     """A lifecycle refusal as the routes answer it: 422 naming the body field for an
     unprocessable one, else 404 or 409 under the problem type
-    ``https://scadbuddy.dev/problems/orders/<slug>``, with the items and shipments it names."""
+    ``https://scadbuddy.dev/problems/orders/<slug>``, with the items, shipments and
+    sources it names."""
     if error.unprocessable:
         return ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -29,6 +30,8 @@ def refused(error: LifecycleError) -> ApiError:
         extensions["items"] = error.items
     if error.shipments:
         extensions["shipments"] = error.shipments
+    if error.sources:
+        extensions["sources"] = error.sources
     return ApiError(
         status.HTTP_404_NOT_FOUND if error.not_found else status.HTTP_409_CONFLICT,
         str(error),

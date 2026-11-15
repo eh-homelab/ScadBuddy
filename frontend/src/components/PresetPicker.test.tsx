@@ -1,7 +1,7 @@
 import { act, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { useState } from 'react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { bridge } from '../agent/bridge'
 import { fillableOf } from '../agent/fillable'
 import { useGlobalAgentTools } from '../agent/global'
@@ -9,7 +9,7 @@ import { api } from '../api/client'
 import type { Job } from '../api/types'
 import { MAX_PRESET_DESCRIPTION } from '../lib/presets'
 import { BUILTIN_SLUG, keychainSchema, versionIds } from '../mocks/fixtures'
-import { resetMockState, setMockPresets } from '../mocks/handlers'
+import { mockSettings, resetMockState, setMockPresets, setMockSettings } from '../mocks/handlers'
 import { emitRealtime } from '../mocks/realtime'
 import { presets as fixturePresets } from '../mocks/fixtures'
 import { server } from '../mocks/server'
@@ -401,11 +401,26 @@ describe('PresetPicker', () => {
     // Not squeezed into the buttons' row, where it wrapped word by word.
     const update = screen.getByRole('button', { name: /^Update preset / })
     expect(note.parentElement).not.toBe(update.parentElement)
-    // Above them, one line, the whole name kept for the eye that hovers.
-    expect(note.compareDocumentPosition(update) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    // Below the select's row (#1023), so it appearing moves neither the select nor the
+    // buttons; one line, the whole name kept for the eye that hovers.
+    expect(note.compareDocumentPosition(update) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy()
     expect(note).toHaveClass('truncate')
     expect(note).toHaveAttribute('role', 'status')
     expect(note).toHaveTextContent('Changed from Mum')
+  })
+
+  it('keeps Save as preset on the select\'s row, with no row of its own (#1023)', async () => {
+    const { user } = render()
+    const select = await picker()
+    const saveAs = screen.getByRole('button', { name: 'Save as preset…' })
+    const row = screen.getByTestId('preset-bar')
+    expect(row.contains(select)).toBe(true)
+    expect(row.contains(saveAs)).toBe(true)
+    // Picked and changed, the preset's actions join the same row.
+    await selectOption(user, select, 'Mum')
+    await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'my')
+    expect(row.contains(screen.getByRole('button', { name: /^Update preset / }))).toBe(true)
+    expect(row.contains(screen.getByRole('button', { name: 'More for preset Mum' }))).toBe(true)
   })
 
   it('offers neither Update nor Delete on a preset the template ships', async () => {
@@ -936,5 +951,28 @@ describe('a preset a link offers (#1022)', () => {
     expect(onDeclined).not.toHaveBeenCalled()
     view.unmount()
     expect(onDeclined).toHaveBeenCalledTimes(1)
+  })
+})
+
+// #6232 — the copied link is on the host the user is on, never the public URL's.
+describe('PresetPicker copy link', () => {
+  const INTERNAL = 'https://scadbuddy.internal.nullreference.io'
+  const SSO = 'https://scadbuddy.sso.nullreference.io'
+
+  beforeEach(() => {
+    resetMockState()
+    // The server builds each preset's `url` on the public URL.
+    setMockSettings({ ...mockSettings(), public_url: INTERNAL })
+  })
+  afterEach(() => vi.unstubAllGlobals())
+
+  it.each([INTERNAL, SSO])('copies the link on %s when the page is there', async (host) => {
+    vi.stubGlobal('location', new URL(`${host}/m/name-keychain`))
+    const { user } = render()
+    await selectOption(user, await picker(), 'Mum')
+    await user.click(screen.getByRole('button', { name: 'More for preset Mum' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Copy link to preset Mum' }))
+    await screen.findByTestId('preset-link-copy')
+    expect(await navigator.clipboard.readText()).toBe(`${host}/m/name-keychain?preset=${presetId('Mum')}`)
   })
 })

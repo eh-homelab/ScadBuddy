@@ -41,6 +41,7 @@ export MANIFEST_PROJECTS=applications/scadbuddy/scadbuddy-projects.yaml
 export MANIFEST_AGENT_DURABLE=applications/scadbuddy/scadbuddy-agent-durable.yaml
 export MANIFEST_SLICER=applications/scadbuddy/scadbuddy-slicer.yaml
 export MANIFEST_STOREFRONT=applications/scadbuddy/scadbuddy-storefront.yaml
+export MANIFEST_INTAKE=applications/scadbuddy/scadbuddy-intake.yaml
 export KUSTOMIZATION=clusters/prod/scadbuddy/kustomization.yaml
 export DASHBOARD_RESOURCE=https://github.com/eh-homelab/ScadBuddy//deploy/grafana
 # What the step before it found: deploy/grafana exists at REVISION.
@@ -228,6 +229,24 @@ if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")" "$(deployment scadbuddy-
   grep -q "${MANIFEST_STOREFRONT} is not in clusters yet" "$work/log" || fail "no storefront: no notice"
 else
   fail "no storefront: step failed: $(grep '::error' "$work/log")"
+fi
+
+# 5f. The intake worker's file (#6133), when present, is pinned too; it has no agent.
+extra_path=$MANIFEST_INTAKE
+extra_content=$(deployment scadbuddy-intake "$IMAGE:$old")
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")" "$(deployment scadbuddy-render "$IMAGE:$old")"; then
+  has_line "$pinned" "$MANIFEST_INTAKE" || fail "intake: image not pinned"
+  grep -q "$MANIFEST_INTAKE" "$work/out" || fail "intake: not among the changed files"
+else
+  fail "intake: step failed: $(grep '::error' "$work/log")"
+fi
+extra_path='' extra_content=''
+
+# 5g. Without the intake worker's file, the deploy pins the rest and says so.
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")" "$(deployment scadbuddy-render "$IMAGE:$old")"; then
+  grep -q "${MANIFEST_INTAKE} is not in clusters yet" "$work/log" || fail "no intake: no notice"
+else
+  fail "no intake: step failed: $(grep '::error' "$work/log")"
 fi
 
 # 6. A bare image with no tag or digest is REJECTED, on purpose: clusters pins

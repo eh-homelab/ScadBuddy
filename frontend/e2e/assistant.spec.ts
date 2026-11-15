@@ -169,6 +169,43 @@ test.describe('assistant panel (#256)', () => {
     await expect(panel.getByText('Queued 2 copies in the Keychains project.')).toHaveCount(0)
   })
 
+  test('queues messages sent while a turn runs: each can be edited or removed, then runs after it (#6386)', async ({ page }) => {
+    await page.goto('/m/name-keychain')
+    await page.getByRole('button', { name: 'Assistant' }).click()
+    const panel = page.getByRole('complementary', { name: 'Assistant' })
+    const composer = panel.getByRole('textbox', { name: 'Message the assistant' })
+    await composer.fill('Make the name bigger and send two to Bambuddy')
+    await composer.press('Enter')
+    const card = panel.getByRole('region', { name: 'Needs your approval' })
+    await expect(card.getByRole('button', { name: 'Approve' })).toBeVisible()
+
+    // The turn waits for approval: what is sent now waits in the queue.
+    await expect(panel.getByText('Sent now, it waits and runs after this turn.')).toBeVisible()
+    await composer.fill('Also make it blue')
+    await composer.press('Enter')
+    await composer.fill('And a hole for the ring')
+    await panel.getByRole('button', { name: 'Queue', exact: true }).click()
+    const queued = panel.getByRole('list', { name: 'Queued messages' }).getByRole('listitem')
+    await expect(queued).toHaveCount(2)
+    await expect(queued.first()).toContainText('Queued, runs next')
+    await expect(queued.first()).toContainText('Also make it blue')
+
+    await queued.nth(1).getByRole('button', { name: 'Edit queued message' }).click()
+    await queued.nth(1).getByRole('textbox', { name: 'Queued message' }).fill('And a 4 mm hole for the ring')
+    await queued.nth(1).getByRole('button', { name: 'Save' }).click()
+    await expect(queued.nth(1)).toContainText('And a 4 mm hole for the ring')
+    await queued.first().getByRole('button', { name: 'Remove queued message' }).click()
+    await expect(queued).toHaveCount(1)
+
+    // Once the turn ends, the queued message runs as its own turn and moves into the transcript.
+    await card.getByRole('button', { name: 'Approve' }).click()
+    const log = panel.getByRole('log', { name: 'Conversation' })
+    await expect(log.getByText('Noted: "And a 4 mm hole for the ring". Anything else on this model?')).toBeVisible()
+    await expect(queued).toHaveCount(0)
+    await expect(log.getByText('Also make it blue')).toHaveCount(0)
+    await expect(panel.getByTestId('agent-status')).toHaveText('Idle')
+  })
+
   test('comes out of the customizer’s full screen for Ctrl+`', async ({ page }) => {
     await page.goto('/m/name-keychain')
     await expect(page.getByTestId('bbox-readout')).toBeVisible()

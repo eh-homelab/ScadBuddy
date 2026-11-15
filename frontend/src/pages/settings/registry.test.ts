@@ -109,7 +109,7 @@ describe('registry', () => {
   it('holds the spec §3.2 table, with Printers and Orders in Printing', () => {
     expect(AREAS.map((a) => [a.id, SECTION_REGISTRY.filter((s) => s.area === a.id).map((s) => s.id)])).toEqual([
       ['general', ['connection']],
-      ['printing', ['printing', 'print-watcher', 'printers', 'inventory', 'native-spools', 'orders', 'remembered', 'hotend-usage']],
+      ['printing', ['printing', 'print-watcher', 'printers', 'inventory', 'native-spools', 'orders', 'storefront-pricing', 'remembered', 'hotend-usage']],
       ['library', ['projects', 'uploads', 'fonts', 'libraries', 'git-remote', 'rendering', 'preview']],
       [
         'assistant',

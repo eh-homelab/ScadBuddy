@@ -146,6 +146,8 @@ class Config:
     #: False in the standalone render worker, which serves no editor checks: its
     #: derived solid slots then keep no CPU back for them.
     serves_checks: bool = True
+    #: How long a settled render job and its files are kept, in seconds; 0 keeps them
+    #: forever (#6236).
     job_ttl: float = DEFAULT_JOB_TTL
     # Never sent to the browser: the catalogue is fetched server-side (issue #82).
     google_fonts_api_key: str | None = None
@@ -181,6 +183,13 @@ class Config:
     download_cache_max_bytes: int = DEFAULT_DOWNLOAD_CACHE_MAX_BYTES
 
     @property
+    def sweep_grace(self) -> float:
+        """How long an unreferenced piece or a revision export waits before a sweep removes
+        it: ``job_ttl``, else (``job_ttl`` 0, renders kept forever, #6236) the default.
+        Never 0, which would race a write that has not recorded its reference yet."""
+        return self.job_ttl if self.job_ttl > 0 else DEFAULT_JOB_TTL
+
+    @property
     def activity_timeout(self) -> float:
         """start_to_close for the openscad activities: `render_timeout` plus the margin."""
         return self.render_timeout + ACTIVITY_TIMEOUT_MARGIN
@@ -200,11 +209,14 @@ class Config:
         # #322: bounds a value saved in Settings meets too, so they are said here once.
         for name, value in (
             ("SCADBUDDY_RENDER_TIMEOUT", self.render_timeout),
-            ("SCADBUDDY_JOB_TTL", self.job_ttl),
             ("SCADBUDDY_TEMPLATE_ACTIVITY_MAX_TIMEOUT", self.template_activity_max_timeout),
         ):
             if value <= 0:
                 raise ValueError(f"{name} must be more than 0, not {value}")
+        if self.job_ttl < 0:
+            raise ValueError(
+                f"SCADBUDDY_JOB_TTL must be 0 (keep forever) or more, not {self.job_ttl}"
+            )
         if self.check_concurrency < 1:
             raise ValueError(
                 f"SCADBUDDY_CHECK_CONCURRENCY must be at least 1, not {self.check_concurrency}"

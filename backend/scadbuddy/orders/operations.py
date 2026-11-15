@@ -15,10 +15,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from collections.abc import Mapping, Sequence
 from contextlib import aclosing
-from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 import psycopg
@@ -59,9 +59,16 @@ from scadbuddy.orders.bambuddy import (
     start_quote_preview,
 )
 from scadbuddy.orders.component import ORDERS
-from scadbuddy.orders.lifecycle import QUOTE_TIMEOUT, LifecycleError
+from scadbuddy.orders.lifecycle import (
+    QUOTE_TIMEOUT,
+    SETTLED,
+    LifecycleError,
+    check_submitted,
+    requote_open,
+)
 from scadbuddy.orders.models import Actor, Reference
 from scadbuddy.orders.printing import (
+    PRINT_TIMEOUT,
     ItemPrintRequest,
     print_check,
     print_item,
@@ -81,24 +88,36 @@ from scadbuddy.orders.quote import (
     operation_quote_id,
     quote_check,
     quote_run,
+    reference_of,
     support_check,
 )
+from scadbuddy.orders.rendering import AttachTo, RenderedOutput, output_for_reference
 from scadbuddy.orders.spools import item_plan
+from scadbuddy.orders.storefront.slice_price import (
+    RUN_ATTEMPTS,
+    SLICE_PRICE_KIND,
+    SliceRun,
+    SliceUnavailableError,
+    SliceVariant,
+    model_digest,
+    price_variant,
+)
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.hot_path import native_backends
-from scadbuddy.render.job_models import Job
+from scadbuddy.render.job_models import Job, JobNotFoundError
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.read_budget import budget_of
 from scadbuddy.render.runner import OpenSCADError, cached_schema
 from scadbuddy.render.schema import CustomizerSchema
 from scadbuddy.slicing.component import NO_CONTENT_STORE, SLICING
-from scadbuddy.store.cache import StaleBlobError
+from scadbuddy.store.cache import StaleBlobError, materialize_result
 from scadbuddy.store.content_models import BlobMissingError
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import PrintCommands
     from scadbuddy.core.components import Components, Core
+    from scadbuddy.orders.store import OrderStore
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +128,9 @@ BODY_ONLY = "body_only"
 #: The item's pinned filaments before a slice's revision (#4673, #5761 review), set by
 #: the quote route with that revision and not keyed: the render's slots take them.
 CARRIED = "carried_filaments"
+#: An item's design rendered and its output set on the item (#6324), so the print dialog
+#: has an output to open on for "Slice…".
+ORDER_ITEM_RENDER = "order_item_render"
 ORDER_ATTACHMENT_ADD = "order_attachment_add"
 ORDER_ITEM_PRINT = "order_item_print"
 ORDER_ATTEMPT_COPY = "order_attempt_copy"
@@ -134,9 +156,8 @@ QUOTE_DETERMINISTIC: tuple[type[Exception], ...] = (
 #: blob swept, while the run read it. The next attempt's ``ensure_output`` renders and
 #: saves the output again, and slices again.
 QUOTE_RETRYABLE: tuple[type[Exception], ...] = (OutputNotFoundError, BlobMissingError)
-#: One ``order_item_print`` run: the print run's accept, which answers within the command
-#: deadline, and the attempt's row. Its slices and queueing are the print run's own.
-PRINT_TIMEOUT = timedelta(minutes=5)
+#: A storefront slice also tries again after a passing failure (#6370 review).
+SLICE_RETRYABLE: tuple[type[Exception], ...] = (*QUOTE_RETRYABLE, SliceUnavailableError)
 
 
 def _slice_failed(plate_id: int, failure: str | None) -> ApiError:
@@ -159,8 +180,9 @@ def _too_big(plate_id: int) -> ApiError:
 
 def preview_request(request: SliceQuoteRequest) -> PrintRunRequest:
     """The print run's request a quote's background slice prepares (Ruling 2): the
-    dialog's choices, the route, the settings per slot (#5571) and the tower, supports
-    and sequence (#4673), so the quote slices what the print will."""
+    dialog's choices, the route, the settings per slot (#5571), the tower, supports
+    and sequence (#4673) and the process overrides (#2998), so the quote slices what the
+    print will."""
     return PrintRunRequest(
         printer=request.printer,
         printer_id=request.printer_id,
@@ -171,6 +193,7 @@ def preview_request(request: SliceQuoteRequest) -> PrintRunRequest:
         prime_tower=request.prime_tower,
         supports=request.supports,
         print_sequence=request.print_sequence,
+        process_overrides=request.process_overrides,
     )
 
 
@@ -466,6 +489,57 @@ async def claimed_run(
     return None
 
 
+def render_output_id(operation: str | None) -> str:
+    """The id an item's render saves its output under (#6324): one per operation, so an
+    attempt that runs again after its worker stopped finds the output an earlier attempt
+    saved instead of saving a second. A run outside an operation gets one of its own."""
+    if operation is None:
+        return uuid.uuid4().hex
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"scadbuddy:order_item_render_output:{operation}").hex
+
+
+def render_check(store: OrderStore, order_id: str, item_id: str) -> None:
+    """The refusals of an item's render (#6324), from the rows alone, writing nothing:
+    404 for an unknown order or item, 409 ``order_not_submitted`` for a storefront cart,
+    ``item_library_file`` (it slices its file), ``item_custom`` and
+    ``item_has_no_design`` (``reference_of``), ``order_not_open`` while the item takes no
+    new quote (``requote_open``) and ``item_not_open`` for a settled item: what the slice
+    quote's own check refuses."""
+    order = store.order(order_id)
+    if order is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
+    try:
+        check_submitted(order)
+    except LifecycleError as error:
+        raise refused(error) from None
+    item = store.item(item_id)
+    if item is None or item.order_id != order.id:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order.label}")
+    if item.library_file is not None:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"item {item_id} is a library file item: it slices its file, and has no design"
+            " to render",
+            type_=PROBLEMS + "item_library_file",
+            items=[item.id],
+        )
+    reference_of(item)
+    if not requote_open(order, item, store.quotes(item.id)):
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"order {order.label} is {order.status}: an item is rendered for a quote while"
+            " the order is draft or quoted, or, past that, while the item has no accepted"
+            " quote or was revised after acceptance",
+            type_=PROBLEMS + "order_not_open",
+        )
+    if item.status in SETTLED:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"item {item_id} is {item.status}",
+            type_=PROBLEMS + "item_not_open",
+        )
+
+
 def order_kinds(core: Core, components: Components) -> list[OperationKind]:
     """The orders' kinds, bound to this process's state."""
 
@@ -567,6 +641,58 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 type(error).__name__, type=type(error).__name__, non_retryable=True
             ) from error
         dumped: dict[str, Any] = quote.model_dump(mode="json")
+        return dumped
+
+    async def render_check_kind(request: dict[str, Any]) -> dict[str, Any]:
+        store = components.get(ORDERS).store
+        await asyncio.to_thread(render_check, store, request["order_id"], request["item_id"])
+        return {}
+
+    async def render_run_kind(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        # Read when it runs: the operations component is built after this one's kinds.
+        from scadbuddy.operations.component import OPERATIONS
+
+        orders = components.get(ORDERS)
+        lifecycle = orders.lifecycle
+        order_id, item_id = request["order_id"], request["item_id"]
+        by = Actor.model_validate(request["by"])
+        create = components.get(OPERATIONS).kinds["output_create"]
+
+        async def create_output(body: dict[str, Any]) -> dict[str, Any]:
+            return await create.run(body, {})
+
+        try:
+            # The revision the output is of: one made while it renders refuses the write.
+            item = await asyncio.to_thread(lifecycle.ensure_revision, order_id, item_id, by)
+        except LifecycleError as error:
+            raise refused(error) from None
+        order = await asyncio.to_thread(orders.store.order, order_id)
+        if order is None:
+            raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
+        reference = reference_of(item)
+        await output_for_reference(
+            reference,
+            outputs=core.outputs,
+            renders=_Renders(core),
+            create_output=create_output,
+            name=f"{order.label} {item.title}",
+            saved_as=render_output_id(OPERATION_RUN.get()),
+            schema=await reference_schema(core, reference),
+            item=AttachTo(
+                lifecycle=lifecycle,
+                order=order,
+                item=item,
+                by=by,
+                revision_id=item.current_revision_id,
+                # The order or the item may have moved on while it rendered. A refusal
+                # here leaves the output saved: a render of the template like any other
+                # (the model's outputs and Recent renders list it), set on no item.
+                check=lambda: render_check(orders.store, order_id, item_id),
+            ),
+        )
+        rendered = await asyncio.to_thread(orders.store.item, item_id)
+        assert rendered is not None
+        dumped: dict[str, Any] = rendered.model_dump(mode="json")
         return dumped
 
     async def item_print_check(request: dict[str, Any]) -> dict[str, Any]:
@@ -696,6 +822,9 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         """The item claimed, then its print started as the print route starts one
         (``accept_run``), then the run attached (``orders/printing.py`` ``print_item``);
         a test print of the request's ``revision_id`` when it names one."""
+        # The run's one clock (#6193), on its first line: the project and the claim
+        # count against its time (`print_item`'s `started`).
+        started = time.monotonic()
         # Here, not at the top: the orders package imports nothing of `api/` as it loads
         # (`orders/__init__.py`); this run is the one place it reaches the print route.
         from scadbuddy.activity.component import ACTIVITY
@@ -757,7 +886,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             if file_id is not None:
                 # The library print route's own start (#5544): its subject, its slug and
                 # the file's filament slots, read as that route reads them (#2550).
-                started = await start_library_run(
+                library_run = await start_library_run(
                     file_id,
                     print_body(request, copies, projects[0], plan, quoted_settings, setup),
                     runs=core.print_runs,
@@ -770,8 +899,8 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                     # #5602: as the output's run below.
                     api=True if request.get("api") else None,
                 )
-                assert isinstance(started, PrintRun)
-                return started
+                assert isinstance(library_run, PrintRun)
+                return library_run
             run = await accept_run(
                 core.print_runs,
                 Response(),
@@ -799,6 +928,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             sliced_blob_key=checked["sliced_blob_key"],
             project_id=project_id,
             revision_id=request.get("revision_id"),
+            started=started,
         )
         dumped: dict[str, Any] = attempt.model_dump(mode="json")
         return dumped
@@ -926,7 +1056,84 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         dumped: dict[str, Any] = attachment.model_dump(mode="json")
         return dumped
 
+    async def storefront_slice_check(request: dict[str, Any]) -> dict[str, Any]:
+        SliceVariant.model_validate(request)
+        return {}
+
+    async def storefront_slice_run(
+        request: dict[str, Any], checked: dict[str, Any]
+    ) -> dict[str, Any]:
+        """A storefront variant sliced and priced as a back-office quote is (#6153,
+        ``orders/storefront/slice_price.py`` ``price_variant``): the same render, slicer
+        and price book, here over this process's services."""
+        # Read when it runs: these import back into this module's imports.
+        from scadbuddy.api.storefront_slice import offered_spools
+        from scadbuddy.operations.component import OPERATIONS
+        from scadbuddy.spools.component import SPOOLS
+
+        orders = components.get(ORDERS)
+        create = components.get(OPERATIONS).kinds["output_create"]
+
+        async def create_output(body: dict[str, Any]) -> dict[str, Any]:
+            return await create.run(body, {})
+
+        async def offered(printer: str) -> set[int] | None:
+            settings = await asyncio.to_thread(core.settings_store.load)
+            found = await offered_spools(
+                settings, components.get(PRINTERS), components.get(SPOOLS), printer
+            )
+            return None if found is None else {spool.spool_id for spool in found}
+
+        async def rendered_sha256(rendered: RenderedOutput) -> str | None:
+            if rendered.job_id is None:
+                return None
+            try:
+                job = await asyncio.to_thread(core.render.store.read, rendered.job_id)
+            except JobNotFoundError:
+                return None
+            if job.result is None:
+                return None
+            await materialize_result(core.store.blobs, job.result)
+            path = core.paths.root / job.result.model_3mf
+            return await asyncio.to_thread(model_digest, job.id, path)
+
+        run = SliceRun(
+            prices=orders.slice_prices,
+            filament=orders.store.filament,
+            book=orders.price_book,
+            outputs=core.outputs,
+            renders=_Renders(core),
+            create_output=create_output,
+            slicer=PreviewSlicer(core, components),
+            offered=offered,
+            rendered_sha256=rendered_sha256,
+        )
+        try:
+            row = await price_variant(run, SliceVariant.model_validate(request))
+        except SLICE_RETRYABLE:
+            raise
+        except QUOTE_DETERMINISTIC as error:
+            # As a quote's: a bug is not tried again.
+            raise ApplicationError(
+                type(error).__name__, type=type(error).__name__, non_retryable=True
+            ) from error
+        return {"price_key": row.price_key, "status": row.status}
+
     return [
+        OperationKind(
+            SLICE_PRICE_KIND,
+            storefront_slice_check,
+            storefront_slice_run,
+            # As a quote's (#5353): a worker that stops mid-run is tried again, and every
+            # attempt writes the same row, by the variant's key.
+            run_attempts=RUN_ATTEMPTS,
+            queue="library",
+            run_timeout=QUOTE_TIMEOUT,
+            where="the storefront's slice prices",
+            # The render and the slice outlast the command deadline: the page reads the
+            # price again.
+            answers_running=True,
+        ),
         OperationKind(
             ORDER_ATTEMPT_COPY,
             copy_check_kind,
@@ -971,11 +1178,27 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             answers_running=True,
         ),
         OperationKind(
+            ORDER_ITEM_RENDER,
+            render_check_kind,
+            render_run_kind,
+            # A worker that stops mid-render (a rollout) fails its attempt; the next one
+            # joins the same render by its key and finds the output an earlier attempt
+            # saved under the operation's id (`render_output_id`).
+            run_attempts=3,
+            queue="library",
+            run_timeout=QUOTE_TIMEOUT,
+            where="the item's output",
+            # A render outlasts the command deadline: the caller follows the operation.
+            answers_running=True,
+        ),
+        OperationKind(
             ORDER_ITEM_PRINT,
             item_print_check,
             item_print_run,
             # A retry repeats the same print run (its `request_id` is the operation's),
-            # so a start that found Temporal busy is tried again, never printed twice.
+            # never prints twice: a crash, or Bambuddy not making the item's project, is
+            # tried again. A start still being accepted, or one that found Temporal busy
+            # or away, is sent again inside the run (`print_item`, #6138).
             run_attempts=3,
             queue="library",
             run_timeout=PRINT_TIMEOUT,

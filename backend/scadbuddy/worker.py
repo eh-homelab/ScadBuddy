@@ -158,7 +158,7 @@ from scadbuddy.workflows.operation_activities import operation_activities
 from scadbuddy.workflows.pipeline_activities import PipelineActivities
 from scadbuddy.workflows.pipelines import TRANSFER
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
-from scadbuddy.workflows.projects_worker import projects_worker
+from scadbuddy.workflows.projects_worker import projects_worker, warm_sandbox
 from scadbuddy.workflows.sdk_metrics import SDK_READ_TIMEOUT, sdk_exposition, sdk_runtime
 
 if TYPE_CHECKING:
@@ -852,7 +852,9 @@ async def _refresh_store_metrics(metrics: Metrics, store: StoreBundle, data: _Da
     health = await store_health(store)
     metrics.store_render_key_fallback.set(1 if health.render_key_fallback else 0)
     if isinstance(store.blobs, CachedBlobStore):
-        metrics.worker_cache_bytes.set(await asyncio.to_thread(store.blobs.cached_bytes))
+        cached = await asyncio.to_thread(store.blobs.cached_bytes)
+        if cached is not None:
+            metrics.worker_cache_bytes.set(cached)
 
 
 def _health_app(
@@ -996,10 +998,10 @@ def _own_volume(paths: DataPaths) -> bool:
 def _housekeep(deps: WorkerDeps) -> None:
     """One pass of the worker's sweep (final review I2): its piece cache down to
     SCADBUDDY_WORKER_CACHE_MAX_BYTES, then, on its own volume, the revision exports
-    it materialized (by last use, on the API's `SCADBUDDY_JOB_TTL`) and the uploads it
-    fetched (by last use, `_upload_grace`). Library checkouts stay: a checkout is a
-    pinned library, and nothing prunes those. Each step is best effort; the next
-    pass retries."""
+    it materialized (by last use, on `Config.sweep_grace`: the API's `SCADBUDDY_JOB_TTL`,
+    or a day while it is 0) and the uploads it fetched (by last use, `_upload_grace`).
+    Library checkouts stay: a checkout is a pinned library, and nothing prunes those.
+    Each step is best effort; the next pass retries."""
     if isinstance(deps.blobs, CachedBlobStore):
         try:
             evicted = deps.blobs.evict()
@@ -1010,7 +1012,7 @@ def _housekeep(deps: WorkerDeps) -> None:
     if not _own_volume(deps.paths):
         return
     try:
-        pruned = prune_revision_exports(deps.paths, deps.config.job_ttl)
+        pruned = prune_revision_exports(deps.paths, deps.config.sweep_grace)
         if pruned:
             logger.info("pruned revision exports", extra={"count": len(pruned)})
     except Exception:
@@ -1112,6 +1114,11 @@ async def run_worker(
             logger.info("stopped before the API answered this worker's store settings")
             return
         current = reading.result()
+        if current.store_backend == "bambuddy" and current.key_is_fallback:
+            logger.error(
+                "the API withholds the full Bambuddy key and no bambuddy_render_api_key is"
+                " saved: renders on the Bambuddy store fail until one is"
+            )
         # Called from the activities' threads (`asyncio.to_thread`), so blocking; one
         # client for the seven, closed with ``jobs``.
         remote = crud.blocking()
@@ -1424,6 +1431,7 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
             # A run's next plate copy waits on the printer's report (#4541).
             reports=reports,
             native_spools=RemoteNativeSpools(blocking),
+            spools=spools,
         )
     )
     return PrintWorkerDeps(
@@ -1662,6 +1670,7 @@ async def run_projects_worker(
             # During a roll the API pod may be older than this worker: poll Temporal only
             # once it serves every area the worker calls.
             if await wait_for_areas(crud, "projects", PROJECTS_CRUD_AREAS, stop):
+                await asyncio.to_thread(warm_sandbox)
                 async with LoopWatch(metrics):
                     await _serve_versioned(
                         client,

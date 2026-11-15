@@ -17,7 +17,7 @@ import {
   migrationChecksum,
   MigrationLedgerError,
   MIGRATIONS,
-} from '../src/db/migrations.js'
+} from './support/migrations.js'
 import { kekFromBase64, SealError } from '../src/secrets.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 
@@ -168,7 +168,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         expect(await db.sql`SELECT 1 FROM ai_migrations WHERE id = '29990101T0000Z_future'`).toHaveLength(1)
       })
 
-      it('are what ready() runs, memoised', async () => {
+      it("are what a test schema's ready() runs, memoised", async () => {
         expect(await db.ready()).toBe(true)
         expect(await db.ready()).toBe(true)
         expect(await db.sql`SELECT id FROM ai_migrations`).toHaveLength(MIGRATIONS.length)
@@ -305,7 +305,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         const contender = postgres(TEST_DATABASE_URL!, { max: 1, onnotice: () => {} })
         const waiting = connectDatabase(TEST_DATABASE_URL!, {
           searchPath: schema,
-          migrate: { lockTimeoutMs: 200, lockKey },
+          schema: async (sql) => void (await migrate(sql, MIGRATIONS, { lockTimeoutMs: 200, lockKey })),
           onMigrationError: (err) => errors.push(err),
         })
         let release!: () => void

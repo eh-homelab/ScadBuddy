@@ -10,11 +10,8 @@ a holder that died frees the key within `COPY_LEASE_TTL`. Every call is natural 
 token: an acquire sent again by its holder answers it held, a renew or release sent again
 renews or deletes what the first did.
 
-Until #5298 Task 35, and during a roll, an old print pod and an old API replica still
-take only the session advisory lock ``COPY_LOCK_PREFIX + key``. Each acquire probes it in
-its own transaction (``pg_try_advisory_xact_lock``, released at commit), and a held one is
-busy. The new API's own holders also take the session lock after the lease (`uploads.py`
-`copy_lock`), so they exclude old print pods and old API replicas both ways.
+The session advisory lock it replaced is gone (#5298 Task 35): no pod of a build before
+the lease is left, so neither an acquire nor `uploads.py` `copy_lock` takes it.
 
 `CopyLeases` is the API's SQL. The print worker's is `crud/print.py` `RemoteCopyLeases`,
 over ``…/crud/print/copy-leases/{key}``; both are a `LeaseCalls`.
@@ -38,8 +35,6 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 logger = logging.getLogger(__name__)
 
-#: Prefixes the key of the old session advisory lock (`uploads.py` `copy_lock`).
-COPY_LOCK_PREFIX = "scadbuddy-library-copy:"
 #: How long a lease holds without a renew, in seconds.
 COPY_LEASE_TTL = 120.0
 #: How often a holder renews its lease, in seconds.
@@ -118,12 +113,6 @@ class CopyLeases:
 
     def _try(self, key: str, token: str, ttl: float) -> datetime | None:
         with self._pool.connection() as conn, conn.transaction():
-            free = conn.execute(
-                "SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0)) AS free",
-                (f"{COPY_LOCK_PREFIX}{key}",),
-            ).fetchone()
-            if free is None or not free["free"]:
-                return None
             row = conn.execute(
                 "INSERT INTO copy_leases (key, token, expires_at)"
                 " VALUES (%s, %s, now() + make_interval(secs => %s))"

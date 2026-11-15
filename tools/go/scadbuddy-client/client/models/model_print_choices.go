@@ -7,12 +7,14 @@ import (
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91 "github.com/microsoft/kiota-abstractions-go/serialization"
 )
 
-// ModelPrintChoices what the print dialog last chose for one model (#78). “printer“ is the registry printer it printed on (#5167). “printer_id“ is not stored: a load gives the Bambuddy printer that “printer“ links, and a save of a “printer_id“ with no “printer“ keeps the registry printer that links it. “filament_plan“ is only a plan the user moved off the auto-match: a spool no longer in the inventory is dropped by the picker, which then falls back to the auto-match for that slot. “nozzles“, “tier“ and “process_name“ are the spool-first dialog's own choices (spec 2026-09-27 §7). “print_sequence“ is its Print sequence (#4970), “None“ for the template's or the process's. “part_settings“ are its slicer settings per filament slot (#5627, “bambuddy/part_settings.py“), a model's or a library file's (#5628). Kept per model or file only, never at the print options' global or printer scope, since a slot number means one file's colour. All default to "nothing remembered", so a settings file written before them still loads; an empty “nozzles“ means the dialog's default.
+// ModelPrintChoices what the print dialog last chose for one model (#78). “printer“ is the registry printer it printed on (#5167). “printer_id“ is not stored: a load gives the Bambuddy printer that “printer“ links, and a save of a “printer_id“ with no “printer“ keeps the registry printer that links it. “filament_plan“ is only a plan the user moved off the auto-match: a spool no longer in the inventory is dropped by the picker, which then falls back to the auto-match for that slot. “nozzles“, “tier“ and “process_name“ are the spool-first dialog's own choices (spec 2026-09-27 §7). “print_sequence“ is its Print sequence (#4970), “None“ for the template's or the process's. “part_settings“ are its slicer settings per filament slot (#5627, “bambuddy/part_settings.py“), a model's or a library file's (#5628). Kept per model or file only, never at the print options' global or printer scope, since a slot number means one file's colour. “force_colour_match“ is the spool step's "Wait for the right colour" (#6218), kept beside the spools it applies to; “None“ is nothing remembered, which the dialog and the agent read as on. “process_overrides“ are its "Slicer settings" (#2998, “bambuddy/process_overrides.py“): any Bambu Studio process key, kept in the stored jsonb with the rest, so no migration. All default to "nothing remembered", so a settings file written before them still loads; an empty “nozzles“ means the dialog's default.
 type ModelPrintChoices struct {
 	// Stores additional data not described in the OpenAPI description found when deserializing. Can be used for serialization as well.
 	additionalData map[string]any
 	// The filament_plan property
 	filament_plan []SlotChoiceable
+	// The force_colour_match property
+	force_colour_match ModelPrintChoices_ModelPrintChoices_force_colour_matchable
 	// The nozzles property
 	nozzles []NozzleChoiceable
 	// The part_settings property
@@ -25,8 +27,96 @@ type ModelPrintChoices struct {
 	printer_id ModelPrintChoices_ModelPrintChoices_printer_idable
 	// The process_name property
 	process_name ModelPrintChoices_ModelPrintChoices_process_nameable
+	// The process_overrides property
+	process_overrides i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable
 	// The tier property
 	tier ModelPrintChoices_ModelPrintChoices_tierable
+}
+
+// ModelPrintChoices_ModelPrintChoices_force_colour_match composed type wrapper for classes bool, ModelPrintChoices_force_colour_matchMember1able
+type ModelPrintChoices_ModelPrintChoices_force_colour_match struct {
+	// Composed type representation for type bool
+	boolean *bool
+	// Composed type representation for type ModelPrintChoices_force_colour_matchMember1able
+	modelPrintChoices_force_colour_matchMember1 ModelPrintChoices_force_colour_matchMember1able
+}
+
+// NewModelPrintChoices_ModelPrintChoices_force_colour_match instantiates a new ModelPrintChoices_ModelPrintChoices_force_colour_match and sets the default values.
+func NewModelPrintChoices_ModelPrintChoices_force_colour_match() *ModelPrintChoices_ModelPrintChoices_force_colour_match {
+	m := &ModelPrintChoices_ModelPrintChoices_force_colour_match{}
+	return m
+}
+
+// CreateModelPrintChoices_ModelPrintChoices_force_colour_matchFromDiscriminatorValue creates a new instance of the appropriate class based on discriminator value
+// returns a Parsable when successful
+func CreateModelPrintChoices_ModelPrintChoices_force_colour_matchFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
+	result := NewModelPrintChoices_ModelPrintChoices_force_colour_match()
+	if parseNode != nil {
+		if val, err := parseNode.GetBoolValue(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetBoolean(val)
+		} else if val, err := parseNode.GetObjectValue(CreateModelPrintChoices_force_colour_matchMember1FromDiscriminatorValue); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			if cast, ok := val.(ModelPrintChoices_force_colour_matchMember1able); ok {
+				result.SetModelPrintChoicesForceColourMatchMember1(cast)
+			}
+		}
+	}
+	return result, nil
+}
+
+// GetBoolean gets the boolean property value. Composed type representation for type bool
+// returns a *bool when successful
+func (m *ModelPrintChoices_ModelPrintChoices_force_colour_match) GetBoolean() *bool {
+	return m.boolean
+}
+
+// GetFieldDeserializers the deserialization information for the current model
+// returns a map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error when successful
+func (m *ModelPrintChoices_ModelPrintChoices_force_colour_match) GetFieldDeserializers() map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+	return make(map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error)
+}
+
+// GetIsComposedType determines if the current object is a wrapper around a composed type
+// returns a bool when successful
+func (m *ModelPrintChoices_ModelPrintChoices_force_colour_match) GetIsComposedType() bool {
+	return true
+}
+
+// GetModelPrintChoicesForceColourMatchMember1 gets the ModelPrintChoices_force_colour_matchMember1 property value. Composed type representation for type ModelPrintChoices_force_colour_matchMember1able
+// returns a ModelPrintChoices_force_colour_matchMember1able when successful
+func (m *ModelPrintChoices_ModelPrintChoices_force_colour_match) GetModelPrintChoicesForceColourMatchMember1() ModelPrintChoices_force_colour_matchMember1able {
+	return m.modelPrintChoices_force_colour_matchMember1
+}
+
+// Serialize serializes information the current object
+func (m *ModelPrintChoices_ModelPrintChoices_force_colour_match) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
+	if m.GetBoolean() != nil {
+		err := writer.WriteBoolValue("", m.GetBoolean())
+		if err != nil {
+			return err
+		}
+	} else if m.GetModelPrintChoicesForceColourMatchMember1() != nil {
+		err := writer.WriteObjectValue("", m.GetModelPrintChoicesForceColourMatchMember1())
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetBoolean sets the boolean property value. Composed type representation for type bool
+func (m *ModelPrintChoices_ModelPrintChoices_force_colour_match) SetBoolean(value *bool) {
+	m.boolean = value
+}
+
+// SetModelPrintChoicesForceColourMatchMember1 sets the ModelPrintChoices_force_colour_matchMember1 property value. Composed type representation for type ModelPrintChoices_force_colour_matchMember1able
+func (m *ModelPrintChoices_ModelPrintChoices_force_colour_match) SetModelPrintChoicesForceColourMatchMember1(value ModelPrintChoices_force_colour_matchMember1able) {
+	m.modelPrintChoices_force_colour_matchMember1 = value
 }
 
 // ModelPrintChoices_ModelPrintChoices_print_sequence composed type wrapper for classes ModelPrintChoices_print_sequenceMember1able, string
@@ -459,6 +549,14 @@ func (m *ModelPrintChoices_ModelPrintChoices_tier) SetString(value *string) {
 	m.string = value
 }
 
+type ModelPrintChoices_ModelPrintChoices_force_colour_matchable interface {
+	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
+	GetBoolean() *bool
+	GetModelPrintChoicesForceColourMatchMember1() ModelPrintChoices_force_colour_matchMember1able
+	SetBoolean(value *bool)
+	SetModelPrintChoicesForceColourMatchMember1(value ModelPrintChoices_force_colour_matchMember1able)
+}
+
 type ModelPrintChoices_ModelPrintChoices_print_sequenceable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetModelPrintChoicesPrintSequenceMember1() ModelPrintChoices_print_sequenceMember1able
@@ -538,6 +636,16 @@ func (m *ModelPrintChoices) GetFieldDeserializers() map[string]func(i878a80d2330
 		}
 		return nil
 	}
+	res["force_colour_match"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreateModelPrintChoices_ModelPrintChoices_force_colour_matchFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetForceColourMatch(val.(ModelPrintChoices_ModelPrintChoices_force_colour_matchable))
+		}
+		return nil
+	}
 	res["nozzles"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetCollectionOfObjectValues(CreateNozzleChoiceFromDiscriminatorValue)
 		if err != nil {
@@ -604,6 +712,16 @@ func (m *ModelPrintChoices) GetFieldDeserializers() map[string]func(i878a80d2330
 		}
 		return nil
 	}
+	res["process_overrides"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.CreateUntypedNodeFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetProcessOverrides(val.(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable))
+		}
+		return nil
+	}
 	res["tier"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetObjectValue(CreateModelPrintChoices_ModelPrintChoices_tierFromDiscriminatorValue)
 		if err != nil {
@@ -621,6 +739,12 @@ func (m *ModelPrintChoices) GetFieldDeserializers() map[string]func(i878a80d2330
 // returns a []SlotChoiceable when successful
 func (m *ModelPrintChoices) GetFilamentPlan() []SlotChoiceable {
 	return m.filament_plan
+}
+
+// GetForceColourMatch gets the force_colour_match property value. The force_colour_match property
+// returns a ModelPrintChoices_ModelPrintChoices_force_colour_matchable when successful
+func (m *ModelPrintChoices) GetForceColourMatch() ModelPrintChoices_ModelPrintChoices_force_colour_matchable {
+	return m.force_colour_match
 }
 
 // GetNozzles gets the nozzles property value. The nozzles property
@@ -659,6 +783,12 @@ func (m *ModelPrintChoices) GetProcessName() ModelPrintChoices_ModelPrintChoices
 	return m.process_name
 }
 
+// GetProcessOverrides gets the process_overrides property value. The process_overrides property
+// returns a UntypedNodeable when successful
+func (m *ModelPrintChoices) GetProcessOverrides() i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable {
+	return m.process_overrides
+}
+
 // GetTier gets the tier property value. The tier property
 // returns a ModelPrintChoices_ModelPrintChoices_tierable when successful
 func (m *ModelPrintChoices) GetTier() ModelPrintChoices_ModelPrintChoices_tierable {
@@ -675,6 +805,12 @@ func (m *ModelPrintChoices) Serialize(writer i878a80d2330e89d26896388a3f487eef27
 			}
 		}
 		err := writer.WriteCollectionOfObjectValues("filament_plan", cast)
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteObjectValue("force_colour_match", m.GetForceColourMatch())
 		if err != nil {
 			return err
 		}
@@ -722,6 +858,12 @@ func (m *ModelPrintChoices) Serialize(writer i878a80d2330e89d26896388a3f487eef27
 		}
 	}
 	{
+		err := writer.WriteObjectValue("process_overrides", m.GetProcessOverrides())
+		if err != nil {
+			return err
+		}
+	}
+	{
 		err := writer.WriteObjectValue("tier", m.GetTier())
 		if err != nil {
 			return err
@@ -744,6 +886,11 @@ func (m *ModelPrintChoices) SetAdditionalData(value map[string]any) {
 // SetFilamentPlan sets the filament_plan property value. The filament_plan property
 func (m *ModelPrintChoices) SetFilamentPlan(value []SlotChoiceable) {
 	m.filament_plan = value
+}
+
+// SetForceColourMatch sets the force_colour_match property value. The force_colour_match property
+func (m *ModelPrintChoices) SetForceColourMatch(value ModelPrintChoices_ModelPrintChoices_force_colour_matchable) {
+	m.force_colour_match = value
 }
 
 // SetNozzles sets the nozzles property value. The nozzles property
@@ -776,6 +923,11 @@ func (m *ModelPrintChoices) SetProcessName(value ModelPrintChoices_ModelPrintCho
 	m.process_name = value
 }
 
+// SetProcessOverrides sets the process_overrides property value. The process_overrides property
+func (m *ModelPrintChoices) SetProcessOverrides(value i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable) {
+	m.process_overrides = value
+}
+
 // SetTier sets the tier property value. The tier property
 func (m *ModelPrintChoices) SetTier(value ModelPrintChoices_ModelPrintChoices_tierable) {
 	m.tier = value
@@ -785,19 +937,23 @@ type ModelPrintChoicesable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.AdditionalDataHolder
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetFilamentPlan() []SlotChoiceable
+	GetForceColourMatch() ModelPrintChoices_ModelPrintChoices_force_colour_matchable
 	GetNozzles() []NozzleChoiceable
 	GetPartSettings() i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable
 	GetPrinter() ModelPrintChoices_ModelPrintChoices_printerable
 	GetPrinterId() ModelPrintChoices_ModelPrintChoices_printer_idable
 	GetPrintSequence() ModelPrintChoices_ModelPrintChoices_print_sequenceable
 	GetProcessName() ModelPrintChoices_ModelPrintChoices_process_nameable
+	GetProcessOverrides() i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable
 	GetTier() ModelPrintChoices_ModelPrintChoices_tierable
 	SetFilamentPlan(value []SlotChoiceable)
+	SetForceColourMatch(value ModelPrintChoices_ModelPrintChoices_force_colour_matchable)
 	SetNozzles(value []NozzleChoiceable)
 	SetPartSettings(value i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable)
 	SetPrinter(value ModelPrintChoices_ModelPrintChoices_printerable)
 	SetPrinterId(value ModelPrintChoices_ModelPrintChoices_printer_idable)
 	SetPrintSequence(value ModelPrintChoices_ModelPrintChoices_print_sequenceable)
 	SetProcessName(value ModelPrintChoices_ModelPrintChoices_process_nameable)
+	SetProcessOverrides(value i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable)
 	SetTier(value ModelPrintChoices_ModelPrintChoices_tierable)
 }

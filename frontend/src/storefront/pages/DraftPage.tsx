@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import { ActionKey, errorText, store, type Draft, type DraftItem, type SubmittedOrder } from '../api/client'
+import { CartSources } from '../components/ModelSources'
+import { blocksSubmit } from '../models'
 import { SubmitForm } from '../components/SubmitForm'
 import { useDraftChanged } from '../draftCount'
 import { valueText } from '../params'
+import { POLL } from '../poll'
 
 /**
  * `/draft`: the visitor's order before it is sent (spec §5.4). Each item can be removed,
@@ -12,6 +15,11 @@ import { valueText } from '../params'
  * visitor's own, shown as text; each value is named by its label. Below the items, the
  * visitor sends the order (`SubmitForm`, spec §5.5); once sent, the page says where the
  * link to it went.
+ *
+ * A "Your models" request (#6133, spec 2026-11-13 §4.3) shows one line per file and link
+ * (`CartSources`). While a file is being checked the page reads the cart again (`POLL`), so
+ * its preview and "Ready", or its reason, show without a reload. A refused or expired file
+ * blocks the submit (409 `model_file_refused`) until the request is removed.
  */
 export function DraftPage() {
   const [draft, setDraft] = useState<Draft | null>()
@@ -35,6 +43,37 @@ export function DraftPage() {
       live = false
     }
   }, [draftChanged])
+
+  // A file still being checked: read the cart again, from 1 s doubling to 5 s, for at most
+  // 10 minutes (`poll.ts`).
+  const checking = draft?.items.some((item) => (item.sources ?? []).some((s) => s.check_status === 'checking')) ?? false
+  useEffect(() => {
+    if (!checking) return
+    let live = true
+    let wait = POLL.firstMs
+    const started = Date.now()
+    let timer: ReturnType<typeof setTimeout>
+    const tick = () => {
+      if (Date.now() - started > POLL.limitMs) return
+      timer = setTimeout(() => {
+        store.draft().then(
+          (answer) => {
+            if (!live) return
+            setDraft(answer)
+            draftChanged(answer)
+          },
+          () => undefined,
+        )
+        wait = Math.min(wait * 2, POLL.maxMs)
+        if (live) tick()
+      }, wait)
+    }
+    tick()
+    return () => {
+      live = false
+      clearTimeout(timer)
+    }
+  }, [checking, draftChanged])
 
   // The cart was sent from another tab: show what is there now, with the shop's answer.
   const sentElsewhere = (message: string) => {
@@ -83,6 +122,7 @@ export function DraftPage() {
   }
 
   const items = draft?.items ?? []
+  const refused = items.filter((item) => (item.sources ?? []).some(blocksSubmit))
   return (
     <section>
       <h1 className="sf-h1">Your order</h1>
@@ -120,6 +160,7 @@ export function DraftPage() {
               )}
               {item.inputs && Object.keys(item.inputs).length === 0 && <p className="sf-hint">As the shop designed it.</p>}
               {item.notes !== null && <p className="sf-notes">{item.notes}</p>}
+              {(item.sources ?? []).length > 0 && <CartSources sources={item.sources ?? []} />}
               {item.attachments.length > 0 && (
                 <ul className="sf-filelist">
                   {item.attachments.map((file) => (
@@ -144,6 +185,11 @@ export function DraftPage() {
           ))}
         </ul>
       )}
+      {refused.map((item) => (
+        <p key={item.id} className="sf-error" role="alert">
+          {`A file cannot be printed. Remove “${item.title}”, then add the files again without it.`}
+        </p>
+      ))}
       {draft && items.length > 0 && <SubmitForm draft={draft} onSubmitted={sent} onSent={sentElsewhere} />}
     </section>
   )

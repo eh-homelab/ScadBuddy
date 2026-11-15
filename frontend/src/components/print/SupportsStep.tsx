@@ -11,7 +11,7 @@ type Props = {
   value: SupportsChoice | null
   onChange: (next: SupportsChoice | null) => void
   /** The template's `print_settings`, for what Default means for this model. */
-  templateSettings?: Record<string, string> | undefined
+  templateSettings?: Record<string, string | string[]> | undefined
   /** A library 3MF: its own project settings, unread here, may declare supports. */
   fromFile?: boolean
 }
@@ -25,10 +25,11 @@ function modeOf(value: SupportsChoice | null): Mode {
 }
 
 /** What Default prints with: the template's declaration, else the process preset's. */
-function defaultLabel(settings: Record<string, string> | undefined, fromFile: boolean): string {
+function defaultLabel(settings: Record<string, string | string[]> | undefined, fromFile: boolean): string {
   if (settings?.enable_support === '1') {
-    const type = settings.support_type?.startsWith('normal') ? 'normal' : 'tree'
-    const angle = settings.support_threshold_angle
+    const supportType = settings.support_type
+    const type = typeof supportType === 'string' && supportType.startsWith('normal') ? 'normal' : 'tree'
+    const angle = typeof settings.support_threshold_angle === 'string' ? settings.support_threshold_angle : undefined
     return `Default (template: ${type} supports${angle ? `, ${angle}°` : ''})`
   }
   if (settings?.enable_support === '0') return 'Default (template: no supports)'
@@ -44,6 +45,8 @@ function defaultLabel(settings: Record<string, string> | undefined, fromFile: bo
 export function SupportsStep({ value, onChange, templateSettings, fromFile = false }: Props) {
   const mode = modeOf(value)
   const on = value?.enabled === true ? value : null
+  const templateAngle =
+    typeof templateSettings?.support_threshold_angle === 'string' ? templateSettings.support_threshold_angle : undefined
   // What was typed, kept even when it is not a whole 0–90, so the field explains itself
   // rather than blanking (#2837 review); the choice carries only a valid angle.
   const [angleText, setAngleText] = useState(on?.threshold_angle?.toString() ?? '')
@@ -98,7 +101,7 @@ export function SupportsStep({ value, onChange, templateSettings, fromFile = fal
               max={90}
               step={1}
               inputMode="numeric"
-              placeholder={templateSettings?.support_threshold_angle ?? (fromFile ? 'Default' : 'Preset')}
+              placeholder={templateAngle ?? (fromFile ? 'Default' : 'Preset')}
               value={angleText}
               aria-invalid={angleInvalid}
               aria-describedby={angleInvalid ? 'supports-angle-invalid' : undefined}

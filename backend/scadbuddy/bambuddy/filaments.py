@@ -107,6 +107,12 @@ WarningKind = Literal[
     "supports-not-applied",
     # #3628: a prime tower setting the process preset has no value for, sent anyway.
     "prime-tower-unconfirmed",
+    # #2998: a process override the process preset has no value for, or a list over
+    # one value: sent as set, and the slicer judges it.
+    "process-override-unchecked",
+    # #2998: a setting that acts on the machine that slices (`post_process`, the print
+    # host's), dropped from the print (`process_overrides.HOST_SIDE_KEYS`).
+    "host-setting-dropped",
     # #3628: a prime tower chosen for an already-sliced file, which queues as it is;
     # #3962: a tower asked for that Bambuddy's slicer dropped from the slice.
     "prime-tower-not-applied",
@@ -231,12 +237,14 @@ class FilamentPlan(BaseModel):
 
     ``force_colour_match`` becomes ``force_color_match`` on every override, which is
     the flag Bambuddy's scheduler reads to require an exact type+colour match rather
-    than merely preferring one. It is off by default because it only bites on a
-    model-targeted queue item, where insisting can leave the job unschedulable.
+    than merely preferring one. It is on by default (#6218): with it off, the scheduler
+    can print a part in the wrong colour when the right one is not loaded; with it on,
+    Bambuddy holds the queue item until a tray of the right colour is loaded. A caller
+    may still send ``False``.
     """
 
     slots: list[SlotChoice] = Field(default_factory=list)
-    force_colour_match: bool = False
+    force_colour_match: bool = True
 
     def spool_for(self, slot_id: int) -> int | None:
         return next((slot.spool_id for slot in self.slots if slot.slot_id == slot_id), None)

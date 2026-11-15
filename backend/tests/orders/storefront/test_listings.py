@@ -27,6 +27,8 @@ from scadbuddy.orders.storefront.listings import (
 from scadbuddy.orders.storefront.wire import (
     Listing,
     ListingInput,
+    ListingPage,
+    ListingQuery,
     ListingSnapshot,
     NumberBound,
     ParamBound,
@@ -110,7 +112,7 @@ def test_only_published_listings_are_listed_as_published(
     store: ListingStore, published: Listing
 ) -> None:
     store.create(body(title="Draft"))
-    assert [listing.id for listing in store.published()] == [published.id]
+    assert [listing.id for listing in store.published(limit=10)] == [published.id]
     assert published.published and published.published_at is not None
     assert published.snapshot == SNAPSHOT
     assert published.fixed == {}
@@ -150,6 +152,72 @@ def test_the_order_is_the_one_given(store: ListingStore) -> None:
     for stale in ([c.id, a.id], [c.id, a.id, b.id, "nope"], [a.id, a.id, b.id]):
         with refused_as("listing_changed"):
             store.reorder(stale)
+
+
+def ids_of(page: ListingPage) -> list[str]:
+    return [row.id for row in page.items]
+
+
+def test_a_move_puts_one_listing_at_a_place(store: ListingStore) -> None:
+    a, b, c, d = (store.create(body(title=t)) for t in "abcd")
+    assert store.move(d.id, 1).id == d.id
+    assert ids_of(store.page(ListingQuery())) == [d.id, a.id, b.id, c.id]
+    store.move(d.id, 3)
+    assert ids_of(store.page(ListingQuery())) == [a.id, b.id, d.id, c.id]
+    # A place past the end is last.
+    store.move(a.id, 99)
+    assert ids_of(store.page(ListingQuery())) == [b.id, d.id, c.id, a.id]
+    assert [row.place for row in store.page(ListingQuery()).items] == [1, 2, 3, 4]
+    # A move leaves the time an editor read alone.
+    assert store.get(a.id) == a.model_copy(update={"position": 3})
+    with refused_as("listing_not_found", 404):
+        store.move("nope", 1)
+
+
+def test_the_list_pages_searches_filters_and_sorts(store: ListingStore, pg_pool: PgPool) -> None:
+    with pg_pool.connection() as conn:
+        pla = conn.execute(
+            "INSERT INTO filaments (material, colour, cost_per_kg) VALUES ('PLA', '#ff0000', 20)"
+            " RETURNING id"
+        ).fetchone()
+        petg = conn.execute(
+            "INSERT INTO filaments (material, colour, cost_per_kg) VALUES ('PETG', '#00ff00', 25)"
+            " RETURNING id"
+        ).fetchone()
+    assert pla is not None and petg is not None
+    star = store.create(body(title="Star Keychain", slug="star-tag", colours=[pla["id"]]))
+    owl = store.create(body(title="Owl Cup", slug="owl-cup", colours=[petg["id"]]))
+    odd = store.create(body(title="100% _odd_", slug="odd", media_ids=["m1", "m2"]))
+    everything = store.page(ListingQuery())
+    assert (
+        ids_of(everything) == [star.id, owl.id, odd.id]
+        and everything.total == 3
+        and everything.places == 3
+    )
+    assert everything.items[2].media_id == "m1" and everything.items[0].media_id is None
+    # The search reads the title and the slug, whatever the case.
+    assert ids_of(store.page(ListingQuery(q="KEYCHAIN"))) == [star.id]
+    assert ids_of(store.page(ListingQuery(q="owl-c"))) == [owl.id]
+    # LIKE's wildcards are taken as they are written.
+    assert ids_of(store.page(ListingQuery(q="0%"))) == [odd.id]
+    assert ids_of(store.page(ListingQuery(q="_o"))) == [odd.id]
+    assert ids_of(store.page(ListingQuery(q="%"))) == [odd.id]
+    # The filters.
+    assert ids_of(store.page(ListingQuery(slug=["owl-cup", "odd"]))) == [owl.id, odd.id]
+    assert ids_of(store.page(ListingQuery(material=["petg"]))) == [owl.id]
+    assert ids_of(store.page(ListingQuery(status="published"))) == []
+    assert ids_of(store.page(ListingQuery(status="draft"))) == [star.id, owl.id, odd.id]
+    # The sorts, and a page past the first; the total counts every match.
+    assert ids_of(store.page(ListingQuery(sort="title"))) == [odd.id, owl.id, star.id]
+    backwards = store.page(ListingQuery(sort="position", dir="desc"))
+    assert ids_of(backwards) == [odd.id, owl.id, star.id]
+    second = store.page(ListingQuery(sort="title", limit=2, offset=2))
+    assert ids_of(second) == [star.id] and second.total == 3 and second.places == 3
+    # A row's place is its place in the whole order, filtered or not.
+    owls = store.page(ListingQuery(q="owl"))
+    assert [row.place for row in owls.items] == [2]
+    # `places` counts the whole shop, the last place a move can name, filtered or not.
+    assert (owls.total, owls.places) == (1, 3)
 
 
 def test_a_published_listing_is_not_deleted(
@@ -263,11 +331,71 @@ def test_a_bound_outside_the_schema_is_refused(bound: dict[str, Any]) -> None:
         checked(params=bound)
 
 
+SUPPORT_SCHEMA = CustomizerSchema.model_validate(
+    {
+        "parameters": [
+            {"name": "colour", "type": "color", "initial": "#FF0000"},
+            {"name": "support_colour", "type": "color", "initial": "#FFFFFF"},
+            {"name": "gap", "type": "number", "initial": 1, "caption": "Interface gap"},
+            {"name": "raft", "type": "number", "initial": 1, "group": "Supports"},
+        ]
+    }
+)
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"support_colour": {"kind": "choice", "choices": ["#FF0000"]}},
+        # The schema's caption names it.
+        {"gap": {"kind": "number", "min": 0, "max": 2}},
+        # Only its group names it, as the page's `isSupport` reads it.
+        {"raft": {"kind": "number", "min": 0, "max": 2}},
+        # The listing's own label names it.
+        {"colour": {"kind": "choice", "choices": ["#FF0000"], "label": "Support colour"}},
+    ],
+)
+def test_a_support_parameter_is_never_offered(params: dict[str, Any]) -> None:
+    """#6152: support is the shop's choice. It may lock it, never offer it."""
+    with refused_as("listing_support_offered", 422):
+        checked_fixed(SUPPORT_SCHEMA, body(colours=[RED], params=params), COLOURS)
+
+
+def test_a_locked_support_colour_needs_no_listing_filament() -> None:
+    """#6152: the support colour is locked (here at its default) with no listing filament
+    of its colour; the customer's colour still must be one."""
+    fixed = checked_fixed(SUPPORT_SCHEMA, body(colours=[RED]), COLOURS)
+    assert fixed["support_colour"] == "#FFFFFF"
+    with refused_as("listing_colour_unknown", 422):
+        checked_fixed(SUPPORT_SCHEMA, body(colours=[BLUE]), COLOURS)
+
+
+def test_a_support_filament_is_no_customer_choice() -> None:
+    """#6152: an offered colour must be the colour of a listing filament that is not a
+    support material."""
+    params = {"colour": {"kind": "choice", "choices": ["#FF0000"]}}
+    with refused_as("listing_colour_unknown", 422):
+        checked_fixed(SCHEMA, body(colours=[RED], params=params), COLOURS, supports={RED})
+
+
+def test_the_materials_are_kept_as_saved(store: ListingStore) -> None:
+    """#6258: the allowed materials are stored in their order, and an edit replaces them."""
+    listing = store.create(body(materials=["PLA", "PETG"]))
+    assert listing.materials == ["PLA", "PETG"]
+    stored = store.get(listing.id)
+    assert stored is not None and stored.materials == ["PLA", "PETG"]
+    edited = store.update(listing.id, body(), expected_updated_at=listing.updated_at)
+    assert edited.materials == []
+    stored = store.get(listing.id)
+    assert stored is not None and stored.materials == []
+
+
 def test_a_step_on_the_schemas_is_kept() -> None:
     fixed = checked(
         params={
-            "width": {"kind": "number", "min": 10, "max": 20, "step": 1.5},
-            "count": {"kind": "number", "min": 2, "max": 8, "step": 2},
+            # Each starts on its grid (#6144: the template's own default is outside).
+            "width": {"kind": "number", "min": 10, "max": 20, "step": 1.5, "default": 11.5},
+            "count": {"kind": "number", "min": 2, "max": 8, "step": 2, "default": 4},
         }
     )
     assert "width" not in fixed and "count" not in fixed

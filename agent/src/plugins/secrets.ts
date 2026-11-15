@@ -54,11 +54,13 @@ export async function readPluginSecrets(deps: {
 
 /** How long one read of the plugin secrets serves every tool call: a header changed since is redacted once it lapses. */
 export const PLUGIN_SECRETS_CACHE_MS = 30_000
+/** How long one reveal of the saved Claude credentials serves every tool call's redaction. */
+export const SAVED_SECRETS_CACHE_MS = 10_000
 
 /**
  * What every tool redacts and every upload refuses, in every mode (an in-process turn, a
  * ToolCall, /mcp, a background task; #5480): each saved Claude credential's secret, read at
- * the call, and `readPluginSecrets`, one read serving `PLUGIN_SECRETS_CACHE_MS`. A read that
+ * most `SAVED_SECRETS_CACHE_MS` before, and `readPluginSecrets`, one read serving `PLUGIN_SECRETS_CACHE_MS`. A read that
  * failed is not kept, so the next call reads again; the call itself fails (fail-closed). A
  * turn adds its loaded plugins' current headers on top (tools/harness.ts).
  *
@@ -70,15 +72,30 @@ export const PLUGIN_SECRETS_CACHE_MS = 30_000
  */
 export function toolSecrets(deps: {
   kek: Kek | undefined
-  credentials?: Pick<CredentialRepo, 'revealAll'> | undefined
+  credentials?: Pick<CredentialRepo, 'revealAll' | 'opener'> | undefined
   plugins?: Pick<PluginStore, 'enabled'> | undefined
   oauth?: Pick<PluginOAuth, 'storedSecrets'> | undefined
   packages?: PackageSecretSource | undefined
 }): { secrets: () => Promise<string[]>; fresh: () => Promise<string[]> } {
   const { kek, credentials } = deps
-  // None without the KEK, which opens them.
-  const saved = async (): Promise<string[]> =>
-    credentials && kek ? (await credentials.revealAll(kek)).flatMap((row) => (row.credential ? [row.credential.secret] : [])) : []
+  // None without a key that opens them: this process's KEK, or the API's (#5299 D5, the store's `opener`).
+  const reveal = async (): Promise<string[]> =>
+    credentials && (kek || credentials.opener)
+      ? (await credentials.revealAll(kek, 'redact')).flatMap((row) => (row.credential ? [row.credential.secret] : []))
+      : []
+  // One reveal serves every call for SAVED_SECRETS_CACHE_MS: through the API's routes each is
+  // every credential's plaintext over HTTP (#5299 D5). A failed one is not kept.
+  let savedCache: { at: number; read: Promise<string[]> } | undefined
+  const saved = (): Promise<string[]> => {
+    if (!savedCache || Date.now() - savedCache.at > SAVED_SECRETS_CACHE_MS) {
+      const next = reveal()
+      savedCache = { at: Date.now(), read: next }
+      next.catch(() => {
+        if (savedCache?.read === next) savedCache = undefined
+      })
+    }
+    return savedCache.read
+  }
   const read = () => readPluginSecrets(deps)
   let cache: { at: number; read: Promise<string[]> } | undefined
   const cached = (): Promise<string[]> => {
@@ -93,6 +110,6 @@ export function toolSecrets(deps: {
   }
   return {
     secrets: async () => [...(await saved()), ...(await cached())],
-    fresh: async () => [...(await saved()), ...(await read())],
+    fresh: async () => [...(await reveal()), ...(await read())],
   }
 }

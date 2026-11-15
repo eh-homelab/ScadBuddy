@@ -10,12 +10,14 @@ import type {
   PrintRunResult,
   PrintSequence,
   PrimeTowerChoice,
+  ProcessOverrides,
   SupportsChoice,
   RackAlgorithm,
   SlotChoice,
 } from '../api/types'
 import { type PlateChoice, plateFields, plateKey } from './plateChoice'
-import { samePartSettings } from './partSettings'
+import { apiParts, samePartSettings } from './partSettings'
+import { sameOverrides } from './processOverrides'
 import { printChoicesOf, sliceOverrides } from './printChoices'
 import { sourceApi, type PrintSource } from './printSource'
 import { traceAction } from './traceAction'
@@ -32,6 +34,8 @@ interface RunInput {
   plan: SlotChoice[]
   /** Whether `plan` differs from the suggestion, so it is worth remembering (#78). */
   planChanged: boolean
+  /** #6218 — Bambuddy's queue waits for each slot's colour; remembered with the spools. */
+  forceColourMatch?: boolean
   /** `null` leaves the quantity to the remembered options (#124). */
   copies: number | null
   /**
@@ -54,6 +58,8 @@ interface RunInput {
   filamentProfiles?: string[]
   /** #5627 — the settings per slot, as `sentPartSettings` gives them; `null` sends none. */
   partSettings?: PartSettingsMap | null
+  /** #2998 — any process settings by key, as `sentOverrides` gives them; `null` sends none. */
+  processOverrides?: ProcessOverrides | null
   /** #836 — a hand-picked rack position, or `null` for Automatic. */
   rackPosition: number | null
   /** #836 — the rack algorithm chosen in this dialog; `null` uses the printer's remembered one. */
@@ -92,6 +98,7 @@ export function printRunBody({
   printerId,
   registryPrinter = null,
   plan,
+  forceColourMatch = true,
   printChoices,
   copies,
   plate,
@@ -103,6 +110,7 @@ export function printRunBody({
   primeTower = null,
   filamentProfiles = [],
   partSettings = null,
+  processOverrides = null,
   rackPosition,
   rackAlgorithm,
 }: {
@@ -110,6 +118,8 @@ export function printRunBody({
   /** #3823 — sent as `printer`, beside `printer_id`, so a backend of either age reads it. */
   registryPrinter?: string | null
   plan: SlotChoice[]
+  /** #6218 — sent as the plan's `force_colour_match`; on unless switched off. */
+  forceColourMatch?: boolean
   printChoices: NonNullable<ReturnType<typeof printChoicesOf>>
   copies: number | null
   plate: PlateChoice
@@ -121,19 +131,20 @@ export function printRunBody({
   primeTower?: PrimeTowerChoice | null
   filamentProfiles?: readonly string[]
   partSettings?: PartSettingsMap | null
+  processOverrides?: ProcessOverrides | null
   rackPosition: number | null
   rackAlgorithm: RackAlgorithm | null
 }): RegistryRunRequest {
   return {
     ...(registryPrinter ? { printer: registryPrinter } : {}),
     printer_id: printerId,
-    filament_plan: { slots: plan, force_colour_match: false },
+    filament_plan: { slots: plan, force_colour_match: forceColourMatch },
     choices: printChoices,
     ...(copies === null ? {} : { copies }),
     ...plateFields(plate),
     ...(folderId !== null ? { folder_id: folderId } : projectId === undefined ? {} : { project_id: projectId }),
     options,
-    ...sliceOverrides(printSequence, supports, filamentProfiles, primeTower, partSettings),
+    ...sliceOverrides(printSequence, supports, filamentProfiles, primeTower, partSettings, processOverrides),
     rack_position: rackPosition,
     rack_algorithm: rackAlgorithm,
   }
@@ -154,6 +165,7 @@ export function useRunPrint({
   selection,
   plan,
   planChanged,
+  forceColourMatch = true,
   copies,
   projectId,
   folderId = null,
@@ -163,6 +175,7 @@ export function useRunPrint({
   primeTower = null,
   filamentProfiles = NONE,
   partSettings = null,
+  processOverrides = null,
   rackPosition,
   rackAlgorithm,
   acceptedFixes = NONE,
@@ -175,6 +188,7 @@ export function useRunPrint({
   const supportsKey = JSON.stringify(supports)
   const towerKey = JSON.stringify(primeTower)
   const partsKey = JSON.stringify(partSettings)
+  const overridesKey = JSON.stringify(processOverrides)
   const fixesKey = acceptedFixes.join(',')
   const [running, setRunning] = useState(false)
   /** A refused run, shown above Print. */
@@ -206,6 +220,7 @@ export function useRunPrint({
     processName,
     bedType,
     plan,
+    forceColourMatch,
     overrides,
     printerId,
     platesKey,
@@ -213,6 +228,7 @@ export function useRunPrint({
     supportsKey,
     towerKey,
     partsKey,
+    overridesKey,
     profilesKey,
     rackPosition,
     rackAlgorithm,
@@ -223,7 +239,8 @@ export function useRunPrint({
 
   /**
    * #78 / spec §7 — what this model reopens on next time: the printer, the nozzles,
-   * tier and process, the print sequence (#4970), the settings per slot (#5627), and the
+   * tier and process, the print sequence (#4970), the settings per slot (#5627), whether
+   * the queue waits for each slot's colour (#6218), the process settings (#2998), and the
    * spools where they differ from the suggestion (re-sending the suggestion is not a
    * choice). Best effort, and only once the print has started.
    */
@@ -239,6 +256,7 @@ export function useRunPrint({
       tier,
       process_name: processName,
       print_sequence: printSequence,
+      force_colour_match: forceColourMatch,
     }
     const before = {
       printer_id: last?.printer_id ?? null,
@@ -248,10 +266,20 @@ export function useRunPrint({
       tier: last?.tier ?? null,
       process_name: last?.process_name ?? null,
       print_sequence: last?.print_sequence ?? null,
+      // Nothing remembered reads as on (#6218), so the default alone writes nothing.
+      force_colour_match: last?.force_colour_match ?? true,
     }
     // #5627: the settings per slot compared by what they set, not by key order.
-    if (JSON.stringify(next) === JSON.stringify(before) && samePartSettings(partSettings, last?.part_settings)) return
-    if (source) void sourceApi(source).remember({ ...next, part_settings: partSettings }).catch(() => undefined)
+    if (
+      JSON.stringify(next) === JSON.stringify(before) &&
+      samePartSettings(partSettings, last?.part_settings) &&
+      sameOverrides(processOverrides, last?.process_overrides)
+    )
+      return
+    if (source)
+      void sourceApi(source)
+        .remember({ ...next, part_settings: apiParts(partSettings), process_overrides: processOverrides })
+        .catch(() => undefined)
   }
 
   /**
@@ -280,6 +308,7 @@ export function useRunPrint({
           printerId,
           registryPrinter,
           plan,
+          forceColourMatch,
           printChoices,
           copies,
           plate,
@@ -291,6 +320,7 @@ export function useRunPrint({
           primeTower,
           filamentProfiles,
           partSettings,
+          processOverrides,
           rackPosition,
           rackAlgorithm,
         }),

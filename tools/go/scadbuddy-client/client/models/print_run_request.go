@@ -19,7 +19,7 @@ type PrintRunRequest struct {
 	choices PrintChoicesable
 	// The copies property
 	copies PrintRunRequest_PrintRunRequest_copiesable
-	// What the dialog submits: one spool per slot, and how hard to insist on it. “force_colour_match“ becomes “force_color_match“ on every override, which is the flag Bambuddy's scheduler reads to require an exact type+colour match rather than merely preferring one. It is off by default because it only bites on a model-targeted queue item, where insisting can leave the job unschedulable.
+	// What the dialog submits: one spool per slot, and how hard to insist on it. “force_colour_match“ becomes “force_color_match“ on every override, which is the flag Bambuddy's scheduler reads to require an exact type+colour match rather than merely preferring one. It is on by default (#6218): with it off, the scheduler can print a part in the wrong colour when the right one is not loaded; with it on, Bambuddy holds the queue item until a tray of the right colour is loaded. A caller may still send “False“.
 	filament_plan FilamentPlanable
 	// The filament_profiles property
 	filament_profiles []string
@@ -43,6 +43,8 @@ type PrintRunRequest struct {
 	printer PrintRunRequest_PrintRunRequest_printerable
 	// The printer_id property
 	printer_id PrintRunRequest_PrintRunRequest_printer_idable
+	// Any Bambu Studio process settings for this print, as {key: value}: every key is accepted, and the slicer judges it. Wins over the template's defaults and over prime_tower, supports and print_sequence. Only the settings that act on the machine that slices (post_process, filename_format, the print host's) are dropped, with a host-setting-dropped warning.
+	process_overrides i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable
 	// The project_id property
 	project_id PrintRunRequest_PrintRunRequest_project_idable
 	// The rack_algorithm property
@@ -1318,6 +1320,16 @@ func (m *PrintRunRequest) GetFieldDeserializers() map[string]func(i878a80d2330e8
 		}
 		return nil
 	}
+	res["process_overrides"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.CreateUntypedNodeFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetProcessOverrides(val.(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable))
+		}
+		return nil
+	}
 	res["project_id"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetObjectValue(CreatePrintRunRequest_PrintRunRequest_project_idFromDiscriminatorValue)
 		if err != nil {
@@ -1371,7 +1383,7 @@ func (m *PrintRunRequest) GetFieldDeserializers() map[string]func(i878a80d2330e8
 	return res
 }
 
-// GetFilamentPlan gets the filament_plan property value. What the dialog submits: one spool per slot, and how hard to insist on it. “force_colour_match“ becomes “force_color_match“ on every override, which is the flag Bambuddy's scheduler reads to require an exact type+colour match rather than merely preferring one. It is off by default because it only bites on a model-targeted queue item, where insisting can leave the job unschedulable.
+// GetFilamentPlan gets the filament_plan property value. What the dialog submits: one spool per slot, and how hard to insist on it. “force_colour_match“ becomes “force_color_match“ on every override, which is the flag Bambuddy's scheduler reads to require an exact type+colour match rather than merely preferring one. It is on by default (#6218): with it off, the scheduler can print a part in the wrong colour when the right one is not loaded; with it on, Bambuddy holds the queue item until a tray of the right colour is loaded. A caller may still send “False“.
 // returns a FilamentPlanable when successful
 func (m *PrintRunRequest) GetFilamentPlan() FilamentPlanable {
 	return m.filament_plan
@@ -1441,6 +1453,12 @@ func (m *PrintRunRequest) GetPrinterId() PrintRunRequest_PrintRunRequest_printer
 // returns a PrintRunRequest_PrintRunRequest_print_sequenceable when successful
 func (m *PrintRunRequest) GetPrintSequence() PrintRunRequest_PrintRunRequest_print_sequenceable {
 	return m.print_sequence
+}
+
+// GetProcessOverrides gets the process_overrides property value. Any Bambu Studio process settings for this print, as {key: value}: every key is accepted, and the slicer judges it. Wins over the template's defaults and over prime_tower, supports and print_sequence. Only the settings that act on the machine that slices (post_process, filename_format, the print host's) are dropped, with a host-setting-dropped warning.
+// returns a UntypedNodeable when successful
+func (m *PrintRunRequest) GetProcessOverrides() i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable {
+	return m.process_overrides
 }
 
 // GetProjectId gets the project_id property value. The project_id property
@@ -1572,6 +1590,12 @@ func (m *PrintRunRequest) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0
 		}
 	}
 	{
+		err := writer.WriteObjectValue("process_overrides", m.GetProcessOverrides())
+		if err != nil {
+			return err
+		}
+	}
+	{
 		err := writer.WriteObjectValue("project_id", m.GetProjectId())
 		if err != nil {
 			return err
@@ -1635,7 +1659,7 @@ func (m *PrintRunRequest) SetCopies(value PrintRunRequest_PrintRunRequest_copies
 	m.copies = value
 }
 
-// SetFilamentPlan sets the filament_plan property value. What the dialog submits: one spool per slot, and how hard to insist on it. “force_colour_match“ becomes “force_color_match“ on every override, which is the flag Bambuddy's scheduler reads to require an exact type+colour match rather than merely preferring one. It is off by default because it only bites on a model-targeted queue item, where insisting can leave the job unschedulable.
+// SetFilamentPlan sets the filament_plan property value. What the dialog submits: one spool per slot, and how hard to insist on it. “force_colour_match“ becomes “force_color_match“ on every override, which is the flag Bambuddy's scheduler reads to require an exact type+colour match rather than merely preferring one. It is on by default (#6218): with it off, the scheduler can print a part in the wrong colour when the right one is not loaded; with it on, Bambuddy holds the queue item until a tray of the right colour is loaded. A caller may still send “False“.
 func (m *PrintRunRequest) SetFilamentPlan(value FilamentPlanable) {
 	m.filament_plan = value
 }
@@ -1695,6 +1719,11 @@ func (m *PrintRunRequest) SetPrintSequence(value PrintRunRequest_PrintRunRequest
 	m.print_sequence = value
 }
 
+// SetProcessOverrides sets the process_overrides property value. Any Bambu Studio process settings for this print, as {key: value}: every key is accepted, and the slicer judges it. Wins over the template's defaults and over prime_tower, supports and print_sequence. Only the settings that act on the machine that slices (post_process, filename_format, the print host's) are dropped, with a host-setting-dropped warning.
+func (m *PrintRunRequest) SetProcessOverrides(value i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable) {
+	m.process_overrides = value
+}
+
 // SetProjectId sets the project_id property value. The project_id property
 func (m *PrintRunRequest) SetProjectId(value PrintRunRequest_PrintRunRequest_project_idable) {
 	m.project_id = value
@@ -1739,6 +1768,7 @@ type PrintRunRequestable interface {
 	GetPrinter() PrintRunRequest_PrintRunRequest_printerable
 	GetPrinterId() PrintRunRequest_PrintRunRequest_printer_idable
 	GetPrintSequence() PrintRunRequest_PrintRunRequest_print_sequenceable
+	GetProcessOverrides() i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable
 	GetProjectId() PrintRunRequest_PrintRunRequest_project_idable
 	GetRackAlgorithm() PrintRunRequest_PrintRunRequest_rack_algorithmable
 	GetRackPosition() PrintRunRequest_PrintRunRequest_rack_positionable
@@ -1760,6 +1790,7 @@ type PrintRunRequestable interface {
 	SetPrinter(value PrintRunRequest_PrintRunRequest_printerable)
 	SetPrinterId(value PrintRunRequest_PrintRunRequest_printer_idable)
 	SetPrintSequence(value PrintRunRequest_PrintRunRequest_print_sequenceable)
+	SetProcessOverrides(value i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable)
 	SetProjectId(value PrintRunRequest_PrintRunRequest_project_idable)
 	SetRackAlgorithm(value PrintRunRequest_PrintRunRequest_rack_algorithmable)
 	SetRackPosition(value PrintRunRequest_PrintRunRequest_rack_positionable)

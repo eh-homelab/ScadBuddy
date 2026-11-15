@@ -1,0 +1,14 @@
+{
+    "type": "filament",
+    "name": "Generic PLA Silk @base",
+    "from": "system",
+    "instantiation": "false",
+    "inherits": "fdm_filament_pla",
+    "filament_id": "GFL96",
+    "filament_vendor": [
+        "Generic"
+    ],
+    "filament_density": [
+        "1.21"
+    ]
+}

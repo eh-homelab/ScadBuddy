@@ -12,6 +12,7 @@ import {
 } from '@anthropic-ai/claude-agent-sdk'
 import type { Context } from '@opentelemetry/api'
 import type { Sql } from 'postgres'
+import type { BrowserOrigins } from '../browser/store.js'
 import type { Tier } from '../auth/principal.js'
 import type { Credential } from '../credentials.js'
 import { payloadKeyLock, type PayloadKeys } from '../temporal/payloadCodec.js'
@@ -45,6 +46,7 @@ import {
   event,
   type Origin,
   type Owner,
+  type QueuedEntry,
   ownerSeenBy,
   publicLabel,
   sameOwner,
@@ -52,9 +54,9 @@ import {
   type SessionMode,
   type SessionStatus,
 } from './protocol.js'
-import { SessionBlobs, type StoredBlob } from './blobs.js'
-import { PgHttpBodies } from './httpBodies.js'
-import { SessionFiles } from '../workspace/store.js'
+import { SessionBlobs, type SessionImages, type StoredBlob } from './blobs.js'
+import { type HttpBodiesFor, pgHttpBodies } from './httpBodies.js'
+import { SessionFiles, type WorkspaceFiles } from '../workspace/store.js'
 import { SessionEdits } from './edits.js'
 import { forkEventCut, transcriptCut } from './forkPoint.js'
 import type { TitleResolver } from './sdkEvents.js'
@@ -64,6 +66,7 @@ import { type ResourceRef, SessionResources, type TouchedRecord } from './touche
 import { type DurableGate, DurableUnavailable } from '../gate/durable.js'
 import type { DurableTurns, SessionRuntime } from './durable.js'
 import { PendingProjection } from '../gate/projection.js'
+import type { FlowRunReads } from '../flows/backendReads.js'
 import { Escalations } from '../flows/escalations.js'
 import { TurnRunner } from './turnRunner.js'
 import { type WarmQuery, WarmSessions } from './warm.js'
@@ -376,6 +379,10 @@ export type SessionErrorCode =
   | 'unavailable'
   /** The session is archived (#1885): read-only until it is unarchived. */
   | 'archived'
+  /** The session's queue holds as many messages as it may (#6386). */
+  | 'queue_full'
+  /** A queued message that is no longer waiting: it started, or was removed (#6386). */
+  | 'not_queued'
 
 type SessionErrorStatus = 400 | 403 | 404 | 409 | 429 | 503
 
@@ -390,6 +397,8 @@ const STATUS_OF: Record<SessionErrorCode, SessionErrorStatus> = {
   rate_limited: 429,
   unavailable: 503,
   archived: 409,
+  queue_full: 409,
+  not_queued: 409,
 }
 
 /**
@@ -541,7 +550,8 @@ export type TurnOutcome =
   /** Another replica took the claim over after this one's lease ran out. */
   | { kind: 'lost_claim' }
 
-export type Turn = { turnId: string; done: Promise<TurnOutcome> }
+/** `queued`: the message waits in the session's queue (#6386), at `position` (1 is next); `done` settles once it has run. */
+export type Turn = { turnId: string; done: Promise<TurnOutcome>; queued?: { position: number } }
 
 
 export type StartOptions = {
@@ -598,6 +608,12 @@ export type SendOptions = {
   flow?: FlowTurn
   /** Sent from a session that keeps no background tasks (#5870): this turn is offered none either (`turn_flow`). */
   withoutBackground?: boolean
+  /**
+   * While a turn runs, queue the message to run after it instead of refusing it `busy` (#6386):
+   * a person's send (the panel, the REST route) and `sessions_send`. Flow runs and background
+   * tasks wait for an idle session instead, as before.
+   */
+  queue?: boolean
 }
 
 /** Who a turn's in-process tools act for, beyond the session's owner (SendOptions.tiers). */
@@ -681,6 +697,8 @@ function startedQuery(run: QueryRunner): (spawn: HarnessRun) => WarmQuery {
 
 export type SessionManagerDeps = {
   sql: Sql
+  /** The backend's flow tables, through its CRUD routes (flows/backendReads.ts, #5299 D7). */
+  flowReads: FlowRunReads
   paths: HarnessPaths
   /**
    * The Claude credentials a turn may use, in priority order, and where what
@@ -788,7 +806,11 @@ export type SessionManagerDeps = {
    * `save_to_workspace` writes, and what a fork copies. One over `sql` (caps from
    * `settings`) when omitted.
    */
-  workspace?: SessionFiles
+  workspace?: WorkspaceFiles
+  /** A session's images (`SessionBlobs` on `sql` when omitted; gated to the API's routes in main.ts). */
+  blobs?: SessionImages
+  /** A session's saved http_request bodies (`PgHttpBodies` on `sql` when omitted). */
+  httpBodies?: HttpBodiesFor
   /**
    * A session's background tasks (src/background/): every turn gets the session's CronCreate
    * and the rest (each not off under `builtin:claude-code`) in place of Claude Code's own,
@@ -820,6 +842,8 @@ export type SessionManagerDeps = {
    * undefined when it cannot.
    */
   currentTiers?: (owner: Owner) => Promise<readonly Tier[] | undefined>
+  /** The headless browser's lists and approvals (browser/store.ts); a turn makes one over `sql` without it. */
+  browserOrigins?: BrowserOrigins
   /** The data keys the transcript is sealed under (D7); without them no transcript line is written. */
   payloadKeys?: PayloadKeys
   /** HMAC key for approval input hashes (approvals/service.ts `approvalHashKey`); per process when omitted. */
@@ -936,7 +960,7 @@ export function titleFrom(prompt: string): string {
 /**
  * The SQL behind `list()`, exported so a test can EXPLAIN it: the owner-or-
  * creator-or-offered filter is served by the ai_sessions_owner,
- * ai_sessions_creator (db/migrations/20260928T0107Z_sessions.sql) and
+ * ai_sessions_creator (backend/scadbuddy/migrations_agent/20260928T0107Z_sessions.sql) and
  * ai_sessions_pending_owner (20260929T1825Z_session_handoff_offers.sql) indexes.
  */
 export function listQuery(principal: Owner, filter: ListFilter = {}): { text: string; params: (string | number)[] } {
@@ -1043,8 +1067,8 @@ export class SessionManager {
   /** What sessions touched (#931), read by `resources`. */
   private readonly touched: SessionResources
   /** The images tool results carried (#782), read by `blob`. */
-  private readonly blobs: SessionBlobs
-  private readonly files: SessionFiles
+  private readonly blobs: SessionImages
+  private readonly files: WorkspaceFiles
   /** Assembles each turn's query options (turnRunner.ts). */
   private readonly runner: TurnRunner
   /**
@@ -1057,7 +1081,7 @@ export class SessionManager {
     this.deps = deps
     this.store = new PostgresSessionStore(deps.sql, deps.payloadKeys ? { keys: deps.payloadKeys } : {})
     this.touched = new SessionResources(deps.sql)
-    this.blobs = new SessionBlobs(deps.sql)
+    this.blobs = deps.blobs ?? new SessionBlobs(deps.sql)
     this.files = deps.workspace ?? new SessionFiles(deps.sql, { settings: deps.settings })
     this.events = new EventLog(deps.sql, {
       ...(deps.pollMs === undefined ? {} : { pollMs: deps.pollMs }),
@@ -1082,9 +1106,10 @@ export class SessionManager {
       ...(deps.run ? { start: startedQuery(deps.run) } : {}),
       ...(deps.warm?.log ? { log: deps.warm.log } : {}),
     })
-    this.queue = new FlowQueue(deps.sql)
+    this.queue = new FlowQueue(deps.sql, deps.flowReads)
     this.escalations = new Escalations({
       sql: deps.sql,
+      reads: deps.flowReads,
       durable: () => this.durable,
       ...(deps.currentTiers ? { currentTiers: deps.currentTiers } : {}),
       // A delivery turn (#2482): as the owner, with the tiers its owner holds now.
@@ -1189,7 +1214,7 @@ export class SessionManager {
   /** `id` is the saved response's id as `savedBody` checked it: a UUID, safe in a header or a path. */
   async httpBody(id: string, saved: string, principal: Owner): Promise<{ id: string; meta: SavedMeta; bytes: Buffer }> {
     await this.get(id, principal)
-    const body = await savedBody(new PgHttpBodies(this.deps.sql, id), saved)
+    const body = await savedBody((this.deps.httpBodies ?? pgHttpBodies(this.deps.sql))(id), saved)
     if (!body) throw new SessionError('not_found', `no saved response ${saved} in session ${id}`)
     return { id: saved, ...body }
   }
@@ -1444,9 +1469,45 @@ export class SessionManager {
       ...(options.tiers ? { tiers: options.tiers } : {}),
       ...(options.flow ? { flow: options.flow } : {}),
       ...(options.withoutBackground ? { withoutBackground: true } : {}),
+      ...(options.context ? { context: options.context } : {}),
+      ...(options.queue ? { queue: true } : {}),
     })
     if (!turn) throw await this.whyNotClaimed(id, principal, before)
     return turn
+  }
+
+  /** The messages waiting in a session's queue (#6386), for whoever may see the session. */
+  async queued(id: string, principal: Owner): Promise<{ version: number; queue: QueuedEntry[] }> {
+    const session = await this.get(id, principal)
+    return this.durableTurns ? this.durableTurns.queue(session) : { version: 0, queue: [] }
+  }
+
+  /** Removes a queued message before it starts (#6386): only a principal that may send to the session. */
+  async removeQueued(id: string, principal: Owner, entryId: string): Promise<{ version: number; queue: QueuedEntry[] }> {
+    const session = await this.mayQueue(id, principal)
+    return this.durableOrRefuse().removeQueued(session, entryId)
+  }
+
+  /** Replaces a queued message's words before it starts (#6386): only a principal that may send to the session. */
+  async editQueued(id: string, principal: Owner, entryId: string, text: string): Promise<{ version: number; queue: QueuedEntry[] }> {
+    const words = text.trim()
+    if (!words) throw new SessionError('invalid', 'the message is empty')
+    const session = await this.mayQueue(id, principal)
+    return this.durableOrRefuse().editQueued(session, entryId, words)
+  }
+
+  /** The session, when `principal` may send to it, as `send` checks (its owner, not archived, not done); else why not. */
+  private async mayQueue(id: string, principal: Owner): Promise<SessionRecord> {
+    const session = await this.get(id, principal)
+    if (session.archivedAt !== null) throw archivedError(id)
+    if (!sameOwner(principal, session.owner)) {
+      throw new SessionError(
+        'forbidden',
+        `session ${id} is controlled by ${ownerSeenBy(principal, session.owner).label}; only its owner can change its queue`,
+      )
+    }
+    if (session.status === 'done') throw new SessionError('closed', `session ${id} is done`)
+    return session
   }
 
   /** The durable dispatch, or `unavailable` when this service has none (no Temporal or no key). */

@@ -40,6 +40,8 @@ class AgentTiers:
         #: Tools answered with no `declared`, as an agent from before it answers.
         self.declared_missing: set[str] = set()
         self.disabled = set(disabled)
+        #: Tools whose every write is keyed to the call (#6345), answered `keyed`.
+        self.keyed: set[str] = set()
         #: Every tool the workflow asked about, in order.
         self.asked: list[str] = []
 
@@ -54,6 +56,8 @@ class AgentTiers:
             answer: dict[str, Any] = {"tier": self.tiers[name], "disabled": name in self.disabled}
             if name not in self.declared_missing:
                 answer["declared"] = self.declared.get(name, self.tiers[name])
+            if name in self.keyed:
+                answer["keyed"] = True
             return answer
 
         return flow_tool_tier
@@ -61,6 +65,10 @@ class AgentTiers:
     async def tool_tiers(self) -> dict[str, str]:
         """As `flows.agent_tools.AgentTools.tool_tiers`: the enabled tools."""
         return {n: t for n, t in self.tiers.items() if n not in self.disabled}
+
+    async def tool_names(self) -> set[str]:
+        """As `flows.agent_tools.AgentTools.tool_names`: every tool, disabled ones too."""
+        return set(self.tiers)
 
 
 class Keys:

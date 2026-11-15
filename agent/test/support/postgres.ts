@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import postgres from 'postgres'
+import postgres, { type Sql } from 'postgres'
 import { connectDatabase, type Database } from '../../src/db.js'
-import { MIGRATIONS } from '../../src/db/migrations.js'
+import { migrate, MIGRATIONS } from './migrations.js'
 
 // A Postgres the tests may create and drop schemas and databases in, the same
 // contract as the backend's `requires_postgres` tests (backend/tests/conftest.py):
@@ -26,7 +26,7 @@ export type Throwaway = {
  * load, since MIGRATION_LOCK serialises migrating across the whole server.
  *
  * `{ empty: true }` gives a fresh, unmigrated schema in the shared database
- * instead, for the tests of migrating itself.
+ * instead, for the tests of migrating itself; its `ready()` migrates it (`migrateSchema`).
  */
 export async function throwawayDatabase(options: { empty?: boolean } = {}): Promise<Throwaway> {
   if (!TEST_DATABASE_URL) throw new Error(`${TEST_DATABASE_URL_ENV} is not set`)
@@ -35,7 +35,7 @@ export async function throwawayDatabase(options: { empty?: boolean } = {}): Prom
   const name = `test_${randomUUID().replaceAll('-', '').slice(0, 12)}`
   if (options.empty) {
     await admin.unsafe(`CREATE SCHEMA "${name}"`)
-    const db = connectDatabase(base, { searchPath: name })
+    const db = connectDatabase(base, { searchPath: name, schema: migrateSchema })
     return {
       db,
       url: base,
@@ -62,6 +62,15 @@ export async function throwawayDatabase(options: { empty?: boolean } = {}): Prom
   }
 }
 
+/**
+ * How a test's schema is made: the agent's own runner over backend/scadbuddy/migrations_agent/
+ * (support/migrations.ts). In production the API applies them and `ready()` waits (#5299 D6);
+ * a copy of the template already holds the ledger, so its `ready()` takes that path.
+ */
+export const migrateSchema = async (sql: Sql): Promise<void> => {
+  await migrate(sql)
+}
+
 function databaseUrl(url: string, database: string): string {
   const u = new URL(url)
   u.pathname = `/${database}`
@@ -73,7 +82,7 @@ function databaseUrl(url: string, database: string): string {
 // builds a new template rather than copying a stale one.
 const TEMPLATE = `test_template_${createHash('sha256')
   .update(JSON.stringify(MIGRATIONS))
-  .update(readFileSync(new URL('../../src/db/migrations.ts', import.meta.url)))
+  .update(readFileSync(new URL('./migrations.ts', import.meta.url)))
   .digest('hex')
   .slice(0, 16)}`
 // Distinct from MIGRATION_LOCK: it only orders the suites building the template.
@@ -98,6 +107,7 @@ export async function ensureTemplate(): Promise<void> {
     let cause: unknown
     const db = connectDatabase(databaseUrl(TEST_DATABASE_URL, building), {
       searchPath: 'public',
+      schema: migrateSchema,
       onMigrationError: (err) => (cause = err),
     })
     try {

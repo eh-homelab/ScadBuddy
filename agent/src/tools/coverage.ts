@@ -7,32 +7,48 @@ import type { Operation } from './registry.js'
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
-    operation: 'GET /api/v1/storefront/listings',
-    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); an agent tool follows with #5283.",
+    operation: 'GET /api/v1/storefront/slice-profile/options',
+    reason: "The printers and spools the Storefront settings control offers for the shop's slice profile (#6153). The assistant reads the profile through get_settings; the shop sets it in Settings, Storefront pricing.",
   },
   {
-    operation: 'POST /api/v1/storefront/listings',
-    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); an agent tool follows with #5283.",
+    operation: 'GET /api/v1/storefront/listings',
+    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); the assistant drafts and publishes through storefront_listing_draft and storefront_listing_publish (#6131).",
   },
   {
     operation: 'PUT /api/v1/storefront/listings/order',
-    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); an agent tool follows with #5283.",
+    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); the assistant drafts and publishes through storefront_listing_draft and storefront_listing_publish (#6131).",
   },
   {
     operation: 'PUT /api/v1/storefront/listings/{listing_id}',
-    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); an agent tool follows with #5283.",
+    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); the assistant drafts and publishes through storefront_listing_draft and storefront_listing_publish (#6131).",
   },
   {
-    operation: 'POST /api/v1/storefront/listings/{listing_id}/publish',
-    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); an agent tool follows with #5283.",
+    operation: 'GET /api/v1/storefront/listings/{listing_id}',
+    reason: "The Storefront page's editor reads one listing at its own address (#6157); an agent tool follows with #5283.",
+  },
+  {
+    operation: 'POST /api/v1/storefront/listings/{listing_id}/move',
+    reason: "The Storefront page's \"Move to top\" and \"Move to position…\" (#6157); an agent tool follows with #5283.",
+  },
+  {
+    operation: 'PUT /api/v1/storefront/listings/{listing_id}/media',
+    reason: "The Storefront page's pictures and a model media's \"Storefront…\" dialog (#6213); an agent tool follows with #5283.",
+  },
+  {
+    operation: 'GET /api/v1/storefront/listings/{listing_id}/prepare',
+    reason: "The Storefront editor's \"Prepare every colour combination\" shows the count and the progress (#6237); a back-office action, as publish is on the page.",
+  },
+  {
+    operation: 'POST /api/v1/storefront/listings/{listing_id}/prepare',
+    reason: "The Storefront editor's \"Prepare every colour combination\" (#6237): a person starts a run of up to storefront_prepare_cap renders, a few at a time, from the page.",
   },
   {
     operation: 'POST /api/v1/storefront/listings/{listing_id}/unpublish',
-    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); an agent tool follows with #5283.",
+    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); the assistant drafts and publishes through storefront_listing_draft and storefront_listing_publish (#6131).",
   },
   {
     operation: 'DELETE /api/v1/storefront/listings/{listing_id}',
-    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); an agent tool follows with #5283.",
+    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); the assistant drafts and publishes through storefront_listing_draft and storefront_listing_publish (#6131).",
   },
   {
     operation: 'POST /api/v1/parts',
@@ -524,10 +540,31 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'adds, edits and removes them with order_attach, order_attachment_update and order_attachment_delete (#4722).',
   })),
   {
+    operation: 'GET /api/v1/orders/{order_id}/sources/{source_id}/preview',
+    reason:
+      "A storefront customer's file preview (#6133, spec 2026-11-13 §7): untrusted bytes the intake check made, " +
+      "for the order page's \"Customer's models\" panel to draw. The agent reads each file's check and facts " +
+      'from order_get (`sources`); it has no use for the bytes.',
+  },
+  {
+    operation: 'GET /api/v1/orders/{order_id}/sources/{source_id}/download',
+    reason:
+      "A presigned GET of a customer's staged file (#6133, spec 2026-11-13 §11), for a person to download in " +
+      'the browser. The agent never opens a customer file: the intake worker checks it, and the import ' +
+      '(#6133 PR 5) copies it into the library.',
+  },
+  {
     operation: 'GET /api/v1/orders/{order_id}/items/{item_id}/quotes/{quote_id}/plates/{plate}/thumbnail',
     reason:
       "A slice quote's plate image from its sliced file (#4673), which the item's print setups draw. The " +
       "agent reads each setup's plates, time, grams and choices from order_get; it has no use for the bytes.",
+  },
+  {
+    operation: 'POST /api/v1/orders/{order_id}/items/{item_id}/render',
+    reason:
+      "The order page's Slice… renders an item with a design and no output first, so the print dialog has an " +
+      "output to open on (#6324). The agent's order_item_quote `slice` needs no dialog: its run renders the " +
+      'item itself when it has no matching output.',
   },
   ...(
     [

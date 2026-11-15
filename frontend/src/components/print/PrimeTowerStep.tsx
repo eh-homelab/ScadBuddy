@@ -9,7 +9,7 @@ type Props = {
   value: PrimeTowerChoice | null
   onChange: (next: PrimeTowerChoice | null) => void
   /** The template's `print_settings`, for what Default means for this model. */
-  templateSettings?: Record<string, string> | undefined
+  templateSettings?: Record<string, string | string[]> | undefined
   /** A library 3MF: its own project settings, unread here, may declare the tower. */
   fromFile?: boolean
   /**
@@ -27,7 +27,7 @@ function modeOf(value: PrimeTowerChoice | null): Mode {
 }
 
 /** What Default prints with: the template's declaration, else the process preset's. */
-function defaultLabel(settings: Record<string, string> | undefined, fromFile: boolean): string {
+function defaultLabel(settings: Record<string, string | string[]> | undefined, fromFile: boolean): string {
   if (settings?.enable_prime_tower === '1') return 'Default (template: on)'
   if (settings?.enable_prime_tower === '0') return 'Default (template: off)'
   return fromFile ? 'Default (file or process)' : 'Default (process: usually on with more than one filament)'

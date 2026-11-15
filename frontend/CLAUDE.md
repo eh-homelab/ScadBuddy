@@ -22,6 +22,18 @@ that each shard ran what it selected, as `backend-pytest-split` does.
 `/api/v1/ai/*` to a real agent with a credential pointed at a fake Anthropic endpoint
 (its header lists the script `E2E_AGENT_SCRIPTED=1` expects; `pnpm preview` routes the
 same way, `vite.config.ts`).
+- `pnpm exec tsc -p tsconfig.app.json --noEmit` - the quick typecheck. It skips
+  `pretypecheck`, so run `pnpm gen:api` once first, or the generated `src/api/schema.d.ts`,
+  `src/storefront/api/schema.d.ts` and `src/api/settingDocs.json` (the Settings field docs
+  `mocks/fixtures.ts` imports) are missing.
+  Run it again after a merge or rebase onto main: a stale `schema.d.ts` gives type errors
+  about fields the merge added or removed.
+  Playwright's web server runs `pnpm build`, which typechecks first, so one type error in
+  a test also fails all three `frontend-e2e` shards (#6238).
+- No prettier here; eslint is the only lint and format check.
+- Shared test helpers go in `src/test/` (e.g. `src/test/appLinks.ts`), not copied per file.
+- The pending-input stream (`lib/pendingChanges.ts`) opens in a passive effect after the
+  first paint: a test that ticks a fake `EventSource` waits for `stream.open()` first (#6287).
 
 
 ## Layout
@@ -99,7 +111,88 @@ same way, `vite.config.ts`).
   them. The session is
   the edge's HttpOnly cookie; the page never sees it. Mocks
   `src/mocks/features/storefrontAccount.ts`, e2e `e2e/storefront-account.spec.ts`.
+  A customer's own models (#6133 PR 4, spec 2026-11-13 §4, §10.5): `components/ModelForm.tsx`
+  at `/print-my-model` (linked from the listings' "Have something else in mind?"). It asks
+  the edge for presigned slots, PUTs each file straight to the bucket with XHR
+  (`api/client.ts` `putFile`, for the progress bar), tries a failed PUT again on the same
+  URL until it expires, then adds the request (Turnstile `model`). `components/PurchaseLinks.tsx`
+  is the "things to buy" list it shares with `RequestForm` (the multipart part
+  `purchase_links`). `components/ModelSources.tsx`: `CartSources` (the draft page reads the
+  cart again while a file is `checking`, `poll.ts` timing) and `OrderSources` (the order
+  page reads each preview by a POST of the reader, `orderPreview`, into a `blob:` URL, so no
+  URL holds the token). A customer's link is always text, never an anchor. Mocks
+  `src/mocks/features/storefrontModels.ts` (the bucket on the page's own origin,
+  `/mock-bucket/staging`, because `vite preview` sends `page-csp.txt`, which names no
+  bucket; the order `/o#models`). One route has one feature module
+  (`mocks/features.test.ts`), so `storefrontPublic.ts`'s `GET /draft` and order view call
+  its `advanceChecks` and `modelsOrderOf`. e2e `e2e/storefront-models.spec.ts`.
 
+- "Sell on storefront" (#6131, design 2026-11-13): Generate's menu (`/storefront?sell=job:<id>`)
+  and a History row (`?sell=output:<id>`) open the listing editor with the listing filled in,
+  unsaved (`components/storefront/sellSource.ts`; the list redirects the address to
+  `/storefront/listings/new?sell=…`); `?listing=<id>` redirects to a saved one's editor. The smart defaults are `listingDraft.ts` `defaultsFor` (free text and
+  every colour offered, from the priced filaments of the design's material, the rest locked;
+  a support setting is never offered, `isSupport`; an offered colour whose template default
+  no colour on offer has starts at one that is, `fittedDefault`, #6144), pinned by
+  `test-fixtures/storefront/sell-draft-vectors.json`, which the agent's copy
+  (`agent/src/tools/storefrontDraft.ts`) is tested against too; a
+  colour no listing filament has is `colourProblems`. e2e `e2e/storefront-sell.spec.ts`.
+
+- The Storefront back office (#6157): `pages/StorefrontPage.tsx` is the list, a table the
+  server searches, filters, sorts and pages (`GET /storefront/listings` answers 50 rows, the
+  matches' `total` and the shop's `places`, the last place a move can name; a page past the
+  last moves to the last); `components/storefront/listingsQuery.ts` keeps that state in the URL. Bulk
+  Publish, Unpublish and Delete run one listing at a time. "Move to top" and "Move to
+  position…" send `POST /storefront/listings/{id}/move`; there is no drag. The editor is
+  `pages/StorefrontListingPage.tsx` at `/storefront/listings/<id>` (or `new`); the list's
+  links pass its query in the history state, which "Back to listings" returns to. While it
+  holds unsaved edits, `lib/useLeaveGuard.ts` holds every in-app navigation away and asks.
+  Each offered parameter's "Starts at" (`DefaultField`, #6144) is the value an unpicked render
+  takes: the template's while the bounds allow it, else the listing's `default`, which
+  narrowed bounds move to the nearest value they allow (`listingDraft.ts` `fittedDefault`). A
+  publish refused about one parameter (`listingRefusal` kind `param`) is said under it. The old
+  `/storefront?listing=<id>` and `?sell=…` addresses redirect to the editor. Mocks
+  `src/mocks/features/storefront.ts`; e2e `e2e/storefront-admin.spec.ts` seeds 2,000
+  listings into the mock's `sessionStorage`.
+  Materials (#6258): the editor's "Materials allowed" is the listing's `materials`, first
+  preferred (`components/storefront/MaterialOrder.tsx`: up, down and remove buttons, the
+  moved row's button keeps the focus; "Add a material" offers the price book's customer
+  materials); empty shows "Shop default (…)" from `storefront_materials`, which Settings →
+  Storefront pricing's `components/settings/StorefrontMaterials.tsx` edits with the same
+  list. "Colours on offer" groups the price book's filaments by allowed material, in that
+  order, with "Offer all" and "Offer none", support filaments last; a ticked filament of a
+  material not allowed is named apart. A publish refused `listing_material_not_allowed` or
+  `listing_locked_colours_unprintable` (`listingDraft.ts` `listingRefusal`) is said beside
+  "Materials allowed" or "Colours on offer" until the next edit. The mock's publish checks
+  only the materials (`materialRefusal`).
+  Pictures (#6213): the editor's `components/storefront/ListingPictures.tsx` lists every
+  id of the draft's `media_ids` (a video, a missing file or an unknown id says so), orders,
+  removes and adds a listing's images, uploads one into the template's media, and marks
+  each one Live from the listing's published `media` (`media_id`; a listing published
+  before that was kept says to publish again, never matched by place). A template's Media
+  dialog has "Storefront…" per image (`components/storefront/StorefrontPicture.tsx`),
+  which sets the image on each listing of that template through `PUT
+  /storefront/listings/{id}/media`; a published listing is published again at once.
+  Prepared colours (#6237): `components/storefront/PrepareColours.tsx`, under a published
+  listing's actions, shows the count (`GET …/prepare`), confirms, starts (`POST …/prepare`)
+  and shows "n of N ready", read again while the run is open (`running`) or renders are in
+  the queue (a failed read does not stop the reads; the next good one clears its error, a
+  failed start's message stays, #6299 review); renders that could not be started (`failed_to_start`) are named, with "Prepare
+  again"; over the cap it says the count and the cap. Mocks in
+  `src/mocks/features/storefront.ts` (`setPrepareCap`, `failNextPrepareStarts`).
+
+- The order lists (#6334): `pages/OrdersPage.tsx`'s views (`lib/orderViews.ts`
+  `ORDER_VIEWS`, each a fixed set of URL filters; the active one is the one the URL holds)
+  and its closed-order rule: a closed or cancelled order that ended more than N days ago is
+  left out by the API's `ended_since` (`endedSince`, local midnight, so the list's key moves
+  once a day) unless `old=1` or the query is a profit report row's (`isReportFiltered`: a
+  row's orders are mostly closed long ago, and its link lists them all). N, "Remember my view" and the last view's query (never the
+  search or a profit report row's filters) live in `localStorage` (`ORDERS_MEMORY_KEY`); a
+  visit to `/orders` with no query opens the remembered one. An order's items table puts
+  the live lines first and the fulfilled and cancelled ones in groups after them
+  (`components/orders/itemGroups.ts`, `DataTable` `groups`), each group's state remembered
+  there too. A unit test of the list pins `Date` (`vi.useFakeTimers({ toFake: ['Date'] })`)
+  and the e2e `page.clock.setFixedTime`, so the mocks' closed order stays on its side of N.
 - Customer messages (#5660): Settings → Orders' `components/settings/CustomerMessaging.tsx`
   (bind, check, test send, unbind) and the order page's `components/orders/OrderMessages.tsx`
   ("Mark sent", "Send again" through a preview). The list and "Mark sent" go through the
@@ -132,6 +225,11 @@ same way, `vite.config.ts`).
   its answer says the print is in Activity (`prints.ts` `lanPrintsActivityPath`), as a
   model's Prints tab does when the model has such a print (`PrintsPage.tsx`
   `LanPrintsNote`).
+- `frontend/src/lib/appLinks.ts` (`appUrl`, `useAppUrl`, `components/AppLink.tsx`) — links
+  to ScadBuddy's own pages use the host the user is on: a path, or a URL on a known origin
+  (`public_url` plus `SCADBUDDY_ALLOWED_ORIGINS`), is put on `window.location.origin`
+  (#6232). `public_url` is only for links that leave the browser. Bambuddy links:
+  `lib/bambuddyLinks.ts`.
 
 ## See also
 

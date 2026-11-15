@@ -92,7 +92,7 @@ export const arrangeTools: Tool[] = [
             'named by this alone.',
         ),
       filament_plan: z
-        .object({ slots: z.array(slotChoice), force_colour_match: z.boolean().default(false) })
+        .object({ slots: z.array(slotChoice), force_colour_match: z.boolean().default(true) })
         .optional(),
       colours: z.array(z.string().regex(/^#[0-9A-Fa-f]{6}$/)).max(32).optional(),
       name: z.string().max(200).optional(),

@@ -3,6 +3,7 @@ import { Link, useLocation, useParams, useSearchParams } from 'react-router'
 import { api } from '../api/client'
 import type { ItemPartRow, OrderDetail, OrderItemDetail, OrderItemPatch } from '../api/types'
 import { RevisionsPanel } from '../components/orders/RevisionsPanel'
+import { CustomerModels } from '../components/orders/CustomerModels'
 import { AddItemDialog } from '../components/orders/AddItemDialog'
 import { addMode, isCart, itemOpen, OPEN_FOR_EDITS, priceOpen, TAKES_ITEMS } from '../components/orders/afterAcceptance'
 import { ChargesEditor } from '../components/orders/ChargesEditor'
@@ -129,7 +130,7 @@ export function OrderPage() {
     // Replaced, so the hash form becomes the search form and Back leaves the order.
     setSearch(next, { replace: true })
   }
-  const slices = useSliceQuotes(id, view.data?.items, reload)
+  const slices = useSliceQuotes(id, view.data?.items, readOrder)
   const loaded = view.data !== undefined
   // A link to an item the order does not have names nothing: it leaves the address bar.
   const dead = openItem !== null && view.data !== undefined && !view.data.items.some((i) => i.id === openItem)
@@ -171,7 +172,12 @@ export function OrderPage() {
   const [pickerBusy, setPickerBusy] = useState(false)
 
   function reload() {
-    view.refresh()
+    readOrder()
+  }
+
+  /** `failed` hears a failed read of the order (a landed render then stops holding Slice…). */
+  function readOrder(failed?: () => void) {
+    view.refresh(undefined, failed)
     events.refresh()
     costs.refresh()
     orderParts.refresh()
@@ -234,12 +240,18 @@ export function OrderPage() {
   const addresses = customer.data?.addresses ?? []
   const orderProject = detail.projects?.find((p) => p.item_id == null)
 
+  const pendingPurchases = (detail.sources ?? []).filter((s) => s.purpose === 'purchase' && s.status === 'pending').length
   return (
     <div className="h-full overflow-y-auto" data-testid="order-page">
       <div className="mx-auto flex max-w-5xl flex-col gap-4 px-4 py-6">
         <div className="flex flex-wrap items-center gap-3">
           <h1 className="text-xl font-semibold tracking-tight">{order.number ?? 'Cart'}</h1>
           <OrderStatusBadge status={order.status} onHold={order.on_hold} />
+          {pendingPurchases > 0 && (
+            <Badge variant="outline" className="border-warn/40 text-warn">
+              Purchase pending ({pendingPurchases})
+            </Badge>
+          )}
           <MarginBadge state={costs.data?.order_id === order.id ? costs.data.margin_state : null} />
           <span className="text-sm text-muted-foreground">
             for{' '}
@@ -641,7 +653,7 @@ function ItemDrawer({
   item: OrderItemDetail
   /** #5543 — the item's parts per unit; undefined until read. */
   parts: ItemPartRow[] | undefined
-  slices: Pick<ReturnType<typeof useSliceQuotes>, 'runs' | 'start' | 'dismiss'>
+  slices: Pick<ReturnType<typeof useSliceQuotes>, 'runs' | 'start' | 'render' | 'dismiss'>
   /** #4953 — `orders_allow_unfulfil`. */
   unfulfilAllowed: boolean
   /** #4955 — the section a row's ⋯ action opened the drawer at: scrolled into view. */
@@ -873,6 +885,7 @@ function ItemDrawer({
           </>
         )}
       </dl>
+      <CustomerModels detail={detail} itemId={item.id} onChanged={onChanged} />
       <RevisionsPanel order={order} item={item} attachments={detail.attachments.filter((a) => a.item_id === item.id)} onChanged={onChanged} />
       {parts && <ItemPartsEditor orderId={order.id} item={item} rows={parts} editable={!ENDED.has(order.status) && item.status !== 'fulfilled'} onChanged={onChanged} />}
       {/* A visitor's cart (#5282) has no price or print section, so no menu action opens one. */}
@@ -883,7 +896,7 @@ function ItemDrawer({
         // left `quoted` (added after acceptance, or by the agent) is accepted here, unless the order is on hold (#5541).
         <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={false} acceptPending={editable && !settled && !order.on_hold} onChanged={onChanged} storefront={order.source === 'storefront'} />
       ) : (
-        <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={quotable && !settled} onChanged={onChanged} item={item} parts={(parts ?? []).map((p) => `${p.part_id}:${p.per_unit}`).join(',')} slice={{ run: slices.runs.get(item.id), start: (body) => slices.start(item.id, body, item.quotes.map((q) => q.id)), dismiss: () => slices.dismiss(item.id) }} startSlicing={sliceAsked} onSliceOpened={onSliceOpened} storefront={order.source === 'storefront'} />
+        <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={quotable && !settled} onChanged={onChanged} item={item} parts={(parts ?? []).map((p) => `${p.part_id}:${p.per_unit}`).join(',')} slice={{ run: slices.runs.get(item.id), start: (body) => slices.start(item.id, body, item.quotes.map((q) => q.id)), render: () => slices.render(item.id, item.quotes.map((q) => q.id)), dismiss: () => slices.dismiss(item.id) }} startSlicing={sliceAsked} onSliceOpened={onSliceOpened} storefront={order.source === 'storefront'} />
       )}
       </div>
       )}

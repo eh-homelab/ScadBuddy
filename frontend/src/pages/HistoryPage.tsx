@@ -50,6 +50,7 @@ import { diffFromDefaults } from '../lib/params'
 import { useAsync } from '../lib/useAsync'
 import { bambuddyBase, webUrls } from '../lib/bambuddyLinks'
 import { libraryLabel, pinChange } from '../lib/libraryPins'
+import { sellPath } from '../components/storefront/sellSource'
 
 /** #2290 — how many outputs a page of the history reads. */
 export const HISTORY_PAGE_SIZE = 20
@@ -986,6 +987,9 @@ function OutputRow({
               </DropdownMenuItem>
               <DropdownMenuItem onSelect={() => setTimeout(onOrder, 0)} aria-label={`Order ${label}`}>
                 Order this
+              </DropdownMenuItem>
+              <DropdownMenuItem asChild aria-label={`Sell ${label} on the storefront`}>
+                <Link to={sellPath({ output: output.id })}>Sell on storefront</Link>
               </DropdownMenuItem>
               <DropdownMenuItem
                 disabled={naming !== null}

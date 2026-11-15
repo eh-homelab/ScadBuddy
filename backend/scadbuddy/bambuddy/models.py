@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import (
@@ -98,6 +98,10 @@ class LocalPreset(BambuddyModel):
     default_filament_colour: str | None = None
     compatible_printers: str | None = None
     inherits: str | None = None
+    #: The preset's density in g/cm³ as Bambuddy stores it, text
+    #: (``backend/app/models/local_preset.py`` at v1.3.2b1-daily.20261113; ``"1.275"`` in
+    #: ``tests/bambuddy/recordings/local-presets.json``), #6136.
+    filament_density: str | None = None
     #: When Bambuddy last wrote the row, as it sends it: its model's ``updated_at`` is
     #: ``onupdate=func.now()`` (``backend/app/models/local_preset.py`` at
     #: maziggy/bambuddy@98ecaf50, read 2026-11-01), so an edit moves it. What the kept
@@ -868,6 +872,9 @@ class LibraryListRow(BambuddyModel):
     created_at: datetime | None = None
     #: Indexed from an external folder: a delete cannot be undone (#2167).
     is_external: bool = False
+    #: ScadBuddy's own library only (#6394): a print run's per-print copy or slice
+    #: (``library_files.print_subject``), which its sweep trashes. Never Bambuddy's.
+    per_print: bool = False
 
 
 class LibraryPlate(BambuddyModel):
@@ -1025,6 +1032,26 @@ class SliceJob(BambuddyModel):
         return "Bambuddy did not say why"
 
 
+class SpoolKProfile(BambuddyModel):
+    """A spool's K-profile, as ``GET /inventory/spools`` nests it: only the preset it
+    names (#6136)."""
+
+    setting_id: str | None = None
+
+
+class CatalogFilament(BambuddyModel):
+    """A row of ``GET /api/v1/filament-catalog/`` (``FilamentResponse`` in Bambuddy's
+    ``backend/app/schemas/filament.py`` at v1.3.2b1-daily.20261113): a filament type
+    with its cost and properties, not a spool. ``density`` is g/cm³."""
+
+    id: int
+    name: str
+    type: str
+    brand: str | None = None
+    color_hex: str | None = None
+    density: float | None = None
+
+
 class Spool(BambuddyModel):
     """A row of ``GET /api/v1/inventory/spools`` — Bambuddy's own spool inventory.
 
@@ -1043,6 +1070,11 @@ class Spool(BambuddyModel):
     subtype: str | None = None
     color_name: str | None = None
     rgba: str | None = None
+    #: Comma-separated 6- or 8-digit stops of a multi-colour spool, and its swatch
+    #: effect (#6209; ``models/spool.py`` at
+    #: https://github.com/maziggy/bambuddy/blob/1aa7bce166682fde929fec0d535bdaaa22685aad/backend/app/models/spool.py).
+    extra_colors: str | None = None
+    effect_type: str | None = None
     brand: str | None = None
     label_weight: int = 0
     core_weight: int = 0
@@ -1062,6 +1094,32 @@ class Spool(BambuddyModel):
     #: or ``None``, for a spool with no tag (``tests/bambuddy/recordings/inventory-spools.json``).
     tag_uid: str | None = None
     tray_uuid: str | None = None
+    #: Its pressure-advance calibrations, each naming the ``setting_id`` of the preset it
+    #: was made with (#6136; ``SpoolKProfileResponse`` in Bambuddy's
+    #: ``backend/app/schemas/spool.py`` at v1.3.2b1-daily.20261113).
+    k_profiles: list[SpoolKProfile] = Field(default_factory=list)
+    #: What ScadBuddy's import reads (#6261, spec §8.1): the product code ScadBuddy's
+    #: spool type keeps as ``code`` (beside ``extra_colors`` and ``effect_type`` above),
+    #: Bambuddy's spool catalog entry of the core, when the row last changed, the last
+    #: scale reading (gross, the core included: ``backend/app/models/spool.py`` line 43 at
+    #: https://github.com/maziggy/bambuddy/tree/1aa7bce166682fde929fec0d535bdaaa22685aad),
+    #: the last drying and the weight lock. Bambuddy's times are naive UTC
+    #: (``created_at``/``updated_at`` in ``tests/bambuddy/recordings/inventory-spools.json``);
+    #: these read as UTC.
+    material_number: str | None = None
+    core_weight_catalog_id: int | None = None
+    updated_at: datetime | None = None
+    last_scale_weight: int | None = None
+    last_weighed_at: datetime | None = None
+    last_dried_at: datetime | None = None
+    weight_locked: bool = False
+
+    @field_validator("updated_at", "last_weighed_at", "last_dried_at")
+    @classmethod
+    def _utc(cls, value: datetime | None) -> datetime | None:
+        if value is None or value.tzinfo is not None:
+            return value
+        return value.replace(tzinfo=UTC)
 
     @property
     def remaining_g(self) -> float:

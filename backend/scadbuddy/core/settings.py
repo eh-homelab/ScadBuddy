@@ -210,6 +210,12 @@ class Settings(BaseSettings):
     # none. A typed tax charge wins over it.
     orders_tax_percent: str = "0"
     orders_tax_shipping: bool = False
+    # The handling fee for bought items (#6133, spec 2026-11-13 §10.3): a flat amount per
+    # recorded purchase in the shop's minor units (`SCADBUDDY_ORDERS_PURCHASE_FEE_FLAT_MINOR`)
+    # and a percent of their sum, 0 to 100 with at most two decimals
+    # (`SCADBUDDY_ORDERS_PURCHASE_FEE_PERCENT`). Both 0 by default: no fee.
+    orders_purchase_fee_flat_minor: int = Field(default=0, ge=0, le=1_000_000_000)
+    orders_purchase_fee_percent: str = "0"
     # SCADBUDDY_ROUGH_ESTIMATE_FACTOR: the rough estimate's allowance for walls, infill
     # and purge over a part's enclosed volume (orders spec §5.3), more than 0.
     rough_estimate_factor: str = "1.15"
@@ -222,8 +228,21 @@ class Settings(BaseSettings):
     storefront_renders_per_minute: int = Field(default=3, ge=1, le=60)
     storefront_renders_per_day: int = Field(default=30, ge=1, le=10000)
     storefront_render_concurrency: int = Field(default=2, ge=1, le=50)
+    # SCADBUDDY_STOREFRONT_SLICES_CONCURRENT: the storefront's slices that run at once,
+    # shop-wide (#6153); the rest wait. Nothing reads it until the storefront prices a
+    # design from a slice (#6153 PR A).
+    storefront_slices_concurrent: int = Field(default=1, ge=1, le=4)
     storefront_draft_ttl_days: int = Field(default=30, ge=1, le=365)
     storefront_requests_enabled: bool = False
+    # The materials a storefront print may be made of, in the shop's order of preference
+    # (#6258): a listing with no materials of its own takes these. Compared casefolded,
+    # at most `MAX_MATERIALS`, at least one (`unique_materials`). A JSON list:
+    # SCADBUDDY_STOREFRONT_MATERIALS='["PETG", "PLA"]'.
+    storefront_materials: list[str] = Field(default_factory=lambda: ["PETG", "PLA"])
+    # The most colour combinations one "Prepare every colour combination" run of a
+    # listing queues (#6237); a listing with more is refused with its count.
+    # SCADBUDDY_STOREFRONT_PREPARE_CAP.
+    storefront_prepare_cap: int = Field(default=256, ge=1, le=4096)
     # The storefront's mail (#5283, spec 2026-11-02 §5.7), sent only by the CRUD service
     # (`orders/storefront/mail.py`): the SMTP host (unset sends nothing), its port, the
     # login user, the From address, and the connection's TLS: `starttls` (the server must
@@ -392,12 +411,33 @@ class Settings(BaseSettings):
         positive = name in {"rough_estimate_factor", "pricing_usd_rate"}
         return decimal_string(value, env_var(name), positive=positive)
 
+    @field_validator("storefront_materials")
+    @classmethod
+    def _storefront_materials(cls, value: list[str]) -> list[str]:
+        materials = unique_materials(value, env_var("storefront_materials"))
+        if not materials:
+            raise ValueError(f"{env_var('storefront_materials')} needs at least one material")
+        return materials
+
     @field_validator("orders_tax_percent")
     @classmethod
     def _tax_percent(cls, value: str) -> str:
         text = decimal_string(value, env_var("orders_tax_percent"))
         if Decimal(text) >= 100:
             raise ValueError(f"{env_var('orders_tax_percent')} must be less than 100")
+        return text
+
+    @field_validator("orders_purchase_fee_percent")
+    @classmethod
+    def _purchase_fee_percent(cls, value: str) -> str:
+        label = env_var("orders_purchase_fee_percent")
+        text = decimal_string(value, label)
+        number = Decimal(text)
+        if number > 100:
+            raise ValueError(f"{label} must be at most 100")
+        exponent = number.as_tuple().exponent
+        if isinstance(exponent, int) and exponent < -2:
+            raise ValueError(f"{label} has at most two decimals")
         return text
 
     @field_validator("store_s3_prefix")
@@ -484,12 +524,15 @@ class Settings(BaseSettings):
     # SCADBUDDY_SECRET_KEY_FILE: the key-encryption key the agent uses too (#602): 32
     # random bytes, base64 (`openssl rand -base64 32`). With it the `SECRET_FIELDS` are
     # sealed at rest (`core/secrets.py`); unset, they stay plaintext, with a warning at
-    # start. Every process that reads them (the API and both workers) needs the same file.
+    # start. Only the API reads the settings' sealed values: the render and print workers
+    # read theirs, already opened, from its CRUD routes (#5298). The projects worker
+    # reads the same file for its flows' sealed payloads.
     secret_key_file: Path | None = None
     # SCADBUDDY_SECRET_KEY_PREVIOUS_FILE: during a rotation, the KEK before it (the
     # agent's variable of the same name). Tried after the current key only where a value
-    # sealed before the rotation may still be in flight: a virtual printer's access code
-    # sealed by the API and opened by the print worker's run (#4888).
+    # sealed before the rotation may still be in flight: a virtual printer's access code,
+    # which the API seals and, for a print worker's run, opens again
+    # (`printers/component.py`, #4888, #5298).
     secret_key_previous_file: Path | None = None
 
     @field_validator("database_url")
@@ -541,6 +584,10 @@ class Settings(BaseSettings):
     # SCADBUDDY_TEMPORAL_TASK_QUEUE_SLICER: where the `scadbuddy-slicer` worker serves
     # `slice_plate` (spec 2026-10-16 §5.2); `SliceWorkflow` runs it there.
     temporal_task_queue_slicer: str = "slicer"
+    # SCADBUDDY_TEMPORAL_TASK_QUEUE_CUSTOMER_FILES: where the intake worker
+    # (`python -m scadbuddy.intake_worker`, #6133) checks a customer's staged files; the
+    # API starts `CustomerFileCheck` on it.
+    temporal_task_queue_customer_files: str = "customer-files"
     # SCADBUDDY_TEMPORAL_SDK_METRICS_PORT: the loopback port where a worker's Temporal
     # SDK exports its own metrics, which the worker's /metrics appends (#3788); 0 turns
     # it off.
@@ -625,6 +672,7 @@ class Settings(BaseSettings):
         "temporal_task_queue_projects",
         "temporal_task_queue_agent_tools",
         "temporal_task_queue_slicer",
+        "temporal_task_queue_customer_files",
     )
     @classmethod
     def _temporal_without_whitespace(cls, value: str, info: ValidationInfo) -> str:
@@ -901,6 +949,10 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
             "Paired with the Temporal address: the API starts slices on it, and the"
             " scadbuddy-slicer worker must name the same queue."
         ),
+        "temporal_task_queue_customer_files": (
+            "Paired with the Temporal address: the API starts customer file checks on it,"
+            " and the intake worker must name the same queue."
+        ),
         "agent_internal_url": (
             "Where the API reaches the agent sidecar in its own pod, which the deployment lays out."
         ),
@@ -1037,8 +1089,12 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "storefront_renders_per_minute": "live",
         "storefront_renders_per_day": "live",
         "storefront_render_concurrency": "live",
+        "storefront_slices_concurrent": "live",
         "storefront_draft_ttl_days": "live",
         "storefront_requests_enabled": "live",
+        "storefront_materials": "live",
+        # Read from the store by each prepare of a listing's colours (#6237).
+        "storefront_prepare_cap": "live",
         # Read from the store by each send of the storefront's mail (#5283).
         "storefront_mail_host": "live",
         "storefront_mail_port": "live",
@@ -1054,6 +1110,9 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         # Read from the store by each recompute of an order's auto tax (#5281).
         "orders_tax_percent": "live",
         "orders_tax_shipping": "live",
+        # Read from the store by each recorded, changed or declined purchase (#6133).
+        "orders_purchase_fee_flat_minor": "live",
+        "orders_purchase_fee_percent": "live",
         # Read from the store by each unfulfil.
         "orders_allow_unfulfil": "live",
         # Read from the store by each print run's plan; a run keeps what it read.
@@ -1097,6 +1156,28 @@ def decimal_string(value: str, label: str, *, positive: bool = False) -> str:
     if number >= MAX_DECIMAL_RATE:
         raise ValueError(f"{label} must be less than {MAX_DECIMAL_RATE}")
     return text
+
+
+#: The most materials a listing or the shop's default may name (#6258).
+MAX_MATERIALS: Final = 16
+#: The longest material name: longer than any price book's (``PETG-CF``, ``PLA Basic``).
+MAX_MATERIAL_LENGTH: Final = 64
+
+
+def unique_materials(values: list[str], label: str) -> list[str]:
+    """``values`` stripped, with blanks and repeats (casefolded) dropped, the first
+    spelling kept, in order (#6258). ``ValueError`` naming ``label`` past `MAX_MATERIALS`
+    or for a name past `MAX_MATERIAL_LENGTH`."""
+    kept: dict[str, str] = {}
+    for value in values:
+        text = value.strip()
+        if len(text) > MAX_MATERIAL_LENGTH:
+            raise ValueError(f"{label}: a material is at most {MAX_MATERIAL_LENGTH} characters")
+        if text:
+            kept.setdefault(text.casefold(), text)
+    if len(kept) > MAX_MATERIALS:
+        raise ValueError(f"{label}: at most {MAX_MATERIALS} materials")
+    return list(kept.values())
 
 
 def split_urls(value: str | None) -> list[str]:

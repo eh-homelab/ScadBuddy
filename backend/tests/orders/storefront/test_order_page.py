@@ -326,6 +326,27 @@ def test_the_view_is_allowlisted() -> None:
         assert not [w for w in words if banned in w.split("_")], banned
 
 
+def test_the_sources_and_charges_carry_exactly_their_fields() -> None:
+    """#6133 PR 4, spec 2026-11-13 §10.5: a customer's files, links and charges reach the
+    page with these fields only, never a cost entry, a margin, a staff name or the
+    import's own reason."""
+    assert set(ORDER_VIEW_FIELDS["items.sources"]) == {
+        "kind",
+        "purpose",
+        "filename",
+        "url",
+        "note",
+        "status",
+        "amount_minor",
+        "shop_note",
+        "preview_url",
+        "customer_reason",
+    }
+    assert set(ORDER_VIEW_FIELDS["charges"]) == {"kind", "label", "amount_minor"}
+    assert "sources" in ORDER_VIEW_FIELDS["items"]
+    assert "charges" in ORDER_VIEW_FIELDS[""]
+
+
 def test_the_answer_holds_only_allowlisted_fields(api: TestClient, crud: CrudCaller) -> None:
     made = make_order(api, crud)
     with _orders(api).store.transaction() as conn:
@@ -748,6 +769,52 @@ def test_a_design_first_price_is_the_customers_to_accept(api: TestClient, crud: 
     assert r.json()["status"] == ORDER_WORDS["accepted"]
 
 
+def test_a_pending_purchase_offers_no_accept(api: TestClient, crud: CrudCaller) -> None:
+    """#6133 (spec 2026-11-13 §10.4): while the shop prices a thing to buy, the page does
+    not offer an accept, and the lifecycle refuses one (`purchase_pending`)."""
+    made = make_order(api, crud, approval="design_first")
+    [item] = items_of(api, made)
+    view = made.reader.answer(newest(api, item).id, "accepted", key="k1").json()
+    assert view["items"][0]["quote"]["can_accept"] is True
+    [source] = rows(
+        api,
+        "INSERT INTO order_item_sources (order_id, item_id, position, kind, purpose, url,"
+        " link_type, status) VALUES (%s, %s, 0, 'link', 'purchase',"
+        " 'https://parts.example.com/x', 'manual', 'pending') RETURNING id",
+        made.order.id,
+        item.id,
+    )
+    assert made.reader.view().json()["items"][0]["quote"]["can_accept"] is False
+    [quote] = _orders(api).store.quotes(item.id)
+    refused = made.reader.accept(quote.id, key="k2")
+    assert refused.status_code == 409 and slug(refused) == "purchase_pending"
+    _orders(api).lifecycle.decline_purchase(made.order.id, source["id"], "", BY)
+    assert made.reader.view().json()["items"][0]["quote"]["can_accept"] is True
+
+
+def test_a_pending_purchase_offers_no_answer_on_a_together_item(
+    api: TestClient, crud: CrudCaller
+) -> None:
+    """Review of #6200: on a `together` item an accepted design accepts the quote too,
+    which the gate refuses while a purchase is pending, so the page offers no answer."""
+    made = make_order(api, crud)
+    [item] = items_of(api, made)
+    assert made.reader.view().json()["items"][0]["revisions"][-1]["can_answer"] is True
+    [source] = rows(
+        api,
+        "INSERT INTO order_item_sources (order_id, item_id, position, kind, purpose, url,"
+        " link_type, status) VALUES (%s, %s, 0, 'link', 'purchase',"
+        " 'https://parts.example.com/x', 'manual', 'pending') RETURNING id",
+        made.order.id,
+        item.id,
+    )
+    assert made.reader.view().json()["items"][0]["revisions"][-1]["can_answer"] is False
+    refused = made.reader.answer(newest(api, item).id, "accepted", key="k1")
+    assert refused.status_code == 409 and slug(refused) == "purchase_pending"
+    _orders(api).lifecycle.decline_purchase(made.order.id, source["id"], "", BY)
+    assert made.reader.view().json()["items"][0]["revisions"][-1]["can_answer"] is True
+
+
 # -- cancel ------------------------------------------------------------------------------
 
 
@@ -765,6 +832,47 @@ def test_the_customer_cancels_before_anything_is_approved(
         if e.kind == "order.status" and e.detail["to"] == "cancelled"
     ]
     assert event.by.kind == "customer" and event.detail["reason"] == "Changed my mind"
+
+
+def test_the_customers_cancel_wakes_the_staged_files_watchers(
+    api: TestClient, crud: CrudCaller, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6164: the files' watchers move to the ended-order grace at once."""
+    from scadbuddy.orders.storefront import staged_files
+
+    told: list[tuple[list[str], str]] = []
+
+    async def poke(_state: Any, uploads: list[str], signal: str) -> None:
+        told.append((uploads, signal))
+
+    made = make_order(api, crud)
+    asked: list[str | None] = []
+
+    def uploads_of(_state: Any, *, order_id: str | None = None) -> list[str]:
+        asked.append(order_id)
+        return ["u1"]
+
+    monkeypatch.setattr(staged_files, "poke", poke)
+    monkeypatch.setattr(staged_files, "uploads_of", uploads_of)
+    assert made.reader.cancel(key="k1").status_code == 200
+    assert asked == [made.order.id]
+    assert told == [(["u1"], "closed")]
+
+
+def test_the_customers_cancel_answers_when_its_staged_files_cannot_be_read(
+    api: TestClient, crud: CrudCaller, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6164: the cancel is committed first; a failed read is logged, never raised."""
+    from scadbuddy.orders.storefront import staged_files
+
+    def broken(*_args: Any, **_kwargs: Any) -> list[str]:
+        raise RuntimeError("the database went away")
+
+    made = make_order(api, crud)
+    monkeypatch.setattr(staged_files, "uploads_of", broken)
+    r = made.reader.cancel(key="k1")
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == ORDER_WORDS["cancelled"]
 
 
 def test_cancel_is_refused_after_an_approval(api: TestClient, crud: CrudCaller) -> None:

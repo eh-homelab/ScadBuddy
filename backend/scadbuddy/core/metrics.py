@@ -471,7 +471,8 @@ class Metrics:
         )
         self.store_render_key_fallback = Gauge(
             "scadbuddy_store_render_key_fallback",
-            "1 while render workers hold the full Bambuddy key (spec 2026-09-27 §9).",
+            "1 while this process's store holds the full Bambuddy key because no render key"
+            " is saved (spec 2026-09-27 §9); a standalone render worker never gets it.",
             registry=r,
         )
         self.worker_cache_bytes = Gauge(
@@ -542,6 +543,14 @@ class Metrics:
         self.assets_swept = Counter(
             "scadbuddy_assets_swept",
             "Stored files removed by the sweep because nothing referenced or used them.",
+            registry=r,
+        )
+        # A customer's staged files (#6133): the backstop's repairs, each a bug signal.
+        self.staged_files_repaired = Counter(
+            "scadbuddy_staged_files_repaired",
+            "Staged customer files the backstop repaired, by kind: a staging object no row"
+            " names (orphan_object) or a row whose watcher was not running (unwatched_row).",
+            ["kind"],
             registry=r,
         )
 

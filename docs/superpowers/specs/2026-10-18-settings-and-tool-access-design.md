@@ -85,7 +85,7 @@ Read on main at `90d8d3025`; paths relative to the repo root.
   (`SOURCES`, `:51`); its overrides are `ai_settings` key `builtin_tools.scadbuddy`,
   tighten-only (`sanitise` `:70`, `validateOverrides` `:89`, 400 on a lowered tier
   `:104`). The headless Playwright browser and `builtin_tools.playwright` were removed
-  (`agent/src/db/migrations/20261012T0454Z_drop_headless_browser.sql`); the browser tools
+  (`backend/scadbuddy/migrations_agent/20261012T0454Z_drop_headless_browser.sql`); the browser tools
   now have origin allow and deny lists (`routes/browserOrigins.ts`, #3654).
 - Switches in `ai_settings`: `http_request_enabled` (`harness/httpRequest.ts:79`),
   `printer_camera_enabled` (`tools/switches.ts:12`), `scadbuddy_plugin_enabled`

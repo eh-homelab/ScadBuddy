@@ -9,6 +9,7 @@ import {
   IDLE_TIMEOUT_SECONDS,
   makePing,
   makeReady,
+  makeUntilReady,
   SQL_CONNECTIONS,
   TEST_LOCK_CONNECTIONS,
 } from '../src/db.js'
@@ -98,6 +99,20 @@ describe('makeReady', () => {
     expect(await Promise.all([ready(), ready()])).toEqual([true, true])
     expect(await ready()).toBe(true)
     expect(calls).toBe(2)
+  })
+})
+
+describe('makeUntilReady (#5299)', () => {
+  it("calls ready() again, with back-off, until the first true, and shares that one wait", async () => {
+    // The API may take longer than one ready() to apply the agent's migrations: a start task
+    // that ran once on the first false would never run in this process.
+    const answers = [false, false, true]
+    const ready = vi.fn(() => Promise.resolve(answers.shift() ?? true))
+    const untilReady = makeUntilReady(ready, { firstDelayMs: 1, maxDelayMs: 2 })
+    await Promise.all([untilReady(), untilReady()])
+    expect(ready).toHaveBeenCalledTimes(3)
+    await untilReady()
+    expect(ready).toHaveBeenCalledTimes(3)
   })
 })
 

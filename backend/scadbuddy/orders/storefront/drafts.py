@@ -49,8 +49,15 @@ from scadbuddy.orders.currency import minor_exponent
 from scadbuddy.orders.lifecycle import LifecycleError, NewModelItem, NewRequestItem
 from scadbuddy.orders.models import Attachment, AttachmentKind, Order, OrderItem
 from scadbuddy.orders.store import item_subject
+from scadbuddy.orders.storefront.limits import RenderLimits
 from scadbuddy.orders.storefront.listings import PUBLIC_MEDIA_TTL, problem, public_content
+from scadbuddy.orders.storefront.model_requests import (
+    checked_purchase_links,
+    draft_sources,
+    insert_links,
+)
 from scadbuddy.orders.storefront.renders import checked_choice
+from scadbuddy.orders.storefront.staged_files import poke, uploads_of
 from scadbuddy.orders.storefront.visitors import VisitorStore, token_sha256, visitor_actor
 from scadbuddy.orders.storefront.wire import (
     MAX_REQUEST_FILE_BYTES,
@@ -65,10 +72,16 @@ from scadbuddy.orders.storefront.wire import (
     PublicShippingOption,
     shown_label,
 )
+from scadbuddy.render.job_models import JobNotFoundError
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.content_models import BlobScope
 from scadbuddy.store.s3 import S3ContentBackend
-from scadbuddy.storefront.uploads import checked_text, file_too_large, too_many_files
+from scadbuddy.storefront.uploads import (
+    PurchaseLinkAsk,
+    checked_text,
+    file_too_large,
+    too_many_files,
+)
 from scadbuddy.storefront.wire import ITEM_ID, unescape_filename
 
 if TYPE_CHECKING:
@@ -94,7 +107,7 @@ def item_not_found() -> ApiError:
     return problem(status.HTTP_404_NOT_FOUND, "item_not_found", "There is no such item.")
 
 
-def _draft_changed() -> ApiError:
+def draft_changed() -> ApiError:
     """409 ``draft_changed``: the draft moved under the write (submitted, or swept)."""
     return problem(
         status.HTTP_409_CONFLICT, "draft_changed", "Your order has changed. Load it again."
@@ -108,7 +121,7 @@ def requests_disabled() -> ApiError:
     )
 
 
-def _draft_full() -> ApiError:
+def draft_full() -> ApiError:
     """422 ``draft_full``: the draft holds `MAX_DRAFT_ITEMS` items already."""
     return problem(
         status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -248,6 +261,11 @@ async def _view(state: AppState, order: Order) -> DraftView:
         )
 
     rows, offered, files, listings, shipping, currency = await asyncio.to_thread(read)
+    sources = (
+        await asyncio.to_thread(draft_sources, state, order.id)
+        if any(item.kind == "request" for item in rows)
+        else {}
+    )
     captions = _captions(listings)
     by_subject: dict[str, list[Attachment]] = {}
     for attachment in files:
@@ -279,6 +297,8 @@ async def _view(state: AppState, order: Order) -> DraftView:
                 labels=_labels(item, inputs, captions),
                 notes=item.notes if item.kind == "request" else None,
                 attachments=attachments,
+                own_model=sources.get(item.id, (False, []))[0],
+                sources=sources.get(item.id, (False, []))[1],
             )
         )
     return DraftView(
@@ -295,11 +315,12 @@ def _stored(state: AppState, key: str, route: str, asked: Any) -> Replay | None:
         return stored(conn, "storefront", key, route, asked)
 
 
-def request_sent(state: AppState, key: str) -> bool:
-    """Whether ``key`` holds a committed design request: its retry is answered even
-    once "Ask for a design" is off (`add_request`)."""
+def request_sent(state: AppState, key: str, route: str | None = None) -> bool:
+    """Whether ``key`` holds a committed write of ``route`` (a design request's by
+    default): its retry is answered even once "Ask for a design" is off
+    (`add_request`)."""
     with state.projection.pool.connection() as conn:
-        return has_reply(conn, "storefront", key, REQUEST_ROUTE)
+        return has_reply(conn, "storefront", key, route or REQUEST_ROUTE)
 
 
 async def _answer(state: AppState, visitor_id: str, reply: Replay) -> DraftView:
@@ -317,8 +338,13 @@ async def _answer(state: AppState, visitor_id: str, reply: Replay) -> DraftView:
 
     order = await asyncio.to_thread(find)
     if order is None:
-        raise _draft_changed()
+        raise draft_changed()
     return await _view(state, order)
+
+
+async def answer(state: AppState, visitor_id: str, reply: Replay) -> DraftView:
+    """`_answer`, for the other draft writes (`model_requests.add_model_request`)."""
+    return await _answer(state, visitor_id, reply)
 
 
 async def get_draft(state: AppState, visitor_id: str) -> DraftView | None:
@@ -334,6 +360,29 @@ async def get_draft(state: AppState, visitor_id: str) -> DraftView | None:
     return None if order is None else await _view(state, order)
 
 
+async def _render_colours(state: AppState, visitor_id: str, render_key: str) -> list[str] | None:
+    """The slot colours of the visitor's own done render of ``render_key``, or None when
+    it has none (#6152): the add fills each slot the page left out with the filament of
+    its colour in the resolved material (#6258)."""
+
+    def read() -> list[str] | None:
+        visitor = VisitorStore(state.projection.pool).find(visitor_id)
+        if visitor is None:
+            return None
+        job_id = RenderLimits(state.projection.pool).job_of(visitor.id, render_key)
+        if job_id is None:
+            return None
+        try:
+            job = state.render.store.read(job_id)
+        except JobNotFoundError:
+            return None
+        if job.state != "done" or job.result is None:
+            return None
+        return list(job.result.colors)
+
+    return await asyncio.to_thread(read)
+
+
 async def add_listing_item(
     state: AppState, visitor_id: str, key: str, body: AddListingItem
 ) -> DraftView:
@@ -341,13 +390,22 @@ async def add_listing_item(
     add: a model item with revision 1, titled as the listing. A retry of a committed add
     (the same key) answers its order as it is now and does nothing else. Refusals: 404
     ``listing_not_found``, 409 ``listing_changed``, 422 ``input_outside_listing`` (with
-    ``name`` and ``reason``), 422 ``draft_full``, 409 ``draft_changed``."""
+    ``name`` and ``reason``), 422 ``listing_colours_clash`` (with ``parts``), 409
+    ``render_pending`` (`checked_choice`, #6152, #6258), 422 ``draft_full``, 409
+    ``draft_changed``. Each slot takes the filament of its colour in the one material
+    the visitor's colours resolve to (`inputs.py` `resolve_choice`)."""
     orders = _orders(state)
     asked = {"visitor": token_sha256(visitor_id), **body.model_dump(mode="json")}
     reply = await asyncio.to_thread(_stored, state, key, ADD_ROUTE, asked)
     if reply is not None:
         return await _answer(state, visitor_id, reply)
-    listing, resolved = await checked_choice(orders, body)
+    shop = await asyncio.to_thread(lambda: state.settings_store.snapshot().runtime)
+    listing, resolved, _choice = await checked_choice(
+        orders,
+        body,
+        shop.storefront_materials,
+        render_colours=lambda key: _render_colours(state, visitor_id, key),
+    )
     visitor = await asyncio.to_thread(VisitorStore(state.projection.pool).ensure, visitor_id)
     by = visitor_actor(visitor)
     currency = await asyncio.to_thread(lambda: orders.price_book.policy()[0])
@@ -367,7 +425,7 @@ async def add_listing_item(
             items = orders.lifecycle.add_items(draft.id, by, [entry], cart_of=visitor.id, conn=conn)
             # Under the order's lock, which the add took: a full draft takes nothing.
             if len(orders.store.items(draft.id, conn=conn)) > MAX_DRAFT_ITEMS:
-                raise _draft_full()
+                raise draft_full()
             order = orders.store.order(draft.id, conn=conn)
             assert order is not None
             changes.append((order, items))
@@ -382,7 +440,7 @@ async def add_listing_item(
     try:
         reply = await asyncio.to_thread(write)
     except LifecycleError:
-        raise _draft_changed() from None
+        raise draft_changed() from None
     return await _answer(state, visitor_id, reply)
 
 
@@ -408,6 +466,8 @@ async def remove_item(state: AppState, visitor_id: str, key: str, item_id: str) 
         changes: list[Order] = []
 
         def remove(conn: Any) -> Replay:
+            # The staged files the line held, for their watchers (#6133).
+            freed.extend(uploads_of(state, item_id=item_id, conn=conn))
             orders.lifecycle.delete_item(draft.id, item_id, by, cart_of=visitor.id, conn=conn)
             order = orders.store.order(draft.id, conn=conn)
             assert order is not None
@@ -422,12 +482,14 @@ async def remove_item(state: AppState, visitor_id: str, key: str, item_id: str) 
             orders.lifecycle.told(order)
         return done
 
+    freed: list[str] = []
     try:
         reply = await asyncio.to_thread(write)
     except LifecycleError as error:
         if error.not_found:
             raise item_not_found() from None
-        raise _draft_changed() from None
+        raise draft_changed() from None
+    await poke(state, freed, "unclaimed")
     return await _answer(state, visitor_id, reply)
 
 
@@ -481,9 +543,12 @@ async def add_request(
     *,
     text: str,
     files: Sequence[UploadFile],
+    purchase_links: Sequence[PurchaseLinkAsk] = (),
 ) -> DraftView:
     """A design request added to the visitor's draft: a ``request`` item whose notes are
-    ``text``, with each file on it as a ``reference`` attachment. Each file is kept as
+    ``text``, with each file on it as a ``reference`` attachment, and each thing to buy
+    (#6133, spec 2026-11-13 §10.1) as a `pending` purchase link
+    (`model_requests.checked_purchase_links`). Each file is kept as
     ``attachment-<sha256>`` (what the back office reads) and as `request_file_key` (what
     the visitor's presigned GET reads) before the rows; a refused row leaves unheld
     objects for the store's sweeps. A retry of a committed request (the same key)
@@ -491,18 +556,21 @@ async def add_request(
     Refusals: 404 ``requests_disabled`` unless ``storefront_requests_enabled``, after
     the retry's lookup; 422 ``request_text``
     (`checked_text`: not 1 to `MAX_REQUEST_TEXT` characters of plain text); 422
-    ``too_many_files`` past `MAX_REQUEST_FILES`; 413 ``file_too_large``; 415
+    ``too_many_files`` past `MAX_REQUEST_FILES`; 422 ``link_invalid`` and
+    ``too_many_links`` for the things to buy; 413 ``file_too_large``; 415
     ``file_type``; 422 ``draft_full``; 409 ``draft_changed``; 503
     ``storefront_needs_s3``."""
     # Before any file is read or stored.
     text = checked_text(text)
     if len(files) > MAX_REQUEST_FILES:
         raise too_many_files()
+    links = checked_purchase_links(purchase_links)
     checked = [await asyncio.to_thread(_checked_file, upload) for upload in files]
     asked = {
         "visitor": token_sha256(visitor_id),
         "text": text,
         "files": [{"filename": f.filename, "sha256": f.sha256} for f in checked],
+        "purchase_links": [{"url": link.url, "note": link.note} for link in links],
     }
     reply = await asyncio.to_thread(_stored, state, key, REQUEST_ROUTE, asked)
     if reply is not None:
@@ -537,7 +605,7 @@ async def add_request(
                 draft.id, by, [entry], cart_of=visitor.id, conn=conn
             )
             if len(orders.store.items(draft.id, conn=conn)) > MAX_DRAFT_ITEMS:
-                raise _draft_full()
+                raise draft_full()
             for file, blob in zip(checked, kept, strict=True):
                 attachment = orders.lifecycle.add_attachment(
                     draft.id,
@@ -558,6 +626,7 @@ async def add_request(
                 orders.store.hold_with_attachment(
                     conn, request_file_key(file.sha256), attachment.id
                 )
+            insert_links(conn, draft.id, item.id, links)
             order = orders.store.order(draft.id, conn=conn)
             assert order is not None
             changes.append((order, [item]))
@@ -574,5 +643,5 @@ async def add_request(
     try:
         reply = await asyncio.to_thread(write)
     except LifecycleError:
-        raise _draft_changed() from None
+        raise draft_changed() from None
     return await _answer(state, visitor_id, reply)

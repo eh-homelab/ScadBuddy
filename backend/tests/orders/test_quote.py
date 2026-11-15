@@ -463,7 +463,9 @@ def test_a_body_only_check_prices_nothing_with_archived_pins_alone(shop: Shop) -
 
 async def test_ensure_output_reuses_a_matching_output(shop: Shop) -> None:
     item = shop.lifecycle.update_item(shop.order.id, shop.item.id, BY, output_id="out-9")
-    meta = OutputMeta.model_construct(id="out-9", slug="demo", model_version="a" * 40)
+    meta = OutputMeta.model_construct(
+        id="out-9", slug="demo", model_version="a" * 40, job_id="job-0"
+    )
     renders = FakeRenders()
 
     async def never(body: dict[str, Any]) -> dict[str, Any]:
@@ -521,7 +523,9 @@ async def test_an_output_saved_before_defaults_were_filled_still_matches(shop: S
     """#4774: an output saved before renders filled defaults records only the params it
     was sent; a reference that names their defaults is the same render, both ways, at
     the commit's schema. Quoting it saves nothing and keeps the item's output."""
-    meta = OutputMeta.model_construct(id="out-9", slug="demo", model_version="a" * 40)
+    meta = OutputMeta.model_construct(
+        id="out-9", slug="demo", model_version="a" * 40, job_id="job-0"
+    )
     sparse: dict[str, Any] = {"params": {"width": 10}, "v": 0}
     full: dict[str, Any] = {"params": {"width": 10, "label": "hi"}, "v": 0}
     reference = reference_of(shop.item)
@@ -564,7 +568,9 @@ async def test_an_output_saved_before_defaults_were_filled_still_matches(shop: S
 async def test_an_output_with_malformed_params_is_compared_exactly(shop: Shop) -> None:
     """A malformed output row's params are not read as none at all: filled, they would
     look like an all-defaults render and match an item that names the defaults."""
-    meta = OutputMeta.model_construct(id="out-9", slug="demo", model_version="a" * 40)
+    meta = OutputMeta.model_construct(
+        id="out-9", slug="demo", model_version="a" * 40, job_id="job-0"
+    )
     full = {"params": {"width": 10, "label": "hi"}, "v": 0}
     resolved = ResolvedReference(
         reference_of(shop.item).model_copy(update={"inputs": full}), shop.item.colours
@@ -580,7 +586,9 @@ async def test_ensure_output_reuses_an_arranged_output(shop: Shop) -> None:
     """#4565: an arranged output records a content hash, not the commit the item pins,
     and no render of the reference remakes the arrangement: it is the one sliced."""
     item = shop.lifecycle.update_item(shop.order.id, shop.item.id, BY, output_id="out-9")
-    meta = OutputMeta.model_construct(id="out-9", slug="demo", model_version="sha256:" + "c" * 64)
+    meta = OutputMeta.model_construct(
+        id="out-9", slug="demo", model_version="sha256:" + "c" * 64, job_id="job-0"
+    )
     renders = FakeRenders()
 
     async def never(body: dict[str, Any]) -> dict[str, Any]:
@@ -703,6 +711,7 @@ async def test_the_quote_records_its_whole_print_setup(shop: Shop, tmp_path: Pat
                 "on_build_plate_only": None,
             },
             "print_sequence": "by object",
+            "process_overrides": None,
         }
         assert recorded.filament_plan == request.filament_plan.model_dump(mode="json")
 
@@ -1021,7 +1030,11 @@ class SavedOutputs:
             output_id = f"out-{len(self.created)}"
         colours = ["#ff0000", "#00ff00"]
         self.metas[output_id] = OutputMeta.model_construct(
-            id=output_id, slug="demo", model_version="a" * 40, colors=colours
+            id=output_id,
+            slug="demo",
+            model_version="a" * 40,
+            colors=colours,
+            job_id=body.get("job_id", "job-0"),
         )
         self.created.append(output_id)
         return {"id": output_id, "colors": colours}
@@ -1265,4 +1278,27 @@ async def test_a_revision_made_after_the_check_refuses_the_slice(
     with pytest.raises(ApiError) as during:
         await quote_run(run, shop.order.id, shop.item.id, request, BY, expected_revision_id=current)
     assert during.value.type == PROBLEMS + "revision_superseded"
+    assert shop.rows.quotes(shop.item.id) == []
+
+
+class FollowRefused(FakeSlicer):
+    """A slicer whose follow of a plate fails as a sliced plate that cannot be priced."""
+
+    async def poll(self, started: PreviewStarted, subject: str) -> SlicedPlate | None:
+        raise QuoteError(f"plate {started.plate_id}: the slicer lost it", plate=started.plate_id)
+
+
+async def test_a_quote_error_while_following_a_slice_is_the_sliced_plate_problem(
+    shop: Shop, tmp_path: Path
+) -> None:
+    """#6370 review: the start and the follow run inside the price step
+    (`slice_and_price`), so a `QuoteError` raised while a back-office slice is followed is
+    the 422 ``sliced_plate`` problem naming the plate, and no quote is recorded."""
+    run = run_of(shop, tmp_path, {1: sliced_plate(1, 3600, [12.5, 3.0])})
+    run.slicer = FollowRefused({1: sliced_plate(1, 3600, [12.5, 3.0])})
+    request = shop.request(s0=shop.pla, s1=shop.petg)
+    with pytest.raises(ApiError) as refused:
+        await quote_run(run, shop.order.id, shop.item.id, request, BY)
+    assert (refused.value.status, refused.value.type) == (422, PROBLEMS + "sliced_plate")
+    assert refused.value.extensions["plate"] == 1
     assert shop.rows.quotes(shop.item.id) == []

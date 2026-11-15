@@ -25,7 +25,7 @@ from psycopg.types.json import Jsonb
 from scadbuddy.api import crud_print
 from scadbuddy.api.components import getter_for
 from scadbuddy.api.crud_areas import CRUD_AREAS
-from scadbuddy.auth.caller_grants import GRANTS, PRINT_GRANTS, PRINT_SEQUENCES, SEQUENCES
+from scadbuddy.auth.caller_grants import GRANTS
 from scadbuddy.auth.service_auth import ServiceAuth
 from scadbuddy.bambuddy.models import LocalPresetDetail
 from scadbuddy.core.problems import install_problem_handlers
@@ -96,9 +96,9 @@ def test_the_area_is_served_and_awaited() -> None:
 
 
 def test_the_print_worker_is_granted_no_table() -> None:
-    """Its last tables went behind these routes: it holds no pool (#5298 Task 31)."""
-    assert PRINT_GRANTS == {} and GRANTS["print"] == {}
-    assert PRINT_SEQUENCES == () and SEQUENCES["print"] == ()
+    """Its last tables went behind these routes: it holds no pool (#5298 Task 31), and
+    it has no list at all since #5298 Task 35."""
+    assert "print" not in GRANTS
 
 
 @pytest.mark.parametrize(("store", "remote", "refused", "composed"), STORES)
@@ -420,9 +420,10 @@ async def test_natural_writes_sent_twice_leave_what_one_left(
     uses = [SpoolUse(slot_id=1, spool_id=spool.id, grams=12.5)]
     remote_native = RemoteNativeSpools(blocking)
     await asyncio.to_thread(remote_native.record_uses, RUN, "p1", uses)
-    once = _rows(store, "native_spool_uses")
+    once = _rows(store, "filament_spool_events")
     await asyncio.to_thread(remote_native.record_uses, RUN, "p1", uses)
-    assert _rows(store, "native_spool_uses") == once and len(once) == 1
+    assert _rows(store, "filament_spool_events") == once
+    assert [row["kind"] for row in once].count("print_started") == 1
 
 
 @pytest.mark.requires_postgres

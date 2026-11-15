@@ -6,10 +6,15 @@ These notes cover `agent/`; paths are repo-relative; the root CLAUDE.md has the 
 
 The rule is in the root CLAUDE.md, "Database access (#5295)". Today the agent sidecar and
 the agent workers connect as the database owner (`SCADBUDDY_DATABASE_URL`), keep the
-`ai_*` tables, and run SQL on backend tables (`events`, `workflow_runs`,
-`workflow_run_decisions`, `flow_grants`, `flow_grant_uses`;
-`backend/scadbuddy/auth/caller_grants.py` `AGENT_GRANTS`). The workspace files' `blob_refs`
-holds go through CRUD routes (#5299, below), no longer a trigger. `src/db/grants.ts`
+`ai_*` tables, and run SQL on two backend tables in the gate's transaction (`flow_grants`,
+`flow_grant_uses`: `src/gate/store.ts` `grantInput`, under the grant row's share lock, until
+the gate moves to the CRUD service, #5299 step 10; `backend/scadbuddy/auth/caller_grants.py`
+`AGENT_GRANTS`). The agent's other reads of backend tables (the event log, flow runs, their
+decisions and grants) go only through CRUD routes (#5299 D7, below); the API revokes its
+role's grants on `events`, `workflow_runs` and `workflow_run_decisions` at every start
+(`backend/scadbuddy/auth/revoke.py` `RETIRED_GRANTS`), which binds nothing while the agent
+connects as the owner (until #5299 step 12); `test/retiredTables.test.ts` is the guard. The workspace files' `blob_refs` holds go through CRUD routes
+(#5299, below), no longer a trigger. `src/db/grants.ts`
 grants the API's role its `ai_*` reads and writes, and revokes what it once granted the
 projects worker's role `scadbuddy_projects` (#5298; the worker holds no database).
 Claude Code, and any plugin package approved with `allow_refused`, runs in the same pod
@@ -33,7 +38,72 @@ is tried again at the next call and logged once as "waiting for the backend". Wi
 
 The agent's own CRUD routes (`/api/v1/internal/crud/agent/`, class `crud.agent`, #5330): the
 holds of the workspace files' blobs (`workspace-blob-refs`, #5299; see the workspace under
-"Layout"), and the assistant's spend on an order. A session's successful `order_item_revision_add` (or
+"Layout"), the assistant's spend on an order, and its reads of the backend's tables (#5299
+D7): area `events` (the LISTEN gap replay's head and gap, `src/events/eventLogReads.ts`, used
+by `pgListener.ts`) and area `flows` (a run's starter, its decision checks, a grant in force,
+a run's queue and steps, the waiting runs, the parent-hop approvals and which of them still
+wait: `src/flows/backendReads.ts` `CrudFlowRunReads`, used by `temporal/flowRuns.ts`,
+`flows/queue.ts`, `flows/escalations.ts` and `temporal/toolActivities.ts`
+`PgApprovalRecords`), all over `src/api/crudRead.ts` `crudRead`. There is no SQL fallback:
+`test/retiredTables.test.ts` fails on agent SQL that names `events`, `workflow_runs` or
+`workflow_run_decisions`, and the Postgres tests answer the flow reads with
+`test/support/sqlFlowRunReads.ts` (the backend's queries on the test database). Its settings, Claude credentials and payload data keys (#5299 step 4, D5;
+#5342; `SECRET_AREAS`): area `settings` (`src/credentials.ts` `SettingsStore`'s `remote`,
+`CrudSettings`: a compare-and-set sends what its check read as `expect`, and the API sends the
+warm-evict and runtime NOTIFYs in the write's transaction, so the LISTEN side is unchanged),
+area `credentials` (`CrudCredentials`, `gatedCredentials`: the API seals and opens with the
+KEK, the routes and the turn's pool read the API's key through the repo's `opener`, and a turn's
+credentials come from `…/credentials/reveal`, audited per call) and area `payload-keys`
+(`src/temporal/payloadCodec.ts` `CrudPayloadKeys`, `gatedPayloadKeys`: a subject's data key,
+made under the subject's lock and never for a forgotten subject, audited as kind `payload_key`
+(a release once per subject in 10 minutes), cached 30 s here).
+None needs a KEK in this process once listed. Area `forget` (#5299 step 6, `FORGET_AREAS`;
+backend `api/crud_agent_forget.py`): `forgetSubject`'s key transaction (`src/sessions/forget.ts`
+`CrudSubjectKeys.forget`: under the subject's lock, the tombstone, a flow run's images and the
+key; a session with forks is refused `forks-take-ranges` and forgotten in the agent's own
+transaction, whose `copyForkRanges` opens and seals its transcript, until the sessions move,
+#5299 step 9), a browser call's key dropped and the hourly key sweep (`gatedKeyDeletes`), and a
+flow run's images (`src/temporal/flowBlobs.ts` `CrudFlowBlobs`, `gatedFlowBlobs`: sealed here,
+sent as multipart bytes, the tombstone check and the cap in the API's transaction).
+Area `workspace` (#5299 step 7, `WORKSPACE_AREAS`; backend `api/crud_agent_workspace.py`):
+the workspace files (`src/workspace/crudStore.ts` `CrudSessionFiles`, `gatedWorkspaceFiles`
+over the `WorkspaceFiles` interface `SessionFiles` also takes): the API seals, stores and opens
+each file and re-wraps principals' keys, a write's row, blob hold and `workspace.file` events
+are one transaction there (`WriteOptions.log`, `DeleteOptions.log`), and the reconcile is one
+transaction under `RECONCILE_LOCK`; this process sends and gets plaintext only.
+Areas `session-blobs`, `attachments` and `http-bodies` (#5299 step 7, `BLOB_AREAS`; backend
+`api/crud_agent_blobs.py`): a session's images (`src/sessions/crudBlobs.ts` `CrudSessionBlobs`
+behind the `SessionImages` interface; a durable tool call's images replaced whole, and a turn
+placement's write fenced by `TurnFence`, checked `FOR SHARE` in the API's transaction), the
+staged attachments (`src/attachments/crudStore.ts` `CrudAttachmentStore` behind `Attachments`)
+and the saved http_request bodies (`CrudHttpBodies`, read by range), each chosen per call by
+`gated` in `main.ts`; the bytes are multipart parts and answer bodies. `copyForkBlobs` stays
+SQL, in the forget's transaction, until #5299 step 9.
+A session's background tasks, a Monitor's events
+and a Workflow's journal and child chats (area `background-tasks`, `src/background/store.ts`
+`BackgroundTaskStore`'s `remote`, `CrudBackgroundTasks`) and the command record `ai_operations`
+(area `operations`, `src/operations/store.ts` `CrudOperations`; the API writes the operation's
+activity row in its transaction) are #5299 step 8 (`TASK_AREAS`, backend
+`api/crud_agent_tasks.py`); their bodies go through `crudRead.ts` `wellFormed`, since the API
+refuses a lone surrogate. These ten have a rolling-deploy fallback:
+`src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` from the start with back-off
+(1 s doubling to 30 s) until every one is listed, and until then each stays on SQL, for an API
+pod older than the routes. The small stores (#5299 step 5, `src/api/crudStores.ts`
+`STORE_AREAS`, backend `api/crud_agent_stores.py` and `api/crud_agent_notify.py`) take the same
+fallback, chosen per call by `gated` (a store's SQL class until its area is listed, its `Crud…`
+class after): area `activity-kinds` (`activity/kinds.ts` `crudUpsertActivityKinds`),
+`browser-origins` (`browser/store.ts` `BrowserOrigins`'s `remote`, `CrudSessionOrigins`),
+`bridge-tabs` (`CrudSessionTabStore`, `CrudTabOwnerStore`, `CrudTabImageStore`: an image's bytes
+are the body either way, `crudCall`), `pairings` (`CrudPairingStore`: only the code's hash
+leaves this process; the API holds the advisory lock and the `FOR UPDATE`), `mcp-tokens`
+(`CrudTokenStore`: a mint and a verify send the token's hash only, expiry by the database's
+clock) and `notify` (`notify/pushStore.ts` `CrudPushStore`, `notify/channels.ts`
+`CrudChannelRows` through `ChannelStore`'s `remote`: the API seals and opens the VAPID key,
+the subscriptions' keys and the channels' tokens, and re-wraps them at a rotation). With no
+KEK here Web Push and the channels work once `notify` is listed (`available`); the test is
+`test/crudStores.test.ts`. A route's
+answer counts only with `X-ScadBuddy-Crud: 1`; any other failure takes the read's existing
+error path (a lookup failure the activity retries, a 500, a resync). A session's successful `order_item_revision_add` (or
 `_after_acceptance`) is an `ai_session_order_costs` row (`src/sessions/orderCosts.ts`
 `OrderCosts`, a `TouchedSink` beside `SessionResources`); each turn's end
 (`temporal/session/finishActivity.ts`, a retry too, not awaited: it never holds up the next
@@ -65,6 +135,10 @@ pnpm install --frozen-lockfile
 pnpm lint && pnpm typecheck && pnpm test && pnpm build
 docker build --target agent -t scadbuddy-agent:dev .   # checks the bundled Claude Code binary
 ```
+
+`pnpm exec tsc` and `pnpm exec vitest` skip `gen:api`: after a fetch of main, TS2820/TS2345
+errors that name an `Operation` or an API path in `src/tools/*.ts` mean `src/api/schema.d.ts` is
+stale. Run `pnpm gen:api`.
 
 Tests never call Anthropic. `test/run.test.ts` runs the bundled Claude Code binary
 against a local fake Anthropic endpoint; `test/pg.test.ts` needs
@@ -154,7 +228,10 @@ opens every one and seals it again byte for byte).
   `agent.turn.spawn` (`warm.outcome`), `agent.turn.release`, the turn's span of each call with
   `scadbuddy.eager` (above), and each ToolCall's
   `agent.tool/<name>` with `scadbuddy.task_queue`, which `deploy/grafana/scadbuddy-agent.json`
-  charts; and a browser call to another replica's tab, `agent.bridge.call` (`bridge/relay.ts`),
+  charts; a flow run's call (a `flow-<id>` workflow's ScadBuddy tool or `turn:` activity) has the
+  same `agent.tool/<name>` span, with `scadbuddy.flow_run_id`, `scadbuddy.tool_use_id`,
+  `scadbuddy.tier` (once known), `scadbuddy.outcome` and `scadbuddy.task_queue` (#6123; a call that
+  throws before it names an outcome reads `error`, `flowCallSpan`); and a browser call to another replica's tab, `agent.bridge.call` (`bridge/relay.ts`),
   whose `scadbuddy.bridge.task_timeouts` counts its BridgeCall's workflow tasks that timed out
   (Temporal started them and never delivered them, #5939), read from the history (once the workflow
   closes) for an aborted call and for one that took at least `BRIDGE_WORKFLOW_TASK_TIMEOUT_MS`,
@@ -217,11 +294,20 @@ opens every one and seals it again byte for byte).
   auth in `src/auth/`); every `/api/v1` operation needs a tool or a
   `src/tools/coverage.ts` entry, or `test/coverage.test.ts` fails.
   - Database: the agent owns the `ai_*` tables (today's state; #5295 moves them behind
-    CRUD routes and takes the agent's database secret away, #5299). Schema changes are new files in
-    `src/db/migrations/` (see "Migrations" below; `src/db/migrations.ts` applies them at
-    start under advisory lock "SCADAGNT" with `lock_timeout`/`statement_timeout`,
-    ledger `ai_migrations` with a sha256 per file: an edited merged file stops the
-    service at start; separate from the backend's `scadbuddy_migrations`). Secrets are
+    CRUD routes and takes the agent's database secret away, #5299). The agent does not
+    migrate them: the API applies their files at its start (root CLAUDE.md "Migrations
+    (#491)", #5299 D6), and `ready()` (`src/db.ts`) is true once `ai_migrations` holds
+    every file in `src/db/expected-migrations.json` (`src/db/schema.ts` `awaitMigrations`;
+    one read a call, so a route that asks fails fast; a row with other SQL than listed is
+    `MigrationChecksumError`, and `main.ts` exits on it). Work a process does once at start
+    waits for `untilReady()`, which calls `ready()` again 1 s apart, doubling to 30 s,
+    until it is true, so an API that migrates late drops none of it; the agent logs
+    `waiting for the API to apply the agent's database migrations` once a wait; meanwhile
+    `/healthz` says `unavailable (waiting for the API to apply the database migrations)`
+    (`waitingForMigrations`). The
+    tests make their schemas with the agent's old runner, `test/support/migrations.ts`
+    (`test/support/postgres.ts` `migrateSchema`, the `schema` option of
+    `connectDatabase`), and `test/schema.test.ts` checks the list against both runners. Secrets are
     envelope-encrypted with `src/secrets.ts` under the KEK in
     `SCADBUDDY_SECRET_KEY_FILE` (32 random bytes, base64; spec §9); the AAD binds each
     value to its row and to the columns that say where it is sent (for the credential:
@@ -246,7 +332,8 @@ opens every one and seals it again byte for byte).
     state lives on the pod, `http_request` and the browser, is `pinned`: its calls run on
     `agent-tools.<hostname>`, which each agent also polls); and `AgentOperation` (`workflows.ts`, bundled by
     `pnpm build` into `dist/temporal/workflow-bundle.js`), the §4.2 command shape for
-    the agent's commands, recorded in `ai_operations` (`src/operations/`). A change to
+    the agent's commands, recorded in `ai_operations` (`src/operations/`; through the API's CRUD
+    routes once it lists area `operations`, #5299 step 8). A change to
     `AgentOperation` goes behind `patched()`; `test/fixtures/agent_operation_histories/`
     replays. Temporal tests (`test/*temporal*.test.ts`)
     skip unless `SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` names a Temporal CLI (or
@@ -269,10 +356,12 @@ opens every one and seals it again byte for byte).
     sent on the chat socket (`routes/chat.ts` `sentToPanel`).
   - Durable payloads (#1056 phase 5c, spec §6.5): `src/temporal/payloadCodec.ts` seals
     every payload of a `session-<uuid>` / `flow-<uuid>` workflow under that subject's
-    data key (`ai_payload_keys`, sealed under the KEK, re-wrapped at start on rotation);
-    the agent-tools worker and the service's Temporal client carry it when the KEK is
-    mounted. `src/sessions/forget.ts` `forgetSubject` (key row, then the workflow, then
-    the rows) is the one way a durable subject is deleted; operators run
+    data key (`ai_payload_keys`, sealed under the KEK; the API re-wraps them at its start on
+    rotation). The agent-tools worker and the service's Temporal client carry it; once the
+    API lists area `payload-keys` the API releases each key (`CrudPayloadKeys`, #5299 step 4,
+    #5342), so no KEK is needed here, and until then it opens them with its own
+    (`gatedPayloadKeys`; with neither, a call that needs one is `PayloadKeyUnavailable`). `src/sessions/forget.ts` `forgetSubject` (key row, then the workflow, then
+    the rows; the key row through the API once it lists area `forget`, above) is the one way a durable subject is deleted; operators run
     `node dist/forget-subject.js session-<uuid>`. A fork reads its parent's transcript
     through the cut (`ai_sessions.fork_parent_id`, `fork_cut`; `src/sessions/store.ts`,
     plan Step 6.5), and its event log and images through `fork_event_cut` (#4212:
@@ -280,7 +369,11 @@ opens every one and seals it again byte for byte).
     its own later events come after the cut), so forgetting a parent first copies each fork's
     range into it, the transcript under the fork's key (`copyForkRanges`, `inherited` rows),
     and refuses without the KEK when a fork takes transcript entries (`fork_cut` above 0; a
-    fork of a closed DurableSession takes none). A gated tool's activity runs only
+    fork of a closed DurableSession takes none). Every read through the fork chain stops at
+    the least cut below each ancestor (`LEAST(bound, cut)`: `eventLog.ts` `forkChain`,
+    `store.ts` `chainRows`, `blobs.ts` `getThroughChain`); a new chain read must do the same.
+    When it is made, a fork copies none of its parent's transcript, event or image rows; its workspace file rows
+    are copied, naming the same bytes (`SessionFiles.copy`). A gated tool's activity runs only
     with an `approved` `ai_input_responses` row for its own request id.
   - DurableSession, the retired Python turn (plan 2026-10-13 Steps 7.2 and 8.1, #4772): its
     open sessions were moved to AgentSession on 2026-11-01 (their conversations in
@@ -306,11 +399,17 @@ opens every one and seals it again byte for byte).
     the row that names a blob and releases after the row is gone, and `reconcile`, on the
     sweeper's tick hourly (a failed or `no_connection` run is tried again at the next tick),
     on one replica at a time (`RECONCILE_LOCK` on a `database.locks` connection), releases what cascades, `forgetSubject` and crashes left and holds
-    a row no hold names; no trigger;
+    a row no hold names; no trigger; once the API lists area `workspace` all of this runs on the
+    API instead, above;
     `test/workspaceBlobs.backend.e2e.test.ts` runs it against the real API on moto,
     `backend/tests/support/workspace_backend.py`). Only on `store_backend` local do they stay
-    in `data`; on any other backend a write that cannot be sealed and stored is refused
-    `unavailable`, never kept in plaintext. Uploads take `workspace_path` + `workspace_sha256` instead of
+    in Postgres, one `ai_session_file_bytes` row per sha256 that every file with those bytes
+    names, so a fork shares them (#4212); on any other backend a write that cannot be sealed and stored is refused
+    `unavailable`, never kept in plaintext. Rows of `ai_session_file_bytes` are shared and swept: a
+    writer locks them `FOR KEY SHARE` first, inserts only the missing ones and locks again, in a
+    loop (`putBytes`, `copy`); `INSERT … ON CONFLICT DO NOTHING` takes no lock on the existing row,
+    and the table's CHECK (sha256 of the bytes) runs before the conflict check (`ExecInsert`,
+    [nodeModifyTable.c](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/executor/nodeModifyTable.c)). Uploads take `workspace_path` + `workspace_sha256` instead of
     inline content (`src/tools/workspaceUploads.ts`: binary streamed by
     `SessionFiles.chunks` into the multipart route, text decoded as UTF-8).
     The panel's Files (part 3) are `routes/sessionFiles.ts`
@@ -377,6 +476,12 @@ opens every one and seals it again byte for byte).
     an ended one is answered with no plugin, binding or contact; one with no outcome is sent
     again only when the binding maps `idempotency_key`, with the row's own recipients and text,
     and needs the binding (none is `no_messaging_plugin`) but no contact.
+  - The storefront (#6131, design 2026-11-13 §6): `tools/storefront.ts`
+    `storefront_listing_draft` (`write`: a listing from an output or a model, unpublished,
+    with the Storefront page's smart defaults in `tools/storefrontDraft.ts`, a copy of the
+    frontend's `listingDraft.ts` tested against `test-fixtures/storefront/sell-draft-vectors.json`;
+    a colour the customer can choose is taken out of the title) and
+    `storefront_listing_publish` (`outward`). The listings' other routes stay the page's.
   - Plugin packages (#297; skills, agents, hooks from git or a marketplace entry) live
     in `ai_plugin_packages` (`src/plugins/packages/`, routes
     `src/routes/pluginPackages.ts`). Postgres holds the pin (commit + content hash);

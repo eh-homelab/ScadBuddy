@@ -1,5 +1,5 @@
 """ScadBuddy's own spool inventory, the native spool provider (#4643, tier B): its records
-in ``native_spools``, and the provider that the refresh copies them through."""
+in the ``filament_*`` tables (#6261), and the provider that the refresh copies them through."""
 
 from __future__ import annotations
 

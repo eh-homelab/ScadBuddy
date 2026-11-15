@@ -154,6 +154,16 @@ def idempotent_write(
         return reply
 
 
+def forget(conn: Connection[DictRow], caller: CrudCaller, key: str, route: str) -> None:
+    """Drop ``key``'s reply of ``route``, in the caller's transaction: for a write undone
+    after its commit (a presign whose watchers could not start), so a retry of the key
+    writes afresh instead of answering what no longer stands."""
+    conn.execute(
+        "DELETE FROM crud_requests WHERE caller = %s AND key = %s AND route = %s",
+        (caller, key, route),
+    )
+
+
 def prune(conn: Connection[DictRow], older_than: timedelta = RETENTION) -> int:
     """Drop the replies older than ``older_than``; how many there were."""
     cursor = conn.execute("DELETE FROM crud_requests WHERE created_at < now() - %s", (older_than,))

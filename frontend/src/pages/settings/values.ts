@@ -1,5 +1,5 @@
 import type { Settings } from '../../api/types'
-import { RUNTIME_FIELDS, envVar, serverValue, type FieldName, type FieldSpec, type SectionId } from './fields'
+import { RUNTIME_FIELDS, serverValue, type FieldName, type FieldSpec, type SectionId } from './fields'
 
 /** #296 — `used` of `limit`, where a limit of 0 means none. */
 export function ofLimit(used: string, limit: number, format: (n: number) => string): string {
@@ -101,7 +101,6 @@ export function extraSpecs(settings: Settings | undefined): FieldSpec[] {
       return {
         name: name as FieldName,
         section: 'diagnostics' as const,
-        label: envVar(name),
         kind:
           typeof current === 'boolean'
             ? ('bool' as const)

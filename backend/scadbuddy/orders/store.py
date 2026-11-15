@@ -27,6 +27,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.orders.models import (
+    IMPORT_STUCK,
     Actor,
     Address,
     AddressInput,
@@ -38,12 +39,14 @@ from scadbuddy.orders.models import (
     Charge,
     ChargeInput,
     ColourSlot,
+    ColourSource,
     Contact,
     ContactInput,
     CostEntry,
     CostEntryInput,
     Customer,
     Filament,
+    FilamentEffect,
     FilamentInput,
     FilamentPatch,
     Fulfilment,
@@ -52,15 +55,20 @@ from scadbuddy.orders.models import (
     ItemStatus,
     LibraryFileRef,
     MachineRateBreakdown,
+    ModelRequestColours,
     Money,
     Order,
     OrderEvent,
     OrderFilter,
     OrderItem,
+    OrderItemSource,
     OrderProject,
     OrderStatus,
     Outcome,
     Payment,
+    PurchaseCostKind,
+    PurchaseSource,
+    PurchaseStatus,
     Quote,
     QuoteLine,
     QuoteSource,
@@ -128,7 +136,8 @@ class RowNotOwnedError(LookupError):
 
 class FilamentExistsError(ValueError):
     """A filament record with the same identity (material, subtype, brand and colour,
-    upper-cased; #4250 Ruling 4) is there already: the routes answer 409 naming it."""
+    upper-cased, #4250 Ruling 4, and alpha, #6261) is there already: the routes answer 409
+    naming it."""
 
     def __init__(self, existing_id: str) -> None:
         super().__init__("a filament with that material, subtype, brand and colour exists")
@@ -138,8 +147,11 @@ class FilamentExistsError(ValueError):
 _CUSTOMER = "id, display_name, company, notes, tags, created_at, updated_at, archived_at"
 _FILAMENT = (
     "id, material, subtype, brand, colour_name, colour, cost_per_kg, density_g_cm3,"
-    " archived_at, created_at, updated_at"
+    " density_profile, alpha, extra_colours, effect, colour_source, archived_at, created_at,"
+    " updated_at, (spool_colour IS NOT NULL OR cardinality(spool_ids) > 0) AS spool_linked"
 )
+#: What a filament's colour is, as a person or the spool import sets it (#6209).
+_LOOK = ("colour", "alpha", "extra_colours", "effect")
 _CONTACT = 'id, kind, value, label, "primary", position'
 _ADDRESS = (
     "id, label, recipient, lines, locality, region, postal_code, country, phone,"
@@ -192,7 +204,36 @@ _FULFILMENT = (
 _SHIPMENT = (
     "id, order_id, carrier, service, tracking, shipped_at, address, cost_minor, notes, created_at"
 )
-_CHARGE = "id, order_id, kind, label, amount_minor, position, auto, shipping_option_id"
+_CHARGE = (
+    "id, order_id, kind, label, amount_minor, position, auto, shipping_option_id, purchase_link_id"
+)
+#: The charge kinds only the lifecycle writes (#6133): a replace of the typed charges
+#: keeps their rows and never writes one.
+LIFECYCLE_CHARGES: frozenset[str] = frozenset({"purchase", "handling"})
+#: The label of the order's one ``handling`` charge (spec 2026-11-13 §10.3).
+HANDLING_LABEL = "Handling for bought items"
+_PURCHASE = (
+    "s.id, s.order_id, s.item_id, s.url, s.note, s.status, s.cost_entry_id, s.charge_id,"
+    " s.shop_note, c.amount_minor, e.kind AS cost_kind"
+    " FROM order_item_sources s"
+    " LEFT JOIN order_charges c ON c.id = s.charge_id"
+    " LEFT JOIN order_cost_entries e ON e.id = s.cost_entry_id"
+)
+#: A request source as the back office reads it (#6133 PR 4); its first parameter is
+#: `IMPORT_STUCK`, then the WHERE clause's.
+_ITEM_SOURCE = (
+    "s.id, s.order_id, s.item_id, s.position, s.kind, s.purpose, s.filename, s.size,"
+    " s.media_type, s.url, s.link_type, s.canonical, s.note, s.check_status, s.check_reason,"
+    " s.facts, s.sha256, s.preview_key IS NOT NULL AS has_preview,"
+    " (u.frozen_key IS NOT NULL) AS staged, s.status, s.status_reason,"
+    " coalesce(s.status_reason = %s, false) AS import_stuck, s.library_file_id,"
+    " s.result_item_id, s.shop_note, CASE WHEN s.status = 'recorded' THEN c.amount_minor END"
+    " AS amount_minor, CASE WHEN s.status = 'recorded' THEN e.kind END AS cost_kind"
+    " FROM order_item_sources s"
+    " LEFT JOIN storefront_uploads u ON u.id = s.upload_id"
+    " LEFT JOIN order_charges c ON c.id = s.charge_id"
+    " LEFT JOIN order_cost_entries e ON e.id = s.cost_entry_id"
+)
 _PAYMENT = (
     "id, order_id, amount_minor, method, reference, received_at, notes, created_at,"
     " provider, payment_request_id"
@@ -413,6 +454,33 @@ def _dump(value: Any) -> Any:
     if hasattr(value, "model_dump"):
         return value.model_dump(mode="json")
     return value
+
+
+@dataclass(frozen=True)
+class ImportRecord:
+    """A record of the book as the spool import matches it to its spools (#6209)."""
+
+    id: str
+    material: str
+    subtype: str | None
+    brand: str | None
+    colour: str
+    alpha: int
+    extra_colours: list[str]
+    effect: FilamentEffect | None
+    colour_source: ColourSource
+    #: The spools' ``#RRGGBB`` and ids at the last import; ``None`` and empty before one.
+    spool_colour: str | None
+    spool_ids: list[int]
+
+
+@dataclass(frozen=True)
+class SpoolLink:
+    """A record's link to its spools at the last spool import (#6209): their ``#RRGGBB``
+    (``None`` before one) and Bambuddy ids."""
+
+    spool_colour: str | None
+    spool_ids: frozenset[int]
 
 
 class OrderStore:
@@ -733,20 +801,41 @@ class OrderStore:
     # -- the price book's filaments (§5.1, #4250) -------------------------------------
 
     def existing_filament(
-        self, conn: Conn, material: str, subtype: str | None, brand: str | None, colour: str
+        self,
+        conn: Conn,
+        material: str,
+        subtype: str | None,
+        brand: str | None,
+        colour: str,
+        alpha: int | None = None,
     ) -> str | None:
+        """The record in the book of this identity (#6261: it holds the alpha); with no
+        ``alpha``, the most opaque record of the other four."""
         row = conn.execute(
             "SELECT id FROM filaments WHERE upper(material) = upper(%s)"
             " AND upper(coalesce(subtype, '')) = upper(coalesce(%s, ''))"
             " AND upper(coalesce(brand, '')) = upper(coalesce(%s, ''))"
-            " AND upper(colour) = upper(%s) AND archived_at IS NULL",
-            (material, subtype, brand, colour),
+            " AND upper(colour) = upper(%s) AND (%s::smallint IS NULL OR alpha = %s)"
+            " AND archived_at IS NULL ORDER BY alpha DESC, id LIMIT 1",
+            (material, subtype, brand, colour, alpha, alpha),
         ).fetchone()
         return None if row is None else str(row["id"])
 
-    def insert_filament(self, body: FilamentInput, *, conn: Conn | None = None) -> Filament:
+    def insert_filament(
+        self,
+        body: FilamentInput,
+        *,
+        conn: Conn | None = None,
+        density_profile: str | None = None,
+        colour_source: ColourSource = "manual",
+        spool_colour: str | None = None,
+        spool_ids: Sequence[int] = (),
+    ) -> Filament:
         """A new record; :class:`FilamentExistsError` for an identity a record in the book
-        holds (an archived one frees its identity: the index is partial)."""
+        holds (an archived one frees its identity: the index is partial).
+        ``density_profile`` names the slicer preset its density was read from (#6136).
+        ``colour_source`` says who set its colour, and ``spool_colour`` and ``spool_ids``
+        link a record the import made to its spools (#6209)."""
         values = (
             body.material,
             body.subtype,
@@ -755,52 +844,172 @@ class OrderStore:
             body.colour,
             Decimal(body.cost_per_kg),
             None if body.density_g_cm3 is None else Decimal(body.density_g_cm3),
+            None if body.density_g_cm3 is None else density_profile,
+            body.alpha,
+            body.extra_colours,
+            body.effect,
+            colour_source,
+            spool_colour,
+            list(spool_ids),
         )
         try:
             with self._write(conn) as c:
                 row = c.execute(
                     "INSERT INTO filaments (material, subtype, brand, colour_name, colour,"
-                    " cost_per_kg, density_g_cm3) VALUES (%s, %s, %s, %s, %s, %s, %s)"
+                    " cost_per_kg, density_g_cm3, density_profile, alpha, extra_colours,"
+                    " effect, colour_source, spool_colour, spool_ids)"
+                    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
                     f" RETURNING {_FILAMENT}",
                     values,
                 ).fetchone()
         except errors.UniqueViolation:
-            self._raise_exists(body.material, body.subtype, body.brand, body.colour)
+            self._raise_exists(body.material, body.subtype, body.brand, body.colour, body.alpha)
         assert row is not None
         return _filament_of(row)
 
     def _raise_exists(
-        self, material: str, subtype: str | None, brand: str | None, colour: str
+        self, material: str, subtype: str | None, brand: str | None, colour: str, alpha: int
     ) -> NoReturn:
         with self._pool.connection() as c:
-            existing = self.existing_filament(c, material, subtype, brand, colour)
+            existing = self.existing_filament(c, material, subtype, brand, colour, alpha)
         raise FilamentExistsError(existing or "")
 
     def update_filament(
-        self, filament_id: str, patch: FilamentPatch, *, conn: Conn | None = None
+        self,
+        filament_id: str,
+        patch: FilamentPatch,
+        *,
+        conn: Conn | None = None,
+        density_profile: str | None = None,
     ) -> Filament | None:
-        """The fields ``patch`` sends; ``None`` for no such record."""
+        """The fields ``patch`` sends; ``None`` for no such record. A density sent that
+        differs from the record's is a person's (``density_profile`` cleared), unless
+        ``density_profile`` names the slicer preset it was read from (#6136); the same
+        density sent back, as the editor's save does, keeps its preset. In the same way a
+        colour, alpha, stops or effect sent that differs from the record's makes its colour
+        ``manual`` (#6209), unless ``colour_source`` is sent."""
         sent = patch.model_fields_set
         fields: dict[str, Any] = {}
-        for name in ("material", "colour", "cost_per_kg"):
+        for name in ("material", "colour", "cost_per_kg", "alpha", "extra_colours"):
             value = getattr(patch, name)
             if name in sent and value is not None:
                 fields[name] = Decimal(value) if name == "cost_per_kg" else value
-        for name in ("subtype", "brand", "colour_name", "density_g_cm3"):
+        for name in ("subtype", "brand", "colour_name", "density_g_cm3", "effect"):
             if name in sent:
                 value = getattr(patch, name)
                 fields[name] = (
                     Decimal(value) if name == "density_g_cm3" and value is not None else value
                 )
+        if patch.colour_source is not None:
+            fields["colour_source"] = patch.colour_source
         try:
             with self._write(conn) as c:
+                look = {name: fields[name] for name in _LOOK if name in fields}
+                if look and patch.colour_source is None:
+                    was = c.execute(
+                        "SELECT colour, alpha, extra_colours, effect FROM filaments"
+                        " WHERE id = %s FOR UPDATE",
+                        (filament_id,),
+                    ).fetchone()
+                    if was is not None and any(
+                        _differs(name, was[name], value) for name, value in look.items()
+                    ):
+                        fields["colour_source"] = "manual"
+                if "density_g_cm3" in sent:
+                    density = fields["density_g_cm3"]
+                    fields["density_profile"] = None if density is None else density_profile
+                    if density_profile is None and density is not None:
+                        # A preset's density sent back unchanged keeps its preset.
+                        was = c.execute(
+                            "SELECT density_g_cm3, density_profile FROM filaments"
+                            " WHERE id = %s FOR UPDATE",
+                            (filament_id,),
+                        ).fetchone()
+                        if was is not None and was["density_g_cm3"] == density:
+                            fields["density_profile"] = was["density_profile"]
                 row = _update(c, "filaments", filament_id, fields, _FILAMENT)
         except errors.UniqueViolation:
             current = self.filament(filament_id)
             assert current is not None
             merged = current.model_copy(update=fields)
-            self._raise_exists(merged.material, merged.subtype, merged.brand, merged.colour)
+            self._raise_exists(
+                merged.material, merged.subtype, merged.brand, merged.colour, merged.alpha
+            )
         return None if row is None else _filament_of(row)
+
+    def import_records(self, conn: Conn) -> list[ImportRecord]:
+        """Every record of the book, locked until ``conn``'s transaction ends, for the
+        spool import to match (#6209)."""
+        rows = conn.execute(
+            "SELECT id, material, subtype, brand, colour, alpha, extra_colours, effect,"
+            " colour_source, spool_colour, spool_ids FROM filaments"
+            " WHERE archived_at IS NULL ORDER BY id FOR UPDATE"
+        ).fetchall()
+        return [ImportRecord(**row) for row in rows]
+
+    def park_filaments(self, conn: Conn, filament_ids: Sequence[str]) -> None:
+        """Take records out of the identity index (``archived_at`` set) inside ``conn``'s
+        transaction, so the spool import can move their colours in any order, a swap
+        included (#6211 review). The import puts each back with
+        :meth:`set_import_look`'s ``unpark`` before it commits; no other transaction sees
+        them parked."""
+        if filament_ids:
+            conn.execute(
+                "UPDATE filaments SET archived_at = now() WHERE id = ANY(%s)"
+                " AND archived_at IS NULL",
+                (list(filament_ids),),
+            )
+
+    def spool_links(self, filament_ids: Sequence[str]) -> dict[str, SpoolLink]:
+        """Each record's :class:`SpoolLink`, by id; an id with no record is left out."""
+        if not filament_ids:
+            return {}
+        with self._read(None) as c:
+            rows = c.execute(
+                "SELECT id, spool_colour, spool_ids FROM filaments WHERE id = ANY(%s)",
+                (list(filament_ids),),
+            ).fetchall()
+        return {
+            str(row["id"]): SpoolLink(row["spool_colour"], frozenset(row["spool_ids"]))
+            for row in rows
+        }
+
+    def set_import_look(
+        self,
+        conn: Conn,
+        filament_id: str,
+        *,
+        look: dict[str, Any],
+        spool_colour: str,
+        spool_ids: Sequence[int],
+        unpark: bool = False,
+    ) -> None:
+        """The import's colour, alpha, stops and effect in ``look`` (any of them; none
+        for a record whose colour a person set) and its link to its spools (#6209);
+        ``unpark`` puts a record :meth:`park_filaments` took out back in the book.
+        ``updated_at`` moves only when ``look`` changes something."""
+        fields: dict[str, Any] = {
+            **{name: look[name] for name in _LOOK if name in look},
+            "spool_colour": spool_colour,
+            "spool_ids": list(spool_ids),
+        }
+        if unpark:
+            fields["archived_at"] = None
+        try:
+            # A savepoint, so the import's transaction can still read which record holds
+            # the colour, a record this run made included.
+            with conn.transaction():
+                _update(conn, "filaments", filament_id, fields, "id", stamp=bool(look))
+        except errors.UniqueViolation:
+            # The import checks first (`colour_taken`); a collision past it is a 409.
+            current = self.filament(filament_id, conn=conn)
+            assert current is not None
+            colour = str(look.get("colour", current.colour))
+            alpha = int(str(look.get("alpha", current.alpha)))
+            existing = self.existing_filament(
+                conn, current.material, current.subtype, current.brand, colour, alpha
+            )
+            raise FilamentExistsError(existing or "") from None
 
     def archive_filament(self, filament_id: str, *, conn: Conn | None = None) -> Filament | None:
         """Hidden from the book from now on; a quote priced with it keeps its lines."""
@@ -826,26 +1035,43 @@ class OrderStore:
         except errors.UniqueViolation:
             current = self.filament(filament_id)
             assert current is not None
-            self._raise_exists(current.material, current.subtype, current.brand, current.colour)
+            self._raise_exists(
+                current.material, current.subtype, current.brand, current.colour, current.alpha
+            )
         return None if row is None else _filament_of(row)
 
-    def filament(self, filament_id: str, *, conn: Conn | None = None) -> Filament | None:
+    def filament(
+        self, filament_id: str, *, conn: Conn | None = None, lock: bool = False
+    ) -> Filament | None:
+        """``lock`` (in a transaction, ``conn``) holds the row until it ends, so a write
+        decided from what was read is not lost to one in between (#6136 review)."""
         with self._read(conn) as c:
             row = c.execute(
-                f"SELECT {_FILAMENT} FROM filaments WHERE id = %s", (filament_id,)
+                f"SELECT {_FILAMENT} FROM filaments WHERE id = %s{' FOR UPDATE' if lock else ''}",
+                (filament_id,),
             ).fetchone()
         return None if row is None else _filament_of(row)
 
     def filaments(
-        self, *, include_archived: bool = False, conn: Conn | None = None
+        self,
+        *,
+        include_archived: bool = False,
+        conn: Conn | None = None,
+        lock: bool = False,
+        no_density: bool = False,
     ) -> list[Filament]:
-        """By material, brand and colour name."""
-        where = "" if include_archived else " WHERE archived_at IS NULL"
+        """By material, brand and colour name; ``lock`` as :meth:`filament`'s;
+        ``no_density`` only the records with no density, so a lock takes no other row."""
+        conditions = ([] if include_archived else ["archived_at IS NULL"]) + (
+            ["density_g_cm3 IS NULL"] if no_density else []
+        )
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
         with self._read(conn) as c:
             rows = c.execute(
                 f"SELECT {_FILAMENT} FROM filaments{where}"
                 " ORDER BY upper(material), upper(coalesce(subtype, '')),"
                 " upper(coalesce(brand, '')), upper(coalesce(colour_name, colour)), id"
+                + (" FOR UPDATE" if lock else "")
             ).fetchall()
         return [_filament_of(row) for row in rows]
 
@@ -1028,6 +1254,35 @@ class OrderStore:
             add("NOT (o.source = 'storefront' AND o.submitted_at IS NULL)")
         if filters.source is not None:
             add("o.source = %s", filters.source)
+        if filters.own_model:
+            add(
+                "EXISTS (SELECT 1 FROM order_item_model_requests m"
+                " JOIN order_items i ON i.id = m.item_id WHERE i.order_id = o.id)"
+            )
+        if filters.purchase_pending:
+            # Index `order_item_sources_pending_purchase`.
+            add(
+                "EXISTS (SELECT 1 FROM order_item_sources s WHERE s.order_id = o.id"
+                " AND s.purpose = 'purchase' AND s.status = 'pending')"
+            )
+        if filters.import_stuck:
+            add(
+                "EXISTS (SELECT 1 FROM order_item_sources s WHERE s.order_id = o.id"
+                " AND s.status_reason = %s)",
+                IMPORT_STUCK,
+            )
+        if filters.ended_since is not None:
+            add(
+                "NOT (o.status IN ('closed', 'cancelled')"
+                " AND COALESCE(o.closed_at, o.cancelled_at, o.updated_at) < %s)",
+                filters.ended_since,
+            )
+        if filters.owing:
+            # Index `payment_requests_order`.
+            add(
+                "EXISTS (SELECT 1 FROM payment_requests r WHERE r.order_id = o.id"
+                " AND r.status IN ('open', 'pending', 'failed'))"
+            )
         if filters.status:
             add("o.status = ANY(%s)", list(filters.status))
         if filters.customer_id is not None:
@@ -1857,11 +2112,12 @@ class OrderStore:
         """What printed Bambuddy archive ``archive_id`` (#4777): the output or library file
         whose link owns it, an output's before a library file's, both before an import's,
         as every owner lookup orders (``bambuddy/print_links.py`` ``_OWNER_ORDER``); None
-        when ScadBuddy printed neither."""
+        when ScadBuddy printed neither, an import's included (#6394: onto a library file
+        too)."""
         with self._read(conn) as c:
             row = c.execute(
-                "SELECT subject FROM print_links WHERE archive_id = %s"
-                " ORDER BY (subject LIKE 'model:%%'), (subject LIKE 'library:%%'), first_seen,"
+                "SELECT subject, matched_by FROM print_links WHERE archive_id = %s"
+                " ORDER BY (matched_by = 'import'), (subject LIKE 'library:%%'), first_seen,"
                 " subject, queue_item_id"
                 " LIMIT 1",
                 (archive_id,),
@@ -1869,12 +2125,12 @@ class OrderStore:
         if row is None:
             return None
         kind, _, key = str(row["subject"]).partition(":")
+        if row["matched_by"] == "import":
+            # A print a person imported onto a model (#4698) or a library file (#6394):
+            # ScadBuddy did not print it, so its file is copied as any other archive's.
+            return None
         if kind == "library":
             return ArchiveOrigin(output_id=None, library_file_id=int(key))
-        if kind == "model":
-            # A print imported onto a model (#4698): no output or library file printed
-            # it, so its file is copied as any other archive's.
-            return None
         return ArchiveOrigin(output_id=key, library_file_id=None)
 
     def archive_run_plates(
@@ -1888,7 +2144,7 @@ class OrderStore:
             rows = c.execute(
                 "WITH owner AS (SELECT subject, queue_item_id FROM print_links"
                 "  WHERE archive_id = %(a)s"
-                "  ORDER BY (subject LIKE 'model:%%'), (subject LIKE 'library:%%'), first_seen,"
+                "  ORDER BY (matched_by = 'import'), (subject LIKE 'library:%%'), first_seen,"
                 "  subject, queue_item_id"
                 "  LIMIT 1),"
                 " run AS (SELECT s.subject, s.run_id FROM print_sends s JOIN owner o"
@@ -2352,7 +2608,8 @@ class OrderStore:
         with self._read(conn) as c:
             rows = c.execute(
                 f"SELECT {_CHARGE} FROM order_charges WHERE order_id = %s"
-                " ORDER BY auto, position, id",
+                # The typed charges, then the purchases, the handling fee and the auto tax.
+                " ORDER BY auto, kind = 'handling', kind = 'purchase', position, id",
                 (order_id,),
             ).fetchall()
         return [Charge.model_validate(r) for r in rows]
@@ -2361,9 +2618,15 @@ class OrderStore:
         self, conn: Conn, order_id: str, charges: Sequence[ChargeInput]
     ) -> list[Charge]:
         """The typed charges, replaced whole (§4's `PATCH` row). The auto tax row
-        (#5281) is not one of them: it stays, and the typed rows come before it."""
-        conn.execute("DELETE FROM order_charges WHERE order_id = %s AND NOT auto", (order_id,))
-        for position, charge in enumerate(charges):
+        (#5281) and the `LIFECYCLE_CHARGES` rows (#6133) are not among them: they stay, and
+        the typed rows come before them. A charge of a `LIFECYCLE_CHARGES` kind in
+        ``charges`` is not written."""
+        conn.execute(
+            "DELETE FROM order_charges WHERE order_id = %s AND NOT auto AND kind <> ALL(%s)",
+            (order_id, sorted(LIFECYCLE_CHARGES)),
+        )
+        typed = [charge for charge in charges if charge.kind not in LIFECYCLE_CHARGES]
+        for position, charge in enumerate(typed):
             conn.execute(
                 "INSERT INTO order_charges"
                 " (order_id, kind, label, amount_minor, position, shipping_option_id)"
@@ -2567,6 +2830,187 @@ class OrderStore:
             return None
         conn.execute("UPDATE orders SET updated_at = now() WHERE id = %s", (order_id,))
         return CostEntry.model_validate(row)
+
+    def update_cost_entry(
+        self, conn: Conn, entry_id: str, *, amount_minor: Money, kind: PurchaseCostKind, note: str
+    ) -> CostEntry:
+        """A cost entry's amount, kind and note changed. Only a recorded purchase's entry
+        changes (``Lifecycle.update_purchase``, #6133); every other entry is fixed."""
+        row = conn.execute(
+            "UPDATE order_cost_entries SET amount_minor = %s, kind = %s, note = %s"
+            f" WHERE id = %s RETURNING {_COST_ENTRY}",
+            (amount_minor, kind, note, entry_id),
+        ).fetchone()
+        assert row is not None
+        return CostEntry.model_validate(row)
+
+    # -- purchases (#6133, spec 2026-11-13 §10) ----------------------------------------
+
+    def purchase_sources(self, order_id: str, *, conn: Conn | None = None) -> list[PurchaseSource]:
+        """The order's purchase links, by item and position."""
+        with self._read(conn) as c:
+            rows = c.execute(
+                f"SELECT {_PURCHASE} WHERE s.order_id = %s AND s.purpose = 'purchase'"
+                " ORDER BY s.item_id, s.position",
+                (order_id,),
+            ).fetchall()
+        return [PurchaseSource.model_validate(r) for r in rows]
+
+    def item_sources(
+        self, order_id: str, *, conn: Conn | None = None, source_id: str | None = None
+    ) -> list[OrderItemSource]:
+        """The order's request sources, files and links of both purposes, by item and
+        position (#6133, spec 2026-11-13 §11); with ``source_id``, that one only."""
+        with self._read(conn) as c:
+            rows = c.execute(
+                f"SELECT {_ITEM_SOURCE} WHERE s.order_id = %s"
+                + (" AND s.id = %s" if source_id is not None else "")
+                + " ORDER BY s.item_id, s.position",
+                (IMPORT_STUCK, order_id, *((source_id,) if source_id is not None else ())),
+            ).fetchall()
+        return [OrderItemSource.model_validate(r) for r in rows]
+
+    def lock_item_source(self, conn: Conn, order_id: str, source_id: str) -> OrderItemSource | None:
+        """The order's source ``source_id``, its row locked; None when it is not one."""
+        row = conn.execute(
+            f"SELECT {_ITEM_SOURCE} WHERE s.order_id = %s AND s.id = %s FOR UPDATE OF s",
+            (IMPORT_STUCK, order_id, source_id),
+        ).fetchone()
+        return None if row is None else OrderItemSource.model_validate(row)
+
+    def staged_key(self, source_id: str) -> tuple[str | None, str | None]:
+        """A file source's staged upload id and frozen copy key, (None, None) when none."""
+        with self._read(None) as c:
+            row = c.execute(
+                "SELECT u.id, u.frozen_key FROM order_item_sources s"
+                " JOIN storefront_uploads u ON u.id = s.upload_id WHERE s.id = %s",
+                (source_id,),
+            ).fetchone()
+        return (None, None) if row is None else (row["id"], row["frozen_key"])
+
+    def model_request_colours(
+        self, order_id: str, *, conn: Conn | None = None
+    ) -> list[ModelRequestColours]:
+        """The colours each own-model request item of the order asked for."""
+        with self._read(conn) as c:
+            rows = c.execute(
+                "SELECT m.item_id, m.colour_preferences FROM order_item_model_requests m"
+                " JOIN order_items i ON i.id = m.item_id WHERE i.order_id = %s"
+                " ORDER BY i.position, i.id",
+                (order_id,),
+            ).fetchall()
+        return [
+            ModelRequestColours(
+                item_id=r["item_id"],
+                shop_choice=bool(r["colour_preferences"].get("shop_choice")),
+                filaments=list(r["colour_preferences"].get("filaments", [])),
+            )
+            for r in rows
+        ]
+
+    def set_source_status(
+        self, conn: Conn, source_id: str, *, status: str, reason: str | None
+    ) -> None:
+        """A print source's status and its reason (the shop's)."""
+        conn.execute(
+            "UPDATE order_item_sources SET status = %s, status_reason = %s, updated_at = now()"
+            " WHERE id = %s",
+            (status, reason, source_id),
+        )
+
+    def set_source_checking(self, conn: Conn, source_id: str) -> None:
+        """A failed file's check started again: ``checking``, its reason cleared."""
+        conn.execute(
+            "UPDATE order_item_sources SET check_status = 'checking', check_reason = NULL,"
+            " updated_at = now() WHERE id = %s",
+            (source_id,),
+        )
+
+    def lock_purchase_source(
+        self, conn: Conn, order_id: str, source_id: str
+    ) -> PurchaseSource | None:
+        """The order's purchase link ``source_id``, its row locked; None when it is not
+        one."""
+        row = conn.execute(
+            f"SELECT {_PURCHASE} WHERE s.order_id = %s AND s.id = %s AND s.purpose = 'purchase'"
+            " FOR UPDATE OF s",
+            (order_id, source_id),
+        ).fetchone()
+        return None if row is None else PurchaseSource.model_validate(row)
+
+    def pending_purchases(self, conn: Conn, order_id: str) -> list[tuple[str, str]]:
+        """The order's purchase links still ``pending``, as (source id, item id), by item
+        and position (index ``order_item_sources_pending_purchase``). A link of a
+        cancelled item is left out: nothing is bought for it while it stays cancelled."""
+        rows = conn.execute(
+            "SELECT s.id, s.item_id FROM order_item_sources s"
+            " JOIN order_items i ON i.id = s.item_id"
+            " WHERE s.order_id = %s AND s.purpose = 'purchase' AND s.status = 'pending'"
+            " AND i.status <> 'cancelled'"
+            " ORDER BY s.item_id, s.position",
+            (order_id,),
+        ).fetchall()
+        return [(row["id"], row["item_id"]) for row in rows]
+
+    def insert_purchase_charge(
+        self, conn: Conn, order_id: str, source_id: str, *, label: str, amount_minor: Money
+    ) -> Charge:
+        """The ``purchase`` charge of the purchase link ``source_id``, after the order's
+        other purchases."""
+        row = conn.execute(
+            "INSERT INTO order_charges"
+            " (order_id, kind, label, amount_minor, position, purchase_link_id)"
+            " SELECT %s, 'purchase', %s, %s,"
+            " coalesce(max(position) + 1, 0), %s FROM order_charges"
+            " WHERE order_id = %s AND kind = 'purchase'"
+            f" RETURNING {_CHARGE}",
+            (order_id, label, amount_minor, source_id, order_id),
+        ).fetchone()
+        assert row is not None
+        conn.execute("UPDATE orders SET updated_at = now() WHERE id = %s", (order_id,))
+        return Charge.model_validate(row)
+
+    def set_charge_amount(self, conn: Conn, charge_id: str, amount_minor: Money) -> None:
+        conn.execute(
+            "UPDATE order_charges SET amount_minor = %s WHERE id = %s", (amount_minor, charge_id)
+        )
+
+    def delete_charge(self, conn: Conn, charge_id: str) -> None:
+        conn.execute("DELETE FROM order_charges WHERE id = %s", (charge_id,))
+
+    def set_purchase(
+        self,
+        conn: Conn,
+        source_id: str,
+        *,
+        status: PurchaseStatus,
+        cost_entry_id: str | None,
+        charge_id: str | None,
+        shop_note: str | None = None,
+    ) -> None:
+        """A purchase link's state and the ids of its cost entry and charge; ``shop_note``
+        replaces the shop's note when given."""
+        conn.execute(
+            "UPDATE order_item_sources SET status = %s, cost_entry_id = %s, charge_id = %s,"
+            " shop_note = coalesce(%s, shop_note), updated_at = now() WHERE id = %s",
+            (status, cost_entry_id, charge_id, shop_note, source_id),
+        )
+
+    def set_handling(self, conn: Conn, order_id: str, amount_minor: Money | None) -> None:
+        """The order's one ``handling`` charge set to ``amount_minor``, or deleted with
+        None (``order_charges_handling``)."""
+        if amount_minor is None:
+            conn.execute(
+                "DELETE FROM order_charges WHERE order_id = %s AND kind = 'handling'", (order_id,)
+            )
+            return
+        conn.execute(
+            "INSERT INTO order_charges (order_id, kind, label, amount_minor, position)"
+            " VALUES (%s, 'handling', %s, %s, 0)"
+            " ON CONFLICT (order_id) WHERE kind = 'handling'"
+            " DO UPDATE SET amount_minor = EXCLUDED.amount_minor",
+            (order_id, HANDLING_LABEL, amount_minor),
+        )
 
     # -- attachments (§6.2, #4251) ------------------------------------------------------
 
@@ -2843,6 +3287,14 @@ def _jsonb(value: Any) -> Any:
 
 def _escape_like(text: str) -> str:
     return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _differs(name: str, was: Any, value: Any) -> bool:
+    """Whether a filament's look field ``name`` sent as ``value`` changes ``was``; a
+    colour in another case is the same colour."""
+    if name == "colour":
+        return bool(str(was).upper() != str(value).upper())
+    return bool(was != value)
 
 
 def _update(

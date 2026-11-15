@@ -20,6 +20,7 @@ from fastapi import status
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import THREE_MF_MEDIA_TYPE
+from scadbuddy.bambuddy.models import ProcessValue
 from scadbuddy.bambuddy.part_settings import PartSettings, PartSettingsMap, by_colour
 from scadbuddy.bambuddy.project_file import cached_defaults, output_stem
 from scadbuddy.core.heartbeat import heartbeating
@@ -52,7 +53,7 @@ class OutputNaming(BaseModel):
     template's ``print_settings`` as its model.json has them now (#770)."""
 
     stem: str
-    print_settings: dict[str, str] = Field(default_factory=dict)
+    print_settings: dict[str, ProcessValue] = Field(default_factory=dict)
     #: The template's ``part_print_settings`` as its model.json has them now (#5626),
     #: as this output's slots (``part_settings.by_colour``); ``None`` for none.
     part_settings: PartSettingsMap | None = None
@@ -110,7 +111,7 @@ class LocalOutputs:
         parts = await asyncio.to_thread(self._part_settings, meta, declared) if declared else None
         return OutputNaming(stem=stem, print_settings=settings, part_settings=parts, title=title)
 
-    async def print_settings(self, meta: OutputMeta) -> tuple[dict[str, str], str | None]:
+    async def print_settings(self, meta: OutputMeta) -> tuple[dict[str, ProcessValue], str | None]:
         """`naming`'s ``print_settings`` and ``invalid_meta`` only (#5662): the dialog's
         check reads no stem, title or part slots."""
         settings, _, refusal = await self._settings(meta)
@@ -126,7 +127,7 @@ class LocalOutputs:
 
     async def _settings(
         self, meta: OutputMeta
-    ) -> tuple[dict[str, str], dict[str, PartSettings], str | None]:
+    ) -> tuple[dict[str, ProcessValue], dict[str, PartSettings], str | None]:
         """The template's print settings, its declared part settings and the model.json's
         refusal of either; with a refusal, both are empty."""
         try:

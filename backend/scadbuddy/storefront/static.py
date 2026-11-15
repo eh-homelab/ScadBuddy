@@ -65,12 +65,16 @@ PAYPAL_ORIGINS: Final = "https://www.paypal.com https://www.sandbox.paypal.com"
 PAY_PATH: Final = "/pay"
 
 
-def storefront_csp(turnstile: bool, pay: bool = False) -> str:
+def storefront_csp(turnstile: bool, pay: bool = False, upload_origin: str | None = None) -> str:
     """The page's policy: `TURNSTILE_CSP` while the check is on, or until the edge's first
     site-key read succeeds (`SiteKey.ever_read`), else the first-party `STOREFRONT_CSP`;
     with ``pay``, PayPal's origins (`PAYPAL_ORIGINS`) on top, in ``script-src``,
-    ``frame-src`` and ``connect-src``."""
+    ``frame-src`` and ``connect-src``; with ``upload_origin`` (#6133, a bare origin from
+    `upload_origin.bare_origin`), the store's bucket in ``connect-src``, which the page's
+    direct uploads PUT to."""
     csp = TURNSTILE_CSP if turnstile else STOREFRONT_CSP
+    if upload_origin is not None:
+        csp = csp.replace("connect-src 'self'", f"connect-src 'self' {upload_origin}", 1)
     if not pay:
         return csp
     csp = csp.replace("script-src 'self'", f"script-src 'self' {PAYPAL_ORIGINS}", 1)
@@ -82,6 +86,10 @@ def storefront_csp(turnstile: bool, pay: bool = False) -> str:
 
 async def _turnstile_off() -> bool:
     return False
+
+
+async def _no_upload_origin() -> str | None:
+    return None
 
 
 def _closure(manifest: dict[str, Any], key: str) -> set[str]:
@@ -118,9 +126,14 @@ class StorefrontStatic:
     Raises FileNotFoundError when ``dist`` has no ``storefront.html`` or manifest."""
 
     def __init__(
-        self, dist: Path, *, turnstile: Callable[[], Awaitable[bool]] = _turnstile_off
+        self,
+        dist: Path,
+        *,
+        turnstile: Callable[[], Awaitable[bool]] = _turnstile_off,
+        upload_origin: Callable[[], Awaitable[str | None]] = _no_upload_origin,
     ) -> None:
         self._turnstile = turnstile
+        self._upload_origin = upload_origin
         self.page = dist / ENTRY
         if not self.page.is_file():
             raise FileNotFoundError(self.page)
@@ -139,7 +152,11 @@ class StorefrontStatic:
             root: str = scope.get("root_path", "")
             if root and path.startswith(root):
                 path = path[len(root) :]
-            response = self._page(await self._turnstile(), pay=path.rstrip("/") == PAY_PATH)
+            response = self._page(
+                await self._turnstile(),
+                pay=path.rstrip("/") == PAY_PATH,
+                upload_origin=await self._upload_origin(),
+            )
         await response(scope, receive, send)
 
     def _response(self, scope: Scope) -> Response | None:
@@ -169,8 +186,10 @@ class StorefrontStatic:
             return _not_found()
         return None
 
-    def _page(self, turnstile: bool, pay: bool = False) -> Response:
+    def _page(
+        self, turnstile: bool, pay: bool = False, upload_origin: str | None = None
+    ) -> Response:
         response = FileResponse(self.page, media_type="text/html")
         response.headers["Cache-Control"] = REVALIDATE
-        response.headers["Content-Security-Policy"] = storefront_csp(turnstile, pay)
+        response.headers["Content-Security-Policy"] = storefront_csp(turnstile, pay, upload_origin)
         return response

@@ -9,8 +9,9 @@ import { NOT_UP, transportKind } from '../api/backendUp.js'
 // headers are bearer credentials: never logged, never put in an error.
 //
 // Which store the backend runs on is what its /healthz says (`store.backend`). Only on
-// `local`, which has no content store, do the bytes stay in `ai_session_files.data`. On any
-// other backend a write that cannot reach the blob store is refused (WorkspaceBlobError):
+// `local`, which has no content store, do the bytes stay in Postgres: a row of
+// `ai_session_file_bytes` that the file's row names (`bytes_sha256`), or `data` for a row an
+// older agent wrote (workspace/store.ts). On any other backend a write that cannot reach the blob store is refused (WorkspaceBlobError):
 // a backend without SCADBUDDY_API_INTERNAL_URL or the KEK (the routes answer 503), one
 // older than the routes (404), or one that cannot be reached. Nothing is then kept in
 // plaintext.

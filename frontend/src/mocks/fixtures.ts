@@ -24,7 +24,10 @@ import type {
   PrintProgress,
   PrintSummary,
   Settings,
+  BootstrapValue,
 } from '../api/types'
+// Node's loader (Playwright's) needs the attribute; Vite takes it too.
+import settingDocsJson from '../api/settingDocs.json' with { type: 'json' }
 
 /**
  * `group` carries a default on the wire, so the generated type makes it required —
@@ -1027,10 +1030,15 @@ export const settingsDefaults = {
   // #5281 — auto tax, the deposit policy and the shipping options, at the backend's defaults.
   orders_tax_percent: '0',
   orders_tax_shipping: false,
+  // #6133 — the handling fee for bought items, at the backend's defaults (none).
+  orders_purchase_fee_flat_minor: 0,
+  orders_purchase_fee_percent: '0',
   orders_deposit_policy: [],
   storefront_shipping_options: [],
   storefront_payment_instructions: null,
   orders_customer_messaging: null,
+  // #6153 — the shop slice profile: none, so no visitor sees a price.
+  storefront_slice_profile: null,
   // #4250 — the price book's policy and the rough estimate's factor, read by each quote.
   pricing_machine_rate_per_hour: '0',
   pricing_setup_fee: '0',
@@ -1042,8 +1050,12 @@ export const settingsDefaults = {
   storefront_renders_per_minute: 3,
   storefront_renders_per_day: 30,
   storefront_render_concurrency: 2,
+  // #6153 — the storefront's slices at once.
+  storefront_slices_concurrent: 1,
   storefront_draft_ttl_days: 30,
   storefront_requests_enabled: false,
+  storefront_materials: ['PETG', 'PLA'],
+  storefront_prepare_cap: 256,
   // #5283 — the storefront's mail; the password is sealed apart (`/storefront/mail/password`).
   storefront_mail_host: null,
   storefront_mail_port: 587,
@@ -1085,6 +1097,7 @@ const STORED_ONLY = new Set([
   'storefront_shipping_options',
   'storefront_payment_instructions',
   'orders_customer_messaging',
+  'storefront_slice_profile',
 ])
 
 /** `core/settings.py` `APPLIES`: when a change to each env-seeded field takes effect. */
@@ -1121,6 +1134,19 @@ export const settingsApplies: NonNullable<Settings['applies']> = {
 
 /** `asset_fetch.py` `DEFAULT_ASSET_FETCH_DOMAINS`: what a stored `null` resolves to. */
 export const DEFAULT_ASSET_FETCH_DOMAINS = ['game-icons.net', 'github.com', 'raw.githubusercontent.com', 'openmoji.org', 'api.iconify.design']
+
+/** #887 — every setting's label and help, as the backend's spec has them (`pnpm gen:api`). */
+export const settingDocs: Settings['docs'] = settingDocsJson
+
+/** A bootstrap row with its title and description from the docs, as `_bootstrap` gives them. */
+export function bootstrapRow(row: Omit<BootstrapValue, 'title' | 'description'>): BootstrapValue {
+  const doc = settingDocs[row.name]
+  return { ...row, title: doc?.title ?? row.name, description: doc?.description ?? '' }
+}
+
+function bootstrapRows(rows: Omit<BootstrapValue, 'title' | 'description'>[]): BootstrapValue[] {
+  return rows.map(bootstrapRow)
+}
 
 export const settings: Settings = {
   ...settingsDefaults,
@@ -1166,7 +1192,8 @@ export const settings: Settings = {
   },
   applies: settingsApplies,
   restart_required: [],
-  bootstrap: [
+  docs: settingDocs,
+  bootstrap: bootstrapRows([
     {
       name: 'data_dir',
       env_var: 'SCADBUDDY_DATA_DIR',
@@ -1220,7 +1247,7 @@ export const settings: Settings = {
       source: 'default',
       reason: 'Paired with the Temporal address; set with it by the deployment.',
     },
-  ],
+  ]),
   about: { version: 'v0.42.0', revision: 'abc1234', openscad_version: 'OpenSCAD version 2026.09.28' },
 }
 
@@ -1777,6 +1804,8 @@ function printOf(
     imported: null,
     // The summary's own fields went in above; these are the detail's, a disjoint set.
     ...detail,
+    // #2998: the run's process settings; none here.
+    process_overrides: detail.process_overrides ?? null,
   }
 }
 

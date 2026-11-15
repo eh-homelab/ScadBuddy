@@ -28,6 +28,8 @@ from scadbuddy.activity.index import (
     ACTIVITY_REPAIR_WINDOW_DEFAULT,
     ACTIVITY_TTL_DEFAULT,
 )
+from scadbuddy.agent_data.rotation import kek_at
+from scadbuddy.agent_data.rotation import rotate as rotate_agent_secrets
 from scadbuddy.api import (
     health,
     internal_blobs,
@@ -90,6 +92,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.crud import idempotency
 from scadbuddy.crud import listener as crud_listener
+from scadbuddy.filament.component import FILAMENT
 from scadbuddy.flow_triggers.component import FLOW_TRIGGERS
 from scadbuddy.flow_triggers.events import listen_for_triggers
 from scadbuddy.flow_triggers.fire import TriggerFires, reconcile_trigger_schedules
@@ -115,6 +118,8 @@ from scadbuddy.operations.kinds import OperationKind, Queue
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import reap_quote_holds as reap_orphan_quote_holds
+from scadbuddy.orders.storefront.prepare import prepare_activities
+from scadbuddy.orders.storefront.staged_files import staged_file_activities, sweep_staged
 from scadbuddy.orders.storefront.visitors import VisitorStore
 from scadbuddy.payments.component import PAYMENTS
 from scadbuddy.payments.deposits import sync_deposits
@@ -136,14 +141,14 @@ from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.print_activities import LanActivities, LanDeps
 from scadbuddy.printers.watch import WatchActivities
 from scadbuddy.rack.component import RACK_USAGE
+from scadbuddy.render.agent_migrations import migrate_agent
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
 from scadbuddy.render.previews import PreviewUnrunError
 from scadbuddy.render.runner import probe_openscad_version
-from scadbuddy.render.worker_role import grant_at_start
 from scadbuddy.slicing.component import SLICING
 from scadbuddy.slicing.held_presets import HeldPresetStore, held_presets_activity
 from scadbuddy.slicing.start import stop_lost_native_slices, sweep_native_slices
-from scadbuddy.spools.activities import spool_activities
+from scadbuddy.spools.activities import filament_pull_activity, spool_activities
 from scadbuddy.spools.component import SPOOLS
 from scadbuddy.spools.native import NativeSpoolStore
 from scadbuddy.store import sweep_blobs
@@ -215,6 +220,7 @@ from scadbuddy.workflows.housekeeping import (
 from scadbuddy.workflows.library_copy import VersionedLibraryCopy
 from scadbuddy.workflows.operation import VersionedOperationWorkflow
 from scadbuddy.workflows.operation_activities import operation_activities
+from scadbuddy.workflows.prepare_listing import VersionedPrepareListing
 from scadbuddy.workflows.previews import (
     DUE_ACTIVITY,
     REFRESH_ACTIVITY,
@@ -227,6 +233,7 @@ from scadbuddy.workflows.printer_watch import ensure_watches
 from scadbuddy.workflows.slicing import VersionedSliceWorkflow
 from scadbuddy.workflows.slicing_activities import slice_activities
 from scadbuddy.workflows.spool_refresh import VersionedSpoolRefresh, ensure_spool_schedule
+from scadbuddy.workflows.staged_file import VersionedStagedFile
 from scadbuddy.workflows.store_migration import VersionedStoreMigration
 
 API_PREFIX = "/api/v1"
@@ -462,18 +469,18 @@ async def _sweep_blobs_logged(state: AppState) -> None:
     try:
         if state.store.content is None:
             removed = await asyncio.to_thread(
-                sweep_blobs, state.blobs, state.refs, grace=state.config.job_ttl
+                sweep_blobs, state.blobs, state.refs, grace=state.config.sweep_grace
             )
         else:
             failed = False
             try:
                 removed = await sweep_content(
-                    state.store.content, state.refs, grace=state.config.job_ttl
+                    state.store.content, state.refs, grace=state.config.sweep_grace
                 )
                 backend = state.store.content.backend
                 if isinstance(backend, UnrecordedSweeper):
                     # #701: an upload whose process died before its row was written.
-                    cutoff = datetime.now(UTC) - timedelta(seconds=state.config.job_ttl)
+                    cutoff = datetime.now(UTC) - timedelta(seconds=state.config.sweep_grace)
                     index = state.store.content.index
                     swept = await backend.sweep_unrecorded(
                         cutoff=cutoff, recorded=partial(index.shares_backend_id, backend.backend)
@@ -1137,7 +1144,7 @@ def _rotate_service_credentials(state: AppState) -> None:
     """#4975 phase 4 (spec 2026-11-01 §7.2): each caller's next credential when its
     newest has under seven days left, and the long-dead ones forgotten. Without the KEK
     none can be sealed, so none are issued. First, a sealed credential of a caller that
-    reads none any more (the projects worker's, #5298) is revoked, KEK or not."""
+    reads none any more (the projects and print workers', #5298) is revoked, KEK or not."""
     auth = state.components.get(AUTH)
     try:
         retired = auth.credentials.revoke_retired_legacy()
@@ -1158,11 +1165,22 @@ def _rotate_service_credentials(state: AppState) -> None:
     auth.credentials.delete_expired()
 
 
+def _migrate_agent_at_start(state: AppState) -> None:
+    """The agent's migrations (`render/agent_migrations.py`, #5299 D6), after the
+    backend's: the agent no longer migrates, and waits until `ai_migrations` holds the
+    files it expects (`agent/src/db/schema.ts`). Neither set reads the other's tables, so
+    the order is the start's, not the schema's. A failure stops the start."""
+    with state.settings_store.pool.connection() as conn:
+        applied = migrate_agent(conn)
+    if applied:
+        logger.info("applied the agent's database migrations", extra={"versions": applied})
+
+
 def _grant_and_rotate_at_start(state: AppState) -> None:
     """At start, after the migrations: each caller's role its own view, a retired
-    caller's role nothing (#5298 Task 11), a table dropped from a caller's list taken back
-    (`auth/revoke.py` `RETIRED_GRANTS`), and the credentials due. A failure is logged,
-    never fatal, as `grant_at_start`."""
+    caller's role nothing (#5298 Tasks 11, 22 and 35), a table dropped from a caller's list
+    taken back (`auth/revoke.py` `RETIRED_GRANTS`), and the credentials due. A failure is
+    logged, never fatal."""
     try:
         with state.settings_store.pool.connection() as conn:
             granted = grant_caller_views(conn)
@@ -1182,6 +1200,26 @@ def _grant_and_rotate_at_start(state: AppState) -> None:
         _rotate_service_credentials(state)
     except Exception:
         logger.exception("could not issue the service credentials")
+
+
+def _rotate_agent_secrets(state: AppState) -> None:
+    """#5299 D5: with the previous KEK mounted, the agent's Claude credentials, payload
+    keys, Web Push keys, notification channel tokens and the workspace's principal file
+    keys sealed under it are sealed again under the current one (`agent_data/rotation.py`),
+    as the agent did at its own start. Logged, never fatal."""
+    current = kek_at(state.settings.secret_key_file)
+    previous = kek_at(state.settings.secret_key_previous_file)
+    if state.settings.secret_key_previous_file is not None and previous is None:
+        logger.warning(
+            "the previous secret key cannot be read; the agent's secrets are not re-wrapped"
+        )
+    if current is None or previous is None:
+        return
+    try:
+        with state.settings_store.pool.connection() as conn:
+            rotate_agent_secrets(conn, previous, current)
+    except Exception:
+        logger.exception("could not re-wrap the agent's secrets under the current key")
 
 
 def _prune_crud_requests(state: AppState) -> None:
@@ -1292,16 +1330,24 @@ def _sweep_storefront(
 
 async def _sweep_storefront_drafts_logged(state: AppState) -> None:
     """#5282: the storefront carts idle past ``storefront_draft_ttl_days``, then the
-    visitors idle as long with no order, and the visitors' renders past a day."""
+    visitors idle as long with no order, the visitors' renders past a day, and the
+    storefront's staged files' backstop (#6133, `staged_files.sweep_staged`)."""
     try:
         drafts, visitors, renders = await asyncio.to_thread(_sweep_storefront, state)
+        # The backstop only: each staged file's watcher owns its clean-up.
+        staged = await sweep_staged(state)
     except Exception:
         logger.exception("could not sweep the idle storefront carts")
         raise
-    if drafts or visitors or renders:
+    if drafts or visitors or renders or staged:
         logger.info(
             "swept idle storefront carts",
-            extra={"drafts": len(drafts), "visitors": visitors, "renders": renders},
+            extra={
+                "drafts": len(drafts),
+                "visitors": visitors,
+                "renders": renders,
+                "staged": staged,
+            },
         )
 
 
@@ -1625,6 +1671,7 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         # A run's next plate copy waits on the printer's report (#4541).
         reports=registry.reports,
         native_spools=NativeSpoolStore(state.settings_store.pool),
+        spools=state.components.get(SPOOLS),
     )
     auto_imports = state.components.get(AUTO_IMPORTS)
     activities = [
@@ -1689,6 +1736,8 @@ LIBRARY_WORKFLOWS: tuple[type, ...] = (
     VersionedLibraryCopy,
     VersionedSliceWorkflow,
     VersionedSpoolRefresh,
+    VersionedStagedFile,
+    VersionedPrepareListing,
 )
 
 
@@ -1794,6 +1843,8 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
         *_housekeeping_activities(state),
         *_preview_activities(state),
         *spool_activities(state.components.get(SPOOLS)),
+        # Bambuddy's spools pulled into ScadBuddy's own (#6261), on the spools' Schedule.
+        filament_pull_activity(state.components.get(FILAMENT), lambda: state.settings_store.load()),
         # Bambuddy's local presets kept for native runs (#4645), on the spools' Schedule.
         held_presets_activity(
             lambda: HeldPresetStore(state.projection.pool), lambda: state.settings_store.load()
@@ -1812,7 +1863,10 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
             state.components.get(PRINT_LIBRARY),
             lambda: state.settings_store,
             lambda: state.uploads,
-        ),
+        ),  # Each staged customer file's watcher (#6133).
+        *staged_file_activities(state),
+        # A listing's prepared colour combinations (#6237, #6299 review).
+        *prepare_activities(state, lambda: state.components.get(ORDERS)),
     ]
     try:
         while not stop.is_set():
@@ -1978,12 +2032,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # First: without its database ScadBuddy has no settings, so it does not start.
     # It also brings the schema up to date, before the projection opens.
     await asyncio.to_thread(state.settings_store.open)
-    # The render worker's old role, if the deployment made one, gets `RENDER_GRANTS`
-    # (#601), now empty: the worker holds no database (#5298), and the role keeps what
-    # it was granted before until #5298 Task 22 revokes it.
-    await asyncio.to_thread(grant_at_start, state.settings_store.pool)
+    # Then the agent's (#5299 D6), which the agent waits for.
+    try:
+        await asyncio.to_thread(_migrate_agent_at_start, state)
+    except BaseException:
+        await asyncio.to_thread(state.settings_store.close)
+        raise
     # #4975 phase 4: the service credentials, before any caller reads its own.
     await asyncio.to_thread(_grant_and_rotate_at_start, state)
+    # #5299 D5: a KEK rotation re-wraps the agent's credentials and payload keys here.
+    await asyncio.to_thread(_rotate_agent_secrets, state)
     # #4975 phase 8 (spec 2026-11-01 §9.1): `enforce` without a usable login stops here.
     if state.settings.auth_mode == "enforce":
         auth = state.components.get(AUTH)

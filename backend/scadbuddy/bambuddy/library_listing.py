@@ -52,6 +52,9 @@ class LibraryEntry(BaseModel):
     #: Indexed from an external folder: Bambuddy deletes it for good, never to its
     #: trash, so a delete of it cannot be undone (#2167).
     is_external: bool = False
+    #: A print run's per-print copy or slice in ScadBuddy's own library (#6394): never a
+    #: target of Import print, as its sweep trashes it.
+    per_print: bool = False
 
 
 class LibraryListing(BaseModel):
@@ -76,6 +79,7 @@ def _entry(row: LibraryListRow) -> LibraryEntry:
         file_size=row.file_size,
         created_at=_utc(row.created_at) if row.created_at is not None else None,
         is_external=row.is_external,
+        per_print=row.per_print,
     )
 
 

@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from scadbuddy import main
+from scadbuddy.core.config import DEFAULT_JOB_TTL, Config
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.store.bambuddy import BambuddyContentBackend
 from scadbuddy.store.cache import CachedBlobStore
@@ -73,12 +74,14 @@ async def test_a_stopped_sweep_marks_what_it_removed_and_converges_nothing(
     assert remote.calls == ["mark a1"]
 
 
+@pytest.mark.parametrize("job_ttl", [86400.0, 0.0])
 @pytest.mark.parametrize("content", [False, True])
 async def test_both_blob_sweeps_keep_an_unreferenced_piece_for_the_job_ttl(
-    monkeypatch: pytest.MonkeyPatch, content: bool
+    monkeypatch: pytest.MonkeyPatch, content: bool, job_ttl: float
 ) -> None:
     """Pieces and snapshots are a job's data on either backend, so both sweeps take
-    `job_ttl`; `asset_sweep_grace` is the uploads' knob."""
+    `job_ttl`; `asset_sweep_grace` is the uploads' knob. At `job_ttl` 0 (renders kept
+    forever, #6236) they take the default day, never 0."""
     graces: list[int] = []
 
     def sweep_blobs(blobs: Any, refs: Any, *, grace: int) -> list[str]:
@@ -97,10 +100,10 @@ async def test_both_blob_sweeps_keep_an_unreferenced_piece_for_the_job_ttl(
         ),
         blobs=object(),
         refs=object(),
-        config=SimpleNamespace(job_ttl=86400, asset_sweep_grace=7 * 86400),
+        config=Config(job_ttl=job_ttl, asset_sweep_grace=7 * 86400),
     )
     await main._sweep_blobs_logged(state)  # type: ignore[arg-type]
-    assert graces == [86400]
+    assert graces == [DEFAULT_JOB_TTL]
 
 
 _forgotten: list[list[str]] = []
@@ -127,7 +130,7 @@ async def test_the_blob_sweep_forgets_the_geometry_of_the_pieces_it_removes(
         store=SimpleNamespace(content=None),
         blobs=object(),
         refs=SimpleNamespace(pool=object()),
-        config=SimpleNamespace(job_ttl=86400),
+        config=SimpleNamespace(sweep_grace=86400),
     )
     await main._sweep_blobs_logged(state)  # type: ignore[arg-type]
     assert _forgotten == [["p1", "p2"]]
@@ -161,7 +164,7 @@ async def test_the_blob_sweep_reconciles_unrecorded_uploads_on_a_sweeper_only(
     monkeypatch: pytest.MonkeyPatch, on_bambuddy: bool
 ) -> None:
     """#701: on Bambuddy the sweep also deletes the Work/ files no row names that are
-    older than `job_ttl`; a backend that is no `UnrecordedSweeper` is not asked."""
+    older than `sweep_grace`; a backend that is no `UnrecordedSweeper` is not asked."""
 
     async def sweep_content(store: Any, refs: Any, *, grace: int) -> list[str]:
         return []
@@ -174,7 +177,7 @@ async def test_the_blob_sweep_reconciles_unrecorded_uploads_on_a_sweeper_only(
             content=SimpleNamespace(backend=backend, index=_Index()), blobs=object()
         ),
         refs=SimpleNamespace(pool=object()),
-        config=SimpleNamespace(job_ttl=86400),
+        config=SimpleNamespace(sweep_grace=86400),
     )
     before = datetime.now(UTC)
     await main._sweep_blobs_logged(state)  # type: ignore[arg-type]
@@ -191,7 +194,7 @@ async def test_the_blob_sweep_reconciles_unrecorded_s3_objects_by_the_index(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """On S3 too, the sweep deletes the objects no row names that are older than
-    `job_ttl`; whether a row names one is the content store's index, asked for `s3`."""
+    `sweep_grace`; whether a row names one is the content store's index, asked for `s3`."""
     calls: list[tuple[datetime, Callable[[str], bool]]] = []
 
     async def sweep_unrecorded(
@@ -222,7 +225,7 @@ async def test_the_blob_sweep_reconciles_unrecorded_s3_objects_by_the_index(
             content=SimpleNamespace(backend=backend, index=index), blobs=object()
         ),
         refs=SimpleNamespace(pool=object()),
-        config=SimpleNamespace(job_ttl=86400),
+        config=SimpleNamespace(sweep_grace=86400),
     )
     before = datetime.now(UTC)
     await main._sweep_blobs_logged(state)  # type: ignore[arg-type]
@@ -287,7 +290,7 @@ async def test_a_failing_bambuddy_step_still_trims_the_worker_cache(
             content=SimpleNamespace(backend=_Unreachable(), index=_Index()), blobs=cache
         ),
         refs=object(),
-        config=SimpleNamespace(job_ttl=86400),
+        config=SimpleNamespace(sweep_grace=86400),
     )
     with pytest.raises(OSError, match="down"):
         await main._sweep_blobs_logged(state)  # type: ignore[arg-type]
@@ -310,7 +313,7 @@ def _sweep_state(cache: CachedBlobStore, backend: Any) -> SimpleNamespace:
             content=SimpleNamespace(backend=backend, index=_Index()), blobs=cache
         ),
         refs=object(),
-        config=SimpleNamespace(job_ttl=86400),
+        config=SimpleNamespace(sweep_grace=86400),
     )
 
 

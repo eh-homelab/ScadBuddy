@@ -20,8 +20,9 @@ so the dot is an underscore.
 |---|---|---|
 | `sessions_list` | `read` | Sessions the caller may see, newest first, those offered to it flagged `offered_to_you`; filter by `status`, `origin`, and `resource` (the sessions that touched it, §4.1). Archived sessions are left out unless `archived` is `only` or `include`; each row has `archived` (#1885) |
 | `sessions_start` | `write` | A new session owned by the caller, with an optional first `prompt`, `title`, `tags` and `scope` (`model`, `output`, `job`) |
-| `sessions_send` | `write` | A user turn in a session the caller owns, with optional `images` by reference (below); refused while a turn runs |
-| `sessions_get` | `read` | Status, owner, pending approvals, and the transcript after `after_seq` (streamed text joined per message), paged by `next_seq` |
+| `sessions_send` | `write` | A user turn in a session the caller owns, with optional `images` by reference (below); while a turn runs it is queued to run after it (`queued`, `position`; at most 20 wait, #6386) |
+| `sessions_queue_remove`, `sessions_queue_edit` | `write` | Removes a queued message, or gives it new words, before it starts (#6386); the owner only, as a send |
+| `sessions_get` | `read` | Status, owner, pending approvals, the queued messages (`queue`), and the transcript after `after_seq` (streamed text joined per message), paged by `next_seq` |
 | `sessions_resources` | `read` | What the session's tool calls touched, oldest first (§4.1); `GET /api/v1/ai/sessions/:id/resources` answers the same to the UI |
 | `sessions_attach` | `read` | Waits up to `wait_seconds` (≤ 300) for events after `after_seq` and returns them once they pause; a progress notification per event |
 | `sessions_fork` | `write` | A copy of a session the caller may see, owned by the caller, with the conversation so far; counts against the new-session limit, as a start does. The fork has no budget of its own: it spends from the parent's, which the parent and all its forks (and forks of those) share, so a turn in any of them uses it up for all, and a raise on any of them raises it. Forking a lineage that has spent its budget is refused with `budget_exhausted` (409). Only the user's "Continue in a new chat" in the panel gives a fork a budget of its own (#823) |
@@ -33,7 +34,8 @@ so the dot is an underscore.
 | `sessions_approve`, `sessions_deny` | `outward` | Decide another agent's approval; needs the grant (§3) |
 
 `sessions_start` and `sessions_send` take `wait_seconds` (≤ 600, default 0): with 0 they
-answer once the turn has started; otherwise they wait for it, reporting progress every
+answer once the turn has started (a queued message: once it is queued); otherwise they
+wait for it, a queued one through the turns before it, reporting progress every
 5 s, and say how it ended (`turn.finished`, `turn.result`). Either way they return
 `after_seq`, where the turn's events begin, for `sessions_get` or `sessions_attach`.
 
@@ -71,8 +73,11 @@ request), and the manager's rules apply unchanged (spec §6):
 - A caller sees the sessions it owns or started, and those offered to it (§2.1). The
   browser user sees all of them. Any other session answers "no session", so its
   existence is not revealed.
-- Only the owner sends. Two sends cannot both claim a turn: a send while one runs gets
-  `a turn is already running` (the claim in `send()`).
+- Only the owner sends. Two sends cannot both claim a turn: a send while one runs is
+  queued in the session's workflow and runs as its own turn once the turns before it end
+  (#6386); only the owner removes or edits it before it starts. A Stop ends the running
+  turn only. A flow run's or a background task's send is not queued: it is refused
+  `a turn is already running` (the claim in `send()`), and waits for an idle session.
 - Anyone who may see a session may interrupt it (spec §8.6).
 - Only the owner hands off, and to another MCP principal only as an offer that
   principal accepts (§2.1); the browser user may also take any session over (the panel
@@ -110,7 +115,7 @@ spec §6 "Handoff": ownership moves "explicitly"). Now (`handoff()` in `manager.
 - **To `"browser"`** it moves at once. The human may take any session over anyway, and
   sees every one.
 - **To an MCP principal** it is an **offer**: `pending_owner_*` on `ai_sessions`
-  (`agent/src/db/migrations/20260929T1825Z_session_handoff_offers.sql`). The owner keeps
+  (`backend/scadbuddy/migrations_agent/20260929T1825Z_session_handoff_offers.sql`). The owner keeps
   the session. Only the named principal can accept it, with `sessions_accept_handoff` or
   a `sessions_handoff` to itself, the way `confirm_action` completes only for the
   principal that prepared the call (`claim()` in
@@ -156,7 +161,7 @@ per-token grant". §8.2: "Only the browser user decides, or another principal wi
 per-token grant (§6), and never for its own calls or sessions."
 
 - **The grant** is `approval_grant` on `ai_mcp_tokens`
-  (`agent/src/db/migrations/20260929T0249Z_mcp_token_approval_grant.sql`), off for
+  (`backend/scadbuddy/migrations_agent/20260929T0249Z_mcp_token_approval_grant.sql`), off for
   every token. Mint a token with it through `POST /api/v1/ai/mcp-tokens`
   (`{"name":…, "tier":"outward", "approval_grant":true}`,
   [operating.md §4.1](operating.md#41-mcp-access-tokens)), or in Settings → MCP access →

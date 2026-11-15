@@ -1,4 +1,5 @@
 import type { Sql } from 'postgres'
+import { CrudReadError, crudResponse } from '../api/crudRead.js'
 import { sealBytes, openBytes } from '../secrets.js'
 import { BLOB_NAME, type SessionImage, type StoredBlob } from '../sessions/blobs.js'
 import type { ImageMediaType } from '../sessions/images.js'
@@ -17,6 +18,12 @@ import { payloadKeyLock, type PayloadKeys, SubjectForgotten } from './payloadCod
 // A flow hands a pointer on as a `flow_image` reference (tools/imageRefs.ts), which
 // resolves only inside the same run; the run page shows them through the backend's
 // `GET /workflow-runs/{id}/images/{name}`, which opens them with the same key.
+//
+// The rows are the API's (#5299 step 6, area `forget`): once it lists the area, `CrudFlowBlobs`
+// keeps and reads them through `…/crud/agent/flow-blobs/{subject}` (backend
+// api/crud_agent_forget.py), sealed here as before and sent as bytes (multipart, never base64,
+// #5299 D8); the tombstone check, the cap and the insert are one transaction there, under the
+// subject's lock. `PgFlowBlobs` is the SQL it ran itself until then (D9).
 
 /** What a flow holds for an image its call returned: a pointer, never the bytes. */
 export type FlowImage = { name: string; mediaType: ImageMediaType; bytes: number }
@@ -109,5 +116,77 @@ export class PgFlowBlobs implements FlowBlobStore {
     } finally {
       key.fill(0)
     }
+  }
+}
+
+/** A stored image's type, in the CRUD answer's header (backend crud_agent_forget.py `MEDIA_TYPE_HEADER`). */
+const MEDIA_TYPE_HEADER = 'x-scadbuddy-media-type'
+const MEDIA_TYPES = new Set<string>(['image/png', 'image/jpeg', 'image/gif', 'image/webp'])
+
+/** A run's images through the API's CRUD routes (above): sealed and opened here, kept there. */
+export class CrudFlowBlobs implements FlowBlobStore {
+  readonly #base: string
+  readonly #keys: PayloadKeys
+  readonly #fetch: typeof fetch
+
+  constructor(baseUrl: string, keys: PayloadKeys, options: { fetch?: typeof fetch } = {}) {
+    this.#base = baseUrl
+    this.#keys = keys
+    this.#fetch = options.fetch ?? globalThis.fetch
+  }
+
+  async put(subject: string, images: readonly SessionImage[]): Promise<readonly string[]> {
+    if (!FLOW_SUBJECT.test(subject)) throw new Error(`${subject} is not a flow run`)
+    if (images.length === 0) return []
+    // SubjectForgotten for a run already forgotten: its key is never made again.
+    const key = await this.#keys.keyFor(subject, true)
+    const form = new FormData()
+    try {
+      form.append('images', JSON.stringify(images.map((image) => ({ name: image.name, media_type: image.mediaType, size: image.bytes.length }))))
+      for (const image of images) {
+        const sealed = sealBytes(key, image.bytes, flowBlobContext(subject, image.name))
+        form.append('blob', new Blob([new Uint8Array(sealed)], { type: 'application/octet-stream' }), image.name)
+      }
+    } finally {
+      key.fill(0)
+    }
+    let response: Response
+    try {
+      response = await crudResponse(this.#fetch, this.#base, `the images of ${subject}`, `/flow-blobs/${subject}`, { method: 'POST', body: form })
+    } catch (err) {
+      if (err instanceof CrudReadError && err.fromRoute && err.status === 410) throw new SubjectForgotten(`${subject} was forgotten; its images are not kept`)
+      throw err
+    }
+    const { names } = (await response.json()) as { names: string[] }
+    return names
+  }
+
+  async get(subject: string, name: string): Promise<StoredBlob | undefined> {
+    if (!FLOW_SUBJECT.test(subject) || !BLOB_NAME.test(name)) return undefined
+    let response: Response
+    try {
+      response = await crudResponse(this.#fetch, this.#base, `the image ${name} of ${subject}`, `/flow-blobs/${subject}/${name}`)
+    } catch (err) {
+      if (err instanceof CrudReadError && err.fromRoute && err.status === 404) return undefined
+      throw err
+    }
+    const mediaType = response.headers.get(MEDIA_TYPE_HEADER) ?? ''
+    const data = Buffer.from(await response.arrayBuffer())
+    if (!MEDIA_TYPES.has(mediaType)) throw new Error(`the API answered the image ${name} of ${subject} with no image type`)
+    const key = await this.#keys.keyFor(subject, false)
+    try {
+      return { mediaType: mediaType as ImageMediaType, bytes: openBytes(key, data, flowBlobContext(subject, name)) }
+    } finally {
+      key.fill(0)
+    }
+  }
+}
+
+/** `crud` once `useCrud()` holds (the API lists area `forget`), `pg` until then, chosen per call (#5299 D9). */
+export function gatedFlowBlobs(pg: FlowBlobStore, crud: FlowBlobStore, useCrud: () => boolean): FlowBlobStore {
+  const pick = (): FlowBlobStore => (useCrud() ? crud : pg)
+  return {
+    put: (subject, images) => pick().put(subject, images),
+    get: (subject, name) => pick().get(subject, name),
   }
 }

@@ -31,7 +31,12 @@ open. Anything the spec plans but `main` does not have is marked **not built**.
 Spec §8.1 ("minted in Settings, stored hashed") and §9 ("MCP auth mode, tokens
 (hashed)" live in the database). The implementation is `PostgresTokenStore` in
 [`agent/src/auth/tokens.ts`](../../agent/src/auth/tokens.ts), over `ai_mcp_tokens`
-([`agent/src/db/migrations/20260928T0734Z_mcp_tokens.sql`](../../agent/src/db/migrations/20260928T0734Z_mcp_tokens.sql)).
+([`backend/scadbuddy/migrations_agent/20260928T0734Z_mcp_tokens.sql`](../../backend/scadbuddy/migrations_agent/20260928T0734Z_mcp_tokens.sql)),
+and `CrudTokenStore` beside it once the API lists the agent's CRUD area `mcp-tokens`
+(#5299 step 5, [`backend/scadbuddy/api/crud_agent_stores.py`](../../backend/scadbuddy/api/crud_agent_stores.py)):
+the same statements, run by the API. The plaintext never leaves the agent: a mint sends
+the hash it made, and a verify sends the presented token's hash, which the API looks up
+by its unique index and compares as a hash only.
 
 - **Format.** `sbmcp_` plus 32 bytes from `crypto.randomBytes`, base64url. The prefix
   makes a leaked token recognisable to secret scanners.
@@ -42,7 +47,8 @@ Spec §8.1 ("minted in Settings, stored hashed") and §9 ("MCP auth mode, tokens
   table therefore yields no usable token. The plaintext is returned once, by `mint`.
 - **Verify** is a single `UPDATE … RETURNING` that matches the hash, skips revoked and
   expired rows, and stamps `last_used_at` (only forwards, with `GREATEST`). Revoking on
-  one replica takes effect on every replica at the next request.
+  one replica takes effect on every replica at the next request. Through the CRUD route
+  every expiry is judged by the database's clock, never the agent's.
 - **No other store.** There is no file or in-memory persistence. Without a database,
   `/mcp` answers 503 before any token is looked at (`app.ts`), and `main.ts` wires
   `FailClosedTokenStore`, which verifies nothing. The same store is the fallback when
@@ -385,7 +391,46 @@ drive sessions over `/mcp`. What bounds them:
 ## Envelope encryption and AAD binding
 
 Spec §9. The implementation is in [`agent/src/secrets.ts`](../../agent/src/secrets.ts)
-and [`agent/src/credentials.ts`](../../agent/src/credentials.ts).
+and [`agent/src/credentials.ts`](../../agent/src/credentials.ts), and for the Claude
+credentials and the payload data keys, in the CRUD service too
+([`backend/scadbuddy/agent_data/`](../../backend/scadbuddy/agent_data/), the same format and
+AAD, so a row either side seals opens on the other).
+
+- **Where they are opened (#5299 step 4, D5; #5342).** Once the API lists the agent's CRUD
+  areas `credentials` and `payload-keys`
+  ([`backend/scadbuddy/api/crud_agent_secrets.py`](../../backend/scadbuddy/api/crud_agent_secrets.py)),
+  the API seals and opens the Claude credentials with the KEK, and the agent never opens
+  one. A turn's credentials come from `POST …/crud/agent/credentials/reveal` (purpose
+  `turn`; `redact` for the scrubbing of tool output, `test` for a connection test), a
+  subject's payload data key from `POST …/crud/agent/payload-keys/{subject}`, never the
+  KEK. Each answers the `agent` service credential only, writes its `ai_audit` row in the
+  same transaction (principal `service:agent`, never the secret), and is `no-store`. A
+  reveal's row is kind `credential`, action `reveal.<purpose>`: one per call, but
+  `reveal.redact` (every tool call's redaction, which the agent also keeps 10 s,
+  `plugins/secrets.ts` `SAVED_SECRETS_CACHE_MS`) once in 10 minutes
+  (`api/crud_agent_secrets.py` `REDACT_AUDIT_WINDOW`). A payload
+  key's is kind `payload_key`: `payload_key.create` and a refusal every time, and
+  `payload_key.release` once per subject in 10 minutes (`agent_data/payload_keys.py`
+  `RELEASE_AUDIT_WINDOW`), since the agent asks at transcript-read rate. A
+  payload key is made there under the subject's advisory lock, never for a subject in
+  `ai_forgotten_subjects`. The agent keeps a released key 30 s at most, as before. Until the
+  API lists the areas (a rolling deploy), the agent opens them with its own KEK as before.
+  The Web Push keys and the notification channels' tokens are sealed and opened by the
+  API too once it lists area `notify` (#5299 step 5,
+  [`backend/scadbuddy/api/crud_agent_notify.py`](../../backend/scadbuddy/api/crud_agent_notify.py)):
+  the agent gets the VAPID private key, a subscription's keys and a channel's token only
+  from the routes that send with them, and with no KEK of its own Web Push and the
+  channels work from then on. The API re-wraps them at a rotation. Its workspace files are
+  sealed and opened on the API once it lists area `workspace` (#5299 step 7,
+  [`backend/scadbuddy/api/crud_agent_workspace.py`](../../backend/scadbuddy/api/crud_agent_workspace.py)):
+  the agent sends and gets plaintext and never holds a file key; until then it seals them
+  itself, as before. Its session images, the staged attachments and the saved HTTP bodies
+  go through the API's routes too once it lists areas `session-blobs`, `attachments` and
+  `http-bodies` (#5299 step 7,
+  [`backend/scadbuddy/api/crud_agent_blobs.py`](../../backend/scadbuddy/api/crud_agent_blobs.py)):
+  the same statements, the owner's caps under the owner's lock there, the bytes as the
+  bodies' bytes, never base64. The agent still opens its plugin secrets and plugin sign-ins itself,
+  until the later steps of #5299.
 
 - **Envelope.** `sealSecret()` draws a random 32-byte data key per secret, seals the
   secret under it with AES-256-GCM, then seals the data key under the KEK (the key file,
@@ -422,8 +467,9 @@ and [`agent/src/credentials.ts`](../../agent/src/credentials.ts).
 - **Wrong key vs. tampering.** `openSecret()` compares `kek_id` first, so "wrong key"
   is reported as such. Anything else that fails authentication raises `SealError`,
   which never carries plaintext.
-- **Rotation** re-wraps data keys only (`rewrap()`, `CredentialStore.rewrapFrom()`).
-  See [operating.md](operating.md#33-rotating-it).
+- **Rotation** re-wraps data keys only (`rewrap()`). The API re-wraps the Claude
+  credentials and the payload keys at its start (`agent_data/rotation.py`), the agent the
+  rest. See [operating.md](operating.md#33-rotating-it).
 - **Plaintext in memory.** The Buffers the module creates are zeroed after use. JS
   strings cannot be zeroed, and the header states it: "Zeroing the Buffers shortens the
   exposure; it does not remove it."
@@ -781,7 +827,7 @@ design is [spec §4](../superpowers/specs/2026-10-18-settings-and-tool-access-de
 - **Old keys.** The `ai_settings` keys `builtin_tools.scadbuddy`, `scadbuddy_plugin_enabled`,
   `http_request_enabled` and `printer_camera_enabled`, and the dropped `ai_plugins` columns
   `enabled`, `tool_tiers` and `disabled_tools`, no longer decide. Migration
-  [`20261026T2201Z_access_copy.sql`](../../agent/src/db/migrations/20261026T2201Z_access_copy.sql)
+  [`20261026T2201Z_access_copy.sql`](../../backend/scadbuddy/migrations_agent/20261026T2201Z_access_copy.sql)
   carried their values into `ai_access`. `20261030T1020Z_access_drop_mirrors.sql` (#4828) dropped the
   mirror triggers and deleted the four keys (and the stray `builtin_tools.claude`). The agent writes `ai_access` only.
   `20261101T1527Z_access_drop_columns.sql` (#5014) dropped the `ai_plugins` columns and deleted the four keys again.
@@ -1006,7 +1052,10 @@ The `browser_*` tools act in the user's own tab. How they are built is
   itself paired.
 - **Codes are short-lived, single-use and hashed**: 5 minutes, once, 5 tries, and only
   the SHA-256 in `ai_browser_pairings`. One live pairing per principal, enforced by a
-  partial unique index. Requests are capped per principal and overall.
+  partial unique index. Requests are capped per principal and overall. Once the API lists
+  the agent's CRUD area `pairings` (#5299 step 5), the API runs each transaction: the cap
+  check under the same advisory lock, the accept under the row's `FOR UPDATE`, comparing
+  the code's hash in constant time. The code itself never leaves the agent.
 - **Tiers.** Acting in the tab is at least `write`; `browser_open_print_dialog` is
   `outward` and goes through the approval gate (§8.2). The confirmation controls stay
   user-only (`data-agent-user-only`), so nothing an agent does in the tab sends,
@@ -1089,7 +1138,10 @@ an upload is refused with 429, so the route cannot fill the database. Every pane
 upload is the browser user's, so the cap covers all tabs together: drafts abandoned in
 several tabs can hold it for up to the TTL. Removing an image in the composer deletes
 its upload; a message the agent refuses after the composer has cleared leaves its
-uploads to expire. The bytes are plaintext, as in `ai_session_blobs`.
+uploads to expire. The bytes are plaintext, as in `ai_session_blobs`. Once the API lists
+area `attachments`, each of these runs on its CRUD routes
+([`agent/src/attachments/crudStore.ts`](../../agent/src/attachments/crudStore.ts); #5299
+step 7): the same owner checks, caps and lock, and the image's signature checked again there.
 
 **The turn.** The chat socket, and `sessions_send` for an MCP caller
 (`tools/imageRefs.ts`, where `attachment` is a member of #1906's reference union), read
@@ -1134,7 +1186,7 @@ Spec §8.3 ("the audit log records the client IP"), §8.6 ("audit log"; credenti
 spec asks the same of a client: "Log tool usage for audit purposes"
 ([MCP tools, Security Considerations](https://modelcontextprotocol.io/specification/2025-06-18/server/tools)).
 The code is [`agent/src/audit/`](../../agent/src/audit/), over `ai_audit`
-([`agent/src/db/migrations/20260928T0950Z_audit.sql`](../../agent/src/db/migrations/20260928T0950Z_audit.sql)).
+([`backend/scadbuddy/migrations_agent/20260928T0950Z_audit.sql`](../../backend/scadbuddy/migrations_agent/20260928T0950Z_audit.sql)).
 
 | Kind | Recorded by | When |
 |---|---|---|
@@ -1146,7 +1198,7 @@ The code is [`agent/src/audit/`](../../agent/src/audit/), over `ai_audit`
 | `settings` | `SettingsStore.set()` (`credentials.ts`) | every `ai_settings` write, with the key and value (the table holds no secrets by contract) |
 | `settings` | `SessionManager.raiseBudget()` (`sessions/manager.ts`); refusals by `auditWrites()` | a raise of one session's budget (#790), action `session_budget_usd`, with the session id and the old and new budget; refused and failed attempts from the route's status |
 | `http` | `httpRequestServer()` (`harness/httpRequest.ts`) | every request the `http_request` tool makes, each redirect hop its own row (#827): method, scheme, host, status and size; never a path, a header or a body; refused requests included |
-| `turn` | `turnCostEntry()` (`audit/turn.ts`), written by `SessionManager.finish()` (`sessions/manager.ts`) | every session turn as it ends (#1922): the action is the result's subtype, `interrupted` or `failed`, and the row carries what the turn cost: `cost_usd` (its share of the session's spend), `cost_priced` (false when no result came back, so Claude Code never priced it) and `cost_estimated_usd` (the part ScadBuddy priced itself: the request a stopped turn was cut off in, `sessions/unpricedSpend.ts`). Only `turn` rows have the cost columns ([`20261009T0924Z_audit_turn_cost.sql`](../../agent/src/db/migrations/20261009T0924Z_audit_turn_cost.sql)) |
+| `turn` | `turnCostEntry()` (`audit/turn.ts`), written by `SessionManager.finish()` (`sessions/manager.ts`) | every session turn as it ends (#1922): the action is the result's subtype, `interrupted` or `failed`, and the row carries what the turn cost: `cost_usd` (its share of the session's spend), `cost_priced` (false when no result came back, so Claude Code never priced it) and `cost_estimated_usd` (the part ScadBuddy priced itself: the request a stopped turn was cut off in, `sessions/unpricedSpend.ts`). Only `turn` rows have the cost columns ([`20261009T0924Z_audit_turn_cost.sql`](../../backend/scadbuddy/migrations_agent/20261009T0924Z_audit_turn_cost.sql)) |
 | `token` | `auditedTokenStore()` (`audit/writes.ts`), around the one store `main.ts` gives both the Settings token routes (#517) and `/mcp` | MCP token mint and revoke, with the token's id and name; never the token. A refused or failed `POST`/`DELETE /api/v1/ai/mcp-tokens…` is recorded by `auditWrites()` (failures only, so a mint is one row) |
 
 Each row has who (principal kind, id and label; session and turn), the tool and tier,
@@ -1341,7 +1393,9 @@ From the merged code and PR bodies:
    started (the comment on `sessions` in `main.ts`). ScadBuddy's own plugin is
    loaded into each of those turns (#896, see [Plugin vetting](#plugin-vetting)).
 8. **Rotation leaves unopenable rows** as they are, and counts them in the log
-   (`rewrapFrom()`).
+   (the API's `agent_data/rotation.py` for the Claude credentials, payload keys, Web
+   Push keys, notification channel tokens and the workspace's principal file keys, the
+   agent's `rewrapFrom()` for its plugin secrets and plugin sign-ins).
 9. **Write-tier calls are not gated, so injected content can drive one.** Tiers put
    `update_source` and other `write` tools in the tier that runs without a human,
    because a write is reversible through the model's git history (spec §8.1). The

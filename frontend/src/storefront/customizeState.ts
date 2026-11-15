@@ -29,11 +29,16 @@ export function loadChoices(listingId: string): SavedChoices | null {
     if (text === null) return null
     const saved: unknown = JSON.parse(text)
     if (typeof saved !== 'object' || saved === null) return null
+    // #6258: choices saved before it may still hold `picks` and `material`; they are
+    // read past, as a pick is now the colour in `values`.
     const { v, values, quantity } = saved as { v?: unknown; values?: unknown; quantity?: unknown }
     if (v !== VERSION || typeof values !== 'object' || values === null) return null
     const kept: Record<string, ParamValue> = {}
     for (const [name, value] of Object.entries(values)) if (isValue(value)) kept[name] = value
-    return { values: kept, quantity: typeof quantity === 'number' && Number.isInteger(quantity) && quantity >= 1 ? quantity : 1 }
+    return {
+      values: kept,
+      quantity: typeof quantity === 'number' && Number.isInteger(quantity) && quantity >= 1 ? quantity : 1,
+    }
   } catch {
     return null
   }

@@ -490,6 +490,7 @@ def test_one_file_is_read_by_id_whatever_its_type_with_its_folder_path(
         "created_at": "2026-09-28T00:00:00Z",
         "output_id": None,
         "is_external": False,
+        "per_print": False,
         "folder_path": ["Supplies", "Storage"],
     }
     assert client.get("/api/v1/print/library/3999").status_code == 404

@@ -13,7 +13,7 @@ import { redact } from '../secrets.js'
 // (https://modelcontextprotocol.io/specification/2025-06-18/server/tools,
 // "Security Considerations").
 //
-// One append-only table, `ai_audit` (db/migrations/20260928T0950Z_audit.sql;
+// One append-only table, `ai_audit` (backend/scadbuddy/migrations_agent/20260928T0950Z_audit.sql;
 // triggers refuse UPDATE, TRUNCATE and any DELETE but the retention sweep's).
 // What is recorded, and by whom:
 //
@@ -67,7 +67,7 @@ import { redact } from '../secrets.js'
 // database blip stop every session; the table is in the same database as
 // everything the actions touch, so an outage stops those too.
 
-export const AUDIT_KINDS = ['tool_call', 'resource', 'approval', 'credential', 'plugin', 'settings', 'token', 'memory', 'http', 'question', 'turn'] as const
+export const AUDIT_KINDS = ['tool_call', 'resource', 'approval', 'credential', 'plugin', 'settings', 'token', 'memory', 'http', 'question', 'turn', 'payload_key'] as const
 export type AuditKind = (typeof AUDIT_KINDS)[number]
 export const AUDIT_OUTCOMES = ['ok', 'error', 'refused', 'denied'] as const
 export type AuditOutcome = (typeof AUDIT_OUTCOMES)[number]

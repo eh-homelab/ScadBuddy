@@ -78,6 +78,7 @@ from scadbuddy.bambuddy.models import (
 from scadbuddy.bambuddy.options import OptionScope, PrintOptions, library_options_scope
 from scadbuddy.bambuddy.part_settings import PartSettingsMap, normalised, parts_set_only
 from scadbuddy.bambuddy.print_links import ImportSource
+from scadbuddy.bambuddy.process_overrides import ProcessOverrides, normalised_overrides
 from scadbuddy.core.config import LibraryBackend, Slicer, StoreBackend
 from scadbuddy.core.events import EventBus, SettingsChanged, SettingsSection, emit
 from scadbuddy.core.pg_pool import row_pool
@@ -94,6 +95,7 @@ from scadbuddy.library.asset_fetch import DEFAULT_ASSET_FETCH_DOMAINS, normalise
 from scadbuddy.library.catalogue import PrintSequence
 from scadbuddy.orders.message_models import MessagingBinding
 from scadbuddy.orders.money import DepositRule, ShippingOption
+from scadbuddy.orders.storefront.slice_profile import StorefrontSliceProfile
 from scadbuddy.render.pg_store import MIGRATION_LOCK, migrate
 
 logger = logging.getLogger(__name__)
@@ -293,6 +295,8 @@ def _parts_only_when_set(dumped: dict[str, Any]) -> dict[str, Any]:
     the settings set in each slot (#5627, ``parts_set_only``)."""
     if dumped.get("part_settings") is None:
         dumped.pop("part_settings", None)
+    if dumped.get("process_overrides") is None:
+        dumped.pop("process_overrides", None)
     return parts_set_only(dumped, maps=("part_settings",))
 
 
@@ -309,8 +313,13 @@ class ModelPrintChoices(BaseModel):
     the template's or the process's. ``part_settings`` are its slicer settings per
     filament slot (#5627, ``bambuddy/part_settings.py``), a model's or a library file's
     (#5628). Kept per model or file only, never at the print options' global or printer
-    scope, since a slot number means one file's colour. All default to "nothing remembered", so
-    a settings file written before them still loads; an empty ``nozzles`` means the
+    scope, since a slot number means one file's colour. ``force_colour_match`` is the
+    spool step's "Wait for the right colour" (#6218), kept beside the spools it applies
+    to; ``None`` is nothing remembered, which the dialog and the agent read as on.
+    ``process_overrides`` are its "Slicer settings" (#2998,
+    ``bambuddy/process_overrides.py``): any Bambu Studio process key, kept in the stored
+    jsonb with the rest, so no migration. All default to "nothing remembered", so a
+    settings file written before them still loads; an empty ``nozzles`` means the
     dialog's default.
     """
 
@@ -323,6 +332,8 @@ class ModelPrintChoices(BaseModel):
     process_name: str | None = Field(default=None, max_length=200)
     print_sequence: PrintSequence | None = None
     part_settings: PartSettingsMap | None = None
+    force_colour_match: bool | None = None
+    process_overrides: ProcessOverrides | None = None
 
     @field_validator("part_settings")
     @classmethod
@@ -330,9 +341,16 @@ class ModelPrintChoices(BaseModel):
         """Only slots that set something (#5627): none set is nothing remembered."""
         return normalised(value)
 
-    # `part_settings` only when some are remembered (#5627): an entry with none reads as
-    # it did before the field existed. A lambda with no return annotation, so the schema
-    # stays the model's (`part_settings.parts_set_only` says why).
+    @field_validator("process_overrides")
+    @classmethod
+    def _overrides_set(cls, value: ProcessOverrides | None) -> ProcessOverrides | None:
+        """As a print request keeps them (#2998); none set is nothing remembered."""
+        return normalised_overrides(value)  # type: ignore[return-value]
+
+    # `part_settings` and `process_overrides` only when some are remembered (#5627,
+    # #2998): an entry with none reads as it did before the fields existed. A lambda with
+    # no return annotation, so the schema stays the model's (`part_settings.parts_set_only`
+    # says why).
     _parts_when_set = model_serializer(mode="wrap")(
         lambda self, handler: _parts_only_when_set(handler(self))
     )
@@ -484,6 +502,9 @@ class StoredSettings(BambuddyIds):
     #: The messaging plugin tool bound to "customer messages" (#5660); ``None`` is none,
     #: so `order_notify_customer` only composes. No secret: the plugin's stay in the agent.
     orders_customer_messaging: MessagingBinding | None = None
+    #: The shop slice profile (#6153): the printer and a spool per material a storefront
+    #: variant is sliced with. ``None`` slices nothing, so no visitor sees a price.
+    storefront_slice_profile: StorefrontSliceProfile | None = None
 
     #: Options scope (a model slug, or ``library:<file id>``, #1754) -> what the picker
     #: chose, set one at a time (:meth:`SettingsStore.set_model_choices`,
@@ -613,6 +634,19 @@ class StoredSettings(BambuddyIds):
             logger.warning("unreadable messaging binding")
             return None
 
+    @field_validator("storefront_slice_profile", mode="before")
+    @classmethod
+    def _readable_profile(cls, value: Any) -> Any:
+        """A profile this version cannot read (#6153) is none, so it cannot stop the
+        settings loading; the storefront then shows no price."""
+        if value is None:
+            return None
+        try:
+            return StorefrontSliceProfile.model_validate(value)
+        except ValidationError:
+            logger.warning("unreadable storefront slice profile")
+            return None
+
     @field_validator("model_print_choices", mode="before")
     @classmethod
     def _readable_choices(cls, value: Any) -> Any:
@@ -703,9 +737,10 @@ class StoredSettings(BambuddyIds):
         return tuple(self.asset_fetch_domains)
 
     def render_bambuddy_key(self) -> tuple[str | None, bool]:
-        """The key render workers use, and whether it is the full key by fallback. With
-        no key at all there is nothing to fall back to: ``(None, False)``, as the view's
-        ``render_key_fallback``."""
+        """The key the API's own render store uses, and whether it is the full key by
+        fallback. With no key at all there is nothing to fall back to: ``(None, False)``,
+        as the view's ``render_key_fallback``. A standalone render worker never gets the
+        full key: the CRUD route withholds it (`api/crud_render.py` `withheld`, #5298)."""
         if self.bambuddy_render_api_key:
             return self.bambuddy_render_api_key, False
         return self.bambuddy_api_key, self.bambuddy_api_key is not None
@@ -783,6 +818,8 @@ class SettingsPatch(BaseModel):
     storefront_payment_instructions: str | None = Field(default=None, max_length=2000)
     #: ``null`` unbinds the messaging plugin (#5660).
     orders_customer_messaging: MessagingBinding | None = None
+    #: ``null`` removes the shop slice profile (#6153).
+    storefront_slice_profile: StorefrontSliceProfile | None = None
 
     # -- the runtime settings (#322), each env-seeded ---------------------------------
     render_timeout: float | None = None
@@ -843,8 +880,13 @@ class SettingsPatch(BaseModel):
     storefront_renders_per_minute: int | None = None
     storefront_renders_per_day: int | None = None
     storefront_render_concurrency: int | None = None
+    storefront_slices_concurrent: int | None = None
     storefront_draft_ttl_days: int | None = None
     storefront_requests_enabled: bool | None = None
+    #: The materials a storefront print may be made of, in order (#6258).
+    storefront_materials: list[str] | None = None
+    #: The most colour combinations one prepare of a listing queues (#6237).
+    storefront_prepare_cap: int | None = None
     #: The storefront's mail (#5283); the password is sealed apart, never a setting.
     storefront_mail_host: str | None = None
     storefront_mail_port: int | None = None
@@ -872,6 +914,9 @@ class SettingsPatch(BaseModel):
     #: Auto tax (#5281): the percent, and whether shipping is in its base.
     orders_tax_percent: str | None = None
     orders_tax_shipping: bool | None = None
+    #: The handling fee for bought items (#6133): flat per purchase, and a percent.
+    orders_purchase_fee_flat_minor: int | None = None
+    orders_purchase_fee_percent: str | None = None
     #: Whether a fulfilled line item may be unfulfilled (#4953).
     orders_allow_unfulfil: bool | None = None
     #: Whether a native run waits for a cleared plate between its prints (#4939).
@@ -1651,7 +1696,9 @@ class RenderStoreSettings(BaseModel):
     store_backend: StoreBackend = "local"
     bambuddy_url: str | None = None
     api_key: str | None = Field(default=None, repr=False)
-    #: True when `api_key` is the full key because no render key is stored.
+    #: True when no render key is stored but the full key is: the API's own read then
+    #: holds the full key in `api_key`; the CRUD route's answer to a render worker holds
+    #: none (`api/crud_render.py` `withheld`).
     key_is_fallback: bool = False
     library_folder_id: int | None = None
     s3: S3Settings | None = None
@@ -1665,8 +1712,9 @@ def load_render_store_settings(
 ) -> RenderStoreSettings:
     """Read only `RENDER_FIELDS`: a worker holds no settings store (spec §9). Through
     the `render_settings` view, all of the settings a render worker gets (#601), from
-    the API's CRUD route (#5298); the full key is in it only while no render key is
-    stored."""
+    the API's CRUD route (#5298). The full key is in it only while no render key is
+    stored, and the route withholds it from the worker then (`api/crud_render.py`
+    `withheld`)."""
     kek = settings_kek(defaults.secret_key_file)
     with pool.connection() as conn:
         rows = conn.execute(

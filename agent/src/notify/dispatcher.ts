@@ -6,7 +6,7 @@ import type { Owner } from '../sessions/protocol.js'
 import { BROWSER_USER } from '../routes/approvals.js'
 import { ChannelError, type ChannelMessage, type ChannelStore, type OpenChannel } from './channels.js'
 import { checkPushEndpoint, type PinnedEndpoint } from './pushEgress.js'
-import type { PushStore, PushSubscriptionRow } from './pushStore.js'
+import type { PushRepo, PushSubscriptionRow } from './pushStore.js'
 import { encryptPayload, vapidAuthorization } from './webPush.js'
 
 // #815 §3, the closed-tab channel: every request waiting on a person (an attention request,
@@ -55,7 +55,7 @@ export const PASS_DEADLINE_MS = 30_000
 export const PUSH_TIMEOUT_MS = 10_000
 
 export type NotificationDispatcherDeps = {
-  store: PushStore
+  store: PushRepo
   /** The requests waiting on `owner` now (`pendingNotices` of `pendingInput`). */
   notices: (owner: Owner) => Promise<AttentionNotice[]>
   /** VAPID's `sub`: who the push service may contact (SCADBUDDY_PUBLIC_URL). */
@@ -67,14 +67,14 @@ export type NotificationDispatcherDeps = {
   pinEndpoint?: (endpoint: string) => Promise<PinnedEndpoint>
   /** A pass's deadline, PASS_DEADLINE_MS unless a test sets it. */
   passDeadlineMs?: number
-  /** The out-of-browser channels (channels.ts), told of what the browser user may see; none without the KEK. */
+  /** The out-of-browser channels (channels.ts), told of what the browser user may see; none without the database; with no KEK here, only once the API serves area `notify`. */
   channels?: ChannelStore | undefined
   /** SCADBUDDY_PUBLIC_URL: where a channel's link opens the session; no link without it. */
   publicUrl?: string | undefined
   log?: (message: string) => void
 }
 
-type Vapid = Awaited<ReturnType<PushStore['vapidKeys']>>
+type Vapid = Awaited<ReturnType<PushRepo['vapidKeys']>>
 
 export class NotificationDispatcher {
   readonly #deps: NotificationDispatcherDeps
@@ -104,8 +104,10 @@ export class NotificationDispatcher {
 
   /** Sends what has not been sent yet to every subscription and every enabled channel. */
   async pass(): Promise<void> {
-    const subscriptions = await this.#deps.store.subscriptions()
-    const channels = (await this.#deps.channels?.enabled()) ?? []
+    // With no KEK in this process, the records are reachable only once the API serves them (#5299 step 5).
+    const subscriptions = this.#deps.store.available?.() === false ? [] : await this.#deps.store.subscriptions()
+    const channelStore = this.#deps.channels?.available() === false ? undefined : this.#deps.channels
+    const channels = (await channelStore?.enabled()) ?? []
     if (subscriptions.length === 0 && channels.length === 0) return
     const deadline = AbortSignal.timeout(this.#deps.passDeadlineMs ?? PASS_DEADLINE_MS)
     const byOwner = new Map<string, { owner: Owner; subs: PushSubscriptionRow[] }>()

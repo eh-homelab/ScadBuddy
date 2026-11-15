@@ -85,7 +85,8 @@ def two_colours(fake_openscad: str) -> None:
 
 
 def price_book(client: TestClient, **policy: str) -> tuple[str, str]:
-    """A machine rate and two filaments (PLA at 20 a kilogram, PETG at 30)."""
+    """A machine rate and two filaments (PLA at 20 a kilogram, PETG at 30). Each states
+    its density, so the add never asks a linked Bambuddy for one (#6136)."""
     saved = client.put(
         BOOK,
         json={
@@ -99,9 +100,18 @@ def price_book(client: TestClient, **policy: str) -> tuple[str, str]:
     )
     assert saved.status_code == 200, saved.text
     ids = []
-    for material, colour, cost in (("PLA", "#FF0000", "20"), ("PETG", "#00FF00", "30")):
+    for material, colour, cost, density in (
+        ("PLA", "#FF0000", "20", "1.24"),
+        ("PETG", "#00FF00", "30", "1.25"),
+    ):
         made = client.post(
-            f"{BOOK}/filaments", json={"material": material, "colour": colour, "cost_per_kg": cost}
+            f"{BOOK}/filaments",
+            json={
+                "material": material,
+                "colour": colour,
+                "cost_per_kg": cost,
+                "density_g_cm3": density,
+            },
         )
         assert made.status_code == 201, made.text
         ids.append(made.json()["id"])
@@ -639,7 +649,8 @@ def test_a_quote_is_refused_before_anything_is_written(bambuddy: TestClient) -> 
     assert no_filament.status_code == 422, no_filament.text
     assert no_filament.json()["type"].endswith("/filaments")
     free = bambuddy.post(
-        f"{BOOK}/filaments", json={"material": "PLA", "colour": "#FFFFFF", "cost_per_kg": "0"}
+        f"{BOOK}/filaments",
+        json={"material": "PLA", "colour": "#FFFFFF", "cost_per_kg": "0", "density_g_cm3": "1.24"},
     ).json()["id"]
     assert bambuddy.put(BOOK, json={}).status_code == 200
     nothing = shop.post(filaments={"0": free, "1": free})

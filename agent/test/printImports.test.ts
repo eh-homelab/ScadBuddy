@@ -159,6 +159,37 @@ describe('get_print_sources and import_print (#4698)', () => {
     )
     expect(result.isError).toBe(true)
   })
+
+  it('imports onto a native library file (#6394)', async () => {
+    const onFile = {
+      ...IMPORTED,
+      subject: 'library:1000001498',
+      slug: null,
+      library_file_id: 1000001498,
+    }
+    const seen: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/print-imports/193`, async ({ request }) => {
+        seen.push(await request.json())
+        return HttpResponse.json(onFile, { status: 201 })
+      }),
+    )
+    const input = { archive_id: 193, source: { kind: 'archive' as const }, library_file_id: 1000001498 }
+    const result = await runTool(tool('import_print'), input, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(firstText(result)).toEqual(onFile)
+    expect(seen).toEqual([{ source: { kind: 'archive' }, library_file_id: 1000001498 }])
+    expect(tool('import_print').summarize?.(input as never)).toBe(
+      'Import print 193 from its archive file onto library file 1000001498',
+    )
+  })
+
+  it('refuses no target, or a library file with another target', async () => {
+    for (const target of [{}, { slug: 'm', library_file_id: 1000001498 }, { new_model: { name: 'N' }, library_file_id: 1000001498 }]) {
+      const result = await runTool(tool('import_print'), { archive_id: 193, source: { kind: 'archive' }, ...target }, ctx())
+      expect(result.isError).toBe(true)
+    }
+  })
 })
 
 describe('the touched list of an import (#5979)', () => {
@@ -174,6 +205,14 @@ describe('the touched list of an import (#5979)', () => {
     const touches = extract({ archive_id: 193 }, { ...made, made_now: false })
     expect(touches.some((t) => t.action === 'created')).toBe(false)
     expect(touches).toEqual([{ type: 'print_archive', id: '193', action: 'modified' }])
+  })
+
+  it('records the library file an import linked the print to (#6394)', () => {
+    const onFile = { ...IMPORTED, subject: 'library:1000001498', slug: null, library_file_id: 1000001498 }
+    expect(extract({ archive_id: 193 }, { ...onFile, made_now: true })).toEqual([
+      { type: 'print_archive', id: '193', action: 'modified' },
+      { type: 'library_file', id: '1000001498', action: 'modified' },
+    ])
   })
 })
 

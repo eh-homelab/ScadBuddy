@@ -68,6 +68,12 @@ export type ImageRef = { name: string; mediaType: 'image/png' | 'image/jpeg' | '
  */
 export type SentImage = Partial<ImageRef> & { preview: { name: string; mediaType: 'image/png' | 'image/jpeg' | 'image/webp' } }
 
+/**
+ * A message waiting for its turn (#6386): its id is the turn id it runs as, `text` the user's
+ * words (never the page context), images by name only (#2479).
+ */
+export type QueuedEntry = { id: string; text: string; author: Owner; images?: SentImage[]; queuedAt: string }
+
 export type SessionSummary = {
   sessionId: string
   title: string
@@ -236,6 +242,12 @@ export type ServerEvent = V &
     /** The entry `id` ended: answered, decided, timed out or cancelled. */
     | { type: 'input.resolved'; sessionId: string; id: string; kind: 'approval' | 'answer'; outcome: InputOutcome; reason?: string }
     | { type: 'session.status'; sessionId: string; status: SessionStatus }
+    /**
+     * #6386: the messages that wait for their turns, oldest first, after a change (one queued,
+     * removed, edited, started or dropped). The log's last one is the queue; `version` grows with
+     * each change, so a reader keeps the highest it has seen.
+     */
+    | { type: 'session.queue'; sessionId: string; version: number; queue: QueuedEntry[] }
     | { type: 'session.result'; sessionId: string; costUsd?: number; turns: number; budgetUsd?: number }
     /** The budget changed (a raise, #790), or a send was refused because it is spent. */
     | { type: 'session.budget'; sessionId: string; costUsd: number; budgetUsd: number }
@@ -256,11 +268,12 @@ export type ServerEvent = V &
       }
     /**
      * `questionId`: the error refused the panel's answer to that question (#940), so its card is answerable again.
+     * `queuedId`: the error refused the panel's remove or edit of that queued message (#6386), which stays queued.
      * `shown`: `message` with the credential named by its name (#3710, credentials.ts `credentialDisplayLabel`),
      * which the panel shows in its place. Only the panel reads it: logs, a flow's failure and the turn's
      * outcome read `message`.
      */
-    | { type: 'error'; sessionId?: string; code?: string; message: string; questionId?: string; shown?: string }
+    | { type: 'error'; sessionId?: string; code?: string; message: string; questionId?: string; queuedId?: string; shown?: string }
     /**
      * #3710: a model request failed on one Claude credential, and the turn continues on the
      * next (harness/fallback.ts `onFallback`). Both are named for the person, with their names

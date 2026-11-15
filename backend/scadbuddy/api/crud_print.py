@@ -201,7 +201,14 @@ from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.secrets import SealError
 from scadbuddy.crud.guard import crud_router
-from scadbuddy.crud.idempotency import MaybeIdempotencyKey, Replay, idempotent_write, required_key
+from scadbuddy.crud.idempotency import (
+    MaybeIdempotencyKey,
+    Replay,
+    idempotent,
+    idempotent_write,
+    record,
+    required_key,
+)
 from scadbuddy.crud.operations import operations_router
 from scadbuddy.crud.print import (
     ACCESS_CODE_UNREADABLE,
@@ -942,32 +949,36 @@ async def put_report(
     idempotency_key: MaybeIdempotencyKey = None,
 ) -> ReportWritten:
     """The watch's write. Only the write that shows a print ended answers that end, and
-    only the one that shows a print start answers that start, so once per
-    ``Idempotency-Key``: a resend after a lost answer answers the same end and start."""
-    # One ledger row per report written: the watch puts about once a `watch.py`
-    # `write_every` (1 s) while a printer reports, and at once on a shown change, so up
-    # to tens of thousands of rows a day per printer. `crud/idempotency.py` `prune` drops
-    # each after `RETENTION` (24 h), which bounds them.
+    only the one that shows a print start answers that start, so such a write is once
+    per ``Idempotency-Key``: a resend after a lost answer answers the same end and start.
+
+    Only a write that answers an end or a start keeps a ledger row (#5298 final review
+    M2): the watch puts about once a `watch.py` `write_every` (1 s) while a printer
+    reports, so a row per write was tens of thousands a day per printer. A plain write
+    sent again needs none: the row then holds that report at that ``seen_at``, which never
+    moves back, so the resend ends and starts nothing, the same answer as the first
+    send's; one older than the row is `stale` and answers nothing too."""
     key = required_key(idempotency_key)
     reports = printers.reports
+    request = {"printer_id": printer_id, **body.model_dump(mode="json")}
 
-    def write(conn: Connection[DictRow]) -> dict[str, Any]:
-        advance = PrinterReportStore.advance_in(conn, printer_id, body.report, body.seen_at)
-        ended = advance.ended
-        return {
-            "ended": None if ended is None else dataclasses.asdict(ended),
-            "started": advance.started,
-        }
+    def run() -> dict[str, Any]:
+        with reports.pool.connection() as conn, conn.transaction():
+            stored = idempotent(conn, "print", key, REPORT_ROUTE, request)
+            if stored is not None:
+                answer: dict[str, Any] = stored.body
+                return answer
+            advance = PrinterReportStore.advance_in(conn, printer_id, body.report, body.seen_at)
+            ended = advance.ended
+            answer = {
+                "ended": None if ended is None else dataclasses.asdict(ended),
+                "started": advance.started,
+            }
+            if ended is not None or advance.started is not None:
+                record(conn, "print", key, REPORT_ROUTE, request, Replay(200, answer))
+            return answer
 
-    answer = await asyncio.to_thread(
-        _once_on,
-        reports.pool,
-        key,
-        REPORT_ROUTE,
-        {"printer_id": printer_id, **body.model_dump(mode="json")},
-        write,
-    )
-    return ReportWritten.model_validate(answer)
+    return ReportWritten.model_validate(await asyncio.to_thread(run))
 
 
 @router.post(

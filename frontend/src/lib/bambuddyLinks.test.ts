@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bambuddyBase, bambuddyLink, framingOrigin, webUrls } from './bambuddyLinks'
+import { bambuddyBase, bambuddyLink, framingOrigin, pageMatch, webUrls } from './bambuddyLinks'
 
 const API = 'http://bambuddy.bambuddy.svc.cluster.local:8000'
 const SSO = 'https://bambuddy.sso.example'
@@ -26,6 +26,72 @@ describe('bambuddyBase', () => {
     expect(bambuddyBase([SSO, LAN], 'https://evil.example')).toBe(SSO)
     expect(bambuddyBase([], null)).toBeNull()
   })
+
+  // #6212 — ScadBuddy is reached on more than one hostname, each beside one of Bambuddy's.
+  it("is the listed Bambuddy beside the page's host", () => {
+    expect(bambuddyBase([SSO, LAN], null, 'scadbuddy.lan.example')).toBe(LAN)
+    expect(bambuddyBase([SSO, LAN], null, 'scadbuddy.sso.example')).toBe(SSO)
+    expect(bambuddyBase([SSO, 'http://192.168.1.5:8000'], null, '192.168.1.5')).toBe('http://192.168.1.5:8000')
+  })
+
+  it('is the framing Bambuddy before the one beside the page', () => {
+    expect(bambuddyBase([SSO, LAN], SSO, 'scadbuddy.lan.example')).toBe(SSO)
+  })
+
+  it('is the default when no listed Bambuddy is beside the page', () => {
+    expect(bambuddyBase([SSO, LAN], null, 'scadbuddy.evil.example')).toBe(SSO)
+    expect(bambuddyBase([SSO, LAN], null, 'lan.example')).toBe(SSO)
+    expect(bambuddyBase([SSO, LAN], null, 'localhost')).toBe(SSO)
+    expect(bambuddyBase([SSO, 'http://10.0.0.5'], null, '192.168.0.5')).toBe(SSO)
+  })
+
+  // #6227 — a parent of one label is a bare TLD (`example` stands for `com`) or a LAN
+  // suffix, shared by unrelated names.
+  it('is the default on a two-label host: a bare TLD makes no sibling', () => {
+    expect(bambuddyBase([SSO, 'https://bambuddy.example'], null, 'scadbuddy.example')).toBe(SSO)
+    expect(bambuddyBase([SSO, 'https://other.example'], null, 'scadbuddy.example')).toBe(SSO)
+    expect(bambuddyBase([SSO, 'https://bambuddy.lan'], null, 'scadbuddy.lan')).toBe(SSO)
+  })
+
+  it('strips one trailing dot from a fully qualified host before it matches', () => {
+    expect(bambuddyBase([SSO, 'https://other.example.'], null, 'scadbuddy.example.')).toBe(SSO)
+    expect(bambuddyBase([SSO, LAN], null, 'scadbuddy.lan.example.')).toBe(LAN)
+  })
+
+  // The code has no public-suffix list, so a suffix of two labels (`co.uk`-style) still
+  // reads as a shared parent. Only listed URLs can be picked, so the cost is a wrong
+  // choice among them, never a link to an unlisted host.
+  it('still takes a sibling under a two-label public suffix (a known limit)', () => {
+    expect(bambuddyBase([SSO, 'https://other.co.example'], null, 'scadbuddy.co.example')).toBe(
+      'https://other.co.example',
+    )
+  })
+
+  it('is the same host on another port on a two-label host', () => {
+    expect(bambuddyBase([SSO, 'http://scadbuddy.lan:8000'], null, 'scadbuddy.lan')).toBe('http://scadbuddy.lan:8000')
+  })
+
+  it('is the Bambuddy beside the page when the framing origin is not listed', () => {
+    expect(bambuddyBase([SSO, LAN], 'https://bambuddy.unlisted.example', 'scadbuddy.lan.example')).toBe(LAN)
+  })
+})
+
+describe('pageMatch', () => {
+  // #6240: a page whose rest is one label (`scadbuddy.example`, with `example` standing
+  // for `com`) looks for no sibling. That page-side rule is what this test pins. A listed
+  // host matches only when its rest equals the page's, so a listed host whose rest is one
+  // label cannot match a page that passed the rule; the second assertion below is a
+  // regression guard for that case and passes with or without the rule (#6247).
+  it('takes a listed sibling whose rest keeps two labels', () => {
+    expect(pageMatch(['https://bambuddy.sso.example'], 'scadbuddy.sso.example')).toBe(
+      'https://bambuddy.sso.example',
+    )
+  })
+
+  it('takes no sibling for a page whose rest is a bare TLD', () => {
+    expect(pageMatch(['https://bambuddy.example'], 'scadbuddy.example')).toBeNull()
+    expect(pageMatch(['https://bambuddy.example'], 'scadbuddy.sso.example')).toBeNull()
+  })
 })
 
 describe('bambuddyLink', () => {
@@ -36,6 +102,11 @@ describe('bambuddyLink', () => {
   it('leaves it alone outside a listed frame', () => {
     expect(bambuddyLink(`${SSO}/queue`, [SSO, LAN], null)).toBe(`${SSO}/queue`)
     expect(bambuddyLink(`${SSO}/queue`, [SSO, LAN], 'https://evil.example')).toBe(`${SSO}/queue`)
+  })
+
+  it("moves a server link onto the Bambuddy beside the page's host (#6212)", () => {
+    expect(bambuddyLink(`${SSO}/library`, [SSO, LAN], null, 'scadbuddy.lan.example')).toBe(`${LAN}/library`)
+    expect(bambuddyLink(`${SSO}/library`, [SSO, LAN], null, 'scadbuddy.sso.example')).toBe(`${SSO}/library`)
   })
 
   it('leaves a link on another host alone', () => {

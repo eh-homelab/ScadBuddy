@@ -13,9 +13,10 @@ import {
 } from '../api/client'
 import { Estimate } from '../components/Estimate'
 import { ListingView } from '../components/ListingView'
+import { clashText } from '../colours'
 import { clearChoices, loadChoices, saveChoices } from '../customizeState'
 import { useDraftChanged } from '../draftCount'
-import { keepOffered, listingUnavailable, slotFilaments, valueProblem } from '../params'
+import { keepOffered, listingUnavailable, valueProblem } from '../params'
 import { POLL, type PollTiming } from '../poll'
 
 // three.js is most of the viewer: its own chunk, fetched once there is a render to show.
@@ -39,8 +40,18 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+/**
+ * Whether a render has ended. A done one ends once it names its preview: until the shop
+ * has its files at hand it names none, and the page reads it again (#6120).
+ */
 function terminal(render: StoreRender): boolean {
+  if (render.status === 'done') return render.preview_url !== null
   return render.status !== 'pending' && render.status !== 'running'
+}
+
+/** What the viewer is shown of a render: a done one with no preview yet as still running. */
+function onScreen(render: StoreRender): StoreRender {
+  return render.status === 'done' && render.preview_url === null ? { ...render, status: 'running' } : render
 }
 
 /** A poll that failed for a reason that passes: the network, a limit, a busy shop. */
@@ -53,12 +64,14 @@ function inSeconds(error: StoreError): string {
   return error.retryAfter === 1 ? 'in 1 second' : `in ${error.retryAfter} seconds`
 }
 
-/** What a visitor reads when a render or an add is refused. */
-function refusalText(error: unknown): string {
+/** What a visitor reads when a render or an add of `listing` is refused. */
+function refusalText(error: unknown, listing: Listing | undefined): string {
   if (!(error instanceof StoreError)) return errorText(error)
   if (error.slug === 'render_limited') return `You have made a lot of previews. Try again ${inSeconds(error)}.`
   if (error.slug === 'render_queue_full') return `The shop is busy making other previews. Try again ${inSeconds(error)}.`
   if (error.slug === 'rate_limited') return `Your connection has sent a lot of requests. Try again ${inSeconds(error)}.`
+  // #6258: the colours given share no allowed material: the text names the parts.
+  if (error.slug === 'listing_colours_clash') return clashText(listing, error.parts)
   return errorText(error)
 }
 
@@ -77,15 +90,24 @@ interface Shown {
   key: string
 }
 
-/** The choices a render is of: the listing as read, and the visitor's values. */
+/** The choices a render is of: the listing as read and the visitor's values. */
 function choicesKey(listing: Listing, values: Record<string, ParamValue>): string {
   return JSON.stringify([listing.updated_at, values])
+}
+
+/** Whether the visitor set a colour: a colour is its value (#6258), and the shop finds its filament. */
+function setsColour(listing: Listing, values: Record<string, ParamValue>): boolean {
+  return Object.keys(values).some((name) => {
+    const param = listing.params[name]
+    return param?.kind === 'choice' && param.colour
+  })
 }
 
 /**
  * `/l/:id`: one listing to customize (spec §5.4). The visitor changes the parameters the
  * listing offers (`ListingView`, the same form the shop previews), sees the preview and
- * the rough price, and adds it to the order. Only the values the visitor set are sent;
+ * the firm price from a slice (#6153; or that it is being worked out, or priced by hand),
+ * and adds it to the order. Only the values the visitor set are sent;
  * every locked value and every default comes from the listing's published snapshot on the
  * shop's side, never from this page.
  *
@@ -118,9 +140,23 @@ export function CustomizePage({
   /** The last done render: the viewer keeps it on screen while a newer one runs. */
   const [shown, setShown] = useState<Shown>()
   const [rendering, setRendering] = useState(false)
+  /**
+   * #6302 review: the colour values the latest render reply says the print takes. A part the
+   * visitor did not set shows its colour from here (the shop may move it to the closest colour
+   * of the material). While no reply has come back, or after a start the shop refused, the
+   * part shows the page's own prediction (`colours.ts` `colourPlan`, #6258). It is kept with
+   * the choices it answered (`key`), and shown only while they are the choices on screen:
+   * after the visitor changes a value, the untouched parts show the prediction until the next
+   * start answers.
+   */
+  const [settled, setSettled] = useState<{ key: string; values: Record<string, ParamValue> }>()
   const [renderError, setRenderError] = useState<string | null>(null)
-  /** The rough price of the render `job` names. */
-  const [estimate, setEstimate] = useState<{ job: string; estimate: StoreEstimate }>()
+  /**
+   * The price of the render `job` names (a slice's, pending, or none: #6153), for the
+   * choices `key` (`choicesKey`): two listings of one design can share a render, so the
+   * job alone does not tell the price.
+   */
+  const [estimate, setEstimate] = useState<{ job: string; key: string; estimate: StoreEstimate }>()
   const [quantity, setQuantity] = useState(1)
   const [adding, setAdding] = useState(false)
   const [addError, setAddError] = useState<string | null>(null)
@@ -148,10 +184,8 @@ export function CustomizePage({
         if (!live) return
         const saved = loadChoices(id)
         setListing(answer)
-        if (saved) {
-          setValues(keepOffered(answer, saved.values))
-          setQuantity(Math.min(saved.quantity, MAX_QUANTITY))
-        }
+        setValues(saved ? keepOffered(answer, saved.values) : {})
+        if (saved) setQuantity(Math.min(saved.quantity, MAX_QUANTITY))
       },
       (caught: unknown) => live && setLoadError(errorText(caught)),
     )
@@ -189,12 +223,18 @@ export function CustomizePage({
   }, [blocked, current, shown, debounceMs])
 
   const shownIsCurrent = shown?.key === current
+  /**
+   * #6152, #6258: the shop fills the slots from the done render of these choices, and
+   * answers 409 `render_pending` to an add that sets a colour until that render is done.
+   */
+  const waitsForPreview = !shownIsCurrent && listing !== undefined && setsColour(listing, values)
   const input = (on: Listing): RenderInput => ({
     listing_id: on.id,
     listing_updated_at: on.updated_at,
+    // #6258: a colour is its value; the shop finds its filament in the one material the
+    // colours resolve to. Never a guess of the slots.
     values,
-    // The colours of the render on screen, when it is of these values.
-    colours: shownIsCurrent ? slotFilaments(shown.job.colors, on.colours) : {},
+    colours: {},
   })
 
   const setValue = (name: string, next: ParamValue | undefined) => {
@@ -233,7 +273,7 @@ export function CustomizePage({
       try {
         next = await store.render(next.id)
         if (!live()) return null
-        setJob(next)
+        setJob(onScreen(next))
         delay = Math.min(delay * 2, timing.maxMs)
       } catch (caught) {
         if (!passing(caught)) throw caught
@@ -246,16 +286,29 @@ export function CustomizePage({
   }
 
   /**
-   * The rough price of a done render. A read that fails for a passing reason (a 504 from
-   * the proxy while the shop works it out, #6120) waits and reads again, backing off, until
-   * the time limit.
+   * The price of a done render (#6153). While the shop's slice works it out, the answer is
+   * `pending`: the page shows that (`onPending`) and reads again after its `retry_after`. A
+   * passing failure (a 5xx, the network) waits and reads again too, backing off. Past the
+   * time limit a price still pending is shown as none: the shop prices it by hand.
    */
-  const estimateOf = async (job: string, live: () => boolean): Promise<StoreEstimate | null> => {
+  const estimateOf = async (
+    job: string,
+    live: () => boolean,
+    onPending: (pending: StoreEstimate) => void,
+  ): Promise<StoreEstimate | null> => {
     const began = now()
     let delay = timing.firstMs
     for (;;) {
       try {
-        return await store.estimate(job)
+        const read = await store.estimate(job)
+        if (read.source !== 'pending') return read
+        if (!live()) return null
+        onPending(read)
+        const left = began + timing.limitMs - now()
+        if (left <= 0) return { ...read, source: 'none', retry_after: null }
+        await wait(Math.min(Math.max(delay, Math.min((read.retry_after ?? 0) * 1000, RETRY_CAP_MS)), left))
+        if (!live()) return null
+        delay = Math.min(delay * 2, timing.maxMs)
       } catch (caught) {
         if (!passing(caught)) throw caught
         const left = began + timing.limitMs - now()
@@ -275,11 +328,18 @@ export function CustomizePage({
     const live = () => alive.current && latest.current === mine
     setRendering(true)
     setRenderError(null)
+    // #6152: the old price is hidden until the new one is read (spec 2026-11-13 §5.3).
+    setEstimate(undefined)
+    let begun = false
     try {
       const first = await store.startRender(body, renderKey.current.for(JSON.stringify(body)))
+      begun = true
       renderKey.current.done()
       if (!live()) return
-      setJob(first)
+      // The colours this start settled, kept with its choices: until it answered, the parts
+      // the visitor did not set showed the page's prediction (#6258, #6302 review).
+      if (first.values) setSettled({ key, values: first.values })
+      setJob(onScreen(first))
       const done = await follow(first, live)
       if (!live() || done === null) return
       if (done.status !== 'done') {
@@ -287,12 +347,15 @@ export function CustomizePage({
         return
       }
       setShown({ job: done, key })
-      const rough = await estimateOf(done.id, live)
-      if (rough && live()) setEstimate({ job: done.id, estimate: rough })
+      const price = await estimateOf(done.id, live, (pending) => setEstimate({ job: done.id, key, estimate: pending }))
+      if (price && live()) setEstimate({ job: done.id, key, estimate: price })
     } catch (caught) {
       if (!live()) return
+      // A start refused or failed settled nothing: the parts the visitor did not set show
+      // the page's prediction again (#6258, #6302 review).
+      if (!begun) setSettled(undefined)
       if (changedListing(caught)) setStale(true)
-      setRenderError(refusalText(caught))
+      setRenderError(refusalText(caught, listing))
       if (retryable(caught) && !retry) {
         const after = Math.min((caught.retryAfter ?? 60) * 1000, RETRY_RENDER_CAP_MS)
         setTimeout(() => {
@@ -322,7 +385,7 @@ export function CustomizePage({
       setAdded(true)
     } catch (caught) {
       if (changedListing(caught)) setStale(true)
-      setAddError(refusalText(caught))
+      setAddError(refusalText(caught, listing))
     } finally {
       setAdding(false)
     }
@@ -335,7 +398,8 @@ export function CustomizePage({
       const fresh = await store.listing(listing.id)
       if (!alive.current) return
       setListing(fresh)
-      setValues((before) => keepOffered(fresh, before))
+      setValues(keepOffered(fresh, values))
+      setSettled(undefined)
       setStale(false)
       setRenderError(null)
       setAddError(null)
@@ -379,7 +443,7 @@ export function CustomizePage({
         <Link className="sf-back" to="/">
           All designs
         </Link>
-        <ListingView listing={listing} values={values} onChange={setValue} />
+        <ListingView listing={listing} values={values} settled={settled?.key === current ? settled.values : undefined} onChange={setValue} />
         {stale && (
           <div className="sf-panel sf-stale" role="status">
             <p>The shop has changed this design since you opened it.</p>
@@ -405,7 +469,7 @@ export function CustomizePage({
             )}
           </div>
         )}
-        {estimate && shownIsCurrent && estimate.job === shown.job.id && <Estimate estimate={estimate.estimate} />}
+        {estimate && shownIsCurrent && estimate.key === current && estimate.job === shown.job.id && <Estimate estimate={estimate.estimate} />}
         <div className="sf-order">
           <p className="sf-label" id="sf-quantity">
             How many
@@ -419,10 +483,16 @@ export function CustomizePage({
               +
             </button>
           </div>
-          <button type="button" className="sf-button" disabled={blocked || adding} onClick={() => void add()}>
+          <button type="button" className="sf-button" disabled={blocked || adding || waitsForPreview} onClick={() => void add()}>
             {adding ? 'Adding…' : 'Add to order'}
           </button>
         </div>
+        {waitsForPreview && !blocked && (
+          <p className="sf-hint">
+            {/* #6152: a failed or refused preview never shows by itself; say to try again. */}
+            {renderError && !rendering ? 'You can add it once its preview shows. Its preview could not be made: try again.' : 'You can add it once its preview shows.'}
+          </p>
+        )}
         {addError && (
           <p className="sf-error" role="alert">
             {addError}

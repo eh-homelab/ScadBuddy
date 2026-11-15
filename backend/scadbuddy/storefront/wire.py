@@ -9,9 +9,43 @@ from typing import Final, Literal
 #: A listing id (``gen_random_uuid()::text``). Both sides answer any other 404
 #: ``listing_not_found`` before a lookup.
 LISTING_ID: Final = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+#: The most cards one page of the public list holds (#6154).
+LISTINGS_MAX_PAGE: Final = 48
+#: The longest title search the public list takes.
+LISTINGS_MAX_QUERY: Final = 100
+#: A title search holds no NUL: Postgres text cannot, and the bind would fail (500).
+LISTINGS_QUERY_PATTERN: Final = r"^[^\x00]*$"
 #: An order item's id (``gen_random_uuid()::text``). Both sides answer any other 404
 #: ``item_not_found`` before a lookup.
 ITEM_ID: Final = LISTING_ID
+#: A customer's own models (#6133, spec 2026-11-13 §6.1). Each file goes straight to the
+#: store's staging area by a presigned PUT, at most `MAX_MODEL_FILE_BYTES` (256 MiB: 2.7
+#: times the largest real MakerWorld 3MF seen, 98 MB), at most `MAX_MODEL_FILES` files and
+#: `MAX_PRINT_LINKS` links a request and `MAX_MODEL_REQUEST_BYTES` declared in all; at most
+#: `MAX_PURCHASE_LINKS` things to buy per item (the owner's cap).
+MAX_MODEL_FILE_BYTES: Final = 256 * 1024 * 1024
+MAX_MODEL_FILES: Final = 20
+MAX_PRINT_LINKS: Final = 10
+MAX_PURCHASE_LINKS: Final = 5
+MAX_MODEL_REQUEST_BYTES: Final = 1024 * 1024 * 1024
+#: The longest file name of an upload slot, and of a link's note, in characters.
+MAX_UPLOAD_NAME: Final = 200
+MAX_LINK_NOTE: Final = 500
+#: The longest link a customer gives, in characters (`orders/customer_links.py`).
+MAX_LINK_CHARS: Final = 2048
+#: A design request's things to buy (#6133, spec 2026-11-13 §10.1): the multipart text
+#: part that holds them, a JSON list of ``{"url", "note"}``, at most
+#: `MAX_PURCHASE_LINKS`, and that part's most bytes, with room for the framing. Each
+#: character of a link and a note is at most six bytes: UTF-8 is at most four, and JSON
+#: escapes a control character as ``\u00XX``. The edge forwards the part as UTF-8
+#: (`crud/storefront.py` `_multipart`, ``ensure_ascii=False``); ASCII escapes would write
+#: a character outside the BMP as a surrogate pair, 12 bytes.
+PURCHASE_LINKS_FIELD: Final = "purchase_links"
+MAX_PURCHASE_LINKS_BYTES: Final = MAX_PURCHASE_LINKS * (MAX_LINK_CHARS + MAX_LINK_NOTE) * 6 + 1024
+#: The most colours a customer may ask for (the price book's filaments, by id).
+MAX_COLOUR_CHOICES: Final = 8
+#: An upload slot's id (``uuid4().hex``). Both sides refuse any other before a lookup.
+UPLOAD_ID: Final = re.compile(r"[0-9a-f]{32}")
 #: A design revision's id (``gen_random_uuid()::text``). Both sides answer any other 404
 #: ``revision_not_found`` before a lookup.
 REVISION_ID: Final = LISTING_ID
@@ -48,9 +82,24 @@ ORDER_VIEW_FIELDS: Final[dict[str, frozenset[str]]] = {
             "payments",
             "payment_instructions",
             "shipments",
+            "charges",
         }
     ),
-    "items": frozenset({"id", "title", "quantity", "status", "revisions", "quote"}),
+    "items": frozenset({"id", "title", "quantity", "status", "revisions", "quote", "sources"}),
+    "items.sources": frozenset(
+        {
+            "kind",
+            "purpose",
+            "filename",
+            "url",
+            "note",
+            "status",
+            "amount_minor",
+            "shop_note",
+            "preview_url",
+            "customer_reason",
+        }
+    ),
     "items.revisions": frozenset(
         {
             "id",
@@ -73,7 +122,37 @@ ORDER_VIEW_FIELDS: Final[dict[str, frozenset[str]]] = {
         {"id", "kind", "amount_minor", "currency", "status", "pay_url", "manual"}
     ),
     "shipments": frozenset({"carrier", "service", "tracking", "shipped_at"}),
+    "charges": frozenset({"kind", "label", "amount_minor"}),
 }
+#: An order item source's id (``gen_random_uuid()::text``, #6133). Both sides answer any
+#: other with a bare 404 before a lookup.
+SOURCE_ID: Final = LISTING_ID
+#: The headers of a checked file's preview, wherever it is served (#6133, spec 2026-11-13
+#: §7 "Serving the preview"). The bytes are the untrusted check's and are never decoded or
+#: re-encoded, so they are always a PNG shown inline that no browser sniffs as anything
+#: else. A presigned GET cannot set ``nosniff``, so the bytes always come through a route.
+#: Only the reader's own browser keeps a copy, and it asks again on each use: the URL
+#: stays the same when a check run again stores a new preview (review of #6217).
+PREVIEW_HEADERS: Final[dict[str, str]] = {
+    "Content-Type": "image/png",
+    "Content-Disposition": "inline",
+    "X-Content-Type-Options": "nosniff",
+    "Cache-Control": "private, no-cache",
+}
+
+
+def draft_preview_path(source_id: str) -> str:
+    """The edge's path of a cart line's preview (the visitor's cookie reads it)."""
+    return f"/api/store/v1/draft/sources/{source_id}/preview"
+
+
+def order_preview_path(source_id: str) -> str:
+    """The edge's path of an order source's preview. The page POSTs its reader's body to
+    it (the order link's token, or a signed-in reader's ``order_id``), so no URL holds the
+    token."""
+    return f"/api/store/v1/order/sources/{source_id}/preview"
+
+
 #: A render job's id (``uuid4().hex``). Both sides answer any other 404
 #: ``render_not_found`` before a lookup.
 JOB_ID: Final = re.compile(r"[0-9a-f]{32}")
@@ -127,7 +206,7 @@ SESSION_HEADER: Final = "X-ScadBuddy-Store-Session"
 _INTERNAL_PROBLEMS: Final = frozenset({VISITOR_ID_PROBLEM, STORE_CLIENT_PROBLEM})
 #: The forms that take the bot check (spec §5.8), each the widget's ``action``: a token
 #: made for one form does not pass another's check. Each has a route.
-TurnstileAction = Literal["submit", "request", "sign_up", "sign_in"]
+TurnstileAction = Literal["submit", "request", "model", "sign_up", "sign_in"]
 #: The header the page sends the widget's token in.
 TURNSTILE_HEADER: Final = "X-Turnstile-Token"
 #: Cloudflare's bound on a token's length

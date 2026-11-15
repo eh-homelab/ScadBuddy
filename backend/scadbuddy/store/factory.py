@@ -153,7 +153,9 @@ class StoreHealth(BaseModel):
     backend: StoreBackend
     #: The backend stored in Settings; differs from `backend` until a restart.
     configured_backend: StoreBackend
-    #: Render workers hold the full Bambuddy key (spec §9): template code can print.
+    #: This process's store holds the full Bambuddy key because no render key is saved
+    #: (spec §9): a render inside the API process runs template code that can print. A
+    #: standalone render worker never gets the full key (`api/crud_render.py` `withheld`).
     render_key_fallback: bool
     #: The render worker Deployment may run more than one replica (spec §3.1).
     multi_worker: bool
@@ -162,8 +164,13 @@ class StoreHealth(BaseModel):
     settings_current: bool
 
 
-async def store_health(bundle: StoreBundle) -> StoreHealth:
-    current = await bundle.source.current()
+async def store_health(bundle: StoreBundle, *, wait: bool = True) -> StoreHealth:
+    """The store as this process runs it. With `wait` false (the API's `/healthz`, #6354)
+    it answers from the settings last read and never waits for a read, unless none has
+    been read yet."""
+    current = None if wait else bundle.source.known()
+    if current is None:
+        current = await bundle.source.current()
     return StoreHealth(
         backend=bundle.backend,
         configured_backend=current.store_backend,

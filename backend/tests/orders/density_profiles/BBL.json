@@ -1,0 +1,70 @@
+{
+    "name": "Bambulab",
+    "version": "02.08.00.05",
+    "description": "ScadBuddy's density test tree (#6136)",
+    "machine_model_list": [],
+    "machine_list": [],
+    "process_list": [],
+    "filament_list": [
+        {
+            "name": "fdm_filament_common",
+            "sub_path": "filament/fdm_filament_common.json"
+        },
+        {
+            "name": "fdm_filament_pla",
+            "sub_path": "filament/fdm_filament_pla.json"
+        },
+        {
+            "name": "fdm_filament_pet",
+            "sub_path": "filament/fdm_filament_pet.json"
+        },
+        {
+            "name": "fdm_filament_template_direct_dual",
+            "sub_path": "filament/fdm_filament_template_direct_dual.json"
+        },
+        {
+            "name": "Bambu PLA Basic @base",
+            "sub_path": "filament/Bambu PLA Basic @base.json"
+        },
+        {
+            "name": "Bambu PLA Basic @BBL X1C",
+            "sub_path": "filament/Bambu PLA Basic @BBL X1C.json"
+        },
+        {
+            "name": "Bambu PLA Basic @BBL H2C",
+            "sub_path": "filament/Bambu PLA Basic @BBL H2C.json"
+        },
+        {
+            "name": "Bambu PLA Silk @base",
+            "sub_path": "filament/Bambu PLA Silk @base.json"
+        },
+        {
+            "name": "Bambu PLA Silk @BBL X1C",
+            "sub_path": "filament/Bambu PLA Silk @BBL X1C.json"
+        },
+        {
+            "name": "Bambu PETG Translucent @base",
+            "sub_path": "filament/Bambu PETG Translucent @base.json"
+        },
+        {
+            "name": "Bambu PETG-CF @BBL X1C",
+            "sub_path": "filament/Bambu PETG-CF @BBL X1C.json"
+        },
+        {
+            "name": "Generic PLA @base",
+            "sub_path": "filament/Generic PLA @base.json"
+        },
+        {
+            "name": "Generic PLA Silk @base",
+            "sub_path": "filament/Generic PLA Silk @base.json"
+        },
+        {
+            "name": "Generic PETG @BBL X1C",
+            "sub_path": "filament/Generic PETG @BBL X1C.json"
+        },
+        {
+            "name": "Generic PETG @BBL H2C",
+            "sub_path": "filament/Generic PETG @BBL H2C.json"
+        }
+    ]
+}

@@ -196,10 +196,22 @@ export type PrintRunRequest = Schemas['PrintRunRequest']
  */
 export type RegistryRunRequest = PrintRunRequest & { printer?: string }
 export type PrintRunResult = Schemas['PrintRunResult']
-/** #5571, #5627 — a print's slicer settings for the parts of one filament slot. */
-export type PartSettings = Schemas['PartSettings']
+/**
+ * #5571, #5627, #2998 — a print's slicer settings for the parts of one filament slot: any
+ * Bambu Studio key. Open as the API's `PartSettings` is, with an unset key `null`: the
+ * schema's named keys take `null` and its other keys do not, so the dialog keeps one type
+ * for all, cast where a request is sent.
+ */
+export type PartSettings = Record<string, Schemas['PartSettings'][string] | null | undefined>
 /** #5627 — the settings per slot, keyed by the slot (from 1) as a string. */
 export type PartSettingsMap = Record<string, PartSettings>
+/**
+ * #2998 — any Bambu Studio process settings for a print, `{key: value}`: every key is
+ * accepted, and the slicer judges it (`backend/scadbuddy/bambuddy/process_overrides.py`).
+ */
+export type ProcessOverrides = NonNullable<PrintRunRequest['process_overrides']>
+/** #2998 — every value of the process preset a print's choices resolve to. */
+export type ProcessValues = Schemas['ProcessValues']
 /** #755, #760 — what the run would refuse for the dialog's choices, before Print. */
 export type PrintCheck = Schemas['PrintCheck']
 export type PrintRun = Schemas['PrintRun']
@@ -328,6 +340,10 @@ export type LibraryListing = Schemas['LibraryListing']
 export type LibraryFileName = Schemas['LibraryFileName']
 export type LibraryEntry = Schemas['LibraryEntry']
 export type LibraryFileEntry = Schemas['LibraryFileEntry']
+export type Association = Schemas['Association']
+export type AssociationRelation = Association['relation']
+export type AssociationRequest = Schemas['AssociationRequest']
+export type Associations = Schemas['Associations']
 export type LibraryFolderView = Schemas['LibraryFolderView']
 export type LibrarySearch = Schemas['LibrarySearch']
 export type LibrarySearchHit = Schemas['LibrarySearchHit']
@@ -414,6 +430,15 @@ export type CustomerPatch = Partial<Schemas['CustomerPatch']>
 export type Order = Schemas['Order']
 export type OrderStatus = Order['status']
 export type OrderDetail = Schemas['OrderDetail']
+/** #6133 — a storefront customer's file or link on a request item, as the back office reads it. */
+export type OrderItemSource = Schemas['OrderItemSource']
+/** #6133 — the colours an own-model request asked for. */
+export type ModelRequestColours = Schemas['ModelRequestColours']
+/** #6133 — a thing to buy for the customer (`GET /orders/{id}/purchases`). */
+export type PurchaseSource = Schemas['PurchaseSource']
+export type PurchaseRecordInput = Defaulted<Schemas['PurchaseRecordInput'], 'cost_kind' | 'note'>
+export type PurchaseUpdateInput = Partial<Schemas['PurchaseUpdateInput']>
+export type SourceDownload = Schemas['SourceDownload']
 export type OrderItem = Schemas['OrderItem']
 export type OrderItemStatus = OrderItem['status']
 /** An item with its quotes and fulfilment attempts, as `GET /orders/{id}` lists them. */
@@ -500,12 +525,16 @@ export type PaymentCreate = Defaulted<Schemas['PaymentCreate'], 'notes' | 'metho
  * way an order reaches its customer at a fixed price. */
 export type DepositRule = Schemas['DepositRule']
 export type ShippingOption = Schemas['ShippingOption']
+/** #6153 — the shop slice profile: a printer and a spool per material. */
+export type StorefrontSliceProfile = Schemas['StorefrontSliceProfile']
+export type ProfileOptions = Schemas['ProfileOptions']
+export type ProfileSpool = Schemas['ProfileSpool']
 /** Orders phase 2 (#4250, spec 2026-10-18 §5): the price book, the slice quote and the
  * rough estimate. Rates are decimal strings; `minor_exponent` is the minor unit's decimal
  * places, the backend's (ISO 4217) and never `Intl`'s. */
 export type QuoteLine = Schemas['QuoteLine']
 export type Filament = Schemas['Filament']
-export type FilamentInput = Defaulted<Schemas['FilamentInput'], 'subtype' | 'brand' | 'colour_name' | 'density_g_cm3'>
+export type FilamentInput = Defaulted<Schemas['FilamentInput'], 'subtype' | 'brand' | 'colour_name' | 'density_g_cm3' | 'alpha'>
 export type FilamentPatch = Partial<Schemas['FilamentPatch']>
 /** #4625 (order operations spec 2026-11-07 §6) — a registry printer's machine rate: its
  * inputs (null with no profile) and the rate they give now, with each part of the sum. */
@@ -521,8 +550,17 @@ export type MachineRateInputs = {
 /** #5282 (spec 2026-11-02 §5.3) — a storefront listing, as the back office's Storefront page edits it. */
 /** Every field is always sent: the ones the spec marks optional have defaults. */
 export type StorefrontListing = Required<Schemas['Listing']>
-export type StorefrontListingInput = Defaulted<Schemas['ListingInput'], 'description' | 'params' | 'fixed' | 'colours' | 'media_ids'>
+export type StorefrontListingInput = Defaulted<
+  Schemas['ListingInput'],
+  'description' | 'params' | 'fixed' | 'colours' | 'media_ids' | 'materials'
+>
+/** #6237 — a listing's colour combinations and how far their renders are; a prepare's answer. */
+export type ListingPrepareProgress = Schemas['PrepareProgress']
+export type ListingPrepareStarted = Schemas['PrepareStarted']
 export type ListingBound = Schemas['NumberBound'] | Schemas['ChoiceBound'] | Schemas['TextBound']
+/** #6157 — one row of the back office's list, and a page of them. */
+export type StorefrontListingRow = Schemas['ListingRow']
+export type StorefrontListingPage = Schemas['ListingPage']
 /** ScadBuddy's own spools (#4643), the native spool provider's records; not Bambuddy's inventory. */
 export type NativeSpool = Schemas['NativeSpool']
 export type NativeSpoolCreate = Schemas['NativeSpoolCreate']
@@ -532,6 +570,8 @@ export type PricingPolicy = Schemas['PricingPolicy']
 export type PolicyUpdate = Defaulted<Schemas['PolicyUpdate'], 'rough_estimate_factor'>
 export type PriceBook = Schemas['PriceBook']
 export type SpoolImport = Schemas['SpoolImport']
+export type DensityFill = Schemas['DensityFill']
+export type DensityFillRow = Schemas['DensityFillRow']
 export type SpoolImportRow = Schemas['SpoolImportRow']
 /** `POST …/items/{item}/quote`: the print dialog's choices, and a price-book filament per
  * colour slot (`colours[].slot`, from 0); with `inputs` or `commit`, a new design first
@@ -540,10 +580,11 @@ export type SliceQuoteRequest = Schemas['ItemSliceQuoteRequest']
 /** #4719 — `POST …/items/{item}/print`: the print dialog's printer, spools and choices; the
  * item's copies, plates and request id are the server's. `part_settings` (#5627): the dialog
  * sends the quote's own, so the body matches the background slice's; the server refuses
- * others (`requote_needed`), and a body with none prints with the quote's. */
+ * others (`requote_needed`), and a body with none prints with the quote's. `process_overrides`
+ * (#2998) the same. */
 export type OrderItemPrintRequest = Pick<
   RegistryRunRequest,
-  'printer' | 'printer_id' | 'filament_plan' | 'choices' | 'part_settings'
+  'printer' | 'printer_id' | 'filament_plan' | 'choices' | 'part_settings' | 'process_overrides'
 >
 export type OrderEstimate = Schemas['OrderEstimate']
 /** #5328, job cost spec §6.3 — `GET /orders/history/unit-cost`: the quote warning's history. */
@@ -574,6 +615,7 @@ export type ActivityDetail = Schemas['ActivityDetail']
 export type PrintDetail = Schemas['PrintDetail']
 /** #4698 — where an unlinked print's 3MF can be, and the models it may be a print of. */
 export type PrintSources = Schemas['PrintSources']
+export type LibraryFileSuggestion = Schemas['LibraryFileSuggestion']
 export type FoundSource = Schemas['FoundSource']
 export type PrintImportRequest = Schemas['ImportRequest']
 export type ImportedPrint = Schemas['ImportedPrint']

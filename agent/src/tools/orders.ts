@@ -12,6 +12,7 @@ import {
   printOptionFields,
   printPath,
   printSequence,
+  processOverrides,
   setupPhrase,
   slotChoice,
   supportsChoice,
@@ -471,7 +472,9 @@ const address = z
 const AUTO_TAX =
   'The auto tax row (#5281, `auto: true` in order_get) is not part of the list: leave it out and the order keeps it ' +
   'and recomputes it. Sent back as read, with its `id` and `auto`, it stays the auto row and is recomputed, ' +
-  'whatever the amount. Any other `tax` charge, whatever its label, is a typed tax and replaces the auto row.'
+  'whatever the amount. Any other `tax` charge, whatever its label, is a typed tax and replaces the auto row. ' +
+  'The `purchase` and `handling` rows (#6133) are not part of the list either: leave them out, and the order keeps ' +
+  'them; only order_purchase_record, order_purchase_update and order_purchase_decline change them.'
 const charge = z
   .object({
     kind: z.enum(['shipping', 'discount', 'fee', 'tax']),
@@ -629,6 +632,22 @@ const filamentFields = {
   colour: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
   cost_per_kg: decimal.optional().describe('In the shop\'s currency'),
   density_g_cm3: decimal.nullable().optional().describe('g/cm³, for the rough estimate'),
+  // #6209: what Bambuddy keeps beside the RGB; `colour` stays #RRGGBB for the render.
+  alpha: z.number().int().min(0).max(255).optional().describe('The alpha byte: 255 opaque, below it translucent (a clear filament is its RGB with alpha 0)'),
+  extra_colours: z
+    .array(z.string().regex(/^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/))
+    .max(8)
+    .optional()
+    .describe('A multi-colour filament\'s stops, #RRGGBB or #RRGGBBAA'),
+  effect: z
+    .enum(['sparkle', 'wood', 'marble', 'glow', 'matte', 'silk', 'galaxy', 'rainbow', 'metal', 'translucent', 'gradient', 'dual-color', 'tri-color', 'multicolor'])
+    .nullable()
+    .optional()
+    .describe("Bambuddy's swatch effect"),
+  colour_source: z
+    .literal('import')
+    .optional()
+    .describe('Edit only: hand the colour back to the spool import, which sets it at its next run. A colour, alpha, stops or effect changed here marks it set by hand'),
 }
 /** The print dialog's choices (`PrintChoices`): what the item is sliced with. */
 const printChoices = z
@@ -655,7 +674,7 @@ const sliceQuote = z
           'and a printer a run reaches over the LAN is sliced for with no Bambuddy call',
       ),
     filament_plan: z
-      .object({ slots: z.array(slotChoice), force_colour_match: z.boolean().default(false) })
+      .object({ slots: z.array(slotChoice), force_colour_match: z.boolean().default(true) })
       .describe('One spool per slot (slot_id from 1), as the print dialog sends it'),
     choices: printChoices,
     filaments: z
@@ -673,6 +692,14 @@ const sliceQuote = z
     prime_tower: primeTowerChoice,
     supports: supportsChoice,
     print_sequence: printSequence,
+    // #2998: any process setting, sliced with and recorded as part of the quote's print setup.
+    process_overrides: processOverrides.describe(
+      'Any Bambu Studio process settings to slice the quote with (#2998), as {key: value}, e.g. ' +
+        '{"skirt_loops": 0, "wipe_tower_no_sparse_layers": true}: every key but the host-side ones (post_process, print_host*: dropped) is accepted, and the ' +
+        "slicer judges it (a slice it refuses over one is a 422 naming the key). They win over the template's " +
+        "defaults and over prime_tower, supports and print_sequence. Recorded in the quote's print setup " +
+        "(`choices.process_overrides`), so order_item_print slices what was priced",
+    ),
     // #4673 PR 3: a new design first, through the revise path; the quote is of it.
     inputs: z
       .object({})
@@ -903,7 +930,9 @@ export const orderTools: Tool[] = [
       'One order whole: its status, number and addresses, its line items with their quotes, design `revisions` ' +
       'and fulfilment attempts (every attempt has a `purpose`: `production`, or `test` for a revision\'s test print), ' +
       'charges, payments, shipments and totals. A payment\'s `method` says how it was paid: a provider id, ' +
-      '`venmo` for a PayPal payment funded by Venmo (#4960), or a method recorded by hand.',
+      '`venmo` for a PayPal payment funded by Venmo (#4960), or a method recorded by hand. A customer\'s own ' +
+      'models request (#6133) adds `sources` (each file and link: its check, status, `import_stuck`, cost and ' +
+      'charge) and `model_requests` (the colours the customer asked for, per item).',
     input: z.object({ order_id: orderId }),
     risk: 'read',
     routes: ['GET /api/v1/orders/{order_id}'],
@@ -1348,6 +1377,186 @@ export const orderTools: Tool[] = [
         await ok(
           backend.POST('/api/v1/orders/{order_id}/cost-entries', { params: { path: { order_id } }, body }),
           `add a cost to order ${order_id}`,
+        ),
+      ),
+  }),
+  // Purchases (#6133, spec 2026-11-13 §10, §11): the things a storefront customer asked the
+  // shop to buy for their project. Each link is text only; no tool fetches it.
+  defineTool({
+    name: 'order_purchases',
+    label: "List an order's things to buy",
+    description:
+      "The things a storefront customer asked the shop to buy for their project, by item: each purchase link's `id` " +
+      '(the `source_id` the purchase tools take), the link as text (never fetch it), the customer\'s note, its ' +
+      '`status` (`pending`, `recorded`, `not_needed`), a recorded one\'s `amount_minor` and `cost_kind`, and the ' +
+      "shop's note to the customer. While one is `pending`, the order cannot be accepted and no balance request " +
+      'opens (409 purchase_pending).',
+    input: z.object({ order_id: orderId }),
+    risk: 'read',
+    routes: ['GET /api/v1/orders/{order_id}/purchases'],
+    handler: async ({ order_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/orders/{order_id}/purchases', { params: { path: { order_id } } }),
+          `list the purchases of order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_purchase_record',
+    label: 'Record what the shop paid for a thing to buy',
+    description:
+      "Record what the shop paid for one purchase link, in the order's minor units: one cost entry on the link's " +
+      'item (`material` for parts, `other` for a paid model file) and a `purchase` charge of the same amount that ' +
+      "the customer pays, labelled \"Bought for your project: …\". The handling fee (Settings → Orders) and the " +
+      'auto tax are recomputed. A second call for a recorded link with the same amount and cost_kind returns it as ' +
+      'it is and writes nothing; one that differs is 409 purchase_recorded (use order_purchase_update). Only ' +
+      'while the order is `draft` or `quoted` (409 purchase_locked after); 409 purchase_not_pending for a link ' +
+      'marked not needed.',
+    input: z.object({
+      order_id: orderId,
+      source_id: ID.describe('A purchase link id, as order_purchases lists them'),
+      amount_minor: money.min(1),
+      cost_kind: z.enum(['material', 'other']).default('material'),
+      note: z.string().max(1000).default('').describe("The cost entry's note, the shop's own; the customer never reads it"),
+    }),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/{order_id}/purchases/{source_id}/record'],
+    title: ({ order_id, amount_minor }) => `Record a purchase of ${amount_minor} on order ${order_id}`,
+    handler: async ({ order_id, source_id, ...body }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/purchases/{source_id}/record', {
+            params: { path: { order_id, source_id } },
+            body,
+          }),
+          `record purchase ${source_id} of order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_purchase_update',
+    label: 'Change a recorded purchase',
+    description:
+      'Change a recorded purchase: its cost entry and its charge change together (each field given replaces its ' +
+      'value; the amount is both). The handling fee and the auto tax are recomputed. 409 purchase_not_recorded ' +
+      'for a link not recorded; 409 purchase_locked once the order is accepted (then change the charges with ' +
+      'order_charges_update_after_acceptance).',
+    input: z.object({
+      order_id: orderId,
+      source_id: ID.describe('A purchase link id, as order_purchases lists them'),
+      amount_minor: money.min(1).optional(),
+      cost_kind: z.enum(['material', 'other']).optional(),
+      note: z.string().max(1000).optional(),
+    }),
+    risk: 'write',
+    routes: ['PATCH /api/v1/orders/{order_id}/purchases/{source_id}'],
+    title: ({ order_id, source_id }) => `Change purchase ${source_id} of order ${order_id}`,
+    handler: async ({ order_id, source_id, ...body }, { backend }) =>
+      json(
+        await ok(
+          backend.PATCH('/api/v1/orders/{order_id}/purchases/{source_id}', {
+            params: { path: { order_id, source_id } },
+            body,
+          }),
+          `change purchase ${source_id} of order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_purchase_decline',
+    label: 'Mark a thing to buy not needed',
+    description:
+      'Mark a purchase link not needed: a recorded one loses its cost entry and its charge, and the link keeps ' +
+      '`shop_note`, which the customer reads. The handling fee and the auto tax are recomputed. A link already ' +
+      'not needed is returned as it is. 409 purchase_locked once the order is accepted.',
+    input: z.object({
+      order_id: orderId,
+      source_id: ID.describe('A purchase link id, as order_purchases lists them'),
+      shop_note: z.string().max(500).default('').describe('Why it is not needed, in words the customer reads'),
+    }),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/{order_id}/purchases/{source_id}/decline'],
+    title: ({ order_id, source_id }) => `Mark purchase ${source_id} of order ${order_id} not needed`,
+    handler: async ({ order_id, source_id, shop_note }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/purchases/{source_id}/decline', {
+            params: { path: { order_id, source_id } },
+            body: { shop_note },
+          }),
+          `decline purchase ${source_id} of order ${order_id}`,
+        ),
+      ),
+  }),
+  // A customer's own models (#6133 PR 4, spec 2026-11-13 §11): the back office's actions on
+  // a request's files and links, as `order_get`'s `sources` lists them. Download, the
+  // preview and "Open link" are the page's (coverage.ts).
+  defineTool({
+    name: 'order_item_source_decline',
+    label: "Decline a customer's model",
+    description:
+      "Decline a file or link of a customer's own models request: the shop will not print it. A staged file is " +
+      'deleted by its watcher. `reason` is the shop\'s; the customer never reads it. ' +
+      'A source already declined is returned as it is. 409 source_not_print for a thing to buy (use ' +
+      'order_purchase_decline), source_imported once it is in the library.',
+    input: z.object({
+      order_id: orderId,
+      source_id: ID.describe("A source id, as order_get's sources list them"),
+      reason: z.string().max(500).default('').describe('Why, for the shop; empty is "Declined by the shop."'),
+    }),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/{order_id}/sources/{source_id}/decline'],
+    title: ({ order_id, source_id }) => `Decline source ${source_id} of order ${order_id}`,
+    handler: async ({ order_id, source_id, reason }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/sources/{source_id}/decline', {
+            params: { path: { order_id, source_id } },
+            body: { reason },
+          }),
+          `decline source ${source_id} of order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_item_source_check_again',
+    label: "Check a customer's file again",
+    description:
+      "Start the check of a customer's staged file again after it failed (`check_status` `failed`). A file still " +
+      '`checking` is not refused: it is returned as it is and its check is started again (a running check is ' +
+      'joined), for a check that stalled. 409 source_not_failed for a file that is ready or refused, ' +
+      'source_not_staged once its staged copy is gone, order_not_submitted on a visitor\'s cart.',
+    input: z.object({ order_id: orderId, source_id: ID.describe("A file source id, as order_get's sources list them") }),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/{order_id}/sources/{source_id}/check'],
+    title: ({ order_id, source_id }) => `Check source ${source_id} of order ${order_id} again`,
+    handler: async ({ order_id, source_id }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/sources/{source_id}/check', { params: { path: { order_id, source_id } } }),
+          `check source ${source_id} of order ${order_id} again`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_item_source_retry_import',
+    label: "Retry a customer's file import",
+    description:
+      "Ask the watcher of a customer's file to import it into the library again, when `import_stuck` says the " +
+      'import has not finished an hour after the order was sent. 409 import_not_stuck otherwise, ' +
+      "order_not_submitted on a visitor's cart.",
+    input: z.object({ order_id: orderId, source_id: ID.describe("A file source id, as order_get's sources list them") }),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/{order_id}/sources/{source_id}/retry-import'],
+    title: ({ order_id, source_id }) => `Retry the import of source ${source_id} of order ${order_id}`,
+    handler: async ({ order_id, source_id }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/sources/{source_id}/retry-import', {
+            params: { path: { order_id, source_id } },
+          }),
+          `retry the import of source ${source_id} of order ${order_id}`,
         ),
       ),
   }),
@@ -1968,9 +2177,9 @@ export const orderTools: Tool[] = [
     description:
       "Print an approved line item of an accepted order from its accepted quote (#4719): a print run of the item's " +
       "output with the quote's print setup (#4673: printer, path, a spool per slot, nozzles and quality, tower, " +
-      'supports and sequence, as order_item_quote `slice` recorded them; order_get lists each quote\'s `choices` and ' +
+      'supports, sequence and process overrides, as order_item_quote `slice` recorded them; order_get lists each quote\'s `choices` and ' +
       '`filament_plan`), every plate, for the quantity still to print. Send none of them to print what was quoted; ' +
-      "each one sent must be the quote's (a printer, choices, tower, supports or sequence that differs is refused " +
+      "each one sent must be the quote's (a printer, choices, tower, supports, sequence or process overrides that differ is refused " +
       '`requote_needed`: quote it again with them), except `path` (another route slices again) and the spools ' +
       "(`filament_plan`, filled from the item's filaments). A manual or archive quote records no setup: send " +
       '`choices` and `filament_plan` (else 422 `print_setup_missing`). Answers with the attempt it recorded (outcome unknown, ' +
@@ -2013,6 +2222,12 @@ export const orderTools: Tool[] = [
       ),
       print_sequence: printSequence.describe(
         "Omit to print with the accepted quote's (order_item_quote's `slice.print_sequence`); another is refused `requote_needed`",
+      ),
+      // #2998: any process setting; omitted is the quote's (`choices.process_overrides`).
+      process_overrides: processOverrides.describe(
+        'Any Bambu Studio process settings (#2998), as {key: value}: every key but the host-side ones (post_process, print_host*: dropped) is accepted, and ' +
+          'the slicer judges it (a refusal is a 422 naming the key). Omit to print with the accepted quote\'s ' +
+          "(order_item_quote's `slice.process_overrides`); others are refused `requote_needed`: quote with them first",
       ),
       test_revision_id: ID.optional().describe(
         "Print this design revision of the item as a test instead (order_item_revision_add makes one): an attempt of " +
@@ -2507,6 +2722,7 @@ export const orderTools: Tool[] = [
         if (archive && unarchive) throw new ToolError('archive and unarchive cannot both be true')
         if (filament_id === undefined) {
           if (archive || unarchive) throw new ToolError(`${archive ? 'archive' : 'unarchive'} needs a filament_id`)
+          if (fields.colour_source !== undefined) throw new ToolError('colour_source needs a filament_id: a new filament\'s colour is set by hand')
           answer.filament = await ok(backend.POST('/api/v1/orders/price-book/filaments', { body: body as never }), 'add a filament')
         } else {
           const path = { filament_id }
@@ -2634,7 +2850,12 @@ export const orderTools: Tool[] = [
       "Make or update the price book's filament records from Bambuddy's spool inventory: one record per filament " +
       '(material, subtype, brand and colour), made when the book has none, else given the most recent priced ' +
       "spool's cost per kilogram; `min_cost_per_kg`/`max_cost_per_kg` show the spread when the spools' prices " +
-      'differ. A filament known only by its colour name, or with no priced spool, is `skipped` with its `reason`. ' +
+      'differ. A record keeps its link to its spools, so a colour set by hand makes no second record; the import sets ' +
+      "a record's colour, alpha, stops and effect only while its `colour_source` is `import`. " +
+      'A filament known only by its colour name, with no priced spool, or whose colour another record of its ' +
+      'material, subtype and brand already has (`colour_taken`), is `skipped` with its `reason`. A matched record ' +
+      "whose spools' colour another record of its names holds keeps its own colour, alpha, stops and effect, and " +
+      'comes back `updated` or `unchanged` with `reason` `colour_taken`. ' +
       "Only when Bambuddy is linked (price_book_get's `spool_import`); else `not_linked`. Quotes never read spools.",
     input: z.object({}),
     risk: 'write',
@@ -2642,6 +2863,22 @@ export const orderTools: Tool[] = [
     title: () => 'Import filaments from spools',
     handler: async (_input, { backend }) =>
       json(await ok(backend.POST('/api/v1/orders/price-book/import-spools'), 'import filaments from spools')),
+  }),
+  defineTool({
+    name: 'price_book_fill_densities',
+    label: 'Fill empty filament densities',
+    description:
+      'Give every price-book filament with no density the one its Bambuddy spools link to: the preset id ' +
+      "(the spool's slicer preset, then its K-profile's, then its AMS tray's) gives Bambuddy's local preset or " +
+      "the Bambu Studio vendor preset's `filament_density`, then Bambuddy's filament catalogue. Never " +
+      "overwrites a density that is set. Each row is filled with its `density_profile` (the source) or has no " +
+      "`density_g_cm3` (no source: enter it with price_book_set). Only when Bambuddy is linked; else `not_linked`.",
+    input: z.object({}),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/price-book/fill-densities'],
+    title: () => 'Fill filament densities',
+    handler: async (_input, { backend }) =>
+      json(await ok(backend.POST('/api/v1/orders/price-book/fill-densities'), 'fill filament densities')),
   }),
   defineTool({
     name: 'order_estimate',

@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import io
 import os
 import socket
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
+import httpx
 import pytest
 from aiobotocore.config import AioConfig
 from botocore.exceptions import EndpointConnectionError
@@ -17,7 +20,13 @@ from botocore.exceptions import EndpointConnectionError
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.store.content import ContentBackend
 from scadbuddy.store.content_models import BlobMissingError, BlobScope
-from scadbuddy.store.s3 import S3ContentBackend, object_key
+from scadbuddy.store.s3 import (
+    STAGED_PUT_HEADERS,
+    S3ContentBackend,
+    object_key,
+    staged_upload,
+    staging_key,
+)
 
 SCOPE = BlobScope(slug="demo", title="Demo")
 MISSING = "t/asset/" + "0" * 64
@@ -284,5 +293,142 @@ async def test_a_slice_blob_round_trips(s3: S3Settings) -> None:
         key = await backend.upload("slice", b"gcode", name="plate.3mf", scope=SCOPE)
         assert key == f"t/slice/{hashlib.sha256(b'gcode').hexdigest()}"
         assert b"".join([c async for c in backend.download(key)]) == b"gcode"
+    finally:
+        await backend.aclose()
+
+
+# -- the storefront's staging area (#6133, spec 2026-11-13 §6) ---------------------------
+
+STAGED = "0123456789abcdef0123456789abcdef"
+
+
+async def test_a_presigned_put_signs_its_length_and_type_and_writes_one_staging_key(
+    s3: S3Settings,
+) -> None:
+    backend = S3ContentBackend(s3)
+    try:
+        key = staging_key(s3.prefix, STAGED)
+        assert key == f"t/staging/{STAGED}"
+        url = await backend.presign_put(
+            key, size=5, media_type="model/stl", expires=timedelta(minutes=15)
+        )
+        query = parse_qs(urlsplit(url).query)
+        assert query["X-Amz-SignedHeaders"] == ["content-length;content-type;host;x-amz-acl"]
+        assert query["X-Amz-Expires"] == ["900"]
+        sent = {"Content-Type": "model/stl", **STAGED_PUT_HEADERS}
+        # moto checks no signature, so a PUT with another ACL is not refused here; the
+        # signed ``x-amz-acl`` is what makes S3 refuse it (SigV4, signed headers).
+        async with httpx.AsyncClient() as http:
+            answer = await http.put(url, content=b"solid", headers=sent)
+        answer.raise_for_status()
+        assert await backend.staged_size(key) == 5
+        assert await backend.staged_size(staging_key(s3.prefix, "f" * 32)) is None
+        got = await backend.presign_staged_get(key, timedelta(minutes=5))
+        async with httpx.AsyncClient() as http:
+            assert (await http.get(got)).content == b"solid"
+        await backend.remove_staged(key)
+        assert await backend.staged_size(key) is None
+    finally:
+        await backend.aclose()
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "t/asset/" + "0" * 64,
+        f"t/staging/{STAGED}/x",
+        "t/staging/../asset/" + "0" * 64,
+        f"other/staging/{STAGED}",
+        "t/staging/ABC",
+        f"t/staging/{STAGED}\n",
+    ],
+)
+async def test_staging_calls_refuse_any_other_key(s3: S3Settings, key: str) -> None:
+    backend = S3ContentBackend(s3)
+    try:
+        with pytest.raises(ValueError):
+            await backend.presign_put(
+                key, size=1, media_type="model/stl", expires=timedelta(minutes=1)
+            )
+        with pytest.raises(ValueError):
+            await backend.staged_size(key)
+        with pytest.raises(ValueError):
+            await backend.remove_staged(key)
+        with pytest.raises(ValueError):
+            await backend.presign_staged_get(key, timedelta(minutes=1))
+    finally:
+        await backend.aclose()
+
+
+def test_a_preview_key_sits_beside_its_upload() -> None:
+    assert staging_key("t", STAGED, preview=True) == f"t/staging/{STAGED}.png"
+
+
+async def test_a_frozen_copy_keeps_the_bytes_of_the_moment_it_was_made(s3: S3Settings) -> None:
+    backend = S3ContentBackend(s3)
+    source = staging_key("t", STAGED)
+    frozen = staging_key("t", STAGED, frozen="0123456789abcdef")
+    assert frozen == f"t/staging/{STAGED}.0123456789abcdef.frozen"
+    assert staged_upload("t", frozen) == staged_upload("t", f"{source}.png") == source
+    with pytest.raises(ValueError):
+        staging_key("t", STAGED, frozen="../x")
+    try:
+        assert await backend.freeze_staged(source, frozen) is None  # nothing to copy
+        client = await backend._s3()
+        await client.put_object(Bucket=s3.bucket, Key=source, Body=b"first")
+        copy = await backend.freeze_staged(source, frozen)
+        assert copy is not None and copy.size == 5 and copy.etag.startswith('"')
+        if copy.sha256 is not None:  # S3 computed it on the copy
+            assert copy.sha256 == base64.b64encode(hashlib.sha256(b"first").digest()).decode()
+        await client.put_object(Bucket=s3.bucket, Key=source, Body=b"later")
+        held = await client.get_object(Bucket=s3.bucket, Key=frozen, IfMatch=copy.etag)
+        assert await held["Body"].read() == b"first"
+    finally:
+        await backend.aclose()
+
+
+async def test_an_uploads_staging_objects_go_together(s3: S3Settings) -> None:
+    backend = S3ContentBackend(s3)
+    other = "f" * 32
+    keys = [
+        staging_key("t", STAGED),
+        staging_key("t", STAGED, preview=True),
+        staging_key("t", STAGED, frozen="0123456789abcdef"),
+        staging_key("t", STAGED, frozen="fedcba9876543210"),
+        staging_key("t", other),
+    ]
+    try:
+        client = await backend._s3()
+        for key in keys:
+            await client.put_object(Bucket=s3.bucket, Key=key, Body=b"x")
+        await backend.remove_staged_of(staging_key("t", STAGED))
+        assert [key async for key, _ in backend.staged_objects()] == [staging_key("t", other)]
+        with pytest.raises(ValueError):
+            await backend.remove_staged_of(staging_key("t", STAGED, preview=True))
+    finally:
+        await backend.aclose()
+
+
+async def test_staged_objects_lists_the_staging_area_only(s3: S3Settings) -> None:
+    backend = S3ContentBackend(s3)
+    try:
+        client = await backend._s3()
+        await client.put_object(Bucket=s3.bucket, Key=staging_key("t", STAGED), Body=b"x")
+        await backend.upload("piece", b"recorded", name="a", scope=SCOPE)
+        listed = [key async for key, _ in backend.staged_objects()]
+        assert listed == [staging_key("t", STAGED)]
+    finally:
+        await backend.aclose()
+
+
+async def test_sweep_unrecorded_never_touches_the_staging_area(s3: S3Settings) -> None:
+    backend = S3ContentBackend(s3)
+    try:
+        client = await backend._s3()
+        await client.put_object(Bucket=s3.bucket, Key=staging_key("t", STAGED), Body=b"x")
+        await asyncio.sleep(1.1)
+        swept = await backend.sweep_unrecorded(cutoff=datetime.now(UTC), recorded=lambda _: False)
+        assert swept == 0
+        assert await backend.staged_size(staging_key("t", STAGED)) == 1
     finally:
         await backend.aclose()

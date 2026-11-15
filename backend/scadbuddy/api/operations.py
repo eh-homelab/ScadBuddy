@@ -188,6 +188,11 @@ def temporal_refused(what: str, detail: str, *, may_have_started: bool | None) -
 _MAY_STILL_RUN = frozenset({STILL_ACCEPTING_PROBLEM, TEMPORAL_UNAVAILABLE_PROBLEM})
 
 
+def may_still_run(error: ApiError) -> bool:
+    """Whether the operation a start answered ``error`` for may still run."""
+    return error.type in _MAY_STILL_RUN or error.extensions.get(MAY_HAVE_STARTED) is True
+
+
 #: The client's key for one deliberate press (§4.2 step 1).
 IdempotencyKey = Annotated[str | None, Header(alias="Idempotency-Key", max_length=128)]
 
@@ -361,10 +366,7 @@ async def run_operation(
             before_start=refuse if before_start is not None else None,
         )
     except ApiError as error:
-        may_still_run = (
-            error.type in _MAY_STILL_RUN or error.extensions.get(MAY_HAVE_STARTED) is True
-        )
-        if claimed is not None and (refused or not may_still_run):
+        if claimed is not None and (refused or not may_still_run(error)):
             await _release(ops, claimed)
         raise
     if claimed is not None and not (

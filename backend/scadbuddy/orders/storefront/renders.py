@@ -19,51 +19,59 @@ A visitor reads a render only when one of its own rows names it (`RenderLimits.o
 any other job id, a guessed one among them, is 404 ``render_not_found``. `store_render`
 shows a render with a fixed text in place of its error, never the log.
 
-`render_estimate` is the rough price of a done render (plan point 4): its part volumes,
-analysed once per job into ``storefront_job_parts`` (plan point 5), each at the listing
-filament the visitor chose for its colour. The analyses run on `ANALYSIS_WORKERS` threads
-shared by the process, at most `ANALYSIS_QUEUE` held at once, one per job (`_flights`):
-every request for a job awaits the same work, which records its own outcome, so a request
-that leaves starts nothing again. A 3MF that cannot be analysed, or that runs past
-``render_timeout`` from its start, is recorded as such and never analysed again; one that
-waits in the queue past it is withdrawn ("not ready yet") and analysed on a later request.
+`render_estimate` is the firm price of a done render (#6153): the price of a slice of its
+variant through the back office's quote path (`slice_price.py`), each slot at the listing
+filament of its colour in the material the visitor's colours resolved to (``material``,
+kept on the visitor's row, `inputs.py` `resolve_choice`, #6258), else the one it chose
+for its slot, else the first listing filament of that colour (a locked support colour).
+A render with no firm price has none: the visitor never reads a volume estimate.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import threading
-from collections.abc import Mapping
-from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
-from contextlib import suppress
-from dataclasses import dataclass
+import time
+from collections import OrderedDict
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Final
 
 from fastapi import status
-from psycopg.types.json import Jsonb
-from pydantic import TypeAdapter
 from temporalio.client import WorkflowUpdateFailedError
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.crud.idempotency import Replay, idempotent_write
 from scadbuddy.orders.component import ORDERS, OrdersComponent
-from scadbuddy.orders.estimate import EstimatedPart, StoreEstimate, rough_estimate
-from scadbuddy.orders.estimate import part_volumes as part_volumes  # tests count its calls
-from scadbuddy.orders.models import Filament
-from scadbuddy.orders.reference import ResolvedReference
+from scadbuddy.orders.estimate import StoreEstimate
+from scadbuddy.orders.models import Filament, Reference
+from scadbuddy.orders.reference import ResolvedReference, render_key_of
 from scadbuddy.orders.storefront.inputs import (
+    ColoursClashError,
     InputOutsideListingError,
+    LockedColoursClashError,
+    ResolvedChoice,
+    check_one_material,
+    customer_filaments,
+    effective_materials,
     listing_reference,
     listing_values,
+    resolve_choice,
+    slot_filaments,
 )
 from scadbuddy.orders.storefront.limits import OwnedRender, RenderLimited, RenderLimits
 from scadbuddy.orders.storefront.listings import problem, published_listing
+from scadbuddy.orders.storefront.slice_price import (
+    NO_PRICE,
+    model_digest,
+    pending,
+    slice_estimate,
+)
 from scadbuddy.orders.storefront.visitors import VisitorStore
 from scadbuddy.orders.storefront.wire import Listing, RenderBody, StoreRender
 from scadbuddy.render.job_models import Job, JobNotFoundError, QueueFullError
 from scadbuddy.render.jobs import SnapshotPendingError, SnapshotUnavailableError
+from scadbuddy.render.schema import ParamValue
 from scadbuddy.store.cache import materialize_result
 from scadbuddy.store.content import StoreFullError
 from scadbuddy.storefront.settings import STOREFRONT_PREFIX
@@ -80,9 +88,14 @@ RENDER_ROUTE: Final = "POST /storefront/renders"
 #: What a visitor reads of a render that failed or was cancelled: never its log.
 RENDER_FAILED: Final = "This design could not be made with these choices. Try other values."
 RENDER_CANCELLED: Final = "This render was stopped. Try again."
-_PARTS: Final = TypeAdapter(list[EstimatedPart])
 #: What a visitor whose render could not start waits before it asks again.
 UNAVAILABLE_RETRY: Final = 5
+#: The longest a status or estimate request waits on work behind it (#6120): a done
+#: render's files being fetched. Past it the request answers "not ready yet" and the page
+#: asks again, so no request is held near Cloudflare's 100 s. The fetch state below
+#: (`_fetches`, `_ready`, `_failed`) is this process's: it assumes one API process, as
+#: today; with more, a preview read may still fetch on its own.
+READY_WAIT: Final = 3.0
 
 
 def not_found() -> ApiError:
@@ -103,8 +116,9 @@ def _limits(state: AppState) -> RenderLimits:
     return RenderLimits(state.projection.pool)
 
 
-def store_render(job: Job) -> StoreRender:
-    """The visitor's view of ``job``."""
+def store_render(job: Job, *, ready: bool = True) -> StoreRender:
+    """The visitor's view of ``job``. A done job's ``preview_url`` is there only once
+    its files are ``ready`` in this process (`shown_render`)."""
     result = job.result
     error = {"failed": RENDER_FAILED, "cancelled": RENDER_CANCELLED}.get(job.state)
     stage = next((step.name for step in job.steps if step.state == "running"), None)
@@ -117,7 +131,7 @@ def store_render(job: Job) -> StoreRender:
         colors=list(result.colors) if result else None,
         preview_url=(
             f"{STOREFRONT_PREFIX}/renders/{job.id}/preview.glb"
-            if result is not None and job.state == "done"
+            if result is not None and job.state == "done" and ready
             else None
         ),
         error=error,
@@ -126,6 +140,94 @@ def store_render(job: Job) -> StoreRender:
 
 def _filaments(orders: OrdersComponent) -> dict[str, Filament]:
     return {f.id: f for f in orders.store.filaments()}
+
+
+#: Each done job's files being fetched into this process's cache, by job id: one fetch
+#: per job, which every request for it shares and none cancels.
+_fetches: dict[str, asyncio.Task[None]] = {}
+#: The done jobs whose files this process fetched, newest last: their status reads skip
+#: the fetch. Bounded; a job that falls out is only fetched (from the cache) again.
+_ready: OrderedDict[str, None] = OrderedDict()
+READY_KEPT: Final = 4096
+#: Each job's failed fetches in a row, and when the first failed. Past `FETCH_TRIES`
+#: its files are taken as lost for the status only: it names the preview, whose read then
+#: says so at once (404), rather than the page polling a render that can never show. The
+#: estimate never takes lost files as there (`files_ready`). A count older than
+#: `FAILED_FOR` starts over, so an outage that ends is tried again; bounded as `_ready`.
+_failed: OrderedDict[str, tuple[int, float]] = OrderedDict()
+FETCH_TRIES: Final = 3
+FAILED_FOR: Final = 600.0
+
+
+def _fetched(job_id: str, task: asyncio.Task[None]) -> None:
+    if _fetches.get(job_id) is task:
+        del _fetches[job_id]
+    if task.cancelled():
+        return
+    if task.exception() is not None:
+        count, first = _failures(job_id)
+        _failed[job_id] = (count + 1, first if count else time.monotonic())
+        _failed.move_to_end(job_id)
+        while len(_failed) > READY_KEPT:
+            _failed.popitem(last=False)
+        logger.warning("a render's files could not be fetched", exc_info=task.exception())
+        return
+    _failed.pop(job_id, None)
+    _ready[job_id] = None
+    _ready.move_to_end(job_id)
+    while len(_ready) > READY_KEPT:
+        _ready.popitem(last=False)
+
+
+def _failures(job_id: str) -> tuple[int, float]:
+    """The job's failed fetches in a row and when the first failed; none once they are
+    older than `FAILED_FOR`."""
+    count, first = _failed.get(job_id, (0, 0.0))
+    if count and time.monotonic() - first > FAILED_FOR:
+        _failed.pop(job_id, None)
+        return 0, 0.0
+    return count, first
+
+
+def files_lost(job_id: str) -> bool:
+    """Whether the job's fetch failed `FETCH_TRIES` times in a row, lately."""
+    return _failures(job_id)[0] >= FETCH_TRIES
+
+
+async def _fetch(state: AppState, job: Job) -> bool:
+    """Starts the fetch of the done ``job``'s files (`materialize_result`) when none
+    runs, shared by every request, and waits on it at most `READY_WAIT` seconds: whether
+    it succeeded. It runs on when the wait ends, so the next request finds it done."""
+    task = _fetches.get(job.id)
+    if task is None:
+        task = asyncio.create_task(materialize_result(state.store.blobs, job.result))
+        _fetches[job.id] = task
+        task.add_done_callback(lambda done: _fetched(job.id, done))
+    done, _ = await asyncio.wait({task}, timeout=READY_WAIT)
+    return task in done and not task.cancelled() and task.exception() is None
+
+
+async def files_ready(state: AppState, job: Job) -> bool:
+    """Whether the status may name the done ``job``'s preview: its files were fetched
+    into this process's cache (a job fetched before answers at once), else `_fetch`.
+    Only the preview leans on this: its read fetches again if the cache evicted them.
+    The estimate always fetches (`render_estimate`): it hashes the 3MF."""
+    return job.id in _ready or await _fetch(state, job)
+
+
+async def shown_render(state: AppState, job: Job) -> StoreRender:
+    """`store_render` of ``job``, its preview named only once its files are fetched
+    (#6120): the preview request then streams at once, and the page polls the status
+    until it is. A fetch that failed is tried again on the next poll; once it failed
+    `FETCH_TRIES` times lately, the preview is named all the same, so its read says the
+    files are gone rather than the page polling to its limit."""
+    ready = (
+        job.state != "done"
+        or job.result is None
+        or await files_ready(state, job)
+        or files_lost(job.id)
+    )
+    return store_render(job, ready=ready)
 
 
 def _limited(error: RenderLimited) -> ApiError:
@@ -205,13 +307,35 @@ def _shared(state: AppState, conn: Any, render_key: str) -> bool:
     return row is not None or state.projection.reuse_done(render_key) is not None
 
 
+#: The slot colours (``job.result.colors``) of the visitor's render of a render key, or
+#: None when there is none to read.
+RenderColours = Callable[[str], Awaitable[Sequence[str] | None]]
+
+
 async def checked_choice(
-    orders: OrdersComponent, body: RenderBody
-) -> tuple[Listing, ResolvedReference]:
-    """The published listing ``body`` names and the reference of ``body``'s values and
-    colours on it. Refusals: 404 ``listing_not_found``, 409 ``listing_changed`` (the
-    listing moved since the page read it), 422 ``input_outside_listing`` (with ``name``
-    and ``reason``)."""
+    orders: OrdersComponent,
+    body: RenderBody,
+    shop_materials: Sequence[str],
+    *,
+    render_colours: RenderColours | None = None,
+) -> tuple[Listing, ResolvedReference, ResolvedChoice]:
+    """The published listing ``body`` names, the reference of ``body``'s values and
+    colours on it, and what its colours resolve to (`inputs.py` `resolve_choice`, #6258):
+    the one material, among the listing's materials (else ``shop_materials``, the
+    ``storefront_materials`` setting), that the render, the estimate and the order line
+    all print in. Each colour the visitor leaves alone is settled in that material, so
+    the reference renders those values. With ``render_colours``, each slot
+    ``body.colours`` lacks takes that material's filament of the slot's colour in that
+    render (`slot_filaments`). Refusals: 404 ``listing_not_found``, 409
+    ``listing_changed`` (the listing moved since the page read it), 422
+    ``input_outside_listing`` (with ``name`` and ``reason``), 422
+    ``listing_colours_clash`` (colours no one allowed material offers together, with
+    ``parts``, `ColoursClashError`; only the visitor's colours and slots, never a locked
+    one), 409 ``listing_unavailable`` (no allowed material is printable,
+    `printable_materials`, `LockedColoursClashError`: a listing published before publish
+    refused that, or broken since by the materials or the price book), 409
+    ``render_pending`` (with ``render_colours``, colours given but no done render of the
+    visitor's to take the slots from)."""
     listing = await asyncio.to_thread(published_listing, orders.listings, body.listing_id)
     if listing.updated_at != body.listing_updated_at:
         raise problem(
@@ -220,9 +344,45 @@ async def checked_choice(
             "This listing has changed. Load it again.",
         )
     filaments = await asyncio.to_thread(_filaments, orders)
+    materials = effective_materials(listing, shop_materials)
     try:
-        values = listing_values(listing, body.values, filaments)
-        resolved = listing_reference(listing, values, body.colours, filaments=filaments)
+        values = listing_values(listing, body.values, filaments, materials)
+        choice = resolve_choice(
+            listing, values, body.values.keys(), filaments, materials, slots=body.colours
+        )
+        resolved = listing_reference(listing, choice.values, body.colours, filaments=filaments)
+        if render_colours is not None:
+            colours = await render_colours(resolved.reference.render_key)
+            given = [name for name in body.values if name in values and _is_colour(listing, name)]
+            if not colours and given:
+                # The slots are known only from a done render; without them the order
+                # line would lose the visitor's colours (#6152, #6258).
+                raise problem(
+                    status.HTTP_409_CONFLICT,
+                    "render_pending",
+                    "Your preview is still being made. Add it once it shows.",
+                )
+            if colours:
+                chosen = slot_filaments(body.colours, choice, colours)
+                resolved = listing_reference(listing, choice.values, chosen, filaments=filaments)
+        # A print never mixes materials (#6152, always on since #6258).
+        check_one_material(resolved.colours, choice, filaments)
+    except LockedColoursClashError:
+        # No material can print it (published before publish checked, or broken since):
+        # no visitor's colour can fix it, so the refusal names none (#6302 review).
+        raise problem(
+            status.HTTP_409_CONFLICT,
+            "listing_unavailable",
+            "This design can't be made right now. Please try again later.",
+        ) from None
+    except ColoursClashError as error:
+        raise problem(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "listing_colours_clash",
+            "Some of these colours can't go together: each print is made from one kind of"
+            " plastic. Change one of them.",
+            parts=error.parts,
+        ) from None
     except InputOutsideListingError as error:
         raise problem(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -231,7 +391,23 @@ async def checked_choice(
             name=error.name,
             reason=error.reason,
         ) from None
-    return listing, resolved
+    return listing, resolved, choice
+
+
+def _is_colour(listing: Listing, name: str) -> bool:
+    """Whether ``name`` is a ``// color`` parameter of the published ``listing``."""
+    assert listing.snapshot is not None
+    return any(p.name == name and p.type == "color" for p in listing.snapshot.schema_.parameters)
+
+
+def _colour_values(listing: Listing, choice: ResolvedChoice) -> dict[str, ParamValue]:
+    """The values the render takes of the colour parameters the listing offers, as
+    `resolve_choice` settled them: what the page shows (#6258, #6302 review)."""
+    return {
+        name: value
+        for name, value in choice.values.items()
+        if name in listing.params and _is_colour(listing, name)
+    }
 
 
 async def start_render(
@@ -246,13 +422,14 @@ async def start_render(
     503 when the start keeps failing. A key seen before replays its row: the job the
     row names (410 ``render_expired`` when that job is gone; it is never submitted
     again), else the submit sent again, counted as a fresh one is when it runs on its own
-    and the row is free."""
+    and the row is free. The answer carries the colour values the render takes
+    (`StoreRender.values`, #6302 review)."""
     orders = _orders(state)
-    listing, resolved = await checked_choice(orders, body)
+    runtime = await asyncio.to_thread(_runtime, state)
+    listing, resolved, choice = await checked_choice(orders, body, runtime.storefront_materials)
     reference = resolved.reference
     assert listing.snapshot is not None
     visitor = await asyncio.to_thread(VisitorStore(state.projection.pool).ensure, visitor_id)
-    runtime = await asyncio.to_thread(_runtime, state)
     limits = _limits(state)
     asked = {
         "visitor": visitor.id,
@@ -273,6 +450,7 @@ async def start_render(
                 listing_id=listing.id,
                 render_key=reference.render_key,
                 colours=body.colours,
+                material=choice.material,
             )
             return Replay(200, {"row": row, "counted": False})
         row = limits.admit(
@@ -283,6 +461,7 @@ async def start_render(
             render_key=reference.render_key,
             settings=runtime,
             colours=body.colours,
+            material=choice.material,
         )
         return Replay(200, {"row": row, "counted": True})
 
@@ -309,7 +488,9 @@ async def start_render(
         named, counted = stood
         if named is not None:
             try:
-                return store_render(await asyncio.to_thread(state.render.store.read, named))
+                named_job = await asyncio.to_thread(state.render.store.read, named)
+                shown = await shown_render(state, named_job)
+                return shown.model_copy(update={"values": _colour_values(listing, choice)})
             except JobNotFoundError:
                 raise _expired() from None
     params = reference.inputs.get("params", {})
@@ -359,7 +540,8 @@ async def start_render(
             await _withdraw_limited(state, limits, job, row, key)
             raise _limited(error) from None
     await asyncio.to_thread(limits.attach, row, job.id)
-    return store_render(job)
+    shown = await shown_render(state, job)
+    return shown.model_copy(update={"values": _colour_values(listing, choice)})
 
 
 async def owned_render(state: AppState, visitor_id: str, job_id: str) -> OwnedRender:
@@ -389,242 +571,73 @@ async def owned_job(state: AppState, visitor_id: str, job_id: str) -> tuple[Owne
     return owned, job
 
 
-@dataclass(frozen=True)
-class _Analysis:
-    """A job's analysis: its parts, or why there are none. ``error`` is ``unreadable``
-    or ``timeout`` (both recorded, never tried again), or ``busy`` (not recorded: the
-    queue was full, or the analysis did not start within the render timeout)."""
-
-    parts: list[EstimatedPart] | None = None
-    error: str | None = None
-
-
-BUSY: Final = _Analysis(error="busy")
-#: The most analyses one process runs at once: every estimate shares these threads.
-ANALYSIS_WORKERS: Final = 2
-#: The most analyses one process holds, queued or running; past it, "not ready yet".
-ANALYSIS_QUEUE = 8
-_analyses: ThreadPoolExecutor | None = None
-#: Each job's analysis while its work is queued or running: its outcome, which every
-#: request for the job awaits. The work owns it, not a request (`_begin`). `_lock`
-#: guards it and `_held` in threads only, never around I/O; the loop only reads it.
-_flights: dict[str, Future[_Analysis]] = {}
-_held = 0
-_lock = threading.Lock()
-
-
-def _executor() -> ThreadPoolExecutor:
-    global _analyses
-    with _lock:
-        if _analyses is None:
-            _analyses = ThreadPoolExecutor(ANALYSIS_WORKERS, thread_name_prefix="estimate")
-        return _analyses
-
-
-def _recorded(state: AppState, job_id: str) -> _Analysis | None:
-    with state.projection.pool.connection() as conn:
-        row = conn.execute(
-            "SELECT parts, error FROM storefront_job_parts WHERE job_id = %s", (job_id,)
-        ).fetchone()
-    if row is None:
-        return None
-    if row["error"] is not None:
-        return _Analysis(error=row["error"])
-    return _Analysis(parts=_PARTS.validate_python(row["parts"]))
-
-
-def _record(state: AppState, job_id: str, analysis: _Analysis) -> _Analysis:
-    """``analysis`` written once for the job; the record that stands."""
-    parts = None
-    if analysis.parts is not None:
-        parts = Jsonb(_PARTS.dump_python(analysis.parts, mode="json"))
-    with state.projection.pool.connection() as conn:
-        conn.execute(
-            "INSERT INTO storefront_job_parts (job_id, parts, error) VALUES (%s, %s, %s)"
-            " ON CONFLICT (job_id) DO NOTHING",
-            (job_id, parts, analysis.error),
-        )
-    stood = _recorded(state, job_id)
-    assert stood is not None
-    return stood
-
-
-def _settle(outcome: Future[_Analysis], analysis: _Analysis) -> None:
-    """The flight's outcome, once: a later one (the work after its timeout) is dropped."""
-    with suppress(InvalidStateError):
-        outcome.set_result(analysis)
-
-
-def _begin(state: AppState, job: Job, timeout: float) -> Future[_Analysis]:
-    """The job's analysis in flight: the one already there, else its record, else a new
-    one on the shared threads, else `BUSY` when `ANALYSIS_QUEUE` analyses are held.
-    Blocking: call it in a thread. The work records its
-    own outcome and ends its flight, whatever the requests do. One not started within
-    ``timeout`` is withdrawn (`BUSY`, not recorded); one that runs past ``timeout`` from
-    its start is recorded ``timeout``.
-
-    The bound after a timeout: Python cannot stop a thread, so the timed-out work keeps
-    its thread and its `_held` place until `part_volumes` returns. A 3MF that never
-    finishes analysing holds them for the life of the process; `ANALYSIS_WORKERS` such
-    3MFs hold every thread, and then every new analysis is withdrawn as `BUSY` ("not
-    ready yet") until one ends. Estimates only: renders and the recorded estimates are
-    not affected, and each such job is recorded ``timeout``, so it is never started
-    again."""
-    global _held
-    result = job.result
-    assert result is not None
-    with _lock:
-        flying = _flights.get(job.id)
-    if flying is not None:
-        return flying
-    # Outside the lock: no I/O holds it. The work records before it ends its flight, so
-    # a flight that ended after the caller's look has left its record here.
-    stood = _recorded(state, job.id)
-    with _lock:
-        flying = _flights.get(job.id)
-        if flying is not None:
-            return flying
-        if stood is not None or _held >= ANALYSIS_QUEUE:
-            answered: Future[_Analysis] = Future()
-            answered.set_result(stood or BUSY)
-            return answered
-        outcome: Future[_Analysis] = Future()
-        _flights[job.id] = outcome
-        _held += 1
-    model = state.paths.root / result.model_3mf
-    plates = max(len(result.plates), 1)
-
-    def timed_out() -> None:
-        try:
-            _settle(outcome, _record(state, job.id, _Analysis(error="timeout")))
-        except Exception:
-            logger.warning("a render's analysis timeout could not be recorded", exc_info=True)
-            _settle(outcome, BUSY)
-        logger.warning("a render's 3MF took past the render timeout to analyse")
-
-    def work() -> list[EstimatedPart]:
-        withdraw.cancel()
-        watchdog = threading.Timer(timeout, timed_out)
-        watchdog.daemon = True
-        watchdog.start()
-        try:
-            return part_volumes(model, plates, result.warnings)
-        finally:
-            watchdog.cancel()
-
-    def withdrawn() -> None:
-        running.cancel()
-
-    def settled(done: Future[list[EstimatedPart]]) -> None:
-        global _held
-        analysis = BUSY
-        try:
-            if not done.cancelled():
-                error = done.exception()
-                if error is None:
-                    analysis = _record(state, job.id, _Analysis(parts=done.result()))
-                else:
-                    logger.warning("a render's 3MF could not be analysed", exc_info=error)
-                    analysis = _record(state, job.id, _Analysis(error="unreadable"))
-        except Exception:
-            logger.warning("a render's analysis could not be recorded", exc_info=True)
-        finally:
-            with _lock:
-                if _flights.get(job.id) is outcome:
-                    del _flights[job.id]
-                _held -= 1
-            _settle(outcome, analysis)
-
-    withdraw = threading.Timer(timeout, withdrawn)
-    withdraw.daemon = True
-    try:
-        running = _executor().submit(work)
-    except BaseException:
-        # No work, so no `settled`: take the flight and its place back.
-        with _lock:
-            if _flights.get(job.id) is outcome:
-                del _flights[job.id]
-            _held -= 1
-        _settle(outcome, BUSY)
-        raise
-    running.add_done_callback(settled)
-    try:
-        withdraw.start()
-    except BaseException:
-        # `settled` ends the flight: at once when the work is cancelled, else when it ends.
-        running.cancel()
-        raise
-    return outcome
-
-
-async def _parts(state: AppState, job: Job) -> list[EstimatedPart]:
-    """The job's part volumes: recorded, else analysed once per job (`_begin`)."""
-    analysis = await asyncio.to_thread(_recorded, state, job.id)
-    if analysis is None:
-        # Lock-free: the loop never takes `_lock`. A miss only means `_begin` looks again.
-        outcome = _flights.get(job.id)
-        if outcome is None:
-            assert job.result is not None
-            await materialize_result(state.store.blobs, job.result)
-            runtime = await asyncio.to_thread(_runtime, state)
-            outcome = await asyncio.to_thread(_begin, state, job, runtime.render_timeout)
-        # Shielded: a request that leaves never cancels the flight others await.
-        analysis = await asyncio.shield(asyncio.wrap_future(outcome))
-    if analysis.parts is not None:
-        return analysis.parts
-    if analysis.error == "busy":
-        raise _unavailable("The price is not ready yet. Try again in a moment.")
-    raise _unavailable(
-        "We cannot price this design here. Add it to your order and we will price it."
-    )
-
-
 def _filament_for(
     listing: Listing,
     filaments: Mapping[str, Filament],
     colours: Mapping[int, str],
     render_colours: list[str],
+    material: str | None = None,
 ) -> dict[str, Filament]:
-    """Each colour of the render, casefolded, to its filament: the listing filament the
-    visitor chose for its slot, else the first listing filament of that colour."""
-    offered = [filaments[f] for f in listing.colours if f in filaments]
+    """Each colour of the render, casefolded, to its filament: the first customer
+    filament of that colour in ``material``, the one the visitor's colours resolved to
+    (#6258), else the one it chose for its slot, else the first listing filament of that
+    colour. The last takes a support filament too: a locked support colour is a slot of
+    the render, and the estimate prices it (#6152)."""
+    listed = [filaments[f] for f in listing.colours if f in filaments]
     chosen: dict[str, Filament] = {}
+    if material is not None:
+        for picked in customer_filaments(listing, filaments, [material]):
+            chosen.setdefault(picked.colour.casefold(), picked)
     for slot, filament_id in sorted(colours.items()):
         if 0 <= slot < len(render_colours) and filament_id in listing.colours:
             record = filaments.get(filament_id)
             if record is not None:
                 chosen.setdefault(render_colours[slot].casefold(), record)
-    for record in offered:
+    for record in listed:
         chosen.setdefault(record.colour.casefold(), record)
     return chosen
 
 
 async def render_estimate(state: AppState, visitor_id: str, job_id: str) -> StoreEstimate:
-    """The rough price of the visitor's done render. 404 ``render_not_found`` as
-    `owned_job` says; 422 ``estimate_unavailable`` for a job not done, a 3MF that cannot
-    be analysed (or not within ``render_timeout``), a colour no listing filament has,
-    or a filament with no density."""
+    """The firm price of the visitor's done render (#6153, `slice_price.py`
+    `slice_estimate`). 404 ``render_not_found`` as `owned_job` says; 422
+    ``estimate_unavailable`` for a job not done. ``pending`` while its files are fetched
+    (#6120) or its slice runs; ``none`` when the listing is gone, its files are lost, a
+    colour of the render has no listing filament, or the render is of another design
+    than the listing's now (its slug or commit moved since, #6370 review): the price
+    is never of a design the visitor does not see."""
     owned, job = await owned_job(state, visitor_id, job_id)
     if job.state != "done" or job.result is None:
         raise _unavailable("The price is ready once the render is done.")
-    parts = await _parts(state, job)
     orders = _orders(state)
     listing = await asyncio.to_thread(orders.listings.get, owned.listing_id)
-    if listing is None:
-        raise _unavailable("This listing is no longer offered.")
+    if listing is None or listing.snapshot is None:
+        return NO_PRICE
+    if job.slug != listing.slug or job.model_version != listing.commit:
+        # The shop moved the listing since this render: the page renders again.
+        return NO_PRICE
+    if not await _fetch(state, job):
+        return NO_PRICE if files_lost(job.id) else pending()
     filaments = await asyncio.to_thread(_filaments, orders)
-    currency, policy, factor = await asyncio.to_thread(orders.price_book.policy)
-    by_colour = _filament_for(listing, filaments, owned.colours, list(job.result.colors))
-    try:
-        return rough_estimate(
-            parts,
-            lambda colour: by_colour[colour.casefold()],
-            policy,
-            currency=currency,
-            factor=factor,
-        ).public()
-    except (KeyError, ValueError):
-        logger.warning("a render could not be priced", exc_info=True)
-        raise _unavailable(
-            "We cannot price this design here. Add it to your order and we will price it."
-        ) from None
+    by_colour = _filament_for(
+        listing, filaments, owned.colours, list(job.result.colors), owned.material
+    )
+    slots = [by_colour.get(colour.casefold()) for colour in job.result.colors]
+    digest = await asyncio.to_thread(model_digest, job.id, state.paths.root / job.result.model_3mf)
+    snapshot = listing.snapshot
+    reference = Reference(
+        slug=listing.slug,
+        commit=listing.commit,
+        inputs=job.inputs,
+        libraries=list(snapshot.libraries),
+        template_name=snapshot.template_name,
+        render_key=render_key_of(
+            listing.slug, job.inputs, listing.commit, pipeline=snapshot.pipeline
+        ),
+    )
+    return await slice_estimate(
+        state,
+        reference=reference,
+        model_sha256=digest,
+        filaments=None if None in slots else [slot for slot in slots if slot is not None],
+    )

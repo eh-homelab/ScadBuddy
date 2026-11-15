@@ -130,6 +130,8 @@ class StoreSettingsSource:
         self._at = 0.0
         #: False while a re-read fails and `current` answers the last good settings.
         self.fresh = True
+        #: The one background re-read `known` started, while it runs (#6354).
+        self._refreshing: asyncio.Task[RenderStoreSettings] | None = None
 
     async def current(self) -> RenderStoreSettings:
         """The settings, re-read once ``ttl`` has passed. A re-read that fails keeps the
@@ -148,6 +150,25 @@ class StoreSettingsSource:
                 self.fresh = True
             self._at = now
         return self._cached
+
+    def known(self) -> RenderStoreSettings | None:
+        """The last settings read, without waiting for a read (#6354): a re-read that is
+        due starts in the background, one at a time, and the answer after it ends is
+        fresh. None before the first read. For `/healthz`, which a liveness probe calls
+        with 5 s to answer: awaiting `current` there waited on the default executor and
+        the database pool, and a probe that timed out on them restarted the API."""
+        due = self._cached is None or self._clock() - self._at >= self.ttl
+        if due and self._refreshing is None:
+            self._refreshing = asyncio.create_task(self.current())
+            self._refreshing.add_done_callback(self._refreshed)
+        return self._cached
+
+    def _refreshed(self, task: asyncio.Task[RenderStoreSettings]) -> None:
+        self._refreshing = None
+        # `current` keeps the last good settings and clears `fresh`; only a first read
+        # raises, and the next probe starts another.
+        if not task.cancelled():
+            task.exception()
 
     async def _read(self) -> RenderStoreSettings:
         raise NotImplementedError
@@ -170,6 +191,13 @@ def render_target(current: RenderStoreSettings) -> BambuddyTarget:
     if not current.bambuddy_url or current.library_folder_id is None:
         raise not_configured(
             "the Bambuddy store needs a Bambuddy URL and a library folder in Settings"
+        )
+    if current.key_is_fallback and current.api_key is None:
+        # The API's CRUD route withholds the full key from a render worker
+        # (`api/crud_render.py` `withheld`); only the API's own read carries it.
+        raise not_configured(
+            "the render worker gets no Bambuddy key while no render key is saved: save"
+            " bambuddy_render_api_key (Settings, Bambuddy render key)"
         )
     return BambuddyTarget(
         config=BambuddyConfig(base_url=current.bambuddy_url.rstrip("/"), api_key=current.api_key),

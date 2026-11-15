@@ -79,6 +79,7 @@ from scadbuddy.workflows.printing import (
     UNWAITED,
     PrintRunWorkflow,
 )
+from scadbuddy.workflows.problems import SETTING_REFUSED_PROBLEM
 from tests.support.temporal import temporal_client
 
 pytestmark = pytest.mark.requires_temporal
@@ -1293,3 +1294,27 @@ async def test_a_slice_the_slicer_refused_is_not_sliced_again(
 
     assert run.status == "failed" and run.error == refused
     assert fake.slice_starts == 1
+
+
+async def test_a_slice_refusal_naming_a_requested_override_is_recorded_as_a_422_naming_it(
+    client: Client, quick: str, fake: Fake
+) -> None:
+    # #2998: `_slice` -> `_print` -> `print_fail` records the slicer's refusal of a key
+    # the request set as `slicer-setting-refused`, with the key.
+    refused = PrintRunError(
+        status=502,
+        title="Bad Gateway",
+        detail="Bambuddy failed to slice the plate: invalid value for wall_loops",
+    )
+    fake.slice_errors = [ApplicationError(refused.detail, refused, type=FAILED, non_retryable=True)]
+    arg = run_input().model_copy(
+        update={"request": REQUEST.model_copy(update={"process_overrides": {"wall_loops": "99"}})}
+    )
+    await start(client, quick, arg)
+    run = await ended(client, arg)
+
+    assert run.status == "failed" and run.error is not None
+    assert run.error.type == SETTING_REFUSED_PROBLEM and run.error.status == 422
+    assert run.error.extensions["key"] == "wall_loops"
+    assert run.error.detail == f"The slicer refused the setting wall_loops: {refused.detail}"
+    assert fake.calls[-1].startswith("fail:422:")

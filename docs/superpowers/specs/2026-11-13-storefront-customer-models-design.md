@@ -74,7 +74,7 @@ run in a pod that holds a database secret (root `CLAUDE.md`, "Database access";
 | --- | --- | --- | --- |
 | Presign | storefront edge, then CRUD | edge none; CRUD yes | text fields only: names, sizes, types. No bytes. |
 | Upload | the browser, straight to the bucket | n/a | the bytes go to a staging key; no ScadBuddy process sees them |
-| Claim | CRUD | yes | a `HEAD` of each staging object for its size. No bytes read. |
+| Claim | CRUD | yes | a server-side `CopyObject` of each staging object to a frozen key of its own attempt, and a `HEAD` of the copy for its size and ETag. No bytes read. |
 | Check and preview | intake worker (new, §7) | none | the full check, the plates, the preview, the SHA-256 |
 | Import | CRUD's `library` queue, through a flow (§8) | yes | copies the bytes to the native library; reads no structure (the worker's plates are passed in, §8.3) |
 | MakerWorld link | Bambuddy, through #6128's API | n/a | Bambuddy downloads; the native copy is #6128's |
@@ -115,14 +115,32 @@ zip"). A refused file blocks submit until the customer removes it (`model_file_r
 409) **(call)**. A file still being checked does not block submit. Each link and purchase
 link is shown back as escaped text only, never an anchor (the owner's ruling).
 
-A staged file of a cart not submitted within `storefront_staging_ttl_hours` (default 72) is
-deleted by the sweep, and the line reads "This file expired; upload it again" **(call)**:
-an abandoned cart must not keep up to 1 GiB in the bucket for the 30-day cart TTL.
+A staged file of a cart not submitted within 72 hours of its claim
+(`model_requests.STAGING_TTL`) is deleted by its watcher (§6.5), and the line reads "This
+file expired; upload it again" **(call)**: an abandoned cart must not keep up to 1 GiB in
+the bucket for the 30-day cart TTL. A new claim or other activity does not move that
+deadline.
+
+As built (PR 4): the form is the storefront's `/print-my-model`
+(`frontend/src/storefront/components/ModelForm.tsx`). It asks `POST /api/store/v1/uploads`
+for the slots, PUTs each file to its slot with a progress bar of its own, tries a failed
+PUT again on the same URL until the URL expires, then sends `POST
+/api/store/v1/draft/models` (Turnstile action `model`). Its colour list is the price book's
+filaments with no price, from a new edge route, `GET /api/store/v1/models/colours`. The
+cart (`components/ModelSources.tsx` `CartSources`) reads itself again while a file is
+`checking` (1 s, doubling to 5 s, for at most 10 minutes). A refused or expired file
+shows "A file cannot be printed. Remove “Your models”, then add the files again without
+it." The customer removes the whole item: there is no route that removes one source.
+`submit` refuses such a cart with 409 `model_file_refused`, whose `sources` names the
+refused files (`orders/storefront/submit.py` `_no_refused_file`).
 
 ### 4.4 After submit
 
-Submit (storefront spec §5.5) fires the `order.submitted` trigger event (new, §8.1), which
-runs the built-in `customer-model-intake` flow (§8). It imports each ready file into the
+Submit (storefront spec §5.5) signals each staged file's watcher (§6.5): from then on the
+file has no deadline while the order is live, and its watcher runs the import (§8) and
+waits until the file is imported, a person declines it, or the order ends (§6.5: a
+cancelled or closed order keeps the file `ENDED_GRACE`, 30 days, for a reopen). The built-in `customer-model-intake` flow (§8) keeps the
+orchestration. It imports each ready file into the
 native library and deletes its staging object, and it imports each MakerWorld link through
 #6128. Each import makes a `library_file` item on the order (§5.4). The shop slices a quote
 per item and the customer accepts it on the order page (a `library_file` item has no
@@ -136,9 +154,10 @@ All schema changes are new migration files (root `CLAUDE.md`, "Migrations").
 
 ### 5.1 The request item
 
-An own-model request is an `ItemKind` `request` item (storefront spec §4.2) with a new column
-`order_items.request_kind`: `design` (every existing row) or `own_model`, null for other
-kinds. `order_items.colour_preferences` (jsonb, nullable) records what the customer asked:
+An own-model request is an `ItemKind` `request` item (storefront spec §4.2) with a row in
+the side table `order_item_model_requests` (`item_id`, `colour_preferences`); a design request
+has none. As built (PR 1) this is a side table, not columns on `order_items`, so no
+`OrderItem` read changes. `colour_preferences` (jsonb) records what the customer asked:
 `{"shop_choice": true}` or `{"filaments": [<price book id>, …]}`, at most 8.
 
 ### 5.2 Staging uploads: `storefront_uploads`
@@ -146,7 +165,7 @@ kinds. `order_items.colour_preferences` (jsonb, nullable) records what the custo
 One row per presigned slot: `id` (uuid4 hex), `visitor` (the visitor id's sha256), `object_key`
 (`<prefix>/staging/<id>`), `filename`, `size` (declared, signed into the URL), `media_type`
 (`model/stl` or `model/3mf`), `created_at`, `expires_at` (the URL's expiry), `claimed_at`.
-The row owns its staging object: the sweep (§6.5) deletes the object with the row.
+The row owns its staging object: its watcher (§6.5) deletes the object with the row.
 
 ### 5.3 The request's sources: `order_item_sources`
 
@@ -203,7 +222,7 @@ written only by the lifecycle (§10.3).
   often comes as one STL per part, and 20 covers a typical kit. Each file costs one worker
   check and one import, so the count bounds the work one request starts. The 1 GiB total
   bounds what one allowance can stage: 6 requests an hour per client (`REQUEST_UPLOADS`,
-  `storefront/ratelimit.py`) is at most 6 GiB an hour, and the sweep removes what is never
+  `storefront/ratelimit.py`) is at most 6 GiB an hour, and each watcher removes what is never
   claimed (§6.5).
 - **Purchase links**: 5 per item (the owner's cap).
 
@@ -215,31 +234,58 @@ Edge route `POST /api/store/v1/uploads`, JSON
 `UploadAllowance` (the design requests' allowance, shared, so the two forms do not add up);
 Turnstile, a new action `model`, after the allowance. No `UploadGate`: no body bytes pass.
 
-CRUD route `POST /api/v1/crud/storefront/uploads` (area `draft`, service credential): needs
+CRUD route `POST /api/v1/crud/storefront/uploads` (area `models`, service credential): needs
 the S3 store (`listings.py` `public_content`; any other backend is 503 `storefront_needs_s3`,
 as public media is), checks each entry (a name ending `.stl` or `.3mf` that agrees with
-`media_type`, `1 <= size <= 256 MiB`, the per-request total), writes the rows, and answers
-per file `{id, url, headers: {"Content-Type": …}, expires_at}`.
+`media_type`, `1 <= size <= 256 MiB`, the per-request total), writes the rows, starts one watcher per row (§6.5), and only then answers per file
+`{id, url, headers: {"Content-Type": …, "x-amz-acl": "private"}, expires_at}`. A watcher
+that cannot be started is 503 `uploads_unavailable` with no URL, and the new rows are
+dropped: no file can land in the staging area without a watcher.
 
 Each URL is a presigned `PUT` (`S3ContentBackend.presign_put`, new) for exactly one key,
 `<prefix>/staging/<id>`, with `ContentType` and `ContentLength` signed in, valid 15 minutes
 **(call)**. botocore signs both headers: a URL made with aiobotocore for a DO Spaces endpoint
 carried `X-Amz-SignedHeaders=content-length;content-type;host` (generated offline in
 `backend/`'s environment, 2026-11-13). So the store refuses a body of any other length or
-type. S3 checks the expiry when the request starts, so a slow upload that started in time
+type. As built (PR 1) the canned ACL `private` is signed in too (`ACL`, so
+`X-Amz-SignedHeaders=content-length;content-type;host;x-amz-acl`): a PUT that asks for
+another ACL, `public-read` among them, does not match the signature. The bucket itself names
+no ACL and no policy (`infra/do-spaces/scadbuddy-store/main.tf`), so it is private, and every
+staging object is private; a staging object is read only through a presigned GET. S3 checks
+the expiry when the request starts, so a slow upload that started in time
 completes ([AWS, presigned URLs](https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-presigned-url.html),
 "Expiration time").
 
 ### 6.3 The claim
 
 Edge route `POST /api/store/v1/draft/models`, JSON
-`{uploads: [ids], links: [{url, purpose, note}], quantity, colours, note}` (Turnstile is not
-asked again; the allowance was spent at presign). CRUD route
-`POST /api/v1/crud/storefront/draft/models` (area `draft`): each upload must be the
-visitor's, unclaimed and not swept; a `HEAD` of its key must answer exactly the declared size
-(else 422 `upload_missing` or `upload_size`, naming the file). Then one transaction adds the
-request item, its sources and a `checking` state per file, and claims the uploads. After
-commit it starts one `CustomerFileCheck` per file (§7). A retry with the same idempotency
+`{uploads: [ids], links: [{url, purpose, note}], quantity, colours, note}`. It is 404
+`requests_disabled` while "Ask for a design" is off. A request that names an upload is not
+asked Turnstile again: the allowance and the check were spent at that upload's presign, and
+each slot is claimed once. A request that names none (links only) takes them here, as the
+presign does: the design requests' `UploadAllowance` (429 `request_limited`), then Turnstile
+action `model`, a passed check spending one (found in review of #6147: a links-only request
+skipped every gate). CRUD route
+`POST /api/v1/crud/storefront/draft/models` (area `models`): each upload must be the
+visitor's, unclaimed and not cleaned up. Each is then frozen: a server-side `CopyObject` of
+`<prefix>/staging/<id>` to `<prefix>/staging/<id>.<nonce>.frozen` (a nonce of 16 hex digits
+per claim attempt, so two claims at once never write one key), a key no presigned URL names, and a
+`HEAD` of the copy, which must answer exactly the declared size (else 422 `upload_missing` or
+`upload_size`, naming the file; a copy of the wrong size is deleted). The customer's PUT URL
+stays valid up to 15 minutes after the claim, so nothing after the claim reads the original:
+the check and the import read only the frozen copy. Then one transaction adds the request
+item, its sources and a `checking` state per file, claims the uploads and keeps each copy's
+key, ETag and SHA-256 (`storefront_uploads.frozen_key`, `frozen_etag`, `frozen_sha256`). The
+claim's `UPDATE` takes only unclaimed rows, so one attempt wins; a losing or refused attempt
+deletes the copies it made, and the winner's are the only ones a row names. The copy asks S3
+for a SHA-256 checksum (`x-amz-checksum-algorithm: SHA256`; DigitalOcean's Spaces API reference
+lists that header and `x-amz-copy-source-if-match` for `CopyObject`, and `If-Match` for
+`GetObject`: <https://docs.digitalocean.com/reference/api/spaces/>; its S3-compatibility page
+says nothing about additional checksums,
+<https://docs.digitalocean.com/products/spaces/reference/s3-compatibility/>, so a store that
+returns none leaves `frozen_sha256` null and the ETag alone pins the copy). After commit it deletes the writable originals (best
+effort; the watcher deletes every staging key of the file when it ends, §6.5), signals each
+file's watcher `claimed` (§6.5) and starts one `CustomerFileCheck` per file (§7). A retry with the same idempotency
 key answers its first reply, as `add_request` does. The CRUD service never reads the bytes.
 
 ### 6.4 The bucket's CORS rule
@@ -254,7 +300,7 @@ The rule, added to the tofu module `infra/do-spaces/scadbuddy-store` in eh-homel
 
 - `AllowedOrigin`: `https://michaels-workshop.nullreference.io` only;
 - `AllowedMethod`: `PUT` only;
-- `AllowedHeader`: `content-type`;
+- `AllowedHeader`: `content-type` and `x-amz-acl`;
 - `ExposeHeader`: `ETag`;
 - `MaxAgeSeconds`: 3600.
 
@@ -265,20 +311,71 @@ origin for the `PUT`. The edge reads it from the CRUD service with the upload ca
 (`GET /api/v1/crud/storefront/uploads/config`, cached as the site key is, `SiteKey`), and adds
 that origin to `connect-src` once read **(call)**.
 
-### 6.5 The sweep
+### 6.5 Each file's watcher, and the backstop
 
-A new housekeeping activity `housekeeping_sweep_storefront_uploads` (both Schedules, behind
-its patch), 200 rows a run:
+The owner's rule (2026-11-13): "start a workflow to watch the file that ends when work is
+done, or if the file times out." Each upload has one watcher, the workflow `StagedFile`
+(`workflows/staged_file.py`) on the `library` queue, id `staged-file:<upload id>`. As built
+(PR 1, #6147):
 
-- a row never claimed, an hour past `expires_at`;
-- a row claimed by a source of a cart not submitted, past `storefront_staging_ttl_hours`;
-- a row whose source is gone (a swept cart, a removed line).
+- **Start.** The presign route starts the watchers before it answers any URL (§6.2), with
+  `USE_EXISTING` and `ALLOW_DUPLICATE`: a presign sent again (its replay re-signs the same
+  slots) joins the running watcher, and a watcher that ended is started again. This is the
+  owner's `REJECT_DUPLICATE` intent, one watcher per file, in a form a replay can pass.
+- **One step.** Each turn runs one activity, `staged_file_step`
+  (`orders/storefront/staged_files.py` `step`). It reads the file's state from Postgres under
+  the order's lock (the lock a claim, a line's removal and a submit take) and, when the file
+  is due, cleans it up in the same transaction. The database is the truth: a signal only
+  wakes the watcher early, so a lost signal costs time, never a file.
+- **Signals.** `claimed` (the claim's route), `unclaimed` (a line's removal), `submitted`
+  (the submit), `closed` (an order's cancel, by the shop or the customer, and its close),
+  `retry` (an order's reopen), and, for later PRs, `checked` (the intake worker), `imported`
+  and `declined`. Each is sent after its commit and may be lost.
+- **Deadlines** (the TTLs below, measured from the database's timestamps): an upload never
+  claimed is cleaned up `UNCLAIMED_GRACE` after its URL's expiry; a claimed upload of a cart
+  not submitted, `STAGING_TTL` after its claim; a claimed upload whose line is gone, at once.
+  A live submitted order's file has **no deadline**: the watcher reads it again every hour
+  and ends only when the file is imported (§8.3), a person declines it, or the order ends.
+  A file of an order cancelled or closed is cleaned up `ENDED_GRACE` after `cancelled_at` or
+  `closed_at` (#6164): its source then reads `declined`, "The order ended; the staged file
+  was removed. Upload it again." A reopen within the grace clears those timestamps, so the
+  next step reads the order live again and the file goes back to no deadline.
+  `reopen_order` has no time limit, so a reopen after the grace finds the source declined
+  with that reason, which the customer's order page shows (§10.5). The customer uploads
+  the file again as a new request (§4: a new cart, sent as its own order), as files are
+  added to a cart only; the shop may also ask for it. 30 days matches the cart TTL's default
+  (`storefront_draft_ttl_days`).
+- **Clean-up.** In one transaction: a cart's line reads `EXPIRED` (`check_status`
+  `refused`), and the row is deleted. After the commit, the staging object and its preview
+  are deleted; a missing object is no error. A step that fails is retried with backoff and
+  no limit, so the watcher does not end before its clean-up succeeded; a retry after a crash
+  between the commit and the deletes finds no row and deletes the objects again. The order's
+  page is told (`OrderChanged`).
+- **History.** A watcher holds a few signals and one step per deadline; one that waits long
+  (a submitted file) continues as new past 2000 events.
 
-Each: delete the staging object and its preview, then the row. An object under `staging/`
-with no row, older than a day, is deleted too (a crash between the `PUT` and the row is not
-possible, because the row is written before the URL is answered, but a manual upload or a
-lost delete is). `S3ContentBackend.sweep_unrecorded` already skips keys outside
-`<kind>/<sha256>` (its `_OBJECT` pattern), so it never touches staging.
+| TTL | Value | What it bounds |
+| --- | --- | --- |
+| `UPLOAD_URL_TTL` | 15 minutes | how long a presigned `PUT` may start |
+| `UNCLAIMED_GRACE` | 1 hour | an upload never claimed, after its URL's expiry |
+| `STAGING_TTL` | 72 hours | a claimed upload of a cart not submitted, after its claim |
+| `ORPHAN_AGE` | 1 day | the backstop's threshold |
+| `ENDED_GRACE` | 30 days | a file of a submitted order cancelled or closed, after the end (a reopen cancels it) |
+| (submitted) | none | a live submitted order's file waits for its import or a decline |
+
+**The backstop.** The storefront drafts sweep (`housekeeping_sweep_storefront_drafts`, both
+Schedules) runs `staged_files.sweep_staged` after the carts; it owns no file's life. It
+deletes an object under `staging/` that no row names, older than `ORPHAN_AGE`, and it starts
+the watcher again of a row older than `ORPHAN_AGE` whose watcher is not running (Temporal's
+describe answers not found or closed), and the check again (§7) of a file source still
+`checking` past `CHECK_STALE` (1 hour) whose check is not running; that watcher then applies the rules above, so a
+submitted file is never deleted by the backstop. One pass checks at most 1000 rows, and as many waiting file sources
+(`SWEEP_PASS_BATCHES` batches of `SWEEP_BATCH`, one describe each, so the sweep keeps
+inside its 5-minute timeout); the next pass goes on from where it stopped, and past the
+newest row it starts again from the oldest. Each repair is logged and counted
+(`scadbuddy_staged_files_repaired`, by kind); it should find nothing, and a count is a bug
+to look into. `S3ContentBackend.sweep_unrecorded` skips keys outside `<kind>/<sha256>` (its
+`_OBJECT` pattern), so it never touches staging.
 
 ## 7. The intake worker (no database secret)
 
@@ -288,15 +385,27 @@ holds no database secret and no store credential. It gets a service credential t
 `exchange_source` (`auth/service_auth.py`), scoped to the CRUD area `intake` only. The pod
 has a read-only root file system and a memory limit; each parse runs in a child process with
 an address-space limit and a timeout, killed with its process group, as
-`workflows/template_process.py` runs template Python. Its egress policy allows the CRUD
-service, Temporal and the bucket host only (eh-homelab/clusters#3182 owns the policies; the
-clusters PR adds this pod's).
+`workflows/template_process.py` runs template Python. The child runs in a second
+Deployment, `scadbuddy-intake-sandbox` ("The child's sandbox" below). The worker's egress
+policy allows the CRUD service, Temporal, the bucket host and the sandbox's port only; the
+sandbox's ingress admits only the worker's pods, and its egress allows nothing
+(eh-homelab/clusters#3182 owns the policies; the clusters PR adds these pods').
 
-`CustomerFileCheck(source_id)`:
+`CustomerFileCheck(source_id)` (`intake_worker/workflow.py`; the CRUD service starts it after
+a claim, `orders/storefront/intake.py` `start_checks`, workflow id
+`customer-file-check:<source id>`; the backstop starts it again for a source still
+`checking` an hour after its claim whose check is not running, §6.5). Its activity
+(`intake_worker/activities.py`), tried three times:
 
 1. asks the CRUD service for a presigned `GET` of the staging object
-   (`POST /api/v1/crud/intake/sources/{id}/read`, area `intake`, 5 minutes) and downloads it
-   to its disk, counting bytes (at most the declared size);
+   (`POST /api/v1/internal/crud/intake/sources/{id}/read`, area `sources`, 5 minutes; 409
+   `not_checking` for a source that no longer waits, which ends the run) and downloads it
+   to its disk, counting bytes (at most the declared size; any other size is refused). The
+   GET is of the frozen copy (§6.3) and signs `If-Match` of its ETag, which the worker
+   sends, so S3 answers 412 for any other object at that key and the attempt fails; where the
+   claim kept a SHA-256, the worker also compares the downloaded bytes with it. The
+   import (§8, PR 5) copies the same key with `CopySourceIfMatch` and checks the SHA-256
+   the worker reported;
 2. checks it by content, never by name or declared type:
    - a 3MF starts `PK\x03\x04`; a binary STL is `84 + 50 × n` bytes for the uint32 `n` at
      offset 80; otherwise printable ASCII starting `solid` is an ASCII STL; the name's
@@ -308,15 +417,265 @@ clusters PR adds this pod's).
      model present; then the read itself inflates through a counting reader that stops at
      each declared size (§7.1);
    - the model read under the read budget (`render/read_budget.py`) and the mesh caps;
-3. writes the facts (format, objects, plates with names, triangles, size in mm, colours),
-   the SHA-256 and the plate list the native library keeps, and uploads a preview PNG
-   (`render/thumbnail.py` `render_view`, the iso view) through a presigned `PUT` the CRUD
-   service mints for `<prefix>/staging/<id>.png`;
-4. posts the result: `PUT /api/v1/crud/intake/sources/{id}/check` (area `intake`). The CRUD
-   service checks the result with Pydantic, `HEAD`s the preview, copies it into the content
-   store as `customer-preview-<sha256>` held by the source, and deletes the staging preview.
-   A refusal writes `refused` and the reason; a timeout or crash writes `failed`, which the
-   back office can run again.
+3. writes the facts (format, each plate's index, triangles, size in mm and colours, the
+   triangles in all; at most 64 plates) and the SHA-256, and uploads a preview PNG of plate 1
+   (`render/thumbnail.py` `render_view`, the iso view) through a presigned `PUT` of exactly
+   its size the CRUD service mints for `<prefix>/staging/<id>.png`
+   (`POST …/intake/sources/{id}/preview`). The plate list the native library keeps is the
+   import's (§8.3, PR 5);
+4. posts the result: `PUT /api/v1/internal/crud/intake/sources/{id}/check` (an
+   `Idempotency-Key` that is the same on each retry). The CRUD service checks the result
+   with Pydantic, reads the preview as opaque bytes (at most 4 MiB; none is 409
+   `preview_missing`), stores it in the content store as `customer-preview-<sha256>`, the
+   SHA-256 of the preview bytes it read, never a hash the worker reports (the file's SHA-256
+   is kept as the blob's metadata only), so no verdict can point a source at another file's
+   preview; it is held by the source (`blob_refs` holder `order_item_source`, dropped by a trigger with the source),
+   deletes the staging preview, and signals the watcher `checked`. A refusal writes
+   `refused` and the reason; a check whose attempts all fail (a timeout, a crash) writes
+   `failed`, which the back office can run again (PR 4). A verdict for a source that
+   stopped waiting meanwhile records nothing (`recorded` false).
+
+The worker (`intake_worker/worker.py`) refuses to start with `SCADBUDDY_DATABASE_URL`,
+`PGPASSWORD`, `PGPASSFILE` or `SCADBUDDY_SECRET_KEY_FILE` set, and imports no database code;
+only its child process (`intake_worker/child.py`) reads the file, under its own
+`RLIMIT_AS` (4 GiB) and a 5-minute timeout, with none of the worker's environment. The
+worker is not versioned (no worker deployment): a change to the workflow's commands goes
+behind `workflow.patched`. It serves `/healthz` on 9090. Its child gets no inherited file
+descriptor but its three standard streams, all `/dev/null` (`close_fds`), so it cannot
+reach the worker's sockets.
+
+**The child's sandbox.** These layers keep a parser exploit away from the worker's
+credential and from other customers' files (`intake_worker/hardening.py`, `confine.py`,
+`runner.py`, `sandbox.py`). Two design rules:
+
+- **Fail closed.** A step that cannot be taken stops the check; it never runs weaker.
+- **The isolation rule: one tenant per pod.** A pod holds one customer's file at any
+  moment. The sandbox runs one check at a time, fixed and not configurable: a second
+  request while one runs is answered 503, and its body is never stored. Each check gets a
+  fresh box that is removed after it. Before each check the sandbox also checks that no
+  process of an earlier check is alive (`clear_job_processes`: it is the pod's child
+  subreaper, so a check's orphans become its children; it kills what it finds, and stops
+  serving and exits 4 when one survives five seconds). The worker takes one check at a
+  time too (`max_concurrent_activities=1`). So while a parse runs, no other customer's
+  file or process exists in the sandbox's pod for an exploit to reach, whatever it
+  escapes. Throughput comes from replicas of the two Deployments, never from checks at
+  once in one pod.
+
+- The worker makes itself non-dumpable at start (`prctl(PR_SET_DUMPABLE, 0)`), before it
+  reads its proof, so no process of its user can `ptrace` it or read its
+  `/proc/<pid>/mem` or `environ`
+  ([prctl(2)](https://man7.org/linux/man-pages/man2/prctl.2.html)); the child does the same.
+- The deployment runs the child in a Deployment of its own, `scadbuddy-intake-sandbox`
+  (`python -m scadbuddy.intake_worker.sandbox`): no ServiceAccount token, no proof
+  volume, `readOnlyRootFilesystem`, its own `emptyDir` (the spool). Its pods share no
+  network namespace, no volume and no token with the worker's. It used to be a second
+  container of the worker's pod; a security review found two faults in that design. The
+  pod's NetworkPolicy gave the sandbox the worker's grant to Temporal, whose frontend asks
+  no credential here. And the pod `fsGroup` on the shared spool made the worker's projected
+  token group-readable to the sandbox
+  ([Kubernetes: configure volume permission and ownership](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#configure-volume-permission-and-ownership-change-policy-for-pods)).
+  The owner chose the split (secure by default).
+  The worker hands each check over a narrow HTTP RPC on the pod network
+  (`SCADBUDDY_INTAKE_SANDBOX=true` and `SCADBUDDY_INTAKE_SANDBOX_URL` on the worker, an
+  `http://` URL of the sandbox's Service; the sandbox listens on
+  `SCADBUDDY_INTAKE_SANDBOX_PORT`, default 8090). `SCADBUDDY_INTAKE_SANDBOX` has no
+  default: the worker refuses to start without it, so a missing value never falls back to
+  the weaker mode; `unsafe-local` (development only) starts the child in the worker's own
+  container. The sandbox refuses to start with a database secret, the KEK or a proof, and
+  with any file under `/var/run/secrets/` (where Kubernetes mounts a ServiceAccount token,
+  [Kubernetes: opt out of API credential automounting](https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/#opt-out-of-api-credential-automounting);
+  `sandbox.mounted_secrets`; a folder it cannot list refuses too). The RPC token's Secret
+  is therefore mounted outside `/var/run/secrets/`, e.g. at
+  `/etc/scadbuddy-intake-rpc/token`.
+- The RPC (`runner.py`'s docstring has every bound). `POST /check`: the header
+  `Authorization: Bearer <token>` carries the RPC token, the body is the file's
+  bytes (`Content-Length` required, at most 256 MiB, streamed to the box, never held in
+  memory whole), and the header `X-Intake-Request` is the request as JSON (the filename,
+  the timeout, the address-space cap and a random `id` of 16 to 64 hex digits; at most
+  4 KiB; checked by `runner.parse_request`). The answer is 200
+  `application/octet-stream` with `X-Intake-Id` (the id, echoed) and
+  `X-Intake-Verdict-Bytes: N`: the first `N` bytes are the verdict's JSON (at most 1 MiB),
+  the rest the preview PNG (at most 4 MiB, empty when none). The framing is binary, never
+  base64 (`.github/scripts/lint-base64-images.sh`). Every other status is a small JSON
+  error that fails the check: 401 (no token or a wrong one), 400, 404, 405, 411, 413,
+  431, 500 (the child crashed, did not start or wrote no verdict), 503 (busy, or stopping)
+  and 504 (past the check's timeout). When the client goes away, or the timeout passes, the
+  sandbox kills the child's group.
+- The RPC token. A security review found that `serve` listened on every address with no
+  authentication, so anything that reached the port could take the one check slot or feed
+  the sandbox files. The owner decided on a token that authorizes calls to the sandbox and
+  nothing else. Both processes read it from the file `SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE`
+  names, from the Secret `scadbuddy-intake-sandbox-rpc`, mounted in the worker's and the
+  sandbox's pods only. Both refuse to start without the file, with an empty file, or with a
+  token shorter than 32 bytes or not visible ASCII (`runner.read_token`; one final newline
+  is dropped). It is the one secret the sandbox may hold, and the rule "the sandbox holds
+  no secret" stays true of every other credential: an escaped parser that reads the token
+  can call only the sandbox it is already in, so the leak reaches no other service, no
+  data and no other customer's file. The sandbox compares the header with
+  `hmac.compare_digest` ([Python: hmac](https://docs.python.org/3/library/hmac.html#hmac.compare_digest))
+  and answers 401 (`WWW-Authenticate: Bearer`) before it reads any byte of the body, then
+  closes the connection without draining it. `/healthz` asks no token: the kubelet's
+  probes cannot read a Secret, and it tells nothing. The parser cannot read the token
+  either: the launcher covers the token's directory with an empty tmpfs (mode 0) in each
+  check's mount namespace, as it covers the spool and `/proc` (`confine.py --cover`,
+  `sandbox.covered_dirs`; the start's probe covers it too, so a refusal stops the start).
+  The file is not unlinked, because a Secret volume is read-only. Test:
+  `test_a_confined_child_cannot_read_the_rpc_token`. The launcher also covers the
+  container's `/dev/shm` (a tmpfs of mode 1777) the same way, so a parse can neither fill
+  pod memory there nor leave a file for a later check (`test_a_confined_child_cannot_write_a_covered_folder`).
+- The request deadline. A request's head and its whole body must arrive within
+  `REQUEST_DEADLINE` (60 s) of the connection, on top of the 256 MiB cap; 256 MiB in 60 s
+  is about 4.5 MB/s. Past it the sandbox drops the connection with no answer, frees the
+  check slot and keeps no file (the box is removed), so one connection cannot hold `busy`
+  by trickling its body.
+- Two more things protect the RPC. The NetworkPolicy admits only the worker's pods to
+  the sandbox's port; it ships in the eh-homelab/clusters PR with a check that fails
+  without it. And the worker reads every answer as untrusted:
+  status 200, the echoed id, the verdict length an integer within its cap, no
+  `Content-Encoding`, the body counted while it is read and stopped past 5 MiB, the
+  verdict validated (`runner.parse_verdict`) and the preview's PNG signature and `IHDR`
+  checked. Each failed call is counted, `scadbuddy_intake_sandbox_failed_total` by
+  `reason`. A 503 busy or a refused connection is tried again for up to 60 s.
+- Pod security. Both pods run as non-root with a read-only root and no token automount.
+  The sandbox's pod runs with the seccomp profile `Unconfined`, which the launcher's
+  `unshare(CLONE_NEWUSER)` needs, since a runtime's default profile refuses it
+  ([Kubernetes: seccomp](https://kubernetes.io/docs/tutorials/security/seccomp/)). Its
+  AppArmor profile is a `Localhost` one, `scadbuddy-intake-sandbox`: `unconfined` plus
+  `userns,`. The prod nodes are Ubuntu 24.04 with
+  `kernel.apparmor_restrict_unprivileged_userns=1`, where an AppArmor-unconfined pod keeps
+  no capabilities in its new user namespace and the launcher could not write its id maps
+  (`EACCES`, measured in prod on 2026-11-15;
+  [AppArmor wiki](https://gitlab.com/apparmor/apparmor/-/wikis/unprivileged_userns_restriction)).
+  eh-homelab/clusters `applications/scadbuddy/apparmor-loader.yaml` loads it on every node.
+  That is the sandbox's pod only, and the seccomp part lasts until the nodes carry a
+  `Localhost` seccomp profile that allows that call; the launcher's own seccomp filter
+  still binds the parser. The worker's pod
+  keeps `RuntimeDefault`. Only the worker is on the Temporal frontend's allowlist.
+- Each parse starts through a small launcher, `confine.py` (standard library only, run
+  with `-I -S`, so it is single-threaded), which confines itself and then `execv`s the
+  parser in place:
+  0. `prctl(PR_SET_DUMPABLE, 0)` first, lifted only for the three writes of its id maps
+     (a non-dumpable process's `/proc` files belong to root, which the new user namespace
+     does not map, so it could not open them);
+  1. `unshare(CLONE_NEWUSER | CLONE_NEWNET | CLONE_NEWNS | CLONE_NEWPID)` with its own uid
+     and gid mapped to themselves: a network namespace with only a loopback device that is down
+     ([network_namespaces(7)](https://man7.org/linux/man-pages/man7/network_namespaces.7.html)),
+     and a mount namespace where an empty tmpfs (mode 0) covers the spool and the job's box
+     is bind-mounted onto `<spool>/box` inside it, the process's new working directory
+     ([mount_namespaces(7)](https://man7.org/linux/man-pages/man7/mount_namespaces.7.html)).
+     The bind matters: a working directory left below the covered spool still reached a
+     sibling job by `../../<job>`, which the cover alone does not stop (found by
+     `test_a_confined_child_reaches_only_its_own_box`, 2026-11-14). It then forks the
+     parser as PID 1 of the new PID namespace, which covers `/proc` with an empty tmpfs:
+     the parser sees no process, its launcher included
+     ([pid_namespaces(7)](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html)).
+     No fresh `/proc` is mounted: a container's masked `/proc` paths make the kernel
+     refuse one in a user namespace, and the parser needs none. The launcher reaps the
+     parser and exits with its code. The parser dies with its launcher: it sets
+     `PR_SET_PDEATHSIG` to `SIGKILL`, then checks through a pipe only the launcher holds
+     that the launcher is still alive (`getppid` reads 0 across the namespace boundary).
+     When PID 1 of a PID namespace dies the kernel kills every process in it, so the
+     runner's kill of the launcher's process group ends the whole job;
+  2. `prctl(PR_SET_NO_NEW_PRIVS, 1)`;
+  3. a seccomp filter that answers `EPERM` to `mount`, `umount2`, `pivot_root`, `chroot`,
+     the new mount API, `unshare`, `setns`, `clone` with a namespace flag, `setsid`,
+     `setpgid` (the parser cannot leave the process group a timeout kills), `ptrace`,
+     `process_vm_readv`, `process_vm_writev`, `kcmp`, `pidfd_open`, `pidfd_getfd`,
+     `pidfd_send_signal`, `keyctl`, `add_key`, `request_key`, `bpf`, `perf_event_open` and `userfaultfd`, and
+     `ENOSYS` to `clone3` and `io_uring_setup`
+     ([seccomp(2)](https://man7.org/linux/man-pages/man2/seccomp.2.html));
+  4. `execv` of the parser in the forked PID 1 (the launcher takes steps 2 and 3 too). The creator of a user namespace holds every capability inside
+     it, enough to unmount the cover; an `execve` by a uid that is not 0 in the namespace
+     clears them all ([capabilities(7)](https://man7.org/linux/man-pages/man7/capabilities.7.html)),
+     so the parser runs with none. The launcher refuses root with `--strict`.
+
+  Measured on WSL2 (Linux 6.6.87.2), 2026-11-14, by `tests/intake_worker/test_runner.py`:
+  the parser's `CapEff` and `CapPrm` are 0, `NoNewPrivs` 1, `Seccomp` 2; `umount2` of the
+  cover, `mount`, `unshare(CLONE_NEWUSER)` and `clone(CLONE_NEWUSER)` each fail with
+  `EPERM`; the parser is PID 1 and `/proc` lists nothing; `process_vm_readv`,
+  `process_vm_writev`, `kcmp`, `pidfd_open`, `pidfd_getfd`, `pidfd_send_signal`,
+  `setsid` and `setpgid` fail with `EPERM`; a kill of the launcher alone ends the parser
+  and its child; a connect to a host loopback listener fails; the spool's other jobs are
+  unreachable by absolute path and by `..`. CI proves the same on every run: shard 1 of
+  `backend-pytest` runs `tests/intake_worker/test_runner.py` and `test_sandbox.py` as uid
+  10001 in a container unconfined by seccomp and AppArmor, with the runner's AppArmor
+  user-namespace restriction lifted and `SCADBUDDY_REQUIRE_CONFINEMENT=1`, where a refused
+  step fails.
+- It fails closed. The sandbox runs the launcher with `--strict`, where any refused step
+  exits 126 and no parse runs; at start it runs the launcher once (`probe_isolation`), and
+  where that is refused it logs why and exits 3 without serving a check. The pod then
+  crash-loops and every check fails; the worker counts them in
+  `scadbuddy_intake_sandbox_failed_total` (`/metrics` on its health port). Only
+  `unsafe-local` runs a parse whose launcher step was refused (reported in the verdict's
+  `isolation`).
+- The box never follows a name it did not make. For each check the sandbox makes `box/` on
+  its spool (0700, its own; one left by a crash is removed first), streams the body into
+  `upload.bin` made with `O_CREAT | O_EXCL | O_NOFOLLOW`, and starts the launcher with the
+  box's descriptor, inherited (`--box-fd`), which the launcher `fchdir`s to and closes
+  before anything else. Never a `/proc/<pid>/fd/<n>` path: the sandbox is non-dumpable, so
+  its children cannot follow such a link of its own. A launcher that does not start is a
+  500 `spawn-failed`. The sandbox reads the box's outputs with `runner.read_output`:
+  `O_NOFOLLOW | O_NONBLOCK` relative to the box's descriptor, then `fstat` (a regular file
+  with one link, its own user's, at most the cap). The box is removed before the answer is
+  sent. The worker checks the answer again (the RPC above): the verdict 1 MiB and
+  validated, the preview 4 MiB, which must start with the PNG signature and an `IHDR`
+  chunk of sides 1 to 4096 ([PNG §5.2, §11.2.2](https://www.w3.org/TR/png-3/)).
+- No gVisor or Kata. The production cluster (`primary`, containerd 2.2.7-k3s1, Ubuntu
+  kernels 6.8) offers the RuntimeClasses `crun`, `nvidia` and `nvidia-experimental` only
+  (`kubectl get runtimeclass`, 2026-11-14), so the sandbox runs on the host kernel; a
+  gVisor RuntimeClass would be the strongest layer, and the clusters PR should use one if
+  the cluster ever offers it.
+
+**Residual risk.** Accepted, and what would remove each:
+
+- A kernel bug reachable from the parser's allowed syscalls escapes everything above;
+  only a sandboxed kernel (gVisor, Kata) removes that. The sandbox's pod runs `Unconfined`
+  by the runtime's seccomp, and its AppArmor profile adds no rule beyond `userns,`, so the
+  launcher's own filter is the only syscall filter on the parser until a `Localhost`
+  seccomp profile replaces `Unconfined`.
+- A parser that escaped through such a bug runs as the sandbox's user in the sandbox's
+  pod. That pod holds no ServiceAccount token, no proof and no secret but the RPC token
+  (which reaches only the sandbox itself), and by the isolation rule no other
+  customer's file: it runs one check at a time and removes each box. It shares no network
+  namespace and no volume with the worker, so the worker's projected token, its Temporal
+  grant and its CRUD credential are out of reach. Its NetworkPolicy allows it no egress,
+  and it can answer the worker only with bytes the worker reads as untrusted.
+- An escaped parser could answer a later check of the same pod with a forged verdict: the
+  verdict is what the sandbox says. The worker bounds and validates it, and the CRUD
+  service stores the preview as opaque bytes under their own hash (§7, step 4), so a
+  forged verdict mislabels at most the files that pod checks until it restarts.
+- The parser's memory and time are capped (`RLIMIT_AS` 4 GiB, 5 minutes); the pod's memory
+  limit bounds the rest.
+- On a node where the `scadbuddy-intake-sandbox` AppArmor profile is not loaded, the
+  sandbox's container is not created, and the kubelet retries it. Under a profile without
+  `userns,`, the nodes' `kernel.apparmor_restrict_unprivileged_userns=1` makes the sandbox
+  exit 3 at start (measured in prod on 2026-11-15). Both are safe and visible.
+
+With `unsafe-local` (development, tests) the worker starts the launcher itself, without
+`--strict`.
+
+**Serving the preview (PR 4).** The preview is bytes the untrusted check made. ScadBuddy
+never decodes, resizes or re-encodes it, and serves it only as `Content-Type: image/png`,
+`Content-Disposition: inline` and `X-Content-Type-Options: nosniff`, whatever the bytes
+are. A presigned `GET` can fix the first two (`ResponseContentType`,
+`ResponseContentDisposition`) but cannot add `nosniff`, because S3 overrides only six
+response headers ([GetObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html)).
+So the back office and the edge stream it through a route of their own that sets all
+three, never a presigned URL.
+
+As built (PR 4): the headers are `storefront/wire.py` `PREVIEW_HEADERS`, with
+`Cache-Control: private, no-cache` (a shared cache must not keep a customer's picture, and
+the browser asks again on each use: the URL stays the same when "Check again" stores a new
+preview).
+The CRUD service reads the bytes (`intake.read_preview`: at most `MAX_PREVIEW_BYTES`) and
+the edge streams them (`routes.py` `_relayed_preview`). The cart's line is `GET
+/api/store/v1/draft/sources/{id}/preview` (the visitor's cookie, only for a cart not yet
+submitted, `intake.draft_preview`). The order page's is `POST
+/api/store/v1/order/sources/{id}/preview` with the reader in the body (`order_page.preview`),
+so no URL carries the order link's token; the page makes a `blob:` URL of the answer. Any
+failure, a source id that is not one included, is a 404 with no body, and the edge checks
+the id's shape before it calls the CRUD service. The back office's route is `GET
+/api/v1/orders/{id}/sources/{source}/preview` (`api/order_sources.py`), with the same headers.
 
 ### 7.1 The zip-bomb limits, measured
 
@@ -341,9 +700,18 @@ check has its own limits and leaves those alone.
 
 ### 8.1 The trigger and the flow
 
-A new trigger event `order.submitted` (`flow_triggers/events.py`), fired once per order when
-a storefront submit commits, key `order:<id>:submitted` **(call)**: no status change marks a
-submit (it stays `draft`, storefront spec §5.5), so `order.changed` cannot.
+The import does not hang on the event bus (the owner's question, 2026-11-13: "How do we
+have a strong guarantee that the workflow triggers to import it into regular storage?").
+`flow_triggers/events.py` fires nothing for an event lost while the bus is disconnected, and
+its catch-up reads status changes only; a submit is none (the order stays `draft`, storefront
+spec §5.5). So each staged file's watcher (§6.5) owns the import: once its step reads the
+file as submitted, it runs the import itself, as a child workflow with a deterministic id
+(`staged-file-import:<upload id>`) that runs the flow's import step for that file, retried
+with backoff and no limit. A watcher whose import has not finished one hour after the submit
+marks the source "Import stuck" (`status_reason`, shown on the order page and the orders
+list, with "Retry import", which sends the watcher `retry`), logs it and counts it
+(`scadbuddy_staged_files_stuck`), and keeps waiting. A paused intake trigger or a revoked
+grant shows the same way. The watcher ends only when the file is imported or declined.
 
 A new built-in flow `customer-model-intake` (`orders/builtin_intake_flow.py`), registered as
 `order-fulfilment` is (`orders/builtin_flow.py`: `register_new`, the upgrade rules, a trigger
@@ -403,7 +771,8 @@ This PR waits for #6128 to merge and does not rebase onto its branch.
    in the API process, `print_library/native.py` `_read_upload`);
 4. in one transaction: the source gets `library_file_id`, `status` `imported`, `upload_id`
    null; the `library_file` item is added (§5.4); the upload row is deleted;
-5. after commit, deletes the staging object. A failed delete leaves it to the sweep.
+5. after commit, signals the file's watcher `imported`; its next step finds no row and
+   deletes the staging object (§6.5).
 
 Known residue: the native library's cover and plate image routes still read the 3MF in the
 API process when served. That is the same as for every library file today, and #5296 owns
@@ -517,6 +886,27 @@ A `deposit` request is not gated (the owner's decision): submit opens it before 
 price a purchase. The customer's view sets `can_accept` false while the gate is on and shows
 "Purchase pending: the shop is pricing <n> thing(s) to buy for you."
 
+**As built (PR 3, #6133).** `record_purchase(order_id, source_id, body, by)` also takes
+the order id, for its lock. Record, update and decline work only while the order is
+`draft` or `quoted` (`purchase_locked` after, so record too); a second record of a
+recorded link with the same amount and cost kind, and a second decline, write nothing; a
+second record that differs is 409 `purchase_recorded` (a change is the update); a record of a `not_needed` link is
+409 `purchase_not_pending`, an update of a link not recorded 409
+`purchase_not_recorded`. A cost entry with a `purchase:` source cannot be added by hand
+either (`purchase_cost_linked`). The routes are `GET /orders/{id}/purchases`, `POST
+…/purchases/{source}/record`, `PATCH …/purchases/{source}` and `POST
+…/purchases/{source}/decline`, with no `Idempotency-Key`: the cost entry's `purchase:`
+source and the link's state make a repeat safe. The agent also gets `order_purchases`
+(read), which lists the links' ids that the three write tools take. A design request
+sends its things to buy as the multipart part `purchase_links` (a JSON list of `{url,
+note}`). The fee settings are env-seeded and live, as `orders_tax_percent` is. The
+`purchase_pending` problem names the pending links in `sources` and their items in
+`items`. The gate counts only links of items not cancelled: a cancelled item's link
+stops nothing until the item is reopened. A change to a fee setting reprices an order's
+`handling` row only at that order's next record, update or decline. Sources:
+`backend/scadbuddy/orders/lifecycle.py`, `api/order_purchases.py`,
+`storefront/uploads.py`; `backend/tests/orders/test_purchases.py`.
+
 ### 10.5 What the customer sees
 
 `CustomerOrderView` and `ORDER_VIEW_FIELDS` gain:
@@ -524,9 +914,18 @@ price a purchase. The customer's view sets `can_accept` false while the gate is 
 - `charges`: `kind`, `label`, `amount_minor` (so shipping and tax show too, which is
   intended: the customer must see what they pay);
 - `sources`: per request item, `kind`, `purpose`, `filename`, `url` (text), `note`, `status`,
-  `amount_minor` (a recorded purchase's), `shop_note`, `preview_url` (a presigned `GET`).
+  `amount_minor` (a recorded purchase's), `shop_note`, `preview_url` (the edge's route that
+  streams it, §7, never a presigned `GET`), and `customer_reason`: the `status_reason` only
+  when ScadBuddy wrote it for the customer (the ended order's `ENDED`, §6.5), else null.
 
-No cost entry, margin, staff name or import reason reaches the customer.
+No cost entry, margin, staff name or import reason reaches the customer. A source declined
+with `ENDED` shows its reason and an "Upload again" link to the storefront's model form.
+
+As built (PR 4): `order_page.py` `CUSTOMER_REASONS` holds only `ENDED`, and
+`test_order_page.py` pins the new fields. A recorded purchase's `amount_minor` is the
+`purchase` charge's amount, never the cost entry's. The page says "Purchase pending: the
+shop is pricing <n> thing(s) to buy for you." while a purchase link is `pending`, and lists
+the charges by label and amount.
 
 ## 11. The back office
 
@@ -535,7 +934,8 @@ state, facts, preview, "Download" as a presigned `GET` while staged or the libra
 imported, "Check again", "Import"), each link (type, the link as text, "Open link", "Import
 again" for MakerWorld, "Use library file", "Decline"), and each purchase ("Open link", the
 note, "Record cost", "Change", "Not needed"). The order header shows "Purchase pending (n)".
-The orders list filters by "own model" and "purchase pending". Settings → Orders gets the two
+The orders list filters by "own model", "purchase pending" and "import stuck" (§8.1); a
+stuck source shows "Import stuck", its reason and "Retry import". Settings → Orders gets the two
 fee fields.
 
 Agent tools: `order_get` shows the sources; `import_staged_model`,
@@ -543,22 +943,47 @@ Agent tools: `order_get` shows the sources; `import_staged_model`,
 `order_purchase_record`, `order_purchase_update`, `order_purchase_decline` (write). No tool
 fetches a link.
 
+As built (PR 4): the routes are `api/order_sources.py` under
+`/api/v1/orders/{id}/sources/{source}`: `GET …/preview`, `GET …/download` (a presigned
+`GET` of the frozen copy, 5 minutes, `attachment` with a safe file name; 409
+`source_not_staged` once it is gone), `POST …/check` (a `failed` check back to `checking`,
+then `intake.start_checks`; a check still `checking` is not refused but started again, a
+running one joined, so a stalled check can be pushed), `POST …/decline` (`{reason}`, default "Declined by the
+shop."; the watcher is told `declined`) and `POST …/retry-import` (the watcher is told
+`retry`). They take no `Idempotency-Key`: a repeat finds the source in its new state and
+writes nothing. `GET /orders/{id}` adds `sources` (`OrderItemSource`) and `model_requests`
+(the colours asked for). A source is `import_stuck` while it is not imported an hour after
+the order was sent (`models.py` `IMPORT_STUCK`, the reason shown). `GET /orders` takes
+`own_model`, `purchase_pending` and `import_stuck`. "Open link" opens a link only after the
+page checks its scheme again (`https:` or `http:`), with `target="_blank"`, `rel="noopener
+noreferrer"` and `referrerpolicy="no-referrer"`. The agent's tools in this PR are
+`order_item_source_decline`, `order_item_source_check_again` and
+`order_item_source_retry_import` (write); the import tools wait for phase 5.
+
 ## 12. eh-homelab/clusters
 
 One PR: the `scadbuddy-intake` Deployment (the app image, `python -m scadbuddy.intake_worker`,
 a ServiceAccount whose projected token the CRUD service exchanges, no database secret, no
-store credential, read-only root, a memory limit, its egress policy), and the bucket's CORS
-rule (§6.4).
+store credential, read-only root, a memory limit, its egress policy), the
+`scadbuddy-intake-sandbox` Deployment and its Service (`python -m
+scadbuddy.intake_worker.sandbox`, no ServiceAccount token, its own `emptyDir`, the
+Secret `scadbuddy-intake-sandbox-rpc` mounted outside `/var/run/secrets/` in it and in the
+worker, a NetworkPolicy check that fails without its policy, seccomp `Unconfined` and the
+`Localhost` AppArmor profile `scadbuddy-intake-sandbox` (`unconfined` plus `userns,`,
+loaded on each node by `applications/scadbuddy/apparmor-loader.yaml`) on its pod only, ingress from the worker's pods only, no egress; §7, "The
+child's sandbox"), and the bucket's CORS rule (§6.4).
 
 ## 13. Phases, one PR each
 
-1. Data and staging: migrations, the registry, presign, claim, the sweep, the CRUD and edge
-   routes, CORS config read.
+1. Data and staging: migrations, the registry, presign, claim, each file's watcher and its
+   clean-up (§6.5), the backstop, the CRUD and edge routes, CORS config read.
 2. The intake worker and its check.
 3. Purchases, the fee, the gate.
-4. The storefront form, cart and order page; the back office panel and fee settings.
-5. After #6128 merges: `staged_model_import`, `copy_staged_to_native`, the
-   `order.submitted` event, the `customer-model-intake` flow and the source tools.
+4. The storefront form, cart and order page; the back office panel and fee settings;
+   "Import stuck" and "Retry import".
+5. After #6128 merges: `staged_model_import`, `copy_staged_to_native`, the watcher's
+   import child and its stuck state (§8.1), the `customer-model-intake` flow and the source
+   tools.
 6. eh-homelab/clusters: the Deployment and the CORS rule.
 
 ## 14. Out of scope

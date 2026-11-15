@@ -21,6 +21,8 @@ expect "true false false true"  frontend/page-csp.txt
 expect "true false false true"  THIRD_PARTY_NOTICES.md
 expect "true false false true"  .github/scripts/merge-test-durations.sh
 expect "true true false true"   backend/uv.lock
+expect "true true false true"   backend/scadbuddy/migrations_agent/20261114T1609Z_session_file_bytes.sql
+expect "true false false true"  backend/scadbuddy/migrations/20260928T0840Z_settings.sql
 expect "false true false false" agent-durable/scadbuddy_durable/worker.py
 expect "false true false false" agent/src/secrets.ts
 expect "false false false false" plugins/scadbuddy/skills/print/SKILL.md

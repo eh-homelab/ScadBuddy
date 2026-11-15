@@ -310,6 +310,57 @@ test.describe('orders', () => {
     await expect(keychain.getByText('Approved')).toBeVisible()
   })
 
+  // #6334: the views, the closed orders hidden after N days, and the URL that keeps them.
+  test('a view, closed orders hidden after 30 days, and All again', async ({ page }) => {
+    // ORD-2026-1 closed on 2026-10-18 in the mocks: past 30 days on this pinned day.
+    await page.clock.setFixedTime(new Date('2026-12-01T12:00:00Z'))
+    await page.goto('/orders')
+    const table = page.getByRole('table', { name: 'Orders' })
+    await expect(table.getByRole('link', { name: 'ORD-2026-3', exact: true })).toBeVisible()
+    await expect(table.getByRole('link', { name: 'ORD-2026-1', exact: true })).toHaveCount(0)
+    await expect(page.getByTestId('orders-hidden-note')).toContainText('are hidden.')
+
+    await page.getByRole('navigation', { name: 'Order views' }).getByRole('button', { name: 'Ready to ship' }).click()
+    await expect(page).toHaveURL(/\/orders\?status=ready$/)
+    await expect(page.getByText('No orders match.')).toBeVisible()
+    // A reload keeps the view.
+    await page.reload()
+    await expect(page.getByRole('button', { name: 'Ready to ship' })).toHaveAttribute('aria-pressed', 'true')
+
+    await page.getByRole('button', { name: 'Show all' }).click()
+    await expect(page).toHaveURL(/\/orders$/)
+    await page.getByRole('button', { name: 'Show them' }).click()
+    await expect(page).toHaveURL(/\/orders\?old=1$/)
+    await expect(table.getByRole('link', { name: 'ORD-2026-1', exact: true })).toBeVisible()
+  })
+
+  // #6334: a cancelled line leaves the live ones and waits, closed, in a group of its own.
+  test("the items table's cancelled group", async ({ page }) => {
+    await page.goto('/orders')
+    await page.getByRole('link', { name: 'ORD-2026-3', exact: true }).click()
+    const card = page.getByRole('region', { name: 'Items' })
+    const items = card.getByRole('table', { name: 'Line items' })
+    await card.getByRole('button', { name: 'Add custom item' }).click()
+    await items.getByRole('textbox', { name: 'Custom item title' }).fill('Unicorn pencil cup holder, pink multicolour, a very long title')
+    await items.getByRole('textbox', { name: 'Custom item unit price' }).fill('6')
+    await items.getByRole('textbox', { name: 'Custom item unit price' }).press('Enter')
+    const line = items.getByRole('row').filter({ has: page.getByRole('textbox', { name: /^Quantity for Unicorn/ }) })
+    await line.getByRole('button', { name: 'Row actions' }).click()
+    await page.getByRole('menuitem', { name: 'Cancel item' }).click()
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Cancel item' }).click()
+
+    const group = items.getByTestId('row-group-cancelled')
+    await expect(group).toContainText('1 cancelled line, not counted in the total ($6.00)')
+    await expect(items.getByRole('button', { name: /^Unicorn pencil cup holder/ })).toHaveCount(0)
+    await group.getByRole('button').click()
+    await expect(items.getByRole('button', { name: /^Unicorn pencil cup holder/ })).toBeVisible()
+    // The open group is remembered in this browser: away and back in the app (a reload
+    // would start the mocks over, and the cancelled line with them).
+    await page.getByRole('link', { name: 'Orders', exact: true }).first().click()
+    await page.getByRole('link', { name: 'ORD-2026-3', exact: true }).click()
+    await expect(items.getByTestId('row-group-cancelled').getByRole('button')).toHaveAttribute('aria-expanded', 'true')
+  })
+
   test('on a phone the orders page fits', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 })
     await page.goto('/orders')

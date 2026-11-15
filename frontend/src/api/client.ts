@@ -3,6 +3,7 @@ import type {
   PrintChoices,
   FilamentProfile,
   ProfilePreview,
+  ProcessValues,
   AnalysisReport,
   AnalysisRun,
   AnalyzerDecision,
@@ -54,6 +55,9 @@ import type {
   CatalogueLibrary,
   DependencyReport,
   LibraryFileEntry,
+  Association,
+  AssociationRequest,
+  Associations,
   LibraryFileObjects,
   LibraryCopyResult,
   LibraryCopyRequest,
@@ -232,6 +236,11 @@ import type {
   Order,
   OrderCreate,
   OrderDetail,
+  OrderItemSource,
+  PurchaseRecordInput,
+  PurchaseSource,
+  PurchaseUpdateInput,
+  SourceDownload,
   OrderEstimate,
   UnitCostHistory,
   ProfitReport,
@@ -275,6 +284,9 @@ import type {
   PriceBook,
   StorefrontListing,
   StorefrontListingInput,
+  StorefrontListingPage,
+  ListingPrepareProgress,
+  ListingPrepareStarted,
   ProviderConnect,
   ProviderStatus,
   Quote,
@@ -285,6 +297,7 @@ import type {
   OrderItemPrintRequest,
   SliceQuoteRequest,
   SpoolImport,
+  DensityFill,
   Shipment,
   ShipmentEdit,
   ShipmentInput,
@@ -293,6 +306,7 @@ import type {
   VirtualPrinterCreate,
   VirtualPrinterUpdate,
   VirtualPrinterDiagnostic,
+  ProfileOptions,
 } from './types'
 import type {
   McpAuthSetting,
@@ -387,6 +401,10 @@ export const MODELS_PAGE_LIMIT = 500
 export const ACTIVITY_SUBJECTS = 200
 /** A slice quote's activity subject is `order_item:<id>`. */
 const ORDER_ITEM = 'order_item:'
+/** #6324 — a slice quote's activity kinds: the quote, and the render "Slice…" starts first for
+ * an item with a design and no output. */
+export const RENDER_KIND = 'operation.order_item_render'
+const SLICE_KINDS = ['operation.order_item_quote', RENDER_KIND]
 
 /** #2290 — the catalogue's search and filters, as `GET /models` and `GET /model-facets` take them. */
 export interface ModelFilters {
@@ -2191,6 +2209,16 @@ export const api = {
     }),
 
   /**
+   * #2998 — every key and value of the process preset these choices resolve to: what the
+   * dialog's "Slicer settings" list, and the value each prints with when none is set.
+   */
+  processValues: (choices: PrintChoices) =>
+    request<ProcessValues>('/print/process-values', {
+      method: 'POST',
+      body: JSON.stringify({ choices }),
+    }),
+
+  /**
    * spec 2026-09-27 §4 — the spool-first run: no pipeline is named, every slicer preset
    * is derived server-side from the dialog's spools, nozzles, quality and plate.
    * `signal` stops following the run (the dialog went away); the run itself goes on.
@@ -2519,6 +2547,29 @@ export const api = {
     request<CostEntry>(`/orders/${seg(orderId)}/cost-entries`, { method: 'POST', body: JSON.stringify(body) }),
   removeCostEntry: (orderId: string, id: string) =>
     request<void>(`/orders/${seg(orderId)}/cost-entries/${seg(id)}`, { method: 'DELETE' }),
+  /** #6133 — the address of a customer file's preview: untrusted bytes the backend serves
+   * as `image/png` with `nosniff`, for an `<img>` only. */
+  sourcePreviewUrl: (orderId: string, sourceId: string) => `${API_BASE}/orders/${seg(orderId)}/sources/${seg(sourceId)}/preview`,
+  /** #6133 — a presigned GET of a customer's staged file, as an attachment. */
+  sourceDownload: (orderId: string, sourceId: string) =>
+    request<SourceDownload>(`/orders/${seg(orderId)}/sources/${seg(sourceId)}/download`),
+  /** #6133 — "Check again" for a file whose check failed. */
+  checkSourceAgain: (orderId: string, sourceId: string) =>
+    request<OrderItemSource>(`/orders/${seg(orderId)}/sources/${seg(sourceId)}/check`, { method: 'POST' }),
+  /** #6133 — the shop does not print this file or link; the reason is the shop's. */
+  declineSource: (orderId: string, sourceId: string, reason: string) =>
+    request<OrderItemSource>(`/orders/${seg(orderId)}/sources/${seg(sourceId)}/decline`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  /** #6133 — "Retry import" for a file whose import is stuck. */
+  retrySourceImport: (orderId: string, sourceId: string) =>
+    request<OrderItemSource>(`/orders/${seg(orderId)}/sources/${seg(sourceId)}/retry-import`, { method: 'POST' }),
+  /** #6133 — what the shop paid for a thing to buy: a cost entry and a charge together. */
+  recordPurchase: (orderId: string, sourceId: string, body: PurchaseRecordInput) =>
+    request<PurchaseSource>(`/orders/${seg(orderId)}/purchases/${seg(sourceId)}/record`, { method: 'POST', body: JSON.stringify(body) }),
+  updatePurchase: (orderId: string, sourceId: string, body: PurchaseUpdateInput) =>
+    request<PurchaseSource>(`/orders/${seg(orderId)}/purchases/${seg(sourceId)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  /** #6133 — a thing to buy the shop does not buy; the customer reads `shop_note`. */
+  declinePurchase: (orderId: string, sourceId: string, shopNote: string) =>
+    request<PurchaseSource>(`/orders/${seg(orderId)}/purchases/${seg(sourceId)}/decline`, { method: 'POST', body: JSON.stringify({ shop_note: shopNote }) }),
   createOrder: (body: OrderCreate) => request<Order>('/orders', { method: 'POST', body: JSON.stringify(body) }),
   updateOrder: (id: string, body: OrderPatch) =>
     request<Order>(`/orders/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
@@ -2728,6 +2779,11 @@ export const api = {
       undefined,
       onAccepted,
     ),
+  /** #6324 — the `order_item_render` operation: the item's design rendered (a finished render
+   * of its key reused), its output saved and set on the item, so "Slice…" has an output to open
+   * the print dialog on. Followed to the item as every command is. */
+  renderItem: (orderId: string, itemId: string, onAccepted?: (operation: OperationAccepted) => void, signal?: AbortSignal) =>
+    command<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/render`, { method: 'POST', signal }, undefined, undefined, onAccepted),
   /** #4719 — the `order_item_print` operation: a print run of the item's output with the
    * dialog's choices, every plate, the quantity still to print; followed to the attempt
    * it recorded, the item `queued`. */
@@ -2738,7 +2794,8 @@ export const api = {
    * `subject` is `order_item:<id>`, its `id` `operation:<operation id>`. Running quotes are
    * few (each is minutes of slicing), so one page holds them.
    */
-  runningQuotes: () => request<ActivityPage>('/activity?kind=operation.order_item_quote&status=running&limit=200'),
+  runningQuotes: () =>
+    request<ActivityPage>(`/activity?${new URLSearchParams([...SLICE_KINDS.map((kind) => ['kind', kind]), ['status', 'running'], ['limit', '200']])}`),
   /**
    * #5554 — the newest `failed` activity row of each item's slice quotes, by item id: a
    * failure the page did not start (over MCP, in another tab) shows on its item with its
@@ -2754,7 +2811,7 @@ export const api = {
     for (let at = 0; at < items.length; at += ACTIVITY_SUBJECTS) {
       const chunk = items.slice(at, at + ACTIVITY_SUBJECTS)
       const since = chunk.reduce((a, b) => (Date.parse(b.created_at) < Date.parse(a) ? b.created_at : a), chunk[0]!.created_at)
-      const query = new URLSearchParams({ kind: 'operation.order_item_quote', status: 'failed', since, limit: '1' })
+      const query = new URLSearchParams([...SLICE_KINDS.map((kind) => ['kind', kind]), ['status', 'failed'], ['since', since], ['limit', '1']])
       for (const item of chunk) query.append('subject', `${ORDER_ITEM}${item.id}`)
       // #5599 — a failed chunk loses its own items' failures only, not the other chunks'.
       let page: ActivityPage
@@ -2797,7 +2854,14 @@ export const api = {
   /** The printer is priced at the price book's machine rate again. */
   deleteMachineRate: (printerId: string) => request<void>(`/printers/${seg(printerId)}/machine-rate`, { method: 'DELETE' }),
   // -- the storefront's listings (#5282, spec 2026-11-02 §5.3) ---------------------------------
-  storefrontListings: () => request<StorefrontListing[]>('/storefront/listings'),
+  /** #6157 — one page of the listings: searched, filtered and sorted on the server. */
+  storefrontListings: (query: URLSearchParams = new URLSearchParams()) =>
+    request<StorefrontListingPage>(`/storefront/listings${query.size ? `?${query}` : ''}`),
+  /** #6157 — one listing whole, for its editor. */
+  storefrontListing: (id: string) => request<StorefrontListing>(`/storefront/listings/${seg(id)}`),
+  /** #6157 — the listing put at `place` (from 1) in the public site's order. */
+  moveStorefrontListing: (id: string, place: number) =>
+    request<StorefrontListing>(`/storefront/listings/${seg(id)}/move`, { method: 'POST', body: JSON.stringify({ place }) }),
   createStorefrontListing: (body: StorefrontListingInput) =>
     request<StorefrontListing>('/storefront/listings', { method: 'POST', body: JSON.stringify(body) }),
   /** Replaces the listing whole and unpublishes it; `updatedAt` is the `updated_at` the editor read. */
@@ -2806,10 +2870,24 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ listing: body, updated_at: updatedAt }),
     }),
+  /**
+   * #6213 — the listing's pictures (ids of its template's images, in order), nothing else
+   * changed. A draft stays a draft; a published listing is published again and stays live.
+   */
+  setStorefrontListingMedia: (id: string, mediaIds: string[], updatedAt: string) =>
+    request<StorefrontListing>(`/storefront/listings/${seg(id)}/media`, {
+      method: 'PUT',
+      body: JSON.stringify({ media_ids: mediaIds, updated_at: updatedAt }),
+    }),
   publishStorefrontListing: (id: string) =>
     request<StorefrontListing>(`/storefront/listings/${seg(id)}/publish`, { method: 'POST' }),
   unpublishStorefrontListing: (id: string) =>
     request<StorefrontListing>(`/storefront/listings/${seg(id)}/unpublish`, { method: 'POST' }),
+  /** #6237 — the listing's colour combinations, the cap, and how many are ready. */
+  storefrontListingPrepare: (id: string) => request<ListingPrepareProgress>(`/storefront/listings/${seg(id)}/prepare`),
+  /** #6237 — queue a render of every colour combination; 422 over the cap or with no colour. */
+  prepareStorefrontListing: (id: string) =>
+    request<ListingPrepareStarted>(`/storefront/listings/${seg(id)}/prepare`, { method: 'POST' }),
   /** Every listing's id, in the order the public site shows them. */
   orderStorefrontListings: (ids: string[]) =>
     request<StorefrontListing[]>('/storefront/listings/order', { method: 'PUT', body: JSON.stringify({ ids }) }),
@@ -2817,6 +2895,7 @@ export const api = {
   unarchiveFilament: (id: string) => request<Filament>(`/orders/price-book/filaments/${seg(id)}/unarchive`, { method: 'POST' }),
   /** #4253 §8.3: the filament records made or updated from Bambuddy's spools, on click only. */
   importSpools: () => request<SpoolImport>('/orders/price-book/import-spools', { method: 'POST' }),
+  fillDensities: () => request<DensityFill>('/orders/price-book/fill-densities', { method: 'POST' }),
   /** A rough estimate (§5.3), never a quote: nothing is recorded. */
   orderEstimate: (outputId: string, filamentId: string) =>
     request<OrderEstimate>(`/orders/estimate?${new URLSearchParams({ output_id: outputId, filament_id: filamentId })}`),
@@ -2982,6 +3061,14 @@ export const api = {
   libraryThumbnailUrl: (fileId: number) => `${API_BASE}/print/library/${fileId}/thumbnail`,
   /** #5321 — one library file by id, whatever its type, with its folder's path. */
   getLibraryFile: (fileId: number) => request<LibraryFileEntry>(`/print/library/${fileId}`),
+  /** #6395 — a library file's associations, both ways, with the implied ones (`id` null). */
+  getLibraryAssociations: (fileId: number) => request<Associations>(`/print/library/${fileId}/associations`),
+  /** #6395 — the library files associated with a model, with the implied ones. */
+  getModelAssociations: (slug: string) => request<Associations>(`/models/${seg(slug)}/associations`),
+  /** #6395 — the file is `relation` the target, said from the file's side. */
+  associateLibraryFile: (fileId: number, body: AssociationRequest) =>
+    request<Association>(`/print/library/${fileId}/associations`, { method: 'POST', body: JSON.stringify(body) }),
+  removeAssociation: (id: string) => request<void>(`/print/library/associations/${seg(id)}`, { method: 'DELETE' }),
   /** #1031 — the library file itself, always served as a download. */
   libraryFileUrl: (fileId: number) => `${API_BASE}/print/library/${fileId}/file`,
 
@@ -3247,6 +3334,10 @@ export const api = {
     settingsInFlight = undefined
     return request<Settings>('/settings', { method: 'PUT', body: JSON.stringify(body) })
   },
+
+  /** #6153 — the price book's materials, and the spools the print dialog offers on `printer`. */
+  storefrontSliceOptions: (printer?: string) =>
+    request<ProfileOptions>(`/storefront/slice-profile/options${printer ? `?printer=${encodeURIComponent(printer)}` : ''}`),
 
   getPrintOptions: () => request<PrintOptionsState>('/settings/print-options'),
 

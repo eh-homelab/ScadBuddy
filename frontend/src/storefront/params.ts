@@ -53,32 +53,32 @@ export function colourGone(param: PublicParam): boolean {
   return param.kind === 'choice' && param.colour && param.choices.length === 0
 }
 
+/**
+ * Whether `listing` cannot be ordered: the shop says no material can print it (`available`
+ * false, #6302 review: its locked colours share no material with the offered ones), or a
+ * colour has no filament left.
+ */
 export function listingUnavailable(listing: Listing): boolean {
-  return Object.values(listing.params).some(colourGone)
-}
-
-/** The listing filament whose colour is `colour`, compared as the backend does (casefolded). */
-export function filamentOf(filaments: readonly Filament[], colour: string): Filament | undefined {
-  const wanted = colour.toLowerCase()
-  return filaments.find((filament) => filament.colour.toLowerCase() === wanted)
-}
-
-export function filamentName(filament: Filament): string {
-  return filament.colour_name ? `${filament.colour_name} ${filament.material}` : `${filament.material} ${filament.colour}`
+  return listing.available === false || Object.values(listing.params).some(colourGone)
 }
 
 /**
- * The listing filament for each colour slot of a render (`StoreRender.colors`), by slot:
- * the one whose colour the slot has. A slot no filament matches is left out, and the shop
- * picks it.
+ * #6152 — of `filaments`, those a customer may pick for colour parameter `param`: its
+ * choices' colours, never a support material.
  */
-export function slotFilaments(colors: readonly string[] | null | undefined, filaments: readonly Filament[]): Record<string, string> {
-  const chosen: Record<string, string> = {}
-  ;(colors ?? []).forEach((colour, slot) => {
-    const filament = filamentOf(filaments, colour)
-    if (filament) chosen[String(slot)] = filament.id
-  })
-  return chosen
+export function paramFilaments(param: PublicParam, filaments: readonly Filament[]): Filament[] {
+  if (param.kind !== 'choice') return []
+  const colours = new Set(param.choices.filter((c): c is string => typeof c === 'string').map((c) => c.toLowerCase()))
+  return customerFilaments(filaments).filter((filament) => colours.has(filament.colour.toLowerCase()))
+}
+
+/**
+ * The colour an unpicked parameter starts at: `default`, what an unpicked render takes
+ * (the listing's default, else the template's, `inputs.py` `effective_default`, #6144).
+ * None when the page may not show it (its filament is gone).
+ */
+export function startColour(param: PublicParam): string | undefined {
+  return typeof param.default === 'string' ? param.default : undefined
 }
 
 /** Of `values`, those `listing` still offers and allows: what survives a reload of it. */
@@ -106,3 +106,41 @@ export function shownLabel(name: string, label: string | null | undefined, capti
   return name
 }
 
+
+/**
+ * A support material: the shop's choice, never the customer's (owner rule, 2026-11-13).
+ * The shop's copy is `backend/scadbuddy/orders/storefront/wire.py` `SUPPORT_MATERIAL`, and
+ * the agent's `agent/src/tools/storefrontDraft.ts` `SUPPORT_MATERIAL`: change all together.
+ */
+const SUPPORT_MATERIAL = /support|pva|bvoh|hips/i
+
+/** Of `filaments`, those a customer may pick: never a support material. */
+export function customerFilaments<T extends { material: string }>(filaments: readonly T[]): T[] {
+  return filaments.filter((filament) => !SUPPORT_MATERIAL.test(filament.material))
+}
+
+/** How a filament looks beyond its hex, from its finish and name (#6152). */
+export type Finish = 'translucent' | 'silk' | 'multi' | 'solid'
+
+export function filamentFinish(filament: Filament): Finish {
+  const text = `${filament.subtype ?? ''} ${filament.colour_name ?? ''}`
+  if (/rainbow|tri.?colou?r|dual|multi|gradient/i.test(text)) return 'multi'
+  if (/translucent|transparent|clear/i.test(text)) return 'translucent'
+  if (/silk|metallic|shimmer/i.test(text)) return 'silk'
+  return 'solid'
+}
+
+/** The swatch's CSS background for `filament`: its hex, drawn as its finish looks. */
+export function swatchBackground(filament: Filament): string {
+  const colour = filament.colour
+  switch (filamentFinish(filament)) {
+    case 'translucent':
+      return `linear-gradient(${colour}99, ${colour}99), repeating-conic-gradient(#ccc 0 25%, #fff 0 50%) 50% / 10px 10px`
+    case 'silk':
+      return `linear-gradient(135deg, ${colour} 30%, #ffffffb3 50%, ${colour} 70%)`
+    case 'multi':
+      return `conic-gradient(${colour}, #e8532f, #f2c14e, #1c8c8c, #1b6ca8, ${colour})`
+    default:
+      return colour
+  }
+}

@@ -29,6 +29,7 @@ from scadbuddy.api.operations import (
 )
 from scadbuddy.api.printing import printer_keys
 from scadbuddy.api.runtime import apply_runtime, restart_required
+from scadbuddy.api.storefront_slice import check_profile
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.errors import SCOPE_PROBLEM, Scope, UpstreamAnswer
 from scadbuddy.bambuddy.models import Folder, Printer, RackAlgorithm
@@ -44,9 +45,11 @@ from scadbuddy.bambuddy.uploads import ProjectTarget
 from scadbuddy.core.authorship import by_a_person
 from scadbuddy.core.config import LibraryBackend, Slicer, StoreBackend
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.setting_docs import SETTING_DOCS
 from scadbuddy.core.settings import (
     APPLIES,
     BOOTSTRAP_FIELDS,
+    ENV_SEEDED,
     Applies,
     Settings,
     env_var,
@@ -70,8 +73,10 @@ from scadbuddy.library.settings_store import (
 from scadbuddy.operations.component import OperationCommands, OperationsDep
 from scadbuddy.orders.message_models import MessagingBinding
 from scadbuddy.orders.money import DepositRule, ShippingOption
+from scadbuddy.orders.storefront.slice_profile import StorefrontSliceProfile
 from scadbuddy.print_watch.component import AUTO_IMPORTS
 from scadbuddy.printers.component import Printers, PrintersDep
+from scadbuddy.spools.component import SpoolsDep
 from scadbuddy.workflows.commands import (
     TemporalRefusedError,
     TemporalUnavailableError,
@@ -83,11 +88,33 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["settings"])
 
 
+class SettingFieldDoc(BaseModel):
+    """A setting's label and help (#887), from `core/setting_docs.py`."""
+
+    title: str
+    description: str
+    #: The variable that seeds it, or ``None`` for a setting only Settings stores.
+    env_var: str | None = None
+
+
+#: Every setting's doc, as `GET /settings` answers it and the spec's default shows it.
+FIELD_DOCS: dict[str, SettingFieldDoc] = {
+    name: SettingFieldDoc(
+        title=doc.title,
+        description=doc.description,
+        env_var=env_var(name) if name in Settings.model_fields else None,
+    )
+    for name, doc in SETTING_DOCS.items()
+}
+
+
 class BootstrapValue(BaseModel):
     """A setting the UI shows but cannot change (#322), and why."""
 
     name: str
     env_var: str
+    title: str
+    description: str
     #: As the process runs with it. The database URL is shown without its credentials.
     value: str | None
     source: Literal["env", "default"]
@@ -116,8 +143,9 @@ class SettingsView(BaseModel):
     #: As saved (comma-separated); the first is where Bambuddy links point (#775).
     bambuddy_web_urls: str | None = None
     has_render_api_key: bool = False
-    #: True while render workers would hold the full key (spec §9): a key is stored and
-    #: no render key is. The Settings page shows a persistent warning.
+    #: True while a key is stored and no render key is (spec §9): standalone render
+    #: workers then get no Bambuddy key, and a render inside the API process uses the
+    #: full one. The Settings page shows a persistent warning.
     render_key_fallback: bool = False
     store_backend: StoreBackend = "local"
     library_backend: LibraryBackend = "bambuddy"
@@ -136,8 +164,14 @@ class SettingsView(BaseModel):
     storefront_renders_per_minute: int = 3
     storefront_renders_per_day: int = 30
     storefront_render_concurrency: int = 2
+    #: The storefront's slices at once, shop-wide (#6153).
+    storefront_slices_concurrent: int = 1
     storefront_draft_ttl_days: int = 30
     storefront_requests_enabled: bool = False
+    #: The materials a storefront print may be made of, in the shop's order (#6258).
+    storefront_materials: list[str] = Field(default_factory=lambda: ["PETG", "PLA"])
+    #: The most colour combinations one prepare of a listing queues (#6237).
+    storefront_prepare_cap: int = 256
     #: The storefront's mail (#5283): SMTP host, port, user, From and the TLS mode
     #: (`starttls`, `implicit` or `none`). The password is sealed apart
     #: (`GET /storefront/mail/password` says whether it is set).
@@ -157,6 +191,10 @@ class SettingsView(BaseModel):
     #: in its base.
     orders_tax_percent: str = "0"
     orders_tax_shipping: bool = False
+    #: The handling fee for bought items (#6133): a flat amount per recorded purchase, in
+    #: the shop's minor units, and a percent of their sum.
+    orders_purchase_fee_flat_minor: int = 0
+    orders_purchase_fee_percent: str = "0"
     #: The shop's money rules (#5281), stored only: the deposit policy, the shipping
     #: options and how a customer pays by hand. An empty list is none.
     orders_deposit_policy: list[DepositRule] = Field(default_factory=list)
@@ -164,6 +202,9 @@ class SettingsView(BaseModel):
     storefront_payment_instructions: str | None = None
     #: The messaging plugin tool bound to "customer messages" (#5660); null is none.
     orders_customer_messaging: MessagingBinding | None = None
+    #: The shop slice profile (#6153): the printer and a spool per material; null is none,
+    #: and the storefront then shows no price.
+    storefront_slice_profile: StorefrontSliceProfile | None = None
     #: Whether a fulfilled line item may be unfulfilled (#4953); on by default.
     orders_allow_unfulfil: bool = True
     #: Whether a native run waits for a cleared plate between its prints (#4939).
@@ -261,6 +302,9 @@ class SettingsView(BaseModel):
     #: The settings the UI cannot change, with their values.
     bootstrap: list[BootstrapValue] = Field(default_factory=list)
     about: AboutView | None = None
+    #: Every setting's label and help (#887), keyed by field name. The default carries
+    #: them all, so the exported spec holds them too (the frontend's mocks read them there).
+    docs: dict[str, SettingFieldDoc] = Field(default=FIELD_DOCS)
 
 
 class PrintOptionsView(BaseModel):
@@ -419,6 +463,8 @@ def _bootstrap(settings: Settings) -> list[BootstrapValue]:
             BootstrapValue(
                 name=name,
                 env_var=env_var(name),
+                title=SETTING_DOCS[name].title,
+                description=SETTING_DOCS[name].description,
                 value=None if value is None else str(value),
                 source="env" if name in settings.model_fields_set else "default",
                 reason=reason,
@@ -472,6 +518,7 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
         storefront_shipping_options=stored.storefront_shipping_options or [],
         storefront_payment_instructions=stored.storefront_payment_instructions,
         orders_customer_messaging=stored.orders_customer_messaging,
+        storefront_slice_profile=stored.storefront_slice_profile,
         has_google_fonts_api_key=bool(runtime.google_fonts_api_key),
         has_git_remote_token=bool(runtime.git_remote_token),
         has_storefront_turnstile_secret=bool(runtime.storefront_turnstile_secret),
@@ -536,6 +583,26 @@ async def _check_operation_retention(
         )
 
 
+def _pending(store: SettingsStore, patch: SettingsPatch) -> StoredSettings:
+    """The stored settings as ``patch`` leaves them, for a check that reads the connection
+    this same PUT sets or resets (#6255): a given field takes the patch's value, a reset
+    one the deployment's (the environment's, else the default)."""
+    stored = store.load()
+    fields = StoredSettings.model_fields
+    update: dict[str, Any] = {}
+    for name in patch.reset:
+        if name in fields:
+            update[name] = (
+                getattr(store.defaults, name)
+                if name in ENV_SEEDED
+                else fields[name].get_default(call_default_factory=True)
+            )
+    for name in patch.model_fields_set & fields.keys():
+        if name != "reset":
+            update[name] = getattr(patch, name)
+    return stored.model_copy(update=update)
+
+
 @router.put("/settings", response_model=SettingsView, summary="Update the settings")
 async def put_settings(
     patch: SettingsPatch,
@@ -543,6 +610,7 @@ async def put_settings(
     state: StateDep,
     ops: OperationsDep,
     registry: PrintersDep,
+    spools: SpoolsDep,
 ) -> SettingsView:
     """Saves the fields given; a ``null`` clears one and ``reset`` puts one back on the
     deployment's value. A live field applies before this answers, here and (through
@@ -551,10 +619,15 @@ async def put_settings(
     The default printer is ``default_printer``, a registry id (#4971, #5167). An older
     client's ``printer_id`` (a Bambuddy id) is saved as the registry printer that links
     it; ``default_printer`` sent beside it wins. 422 for a ``default_printer`` the
-    registry does not hold, and for a ``printer_id`` no registry printer links."""
+    registry does not hold, and for a ``printer_id`` no registry printer links. 422 for a
+    ``storefront_slice_profile`` whose printer the registry does not hold, or whose spool
+    the print dialog does not offer on that printer (#6153)."""
     _mail_connection_by_a_person(patch)
     _print_watch_by_a_person(patch)
     patch = await asyncio.to_thread(_default_printer, patch, registry)
+    if patch.storefront_slice_profile is not None:
+        pending = await asyncio.to_thread(_pending, store, patch)
+        await check_profile(patch.storefront_slice_profile, pending, registry, spools)
     if patch.operation_retention_seconds is not None:
         await _check_operation_retention(store, ops, patch.operation_retention_seconds)
     if patch.git_remote_token and store.kek is None:
@@ -584,8 +657,10 @@ async def put_settings(
         # itself, under the lock a pass takes (#6011).
         await state.components.get(AUTO_IMPORTS).floor()
     apply_runtime(state, snapshot.runtime)
-    # This process sees its own write at once; workers within the source's TTL.
+    # This process sees its own write at once, `/healthz` too, which only reads what the
+    # source last read (#6354); workers within the source's TTL.
     state.store.source.invalidate()
+    await state.store.source.current()
     return _view(snapshot, state)
 
 

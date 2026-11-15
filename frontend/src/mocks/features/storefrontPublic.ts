@@ -1,7 +1,9 @@
 import { http, HttpResponse } from 'msw'
-import type { CustomerOrder, Draft, Listing, StoreEstimate, StoreRender } from '../../storefront/api/client'
+import type { CustomerOrder, Draft, Listing, ListingCard, ParamValue, StoreEstimate, StoreRender } from '../../storefront/api/client'
+import { colourPlan } from '../../storefront/colours'
 import { keychainGlb } from '../glb'
 import { problem } from '../handlers'
+import { advanceChecks, modelsOrderOf } from './storefrontModels'
 
 /**
  * #5282 (spec 2026-11-02 §5.1-§5.4; backend `storefront/routes.py`): the public page's edge,
@@ -23,12 +25,14 @@ import { problem } from '../handlers'
 
 const base = '/api/store/v1'
 const PROBLEMS = 'https://scadbuddy.dev/problems/storefront/'
+/** The shop's default materials (`storefront_materials`), in its order (#6258). */
+const SHOP_MATERIALS = ['PETG', 'PLA']
 const STORAGE_KEY = 'sb-mock-storefront-draft'
 
 export const KEYCHAIN_ID = 'l1'
 export const TAG_ID = 'l2'
-const BLUE = { id: 'f-blue', colour: '#1B6CA8', colour_name: 'Ocean blue', material: 'PLA' }
-const ORANGE = { id: 'f-orange', colour: '#E8532F', colour_name: 'Signal orange', material: 'PLA' }
+const BLUE = { id: 'f-blue', colour: '#1B6CA8', colour_name: 'Ocean blue', material: 'PLA', alpha: 255, extra_colours: [], effect: null }
+const ORANGE = { id: 'f-orange', colour: '#E8532F', colour_name: 'Signal orange', material: 'PLA', alpha: 255, extra_colours: [], effect: null }
 
 export const KEYCHAIN: Listing = {
   id: KEYCHAIN_ID,
@@ -36,12 +40,14 @@ export const KEYCHAIN: Listing = {
   description: 'A keychain with your name raised on it, in two colours.',
   params: {
     name: { kind: 'text', label: 'Name', group: '', colour: false, max_length: 20 },
-    size: { kind: 'number', label: 'Length (mm)', group: '', colour: false, min: 40, max: 80, step: 5 },
-    base_colour: { kind: 'choice', label: 'Base colour', group: '', colour: true, choices: ['#1B6CA8', '#E8532F'] },
+    size: { kind: 'number', label: 'Length (mm)', group: '', colour: false, min: 40, max: 80, step: 5, default: 60 },
+    base_colour: { kind: 'choice', label: 'Base colour', group: '', colour: true, choices: ['#1B6CA8', '#E8532F'], default: '#1b6ca8' },
   },
   colours: [BLUE, ORANGE],
   media: [],
+  materials: SHOP_MATERIALS,
   updated_at: '2026-11-07T12:00:00Z',
+  available: true,
 }
 
 export const TAG: Listing = {
@@ -53,20 +59,83 @@ export const TAG: Listing = {
   },
   colours: [],
   media: [],
+  materials: SHOP_MATERIALS,
   updated_at: '2026-11-07T12:00:00Z',
+  available: false,
 }
 
-const LISTINGS = [KEYCHAIN, TAG]
+export const CHARM_ID = 'l3'
+const PETG_TEAL = { id: 'f-petg-teal', colour: '#1C8C8C', colour_name: 'Teal', material: 'PETG' }
+const PETG_RUST = { id: 'f-petg-rust', colour: '#C0502A', colour_name: 'Rust', material: 'PETG' }
 
+/**
+ * #6152, #6258: a listing in two materials. A print is of one: the first of the shop's
+ * order (PETG, then PLA) that has every colour the visitor sets.
+ */
+export const CHARM: Listing = {
+  id: CHARM_ID,
+  title: 'Bag charm',
+  description: 'A charm in two colours of one material.',
+  params: {
+    body_colour: {
+      kind: 'choice',
+      label: 'Body colour',
+      group: '',
+      colour: true,
+      choices: [BLUE.colour, ORANGE.colour, PETG_TEAL.colour, PETG_RUST.colour],
+      default: BLUE.colour,
+    },
+    rim_colour: {
+      kind: 'choice',
+      label: 'Rim colour',
+      group: '',
+      colour: true,
+      choices: [BLUE.colour, ORANGE.colour, PETG_TEAL.colour, PETG_RUST.colour],
+      default: BLUE.colour,
+    },
+  },
+  colours: [BLUE, ORANGE, PETG_TEAL, PETG_RUST],
+  media: [],
+  materials: SHOP_MATERIALS,
+  updated_at: '2026-11-07T12:00:00Z',
+  available: true,
+}
+
+const LISTINGS = [KEYCHAIN, TAG, CHARM]
+
+/** A listing as the public list shows it (#6154): its first picture, and whether it can be ordered. */
+export function card(listing: Listing): ListingCard {
+  const image = listing.media.find((media) => media.kind === 'image') ?? null
+  const available = !Object.values(listing.params).some((param) => param.kind === 'choice' && param.colour && param.choices.length === 0)
+  return { id: listing.id, title: listing.title, description: listing.description, image, available }
+}
+
+/** One page of `listings`, as the edge pages them: the cursor is the next card's index. */
+export function listingsPage(listings: readonly Listing[], url: URL, requestsEnabled = true) {
+  const q = url.searchParams.get('q')?.trim().toLowerCase() ?? ''
+  const limit = Number(url.searchParams.get('limit') ?? 24)
+  const start = Number(url.searchParams.get('cursor') ?? 0)
+  const matched = listings.filter((listing) => listing.title.toLowerCase().includes(q))
+  const page = matched.slice(start, start + limit)
+  return {
+    listings: page.map(card),
+    next_cursor: start + limit < matched.length ? String(start + limit) : null,
+    requests_enabled: requestsEnabled,
+  }
+}
+
+/** A slice price (#6153): firm, and only the price. */
 export const ESTIMATE: StoreEstimate = {
-  estimate: true,
+  source: 'slice',
   price_minor: 1240,
   currency: 'USD',
   minor_exponent: 2,
-  grams: '9.40',
-  parts: [],
-  unknown_parts: 0,
+  retry_after: null,
 }
+/** The price while the shop's slice runs: read again after `retry_after` seconds. */
+export const PENDING_PRICE: StoreEstimate = { source: 'pending', price_minor: null, currency: null, minor_exponent: null, retry_after: 2 }
+/** No firm price: the shop prices the design by hand. */
+export const NO_PRICE: StoreEstimate = { source: 'none', price_minor: null, currency: null, minor_exponent: null, retry_after: null }
 
 /** The shop's shipping options (backend `storefront_shipping_options`): one ships, one does not. */
 const SHIPPING = [
@@ -79,7 +148,7 @@ let draft: Draft | null = null
 let renders = new Map<string, { render: StoreRender; polls: number }>()
 let serial = 0
 
-function save(): void {
+export function save(): void {
   try {
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(draft))
   } catch {
@@ -95,16 +164,16 @@ function load(): void {
   }
 }
 
-function next(): string {
+export function next(): string {
   serial += 1
   return serial.toString(16).padStart(32, '0')
 }
 
-function refused(status: number, slug: string, detail: string) {
+export function refused(status: number, slug: string, detail: string) {
   return problem(status, status === 404 ? 'Not Found' : 'Unprocessable Content', detail, { type: PROBLEMS + slug })
 }
 
-function keyMissing(request: Request) {
+export function keyMissing(request: Request) {
   return request.headers.get('Idempotency-Key')
     ? null
     : refused(428, 'idempotency_key_required', 'Send an Idempotency-Key with this request.')
@@ -128,6 +197,20 @@ function outside(body: Body): Response | Listing {
     if (bound.kind === 'choice' && !bound.choices.includes(value as string)) {
       return refused(422, 'input_outside_listing', 'This choice is not offered for this listing.')
     }
+  }
+  // #6258: the colours given fix one material, the first of the listing's that has each
+  // (`inputs.py` `resolve_choice`); none is 422 `listing_colours_clash` with the parts.
+  const given = Object.entries(body.values ?? {}).filter(([name]) => {
+    const bound = listing.params[name]
+    return bound?.kind === 'choice' && bound.colour
+  })
+  const offers = (material: string, colour: unknown) =>
+    listing.colours.some((f) => f.material.toLowerCase() === material.toLowerCase() && f.colour.toLowerCase() === String(colour).toLowerCase())
+  if (given.length > 0 && !listing.materials.some((material) => given.every(([, colour]) => offers(material, colour)))) {
+    return problem(422, 'Unprocessable Content', "Some of these colours can't go together: each print is made from one kind of plastic. Change one of them.", {
+      type: PROBLEMS + 'listing_colours_clash',
+      parts: given.map(([name]) => name),
+    })
   }
   const archived = Object.values(listing.params).some((p) => p.kind === 'choice' && p.colour && p.choices.length === 0)
   if (archived) return refused(422, 'input_outside_listing', 'This choice is not offered for this listing.')
@@ -185,7 +268,7 @@ async function orderOf(request: Request): Promise<CustomerOrder | Response> {
     : new HttpResponse(null, { status: 404 })
 }
 
-function ensureDraft(): Draft {
+export function ensureDraft(): Draft {
   draft ??= { id: 'draft-1', currency: 'USD', minor_exponent: 2, items: [], shipping_options: SHIPPING }
   return draft
 }
@@ -204,7 +287,7 @@ export const handlers = [
         })
       : new HttpResponse(null, { status: 404 })
   }),
-  http.get(`${base}/listings`, () => HttpResponse.json({ listings: LISTINGS, requests_enabled: true })),
+  http.get(`${base}/listings`, ({ request }) => HttpResponse.json(listingsPage(LISTINGS, new URL(request.url)))),
   http.get(`${base}/listings/:id`, ({ params }) => {
     const listing = LISTINGS.find((l) => l.id === params.id)
     return listing ? HttpResponse.json(listing) : refused(404, 'listing_not_found', 'There is no such listing.')
@@ -212,7 +295,8 @@ export const handlers = [
   http.post(`${base}/renders`, async ({ request }) => {
     const missing = keyMissing(request)
     if (missing) return missing
-    const checked = outside((await request.json()) as Body)
+    const body = (await request.json()) as Body
+    const checked = outside(body)
     if (checked instanceof Response) return checked
     const id = next()
     const render: StoreRender = {
@@ -224,6 +308,10 @@ export const handlers = [
       colors: null,
       preview_url: null,
       error: null,
+      // #6258, #6302 review: the colours the render takes. A part not given moves to the
+      // closest colour of the material, as the shop's `resolve_choice` does: the mock uses
+      // the page's copy of that rule.
+      values: colourPlan(checked, (body.values ?? {}) as Record<string, ParamValue>).shown,
     }
     renders.set(id, { render, polls: 0 })
     return HttpResponse.json(render, { status: 202 })
@@ -253,7 +341,11 @@ export const handlers = [
       ? HttpResponse.json(ESTIMATE)
       : refused(404, 'render_not_found', 'There is no such render.'),
   ),
-  http.get(`${base}/draft`, () => HttpResponse.json(draft)),
+  http.get(`${base}/draft`, () => {
+    // A cart read moves each model check on (`storefrontModels.ts`).
+    if (draft) advanceChecks(draft)
+    return HttpResponse.json(draft)
+  }),
   http.post(`${base}/draft/items`, async ({ request }) => {
     const missing = keyMissing(request)
     if (missing) return missing
@@ -270,6 +362,8 @@ export const handlers = [
       labels: Object.fromEntries(Object.keys(body.values ?? {}).map((name) => [name, checked.params[name]?.label ?? name])),
       notes: null,
       attachments: [],
+      sources: [],
+      own_model: false,
     })
     save()
     return HttpResponse.json(current)
@@ -304,6 +398,9 @@ export const handlers = [
     return HttpResponse.json(submitted)
   }),
   http.post(`${base}/order/view`, async ({ request }) => {
+    // The token `models` opens `storefrontModels.ts`'s order.
+    const models = await modelsOrderOf(request)
+    if (models) return HttpResponse.json(models)
     const found = await orderOf(request)
     return found instanceof Response ? found : HttpResponse.json(found)
   }),
@@ -363,6 +460,8 @@ export const handlers = [
       labels: {},
       notes: text,
       attachments: files.map((file) => ({ filename: file.name, kind: 'image', url: `/mock-files/${encodeURIComponent(file.name)}` })),
+      sources: [],
+      own_model: false,
     })
     save()
     return HttpResponse.json(current)

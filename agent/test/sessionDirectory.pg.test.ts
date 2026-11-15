@@ -530,8 +530,8 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
     await files.write(ws(id), 'notes/a.txt', Buffer.from('a'))
     // A row from before the write refused the collision.
     await db.sql`
-      INSERT INTO ai_session_files (workspace, session_id, path, media_type, data, blob_key, key_sealed, key_kek_id, sha256, size, source)
-      SELECT workspace, session_id, 'notes', media_type, data, blob_key, key_sealed, key_kek_id, sha256, size, source
+      INSERT INTO ai_session_files (workspace, session_id, path, media_type, data, bytes_sha256, blob_key, key_sealed, key_kek_id, sha256, size, source)
+      SELECT workspace, session_id, 'notes', media_type, data, bytes_sha256, blob_key, key_sealed, key_kek_id, sha256, size, source
       FROM ai_session_files WHERE workspace = ${`session:${id}`} AND path = 'notes/a.txt'`
     const dirs = new SessionDirectory(files, await root())
     const turn = await dirs.place(id)

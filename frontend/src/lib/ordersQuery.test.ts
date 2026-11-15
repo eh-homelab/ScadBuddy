@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_ORDERS_QUERY, isOrdersFiltered, isReportFiltered, ordersApiParams, parseOrdersQuery, toOrdersParams } from './ordersQuery'
+import { DEFAULT_ORDERS_QUERY, isOrdersFiltered, isReportFiltered, moreFiltersOn, ordersApiParams, parseOrdersQuery, toOrdersParams } from './ordersQuery'
 
 describe('ordersQuery (#4249)', () => {
   it('round-trips through the URL, defaults left out', () => {
@@ -35,5 +35,21 @@ describe('ordersQuery (#4249)', () => {
     expect(toOrdersParams({ ...DEFAULT_ORDERS_QUERY, source: 'back_office', unsubmitted: false }).toString()).toBe('source=back_office')
     expect(isOrdersFiltered({ ...DEFAULT_ORDERS_QUERY, unsubmitted: true })).toBe(true)
     expect(parseOrdersQuery(new URLSearchParams('unsubmitted=0')).unsubmitted).toBe(false)
+  })
+  it('keeps the customer models filters in the URL and sends them as true (#6133)', () => {
+    const q = parseOrdersQuery(new URLSearchParams('?own_model=1&purchase_pending=1&import_stuck=1'))
+    expect(q).toMatchObject({ own_model: true, purchase_pending: true, import_stuck: true })
+    expect(toOrdersParams(q).toString()).toBe('own_model=1&purchase_pending=1&import_stuck=1')
+    expect(ordersApiParams(q).toString()).toBe('own_model=true&purchase_pending=true&import_stuck=true')
+    expect(isOrdersFiltered({ ...DEFAULT_ORDERS_QUERY, import_stuck: true })).toBe(true)
+    expect(toOrdersParams(DEFAULT_ORDERS_QUERY).toString()).toBe('')
+  })
+  it('takes several statuses, owing and old, and sends old to no one (#6334)', () => {
+    const q = parseOrdersQuery(new URLSearchParams('status=draft,ready,draft&owing=1&old=1'))
+    expect(q).toMatchObject({ status: 'draft,ready,draft', owing: true, old: true })
+    expect(toOrdersParams(q).toString()).toBe('status=draft%2Cready%2Cdraft&owing=1&old=1')
+    expect(ordersApiParams(q).toString()).toBe('status=draft&status=ready&owing=true')
+    expect(moreFiltersOn(q)).toBe(2)
+    expect(moreFiltersOn({ ...DEFAULT_ORDERS_QUERY, q: 'x', old: true })).toBe(0)
   })
 })

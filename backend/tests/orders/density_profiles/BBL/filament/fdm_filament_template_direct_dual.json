@@ -1,0 +1,9 @@
+{
+    "type": "filament",
+    "name": "fdm_filament_template_direct_dual",
+    "from": "system",
+    "instantiation": "false",
+    "filament_density": [
+        "1.29"
+    ]
+}

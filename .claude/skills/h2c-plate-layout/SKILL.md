@@ -39,6 +39,16 @@ every layer the tower is printed anyway, so nothing is lost.
 3. `python3 -I scripts/layout_h2c.py move in.3mf out.3mf --center 136,160 --tower 260,130`. It shifts every build item by one delta (relative positions kept), sets `wipe_tower_x/y`, writes the H2C process and printer preset names, the 330x320 area and 325 height, and re-reports the result. Add `--no-sparse` to have the report apply the 96 mm rule.
 4. Upload the result to ScadBuddy's library (`POST /print/library/files`, multipart, `type=model/3mf`) and print from the library file. Read `wipe_tower_x/y` out of the sliced file if the exact spot matters.
 
+## Print by object
+
+From Bambu Studio `src/libslic3r/Print.cpp` (tag `v02.08.02.61`) and the H2C profile, read for ORD-2026-2 (#6246):
+
+- Two object hulls need about 96 mm between them: each is grown by 0.5 x `extruder_clearance_max_radius` (96) - 0.1. The skirt adds to it.
+- Objects print in object-list order, not by position (the sort by position is `#if 0`).
+- Height limit: the last object gets the full printable height. Every other object gets 201 mm (`extruder_clearance_height_to_lid`), or 47.4 mm (`..._height_to_rod`) if a later object overlaps its Y band (its Y range +/- 25 mm, half of `extruder_clearance_dist_to_rod`). Put tall objects last, or in a Y band no later object overlaps.
+- Only `bed_exclude_area` is checked. `wrapping_exclude_area` is not checked by object.
+- A prime tower is still made when timelapse is on or there is more than one filament. Pass `prime_tower: {enabled: false}` in the print or quote call (it becomes `enable_prime_tower: "0"` in the process overrides) to stop it.
+
 ## Why the meshes centre the way they do
 
 Default-pipeline files hold one object per colour group, all origin-centred, each

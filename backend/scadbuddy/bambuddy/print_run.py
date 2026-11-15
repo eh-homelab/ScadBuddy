@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, Self
 
 from fastapi import status
 from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from scadbuddy.bambuddy.catalogue import Catalogue, ReadCatalogue
 from scadbuddy.bambuddy.clearance import (
@@ -93,6 +94,7 @@ from scadbuddy.bambuddy.models import (
     PresetRef,
     Printer,
     PrinterStatus,
+    ProcessValue,
     RackAlgorithm,
     Spool,
     SpoolFilamentPreset,
@@ -132,6 +134,13 @@ from scadbuddy.bambuddy.print_source import (
     SharedFilamentReader,
     bambuddy_client,
 )
+from scadbuddy.bambuddy.process_overrides import (
+    ProcessOverrides,
+    host_side_keys,
+    host_side_message,
+    normalised_overrides,
+    override_warnings,
+)
 from scadbuddy.bambuddy.projects import require_destination_folder
 from scadbuddy.bambuddy.resolver import (
     PRINTER_MODEL,
@@ -153,6 +162,7 @@ from scadbuddy.bambuddy.supports import (
     SupportsChoice,
     support_overrides,
     wanted_settings,
+    without_overridden,
 )
 from scadbuddy.bambuddy.trays import (
     colour_word,
@@ -368,12 +378,66 @@ class PrintRunRequest(BaseModel):
     #: An order item's print that sends none prints with its quote's
     #: (``orders/operations.py`` ``print_body``).
     part_settings: PartSettingsMap | None = None
+    #: Any Bambu Studio process settings for this print (#2998), ``{key: value}``: no
+    #: key or value is refused, and the slicer judges each
+    #: (``bambuddy/process_overrides.py``). Written over the template's
+    #: ``print_settings``, the filament profiles and the named shorthands (``supports``,
+    #: ``prime_tower``, ``print_sequence``), so a setting here wins. Each value is kept
+    #: as a Bambu config stores it (a string, or a list of strings). An order item's
+    #: print that sends none prints with its quote's (``orders/printing.py``
+    #: ``QUOTED_SETUP``).
+    process_overrides: ProcessOverrides | None = Field(
+        default=None,
+        description=(
+            "Any Bambu Studio process settings for this print, as {key: value}: every key"
+            " is accepted, and the slicer judges it. Wins over the template's defaults and"
+            " over prime_tower, supports and print_sequence. Only the settings that act on"
+            " the machine that slices (post_process, filename_format, the print host's)"
+            " are dropped, with a host-setting-dropped warning."
+        ),
+    )
+    #: The host-side keys (``process_overrides.HOST_SIDE_KEYS``) this request's
+    #: ``process_overrides`` or ``part_settings`` named, dropped before anything else read
+    #: them (#2998), so the check and the run can say so. Set by the request's own
+    #: validation, never by a caller (not in the API's schema), and never part of the run
+    #: key: a request that named one slices as one that did not.
+    dropped_settings: SkipJsonSchema[list[str]] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_host_side(cls, data: Any) -> Any:
+        """Strip the host-side keys before any field reads them, noting each."""
+        if not isinstance(data, dict):
+            return data
+        # A dump read back (the run's history) carries what was dropped; a caller may send
+        # the field too, so only host-side key names are kept: any other text never
+        # reaches a `host-setting-dropped` warning (#6291 review).
+        sent = data.get("dropped_settings")
+        named = [key for key in sent if isinstance(key, str)] if isinstance(sent, list) else []
+        dropped = set(host_side_keys(named))
+        overrides = data.get("process_overrides")
+        if isinstance(overrides, dict):
+            dropped |= set(host_side_keys(overrides))
+        parts = data.get("part_settings")
+        if isinstance(parts, dict):
+            for settings in parts.values():
+                if isinstance(settings, dict):
+                    dropped |= set(host_side_keys(settings))
+        if not dropped:
+            return data
+        return {**data, "dropped_settings": sorted(dropped)}
 
     @field_validator("part_settings")
     @classmethod
     def _part_settings_set(cls, value: PartSettingsMap | None) -> PartSettingsMap | None:
         # Slots that set nothing are dropped, so they key as a request without them.
         return normalised(value)
+
+    @field_validator("process_overrides")
+    @classmethod
+    def _overrides_stored(cls, value: ProcessOverrides | None) -> ProcessOverrides | None:
+        # The stored shape, sorted; none set is none sent, so the run keys as before.
+        return normalised_overrides(value)  # type: ignore[return-value]
 
     @field_validator("accepted_fixes")
     @classmethod
@@ -413,6 +477,21 @@ class PrintRunRequest(BaseModel):
         # (#3762 review): `plate_ids=[2]` and `plate_id=2` are the same run.
         fold_plates(self)
         return self
+
+    def overrides(self) -> dict[str, ProcessValue]:
+        """``process_overrides`` as the plan takes them (#2998); empty for none."""
+        return normalised_overrides(self.process_overrides) or {}
+
+    def plate_type(self, template: Mapping[str, ProcessValue]) -> str:
+        """The plate the slice uses: a ``curr_bed_type`` in the plan's overrides wins at
+        the slice on both paths (#2998, ``dispatch.slice_request``, ``build_presets``),
+        so the request's own, else the template's ``print_settings`` (``template``), as
+        ``plan_run`` merges them; else the chosen ``bed_type``. The check's plate
+        warnings name this one."""
+        for value in (self.overrides().get("curr_bed_type"), template.get("curr_bed_type")):
+            if isinstance(value, str) and value:
+                return value
+        return self.choices.bed_type
 
     def asked_plates(self) -> list[int] | None:
         """The plates asked for, in plate order; ``None`` for every plate."""
@@ -517,6 +596,11 @@ class PrintRunResult(BaseModel):
     #: and apply again, as the template has them then, when the print is sent again. The
     #: print record (``GET /prints/{archive_id}``) lists them.
     part_settings: PartSettingsMap | None = None
+    #: The process settings the request set (#2998, ``PrintRunRequest.process_overrides``),
+    #: in their stored shape; ``None`` for none. Only the request's, as ``part_settings``:
+    #: the template's ``print_settings`` apply again on their own. The print record lists
+    #: them, so a reprint is exact.
+    process_overrides: dict[str, ProcessValue] | None = None
 
     _parts_set_only = model_serializer(mode="wrap")(
         lambda self, handler: parts_set_only(handler(self), maps=("part_settings",))
@@ -1357,7 +1441,9 @@ async def check_print(
             *rack_notes,
             *_listed(
                 plate_unlisted_warning(
-                    request.choices.bed_type, prepared.printer_model, prepared.printer_name
+                    request.plate_type(source.print_settings),
+                    prepared.printer_model,
+                    prepared.printer_name,
                 )
             ),
             *(
@@ -1389,18 +1475,51 @@ async def check_print(
                 await support_overrides(
                     client,
                     process,
-                    wanted_settings(source.print_settings, request.supports),
+                    without_overridden(
+                        wanted_settings(source.print_settings, request.supports),
+                        request.overrides(),
+                    ),
                     read=read,
                 )
             )[1],
             # #3628: and of a prime tower setting the preset has no value for.
-            *(await prime_tower_warnings(client, process, request.prime_tower, read=read)),
+            *(
+                await prime_tower_warnings(
+                    client, process, request.prime_tower, read=read, overrides=request.overrides()
+                )
+            ),
+            # #2998: and of a process override the preset has no value for.
+            *(await _override_warnings(request, process, read)),
         ],
         rack=rack_view,
         nozzle_plan=nozzle_plan,
         # Last, so the read above (`read` keeps each preset's answer) is not made again.
         **(await _part_baselines(source, process, read, client) if process_values else {}),
     )
+
+
+async def _override_warnings(
+    request: PrintRunRequest, process: PresetRef | None, read: ReadPresetValues
+) -> list[FilamentWarning]:
+    """#2998: what to say of the request's process overrides against the process
+    preset's values (``process_overrides.override_warnings``). Nothing when there are
+    none, or the values cannot be read: an override is never refused. A host-side key the
+    request named, and its validation dropped, is said too (``host-setting-dropped``)."""
+    dropped = host_side_message(request.dropped_settings)
+    warnings = (
+        [] if dropped is None else [FilamentWarning(kind="host-setting-dropped", message=dropped)]
+    )
+    overrides = request.overrides()
+    if not overrides or process is None:
+        return warnings
+    try:
+        answer = await read(process)
+    except ApiError:
+        return warnings
+    said = override_warnings(overrides, answer.values if answer.resolved else None)
+    if said is not None:
+        warnings.append(FilamentWarning(kind="process-override-unchecked", message=said))
+    return warnings
 
 
 async def _native_check(
@@ -1501,7 +1620,9 @@ async def _native_check(
             *rack_notes,
             *_listed(
                 plate_unlisted_warning(
-                    request.choices.bed_type, prepared.printer_model, prepared.printer_name
+                    request.plate_type(source.print_settings),
+                    prepared.printer_model,
+                    prepared.printer_name,
                 )
             ),
             *(
@@ -1517,11 +1638,19 @@ async def _native_check(
                 await support_overrides(
                     None,
                     process,
-                    wanted_settings(source.print_settings, request.supports),
+                    without_overridden(
+                        wanted_settings(source.print_settings, request.supports),
+                        request.overrides(),
+                    ),
                     read=read,
                 )
             )[1],
-            *(await prime_tower_warnings(None, process, request.prime_tower, read=read)),
+            *(
+                await prime_tower_warnings(
+                    None, process, request.prime_tower, read=read, overrides=request.overrides()
+                )
+            ),
+            *(await _override_warnings(request, process, read)),
         ],
         rack=rack_view,
         nozzle_plan=nozzle_plan,
@@ -1594,7 +1723,11 @@ async def _sequence_clearance(
     objects on each plate printed, and what the toolhead or the gantry would hit, as
     warnings, never a refusal. Only then is the file read for its objects; an unreadable
     one says nothing, and the slicer still has the last word."""
-    sequence = request.print_sequence or source.print_settings.get("print_sequence")
+    sequence = (
+        request.overrides().get("print_sequence")
+        or request.print_sequence
+        or source.print_settings.get("print_sequence")
+    )
     if sequence != "by object":
         return None, []
     # The resolved printer's, as the plate warnings are (#3024 review). Only a printer
@@ -1919,7 +2052,7 @@ async def check_for_output(
     request: PrintRunRequest,
     *,
     rack: RackUsage | None = None,
-    print_settings: dict[str, str] | None = None,
+    print_settings: dict[str, ProcessValue] | None = None,
     printers: PrinterStore | None = None,
     reports: PrinterReportStore | None = None,
     catalogue: ReadCatalogue | None = None,
@@ -3124,11 +3257,21 @@ async def plan_run(
     )
     # Never refused (#1899): a support setting that cannot be shaped is left out.
     supports, support_warnings = await support_overrides(
-        client, process, wanted_settings(source.print_settings, request.supports), read=read
+        client,
+        process,
+        without_overridden(
+            wanted_settings(source.print_settings, request.supports),
+            request.overrides(),
+        ),
+        read=read,
     )
     # Nor a prime tower setting (#3628): it is sent, with a warning when the preset lacks it.
     # No second round trip: `read` (values_for) answers again what supports just read.
-    tower_warnings = await prime_tower_warnings(client, process, request.prime_tower, read=read)
+    tower_warnings = await prime_tower_warnings(
+        client, process, request.prime_tower, read=read, overrides=request.overrides()
+    )
+    # #2998: nor any process override; a key the preset lacks is said, and sent.
+    tower_warnings += await _override_warnings(request, process, read)
     tower_dropped = template_keys_dropped(request.prime_tower)
     # The plan's sides (one chosen by hand, or each Track Switch inlet's, #4272) are
     # kept only in a file of one plate (#3955 review): the map it pins is read by a slice
@@ -3262,7 +3405,9 @@ async def plan_run(
                 **{
                     k: v
                     for k, v in source.print_settings.items()
-                    if k not in SUPPORT_KEYS and k not in tower_dropped
+                    # A support key the template set as a list is not `supports`' (it
+                    # shapes single values only), so it goes as written (#2998).
+                    if (k not in SUPPORT_KEYS or isinstance(v, list)) and k not in tower_dropped
                 },
                 **supports,
                 **prime_tower_overrides(request.prime_tower),
@@ -3271,6 +3416,8 @@ async def plan_run(
                     if request.print_sequence is None
                     else {"print_sequence": request.print_sequence}
                 ),
+                # #2998: any setting the request names, over everything above.
+                **request.overrides(),
             },
         )
         ready.append((plate_id, options, resolved, plan))
@@ -3324,6 +3471,7 @@ async def plan_run(
         printer_status,
         printer_name=planned[0][1].printer_name,
         printer_model=prepared.printer_model,
+        plate_type=request.plate_type(source.print_settings),
     )
     hardware += high_flow_warnings(
         printer_status,
@@ -3680,8 +3828,10 @@ async def _hardware_warnings(
     *,
     printer_name: str | None,
     printer_model: str | None,
+    plate_type: str,
 ) -> list[FilamentWarning]:
     """The chosen nozzles and plate against what the printer reports (spec §4.4-4.5).
+    ``plate_type`` is the plate the slice uses (``PrintRunRequest.plate_type``).
 
     Advisory only: an offline printer's status and an unreadable archive list mean
     "unknown", which says nothing rather than failing the print. A native run has no
@@ -3701,8 +3851,8 @@ async def _hardware_warnings(
         nozzle_warning(size, installed)
         for size in dict.fromkeys(nozzle.size for nozzle in choices.nozzles)
     ]
-    found.append(plate_warning(choices.bed_type, last, printer_name))
-    found.append(plate_unlisted_warning(choices.bed_type, printer_model, printer_name))
+    found.append(plate_warning(plate_type, last, printer_name))
+    found.append(plate_unlisted_warning(plate_type, printer_model, printer_name))
     return [warning for warning in found if warning is not None]
 
 

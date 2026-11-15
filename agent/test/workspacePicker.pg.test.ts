@@ -164,7 +164,7 @@ describe.skipIf(skip !== undefined)(`the workspace file picker${skip ? ` (skippe
     const s = (await m.start(browser, { origin: 'chat', title: 'sealed' })).session
     await put(s.id, 'gone.png', 'x', 'image/png')
     await db.sql`
-      UPDATE ai_session_files SET data = NULL, blob_key = ${`workspace-${'a'.repeat(64)}`}, key_sealed = ${Buffer.from([0])}
+      UPDATE ai_session_files SET data = NULL, bytes_sha256 = NULL, blob_key = ${`workspace-${'a'.repeat(64)}`}, key_sealed = ${Buffer.from([0])}
       WHERE session_id = ${s.id}`
     // A file of another kind that can be read does not keep the session from being greyed.
     await put(s.id, 'notes.txt', 'readable')

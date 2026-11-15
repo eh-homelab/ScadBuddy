@@ -2,7 +2,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { Context } from '@temporalio/activity'
 import { ApplicationFailure, CancelledFailure } from '@temporalio/common'
 import type { Sql } from 'postgres'
-import { context as otelContext, SpanStatusCode } from '@opentelemetry/api'
+import { type Attributes, context as otelContext, SpanStatusCode } from '@opentelemetry/api'
 import type { AuditLog } from '../audit/log.js'
 import { contextFrom, withSpan } from '../telemetry/trace.js'
 import { type Tier, TIERS } from '../auth/principal.js'
@@ -27,11 +27,12 @@ import { durableRequestId, flowRequestId, parseRequestId } from '../gate/ids.js'
 import { type ToolCallArgs, type ToolCallBlock, type ToolCallResult, toolCallActivity } from './toolCall.js'
 import { turnPrincipal } from '../tools/harness.js'
 import { FLOW_IMAGES_MAX, type FlowBlobStore, type FlowImage, flowImageOf } from './flowBlobs.js'
+import type { FlowRunReads } from '../flows/backendReads.js'
 import { flowOf, type FlowRuns } from './flowRuns.js'
 import { FLOW_TOOL_TIER_ACTIVITY, flowToolTierActivity } from './flowTools.js'
 import { BUILTIN_TIER_ACTIVITY, builtinTier, TOOL_TIER_ACTIVITY, toolTierActivity } from './toolTier.js'
 import type { AccessResolver } from '../access/resolver.js'
-import { type SessionFiles, withWorkspaceSize } from '../workspace/store.js'
+import { type WorkspaceFiles, withWorkspaceSize } from '../workspace/store.js'
 
 // Every tool as an activity on `agent-tools` (spec 2026-10-01 §6.3, #1055), registered
 // under the tool's name, which is how the durable worker's `activity_as_tool` stubs
@@ -116,9 +117,12 @@ type Responder = { kind?: unknown; id?: unknown }
 
 export class PgApprovalRecords implements ApprovalRecords {
   readonly #sql: Sql
+  readonly #grants: Pick<FlowRunReads, 'grantInForce'>
 
-  constructor(sql: Sql) {
+  /** `grants`: the backend's `flow_grants`, through its CRUD routes (flows/backendReads.ts, #5299 D7). */
+  constructor(sql: Sql, grants: Pick<FlowRunReads, 'grantInForce'>) {
     this.#sql = sql
+    this.#grants = grants
   }
 
   async approved(requestId: string, call?: ApprovalBinding): Promise<boolean> {
@@ -156,12 +160,9 @@ export class PgApprovalRecords implements ApprovalRecords {
     return typeof row.responder.id === 'string' ? row.responder.id : ''
   }
 
-  /** Whether the run grant is in force; the backend's table, read only for a grant's approval. */
+  /** Whether the run grant is in force; the backend's table, asked only for a grant's approval. */
   async #inForce(grantId: string): Promise<boolean> {
-    const rows = await this.#sql`
-      SELECT 1 FROM flow_grants
-      WHERE id = ${grantId} AND status = 'approved' AND revoked_at IS NULL AND now() < expires_at`
-    return rows.length > 0
+    return await this.#grants.grantInForce(grantId)
   }
 }
 
@@ -434,6 +435,62 @@ async function runAsActivity(
   const { workflowExecution, activityId } = context.info
   const toolUseId = activityId.startsWith('tool-') ? activityId.slice('tool-'.length) : activityId
   const flow = flowOf(workflowExecution?.workflowId)
+  if (flow === undefined) return runCall(tool, input, deps, lookup, toolUseId, undefined, undefined)
+  // A flow run's call is no session's ToolCall, so it gets its `agent.tool/<name>` span here (#6123).
+  // No declared tier here: the span takes the effective one once `runGated` knows it, so
+  // a call that fails before (its run gone) has no tier, as on the `turn:` path.
+  return flowCallSpan(tool.name, flowCallAttributes(tool.name, flow, toolUseId, context.info.taskQueue), (span) =>
+    runCall(tool, input, deps, lookup, toolUseId, flow, span),
+  )
+}
+
+/** What a call sets on its `agent.tool/<name>` span: its tier and its outcome. */
+export type CallSpan = { setAttribute(key: string, value: string): void }
+
+/**
+ * A flow run's call under its `agent.tool/<name>` span (#6123). A call that throws before
+ * it names an outcome (its run gone, an unknown server) reads `error`, so the dashboard's
+ * outcome column has one for every call.
+ */
+export function flowCallSpan<T>(tool: string, attributes: Attributes, run: (span: CallSpan) => Promise<T>): Promise<T> {
+  return withSpan(`agent.tool/${tool}`, { attributes }, async (span) => {
+    let named = false
+    const call: CallSpan = {
+      setAttribute: (key, value) => {
+        if (key === 'scadbuddy.outcome') named = true
+        span.setAttribute(key, value)
+      },
+    }
+    try {
+      return await run(call)
+    } catch (err) {
+      if (!named) span.setAttribute('scadbuddy.outcome', 'error')
+      throw err
+    }
+  })
+}
+
+/** A flow run's `agent.tool/<name>` attributes: the run and its call, and the queue it ran on. */
+export function flowCallAttributes(tool: string, flow: string, toolUseId: string, taskQueue: string): Attributes {
+  return {
+    'scadbuddy.tool': tool,
+    'scadbuddy.flow_run_id': flow,
+    'scadbuddy.tool_use_id': toolUseId,
+    'scadbuddy.task_queue': taskQueue,
+  }
+}
+
+async function runCall(
+  tool: Tool,
+  input: unknown,
+  deps: ToolActivityDeps,
+  lookup: (name: string) => Tool | undefined,
+  toolUseId: string,
+  flow: string | undefined,
+  span: CallSpan | undefined,
+): Promise<unknown> {
+  const context = Context.current()
+  const { workflowExecution } = context.info
   let caller: Caller
   if (flow !== undefined) {
     caller = await flowCaller(tool, flow, deps, toolUseId)
@@ -449,10 +506,22 @@ async function runAsActivity(
     flow,
     signal: context.cancellationSignal,
     heartbeat: (details) => context.heartbeat(details),
+    // The gate's request id is the same on every attempt of this activity, so each attempt keys
+    // its commands alike and a retry is answered from the first's operation (#6345); a fresh key
+    // per attempt made a second attempt a second operation.
+    callKey: caller.requestId,
+    span,
   })
+  if (context.cancellationSignal.aborted || run.outcome !== 'ok') span?.setAttribute('scadbuddy.outcome', run.outcome)
   if (context.cancellationSignal.aborted) throw new CancelledFailure('the call was cancelled')
   if (run.outcome !== 'ok') throw ApplicationFailure.nonRetryable(failureText(run), TOOL_ERROR)
-  if (flow !== undefined) return flowResult(run.result.content, deps.flowBlobs ? { subject: `flow-${flow}`, blobs: deps.flowBlobs } : undefined)
+  // `ok` once the result is built, as the `turn:` path records it: a flow result that
+  // throws (its images not kept) is left to `flowCallSpan`, which reads it as `error`.
+  if (flow !== undefined) {
+    const result = await flowResult(run.result.content, deps.flowBlobs ? { subject: `flow-${flow}`, blobs: deps.flowBlobs } : undefined)
+    span?.setAttribute('scadbuddy.outcome', 'ok')
+    return result
+  }
   return resultText(run.result.content, session !== undefined && deps.blobs ? { session, blobs: deps.blobs, toolUseId } : undefined)
 }
 
@@ -466,6 +535,8 @@ type GatedRun = {
   describedAs?: string
   /** ToolContext.callKey: the call's Idempotency-Key. */
   callKey?: string
+  /** The call's `agent.tool/<name>` span, given the tier it ran at and a refusal's outcome. */
+  span?: CallSpan | undefined
 }
 
 /**
@@ -496,7 +567,9 @@ async function runGated(
   // approval and is refused NotApproved; one disabled after its approval is refused as
   // disabled; and no second read can disagree with the one that was checked.
   const effective = await effectiveTool(tool, deps.services, input)
+  call.span?.setAttribute('scadbuddy.tier', effective.risk)
   const refuse = async (detail: string, message: string, type: string, outcome: 'refused' | 'error' = 'refused'): Promise<never> => {
+    call.span?.setAttribute('scadbuddy.outcome', outcome)
     const parsed = parsedOrRaw(tool, input)
     const now = new Date()
     await deps.audit?.record({
@@ -529,8 +602,10 @@ async function runGated(
   // `printer_id`, or null for a row only the LAN reaches), which the backend binds a person's
   // approval to (flows/print_binding.py, #4445): a printer re-linked since hashes otherwise.
   //
-  // Its activity runs once (a gated call is never retried), so a backend away or rate-limiting
-  // is tried again here, within the one approval: safe, since nothing is checked or sent before
+  // Its activity runs once (Temporal never retries a gated call; only a flow's keyed call whose
+  // one attempt lost its heartbeat is asked once more, by the flow's workflow, with its commands
+  // keyed on the request id: backend workflows/flow_tools.py FLOW_KEYED_RETRY_PATCH, #6345), so a
+  // backend away or rate-limiting is tried again here, within the one approval: safe, since nothing is checked or sent before
   // the read succeeds, and the approval is then checked against what that read resolved. Still
   // away after the last try, the call fails closed and is audited, and the model is told the
   // approval was spent, so it asks again and a person approves again.
@@ -867,7 +942,7 @@ export const DESCRIBE_CALL_ACTIVITY = 'gate.describe_call'
  */
 export function gateActivities(
   deps: Pick<ToolActivityDeps, 'audit' | 'sessions' | 'currentTiers'> & {
-    workspace?: SessionFiles | undefined
+    workspace?: WorkspaceFiles | undefined
     /**
      * The tools whose own `prepareApproval` decides what a call parks (#4442), and the
      * services it reads with, as the session's owner. Without them, every call parks as sent.

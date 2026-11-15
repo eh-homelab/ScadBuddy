@@ -13,7 +13,7 @@ lock of its own with its HEAD in ``flows_repo_head`` (:func:`flows_coordinator`)
 
 A session-level advisory lock on a connection of its own, closed on the way out, as
 `bambuddy.uploads.BambuddyUploadStore.copy_lock` took its own before the copy lease
-(#5298 Task 27; on the API it still takes one after the lease until Task 35): the hold
+(#5298 Task 27): the hold
 spans git calls, and closing the connection releases the lock however the section ends.
 
 Recording a models HEAD is also the signal (#2507): in the same transaction as the

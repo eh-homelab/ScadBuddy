@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { KEYCHAIN } from '../mocks/features/storefrontPublic'
-import { keepOffered, parseNumber, shownLabel, valueText } from './params'
+import { CHARM, KEYCHAIN } from '../mocks/features/storefrontPublic'
+import { startColour, filamentFinish, keepOffered, paramFilaments, parseNumber, shownLabel, swatchBackground, valueText } from './params'
 
 describe('parseNumber', () => {
   it.each([
@@ -61,5 +61,46 @@ describe('shownLabel (#6137)', () => {
   it('takes the listing’s own label, else the name', () => {
     expect(shownLabel('colour', 'Letters', 'Letter colour (extruder 2)')).toBe('Letters')
     expect(shownLabel('colour', null, null)).toBe('colour')
+  })
+})
+
+describe('colour choices (#6152)', () => {
+  const blue = KEYCHAIN.colours[0]!
+  const orange = KEYCHAIN.colours[1]!
+
+  it('never offers a support material', () => {
+    const pva = { id: 'f-pva', colour: '#1B6CA8', colour_name: 'Natural', material: 'PVA' }
+    const param = KEYCHAIN.params.base_colour!
+    expect(paramFilaments(param, [...KEYCHAIN.colours, pva]).map((f) => f.id)).toEqual([blue.id, orange.id])
+  })
+})
+
+describe('filament names and finishes (#6152)', () => {
+  const f = (id: string, colour: string, colour_name: string | null, extra: { material?: string; subtype?: string | null; brand?: string | null } = {}) => ({
+    id,
+    colour,
+    colour_name,
+    material: extra.material ?? 'PLA',
+    subtype: extra.subtype ?? null,
+    brand: extra.brand ?? null,
+  })
+
+  it('draws translucent, silk and multi-colour filaments apart from a solid one', () => {
+    expect(filamentFinish(f('a', '#FFFFFF', 'Insignia Clear', { material: 'PETG' }))).toBe('translucent')
+    expect(filamentFinish(f('b', '#C0C0C0', 'Silver', { subtype: 'Silk' }))).toBe('silk')
+    expect(filamentFinish(f('c', '#FFFFFF', 'Fluorescent Rainbow'))).toBe('multi')
+    expect(filamentFinish(f('d', '#000000', 'Velvet Eclipse', { subtype: 'Tri Color' }))).toBe('multi')
+    expect(filamentFinish(f('e', '#FFFFFF', 'Jade White'))).toBe('solid')
+    expect(swatchBackground(f('e', '#FFFFFF', 'Jade White'))).toBe('#FFFFFF')
+    expect(swatchBackground(f('c', '#FFFFFF', 'Fluorescent Rainbow'))).not.toBe('#FFFFFF')
+  })
+})
+
+describe('start colours (#6144)', () => {
+  it('starts a colour at what an unpicked render takes, never at its first choice', () => {
+    const body = CHARM.params.body_colour!
+    expect(startColour({ ...body, default: '#E8532F' })).toBe('#E8532F')
+    // No default the page may show (its filament is gone): no start colour.
+    expect(startColour({ ...body, default: null })).toBeUndefined()
   })
 })

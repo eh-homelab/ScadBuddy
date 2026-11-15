@@ -2,6 +2,7 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { SwitchField } from '../../../components/settings/form'
 import { useBambuddyResources } from '../bambuddyResources'
 import { FieldRow } from '../controls'
+import { docOf } from '../fields'
 import { SavedSection } from '../formParts'
 import type { AreaId } from '../registry'
 import { useBackendSettings } from '../useBackendSettings'
@@ -86,8 +87,7 @@ export function Component() {
     <SavedSection form={form} id={id} title={title}>
       <FieldRow
         id="print-auto-import"
-        label="Watcher"
-        help="Every 5 minutes, it reads the archives Bambuddy made since it was switched on. It links a print to a model only when it is sure; every other print goes to Unsorted imports on the Prints page."
+        {...docOf(form.settings, 'print_auto_import')}
         error={errors.print_auto_import}
       >
         <SwitchField
@@ -99,8 +99,7 @@ export function Component() {
       </FieldRow>
       <FieldRow
         id="print-auto-import-sources"
-        label="Take a print's 3MF from"
-        help="The watcher tries these in this order and takes the first that has the file. With none, every print goes to Unsorted imports."
+        {...docOf(form.settings, 'print_auto_import_sources')}
         error={errors.print_auto_import_sources}
       >
         <fieldset id="print-auto-import-sources" className="flex flex-col gap-1.5">
@@ -127,8 +126,7 @@ export function Component() {
       </FieldRow>
       <FieldRow
         id="print-auto-import-skip"
-        label="Leave these printers alone"
-        help="The watcher takes no print from a printer checked here."
+        {...docOf(form.settings, 'print_auto_import_skip_printers')}
         error={errors.print_auto_import_skip_printers}
       >
         <fieldset id="print-auto-import-skip" className="flex flex-col gap-1.5">
@@ -152,8 +150,7 @@ export function Component() {
       </FieldRow>
       <FieldRow
         id="print-auto-import-skip-lan"
-        label="Leave these LAN-only printers alone"
-        help="A printer with no Bambuddy link has no archive. The watcher records its prints itself, and keeps the printer's file in ScadBuddy's own library. It records no print from a printer checked here."
+        {...docOf(form.settings, 'print_auto_import_skip_lan_printers')}
         error={errors.print_auto_import_skip_lan_printers}
       >
         <fieldset

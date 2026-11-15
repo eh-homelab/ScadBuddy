@@ -1,5 +1,6 @@
-import type { ElementType } from 'react'
+import { useMemo, type ElementType } from 'react'
 import type { Listing, ParamValue } from '../api/client'
+import { colourPlan } from '../colours'
 import { listingUnavailable } from '../params'
 import { ParamField } from './ParamField'
 
@@ -9,6 +10,12 @@ export interface ListingViewProps {
   listing: Listing
   /** Only the values the visitor set: a field with none shows the shop's choice. */
   values: ParamValues
+  /**
+   * The colour values the latest render start answered (`StoreRender.values`) for the
+   * values on screen. A part the visitor did not set shows them; they win over the page's
+   * prediction (#6258).
+   */
+  settled?: ParamValues
   onChange: (name: string, next: ParamValue | undefined) => void
   /** The title's heading level: 1 on the public page, 2 inside the back office's preview. */
   headingLevel?: 1 | 2
@@ -21,12 +28,18 @@ export interface ListingViewProps {
  * Storefront page as its live preview, so the shop sees the customer's form. It fetches
  * nothing and is styled with the theme's tokens only.
  *
+ * #6258: "choose a colour, the plastic follows". A pick of a colour that only another
+ * material offers moves each part the visitor did not set to the closest colour of that
+ * material at once (`colours.ts` `colourPlan`, the page's copy of the shop's rule). A part
+ * whose default that material offers keeps it. A colour the visitor set never moves.
+ *
  * Everything the shop typed (title, description, captions, labels) renders as React text,
  * never as HTML (spec §5.8).
  */
-export function ListingView({ listing, values, onChange, headingLevel = 1 }: ListingViewProps) {
+export function ListingView({ listing, values, settled, onChange, headingLevel = 1 }: ListingViewProps) {
   const Heading: ElementType = headingLevel === 1 ? 'h1' : 'h2'
   const params = Object.entries(listing.params)
+  const plan = useMemo(() => colourPlan(listing, values), [listing, values])
   return (
     <article className="flex min-w-0 flex-col gap-5">
       <header className="flex flex-col gap-2">
@@ -59,7 +72,14 @@ export function ListingView({ listing, values, onChange, headingLevel = 1 }: Lis
       {params.length > 0 ? (
         <form className="grid gap-[18px]" aria-label="Customize" onSubmit={(event) => event.preventDefault()}>
           {params.map(([name, param]) => (
-            <ParamField key={name} param={param} value={values[name]} filaments={listing.colours} onChange={(next) => onChange(name, next)} />
+            <ParamField
+              key={name}
+              param={param}
+              value={values[name]}
+              shown={settled?.[name] ?? plan.shown[name]}
+              filaments={listing.colours}
+              onChange={(next) => onChange(name, next)}
+            />
           ))}
         </form>
       ) : (

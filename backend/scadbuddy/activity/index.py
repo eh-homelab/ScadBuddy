@@ -390,51 +390,59 @@ class ActivityIndex:
                 )
 
     async def ingest_agent_operation(self, operation_id: str) -> None:
-        """Mirror the agent's ``ai_operations`` row (spec §5). A no-op when the agent's
-        tables, or the attribution columns its migration adds, are not there."""
+        """Mirror an ``ai_operations`` row (spec §5) that an agent pod still on SQL wrote
+        and announced (``ai_operation.changed``). Rows written through the CRUD routes are
+        mirrored in their own transaction (``ingest_agent_operation_in``)."""
         await asyncio.to_thread(self._ingest_agent_operation, operation_id)
 
     def _ingest_agent_operation(self, operation_id: str, *, restore: bool = False) -> bool:
         with self.pool.connection() as conn, conn.transaction():
-            try:
-                with conn.transaction():
-                    op = conn.execute(
-                        "SELECT id, kind, subject, status, request, result, error, principal,"
-                        " session, via_tool, workflow_id, workflow_run_id, created_at, finished_at"
-                        " FROM ai_operations WHERE id = %s",
-                        (operation_id,),
-                    ).fetchone()
-            except (errors.UndefinedTable, errors.UndefinedColumn):
-                return False
-            if op is None:
-                return False
-            return self.upsert_in(
-                conn,
-                lambda: ActivityRow(
-                    id=f"agent_operation:{op['id']}",
-                    kind=f"agent.{op['kind']}",
-                    subject=op["subject"] or "",
-                    status=_AGENT_STATUS[op["status"]],
-                    title=(
-                        f"{op['kind'].replace('_', ' ').capitalize()} {op['subject'] or ''}"
-                    ).strip(),
-                    source="ai_operations",
-                    source_id=op["id"],
-                    workflow_id=op["workflow_id"],
-                    run_id=op["workflow_run_id"],
-                    created_at=op["created_at"],
-                    finished_at=op["finished_at"],
-                    detail={
-                        "request": op["request"],
-                        "result": op["result"],
-                        "error": op["error"],
-                    },
-                ),
-                attribution=Attribution(
-                    op["principal"] or "browser", op["session"], op["via_tool"]
-                ),
-                restore=restore,
-            )
+            return self.ingest_agent_operation_in(conn, operation_id, restore=restore)
+
+    def ingest_agent_operation_in(
+        self, conn: Connection[Any], operation_id: str, *, restore: bool = False
+    ) -> bool:
+        """Mirror the ``ai_operations`` row in the caller's transaction: the API's own
+        table since the agent's operations moved behind its CRUD routes (#5299 step 8,
+        ``agent_data/operations.py``). A no-op when the table is not there (an app that
+        skips the agent's migrations: a test's, ``tests/conftest.py``)."""
+        try:
+            with conn.transaction():
+                op = conn.execute(
+                    "SELECT id, kind, subject, status, request, result, error, principal,"
+                    " session, via_tool, workflow_id, workflow_run_id, created_at, finished_at"
+                    " FROM ai_operations WHERE id = %s",
+                    (operation_id,),
+                ).fetchone()
+        except (errors.UndefinedTable, errors.UndefinedColumn):
+            return False
+        if op is None:
+            return False
+        return self.upsert_in(
+            conn,
+            lambda: ActivityRow(
+                id=f"agent_operation:{op['id']}",
+                kind=f"agent.{op['kind']}",
+                subject=op["subject"] or "",
+                status=_AGENT_STATUS[op["status"]],
+                title=(
+                    f"{op['kind'].replace('_', ' ').capitalize()} {op['subject'] or ''}"
+                ).strip(),
+                source="ai_operations",
+                source_id=op["id"],
+                workflow_id=op["workflow_id"],
+                run_id=op["workflow_run_id"],
+                created_at=op["created_at"],
+                finished_at=op["finished_at"],
+                detail={
+                    "request": op["request"],
+                    "result": op["result"],
+                    "error": op["error"],
+                },
+            ),
+            attribution=Attribution(op["principal"] or "browser", op["session"], op["via_tool"]),
+            restore=restore,
+        )
 
     async def prune(self, ttl: float, placeholder_ttl: float) -> int:
         """Delete finished rows older than ``ttl`` seconds and placeholders older than

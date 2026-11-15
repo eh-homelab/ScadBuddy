@@ -1,6 +1,7 @@
 import { Suspense, lazy, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Link, useLocation } from 'react-router'
 import { formatMoney } from '../../lib/money'
+import { OrderSources } from '../components/ModelSources'
 import { markPayFromOrder } from '../payReturn'
 import {
   ActionKey,
@@ -154,9 +155,11 @@ export function OrderPage() {
                   )
                 }
                 acceptPrice={(quoteId) => write(`accept:${quoteId}`, (key) => store.acceptQuote(reader, quoteId, key))}
+                reader={reader}
               />
             ))}
           </ul>
+          <Purchases order={order} />
           {order.payments.length > 0 && <Payments order={order} />}
           {order.shipments.length > 0 && (
             <div className="sf-panel">
@@ -193,12 +196,14 @@ function Item({
   busy,
   answer,
   acceptPrice,
+  reader,
 }: {
   item: CustomerItem
   order: CustomerOrder
   busy: boolean
   answer: (revision: CustomerRevision, answer: Answer, note: string) => Promise<boolean>
   acceptPrice: (quoteId: string) => Promise<boolean>
+  reader: OrderReader
 }) {
   const quote = item.quote
   return (
@@ -208,6 +213,14 @@ function Item({
         <span className="sf-item-qty">{`Quantity ${item.quantity}`}</span>
       </div>
       <p className="sf-hint">{item.status}</p>
+      {(item.sources ?? []).length > 0 && (
+        <OrderSources
+          sources={item.sources ?? []}
+          who={reader}
+          currency={order.currency}
+          minorExponent={order.minor_exponent}
+        />
+      )}
       {item.revisions.map((revision) => (
         <Revision key={revision.id} revision={revision} busy={busy} answer={answer} />
       ))}
@@ -226,6 +239,41 @@ function Item({
         </div>
       )}
     </li>
+  )
+}
+
+/**
+ * The things the shop buys for the order (#6133, spec 2026-11-13 §10.5): how many it is
+ * still pricing, and the purchase and handling charges. Never a cost or a margin: the view
+ * carries only each charge's kind, label and amount.
+ */
+function Purchases({ order }: { order: CustomerOrder }) {
+  const pending = order.items
+    .flatMap((item) => item.sources ?? [])
+    .filter((source) => source.purpose === 'purchase' && source.status === 'pending').length
+  const charges = order.charges ?? []
+  if (pending === 0 && charges.length === 0) return null
+  return (
+    <div className="sf-panel">
+      {pending > 0 && (
+        <p className="sf-lead" role="status">
+          {`Purchase pending: the shop is pricing ${pending} ${pending === 1 ? 'thing' : 'things'} to buy for you.`}
+        </p>
+      )}
+      {charges.length > 0 && (
+        <>
+          <h2 className="sf-item-title">Charges</h2>
+          <ul className="sf-filelist" aria-label="Charges">
+            {charges.map((charge, index) => (
+              <li key={index} className="sf-charge">
+                <span>{charge.label}</span>
+                <span>{formatMoney(charge.amount_minor, order.currency, order.minor_exponent)}</span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </div>
   )
 }
 

@@ -188,7 +188,7 @@
       "id": 8,
       "type": "table",
       "title": "Slowest tool calls",
-      "description": "Tool calls inside turns (agent.tool/<name>, marked by scadbuddy.tool_use_id), with the tool, its tier and outcome. Tempo search returns recent matches, not the slowest of the whole range: sort by Duration to find the worst of them. Needs the Tempo datasource (clusters#1596 Phase 4).",
+      "description": "Tool calls inside turns and flow runs (agent.tool/<name>, marked by scadbuddy.tool_use_id; a flow run's call also carries scadbuddy.flow_run_id), with the tool, its tier and outcome. Tempo search returns recent matches, not the slowest of the whole range: sort by Duration to find the worst of them. Needs the Tempo datasource (clusters#1596 Phase 4).",
       "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
       "gridPos": { "x": 0, "y": 20, "w": 12, "h": 10 },
       "options": { "sortBy": [{ "displayName": "Duration", "desc": true }] },

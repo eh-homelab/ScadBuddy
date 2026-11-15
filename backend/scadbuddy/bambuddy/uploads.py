@@ -17,14 +17,13 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
-from psycopg import AsyncConnection, Connection
+from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.copy_leases import (
-    COPY_LOCK_PREFIX,
     CopyLease,
     CopyLeases,
     LeaseLostError,
@@ -158,34 +157,9 @@ class BambuddyUploadStore:
         uploads and records a library copy under ``key`` (#317): the copy lease
         (`copy_leases.py`, #5298 Task 27), renewed while the section runs. Pass the
         lease it yields to `record`, which refuses once another holder took it.
-
-        Until #5298 Task 35 the API also holds the old session advisory lock after the
-        lease, so an old print pod or an old API replica, which during a roll still takes
-        only that lock, waits for it too (`_session_lock`).
         """
-        async with hold_lease(CopyLeases(self._pool), key) as lease, self._session_lock(key):
+        async with hold_lease(CopyLeases(self._pool), key) as lease:
             yield lease
-
-    @asynccontextmanager
-    async def _session_lock(self, key: str) -> AsyncIterator[None]:
-        """The old copy lock: a session-level advisory lock on a connection of its own,
-        closed on the way out, rather than a transaction-level one on the pool's. The
-        section spans a Bambuddy upload (up to its upload timeout), and the pool is the
-        render queue's: a pooled connection held that long takes a slot from it, and the
-        store's own queries inside the section need further slots, so enough folders
-        locked at once would exhaust the pool against itself. Closing the connection
-        releases the lock however the section ends, cancellation and a lost connection
-        included."""
-        pool = self._pool
-        conninfo = pool.conninfo if isinstance(pool.conninfo, str) else pool.conninfo()
-        conn = await AsyncConnection.connect(conninfo, autocommit=True)
-        try:
-            await conn.execute(
-                "SELECT pg_advisory_lock(hashtextextended(%s, 0))", (f"{COPY_LOCK_PREFIX}{key}",)
-            )
-            yield
-        finally:
-            await conn.close()
 
     async def for_output(self, output_id: str, *, native: bool = False) -> list[LibraryCopy]:
         """The output's copies in upload order, each with its slices: Bambuddy's, or with

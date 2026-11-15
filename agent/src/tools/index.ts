@@ -9,6 +9,7 @@ import { customizerTools } from './customizer.js'
 import { farmTools } from './farm.js'
 import { printerTools } from './printers.js'
 import { fileTools } from './files.js'
+import { filamentTools } from './filament.js'
 import { flowTools } from './flows.js'
 import { flowTriggerTools } from './flowTriggers.js'
 import { guideTools } from './guide.js'
@@ -28,7 +29,9 @@ import { settingsTools } from './settings.js'
 import { delegationTools } from './delegation.js'
 import { sourceFileTools } from './sourceFiles.js'
 import { storeTools } from './store.js'
+import { storefrontTools } from './storefront.js'
 import { libraryCopyTools } from './libraryCopy.js'
+import { makerworldTools } from './makerworld.js'
 import { templateTools } from './templates.js'
 import { toolCallTools } from './toolCalls.js'
 import { traySpoolTools } from './traySpools.js'
@@ -59,6 +62,7 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...settingsTools,
   ...storeTools,
   ...libraryCopyTools,
+  ...makerworldTools,
   ...printTools,
   ...printHistoryTools,
   ...printMediaTools,
@@ -66,6 +70,7 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...analyzerTools,
   ...traySpoolTools,
   ...nativeSpoolTools,
+  ...filamentTools,
   ...printerTools,
   ...browserTools,
   ...delegationTools,
@@ -75,6 +80,7 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...flowTools,
   ...flowTriggerTools,
   ...orderTools,
+  ...storefrontTools,
 ]
 
 const byName = new Map<string, Tool>()

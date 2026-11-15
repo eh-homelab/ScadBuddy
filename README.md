@@ -62,7 +62,7 @@ multi-colour rules, connecting Bambuddy and each feature.
 - **Inside Bambuddy**: one click adds ScadBuddy to Bambuddy's sidebar as an External
   Link that opens inside Bambuddy.
 - **Prints ScadBuddy did not start**: the Prints page's **Import print** links such a
-  print to a model by hand (#4698). The **print watcher** does it with no user step
+  print to a model, or to a file of ScadBuddy's own library (#6394), by hand (#4698). The **print watcher** does it with no user step
   (#4699). See [The print watcher](#the-print-watcher-4699).
 
 | | |
@@ -422,7 +422,11 @@ on shutdown.
   one job. An identical OpenSCAD run (same template, revision, file and
   parameters) is rendered once and its piece kept in the blob store
   (`/data/blobs/`), so a later job that needs it reuses it; a piece no job
-  references is removed after `SCADBUDDY_JOB_TTL`.
+  references is removed after `SCADBUDDY_JOB_TTL` (a day while it is 0, which keeps renders forever).
+  - `SCADBUDDY_JOB_TTL` (seconds, `86400` by default): how long a settled render job
+    and its files are kept. `0` keeps settled renders and their files forever (#6236).
+    The blob sweep and the revision-export prune still wait a day at `0`, never 0
+    seconds, so that a write that has not recorded its reference yet is safe.
   - `SCADBUDDY_RENDER_QUEUE_MAX` (0 = no limit): set, a request that would be a new
     job while that many already wait gets 503 with `Retry-After`. A request that
     matches a job still open (pending or running) joins it and is never refused, and
@@ -829,13 +833,14 @@ above. On the deployment, besides that login's variables (`SCADBUDDY_AUTH_MODE`,
 `SCADBUDDY_AUTH_OIDC_PRIVATE_NETWORK=true` for an issuer inside the cluster), every
 service that calls the API presents a **service credential** (`Authorization: Bearer
 sbsvc_…`): the agent sidecar, the print worker (`--queue bambuddy`) and the flow runs'
-worker (`--queue projects`). Nothing is configured for them: the API issues each
-caller's credential at its start and rotates it on the prune Schedule with an overlap,
-and each caller reads its current one from a view of its own and unseals it with the
-KEK, so **each caller that reads its view needs `SCADBUDDY_SECRET_KEY_FILE` mounted**.
-The print and projects workers read no view: each exchanges a proof (below), and the
-print worker needs no KEK at all (#5298 Task 33). Settings → System →
-Service credentials lists, rotates and revokes them.
+worker (`--queue projects`). Nothing is configured for them. The agent sidecar reads its
+current one from a view of its own: the API issues it at its start and rotates it on the
+prune Schedule with an overlap, and the sidecar unseals it with the KEK, so **a caller
+that reads its view needs `SCADBUDDY_SECRET_KEY_FILE` mounted**. The print and projects
+workers read no view: each exchanges a proof (below), and the API mints them no sealed
+credential and revokes any left at its start (#5298). The print worker needs no KEK at
+all (#5298 Task 33). Settings → System → Service credentials lists and revokes them, and
+rotates the agent's.
 
 **The service-token exchange (#5494).** A caller can prove who it is instead, and get a
 15-minute credential with no sealed copy and no database read
@@ -904,23 +909,24 @@ store or another caller's credential:
 
 | Caller | Role | Its `SCADBUDDY_DATABASE_URL` |
 |---|---|---|
-| render worker | `scadbuddy_render`, unused: the worker has no database client and ignores the URL (#5298) | `scadbuddy-render.yaml` |
-| print worker | `scadbuddy_print`: its list grants no table; the role keeps the 34 tables and the sequence it held until #5298 Task 35 revokes them. The worker holds no pool and no KEK. It exchanges its proof only (`exchange_source`, no view fallback) and ignores `SCADBUDDY_DATABASE_URL` with a warning; with no proof it refuses to start (#5298 Task 33) | `scadbuddy-print.yaml` |
-| flow runs' worker | none: the worker has no database client and ignores the URL (#5298); the API and the agent revoke everything the role `scadbuddy_projects` held at every start, so the deployment can drop it | `scadbuddy-projects.yaml`, until eh-homelab/clusters removes it |
+| render worker | none: the worker has no database client and ignores the URL (#5298 Task 20); the API revokes everything the role `scadbuddy_render` held at every start where the role still exists (#5298 Task 22) | none: prod sets none and has no such role (eh-homelab/clusters#3555, #3566, #3578; measured 2026-11-14) |
+| print worker | none: the worker holds no pool and no KEK. It exchanges its proof only (`exchange_source`, no view fallback) and ignores `SCADBUDDY_DATABASE_URL` with a warning; with no proof it refuses to start (#5298 Task 33). The API revokes everything the role `scadbuddy_print` held at every start where the role still exists (#5298 Task 35) | none: prod sets none and has no such role (as above) |
+| flow runs' worker | none: the worker has no database client and ignores the URL (#5298); the API and the agent revoke everything the role `scadbuddy_projects` held at every start where the role still exists | none: prod sets none and has no such role (as above) |
 | agent sidecar | `scadbuddy_agent` | the sidecar in `scadbuddy.yaml` |
 
-Create each role with a password (`CREATE ROLE scadbuddy_print LOGIN PASSWORD '…'`; on
+Create each role with a password (`CREATE ROLE scadbuddy_agent LOGIN PASSWORD '…'`; on
 CNPG a `managed.roles` entry) and point that caller's `SCADBUDDY_DATABASE_URL` at it;
 the API itself stays on the database's owner role. At every start the API grants each
-role that exists exactly its list (`backend/scadbuddy/auth/caller_grants.py`, and the
-render worker's `RENDER_GRANTS`, empty now) and its credential's view; a role created
-after the API started is granted on the API's next start. The print worker never
-migrates and waits for no migration: it waits for its CRUD areas (#5298). The agent's role owns the
+role that exists exactly its list (`backend/scadbuddy/auth/caller_grants.py`) and its
+credential's view; a role created
+after the API started is granted on the API's next start. The agent's role owns the
 `ai_*` tables it migrates and grants what the API's role reads of them
 (`agent/src/db/grants.ts`).
 
 On 2026-11-05 the render, print and projects workers connected as their own roles (the
-projects worker has made no connection since 2026-11-07, #5298), and
+projects worker has made no connection since 2026-11-07, and the print worker none since
+its build `sha-4d71920`, read in `pg_stat_activity` on 2026-11-14, #5298; the render
+worker has had no database client since #5298 Task 20, PR #5665), and
 the agent sidecar and the agent workers still connected as the owner. **The target
 (#5295) replaces these roles.** A role per caller in one database is not a boundary, so
 only the CRUD service (the API) will hold a database secret. Every other caller becomes an
@@ -1011,7 +1017,8 @@ Both call `deploy.reusable.yml`, which:
    the deploy;
 3. opens **one** PR, `deploy(scadbuddy): <version>`, on the fixed branch
    `deploy/scadbuddy`, and arms `gh pr merge --auto --squash`. A newer deploy
-   first waits up to 45 minutes for an older open one to land, and closes it and
+   first waits up to 90 minutes (two 45 minute rounds, #6368) for an older open
+   one to land, and closes it and
    replaces the branch only when it cannot (a failed CI run, a conflict,
    auto-merge off) or is still open after the wait (#5168: the PR's
    checks take 15 to 40 minutes, and closing it at every merge kept prod on one
@@ -1104,16 +1111,22 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   timeouts from the same values.
 - **No database (#5298).** The worker opens no database connection. It reads the
   store's settings (backend, Bambuddy URL, library folder, render key, S3 keys) from the
-  API's CRUD route `/api/v1/internal/crud/render/settings`, which answers the full
-  Bambuddy key **only while no render key is saved** in Settings, the fallback `/healthz`
-  reports as `render_key_fallback`. Save a render key and the worker cannot read the
-  full key at all. The API writes a job's row, its events and its activity row for it,
+  API's CRUD route `/api/v1/internal/crud/render/settings`, which never answers the full
+  Bambuddy key: while no render key is saved in Settings (the fallback `/healthz` reports
+  as `render_key_fallback`), it answers no Bambuddy key at all and logs that it withheld
+  it, and a worker on the Bambuddy store fails its renders with an error that names
+  `bambuddy_render_api_key`. Save a render key before you run a standalone render worker
+  on the Bambuddy store. The API writes a job's row, its events and its activity row for it,
   through the routes under `/api/v1/internal/crud/render/jobs`, holds a done job's blobs
   and records a piece's geometry for it, through `/api/v1/internal/crud/render/blob-refs`
   and `…/render/geometry`, reads and writes the blob index for it, through
-  `…/render/blob-index` (it may not store or delete an upload's, font's or snapshot's
-  key, which only the API writes: the API drops or forgets a copy the worker cannot read,
-  through `…/render/assets/{id}/drop-copy` and `…/render/blob-index/{key}/forget-copy`),
+  `…/render/blob-index` (it may store, mark or delete only a render job's own pieces, and
+  read only those, the library pieces Arrange lays out, snapshots, fonts and uploads; it
+  may touch only its pieces, the library pieces and snapshots; every other key is the
+  API's: the API drops or forgets a copy the worker cannot read, through
+  `…/render/assets/{id}/drop-copy` and `…/render/blob-index/{key}/forget-copy`, and
+  forgets a library piece only when its own read, bounded to a minute and made at most
+  once a piece in ten minutes, finds the object gone or altered and the row still names it),
   and finds a template's Bambuddy folder for it, through
   `…/render/store-folders`: the API calls Bambuddy itself, on the URL, library folder and
   render key in Settings, under the folder's lock, and refuses a worker whose URL or
@@ -1126,11 +1139,11 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   render or a pin on the worker still holds a removal off; a renew or release must
   name the token the worker took it under, and a lease or hold lives at most five
   minutes unless renewed.
-- **The role `scadbuddy_render` (#601)** is no longer used. Remove the worker's
-  database secret from its Deployment. Until #5298 Task 22 revokes and drops the role,
-  the API still grants it `RENDER_GRANTS` (`backend/scadbuddy/render/worker_role.py`),
-  now empty, at every start, and a role granted the older `render_settings` view or
-  the tables above keeps them.
+- **The role `scadbuddy_render` (#601)** is gone. The worker's Deployment holds no
+  database secret, and prod dropped the role (eh-homelab/clusters#3555, #3566, #3578;
+  measured 2026-11-14). The API grants the role nothing and, at every start, revokes
+  what it held where it still exists (`backend/scadbuddy/auth/revoke.py`, #5298 Task
+  22); with no such role, it does nothing.
 - **The worker never migrates.** It waits at start, logging what it waits for,
   until the API serves its CRUD areas (`settings`, `jobs`, `refs`, `blob-index`,
   `store-folders`, `assets`, `libraries`) and answers its first read of the store
@@ -1541,7 +1554,8 @@ workers restart.
   and ScadBuddy deletes only inside a `Work/` folder of the inbox folder Settings
   names. Changing that folder leaves the previous one's `Work/` files for you to delete.
   Any file in a ScadBuddy `Work/` folder that ScadBuddy did not upload, such as one
-  dropped there by hand, is deleted once it is older than `SCADBUDDY_JOB_TTL`: keep
+  dropped there by hand, is deleted once it is older than `SCADBUDDY_JOB_TTL`
+  (a day while it is 0, which keeps renders forever): keep
   your own files elsewhere.
   The same goes for the Bambuddy URL: folders are recorded per instance, so pointing
   ScadBuddy at another Bambuddy makes new folders there and never deletes by the old
@@ -1551,7 +1565,7 @@ workers restart.
   1. Set Bambuddy's URL (Settings → *Connection*) and the **Inbox folder, for sends
      without a project** (Settings → *Projects & files*), which is the store's inbox.
   2. In Bambuddy, create a key with *Manage Library* only, and paste it into Settings as
-     **Render key**.
+     **Render worker API key**.
   3. Choose **Bambuddy library** under **Blob store**, and restart the API and the
      workers.
 
@@ -1567,7 +1581,8 @@ workers restart.
   - On the workers, set `SCADBUDDY_ASSET_SWEEP_INTERVAL` short, e.g. `900`. On that
     interval, and **only** then, a worker trims its cache to
     `SCADBUDDY_WORKER_CACHE_MAX_BYTES` (least recently used first), removes the
-    revision exports it has not used for `SCADBUDDY_JOB_TTL` (a day by default), and
+    revision exports it has not used for `SCADBUDDY_JOB_TTL` (a day by default, and
+    a day while it is 0, which keeps renders forever), and
     removes the uploads it has not used for `SCADBUDDY_ASSET_SWEEP_GRACE` (at least an
     hour; it fetches one again when a render names it). `0` (or unset) does not
     stop that pass: the worker falls back to a fixed 300 s.
@@ -1579,7 +1594,7 @@ workers restart.
     | the cache after a trim | `SCADBUDDY_WORKER_CACHE_MAX_BYTES` | 10 GiB |
     | one interval's new pieces | render slots × (interval ÷ time per piece) × piece size, e.g. 2 × (900 s ÷ 30 s) × 20 MiB | 1.2 GiB |
     | uploads fetched (`assets/`) | last use: those a render named within `SCADBUDDY_ASSET_SWEEP_GRACE`; in practice no more than the API's `SCADBUDDY_ASSET_MAX_TOTAL_BYTES` | 1 GB |
-    | revision exports (`cache/`) | last use: the template revisions rendered within `SCADBUDDY_JOB_TTL` | measure |
+    | revision exports (`cache/`) | last use: the template revisions rendered within `SCADBUDDY_JOB_TTL` (a day while it is 0, which keeps renders forever) | measure |
     | fonts (`fonts/`) and library checkouts (`libraries/`) | nothing: the families and libraries the rendered templates name, kept for the pod's life | measure |
     | **sum; `sizeLimit` with slack** | 10 + 1.2 + 0.93 (1 GB) ≈ 12.1 GiB, plus the measured rows (~1 GiB on a typical worker) ≈ 13.1 GiB | **`14Gi`: ~0.9 GiB of slack** |
 
@@ -1633,9 +1648,12 @@ workers restart.
   `/healthz` on the API and on each worker (port 9090) carries a `store` object:
   - `multi_worker: true` says more than one replica is safe;
   - `backend` differs from `configured_backend` until the restart;
-  - `render_key_fallback: true` means no render key is stored, so the workers hold the
-    full Bambuddy key and template code can print. The Settings page shows the same
-    warning.
+  - `render_key_fallback: true` (on the API) means no render key is stored but the full
+    Bambuddy key is. The API withholds the full key from standalone render workers, so
+    their renders on the `bambuddy` store fail with an error that names
+    `bambuddy_render_api_key`; a render worker inside the API process
+    (`SCADBUDDY_TEMPORAL_WORKER_INPROCESS`) uses the full key, and its template code can
+    print. The Settings page shows the same warning.
 
   If a `bambuddy` or `s3` store cannot start (no URL or folder; no endpoint, bucket or
   keys), see "Recovering an unready blob store" below.
@@ -1664,7 +1682,7 @@ workers restart.
   ([S3's HeadObject permissions](https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadObject.html)).
   Uploads above 64 MiB go as multipart ([S3's limits](https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html)).
   An object whose upload never got a row (a crash between the two) is removed by the
-  blob sweep once it is older than `SCADBUDDY_JOB_TTL`.
+  blob sweep once it is older than `SCADBUDDY_JOB_TTL` (a day while it is 0, which keeps renders forever).
 
   **Switching a store that already holds blobs.** Changing `store_backend` alone would
   leave every existing piece, snapshot and upload behind, so the move is two phases:
@@ -1711,7 +1729,7 @@ workers restart.
 |---|---|---|
 | `SCADBUDDY_STORE_BACKEND` | `local` | Seeds the stored **Blob store** setting. A value saved in Settings wins. |
 | `SCADBUDDY_LIBRARY_BACKEND` | `bambuddy` | Seeds the stored **Print library** setting (`bambuddy` or `native`; applies on restart). A value saved in Settings wins. `native` keeps print files in ScadBuddy's own library, in the blob store, and needs `store_backend` `s3` or `bambuddy`: a start with `native` on the `local` store is refused, and so is a save in Settings (422, `NATIVE_LIBRARY_NOT_READY`). |
-| `SCADBUDDY_BAMBUDDY_RENDER_API_KEY` | none | Seeds the stored **Render key**. It is stored like `SCADBUDDY_BAMBUDDY_API_KEY` and never returned by the API. |
+| `SCADBUDDY_BAMBUDDY_RENDER_API_KEY` | none | Seeds the stored **Render worker API key**. It is stored like `SCADBUDDY_BAMBUDDY_API_KEY` and never returned by the API. |
 | `SCADBUDDY_STORE_MAX_TOTAL_BYTES` | 50 GiB | Past this, a new blob is refused (a re-put of one already stored never is). `0` is no limit. |
 | `SCADBUDDY_STORE_MAX_COUNT` | 200000 | The same, counted in blobs. |
 | `SCADBUDDY_WORKER_CACHE_MAX_BYTES` | 10 GiB | Each process's local piece cache on the `bambuddy` store. It is trimmed to this every `SCADBUDDY_ASSET_SWEEP_INTERVAL` (on a worker, every 300 s when that is `0`), not on write. |
@@ -1784,17 +1802,19 @@ form as the `store_backend` one above.
 With **`SCADBUDDY_SECRET_KEY_FILE`** set, the backend seals the API keys it stores
 (`bambuddy_api_key`, `bambuddy_render_api_key`, `google_fonts_api_key`) in the
 `settings` table with envelope encryption, in the agent's format and under the same key
-file (see "The agent sidecar" below: 32 random bytes, base64). At start the API (and the print
-worker, which opens the same store) seals any key still stored in plaintext, once, under the migration lock, and logs
+file (see "The agent sidecar" below: 32 random bytes, base64). At start the API seals any
+key still stored in plaintext, once, under the migration lock, and logs
 `sealed plaintext API keys`. A key that is set but unreadable or malformed stops the
 start.
 
-- Mount the **same** file into the API and the print worker, in one rollout. Both read the
-  keys from the database; a process without the key (or with another one) cannot open a
-  sealed key, logs `ignoring a stored secret this process cannot open` and falls back to
-  its own `SCADBUDDY_<FIELD>`. The render worker needs no key: the API opens its store
-  keys and answers them on its CRUD route (#5298).
-- Unset, the keys stay in plaintext as before, and the API (and the print worker) logs
+- Mount the file into the API only (and the agent, which shares it). The API reads the
+  keys from the database and opens them; a process without the key (or with another one)
+  cannot open a sealed key, logs `ignoring a stored secret this process cannot open` and
+  falls back to its own `SCADBUDDY_<FIELD>`. The render and print workers need no key and
+  must not mount it: they hold no settings store and read their settings, already opened,
+  from the API's CRUD routes (`GET …/crud/render/settings`, `GET …/crud/print/settings`,
+  #5298). Only the projects worker mounts it, for its flows' sealed payloads.
+- Unset, the keys stay in plaintext as before, and the API logs
   `SCADBUDDY_SECRET_KEY_FILE is not set` once at start. The live deployment does not
   mount it yet: #1900.
 - Keep a copy of the key. A key sealed under a lost one cannot be opened: enter it again
@@ -1891,20 +1911,23 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   entered again (`/healthz` then says it was sealed with a different key).
 - **Rotating the key** (spec §9, "re-wraps the data keys only"): create a new
   key file, mount it as `SCADBUDDY_SECRET_KEY_FILE`, mount the old one as
-  **`SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`**, and restart. Once migrations have
-  applied, every credential sealed under the old key has its data key
-  re-sealed under the new one (the secret itself is not decrypted into a
-  route or re-entered); the log says how many. Then remove the previous file
-  and restart again. A row the old key cannot open is left as it is and
-  counted in that log line.
+  **`SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`** on the API container as well as the
+  agent's containers, and restart them. At its start the API re-seals the data
+  key of every Claude credential and payload key sealed under the old key, and
+  the agent does the same for the rest of its secrets (the secret itself is not
+  decrypted into a route or re-entered); each log says how many. Then remove
+  the previous file from every container and restart again. A row the old key
+  cannot open is left as it is and counted in that log line. Which tables each
+  one re-wraps: `docs/ai/operating.md` §3.3.
 - `/healthz` reports `"ai": "enabled"` only when the database answers, its
-  `ai_*` migrations have applied (`agent/src/db/migrations/`, run at start
-  under an advisory lock with a lock timeout, retried on the next call), the
-  key is loaded and a Claude credential is saved. Otherwise `ai` names the
-  first missing piece; each database step is bounded (2 s), so a stuck lock
-  shows as `"unavailable (database timed out)"` instead of a hung probe. An
-  edited, already-applied migration stops the service at start with a message
-  naming it (each file's sha256 is recorded).
+  `ai_*` migrations have applied (`backend/scadbuddy/migrations_agent/`, which
+  the API applies at its start; the agent waits for them, #5299), the key is loaded and a Claude credential is
+  saved. Otherwise `ai` names the first missing piece; each database step is
+  bounded (2 s), so an API that has not migrated yet shows as
+  `"unavailable (waiting for the API to apply the database migrations)"`, and any
+  other stuck step as `"unavailable (database timed out)"`, instead of a hung probe. An edited,
+  already-applied migration stops the API at start, and the agent, with a
+  message naming it (each file's sha256 is recorded).
 - The Claude credentials (Anthropic API keys, Claude Code OAuth tokens from
   `claude setup-token`, or gateway base URLs plus tokens) are set in
   Settings → Assistant → **Claude credentials**, a list in the order the
@@ -2065,9 +2088,10 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   | Route | |
   |---|---|
   | `GET /api/v1/ai/status` | unguarded, like `/healthz`: `{available, state, ai, reason?}`, what the UI's gate reads |
-  | `GET /api/v1/ai/chat` (WebSocket) | the assistant panel's protocol (`frontend/src/agent/chat/protocol.ts`) both ways: start or continue a chat, attach (replay then follow), approve or deny, interrupt, take over |
-  | `GET/POST /api/v1/ai/sessions`, `GET …/{id}` | list, start (`{prompt?, title?}`; `429` past 10 new sessions a minute per owner, counted with the socket's), one |
-  | `POST …/{id}/messages`, `…/interrupt`, `…/handoff` | send a turn (`{text}`; `409` while one runs), stop it, take the session over |
+  | `GET /api/v1/ai/chat` (WebSocket) | the assistant panel's protocol (`frontend/src/agent/chat/protocol.ts`) both ways: start or continue a chat, attach (replay then follow), approve or deny, interrupt, take over, remove or edit a queued message (#6386) |
+  | `GET/POST /api/v1/ai/sessions`, `GET …/{id}` | list, start (`{prompt?, title?}`; `429` past 10 new sessions a minute per owner, counted with the socket's), one (with its `queue`) |
+  | `POST …/{id}/messages`, `…/interrupt`, `…/handoff` | send a turn (`{text}`; while one runs it is queued to run after it, `{turn_id, queued, position}`, and `409 queue_full` past 20 queued messages, #6386), stop the running turn (the queue stays), take the session over |
+  | `GET …/{id}/queue`, `DELETE`/`PATCH …/{id}/queue/{turn_id}` | the messages queued to run after the turn (`{version, queue}`); remove one, or give it new words (`{text}`), before it starts. Owner-only (`403`); `409 not_queued` once it started or went (#6386) |
   | `GET …/{id}/events` | Server-Sent Events: the session's panel events from `Last-Event-ID` (a reconnect) or else `?after=`, then live |
   | `PATCH …/{id}` | `{title?, done?: true}` → `{session}`: rename a session or mark it done (#795). Owner-only (`403`); done is refused while a turn runs and on a durable session (`409`) |
   | `POST …/{id}/fork` | `{title?, up_to?}` → `201 {session}`: a new session with the transcript so far, or through the reply `up_to` names (an `assistant.text.done` event's `messageId`, #793), and a budget of its own (the panel's Fork, "Fork from here" and "Continue in a new chat", #790); counted like a start (`429`); `409` before the session has a transcript; audited. Through the `sessions_fork` tool, the fork instead spends from the parent's budget: the parent and all its forks share one budget, and a spent one's fork is refused (`409`, #823) |
@@ -2329,6 +2353,93 @@ holds the manifests (until that PR merges, the deploy below skips the file with 
   (`MANIFEST_STOREFRONT`) like the other workers: one digest-pinned `image:` line and the
   three `scadbuddy.eh-homelab.io/{version,revision,source}` annotations, which the
   manifest must carry or the deploy fails.
+
+### Intake worker (#6133)
+
+A customer's own model files are checked by their own Deployment, `scadbuddy-intake`, from
+the same image: `python -m scadbuddy.intake_worker` polls the Temporal queue
+`customer-files` (`SCADBUDDY_TEMPORAL_TASK_QUEUE_CUSTOMER_FILES`, which the API names too)
+and answers `/healthz` on port 9090. The design is spec
+`docs/superpowers/specs/2026-11-13-storefront-customer-models-design.md` §7; eh-homelab/clusters
+holds the manifest (spec §12).
+
+- **No database and no key.** It refuses to start when `SCADBUDDY_DATABASE_URL`,
+  `PGPASSWORD`, `PGPASSFILE` or `SCADBUDDY_SECRET_KEY_FILE` is set
+  (`intake_worker/settings.py` `FORBIDDEN_ENV`, #5295): it parses untrusted files. It is an
+  HTTP client of the CRUD port (`SCADBUDDY_API_INTERNAL_URL=http://scadbuddy:8082`) with a
+  projected ServiceAccount token of `scadbuddy-intake` (audience `scadbuddy`) named by
+  `SCADBUDDY_SERVICE_TOKEN_FILE`, and reaches the bucket only through the URLs the API
+  presigns. It holds no store credential.
+- **Environment:** `SCADBUDDY_TEMPORAL_ADDRESS`, `SCADBUDDY_TEMPORAL_NAMESPACE`,
+  `SCADBUDDY_INTAKE_WORK_DIR` (a writable volume for downloads, since the root file system
+  is read-only; default `/tmp`) and `SCADBUDDY_LOG_LEVEL`. A pod checks one file at a time,
+  fixed (spec §7, the isolation rule): scale with the Deployment's replicas.
+- **Two Deployments (spec §7, "The child's sandbox").** The worker never parses a file. It
+  runs with `SCADBUDDY_INTAKE_SANDBOX=true` and `SCADBUDDY_INTAKE_SANDBOX_URL` (a plain
+  `http://` URL of the sandbox's Service, e.g. `http://scadbuddy-intake-sandbox:8090`; any
+  other scheme, a user, a path or a query is refused). `SCADBUDDY_INTAKE_SANDBOX` is
+  required: the worker refuses to start without it, and only the dev-only value
+  `unsafe-local` starts the child in the worker's own container. A second Deployment,
+  `scadbuddy-intake-sandbox`, runs `python -m scadbuddy.intake_worker.sandbox`, which runs
+  each check's child. The worker sends it each file over HTTP (`POST /check` on
+  `SCADBUDDY_INTAKE_SANDBOX_PORT`, default 8090; `GET /healthz` there for its probes; the
+  wire format is `intake_worker/runner.py`'s docstring). The two pods share no network
+  namespace, no volume and no ServiceAccount token.
+- **The RPC token.** Each `POST /check` carries `Authorization: Bearer <token>`; without
+  the right one the sandbox answers 401 before it reads the body. Create a Secret
+  `scadbuddy-intake-sandbox-rpc` holding one random token of at least 32 bytes of visible
+  ASCII (e.g. `openssl rand -hex 32`), mount it in the worker's and the sandbox's pods only,
+  outside `/var/run/secrets/` (e.g. at `/etc/scadbuddy-intake-rpc/token`), and set
+  `SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE` to that file in both. Both refuse to start without
+  the file, with an empty file or with a shorter token. The token authorizes calls to the
+  sandbox and nothing else, so it is the one secret the sandbox may hold, and each check's
+  parser sees an empty tmpfs over the token's directory. A request's head
+  and whole body must arrive within 60 s (`REQUEST_DEADLINE`), or the sandbox drops it.
+- **The sandbox's environment** is `SCADBUDDY_INTAKE_WORK_DIR` (its own `emptyDir`, where
+  each check gets a box that is removed after it), `SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE`,
+  `SCADBUDDY_INTAKE_SANDBOX_PORT` and `SCADBUDDY_LOG_LEVEL`, nothing else: it refuses to
+  start with `SCADBUDDY_SERVICE_TOKEN_FILE`, `SCADBUDDY_SERVICE_BOOTSTRAP_FILE` or any of
+  `FORBIDDEN_ENV` set, and (exit 2) with any file under `/var/run/secrets/`, so its pod
+  must set `automountServiceAccountToken: false` and mount no secret there. The worker
+  reads every answer as untrusted. The sandbox runs one check at a time and answers a
+  second request 503 (the worker tries again for up to 60 s). Give it at least as many
+  replicas as the worker: the Service sends each call to a random sandbox pod, so with
+  fewer sandboxes a check can spend its whole 60 s on busy pods and lose one of its three
+  attempts.
+- **Memory:** each check runs in a child process capped at 4 GiB of address space and 5
+  minutes, so size the sandbox's memory limit for one such child and its work volume for
+  one 256 MiB upload; size the worker's work volume for one 256 MiB download.
+- **The sandbox fails closed.** It starts each parse through `confine.py --strict` (its own
+  user, network, mount and PID namespaces, no `/proc`, no capabilities, no new privileges,
+  a seccomp filter) and exits 3 at start, logging why, when any step is refused. A container
+  runtime's default seccomp profile refuses `unshare(CLONE_NEWUSER)`, so the sandbox's pod
+  runs with the seccomp profile `Unconfined`
+  ([Kubernetes: seccomp](https://kubernetes.io/docs/tutorials/security/seccomp/)), its pod
+  only. On a node with `kernel.apparmor_restrict_unprivileged_userns=1` (Ubuntu 24.04's
+  default) an AppArmor-unconfined pod gets no capabilities in its user namespace, and the
+  sandbox exits 3 ("the user namespace's id maps: Permission denied"). So the pod runs under
+  a `Localhost` AppArmor profile, `scadbuddy-intake-sandbox` (`unconfined` plus `userns,`),
+  that the nodes must have loaded ([AppArmor: unprivileged user namespace restrictions](https://gitlab.com/apparmor/apparmor/-/wikis/unprivileged_userns_restriction);
+  in prod, eh-homelab/clusters `applications/scadbuddy/apparmor-loader.yaml`). The worker's
+  pod keeps `RuntimeDefault`. While the sandbox is down, busy or refusing, each check fails and
+  the worker counts it in `scadbuddy_intake_sandbox_failed_total` by `reason`
+  (`unauthorized`, `busy`, `unreachable`, `timeout`, `transport`, `check-timeout`,
+  `crashed`, `status`, `bad-answer`; `/metrics` on port 9090). Alert on it and on the
+  sandbox's restarts.
+- **Pods:** `runAsNonRoot` and `readOnlyRootFilesystem` in both, and no ServiceAccount token
+  automount in either. The only ServiceAccount token is the projected one the worker's
+  proof needs, in the worker's pod. No `fsGroup` is needed: no volume is shared.
+- **Network
+  ([NetworkPolicy](https://kubernetes.io/docs/concepts/services-networking/network-policies/)):**
+  the worker's egress allows DNS, the API's 8082, Temporal, the bucket host and the
+  sandbox's 8090 only; only the worker is on the Temporal frontend's allowlist. The
+  sandbox's ingress admits the worker's pods on 8090 only, and its egress allows nothing.
+  The policies ship in the eh-homelab/clusters PR, with a check that fails without the
+  sandbox's.
+- **Deploy:** `deploy.reusable.yml` pins `applications/scadbuddy/scadbuddy-intake.yaml`
+  (`MANIFEST_INTAKE`) like the other workers, once that file is in clusters. The sandbox's
+  Deployment has no image line of its own: clusters copies the worker's with a kustomize
+  replacement, so one pin moves both.
 
 ### Switching continuous deploy off
 

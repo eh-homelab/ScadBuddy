@@ -348,7 +348,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`the chat so
     panel.close()
   }, 60_000)
 
-  it('refuses the socket from another origin, and a send while a turn runs', async () => {
+  it('refuses the socket from another origin, and queues a send while a turn runs (#6386)', async () => {
     script = () => ({ hang: true })
     const m = await sessions()
     agent = await startLiveAgent(m)
@@ -361,8 +361,12 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`the chat so
     const running = await panel.until((f) => f.type === 'session.status' && f.status === 'running')
     const sessionId = running.find(is('session.started'))!.sessionId as string
     panel.send(clientMessage({ type: 'user.message', sessionId, text: 'second', context: { route: '/' } }))
-    const busy = await panel.until(is('error'))
-    expect(busy.at(-1)).toMatchObject({ sessionId, code: 'busy' })
+    const queued = await panel.until((f) => f.type === 'session.queue' && (f.queue as unknown[]).length === 1)
+    const entry = (queued.at(-1)!.queue as { id: string; text: string }[])[0]!
+    expect(entry.text).toContain('second')
+    // Removed before it starts, so the Stop below leaves the session idle.
+    panel.send(clientMessage({ type: 'queue.remove', sessionId, id: entry.id }))
+    await panel.until((f) => f.type === 'session.queue' && (f.queue as unknown[]).length === 0)
     // Malformed frames are answered, and the socket stays usable.
     panel.send({ v: 1, type: 'nonsense' })
     const mark = panel.frames.length
