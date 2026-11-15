@@ -1510,7 +1510,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   overstates the unit cost: `ArchiveFacts` carries no count of the units a plate held)
   (no sliced file; printing it re-slices, as a manual quote). A library file item with no
   slots gets the slots the print used (`archive_colours`). Job cost reads an `archive`
-  quote's plates as a slice quote's (`models.py` `MEASURED_SOURCES`). Agent
+  quote's plates as a slice quote's, and a `storefront` quote's too (`models.py`
+  `MEASURED_SOURCES`). Agent
   `order_item_add`'s `archive_id`, `order_item_quote`'s `archive`; frontend
   `components/orders/PastPrintsPicker.tsx` ("Past prints" in `AddItemDialog`, over
   `GET /farm/archives`; status and name filter the listed page), `ArchiveQuote.tsx` ("Quote
@@ -1646,13 +1647,16 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `total_minor`, else `by_hand` and no number) and `pay_now` (every item firm). The
   submit prices each line again (`reprice`: a fresh key from the kept variant, no price
   when the listing is gone, unpublished or at another slug or commit, or a slot
-  filament is gone or archived). A price that changed, or one where there was none, is
-  written and refused 409 `prices_changed` (with `items`); a price that is gone is
-  written and the line goes to the shop's check. `Lifecycle.submit_order(firm=...)`
-  records a `storefront` quote (`QuoteSource`, no sliced file, so a print slices again)
-  of each firm line before the deposit policy; when every open item has one it accepts
-  them and the order as the customer (`_accepted_by_the_last`), and the answer's
-  `pay_now` is true. The submit runs under `Payments.run_closing_linked`, so the balance
+  filament is gone or archived). A price that changed, came or went is written and
+  refused 409 `prices_changed`, with `items` of `{id, price}` (`firm` or `by_hand`), so
+  the customer sees a price that went before the shop prices the line; the next submit
+  sends it to the shop's check. `Lifecycle.submit_order(firm=...)` records a `storefront`
+  quote (`QuoteSource`, no sliced file, so a print slices again) of each firm line, with
+  the slice's plates (`storefront_slice_prices.plates`, else one plate of the row's
+  `print_seconds` and `grams`, else none, so job cost reads unknown, never zero). When
+  every open item has one it skips the deposit policy, accepts the items and the order
+  as the customer (`_accepted_by_the_last`), and the answer's `pay_now` is true; else
+  the deposit policy runs as before. The submit runs under `Payments.run_closing_linked`, so the balance
   request's page is linked and the deposit request it replaced is closed. A storefront
   customer's last accept now always opens the balance request (`_accept_order(balance=True)`,
   decision 11), deposit or not. The order page shows a `storefront` quote with no design

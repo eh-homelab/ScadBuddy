@@ -11,6 +11,7 @@ and the profile are `test_storefront_renders.py`'s fakes."""
 from __future__ import annotations
 
 import uuid
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -116,6 +117,11 @@ def test_a_firm_only_cart_pays_the_firm_total_with_no_shop_check(
     listing: dict[str, Any],
     sliced: type[FakeSlicer],
 ) -> None:
+    """The customer pays the firm total at once: no deposit is asked, so no deposit
+    request is left, open or cancelled, though the policy would ask one."""
+    policy = [{"criterion": "first_order", "amount_minor": 400}]
+    r = crud.api.put("/api/v1/settings", json={"orders_deposit_policy": policy})
+    assert r.status_code == 200, r.text
     draft, price = firm_line(crud, listing, 40)
     [item] = draft["items"]
     assert (item["price"], item["unit_price_minor"], item["total_minor"]) == ("firm", price, price)
@@ -129,6 +135,8 @@ def test_a_firm_only_cart_pays_the_firm_total_with_no_shop_check(
     assert status_of(crud, order_id) == "accepted"
     assert quotes(crud, order_id) == [(item["id"], "storefront", price, True)]
     assert requests(crud, order_id) == [("balance", price, "open")]
+    [order] = rows(crud, "SELECT deposit_minor FROM orders WHERE id = %s", order_id)
+    assert order["deposit_minor"] is None
 
 
 def test_a_mixed_cart_goes_to_the_shops_check_and_charges_nothing_yet(
@@ -204,7 +212,7 @@ def test_a_price_that_changed_is_told_before_the_customer_pays(
     r = submit(crud, draft)
     assert r.status_code == 409, r.text
     assert r.json()["type"] == STOREFRONT_PROBLEMS + "prices_changed"
-    assert r.json()["items"] == [draft["items"][0]["id"]]
+    assert r.json()["items"] == [{"id": draft["items"][0]["id"], "price": "firm"}]
     shown = crud.get("/draft").json()
     assert shown["items"][0]["unit_price_minor"] == after
     r = submit(crud, shown)
@@ -219,16 +227,71 @@ def test_a_stale_key_with_no_new_price_goes_to_the_shops_check(
     sliced: type[FakeSlicer],
 ) -> None:
     """The book changed after the add and the new key has no ``done`` row: the line has
-    no firm price, and the order goes to the shop's check, with nothing to tell."""
+    no firm price now. The customer saw one, so the first submit tells them; the next goes
+    to the shop's check."""
     draft, _ = firm_line(crud, listing, 44)
     set_setup_fee(crud, "3.25")
     r = submit(crud, draft)
+    assert r.status_code == 409, r.text
+    assert r.json()["type"] == STOREFRONT_PROBLEMS + "prices_changed"
+    assert r.json()["items"] == [{"id": draft["items"][0]["id"], "price": "by_hand"}]
+    shown = crud.get("/draft").json()
+    assert shown["items"][0]["price"] == "by_hand" and shown["pay_now"] is False
+    r = submit(crud, shown)
     assert r.status_code == 200, r.text
     assert r.json()["pay_now"] is False
     order_id = r.json()["id"]
     assert status_of(crud, order_id) == "draft"
     assert quotes(crud, order_id) == []
     assert requests(crud, order_id) == []
+
+
+def costs_of(crud: CrudCaller, order_id: str) -> dict[str, Any]:
+    r = crud.api.get(f"/api/v1/orders/{order_id}/costs")
+    assert r.status_code == 200, r.text
+    [item] = r.json()["items"]
+    return {k: item[k] for k in ("quoted_seconds", "quoted_grams", "quoted_filament_minor")}
+
+
+def test_job_cost_reads_the_slice_facts_of_a_cached_price(
+    crud: CrudCaller,
+    listing: dict[str, Any],
+    sliced: type[FakeSlicer],
+) -> None:
+    """scadsy's job cost (#6153 PR B): a `storefront` quote carries the slice's grams,
+    seconds and filament cost, as the slice row has them."""
+    draft, _ = firm_line(crud, listing, 46)
+    [row] = rows(
+        crud,
+        "SELECT print_seconds, grams, lines FROM storefront_slice_prices WHERE status = 'done'",
+    )
+    r = submit(crud, draft)
+    assert r.status_code == 200, r.text
+    filament = sum(line["amount_minor"] for line in row["lines"] if line["kind"] == "filament")
+    assert costs_of(crud, r.json()["id"]) == {
+        "quoted_seconds": row["print_seconds"],
+        "quoted_grams": float(sum(Decimal(g) for g in row["grams"].values())),
+        "quoted_filament_minor": filament,
+    }
+
+
+def test_job_cost_reads_a_missing_slice_fact_as_unknown(
+    crud: CrudCaller,
+    listing: dict[str, Any],
+    sliced: type[FakeSlicer],
+) -> None:
+    """A slice row with no plates and no seconds (one written before it kept them) gives
+    a quote with no plates: job cost reads its figures as unknown, never as zero."""
+    draft, _ = firm_line(crud, listing, 47)
+    with _state(crud.api).projection.pool.connection() as conn:
+        conn.execute("UPDATE storefront_slice_prices SET plates = NULL, print_seconds = NULL")
+    r = submit(crud, draft)
+    assert r.status_code == 200, r.text
+    assert costs_of(crud, r.json()["id"]) == {
+        "quoted_seconds": None,
+        "quoted_grams": None,
+        "quoted_filament_minor": None,
+    }
 
 
 def test_a_line_whose_design_moved_has_no_firm_price(
@@ -241,6 +304,9 @@ def test_a_line_whose_design_moved_has_no_firm_price(
         conn.execute(
             "UPDATE storefront_listings SET commit = %s WHERE id = %s", ("f" * 40, listing["id"])
         )
+    r = submit(crud, draft)
+    assert r.status_code == 409, r.text
+    assert r.json()["items"] == [{"id": draft["items"][0]["id"], "price": "by_hand"}]
     r = submit(crud, draft)
     assert r.status_code == 200, r.text
     assert r.json()["pay_now"] is False

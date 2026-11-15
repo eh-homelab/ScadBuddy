@@ -74,7 +74,7 @@ ChargeKind = Literal["shipping", "discount", "fee", "tax", "purchase", "handling
 #: price, with no sliced file kept.
 QuoteSource = Literal["slice", "manual", "archive", "storefront"]
 #: The sources whose plates hold measured grams and seconds, which job cost prices by.
-MEASURED_SOURCES: frozenset[str] = frozenset({"slice", "archive"})
+MEASURED_SOURCES: frozenset[str] = frozenset({"slice", "archive", "storefront"})
 #: What an item is (#4954): a ``model`` names a template render (its ``reference``); a
 #: ``custom`` item is a title, a quantity and a typed price with nothing behind it; a
 #: ``library_file`` item (#5544) names a file of the library (its ``library_file``).

@@ -13,7 +13,8 @@ shows no number, and the shop prices that line by hand.
 A line keeps, in ``storefront_item_prices`` (:class:`LinePrices`), what its key was made
 from when it was added: the listing, the 3MF's sha256 and the filament of each slot. The
 render job is pruned after a day, and a cart lives for weeks. It keeps the price the
-visitor saw too, so the checkout can tell a price that changed (`Repriced.told`).
+visitor saw too, so the checkout tells the customer of a price that changed, came or went
+(`Repriced.told`).
 """
 
 from __future__ import annotations
@@ -21,12 +22,14 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Final
+from decimal import Decimal
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 from pydantic import BaseModel
 
 from scadbuddy.orders.lifecycle import FirmLine
 from scadbuddy.orders.models import Filament, OrderItem, Reference
+from scadbuddy.orders.pricing import Plate, PlateFilament
 from scadbuddy.orders.storefront.limits import RenderLimits
 from scadbuddy.orders.storefront.renders import fetch_files, variant_of
 from scadbuddy.orders.storefront.slice_price import PriceRow, firm_price
@@ -188,15 +191,22 @@ async def price_of(state: AppState, reference: Reference, variant: Variant) -> P
     )
 
 
+class ChangedLine(BaseModel):
+    """A line in a 409 ``prices_changed``: its item id and its price's state now."""
+
+    id: str
+    price: Literal["firm", "by_hand"]
+
+
 @dataclass
 class Repriced:
     """What the checkout found (`reprice`): each line's firm price by item id, and the
-    lines whose price the visitor has not seen (`told`): a price that changed, or a
-    line that had none and has one now. A line that had a price and has none now is not
-    told: it goes to the shop's check."""
+    lines whose price is not the one the visitor saw (`told`), each with its state now:
+    a price that changed or came is ``firm``, a price that went is ``by_hand`` (the shop
+    prices the line). The customer sees the change before anything is paid."""
 
     firm: dict[str, FirmLine] = field(default_factory=dict)
-    told: list[str] = field(default_factory=list)
+    told: list[ChangedLine] = field(default_factory=list)
 
 
 async def reprice(state: AppState, items: Sequence[OrderItem]) -> Repriced:
@@ -216,17 +226,38 @@ async def reprice(state: AppState, items: Sequence[OrderItem]) -> Repriced:
         now = await price_of(state, item.reference, line.variant)
         if _shown(now) != (line.price_key, line.unit_price_minor, line.currency):
             await asyncio.to_thread(prices.set_price, item.id, now)
+        shown = _shown(now)[1:]
+        if shown != (line.unit_price_minor, line.currency):
+            found.told.append(ChangedLine(id=item.id, price="by_hand" if now is None else "firm"))
         if now is None:
             continue
         assert now.currency is not None and now.unit_price_minor is not None
         assert now.unit_cost_minor is not None
-        if line.unit_price_minor != now.unit_price_minor or line.currency != now.currency:
-            found.told.append(item.id)
         found.firm[item.id] = FirmLine(
             lines=tuple(now.lines or ()),
             unit_cost_minor=now.unit_cost_minor,
             unit_price_minor=now.unit_price_minor,
             currency=now.currency,
             printer=now.printer,
+            plates=_plates(now),
         )
     return found
+
+
+def _plates(row: PriceRow) -> tuple[dict[str, Any], ...]:
+    """The plates a storefront quote carries for job cost (#6153): the row's own, else
+    one plate of its whole seconds and grams per slot (a row written before it kept
+    plates), else none when either is not known: job cost then reads them as unknown."""
+    if row.plates is not None:
+        return tuple(plate.model_dump(mode="json") for plate in row.plates)
+    if row.print_seconds is None or row.grams is None:
+        return ()
+    whole = Plate(
+        index=1,
+        print_seconds=row.print_seconds,
+        filaments=[
+            PlateFilament(slot=int(slot), used_g=Decimal(grams))
+            for slot, grams in sorted(row.grams.items(), key=lambda kv: int(kv[0]))
+        ],
+    )
+    return (whole.model_dump(mode="json"),)

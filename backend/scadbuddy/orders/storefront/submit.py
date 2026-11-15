@@ -141,9 +141,10 @@ async def submit_draft(
     """The visitor's cart ``body.draft_id`` submitted (`Lifecycle.submit_order`). A retry
     of a committed submit (the same key) answers its reply and does nothing else.
     Each listing line is priced again first (`line_prices.reprice`, #6153): a line whose
-    firm price changed, or that has one now and had none, is 409 ``prices_changed`` (with
-    ``items``), and the page shows the new prices before the customer sends it again; a
-    line whose price is gone goes to the shop's check. When every line is firm, the
+    firm price changed, came or went is 409 ``prices_changed`` (``items``: each line's
+    ``id`` and its ``price`` now, ``firm`` or ``by_hand``), and the page shows the cart
+    again before the customer sends it; a line with no price then goes to the shop's
+    check. When every line is firm, the
     order is accepted and its balance request opens (``pay_now``).
     Refusals: 404 ``draft_not_found``, 409 ``order_submitted``, 409 ``draft_empty``, 409
     ``shipping_address_required``, 409 ``model_file_refused`` (#6133), 409
@@ -173,7 +174,7 @@ async def submit_draft(
             status.HTTP_409_CONFLICT,
             PRICES_CHANGED,
             "Some prices changed. Check your order, then send it again.",
-            items=repriced.told,
+            items=[line.model_dump() for line in repriced.told],
         )
     entry = SubmitInput(
         **body.model_dump(exclude={"draft_id"}),

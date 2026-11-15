@@ -355,6 +355,9 @@ class FirmLine:
     unit_price_minor: Money
     currency: str
     printer: str | None = None
+    #: The slice's plates (`Plate` as JSON), which job cost reads; empty when the slice's
+    #: seconds or grams are not known, so they read as unknown, never as zero.
+    plates: tuple[dict[str, Any], ...] = ()
 
 
 class OrderEdit(BaseModel):
@@ -941,12 +944,14 @@ class Lifecycle:
            one that ships with no address), and records a `storefront` quote of each
            line ``firm`` prices (by item id, `_firm_quotes`, #6153), which
         4. recomputes the auto tax;
-        5. applies the deposit policy (`_deposit_policy`; a deposit request opened here
-           queues no `payment_requested` mail, since no link exists yet: the order link's
-           mail leads to the page that shows it). An anonymous submit's customer is new, so
-           a ``first_order`` rule always applies to it, even when the email has ordered
-           before; the shop can change the deposit before it accepts (§8). Step 2 gave the
-           cart the shop's currency, so no rule is skipped for its currency;
+        5. applies the deposit policy (`_deposit_policy`), unless every line is firm (the
+           customer then pays the whole total at once, step 6, #6153). A deposit request
+           opened here queues no `payment_requested` mail, since no link exists yet: the
+           order link's mail leads to the page that shows it. An anonymous submit's
+           customer is new, so a ``first_order`` rule always applies to it, even when
+           the email has ordered before; the shop can change the deposit before it
+           accepts (§8). Step 2 gave the cart the shop's currency, so no rule is
+           skipped for its currency;
         6. stamps ``submitted_at``; when every open item has a firm quote, accepts each
            quote and the order as the customer (`_accepted_by_the_last`), which opens the
            balance request: the customer pays the firm total with no check by the shop
@@ -1003,7 +1008,9 @@ class Lifecycle:
             self._event(tx, order, customer, "order.customer_set")
             order = self._shipping_option(tx, order, customer, option_id, rules)
             order, quoted = self._firm_quotes(tx, order, customer, firm or {})
-            self._deposit_policy(tx, order, customer, rules)
+            if quoted is None:
+                # An order the customer pays at once, in full, asks no deposit (#6153).
+                self._deposit_policy(tx, order, customer, rules)
             order = self.store.stamp_submitted(tx, order.id)
             self._event(tx, order, customer, "order.submitted", account_id=body.account_id)
             if quoted is not None:
@@ -1045,6 +1052,7 @@ class Lifecycle:
                 created_by=by,
                 revision_id=item.current_revision_id,
                 printer=line.printer,
+                plates=line.plates,
             )
             change = self._recorded(conn, order, item, quote, by)
             order = change.order

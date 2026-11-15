@@ -22,6 +22,11 @@ CREATE TABLE storefront_item_prices (
   CHECK ((price_key IS NULL) = (currency IS NULL))
 );
 
+-- Each plate a storefront variant's slice gave (`orders/pricing.py` `Plate`: its index,
+-- seconds and grams per slot), so a checkout's quote carries the slice's facts for job
+-- cost. NULL on a row written before: the quote then sums `print_seconds` and `grams`.
+ALTER TABLE storefront_slice_prices ADD COLUMN plates jsonb;
+
 -- A quote from the storefront's slice price: the line's firm price at checkout. It names
 -- no sliced file (the storefront's slice keeps none), so a print slices again.
 ALTER TABLE order_item_quotes DROP CONSTRAINT order_item_quotes_source_check;

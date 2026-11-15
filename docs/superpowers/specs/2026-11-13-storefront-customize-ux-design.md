@@ -240,11 +240,13 @@ Design:
   what the key was made from in `storefront_item_prices`, with the price it showed.
   The cart shows each line's firm price, or "The shop prices this by hand" and no
   number. At checkout each line is priced again by a fresh key. A price that changed,
-  or a line that has a price now and had none, is 409 `prices_changed`: the page loads
-  the cart again and shows the new prices before the customer pays. A line whose key
-  has no `done` row now (a book or rate change with no new slice, or a listing that
-  moved to another design) has no firm price. When every line is firm, the submit
-  records a `storefront` quote of each line, accepts them and the order as the
+  came or went is 409 `prices_changed`: the page loads the cart again and shows the new
+  prices before the customer pays. A line whose key has no `done` row now (a book or
+  rate change with no new slice, or a listing that moved to another design) has no firm
+  price: the cart then says the shop prices it, and the next submit goes to the shop's
+  check. When every line is firm, the submit asks no deposit, records a `storefront`
+  quote of each line (with the slice's seconds and grams for job cost; a fact the slice
+  row does not have is unknown, never zero), accepts them and the order as the
   customer, and opens the balance request: the customer pays the firm total with no
   check by the shop (`pay_now`). Otherwise the firm lines get their quotes, unaccepted,
   and the order waits for the shop's check. The shop prices the other lines, the

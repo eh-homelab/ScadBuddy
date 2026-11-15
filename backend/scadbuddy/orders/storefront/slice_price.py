@@ -60,6 +60,7 @@ from scadbuddy.orders.models import (
     QuoteLine,
     Reference,
 )
+from scadbuddy.orders.pricing import Plate
 from scadbuddy.orders.quote import (
     FOLLOW_EVERY,
     PolicySource,
@@ -152,6 +153,8 @@ class PriceRow(BaseModel):
     print_seconds: int | None = None
     #: Grams per slot (from 0), as decimal strings.
     grams: dict[str, str] | None = None
+    #: Each plate the slice gave (#6153 PR B); None on a row written before.
+    plates: list[Plate] | None = None
     printer: str | None = None
     failure: str | None = None
     started_at: datetime
@@ -173,7 +176,7 @@ class Claim:
 _COLUMNS: Final = (
     "price_key, model_sha256, status, attempt, claim_key, operation_key, currency,"
     " unit_price_minor,"
-    " total_minor, unit_cost_minor, lines, print_seconds, grams, printer, failure,"
+    " total_minor, unit_cost_minor, lines, print_seconds, grams, plates, printer, failure,"
     " started_at, finished_at"
 )
 
@@ -302,13 +305,14 @@ class SlicePrices:
             found = conn.execute(
                 "INSERT INTO storefront_slice_prices (price_key, model_sha256, status,"
                 " currency, unit_price_minor, total_minor, unit_cost_minor, lines,"
-                " print_seconds, grams, printer, finished_at)"
-                " VALUES (%s, %s, 'done', %s, %s, %s, %s, %s, %s, %s, %s, clock_timestamp())"
+                " print_seconds, grams, plates, printer, finished_at)"
+                " VALUES (%s, %s, 'done', %s, %s, %s, %s, %s, %s, %s, %s, %s, clock_timestamp())"
                 " ON CONFLICT (price_key) DO UPDATE SET status = 'done',"
                 " currency = EXCLUDED.currency, unit_price_minor = EXCLUDED.unit_price_minor,"
                 " total_minor = EXCLUDED.total_minor,"
                 " unit_cost_minor = EXCLUDED.unit_cost_minor, lines = EXCLUDED.lines,"
                 " print_seconds = EXCLUDED.print_seconds, grams = EXCLUDED.grams,"
+                " plates = EXCLUDED.plates,"
                 " printer = EXCLUDED.printer, failure = NULL,"
                 " finished_at = EXCLUDED.finished_at"
                 f" RETURNING {_COLUMNS}",
@@ -322,6 +326,7 @@ class SlicePrices:
                     Jsonb([line.model_dump(mode="json") for line in priced.lines]),
                     sum(plate.print_seconds for plate in sliced.plates),
                     Jsonb({str(slot): format(used, "f") for slot, used in sorted(grams.items())}),
+                    Jsonb([plate.model_dump(mode="json") for plate in sliced.plates]),
                     None if sliced.rate is None else sliced.rate.printer,
                 ),
             ).fetchone()

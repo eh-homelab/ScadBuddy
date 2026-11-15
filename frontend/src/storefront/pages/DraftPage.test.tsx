@@ -247,6 +247,39 @@ describe('Submitting the order', () => {
     expect(screen.queryByText(/We have your order/)).toBeNull()
   })
 
+  it('shows that the shop prices a line whose price went before the send (#6153)', async () => {
+    let reads = 0
+    const gone: Draft = {
+      ...FIRM,
+      shipping_options: [],
+      items: [{ ...FIRM.items[0]!, price: 'by_hand', unit_price_minor: null, total_minor: null }, FIRM.items[1]!],
+      pay_now: false,
+    }
+    server.use(
+      http.get('/api/store/v1/draft', () => HttpResponse.json(reads++ === 0 ? { ...FIRM, shipping_options: [] } : gone)),
+      http.post('/api/store/v1/draft/submit', () =>
+        HttpResponse.json(
+          {
+            type: 'https://scadbuddy.dev/problems/storefront/prices_changed',
+            title: 'Conflict',
+            status: 409,
+            detail: 'Some prices changed. Check your order, then send it again.',
+            items: [{ id: 'i2', price: 'by_hand' }],
+          },
+          { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const { user } = renderPage(<DraftPage />)
+    await user.type(await screen.findByLabelText('Your name'), 'Ada')
+    await user.type(screen.getByLabelText('Email'), 'ada@example.com')
+    await user.click(screen.getByRole('button', { name: 'Send my order' }))
+    expect(await screen.findByText('Some prices changed. Check your order, then send it again.')).toBeInTheDocument()
+    const keychain = (await screen.findByText('Name keychain')).closest('li')!
+    expect(await within(keychain).findByText('The shop prices this by hand')).toBeInTheDocument()
+    expect(screen.getByRole('note')).toHaveTextContent('The shop prices the other designs by hand')
+  })
+
   it('sends a country typed in lower case as the two capital letters the server takes', async () => {
     let body: { address?: { country?: string } } | null = null
     server.use(
