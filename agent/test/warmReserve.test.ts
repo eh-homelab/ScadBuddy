@@ -402,17 +402,22 @@ describe('WarmSessions.reserve and release', () => {
 // already in use", exit 1): one cut off before any of its appends landed leaves one (#6387).
 describe('a new start under the session`s own id (#6387)', () => {
   /** Each setup's warm cache and directories: closed and removed after the test, passed or not. */
-  const made: { warm: WarmSessions; dirs: string[] }[] = []
+  const caches: WarmSessions[] = []
+  /** Kept as each is made, so a setup that throws half way still leaves none behind. */
+  const dirs: string[] = []
   afterEach(async () => {
-    for (const { warm, dirs } of made.splice(0)) {
-      await warm.close()
-      await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true })))
-    }
+    for (const warm of caches.splice(0)) await warm.close()
+    await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })))
   })
+  const tempDir = async (prefix: string) => {
+    const dir = await mkdtemp(path.join(tmpdir(), prefix))
+    dirs.push(dir)
+    return dir
+  }
 
   async function setup(found: boolean) {
-    const stateDir = await mkdtemp(path.join(tmpdir(), 'moved-warm-'))
-    const cwd = await mkdtemp(path.join(tmpdir(), 'moved-cwd-'))
+    const stateDir = await tempDir('moved-warm-')
+    const cwd = await tempDir('moved-cwd-')
     const log = vi.fn()
     const started: HarnessRun[] = []
     // `found`: whether the table holds a transcript to resume (transcriptExists).
@@ -428,7 +433,7 @@ describe('a new start under the session`s own id (#6387)', () => {
         return process()
       },
     })
-    made.push({ warm, dirs: [stateDir, cwd] })
+    caches.push(warm)
     const id = randomUUID()
     const stale = path.join(claudeConfigDir({ stateDir }), 'projects', projectDirName(await realpath(cwd)), `${id}.jsonl`)
     const turn = assembly()
@@ -474,6 +479,8 @@ describe('a new start under the session`s own id (#6387)', () => {
     await s.warm.acquire(s.id, s.turn, credential, 1)
     expect(s.started[0]?.sessionId).toBe(s.id)
     expect(s.lines('could not be removed')).toBe(1)
+    // Never removed recursively: what is there stays.
+    expect(await exists(path.join(s.stale, 'inside'))).toBe(true)
     expect(s.lines('removed an earlier process')).toBe(0)
   })
 })
