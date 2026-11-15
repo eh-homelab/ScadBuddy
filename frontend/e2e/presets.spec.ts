@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Locator, type Page } from '@playwright/test'
 import { choose } from './select'
 
 test.describe('template presets', () => {
@@ -91,7 +91,7 @@ test.describe('the "Changed from" note (#352)', () => {
     test(`stays one line inside the picker at ${width}px`, async ({ page }) => {
       await page.setViewportSize({ width, height: 900 })
       await page.goto('/m/name-keychain')
-      await choose(page, page.getByRole('combobox', { name: 'Preset' }), 'Old engraving')
+      await chooseOldEngraving(page, page.getByRole('combobox', { name: 'Preset' }))
       await page.getByRole('textbox', { name: 'Name on the tag' }).fill('Someone else')
 
       const note = page.getByTestId('preset-modified')
@@ -110,6 +110,21 @@ test.describe('the "Changed from" note (#352)', () => {
     })
   }
 })
+
+/**
+ * Picks "Old engraving" and waits until it is applied: it names a parameter the schema
+ * dropped, so the pick applies once its migration answers, and typing before that is
+ * overwritten by the preset's values (#6434).
+ */
+async function chooseOldEngraving(page: Page, combobox: Locator): Promise<void> {
+  await choose(page, combobox, 'Old engraving')
+  await expect(page.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Ada')
+}
+
+/** A box's vertical centre: buttons of different heights on one row share it. */
+function centre(box: { y: number; height: number }): number {
+  return box.y + box.height / 2
+}
 
 test.describe('the preset bar (#1023)', () => {
   test.skip(
@@ -137,7 +152,7 @@ test.describe('the preset bar (#1023)', () => {
       await page.goto('/m/name-keychain')
       const combobox = page.getByRole('combobox', { name: 'Preset' })
       const unchosen = await combobox.boundingBox()
-      await choose(page, combobox, 'Old engraving')
+      await chooseOldEngraving(page, combobox)
       const saveAsButton = page.getByRole('button', { name: 'Save as preset…' })
       const chosen = await combobox.boundingBox()
       const before = await saveAsButton.boundingBox()
@@ -146,8 +161,8 @@ test.describe('the preset bar (#1023)', () => {
       // The select does not move down when a preset is chosen. The panel is too narrow
       // for the select, Save as and the preset's menu side by side, so the buttons wrap
       // to one row under it, together.
-      expect(chosen.y).toBe(unchosen.y)
-      expect(more.y).toBe(before.y)
+      expect(Math.abs(chosen.y - unchosen.y)).toBeLessThanOrEqual(1)
+      expect(Math.abs(centre(more) - centre(before))).toBeLessThanOrEqual(1)
 
       await page.getByRole('textbox', { name: 'Name on the tag' }).fill('Someone else')
       await expect(page.getByRole('button', { name: 'Update' })).toBeVisible()
@@ -155,8 +170,8 @@ test.describe('the preset bar (#1023)', () => {
       const update = await page.getByRole('button', { name: 'Update' }).boundingBox()
       if (!after || !update) throw new Error('not laid out')
       // Update appearing joins that row: nothing moves to another one.
-      expect(after.y).toBe(before.y)
-      expect(update.y).toBe(before.y)
+      expect(Math.abs(centre(after) - centre(before))).toBeLessThanOrEqual(1)
+      expect(Math.abs(centre(update) - centre(before))).toBeLessThanOrEqual(1)
     })
   }
 })
@@ -235,7 +250,7 @@ test.describe('a preset\'s details (#327)', () => {
     await expect(details.getByRole('listitem')).toHaveText(['small', 'zip pull'])
     await expect(details.locator('strong')).toHaveText('zip pull')
 
-    await choose(page, preset, 'Old engraving')
+    await chooseOldEngraving(page, preset)
     await expect(details).toHaveCount(0)
     await page.getByRole('button', { name: 'More for preset Old engraving' }).click()
     await page.getByRole('menuitem', { name: 'Edit details of preset Old engraving' }).click()

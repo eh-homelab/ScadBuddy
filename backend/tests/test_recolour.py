@@ -113,3 +113,23 @@ def test_recolouring_copies_what_it_does_not_change_and_writes_nothing_to_disk(
     assert PROJECT_SETTINGS_NAME not in copied
     assert _colours(recoloured) == ["#00C000", "#FF9425"]
     assert not np.array_equal(_cover(recoloured), _cover(payload))
+
+
+def test_an_authors_unlit_cover_is_redrawn_too(tmp_path: Path) -> None:
+    """#6170: Bambu Studio saves ``plate_no_light_1.png`` beside ``plate_1.png``, and the
+    CLI keeps it as it keeps the others, so it is redrawn in the chosen colours too."""
+    payload = _written(tmp_path)
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        entries = [(info, archive.read(info)) for info in archive.infolist()]
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for info, data in entries:
+            archive.writestr(info, data)
+        archive.writestr("Metadata/plate_no_light_1.png", archive.read(PLATE_THUMBNAIL))
+
+    recoloured = recolour_3mf(buffer.getvalue(), ["#00C000", "#FF9425"])
+
+    with zipfile.ZipFile(io.BytesIO(recoloured)) as archive:
+        unlit = archive.read("Metadata/plate_no_light_1.png")
+        assert unlit == archive.read(PLATE_THUMBNAIL)
+    assert not np.array_equal(read_png(unlit), _cover(payload))

@@ -4,11 +4,12 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 // #5299: the agent reads these backend tables only through the backend's CRUD routes
-// (flows/backendReads.ts, events/eventLogReads.ts). The API takes back the grants of its role
+// (flows/backendReads.ts, events/eventLogReads.ts), and its gate's run grant check runs on the
+// API (gate/crudStore.ts, step 10). The API takes back the grants of its role
 // `scadbuddy_agent` on them at every start (backend auth/revoke.py `RETIRED_GRANTS`), but the
 // agent still connects as the database owner, so that revoke binds nothing until it loses its
 // database URL (#5299 step 12). Until then this test is the guard: no SQL of the agent names one.
-const RETIRED = ['events', 'workflow_runs', 'workflow_run_decisions']
+const RETIRED = ['events', 'workflow_runs', 'workflow_run_decisions', 'flow_grants', 'flow_grant_uses']
 const SRC = fileURLToPath(new URL('../src', import.meta.url))
 // `\s+` spans line breaks, so a table name on the line after its keyword is found too.
 const SQL_NAMING = new RegExp(String.raw`\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+(?:${RETIRED.join('|')})\b`, 'gi')
@@ -75,7 +76,8 @@ describe('the backend tables whose grants the API took back', () => {
     // Prose and comments name them too, and are not SQL.
     expect(naming('// reads FROM events through the routes\n/**\n * JOIN workflow_runs in a doc comment\n */')).toEqual([])
     expect(naming('the events log, read from the workflow_runs projection')).toEqual([])
-    expect(naming('SELECT 1 FROM events_archive JOIN flow_grants g ON true')).toEqual([])
+    expect(naming('SELECT 1 FROM events_archive JOIN flow_grants_old g ON true')).toEqual([])
+    expect(naming('SELECT 1 FROM flow_grants g JOIN flow_grant_uses u ON u.grant_id = g.id')).toHaveLength(2)
   })
 
   it('are named by no SQL in the agent', async () => {

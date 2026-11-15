@@ -4,7 +4,7 @@ import type { Sql } from 'postgres'
 // agent's. Its role created them, so it owns them, and only the owner can grant them. So
 // the agent grants, at every start once its schema is current, what the backend's roles
 // read and write of them; the backend grants the agent what it touches of the backend's
-// (`backend/scadbuddy/auth/caller_grants.py` `AGENT_GRANTS`). On one shared role (the
+// (`backend/scadbuddy/auth/caller_grants.py` `AGENT_GRANTS`, empty since #5299 step 10). On one shared role (the
 // deployment before it makes the roles, and production) there is nobody else to grant,
 // and nothing is done. Since #5299 D6 the API applies the agent's migrations, so a table a
 // later file makes is the API's role's: per-caller roles need the API and the agent on
@@ -33,7 +33,11 @@ type Grants = Readonly<Record<string, readonly string[]>>
  * session's images, read through its fork chain, a durable tool call's images, the staged
  * attachments and the saved http_request bodies (#5299 step 7, `api/crud_agent_blobs.py`: a
  * write sets an image's `created_at`, and a queued message's images are deleted, #6413; a
- * fenced write locks the session's row FOR SHARE). And a
+ * fenced write locks the session's row FOR SHARE). And the plugin stores (#5299 step 5, `api/crud_agent_access.py`,
+ * `api/crud_agent_plugins.py` and `api/crud_agent_packages.py`): the tool access, the tool
+ * listings, the upstream MCP sessions, the remote plugins and their sign-ins (sealed, opened
+ * and re-wrapped with the KEK) and the plugin packages. The leases of #5299 D3 are the API's
+ * own table (`agent_leases`, a backend migration), so they need no grant here. And a
  * session's background tasks, a Monitor's events, a Workflow's journal and child chats, and the
  * agent's command record with its activity row (#5299 step 8,
  * `api/crud_agent_tasks.py`; `ai_sessions` is read for a Workflow's open child chats). */
@@ -65,6 +69,13 @@ export const API_AI_GRANTS: Grants = {
   ai_session_tool_images: ['SELECT', 'INSERT', 'DELETE'],
   ai_attachments: ['SELECT', 'INSERT', 'DELETE'],
   ai_session_http_bodies: ['SELECT', 'INSERT', 'DELETE'],
+  ai_access: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  ai_tool_listings: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  ai_plugin_sessions: ['SELECT', 'INSERT', 'DELETE'],
+  ai_plugins: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  ai_plugin_oauth: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  ai_plugin_oauth_flows: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  ai_plugin_packages: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   ai_background_tasks: ['SELECT', 'INSERT', 'UPDATE'],
   ai_background_events: ['SELECT', 'INSERT', 'UPDATE'],
   ai_workflow_calls: ['SELECT', 'INSERT'],

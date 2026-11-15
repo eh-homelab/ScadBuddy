@@ -1,4 +1,5 @@
 import type { Sql, TransactionSql } from 'postgres'
+import { chunks, type CrudTarget, crudOf, qs, SOURCES_PER_CALL } from '../api/crudStores.js'
 import { type AuditContext, type AuditSink, SYSTEM_ACTOR } from '../audit/log.js'
 import { notifyWarmEvict } from '../sessions/warmEvict.js'
 import { type Access, itemKindIn } from './items.js'
@@ -137,21 +138,37 @@ async function runEdit(tx: TransactionSql, edit: Edit, by: string): Promise<void
 const toolsDetail = (edits: readonly Edit[]): string =>
   edits.map((e) => `${e.source}/* tools = ${JSON.stringify(e.kind === 'replace' ? e.tools : {})}`).join('; ')
 
+/**
+ * Where `AccessStore` keeps the rows while `use()` holds: the API's CRUD routes (area `access`,
+ * #5299 step 5), which run each write and its warm eviction in one transaction.
+ */
+export type RemoteAccess = { crud: CrudAccessRows; use: () => boolean }
+
 export class AccessStore implements AccessReader, AccessWriter {
   private readonly sql: Sql
   private readonly audit: AuditSink | undefined
-  constructor(sql: Sql, audit?: AuditSink) {
+  private readonly remote: RemoteAccess | undefined
+  constructor(sql: Sql, audit?: AuditSink, remote?: RemoteAccess) {
     this.sql = sql
     this.audit = audit
+    this.remote = remote
+  }
+
+  private crud(): CrudAccessRows | undefined {
+    return this.remote?.use() ? this.remote.crud : undefined
   }
 
   async rows(sources: readonly string[]): Promise<AccessRow[]> {
     if (sources.length === 0) return []
+    const crud = this.crud()
+    if (crud) return crud.rows(sources)
     return this.sql<AccessRow[]>`
       SELECT source, item, access, updated_by FROM ai_access WHERE source IN ${this.sql(sources)} ORDER BY source, item`
   }
 
   async row(source: string, item: string): Promise<AccessRow | undefined> {
+    const crud = this.crud()
+    if (crud) return crud.row(source, item)
     const [row] = await this.sql<AccessRow[]>`
       SELECT source, item, access, updated_by FROM ai_access WHERE source = ${source} AND item = ${item}`
     return row
@@ -210,19 +227,26 @@ export class AccessStore implements AccessReader, AccessWriter {
     const by = updatedBy(context)
     let applied: readonly Edit[] = edits
     let failure: unknown
+    const crud = this.crud()
     try {
-      await this.sql.begin(async (tx) => {
-        if (options.skipUnchanged) {
-          const sources = [...new Set(edits.map((e) => e.source))]
-          const current = await tx<AccessRow[]>`
-            SELECT source, item, access, updated_by FROM ai_access WHERE source IN ${tx(sources)} FOR UPDATE`
-          applied = edits.filter((e) => shape(applyEdit(current, e, by), e.source) !== shape(current, e.source))
-          if (applied.length === 0) return
-        }
-        // Told first: the notification is queued in this transaction, so a failing write drops it.
-        await notifyWarmEvict(tx, '*')
-        for (const edit of applied) await runEdit(tx, edit, by)
-      })
+      if (crud) {
+        // The API runs the same transaction, the skip and the eviction included.
+        const indices = await crud.write(edits, by, options.skipUnchanged ?? false)
+        applied = indices.flatMap((i) => (edits[i] ? [edits[i]] : []))
+      } else {
+        await this.sql.begin(async (tx) => {
+          if (options.skipUnchanged) {
+            const sources = [...new Set(edits.map((e) => e.source))]
+            const current = await tx<AccessRow[]>`
+              SELECT source, item, access, updated_by FROM ai_access WHERE source IN ${tx(sources)} FOR UPDATE`
+            applied = edits.filter((e) => shape(applyEdit(current, e, by), e.source) !== shape(current, e.source))
+            if (applied.length === 0) return
+          }
+          // Told first: the notification is queued in this transaction, so a failing write drops it.
+          await notifyWarmEvict(tx, '*')
+          for (const edit of applied) await runEdit(tx, edit, by)
+        })
+      }
     } catch (err) {
       failure = err
     }
@@ -241,3 +265,36 @@ export class AccessStore implements AccessReader, AccessWriter {
     if (failure !== undefined) throw failure
   }
 }
+
+/**
+ * The access rows through the API's CRUD routes, area `access` (#5299 step 5; backend
+ * api/crud_agent_access.py). `AccessStore` still checks each write against the model and
+ * records the audit row; the API runs the write's transaction, its warm eviction included.
+ */
+export class CrudAccessRows {
+  readonly #call: ReturnType<typeof crudOf>
+
+  constructor(target: CrudTarget) {
+    this.#call = crudOf(target)
+  }
+
+  async rows(sources: readonly string[]): Promise<AccessRow[]> {
+    const out: AccessRow[] = []
+    for (const part of chunks(sources, SOURCES_PER_CALL)) {
+      out.push(...(await this.#call<{ rows: AccessRow[] }>('the tool access', '/access/rows', { body: { sources: part } })).rows)
+    }
+    return out
+  }
+
+  async row(source: string, item: string): Promise<AccessRow | undefined> {
+    const { row } = await this.#call<{ row: AccessRow | null }>('a tool access', `/access/row${qs({ source, item })}`)
+    return row ?? undefined
+  }
+
+  /** The places in `edits` of the edits written. */
+  async write(edits: readonly Edit[], by: string, skipUnchanged: boolean): Promise<number[]> {
+    const body = { by, edits, skip_unchanged: skipUnchanged }
+    return (await this.#call<{ applied: number[] }>('a tool access written', '/access/write', { body })).applied
+  }
+}
+

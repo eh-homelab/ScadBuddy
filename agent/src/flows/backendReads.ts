@@ -9,8 +9,8 @@ import { crudRead } from '../api/crudRead.js'
 // test/retiredTables.test.ts.
 //
 // The gate's own read of `flow_grants` and `flow_grant_uses` (gate/store.ts `grantInput`) is not
-// here: it holds the grant row's share lock across the agent's own writes, and moves with the
-// gate (#5299 step 10).
+// here: it holds the grant row's share lock across the gate's writes, so it runs on the API in
+// the grant's own route (gate/crudStore.ts, backend api/crud_agent_gate.py, #5299 step 10).
 
 export type QueueHop = { hop: string; action: string; actor: string; at: string; reason?: string | null }
 

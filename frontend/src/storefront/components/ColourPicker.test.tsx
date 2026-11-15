@@ -81,6 +81,23 @@ describe('ColourPicker (#6152, #6258)', () => {
     expect(document.activeElement).toBe(screen.getAllByRole('radio')[5])
   })
 
+  it('draws each swatch, closed and open, from the filament’s effect, alpha and extra colours (#6215)', async () => {
+    const filaments = [
+      { ...f('w1', '#8B5A2B', 'Oak'), effect: 'wood' as const },
+      { ...f('c1', '#FFFFFF', 'Clear', 'PETG'), alpha: 128 },
+      { ...f('m1', '#FF0000', 'Rainbow'), effect: 'multicolor' as const, extra_colours: ['#FF0000', '#00FF00'] },
+    ]
+    const { user } = show({ filaments, shown: '#8B5A2B' })
+    const trigger = screen.getByRole('button', { name: /Letters/ })
+    const row = trigger.querySelector<HTMLElement>('[aria-hidden="true"]')!
+    expect(row.style.backgroundImage).toContain('repeating-linear-gradient(90deg')
+    await user.click(trigger)
+    const dot = (name: string) => screen.getByRole('radio', { name }).querySelector<HTMLElement>('[aria-hidden="true"]')!
+    expect(dot('Oak · Wood').style.backgroundImage).toContain('repeating-linear-gradient(90deg')
+    expect(dot('Clear').style.backgroundImage).toMatch(/^linear-gradient\(rgba\(255, 255, 255, 0\.5/)
+    expect(dot('Rainbow · Multicolor').style.backgroundImage).toContain('conic-gradient')
+  })
+
   it('goes back to the shop’s choice', async () => {
     const { user, onChange } = show({ picked: true, shown: '#0A2E8C' })
     await user.click(screen.getByRole('button', { name: /Letters/ }))

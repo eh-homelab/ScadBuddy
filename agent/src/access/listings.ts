@@ -1,5 +1,7 @@
 import type { Sql, TransactionSql } from 'postgres'
-import type { LockClient, LockLease } from '../db.js'
+import { type LockClient, type LockLease, TEST_LOCK_CONNECTIONS } from '../db.js'
+import { chunks, type CrudTarget, crudOf, CrudLeases, CrudPathError, type HeldLease, SOURCES_PER_CALL } from '../api/crudStores.js'
+import { CrudReadError } from '../api/crudRead.js'
 import { z } from 'zod'
 import { packageServerSource, remoteSource } from './model.js'
 
@@ -196,17 +198,34 @@ function parseRow(row: Row): Listing | undefined {
   return { tools: parsed.data.map(listedTool), listed_at: row.listed_at.toISOString(), truncated: row.truncated }
 }
 
+/**
+ * Where `ToolListings` keeps the listings while `use()` holds: the API's CRUD routes (area
+ * `access`, #5299 step 5), with a lease row in place of the session advisory lock (#5299 D3).
+ */
+export type RemoteListings = { crud: CrudToolListings; use: () => boolean }
+
+/** The lease key of a connection test of `source` (backend agent_data/leases.py). */
+export const listingLeaseKey = (source: string): string => `tool-listing:${source}`
+
 export class ToolListings {
   readonly #sql: Sql
   readonly #locks: LockClient
+  readonly #remote: RemoteListings | undefined
 
   /** `locks`: the lock client (db.ts `Database.locks`). */
-  constructor(sql: Sql, locks: LockClient) {
+  constructor(sql: Sql, locks: LockClient, remote?: RemoteListings) {
     this.#sql = sql
     this.#locks = locks
+    this.#remote = remote
+  }
+
+  #crud(): CrudToolListings | undefined {
+    return this.#remote?.use() ? this.#remote.crud : undefined
   }
 
   async get(source: string): Promise<Listing | undefined> {
+    const crud = this.#crud()
+    if (crud) return (await crud.read([source])).get(source)
     const [row] = await this.#sql<Row[]>`
       SELECT tools, listed_at, truncated FROM ai_tool_listings WHERE source = ${source}`
     return row ? parseRow(row) : undefined
@@ -215,6 +234,8 @@ export class ToolListings {
   async getMany(sources: readonly string[]): Promise<Map<string, Listing>> {
     const out = new Map<string, Listing>()
     if (sources.length === 0) return out
+    const crud = this.#crud()
+    if (crud) return crud.read(sources)
     const rows = await this.#sql<(Row & { source: string })[]>`
       SELECT source, tools, listed_at, truncated FROM ai_tool_listings WHERE source = ANY(${[...sources]}::text[])`
     for (const row of rows) {
@@ -230,8 +251,18 @@ export class ToolListings {
    * replica already runs TEST_LOCK_CONNECTIONS tests; `unreachable`: the lock client could not
    * reach Postgres, and `fn` did not run. An error of `fn`'s own is thrown as it is. The lock is held on the lock client
    * (db.ts `createLockClient`), never on the shared pool, which a test therefore never waits on.
+   * Through the API (`RemoteListings`), the lock is the lease `tool-listing:remote:<name>`,
+   * renewed while `fn` runs; `unreachable` then says the API did not answer the acquire (a
+   * 4xx its route answered is thrown), and `full` says this replica already runs
+   * TEST_LOCK_CONNECTIONS tests through the API.
    */
   async exclusive<T>(name: string, fn: (put: PluginListingPut) => Promise<T>): Promise<{ value: T } | 'busy' | 'full' | 'unreachable'> {
+    const crud = this.#crud()
+    if (crud) {
+      return crud.leased(listingLeaseKey(remoteSource(name)), (lease) =>
+        fn((url, tools, options) => crud.putPlugin(lease, name, url, tools, options.truncated ?? false)),
+      )
+    }
     return this.#held(`scadbuddy:ai_tool_listings:test:${name}`, () =>
       fn((url, tools, options) => this.#putIfCurrent(name, url, tools, options.truncated ?? false)),
     )
@@ -247,6 +278,12 @@ export class ToolListings {
     server: string,
     fn: (put: PackageListingPut) => Promise<T>,
   ): Promise<{ value: T } | 'busy' | 'full' | 'unreachable'> {
+    const crud = this.#crud()
+    if (crud) {
+      return crud.leased(listingLeaseKey(packageServerSource(pkg, server)), (lease) =>
+        fn((contentHash, tools, options) => crud.putPackageServer(lease, pkg, server, contentHash, tools, options.truncated ?? false)),
+      )
+    }
     // A remote plugin's name holds no `:`, so the two kinds of key never meet.
     return this.#held(`scadbuddy:ai_tool_listings:test:${packageServerSource(pkg, server)}`, () =>
       fn((contentHash, tools, options) => this.#putIfPinned(pkg, server, contentHash, tools, options.truncated ?? false)),
@@ -335,4 +372,82 @@ async function upsert(sql: TransactionSql, source: string, tools: readonly Store
     INSERT INTO ai_tool_listings (source, tools, truncated)
     VALUES (${source}, ${sql.json(tools as never)}, ${truncated})
     ON CONFLICT (source) DO UPDATE SET tools = EXCLUDED.tools, truncated = EXCLUDED.truncated, listed_at = now()`
+}
+
+/** The connection tests this replica runs through the API now, capped as the lock client caps its own. */
+let crudTests = 0
+
+type WireListing = { source: string; tools: unknown; listed_at: string; truncated: boolean }
+
+/**
+ * The listings through the API's CRUD routes, area `access` (#5299 step 5; backend
+ * api/crud_agent_access.py). A connection test holds the lease `tool-listing:<source>`
+ * (`CrudLeases`), and the API stores its listing only while that lease holds, under the
+ * plugin's or the package's row lock (`lease-lost` otherwise, an error of the test's own).
+ */
+export class CrudToolListings {
+  readonly #call: ReturnType<typeof crudOf>
+  readonly #leases: CrudLeases
+
+  constructor(target: CrudTarget) {
+    this.#call = crudOf(target)
+    this.#leases = new CrudLeases(target)
+  }
+
+  async read(sources: readonly string[]): Promise<Map<string, Listing>> {
+    const out = new Map<string, Listing>()
+    for (const part of chunks(sources, SOURCES_PER_CALL)) {
+      const { listings } = await this.#call<{ listings: WireListing[] }>('the tool listings', '/tool-listings/read', {
+        body: { sources: part },
+      })
+      for (const row of listings) {
+        const listing = parseRow({ tools: row.tools, listed_at: new Date(row.listed_at), truncated: row.truncated })
+        if (listing) out.set(row.source, listing)
+      }
+    }
+    return out
+  }
+
+  /**
+   * `fn` under `key`'s lease (`CrudLeases.hold`); `full` when this replica already runs
+   * TEST_LOCK_CONNECTIONS tests, as on the SQL path; `unreachable` when the acquire got no
+   * answer of the route's own. In both `fn` did not run. A key refused here (`CrudPathError`)
+   * or a 4xx the route answered (a key it refuses) is thrown as it is.
+   */
+  async leased<T>(key: string, fn: (lease: HeldLease) => Promise<T>): Promise<{ value: T } | 'busy' | 'full' | 'unreachable'> {
+    if (crudTests >= TEST_LOCK_CONNECTIONS) return 'full'
+    crudTests++
+    try {
+      let lease: HeldLease | 'busy'
+      try {
+        lease = await this.#leases.acquire(key)
+      } catch (err) {
+        if (err instanceof CrudPathError) throw err
+        if (err instanceof CrudReadError && err.fromRoute && err.status !== undefined && err.status >= 400 && err.status < 500) throw err
+        console.error(`plugin test lease: ${message(err)}`)
+        return 'unreachable'
+      }
+      if (lease === 'busy') return 'busy'
+      return { value: await this.#leases.hold(lease, fn) }
+    } finally {
+      crudTests--
+    }
+  }
+
+  async putPlugin(lease: HeldLease, name: string, url: string, tools: readonly StoredTool[], truncated: boolean): Promise<boolean> {
+    const body = { name, url, tools, truncated, lease_token: lease.token }
+    return (await this.#call<{ stored: boolean }>("a plugin's tool listing", '/tool-listings/plugin', { body })).stored
+  }
+
+  async putPackageServer(
+    lease: HeldLease,
+    pkg: string,
+    server: string,
+    contentHash: string,
+    tools: readonly StoredTool[],
+    truncated: boolean,
+  ): Promise<boolean> {
+    const body = { pkg, server, content_hash: contentHash, tools, truncated, lease_token: lease.token }
+    return (await this.#call<{ stored: boolean }>("a package server's tool listing", '/tool-listings/package-server', { body })).stored
+  }
 }
