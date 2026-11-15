@@ -23,7 +23,8 @@ that each shard ran what it selected, as `backend-pytest-split` does.
 (its header lists the script `E2E_AGENT_SCRIPTED=1` expects; `pnpm preview` routes the
 same way, `vite.config.ts`).
 - `pnpm exec tsc -p tsconfig.app.json --noEmit` - the quick typecheck. It skips
-  `pretypecheck`, so run `pnpm gen:api` once first, or `src/api/schema.d.ts` is missing.
+  `pretypecheck`, so run `pnpm gen:api` once first, or the generated `src/api/schema.d.ts` and
+  `src/storefront/api/schema.d.ts` are missing.
   Playwright's web server runs `pnpm build`, which typechecks first, so one type error in
   a test also fails all three `frontend-e2e` shards (#6238).
 - No prettier here; eslint is the only lint and format check.
