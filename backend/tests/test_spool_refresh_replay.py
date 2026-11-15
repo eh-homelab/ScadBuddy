@@ -7,7 +7,8 @@ run left open across a deploy replays on the new code. A change to the commands
 ``refreshed`` was recorded with two providers that answered, ``failed`` with a provider
 whose activity raised and a trays step that raised (``SCADBUDDY_RECORD_HISTORIES=1`` runs
 the recording below), both before the kept local presets' step (#4645); ``held`` with
-that step, behind its patch. Never re-record them: a later change adds a history
+that step, behind its patch; ``bb_pull`` with Bambuddy's spools pulled after it, behind
+``filament-bb-pull`` (#6261). Never re-record them: a later change adds a history
 recorded on the changed code beside them.
 """
 
@@ -24,6 +25,7 @@ from temporalio.client import Client, WorkflowHistory
 from temporalio.worker import Replayer, Worker
 
 from scadbuddy.workflows.spool_refresh import (
+    FILAMENT_PULL_ACTIVITY,
     HELD_ACTIVITY,
     LIST_ACTIVITY,
     PROVIDER_ACTIVITY,
@@ -35,7 +37,7 @@ from tests.support.temporal import temporal_server
 HISTORIES = Path(__file__).parent / "fixtures" / "spool_refresh_histories"
 
 
-@pytest.mark.parametrize("name", ["refreshed", "failed", "held"])
+@pytest.mark.parametrize("name", ["refreshed", "failed", "held", "bb_pull"])
 async def test_spool_refresh_replays_its_recorded_history(name: str) -> None:
     history = WorkflowHistory.from_json(
         f"spool-refresh-{name}", (HISTORIES / f"{name}.json").read_text()
@@ -51,7 +53,7 @@ def recording_temporal() -> Iterator[str]:
 
 @pytest.mark.requires_temporal
 @pytest.mark.skipif(os.environ.get("SCADBUDDY_RECORD_HISTORIES") != "1", reason="records a history")
-@pytest.mark.parametrize("name", ["held"])
+@pytest.mark.parametrize("name", ["bb_pull"])
 async def test_record(recording_temporal: str, name: str) -> None:
     @activity.defn(name=LIST_ACTIVITY)
     async def names() -> list[str]:
@@ -72,13 +74,17 @@ async def test_record(recording_temporal: str, name: str) -> None:
     async def held() -> str:
         return "refreshed"
 
+    @activity.defn(name=FILAMENT_PULL_ACTIVITY)
+    async def bb_pull() -> str:
+        return "pulled"
+
     client = await Client.connect(recording_temporal)
     queue = f"spools-{uuid.uuid4().hex[:8]}"
     async with Worker(
         client,
         task_queue=queue,
         workflows=[SpoolRefresh],
-        activities=[names, refresh, seen, held],
+        activities=[names, refresh, seen, held, bb_pull],
     ):
         handle = await client.start_workflow(
             SpoolRefresh.run, id=f"spool-providers-{queue}", task_queue=queue

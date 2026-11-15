@@ -139,12 +139,15 @@ linking needs the exact RGBA, alpha included (the `filament-intake` skill's
 traps table). A `#RRGGBB` value from an old row or a person reads as alpha
 `FF`.
 
-Today SB drops the alpha in several places; each changes:
-- `native_spools.colour` is `^#[0-9A-Fa-f]{6}$` (`spools/native.py:57`).
+Before #6261, SB dropped the alpha in several places; each changes:
+- `native_spools.colour` was `^#[0-9A-Fa-f]{6}$`; since #6261 native spools are
+  RGBA spools, and the native API shows the first 7 characters until #6262.
 - The tray fingerprint is `material|RRGGBB` (`spools/models.py:59-62`), so a
   clear and an opaque spool of one hue look alike.
-- The price book keeps `#RRGGBB` (`orders/bambuddy.py:63-64`, `_colour`); open issue
-  #6209 is the same gap and folds into this work.
+- The price book kept `#RRGGBB` (`orders/bambuddy.py:63-64`, `_colour`). #6209 closed
+  that gap in #6211, before #6261: `filaments.colour` stays `#RRGGBB` beside `alpha`,
+  `extra_colours` and `effect` (`20261114T1607Z_filaments_alpha_effect.sql`), and a
+  type's book row takes its alpha (#6261, `filament/types.py` `_link_price_book`).
 
 Where alpha is used:
 - Matching (print dialog nearest colour, BB type matching §8.1, tag
@@ -216,15 +219,18 @@ tray.
 
 `native_spools` and `physical_spools` exist today. `physical_spools` already
 gives an identity keyed by RFID
-(`20261018T1744Z_physical_spools.sql`). The migration (our call):
-- Each `physical_spools` row with at least one provider record becomes a
-  `spools` row with the same id. Its fields come from the native record if one
-  exists, else from the BB record.
+(`20261018T1744Z_physical_spools.sql`). The migration (our call; as built in
+#6261, `20261114T1302Z_filament_from_native.sql`):
+- A `physical_spools` row that a `native` record link names becomes a `spools`
+  row with the same id. Its fields come from the native record.
 - A `native_spools` row with no physical spool becomes a `spools` row with the
   native id.
-- A physical spool that was only seen in a tray (no record) is not migrated as
-  a spool. Its keys become a `tags` row with no binding.
-- `tray_uuid` and `tag_uid` become `tags` rows and open bindings.
+- Any other physical spool (only a BB record, or only seen in a tray) is not
+  migrated as a spool. Its keys become a `tags` row with no binding. For one with
+  a BB record, the first BB pull (§8.1) makes a spool with a new id, links it to
+  the BB spool and binds the tag to it.
+- A native spool's `tray_uuid` and `tag_uid` become a `tags` row with an open
+  binding, or, for an archived spool, a closed one (reason `archived`).
 - Migrated spools have no type (needs type) until the BB import (§8.1) or a
   person sets one.
 
@@ -262,13 +268,37 @@ anchor, then subtract the **deltas** of every later event.
 - An `ams_remain` reading is an anchor only if it is newer than the newest
   `scale` or `person` reading and the spool is not locked. With the weight lock
   on, `ams_remain` is recorded but never used.
+- The weight lock guards against estimates only: `ams_remain` and BB's own
+  `label_weight - weight_used`. A scale weighing always counts, a BB one
+  included (BB's `last_scale_weight` is gross, so SB books it net of the
+  insert's empty weight, else BB's `core_weight`).
+- Order is physical time (as built in #6261). Each event carries when it
+  happened: a print's `print_started` and `print_ended` at the plate's start, a
+  BB reading at the BB row's `updated_at`, a scale reading at its weighing time.
+  An event with no time of its own gets the clock time, kept after the spool's
+  newest event (the WSL clock can step back). Events of one time keep insert
+  order (`seq`).
 - The UI shows the anchor and the deltas that make the current value.
 
-`native_spool_uses` (`20261101T1849Z_native_spool_uses.sql`) holds a LAN
-print's sliced grams, taken off when the run settles. The migration writes an
-applied row as `print_actual` with `data.basis = "sliced"` (a LAN print has no
-archive actual, so the sliced grams are the best actual known), and an
-unapplied row as `print_estimate`, which the run's end then replaces.
+Known limits of the time rule (#6261, to revisit in #6263, which records plate
+end times and AMS readings per tick):
+- A BB write during a plate that is not a deduction (a rename, say) becomes an
+  anchor before BB took the plate off, so that plate is under-counted until the
+  next absolute reading.
+- A BB clock behind SB's by more than a plate's length counts that plate twice
+  until the next reading.
+- A reading taken in the middle of a plate hides the rest of that plate.
+- The rule assumes BB deducts `weight_used` when a print ends (§8.2); this is
+  not yet measured on a live BB.
+
+`native_spool_uses` (`20261101T1849Z_native_spool_uses.sql`) held a LAN print's
+sliced grams. Since #6261 the native store writes only the ledger, and the
+migration `20261114T1302Z` copied the old rows: an applied use as `print_ended`
+/ `print_actual` with `data.basis = "sliced"` (a LAN print has no archive
+actual, so the sliced grams are the best actual known), a settled but unapplied
+use as `print_ended` with delta 0 (`basis = "not_applied"`), and an unsettled
+use as `print_started` / `print_estimate`, which the run's end then replaces.
+The old tables are dropped in #6262.
 
 ### 5.6 Locations
 
@@ -414,6 +444,11 @@ else SB proposes a new type for a person to confirm.
   archive, or the same SB run) is not written again. Any other pulled change is
   a `bb` absolute reading. When SB pushes weights, it pushes `weight_used` as
   label weight minus SB's grams left, so BB converges on SB's value.
+  As built in #6261 (pull only), by time rather than by matching: the ledger
+  orders events by when they physically happened. A pulled reading sits at the
+  BB row's `updated_at`, and a native print's `print_ended` at its plate's start,
+  so a plate that started before BB's write is inside BB's value and is not
+  taken off again (`filament/ledger.py`, `filament/bambuddy_pull.py`).
 - The sync runs in a worker and calls CRUD routes for SB data, with a service
   credential (§3).
 
@@ -569,7 +604,7 @@ that block it (GitHub's blocked-by links hold the same graph).
 
 | Phase | Issue | Builds | After |
 |---|---|---|---|
-| 1 | [#6261](https://github.com/eh-homelab/ScadBuddy/issues/6261) | Data model: catalogs, types, instances, RGBA, tags, ledger, locations (§5.1-5.6); migration of `native_spools`, `physical_spools` and `native_spool_uses`; one-time BB import and scheduled BB→SB pull (§8.1); the price book as a view over types that keeps the `filaments` ids | - |
+| 1 | [#6261](https://github.com/eh-homelab/ScadBuddy/issues/6261) | Data model: catalogs, types, instances, RGBA, tags, ledger, locations (§5.1-5.6); migration of `native_spools`, `physical_spools` and `native_spool_uses`; one-time BB import and scheduled BB→SB pull (§8.1); the price book linked to types: one `filaments` row per type identity, alpha included, named by `filament_spool_types.filament_id`, the `filaments` ids kept | - |
 | 1 | [#6262](https://github.com/eh-homelab/ScadBuddy/issues/6262) | Filament section, spool edit page, Settings clean-up (§10); the print dialog, orders and agent tools read SB spools, and the provider overlay is removed | [#6261](https://github.com/eh-homelab/ScadBuddy/issues/6261) |
 | 2 | [#6263](https://github.com/eh-homelab/ScadBuddy/issues/6263) | Capture from tray changes and prints (§6) | [#6261](https://github.com/eh-homelab/ScadBuddy/issues/6261) |
 | 3 | [#6264](https://github.com/eh-homelab/ScadBuddy/issues/6264) | RFID: tags, bindings, overrides, NTAG through SpoolBuddy (§7) | [#6261](https://github.com/eh-homelab/ScadBuddy/issues/6261) |
@@ -580,8 +615,8 @@ that block it (GitHub's blocked-by links hold the same graph).
 | 6 | [#6269](https://github.com/eh-homelab/ScadBuddy/issues/6269) | History timeline, metrics, Grafana panel (§5.7) | [#6263](https://github.com/eh-homelab/ScadBuddy/issues/6263) |
 | 6 | [#6270](https://github.com/eh-homelab/ScadBuddy/issues/6270) | Parity sweep against §11 | all of the above |
 
-[#6209](https://github.com/eh-homelab/ScadBuddy/issues/6209) (the price book keeps alpha, colour stops and effect) is a sub-issue
-of the epic; [#6261](https://github.com/eh-homelab/ScadBuddy/issues/6261)'s RGBA rule covers it.
+[#6209](https://github.com/eh-homelab/ScadBuddy/issues/6209) (the price book keeps alpha, colour stops and effect) landed in
+[#6211](https://github.com/eh-homelab/ScadBuddy/pull/6211) before [#6261](https://github.com/eh-homelab/ScadBuddy/issues/6261); #6261's types write the book's alpha, stops and effect from it.
 
 ## 13. Left to the builder
 

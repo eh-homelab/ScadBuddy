@@ -20,9 +20,15 @@ from typing import Annotated, Final, Literal
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from scadbuddy.library.libraries import ModelLibrary
-from scadbuddy.library.media import MediaKind
+from scadbuddy.library.media import MEDIA_ID_PATTERN, MediaKind
 from scadbuddy.orders.customer_links import MAX_LINK_CHARS
-from scadbuddy.orders.models import ChargeKind, ItemKind, OrderStatus, SubmitAddress
+from scadbuddy.orders.models import (
+    ChargeKind,
+    FilamentEffect,
+    ItemKind,
+    OrderStatus,
+    SubmitAddress,
+)
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import JobState, PlateInfo
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
@@ -219,11 +225,14 @@ LISTING_MEDIA_MAX = 50
 
 class ListingMediaUpdate(BaseModel):
     """``PUT …/listings/{id}/media`` (#6213): the listing's pictures, ids of its
-    template's images in the order to show them, and the ``updated_at`` that was read."""
+    template's images (and any video the listing already shows, #6290) in the order to
+    show them, and the ``updated_at`` that was read."""
 
     model_config = ConfigDict(extra="forbid")
 
-    media_ids: list[str] = Field(max_length=LISTING_MEDIA_MAX)
+    media_ids: list[Annotated[str, StringConstraints(pattern=MEDIA_ID_PATTERN)]] = Field(
+        max_length=LISTING_MEDIA_MAX
+    )
     updated_at: datetime
 
 
@@ -344,9 +353,19 @@ class PublicFilament(BaseModel):
     """A filament a visitor may pick: never its price."""
 
     id: str
+    #: ``#RRGGBB``: what a render splits parts by. A clear filament is its RGB with
+    #: ``alpha`` below 255 (#6209).
     colour: str
     colour_name: str | None
     material: str
+    #: The ``rgba`` alpha byte (255 opaque), the multi-colour stops (``#RRGGBB`` or
+    #: ``#RRGGBBAA``, at most 8) and Bambuddy's swatch effect, for the picker's swatch.
+    #: The backend always sends all three. They have defaults (``alpha`` null reads as
+    #: 255) so a caller that builds one without them, as the storefront's own tests do,
+    #: still type-checks: a single opaque colour with no effect.
+    alpha: int | None = None
+    extra_colours: list[str] = Field(default_factory=list)
+    effect: FilamentEffect | None = None
     #: The finish ("Matte", "Silk", "Translucent") and the maker: what tells two filaments
     #: of one colour name apart (#6152).
     subtype: str | None = None

@@ -30,8 +30,11 @@ from scadbuddy.printers.models import LanLink, PrinterCreate
 from scadbuddy.printers.print_activities import LanActivities, LanDeps
 from scadbuddy.printers.progress import from_lan_report
 from scadbuddy.printers.store import PrinterStore
+from scadbuddy.spools.component import Spools
 from scadbuddy.spools.models import SpoolSnapshot
 from scadbuddy.spools.native import NativeSpoolCreate, NativeSpoolStore
+from scadbuddy.spools.spool_providers import NativeProvider
+from scadbuddy.spools.store import SpoolStore
 from scadbuddy.workflows.print_models import LAN_UNSURE, LanPrintInput, LanUploaded
 from tests.conftest import PgPool
 from tests.printers.conftest import KEK
@@ -210,6 +213,7 @@ async def test_a_start_saves_what_it_uses_of_the_native_spools_once(pg_pool: PgP
     grams against it, and an attempt that finds its print running saves nothing new."""
     native = NativeSpoolStore(pg_pool)
     spool = native.create(NativeSpoolCreate(material="PLA", remaining_g=500))
+    spools = Spools(store=SpoolStore(pg_pool), providers=[NativeProvider(native)])
     option = SpoolOption(
         spool_id=tray_spool_id(0, 1),
         material="PLA",
@@ -232,14 +236,20 @@ async def test_a_start_saves_what_it_uses_of_the_native_spools_once(pg_pool: PgP
             printers=printers,
             settings_store=cast(SettingsStore, None),
             native_spools=native,
+            spools=spools,
             connect=lambda *_, lan=lan: cast(LanPrinter, lan),
             start_wait=2,
         )
         await ActivityEnvironment().run(LanActivities(deps).lan_print, input)
     with pg_pool.connection() as conn:
         uses = conn.execute(
-            "SELECT run_id, subtask_name, slot_id, spool_id, grams FROM native_spool_uses"
+            "SELECT ref_id, spool_id, delta_g FROM filament_spool_events"
+            " WHERE kind = 'print_started'"
         ).fetchall()
-    assert uses == [
-        {"run_id": "run-1", "subtask_name": NAME, "slot_id": 1, "spool_id": spool.id, "grams": 12.5}
-    ]
+    assert uses == [{"ref_id": f"run-1/{NAME}/1", "spool_id": spool.id, "delta_g": -12.5}]
+    # The overlay's copy shows the estimate taken off at start (#6261).
+    with pg_pool.connection() as conn:
+        cached = conn.execute(
+            "SELECT snapshot FROM spool_provider_records WHERE provider = 'native'"
+        ).fetchall()
+    assert [row["snapshot"]["remaining_g"] for row in cached] == [487.5]

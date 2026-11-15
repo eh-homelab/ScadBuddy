@@ -9,7 +9,9 @@ overlap SKIP, and once at each boot; 0 deletes it). A run lists the providers
 then records the printers' trays (``spool_trays_seen``); `spools/activities.py`. Last
 it keeps Bambuddy's local presets (``held_presets_refresh``, #4645,
 `slicing/held_presets.py`), behind `HELD_PATCH`, which a native run offers and slices
-from with no Bambuddy call (hot-path plan D5). It is
+from with no Bambuddy call (hot-path plan D5). Then it pulls Bambuddy's spools into
+ScadBuddy's own (``filament_bambuddy_pull``, #6261, `filament/bambuddy_pull.py`), behind
+`FILAMENT_PULL_PATCH`; with no Bambuddy, or Bambuddy down, that step logs and returns. It is
 never started, signalled or awaited by the print dialog, which reads only what it
 wrote: the hot path never waits on Bambuddy. A step that fails is not retried within
 its run; the next tick is the retry, as it is for the sweeps.
@@ -39,6 +41,9 @@ SEEN_ACTIVITY = "spool_trays_seen"
 HELD_ACTIVITY = "held_presets_refresh"
 #: The `workflow.patched` id that adds `HELD_ACTIVITY` to a run.
 HELD_PATCH = "spool-refresh-held-presets"
+FILAMENT_PULL_ACTIVITY = "filament_bambuddy_pull"
+#: The `workflow.patched` id that adds `FILAMENT_PULL_ACTIVITY` to a run.
+FILAMENT_PULL_PATCH = "filament-bb-pull"
 #: Listing the providers reads nothing.
 LIST_TIMEOUT = timedelta(seconds=30)
 #: One provider's refresh is bounded at a minute (`activities.PROVIDER_TIMEOUT`), then
@@ -48,6 +53,8 @@ PROVIDER_TIMEOUT = timedelta(seconds=90)
 SEEN_TIMEOUT = timedelta(minutes=2)
 #: One list of Bambuddy's local presets, then a read of each one edited since.
 HELD_TIMEOUT = timedelta(minutes=2)
+#: One list of Bambuddy's spools, then a transaction per spool.
+FILAMENT_PULL_TIMEOUT = timedelta(minutes=5)
 #: Each provider is its own activity, so the run grows with them; a run that can never
 #: finish still ends, and the Schedule's overlap SKIP stops holding later ticks back.
 RUN_TIMEOUT = timedelta(minutes=15)
@@ -100,6 +107,16 @@ class SpoolRefresh:
                 )
             except ActivityError:
                 workflow.logger.warning("could not keep Bambuddy's local presets")
+        if workflow.patched(FILAMENT_PULL_PATCH):
+            try:
+                await workflow.execute_activity(
+                    FILAMENT_PULL_ACTIVITY,
+                    result_type=str,
+                    start_to_close_timeout=FILAMENT_PULL_TIMEOUT,
+                    retry_policy=_ONCE,
+                )
+            except ActivityError:
+                workflow.logger.warning("could not pull Bambuddy's spools")
         return outcome
 
 

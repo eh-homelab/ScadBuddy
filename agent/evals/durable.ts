@@ -45,6 +45,7 @@ import { ALL_TOOLS } from '../src/tools/index.js'
 import { PendingActionStore } from '../src/tools/pending.js'
 import type { ToolServices } from '../src/tools/registry.js'
 import { fixedCredentials } from '../test/support/fixedCredentials.js'
+import { SqlFlowRunReads } from '../test/support/sqlFlowRunReads.js'
 import { ensureTemplate, TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from '../test/support/postgres.js'
 import { localTemporal, TEMPORAL_CLI, TEMPORAL_CLI_ENV } from '../test/support/temporal.js'
 import { EVAL_BACKEND_URL, EvalBackend } from './backend.js'
@@ -263,6 +264,7 @@ export async function startEvalStack(options: EvalStackOptions): Promise<EvalSta
         )
       }
       p.m = new SessionManager({
+        flowReads: new SqlFlowRunReads(pool.sql),
         sql: pool.sql,
         paths: { stateDir },
         credentials: fixedCredentials(options.credential),
@@ -295,7 +297,7 @@ export async function startEvalStack(options: EvalStackOptions): Promise<EvalSta
         })
         const turnDeps: TurnToolsDeps = {
           sessions: new PgSessionOwners(pool.sql),
-          approvals: new PgApprovalRecords(pool.sql),
+          approvals: new PgApprovalRecords(pool.sql, new SqlFlowRunReads(pool.sql)),
           audit,
           servers: async () => ({ servers: [], problems: [], secrets: [], release: () => {} }),
         }

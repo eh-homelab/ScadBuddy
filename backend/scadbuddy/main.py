@@ -90,6 +90,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.crud import idempotency
 from scadbuddy.crud import listener as crud_listener
+from scadbuddy.filament.component import FILAMENT
 from scadbuddy.flow_triggers.component import FLOW_TRIGGERS
 from scadbuddy.flow_triggers.events import listen_for_triggers
 from scadbuddy.flow_triggers.fire import TriggerFires, reconcile_trigger_schedules
@@ -137,13 +138,14 @@ from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.print_activities import LanActivities, LanDeps
 from scadbuddy.printers.watch import WatchActivities
 from scadbuddy.rack.component import RACK_USAGE
+from scadbuddy.render.agent_migrations import migrate_agent
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
 from scadbuddy.render.previews import PreviewUnrunError
 from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.slicing.component import SLICING
 from scadbuddy.slicing.held_presets import HeldPresetStore, held_presets_activity
 from scadbuddy.slicing.start import stop_lost_native_slices, sweep_native_slices
-from scadbuddy.spools.activities import spool_activities
+from scadbuddy.spools.activities import filament_pull_activity, spool_activities
 from scadbuddy.spools.component import SPOOLS
 from scadbuddy.spools.native import NativeSpoolStore
 from scadbuddy.store import sweep_blobs
@@ -1159,6 +1161,17 @@ def _rotate_service_credentials(state: AppState) -> None:
     auth.credentials.delete_expired()
 
 
+def _migrate_agent_at_start(state: AppState) -> None:
+    """The agent's migrations (`render/agent_migrations.py`, #5299 D6), after the
+    backend's: the agent no longer migrates, and waits until `ai_migrations` holds the
+    files it expects (`agent/src/db/schema.ts`). Neither set reads the other's tables, so
+    the order is the start's, not the schema's. A failure stops the start."""
+    with state.settings_store.pool.connection() as conn:
+        applied = migrate_agent(conn)
+    if applied:
+        logger.info("applied the agent's database migrations", extra={"versions": applied})
+
+
 def _grant_and_rotate_at_start(state: AppState) -> None:
     """At start, after the migrations: each caller's role its own view, a retired
     caller's role nothing (#5298 Tasks 11, 22 and 35), a table dropped from a caller's list
@@ -1634,6 +1647,7 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         # A run's next plate copy waits on the printer's report (#4541).
         reports=registry.reports,
         native_spools=NativeSpoolStore(state.settings_store.pool),
+        spools=state.components.get(SPOOLS),
     )
     auto_imports = state.components.get(AUTO_IMPORTS)
     activities = [
@@ -1804,6 +1818,8 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
         *_housekeeping_activities(state),
         *_preview_activities(state),
         *spool_activities(state.components.get(SPOOLS)),
+        # Bambuddy's spools pulled into ScadBuddy's own (#6261), on the spools' Schedule.
+        filament_pull_activity(state.components.get(FILAMENT), lambda: state.settings_store.load()),
         # Bambuddy's local presets kept for native runs (#4645), on the spools' Schedule.
         held_presets_activity(
             lambda: HeldPresetStore(state.projection.pool), lambda: state.settings_store.load()
@@ -1989,6 +2005,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # First: without its database ScadBuddy has no settings, so it does not start.
     # It also brings the schema up to date, before the projection opens.
     await asyncio.to_thread(state.settings_store.open)
+    # Then the agent's (#5299 D6), which the agent waits for.
+    try:
+        await asyncio.to_thread(_migrate_agent_at_start, state)
+    except BaseException:
+        await asyncio.to_thread(state.settings_store.close)
+        raise
     # #4975 phase 4: the service credentials, before any caller reads its own.
     await asyncio.to_thread(_grant_and_rotate_at_start, state)
     # #4975 phase 8 (spec 2026-11-01 §9.1): `enforce` without a usable login stops here.

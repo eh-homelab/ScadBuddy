@@ -143,7 +143,8 @@ async def test_the_follow_takes_a_settled_lan_print_off_and_recaches(
     running = _settled("running").model_copy(update={"settled": False})
     await hook("output:x", running)
     await hook("output:x", _settled("done").model_copy(update={"route": "slice_queue"}))
-    assert native.get(red.id).remaining_g == 100  # type: ignore[union-attr]
+    # The estimate comes off as the print starts (the ledger rule, #6261).
+    assert native.get(red.id).remaining_g == 70  # type: ignore[union-attr]
 
     await hook("output:x", _settled("done"))
     await hook("output:x", _settled("done"))

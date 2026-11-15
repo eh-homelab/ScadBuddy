@@ -10,6 +10,7 @@ import { inputHash } from '../src/approvals/service.js'
 import { flowRequestId } from '../src/gate/ids.js'
 import { PgFlowRuns } from '../src/temporal/flowRuns.js'
 import { connectInProcess, turnToolActivity } from '../src/temporal/turnTools.js'
+import { SqlFlowRunReads } from './support/sqlFlowRunReads.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase, type Throwaway } from './support/postgres.js'
 
 // A flow run's starter and decisions, read from the backend's own tables (#1057, plan
@@ -27,7 +28,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`PgFlowRuns${TEST_DATABASE_URL ? '' : ` (set
     await t.db.sql`
       INSERT INTO workflow_definitions (id, name, version, commit, created_by)
       VALUES ('d1', 'swap', 1, 'c1', '{"kind": "browser"}')`
-    flows = new PgFlowRuns(t.db.sql)
+    flows = new PgFlowRuns(t.db.sql, new SqlFlowRunReads(t.db.sql))
   })
   afterEach(async () => {
     await t?.drop()

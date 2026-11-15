@@ -19,7 +19,7 @@ URL = "/api/v1/native-spools"
 
 def _cached(client: TestClient) -> dict[str, dict[str, Any]]:
     state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
-    with state.components.get(SPOOLS).store._pool.connection() as conn:
+    with state.components.get(SPOOLS).store.pool.connection() as conn:
         rows = conn.execute(
             "SELECT record_id, snapshot FROM spool_provider_records WHERE provider = 'native'"
         ).fetchall()
@@ -73,3 +73,35 @@ def test_a_spool_is_kept_and_its_record_cached_at_once(client: TestClient) -> No
 def test_what_no_spool_has_is_refused(client: TestClient) -> None:
     for body in ({"colour": "red"}, {"remaining_g": -1}, {"tray_uuid": "zz"}, {"weight": 1}):
         assert client.post(URL, json=body).status_code == 422, body
+
+
+def test_a_spool_a_print_ended_on_is_not_deleted(client: TestClient) -> None:
+    spool = client.post(URL, json={"material": "PLA", "remaining_g": 100}).json()
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    with state.components.get(SPOOLS).store.pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO filament_spool_events (spool_id, kind, source, delta_g, ref_kind, ref_id)"
+            " VALUES (%s, 'print_ended', 'print_actual', -5, 'print_run', 'r/p/1')",
+            (spool["id"],),
+        )
+    path = f"{URL}/{spool['id']}"
+    refused = client.delete(path)
+    assert refused.status_code == 409, refused.text
+    assert "archive it" not in refused.json()["detail"]
+    assert "finished" in refused.json()["detail"]
+    assert client.get(path).status_code == 200
+
+
+def test_the_routes_name_their_caller_in_the_ledger(client: TestClient) -> None:
+    spool = client.post(URL, json={"material": "PLA", "remaining_g": 100}).json()
+    client.patch(f"{URL}/{spool['id']}", json={"remaining_g": 90, "name": "x"})
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    with state.components.get(SPOOLS).store.pool.connection() as conn:
+        actors = {
+            row["actor"]
+            for row in conn.execute(
+                "SELECT actor FROM filament_spool_events WHERE spool_id = %s", (spool["id"],)
+            ).fetchall()
+        }
+    assert len(actors) == 1
+    assert actors != {"native"}

@@ -18,7 +18,7 @@ import {
 
 // The Claude credentials (issue #255, spec D2 and §9; several since #1093):
 // each an Anthropic API key, a Claude Code OAuth token (`claude setup-token`),
-// or a gateway base URL plus the gateway's credential. Stored sealed in `ai_credentials` (db/migrations/), one row
+// or a gateway base URL plus the gateway's credential. Stored sealed in `ai_credentials` (backend/scadbuddy/migrations_agent/), one row
 // each, in priority order: a query uses the first one that is usable and
 // falls back to the next (harness/fallback.ts). Only `kind`, `base_url`, the
 // last four characters, the optional name (#3710) and the row's health are ever

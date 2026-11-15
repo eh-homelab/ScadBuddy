@@ -802,6 +802,11 @@ Containment is by reach, not by restriction:
   the Settings page shows a persistent warning — "render workers hold the full
   Bambuddy key; template code can print" — so the containment claim is either true
   or visibly false, never silently false.
+  *Amended 2026-11-14 (#5298 final review):* the fallback no longer reaches a
+  standalone render worker. The render settings CRUD route withholds the full key
+  (`api/crud_render.py` `withheld`), so with no render key saved a render worker gets
+  no Bambuddy key and its renders on the Bambuddy store fail; only a worker inside the
+  API process still uses the full key, and the Settings warning says so.
 - Printing activities run on the `bambuddy` task queue in a separate Deployment
   that holds the fuller key and runs no template code.
 - A URL-imported template (#174) that ships `ui/` or `pipeline/` is shown as such

@@ -9,6 +9,7 @@ import { SessionManager, type SessionManagerDeps } from '../../src/sessions/mana
 import type { Owner } from '../../src/sessions/protocol.js'
 import { testPayloadKeys } from './payloadKeys.js'
 import { serveManager } from './agentSessions.js'
+import { SqlFlowRunReads } from './sqlFlowRunReads.js'
 
 export const browser: Owner = { kind: 'browser', id: 'browser', label: 'You' }
 export const agentA: Owner = { kind: 'bearer', id: 'token:a', label: 'Agent A' }
@@ -269,6 +270,7 @@ export function manager(deps: Partial<SessionManagerDeps> & Pick<SessionManagerD
     renewMs: 50,
     pollMs: 50,
     payloadKeys: testPayloadKeys(deps.sql),
+    flowReads: new SqlFlowRunReads(deps.sql),
     ...deps,
   })
   serveManager(m, deps)
