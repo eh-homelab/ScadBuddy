@@ -19,7 +19,7 @@ import { approvalEntry, inputRequested, inputResolved } from '../gate/projection
 import { type AuditOutcome, type AuditSink, type AuditSurface, SYSTEM_ACTOR } from '../audit/log.js'
 import { type Span, SpanKind } from '@opentelemetry/api'
 import { linkTo, recordFailure, traceparentOf, tracer } from '../telemetry/trace.js'
-import { type SessionFiles, type WorkspaceRef, withWorkspaceSize } from '../workspace/store.js'
+import { type WorkspaceFiles, type WorkspaceRef, withWorkspaceSize } from '../workspace/store.js'
 
 // Approvals of outward tool calls (#258, spec §8.2: "Outward tools always need
 // a human approval in the ScadBuddy UI, in every auth mode"). Stored in
@@ -188,7 +188,7 @@ export type ApprovalServiceDeps = {
    */
   audit?: AuditSink
   /** The workspace (#2329): a workspace upload's size is read from it for the card (`withWorkspaceSize`). */
-  workspace?: SessionFiles
+  workspace?: WorkspaceFiles
 }
 
 /** The input-hash key, derived from the key-encryption key (HKDF-SHA256, its own label). */

@@ -428,8 +428,11 @@ AAD, so a row either side seals opens on the other).
   them only for the routes that load a plugin for a turn or a test, refresh a token, and
   list the secrets the tools redact. A token refresh holds the lease
   `plugin-oauth:<plugin>` on the API (#5299 D3) in place of the grant row's lock, and the
-  refreshed tokens are stored only while that lease holds. The agent still opens its
-  workspace file keys itself, until a later step of #5299.
+  refreshed tokens are stored only while that lease holds. Its workspace files are
+  sealed and opened on the API once it lists area `workspace` (#5299 step 7,
+  [`backend/scadbuddy/api/crud_agent_workspace.py`](../../backend/scadbuddy/api/crud_agent_workspace.py)):
+  the agent sends and gets plaintext and never holds a file key. Until the API lists each
+  area, the agent seals and opens that area's secrets itself, as before.
 
 - **Envelope.** `sealSecret()` draws a random 32-byte data key per secret, seals the
   secret under it with AES-256-GCM, then seals the data key under the KEK (the key file,
@@ -1389,9 +1392,9 @@ From the merged code and PR bodies:
    started (the comment on `sessions` in `main.ts`). ScadBuddy's own plugin is
    loaded into each of those turns (#896, see [Plugin vetting](#plugin-vetting)).
 8. **Rotation leaves unopenable rows** as they are, and counts them in the log
-   (the API's `agent_data/rotation.py` for the Claude credentials, payload keys, Web
-   Push keys and notification channel tokens, the agent's `rewrapFrom()` for its
-   workspace file keys, plugin secrets and plugin sign-ins).
+   (the API's `agent_data/rotation.py`, for the Claude credentials, payload keys, Web
+   Push keys, notification channel tokens, the plugins' header secrets and sign-ins, and
+   the workspace's principal file keys; the agent re-wraps nothing itself).
 9. **Write-tier calls are not gated, so injected content can drive one.** Tiers put
    `update_source` and other `write` tools in the tier that runs without a human,
    because a write is reversible through the model's git history (spec §8.1). The

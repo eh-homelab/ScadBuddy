@@ -166,14 +166,22 @@ const EMPTY_SCHEMA: CustomizerSchema = { title: null, source_sha256: '', groups:
 /** The backend's bounds on a page (`wire.py` `ListingQuery`: `LISTING_PAGE_MAX`, `LISTING_OFFSET_MAX`). */
 const PAGE_BOUNDS = { limit: [1, 200], offset: [0, 1_000_000] } as const
 
+/**
+ * `raw` as Pydantic reads an int from a query (measured with `TypeAdapter(int)`, pydantic
+ * 2.14.2): decimal digits with an optional sign and surrounding spaces, single `_` between
+ * digits, and a fraction of zeros only (`1_000.00` is 1000); `5.`, `.0`, `5.5`, `1e2` and
+ * `0x10` are refused (NaN).
+ */
+function queryInt(raw: string): number {
+  return /^\s*[+-]?\d+(_\d+)*(\.0+)?\s*$/.test(raw) ? Number(raw.replace(/_/g, '')) : NaN
+}
+
 /** FastAPI's 422 for a `limit` or `offset` out of its bounds, as the real route answers; null when both fit. */
 function outOfBounds(url: URL): Response | null {
   const detail = Object.entries(PAGE_BOUNDS).flatMap(([name, [min, max]]) => {
     const raw = url.searchParams.get(name)
     if (raw === null) return []
-    // As Pydantic reads an int from a query (measured with its `TypeAdapter(int)`): decimal
-    // digits with an optional sign and surrounding spaces; `1e2` and `0x10` are refused.
-    const value = /^\s*[+-]?\d+\s*$/.test(raw) ? Number(raw) : NaN
+    const value = queryInt(raw)
     if (!Number.isInteger(value)) return [{ type: 'int_parsing', loc: ['query', name], msg: 'Input should be a valid integer' }]
     if (value < min) return [{ type: 'greater_than_equal', loc: ['query', name], msg: `Input should be greater than or equal to ${min}` }]
     if (value > max) return [{ type: 'less_than_equal', loc: ['query', name], msg: `Input should be less than or equal to ${max}` }]
@@ -189,8 +197,8 @@ function page(url: URL): StorefrontListingPage {
   const slugs = url.searchParams.getAll('slug')
   const materials = url.searchParams.getAll('material').map((m) => m.toUpperCase())
   const status = get('status')
-  const limit = Number(get('limit') || 50)
-  const offset = Number(get('offset') || 0)
+  const limit = queryInt(get('limit') || '50')
+  const offset = queryInt(get('offset') || '0')
   const ordered = sorted()
   const place = new Map(ordered.map((listing, index) => [listing.id, index + 1]))
   const materialOf = new Map(orders.state.filaments.map((f) => [f.id, f.material.toUpperCase()]))

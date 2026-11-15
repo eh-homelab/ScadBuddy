@@ -69,7 +69,7 @@ import {
   withServiceCredential,
 } from './api/serviceCredential.js'
 import { untilBackendAnswers } from './api/backendUp.js'
-import { CrudAreas, FORGET_AREAS, SECRET_AREAS } from './api/crudAreas.js'
+import { CrudAreas, FORGET_AREAS, SECRET_AREAS, WORKSPACE_AREAS } from './api/crudAreas.js'
 import { gated, STORE_AREAS, type StoreArea } from './api/crudStores.js'
 import { CrudFlowRunReads } from './flows/backendReads.js'
 import { BrowserSessions } from './auth/browserSession.js'
@@ -145,7 +145,8 @@ import { PendingActionStore } from './tools/pending.js'
 import type { ToolServices } from './tools/registry.js'
 import { RenderLimiter, settingsRenderLimits } from './tools/renderLimits.js'
 import { BackendWorkspaceBlobs, WorkspaceBlobError } from './workspace/blobs.js'
-import { rewrapWorkspaceKeys, WorkspaceSealing } from './workspace/sealing.js'
+import { CrudSessionFiles, gatedWorkspaceFiles } from './workspace/crudStore.js'
+import { WorkspaceSealing } from './workspace/sealing.js'
 import { SessionFiles, WORKSPACE_SWEEP_MS, type WorkspaceBytesStatus } from './workspace/store.js'
 
 // Fixed rather than configurable: the listening port is part of the pod
@@ -199,15 +200,15 @@ if (!kek.ok) console.error(`secret key: ${kek.detail ?? kek.reason}; saving Clau
 
 // Rotation (spec §9, "Rotating it re-wraps the data keys only"): mount the new
 // key as SCADBUDDY_SECRET_KEY_FILE and the old one as
-// SCADBUDDY_SECRET_KEY_PREVIOUS_FILE; once migrations have applied, every row
-// sealed under the old key is re-wrapped under the new one: the Claude credentials
-// and payload keys by the API, which needs both keys mounted too (#5299 D5), the
-// rest here. Then drop the old.
+// SCADBUDDY_SECRET_KEY_PREVIOUS_FILE, here and on the API. The API re-wraps every row
+// sealed under the old key at its start (#5299 D5, steps 5 and 7, backend
+// agent_data/rotation.py); this process re-wraps nothing, and opens with the old key only
+// what its SQL fallbacks read before then. Then drop the old.
 const previousKek = config.previousSecretKeyFile
   ? await loadKek(config.previousSecretKeyFile, 'SCADBUDDY_SECRET_KEY_PREVIOUS_FILE')
   : undefined
 if (previousKek && !previousKek.ok) {
-  console.error(`previous secret key: ${previousKek.detail ?? previousKek.reason}; nothing will be re-wrapped`)
+  console.error(`previous secret key: ${previousKek.detail ?? previousKek.reason}; rows sealed under it will not open here`)
 }
 
 const database = config.databaseUrl
@@ -216,21 +217,6 @@ const database = config.databaseUrl
         console.error('the database is not ready:', (err as Error).message)
         // An edited migration is not a transient failure: stop, visibly.
         if (err instanceof MigrationChecksumError) process.exit(1)
-      },
-      afterMigrate: async (sql) => {
-        if (!previousKek?.ok || !kek.ok) return
-        // The Claude credentials, the payload keys, the Web Push keys, the notification
-        // channels' tokens, the plugins' header secrets and the plugin sign-ins are re-wrapped
-        // by the API at its start (#5299 D5 and step 5, backend agent_data/rotation.py), which
-        // holds the KEK they are opened with. The workspace file keys are re-wrapped here until
-        // the step of #5299 that moves their table (7).
-        const files = await rewrapWorkspaceKeys(sql, previousKek.kek, kek.kek)
-        if (files.rewrapped || files.failed) {
-          console.log(
-            `secret key rotation: re-wrapped ${files.rewrapped} workspace file key(s)` +
-              (files.failed ? `; ${files.failed} could not be opened with the previous key` : ''),
-          )
-        }
       },
     })
   : undefined
@@ -258,7 +244,7 @@ const serviceCredential: CredentialSource | undefined =
 // with those areas listed this process needs no KEK for them. So do the key deletes and a flow
 // run's images (#5299 step 6, area `forget`).
 const crudFetch = serviceCredential ? withServiceCredential(globalThis.fetch, serviceCredential, config.backendUrl) : globalThis.fetch
-const crudAreas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: [...SECRET_AREAS, ...FORGET_AREAS, ...STORE_AREAS] })
+const crudAreas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: [...SECRET_AREAS, ...FORGET_AREAS, ...STORE_AREAS, ...WORKSPACE_AREAS] })
 crudAreas.start()
 // The small stores (#5299 step 5, api/crudStores.ts): each through its CRUD routes once the API
 // lists its area, over SQL until then.
@@ -465,16 +451,22 @@ const workspaceBlobStore = new BackendWorkspaceBlobs(
   config.backendUrl,
   serviceCredential ? { fetch: withServiceCredential(globalThis.fetch, serviceCredential, config.backendUrl) } : {},
 )
+// The API keeps them once it lists area `workspace` (#5299 step 7, workspace/crudStore.ts): it
+// seals and opens them with its own KEK, so this process needs none; until then, over SQL.
 const workspace = database
-  ? new SessionFiles(database.sql, {
-      settings,
-      // The hourly reconcile runs on one replica at a time, its lock on a lock connection.
-      locks: database.locks,
-      blobs: {
-        store: workspaceBlobStore,
-        ...(dataKeys && kek.ok ? { sealing: new WorkspaceSealing(dataKeys, kek.kek, { previous: previousKek?.ok ? previousKek.kek : undefined }) } : {}),
-      },
-    })
+  ? gatedWorkspaceFiles(
+      new SessionFiles(database.sql, {
+        settings,
+        // The hourly reconcile runs on one replica at a time, its lock on a lock connection.
+        locks: database.locks,
+        blobs: {
+          store: workspaceBlobStore,
+          ...(dataKeys && kek.ok ? { sealing: new WorkspaceSealing(dataKeys, kek.kek, { previous: previousKek?.ok ? previousKek.kek : undefined }) } : {}),
+        },
+      }),
+      new CrudSessionFiles(config.backendUrl, { fetch: crudFetch, settings }),
+      () => crudAreas.has('workspace'),
+    )
   : undefined
 if (workspace) toolServices.workspace = workspace
 // Where writes go, for GET /api/v1/ai/status: checked at most once a minute (the backend may start after this).

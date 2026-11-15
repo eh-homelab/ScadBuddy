@@ -11,8 +11,10 @@ no ``Idempotency-Key``).
 The holds of the assistant's workspace files (#5299, in place of the agent's trigger on
 ``blob_refs``): each file whose sealed bytes are a blob of the content store
 (`api/internal_workspace.py`) is held ``(ai_session_file, <workspace>/<path>)`` while
-its ``ai_session_files`` row names it, so the blob sweep keeps it. The agent holds before
-it writes the row and releases once the row is gone (``agent/src/workspace/store.ts``):
+its ``ai_session_files`` row names it, so the blob sweep keeps it. An agent on SQL holds
+before it writes the row and releases once the row is gone (``agent/src/workspace/store.ts``);
+once the API lists area ``workspace`` its routes write the holds in each row's own
+transaction instead (``api/crud_agent_workspace.py``, #5299 step 7):
 
 - ``POST …/workspace-blob-refs`` holds a key for a holder (a hold sent again refreshes its
   ``created_at``);

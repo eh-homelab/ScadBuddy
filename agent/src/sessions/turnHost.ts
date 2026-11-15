@@ -17,7 +17,7 @@ import type { QuestionGate, QuestionRequest, QuestionVerdict, UserQuestion } fro
 import type { QuestionService } from '../gate/questions.js'
 import type { Continuation, OpenInputAnswer, OpenInputArgs, SessionTurnInput, SessionTurnResult, WithdrawInputArgs } from '../temporal/session/models.js'
 import type { DecidedCall, DecidedRun } from '../temporal/toolActivities.js'
-import { NO_CAPACITY, SESSION_GONE, SHUTTING_DOWN_FAILURE } from '../temporal/session/names.js'
+import { NO_CAPACITY, PLACEMENT_MOVED, SESSION_GONE, SHUTTING_DOWN_FAILURE } from '../temporal/session/names.js'
 import { attentionGate, type HeldRow, replyOf, TAB_WAIT_CALL } from './attentionGate.js'
 import type { SessionBlobs } from './blobs.js'
 import { userPrompt } from './images.js'
@@ -49,7 +49,9 @@ import { type Placement, type SessionDirectory, watchCaps } from '../workspace/d
 // appends checks, in its own transaction, that the row is still this placement's
 // (`turn_attempt`), so none lands once another has claimed the turn. Every FENCE_MS it also reads
 // the row, and once another placement holds it, or the turn is no longer the row's, it is cut
-// off: its process closed. Its spend is always written: its requests are its own, never the
+// off: its process closed. One cut off because another placement holds the row fails the
+// retryable PlacementMoved, which the workflow, waiting on it, answers by placing the turn again
+// (#6387); the row names the other placement in the log. Its spend is always written: its requests are its own, never the
 // next placement's, so the budget counts every replica that ran the turn, once. A new placement
 // here for the same session cuts an older one first, so the warm process is free.
 //
@@ -553,7 +555,9 @@ export class TurnHost {
     // Signal is the backstop.
     const fence = setInterval(() => {
       void this.#holds(id, turnId, attempt).then(
-        (holds) => {
+        ({ holds, holder }) => {
+          // Which placement took the row, for the log: a stray one is otherwise named nowhere (#6387).
+          if (holds === 'moved' && cutBy() === undefined) console.warn(`session ${id}: placement ${attempt} of turn ${turnId} is cut off: the row names placement ${holder ?? 'none'}`)
           if (holds === 'interrupted') {
             if (!controller.signal.aborted) controller.abort(new Error('the turn was interrupted'))
             spend.flush(core.runningUsd())
@@ -643,6 +647,11 @@ export class TurnHost {
         return { status: 'released', hostQueue: this.#deps.hostQueue, parked: parks.taken }
       }
       if (why === 'shutdown') throw ApplicationFailure.retryable(CUT_TEXT.shutdown, SHUTTING_DOWN_FAILURE, { pushed: entries.length > 0 })
+      // Another placement took the row (#6387): the workflow owns placement, and places the turn
+      // again, whose claim fences that one out. Only an ended turn is over.
+      if (why === 'moved' || why === 'replaced') {
+        throw ApplicationFailure.retryable(`session ${id}'s placement ${attempt} was cut off: ${CUT_TEXT[why]}`, PLACEMENT_MOVED)
+      }
       if (why !== undefined) throw ApplicationFailure.nonRetryable(`session ${id}'s placement ${attempt} was cut off: ${CUT_TEXT[why]}`, SESSION_GONE)
       // A process the turn let go (it failed, or was recycled) lands its last appends before the
       // turn ends, as a classic turn's does: the next turn's claim would fence them out, and its
@@ -1037,15 +1046,17 @@ export class TurnHost {
 
   /**
    * Whether the row still runs this turn on this placement: `moved` when another placement holds
-   * it, `ended` when the turn is over, `interrupted` when a Stop has asked it to end (§5.6).
+   * it, `ended` when the turn is over, `interrupted` when a Stop has asked it to end (§5.6); and
+   * the placement the row names.
    */
-  async #holds(id: string, turnId: string, attempt: string): Promise<'yes' | 'moved' | 'ended' | 'interrupted'> {
+  async #holds(id: string, turnId: string, attempt: string): Promise<{ holds: 'yes' | 'moved' | 'ended' | 'interrupted'; holder: string | null }> {
     const [row] = await this.#deps.sql<{ turn_attempt: string | null; durable_turn_id: string | null; interrupt_requested: boolean }[]>`
       SELECT turn_attempt, durable_turn_id, interrupt_requested FROM ai_sessions WHERE id = ${id}`
-    if (!row) return 'ended'
-    if (row.turn_attempt !== attempt) return 'moved'
-    if (row.durable_turn_id !== turnId) return 'ended'
-    return row.interrupt_requested ? 'interrupted' : 'yes'
+    if (!row) return { holds: 'ended', holder: null }
+    const holder = row.turn_attempt
+    if (holder !== attempt) return { holds: 'moved', holder }
+    if (row.durable_turn_id !== turnId) return { holds: 'ended', holder }
+    return { holds: row.interrupt_requested ? 'interrupted' : 'yes', holder }
   }
 
   async #images(id: string, refs: readonly { name: string }[]) {

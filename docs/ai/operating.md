@@ -445,10 +445,10 @@ kubectl -n scadbuddy create secret generic scadbuddy-agent-kek \
   payload keys: the API seals and opens them
   ([`backend/scadbuddy/api/crud_agent_secrets.py`](../../backend/scadbuddy/api/crud_agent_secrets.py)),
   and the agent asks it whether it holds a key (`GET …/crud/agent/credentials/key`). The
-  agent's own file still opens its workspace file keys, until the later steps of #5299,
-  and the rest only while the API does not list their areas yet: the Web Push and channel
-  keys (area `notify`), the plugins' header secrets and their sign-ins (area `plugins`,
-  #5299 step 5). Mount the same key in both.
+  agent's own file still opens the Web Push and channel keys (area `notify`), the plugins'
+  header secrets and their sign-ins (area `plugins`, #5299 step 5) and its workspace file
+  keys (area `workspace`, #5299 step 7) only while the API does not list their areas yet,
+  until the later steps of #5299. Mount the same key in both.
 - **Keep a copy.** Each stored row records the KEK's id (the first 16 hex characters of
   SHA-256 over the key; `kekFromBase64()`). A credential sealed under a lost key cannot
   be opened. `/healthz` then reports "stored credential was sealed with a different
@@ -479,14 +479,13 @@ key, and they stop opening once the old key's mount is removed.
    - The API, after its migrations: `ai_credentials` (the Claude credentials),
      `ai_payload_keys` (the durable payload keys), `ai_push_vapid`,
      `ai_push_subscriptions` and `ai_notify_channels` (the Web Push keys and the
-     notification channels' tokens, #5299 step 5), and `ai_plugins` and `ai_plugin_oauth`
+     notification channels' tokens, #5299 step 5), `ai_plugins` and `ai_plugin_oauth`
      (the plugins' header secrets and sign-ins, #5299 step 5; the sign-ins under way in
-     `ai_plugin_oauth_flows` that the old key sealed are deleted, as before). The log line
+     `ai_plugin_oauth_flows` that the old key sealed are deleted, as before), and
+     `ai_session_files` (the workspace's principal file keys, #5299 step 7). The log line
      reads `secret key rotation: re-wrapped the agent's credentials` (or `payload_keys`,
-     `notify` or `plugins`), with the counts.
-   - The agent, once migrations have applied (the `afterMigrate` hook of
-     `connectDatabase()`): `ai_session_files` (workspace file keys). A later step of #5299
-     moves it to the API too.
+     `notify`, `plugins` or `session_files`), with the counts.
+   - The agent re-wraps nothing itself any more.
 
    The sealed secret and `updated_at` are not touched. Each `UPDATE` is conditional on
    `kek_id`, so two pods rotating at once do not overwrite each other.
@@ -1722,6 +1721,21 @@ the pod's disk, so every replica, every session and `/mcp` see the same
 files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), tools in
 [`agent/src/tools/workspace.ts`](../../agent/src/tools/workspace.ts)).
 
+- Who keeps them (#5299 step 7): the API, once it lists area `workspace` (`GET
+  …/crud/agent/areas`). Its routes `/api/v1/internal/crud/agent/workspace/*`
+  ([`backend/scadbuddy/api/crud_agent_workspace.py`](../../backend/scadbuddy/api/crud_agent_workspace.py),
+  the `crud.agent` credential; the agent's
+  [`agent/src/workspace/crudStore.ts`](../../agent/src/workspace/crudStore.ts)) take and give
+  plaintext and seal, store and open each file on the API, with its KEK and the session's
+  payload key, in the format below, so either side opens what the other sealed. A write's
+  row, its blob's hold and its `workspace.file` events are one transaction there, so no hold
+  waits for a release, and the API re-wraps principals' file keys at a rotation
+  (`agent_data/rotation.py`). The reconcile is one transaction on the API too, under
+  `RECONCILE_LOCK` as a transaction lock, which an agent pod still on SQL takes as a session
+  lock: never two at once. A workspace and a path go in the query or the body, never in a
+  route's path. A file is at most `workspace_file_max_bytes` and, whatever that setting says,
+  100 MiB (the Settings form's ceiling, `FILE_BYTES_CEILING`). Until the API lists the area
+  (a rolling deploy) the agent does all of the below itself, over SQL.
 - Where the bytes are (#4789): a blob of the backend's content store (`store_backend` s3
   or bambuddy), `workspace-<sha256 of the sealed bytes>`. The agent reads which store the
   backend runs on from its `/healthz` (`store.backend`), and asks its hidden

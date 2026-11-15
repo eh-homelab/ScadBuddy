@@ -49,6 +49,7 @@ import {
   NO_CAPACITY,
   OPEN_INPUT_UPDATE,
   OWNER_CHANGED_SIGNAL,
+  PLACEMENT_MOVED,
   RELEASE_WORKER_ACTIVITY,
   SEND_MESSAGE_UPDATE,
   SESSION_FINISH_ACTIVITY,
@@ -91,7 +92,8 @@ import {
 //
 // Affinity (§5.2), Go's Worker Sessions on worker-specific queues: `home` is the session host
 // queue (`agent-sessions.<identity>`) of the replica `acquire_worker` reserved a place on; each
-// turn runs there, and a turn whose home has gone (a timeout, ShuttingDown, NoCapacity) is placed
+// turn runs there, and a turn whose home has gone (a timeout, ShuttingDown, NoCapacity), or whose
+// placement another placement took the row from (PlacementMoved, PLACEMENT_MOVED_PATCH), is placed
 // again: acquire on the shared `agent-tools` (not one of the homes it was lost on while another
 // replica can take it, and the last placement unrestricted), then the turn on the new home,
 // resumed from its transcript (`restarted`), at most PLACEMENTS times, waiting PLACEMENT_BACKOFF
@@ -137,6 +139,13 @@ const FULL_HOME_PATCH = 'agent-session-full-home'
  */
 const PLACEMENT_BACKOFF_PATCH = 'agent-session-placement-backoff'
 const PLACEMENT_BACKOFF = ['10s', '30s'] as const
+/**
+ * A placement cut off because another placement took the turn's row (PlacementMoved) is placed
+ * again, as a lost worker's is (#6387). On 2026-11-15, in a rollout, such a cut (then SessionGone)
+ * failed a turn whose workflow had placed nothing else, and the user read "Activity task failed".
+ * Asked only when such a failure arrives, which no older worker sent.
+ */
+const PLACEMENT_MOVED_PATCH = 'agent-session-placement-moved'
 /**
  * An attention request may name `on_timeout` `wait` or `stop` (#5003): the turn acts on its
  * timeout, so the entry records what it will do. Asked only of such a request, which no earlier
@@ -187,7 +196,19 @@ export function movesWorker(err: unknown): boolean {
   // `turn_max_seconds` (StartToClose) is over, not lost: placing it again could triple its spend.
   if (cause instanceof TimeoutFailure) return cause.timeoutType === 'SCHEDULE_TO_START' || cause.timeoutType === 'HEARTBEAT'
   const type = failureType(err)
-  return type === SHUTTING_DOWN_FAILURE || type === NO_CAPACITY
+  // Another placement took the turn's row: the workflow, which owns placement, places it again (#6387).
+  return type === SHUTTING_DOWN_FAILURE || type === NO_CAPACITY || type === PLACEMENT_MOVED
+}
+
+/** Why a placement was lost, in the user's words: what the turn's failure says once the placements run out. */
+function lostWhy(err: unknown): string {
+  const cause = err instanceof ActivityFailure ? err.cause : err
+  if (cause instanceof TimeoutFailure) return cause.timeoutType === 'SCHEDULE_TO_START' ? 'no worker took the turn up in time' : 'its worker stopped answering'
+  const type = failureType(err)
+  if (type === PLACEMENT_MOVED) return 'another placement took the turn over'
+  if (type === SHUTTING_DOWN_FAILURE) return 'its worker was shutting down'
+  if (type === NO_CAPACITY) return 'every worker was busy with other turns'
+  return failureText(err)
 }
 
 /**
@@ -205,9 +226,13 @@ type TurnEnd = { outcome: TurnOutcome; message?: string; code?: string; tail?: S
 
 const busy = (): ApplicationFailure => ApplicationFailure.nonRetryable('the session is running a turn', 'busy')
 
+/**
+ * A failure in the user's words: its cause, without the activity's own "Activity task failed",
+ * which says only where it happened (#6387). Only the activity's input, so an older history replays.
+ */
 function failureText(err: unknown): string {
-  const cause = err instanceof ActivityFailure ? err.cause : err
-  const text = cause instanceof Error ? `${err instanceof Error ? err.message : ''}: ${cause.message}` : String(err)
+  const cause = err instanceof ActivityFailure && err.cause ? err.cause : err
+  const text = cause instanceof Error ? cause.message : String(err)
   return text.slice(0, MESSAGE_MAX)
 }
 
@@ -384,6 +409,7 @@ export async function AgentSession(started: SessionStart): Promise<void> {
       } catch (err) {
         // An interrupt cancels the turn; it never moves the session (BudgetExhausted, CredentialRefused, SessionGone: the turn's end).
         if (isCancellation(err) || interrupted !== undefined || !movesWorker(err)) throw err
+        if (failureType(err) === PLACEMENT_MOVED && !patched(PLACEMENT_MOVED_PATCH)) throw err
         last = err
         // A kept home whose slots all run turns refused this one as it arrived (session_turn
         // re-reserves there, TurnHost.run): nothing ran, and its place was never this turn's, so
@@ -402,7 +428,7 @@ export async function AgentSession(started: SessionStart): Promise<void> {
         continuation = mergeRestarted(continuation)
       }
     }
-    return { status: 'failed', hostQueue: '', error: `the turn could not be placed on a worker: ${failureText(last)}` }
+    return { status: 'failed', hostQueue: '', error: `the turn could not be placed on a worker: ${lostWhy(last)} (${placements} tries); send the message again` }
   }
 
   /** acquire_worker on one replica's own session host queue, with no exclusion: its place there, or its refusal. */
