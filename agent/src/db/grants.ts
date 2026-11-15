@@ -16,16 +16,38 @@ type Grants = Readonly<Record<string, readonly string[]>>
  * projects worker in-process, and serves its CRUD routes), what `flows/store.py` reads of
  * a session's tiers and the approval timeout, the activity list's (`activity/index.py`,
  * `activity/kinds.py`), a flow's images (`flows/images.py`) and forgetting a run
- * (`flows/forget.py`). */
+ * (`flows/forget.py`). And the agent's own settings, Claude credentials and payload keys,
+ * which the API serves this agent over its CRUD routes, sealing and opening them with the KEK
+ * and auditing each reveal (#5299 step 4, `api/crud_agent_secrets.py`), and forgetting a subject,
+ * the key deletes no forget makes and a flow run's images, which it keeps for this agent (#5299
+ * step 6, `api/crud_agent_forget.py`: the sweep reads `ai_session_entries`): the CRUD service's
+ * grants on the tables it takes over (#5299 D1), never another service's on its tables. A
+ * KEK rotation re-wraps the credentials and payload keys there (UPDATE). And the small stores
+ * it serves over its CRUD routes (#5299 step 5, `api/crud_agent_stores.py` and
+ * `api/crud_agent_notify.py`): the activity kinds, the browser's approved origins, the
+ * session tabs, tab owners and tab images, the pairings, the MCP tokens, and the Web Push
+ * records and notification channels, which it seals, opens and re-wraps with the KEK. */
 export const API_AI_GRANTS: Grants = {
-  ai_payload_keys: ['SELECT', 'INSERT', 'DELETE'],
+  ai_payload_keys: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   ai_forgotten_subjects: ['SELECT', 'INSERT'],
   ai_sessions: ['SELECT'],
-  ai_mcp_tokens: ['SELECT'],
-  ai_settings: ['SELECT'],
-  ai_flow_blobs: ['SELECT', 'DELETE'],
+  ai_mcp_tokens: ['SELECT', 'INSERT', 'UPDATE'],
+  ai_settings: ['SELECT', 'INSERT', 'UPDATE'],
+  ai_credentials: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  ai_audit: ['INSERT'],
+  ai_flow_blobs: ['SELECT', 'INSERT', 'DELETE'],
+  ai_session_entries: ['SELECT'],
   ai_operations: ['SELECT'],
-  ai_activity_kinds: ['SELECT'],
+  ai_activity_kinds: ['SELECT', 'INSERT', 'UPDATE'],
+  ai_browser_session_origins: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  ai_session_tabs: ['SELECT', 'INSERT', 'UPDATE'],
+  ai_tab_owners: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  ai_tab_images: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  ai_browser_pairings: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  ai_push_vapid: ['SELECT', 'INSERT', 'UPDATE'],
+  ai_push_subscriptions: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  ai_notifications_sent: ['SELECT', 'INSERT', 'DELETE'],
+  ai_notify_channels: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
 }
 
 /** The projects worker's role: it holds no database (ScadBuddy#5298), so the agent takes back

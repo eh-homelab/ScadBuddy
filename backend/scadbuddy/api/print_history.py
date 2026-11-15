@@ -67,6 +67,7 @@ from scadbuddy.bambuddy.models import (
     ArchiveRun,
     LibraryFile,
     PrinterMedia,
+    ProcessValue,
     TimelapseInfo,
 )
 from scadbuddy.bambuddy.part_settings import PartSettingsMap, parts_set_only
@@ -502,6 +503,11 @@ class PrintDetail(PrintSummary):
     #: again; a template's ``part_print_settings`` (#5626) apply again on their own. None
     #: for none, or for a print no recorded run queued or started.
     part_settings: PartSettingsMap | None = None
+    #: The process settings that run's request set (#2998,
+    #: ``PrintRunResult.process_overrides``), which a reprint sends again as
+    #: ``process_overrides``; the template's ``print_settings`` apply again on their own.
+    #: None as ``part_settings`` is.
+    process_overrides: dict[str, ProcessValue] | None = None
 
     _parts_set_only = model_serializer(mode="wrap")(
         lambda self, handler: parts_set_only(handler(self), maps=("part_settings",))
@@ -522,11 +528,12 @@ async def _part_settings(
     links: PrintLinkStore,
     runs: PrintRunStore,
     link: LinkedPrint,
-) -> tuple[ArchiveDetail | None, PartSettingsMap | None]:
-    """The archive, and ``link``'s print's settings per slot (#5627): the run that queued
-    or started it recorded them in its result. A print on Bambuddy's queue names that run
-    through its queue item's send. A LAN print names it through the start it became
-    (#5661): a recorded start, else the archive's file name (`_run_by_file`). The send
+) -> tuple[ArchiveDetail | None, PartSettingsMap | None, dict[str, ProcessValue] | None]:
+    """The archive, and ``link``'s print's settings per slot (#5627) and process
+    settings (#2998): the run that queued or started it recorded them in its result. A
+    print on Bambuddy's queue names that run through its queue item's send. A LAN print
+    names it through the start it became (#5661): a recorded start, else the archive's
+    file name (`_run_by_file`). The send
     and the recorded start are read while the archive is fetched; only the file name
     waits for it (#5733). The settings are None when nothing names a run exactly (a send
     recorded before #1751, a print queued outside ScadBuddy, a reprint made in Bambuddy
@@ -547,8 +554,10 @@ async def _part_settings(
         if isinstance(named, _ByFile)
         else named
     )
-    settings = run.result.part_settings if run is not None and run.result is not None else None
-    return archive, settings
+    result = run.result if run is not None else None
+    if result is None:
+        return archive, None, None
+    return archive, result.part_settings, result.process_overrides
 
 
 async def _guarded[T](read: Awaitable[T], link: LinkedPrint) -> T | None:
@@ -1386,7 +1395,8 @@ def _outcome(
         "parameters; none for a library file's print), every file (ScadBuddy's 3MF and "
         "preview mesh, the sliced file and slicer project Bambuddy kept), its photos, "
         "timelapse and plate image, its outcome and runs, and the slicer settings per "
-        "filament slot (`part_settings`) the ScadBuddy run that queued or started it set. "
+        "filament slot (`part_settings`) and the process settings (`process_overrides`) the "
+        "ScadBuddy run that queued or started it set. "
         "`printer_media=1` also lists what the printer holds for it, which asks the printer."
     ),
 )
@@ -1418,7 +1428,9 @@ async def get_print(
     imported = await links.import_of(archive_id) if link.matched_by == "import" else None
 
     async with client_for(store.load()) as client:
-        archive, part_settings = await _part_settings(cache, client, links, print_runs.store, link)
+        archive, part_settings, process_overrides = await _part_settings(
+            cache, client, links, print_runs.store, link
+        )
         diff = await defaults.diff(output) if output is not None else None
         file = await _LibraryFiles(cache, client).file(link.library_file_id)
         summary = _summary(link, meta, archive, diff, file.filename if file else None)
@@ -1467,6 +1479,7 @@ async def get_print(
         slicing=_slicing(archive) if archive is not None else None,
         record=_record(archive) if archive is not None else None,
         part_settings=part_settings,
+        process_overrides=process_overrides,
         imported=imported,
         links=PrintLinks(
             bambuddy_url=bambuddy_url,

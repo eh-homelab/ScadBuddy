@@ -6,6 +6,7 @@ import { CHANNEL_KINDS, ChannelError, type ChannelStore } from '../notify/channe
 import { sessionLink } from '../notify/dispatcher.js'
 import { jsonBodyLimit, type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
+import { UUID_SEGMENT } from '../api/crudStores.js'
 
 // The out-of-browser notification channels (#815 §3, notify/channels.ts), Settings →
 // Assistant → Notifications. Only the person sets them: these routes take the UI's own
@@ -23,7 +24,7 @@ import { ready, type RouteModule } from './module.js'
 export const NOTIFY_CHANNELS_PATH = '/api/v1/ai/notify/channels'
 
 export type NotifyChannelRouteDeps = {
-  /** Undefined without the database or the KEK (tokens are kept sealed). */
+  /** Undefined without the database; with no KEK here, `available` only once the API serves area `notify` (it seals the tokens). */
   channels: ChannelStore | undefined
   notify: { publicUrl: string | undefined }
   ready: () => Promise<boolean>
@@ -33,14 +34,14 @@ export type NotifyChannelRouteDeps = {
 
 declare module '../app.js' {
   interface AppDeps {
-    /** The notification channels (#815, notify/channels.ts); left out without the database or the KEK. */
+    /** The notification channels (#815, notify/channels.ts); left out without the database. */
     notifyChannels?: ChannelStore | undefined
     /** SCADBUDDY_PUBLIC_URL, for the links notifications carry. */
     publicUrl?: string | undefined
   }
 }
 
-const UNAVAILABLE = 'notification channels need the database and SCADBUDDY_SECRET_KEY_FILE (their tokens are kept sealed)'
+const UNAVAILABLE = 'notification channels need the database, and SCADBUDDY_SECRET_KEY_FILE or an API that seals their tokens (CRUD area notify)'
 const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
 const WHAT = 'notification channels'
 
@@ -78,7 +79,7 @@ function present<T extends object>(value: T): { [K in keyof T]?: Exclude<T[K], u
 
 export function registerNotifyChannelRoutes(app: Hono, deps: NotifyChannelRouteDeps): void {
   async function store(): Promise<ChannelStore | string> {
-    if (!deps.channels) return UNAVAILABLE
+    if (!deps.channels || !deps.channels.available()) return UNAVAILABLE
     return (await deps.ready()) ? deps.channels : NOT_READY
   }
 
@@ -122,6 +123,7 @@ export function registerNotifyChannelRoutes(app: Hono, deps: NotifyChannelRouteD
       return c.json({ detail: problemOf(err) }, 400)
     }
     const id = c.req.param('id')
+    if (!UUID_SEGMENT.test(id)) return c.json({ detail: `no channel ${id}` }, 404)
     try {
       await s.update(id, present(body))
       return c.json((await s.list()).find((v) => v.id === id))
@@ -136,7 +138,9 @@ export function registerNotifyChannelRoutes(app: Hono, deps: NotifyChannelRouteD
     if (problem) return c.json({ detail: problem }, 403)
     const s = await store()
     if (typeof s === 'string') return c.json({ detail: s }, 503)
-    return (await s.delete(c.req.param('id'))) ? c.body(null, 204) : c.json({ detail: `no channel ${c.req.param('id')}` }, 404)
+    const id = c.req.param('id')
+    if (!UUID_SEGMENT.test(id)) return c.json({ detail: `no channel ${id}` }, 404)
+    return (await s.delete(id)) ? c.body(null, 204) : c.json({ detail: `no channel ${id}` }, 404)
   })
 
   app.post(`${NOTIFY_CHANNELS_PATH}/:id/test`, async (c) => {
@@ -145,6 +149,7 @@ export function registerNotifyChannelRoutes(app: Hono, deps: NotifyChannelRouteD
     const s = await store()
     if (typeof s === 'string') return c.json({ detail: s }, 503)
     const id = c.req.param('id')
+    if (!UUID_SEGMENT.test(id)) return c.json({ detail: `no channel ${id}` }, 404)
     let channel
     try {
       channel = await s.open(id)

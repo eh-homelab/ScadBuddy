@@ -145,6 +145,10 @@ class SettingsView(BaseModel):
     storefront_slices_concurrent: int = 1
     storefront_draft_ttl_days: int = 30
     storefront_requests_enabled: bool = False
+    #: The materials a storefront print may be made of, in the shop's order (#6258).
+    storefront_materials: list[str] = Field(default_factory=lambda: ["PETG", "PLA"])
+    #: The most colour combinations one prepare of a listing queues (#6237).
+    storefront_prepare_cap: int = 256
     #: The storefront's mail (#5283): SMTP host, port, user, From and the TLS mode
     #: (`starttls`, `implicit` or `none`). The password is sealed apart
     #: (`GET /storefront/mail/password` says whether it is set).
@@ -625,8 +629,10 @@ async def put_settings(
         # itself, under the lock a pass takes (#6011).
         await state.components.get(AUTO_IMPORTS).floor()
     apply_runtime(state, snapshot.runtime)
-    # This process sees its own write at once; workers within the source's TTL.
+    # This process sees its own write at once, `/healthz` too, which only reads what the
+    # source last read (#6354); workers within the source's TTL.
     state.store.source.invalidate()
+    await state.store.source.current()
     return _view(snapshot, state)
 
 

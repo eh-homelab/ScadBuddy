@@ -392,6 +392,7 @@ QUOTED_SETUP = (
     "prime_tower",
     "supports",
     "print_sequence",
+    "process_overrides",
 )
 
 

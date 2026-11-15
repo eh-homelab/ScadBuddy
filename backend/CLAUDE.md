@@ -74,11 +74,20 @@ queue, template media's `template_media`) skip unless `SCADBUDDY_TEST_DATABASE_U
 points at a Postgres they can create schemas in, e.g.
 `docker run -d -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=scadbuddy_test -p 5432:5432
 postgres:18` and `SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test`.
-Without Docker, a native Postgres 18 works (`initdb`, then `pg_ctl -o "-p 55432"`). It needs
-`timezone='UTC'` in `postgresql.conf`, or a timezone test fails. A data directory on a long
-path also needs `unix_socket_directories=''`, with TCP only (measured 2026-11-14 on WSL2,
-Homebrew `postgresql@18`, #6322).
-Without it most of `tests/api` skips. CI runs them against a `postgres:18` service
+Without Docker, a native Postgres 18 works:
+
+```bash
+initdb -D "$PGDATA" -U postgres --auth=trust
+pg_ctl -D "$PGDATA" -o "-p 55432 -c timezone=UTC -c unix_socket_directories=''" start
+createdb -h 127.0.0.1 -p 55432 -U postgres scadbuddy_test
+# SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:55432/scadbuddy_test
+```
+
+`timezone='UTC'` is required, or a timezone test fails. TCP only
+(`unix_socket_directories=''`) is needed when the data directory is on a long path.
+Measured on 2026-11-14 on WSL2 with Homebrew `postgresql@18` (#6322): the `timezone` and
+long-path findings. The commands above are that recipe written out in full, not re-run as one script.
+Without `SCADBUDDY_TEST_DATABASE_URL` most of `tests/api` skips. CI runs them against a `postgres:18` service
 container. A `Settings` for an app that never starts uses `tests.conftest.UNUSED_DATABASE_URL`.
 Tests marked `requires_fixtures` (#2146) use the real MakerWorld 3MFs in
 `test-fixtures/makerworld/` (Git LFS, ~290 MB; `git lfs pull --include "test-fixtures/**"`;
@@ -181,7 +190,12 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   backend's migrations), `agent_migrations.py` (the agent's, which the API applies at
   start after the backend's, `main._migrate_agent_at_start`; root CLAUDE.md "Migrations
   (#491)"; a test's app skips them unless the test is marked `agent_migrations`,
-  `tests/conftest.py`); the render worker holds no database (#5298,
+  `tests/conftest.py`; a table or other object an agent migration creates belongs to the
+  role the API connects as, not the agent's. Prod's API and agent connect as one role, so
+  nothing changes there; with a role per caller, the agent could not use what a later file
+  makes (nothing grants it: `agent/src/db/grants.ts` grants only from the agent's own
+  tables to the API's role), so such a deployment keeps the API and the agent on one role
+  until the agent's data moves behind CRUD routes (#5299)); the render worker holds no database (#5298,
   `tests/test_render_worker_nodb.py`; the API revokes its old role `scadbuddy_render` at
   every start, `auth/revoke.py`, and every caller's grant list goes through
   `auth/caller_grants.py` `grant_role`): it reads the store settings and
@@ -201,6 +215,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
 - `backend/scadbuddy/workflows/arrange.py` — Arrange's packer (spec 2026-09-27 §7): goals,
   quarter turns, filament signatures, every plate checked with `plate.fit_problem`;
   `Arrange` in `workflows/pipelines.py` runs a `kind='arrange'` row (`POST /outputs/arrange`).
+  It packs with `packing.py` `GAP_MM` (5 mm) and ignores Bambu's by-object clearance, so a
+  by-object plate fails "too close to others" (#6246). A template plate is one object with
+  colour parts (#6245), so by-object slicing does nothing useful on it: render each piece
+  alone and arrange the pieces, which makes each one its own object (#956).
 - `backend/scadbuddy/workflows/` — renders on Temporal (#424): `pipelines.py`
   (`TemplatePipeline`, its `RenderPiece` children, `RenderPreview`), `activities.py`
   (the render stages as activities, `WorkerDeps`), `client.py` (`connect`,
@@ -260,8 +278,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
 - `backend/scadbuddy/flows/` — flow versions and runs (`store.py`: `workflow_definitions`,
   `workflow_runs`, the latter written only by the run's workflow), `agent_reads.py` (the
   agent's questions about the flow tables, read only, for `api/crud_agent.py` area `flows`,
-  #5299 D7: the queries the agent ran over SQL, which `agent/src/flows/backendReads.ts`
-  `SqlFlowRunReads` keeps a copy of until every API pod serves the routes), `typecheck.py` (a
+  #5299 D7: the queries the agent ran over SQL, of which the agent's tests keep a copy,
+  `agent/test/support/sqlFlowRunReads.ts`; the API revokes the agent's grants on
+  `workflow_runs` and `workflow_run_decisions`, `auth/revoke.py`), `typecheck.py` (a
   script's check at registration and at each start), `history.py` (a Reset's preview: the
   outward sends past a point, by activity id), `component.py` (`FLOWS`; runs the
   `projects` worker in-process with `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` or
@@ -270,6 +289,38 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   sweep for runs whose execution closed). Routes `api/flows.py`. An outward call's
   approval timeout resolves from the run, its flow, then `flow_approval_timeout_seconds`
   (0 is never).
+- `backend/scadbuddy/agent_data/` — the agent's settings, Claude credentials and payload data
+  keys behind the CRUD service (#5299 step 4, D5; #5342), for `api/crud_agent_secrets.py`
+  (class `crud.agent`, areas `settings`, `credentials`, `payload-keys`): `credentials.py` is
+  `agent/src/credentials.ts` `CredentialStore` statement for statement (the AAD, the table
+  lock, the `FOR UPDATE` health write, the warm-evict NOTIFY), sealed and opened here with the
+  KEK; `settings.py` a write with the NOTIFYs in its transaction and, with `expect`, a
+  compare-and-set under the table's lock; `payload_keys.py` a subject's data key released
+  (made first under the subject's advisory lock, never for a subject in
+  `ai_forgotten_subjects`), never the KEK; `audit.py` the `ai_audit` row each reveal
+  (kind `credential`; a redaction's once per `REDACT_AUDIT_WINDOW`) and release (kind `payload_key`, once per subject and
+  `RELEASE_AUDIT_WINDOW`) writes in its transaction; `rotation.py` the re-wrap of the credentials and payload
+  keys at the API's start (`main._rotate_agent_secrets`). For `api/crud_agent_forget.py` (area
+  `forget`, #5299 step 6): `forget.py` a subject's tombstone, its flow images and its key in one
+  transaction under its lock (a session with forks refused, `ForksTakeRangesError`: the agent
+  copies their ranges itself until its sessions move here), a browser call's key dropped and the
+  hourly sweep of the keys no forget deletes; `flow_blobs.py` a flow run's images kept (sealed by
+  the agent, sent as multipart bytes; the tombstone check and `FLOW_IMAGES_MAX` under the lock)
+  and read. `flows/forget.py` and `flows/images.py` run the same statements on the API's own
+  tables, with no fallback for a database the agent never migrated (the API applies its files
+  first, #5299 D6). Its tests make the agent's tables
+  with the agent's own migration files (`render/agent_migrations.py` `migrate_agent`) and open
+  the credential vectors `tests/fixtures/secret-vectors.json`, a copy that
+  `lint-codec-copies.sh` keeps equal to the agent's. `notify.py` re-wraps the agent's Web Push
+  keys and notification channels' tokens (#5299 step 5) in the same rotation.
+- The agent's small stores (#5299 step 5): `api/crud_agent_stores.py` (areas
+  `activity-kinds`, `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`) and
+  `api/crud_agent_notify.py` (area `notify`, sealed with the KEK under the agent's AAD), each
+  route one method of the agent's store and its SQL, a transaction as one transaction: the
+  pairing request's advisory lock, the accept's `FOR UPDATE` with the code hash compared in
+  constant time, a push subscription under its endpoint row's lock. A tab image's bytes are
+  the request's and the answer's body, checked against its sha256 name. Tests
+  `tests/api/test_crud_agent_stores.py`, `test_crud_agent_notify.py`.
 - `backend/scadbuddy/flow_triggers/` — runs started on a schedule or an event (#2484,
   spec 2026-10-11 §12): `store.py` (`flow_triggers`, their standing grants and fires),
   `fire.py` (the `flow_trigger_fire` activity on the `library` queue), `events.py` (the
@@ -570,9 +621,18 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`BambuddyClient.makerworld_*`; Bambuddy's 400 for a link it refuses is a 422). The
   assistant imports only through these routes (agent `get_makerworld_status`,
   `resolve_makerworld_url`, `import_makerworld_model`): the agent worker has no route to
-  Bambuddy and never holds its key. The `makerworld-import` flow (stored in the
-  database, not in this repo) still posts to Bambuddy's `/api/v1/makerworld/import`
-  directly until its `import_one` is changed to call `import_makerworld_model`. The import is the `makerworld_import` operation on the
+  Bambuddy and never holds its key. The `makerworld-import` flow is not in this repo:
+  its versions are prod's `data/flows/makerworld-import/flow.py`, written only through
+  the API's `/workflows` routes (`POST /workflows` registers a version; restore and
+  delete commit too), never from this repo. Since version 2 its `import_one` calls `resolve_makerworld_url`,
+  `create_print_project` and `import_makerworld_model` (#6340). A command tool
+  (`agent/src/tools/command.ts`: `create_print_project`, `import_makerworld_model`)
+  answers `{status: "running", operation_id, next}` once its follow window ends, which a
+  script follows with `get_operation`; version 2 read `folder_id` straight off
+  `create_print_project` and failed `'folder_id'`. A flow run's call carries no `callKey`
+  (`agent/src/temporal/toolActivities.ts` `runCall`), so each call of a write sends a
+  fresh `Idempotency-Key`: after `may have run` or `StartToClose` the script checks
+  state (`list_print_projects`) before it sends the write again. The import is the `makerworld_import` operation on the
   `library` queue (`makerworld/operations.py`): Bambuddy downloads the 3MF (up to
   `MAKERWORLD_IMPORT_TIMEOUT`), then on `library_backend` native `makerworld/imports.py`
   copies it into the native library as a `bb_to_sb` copy does
@@ -957,13 +1017,15 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `QUOTE_TIMEOUT`), its steps `quote.py`: the check writes nothing; the run writes the
   body's filaments onto the item (`update_item`'s `filaments`, a repin only when a slot
   changes), renders and saves an output through `output_create`'s run when the item has
-  none matching, slices every plate through `bambuddy/preview.py` `start_preview_plates`
+  none matching (`ensure_output` over `rendering.py` `output_for_reference`, #6324: a
+  `Reference` to its output, no item needed; given one, `AttachTo` sets it on the item with
+  no new revision and no quote dropped), slices every plate through `bambuddy/preview.py` `start_preview_plates`
   (the dialog's background slice, either slicer), keeps each plate's sliced file as the
   directory blob `quote-<sha256>` held by `blob_refs (order_item_quote, <quote id>)`
   before the quote's row exists, reads each plate with `read_sliced`, prices and records
   it (`Lifecycle.record_slice_quote`). The quote records its print setup (#4673, order operations spec §5): `choices`
-  (`quote.py` `print_setup`: printer, path, `PrintChoices`, and the `prime_tower`, `supports` and
-  `print_sequence` the body takes in `PrintRunRequest`'s shapes, which `operations.py`
+  (`quote.py` `print_setup`: printer, path, `PrintChoices`, the `prime_tower`, `supports`,
+  `print_sequence` and `process_overrides` (#2998) the body takes in `PrintRunRequest`'s shapes, which `operations.py`
   `preview_request` slices with) and `filament_plan`, null on a manual or archive quote.
   An item's print (`ItemPrintRequest`, `{}` included) takes every part of that setup and
   the spools it omits from the quote's (`printing.py` `QUOTED_SETUP`, `quoted_setup`;
@@ -996,6 +1058,13 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`components/orders/FilamentsEditor.tsx`), `PrintPicker`'s `quote` mode with
   `QuoteFilaments` ("Slice…" in `QuoteEditor`), and the estimate in
   `AddToOrderDialog`; mocks `src/mocks/features/orders/priceBook.ts`.
+  An item's render (#6324, order operations spec §5 "#6324, as built"): the
+  `order_item_render` kind of `operations.py` on the `library` queue (`POST
+  /orders/{id}/items/{item}/render`, subject `order_item:<id>`, check `render_check`, the
+  quote's refusals; the output saved under `render_output_id`, one per operation), which
+  renders the item's reference and sets the output on it. "Slice…" on an item with a design
+  and no output starts it, then opens the print dialog on the new output (`useSliceQuotes`
+  `render`, the run's `stage` `rendering`); the agent's `order_item_quote` needs none.
   Attachments (#4251, spec §6.2 "As built"): any file on an order, a line item or a print attempt,
   `order_attachments` (subject `order:<id>` / `order_item:<id>` / `order_item_fulfilment:<id>`, an attempt's file listed
   under its item through `attempt_item_id`; `POST …/fulfilments/{f}/attachments`; typed by its bytes in
@@ -1482,6 +1551,44 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   edit (#6211 review). An item
   print's spools are matched the same way (`orders/spools.py` `_of`, the store's
   `spool_links`), so a hand-set colour still finds its spools.
+- Prepared colour combinations (#6237): `orders/storefront/prepare.py`, routes `GET`/`POST
+  /storefront/listings/{id}/prepare` (`api/storefront.py`). The combinations are enumerated
+  per printable material (of the listing's effective materials, in order, #6258, those
+  `inputs.py` `printable_materials` keeps: each locked colour and a choice of each offered
+  colour, #6302 review): for one
+  material, a combination is one colour per offered colour parameter (that material's
+  customer filaments' colours, support excluded, in each spelling the page can send: each
+  filament's own `colour`, as `ParamField.tsx` sends it, and the effective default when no
+  filament spells it so, #6299 review). Each is built by the visitor's render path
+  (`listing_values`, `resolve_choice`, `listing_reference`), a colour at its effective
+  default (same spelling) left out as the page leaves it out, so a visitor's render of the
+  same picks has its render key and reuses the prepared job. A clash
+  (`ColoursClashError`) is left out; a listing no material can print
+  (`LockedColoursClashError`) has no combination. The list is one combination per render key (the
+  first in material order); `count` is the number of keys. The list is built once per
+  listing, price book and materials (a small in-process cache), so an index names one
+  combination; above `ENUMERATION_LIMIT` (16384) picks it is not built and `count` is the
+  picks. The POST starts the workflow
+  `PrepareListing` (`workflows/prepare_listing.py`, `library` queue, id
+  `prepare-listing:<listing id>`, `USE_EXISTING`: a second POST joins it; AUTO_UPGRADE as
+  `VersionedPrepareListing`) and answers at once (`{count, started}`). The run submits by
+  index (activity `prepare_listing_submit`, `RenderService.submit_answer(...,
+  reuse_finished=True)` at the default priority, #6299 review: a visitor's render of the same
+  key joins the prepared execution, so a lower priority would hold the visitor up) and keeps
+  at most `PREPARE_IN_FLIGHT` (2) open, reading them with a backoff
+  (`prepare_listing_settled`). A done job is skipped, a full queue waited out, a failed
+  submit's index kept in the memo `failed_to_start` (a list; a run from before the patch
+  `prepare-failed-indices` keeps a count); it continues as new every 50 submits, carrying
+  the memo. Each render's claim (`request_id`) is `prepare:<listing>:<run id>:<key>`: a
+  retry of one submit joins it, a new run makes a new one, so "Prepare again" renders a
+  failed combination again (#6299 review). The POST's `started` comes from the start's own
+  answer (its run id against the open run's, or its chain's first run id). No
+  table: the GET reads the newest `render_jobs` row of each render key, and the run's state
+  (`running`, and `failed_to_start`: how many of the memo's indices have no done job) only
+  when `0 < count <= cap`; a failed Temporal read gives
+  `running: false`, not an error. Capped by `storefront_prepare_cap` (default 256; 422
+  `listing_combinations_over_cap` with `count` and `cap`, `listing_no_colours`, 409
+  `listing_not_published`). Prepared renders follow `job_ttl`; there is no keep mark.
 - A customer's own models (#6133, spec 2026-11-13; migration
   `20261113T1547Z_storefront_customer_models.sql`): `orders/storefront/model_requests.py`,
   CRUD area `models`, the edge's `POST /api/store/v1/uploads` and `…/draft/models`. The files

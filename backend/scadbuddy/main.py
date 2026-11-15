@@ -28,6 +28,8 @@ from scadbuddy.activity.index import (
     ACTIVITY_REPAIR_WINDOW_DEFAULT,
     ACTIVITY_TTL_DEFAULT,
 )
+from scadbuddy.agent_data.rotation import kek_at
+from scadbuddy.agent_data.rotation import rotate as rotate_agent_secrets
 from scadbuddy.api import (
     health,
     internal_blobs,
@@ -116,6 +118,7 @@ from scadbuddy.operations.kinds import OperationKind, Queue
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import reap_quote_holds as reap_orphan_quote_holds
+from scadbuddy.orders.storefront.prepare import prepare_activities
 from scadbuddy.orders.storefront.staged_files import staged_file_activities, sweep_staged
 from scadbuddy.orders.storefront.visitors import VisitorStore
 from scadbuddy.payments.component import PAYMENTS
@@ -217,6 +220,7 @@ from scadbuddy.workflows.housekeeping import (
 from scadbuddy.workflows.library_copy import VersionedLibraryCopy
 from scadbuddy.workflows.operation import VersionedOperationWorkflow
 from scadbuddy.workflows.operation_activities import operation_activities
+from scadbuddy.workflows.prepare_listing import VersionedPrepareListing
 from scadbuddy.workflows.previews import (
     DUE_ACTIVITY,
     REFRESH_ACTIVITY,
@@ -1198,6 +1202,26 @@ def _grant_and_rotate_at_start(state: AppState) -> None:
         logger.exception("could not issue the service credentials")
 
 
+def _rotate_agent_secrets(state: AppState) -> None:
+    """#5299 D5: with the previous KEK mounted, the agent's Claude credentials, payload
+    keys, Web Push keys and notification channel tokens sealed under it are sealed again
+    under the current one (`agent_data/rotation.py`), as the agent did at its own start.
+    Logged, never fatal."""
+    current = kek_at(state.settings.secret_key_file)
+    previous = kek_at(state.settings.secret_key_previous_file)
+    if state.settings.secret_key_previous_file is not None and previous is None:
+        logger.warning(
+            "the previous secret key cannot be read; the agent's secrets are not re-wrapped"
+        )
+    if current is None or previous is None:
+        return
+    try:
+        with state.settings_store.pool.connection() as conn:
+            rotate_agent_secrets(conn, previous, current)
+    except Exception:
+        logger.exception("could not re-wrap the agent's secrets under the current key")
+
+
 def _prune_crud_requests(state: AppState) -> None:
     with state.settings_store.pool.connection() as conn:
         idempotency.prune(conn)
@@ -1713,6 +1737,7 @@ LIBRARY_WORKFLOWS: tuple[type, ...] = (
     VersionedSliceWorkflow,
     VersionedSpoolRefresh,
     VersionedStagedFile,
+    VersionedPrepareListing,
 )
 
 
@@ -1840,6 +1865,8 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
             lambda: state.uploads,
         ),  # Each staged customer file's watcher (#6133).
         *staged_file_activities(state),
+        # A listing's prepared colour combinations (#6237, #6299 review).
+        *prepare_activities(state, lambda: state.components.get(ORDERS)),
     ]
     try:
         while not stop.is_set():
@@ -2013,6 +2040,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise
     # #4975 phase 4: the service credentials, before any caller reads its own.
     await asyncio.to_thread(_grant_and_rotate_at_start, state)
+    # #5299 D5: a KEK rotation re-wraps the agent's credentials and payload keys here.
+    await asyncio.to_thread(_rotate_agent_secrets, state)
     # #4975 phase 8 (spec 2026-11-01 §9.1): `enforce` without a usable login stops here.
     if state.settings.auth_mode == "enforce":
         auth = state.components.get(AUTH)

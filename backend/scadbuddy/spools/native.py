@@ -527,9 +527,10 @@ class NativeSpoolStore:
 
     def delete(self, spool_id: UUID) -> bool:
         """Forget a spool no print has ended on, with its open estimates, events, tag
-        bindings, presets and Bambuddy link; ``False`` when there was none. A spool with
+        bindings and presets; ``False`` when there was none. A spool with
         a ``print_ended`` event is `SpoolInUseError`: it stays, archived, since its ledger
-        keeps a finished print. Its cached copy
+        keeps a finished print. A Bambuddy-linked one is `SpoolBambuddyLinkedError`: the
+        next pull would make it again. Its cached copy
         goes at the provider's next refresh, as an archived one's does."""
         return FilamentSpoolStore(self._pool).delete(spool_id, refusing=("print_ended",))
 

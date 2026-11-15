@@ -1,5 +1,5 @@
 import type { Sql } from 'postgres'
-import { type FlowRunReads, SqlFlowRunReads } from '../flows/backendReads.js'
+import type { FlowRunReads } from '../flows/backendReads.js'
 import type { Owner } from '../sessions/protocol.js'
 
 // A flow run's tool calls (#1057, plan 2026-10-09-durable-phase-6-flows.md Task D1):
@@ -76,10 +76,10 @@ export class PgFlowRuns implements FlowRuns {
   readonly #sql: Sql
   readonly #reads: FlowRunReads
 
-  /** `reads`: the backend's flow tables (flows/backendReads.ts); its SQL on `sql` by default. */
-  constructor(sql: Sql, reads?: FlowRunReads) {
+  /** `reads`: the backend's flow tables, through its CRUD routes (flows/backendReads.ts). */
+  constructor(sql: Sql, reads: FlowRunReads) {
     this.#sql = sql
-    this.#reads = reads ?? new SqlFlowRunReads(sql)
+    this.#reads = reads
   }
 
   async startedBy(runId: string, execution: string): Promise<Owner | undefined> {
@@ -87,10 +87,8 @@ export class PgFlowRuns implements FlowRuns {
     // UPDATE while it starts the new execution, and opens it only after: the lock waits
     // for that, or the new execution's first call reads the old closed row and is
     // refused. It is taken by id alone, as a row a WHERE filters out is never waited on.
-    // The backend's route takes it in its own transaction (#5299 D7); the SQL fallback for an
-    // older API pod takes it on the agent's role, where FOR SHARE needs UPDATE on
-    // workflow_runs, not only SELECT. Every call also waits behind a writer's FOR UPDATE on
-    // the row (_project, _reset_run), which is held only briefly.
+    // The backend's route takes it in its own transaction (#5299 D7). Every call also waits
+    // behind a writer's FOR UPDATE on the row (_project, _reset_run), which is held only briefly.
     const row = await this.#reads.starter(runId, execution)
     if (row && !row.open && row.unrecorded) {
       // Closed, and this execution is neither the row's nor one a Reset replaced: a Reset

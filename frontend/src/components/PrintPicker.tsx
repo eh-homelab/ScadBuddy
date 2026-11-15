@@ -46,6 +46,7 @@ import { resolvedColors } from '../lib/plateColors'
 import { checkPlan, slicedPlateSlots, withSlicedGrams } from '../lib/filaments'
 import { useFilamentProfiles } from '../lib/filamentProfiles'
 import {
+  apiParts,
   comparedBaseline,
   samePartSettings,
   sentPartSettings,
@@ -54,6 +55,8 @@ import {
   withoutSeededDefaults,
 } from '../lib/partSettings'
 import { printChoicesOf, sliceOverrides } from '../lib/printChoices'
+import { sentOverrides } from '../lib/processOverrides'
+import { useProcessValues } from '../lib/useProcessValues'
 import { linkedRegistryPrinter, resolveOptions } from '../lib/printOptions'
 import { useLanCleared } from '../lib/useLanCleared'
 import {
@@ -96,6 +99,7 @@ import { PrimeTowerStep } from './print/PrimeTowerStep'
 import { overriddenTowerKeys } from '../lib/primeTower'
 import { overriddenSupportKeys } from '../lib/supports'
 import { SlicerDefaults } from './print/SlicerDefaults'
+import { SlicerSettingsEditor } from './print/SlicerSettingsEditor'
 import { SlicedSettings } from './print/SlicedSettings'
 import { slicedEstimate } from '../lib/slicedEstimate'
 import { QualityStep } from './print/QualityStep'
@@ -240,7 +244,7 @@ interface Props {
    * #1294 — the model's own slicer defaults (`print_settings`), shown read-only for an
    * output. A library file has none of ScadBuddy's.
    */
-  printSettings?: Record<string, string> | undefined
+  printSettings?: Record<string, string | string[]> | undefined
   /**
    * #2288 — History's Queue: the same dialog with "Wait for a manual start" ticked, so
    * the print waits in Bambuddy's queue rather than starting. It can be unticked.
@@ -317,7 +321,7 @@ const NO_TOPICS: readonly string[] = []
  * The backend accepts only these two spellings (`PrintSequence`, `library/catalogue.py`),
  * so any other value is unknown.
  */
-function templateSequence(settings: Record<string, string> | undefined): PrintSequence | null {
+function templateSequence(settings: Record<string, string | string[]> | undefined): PrintSequence | null {
   const value = settings?.['print_sequence']
   return value === 'by layer' || value === 'by object' ? value : null
 }
@@ -629,6 +633,15 @@ export function PrintPicker({
   }, [options])
   // #1862, #4970 — the print's sequence, remembered by subject with the other choices.
   const { printSequence, setPrintSequence } = picker
+  /**
+   * #2998 — any Bambu Studio process setting, by key: what the check, the background
+   * slice, the run, a quote and an item's print send. A sliced file prints as it was
+   * sliced, so it sends none.
+   */
+  const { processOverrides, setProcessOverrides } = picker
+  const sentProcess = sliced ? null : sentOverrides(processOverrides)
+  /** #2998 — the "Slicer settings" list was opened: from then on the process's values are read. */
+  const [slicerOpened, setSlicerOpened] = useState(false)
   // #1899 — this print's supports; `null` leaves them to the template and the process.
   const [supports, setSupports] = useState<SupportsChoice | null>(null)
   // #3628 — this print's prime tower; `null` leaves it to the template and the process.
@@ -938,6 +951,7 @@ export function PrintPicker({
     primeTower,
     filamentProfiles: filamentProfiles.active,
     partSettings: sentParts,
+    processOverrides: sentProcess,
     rackPosition,
     rackAlgorithm: chosenAlgorithm,
     acceptedFixes: sliced ? NO_IDS : acceptedFixes,
@@ -1181,11 +1195,13 @@ export function PrintPicker({
           // #1899, #717: supports and the profiles left on are process overrides too, and
           // Checks says when one can't apply.
           // #3628: and so is the prime tower. #5627: the settings per slot change the copy,
-          // and the check refuses a slot the output lacks.
-          ...sliceOverrides(printSequence, supports, filamentProfiles.active, primeTower, sentParts),
+          // and the check refuses a slot the output lacks. #2998: any other setting by key.
+          ...sliceOverrides(printSequence, supports, filamentProfiles.active, primeTower, sentParts, sentProcess),
         }
       : null
   const check = usePrintCheck(source, checkRequest, takesParts && partsOpened)
+  /** #2998 — every value of the resolved process, which both settings lists show. */
+  const processValues = useProcessValues(open && !sliced && (slicerOpened || partsOpened), printChoices)
   const processParts = check.processPartSettings
   const slotParts = check.slotPartSettings
   const inexact = check.processInexact
@@ -1424,6 +1440,9 @@ export function PrintPicker({
     // when it has one, and otherwise leaves the subject's remembered one (#4970).
     if (seeded.seedIsOwn) setPrintSequence(seed.print_sequence ?? null)
     else if (seed.print_sequence) setPrintSequence(seed.print_sequence)
+    // #2998: the slicer settings follow the sequence's rule.
+    const seedOverrides = sentOverrides(seed.process_overrides)
+    if (!sliced && (seeded.seedIsOwn || seedOverrides !== null)) setProcessOverrides(seedOverrides ?? {})
     if (seeded.seedIsOwn) {
       // Its own choices, the ones a mount resets to the defaults (#2718 review): saving
       // the step again without them would queue it without the supports, tower or
@@ -1459,6 +1478,7 @@ export function PrintPicker({
     setForceColourMatch,
     setPlate,
     setPrintSequence,
+    setProcessOverrides,
     setPartSettings,
     setSeededParts,
     restoreProfiles,
@@ -1484,6 +1504,7 @@ export function PrintPicker({
       primeTower,
       filamentProfiles: filamentProfiles.active,
       partSettings: sentParts,
+      processOverrides: sentProcess,
       rackPosition,
       rackAlgorithm: chosenAlgorithm,
     })
@@ -1531,11 +1552,13 @@ export function PrintPicker({
         // A support slot with no filament chosen yet prices nothing.
         support_filaments: Object.fromEntries(Object.entries(support).filter(([, filament]) => filament)),
         // #5627: what the quote slices with, so its print can send the same.
-        ...(sentParts === null ? {} : { part_settings: sentParts }),
+        ...(sentParts === null ? {} : { part_settings: apiParts(sentParts) }),
         // #4673: the whole print setup, which the quote records and its print sends.
         ...(printSequence === null ? {} : { print_sequence: printSequence }),
         ...(supports === null ? {} : { supports }),
         ...(primeTower === null ? {} : { prime_tower: primeTower }),
+        // #2998: and any slicer setting by key.
+        ...(sentProcess === null ? {} : { process_overrides: sentProcess }),
         ...(designInputs === null ? {} : { inputs: designInputs }),
       })
       close()
@@ -1558,7 +1581,11 @@ export function PrintPicker({
         filament_plan: { slots: plan, force_colour_match: forceColourMatch },
         choices: printChoices,
         // #5627: the quote's, as the background slice was made with them.
-        ...(sentParts === null ? {} : { part_settings: sentParts }),
+        ...(sentParts === null ? {} : { part_settings: apiParts(sentParts) }),
+        // #2998: the slicer settings as shown, seeded from the quote's; none is sent as
+        // null, so settings dropped here are not printed as the quote's unseen. Others than
+        // the quote's are refused `requote_needed`.
+        ...(sliced ? {} : { process_overrides: sentProcess }),
       })
       close()
     } catch (cause) {
@@ -1582,6 +1609,7 @@ export function PrintPicker({
     setPrimeTower(null)
     filamentProfiles.reset()
     setPartsOpened(false)
+    setSlicerOpened(false)
     setPicked(null)
     // #1084: the algorithm chosen here, and a failed save of it, are this session's too.
     algorithmSession.current += 1
@@ -1943,6 +1971,9 @@ export function PrintPicker({
                                 compared={comparedBaseline(String(slotId), processParts, slotParts, inexact)}
                                 // Until a check has read the process's values, a value typed
                                 // could not be told from the process's own.
+                                processValues={processValues.values}
+                                unread={processValues.unread}
+                                loading={processValues.loading}
                                 disabled={!check.processValuesRead}
                                 onOpen={() => setPartsOpened(true)}
                                 onChange={(next) => picker.setSlotPartSettings(slotId, next)}
@@ -2268,6 +2299,21 @@ export function PrintPicker({
                             colours={filaments ? (filaments.slots ?? []).length : null}
                           />
 
+                          <SlicerSettingsEditor
+                            id="slicer-settings"
+                            title="Slicer settings"
+                            value={processOverrides}
+                            baseline={
+                              processValues.values === null
+                                ? null
+                                : { ...processValues.values, ...(given?.kind === 'output' ? printSettings : {}) }
+                            }
+                            unread={processValues.unread}
+                            loading={processValues.loading}
+                            onOpen={() => setSlicerOpened(true)}
+                            onChange={setProcessOverrides}
+                          />
+
                           {given?.kind === 'output' && (
                             <SlicerDefaults
                               settings={printSettings}
@@ -2275,6 +2321,7 @@ export function PrintPicker({
                                 ...(printSequence !== null ? ['print_sequence'] : []),
                                 ...overriddenSupportKeys(supports),
                                 ...overriddenTowerKeys(primeTower),
+                                ...Object.keys(sentProcess ?? {}),
                               ]}
                             />
                           )}

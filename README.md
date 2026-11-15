@@ -1017,7 +1017,8 @@ Both call `deploy.reusable.yml`, which:
    the deploy;
 3. opens **one** PR, `deploy(scadbuddy): <version>`, on the fixed branch
    `deploy/scadbuddy`, and arms `gh pr merge --auto --squash`. A newer deploy
-   first waits up to 45 minutes for an older open one to land, and closes it and
+   first waits up to 90 minutes (two 45 minute rounds, #6368) for an older open
+   one to land, and closes it and
    replaces the branch only when it cannot (a failed CI run, a conflict,
    auto-merge off) or is still open after the wait (#5168: the PR's
    checks take 15 to 40 minutes, and closing it at every merge kept prod on one
@@ -1910,12 +1911,14 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   entered again (`/healthz` then says it was sealed with a different key).
 - **Rotating the key** (spec §9, "re-wraps the data keys only"): create a new
   key file, mount it as `SCADBUDDY_SECRET_KEY_FILE`, mount the old one as
-  **`SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`**, and restart. Once migrations have
-  applied, every credential sealed under the old key has its data key
-  re-sealed under the new one (the secret itself is not decrypted into a
-  route or re-entered); the log says how many. Then remove the previous file
-  and restart again. A row the old key cannot open is left as it is and
-  counted in that log line.
+  **`SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`** on the API container as well as the
+  agent's containers, and restart them. At its start the API re-seals the data
+  key of every Claude credential and payload key sealed under the old key, and
+  the agent does the same for the rest of its secrets (the secret itself is not
+  decrypted into a route or re-entered); each log says how many. Then remove
+  the previous file from every container and restart again. A row the old key
+  cannot open is left as it is and counted in that log line. Which tables each
+  one re-wraps: `docs/ai/operating.md` §3.3.
 - `/healthz` reports `"ai": "enabled"` only when the database answers, its
   `ai_*` migrations have applied (`backend/scadbuddy/migrations_agent/`, which
   the API applies at its start; the agent waits for them, #5299), the key is loaded and a Claude credential is

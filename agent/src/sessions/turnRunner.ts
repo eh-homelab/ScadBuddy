@@ -82,6 +82,7 @@ export type TurnRunnerDeps = Pick<
   | 'memory'
   | 'httpRequest'
   | 'sql'
+  | 'browserOrigins'
   | 'background'
   | 'sandbox'
   | 'nestedQueries'
@@ -303,7 +304,7 @@ export class TurnRunner {
   async assemble(
     session: ClaimedSession,
     principal: TurnPrincipal,
-    options: { includeCooling?: boolean; parent?: Context } = {},
+    options: { includeCooling?: boolean; parent?: Context; turnId?: string } = {},
   ): Promise<AssembledTurn> {
     const id = session.id
     const slot = createTurnSlot()
@@ -346,7 +347,11 @@ export class TurnRunner {
       // after this point is redacted before it reaches the event log. Every
       // candidate's, since the turn may fall back to any of them.
       const candidates = await phase('credentials', () =>
-        this.deps.credentials.candidates(options.includeCooling ? { includeCooling: true } : undefined),
+        this.deps.credentials.candidates({
+          ...(options.includeCooling ? { includeCooling: true } : {}),
+          sessionId: id,
+          ...(options.turnId ? { turnId: options.turnId } : {}),
+        }),
       )
       secrets = candidates.map((c) => c.credential.secret)
       const builtInTools = this.deps.builtInTools
@@ -681,7 +686,7 @@ export class TurnRunner {
         tierOf: proxies ? pluginTiers : tierOf,
         // The headless browser's lists (#982): every remote plugin's browser_* calls.
         browser: browserGuard({
-          store: new BrowserOrigins(this.deps.sql, this.deps.settings),
+          store: this.deps.browserOrigins ?? new BrowserOrigins(this.deps.sql, this.deps.settings),
           sessionId: id,
           plugins: remotePlugins.map((p) => p.name),
         }),

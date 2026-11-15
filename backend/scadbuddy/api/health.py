@@ -38,7 +38,9 @@ class Health(BaseModel):
 @router.get("/healthz", response_model=Health, summary="Liveness")
 async def healthz(state: StateDep) -> Health:
     writable = state.paths.root.is_dir() and os.access(state.paths.root, os.W_OK)
-    store = await store_health(state.store)
+    # Never waits on a settings read (#6354): the probe has 5 s, and a read waits on the
+    # default executor and the database pool.
+    store = await store_health(state.store, wait=False)
     healthy = writable and state.openscad_version is not None and store.settings_current
     settings = state.settings
     return Health(

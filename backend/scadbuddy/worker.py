@@ -158,7 +158,7 @@ from scadbuddy.workflows.operation_activities import operation_activities
 from scadbuddy.workflows.pipeline_activities import PipelineActivities
 from scadbuddy.workflows.pipelines import TRANSFER
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
-from scadbuddy.workflows.projects_worker import projects_worker
+from scadbuddy.workflows.projects_worker import projects_worker, warm_sandbox
 from scadbuddy.workflows.sdk_metrics import SDK_READ_TIMEOUT, sdk_exposition, sdk_runtime
 
 if TYPE_CHECKING:
@@ -852,7 +852,9 @@ async def _refresh_store_metrics(metrics: Metrics, store: StoreBundle, data: _Da
     health = await store_health(store)
     metrics.store_render_key_fallback.set(1 if health.render_key_fallback else 0)
     if isinstance(store.blobs, CachedBlobStore):
-        metrics.worker_cache_bytes.set(await asyncio.to_thread(store.blobs.cached_bytes))
+        cached = await asyncio.to_thread(store.blobs.cached_bytes)
+        if cached is not None:
+            metrics.worker_cache_bytes.set(cached)
 
 
 def _health_app(
@@ -1668,6 +1670,7 @@ async def run_projects_worker(
             # During a roll the API pod may be older than this worker: poll Temporal only
             # once it serves every area the worker calls.
             if await wait_for_areas(crud, "projects", PROJECTS_CRUD_AREAS, stop):
+                await asyncio.to_thread(warm_sandbox)
                 async with LoopWatch(metrics):
                     await _serve_versioned(
                         client,

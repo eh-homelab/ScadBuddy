@@ -3280,7 +3280,7 @@
     "tests/api/test_print_run_choices.py::test_an_all_plates_run_reads_the_assignments_and_printer_once": 7.911850197000376,
     "tests/api/test_print_run_choices.py::test_an_unknown_advanced_override_is_a_422_naming_the_slot_before_slicing": 8.288754605000122,
     "tests/api/test_print_run_choices.py::test_an_unknown_print_sequence_is_refused": 6.326059479999913,
-    "tests/api/test_print_run_choices.py::test_an_unknown_print_setting_is_refused_before_anything_is_sliced": 5.221946511999931,
+    "tests/api/test_print_run_choices.py::test_a_print_setting_no_slicer_takes_is_refused_before_anything_is_sliced": 5.221946511999931,
     "tests/api/test_print_run_choices.py::test_an_unreadable_printer_still_prints_without_hardware_warnings": 7.415578191000122,
     "tests/api/test_print_run_choices.py::test_an_unreadable_rack_sends_no_choice_and_says_so": 7.229676636000022,
     "tests/api/test_print_run_choices.py::test_an_unreadable_status_leaves_the_slicer_to_choose": 5.834441556000002,

@@ -10,8 +10,10 @@ the agent workers connect as the database owner (`SCADBUDDY_DATABASE_URL`), keep
 `flow_grant_uses`: `src/gate/store.ts` `grantInput`, under the grant row's share lock, until
 the gate moves to the CRUD service, #5299 step 10; `backend/scadbuddy/auth/caller_grants.py`
 `AGENT_GRANTS`). The agent's other reads of backend tables (the event log, flow runs, their
-decisions and grants) go through CRUD routes (#5299 D7, below), over SQL only while the API
-does not list their areas yet. The workspace files' `blob_refs` holds go through CRUD routes
+decisions and grants) go only through CRUD routes (#5299 D7, below); the API revokes its
+role's grants on `events`, `workflow_runs` and `workflow_run_decisions` at every start
+(`backend/scadbuddy/auth/revoke.py` `RETIRED_GRANTS`), which binds nothing while the agent
+connects as the owner (until #5299 step 12); `test/retiredTables.test.ts` is the guard. The workspace files' `blob_refs` holds go through CRUD routes
 (#5299, below), no longer a trigger. `src/db/grants.ts`
 grants the API's role its `ai_*` reads and writes, and revokes what it once granted the
 projects worker's role `scadbuddy_projects` (#5298; the worker holds no database).
@@ -42,12 +44,46 @@ by `pgListener.ts`) and area `flows` (a run's starter, its decision checks, a gr
 a run's queue and steps, the waiting runs, the parent-hop approvals and which of them still
 wait: `src/flows/backendReads.ts` `CrudFlowRunReads`, used by `temporal/flowRuns.ts`,
 `flows/queue.ts`, `flows/escalations.ts` and `temporal/toolActivities.ts`
-`PgApprovalRecords`). `src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` from
-the start with back-off (1 s doubling to 30 s) until both are listed; until then each read
-stays on SQL (`SqlFlowRunReads`, the listener's own connection), the rolling deploy's
-fallback for an API pod older than the routes. A route's answer counts only with
-`X-ScadBuddy-Crud: 1`; any other failure takes the read's existing error path (a lookup
-failure the activity retries, a 500, a resync). A session's successful `order_item_revision_add` (or
+`PgApprovalRecords`), all over `src/api/crudRead.ts` `crudRead`. There is no SQL fallback:
+`test/retiredTables.test.ts` fails on agent SQL that names `events`, `workflow_runs` or
+`workflow_run_decisions`, and the Postgres tests answer the flow reads with
+`test/support/sqlFlowRunReads.ts` (the backend's queries on the test database). Its settings, Claude credentials and payload data keys (#5299 step 4, D5;
+#5342; `SECRET_AREAS`): area `settings` (`src/credentials.ts` `SettingsStore`'s `remote`,
+`CrudSettings`: a compare-and-set sends what its check read as `expect`, and the API sends the
+warm-evict and runtime NOTIFYs in the write's transaction, so the LISTEN side is unchanged),
+area `credentials` (`CrudCredentials`, `gatedCredentials`: the API seals and opens with the
+KEK, the routes and the turn's pool read the API's key through the repo's `opener`, and a turn's
+credentials come from `…/credentials/reveal`, audited per call) and area `payload-keys`
+(`src/temporal/payloadCodec.ts` `CrudPayloadKeys`, `gatedPayloadKeys`: a subject's data key,
+made under the subject's lock and never for a forgotten subject, audited as kind `payload_key`
+(a release once per subject in 10 minutes), cached 30 s here).
+None needs a KEK in this process once listed. Area `forget` (#5299 step 6, `FORGET_AREAS`;
+backend `api/crud_agent_forget.py`): `forgetSubject`'s key transaction (`src/sessions/forget.ts`
+`CrudSubjectKeys.forget`: under the subject's lock, the tombstone, a flow run's images and the
+key; a session with forks is refused `forks-take-ranges` and forgotten in the agent's own
+transaction, whose `copyForkRanges` opens and seals its transcript, until the sessions move,
+#5299 step 9), a browser call's key dropped and the hourly key sweep (`gatedKeyDeletes`), and a
+flow run's images (`src/temporal/flowBlobs.ts` `CrudFlowBlobs`, `gatedFlowBlobs`: sealed here,
+sent as multipart bytes, the tombstone check and the cap in the API's transaction).
+These four have a rolling-deploy fallback:
+`src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` from the start with back-off
+(1 s doubling to 30 s) until every one is listed, and until then each stays on SQL, for an API
+pod older than the routes. The small stores (#5299 step 5, `src/api/crudStores.ts`
+`STORE_AREAS`, backend `api/crud_agent_stores.py` and `api/crud_agent_notify.py`) take the same
+fallback, chosen per call by `gated` (a store's SQL class until its area is listed, its `Crud…`
+class after): area `activity-kinds` (`activity/kinds.ts` `crudUpsertActivityKinds`),
+`browser-origins` (`browser/store.ts` `BrowserOrigins`'s `remote`, `CrudSessionOrigins`),
+`bridge-tabs` (`CrudSessionTabStore`, `CrudTabOwnerStore`, `CrudTabImageStore`: an image's bytes
+are the body either way, `crudCall`), `pairings` (`CrudPairingStore`: only the code's hash
+leaves this process; the API holds the advisory lock and the `FOR UPDATE`), `mcp-tokens`
+(`CrudTokenStore`: a mint and a verify send the token's hash only, expiry by the database's
+clock) and `notify` (`notify/pushStore.ts` `CrudPushStore`, `notify/channels.ts`
+`CrudChannelRows` through `ChannelStore`'s `remote`: the API seals and opens the VAPID key,
+the subscriptions' keys and the channels' tokens, and re-wraps them at a rotation). With no
+KEK here Web Push and the channels work once `notify` is listed (`available`); the test is
+`test/crudStores.test.ts`. A route's
+answer counts only with `X-ScadBuddy-Crud: 1`; any other failure takes the read's existing
+error path (a lookup failure the activity retries, a 500, a resync). A session's successful `order_item_revision_add` (or
 `_after_acceptance`) is an `ai_session_order_costs` row (`src/sessions/orderCosts.ts`
 `OrderCosts`, a `TouchedSink` beside `SessionResources`); each turn's end
 (`temporal/session/finishActivity.ts`, a retry too, not awaited: it never holds up the next
@@ -299,10 +335,12 @@ opens every one and seals it again byte for byte).
     sent on the chat socket (`routes/chat.ts` `sentToPanel`).
   - Durable payloads (#1056 phase 5c, spec §6.5): `src/temporal/payloadCodec.ts` seals
     every payload of a `session-<uuid>` / `flow-<uuid>` workflow under that subject's
-    data key (`ai_payload_keys`, sealed under the KEK, re-wrapped at start on rotation);
-    the agent-tools worker and the service's Temporal client carry it when the KEK is
-    mounted. `src/sessions/forget.ts` `forgetSubject` (key row, then the workflow, then
-    the rows) is the one way a durable subject is deleted; operators run
+    data key (`ai_payload_keys`, sealed under the KEK; the API re-wraps them at its start on
+    rotation). The agent-tools worker and the service's Temporal client carry it; once the
+    API lists area `payload-keys` the API releases each key (`CrudPayloadKeys`, #5299 step 4,
+    #5342), so no KEK is needed here, and until then it opens them with its own
+    (`gatedPayloadKeys`; with neither, a call that needs one is `PayloadKeyUnavailable`). `src/sessions/forget.ts` `forgetSubject` (key row, then the workflow, then
+    the rows; the key row through the API once it lists area `forget`, above) is the one way a durable subject is deleted; operators run
     `node dist/forget-subject.js session-<uuid>`. A fork reads its parent's transcript
     through the cut (`ai_sessions.fork_parent_id`, `fork_cut`; `src/sessions/store.ts`,
     plan Step 6.5), and its event log and images through `fork_event_cut` (#4212:

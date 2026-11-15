@@ -15,7 +15,7 @@ import { Estimate } from '../components/Estimate'
 import { ListingView } from '../components/ListingView'
 import { clearChoices, loadChoices, saveChoices } from '../customizeState'
 import { useDraftChanged } from '../draftCount'
-import { filamentLabels, keepOffered, keepPicks, listingMaterials, listingUnavailable, oneFilamentPerColour, settleMaterial, startMaterial, valueProblem } from '../params'
+import { keepOffered, listingUnavailable, valueProblem } from '../params'
 import { POLL, type PollTiming } from '../poll'
 
 // three.js is most of the viewer: its own chunk, fetched once there is a render to show.
@@ -69,8 +69,9 @@ function refusalText(error: unknown): string {
   if (error.slug === 'render_limited') return `You have made a lot of previews. Try again ${inSeconds(error)}.`
   if (error.slug === 'render_queue_full') return `The shop is busy making other previews. Try again ${inSeconds(error)}.`
   if (error.slug === 'rate_limited') return `Your connection has sent a lot of requests. Try again ${inSeconds(error)}.`
-  // #6152: the page gives one colour one filament (`oneFilamentPerColour`); this is the shop's own check.
-  if (error.slug === 'pick_colour_clash') return 'Two of your colours are one colour of two filaments. A colour prints from one filament: pick the same one for both.'
+  // #6258: the colours given share no allowed material (the issue's page copy).
+  if (error.slug === 'listing_colours_clash')
+    return "Some colours can't go together. Each print is made from one kind of plastic, and a few colours only come in one kind. Change one of them."
   return errorText(error)
 }
 
@@ -89,17 +90,17 @@ interface Shown {
   key: string
 }
 
-/**
- * The choices a render is of: the listing as read, the visitor's values and picks. A new
- * pick of the same colour asks again: the shop reuses the render and prices the pick.
- */
-function choicesKey(listing: Listing, values: Record<string, ParamValue>, picks: Record<string, string>): string {
-  return JSON.stringify([listing.updated_at, values, picks])
+/** The choices a render is of: the listing as read and the visitor's values. */
+function choicesKey(listing: Listing, values: Record<string, ParamValue>): string {
+  return JSON.stringify([listing.updated_at, values])
 }
 
-/** The material `material` names, if `listing` still offers it for a customer to pick. */
-function offeredMaterial(listing: Listing, material: string | null | undefined): string | null {
-  return listingMaterials(listing).find((each) => each === material) ?? null
+/** Whether the visitor set a colour: a colour is its value (#6258), and the shop finds its filament. */
+function setsColour(listing: Listing, values: Record<string, ParamValue>): boolean {
+  return Object.keys(values).some((name) => {
+    const param = listing.params[name]
+    return param?.kind === 'choice' && param.colour
+  })
 }
 
 /**
@@ -133,23 +134,24 @@ export function CustomizePage({
   const [listing, setListing] = useState<Listing>()
   const [loadError, setLoadError] = useState<string | null>(null)
   const [values, setValues] = useState<Record<string, ParamValue>>({})
-  /** The filament picked for each colour parameter, by id (#6152): the shop prices it and fills the slots from it. */
-  const [picks, setPicks] = useState<Record<string, string>>({})
-  /** With `one_material`, the material shown (`startMaterial` until the visitor picks one); else null. */
-  const [material, setMaterial] = useState<string | null>(null)
-  const [materialNote, setMaterialNote] = useState<string | null>(null)
-  /** #6152: which other colours a pick moved to its filament (`oneFilamentPerColour`). */
-  const [pickNote, setPickNote] = useState<string | null>(null)
   /** The latest render while it runs; the viewer shows its progress until one is done. */
   const [job, setJob] = useState<StoreRender>()
   /** The last done render: the viewer keeps it on screen while a newer one runs. */
   const [shown, setShown] = useState<Shown>()
   const [rendering, setRendering] = useState(false)
+  /**
+   * #6302 review: the colour values the latest render reply says the print takes. A part the
+   * visitor did not set shows its colour from here (the shop may move it to the closest colour
+   * of the material), else the listing's default while no reply has come back or after a
+   * start the shop refused. It is kept with the choices it answered (`key`), and shown only
+   * while they are the choices on screen: after the visitor changes a value, the untouched
+   * parts show the listing's default until the next start answers.
+   */
+  const [settled, setSettled] = useState<{ key: string; values: Record<string, ParamValue> }>()
   const [renderError, setRenderError] = useState<string | null>(null)
   /**
-   * The rough price of the render `job` names, for the choices `key` (`choicesKey`). #6152:
-   * a pick of another filament of the same colour reuses the render, so the job alone does
-   * not tell the price of one pick from that of the other.
+   * The rough price of the render `job` names, for the choices `key` (`choicesKey`): two
+   * listings of one design can share a render, so the job alone does not tell the price.
    */
   const [estimate, setEstimate] = useState<{ job: string; key: string; estimate: StoreEstimate }>()
   const [quantity, setQuantity] = useState(1)
@@ -179,12 +181,7 @@ export function CustomizePage({
         if (!live) return
         const saved = loadChoices(id)
         setListing(answer)
-        const kept = saved ? keepOffered(answer, saved.values) : {}
-        const shownMaterial = answer.one_material ? (offeredMaterial(answer, saved?.material) ?? startMaterial(answer)) : null
-        const settled = settleMaterial(answer, kept, saved ? keepPicks(answer, kept, saved.picks ?? {}) : {}, shownMaterial)
-        setValues(settled.values)
-        setPicks(settled.picks)
-        setMaterial(shownMaterial)
+        setValues(saved ? keepOffered(answer, saved.values) : {})
         if (saved) setQuantity(Math.min(saved.quantity, MAX_QUANTITY))
       },
       (caught: unknown) => live && setLoadError(errorText(caught)),
@@ -200,13 +197,11 @@ export function CustomizePage({
     [listing, values],
   )
   const blocked = !listing || listingUnavailable(listing) || problems.length > 0 || stale
-  /** Only the picks the values still match: the shop refuses any other. */
-  const sentPicks = useMemo(() => (listing ? keepPicks(listing, values, picks) : {}), [listing, values, picks])
-  const current = listing ? choicesKey(listing, values, sentPicks) : ''
+  const current = listing ? choicesKey(listing, values) : ''
 
   useEffect(() => {
-    if (listing) saveChoices(listing.id, { values, quantity, picks, material })
-  }, [listing, values, quantity, picks, material])
+    if (listing) saveChoices(listing.id, { values, quantity })
+  }, [listing, values, quantity])
 
   useEffect(() => {
     choicesNow.current = { key: current, blocked }
@@ -226,17 +221,16 @@ export function CustomizePage({
 
   const shownIsCurrent = shown?.key === current
   /**
-   * #6152: the shop maps picks to the slots of the done render of these choices, and
-   * answers 409 `render_pending` to an add with picks until that render is done.
+   * #6152, #6258: the shop fills the slots from the done render of these choices, and
+   * answers 409 `render_pending` to an add that sets a colour until that render is done.
    */
-  const waitsForPreview = !shownIsCurrent && Object.keys(sentPicks).length > 0
+  const waitsForPreview = !shownIsCurrent && listing !== undefined && setsColour(listing, values)
   const input = (on: Listing): RenderInput => ({
     listing_id: on.id,
     listing_updated_at: on.updated_at,
+    // #6258: a colour is its value; the shop finds its filament in the one material the
+    // colours resolve to. Never a guess of the slots.
     values,
-    // #6152: the picks, never a guess of the slots. The shop maps them to the render's
-    // slots by colour.
-    picks: sentPicks,
     colours: {},
   })
 
@@ -247,53 +241,6 @@ export function CustomizePage({
       else copy[name] = next
       return copy
     })
-    setAdded(false)
-  }
-
-  const setPick = (name: string, next: string | undefined) => {
-    if (!listing) return
-    setMaterialNote(null)
-    setPickNote(null)
-    if (next === undefined && listing.one_material) {
-      // #6152: "Use the shop's choice" on a `one_material` listing. With no value, the shop
-      // would use the listing's default, which can be of another material (422
-      // `listing_mixed_material`): the colour goes to the nearest of the shown material.
-      const without = <T,>(record: Record<string, T>) => Object.fromEntries(Object.entries(record).filter(([key]) => key !== name))
-      const settled = settleMaterial(listing, without(values), without(picks), material)
-      setValues(settled.values)
-      setPicks(settled.picks)
-      return
-    }
-    const copy = { ...picks }
-    if (next === undefined) delete copy[name]
-    else copy[name] = next
-    // #6152: a colour prints from one filament. A pick of a colour another parameter
-    // already picked moves that parameter to the new filament, and the page says so. Only
-    // the picks the page sends count (`keepPicks`); `values` does not yet hold this one.
-    const sent = next === undefined ? {} : { ...keepPicks(listing, values, copy), [name]: next }
-    const one = oneFilamentPerColour(listing, sent, name)
-    setPicks({ ...copy, ...one.picks })
-    const filament = listing.colours.find((each) => each.id === next)
-    if (filament && one.moved.length > 0) {
-      const names = one.moved.map((moved) => listing.params[moved]?.label ?? moved)
-      const shown = `${filamentLabels(listing.colours).get(filament.id) ?? filament.colour} ${filament.material}`
-      setPickNote(`${names.join(' and ')} ${names.length === 1 ? 'uses' : 'use'} ${shown} too. One colour prints from one filament.`)
-    }
-  }
-
-  /**
-   * #6152: a `one_material` listing's material. Every colour moves to the nearest colour
-   * (RGB distance) of the new material (`settleMaterial`), and the page says so when one the
-   * visitor set changed.
-   */
-  const chooseMaterial = (next: string) => {
-    if (!listing || next === material) return
-    const { values: nextValues, picks: nextPicks, moved } = settleMaterial(listing, values, picks, next)
-    setMaterial(next)
-    setValues(nextValues)
-    setPicks(nextPicks)
-    setPickNote(null)
-    setMaterialNote(moved ? `Your colours changed to the nearest ${next} colours.` : null)
     setAdded(false)
   }
 
@@ -367,10 +314,15 @@ export function CustomizePage({
     setRenderError(null)
     // #6152: the old price is hidden until the new one is read (spec 2026-11-13 §5.3).
     setEstimate(undefined)
+    let begun = false
     try {
       const first = await store.startRender(body, renderKey.current.for(JSON.stringify(body)))
+      begun = true
       renderKey.current.done()
       if (!live()) return
+      // The colours this start settled, kept with its choices: until it answered, the parts
+      // the visitor did not set showed the listing's default (#6302 review).
+      if (first.values) setSettled({ key, values: first.values })
       setJob(onScreen(first))
       const done = await follow(first, live)
       if (!live() || done === null) return
@@ -383,6 +335,9 @@ export function CustomizePage({
       if (rough && live()) setEstimate({ job: done.id, key, estimate: rough })
     } catch (caught) {
       if (!live()) return
+      // A start refused or failed settled nothing: the parts the visitor did not set show
+      // the listing's defaults again (#6302 review).
+      if (!begun) setSettled(undefined)
       if (changedListing(caught)) setStale(true)
       setRenderError(refusalText(caught))
       if (retryable(caught) && !retry) {
@@ -427,15 +382,8 @@ export function CustomizePage({
       const fresh = await store.listing(listing.id)
       if (!alive.current) return
       setListing(fresh)
-      const kept = keepOffered(fresh, values)
-      const shownMaterial = fresh.one_material ? (offeredMaterial(fresh, material) ?? startMaterial(fresh)) : null
-      const settled = settleMaterial(fresh, kept, keepPicks(fresh, kept, picks), shownMaterial)
-      setValues(settled.values)
-      setPicks(settled.picks)
-      setMaterial(shownMaterial)
-      // The re-read may move a colour: an earlier note no longer tells what is on screen.
-      setPickNote(null)
-      setMaterialNote(null)
+      setValues(keepOffered(fresh, values))
+      setSettled(undefined)
       setStale(false)
       setRenderError(null)
       setAddError(null)
@@ -479,21 +427,7 @@ export function CustomizePage({
         <Link className="sf-back" to="/">
           All designs
         </Link>
-        <ListingView
-          listing={listing}
-          values={values}
-          onChange={setValue}
-          picks={picks}
-          onPick={setPick}
-          material={material}
-          onMaterial={chooseMaterial}
-          materialNote={materialNote}
-        />
-        {pickNote && (
-          <p className="sf-hint" role="status">
-            {pickNote}
-          </p>
-        )}
+        <ListingView listing={listing} values={values} settled={settled?.key === current ? settled.values : undefined} onChange={setValue} />
         {stale && (
           <div className="sf-panel sf-stale" role="status">
             <p>The shop has changed this design since you opened it.</p>

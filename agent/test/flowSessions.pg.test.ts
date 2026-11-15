@@ -16,6 +16,7 @@ import {
   type TurnAnswer,
 } from '../src/temporal/flowSessions.js'
 import { NOT_FOR_FLOWS, UNKNOWN_FLOW } from '../src/temporal/toolActivities.js'
+import { SqlFlowRunReads } from './support/sqlFlowRunReads.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase, type Throwaway } from './support/postgres.js'
 
 // A flow's `agent(...)` and `ask_session(...)` (#1057, phase 6g): the activities on
@@ -41,7 +42,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow session activities${TEST_DATABASE_URL 
       INSERT INTO workflow_runs (id, definition_id, version, name, status, workflow_id, workflow_run_id, started_by)
       VALUES (${runId}, 'd1', 1, 'swap', 'running', ${`flow-${runId}`}, 'wr1', '{"kind": "browser"}')`
     log = new EventLog(t.db.sql)
-    acts = flowSessionActivities({ sql: t.db.sql, flows: new PgFlowRuns(t.db.sql), pollMs: 20 })
+    acts = flowSessionActivities({ sql: t.db.sql, flows: new PgFlowRuns(t.db.sql, new SqlFlowRunReads(t.db.sql)), pollMs: 20 })
   })
   afterEach(async () => {
     await t?.drop()
@@ -149,7 +150,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow session activities${TEST_DATABASE_URL 
       if (args[0].join('').includes('ai_session_events')) reads += 1
       return t.db.sql(...args)
     }, t.db.sql) as unknown as typeof t.db.sql
-    const watched = flowSessionActivities({ sql: counted, flows: new PgFlowRuns(t.db.sql), pollMs: 20 })
+    const watched = flowSessionActivities({ sql: counted, flows: new PgFlowRuns(t.db.sql, new SqlFlowRunReads(t.db.sql)), pollMs: 20 })
     const waiting = env().run(watched[FLOW_SESSION_TURN]!, { session_id: sid, turn_id: 't1' })
     // Its first read found the turn; the second is the loop, polling past it.
     await expect.poll(() => reads).toBeGreaterThanOrEqual(2)
@@ -176,7 +177,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow session activities${TEST_DATABASE_URL 
       queries += 1
       return t.db.sql(...args)
     }, t.db.sql) as unknown as typeof t.db.sql
-    const guarded = flowSessionActivities({ sql: counted, flows: new PgFlowRuns(counted) })
+    const guarded = flowSessionActivities({ sql: counted, flows: new PgFlowRuns(counted, new SqlFlowRunReads(counted)) })
     for (const sid of ['-'.repeat(36), 'g'.repeat(8) + '-0000-0000-0000-' + '0'.repeat(12), ` ${randomUUID()}`]) {
       const err = await failure(env().run(guarded[FLOW_SESSION_CHECK]!, { session_id: sid }))
       expect([err.type, err.nonRetryable]).toEqual([SESSION_REFUSED, true])

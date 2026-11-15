@@ -437,7 +437,15 @@ kubectl -n scadbuddy create secret generic scadbuddy-agent-kek \
 - Saving a credential then fails with `503`, "no key-encryption key is configured"
   (`planPut()` in [`agent/src/credentials.ts`](../../agent/src/credentials.ts)).
   `/healthz` reports `"ai": "disabled (no key-encryption key: …)"` (`aiStatus()` in
-  [`agent/src/app.ts`](../../agent/src/app.ts)).
+  [`agent/src/aiStatus.ts`](../../agent/src/aiStatus.ts)).
+- Once the API lists the agent's CRUD areas `credentials` and `payload-keys` (#5299
+  step 4), the API's key is the one that counts for the Claude credentials and the
+  payload keys: the API seals and opens them
+  ([`backend/scadbuddy/api/crud_agent_secrets.py`](../../backend/scadbuddy/api/crud_agent_secrets.py)),
+  and the agent asks it whether it holds a key (`GET …/crud/agent/credentials/key`). The
+  agent's own file still opens its plugin secrets, Web Push and channel keys, plugin
+  sign-ins and workspace file keys, until the later steps of #5299. Mount the same key
+  in both.
 - **Keep a copy.** Each stored row records the KEK's id (the first 16 hex characters of
   SHA-256 over the key; `kekFromBase64()`). A credential sealed under a lost key cannot
   be opened. `/healthz` then reports "stored credential was sealed with a different
@@ -446,23 +454,44 @@ kubectl -n scadbuddy create secret generic scadbuddy-agent-kek \
 ### 3.3 Rotating it
 
 Spec §9: "Rotating it re-wraps the data keys only." The procedure comes from the
-comment above `previousKek` in `main.ts` and from `CredentialStore.rewrapFrom()` in
-`credentials.ts`:
+comment above `previousKek` in `main.ts` and from
+[`backend/scadbuddy/agent_data/rotation.py`](../../backend/scadbuddy/agent_data/rotation.py)
+(`main._rotate_agent_secrets` calls it).
+
+In normal running no container sets `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`: in
+eh-homelab/clusters' `scadbuddy.yaml` neither the API container nor the agent sidecar
+sets it (the API container at line 471, the agent at 652), and the comment at line 651 says it is added only during a rotation (read on clusters main,
+2026-11-15). Since #5299 step 4 the API re-wraps the Claude credentials and the payload
+keys, so a rotation sets the previous key on the API container as well as on the agent's
+containers (the sidecar and the `scadbuddy-agent-worker` Deployment). A rotation that
+sets it on the agent alone leaves `ai_credentials` and `ai_payload_keys` under the old
+key, and they stop opening once the old key's mount is removed.
 
 1. Generate a new key file (§3.1).
 2. Mount the **new** key as `SCADBUDDY_SECRET_KEY_FILE` and the **old** one as
-   `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`, then restart.
-3. Once migrations have applied (the `afterMigrate` hook of `connectDatabase()`),
-   every row whose `kek_id` is the old key's has its data key re-sealed under the new
-   key. The sealed secret and `updated_at` are not touched. The `UPDATE` is
-   conditional on `kek_id`, so two pods rotating at once do not overwrite each other.
-   The log line reads `secret key rotation: re-wrapped N credential(s) from key <old> to <new>`.
+   `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` on the **API container and the agent's
+   containers**, then restart them.
+3. Each one re-wraps its own tables at its start. Only the data key of a row whose
+   `kek_id` is the old key's is sealed again under the new key:
+   - The API, after its migrations: `ai_credentials` (the Claude credentials),
+     `ai_payload_keys` (the durable payload keys), and `ai_push_vapid`,
+     `ai_push_subscriptions` and `ai_notify_channels` (the Web Push keys and the
+     notification channels' tokens, #5299 step 5). The log line reads
+     `secret key rotation: re-wrapped the agent's credentials` (or `payload_keys`, or
+     `notify`), with the counts.
+   - The agent, once migrations have applied (the `afterMigrate` hook of
+     `connectDatabase()`): `ai_session_files` (workspace file keys), `ai_plugins` (plugin
+     secrets) and `ai_plugin_oauth` (plugin sign-ins). The later steps of #5299 move these
+     to the API too.
+
+   The sealed secret and `updated_at` are not touched. Each `UPDATE` is conditional on
+   `kek_id`, so two pods rotating at once do not overwrite each other.
 4. A row the old key cannot open (altered, or in the v1 format) is left as it is and
    counted as `failed` in the same log line.
-5. Remove the previous-key mount and restart again.
+5. Remove the previous-key mounts from every container and restart again.
 
 If the previous file cannot be loaded, the log says so and nothing is re-wrapped
-(`main.ts`).
+(`main.ts`, and the API's start).
 
 ## 4. Setting up the Claude credential
 
@@ -679,6 +708,8 @@ In an `api` process, `temporal` reports its own `agent-tools.<hostname>` worker.
   | `unavailable (database migrations failed)` | `ready()` returned false |
   | `unavailable (waiting for the API to apply the database migrations)` | `ai_migrations` lacks a file this build expects: the API has not migrated yet (#5299) |
   | `unavailable (database timed out)` | `ready()` or the credential read took longer than 2 s (`DEFAULT_HEALTH_TIMEOUT_MS`) |
+  | `unavailable (the API did not answer for its key-encryption key)` | Once the API serves area `credentials` (#5299 step 4): `GET …/crud/agent/credentials/key` failed |
+  | `unavailable (the API timed out answering for its key-encryption key)` | That read took longer than 2 s |
   | `disabled (no key-encryption key: <reason>)` | See §3.2 |
   | `disabled (no Claude credential)` | No row saved |
   | `unavailable (stored credential was sealed with a different key-encryption key)` | The row's `kek_id` does not match the mounted key |
@@ -929,16 +960,19 @@ The agent's migration advisory lock key is "SCADAGNT", distinct from the backend
 
 The agent also reads the backend's flow tables, which the backend migrates. It asks the
 backend over its CRUD routes (`/api/v1/internal/crud/agent/`, area `flows`,
-`agent/src/flows/backendReads.ts`, #5299) once `GET …/crud/agent/areas` lists the area,
-and reads them over SQL only until then, while an API pod older than the routes answers.
-Over SQL its database role needs `UPDATE` on `workflow_runs`, not only `SELECT`: every
-flow tool call reads its run `FOR SHARE` (`PgFlowRuns.startedBy`,
-`agent/src/temporal/flowRuns.ts`), and Postgres requires `UPDATE` for that lock. A role
-narrowed to `SELECT` fails every flow tool call, as a lookup error the activity retries
-until it gives up. Through the route the backend takes that lock itself. The gate's grant
-check (`agent/src/gate/store.ts` `grantInput`) still reads `flow_grants` and
-`flow_grant_uses` over SQL, under the grant row's share lock, so the role keeps `UPDATE`
-on `flow_grants`.
+`agent/src/flows/backendReads.ts`, #5299), and never over SQL. The API takes back the
+grants of its role `scadbuddy_agent` on `events`, `workflow_runs` and
+`workflow_run_decisions` at every start (`backend/scadbuddy/auth/revoke.py`
+`RETIRED_GRANTS`), but the agent still connects as the database owner, so that revoke binds
+nothing until #5299 step 12 removes the agent's database URL. Until then the guard is
+`agent/test/retiredTables.test.ts`, which fails on agent SQL that names one of those tables.
+Every flow tool call reads its run
+`FOR SHARE` (`PgFlowRuns.startedBy`, `agent/src/temporal/flowRuns.ts`); the backend's
+route takes that lock in its own transaction. The gate's grant check
+(`agent/src/gate/store.ts` `grantInput`) still reads `flow_grants` and `flow_grant_uses`
+over SQL, under the grant row's share lock, so the role keeps `SELECT` on both and
+`UPDATE` on `flow_grants` (Postgres requires `UPDATE` for `FOR SHARE`), until the gate
+moves to the CRUD service (#5299 step 10).
 
 ## 8. Per-query limits
 
@@ -2087,8 +2121,11 @@ approve:
   on. The agent pushes each request once to every subscribed browser of someone who may see
   it. A push carries the request's id, its session's id and its reason, never the message.
   The VAPID key is made on first use and sealed under the KEK (`ai_push_vapid`).
-  Subscriptions (`ai_push_subscriptions`) are sealed under the KEK too, so Web Push needs
-  `SCADBUDDY_SECRET_KEY_FILE`, and rotation re-wraps both. A subscription's endpoint comes
+  Subscriptions (`ai_push_subscriptions`) are sealed under the KEK too, and rotation
+  re-wraps both. Once the API lists the agent's CRUD area `notify` (#5299 step 5), the API
+  seals and opens them with its own KEK, so the agent needs none for Web Push or the
+  notification channels; before that, Web Push needs `SCADBUDDY_SECRET_KEY_FILE` in the
+  agent. A subscription's endpoint comes
   from the browser, so it is checked strictly
   ([`agent/src/notify/pushEgress.ts`](../../agent/src/notify/pushEgress.ts)), when it is
   stored and again at every push. It must use https, and its host must be on the push-service

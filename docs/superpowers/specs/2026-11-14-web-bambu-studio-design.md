@@ -78,8 +78,8 @@ ScadBuddy could set none of them (#2998, #6245, #6246).
 
 | Area | Today | Code |
 |---|---|---|
-| Whole-print settings | Named fields (`prime_tower`, `supports`, `print_sequence`) and an allowlist for template `print_settings`. #2998's PR (in progress, another worktree) adds a generic `process_overrides`, a searchable settings list from the resolved process (`POST /api/v1/print/process-values`), free keys, and the agent tool `get_process_values`. It has no option metadata: labels, sections, types and ranges are compiled into the Bambu Studio binary and are not in the image. | `backend/scadbuddy/library/catalogue.py` `PRINT_SETTING_VALUES`; `bambuddy/dispatch.py` `SliceRequest.process_overrides`; `slicing/presets.py` `apply_overrides` |
-| Per-part settings | Keyed by filament slot, a fixed list of keys (#5571, #5627). | `bambuddy/part_settings.py`; `render/bambu3mf.py` `set_part_settings`; `components/print/PartSettingsDisclosure.tsx` |
+| Whole-print settings | A generic `process_overrides` (#2998, PR #6291) beside the named fields (`prime_tower`, `supports`, `print_sequence`), which stay as shorthands. Template `print_settings` take any process key too. Host-side keys (`process_overrides.HOST_SIDE_KEYS`) are dropped everywhere. A searchable settings list comes from the resolved process (`POST /api/v1/print/process-values`), with free keys, and the agent tool `get_process_values`. It has no option metadata: labels, sections, types and ranges are compiled into the Bambu Studio binary and are not in the image. | `bambuddy/process_overrides.py`; `library/catalogue.py` `ModelMeta._print_setting_texts`; `bambuddy/dispatch.py` `SliceRequest.process_overrides`; `slicing/presets.py` `apply_overrides` |
+| Per-part settings | Keyed by filament slot (#5571, #5627), any process key (#2998). Part-structure keys (`process_overrides.PART_STRUCTURE_KEYS`) and host-side keys are dropped. | `bambuddy/part_settings.py`; `render/bambu3mf.py` `set_part_settings`; `components/print/PartSettingsDisclosure.tsx` |
 | Objects in a 3MF | One object per declared object (`echo(objects = N)`) or per placed copy of an Arrange layout (#956). A template plate with no declaration is one object (#6245). | `workflows/outputs.py`; spec `2026-10-13-declared-objects-design.md` |
 | Layout | `Layout` → `LayoutPlate` → `Placed(piece_key, x, y, rot, recolour)`. Quarter turns only. | `workflows/models.py`; packer `workflows/arrange.py` |
 | By-object check | Bounding boxes and `extruder_clearance_radius` (49 mm on the H2C). Bambu Studio reads `extruder_clearance_max_radius` (96 mm) and convex hulls. | `bambuddy/clearance.py`; `render/plate_profiles.py` `CLEARANCES` |
@@ -368,9 +368,9 @@ PlateDocument
 
 - Any process key, on any print, quote, item print, library-file print and batch step,
   through `process_overrides: {key: value}`. The named fields stay as shorthands.
-- No key or value is refused. A check may warn, with Bambu Studio's type or range. The
+- No real key or value is refused (the bounds on `process_overrides` are far past any real setting). A check may warn, with Bambu Studio's type or range. The
   slicer's refusal returns as a 422 that names the key.
-- #2998's PR ships the path, the list of resolved values and the agent tool
+- #2998's PR (#6291) ships the path, the list of resolved values and the agent tool
   `get_process_values`.
 
 ### 7.2 The settings catalogue (new)

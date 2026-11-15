@@ -12,6 +12,7 @@ import {
 } from '@anthropic-ai/claude-agent-sdk'
 import type { Context } from '@opentelemetry/api'
 import type { Sql } from 'postgres'
+import type { BrowserOrigins } from '../browser/store.js'
 import type { Tier } from '../auth/principal.js'
 import type { Credential } from '../credentials.js'
 import { payloadKeyLock, type PayloadKeys } from '../temporal/payloadCodec.js'
@@ -682,8 +683,8 @@ function startedQuery(run: QueryRunner): (spawn: HarnessRun) => WarmQuery {
 
 export type SessionManagerDeps = {
   sql: Sql
-  /** The backend's flow tables (flows/backendReads.ts, #5299 D7); their SQL on `sql` by default. */
-  flowReads?: FlowRunReads | undefined
+  /** The backend's flow tables, through its CRUD routes (flows/backendReads.ts, #5299 D7). */
+  flowReads: FlowRunReads
   paths: HarnessPaths
   /**
    * The Claude credentials a turn may use, in priority order, and where what
@@ -823,6 +824,8 @@ export type SessionManagerDeps = {
    * undefined when it cannot.
    */
   currentTiers?: (owner: Owner) => Promise<readonly Tier[] | undefined>
+  /** The headless browser's lists and approvals (browser/store.ts); a turn makes one over `sql` without it. */
+  browserOrigins?: BrowserOrigins
   /** The data keys the transcript is sealed under (D7); without them no transcript line is written. */
   payloadKeys?: PayloadKeys
   /** HMAC key for approval input hashes (approvals/service.ts `approvalHashKey`); per process when omitted. */

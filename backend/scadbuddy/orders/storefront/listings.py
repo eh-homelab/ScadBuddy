@@ -31,6 +31,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable, Collection, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
@@ -54,12 +55,18 @@ from scadbuddy.orders.storefront.inputs import (
     InputReason,
     customer_filaments,
     effective_default,
+    effective_materials,
+    locked_colours,
+    material_key,
+    needs_material,
+    printable_materials,
+    printable_of,
     same_value,
     value_reason,
 )
+from scadbuddy.orders.storefront.inputs import sets_support as _sets_support
 from scadbuddy.orders.storefront.slice_profile import StorefrontSliceProfile, missing_materials
 from scadbuddy.orders.storefront.wire import (
-    SUPPORT_PARAM,
     ChoiceBound,
     Listing,
     ListingInput,
@@ -119,7 +126,7 @@ _needs_s3_warned: float | None = None
 
 _COLUMNS = (
     "id, slug, commit, title, description, position, published, params, fixed, colours,"
-    " media_ids, one_material, snapshot, media, published_at, created_at, updated_at"
+    " media_ids, materials, snapshot, media, published_at, created_at, updated_at"
 )
 _NUMBERS = frozenset({"number", "integer", "slider"})
 #: Each sort's columns, the last of each the id, so a page boundary never splits ties.
@@ -235,7 +242,7 @@ class ListingStore:
             row = conn.execute(
                 "INSERT INTO storefront_listings"
                 " (slug, commit, title, description, position, params, fixed, colours, media_ids,"
-                " one_material)"
+                " materials)"
                 " VALUES (%s, %s, %s, %s,"
                 " (SELECT coalesce(max(position) + 1, 0) FROM storefront_listings),"
                 f" %s, %s, %s, %s, %s) RETURNING {_COLUMNS}",
@@ -256,7 +263,7 @@ class ListingStore:
             Jsonb(dumped["fixed"]),
             body.colours,
             body.media_ids,
-            body.one_material,
+            body.materials,
         )
 
     def update(
@@ -266,14 +273,14 @@ class ListingStore:
         when it changed after ``expected_updated_at`` was read, 404 when it is gone, 422
         ``listing_choice_empty`` for a choice with nothing to choose."""
         _check_choices(body)
-        slug, commit, title, description, params, fixed, colours, media_ids, one_material = (
+        slug, commit, title, description, params, fixed, colours, media_ids, materials = (
             self._fields(body)
         )
         with self.pool.connection() as conn, conn.transaction():
             row = conn.execute(
                 "UPDATE storefront_listings SET slug = %s, commit = %s, title = %s,"
                 " description = %s, params = %s, fixed = %s, colours = %s, media_ids = %s,"
-                " one_material = %s, published = false, snapshot = NULL, media = '[]',"
+                " materials = %s, published = false, snapshot = NULL, media = '[]',"
                 " published_at = NULL,"
                 " updated_at = clock_timestamp()"
                 f" WHERE id = %s AND updated_at = %s RETURNING {_COLUMNS}",
@@ -286,7 +293,7 @@ class ListingStore:
                     fixed,
                     colours,
                     media_ids,
-                    one_material,
+                    materials,
                     listing_id,
                     expected_updated_at,
                 ),
@@ -618,7 +625,7 @@ class ListingStore:
         return {row["id"]: row["colour"] for row in rows}
 
     def filament_materials(self) -> dict[str, str]:
-        """Each price-book filament not archived, by id: its material (#6153)."""
+        """Each price-book filament not archived, by id: its material (#6153, #6258)."""
         with self.pool.connection() as conn:
             rows = conn.execute(
                 "SELECT id, material FROM filaments WHERE archived_at IS NULL"
@@ -751,13 +758,6 @@ def _check_bound(parameter: Parameter, bound: ParamBound, colours: Collection[st
         raise outside
 
 
-def _sets_support(parameter: Parameter, label: str) -> bool:
-    """Whether ``parameter`` sets support: its name, caption, group or shown ``label`` says
-    so, as the page's and the agent's ``isSupport`` read it (#6152)."""
-    texts = (parameter.name, parameter.caption, parameter.group, label)
-    return any(t is not None and SUPPORT_PARAM.search(t) is not None for t in texts)
-
-
 def checked_fixed(
     schema: CustomizerSchema,
     body: ListingInput,
@@ -823,6 +823,68 @@ def checked_fixed(
         ):
             _check_colour(name, value, offered)
     return fixed
+
+
+def check_materials(
+    body: ListingInput, materials: Mapping[str, str], allowed: Collection[str]
+) -> None:
+    """422 ``listing_material_not_allowed`` (with ``name``, the filament id) for a
+    listing filament whose material (``materials``, by id) is not one of ``allowed``,
+    casefolded (#6258: the listing's materials, else the shop's default). A support
+    material is the shop's choice and never offered (#6152), so it is not checked: a
+    locked support colour still needs its filament."""
+    wanted = {material_key(m) for m in allowed}
+    for filament_id in body.colours:
+        material = materials.get(filament_id)
+        if material is None or is_support(material):
+            continue  # `checked_fixed` refuses a filament the price book lacks.
+        if material_key(material) not in wanted:
+            raise _unprocessable(
+                "listing_material_not_allowed",
+                f"{filament_id!r} is {material}, which this listing does not allow; allow"
+                f" {material} or take the filament out",
+                filament_id,
+            )
+
+
+def check_locked_colours(
+    schema: CustomizerSchema,
+    fixed: Mapping[str, ParamValue],
+    body: ListingInput,
+    colours: Mapping[str, str],
+    materials: Mapping[str, str],
+    allowed: Sequence[str],
+) -> None:
+    """422 ``listing_locked_colours_unprintable`` (with ``names``, the locked colour
+    parameters) when none of ``allowed`` is printable (`printable_materials`, ``fixed``
+    as `checked_fixed` answers it, the listing's customer filaments from ``colours`` and
+    ``materials``, by id): none offers every colour the shop locked and a choice of each
+    offered colour parameter. So an offered parameter with no choice in a lock's
+    material causes it too. A print is made of one material (#6258), and a render would
+    refuse every visitor (#6302 review)."""
+    locks = locked_colours(schema, fixed, body.params)
+    by_name = {p.name: p for p in schema.parameters}
+    offers_colour = any(
+        (p := by_name.get(n)) is not None and p.type == "color" for n in body.params
+    )
+    if not locks and not offers_colour:
+        return
+    offered = [
+        (materials[f], colours[f])
+        for f in body.colours
+        if f in materials and f in colours and not is_support(materials[f])
+    ]
+    if printable_of(schema, fixed, body.params, offered, allowed):
+        return
+    names = list(locks)
+    raise problem(
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        "listing_locked_colours_unprintable",
+        "no allowed material offers every locked colour"
+        + (f" ({', '.join(names)})" if names else "")
+        + " and a choice of each offered colour; add them in one material, or unlock one",
+        names=names,
+    )
 
 
 async def _commit_facts(core: Core, slug: str, commit: str) -> ListingSnapshot:
@@ -949,6 +1011,8 @@ async def publish(core: Core, store: ListingStore, listing_id: str) -> Listing:
     409 ``storefront_needs_s3`` unless the store is S3; 422 ``listing_param_unknown``,
     ``listing_bounds_outside_schema``, ``listing_fixed_invalid``,
     ``listing_default_invalid``, ``listing_colour_unknown``, ``listing_media_unknown``,
+    ``listing_material_not_allowed`` (`check_materials`, #6258),
+    ``listing_locked_colours_unprintable`` (`check_locked_colours`, #6302 review),
     ``listing_reference`` or ``listing_pipeline_unsupported`` for a listing its commit or
     the price book does not back, ``listing_material_unsliceable`` for a material the shop
     slice profile has no spool for (#6153); 409 ``listing_changed`` when it was edited while it was
@@ -977,8 +1041,13 @@ async def _publish(
     colours = await asyncio.to_thread(store.filament_colours)
     supports = await asyncio.to_thread(store.support_filaments)
     fixed = checked_fixed(facts.schema_, listing, colours, supports)
+    materials = await asyncio.to_thread(store.filament_materials)
+    shop = (await asyncio.to_thread(core.settings_store.snapshot)).runtime.storefront_materials
+    allowed = effective_materials(listing, shop)
+    check_materials(listing, materials, allowed)
+    check_locked_colours(facts.schema_, fixed, listing, colours, materials, allowed)
     profile = (await asyncio.to_thread(core.settings_store.load)).storefront_slice_profile
-    check_sliceable(profile, listing, await asyncio.to_thread(store.filament_materials))
+    check_sliceable(profile, listing, materials)
     refs = BlobRefs(core.projection.pool)
     try:
         key = await snapshots.ensure(listing.slug, listing.commit)
@@ -1128,9 +1197,14 @@ def _public_param(
     if isinstance(bound, TextBound):
         fields["placeholder"] = start if isinstance(start, str) and start.strip() else None
     if isinstance(bound, ChoiceBound) and shown["colour"]:
-        fields["choices"] = [
-            c for c in bound.choices if isinstance(c, str) and c.casefold() in colours
-        ]
+        # Each colour once, the first spelling kept (#6299 review). The page picks a
+        # filament and sends its own spelling, so the prepare run (#6237) takes each
+        # filament's spelling, not this one.
+        kept: dict[str, str] = {}
+        for c in bound.choices:
+            if isinstance(c, str) and c.casefold() in colours:
+                kept.setdefault(c.casefold(), c)
+        fields["choices"] = list(kept.values())
         if not (isinstance(start, str) and start.casefold() in colours):
             fields["default"] = None
     elif isinstance(bound, ChoiceBound) and not any(
@@ -1199,22 +1273,51 @@ def cursor_after(cursor: str) -> tuple[int, str]:
     return position, listing_id
 
 
+@dataclass(frozen=True)
+class _Offered:
+    """What a visitor of a published listing is offered (`_offered`)."""
+
+    #: The effective materials (`effective_materials`), in order.
+    materials: list[str]
+    #: Their customer filaments, in the listing's order (never support, #6152).
+    filaments: list[Filament]
+    params: dict[str, PublicParam]
+    #: Whether a render can be made: a printable material (or no colour to print), and
+    #: a colour left for every colour parameter (the page's `colourGone`).
+    available: bool
+
+
+def _offered(
+    listing: Listing, filaments: Mapping[str, Filament], shop_materials: Sequence[str]
+) -> _Offered:
+    """The public listing's materials, filaments and parameters. The filaments and the
+    choices come from the printable materials only (#6302 review): the same filaments
+    and live materials a render takes (`printable_materials` of `effective_materials`),
+    so a visitor never sees a colour that can only clash, and a listing no render can
+    make reads as unavailable. The materials stay the effective list."""
+    assert listing.snapshot is not None
+    by_name = {p.name: p for p in listing.snapshot.schema_.parameters}
+    effective = effective_materials(listing, shop_materials)
+    printable = printable_materials(listing, filaments, effective)
+    offered = customer_filaments(listing, filaments, printable)
+    colours = {f.colour.casefold() for f in offered}
+    params = {name: _public_param(name, b, by_name, colours) for name, b in listing.params.items()}
+    gone = any(isinstance(p, PublicChoice) and p.colour and not p.choices for p in params.values())
+    available = (bool(printable) or not needs_material(listing)) and not gone
+    return _Offered(materials=effective, filaments=offered, params=params, available=available)
+
+
 async def public_card(
-    content: ContentStore, listing: Listing, filaments: Mapping[str, Filament]
+    content: ContentStore,
+    listing: Listing,
+    filaments: Mapping[str, Filament],
+    shop_materials: Sequence[str],
 ) -> PublicListingCard:
     """``listing`` as a card of the public list (#6154): its first picture as the one
-    presigned GET, and whether every colour it offers still has a filament."""
+    presigned GET, and whether it can be ordered (`_offered`: a printable material, and a
+    filament a customer may pick for every colour it offers, #6258, #6302 review)."""
     assert listing.snapshot is not None
-    colours = {filaments[i].colour.casefold() for i in listing.colours if i in filaments}
-    by_name = {p.name: p for p in listing.snapshot.schema_.parameters}
-    # As the page's `colourGone` (`frontend/src/storefront/params.ts`): a colour with no
-    # filament left cannot be ordered.
-    available = True
-    for name, bound in listing.params.items():
-        shown = _public_param(name, bound, by_name, colours)
-        if isinstance(shown, PublicChoice) and shown.colour and not shown.choices:
-            available = False
-            break
+    available = _offered(listing, filaments, shop_materials).available
     image = None
     for item in listing.media:
         if item.kind != "image":
@@ -1233,18 +1336,20 @@ async def public_card(
 
 
 async def public_listing(
-    content: ContentStore, listing: Listing, filaments: Mapping[str, Filament]
+    content: ContentStore,
+    listing: Listing,
+    filaments: Mapping[str, Filament],
+    shop_materials: Sequence[str],
 ) -> PublicListing:
     """The published ``listing`` as the public site shows it: each bound with its
-    schema label and group, the listing's filaments the price book still has
-    (``filaments``, by id) and a customer may pick (never a support material,
-    `customer_filaments`, #6152), and each media file as a presigned GET of
-    `PUBLIC_MEDIA_TTL`. A media file the index lost is left out, and logged."""
+    schema label and group, its effective materials (the listing's, else
+    ``shop_materials``, #6258), the listing's filaments the price book still has
+    (``filaments``, by id) and a customer may pick (never a support material, and only
+    of those materials, `customer_filaments`, #6152, #6258), and each media file as a
+    presigned GET of `PUBLIC_MEDIA_TTL`. A media file the index lost is left out, and
+    logged."""
     assert listing.snapshot is not None
-    by_name = {p.name: p for p in listing.snapshot.schema_.parameters}
-    # Never a support filament: support is the shop's choice (#6152).
-    offered = customer_filaments(listing, filaments)
-    colours = {f.colour.casefold() for f in offered}
+    shown = _offered(listing, filaments, shop_materials)
     media: list[PublicMedia] = []
     for item in listing.media:
         url = await _media_url(content, listing.id, item.blob_key)
@@ -1254,9 +1359,7 @@ async def public_listing(
         id=listing.id,
         title=listing.title,
         description=listing.description,
-        params={
-            name: _public_param(name, b, by_name, colours) for name, b in listing.params.items()
-        },
+        params=shown.params,
         colours=[
             PublicFilament(
                 id=f.id,
@@ -1269,10 +1372,11 @@ async def public_listing(
                 subtype=f.subtype,
                 brand=f.brand,
             )
-            for f in offered
+            for f in shown.filaments
         ],
+        materials=shown.materials,
+        available=shown.available,
         media=media,
-        one_material=listing.one_material,
         updated_at=listing.updated_at,
     )
 

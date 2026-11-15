@@ -510,7 +510,7 @@ if "%%LISTING%%" in text and out is not None and out.endswith(".param"):
                      {"name": "Square", "value": "square"}]},
     ]
     if "%%TWO_COLOURS%%" in text:
-        # A second colour a customer picks (#6152: one material across colours).
+        # A second colour a customer picks (#6152, #6258: one material per print).
         parameters.append(
             {"name": "trim", "type": "string", "initial": "#FF0000", "group": "Main"}
         )
@@ -527,6 +527,15 @@ if out is not None and out.endswith(".3mf"):
     # exports the 3MF named FAKE_3MF, if any.
     if any(arg.startswith("width=999") for arg in args):
         print("WARNING: The file 'pic.svg' couldn't be opened", file=sys.stderr)
+        print("ERROR: something broke", file=sys.stderr)
+        raise SystemExit(1)
+    fail_while = settings.get("FAKE_FAIL_WHILE")
+    if (
+        fail_while
+        and pathlib.Path(fail_while["file"]).exists()
+        and any(fail_while["arg"] in arg for arg in args)
+    ):
+        # A render of the arg that fails while the file is there (#6299 review).
         print("ERROR: something broke", file=sys.stderr)
         raise SystemExit(1)
     for line in settings.get("FAKE_STDERR", []):

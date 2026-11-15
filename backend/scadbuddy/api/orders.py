@@ -28,7 +28,15 @@ from typing import Annotated, Any, Literal, Self
 
 from fastapi import APIRouter, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from scadbuddy.api.activity import BAD_CURSOR, _no_nul, _unknown
 from scadbuddy.api.deps import (
@@ -129,6 +137,7 @@ from scadbuddy.orders.operations import (
     ORDER_ATTEMPT_COPY,
     ORDER_ITEM_PRINT,
     ORDER_ITEM_QUOTE,
+    ORDER_ITEM_RENDER,
 )
 from scadbuddy.orders.past_prints import NativeArchiveCopies, copied_file, quote_from_archive
 from scadbuddy.orders.printing import ItemPrintRequest, print_request_id
@@ -203,6 +212,8 @@ LIST_PARAMS = frozenset(
         "own_model",
         "purchase_pending",
         "import_stuck",
+        "ended_since",
+        "owing",
         "cursor",
         "limit",
     }
@@ -731,6 +742,8 @@ async def list_orders(
     own_model: bool = False,
     purchase_pending: bool = False,
     import_stuck: bool = False,
+    ended_since: AwareDatetime | None = None,
+    owing: bool = False,
     cursor: str | None = None,
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
 ) -> OrderPage:
@@ -750,7 +763,11 @@ async def list_orders(
     them. A cart has no ``number`` and no ``customer_id`` (both null). ``own_model=true``
     lists only orders with a customer's own-model request, ``purchase_pending=true`` only
     those with a thing to buy not yet priced, and ``import_stuck=true`` only those with a
-    file whose import is stuck (#6133, spec 2026-11-13 §11)."""
+    file whose import is stuck (#6133, spec 2026-11-13 §11). ``ended_since`` leaves out
+    the closed and cancelled orders that ended (``closed_at``, else ``cancelled_at``, else
+    ``updated_at``) before
+    it, keeping every open one; ``owing=true`` lists only orders with an ``open``,
+    ``pending`` or ``failed`` payment request (#6334)."""
     _no_nul(request)
     _unknown(request, LIST_PARAMS)
     try:
@@ -776,6 +793,8 @@ async def list_orders(
         own_model=own_model,
         purchase_pending=purchase_pending,
         import_stuck=import_stuck,
+        ended_since=ended_since,
+        owing=owing,
     )
     if cursor is not None:
         try:
@@ -2585,6 +2604,46 @@ async def quote_item_from_archive(
 
 
 @router.post(
+    "/{order_id}/items/{item_id}/render",
+    response_model=OrderItem,
+    summary="Render an item's design",
+    responses=OPERATION_RESPONSES,
+)
+async def render_item(
+    order_id: str,
+    item_id: str,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> OrderItem | JSONResponse:
+    """The ``order_item_render`` operation (#6324): render the item's design (its
+    reference's commit, inputs, libraries and colours) on the normal pipeline, reusing a
+    finished render of its render key, save the output and set it on the item, so the
+    print dialog has an output to slice. The item's own output is kept while it still
+    matches. Not a design change: the item keeps its revision and its quotes. Answered
+    202 once recorded; follow ``GET /operations/{id}`` to the item. A failed render is
+    the operation's error. Refused before anything runs: 404 for an unknown order or
+    item, 409 ``order_not_submitted`` (a storefront cart), ``item_library_file``,
+    ``item_custom``, ``item_has_no_design``, ``order_not_open`` and ``item_not_open``,
+    as the slice quote refuses them."""
+    check_path(order_id, item_id)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds[ORDER_ITEM_RENDER],
+        subject=subject_of(item_id),
+        request={
+            "order_id": order_id,
+            "item_id": item_id,
+            # Who it is for comes from the author header, never a body (Ruling 12).
+            "by": current_actor().model_dump(mode="json"),
+        },
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, OrderItem)
+
+
+@router.post(
     "/{order_id}/items/{item_id}/quote",
     response_model=Quote,
     summary="Quote an item from its slice",
@@ -2833,8 +2892,9 @@ async def print_item(
     test print), and ``requote_needed`` (no accepted quote, its output gone,
     or a slice quote whose sliced file is gone or no longer the file it priced, or a
     ``part_settings``, ``printer_id``, ``printer``, ``choices``, ``prime_tower``,
-    ``supports`` or ``print_sequence`` sent that the quote was not sliced with; each one
-    omitted, and an omitted ``path``, is the quote's, #5571, #4673; another ``path``
+    ``supports``, ``print_sequence`` or ``process_overrides`` sent that the quote was not
+    sliced with; each one omitted, and an omitted ``path``, is the quote's, #5571, #4673,
+    #2998; another ``path``
     slices again on its route, #5352); 422 ``print_setup_missing`` when the quote records
     no setup (manual, archive) and the body sends no ``choices`` or ``filament_plan``;
     and the print run's own refusals, as the print route answers them."""
@@ -2891,8 +2951,9 @@ async def test_print_item(
     print), and ``requote_needed`` (no slice quote of the revision,
     its sliced file gone or no longer the file it priced, the output gone, or a
     ``part_settings``, ``printer_id``, ``printer``, ``choices``, ``prime_tower``,
-    ``supports`` or ``print_sequence`` sent that the quote was not sliced with; each one
-    omitted, and an omitted ``path``, is the quote's, #5571, #4673; another ``path``
+    ``supports``, ``print_sequence`` or ``process_overrides`` sent that the quote was not
+    sliced with; each one omitted, and an omitted ``path``, is the quote's, #5571, #4673,
+    #2998; another ``path``
     slices again on its route, #5352); 422 ``print_setup_missing`` as ``POST …/print``
     answers it; and the print run's own refusals, as the print route answers them."""
     check_path(order_id, item_id, revision_id)

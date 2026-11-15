@@ -1,6 +1,6 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
-import { ArrowDownIcon, ArrowUpDownIcon, ArrowUpIcon, Loader2Icon } from 'lucide-react'
+import { ArrowDownIcon, ArrowUpDownIcon, ArrowUpIcon, Loader2Icon, SlidersHorizontalIcon } from 'lucide-react'
 import { api } from '../api/client'
 import type { Customer, InventoryPart, OrderRow, OrderStatus } from '../api/types'
 import { CustomerPicker } from '../components/orders/CustomerPicker'
@@ -11,17 +11,20 @@ import { OrderStatusBadge } from '../components/orders/OrderStatusBadge'
 import { OrdersTabs } from '../components/orders/OrdersTabs'
 import { refusalText } from '../components/orders/refusal'
 import { DataTable, type Column } from '../components/records/DataTable'
-import { FilterBar } from '../components/records/FilterBar'
+import { FilterBar, SearchField } from '../components/records/FilterBar'
 import { statusLabel } from '../components/prints/status'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Switch } from '@/components/ui/switch'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import { dueAt, formatDueDate, timeAgo } from '../lib/format'
 import { formatMoney } from '../lib/money'
-import { DEFAULT_ORDERS_QUERY, isOrdersFiltered, isReportFiltered, LOSS_OR_THIN, parseOrdersQuery, REPORT_KEYS, toOrdersParams, type OrdersQuery } from '../lib/ordersQuery'
+import { DEFAULT_ORDERS_QUERY, isReportFiltered, LOSS_OR_THIN, moreFiltersOn, parseOrdersQuery, REPORT_KEYS, statusesOf, toOrdersParams, type OrdersQuery } from '../lib/ordersQuery'
+import { applyView, endedSince, HIDE_DAYS, ORDER_VIEWS, readOrdersMemory, storeOrdersMemory, viewOf } from '../lib/orderViews'
 import { useAsync } from '../lib/useAsync'
 
 const PAGE = 50
@@ -33,6 +36,7 @@ const SOURCES = [
   { value: 'storefront', label: 'Storefront' },
 ]
 const UNSUBMITTED = 'unsubmitted'
+const OWING = 'owing'
 /** #6133 (spec 2026-11-13 §11): a storefront customer's own models and things to buy. */
 const MODEL_FILTERS = [
   { value: 'own_model', label: 'Own model' },
@@ -90,12 +94,104 @@ function LowStock({ parts }: { parts: InventoryPart[] }) {
   )
 }
 
+/**
+ * The query this browser remembers: the URL's, less the search; null for a profit report
+ * row's query, which is a visit of its own and never replaces the remembered view.
+ */
+function remembered(query: OrdersQuery): string | null {
+  if (isReportFiltered(query)) return null
+  const params = toOrdersParams(query)
+  params.delete('q')
+  return params.toString()
+}
+
+/**
+ * #6334 — the views above the list, one row that scrolls sideways on a phone, and under
+ * them what the view lists and the closed orders it hides after N days.
+ */
+function OrderViews({ query, hideDays, onChange, onHideDays }: { query: OrdersQuery; hideDays: number; onChange: (next: OrdersQuery) => void; onHideDays: (days: number) => void }) {
+  const active = viewOf(query)
+  return (
+    <div className="flex flex-col gap-2">
+      <nav aria-label="Order views" className="-mx-4 overflow-x-auto px-4 [scrollbar-width:none] sm:mx-0 sm:px-0">
+        <ul className="flex w-max gap-1 border-b border-border sm:w-full">
+          {ORDER_VIEWS.map((view) => {
+            const on = active?.key === view.key
+            return (
+              <li key={view.key}>
+                <button
+                  type="button"
+                  aria-pressed={on}
+                  data-testid={`order-view-${view.key}`}
+                  onClick={() => onChange(applyView(query, view))}
+                  className={`-mb-px border-b-2 px-3 py-2 text-[13px] whitespace-nowrap transition-colors focus-visible:outline-2 focus-visible:outline-ring ${on ? 'border-primary font-medium text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'}`}
+                >
+                  {view.label}
+                </button>
+              </li>
+            )
+          })}
+        </ul>
+      </nav>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-muted-foreground" data-testid="order-view-rule">
+        <span>{active ? active.rule : 'Your own filters.'}</span>
+        {isReportFiltered(query) ? null : query.old ? (
+          <span className="flex items-center gap-1">
+            Showing closed and cancelled orders of any age.
+            <Button variant="link" size="sm" className="h-auto p-0 text-[12px]" onClick={() => onChange({ ...query, old: false })}>
+              Hide the old ones
+            </Button>
+          </span>
+        ) : (
+          <span className="flex flex-wrap items-center gap-1" data-testid="orders-hidden-note">
+            Closed and cancelled orders older than
+            <Select value={String(hideDays)} onValueChange={(days) => onHideDays(Number(days))}>
+              <SelectTrigger size="sm" aria-label="Hide closed orders after" className="h-6 px-1.5 text-[12px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent position="popper" align="start">
+                {HIDE_DAYS.map((days) => (
+                  <SelectItem key={days} value={String(days)}>
+                    {days} days
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            are hidden.
+            <Button variant="link" size="sm" className="h-auto p-0 text-[12px]" onClick={() => onChange({ ...query, old: true })}>
+              Show them
+            </Button>
+          </span>
+        )}
+      </div>
+    </div>
+  )
+}
+
 /** `/orders` (spec 2026-10-18 §9): the list with its filters, newest first, paged by cursor. */
 export function OrdersPage() {
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
-  const query = parseOrdersQuery(params)
-  const key = toOrdersParams(query).toString()
+  // #6334: what this browser remembers. A visit with no query opens the remembered view.
+  const [memory, setMemory] = useState(readOrdersMemory)
+  const [restore, setRestore] = useState(() => (params.size === 0 && memory.remember && memory.query ? memory.query : null))
+  const shown = restore !== null && params.size === 0 ? new URLSearchParams(restore) : params
+  useEffect(() => {
+    if (restore === null) return
+    setRestore(null)
+    if (params.size === 0) setParams(new URLSearchParams(restore), { replace: true })
+  }, [restore, params, setParams])
+  const urlQuery = parseOrdersQuery(shown)
+  // A profit report row's orders are its accepted ones over a period, mostly closed long
+  // ago: its link lists them all, so the N-day rule does not apply to it.
+  const query: OrdersQuery = { ...urlQuery, ended_since: urlQuery.old || isReportFiltered(urlQuery) ? '' : endedSince(memory.hideDays) }
+  const key = `${toOrdersParams(query).toString()}#${query.ended_since}`
+  // Null on a profit report row's link (`remembered`), so the effect stores nothing.
+  const keep = memory.remember ? remembered(query) : null
+  useEffect(() => {
+    if (keep !== null && restore === null) setMemory(storeOrdersMemory({ query: keep }))
+  }, [keep, restore])
+  const [filtersOpen, setFiltersOpen] = useState(() => moreFiltersOn(urlQuery) > 0 && viewOf(urlQuery) === null)
   const customers = useAsync(() => api.customers({ includeArchived: true, limit: 500 }), [])
   const list = useAsync(() => api.orders(query, { limit: PAGE }), [key], ['orders'])
   // #5543: a fulfilment takes parts out of stock, so the low parts are read again on an order's change.
@@ -114,7 +210,7 @@ export function OrdersPage() {
   const madeCustomer = useRef(false)
 
   const onChange = useCallback(
-    (next: OrdersQuery, options?: { typing?: boolean }) => setParams(toOrdersParams(next), { replace: options?.typing === true }),
+    (next: OrdersQuery, options?: { typing?: boolean }) => setParams(toOrdersParams({ ...next, ended_since: '' }), { replace: options?.typing === true }),
     [setParams],
   )
   const held = older?.key === key ? older : null
@@ -174,6 +270,7 @@ export function OrdersPage() {
     {
       key: 'number',
       header: 'Order',
+      className: 'whitespace-nowrap',
       cell: (order) => (
         <Link to={`/orders/${order.id}`} className="font-medium text-foreground underline-offset-4 hover:underline">
           {order.number ?? 'Cart'}
@@ -227,9 +324,37 @@ export function OrdersPage() {
           </Button>
         </div>
         <LowStock parts={lowParts.data ?? []} />
+        <OrderViews
+          query={query}
+          hideDays={memory.hideDays}
+          onChange={onChange}
+          onHideDays={(hideDays) => setMemory(storeOrdersMemory({ hideDays }))}
+        />
+        <div className="flex flex-wrap items-center gap-2">
+          <SearchField value={query.q} onChange={(q) => onChange({ ...query, q }, { typing: true })} placeholder="Search orders" />
+          <Button variant="outline" size="sm" aria-expanded={filtersOpen} aria-controls={filtersOpen ? 'order-filters' : undefined} onClick={() => setFiltersOpen(!filtersOpen)}>
+            <SlidersHorizontalIcon aria-hidden />
+            Filters
+            {moreFiltersOn(query) > 0 && <span className="sb-num rounded-full bg-primary/15 px-1.5 text-[11px]" aria-label={`${moreFiltersOn(query)} on`}>{moreFiltersOn(query)}</span>}
+          </Button>
+          {viewOf(query)?.key !== 'all' && (
+            <Button variant="ghost" size="sm" onClick={() => onChange({ ...DEFAULT_ORDERS_QUERY, old: query.old })}>
+              Show all
+            </Button>
+          )}
+          <label className="ml-auto flex items-center gap-2 text-[12px] text-muted-foreground">
+            <Switch
+              size="sm"
+              checked={memory.remember}
+              onCheckedChange={(remember) => setMemory(storeOrdersMemory({ remember, query: remember ? (remembered(query) ?? memory.query) : '' }))}
+            />
+            Remember my view
+          </label>
+        </div>
+        {filtersOpen && (
+        <div id="order-filters" className="rounded-lg border border-border p-3">
         <FilterBar
           label="Order filters"
-          search={{ value: query.q, onChange: (q) => onChange({ ...query, q }, { typing: true }), placeholder: 'Search orders' }}
           selects={[
             {
               key: 'customer',
@@ -243,9 +368,18 @@ export function OrdersPage() {
             {
               key: 'status',
               label: 'Status',
+              multiple: true,
               chips: STATUSES.map((s) => ({ value: s, label: statusLabel(s) })),
-              selected: query.status ? [query.status] : [],
-              onChange: ([status]) => onChange({ ...query, status: status ?? '' }),
+              selected: statusesOf(query),
+              // In the list's order, so a view's statuses read as that view.
+              onChange: (on) => onChange({ ...query, status: STATUSES.filter((s) => on.includes(s)).join(',') }),
+            },
+            {
+              key: 'owing',
+              label: 'Money',
+              chips: [{ value: OWING, label: 'Owes money' }],
+              selected: query.owing ? [OWING] : [],
+              onChange: ([on]) => onChange({ ...query, owing: on === OWING }),
             },
             {
               key: 'margin',
@@ -277,8 +411,8 @@ export function OrdersPage() {
               onChange: (on) => onChange({ ...query, ...Object.fromEntries(MODEL_FILTERS.map((f) => [f.value, on.includes(f.value)])) }),
             },
           ]}
-          filtered={isOrdersFiltered(query)}
-          onClear={() => onChange(DEFAULT_ORDERS_QUERY)}
+          filtered={moreFiltersOn(query) > 0}
+          onClear={() => onChange({ ...DEFAULT_ORDERS_QUERY, q: query.q, old: query.old })}
         >
           <div className="flex flex-wrap items-end gap-2">
             <div className="flex flex-col gap-1">
@@ -295,6 +429,8 @@ export function OrdersPage() {
             </div>
           </div>
         </FilterBar>
+        </div>
+        )}
         {isReportFiltered(query) && (
           <div role="status" data-testid="orders-report-filter" className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-[13px]">
             <span>The orders behind a profit report row: {reportFilterText(query)}.</span>

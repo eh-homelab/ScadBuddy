@@ -3,6 +3,7 @@ import type {
   PrintChoices,
   FilamentProfile,
   ProfilePreview,
+  ProcessValues,
   AnalysisReport,
   AnalysisRun,
   AnalyzerDecision,
@@ -281,6 +282,8 @@ import type {
   StorefrontListing,
   StorefrontListingInput,
   StorefrontListingPage,
+  ListingPrepareProgress,
+  ListingPrepareStarted,
   ProviderConnect,
   ProviderStatus,
   Quote,
@@ -395,6 +398,10 @@ export const MODELS_PAGE_LIMIT = 500
 export const ACTIVITY_SUBJECTS = 200
 /** A slice quote's activity subject is `order_item:<id>`. */
 const ORDER_ITEM = 'order_item:'
+/** #6324 — a slice quote's activity kinds: the quote, and the render "Slice…" starts first for
+ * an item with a design and no output. */
+export const RENDER_KIND = 'operation.order_item_render'
+const SLICE_KINDS = ['operation.order_item_quote', RENDER_KIND]
 
 /** #2290 — the catalogue's search and filters, as `GET /models` and `GET /model-facets` take them. */
 export interface ModelFilters {
@@ -2199,6 +2206,16 @@ export const api = {
     }),
 
   /**
+   * #2998 — every key and value of the process preset these choices resolve to: what the
+   * dialog's "Slicer settings" list, and the value each prints with when none is set.
+   */
+  processValues: (choices: PrintChoices) =>
+    request<ProcessValues>('/print/process-values', {
+      method: 'POST',
+      body: JSON.stringify({ choices }),
+    }),
+
+  /**
    * spec 2026-09-27 §4 — the spool-first run: no pipeline is named, every slicer preset
    * is derived server-side from the dialog's spools, nozzles, quality and plate.
    * `signal` stops following the run (the dialog went away); the run itself goes on.
@@ -2759,6 +2776,11 @@ export const api = {
       undefined,
       onAccepted,
     ),
+  /** #6324 — the `order_item_render` operation: the item's design rendered (a finished render
+   * of its key reused), its output saved and set on the item, so "Slice…" has an output to open
+   * the print dialog on. Followed to the item as every command is. */
+  renderItem: (orderId: string, itemId: string, onAccepted?: (operation: OperationAccepted) => void, signal?: AbortSignal) =>
+    command<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/render`, { method: 'POST', signal }, undefined, undefined, onAccepted),
   /** #4719 — the `order_item_print` operation: a print run of the item's output with the
    * dialog's choices, every plate, the quantity still to print; followed to the attempt
    * it recorded, the item `queued`. */
@@ -2769,7 +2791,8 @@ export const api = {
    * `subject` is `order_item:<id>`, its `id` `operation:<operation id>`. Running quotes are
    * few (each is minutes of slicing), so one page holds them.
    */
-  runningQuotes: () => request<ActivityPage>('/activity?kind=operation.order_item_quote&status=running&limit=200'),
+  runningQuotes: () =>
+    request<ActivityPage>(`/activity?${new URLSearchParams([...SLICE_KINDS.map((kind) => ['kind', kind]), ['status', 'running'], ['limit', '200']])}`),
   /**
    * #5554 — the newest `failed` activity row of each item's slice quotes, by item id: a
    * failure the page did not start (over MCP, in another tab) shows on its item with its
@@ -2785,7 +2808,7 @@ export const api = {
     for (let at = 0; at < items.length; at += ACTIVITY_SUBJECTS) {
       const chunk = items.slice(at, at + ACTIVITY_SUBJECTS)
       const since = chunk.reduce((a, b) => (Date.parse(b.created_at) < Date.parse(a) ? b.created_at : a), chunk[0]!.created_at)
-      const query = new URLSearchParams({ kind: 'operation.order_item_quote', status: 'failed', since, limit: '1' })
+      const query = new URLSearchParams([...SLICE_KINDS.map((kind) => ['kind', kind]), ['status', 'failed'], ['since', since], ['limit', '1']])
       for (const item of chunk) query.append('subject', `${ORDER_ITEM}${item.id}`)
       // #5599 — a failed chunk loses its own items' failures only, not the other chunks'.
       let page: ActivityPage
@@ -2857,6 +2880,11 @@ export const api = {
     request<StorefrontListing>(`/storefront/listings/${seg(id)}/publish`, { method: 'POST' }),
   unpublishStorefrontListing: (id: string) =>
     request<StorefrontListing>(`/storefront/listings/${seg(id)}/unpublish`, { method: 'POST' }),
+  /** #6237 — the listing's colour combinations, the cap, and how many are ready. */
+  storefrontListingPrepare: (id: string) => request<ListingPrepareProgress>(`/storefront/listings/${seg(id)}/prepare`),
+  /** #6237 — queue a render of every colour combination; 422 over the cap or with no colour. */
+  prepareStorefrontListing: (id: string) =>
+    request<ListingPrepareStarted>(`/storefront/listings/${seg(id)}/prepare`, { method: 'POST' }),
   /** Every listing's id, in the order the public site shows them. */
   orderStorefrontListings: (ids: string[]) =>
     request<StorefrontListing[]>('/storefront/listings/order', { method: 'PUT', body: JSON.stringify({ ids }) }),

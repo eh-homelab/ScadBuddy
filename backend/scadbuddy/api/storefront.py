@@ -30,6 +30,12 @@ from scadbuddy.orders.storefront.listings import (
     unpublish,
 )
 from scadbuddy.orders.storefront.mail import MailConnectionUnsetError
+from scadbuddy.orders.storefront.prepare import (
+    PrepareProgress,
+    PrepareStarted,
+    progress,
+    start_run,
+)
 from scadbuddy.orders.storefront.wire import (
     Listing,
     ListingInput,
@@ -169,13 +175,55 @@ async def publish_listing(listing_id: str, orders: OrdersDep, state: StateDep) -
     snapshot, the media). 409 ``storefront_needs_s3`` unless the store is S3; 422 names
     the fault (``listing_param_unknown``, ``listing_bounds_outside_schema``,
     ``listing_fixed_invalid``, ``listing_default_invalid``, ``listing_colour_unknown``,
-    ``listing_media_unknown``,
+    ``listing_media_unknown``, ``listing_material_not_allowed``,
+    ``listing_locked_colours_unprintable``: no allowed material offers every locked colour
+    and a choice of each offered colour,
     ``listing_reference``, ``listing_pipeline_unsupported``,
     ``listing_material_unsliceable``: the shop slice profile has no spool for a material
     of the listing's filaments, #6153); 409 ``listing_publishing``
     while another publish of it runs; 503 ``listing_publish_busy`` while this process
     runs as many publishes as it allows."""
     return await publish(state, orders.listings, listing_id)
+
+
+@router.get(
+    "/listings/{listing_id}/prepare",
+    response_model=PrepareProgress,
+    summary="A storefront listing's colour combinations and how far they are prepared",
+)
+async def get_prepare(listing_id: str, orders: OrdersDep, state: StateDep) -> PrepareProgress:
+    """How many colour combinations the published listing has (``count``: the render keys of
+    its combinations, each of one allowed material, #6258; 0 with no colour parameter), the cap
+    (``storefront_prepare_cap``), and how many have a done (``ready``), an open
+    (``rendering``) and a failed render (#6237). ``running`` is whether the listing's
+    prepare run is open, and ``failed_to_start`` how many combinations its last run could
+    not submit and that have no done render since (#6299 review). Both are read only for
+    a listing that can be prepared; when Temporal does not answer, ``running`` is false
+    and ``failed_to_start`` 0. Over the cap only the count is computed. 404
+    ``listing_not_found``, 409 ``listing_not_published``."""
+    return await progress(state, orders, listing_id)
+
+
+@router.post(
+    "/listings/{listing_id}/prepare",
+    response_model=PrepareStarted,
+    summary="Prepare every colour combination of a storefront listing",
+)
+async def post_prepare(listing_id: str, orders: OrdersDep, state: StateDep) -> PrepareStarted:
+    """Start the listing's prepare run (#6237): a render of each colour combination of the
+    published listing, at the values a visitor's page sends for it, so a visitor's render
+    of it reuses the job. Every other parameter stays at its default. The run renders a few
+    at a time (`PREPARE_IN_FLIGHT`), at the default priority (#6299 review), so it never
+    holds up a visitor's render or the shop's own. It answers at once: ``started`` is false
+    when a run was open already, and this POST joined it. 404 ``listing_not_found``, 409
+    ``listing_not_published``, 422 ``listing_no_colours``, 422
+    ``listing_combinations_over_cap`` (with ``count`` and ``cap``), 503
+    ``render_unavailable``.
+
+    Prepared renders follow ``job_ttl`` as any other render does: with ``job_ttl`` 0
+    (#6244) they are kept, else the prune takes each one a ``job_ttl`` after its finish or
+    its last reuse. They carry no keep mark."""
+    return await start_run(state, orders, listing_id)
 
 
 @router.post(

@@ -26,7 +26,18 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: ``/release`` (#5299), the holds of its workspace files' blobs. Its ``events`` area is
 #: ``…/agent/events`` and ``…/events/head``, the event log's gap and head; its ``flows``
 #: area is ``…/agent/flow-runs/*``, ``…/flow-decisions`` and ``…/flow-grants/in-force``,
-#: its reads of flow runs, their decisions and grants (#5299 D7). The print ``uploads``
+#: its reads of flow runs, their decisions and grants (#5299 D7). Its ``settings`` area is
+#: ``…/agent/settings``, ``ai_settings`` (#5299 step 4); its ``credentials`` area is
+#: ``…/agent/credentials`` and every route under it, the Claude credentials sealed and
+#: opened on the API, a reveal audited; its ``payload-keys`` area is
+#: ``…/agent/payload-keys/{subject}``, a subject's data key released (made first under the
+#: subject's lock, never for a forgotten one) and audited, never the KEK (#5299 D5,
+#: #5342; `api/crud_agent_secrets.py`); its ``forget`` area is
+#: ``…/agent/forgotten-subjects/{subject}``, ``…/payload-keys/{subject}/drop``,
+#: ``…/payload-key-sweeps`` and ``…/flow-blobs/{subject}`` with its ``/{name}``: a subject's
+#: tombstone with its key and flow images, a browser call's key dropped, the keys no forget
+#: deletes swept, and a flow run's images kept and read (#5299 step 6;
+#: `api/crud_agent_forget.py`). The print ``uploads``
 #: area also covers ``…/print/slices`` and ``…/print/slice-starts`` (#5298 Task 25). Its
 #: ``previews`` area also covers ``…/print/project-targets``, ``…/print/folderless`` and
 #: ``…/print/destination-touches`` (#5298 Task 26). Its ``copy-leases`` area is
@@ -43,7 +54,18 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: ``…/print/access-codes`` and ``…/access-codes/virtual-printer``: whether the API opens
 #: access codes, and a virtual printer's sealed code opened (#5298 Task 33). The intake
 #: ``sources`` area is ``…/intake/sources/{id}/read``, ``…/preview`` and ``…/check``: a
-#: customer's staged file, checked by the intake worker (#6133).
+#: customer's staged file, checked by the intake worker (#6133). The agent's small stores
+#: (#5299 step 5, `api/crud_agent_stores.py`): its ``activity-kinds`` area is
+#: ``…/agent/activity-kinds``; its ``browser-origins`` area is ``…/agent/browser-origins``
+#: and every route under it, a session's approved origins; its ``bridge-tabs`` area is
+#: ``…/agent/session-tabs``, ``…/agent/tab-owners/*`` and ``…/agent/tab-images/{name}``
+#: (the bytes in the body), which tab a session pairs with, which replica holds a tab and
+#: a tab's images; its ``pairings`` area is ``…/agent/pairings`` and every route under it;
+#: its ``mcp-tokens`` area is ``…/agent/mcp-tokens`` and every route under it, the MCP
+#: bearer tokens by their hashes; its ``notify`` area is ``…/agent/push/*`` and
+#: ``…/agent/notify-channels`` and every route under it, the Web Push records and the
+#: notification channels, sealed and opened with the API's KEK
+#: (`api/crud_agent_notify.py`).
 CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "projects": ["flows", "operations", "payload-keys"],
     "render": ["settings", "jobs", "refs", "blob-index", "store-folders", "assets", "libraries"],
@@ -76,7 +98,22 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "order",
         "models",
     ],
-    "agent": ["order-costs", "workspace-blob-refs", "events", "flows"],
+    "agent": [
+        "order-costs",
+        "workspace-blob-refs",
+        "events",
+        "flows",
+        "settings",
+        "credentials",
+        "payload-keys",
+        "forget",
+        "activity-kinds",
+        "browser-origins",
+        "bridge-tabs",
+        "pairings",
+        "mcp-tokens",
+        "notify",
+    ],
     "intake": ["sources"],
 }
 

@@ -440,6 +440,12 @@ class OrderFilter(BaseModel):
     purchase_pending: bool = False
     #: Only orders with a source whose import is stuck (`IMPORT_STUCK`).
     import_stuck: bool = False
+    #: A closed or cancelled order is left out when it ended (``closed_at``, else
+    #: ``cancelled_at``, else ``updated_at``) before this; an open order is always kept (#6334).
+    ended_since: datetime | None = None
+    #: Only orders the customer owes money on: an `open`, `pending` or `failed` payment
+    #: request (#6334, the list's "Awaiting payment").
+    owing: bool = False
 
 
 # -- line items (§3.3) ------------------------------------------------------------------
@@ -640,8 +646,9 @@ class Quote(BaseModel):
     printer: str | None = None
     machine_rate_breakdown: MachineRateBreakdown | None = None
     #: A slice quote's print setup (#4673, order operations spec §5.1), as it sliced:
-    #: `printer_id`, `printer`, `path`, `choices`, `prime_tower`, `supports` and
-    #: `print_sequence`, each in `PrintRunRequest`'s shape (`orders/quote.py`
+    #: `printer_id`, `printer`, `path`, `choices`, `prime_tower`, `supports`,
+    #: `print_sequence` and `process_overrides` (#2998; absent from one recorded before
+    #: it), each in `PrintRunRequest`'s shape (`orders/quote.py`
     #: `print_setup`). Null for a manual or archive quote, and one recorded before.
     choices: dict[str, Any] | None = None
     #: The spool per slot a slice quote sliced with (`PrintRunRequest.filament_plan`).

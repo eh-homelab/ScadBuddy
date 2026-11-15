@@ -52,6 +52,7 @@ const KIND_LABEL: Record<AuditKind, string> = {
   http: 'HTTP requests',
   question: 'Questions',
   turn: 'Turns',
+  payload_key: 'Payload keys',
 }
 
 const OUTCOME_LABEL: Record<AuditOutcome, string> = {

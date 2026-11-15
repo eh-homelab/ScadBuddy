@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import type { Sql } from 'postgres'
+import { type CrudTarget, crudOf, segment, UUID_SEGMENT } from '../api/crudStores.js'
 import { type Principal, type Tier, tiersUpTo } from './principal.js'
 
 // Bearer tokens for `/mcp` (spec §8.3, issue #251 "Auth"): minted in Settings,
@@ -15,8 +16,9 @@ import { type Principal, type Tier, tiersUpTo } from './principal.js'
 //
 // Persistence is Postgres only (spec §9: "All AI state lives in the #241
 // database, in `ai_*` tables"): `PostgresTokenStore` over `ai_mcp_tokens`
-// (backend/scadbuddy/migrations_agent/20260928T0734Z_mcp_tokens.sql). There is no file or in-memory
-// fallback. With no database configured, main.ts wires `FailClosedTokenStore`
+// (backend/scadbuddy/migrations_agent/20260928T0734Z_mcp_tokens.sql), or `CrudTokenStore`, the
+// same statements run by the API once it lists area `mcp-tokens` (#5299 step 5). There is no
+// file or in-memory fallback. With no database configured, main.ts wires `FailClosedTokenStore`
 // and /mcp answers 503 "AI disabled: no database" before any token is looked
 // at (app.ts); tests use test/support/memoryTokens.ts.
 
@@ -182,6 +184,87 @@ export class PostgresTokenStore implements TokenStore {
        WHERE id = ${id} AND revoked_at IS NULL
          AND (expires_at IS NULL OR expires_at > now())`
     return rows[0]?.tier ?? null
+  }
+}
+
+type WireToken = Omit<TokenRow, 'created_at' | 'expires_at' | 'revoked_at' | 'last_used_at'> & {
+  created_at: string
+  expires_at: string | null
+  revoked_at: string | null
+  last_used_at: string | null
+}
+
+const dateOf = (text: string | null): Date | null => (text === null ? null : new Date(text))
+
+function recordOfWire(row: WireToken): TokenRecord {
+  return recordOf({
+    ...row,
+    created_at: new Date(row.created_at),
+    expires_at: dateOf(row.expires_at),
+    revoked_at: dateOf(row.revoked_at),
+    last_used_at: dateOf(row.last_used_at),
+  })
+}
+
+/**
+ * The token store through the API's CRUD routes, area `mcp-tokens` (#5299 step 5; backend
+ * api/crud_agent_stores.py). The plaintext never leaves this process: a mint sends the hash
+ * it made, and `verify` sends the presented token's hash, which the API looks up and stamps in
+ * one `UPDATE … RETURNING` by its unique index, comparing hashes only. Every expiry is judged
+ * by the database's clock, so `now` is not sent.
+ */
+export class CrudTokenStore implements TokenStore {
+  readonly #call: ReturnType<typeof crudOf>
+
+  constructor(target: CrudTarget) {
+    this.#call = crudOf(target)
+  }
+
+  async verify(token: string): Promise<Principal | null> {
+    const { token: found } = await this.#call<{ token: { id: string; tier: Tier } | null }>('an MCP token verified', '/mcp-tokens/verify', {
+      body: { token_hash: hashToken(token) },
+    })
+    return found ? principalFor(found.id, found.tier) : null
+  }
+
+  async mint(request: MintRequest): Promise<{ token: string; record: TokenRecord }> {
+    const problem = mintProblem(request)
+    if (problem) throw new Error(problem)
+    const token = newToken()
+    const body = {
+      name: request.name,
+      tier: request.tier,
+      token_hash: hashToken(token),
+      ...(request.expiresAt ? { expires_at: request.expiresAt.toISOString() } : {}),
+      approval_grant: request.approvalGrant ?? false,
+    }
+    const { token: row } = await this.#call<{ token: WireToken }>('an MCP token minted', '/mcp-tokens', { body })
+    return { token, record: recordOfWire(row) }
+  }
+
+  async revoke(id: string): Promise<boolean> {
+    if (!UUID.test(id)) return false
+    // An id that is no UUID names no token, and never reaches the URL.
+    if (!UUID_SEGMENT.test(id)) return false
+    return (await this.#call<{ done: boolean }>('an MCP token revoked', `/mcp-tokens/${segment(id, UUID_SEGMENT, 'an MCP token id')}/revoke`, { method: 'POST' })).done
+  }
+
+  async list(): Promise<TokenRecord[]> {
+    return (await this.#call<{ tokens: WireToken[] }>('the MCP tokens', '/mcp-tokens')).tokens.map(recordOfWire)
+  }
+
+  async #live(id: string): Promise<{ tier: Tier | null; approval_grant: boolean }> {
+    return this.#call('a live MCP token', `/mcp-tokens/${segment(id, UUID_SEGMENT, 'an MCP token id')}/live`)
+  }
+
+  async approvalGrant(id: string): Promise<boolean> {
+    if (!UUID.test(id)) return false
+    return (await this.#live(id)).approval_grant
+  }
+
+  async liveTier(id: string): Promise<Tier | null> {
+    if (!UUID.test(id)) return null
+    return (await this.#live(id)).tier
   }
 }
 

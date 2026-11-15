@@ -35,6 +35,14 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: "The Storefront page's pictures and a model media's \"Storefront…\" dialog (#6213); an agent tool follows with #5283.",
   },
   {
+    operation: 'GET /api/v1/storefront/listings/{listing_id}/prepare',
+    reason: "The Storefront editor's \"Prepare every colour combination\" shows the count and the progress (#6237); a back-office action, as publish is on the page.",
+  },
+  {
+    operation: 'POST /api/v1/storefront/listings/{listing_id}/prepare',
+    reason: "The Storefront editor's \"Prepare every colour combination\" (#6237): a person starts a run of up to storefront_prepare_cap renders, a few at a time, from the page.",
+  },
+  {
     operation: 'POST /api/v1/storefront/listings/{listing_id}/unpublish',
     reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); the assistant drafts and publishes through storefront_listing_draft and storefront_listing_publish (#6131).",
   },
@@ -550,6 +558,13 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason:
       "A slice quote's plate image from its sliced file (#4673), which the item's print setups draw. The " +
       "agent reads each setup's plates, time, grams and choices from order_get; it has no use for the bytes.",
+  },
+  {
+    operation: 'POST /api/v1/orders/{order_id}/items/{item_id}/render',
+    reason:
+      "The order page's Slice… renders an item with a design and no output first, so the print dialog has an " +
+      "output to open on (#6324). The agent's order_item_quote `slice` needs no dialog: its run renders the " +
+      'item itself when it has no matching output.',
   },
   ...(
     [

@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PreviewJob } from '../../components/Preview'
@@ -66,7 +66,7 @@ describe('CustomizePage', () => {
     show()
     expect(await screen.findByText('about $12.40, confirmed after we check it')).toBeInTheDocument()
     expect(screen.getByTestId('preview')).toHaveAttribute('data-status', 'done')
-    expect(sent).toEqual([{ listing_id: 'l1', listing_updated_at: '2026-11-07T12:00:00Z', values: {}, picks: {}, colours: {} }])
+    expect(sent).toEqual([{ listing_id: 'l1', listing_updated_at: '2026-11-07T12:00:00Z', values: {}, colours: {} }])
     expect(screen.queryByRole('button', { name: 'Render' })).toBeNull()
   })
 
@@ -93,7 +93,6 @@ describe('CustomizePage', () => {
       listing_id: 'l1',
       listing_updated_at: '2026-11-07T12:00:00Z',
       values: { name: 'Ada' },
-      picks: {},
       colours: {},
     })
     expect(sent[1]!.key).toMatch(/^[0-9a-f-]{36}$/)
@@ -111,7 +110,7 @@ describe('CustomizePage', () => {
     const picker = await screen.findByRole('button', { name: /Base colour/ })
     await user.click(picker)
     await user.click(await screen.findByRole('radio', { name: 'Signal orange PLA' }))
-    // A pick waits for its preview: the shop maps it to the render's slots.
+    // A colour set waits for its preview: the shop fills the render's slots from it.
     await waitFor(() => expect(screen.getByRole('button', { name: 'Add to order' })).toBeEnabled())
     await user.click(screen.getByRole('button', { name: 'Add to order' }))
     await screen.findByText('Added to your order.')
@@ -124,185 +123,137 @@ describe('CustomizePage', () => {
     expect(sent).toEqual([{ base_colour: '#E8532F' }, {}])
   })
 
-  it('moves each colour to the nearest of a new material, and says so (#6152)', async () => {
-    const sent: unknown[] = []
-    server.events.on('request:start', async ({ request }) => {
-      if (request.method === 'POST' && new URL(request.url).pathname === '/api/store/v1/renders') sent.push(await request.clone().json())
-    })
+  it('shows no Material control, and sends only the colours the visitor sets (#6258)', async () => {
+    const sent = renders()
+    const { user } = show(CHARM_ID)
+    await waitFor(() => expect(sent).toHaveLength(1))
+    expect(screen.queryByRole('radiogroup', { name: 'Material' })).toBeNull()
+    expect(sent[0]).toEqual(expect.objectContaining({ values: {} }))
+    await user.click(screen.getByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Rust PETG' }))
+    await waitFor(() => expect(sent.at(-1)).toEqual(expect.objectContaining({ values: { body_colour: '#C0502A' } })))
+    server.events.removeAllListeners()
+    expect(sent.every((body) => !('picks' in (body as object)))).toBe(true)
+  })
+
+  it('shows the colour the shop settled for a part the visitor did not set (#6302 review)', async () => {
+    // The rim's default blue is PLA only. The visitor picks a rust that is PETG only, so the
+    // print is PETG and the shop moves the rim to its closest PETG colour, teal.
+    server.use(
+      http.post('/api/store/v1/renders', async ({ request }) => {
+        const body = (await request.json()) as { values: Record<string, string> }
+        const values = body.values.body_colour ? { body_colour: body.values.body_colour, rim_colour: '#1C8C8C' } : { body_colour: '#1B6CA8', rim_colour: '#1B6CA8' }
+        return HttpResponse.json({ ...RUNNING, values }, { status: 202 })
+      }),
+      http.get('/api/store/v1/renders/:id', () => HttpResponse.json(RUNNING)),
+    )
+    const { user } = show(CHARM_ID)
+    expect(await screen.findByRole('button', { name: /Rim colour Ocean blue/ })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Rust PETG' }))
+    expect(await screen.findByRole('button', { name: /Rim colour Teal/ })).toBeInTheDocument()
+  })
+
+  it('shows the listing default while the start of changed choices has not answered (#6302 review)', async () => {
+    // The first pick settles the rim to teal. The next pick's start does not answer yet, so
+    // the rim shows the listing's default, not the last reply's teal.
+    let hold: (() => void) | undefined
+    server.use(
+      http.post('/api/store/v1/renders', async ({ request }) => {
+        const body = (await request.json()) as { values: Record<string, string> }
+        if (body.values.body_colour === '#C0502A') return HttpResponse.json({ ...RUNNING, values: { body_colour: '#C0502A', rim_colour: '#1C8C8C' } }, { status: 202 })
+        if (body.values.body_colour === undefined) return HttpResponse.json({ ...RUNNING, values: { body_colour: '#1B6CA8', rim_colour: '#1B6CA8' } }, { status: 202 })
+        await new Promise<void>((resolve) => { hold = resolve })
+        return HttpResponse.json({ ...RUNNING, values: { body_colour: body.values.body_colour, rim_colour: '#1C8C8C' } }, { status: 202 })
+      }),
+      http.get('/api/store/v1/renders/:id', () => HttpResponse.json(RUNNING)),
+    )
+    const { user } = show(CHARM_ID)
+    await user.click(await screen.findByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Rust PETG' }))
+    expect(await screen.findByRole('button', { name: /Rim colour Teal/ })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Teal PETG' }))
+    expect(await screen.findByRole('button', { name: /Rim colour Ocean blue/ })).toBeInTheDocument()
+    await waitFor(() => expect(hold).toBeDefined())
+    expect(screen.getByRole('button', { name: /Rim colour Ocean blue/ })).toBeInTheDocument()
+    hold?.()
+    expect(await screen.findByRole('button', { name: /Rim colour Teal/ })).toBeInTheDocument()
+  })
+
+  it('shows the listing default again once a render start is refused (#6302 review)', async () => {
+    server.use(
+      http.post('/api/store/v1/renders', async ({ request }) => {
+        const body = (await request.json()) as { values: Record<string, string> }
+        if (body.values.body_colour === '#C0502A') return HttpResponse.json({ ...RUNNING, values: { body_colour: '#C0502A', rim_colour: '#1C8C8C' } }, { status: 202 })
+        if (body.values.body_colour === undefined) return HttpResponse.json({ ...RUNNING, values: { body_colour: '#1B6CA8', rim_colour: '#1B6CA8' } }, { status: 202 })
+        return HttpResponse.json(
+          { type: PROBLEMS + 'listing_colours_clash', title: 'Unprocessable Content', status: 422, detail: 'No.', parts: ['body_colour'] },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        )
+      }),
+      http.get('/api/store/v1/renders/:id', () => HttpResponse.json(RUNNING)),
+    )
+    const { user } = show(CHARM_ID)
+    await user.click(await screen.findByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Rust PETG' }))
+    expect(await screen.findByRole('button', { name: /Rim colour Teal/ })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Teal PETG' }))
+    expect(await screen.findByRole('button', { name: /Rim colour Ocean blue/ })).toBeInTheDocument()
+  })
+
+  it('says plainly when colours of no one material are set (#6258)', async () => {
     const { user } = show(CHARM_ID)
     await user.click(await screen.findByRole('button', { name: /Body colour/ }))
     await user.click(await screen.findByRole('radio', { name: 'Signal orange PLA' }))
-    await user.click(within(screen.getByRole('radiogroup', { name: 'Material' })).getByRole('radio', { name: 'PETG' }))
-    expect(await screen.findByText('Your colours changed to the nearest PETG colours.')).toBeInTheDocument()
-    // Signal orange's nearest PETG colour is Rust.
-    await waitFor(() =>
-      // The rim the visitor never set moves too: from the first choice, Ocean blue, to Teal.
-      expect(sent.at(-1)).toEqual(
-        expect.objectContaining({
-          values: { body_colour: '#C0502A', rim_colour: '#1C8C8C' },
-          picks: { body_colour: 'f-petg-rust', rim_colour: 'f-petg-teal' },
-        }),
-      ),
-    )
-    server.events.removeAllListeners()
-  })
-
-  it('sends every colour of a one-material listing in its material from the first render (#6152)', async () => {
-    const sent: unknown[] = []
-    server.events.on('request:start', async ({ request }) => {
-      if (request.method === 'POST' && new URL(request.url).pathname === '/api/store/v1/renders') sent.push(await request.clone().json())
-    })
-    show(CHARM_ID)
-    await waitFor(() => expect(sent).toHaveLength(1))
-    server.events.removeAllListeners()
-    expect(sent[0]).toEqual(
-      expect.objectContaining({
-        values: { body_colour: '#1B6CA8', rim_colour: '#1B6CA8' },
-        picks: { body_colour: 'f-blue', rim_colour: 'f-blue' },
-      }),
-    )
-  })
-
-  it('hides the price of the last pick when a pick of the same colour renders (#6152)', async () => {
-    const cheap = { id: 'f-cheap', colour: '#C0392B', colour_name: 'Cheap red', material: 'PLA' }
-    const dear = { id: 'f-dear', colour: '#C0392B', colour_name: 'Dear red', material: 'PLA' }
-    const listing = {
-      ...KEYCHAIN,
-      id: 'l9',
-      params: { base_colour: { kind: 'choice', label: 'Base colour', group: '', colour: true, choices: ['#C0392B'] } },
-      colours: [cheap, dear],
-    }
-    let reads = 0
-    server.use(
-      http.get('/api/store/v1/listings/l9', () => HttpResponse.json(listing)),
-      // The shop reuses one render for one colour, whatever filament is picked.
-      http.post('/api/store/v1/renders', () => HttpResponse.json(DONE)),
-      http.get('/api/store/v1/renders/:id/estimate', () => {
-        reads += 1
-        if (reads === 1) return HttpResponse.json(ESTIMATE)
-        if (reads === 2) return HttpResponse.json({ ...ESTIMATE, price_minor: 500 })
-        return HttpResponse.json({ type: `${PROBLEMS}render_not_found`, status: 404, detail: 'There is no such render.' }, { status: 404 })
-      }),
-    )
-    const { user } = show('l9')
-    await screen.findByText('about $12.40, confirmed after we check it')
-    await user.click(screen.getByRole('button', { name: /Base colour/ }))
-    await user.click(await screen.findByRole('radio', { name: 'Cheap red PLA' }))
-    await screen.findByText('about $5.00, confirmed after we check it')
-    await user.click(screen.getByRole('button', { name: /Base colour/ }))
-    await user.click(await screen.findByRole('radio', { name: 'Dear red PLA' }))
-    await waitFor(() => expect(reads).toBe(3))
-    expect(await screen.findByRole('alert')).toBeInTheDocument()
-    expect(screen.queryByText(/about \$5\.00/)).toBeNull()
-  })
-
-  it('moves a one-material colour to the shop’s, in the shown material, when its pick is cleared (#6152)', async () => {
-    const sent: unknown[] = []
-    server.events.on('request:start', async ({ request }) => {
-      if (request.method === 'POST' && new URL(request.url).pathname === '/api/store/v1/renders') sent.push(await request.clone().json())
-    })
-    const { user } = show(CHARM_ID)
-    await user.click(within(await screen.findByRole('radiogroup', { name: 'Material' })).getByRole('radio', { name: 'PETG' }))
-    await user.click(screen.getByRole('button', { name: /Body colour/ }))
-    await user.click(await screen.findByRole('radio', { name: 'Rust PETG' }))
-    await waitFor(() => expect(sent.at(-1)).toMatchObject({ picks: { body_colour: 'f-petg-rust' } }))
-    const before = sent.length
-    await user.click(screen.getByRole('button', { name: /Body colour/ }))
-    await user.click(await screen.findByRole('button', { name: 'Use the shop’s choice' }))
-    await waitFor(() => expect(sent.length).toBeGreaterThan(before))
-    server.events.removeAllListeners()
-    // The shop's start colour, Ocean blue, is PLA only: its nearest PETG colour is Teal.
-    expect(sent.at(-1)).toEqual(
-      expect.objectContaining({
-        values: { body_colour: '#1C8C8C', rim_colour: '#1C8C8C' },
-        picks: { body_colour: 'f-petg-teal', rim_colour: 'f-petg-teal' },
-      }),
-    )
-    expect(screen.getByRole('button', { name: /Body colour/ })).toHaveAccessibleName('Body colour Teal')
-  })
-
-  it('gives one colour one filament, and says so, when a second pick of it names another (#6152 review)', async () => {
-    const cheap = { id: 'f-cheap', colour: '#C0392B', colour_name: 'Cheap red', material: 'PLA' }
-    const dear = { id: 'f-dear', colour: '#C0392B', colour_name: 'Dear red', material: 'PLA' }
-    const choice = { kind: 'choice', group: '', colour: true, choices: ['#C0392B'] }
-    const listing = {
-      ...KEYCHAIN,
-      id: 'l9',
-      params: { body_colour: { ...choice, label: 'Body colour' }, rim_colour: { ...choice, label: 'Rim colour' } },
-      colours: [cheap, dear],
-    }
-    const sent: { picks?: Record<string, string> }[] = []
-    server.use(
-      http.get('/api/store/v1/listings/l9', () => HttpResponse.json(listing)),
-      http.post('/api/store/v1/renders', async ({ request }) => {
-        sent.push((await request.json()) as { picks?: Record<string, string> })
-        return HttpResponse.json(DONE)
-      }),
-    )
-    const { user } = show('l9')
-    await user.click(await screen.findByRole('button', { name: /Body colour/ }))
-    await user.click(await screen.findByRole('radio', { name: 'Cheap red PLA' }))
     await user.click(screen.getByRole('button', { name: /Rim colour/ }))
-    await user.click(await screen.findByRole('radio', { name: 'Dear red PLA' }))
-    expect(await screen.findByText('Body colour uses Dear red PLA too. One colour prints from one filament.')).toBeInTheDocument()
-    await waitFor(() => expect(sent.at(-1)?.picks).toEqual({ body_colour: 'f-dear', rim_colour: 'f-dear' }))
-    expect(sent.some((body) => new Set(Object.values(body.picks ?? {})).size > 1)).toBe(false)
-    expect(screen.getByRole('button', { name: /Body colour/ })).toHaveAccessibleName('Body colour Dear red')
-  })
-
-  it('says why the shop refused two filaments of one colour (#6152 review)', async () => {
-    server.use(
-      http.post('/api/store/v1/renders', () =>
-        HttpResponse.json(
-          { type: `${PROBLEMS}pick_colour_clash`, status: 422, detail: 'refused', name: 'picks.rim_colour' },
-          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
-        ),
-      ),
-    )
-    show()
-    expect(await screen.findByText('Two of your colours are one colour of two filaments. A colour prints from one filament: pick the same one for both.')).toBeInTheDocument()
+    await user.click(await screen.findByRole('radio', { name: 'Teal PETG' }))
+    expect(
+      await screen.findByText("Some colours can't go together. Each print is made from one kind of plastic, and a few colours only come in one kind. Change one of them."),
+    ).toBeInTheDocument()
   })
 
   it('says the preview must show before an add, with a retry, when the preview fails (#6152 review)', async () => {
+    // A colour the visitor set (saved), so the first render is the one that fails.
+    window.localStorage.setItem('scadbuddy.storefront.customize.l1', JSON.stringify({ v: 1, values: { base_colour: '#E8532F' }, quantity: 1 }))
     server.use(
       http.post('/api/store/v1/renders', () =>
         HttpResponse.json({ type: `${PROBLEMS}render_queue_full`, status: 503, detail: 'busy' }, { status: 503, headers: { 'Retry-After': '120' } }),
       ),
     )
-    show(CHARM_ID)
+    show()
     expect(await screen.findByText('You can add it once its preview shows. Its preview could not be made: try again.')).toBeInTheDocument()
     expect(screen.queryByText('You can add it once its preview shows.')).toBeNull()
     expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Add to order' })).toBeDisabled()
   })
 
-  it('holds “Add to order” back while the preview of the picked colours is made (#6152)', async () => {
+  it('holds “Add to order” back while the preview of the colours set is made (#6152)', async () => {
+    window.localStorage.setItem('scadbuddy.storefront.customize.l1', JSON.stringify({ v: 1, values: { base_colour: '#E8532F' }, quantity: 1 }))
     server.use(
       http.post('/api/store/v1/renders', () => HttpResponse.json(RUNNING, { status: 202 })),
       http.get('/api/store/v1/renders/:id', () => HttpResponse.json(RUNNING)),
     )
-    show(CHARM_ID, { firstMs: 5, maxMs: 20, limitMs: 60_000 })
+    show('l1', { firstMs: 5, maxMs: 20, limitMs: 60_000 })
     expect(await screen.findByText('You can add it once its preview shows.')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Add to order' })).toBeDisabled()
   })
 
-  it('keeps a pick across a reload of the page (#6152)', async () => {
-    const sent: unknown[] = []
-    server.events.on('request:start', async ({ request }) => {
-      if (request.method === 'POST' && new URL(request.url).pathname === '/api/store/v1/renders') sent.push(await request.clone().json())
-    })
+  it('reads past the picks and material of choices saved before #6258', async () => {
+    const sent = renders()
     window.localStorage.setItem(
       'scadbuddy.storefront.customize.l1',
-      JSON.stringify({ v: 1, values: { base_colour: '#E8532F' }, quantity: 1, picks: { base_colour: 'f-orange', gone: 'f-blue' } }),
+      JSON.stringify({ v: 1, values: { base_colour: '#E8532F' }, quantity: 2, picks: { base_colour: 'f-orange' }, material: 'PLA' }),
     )
     show()
     await screen.findByText('about $12.40, confirmed after we check it')
     server.events.removeAllListeners()
-    expect(sent[0]).toMatchObject({ values: { base_colour: '#E8532F' }, picks: { base_colour: 'f-orange' } })
-    expect((sent[0] as { picks: object }).picks).toEqual({ base_colour: 'f-orange' })
+    expect(sent[0]).toEqual({ listing_id: 'l1', listing_updated_at: '2026-11-07T12:00:00Z', values: { base_colour: '#E8532F' }, colours: {} })
+    expect(screen.getByText('2')).toBeInTheDocument()
   })
 
-  it('adds the design to the order with its picks, never a guess of the slots', async () => {
+  it('adds the design to the order with its values, never a guess of the slots', async () => {
     const added: unknown[] = []
     server.events.on('request:start', async ({ request }) => {
       if (request.method === 'POST' && new URL(request.url).pathname === '/api/store/v1/draft/items') {
@@ -319,7 +270,6 @@ describe('CustomizePage', () => {
         listing_id: 'l1',
         listing_updated_at: '2026-11-07T12:00:00Z',
         values: {},
-        picks: {},
         colours: {},
         quantity: 1,
       },
@@ -464,37 +414,6 @@ describe('CustomizePage', () => {
     show()
     expect(await screen.findByText(text)).toBeInTheDocument()
     expect(screen.queryByText(/a lot of previews/)).toBeNull()
-  })
-
-  it('drops a pick note once the latest version of the listing is loaded (#6152)', async () => {
-    const cheap = { id: 'f-cheap', colour: '#C0392B', colour_name: 'Cheap red', material: 'PLA' }
-    const dear = { id: 'f-dear', colour: '#C0392B', colour_name: 'Dear red', material: 'PLA' }
-    const choice = { kind: 'choice', group: '', colour: true, choices: ['#C0392B'] }
-    const listing = {
-      ...KEYCHAIN,
-      id: 'l9',
-      params: { body_colour: { ...choice, label: 'Body colour' }, rim_colour: { ...choice, label: 'Rim colour' } },
-      colours: [cheap, dear],
-    }
-    let changed = false
-    server.use(
-      http.get('/api/store/v1/listings/l9', () => HttpResponse.json(changed ? { ...listing, updated_at: '2026-11-08T09:00:00Z' } : listing)),
-      http.post('/api/store/v1/renders', () =>
-        changed
-          ? HttpResponse.json({ type: `${PROBLEMS}listing_changed`, status: 409, detail: 'This listing has changed. Load it again.' }, { status: 409 })
-          : HttpResponse.json(DONE),
-      ),
-    )
-    const { user } = show('l9')
-    await user.click(await screen.findByRole('button', { name: /Body colour/ }))
-    await user.click(await screen.findByRole('radio', { name: 'Cheap red PLA' }))
-    changed = true
-    await user.click(screen.getByRole('button', { name: /Rim colour/ }))
-    await user.click(await screen.findByRole('radio', { name: 'Dear red PLA' }))
-    const note = 'Body colour uses Dear red PLA too. One colour prints from one filament.'
-    expect(await screen.findByText(note)).toBeInTheDocument()
-    await user.click(await screen.findByRole('button', { name: 'Load the latest version' }))
-    await waitFor(() => expect(screen.queryByText(note)).toBeNull())
   })
 
   it('loads the latest version of a changed listing and keeps the values it still offers', async () => {
