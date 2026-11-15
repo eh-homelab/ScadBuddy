@@ -46,7 +46,7 @@ export const TASK_AREAS = ['background-tasks', 'operations'] as const
  * api/crud_agent_transcripts.py, api/crud_agent_events.py; sessions/crudTranscripts.ts,
  * sessions/crudEvents.ts).
  */
-export const SESSION_AREAS = ['sessions', 'session-resources', 'transcripts', 'session-events'] as const
+export const SESSION_AREAS = ['sessions', 'session-resources', 'transcripts', 'session-events', 'session-order-costs'] as const
 
 export type CrudAreasOptions = {
   fetch?: typeof fetch

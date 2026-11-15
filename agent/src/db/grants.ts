@@ -44,7 +44,8 @@ type Grants = Readonly<Record<string, readonly string[]>>
  * transcript rows and its key, and what its tool calls touched (#5299 step 9,
  * `api/crud_agent_sessions.py`). And a session's transcript, sealed and opened by the API
  * (#5299 step 9, part b, `api/crud_agent_transcripts.py`), and its event log
- * (`api/crud_agent_events.py`). */
+ * (`api/crud_agent_events.py`), and the order items it revised and its spend's report
+ * (part c, `api/crud_agent_order_costs.py`). */
 export const API_AI_GRANTS: Grants = {
   ai_payload_keys: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   ai_forgotten_subjects: ['SELECT', 'INSERT'],
@@ -85,6 +86,7 @@ export const API_AI_GRANTS: Grants = {
   ai_workflow_calls: ['SELECT', 'INSERT'],
   ai_workflow_children: ['SELECT', 'INSERT'],
   ai_session_resources: ['SELECT', 'INSERT'],
+  ai_session_order_costs: ['SELECT', 'INSERT', 'UPDATE'],
 }
 
 /** The sequences behind the API's inserts: `ai_background_events.seq` and `ai_session_entries.id`

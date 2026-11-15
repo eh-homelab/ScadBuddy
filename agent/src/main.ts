@@ -102,7 +102,7 @@ import { CrudTranscriptRows } from './sessions/crudTranscripts.js'
 import { CrudEventRows } from './sessions/crudEvents.js'
 import { type EventRows, PgEventRows } from './sessions/eventLog.js'
 import { PgTranscriptRows, type TranscriptRows } from './sessions/store.js'
-import { crudCostPoster, OrderCosts, touchedSinks } from './sessions/orderCosts.js'
+import { CrudOrderCostRows, crudCostPoster, OrderCosts, type OrderCostRows, PgOrderCostRows, touchedSinks } from './sessions/orderCosts.js'
 import { ALL_TOOLS } from './tools/index.js'
 import { CrudFlowBlobs, gatedFlowBlobs, PgFlowBlobs } from './temporal/flowBlobs.js'
 import { PgFlowRuns } from './temporal/flowRuns.js'
@@ -443,9 +443,11 @@ toolServices.browser = tabs
 // service credential (#5330, sessions/orderCosts.ts).
 const orderCosts = database
   ? new OrderCosts({
-      sql: database.sql,
-      // The session's report lock is held across its posts on the lock client's own connections.
-      locks: database.locks,
+      // The session's report lock is held across its posts on the lock client's own connections
+      // over SQL, or as a lease row once the API lists area `session-order-costs` (#5299 step 9).
+      rows: gated<OrderCostRows>(new PgOrderCostRows(database.sql, database.locks), new CrudOrderCostRows(crudTarget), () =>
+        crudAreas.has('session-order-costs'),
+      ),
       post: crudCostPoster(config.backendUrl, serviceCredential ? withServiceCredential(globalThis.fetch, serviceCredential, config.backendUrl) : globalThis.fetch),
       onError: (err) => console.error('order costs: could not record or report:', (err as Error).message),
     })

@@ -60,7 +60,10 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: transcript, sealed and opened on the API, a fork's read through its chain (#5299 step 9,
 #: `api/crud_agent_transcripts.py`). Its ``session-events`` area is
 #: ``…/agent/sessions/{id}/events`` and ``…/fork-log`` with every route under them: a session's
-#: event log, a fork's read through its chain (#5299 step 9, `api/crud_agent_events.py`). The
+#: event log, a fork's read through its chain (#5299 step 9, `api/crud_agent_events.py`). Its
+#: ``session-order-costs`` area is ``…/agent/sessions/{id}/order-costs`` and
+#: ``…/agent/order-costs/sweep`` with every route under them: the order items a session revised
+#: and its spend's report under its lease (#5299 step 9, `api/crud_agent_order_costs.py`). The
 #: print ``uploads``
 #: area also covers ``…/print/slices`` and ``…/print/slice-starts`` (#5298 Task 25). Its
 #: ``previews`` area also covers ``…/print/project-targets``, ``…/print/folderless`` and
@@ -161,6 +164,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "session-resources",
         "transcripts",
         "session-events",
+        "session-order-costs",
     ],
     "intake": ["sources"],
 }

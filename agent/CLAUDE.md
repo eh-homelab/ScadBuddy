@@ -109,7 +109,7 @@ in one snapshot, an inherited event addressed to the session here), a flow's tur
 (`turnEvents`) and a new fork's log (`forkLog`, under the parent's payload-key lock, shared).
 `EventLog` keeps its followers, wakes and 1 s polls (D4) over either. An append in a caller's own
 transaction (`append(…, tx)`: the gate, approvals, edits, a turn's end, the durable sweep, the
-workspace) stays `appendEventsIn` on SQL until that caller moves. These fourteen have a
+workspace) stays `appendEventsIn` on SQL until that caller moves. These fifteen have a
 rolling-deploy fallback:
 `src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` from the start with back-off
 (1 s doubling to 30 s) until every one is listed, and until then each stays on SQL, for an API
@@ -154,7 +154,11 @@ turn) reports the session's `cost_usd` since its last report, split equally betw
 orders still to report, to `POST …/crud/agent/orders/{id}/assistant-cost` (5 s each, 15 s
 for the turn's reports in all, one report per session at a time across replicas, by an
 advisory lock on a `database.locks` connection, never the stores' pool, and none while every
-lock connection is out; `sweep` at start and hourly reports what a session's last turn left,
+lock connection is out; once the API lists area `session-order-costs` (#5299 step 9, part c,
+`OrderCostRows`: `PgOrderCostRows`, `CrudOrderCostRows`, backend `api/crud_agent_order_costs.py`)
+the rows go through its routes and the lock is a lease row, `order-cost:<session id>`, renewed
+while the report runs, each of the report's writes refused `lease-lost` once its token no
+longer holds it; `sweep` at start and hourly reports what a session's last turn left,
 20 sessions at most, the ones tried longest ago, `tried_at`, first; a share under one minor
 unit is closed out with nothing carried once its session is over: `done`, `failed`, or `idle`
 with no session activity, `updated_at`, for an hour, `IDLE_OVER_AFTER`; if it works again,

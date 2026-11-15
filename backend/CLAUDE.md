@@ -351,7 +351,12 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `ai_sessions.event_seq` in the insert's statement, a turn's append fenced `FOR UPDATE` on its
   placement, a fork's read through its chain (`LEAST(bound, cut)`) in one statement, and a new
   fork's log under its parent's payload-key lock, shared (tests
-  `tests/crud/test_crud_agent_events.py`).
+  `tests/crud/test_crud_agent_events.py`). `order_costs.py` is the order items a session revised
+  and its spend's report, for `api/crud_agent_order_costs.py` (area `session-order-costs`, #5299
+  step 9, part c): the agent's `PgOrderCostRows`, a report's writes each checking in its
+  transaction that the caller's token holds the session's lease (`leases.py`
+  `order-cost:<session id>`, whose acquire also tries the SQL pod's advisory lock) (tests
+  `tests/crud/test_crud_agent_order_costs.py`).
 - The agent's small stores (#5299 step 5): `api/crud_agent_stores.py` (areas
   `activity-kinds`, `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`) and
   `api/crud_agent_notify.py` (area `notify`, sealed with the KEK under the agent's AAD), each
