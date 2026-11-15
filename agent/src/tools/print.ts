@@ -1358,32 +1358,42 @@ export const printTools: Tool[] = [
       'associations and those of other files naming it as their target; a model\'s has the files naming it. Each ' +
       "`relation` is said from `library_file_id`'s side (that file is an `output_of` the `target`). An implied one " +
       "(`id` null, `implied_by` set) is read live and cannot be removed: a model made from the file (its mesh source) " +
-      "lists the file as `source_of` it, and a copy of a model's output as `output_of` it. Empty on Bambuddy's library.",
+      "lists the file as `source_of` it, and a copy of a model's output as `output_of` it. Empty on Bambuddy's library." +
+      PAGED,
     input: z
       .object({
         file_id: libraryFileId.optional().describe("A native library file's `id` (list_library)"),
         slug: slug.optional(),
+        ...pageInput,
       })
       .refine((o) => (o.file_id === undefined) !== (o.slug === undefined), { message: 'name one: file_id or slug' }),
     risk: 'read',
     source: 'library file names, model names and notes that anyone with access to ScadBuddy can write',
     routes: ['GET /api/v1/print/library/{file_id}/associations', 'GET /api/v1/models/{slug}/associations'],
-    handler: async ({ file_id, slug: model }, { backend }) => {
+    handler: async (args, { backend }) => {
+      const { file_id, slug: model } = args
+      let found
       if (file_id !== undefined) {
-        return json(
-          await ok(
-            backend.GET('/api/v1/print/library/{file_id}/associations', { params: { path: { file_id } } }),
-            `list library file ${file_id}'s associations`,
-          ),
+        found = await ok(
+          backend.GET('/api/v1/print/library/{file_id}/associations', { params: { path: { file_id } } }),
+          `list library file ${file_id}'s associations`,
         )
-      }
-      if (model === undefined) throw new ToolError('name one: file_id or slug')
-      return json(
-        await ok(
+      } else if (model !== undefined) {
+        found = await ok(
           backend.GET('/api/v1/models/{slug}/associations', { params: { path: { slug: model } } }),
           `list model ${model}'s associations`,
-        ),
+        )
+      } else {
+        throw new ToolError('name one: file_id or slug')
+      }
+      // An implied one has no id: what it is read from, its file and its target name it.
+      const { items, ...rest } = page(
+        found.associations,
+        args,
+        (a) => a.id ?? `${a.implied_by}:${a.library_file_id}:${a.target}:${a.relation}`,
+        'list_associations',
       )
+      return json({ associations: items, ...rest })
     },
   }),
 

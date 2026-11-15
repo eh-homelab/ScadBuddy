@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router'
-import { LinkIcon, PlusIcon, XIcon } from 'lucide-react'
+import { PlusIcon, XIcon } from 'lucide-react'
 import { api, ApiError } from '../../api/client'
 import type { Association, AssociationRelation } from '../../api/types'
 import {
@@ -28,8 +28,10 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 
 /** How many search matches the picker lists. */
 const PICKS_SHOWN = 8
@@ -253,24 +255,22 @@ function AssociateDialog({
           }}
         >
           {subject.kind === 'library' && (
-            <div role="radiogroup" aria-label="Associate with" className="flex gap-1">
-              {(['model', 'library'] as const).map((option) => (
-                <Button
-                  key={option}
-                  type="button"
-                  size="sm"
-                  role="radio"
-                  aria-checked={kind === option}
-                  variant={kind === option ? 'default' : 'outline'}
-                  onClick={() => {
-                    setKind(option)
-                    setPicked(null)
-                  }}
-                >
-                  {option === 'model' ? 'A model' : 'A library file'}
-                </Button>
-              ))}
-            </div>
+            <ToggleGroup
+              type="single"
+              variant="outline"
+              size="sm"
+              aria-label="Associate with"
+              value={kind}
+              onValueChange={(value) => {
+                if (value !== 'model' && value !== 'library') return
+                setKind(value)
+                setPicked(null)
+              }}
+              className="justify-start"
+            >
+              <ToggleGroupItem value="model">A model</ToggleGroupItem>
+              <ToggleGroupItem value="library">A library file</ToggleGroupItem>
+            </ToggleGroup>
           )}
           <div className="grid gap-1.5">
             <Label htmlFor="associate-search">{kind === 'model' ? 'Model' : 'Library file'}</Label>
@@ -283,51 +283,46 @@ function AssociateDialog({
             />
             {(models.loading || files.loading) && <Skeleton className="h-8 w-full" />}
             {picks.length > 0 && (
-              <ul role="listbox" aria-label="Matches" className="max-h-48 overflow-y-auto rounded-md border text-sm">
+              <RadioGroup
+                aria-label="Matches"
+                value={picked ? `${picked.kind}:${picked.id}` : ''}
+                onValueChange={(value) => setPicked(picks.find((pick) => `${pick.kind}:${pick.id}` === value) ?? null)}
+                className="max-h-48 gap-0 overflow-y-auto rounded-md border text-sm"
+              >
                 {picks.map((pick) => {
-                  const chosen = picked?.kind === pick.kind && picked.id === pick.id
+                  const value = `${pick.kind}:${pick.id}`
                   return (
-                    <li
-                      key={`${pick.kind}:${pick.id}`}
-                      role="option"
-                      aria-selected={chosen}
-                      tabIndex={0}
-                      onClick={() => setPicked(pick)}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter' || event.key === ' ') {
-                          event.preventDefault()
-                          setPicked(pick)
-                        }
-                      }}
-                      className={`flex cursor-pointer items-center gap-2 px-2 py-1.5 outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                        chosen ? 'bg-primary/15 text-primary' : 'hover:bg-muted'
-                      }`}
+                    <Label
+                      key={value}
+                      htmlFor={`associate-pick-${value}`}
+                      className="flex cursor-pointer items-center gap-2 px-2 py-1.5 font-normal hover:bg-muted has-data-[state=checked]:bg-primary/10"
                     >
-                      <LinkIcon className="size-3.5 shrink-0 opacity-60" />
+                      <RadioGroupItem id={`associate-pick-${value}`} value={value} />
                       <span className="min-w-0 truncate">{pick.name}</span>
-                    </li>
+                    </Label>
                   )
                 })}
-              </ul>
+              </RadioGroup>
             )}
             {kind === 'library' && words !== '' && !files.loading && picks.length === 0 && (
               <p className="text-xs text-muted-foreground">No library file matches. Upload it to the library first.</p>
             )}
           </div>
           <div className="grid gap-1.5">
-            <Label htmlFor="associate-relation">How they relate</Label>
-            <select
-              id="associate-relation"
+            <Label id="associate-relation">How they relate</Label>
+            <RadioGroup
+              aria-labelledby="associate-relation"
               value={relation}
-              onChange={(event) => setRelation(event.target.value as AssociationRelation)}
-              className="h-8 rounded-md border bg-transparent px-2 text-sm"
+              onValueChange={(value) => setRelation(value as AssociationRelation)}
+              className="grid-cols-2 gap-1.5"
             >
               {RELATIONS.map((option) => (
-                <option key={option} value={option}>
+                <Label key={option} htmlFor={`associate-relation-${option}`} className="flex items-center gap-2 font-normal">
+                  <RadioGroupItem id={`associate-relation-${option}`} value={option} />
                   {RELATION_WORDS[option].fromFile}
-                </option>
+                </Label>
               ))}
-            </select>
+            </RadioGroup>
             <p className="text-xs text-muted-foreground" data-testid="associate-sentence">
               {fileSide} is {RELATION_WORDS[relation].fromFile.toLowerCase()} {targetSide}.
             </p>

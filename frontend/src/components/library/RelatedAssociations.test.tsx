@@ -86,8 +86,8 @@ describe('RelatedAssociations', () => {
     await user.click(screen.getByRole('button', { name: /Associate/ }))
     const dialog = await screen.findByRole('dialog')
     await user.type(within(dialog).getByLabelText('Model'), 'keychain')
-    await user.click(await within(dialog).findByRole('option', { name: 'Name Keychain' }))
-    await user.selectOptions(within(dialog).getByLabelText('How they relate'), 'output_of')
+    await user.click(await within(dialog).findByRole('radio', { name: 'Name Keychain' }))
+    await user.click(within(dialog).getByRole('radio', { name: 'Output of' }))
     expect(within(dialog).getByTestId('associate-sentence')).toHaveTextContent('This file is output of Name Keychain.')
     await user.type(within(dialog).getByLabelText('Note (optional)'), 'fixed and scaled')
     await user.click(within(dialog).getByRole('button', { name: 'Associate' }))
@@ -102,9 +102,9 @@ describe('RelatedAssociations', () => {
     await screen.findByText(/Nothing is associated yet/)
     await user.click(screen.getByRole('button', { name: /Associate/ }))
     const dialog = await screen.findByRole('dialog')
-    expect(within(dialog).queryByRole('radiogroup')).not.toBeInTheDocument()
+    expect(within(dialog).queryByRole('group', { name: 'Associate with' })).not.toBeInTheDocument()
     await user.type(within(dialog).getByLabelText('Library file'), 'drawer')
-    await user.click(await within(dialog).findByRole('option', { name: 'drawer-label.3mf' }))
+    await user.click(await within(dialog).findByRole('radio', { name: 'drawer-label.3mf' }))
     expect(within(dialog).getByTestId('associate-sentence')).toHaveTextContent(
       'drawer-label.3mf is related to this model.',
     )
