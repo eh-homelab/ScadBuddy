@@ -568,8 +568,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   assistant imports only through these routes (agent `get_makerworld_status`,
   `resolve_makerworld_url`, `import_makerworld_model`): the agent worker has no route to
   Bambuddy and never holds its key. The `makerworld-import` flow is not in this repo:
-  its versions are prod's `data/flows/makerworld-import/flow.py` (written only through
-  `POST /workflows`). Since version 2 its `import_one` calls `resolve_makerworld_url`,
+  its versions are prod's `data/flows/makerworld-import/flow.py`, written only through
+  the API's `/workflows` routes (`POST /workflows` registers a version; restore and
+  delete commit too), never from this repo. Since version 2 its `import_one` calls `resolve_makerworld_url`,
   `create_print_project` and `import_makerworld_model` (#6340). A command tool
   (`agent/src/tools/command.ts`: `create_print_project`, `import_makerworld_model`)
   answers `{status: "running", operation_id, next}` once its follow window ends, which a
