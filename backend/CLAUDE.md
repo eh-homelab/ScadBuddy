@@ -299,7 +299,14 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   keys at the API's start (`main._rotate_agent_secrets`). Its tests make the agent's tables
   with the agent's own migration files (`render/agent_migrations.py` `migrate_agent`) and open
   the credential vectors `tests/fixtures/secret-vectors.json`, a copy that
-  `lint-codec-copies.sh` keeps equal to the agent's.
+  `lint-codec-copies.sh` keeps equal to the agent's. `background.py` and `operations.py` are
+  the agent's background tasks (with a Monitor's events, a Workflow's journal and child chats)
+  and its command record `ai_operations`, for `api/crud_agent_tasks.py` (areas
+  `background-tasks`, `operations`, #5299 step 8): the agent's `BackgroundTaskStore` and
+  `OperationStore` statement for statement, a task's create under the session's
+  `bgtask:<session>` advisory lock; an operation's insert or end writes its `activity` row in
+  the same transaction (`ActivityIndex.ingest_agent_operation_in`), and the bus's
+  `ai_operation.changed` stays only for an agent pod still on SQL.
 - `backend/scadbuddy/flow_triggers/` — runs started on a schedule or an event (#2484,
   spec 2026-10-11 §12): `store.py` (`flow_triggers`, their standing grants and fires),
   `fire.py` (the `flow_trigger_fire` activity on the `library` queue), `events.py` (the

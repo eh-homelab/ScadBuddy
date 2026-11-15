@@ -1,11 +1,18 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
+import { crudRead, wellFormed } from '../api/crudRead.js'
 import { PG_CHANNEL } from '../events/bus.js'
 import type { OperationActor } from '../temporal/names.js'
 
 // `ai_operations` (spec 2026-10-01 §4.2 "Our record", #1055): one row per execution of
 // an AgentOperation workflow, written only by its activities, as the backend's
 // `operations` (backend/scadbuddy/operations/store.py) is by its `Operation`'s.
+//
+// Since #5299 step 8 the API owns the table: once `GET …/crud/agent/areas` lists `operations`
+// (api/crudAreas.ts), every method goes through `CrudOperations`, the backend's
+// api/crud_agent_tasks.py routes, which write the operation's activity row in the same
+// transaction; until then, its own SQL, which announces each change on the bus for the
+// backend's activity index to read (`announce`).
 
 export type OperationStatus = 'running' | 'succeeded' | 'failed'
 
@@ -100,15 +107,26 @@ async function announce(tx: TransactionSql, operationId: string): Promise<void> 
   await tx`SELECT pg_notify(${PG_CHANNEL}, ${JSON.stringify(event)})`
 }
 
+/** The CRUD routes while the API serves them (`use`), else the store's own SQL. */
+export type RemoteOperations = { crud: CrudOperations; use: () => boolean }
+
 export class OperationStore {
   private readonly sql: Sql
+  private readonly remote: RemoteOperations | undefined
 
-  constructor(sql: Sql) {
+  constructor(sql: Sql, remote?: RemoteOperations) {
     this.sql = sql
+    this.remote = remote
+  }
+
+  private crud(): CrudOperations | undefined {
+    return this.remote?.use() ? this.remote.crud : undefined
   }
 
   /** The key's newest operation, whatever its status: one key is one effect. */
   async find(operationKey: string): Promise<Operation | undefined> {
+    const crud = this.crud()
+    if (crud) return (await crud.find(operationKey))?.operation
     const [row] = await this.sql.unsafe<Row[]>(
       `SELECT ${COLUMNS} FROM ai_operations WHERE operation_key = $1 ORDER BY created_at DESC LIMIT 1`,
       [operationKey],
@@ -117,12 +135,16 @@ export class OperationStore {
   }
 
   async get(id: string): Promise<Operation | undefined> {
+    const crud = this.crud()
+    if (crud) return (await crud.get(id))?.operation
     const [row] = await this.sql.unsafe<Row[]>(`SELECT ${COLUMNS} FROM ai_operations WHERE id = $1`, [id])
     return row ? view(row) : undefined
   }
 
   /** The execution that runs (or ran) an operation. */
   async execution(id: string): Promise<{ workflowId: string; workflowRunId: string } | undefined> {
+    const crud = this.crud()
+    if (crud) return (await crud.get(id))?.execution
     const [row] = await this.sql<{ workflow_id: string; workflow_run_id: string }[]>`
       SELECT workflow_id, workflow_run_id FROM ai_operations WHERE id = ${id}`
     return row ? { workflowId: row.workflow_id, workflowRunId: row.workflow_run_id } : undefined
@@ -133,6 +155,8 @@ export class OperationStore {
    * retried activity). Prunes operations finished more than the retention ago.
    */
   async insert(op: InsertOperation, retentionSeconds = OPERATION_RETENTION_SECONDS): Promise<Operation> {
+    const crud = this.crud()
+    if (crud) return crud.insert(op, retentionSeconds)
     return this.sql.begin(async (tx) => {
       await tx`DELETE FROM ai_operations WHERE finished_at < now() - make_interval(secs => ${retentionSeconds})`
       const [inserted] = await tx<Row[]>`
@@ -157,6 +181,8 @@ export class OperationStore {
 
   /** End a running operation; a retried end finds it ended and changes nothing. */
   async finish(id: string, outcome: { result: unknown } | { error: OperationError }): Promise<Operation> {
+    const crud = this.crud()
+    if (crud) return crud.finish(id, outcome)
     const failed = 'error' in outcome
     const result = failed ? null : this.sql.json((outcome.result ?? null) as never)
     const error = failed ? this.sql.json(outcome.error as never) : null
@@ -171,5 +197,78 @@ export class OperationStore {
     const op = await this.get(id)
     if (!op) throw new Error(`no operation ${id}`)
     return op
+  }
+}
+
+/** A row of `ai_operations` as the routes answer it (backend api/crud_agent_tasks.py `Operation`). */
+type WireOperation = Omit<Operation, 'repeated'> & { workflow_id: string; workflow_run_id: string }
+
+type Execution = { workflowId: string; workflowRunId: string }
+
+/** The operation, with its times as `view` gives them, and the execution that runs it. */
+function fromWire(w: WireOperation): { operation: Operation; execution: Execution } {
+  return {
+    operation: {
+      id: w.id,
+      kind: w.kind,
+      subject: w.subject,
+      status: w.status,
+      result: w.result,
+      error: w.error,
+      created_at: new Date(w.created_at).toISOString(),
+      finished_at: w.finished_at === null ? null : new Date(w.finished_at).toISOString(),
+    },
+    execution: { workflowId: w.workflow_id, workflowRunId: w.workflow_run_id },
+  }
+}
+
+/** `OperationStore`'s methods over the backend's CRUD routes (`…/crud/agent/operations`), one transaction each. */
+export class CrudOperations {
+  readonly #base: string
+  readonly #fetch: typeof fetch
+
+  constructor(baseUrl: string, options: { fetch?: typeof fetch } = {}) {
+    this.#base = baseUrl
+    this.#fetch = options.fetch ?? globalThis.fetch
+  }
+
+  async #one(step: string, path: string, body?: unknown): Promise<WireOperation | null> {
+    const init = body === undefined ? {} : { method: 'POST' as const, body: wellFormed(body) }
+    return (await crudRead<{ operation: WireOperation | null }>(this.#fetch, this.#base, step, `/operations${path}`, init)).operation
+  }
+
+  async find(operationKey: string): Promise<{ operation: Operation; execution: Execution } | undefined> {
+    const w = await this.#one("an operation's key", `/by-key/${encodeURIComponent(operationKey)}`)
+    return w ? fromWire(w) : undefined
+  }
+
+  async get(id: string): Promise<{ operation: Operation; execution: Execution } | undefined> {
+    const w = await this.#one('an operation', `/${encodeURIComponent(id)}`)
+    return w ? fromWire(w) : undefined
+  }
+
+  async insert(op: InsertOperation, retentionSeconds = OPERATION_RETENTION_SECONDS): Promise<Operation> {
+    const actor = op.actor ? { principal: op.actor.principal, session: op.actor.session ?? null, via_tool: op.actor.viaTool ?? null } : null
+    const body = {
+      id: op.id,
+      kind: op.kind,
+      subject: op.subject,
+      operation_key: op.operationKey,
+      request: op.request ?? null,
+      workflow_id: op.workflowId,
+      workflow_run_id: op.workflowRunId,
+      actor,
+      retention_seconds: retentionSeconds,
+    }
+    const w = await this.#one('an operation recorded', '', body)
+    if (!w) throw new Error(`no operation ${op.id}`)
+    return fromWire(w).operation
+  }
+
+  async finish(id: string, outcome: { result: unknown } | { error: OperationError }): Promise<Operation> {
+    const body = 'error' in outcome ? { error: outcome.error } : { result: outcome.result ?? null }
+    const w = await this.#one('an operation ended', `/${encodeURIComponent(id)}/finish`, body)
+    if (!w) throw new Error(`no operation ${id}`)
+    return fromWire(w).operation
   }
 }

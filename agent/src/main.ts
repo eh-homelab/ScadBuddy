@@ -29,7 +29,7 @@ import { managerAgents } from './background/workflowAgents.js'
 import { backgroundActivities, managerSender } from './background/activities.js'
 import { agentTimezone } from './background/schedule.js'
 import { BackgroundTasks } from './background/service.js'
-import { BackgroundTaskStore } from './background/store.js'
+import { BackgroundTaskStore, CrudBackgroundTasks } from './background/store.js'
 import { runCronPasses, temporalTaskRunner } from './background/temporal.js'
 import { connectDatabase } from './db.js'
 import { MigrationChecksumError } from './db/schema.js'
@@ -61,7 +61,7 @@ import {
   withServiceCredential,
 } from './api/serviceCredential.js'
 import { untilBackendAnswers } from './api/backendUp.js'
-import { CrudAreas, SECRET_AREAS } from './api/crudAreas.js'
+import { CrudAreas, SECRET_AREAS, TASK_AREAS } from './api/crudAreas.js'
 import { CrudFlowRunReads } from './flows/backendReads.js'
 import { BrowserSessions } from './auth/browserSession.js'
 import { sealBackfill } from './sessions/sealBackfill.js'
@@ -130,7 +130,7 @@ import { type NativeConnection, Runtime } from '@temporalio/worker'
 import { Client, Connection } from '@temporalio/client'
 import { fileURLToPath } from 'node:url'
 import { AgentCommands } from './operations/run.js'
-import { OperationStore } from './operations/store.js'
+import { CrudOperations, OperationStore } from './operations/store.js'
 import { activityKindsOf, upsertActivityKinds } from './activity/kinds.js'
 import { packageKinds } from './plugins/packages/operations.js'
 import { operationActivities } from './temporal/operationActivities.js'
@@ -273,9 +273,10 @@ const serviceCredential: CredentialSource | undefined =
 // through the backend's CRUD routes once the API lists their areas, read from the start and
 // again with back-off until it does (api/crudAreas.ts); over SQL until then, as an API pod older
 // than the routes needs during a rolling deploy. The API seals and opens them with the KEK, so
-// with those areas listed this process needs no KEK for them.
+// with those areas listed this process needs no KEK for them. A session's background tasks and
+// the agent's command record (#5299 step 8, `TASK_AREAS`) follow the same rule.
 const crudFetch = serviceCredential ? withServiceCredential(globalThis.fetch, serviceCredential, config.backendUrl) : globalThis.fetch
-const crudAreas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: SECRET_AREAS })
+const crudAreas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: [...SECRET_AREAS, ...TASK_AREAS] })
 crudAreas.start()
 const credentials = database
   ? gatedCredentials(new CredentialStore(database.sql), new CrudCredentials(config.backendUrl, { fetch: crudFetch }), () => crudAreas.has('credentials'), kek)
@@ -565,7 +566,13 @@ const backgroundClient =
     : undefined
 const backgroundTasks =
   backgroundClient && database
-    ? new BackgroundTasks({ store: new BackgroundTaskStore(database.sql), runner: temporalTaskRunner(backgroundClient, TASK_QUEUE) })
+    ? new BackgroundTasks({
+        store: new BackgroundTaskStore(database.sql, {
+          crud: new CrudBackgroundTasks(config.backendUrl, { fetch: crudFetch }),
+          use: () => crudAreas.has('background-tasks'),
+        }),
+        runner: temporalTaskRunner(backgroundClient, TASK_QUEUE),
+      })
     : undefined
 // Decision Q11 (plan 2026-10-13 Step 9.8): the recurring cron jobs made before Schedules become
 // Schedules now, not at their next occurrence; then, hourly, the jobs whose last occurrence was
@@ -722,7 +729,9 @@ const stopRetention = !role.http ? undefined : audit?.startRetention(AUDIT_RETEN
 const temporal = config.temporalAddress && database ? { address: config.temporalAddress, sql: database.sql } : undefined
 if (config.temporalAddress && !database) console.error('agent-tools worker: not started, it needs SCADBUDDY_DATABASE_URL')
 if (temporal) Runtime.install({ shutdownSignals: [] })
-const operationStore = temporal ? new OperationStore(temporal.sql) : undefined
+const operationStore = temporal
+  ? new OperationStore(temporal.sql, { crud: new CrudOperations(config.backendUrl, { fetch: crudFetch }), use: () => crudAreas.has('operations') })
+  : undefined
 const commandKinds = pluginPackages ? packageKinds({ packages: pluginPackages, installer: packageInstaller }) : []
 // The agent's activity kinds are its command kinds (spec 2026-10-09 §4), read by the backend.
 if (role.http && database && commandKinds.length > 0) {

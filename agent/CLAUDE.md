@@ -57,7 +57,13 @@ credentials come from `…/credentials/reveal`, audited per call) and area `payl
 (`src/temporal/payloadCodec.ts` `CrudPayloadKeys`, `gatedPayloadKeys`: a subject's data key,
 made under the subject's lock and never for a forgotten subject, audited as kind `payload_key`
 (a release once per subject in 10 minutes), cached 30 s here).
-None needs a KEK in this process once listed. These three have a rolling-deploy fallback:
+None needs a KEK in this process once listed. A session's background tasks, a Monitor's events
+and a Workflow's journal and child chats (area `background-tasks`, `src/background/store.ts`
+`BackgroundTaskStore`'s `remote`, `CrudBackgroundTasks`) and the command record `ai_operations`
+(area `operations`, `src/operations/store.ts` `CrudOperations`; the API writes the operation's
+activity row in its transaction) are #5299 step 8 (`TASK_AREAS`, backend
+`api/crud_agent_tasks.py`); their bodies go through `crudRead.ts` `wellFormed`, since the API
+refuses a lone surrogate. These five have a rolling-deploy fallback:
 `src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` from the start with back-off
 (1 s doubling to 30 s) until every one is listed, and until then each stays on SQL, for an API
 pod older than the routes. A route's
@@ -291,7 +297,8 @@ opens every one and seals it again byte for byte).
     state lives on the pod, `http_request` and the browser, is `pinned`: its calls run on
     `agent-tools.<hostname>`, which each agent also polls); and `AgentOperation` (`workflows.ts`, bundled by
     `pnpm build` into `dist/temporal/workflow-bundle.js`), the §4.2 command shape for
-    the agent's commands, recorded in `ai_operations` (`src/operations/`). A change to
+    the agent's commands, recorded in `ai_operations` (`src/operations/`; through the API's CRUD
+    routes once it lists area `operations`, #5299 step 8). A change to
     `AgentOperation` goes behind `patched()`; `test/fixtures/agent_operation_histories/`
     replays. Temporal tests (`test/*temporal*.test.ts`)
     skip unless `SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` names a Temporal CLI (or
