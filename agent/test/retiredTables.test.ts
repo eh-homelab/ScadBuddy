@@ -16,7 +16,7 @@ const SQL_NAMING = new RegExp(String.raw`\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+(?:
 /**
  * Where `text`'s SQL names a retired table, as `line: text` of the keyword's line. Comment lines
  * are blanked first, keeping the line numbers: a line that starts with `//`, and every line of a
- * block comment that starts a line (`/*` or `/**` up to its `*\/`). A line that only starts with
+ * block comment that starts a line (`/*` or `/**` up to its `*\/`, keeping the code after it). A line that only starts with
  * `*` is code, such as a select list's `* FROM`.
  */
 function naming(text: string): string[] {
@@ -26,8 +26,10 @@ function naming(text: string): string[] {
     .map((line) => {
       const t = line.trim()
       if (inBlock) {
-        inBlock = !t.includes('*/')
-        return ''
+        const end = t.indexOf('*/')
+        inBlock = end < 0
+        // The closing line keeps the code after the `*\/`.
+        return end < 0 ? '' : t.slice(end + 2)
       }
       if (t.startsWith('//')) return ''
       if (t.startsWith('/*')) {
@@ -69,6 +71,7 @@ describe('the backend tables whose grants the API took back', () => {
     expect(naming('/**\n * Reads\n * FROM events, in a doc comment.\n */\nconst x = 1')).toEqual([])
     expect(naming('/* FROM events */ const y = 1')).toEqual([])
     expect(naming('/* a note */ const y = await sql`SELECT 1 FROM workflow_runs`')).toHaveLength(1)
+    expect(naming('/* note\n*/ const r = await sql`SELECT * FROM events`')).toEqual(['2: */ const r = await sql`SELECT * FROM events`'])
     // Prose and comments name them too, and are not SQL.
     expect(naming('// reads FROM events through the routes\n/**\n * JOIN workflow_runs in a doc comment\n */')).toEqual([])
     expect(naming('the events log, read from the workflow_runs projection')).toEqual([])
