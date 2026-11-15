@@ -45,6 +45,7 @@ from scadbuddy.orders.printing import listen_for_prints
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.orders.storefront.listings import ListingStore
 from scadbuddy.orders.storefront.mail import MAIL_SETTINGS, MailConfig, StorefrontMail
+from scadbuddy.orders.storefront.slice_price import SlicePrices
 from scadbuddy.payments.registry import providers
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.rows.component import ROWS
@@ -108,6 +109,11 @@ class OrdersComponent:
             self._pool.open(wait=False)
             self._listings = ListingStore(self._pool)
         return self._listings
+
+    @property
+    def slice_prices(self) -> SlicePrices:
+        """The storefront variants' slice prices (#6153), on the rows' pool."""
+        return SlicePrices(self._opened())
 
     @property
     def integrations(self) -> OrderIntegrations:

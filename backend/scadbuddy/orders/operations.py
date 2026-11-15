@@ -93,6 +93,13 @@ from scadbuddy.orders.quote import (
 )
 from scadbuddy.orders.rendering import AttachTo, output_for_reference
 from scadbuddy.orders.spools import item_plan
+from scadbuddy.orders.storefront.slice_price import (
+    RUN_ATTEMPTS,
+    SLICE_PRICE_KIND,
+    SliceRun,
+    SliceVariant,
+    price_variant,
+)
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.hot_path import native_backends
@@ -1043,7 +1050,71 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         dumped: dict[str, Any] = attachment.model_dump(mode="json")
         return dumped
 
+    async def storefront_slice_check(request: dict[str, Any]) -> dict[str, Any]:
+        SliceVariant.model_validate(request)
+        return {}
+
+    async def storefront_slice_run(
+        request: dict[str, Any], checked: dict[str, Any]
+    ) -> dict[str, Any]:
+        """A storefront variant sliced and priced as a back-office quote is (#6153,
+        ``orders/storefront/slice_price.py`` ``price_variant``): the same render, slicer
+        and price book, here over this process's services."""
+        # Read when it runs: these import back into this module's imports.
+        from scadbuddy.api.storefront_slice import offered_spools
+        from scadbuddy.operations.component import OPERATIONS
+        from scadbuddy.spools.component import SPOOLS
+
+        orders = components.get(ORDERS)
+        create = components.get(OPERATIONS).kinds["output_create"]
+
+        async def create_output(body: dict[str, Any]) -> dict[str, Any]:
+            return await create.run(body, {})
+
+        async def offered(printer: str) -> set[int] | None:
+            settings = await asyncio.to_thread(core.settings_store.load)
+            found = await offered_spools(
+                settings, components.get(PRINTERS), components.get(SPOOLS), printer
+            )
+            return None if found is None else {spool.spool_id for spool in found}
+
+        run = SliceRun(
+            prices=orders.slice_prices,
+            filament=orders.store.filament,
+            book=orders.price_book,
+            outputs=core.outputs,
+            renders=_Renders(core),
+            create_output=create_output,
+            slicer=PreviewSlicer(core, components),
+            offered=offered,
+            machine_rate=orders.machine_rates.for_quote,
+        )
+        try:
+            row = await price_variant(run, SliceVariant.model_validate(request))
+        except QUOTE_RETRYABLE:
+            raise
+        except QUOTE_DETERMINISTIC as error:
+            # As a quote's: a bug is not tried again.
+            raise ApplicationError(
+                type(error).__name__, type=type(error).__name__, non_retryable=True
+            ) from error
+        return {"price_key": row.price_key, "status": row.status}
+
     return [
+        OperationKind(
+            SLICE_PRICE_KIND,
+            storefront_slice_check,
+            storefront_slice_run,
+            # As a quote's (#5353): a worker that stops mid-run is tried again, and every
+            # attempt writes the same row, by the variant's key.
+            run_attempts=RUN_ATTEMPTS,
+            queue="library",
+            run_timeout=QUOTE_TIMEOUT,
+            where="the storefront's slice prices",
+            # The render and the slice outlast the command deadline: the page reads the
+            # price again.
+            answers_running=True,
+        ),
         OperationKind(
             ORDER_ATTEMPT_COPY,
             copy_check_kind,
