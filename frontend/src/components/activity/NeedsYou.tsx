@@ -324,9 +324,8 @@ export function NeedsYouSection() {
   if (count === 0) return null
   return (
     <section id={NEEDS_YOU_ID} aria-labelledby="needs-you-heading" className="flex scroll-mt-4 flex-col gap-2">
-      <h2 id="needs-you-heading" ref={heading} tabIndex={-1} className="flex items-center gap-2 text-base font-semibold focus:outline-none">
+      <h2 id="needs-you-heading" ref={heading} tabIndex={-1} aria-label={`Needs you, ${count}`} className="flex items-center gap-2 text-base font-semibold focus:outline-none">
         Needs you
-        <span className="sr-only">, </span>
         <span className="rounded-full bg-needs px-2 text-xs leading-5 font-semibold text-needs-ink tabular-nums">{count}</span>
       </h2>
       <NeedsYouList />

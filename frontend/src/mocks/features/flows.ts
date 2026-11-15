@@ -14,7 +14,7 @@ import type {
   FlowState,
   FlowStep,
 } from '../../api/types'
-import { requestedTriggers } from './flowTriggers'
+import { changeFlowTrigger, requestedTriggers } from './flowTriggers'
 
 /**
  * #1057 — flow runs (backend `api/flows.py`): the list, one run's view, and a person's
@@ -438,6 +438,15 @@ export function setFlowRunOffline(id: string): void {
 }
 export function setFlowRunStarting(id: string): void {
   starting.add(id)
+}
+
+/**
+ * #6399 — tests that count only the assistant's requests (its badge, the tab title): no grant
+ * waits for a person, neither `run-ask`'s nor `trig-render`'s standing grant.
+ */
+export function clearFlowGrantRequests(): void {
+  grants.delete('run-ask')
+  changeFlowTrigger('trig-render', { grant: null })
 }
 
 /** Tests: a run's grant, as its view shows it; null for none. */

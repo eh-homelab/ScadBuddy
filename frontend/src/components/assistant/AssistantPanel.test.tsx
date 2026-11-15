@@ -11,6 +11,7 @@ import { respondRequests, setPendingAnswers, setPendingApprovals } from '../../m
 import { setRunningSessions, setSessionResources } from '../../mocks/features/assistantSessions'
 import { setMcpAuthMode } from '../../mocks/features/mcpTokens'
 import { seedSessionFile } from '../../mocks/features/sessionFiles'
+import { clearFlowGrantRequests } from '../../mocks/features/flows'
 import { emitRealtime } from '../../mocks/realtime'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
@@ -87,6 +88,9 @@ async function openAndSend(text = 'Make the name bigger and send it') {
 afterEach(() => {
   availability.set({ available: true })
 })
+
+// #6399: the tab title counts every request waiting on the person; these tests count the assistant's.
+beforeEach(() => clearFlowGrantRequests())
 
 describe('assistant panel', () => {
   it('is hidden, shortcut included, when AI is off', async () => {
@@ -378,7 +382,7 @@ describe('assistant panel', () => {
     // card, and Deny (which runs nothing) is the one decision it offers.
     expect(toasts.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
     expect(toasts.queryByRole('link', { name: 'Approve' })).not.toBeInTheDocument()
-    for (const review of toasts.getAllByRole('link', { name: 'Review' })) expect(review).toHaveAttribute('href', '/activity')
+    for (const review of toasts.getAllByRole('link', { name: 'Review' })) expect(review).toHaveAttribute('href', '/activity#needs-you')
     for (const deny of toasts.getAllByRole('button', { name: 'Deny' })) expect(deny).toHaveAttribute('data-agent-user-only')
     await user.click(toasts.getAllByRole('button', { name: 'Deny' })[0]!)
     await waitFor(() => expect(respondRequests()).toHaveLength(1))

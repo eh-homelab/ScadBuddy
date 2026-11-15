@@ -3,6 +3,7 @@ import { Route, Routes } from 'react-router'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { lazyRetry } from '../lib/lazyRetry'
 import { renderPage } from '../test/utils'
+import { clearFlowGrantRequests } from '../mocks/features/flows'
 import { AppShell } from './AppShell'
 
 vi.mock('../agent/chat/availability', () => ({
@@ -96,6 +97,8 @@ describe('the shell’s page boundary retries a page chunk (#3241, #3754)', () =
 
 describe('the shell’s orientation (#2454)', () => {
   it('names the tab after the page’s heading, and follows navigation', async () => {
+    // #6399: no request waits on the person, so the title has no count.
+    clearFlowGrantRequests()
     const { user } = renderPage(
       <Routes>
         <Route element={<AppShell embedded={false} tabLink={null} />}>
