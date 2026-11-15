@@ -940,6 +940,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   short statements on the API's role go on the shared `scadbuddy-rows` pool
   (`rows/component.py` `ROWS`). `tests/test_pg_pools.py` sums an API process's pools
   and fails on any new or bigger one; change it, and README "Running it", on purpose.
+  The agent's lease acquire (`api/crud_agent_access.py`) runs on the settings store's pool.
+  During a roll, a `plugin-oauth:` acquire whose grant row an SQL-path agent pod holds keeps
+  one of its connections for up to the request's `wait_s` (at most `MAX_WAIT`, 25 s).
 - A dict read from a `jsonb` column (e.g. `storefront_listings.params`) has no key order:
   Postgres stores the keys shortest first. Never show or answer its keys in that order;
   order them by the template schema's parameters (#6302).

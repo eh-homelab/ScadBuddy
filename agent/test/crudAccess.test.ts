@@ -2,9 +2,10 @@ import { describe, expect, it } from 'vitest'
 import { CrudToolListings, listingLeaseKey, ToolListings } from '../src/access/listings.js'
 import { AccessStore, CrudAccessRows } from '../src/access/store.js'
 import { CrudReadError } from '../src/api/crudRead.js'
+import { SOURCES_PER_CALL } from '../src/api/crudStores.js'
 import type { AccessRow } from '../src/access/model.js'
 import type { AuditEntry } from '../src/audit/log.js'
-import type { LockClient } from '../src/db.js'
+import { type LockClient, TEST_LOCK_CONNECTIONS } from '../src/db.js'
 import { CrudPluginSessions, endOwnSessions, sweepDeadReplicas } from '../src/plugins/pluginSessions.js'
 
 // The tool access, the tool listings and the plugin sessions through the API's CRUD routes
@@ -209,6 +210,32 @@ describe('the plugin stores through CRUD routes (#5299 step 5)', () => {
     const failing = new ToolListings(noSql, noLocks, { crud: new CrudToolListings({ baseUrl: BASE, fetch: answering(503) }), use: () => true })
     expect(await failing.exclusive('files', async () => (ran = true))).toBe('unreachable')
     expect(ran).toBe(false)
+  })
+
+  it('runs at most TEST_LOCK_CONNECTIONS tests at once on this replica, as the lock client does', async () => {
+    const api = new FakeApi()
+    const listings = new ToolListings(noSql, noLocks, { crud: new CrudToolListings(target(api)), use: () => true })
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    const names = Array.from({ length: TEST_LOCK_CONNECTIONS }, (_, i) => `p${i}`)
+    let started = 0
+    const running = names.map((n) => listings.exclusive(n, async () => (started++, await gate, n)))
+    await expect.poll(() => started).toBe(TEST_LOCK_CONNECTIONS)
+    expect(await listings.exclusive('one-more', async () => 'never')).toBe('full')
+    release()
+    expect(await Promise.all(running)).toEqual(names.map((n) => ({ value: n })))
+    expect(await listings.exclusive('one-more', async () => 'ran')).toEqual({ value: 'ran' })
+  })
+
+  it('reads more sources than one call takes in runs of SOURCES_PER_CALL', async () => {
+    const api = new FakeApi()
+    const sources = Array.from({ length: SOURCES_PER_CALL + 1 }, (_, i) => `remote:s${i}`)
+    api.rows = [{ source: sources.at(-1)!, item: '*', access: 'on', updated_by: 'system' }]
+    api.listings.set(sources.at(-1)!, { tools: [], listed_at: new Date().toISOString(), truncated: false })
+    expect(await new CrudAccessRows(target(api)).rows(sources)).toHaveLength(1)
+    expect((await new CrudToolListings(target(api)).read(sources)).size).toBe(1)
+    const sent = api.seen.filter((s) => s.path === '/access/rows' || s.path === '/tool-listings/read').map((s) => (s.body.sources as string[]).length)
+    expect(sent).toEqual([SOURCES_PER_CALL, 1, SOURCES_PER_CALL, 1])
   })
 
   it("refuses a test's write once its lease is lost: an error of the test's own", async () => {

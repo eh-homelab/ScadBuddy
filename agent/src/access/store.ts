@@ -1,5 +1,5 @@
 import type { Sql, TransactionSql } from 'postgres'
-import { type CrudTarget, crudOf, qs } from '../api/crudStores.js'
+import { chunks, type CrudTarget, crudOf, qs, SOURCES_PER_CALL } from '../api/crudStores.js'
 import { type AuditContext, type AuditSink, SYSTEM_ACTOR } from '../audit/log.js'
 import { notifyWarmEvict } from '../sessions/warmEvict.js'
 import { type Access, itemKindIn } from './items.js'
@@ -279,7 +279,11 @@ export class CrudAccessRows {
   }
 
   async rows(sources: readonly string[]): Promise<AccessRow[]> {
-    return (await this.#call<{ rows: AccessRow[] }>('the tool access', '/access/rows', { body: { sources } })).rows
+    const out: AccessRow[] = []
+    for (const part of chunks(sources, SOURCES_PER_CALL)) {
+      out.push(...(await this.#call<{ rows: AccessRow[] }>('the tool access', '/access/rows', { body: { sources: part } })).rows)
+    }
+    return out
   }
 
   async row(source: string, item: string): Promise<AccessRow | undefined> {

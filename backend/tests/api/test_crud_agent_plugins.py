@@ -16,6 +16,7 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
+from scadbuddy.agent_data import leases
 from scadbuddy.agent_data.rotation import rotate
 from scadbuddy.core.secrets import Envelope, kek_from_base64, open_secret, seal_secret
 from scadbuddy.core.settings import Settings
@@ -385,6 +386,18 @@ def test_a_refresh_lease_waits_for_an_sql_pods_row_lock_only_as_long_as_asked(
         assert db.execute("SELECT count(*) FROM agent_leases").fetchone()[0] == 0
     held = client.post(f"{BASE}/leases/plugin-oauth:docs", json=ask, headers=agent)
     assert held.status_code == 200
+
+
+def test_a_refresh_lease_puts_back_the_lock_timeout_in_force(
+    client: TestClient, agent: dict[str, str], db: Any, pg_conninfo: str
+) -> None:
+    """The wait's own lock_timeout ends with the row lock: the rest of the transaction keeps
+    what was set before."""
+    _signed_in(client, agent, db)
+    with psycopg.connect(pg_conninfo) as conn, conn.transaction():
+        conn.execute("SET LOCAL lock_timeout = '7s'")
+        assert leases.acquire(conn, "plugin-oauth:docs", str(uuid.uuid4()), 60, 0.5) is not None
+        assert conn.execute("SELECT current_setting('lock_timeout')").fetchone() == ("7s",)
 
 
 def test_a_mark_and_a_sign_out_tell_the_warm_caches(

@@ -1,6 +1,6 @@
 import type { Sql, TransactionSql } from 'postgres'
-import type { LockClient, LockLease } from '../db.js'
-import { type CrudTarget, crudOf, CrudLeases, type HeldLease } from '../api/crudStores.js'
+import { type LockClient, type LockLease, TEST_LOCK_CONNECTIONS } from '../db.js'
+import { chunks, type CrudTarget, crudOf, CrudLeases, type HeldLease, SOURCES_PER_CALL } from '../api/crudStores.js'
 import { CrudReadError } from '../api/crudRead.js'
 import { z } from 'zod'
 import { packageServerSource, remoteSource } from './model.js'
@@ -253,7 +253,8 @@ export class ToolListings {
    * (db.ts `createLockClient`), never on the shared pool, which a test therefore never waits on.
    * Through the API (`RemoteListings`), the lock is the lease `tool-listing:remote:<name>`,
    * renewed while `fn` runs; `unreachable` then says the API did not answer the acquire (a
-   * 4xx its route answered is thrown), and `full` never comes back.
+   * 4xx its route answered is thrown), and `full` says this replica already runs
+   * TEST_LOCK_CONNECTIONS tests through the API.
    */
   async exclusive<T>(name: string, fn: (put: PluginListingPut) => Promise<T>): Promise<{ value: T } | 'busy' | 'full' | 'unreachable'> {
     const crud = this.#crud()
@@ -373,6 +374,9 @@ async function upsert(sql: TransactionSql, source: string, tools: readonly Store
     ON CONFLICT (source) DO UPDATE SET tools = EXCLUDED.tools, truncated = EXCLUDED.truncated, listed_at = now()`
 }
 
+/** The connection tests this replica runs through the API now, capped as the lock client caps its own. */
+let crudTests = 0
+
 type WireListing = { source: string; tools: unknown; listed_at: string; truncated: boolean }
 
 /**
@@ -392,32 +396,41 @@ export class CrudToolListings {
 
   async read(sources: readonly string[]): Promise<Map<string, Listing>> {
     const out = new Map<string, Listing>()
-    const { listings } = await this.#call<{ listings: WireListing[] }>('the tool listings', '/tool-listings/read', {
-      body: { sources },
-    })
-    for (const row of listings) {
-      const listing = parseRow({ tools: row.tools, listed_at: new Date(row.listed_at), truncated: row.truncated })
-      if (listing) out.set(row.source, listing)
+    for (const part of chunks(sources, SOURCES_PER_CALL)) {
+      const { listings } = await this.#call<{ listings: WireListing[] }>('the tool listings', '/tool-listings/read', {
+        body: { sources: part },
+      })
+      for (const row of listings) {
+        const listing = parseRow({ tools: row.tools, listed_at: new Date(row.listed_at), truncated: row.truncated })
+        if (listing) out.set(row.source, listing)
+      }
     }
     return out
   }
 
   /**
-   * `fn` under `key`'s lease (`CrudLeases.hold`); `unreachable` when the acquire got no
-   * answer of the route's own, and `fn` did not run. A 4xx the route answered (a key it
+   * `fn` under `key`'s lease (`CrudLeases.hold`); `full` when this replica already runs
+   * TEST_LOCK_CONNECTIONS tests, as on the SQL path; `unreachable` when the acquire got no
+   * answer of the route's own. In both `fn` did not run. A 4xx the route answered (a key it
    * refuses) is thrown as it is.
    */
-  async leased<T>(key: string, fn: (lease: HeldLease) => Promise<T>): Promise<{ value: T } | 'busy' | 'unreachable'> {
-    let lease: HeldLease | 'busy'
+  async leased<T>(key: string, fn: (lease: HeldLease) => Promise<T>): Promise<{ value: T } | 'busy' | 'full' | 'unreachable'> {
+    if (crudTests >= TEST_LOCK_CONNECTIONS) return 'full'
+    crudTests++
     try {
-      lease = await this.#leases.acquire(key)
-    } catch (err) {
-      if (err instanceof CrudReadError && err.fromRoute && err.status !== undefined && err.status >= 400 && err.status < 500) throw err
-      console.error(`plugin test lease: ${message(err)}`)
-      return 'unreachable'
+      let lease: HeldLease | 'busy'
+      try {
+        lease = await this.#leases.acquire(key)
+      } catch (err) {
+        if (err instanceof CrudReadError && err.fromRoute && err.status !== undefined && err.status >= 400 && err.status < 500) throw err
+        console.error(`plugin test lease: ${message(err)}`)
+        return 'unreachable'
+      }
+      if (lease === 'busy') return 'busy'
+      return { value: await this.#leases.hold(lease, fn) }
+    } finally {
+      crudTests--
     }
-    if (lease === 'busy') return 'busy'
-    return { value: await this.#leases.hold(lease, fn) }
   }
 
   async putPlugin(lease: HeldLease, name: string, url: string, tools: readonly StoredTool[], truncated: boolean): Promise<boolean> {

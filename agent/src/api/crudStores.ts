@@ -132,6 +132,9 @@ export function segment(value: string, rule: RegExp, what: string): string {
 /** The most tab ids one call sends (backend api/crud_agent_stores.py `TABS_MAX`). */
 export const TABS_PER_CALL = 500
 
+/** The most sources one access or listing read sends (backend api/crud_agent_access.py `SOURCES_MAX`). */
+export const SOURCES_PER_CALL = 1000
+
 /** `items` in runs of at most `size`, in order. */
 export function chunks<T>(items: readonly T[], size: number): T[][] {
   const out: T[][] = []

@@ -80,6 +80,9 @@ def acquire(
     if key.startswith("plugin-oauth:"):
         # Waits while an SQL pod holds the grant's row across a refresh, but no longer than
         # the caller asked: a lock_timeout of 0 would wait for ever, so at least 1 ms.
+        # The setting in force before is put back after, so the rest of the transaction
+        # keeps whatever the role or server set.
+        before = conn.execute("SELECT current_setting('lock_timeout') AS t").fetchone()
         try:
             with conn.transaction():
                 conn.execute(
@@ -90,7 +93,10 @@ def acquire(
                     "SELECT 1 FROM ai_plugin_oauth WHERE plugin = %s FOR UPDATE",
                     (key[len("plugin-oauth:") :],),
                 )
-                conn.execute("SELECT set_config('lock_timeout', '0', true)")
+                conn.execute(
+                    "SELECT set_config('lock_timeout', %s, true)",
+                    (_first(before) if before is not None else "0",),
+                )
         except LockNotAvailable:
             return None
     row = conn.execute(
