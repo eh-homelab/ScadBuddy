@@ -144,7 +144,7 @@ Today SB drops the alpha in several places; each changes:
 - The tray fingerprint is `material|RRGGBB` (`spools/models.py:59-62`), so a
   clear and an opaque spool of one hue look alike.
 - The price book keeps `#RRGGBB` (`orders/bambuddy.py:63-64`, `_colour`); open issue
-  #6209 is the same gap and folds into this work.
+  #6209 is the same gap; it builds on #6261, whose types keep the full RGBA.
 
 Where alpha is used:
 - Matching (print dialog nearest colour, BB type matching §8.1, tag
@@ -581,7 +581,7 @@ that block it (GitHub's blocked-by links hold the same graph).
 | 6 | [#6270](https://github.com/eh-homelab/ScadBuddy/issues/6270) | Parity sweep against §11 | all of the above |
 
 [#6209](https://github.com/eh-homelab/ScadBuddy/issues/6209) (the price book keeps alpha, colour stops and effect) is a sub-issue
-of the epic; [#6261](https://github.com/eh-homelab/ScadBuddy/issues/6261)'s RGBA rule covers it.
+of the epic; it builds on [#6261](https://github.com/eh-homelab/ScadBuddy/issues/6261), whose types keep the full RGBA.
 
 ## 13. Left to the builder
 
