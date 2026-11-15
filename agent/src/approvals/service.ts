@@ -1004,7 +1004,10 @@ export class ApprovalService {
    * `createPrepared` on the API, under its lock there. An eviction's span is started here before
    * the call, one for each of the asker's pending rows past its bound as last read, so the API
    * writes each evicted row's context with its cancellation; the spans the API did not use are
-   * never ended, so never exported.
+   * never ended, so never exported. The count is read before the API takes `PREPARE_LOCK`, so
+   * a concurrent prepare of the same asker can make the API evict more rows than there are
+   * spans: those rows are cancelled all the same, with no `decision_traceparent`, as the SQL
+   * path's rows past its spans would be (backend `create_prepared` zips them, not strictly).
    */
   private async createPreparedOnApi(
     crud: ApprovalRoutes,

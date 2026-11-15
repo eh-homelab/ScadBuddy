@@ -278,6 +278,9 @@ class StandingGrant(BaseModel):
     revoked_at: datetime | None = None
     expires_at: datetime | None = None
     created_at: datetime
+    #: #6399: when it last started to wait for a person: its creation, or the edit that
+    #: returned it to `requested`. None only in a payload from before the column.
+    requested_at: datetime | None = None
     #: Set afresh on each approval; the run grants it seeds name it.
     approval_id: str | None = None
     #: Per approval id, per rule index: what it let through across every run it seeded

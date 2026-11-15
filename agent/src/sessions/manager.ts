@@ -69,6 +69,7 @@ import type { DurableTurns, SessionRuntime } from './durable.js'
 import { PendingProjection, type PendingReads } from '../gate/projection.js'
 import { gated } from '../api/crudStores.js'
 import type { ApprovalRoutes } from '../approvals/crudApprovals.js'
+import type { QuestionRoutes } from '../gate/crudQuestions.js'
 import type { FlowRunReads } from '../flows/backendReads.js'
 import { Escalations } from '../flows/escalations.js'
 import { TurnRunner } from './turnRunner.js'
@@ -662,6 +663,8 @@ export type SessionManagerDeps = {
   pendingRoutes?: { crud: PendingReads; use: () => boolean } | undefined
   /** The API's `approvals` routes (approvals/crudApprovals.ts), which the approvals take while `use()` holds. */
   approvalRoutes?: { crud: ApprovalRoutes; use: () => boolean } | undefined
+  /** The API's `questions` routes (gate/crudQuestions.ts), which the questions take while `use()` holds. */
+  questionRoutes?: { crud: QuestionRoutes; use: () => boolean } | undefined
   sql: Sql
   /** The sessions' rows (`PgSessionRows` on `sql` when omitted; gated to the API's routes in main.ts, #5299 step 9). */
   rows?: SessionRows
@@ -960,7 +963,7 @@ export class SessionManager {
       workspace: this.files,
       routes: deps.approvalRoutes,
     })
-    this.questions = new QuestionService({ sql: deps.sql, events: this.events, ...(deps.audit ? { audit: deps.audit } : {}) })
+    this.questions = new QuestionService({ sql: deps.sql, events: this.events, ...(deps.audit ? { audit: deps.audit } : {}), routes: deps.questionRoutes })
     // The API's `pending-input` routes once it lists the area (#5299 step 10), SQL until then.
     const pending = new PendingProjection(deps.sql)
     this.projection = deps.pendingRoutes ? gated<PendingReads>(pending, deps.pendingRoutes.crud, deps.pendingRoutes.use) : pending

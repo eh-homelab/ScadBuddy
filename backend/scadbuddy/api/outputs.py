@@ -99,6 +99,7 @@ from scadbuddy.core.tracing import span
 from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
 from scadbuddy.library.output_index import DEFAULT_LIMIT, AfterNotListedError, OutputQuery
 from scadbuddy.library.outputs import (
+    BACK_OFFICE,
     MODEL_NAME,
     OUTPUT_ID_PATTERN,
     PREVIEW_NAME,
@@ -940,15 +941,32 @@ async def list_outputs(
     response: Response,
     limit: PageLimit = None,
     after: PageAfter = None,
+    include_storefront: IncludeStorefront = False,
 ) -> list[OutputDetail]:
     """Details, not summaries: the history page shows each output's parameter diff, and
     a summary list would make it fetch every row again one at a time. Newest first;
-    `after` is an output id, and only the page's outputs are built into details (#843)."""
+    `after` is an output id, and only the page's outputs are built into details (#843).
+    The storefront slice run's outputs are left out unless `include_storefront` (#6371)."""
     await asyncio.to_thread(require_model, catalogue, slug)
     metas = await asyncio.to_thread(outputs.list_for, slug)
+    if not include_storefront:
+        metas = [meta for meta in metas if meta.source == BACK_OFFICE]
     response.headers[TOTAL_COUNT_HEADER] = str(len(metas))
     metas = metas[page_window([meta.id for meta in metas], after, limit, "output")]
     return await _details(outputs, uploads, state.print_runs.store, metas)
+
+
+#: Whether a back-office list of renders shows the storefront slice run's outputs too
+#: (#6371). Off, it lists the back office's only.
+IncludeStorefront = Annotated[
+    bool,
+    Query(
+        description=(
+            "Also list the outputs the storefront slice run saved (`source` `storefront`),"
+            " which are left out by default"
+        )
+    ),
+]
 
 
 #: How many models `GET /outputs` takes in `slug`: a bound on the request only.
@@ -1012,12 +1030,14 @@ async def list_recent_outputs(
         int, Query(ge=1, le=MAX_PAGE_LIMIT, description="At most this many outputs")
     ] = DEFAULT_LIMIT,
     after: PageAfter = None,
+    include_storefront: IncludeStorefront = False,
 ) -> list[OutputDetail]:
     """Recent renders (#4777, order operations spec 2026-11-07 §3.1): the saved outputs of
     every model, newest first, as `OutputDetail`s like the per-model list's. `after` is
     an output id; a page is `limit` outputs (50 when omitted) and `X-Total-Count` counts
     what the filters select. Outputs carry no tags: `tag` matches the model's catalogue
-    tags, case and accents folded."""
+    tags, case and accents folded. The storefront slice run's outputs are left out unless
+    `include_storefront` (#6371)."""
     index = outputs.index
     if index is None:
         raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, "outputs are not indexed here")
@@ -1032,6 +1052,7 @@ async def list_recent_outputs(
         slugs=slugs,
         q=q,
         ordered=None if ordered is None else ordered == "yes",
+        include_storefront=include_storefront,
         after=after,
         limit=limit,
     )
