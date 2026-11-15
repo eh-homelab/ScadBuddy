@@ -39,7 +39,8 @@ export async function flowToolTiers(tools: readonly Tool[], services: Pick<ToolS
  * `flow_tool_tier`: `{tool}` to `{tier, disabled, declared, keyed}`, for a `flow-<run id>`
  * workflow only. `declared` is the code's tier: whether a retry is safe is the code's to say,
  * so the flow retries only when both tiers are `read` (#2171). `keyed` is the code's too
- * (ToolSpec.keyed): a call whose attempt lost its heartbeat is asked again only then (#6345).
+ * (ToolSpec.keyed): once the backend half of #6345 lands (#6355), a call whose attempt lost its
+ * heartbeat is to be asked again only then; until it does, a keyed write is not retried.
  */
 export function flowToolTierActivity(
   tools: readonly Tool[],

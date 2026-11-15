@@ -11,6 +11,7 @@ import { FLOW_TOOLS_PATH } from '../src/routes/flowTools.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { FLOW_TOOL_TIER_ACTIVITY, flowToolTiers } from '../src/temporal/flowTools.js'
 import { toolActivities } from '../src/temporal/toolActivities.js'
+import { ALL_TOOLS } from '../src/tools/index.js'
 import { defineTool, json, type Tool } from '../src/tools/registry.js'
 import { services } from './helpers/mcp.js'
 import { memoryAccess, rowsFromOverrides } from './support/memoryAccess.js'
@@ -118,6 +119,12 @@ describe("a flow's tool tiers (#2704)", () => {
     const keyedSend = defineTool({ name: 'send', label: 'send', description: 'send', input: z.object({}), risk: 'outward', keyed: true, routes: [], handler: async () => json({}) })
     const tier = toolActivities([keyedSend], { services: svc, sessions: { ownerOf: async () => undefined } })[FLOW_TOOL_TIER_ACTIVITY]!
     expect(await env(`flow-${RUN}`).run(tier, { tool: 'send' })).toEqual({ tier: 'outward', disabled: false, declared: 'outward', keyed: true })
+  })
+
+  it('flags exactly the tools whose only write is one keyed command (#6345)', () => {
+    // Each handler is a single command() to a run_operation route; a handler that writes any other
+    // way must not be flagged, or a flow's retry of it could do it twice.
+    expect(ALL_TOOLS.filter((t) => t.keyed).map((t) => t.name).sort()).toEqual(['create_print_project', 'import_makerworld_model'])
   })
 
   it('refuses a tool the agent does not have, one a flow cannot call, and any other caller', async () => {
