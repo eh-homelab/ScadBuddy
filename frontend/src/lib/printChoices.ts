@@ -7,8 +7,10 @@ import type {
   PrintChoices,
   PrintRunRequest,
   PrintSequence,
+  ProcessOverrides,
   SupportsChoice,
 } from '../api/types'
+import { apiParts } from './partSettings'
 import type { PrintSelection } from './usePrintChoices'
 
 /** Both sides at 0.4 mm, standard flow: the defaults when the server names none. */
@@ -58,6 +60,8 @@ export function printChoicesOf(selection: PrintSelection): PrintChoices | null {
  * and the settings per slot (#5627), which go into the laid-out copy. The check, the background
  * slice and the run all send these, from here, so the slice the dialog reuses is the one
  * the run would make. `partSettings` is what `sentPartSettings` gives: `null` sends none.
+ * #2998: any other process setting by key (`processOverrides`, what `sentOverrides`
+ * gives), which goes over all of the above.
  */
 export function sliceOverrides(
   printSequence: PrintSequence | null,
@@ -65,12 +69,17 @@ export function sliceOverrides(
   filamentProfiles: readonly string[] = [],
   primeTower: PrimeTowerChoice | null = null,
   partSettings: PartSettingsMap | null = null,
-): Pick<PrintRunRequest, 'print_sequence' | 'supports' | 'filament_profiles' | 'prime_tower' | 'part_settings'> {
+  processOverrides: ProcessOverrides | null = null,
+): Pick<
+  PrintRunRequest,
+  'print_sequence' | 'supports' | 'filament_profiles' | 'prime_tower' | 'part_settings' | 'process_overrides'
+> {
   return {
     ...(printSequence === null ? {} : { print_sequence: printSequence }),
     ...(supports === null ? {} : { supports }),
     ...(filamentProfiles.length === 0 ? {} : { filament_profiles: [...filamentProfiles] }),
     ...(primeTower === null ? {} : { prime_tower: primeTower }),
-    ...(partSettings === null ? {} : { part_settings: partSettings }),
+    ...(partSettings === null ? {} : { part_settings: apiParts(partSettings) }),
+    ...(processOverrides === null ? {} : { process_overrides: processOverrides }),
   }
 }

@@ -485,3 +485,105 @@ describe('useSliceQuotes (#4693)', () => {
     expect(signal?.aborted).toBe(true)
   })
 })
+
+// #6324 review — a render that landed keeps its run until the reload shows the output, so
+// Slice… stays held in between and no second render starts.
+describe('useSliceQuotes · an item’s render (#6324)', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('keeps the rendering run until the reloaded item has its output, then settles true', async () => {
+    vi.spyOn(api, 'renderItem').mockResolvedValue({} as never)
+    vi.spyOn(api, 'runningQuotes').mockResolvedValue({ items: [] } as never)
+    vi.spyOn(api, 'failedQuotes').mockResolvedValue(new Map())
+    const onQuoted = vi.fn()
+    const before = [{ id: 'item-1', order_id: 'order-1', output_id: null, quotes: [], created_at: '2026-10-26T10:00:00Z' }] as unknown as OrderItemDetail[]
+    const { result, rerender } = renderHook(({ items }) => useSliceQuotes('order-1', items, onQuoted), { initialProps: { items: before } })
+    let rendered!: Promise<boolean>
+    act(() => {
+      rendered = result.current.render('item-1', [])
+    })
+    await waitFor(() => expect(onQuoted).toHaveBeenCalledTimes(1))
+    // Landed, not reloaded yet: still rendering.
+    expect(result.current.runs.get('item-1')).toMatchObject({ stage: 'rendering', error: null })
+    rerender({ items: [{ ...before[0]!, output_id: 'o'.repeat(32) }] })
+    await expect(rendered).resolves.toBe(true)
+    expect(result.current.runs.has('item-1')).toBe(false)
+  })
+
+  it('settles true at once when the items already show the output as the render lands', async () => {
+    const landed = deferred<never>()
+    vi.spyOn(api, 'renderItem').mockReturnValue(landed.promise)
+    vi.spyOn(api, 'runningQuotes').mockResolvedValue({ items: [] } as never)
+    vi.spyOn(api, 'failedQuotes').mockResolvedValue(new Map())
+    const onQuoted = vi.fn()
+    const before = [{ id: 'item-1', order_id: 'order-1', output_id: null, quotes: [], created_at: '2026-10-26T10:00:00Z' }] as unknown as OrderItemDetail[]
+    const { result, rerender } = renderHook(({ items }) => useSliceQuotes('order-1', items, onQuoted), { initialProps: { items: before } })
+    let rendered!: Promise<boolean>
+    act(() => {
+      rendered = result.current.render('item-1', [])
+    })
+    // A realtime frame's read shows the output before the render's answer lands.
+    rerender({ items: [{ ...before[0]!, output_id: 'o'.repeat(32) }] })
+    await act(async () => landed.resolve({} as never))
+    await expect(rendered).resolves.toBe(true)
+    expect(result.current.runs.has('item-1')).toBe(false)
+  })
+
+  it('detaches the run and settles false when the reload after a landed render fails', async () => {
+    vi.spyOn(api, 'renderItem').mockResolvedValue({} as never)
+    vi.spyOn(api, 'runningQuotes').mockResolvedValue({ items: [] } as never)
+    vi.spyOn(api, 'failedQuotes').mockResolvedValue(new Map())
+    // The order's read fails: the items never change.
+    const onQuoted = vi.fn((failed?: () => void) => failed?.())
+    const before = [{ id: 'item-1', order_id: 'order-1', output_id: null, quotes: [], created_at: '2026-10-26T10:00:00Z' }] as unknown as OrderItemDetail[]
+    const { result, rerender } = renderHook(({ items }) => useSliceQuotes('order-1', items, onQuoted), { initialProps: { items: before } })
+    let rendered!: Promise<boolean>
+    act(() => {
+      rendered = result.current.render('item-1', [])
+    })
+    await act(async () => {
+      await expect(rendered).resolves.toBe(false)
+    })
+    expect(result.current.runs.get('item-1')).toMatchObject({ stage: 'rendering', error: null, landed: true, detached: true })
+    // A later read that shows the output ends it.
+    rerender({ items: [{ ...before[0]!, output_id: 'o'.repeat(32) }] })
+    await waitFor(() => expect(result.current.runs.has('item-1')).toBe(false))
+  })
+
+  it('ends a landed render’s run, settling false, when its item is gone from the reload', async () => {
+    vi.spyOn(api, 'renderItem').mockResolvedValue({} as never)
+    vi.spyOn(api, 'runningQuotes').mockResolvedValue({ items: [] } as never)
+    vi.spyOn(api, 'failedQuotes').mockResolvedValue(new Map())
+    const before = [{ id: 'item-1', order_id: 'order-1', output_id: null, quotes: [], created_at: '2026-10-26T10:00:00Z' }] as unknown as OrderItemDetail[]
+    const { result, rerender } = renderHook(({ items }) => useSliceQuotes('order-1', items, vi.fn()), { initialProps: { items: before } })
+    let rendered!: Promise<boolean>
+    act(() => {
+      rendered = result.current.render('item-1', [])
+    })
+    await waitFor(() => expect(result.current.runs.get('item-1')).toMatchObject({ landed: true }))
+    rerender({ items: [] })
+    await expect(rendered).resolves.toBe(false)
+    expect(result.current.runs.has('item-1')).toBe(false)
+  })
+
+  it('lets a landed render whose read never comes be dismissed, settling false', async () => {
+    vi.spyOn(api, 'renderItem').mockResolvedValue({} as never)
+    vi.spyOn(api, 'runningQuotes').mockResolvedValue({ items: [] } as never)
+    vi.spyOn(api, 'failedQuotes').mockResolvedValue(new Map())
+    // Its read was superseded by a newer one that failed: neither `failed` nor new items come.
+    const onQuoted = vi.fn()
+    const before = [{ id: 'item-1', order_id: 'order-1', output_id: null, quotes: [], created_at: '2026-10-26T10:00:00Z' }] as unknown as OrderItemDetail[]
+    const { result, rerender } = renderHook(({ items }) => useSliceQuotes('order-1', items, onQuoted), { initialProps: { items: before } })
+    let rendered!: Promise<boolean>
+    act(() => {
+      rendered = result.current.render('item-1', [])
+    })
+    await waitFor(() => expect(result.current.runs.get('item-1')).toMatchObject({ landed: true, error: null }))
+    act(() => result.current.dismiss('item-1'))
+    await expect(rendered).resolves.toBe(false)
+    expect(result.current.runs.has('item-1')).toBe(false)
+    // A read that shows the output later opens nothing and brings no run back.
+    rerender({ items: [{ ...before[0]!, output_id: 'o'.repeat(32) }] })
+    expect(result.current.runs.has('item-1')).toBe(false)
+  })
+})

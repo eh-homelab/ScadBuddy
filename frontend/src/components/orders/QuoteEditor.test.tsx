@@ -39,6 +39,13 @@ describe('QuoteEditor · a quote from a slice (#4250)', () => {
     }
     await waitFor(() => expect(quote).toBeEnabled())
     expect(within(dialog).queryByRole('button', { name: 'Print' })).toBeNull()
+    // #2998: any slicer setting by key, which the quote slices with and records.
+    await user.click(within(dialog).getByRole('switch', { name: 'Advanced' }))
+    await user.click(await within(dialog).findByTestId('slicer-settings-toggle'))
+    await user.type(within(dialog).getByTestId('slicer-settings-new-key'), 'skirt_loops')
+    await user.type(within(dialog).getByTestId('slicer-settings-new-value'), '2')
+    await user.click(within(dialog).getByTestId('slicer-settings-add'))
+    await waitFor(() => expect(quote).toBeEnabled())
     await user.click(quote)
     // The dialog does not wait on the operation: its modal would hold the page (#4693).
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Quote from a slice' })).toBeNull())
@@ -49,6 +56,7 @@ describe('QuoteEditor · a quote from a slice (#4250)', () => {
     )
     expect(body?.filament_plan.slots?.length).toBeGreaterThan(0)
     expect(body).not.toHaveProperty('project_id')
+    expect(body?.process_overrides).toEqual({ skirt_loops: '2' })
     // #4551: the registry row beside the Bambuddy id, as the run names them.
     const linked = printersState().find((row) => row.bambuddy_printer_id === body?.printer_id)
     expect(linked).toBeDefined()
@@ -186,6 +194,31 @@ describe('QuoteEditor · a quote from a slice (#4250)', () => {
     )
     expect(screen.getByTestId('quote-running')).toHaveTextContent(/Rendering the design/)
     expect(screen.getByTestId('quote-from-slice')).toBeDisabled()
+  })
+
+  it.each([
+    [false, /The render finished\. Reading the order again for its output/],
+    [true, /The render finished, but the order could not be read again/],
+  ])('a landed render (read failed: %s) says so and offers Stop waiting (#6324)', async (detached, text) => {
+    const draft = { ...item(ITEM_DRAFT, ORDER_DRAFT, 'draft'), output_id: null }
+    const dismiss = vi.fn()
+    const { user } = renderPage(
+      <QuoteEditor
+        orderId={ORDER_DRAFT}
+        itemId={ITEM_DRAFT}
+        currency="USD"
+        exponent={2}
+        quotes={[]}
+        editable
+        onChanged={vi.fn()}
+        item={draft}
+        slice={{ run: { startedAt: Date.now(), error: null, known: [], stage: 'rendering', landed: true, detached }, start: vi.fn(), render: vi.fn(), dismiss }}
+      />,
+    )
+    expect(screen.getByTestId('quote-running')).toHaveTextContent(text)
+    expect(screen.getByTestId('quote-from-slice')).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Stop waiting' }))
+    expect(dismiss).toHaveBeenCalledTimes(1)
   })
 
   it('offers Slice… for a design with no output, and says why only when there is no design (#6324)', async () => {

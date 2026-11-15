@@ -5,7 +5,9 @@
    in one transaction: from then on every copy of the run's payloads (history,
    Visibility, Archival) is undecryptable, whatever fails next. The run's images
    (`ai_flow_blobs`, #2477), sealed under that key, are deleted in the same transaction.
-   A process that read the key keeps it 30 s at most (`CachedPayloadKeys`).
+   A process that read the key keeps it 30 s at most (`CachedPayloadKeys`). The agent
+   forgets a subject through its CRUD route with the same statements
+   (`agent_data/forget.py`, `api/crud_agent_forget.py`, #5299 step 6).
 2. The workflow terminated if open, then its execution deleted.
 3. The `workflow_runs` row.
 """
@@ -20,6 +22,7 @@ from temporalio.api.workflowservice.v1 import DeleteWorkflowExecutionRequest
 from temporalio.client import Client
 from temporalio.service import RPCError, RPCStatusCode
 
+from scadbuddy.agent_data import forget as agent_forget
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.workflows.payload_codec import Connect, payload_key_lock, subject_of
 
@@ -38,21 +41,13 @@ async def forget_run(
     subject = f"flow-{run_id}"
     if subject_of(subject) is None:
         raise ValueError(f"{run_id} is not a flow run id")
+    # The API's own tables (#5299 D1, D6: it applies the agent's migrations before it
+    # serves), with the statements the agent's forget route runs (`agent_data/forget.py`).
     async with connect() as conn, conn.transaction():
-        await conn.execute(
-            "SELECT pg_advisory_xact_lock(hashtext(%s))", (payload_key_lock(subject),)
-        )
-        await conn.execute(
-            "INSERT INTO ai_forgotten_subjects (subject) VALUES (%s)"
-            " ON CONFLICT (subject) DO NOTHING",
-            (subject,),
-        )
-        # The agent's migration makes the table: before it ran there are no images, and the
-        # key is deleted all the same (#2578).
-        cur = await conn.execute("SELECT to_regclass('ai_flow_blobs') IS NOT NULL")
-        if (row := await cur.fetchone()) and row[0]:
-            await conn.execute("DELETE FROM ai_flow_blobs WHERE subject = %s", (subject,))
-        cur = await conn.execute("DELETE FROM ai_payload_keys WHERE subject = %s", (subject,))
+        await conn.execute(agent_forget.LOCK, (payload_key_lock(subject),))
+        await conn.execute(agent_forget.TOMBSTONE, (subject,))
+        await conn.execute(agent_forget.DELETE_FLOW_BLOBS, (subject,))
+        cur = await conn.execute(agent_forget.DELETE_KEY, (subject,))
         key = cur.rowcount > 0
     try:
         await client.get_workflow_handle(subject).terminate(

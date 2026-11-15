@@ -342,7 +342,15 @@ export function QuoteEditor({
       {slice && running && (
         <p role="status" className="flex flex-wrap items-center gap-2 text-[13px] text-muted-foreground" data-testid="quote-running">
           <Spinner />
-          {running.detached ? (
+          {running.landed && running.detached ? (
+            <span>The render finished, but the order could not be read again: its output shows here once it is. Stop waiting to press Slice… again.</span>
+          ) : running.landed ? (
+            <span>The render finished. Reading the order again for its output; the print dialog opens then.</span>
+          ) : running.detached && running.stage === 'rendering' ? (
+            <span>
+              No answer from the render started at <When at={running.startedAt} /> ({elapsed(running.startedAt, now)} ago): it may still be rendering, and its output shows here when it lands. If it never started, stop waiting and press Slice… again.
+            </span>
+          ) : running.detached ? (
             <span>
               No answer from the quote started at <When at={running.startedAt} /> ({elapsed(running.startedAt, now)} ago): it may still be slicing, and shows here when it lands. If it never started, stop waiting and quote again.
             </span>
@@ -355,8 +363,9 @@ export function QuoteEditor({
               Slicing every plate and pricing it. Started <When at={running.startedAt} />, running for <span data-testid="quote-elapsed">{elapsed(running.startedAt, now)}</span>…
             </span>
           )}
-          {/* No longer followed, so a failure would never show: the user may stop waiting. */}
-          {running.detached && (
+          {/* No longer followed, so a failure would never show, or a landed render waits on a
+              read that may never come: the user may stop waiting. */}
+          {(running.detached || running.landed) && (
             <Button type="button" size="xs" variant="ghost" onClick={slice.dismiss}>
               Stop waiting
             </Button>

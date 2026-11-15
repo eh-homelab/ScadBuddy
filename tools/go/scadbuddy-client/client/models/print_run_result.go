@@ -33,6 +33,8 @@ type PrintRunResult struct {
 	path *PrintRunResult_path
 	// The printer_id property
 	printer_id PrintRunResult_PrintRunResult_printer_idable
+	// The process_overrides property
+	process_overrides i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable
 	// The project_id property
 	project_id PrintRunResult_PrintRunResult_project_idable
 	// The queue_item_ids property
@@ -776,6 +778,16 @@ func (m *PrintRunResult) GetFieldDeserializers() map[string]func(i878a80d2330e89
 		}
 		return nil
 	}
+	res["process_overrides"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.CreateUntypedNodeFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetProcessOverrides(val.(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable))
+		}
+		return nil
+	}
 	res["project_id"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetObjectValue(CreatePrintRunResult_PrintRunResult_project_idFromDiscriminatorValue)
 		if err != nil {
@@ -921,6 +933,12 @@ func (m *PrintRunResult) GetPrinterId() PrintRunResult_PrintRunResult_printer_id
 	return m.printer_id
 }
 
+// GetProcessOverrides gets the process_overrides property value. The process_overrides property
+// returns a UntypedNodeable when successful
+func (m *PrintRunResult) GetProcessOverrides() i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable {
+	return m.process_overrides
+}
+
 // GetProjectId gets the project_id property value. The project_id property
 // returns a PrintRunResult_PrintRunResult_project_idable when successful
 func (m *PrintRunResult) GetProjectId() PrintRunResult_PrintRunResult_project_idable {
@@ -1034,6 +1052,12 @@ func (m *PrintRunResult) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a
 	}
 	{
 		err := writer.WriteObjectValue("printer_id", m.GetPrinterId())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteObjectValue("process_overrides", m.GetProcessOverrides())
 		if err != nil {
 			return err
 		}
@@ -1161,6 +1185,11 @@ func (m *PrintRunResult) SetPrinterId(value PrintRunResult_PrintRunResult_printe
 	m.printer_id = value
 }
 
+// SetProcessOverrides sets the process_overrides property value. The process_overrides property
+func (m *PrintRunResult) SetProcessOverrides(value i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable) {
+	m.process_overrides = value
+}
+
 // SetProjectId sets the project_id property value. The project_id property
 func (m *PrintRunResult) SetProjectId(value PrintRunResult_PrintRunResult_project_idable) {
 	m.project_id = value
@@ -1210,6 +1239,7 @@ type PrintRunResultable interface {
 	GetPartSettings() i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable
 	GetPath() *PrintRunResult_path
 	GetPrinterId() PrintRunResult_PrintRunResult_printer_idable
+	GetProcessOverrides() i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable
 	GetProjectId() PrintRunResult_PrintRunResult_project_idable
 	GetQueueItemIds() []int32
 	GetRackPicks() []RackSentPickable
@@ -1228,6 +1258,7 @@ type PrintRunResultable interface {
 	SetPartSettings(value i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable)
 	SetPath(value *PrintRunResult_path)
 	SetPrinterId(value PrintRunResult_PrintRunResult_printer_idable)
+	SetProcessOverrides(value i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable)
 	SetProjectId(value PrintRunResult_PrintRunResult_project_idable)
 	SetQueueItemIds(value []int32)
 	SetRackPicks(value []RackSentPickable)

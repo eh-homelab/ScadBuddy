@@ -169,8 +169,9 @@ def _too_big(plate_id: int) -> ApiError:
 
 def preview_request(request: SliceQuoteRequest) -> PrintRunRequest:
     """The print run's request a quote's background slice prepares (Ruling 2): the
-    dialog's choices, the route, the settings per slot (#5571) and the tower, supports
-    and sequence (#4673), so the quote slices what the print will."""
+    dialog's choices, the route, the settings per slot (#5571), the tower, supports
+    and sequence (#4673) and the process overrides (#2998), so the quote slices what the
+    print will."""
     return PrintRunRequest(
         printer=request.printer,
         printer_id=request.printer_id,
@@ -181,6 +182,7 @@ def preview_request(request: SliceQuoteRequest) -> PrintRunRequest:
         prime_tower=request.prime_tower,
         supports=request.supports,
         print_sequence=request.print_sequence,
+        process_overrides=request.process_overrides,
     )
 
 

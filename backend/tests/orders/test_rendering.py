@@ -170,3 +170,38 @@ async def test_a_refusing_check_writes_nothing_on_the_item(shop: Shop) -> None:
             ),
         )
     assert shop.get_item().output_id is None
+
+
+async def test_a_refusing_check_writes_nothing_on_a_retry_that_finds_its_output(
+    shop: Shop,
+) -> None:
+    """The retry's path (an output saved under ``saved_as`` by an earlier attempt, no render)
+    runs ``AttachTo.check`` before the write too."""
+    outputs = SavedOutputs()
+    outputs.metas["kept"] = OutputMeta.model_construct(
+        id="kept", slug="demo", model_version="a" * 40, colors=["#ff0000"], job_id="job-0"
+    )
+    renders = FakeRenders()
+
+    def moved_on() -> None:
+        raise ApiError(409, "order ORD-1 is accepted")
+
+    with pytest.raises(ApiError):
+        await output_for_reference(
+            reference_of(shop),
+            outputs=outputs,
+            renders=renders,
+            create_output=outputs.create,
+            name="ORD 1 Demo",
+            saved_as="kept",
+            follow_every=0.0,
+            item=AttachTo(
+                lifecycle=shop.lifecycle,
+                order=shop.get_order(),
+                item=shop.get_item(),
+                by=BY,
+                check=moved_on,
+            ),
+        )
+    assert renders.submitted == []
+    assert shop.get_item().output_id is None

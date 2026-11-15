@@ -18,7 +18,9 @@ type Grants = Readonly<Record<string, readonly string[]>>
  * `activity/kinds.py`), a flow's images (`flows/images.py`) and forgetting a run
  * (`flows/forget.py`). And the agent's own settings, Claude credentials and payload keys,
  * which the API serves this agent over its CRUD routes, sealing and opening them with the KEK
- * and auditing each reveal (#5299 step 4, `api/crud_agent_secrets.py`): the CRUD service's
+ * and auditing each reveal (#5299 step 4, `api/crud_agent_secrets.py`), and forgetting a subject,
+ * the key deletes no forget makes and a flow run's images, which it keeps for this agent (#5299
+ * step 6, `api/crud_agent_forget.py`: the sweep reads `ai_session_entries`): the CRUD service's
  * grants on the tables it takes over (#5299 D1), never another service's on its tables. A
  * KEK rotation re-wraps the credentials and payload keys there (UPDATE). */
 export const API_AI_GRANTS: Grants = {
@@ -29,7 +31,8 @@ export const API_AI_GRANTS: Grants = {
   ai_settings: ['SELECT', 'INSERT', 'UPDATE'],
   ai_credentials: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   ai_audit: ['INSERT'],
-  ai_flow_blobs: ['SELECT', 'DELETE'],
+  ai_flow_blobs: ['SELECT', 'INSERT', 'DELETE'],
+  ai_session_entries: ['SELECT'],
   ai_operations: ['SELECT'],
   ai_activity_kinds: ['SELECT'],
 }

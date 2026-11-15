@@ -57,7 +57,15 @@ credentials come from `…/credentials/reveal`, audited per call) and area `payl
 (`src/temporal/payloadCodec.ts` `CrudPayloadKeys`, `gatedPayloadKeys`: a subject's data key,
 made under the subject's lock and never for a forgotten subject, audited as kind `payload_key`
 (a release once per subject in 10 minutes), cached 30 s here).
-None needs a KEK in this process once listed. These three have a rolling-deploy fallback:
+None needs a KEK in this process once listed. Area `forget` (#5299 step 6, `FORGET_AREAS`;
+backend `api/crud_agent_forget.py`): `forgetSubject`'s key transaction (`src/sessions/forget.ts`
+`CrudSubjectKeys.forget`: under the subject's lock, the tombstone, a flow run's images and the
+key; a session with forks is refused `forks-take-ranges` and forgotten in the agent's own
+transaction, whose `copyForkRanges` opens and seals its transcript, until the sessions move,
+#5299 step 9), a browser call's key dropped and the hourly key sweep (`gatedKeyDeletes`), and a
+flow run's images (`src/temporal/flowBlobs.ts` `CrudFlowBlobs`, `gatedFlowBlobs`: sealed here,
+sent as multipart bytes, the tombstone check and the cap in the API's transaction).
+These four have a rolling-deploy fallback:
 `src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` from the start with back-off
 (1 s doubling to 30 s) until every one is listed, and until then each stays on SQL, for an API
 pod older than the routes. A route's
@@ -319,7 +327,7 @@ opens every one and seals it again byte for byte).
     API lists area `payload-keys` the API releases each key (`CrudPayloadKeys`, #5299 step 4,
     #5342), so no KEK is needed here, and until then it opens them with its own
     (`gatedPayloadKeys`; with neither, a call that needs one is `PayloadKeyUnavailable`). `src/sessions/forget.ts` `forgetSubject` (key row, then the workflow, then
-    the rows) is the one way a durable subject is deleted; operators run
+    the rows; the key row through the API once it lists area `forget`, above) is the one way a durable subject is deleted; operators run
     `node dist/forget-subject.js session-<uuid>`. A fork reads its parent's transcript
     through the cut (`ai_sessions.fork_parent_id`, `fork_cut`; `src/sessions/store.ts`,
     plan Step 6.5), and its event log and images through `fork_event_cut` (#4212:
