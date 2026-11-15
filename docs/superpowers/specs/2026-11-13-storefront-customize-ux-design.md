@@ -93,7 +93,10 @@ customize page "horrible". A Playwright walk on 2026-11-13 confirmed each point:
   never refused for its material: it moves. The start of a render answers the colour
   values it settled (`StoreRender.values`, never the material), and the page shows them
   for the parts the visitor did not set, and only while the visitor's choices are the ones
-  that start answered. Colours of no one material are 422
+  that start answered. Until then (and after a refused or failed start) the page shows its
+  own prediction of the same rule (`storefront/colours.ts` `colourPlan`, with the TS twin
+  `storefront/closestColour.ts`, which passes the same vectors); the reply wins over it.
+  The page sends only the visitor's own colours, never a moved one. Colours of no one material are 422
   `listing_colours_clash` with `parts` (the visitor's colours and slots only). One rule
   says which materials count (#6302 review): `inputs.py` `printable_materials`, the
   allowed materials that offer each colour the shop locked (support aside) and a choice
@@ -110,17 +113,21 @@ customize page "horrible". A Playwright walk on 2026-11-13 confirmed each point:
 
 ### 5.2 Colour picker (frontend, `storefront/components/ColourPicker.tsx`)
 
-- Closed, a colour parameter is one row: label, the picked swatch, its name and
-  material. Tap opens a popover (sheet on a phone).
-- Open: a material filter (chips, hidden with one material or with `one_material`),
-  then a grid of round swatches, 40 px, each with its name under it. Search by name
+- Closed, a colour parameter is one row: label, the swatch and its name. Tap opens a
+  popover (sheet on a phone).
+- Open: a grid of round swatches, 40 px, each with its name under it. Search by name
   when there are more than 24.
-- Names: `colour_name` (else the hex). Material shows as a small tag. Two filaments with
-  the same name and material show the short hex after the name.
-- With `one_material`, a single "Material" control sits above the parameters; each
-  picker then lists only that material. Changing material re-picks each colour to the
-  nearest hex in the new material (RGB distance), and says so. (#6258 removed this
-  control and `one_material`; the cascade picker that replaces it is #6258's page PR.)
+- The customer never sees a material (owner ruling, #6258): no material filter, tag or
+  word on the row, in the grid or in a swatch's accessible name. A colour that two
+  materials offer is one swatch (`colours.ts` `colourSwatches`). Names: `colour_name`
+  (else the hex) with its finish ("Blue · Matte"), material words taken out. Two of one
+  such name show the brand, else the hex, after the name.
+- "Choose a colour, the plastic follows" (#6258): a pick of a colour that only another
+  material offers moves each part the visitor did not set, at once, to the closest colour
+  of that material among its choices; a part whose default that material offers keeps it.
+  A colour the visitor set never moves. Picks of no one material are the shop's 422
+  `listing_colours_clash`, and the page names the parts in `parts` ("The body colour and
+  the rim colour can't go together. …"). (The `one_material` control of #6152 is gone.)
 - Keyboard: arrow keys move through the grid, Enter picks, Escape closes.
 
 ### 5.3 Automatic render (frontend, `CustomizePage.tsx`)

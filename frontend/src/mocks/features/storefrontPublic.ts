@@ -1,5 +1,6 @@
 import { http, HttpResponse } from 'msw'
-import type { CustomerOrder, Draft, Listing, ListingCard, StoreEstimate, StoreRender } from '../../storefront/api/client'
+import type { CustomerOrder, Draft, Listing, ListingCard, ParamValue, StoreEstimate, StoreRender } from '../../storefront/api/client'
+import { colourPlan } from '../../storefront/colours'
 import { keychainGlb } from '../glb'
 import { problem } from '../handlers'
 import { advanceChecks, modelsOrderOf } from './storefrontModels'
@@ -304,15 +305,10 @@ export const handlers = [
       colors: null,
       preview_url: null,
       error: null,
-      // #6302 review: the colours the render takes. The mock moves none: a part not given
-      // keeps the listing's default.
-      values: Object.fromEntries(
-        Object.entries(checked.params).flatMap(([name, param]) => {
-          if (param.kind !== 'choice' || !param.colour) return []
-          const value = body.values?.[name] ?? param.default
-          return typeof value === 'string' ? [[name, value]] : []
-        }),
-      ),
+      // #6258, #6302 review: the colours the render takes. A part not given moves to the
+      // closest colour of the material, as the shop's `resolve_choice` does: the mock uses
+      // the page's copy of that rule.
+      values: colourPlan(checked, (body.values ?? {}) as Record<string, ParamValue>).shown,
     }
     renders.set(id, { render, polls: 0 })
     return HttpResponse.json(render, { status: 202 })

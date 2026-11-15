@@ -76,13 +76,16 @@ export class StoreError extends Error {
   readonly type: string | null
   /** Seconds to wait, from `Retry-After`; null when the edge sent none. */
   readonly retryAfter: number | null
+  /** The parts a `listing_colours_clash` names (#6258); empty for any other answer. */
+  readonly parts: readonly string[]
 
-  constructor(status: number, type: string | null, detail: string, retryAfter: number | null) {
+  constructor(status: number, type: string | null, detail: string, retryAfter: number | null, parts: readonly string[] = []) {
     super(detail)
     this.name = 'StoreError'
     this.status = status
     this.type = type
     this.retryAfter = retryAfter
+    this.parts = parts
   }
 
   /** The problem's slug: `render_limited` for `…/storefront/render_limited`. */
@@ -103,14 +106,16 @@ function retryAfter(response: Response): number | null {
 async function refusal(response: Response): Promise<StoreError> {
   let type: string | null = null
   let detail = FALLBACK
+  let parts: string[] = []
   try {
-    const body = (await response.json()) as { type?: unknown; detail?: unknown }
+    const body = (await response.json()) as { type?: unknown; detail?: unknown; parts?: unknown }
     if (typeof body.type === 'string') type = body.type
     if (typeof body.detail === 'string' && body.detail.trim()) detail = body.detail
+    if (Array.isArray(body.parts)) parts = body.parts.filter((part): part is string => typeof part === 'string')
   } catch {
     // Not JSON: the fallback text stands.
   }
-  return new StoreError(response.status, type, detail, retryAfter(response))
+  return new StoreError(response.status, type, detail, retryAfter(response), parts)
 }
 
 interface CallOptions {

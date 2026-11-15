@@ -3,7 +3,7 @@ import { useState } from 'react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { CHARM, KEYCHAIN, TAG } from '../../mocks/features/storefrontPublic'
-import type { ParamValue } from '../api/client'
+import type { Listing, ParamValue } from '../api/client'
 import { ListingView } from './ListingView'
 
 describe('ListingView', () => {
@@ -16,7 +16,7 @@ describe('ListingView', () => {
     expect(onChange).toHaveBeenLastCalledWith('size', 5)
     // #6152: a colour is a picker of filaments; #6258: a pick is the colour in the values.
     await userEvent.click(screen.getByRole('button', { name: /Base colour/ }))
-    await userEvent.click(screen.getByRole('radio', { name: 'Signal orange PLA' }))
+    await userEvent.click(screen.getByRole('radio', { name: 'Signal orange' }))
     expect(onChange).toHaveBeenLastCalledWith('base_colour', '#E8532F')
   })
 
@@ -84,8 +84,8 @@ describe('ListingView', () => {
     // #6152: the colour row names the shop's colour; its grid shows it picked.
     expect(screen.getByRole('button', { name: /Base colour/ })).toHaveAccessibleName('Base colour Ocean blue')
     await userEvent.click(screen.getByRole('button', { name: /Base colour/ }))
-    expect(screen.getByRole('radio', { name: 'Ocean blue PLA' })).toHaveAttribute('data-state', 'on')
-    expect(screen.getByRole('radio', { name: 'Signal orange PLA' })).toHaveAttribute('data-state', 'off')
+    expect(screen.getByRole('radio', { name: 'Ocean blue' })).toHaveAttribute('data-state', 'on')
+    expect(screen.getByRole('radio', { name: 'Signal orange' })).toHaveAttribute('data-state', 'off')
     expect(screen.getByLabelText('Length (mm)')).toHaveAttribute('placeholder', '60')
   })
 
@@ -109,12 +109,81 @@ describe('ListingView', () => {
     const hint = () => document.getElementById(row().closest('[aria-describedby]')!.getAttribute('aria-describedby')!)
     expect(hint()).toHaveTextContent("The shop's choice, unless you pick one.")
     await userEvent.click(row())
-    await userEvent.click(screen.getByRole('radio', { name: 'Ocean blue PLA' }))
+    await userEvent.click(screen.getByRole('radio', { name: 'Ocean blue' }))
     expect(onChange.mock.calls.every(([, value]) => value === undefined)).toBe(true)
     expect(row()).toHaveAccessibleName('Base colour Ocean blue')
     await userEvent.click(row())
-    expect(screen.getByRole('radio', { name: 'Ocean blue PLA' })).toHaveAttribute('data-state', 'on')
+    expect(screen.getByRole('radio', { name: 'Ocean blue' })).toHaveAttribute('data-state', 'on')
     expect(hint()).toHaveTextContent("The shop's choice, unless you pick one.")
     expect(screen.queryByText(/Tap it again/)).toBeNull()
+  })
+})
+
+/**
+ * #6258: CHARM with a third part, the loop, whose default black both materials offer. Blue
+ * and orange are PLA only, teal and rust PETG only.
+ */
+const LOOPED: Listing = {
+  ...CHARM,
+  params: {
+    ...CHARM.params,
+    loop_colour: { kind: 'choice', label: 'Loop colour', group: '', colour: true, choices: ['#1B6CA8', '#1C8C8C', '#101010'], default: '#101010' },
+  },
+  colours: [
+    ...CHARM.colours,
+    { id: 'k1', colour: '#101010', colour_name: 'Black', material: 'PLA' },
+    { id: 'k2', colour: '#101010', colour_name: 'Black', material: 'PETG' },
+  ],
+}
+
+/** ListingView with the visitor's values kept, as the page keeps them. */
+function Kept({ listing, onChange = () => undefined }: { listing: Listing; onChange?: (name: string, value: ParamValue | undefined) => void }) {
+  const [values, setValues] = useState<Record<string, ParamValue>>({})
+  return (
+    <ListingView
+      listing={listing}
+      values={values}
+      onChange={(name, value) => {
+        onChange(name, value)
+        setValues(({ [name]: _old, ...rest }) => (value === undefined ? rest : { ...rest, [name]: value }))
+      }}
+    />
+  )
+}
+
+describe('ListingView colour cascade (#6258)', () => {
+  it('moves an untouched part to its closest PETG colour at once when a PETG-only colour is picked, and keeps a default PETG offers', async () => {
+    const onChange = vi.fn()
+    render(<Kept listing={LOOPED} onChange={onChange} />)
+    expect(screen.getByRole('button', { name: /Rim colour/ })).toHaveAccessibleName('Rim colour Ocean blue')
+    await userEvent.click(screen.getByRole('button', { name: /Body colour/ }))
+    await userEvent.click(screen.getByRole('radio', { name: 'Rust' }))
+    expect(screen.getByRole('button', { name: /Rim colour/ })).toHaveAccessibleName('Rim colour Teal')
+    expect(screen.getByRole('button', { name: /Loop colour/ })).toHaveAccessibleName('Loop colour Black')
+    // The moved part is still the shop's choice: the page sends only the visitor's pick.
+    expect(onChange.mock.calls).toEqual([['body_colour', '#C0502A']])
+  })
+
+  it('never moves a colour the visitor set', async () => {
+    render(<Kept listing={LOOPED} />)
+    await userEvent.click(screen.getByRole('button', { name: /Rim colour/ }))
+    await userEvent.click(screen.getByRole('radio', { name: 'Signal orange' }))
+    await userEvent.click(screen.getByRole('button', { name: /Body colour/ }))
+    await userEvent.click(screen.getByRole('radio', { name: 'Rust' }))
+    // Orange and rust share no material: the shop answers 422, and the page says so.
+    expect(screen.getByRole('button', { name: /Rim colour/ })).toHaveAccessibleName('Rim colour Signal orange')
+    expect(screen.getByRole('button', { name: /Body colour/ })).toHaveAccessibleName('Body colour Rust')
+  })
+
+  it('shows the colours a render start settled over its own prediction', () => {
+    render(
+      <ListingView
+        listing={LOOPED}
+        values={{ body_colour: '#C0502A' }}
+        settled={{ body_colour: '#C0502A', rim_colour: '#C0502A', loop_colour: '#101010' }}
+        onChange={() => undefined}
+      />,
+    )
+    expect(screen.getByRole('button', { name: /Rim colour/ })).toHaveAccessibleName('Rim colour Rust')
   })
 })
