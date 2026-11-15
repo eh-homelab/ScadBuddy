@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
@@ -19,10 +20,13 @@ T0 = datetime(2026, 11, 14, 12, tzinfo=UTC)
 SPOOL = UUID(int=1)
 
 
+_SEQ = itertools.count(1)
+
+
 def _event(minute: int, kind: str, source: str | None, **over: Any) -> SpoolEvent:
     values: dict[str, Any] = {
         "id": uuid4(),
-        "seq": minute,
+        "seq": next(_SEQ),
         "spool_id": SPOOL,
         "at": T0 + timedelta(minutes=minute),
         "kind": kind,

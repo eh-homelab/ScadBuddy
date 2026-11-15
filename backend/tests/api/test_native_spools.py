@@ -105,7 +105,7 @@ def test_a_bambuddy_linked_spool_is_not_deleted(client: TestClient) -> None:
     refused = client.delete(path)
     assert refused.status_code == 409, refused.text
     assert "Bambuddy" in refused.json()["detail"]
-    assert "archive" in refused.json()["detail"]
+    assert "stays, archived" in refused.json()["detail"]
     assert client.get(path).status_code == 200
 
 

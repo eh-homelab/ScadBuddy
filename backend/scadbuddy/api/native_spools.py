@@ -124,14 +124,19 @@ async def patch_native_spool(
     summary="Forget one of ScadBuddy's own spools",
     description=(
         "Gone for good; archive it instead to keep its record. 404 for no such spool, 409 "
-        "when a print has ended on it (its ledger keeps that print)."
+        "when a print has ended on it (its ledger keeps that print) or Bambuddy links it "
+        "(the next pull would make it again)."
     ),
 )
 async def delete_native_spool(spools: SpoolsDep, spool_id: UUID) -> Response:
     try:
         deleted = await asyncio.to_thread(native_provider(spools).store.delete, spool_id)
-    except SpoolBambuddyLinkedError as error:
-        raise ApiError(status.HTTP_409_CONFLICT, str(error)) from None
+    except SpoolBambuddyLinkedError:
+        # Settings offers Delete on an archived spool only, so "archive it" says nothing.
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "the spool stays, archived: Bambuddy links it and the next pull would bring it back",
+        ) from None
     except SpoolInUseError:
         # Settings offers Delete on an archived spool only, so "archive it" says nothing.
         raise ApiError(
