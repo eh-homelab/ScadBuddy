@@ -32,8 +32,9 @@ import type { ImageRef, SentImage, ServerEvent } from './protocol.js'
 //
 // Once the API lists area `session-blobs` (#5299 step 7), `CrudSessionBlobs` (crudBlobs.ts)
 // runs each method on the API's CRUD routes instead (backend api/crud_agent_blobs.py), the
-// same statements in one transaction; `copyForkBlobs` stays here, in the forget's own
-// transaction, until the sessions move (#5299 step 9).
+// same statements in one transaction. A forget through the API copies a fork's images there
+// (backend events.py `copy_fork_blobs`, #5299 step 9, part c); `copyForkBlobs` is the agent's own
+// forget transaction's, while the API has no area `forget` or no KEK.
 
 /** The most images one tool result keeps; any past it stay `[image]` in the summary. */
 export const RESULT_IMAGES_MAX = 8

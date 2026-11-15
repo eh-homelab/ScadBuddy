@@ -302,8 +302,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `RELEASE_AUDIT_WINDOW`) writes in its transaction; `rotation.py` the re-wrap of the credentials and payload
   keys at the API's start (`main._rotate_agent_secrets`). For `api/crud_agent_forget.py` (area
   `forget`, #5299 step 6): `forget.py` a subject's tombstone, its flow images and its key in one
-  transaction under its lock (a session with forks refused, `ForksTakeRangesError`: the agent
-  copies their ranges itself until its sessions move here), a browser call's key dropped and the
+  transaction under its lock, a session's forks first taking their ranges of its transcript,
+  events and images (`transcripts.py` `copy_fork_ranges`, #5299 step 9, part c; refused,
+  `ForksTakeRangesError`, only with no KEK when a fork takes transcript entries, and the agent
+  copies them itself), a browser call's key dropped and the
   hourly sweep of the keys no forget deletes; `flow_blobs.py` a flow run's images kept (sealed by
   the agent, sent as multipart bytes; the tombstone check and `FLOW_IMAGES_MAX` under the lock)
   and read. For `api/crud_agent_workspace.py` (area `workspace`, #5299 step 7): `workspace.py`

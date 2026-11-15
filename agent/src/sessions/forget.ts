@@ -39,10 +39,10 @@ import { notifyWarmEvict } from './warmEvict.js'
 // Step 1's transaction is the API's once it lists area `forget` (#5299 step 6, backend
 // api/crud_agent_forget.py): `CrudSubjectKeys.forget` asks `POST …/crud/agent/forgotten-subjects/
 // {subject}`, which takes the lock, writes the tombstone and deletes a flow run's images and the
-// key in one transaction. A session with forks is refused there (`forks`): its forks' copies
-// open and seal its transcript, which stays here, so its forget runs the transaction below until
-// the sessions move to the API (#5299 step 9). Under the same lock, so either way a fork made later
-// sees the tombstone.
+// key in one transaction, a session's forks first taking their ranges of its transcript, events
+// and images there (backend transcripts.py `copy_fork_ranges`, #5299 step 9, part c). Only an API
+// with no KEK, whose forks take transcript entries, refuses it (`forks`): its forget then runs the
+// transaction below. Under the same lock, so either way a fork made later sees the tombstone.
 // Its callers: an operator (`node dist/forget-subject.js <subject>`) and any delete
 // route added later. `SessionStore.delete` is never reached for a durable session,
 // whose conversation is in its workflow, not in ai_session_entries.
@@ -94,8 +94,9 @@ async function endBackgroundTasks(deps: ForgetDeps, sessionId: string): Promise<
 export async function forgetSubject(deps: ForgetDeps, subject: string): Promise<Forgotten> {
   if (subjectOf(subject) !== subject) throw new Error(`${subject} is not a session-<uuid> or flow-<uuid> subject`)
   const sessionId = subject.startsWith('session-') ? subject.slice('session-'.length) : undefined
-  // Said before anything ends; the check that holds is copyForkRanges's, under the lock.
-  if (sessionId !== undefined && !deps.keys && (await hasForks(deps.sql, sessionId))) throw new ForksNeedKeys(sessionId)
+  // Said before anything ends; the check that holds is copyForkRanges's, under the lock. With the
+  // API's route the API copies the ranges under its own KEK, so none is needed here.
+  if (sessionId !== undefined && !deps.crud && !deps.keys && (await hasForks(deps.sql, sessionId))) throw new ForksNeedKeys(sessionId)
   deps.keys?.forget(subject)
   if (sessionId !== undefined) await endBackgroundTasks(deps, sessionId)
   if (sessionId !== undefined && deps.client) await terminateOpenToolCalls({ sql: deps.sql, client: deps.client }, sessionId, 'forgotten (forgetSubject)')
@@ -232,7 +233,8 @@ export class CrudSubjectKeys implements KeyDeletes {
 
   /**
    * forgetSubject's step 1: whether the subject had a key; `forks` for a session whose forks take
-   * their ranges first, which forgetSubject's own transaction does.
+   * transcript entries when the API has no KEK to copy them, which forgetSubject's own
+   * transaction then does.
    */
   async forget(subject: string): Promise<boolean | 'forks'> {
     try {

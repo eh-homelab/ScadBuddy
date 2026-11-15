@@ -60,9 +60,11 @@ made under the subject's lock and never for a forgotten subject, audited as kind
 None needs a KEK in this process once listed. Area `forget` (#5299 step 6, `FORGET_AREAS`;
 backend `api/crud_agent_forget.py`): `forgetSubject`'s key transaction (`src/sessions/forget.ts`
 `CrudSubjectKeys.forget`: under the subject's lock, the tombstone, a flow run's images and the
-key; a session with forks is refused `forks-take-ranges` and forgotten in the agent's own
-transaction, whose `copyForkRanges` opens and seals its transcript, until the sessions move,
-#5299 step 9), a browser call's key dropped and the hourly key sweep (`gatedKeyDeletes`), and a
+key, a session's forks first taking their ranges of its transcript, events and images in that
+transaction, opened and sealed by the API (backend `transcripts.py` `copy_fork_ranges`, #5299 step
+9, part c); only an API with no KEK, whose forks take transcript entries, refuses it
+`forks-take-ranges`, and the agent forgets it in its own transaction, whose `copyForkRanges` opens
+and seals its transcript), a browser call's key dropped and the hourly key sweep (`gatedKeyDeletes`), and a
 flow run's images (`src/temporal/flowBlobs.ts` `CrudFlowBlobs`, `gatedFlowBlobs`: sealed here,
 sent as multipart bytes, the tombstone check and the cap in the API's transaction).
 Area `workspace` (#5299 step 7, `WORKSPACE_AREAS`; backend `api/crud_agent_workspace.py`):
@@ -77,8 +79,9 @@ behind the `SessionImages` interface; a durable tool call's images replaced whol
 placement's write fenced by `TurnFence`, checked `FOR SHARE` in the API's transaction), the
 staged attachments (`src/attachments/crudStore.ts` `CrudAttachmentStore` behind `Attachments`)
 and the saved http_request bodies (`CrudHttpBodies`, read by range), each chosen per call by
-`gated` in `main.ts`; the bytes are multipart parts and answer bodies. `copyForkBlobs` stays
-SQL, in the forget's transaction, until #5299 step 9.
+`gated` in `main.ts`; the bytes are multipart parts and answer bodies. A forget through the API
+copies a fork's images there (#5299 step 9, part c); `copyForkBlobs` is the agent's own forget
+transaction's.
 A session's background tasks, a Monitor's events
 and a Workflow's journal and child chats (area `background-tasks`, `src/background/store.ts`
 `BackgroundTaskStore`'s `remote`, `CrudBackgroundTasks`) and the command record `ai_operations`

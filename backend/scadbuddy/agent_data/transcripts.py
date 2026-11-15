@@ -25,6 +25,7 @@ from typing import Any
 
 from psycopg import Connection
 
+from scadbuddy.agent_data import events
 from scadbuddy.agent_data.payload_keys import key_in
 from scadbuddy.agent_data.workspace import Keks
 from scadbuddy.core.secrets import open_bytes, seal_bytes
@@ -394,3 +395,89 @@ def user_landed(conn: Connection[Any], session_id: str, mark: int) -> bool:
         except ValueError:
             continue
     return False
+
+
+#: At most this many rows in one insert of ``copy_fork_ranges``.
+COPY_BATCH = 1000
+
+
+def copy_fork_ranges(conn: Connection[Any], parent_id: str, keys: Keks) -> int:
+    """``store.ts`` ``copyForkRanges``, in the forget's transaction under the parent's lock:
+    each fork that reads through ``parent_id`` takes the range it references as rows of its own,
+    ``inherited`` and sealed under its own key, with its events and the images they name, and
+    its link is cleared. A fork forgotten itself gets no rows, only its link cleared. How many
+    forks there were. KeyUnavailableError without a KEK when a fork takes transcript entries."""
+    children = conn.execute(
+        "SELECT id::text AS id, fork_cut AS cut FROM ai_sessions"
+        " WHERE fork_parent_id = %s::uuid ORDER BY id FOR UPDATE",
+        (parent_id,),
+    ).fetchall()
+    if not children:
+        return 0
+    takes_entries = any((c["cut"] or 0) > 0 for c in children)
+    if takes_entries and keys.current is None:
+        raise KeyUnavailableError("the API has no SCADBUDDY_SECRET_KEY_FILE")
+    texts: list[str] = []
+    if takes_entries:
+        for owner, owned in segments(conn, parent_id):
+            texts.extend(_open(conn, owner, "", owned, keys))
+    for child in children:
+        child_id = child["id"]
+        subject = f"session-{child_id}"
+        taken = texts[: child["cut"] or 0]
+        dek = None
+        if taken:
+            assert keys.current is not None
+            with conn.transaction():
+                dek, _made = key_in(
+                    conn,
+                    subject,
+                    create=True,
+                    standing=False,
+                    kek=keys.current,
+                    previous=keys.previous,
+                )
+        # As an append does: a forget of the child either went first, and its tombstone is seen
+        # here, or waits for this to commit and then deletes these rows with the rest.
+        conn.execute(
+            "SELECT pg_advisory_xact_lock_shared(hashtext(%s))", (payload_key_lock(subject),)
+        )
+        forgotten = conn.execute(
+            "SELECT 1 FROM ai_forgotten_subjects WHERE subject = %s", (subject,)
+        ).fetchone()
+        if dek is not None and forgotten is None:
+            for at in range(0, len(taken), COPY_BATCH):
+                batch = taken[at : at + COPY_BATCH]
+                ids = [
+                    int(r["id"])
+                    for r in conn.execute(
+                        "SELECT nextval(pg_get_serial_sequence('ai_session_entries', 'id')) AS id"
+                        " FROM generate_series(1, %s)",
+                        (len(batch),),
+                    ).fetchall()
+                ]
+                inserts: list[tuple[Any, ...]] = []
+                for row_id, text in zip(ids, batch, strict=True):
+                    entry = _parsed(text)
+                    uuid = entry.get("uuid") if isinstance(entry.get("uuid"), str) else None
+                    bound = uuid if uuid is not None else f"#{row_id}"
+                    sealed = seal_bytes(dek, text.encode(), entry_context(child_id, "", bound))
+                    inserts.append((row_id, child_id, uuid, entry_type_of(entry), sealed))
+                with conn.cursor() as cur:
+                    # A uuid the fork already holds as its own row stays there.
+                    cur.executemany(
+                        "INSERT INTO ai_session_entries (id, project_key, session_id, subpath,"
+                        " uuid, entry_type, sealed, inherited) VALUES (%s, '', %s, '', %s, %s, %s,"
+                        " true) ON CONFLICT (session_id, subpath, uuid) WHERE uuid IS NOT NULL"
+                        " DO NOTHING",
+                        inserts,
+                    )
+        if forgotten is None:
+            copied = events.copy_fork_events(conn, child_id)
+            events.copy_fork_blobs(conn, child_id, events.blob_names(copied))
+        conn.execute(
+            "UPDATE ai_sessions SET fork_parent_id = NULL, fork_cut = NULL,"
+            " fork_event_cut = NULL WHERE id = %s::uuid",
+            (child_id,),
+        )
+    return len(children)
