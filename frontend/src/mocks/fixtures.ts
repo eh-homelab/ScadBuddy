@@ -26,7 +26,8 @@ import type {
   Settings,
   BootstrapValue,
 } from '../api/types'
-import settingDocsJson from '../api/settingDocs.json'
+// Node's loader (Playwright's) needs the attribute; Vite takes it too.
+import settingDocsJson from '../api/settingDocs.json' with { type: 'json' }
 
 /**
  * `group` carries a default on the wire, so the generated type makes it required —
