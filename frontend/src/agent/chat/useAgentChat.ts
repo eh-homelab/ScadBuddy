@@ -61,8 +61,8 @@ export interface AgentChat {
   /** #940 — answers the agent's question: one answer per question, in order. */
   answer: (sessionId: string, questionId: string, answers: string[]) => void
   interrupt: (sessionId: string) => void
-  /** #6386 — removes a queued message before it starts. */
-  removeQueued: (sessionId: string, id: string) => void
+  /** #6386 — removes a queued message before it starts; false when it was not sent. */
+  removeQueued: (sessionId: string, id: string) => boolean
   /** #6386 — gives a queued message new words before it starts. */
   editQueued: (sessionId: string, id: string, text: string) => void
   /** Take over a session another principal controls (§6 handoff). */
@@ -197,10 +197,12 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
   }, [claim])
 
   /** Sends a control frame, saying so when it is refused or held for the reconnect. */
-  const control = useCallback((message: ClientMessage, queued: string) => {
+  /** Sends a control frame; false when the transport refused it (the notice says so). */
+  const control = useCallback((message: ClientMessage, queued: string): boolean => {
     const result = transport.current?.send(message)
     if (result === 'refused') dispatch({ type: 'not-sent', message: NOT_SENT })
     else if (result === 'queued') dispatch({ type: 'queued', message: queued })
+    return result !== 'refused'
   }, [])
 
   const interrupt = useCallback(

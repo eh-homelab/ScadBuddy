@@ -933,6 +933,7 @@ export function AssistantChat({
             entries={queued}
             sessionId={active.id}
             canChange={canSend}
+            errors={active.items.reduce((n, i) => (i.kind === 'error' ? n + 1 : n), 0)}
             onRemove={(id) => chat.removeQueued(active.id, id)}
             onEdit={(id, text) => chat.editQueued(active.id, id, text)}
           />
@@ -1104,7 +1105,7 @@ export function AssistantChat({
               </Button>
             )}
           </div>
-          {busy && (
+          {busy && canSend && (
             <span className="text-[11.5px] text-muted-foreground">
               {state.awaitingStart || !active
                 ? 'Wait for this chat to start.'

@@ -17,6 +17,7 @@ export function QueuedMessages({
   entries,
   sessionId,
   canChange,
+  errors,
   onRemove,
   onEdit,
 }: {
@@ -24,7 +25,10 @@ export function QueuedMessages({
   sessionId: string
   /** The viewer may send to the session, so may change its queue. */
   canChange: boolean
-  onRemove: (id: string) => void
+  /** How many errors the session's transcript shows: a new one may be a refused remove. */
+  errors: number
+  /** False when the remove was not sent (the agent is unreachable and too much waits). */
+  onRemove: (id: string) => boolean
   onEdit: (id: string, text: string) => void
 }) {
   if (entries.length === 0) return null
@@ -37,6 +41,7 @@ export function QueuedMessages({
           next={index === 0}
           sessionId={sessionId}
           canChange={canChange}
+          errors={errors}
           onRemove={() => onRemove(entry.id)}
           onEdit={(text) => onEdit(entry.id, text)}
         />
@@ -50,6 +55,7 @@ function QueuedMessage({
   next,
   sessionId,
   canChange,
+  errors,
   onRemove,
   onEdit,
 }: {
@@ -57,13 +63,19 @@ function QueuedMessage({
   next: boolean
   sessionId: string
   canChange: boolean
-  onRemove: () => void
+  errors: number
+  onRemove: () => boolean
   onEdit: (text: string) => void
 }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(entry.text)
-  /** Sent, until the next `session.queue` drops the entry: the buttons wait for it. */
-  const [removing, setRemoving] = useState(false)
+  /**
+   * The session's error count when Remove was sent. The buttons wait until the next
+   * `session.queue` drops the entry, or until an error arrives: the agent refused the
+   * remove (the entry stays), so they work again.
+   */
+  const [removingAt, setRemovingAt] = useState<number | undefined>(undefined)
+  const removing = removingAt === errors
   const label = next ? 'Queued, runs next' : 'Queued'
 
   const startEditing = () => {
@@ -74,6 +86,7 @@ function QueuedMessage({
     event?.preventDefault()
     const text = draft.trim()
     if (!text) return
+    // The agent trims the words too: a change of surrounding white space only sends nothing.
     if (text !== entry.text) onEdit(text)
     setEditing(false)
   }
@@ -111,8 +124,7 @@ function QueuedMessage({
                 aria-label="Remove queued message"
                 disabled={removing}
                 onClick={() => {
-                  setRemoving(true)
-                  onRemove()
+                  if (onRemove()) setRemovingAt(errors)
                 }}
               >
                 <XIcon />

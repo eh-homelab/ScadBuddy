@@ -11,7 +11,7 @@ const entries: QueuedEntry[] = [
 
 describe('QueuedMessages (#6386)', () => {
   it('lists each queued message in order, the first marked as the next to run', () => {
-    render(<QueuedMessages entries={entries} sessionId="s1" canChange onRemove={() => {}} onEdit={() => {}} />)
+    render(<QueuedMessages entries={entries} sessionId="s1" canChange errors={0} onRemove={() => true} onEdit={() => {}} />)
     const items = within(screen.getByRole('list', { name: 'Queued messages' })).getAllByRole('listitem')
     expect(items.map((i) => i.getAttribute('aria-label'))).toEqual(['Queued, runs next: Also make it blue', 'Queued: And a hole for the ring'])
     // Another sender is named, as the transcript names them.
@@ -19,22 +19,37 @@ describe('QueuedMessages (#6386)', () => {
   })
 
   it('shows nothing for an empty queue', () => {
-    const { container } = render(<QueuedMessages entries={[]} sessionId="s1" canChange onRemove={() => {}} onEdit={() => {}} />)
+    const { container } = render(<QueuedMessages entries={[]} sessionId="s1" canChange errors={0} onRemove={() => true} onEdit={() => {}} />)
     expect(container).toBeEmptyDOMElement()
   })
 
   it('removes one, and waits for the queue to drop it', async () => {
-    const onRemove = vi.fn()
-    render(<QueuedMessages entries={entries} sessionId="s1" canChange onRemove={onRemove} onEdit={() => {}} />)
+    const onRemove = vi.fn(() => true)
+    render(<QueuedMessages entries={entries} sessionId="s1" canChange errors={0} onRemove={onRemove} onEdit={() => {}} />)
     const first = screen.getAllByRole('listitem')[0]!
     await userEvent.click(within(first).getByRole('button', { name: 'Remove queued message' }))
     expect(onRemove).toHaveBeenCalledWith('q1')
     expect(within(first).getByRole('button', { name: 'Remove queued message' })).toBeDisabled()
   })
 
+  it('keeps a refused remove usable: not sent, or refused by the agent with an error', async () => {
+    const button = () => within(screen.getAllByRole('listitem')[0]!).getByRole('button', { name: 'Remove queued message' })
+    // Not sent (the agent is unreachable and too much waits): the buttons stay.
+    const { rerender } = render(<QueuedMessages entries={entries} sessionId="s1" canChange errors={0} onRemove={() => false} onEdit={() => {}} />)
+    await userEvent.click(button())
+    expect(button()).toBeEnabled()
+    // Sent, then the agent answers with an error and the entry stays: the buttons work again.
+    rerender(<QueuedMessages entries={entries} sessionId="s1" canChange errors={0} onRemove={() => true} onEdit={() => {}} />)
+    await userEvent.click(button())
+    expect(button()).toBeDisabled()
+    rerender(<QueuedMessages entries={entries} sessionId="s1" canChange errors={1} onRemove={() => true} onEdit={() => {}} />)
+    expect(button()).toBeEnabled()
+    expect(within(screen.getAllByRole('listitem')[0]!).getByRole('button', { name: 'Edit queued message' })).toBeEnabled()
+  })
+
   it('edits one: Save sends the new words, Escape sends nothing', async () => {
     const onEdit = vi.fn()
-    render(<QueuedMessages entries={entries} sessionId="s1" canChange onRemove={() => {}} onEdit={onEdit} />)
+    render(<QueuedMessages entries={entries} sessionId="s1" canChange errors={0} onRemove={() => true} onEdit={onEdit} />)
     const second = () => screen.getAllByRole('listitem')[1]!
     await userEvent.click(within(second()).getByRole('button', { name: 'Edit queued message' }))
     expect(within(second()).getByRole('textbox', { name: 'Queued message' })).toHaveFocus()
@@ -49,7 +64,7 @@ describe('QueuedMessages (#6386)', () => {
   })
 
   it('offers no changes to a viewer who may not send to the session', () => {
-    render(<QueuedMessages entries={entries} sessionId="s1" canChange={false} onRemove={() => {}} onEdit={() => {}} />)
+    render(<QueuedMessages entries={entries} sessionId="s1" canChange={false} errors={0} onRemove={() => true} onEdit={() => {}} />)
     expect(screen.queryByRole('button')).toBeNull()
   })
 })
