@@ -1052,6 +1052,8 @@ type Expected = { key: string; present: boolean; value?: unknown }
 
 /** How many times a compare-and-set reads again after another writer moved a key it read. */
 export const SETTINGS_CAS_TRIES = 5
+/** The most keys one `GET …/settings` takes (backend api/crud_agent_secrets.py `SETTINGS_MAX`). */
+export const SETTINGS_READ_MAX = 50
 
 /** `ai_settings` through the API's CRUD routes, area `settings` (see above). */
 export class CrudSettings {
@@ -1064,9 +1066,22 @@ export class CrudSettings {
   }
 
   async get<T>(key: string): Promise<T | undefined> {
-    const path = `/settings?${new URLSearchParams({ key }).toString()}`
-    const { values } = await crudRead<{ values: Record<string, unknown> }>(this.#fetch, this.#base, 'a setting', path)
-    return Object.hasOwn(values, key) ? (values[key] as T) : undefined
+    return (await this.getMany([key])).get(key) as T | undefined
+  }
+
+  /**
+   * The keys' values, one `GET …/settings` per SETTINGS_READ_MAX keys (the route's cap); a key
+   * with no row is absent from the map.
+   */
+  async getMany(keys: readonly string[]): Promise<Map<string, unknown>> {
+    const found = new Map<string, unknown>()
+    const unique = [...new Set(keys)]
+    for (let at = 0; at < unique.length; at += SETTINGS_READ_MAX) {
+      const params = new URLSearchParams(unique.slice(at, at + SETTINGS_READ_MAX).map((key): [string, string] => ['key', key]))
+      const { values } = await crudRead<{ values: Record<string, unknown> }>(this.#fetch, this.#base, 'settings', `/settings?${params.toString()}`)
+      for (const [key, value] of Object.entries(values)) found.set(key, value)
+    }
+    return found
   }
 
   /**
@@ -1084,18 +1099,29 @@ export class CrudSettings {
   /**
    * `setMany`'s compare-and-set: `check` runs over values read from the API, and the write goes
    * through only while each value it read still holds, compared under the table's lock on the
-   * API. A writer in between means reading again, at most SETTINGS_CAS_TRIES times.
+   * API. A writer in between means reading again, at most SETTINGS_CAS_TRIES times. Each try
+   * reads in one `GET …/settings` the keys it writes and every key an earlier try's check read;
+   * a key the check asks for beyond those is one more read, and is in the next try's batch.
    */
   async compareAndSet(
     values: Record<string, unknown>,
     check: (current: { get<T>(key: string): Promise<T | undefined> }) => Promise<boolean>,
   ): Promise<boolean> {
+    const wanted = new Set(Object.keys(values))
     for (let attempt = 0; attempt < SETTINGS_CAS_TRIES; attempt++) {
+      const batch = await this.getMany([...wanted])
+      const fetched = new Set(wanted)
       const read = new Map<string, unknown>()
       const current = {
         get: async <T>(key: string): Promise<T | undefined> => {
-          if (!read.has(key)) read.set(key, await this.get<unknown>(key))
-          return read.get(key) as T | undefined
+          if (!fetched.has(key)) {
+            const more = await this.getMany([key])
+            if (more.has(key)) batch.set(key, more.get(key))
+            fetched.add(key)
+            wanted.add(key)
+          }
+          read.set(key, batch.get(key))
+          return batch.get(key) as T | undefined
         },
       }
       if (!(await check(current))) return false

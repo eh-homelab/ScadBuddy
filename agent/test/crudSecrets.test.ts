@@ -14,6 +14,7 @@ import {
   gatedCredentials,
   type CredentialRepo,
   SETTINGS_CAS_TRIES,
+  SETTINGS_READ_MAX,
   SettingsStore,
 } from '../src/credentials.js'
 import { CredentialPool } from '../src/harness/fallback.js'
@@ -350,9 +351,47 @@ describe('CrudSettings and SettingsStore over the routes', () => {
       ],
     ])
     expect(api.settings.get('mcp_auth_mode')).toBe('disabled')
+    // Each try read the keys in one GET, before its write.
+    expect(api.seen.map((r) => `${r.method} ${r.path}`)).toEqual([
+      'GET /settings?key=mcp_auth_mode&key=mcp_anonymous_cap',
+      'POST /settings',
+      'GET /settings?key=mcp_auth_mode&key=mcp_anonymous_cap',
+      'POST /settings',
+    ])
     // A check that says no writes nothing.
     expect(await store.setMany({ mcp_auth_mode: 'bearer' }, () => Promise.resolve(false))).toBe(false)
     expect(api.settings.get('mcp_auth_mode')).toBe('disabled')
+  })
+
+  it('reads a key the check asks beyond its writes once, then in the next try\'s batch', async () => {
+    const { api, fetch } = setup()
+    const crud = new CrudSettings(BASE, { fetch })
+    api.settings.set('other', 1)
+    let raced = false
+    api.beforeWrite = () => {
+      if (!raced) api.settings.set('other', 2)
+      raced = true
+    }
+    const seen: unknown[] = []
+    expect(await crud.compareAndSet({ k: 0 }, async (c) => (seen.push(await c.get('other')), true))).toBe(true)
+    expect(seen).toEqual([1, 2])
+    expect(api.seen.map((r) => `${r.method} ${r.path}`)).toEqual([
+      'GET /settings?key=k',
+      'GET /settings?key=other',
+      'POST /settings',
+      'GET /settings?key=k&key=other',
+      'POST /settings',
+    ])
+    expect((api.seen.at(-1)?.body as { expect: unknown }).expect).toEqual([{ key: 'other', present: true, value: 2 }])
+  })
+
+  it('reads at most SETTINGS_READ_MAX keys a GET', async () => {
+    const { api, fetch } = setup()
+    const keys = Array.from({ length: SETTINGS_READ_MAX + 1 }, (_, i) => `k${i}`)
+    api.settings.set('k50', 'last')
+    const found = await new CrudSettings(BASE, { fetch }).getMany(keys)
+    expect([...found]).toEqual([['k50', 'last']])
+    expect(api.seen.map((r) => new URLSearchParams(r.path.split('?')[1]).getAll('key').length)).toEqual([SETTINGS_READ_MAX, 1])
   })
 
   it('gives up after its tries when every write meets another writer', async () => {
