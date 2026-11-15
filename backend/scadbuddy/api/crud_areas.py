@@ -43,7 +43,15 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: ``…/print/access-codes`` and ``…/access-codes/virtual-printer``: whether the API opens
 #: access codes, and a virtual printer's sealed code opened (#5298 Task 33). The intake
 #: ``sources`` area is ``…/intake/sources/{id}/read``, ``…/preview`` and ``…/check``: a
-#: customer's staged file, checked by the intake worker (#6133).
+#: customer's staged file, checked by the intake worker (#6133). The agent's small stores
+#: (#5299 step 5, `api/crud_agent_stores.py`): its ``activity-kinds`` area is
+#: ``…/agent/activity-kinds``; its ``browser-origins`` area is ``…/agent/browser-origins``
+#: and every route under it, a session's approved origins; its ``bridge-tabs`` area is
+#: ``…/agent/session-tabs``, ``…/agent/tab-owners/*`` and ``…/agent/tab-images/{name}``
+#: (the bytes in the body), which tab a session pairs with, which replica holds a tab and
+#: a tab's images; its ``pairings`` area is ``…/agent/pairings`` and every route under it;
+#: its ``mcp-tokens`` area is ``…/agent/mcp-tokens`` and every route under it, the MCP
+#: bearer tokens by their hashes.
 CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "projects": ["flows", "operations", "payload-keys"],
     "render": ["settings", "jobs", "refs", "blob-index", "store-folders", "assets", "libraries"],
@@ -76,7 +84,17 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "order",
         "models",
     ],
-    "agent": ["order-costs", "workspace-blob-refs", "events", "flows"],
+    "agent": [
+        "order-costs",
+        "workspace-blob-refs",
+        "events",
+        "flows",
+        "activity-kinds",
+        "browser-origins",
+        "bridge-tabs",
+        "pairings",
+        "mcp-tokens",
+    ],
     "intake": ["sources"],
 }
 
