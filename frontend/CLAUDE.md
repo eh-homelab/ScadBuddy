@@ -156,6 +156,17 @@ same way, `vite.config.ts`).
   which sets the image on each listing of that template through `PUT
   /storefront/listings/{id}/media`; a published listing is published again at once.
 
+- The order lists (#6334): `pages/OrdersPage.tsx`'s views (`lib/orderViews.ts`
+  `ORDER_VIEWS`, each a fixed set of URL filters; the active one is the one the URL holds)
+  and its closed-order rule: a closed or cancelled order that ended more than N days ago is
+  left out by the API's `ended_since` (`endedSince`, local midnight, so the list's key moves
+  once a day) unless `old=1`. N, "Remember my view" and the last view's query (never the
+  search or a profit report row's filters) live in `localStorage` (`ORDERS_MEMORY_KEY`); a
+  visit to `/orders` with no query opens the remembered one. An order's items table puts
+  the live lines first and the fulfilled and cancelled ones in groups after them
+  (`components/orders/itemGroups.ts`, `DataTable` `groups`), each group's state remembered
+  there too. A unit test of the list pins `Date` (`vi.useFakeTimers({ toFake: ['Date'] })`)
+  and the e2e `page.clock.setFixedTime`, so the mocks' closed order stays on its side of N.
 - Customer messages (#5660): Settings → Orders' `components/settings/CustomerMessaging.tsx`
   (bind, check, test send, unbind) and the order page's `components/orders/OrderMessages.tsx`
   ("Mark sent", "Send again" through a preview). The list and "Mark sent" go through the

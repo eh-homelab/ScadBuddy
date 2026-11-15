@@ -7,7 +7,9 @@ import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
-import { CELL, DataTable, ROW, type Column } from '../records/DataTable'
+import { CELL, DataTable, ROW, type Column, type RowGroup } from '../records/DataTable'
+import { groupItems, type ItemGroupKey } from './itemGroups'
+import { readOrdersMemory, storeOrdersMemory } from '../../lib/orderViews'
 import { ItemPicture } from './ItemPicture'
 import { ItemStatusBadge } from './OrderStatusBadge'
 import { byCreated, itemPrice, parseUnitPrice, pricingQuote, UNIT_PRICE_HINT, unitPrice } from './price'
@@ -44,6 +46,9 @@ import { Link } from 'react-router'
  * shown with the reason; an item revised after acceptance (#5350) takes a new price; the
  * title stays editable while the item is open. The ⋯ menu holds the actions allowed now
  * (`itemActions.ts`), a refused one with its reason; Unfulfil (#4952) confirms first.
+ * #6334: the live lines come first; the fulfilled and the cancelled ones follow in groups
+ * that open and close (`itemGroups.ts`), the cancelled one closed at first, each group's
+ * state remembered in the browser. A long title wraps inside its own column.
  */
 export function OrderItemsTable({
   orderId,
@@ -126,6 +131,11 @@ export function OrderItemsTable({
     }
     setPicked(next)
   }
+  const grouped = groupItems(items)
+  const [openGroups, setOpenGroups] = useState(() => readOrdersMemory().itemGroups)
+  const toggleGroup = (key: ItemGroupKey, open: boolean) => setOpenGroups(storeOrdersMemory({ itemGroups: { ...openGroups, [key]: open } }).itemGroups)
+  // Under its group's header, a cancelled line no longer says "not counted": the header does.
+  const cancelledGrouped = grouped.groups.some((group) => group.key === 'cancelled')
   const columns: Column<OrderItemDetail>[] = []
   if (selectable && items.length > 0) {
     const all = chosen.length === items.length
@@ -152,9 +162,11 @@ export function OrderItemsTable({
     {
       key: 'title',
       header: 'Item',
-      className: 'break-words',
+      // #6334: the column keeps a width of its own, so a long title wraps here and never
+      // runs under the status beside it.
+      className: 'min-w-48 break-words',
       cell: (item, open) => (
-        <span className="flex flex-col items-start gap-0.5">
+        <span className="flex min-w-0 flex-col items-start gap-0.5">
           <TitleEditor orderId={orderId} item={item} editable={itemEdits(order, item).title} open={open} onChanged={onChanged} pageBusy={busy} />
           {/* #5544 — a library file item names its file, by its name when it was added. */}
           {item.library_file && (
@@ -178,6 +190,7 @@ export function OrderItemsTable({
     {
       key: 'status',
       header: 'Status',
+      className: 'w-40 min-w-36',
       cell: (item) => <ItemStatus item={item} run={quoting?.get(item.id)} />,
     },
     {
@@ -221,8 +234,8 @@ export function OrderItemsTable({
         if (item.status === 'cancelled') {
           return (
             <span className="flex flex-col items-end text-muted-foreground">
-              <s>{formatMoney(price.amount, currency, exponent)}</s>
-              <span className="text-[11px]">not counted</span>
+              <s aria-label={`${formatMoney(price.amount, currency, exponent)}, not counted`}>{formatMoney(price.amount, currency, exponent)}</s>
+              {!cancelledGrouped && <span className="text-[11px]">not counted</span>}
             </span>
           )
         }
@@ -247,7 +260,15 @@ export function OrderItemsTable({
     columns.push({
       key: 'margin',
       header: <span className="sr-only">Margin</span>,
-      cell: (item) => <MarginBadge state={margins.get(item.id) ?? null} />,
+      cell: (item) =>
+        // A cancelled line's spend is still money lost: the badge says why it shows.
+        item.status === 'cancelled' && margins.get(item.id) === 'loss' ? (
+          <span title="Cancelled after money was spent on it: the cost is a loss.">
+            <MarginBadge state="loss" />
+          </span>
+        ) : (
+          <MarginBadge state={margins.get(item.id) ?? null} />
+        ),
     })
   }
   columns.push({
@@ -272,7 +293,17 @@ export function OrderItemsTable({
     <DataTable
       label="Line items"
       columns={columns}
-      rows={items}
+      rows={grouped.main}
+      groups={grouped.groups.map(
+        (group): RowGroup<OrderItemDetail> => ({
+          key: group.key,
+          label: <GroupLabel kind={group.key} items={group.items} currency={currency} exponent={exponent} />,
+          rows: group.items,
+          open: openGroups[group.key] ?? group.key === 'fulfilled',
+          onToggle: (open) => toggleGroup(group.key, open),
+          rowClassName: group.key === 'cancelled' ? '[&>td]:opacity-60' : '[&>td]:opacity-80',
+        }),
+      )}
       rowKey={(item) => item.id}
       rowTestId={(item) => `order-item-${item.id}`}
       rowId={(item) => itemAnchor(item.id)}
@@ -322,6 +353,25 @@ export function OrderItemsTable({
         ) : undefined
       }
     />
+  )
+}
+
+/** #6334 — a group's header: how many lines, and for the cancelled ones the sum the total leaves out. */
+function GroupLabel({ kind, items, currency, exponent }: { kind: ItemGroupKey; items: OrderItemDetail[]; currency: string; exponent: number }) {
+  const lines = items.length === 1 ? 'line' : 'lines'
+  if (kind === 'fulfilled') return <span>{`${items.length} fulfilled ${lines}`}</span>
+  const left = items.reduce((sum, item) => sum + (itemPrice(item)?.amount ?? 0), 0)
+  return (
+    <span>
+      {`${items.length} cancelled ${lines}, not counted in the total`}
+      {left > 0 && (
+        <>
+          {' ('}
+          <s className="sb-num">{formatMoney(left, currency, exponent)}</s>
+          {')'}
+        </>
+      )}
+    </span>
   )
 }
 
@@ -687,8 +737,8 @@ function TitleEditor({
 
   if (typed === null) {
     return (
-      <span className="flex items-start gap-1">
-        <Button variant="link" className="h-auto p-0 text-left font-medium whitespace-normal text-foreground" onClick={open}>
+      <span className="flex min-w-0 items-start gap-1">
+        <Button variant="link" className="h-auto min-w-0 shrink p-0 text-left font-medium [overflow-wrap:anywhere] whitespace-normal text-foreground" onClick={open}>
           {item.title}
         </Button>
         {editable && (

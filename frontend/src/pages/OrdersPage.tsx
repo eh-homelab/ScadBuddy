@@ -110,7 +110,7 @@ function OrderViews({ query, hideDays, onChange, onHideDays }: { query: OrdersQu
   const active = viewOf(query)
   return (
     <div className="flex flex-col gap-2">
-      <nav aria-label="Order views" className="-mx-4 overflow-x-auto px-4 sm:mx-0 sm:px-0">
+      <nav aria-label="Order views" className="-mx-4 overflow-x-auto px-4 [scrollbar-width:none] sm:mx-0 sm:px-0">
         <ul className="flex w-max gap-1 border-b border-border sm:w-full">
           {ORDER_VIEWS.map((view) => {
             const on = active?.key === view.key
