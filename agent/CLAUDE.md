@@ -74,7 +74,9 @@ transaction under `RECONCILE_LOCK`; this process sends and gets plaintext only.
 Areas `session-blobs`, `attachments` and `http-bodies` (#5299 step 7, `BLOB_AREAS`; backend
 `api/crud_agent_blobs.py`): a session's images (`src/sessions/crudBlobs.ts` `CrudSessionBlobs`
 behind the `SessionImages` interface; a durable tool call's images replaced whole, and a turn
-placement's write fenced by `TurnFence`, checked `FOR SHARE` in the API's transaction), the
+placement's write fenced by `TurnFence`, checked `FOR SHARE` in the API's transaction; a queued
+message's images deleted once it leaves the queue unrun or is refused, `…/session-blobs/deletes`,
+only what its own write made and no write stored since, #6413), the
 staged attachments (`src/attachments/crudStore.ts` `CrudAttachmentStore` behind `Attachments`)
 and the saved http_request bodies (`CrudHttpBodies`, read by range), each chosen per call by
 `gated` in `main.ts`; the bytes are multipart parts and answer bodies. `copyForkBlobs` stays

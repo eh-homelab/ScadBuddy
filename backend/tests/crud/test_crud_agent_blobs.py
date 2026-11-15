@@ -2,8 +2,9 @@
 CRUD routes (#5299 step 7, areas ``session-blobs``, ``attachments``, ``http-bodies``): only
 the ``agent`` credential reaches them; a name is its bytes' sha256 and an image's signature
 its type's, checked again here; a tool call's images replace its earlier attempt's; a
-fenced write stores nothing once the turn moved; a fork reads an ancestor's image only
-when an event it reads names it; an attachment is its owner's alone, under the owner's
+fenced write stores nothing once the turn moved; a delete takes only what one write made and
+no write stored since (#6413); a fork reads an ancestor's image only when an event it reads
+names it; an attachment is its owner's alone, under the owner's
 caps; a saved body is read by range and only the newest ten are kept."""
 
 from __future__ import annotations
@@ -237,8 +238,13 @@ def test_a_name_or_id_that_climbs_is_refused(agent: Agent, tables: PgPool) -> No
 
 def test_images_are_stored_once_by_name_and_read_back(agent: Agent, tables: PgPool) -> None:
     sid = _session(tables)
-    assert agent.blobs(sid, [("image/png", PNG), ("image/jpeg", JPEG)]).json() == {"stored": True}
-    assert agent.blobs(sid, [("image/png", PNG)]).json() == {"stored": True}
+    first = agent.blobs(sid, [("image/png", PNG), ("image/jpeg", JPEG)]).json()
+    assert first["stored"] is True
+    assert first["created"] == [_name(PNG, "png"), _name(JPEG, "jpg")]
+    again = agent.blobs(sid, [("image/png", PNG)]).json()
+    assert again["stored"] is True
+    assert again["created"] == []
+    assert again["at"] > first["at"]
     rows = _sql(tables, "SELECT name FROM ai_session_blobs WHERE session_id = %s", (sid,))
     assert sorted(r["name"] for r in rows) == sorted([_name(PNG, "png"), _name(JPEG, "jpg")])
     read = agent.get("/session-blobs", session_id=sid, name=_name(JPEG, "jpg"))
@@ -286,14 +292,65 @@ def test_a_fenced_write_stores_nothing_once_the_turn_moved(agent: Agent, tables:
         (turn, sid),
     )
     moved = agent.blobs(sid, [("image/png", PNG)], fence={"attempt": "run:2", "turn_id": turn})
-    assert moved.json() == {"stored": False}
+    assert moved.json() == {"stored": False, "created": [], "at": None}
     assert _sql(tables, "SELECT 1 FROM ai_session_blobs") == []
     held = agent.blobs(sid, [("image/png", PNG)], fence={"attempt": "run:1", "turn_id": turn})
-    assert held.json() == {"stored": True}
+    assert held.json()["stored"] is True
     both = agent.blobs(
         sid, [("image/png", PNG)], tool_use_id="t", fence={"attempt": "run:1", "turn_id": turn}
     )
     assert both.status_code == 422
+
+
+def _delete(agent: Agent, session: str, names: list[str], before: str, **extra: Any) -> Any:
+    body = {"session_id": session, "names": names, "before": before, **extra}
+    return agent.post("/session-blobs/deletes", body)
+
+
+def test_a_delete_takes_only_what_its_write_made_and_no_write_stored_since(
+    agent: Agent, tables: PgPool
+) -> None:
+    sid = _session(tables)
+    mine, shared, tool = PNG + b"mine", PNG + b"shared", PNG + b"tool"
+    names = [_name(data, "png") for data in (mine, shared, tool)]
+    agent.blobs(sid, [("image/png", tool)], tool_use_id="toolu_1")
+    made = agent.blobs(sid, [("image/png", mine), ("image/png", shared), ("image/png", tool)])
+    assert made.json()["created"] == names[:2]
+    # Another message stores the same bytes after the write: they stay.
+    agent.blobs(sid, [("image/png", shared)])
+    answer = _delete(agent, sid, names, made.json()["at"])
+    assert answer.json() == {"ran": True, "deleted": [names[0]]}
+    rows = _sql(tables, "SELECT name FROM ai_session_blobs WHERE session_id = %s", (sid,))
+    assert sorted(r["name"] for r in rows) == sorted(names[1:])
+    assert _delete(agent, sid, names, made.json()["at"]).json() == {"ran": True, "deleted": []}
+
+
+def test_a_delete_is_fenced_and_bounded(tables: PgPool) -> None:
+    app = _app(tables)
+    sid = _session(tables)
+    turn = str(uuid.uuid4())
+    _sql(
+        tables,
+        "UPDATE ai_sessions SET turn_attempt = 'run:1', durable_turn_id = %s WHERE id = %s",
+        (turn, sid),
+    )
+    with TestClient(app) as client:
+        agent = Agent(client, _token(app))
+        made = agent.blobs(sid, [("image/png", PNG)]).json()
+        name, at = _name(PNG, "png"), made["at"]
+        moved = _delete(agent, sid, [name], at, fence={"attempt": "run:2", "turn_id": turn})
+        assert moved.json() == {"ran": False, "deleted": []}
+        for names in ([], [f"{'a' * 64}.png"] * 9, ["../x.png"], [f"{'A' * 64}.png"]):
+            assert _delete(agent, sid, names, at).status_code == 422, names
+        assert _delete(agent, "../x", [name], at).status_code == 422
+        no_before = agent.post("/session-blobs/deletes", {"session_id": sid, "names": [name]})
+        assert no_before.status_code == 422
+        body = {"session_id": sid, "names": [name], "before": at}
+        route = f"{BASE}/session-blobs/deletes"
+        assert client.post(route, json=body).status_code == 401
+        assert client.post(route, json=body, headers=_token(app, "render")).status_code == 403
+        held = _delete(agent, sid, [name], at, fence={"attempt": "run:1", "turn_id": turn})
+        assert held.json() == {"ran": True, "deleted": [name]}
 
 
 def test_a_fork_reads_only_the_ancestors_images_its_events_name(

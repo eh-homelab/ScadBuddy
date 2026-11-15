@@ -1091,7 +1091,7 @@ const temporalWorker =
           // Its events through this replica's event log, so they wake its followers at once and
           // go on the bus under its id (#3365); with no session manager, a log that only publishes.
           ...sessionGateActivities(gateDb(temporal.sql, sessions?.events, sessionEvents?.onAppend), settings),
-          ...(sessions ? sessionFinishActivities(temporal.sql, sessions.events, orderCosts) : {}),
+          ...(sessions ? sessionFinishActivities(temporal.sql, sessions.events, orderCosts, sessionImages(temporal.sql)) : {}),
           ...(sessionAcquire ?? {}),
           // A durable turn's plugin and http_request tools (#2320): listed per turn, and
           // each call the `default` activity `turn:<server>__<tool>`.

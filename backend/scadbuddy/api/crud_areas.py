@@ -41,7 +41,8 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: the workspace files, sealed and opened on the API, their blobs' holds and their events
 #: written in each write's transaction, a fork's copy, the move to blobs, the sweep and the
 #: reconcile (#5299 step 7; `api/crud_agent_workspace.py`). Its ``session-blobs`` area is
-#: ``…/agent/session-blobs``, a session's images and a durable tool call's, read through a
+#: ``…/agent/session-blobs`` and its ``…/deletes`` (a queued message's images, #6413), a
+#: session's images and a durable tool call's, read through a
 #: fork's chain; its ``attachments`` area is ``…/agent/attachments`` and every route under
 #: it, the images the panel stages before a turn sends them; its ``http-bodies`` area is
 #: ``…/agent/http-bodies`` and every route under it, a session's saved HTTP bodies read by

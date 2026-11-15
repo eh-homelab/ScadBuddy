@@ -1,4 +1,5 @@
 import type { Sql, TransactionSql } from 'postgres'
+import type { SessionImages } from '../../sessions/blobs.js'
 import type { EventLog } from '../../sessions/eventLog.js'
 import { POOL_BUDGET, POOL_COST } from '../../sessions/manager.js'
 import { event, type ServerEvent, type SessionStatus } from '../../sessions/protocol.js'
@@ -26,7 +27,7 @@ import { SESSION_BEGIN_TURN_ACTIVITY, SESSION_FINISH_ACTIVITY, SESSION_QUEUE_CHA
 // The queue (#6386, workflow.ts): given the queue's head (`next`), the end claims the row for it in
 // the same transaction, so no send takes the idle row first; `session.begin_turn` makes the same
 // claim for a head queued while no turn ran; `session.queue_changed` writes the queue as a
-// `session.queue` event.
+// `session.queue` event, then deletes the images of the messages that left it unrun (#6413).
 
 const RUNNING = ['running', 'waiting_approval', 'waiting_input']
 const usd = (amount: number): string => `$${amount.toFixed(2)}`
@@ -119,7 +120,7 @@ async function claimQueued(tx: TransactionSql, sessionId: string, next: QueuedMe
 /** What a turn's end reports after it is written (sessions/orderCosts.ts `OrderCosts`); never throws. */
 export type TurnEndReports = { report(sessionId: string): Promise<void> }
 
-export function sessionFinishActivities(sql: Sql, events: EventLog, costs?: TurnEndReports) {
+export function sessionFinishActivities(sql: Sql, events: EventLog, costs?: TurnEndReports, blobs?: Pick<SessionImages, 'delete'>) {
   return {
     [SESSION_FINISH_ACTIVITY]: async (args: FinishTurnInput): Promise<boolean | FinishTurnResult> => {
       const sessionId = args.sessionId
@@ -166,8 +167,12 @@ export function sessionFinishActivities(sql: Sql, events: EventLog, costs?: Turn
       return claimed.outcome
     },
 
-    /** Writes the queue after a change as a `session.queue` event (#6386); nothing for a session that is gone. */
-    [SESSION_QUEUE_CHANGED_ACTIVITY]: async ({ sessionId, version, queue }: QueueChangedInput): Promise<boolean> => {
+    /**
+     * Writes the queue after a change as a `session.queue` event (#6386); nothing for a session that
+     * is gone. Then deletes the images of the messages that left it unrun (#6413): best effort, as an
+     * image left behind costs only its row, which goes with the session.
+     */
+    [SESSION_QUEUE_CHANGED_ACTIVITY]: async ({ sessionId, version, queue, drop }: QueueChangedInput): Promise<boolean> => {
       const written = await sql.begin(async (tx) => {
         const [row] = await tx`SELECT 1 FROM ai_sessions WHERE id = ${sessionId} FOR UPDATE`
         if (!row) return undefined
@@ -175,6 +180,13 @@ export function sessionFinishActivities(sql: Sql, events: EventLog, costs?: Turn
         return { tail, seqs: await events.append(sessionId, tail, tx) }
       })
       if (written) events.committed(sessionId, written.tail, written.seqs)
+      if (written && blobs) {
+        for (const made of drop ?? []) {
+          await blobs.delete(sessionId, made).catch((err: unknown) => {
+            console.warn(`session ${sessionId}: a queued message's images were not deleted: ${err instanceof Error ? err.message : String(err)}`)
+          })
+        }
+      }
       return written !== undefined
     },
   }
