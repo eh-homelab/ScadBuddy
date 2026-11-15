@@ -671,6 +671,8 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 item=item,
                 by=by,
                 revision_id=item.current_revision_id,
+                # The order or the item may have moved on while it rendered.
+                check=lambda: render_check(orders.store, order_id, item_id),
             ),
         )
         rendered = await asyncio.to_thread(orders.store.item, item_id)

@@ -182,7 +182,12 @@ export function QuoteEditor({
   /** Slice…: the dialog on the item's output, or the design's render first and then the dialog. */
   function beginSlice() {
     if (sliceSource) setSlicing(true)
-    else if (renders) void slice?.render?.().then((rendered) => setSlicing(rendered))
+    else if (renders) {
+      void slice?.render?.().then(
+        (rendered) => setSlicing(rendered),
+        () => setSlicing(false),
+      )
+    }
   }
   // Slice… again on the row while the drawer is open: the dialog opens again.
   useEffect(() => {

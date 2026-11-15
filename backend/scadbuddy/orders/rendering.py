@@ -87,7 +87,9 @@ class AttachTo:
     ``filaments`` go on the render's slots of an item that has none; ``carried`` (#4673,
     a slice's new design) are the filaments the item had pinned before its revision, put
     on the rendered slot of each number under ``filaments``. With ``revision_id`` nothing
-    is written once the item has another revision (`revision_not_newest`)."""
+    is written once the item has another revision (`revision_not_newest`). ``check``, when
+    given, runs in a thread after the render and before the write, and refuses by raising
+    (the item's render checks its refusals again, ``operations.py`` ``render_check``)."""
 
     lifecycle: Lifecycle
     order: Order
@@ -96,6 +98,7 @@ class AttachTo:
     filaments: Mapping[int, str] = field(default_factory=dict)
     revision_id: str | None = None
     carried: Mapping[int, str] | None = None
+    check: Callable[[], None] | None = None
 
 
 def reference_matches(
@@ -225,6 +228,8 @@ async def attach_output(target: AttachTo, output: RenderedOutput) -> None:
     rendered = {slot.slot for slot in slots}
     fill = {slot: f for slot, f in (target.carried or {}).items() if slot in rendered}
     fill.update(target.filaments)
+    if target.check is not None:
+        await asyncio.to_thread(target.check)
     try:
         await asyncio.to_thread(
             lambda: target.lifecycle.update_item(

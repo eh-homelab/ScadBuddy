@@ -143,3 +143,30 @@ async def test_an_item_with_slots_takes_the_output_and_keeps_its_revision_and_qu
     assert shop.rows.revisions(item.id) == revisions
     assert shop.rows.quotes(item.id) == quotes
     assert after.reference == item.reference and after.colours == item.colours
+
+
+async def test_a_refusing_check_writes_nothing_on_the_item(shop: Shop) -> None:
+    """``AttachTo.check`` runs after the render and before the write: a refusal (the
+    order moved on while it rendered) leaves the item's output unset."""
+    outputs = SavedOutputs()
+
+    def moved_on() -> None:
+        raise ApiError(409, "order ORD-1 is accepted")
+
+    with pytest.raises(ApiError):
+        await output_for_reference(
+            reference_of(shop),
+            outputs=outputs,
+            renders=FakeRenders(),
+            create_output=outputs.create,
+            name="ORD 1 Demo",
+            follow_every=0.0,
+            item=AttachTo(
+                lifecycle=shop.lifecycle,
+                order=shop.get_order(),
+                item=shop.get_item(),
+                by=BY,
+                check=moved_on,
+            ),
+        )
+    assert shop.get_item().output_id is None

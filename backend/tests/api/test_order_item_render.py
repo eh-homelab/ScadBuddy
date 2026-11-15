@@ -6,19 +6,25 @@ dialog then opens on that output, and the slice quote slices it as it slices any
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from scadbuddy.orders import operations as order_operations
 from scadbuddy.orders.component import ORDERS
+from scadbuddy.orders.lifecycle import Lifecycle
+from scadbuddy.orders.models import Actor
+from scadbuddy.orders.rendering import output_for_reference
 from tests.api.conftest import FAIL_WIDTH, follow_operation
 from tests.api.test_order_quote import (
     BambuddySlices,
     Shop,
     output_ids,
     sliced_plate,
+    worker_stopped,
 )
 from tests.api.test_order_quote import (
     bambuddy as quote_bambuddy,
@@ -135,3 +141,51 @@ def test_an_items_render_is_refused_before_anything_runs(bambuddy: TestClient) -
     refused = render(bambuddy, f"/api/v1/orders/{shop.order['id']}/items/{custom.json()['id']}")
     assert refused.status_code == 409, refused.text
     assert refused.json()["type"].endswith("/item_custom")
+
+
+def test_an_items_render_whose_pod_stopped_after_saving_the_output_saves_it_once(
+    bambuddy: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pod stops after the item's output was saved and before the item's
+    ``output_id`` write. The next attempt finds that output by the id the operation saves
+    under (``render_output_id``), sets it on the item, and saves no second output."""
+    shop = Shop(bambuddy, by_hand=True)
+    before = output_ids(bambuddy)
+    real = Lifecycle.update_item
+    stops: list[str] = []
+
+    def update_item(self: Lifecycle, *args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("output_id") is not None and not stops:
+            stops.append(kwargs["output_id"])
+            raise worker_stopped()
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Lifecycle, "update_item", update_item)
+    op = rendered(bambuddy, shop.path)
+    assert op["status"] == "succeeded", op
+    assert len(stops) == 1
+    added = [output for output in output_ids(bambuddy) if output not in before]
+    assert added == stops
+    assert shop.get_item()["output_id"] == stops[0]
+
+
+def test_an_items_render_that_ends_after_the_item_settled_writes_nothing(
+    bambuddy: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The run checks the item again before it sets the output (``render_check``): an
+    item cancelled while it rendered is refused ``item_not_open``, its output unset."""
+    shop = Shop(bambuddy, by_hand=True)
+    real = output_for_reference
+    lifecycle = _state(bambuddy).components.get(ORDERS).lifecycle
+
+    async def cancelled_meanwhile(*args: Any, **kwargs: Any) -> Any:
+        await asyncio.to_thread(
+            lifecycle.cancel_item, shop.order["id"], shop.item["id"], Actor(kind="browser")
+        )
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(order_operations, "output_for_reference", cancelled_meanwhile)
+    op = rendered(bambuddy, shop.path)
+    assert op["status"] == "failed", op
+    assert op["error"]["type"].endswith("/item_not_open")
+    assert shop.get_item()["output_id"] is None

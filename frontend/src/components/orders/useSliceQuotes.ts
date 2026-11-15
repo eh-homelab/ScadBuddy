@@ -35,6 +35,8 @@ interface Failure {
   startedAt: number
   finishedAt: number
   error: string
+  /** #6324 — a failed render (`order_item_render`), which an output on the item answers. */
+  render: boolean
 }
 
 /**
@@ -283,7 +285,10 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
               const ended = row.finished_at ?? row.updated_at
               const finishedAt = shown ? Date.now() : ended && !Number.isNaN(Date.parse(ended)) ? Date.parse(ended) : started
               if (shown && failed) shownSet.add(operationId)
-              settle({ running: false, failure: failed ? { operationId, startedAt: started, finishedAt, error: refusalText(cause) } : undefined })
+              settle({
+                running: false,
+                failure: failed ? { operationId, startedAt: started, finishedAt, error: refusalText(cause), render: row.kind === RENDER_KIND } : undefined,
+              })
               if (shown) update(forOrder, itemId, { ...run, error: refusalText(cause), finishedAt: Date.now() })
             },
           )
@@ -296,10 +301,12 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
       // The item's newest failed row (the rows come newest first, one to a page).
       const operationId = row ? idsOf(row).operationId : ''
       const started = row?.created_at ? Date.parse(row.created_at) : NaN
-      const answered = (at: number) => item.quotes.some((q) => Date.parse(q.created_at) >= at)
+      // A quote made since it started answers a failure; #6324 — an output on the item answers a
+      // failed render too, since a render that succeeds makes no quote.
+      const answered = (at: number, render: boolean) => (render && item.output_id !== null) || item.quotes.some((q) => Date.parse(q.created_at) >= at)
       // #5585 — a stale `running` row's failure that started later is the item's newest.
       if (stale && (!operationId || Number.isNaN(started) || stale.startedAt >= started)) {
-        if (shownSet.has(stale.operationId) || answered(stale.startedAt)) return
+        if (shownSet.has(stale.operationId) || answered(stale.startedAt, stale.render)) return
         shownSet.add(stale.operationId)
         update(forOrder, itemId, { startedAt: stale.startedAt, finishedAt: stale.finishedAt, error: stale.error, known: item.quotes.map((q) => q.id) })
         return
@@ -309,7 +316,7 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
       const finished = Number.isNaN(ended) ? started : ended
       if (followedSet.has(operationId)) return
       // A quote made since it started answers it: the failure is no longer the latest.
-      if (answered(started)) return
+      if (answered(started, row.kind === RENDER_KIND)) return
       followedSet.add(operationId)
       // The row carries no error: its operation's read does (a failed one throws it).
       api.followQuote(operationId, signal).then(
