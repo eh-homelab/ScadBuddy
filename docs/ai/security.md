@@ -1394,8 +1394,8 @@ From the merged code and PR bodies:
    loaded into each of those turns (#896, see [Plugin vetting](#plugin-vetting)).
 8. **Rotation leaves unopenable rows** as they are, and counts them in the log
    (the API's `agent_data/rotation.py` for the Claude credentials, payload keys, Web
-   Push keys and notification channel tokens, the agent's `rewrapFrom()` for its
-   workspace file keys, plugin secrets and plugin sign-ins).
+   Push keys, notification channel tokens and the workspace's principal file keys, the
+   agent's `rewrapFrom()` for its plugin secrets and plugin sign-ins).
 9. **Write-tier calls are not gated, so injected content can drive one.** Tiers put
    `update_source` and other `write` tools in the tier that runs without a human,
    because a write is reversible through the model's git history (spec §8.1). The
