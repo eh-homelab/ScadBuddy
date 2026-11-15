@@ -474,9 +474,11 @@ AAD, so a row either side seals opens on the other).
 - **Wrong key vs. tampering.** `openSecret()` compares `kek_id` first, so "wrong key"
   is reported as such. Anything else that fails authentication raises `SealError`,
   which never carries plaintext.
-- **Rotation** re-wraps data keys only (`rewrap()`). The API re-wraps the Claude
-  credentials and the payload keys at its start (`agent_data/rotation.py`), the agent the
-  rest. See [operating.md](operating.md#33-rotating-it).
+- **Rotation** re-wraps data keys only (`rewrap()`). The API re-wraps every agent
+  secret at its start (`agent_data/rotation.py`): the Claude credentials, the payload keys,
+  the Web Push keys, the notification channels' tokens, the plugins' header secrets and
+  sign-ins, and the workspace's principal file keys. The agent re-wraps nothing. See
+  [operating.md](operating.md#33-rotating-it).
 - **Plaintext in memory.** The Buffers the module creates are zeroed after use. JS
   strings cannot be zeroed, and the header states it: "Zeroing the Buffers shortens the
   exposure; it does not remove it."

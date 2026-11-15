@@ -82,6 +82,11 @@ LEASE_LOST = "lease-lost"
 #: How often a waiting acquire tries again, and the longest wait, in seconds.
 ACQUIRE_POLL = 0.25
 MAX_WAIT = 25.0
+#: How many lease acquires of this process may wait on a grant's row lock at once
+#: (``leases.acquire``'s ``wait``). Each holds a settings-store pool connection while it
+#: waits; past the cap an acquire does not wait on the row and polls as for any busy lease.
+MAX_ROW_WAITS = 2
+_row_waits = 0
 #: ``plugins/pluginSessions.ts``: a session id, a plugin's ledger id, a replica's host.
 SESSION_ID_MAX = 500
 REPLICAS_MAX = 500
@@ -472,11 +477,19 @@ async def acquire_lease(key: LeaseKey, body: LeaseAsk, state: StateDep) -> Lease
     _checked_key(key)
     token = str(body.token)
     deadline = time.monotonic() + body.wait_s
+    global _row_waits
     while True:
-        wait = max(0.0, deadline - time.monotonic())
-        expires = await _in_tx(
-            state, partial(leases.acquire, key=key, token=token, ttl=body.ttl_s, wait=wait)
-        )
+        waits = key.startswith("plugin-oauth:") and _row_waits < MAX_ROW_WAITS
+        wait = max(0.0, deadline - time.monotonic()) if waits else 0.0
+        if waits:
+            _row_waits += 1
+        try:
+            expires = await _in_tx(
+                state, partial(leases.acquire, key=key, token=token, ttl=body.ttl_s, wait=wait)
+            )
+        finally:
+            if waits:
+                _row_waits -= 1
         left = deadline - time.monotonic()
         if expires is not None:
             return LeaseHeld(token=body.token, expires_at=expires)

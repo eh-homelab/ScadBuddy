@@ -41,6 +41,8 @@ class FakeApi {
   flows = new Map<string, Record<string, unknown>>()
   grants = new Map<string, Grant>()
   leases = new Map<string, string>()
+  /** Runs before a refresh is stored: a test takes the lease away there. */
+  beforeRefreshed?: () => void
   evictions = 0
 
   fetch: typeof fetch = async (input, init) => {
@@ -174,6 +176,7 @@ class FakeApi {
         return this.#json({ grant, fail: null })
       }
       if (m[2] === 'refreshed') {
+        this.beforeRefreshed?.()
         if (this.leases.get(refreshLease(m[1]!)) !== b.lease_token) return this.#json({ detail: 'lost', reason: 'lease-lost' }, 409)
         if (!grant || grant.grant_id !== b.grant) return this.#json({ stored: false })
         Object.assign(grant, { secret: b.secret, has_refresh: b.has_refresh, access_expires_at: b.access_expires_at })
@@ -293,6 +296,13 @@ describe('the remote plugins and their sign-ins through CRUD routes (#5299 step 
     api.leases.set(refreshLease('github'), randomUUID())
     await expect(other.source('github', mcp.url, grant.grant_id, undefined).header()).rejects.toThrow(/another replica is renewing/)
     expect(auth.tokenRequests).toHaveLength(2)
+    api.leases.clear()
+
+    // The lease lost while the token endpoint answered: the rotated refresh token is not kept,
+    // and the stored one is spent, so the answer says a new sign-in may be needed.
+    api.beforeRefreshed = () => api.leases.set(refreshLease('github'), randomUUID())
+    await expect(other.source('github', mcp.url, grant.grant_id, undefined).header()).rejects.toThrow(/a new sign-in may be needed/)
+    api.beforeRefreshed = undefined
     api.leases.clear()
 
     // A revoked refresh marks the grant on the API: sign in again.

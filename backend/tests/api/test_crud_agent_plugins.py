@@ -400,6 +400,30 @@ def test_a_refresh_lease_puts_back_the_lock_timeout_in_force(
         assert conn.execute("SELECT current_setting('lock_timeout')").fetchone() == ("7s",)
 
 
+def test_past_max_row_waits_an_acquire_does_not_wait_on_the_grant_row(
+    client: TestClient, agent: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each wait holds a pool connection, so only MAX_ROW_WAITS acquires wait on the row."""
+    from scadbuddy.api import crud_agent_access
+
+    waits: list[float] = []
+    real = leases.acquire
+
+    def acquire(conn: Any, key: str, token: str, ttl: float, wait: float = 0.0) -> Any:
+        waits.append(wait)
+        return real(conn, key, token, ttl, wait)
+
+    monkeypatch.setattr(leases, "acquire", acquire)
+    ask = {"token": str(uuid.uuid4()), "ttl_s": 60, "wait_s": 5}
+    held = client.post(f"{BASE}/leases/plugin-oauth:docs", json=ask, headers=agent)
+    assert held.status_code == 200
+    assert waits[-1] > 0
+    monkeypatch.setattr(crud_agent_access, "_row_waits", crud_agent_access.MAX_ROW_WAITS)
+    ask["token"] = str(uuid.uuid4())
+    client.post(f"{BASE}/leases/plugin-oauth:other", json=ask, headers=agent)
+    assert waits[-1] == 0
+
+
 def test_a_mark_and_a_sign_out_tell_the_warm_caches(
     client: TestClient, agent: dict[str, str], db: Any, listener: Any
 ) -> None:

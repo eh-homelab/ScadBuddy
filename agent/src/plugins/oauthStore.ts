@@ -593,7 +593,12 @@ export class PluginOAuth {
           access_expires_at: tokens.expiresAt?.toISOString() ?? null,
           scope: tokens.scope ?? null,
         })
-        if (kept === 'lease-lost') return { fail: new OAuthError('its renewed token was not kept: the refresh took longer than its lease; try again', 409) }
+        if (kept === 'lease-lost') {
+          // A provider that rotates refresh tokens has spent the stored one: the next refresh is
+          // refused and marks the grant, so "try again" would not help.
+          const rotated = tokens.refreshToken !== undefined && tokens.refreshToken !== secret.refresh_token
+          return { fail: new OAuthError(`its renewed token was not kept: the refresh took longer than its lease; ${rotated ? 'a new sign-in may be needed' : 'try again'}`, 409) }
+        }
         if (!kept) return { fail: new GrantError('it was signed in again or out since this run loaded it') }
         this.remember({ plugin, grant_id: grant, access_expires_at: tokens.expiresAt ?? null }, tokens.accessToken)
         return { header: bearer(tokens.accessToken) }

@@ -81,7 +81,8 @@ def acquire(
         # Waits while an SQL pod holds the grant's row across a refresh, but no longer than
         # the caller asked: a lock_timeout of 0 would wait for ever, so at least 1 ms.
         # The setting in force before is put back after, so the rest of the transaction
-        # keeps whatever the role or server set.
+        # keeps whatever the role or server set: by the restore below once the row is
+        # locked, and by the savepoint's rollback when the wait ends in LockNotAvailable.
         before = conn.execute("SELECT current_setting('lock_timeout') AS t").fetchone()
         try:
             with conn.transaction():
