@@ -28,6 +28,12 @@ export const NO_CAPACITY = 'NoCapacity'
 export const SHUTTING_DOWN_FAILURE = 'ShuttingDown'
 /** `session_turn`'s failure when the session no longer runs this turn (it ended, or was forgotten). */
 export const SESSION_GONE = 'SessionGone'
+/**
+ * `session_turn`'s failure when another placement took the turn's row from this one (`moved`, or a
+ * newer placement here, `replaced`): retryable, the workflow places the turn again, and that
+ * placement's claim fences the other out (#6387).
+ */
+export const PLACEMENT_MOVED = 'PlacementMoved'
 export const OPEN_INPUT_UPDATE = 'open_input'
 /** The turn's activity no longer waits on a call it opened (its answer was lost, Claude Code dropped it): its entry is cancelled. */
 export const WITHDRAW_INPUT_UPDATE = 'withdraw_input'

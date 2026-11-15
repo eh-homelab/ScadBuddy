@@ -84,13 +84,10 @@ def release(
     session = _SESSION.match(subject)
     session_id = session.group(1) if session else None
     with conn.transaction():
-        row = _row(conn, subject)
-        made = False
-        if row is None and create:
-            made = _create(conn, subject, kek, standing)
-            # Whoever inserted first, this is the key every encoder of the subject uses.
-            row = _row(conn, subject)
-        if row is None:
+        key, made = key_in(
+            conn, subject, create=create, standing=standing, kek=kek, previous=previous
+        )
+        if key is None:
             audit.record(
                 conn,
                 "payload_key",
@@ -100,19 +97,6 @@ def release(
                 session_id=session_id,
             )
             return None
-        dek_sealed, kek_id = row
-        opener = (
-            kek if kek_id == kek.id else previous if previous and kek_id == previous.id else None
-        )
-        if opener is None:
-            raise KeyNotHeldError(
-                f"the payload key of {subject} was sealed with key {kek_id}, which the API"
-                " does not hold"
-            )
-        try:
-            key = open_bytes(opener.key, dek_sealed, payload_key_context(subject))
-        except SealError:
-            raise KeyNotHeldError(f"the payload key of {subject} does not open") from None
         if made or not _released_lately(conn, subject):
             audit.record(
                 conn,
@@ -123,6 +107,40 @@ def release(
                 session_id=session_id,
             )
     return key
+
+
+def key_in(
+    conn: Connection[Any],
+    subject: str,
+    *,
+    create: bool,
+    standing: bool,
+    kek: Kek,
+    previous: Kek | None,
+) -> tuple[bytes | None, bool]:
+    """The subject's data key (made first with ``create``) and whether this call made it,
+    in the caller's transaction, with no audit row: for ``release``, and for the API's own
+    use of a key it never hands out (the workspace's file keys, ``workspace.py``). None
+    when it has none."""
+    row = _row(conn, subject)
+    made = False
+    if row is None and create:
+        made = _create(conn, subject, kek, standing)
+        # Whoever inserted first, this is the key every encoder of the subject uses.
+        row = _row(conn, subject)
+    if row is None:
+        return None, False
+    dek_sealed, kek_id = row
+    opener = kek if kek_id == kek.id else previous if previous and kek_id == previous.id else None
+    if opener is None:
+        raise KeyNotHeldError(
+            f"the payload key of {subject} was sealed with key {kek_id}, which the API"
+            " does not hold"
+        )
+    try:
+        return open_bytes(opener.key, dek_sealed, payload_key_context(subject)), made
+    except SealError:
+        raise KeyNotHeldError(f"the payload key of {subject} does not open") from None
 
 
 def _released_lately(conn: Connection[Any], subject: str) -> bool:

@@ -822,11 +822,13 @@ def test_rotation_rewraps_credentials_and_payload_keys(tables: PgPool, tmp_path:
             "credentials": (1, 1),
             "payload_keys": (1, 1),
             "notify": (0, 0),
+            "session_files": (0, 0),
         }
         assert rotate(conn, OLD, KEK) == {
             "credentials": (0, 1),
             "payload_keys": (0, 1),
             "notify": (0, 0),
+            "session_files": (0, 0),
         }
         assert rotate(conn, KEK, KEK) == {}
     app = _app(tables, tmp_path, kek=KEK_B64)

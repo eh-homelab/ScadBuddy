@@ -7,7 +7,9 @@ blob route, `api/internal_blobs.py`), says what it PUT, and asks for one to GET 
 back (S3's presigned URL on `store_backend` s3). The agent holds each file's blob
 `(ai_session_file, <workspace>/<path>)` in `blob_refs` through its CRUD routes
 (`api/crud_agent.py`, #5299) before it writes the row and releases it once the row is
-gone, so the blob sweep keeps a blob while a row names it.
+gone, so the blob sweep keeps a blob while a row names it. These routes serve an agent
+on SQL only: once the API lists area ``workspace`` (#5299 step 7) it seals and stores the
+files itself (``api/crud_agent_workspace.py``) and the agent asks for no URL.
 
 Without a content store (`store_backend` local) every route is a 404, and the agent keeps
 the file's bytes in Postgres as before. With one but without what a `TransferUrl` needs

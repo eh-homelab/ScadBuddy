@@ -65,7 +65,13 @@ transaction, whose `copyForkRanges` opens and seals its transcript, until the se
 #5299 step 9), a browser call's key dropped and the hourly key sweep (`gatedKeyDeletes`), and a
 flow run's images (`src/temporal/flowBlobs.ts` `CrudFlowBlobs`, `gatedFlowBlobs`: sealed here,
 sent as multipart bytes, the tombstone check and the cap in the API's transaction).
-These four have a rolling-deploy fallback:
+Area `workspace` (#5299 step 7, `WORKSPACE_AREAS`; backend `api/crud_agent_workspace.py`):
+the workspace files (`src/workspace/crudStore.ts` `CrudSessionFiles`, `gatedWorkspaceFiles`
+over the `WorkspaceFiles` interface `SessionFiles` also takes): the API seals, stores and opens
+each file and re-wraps principals' keys, a write's row, blob hold and `workspace.file` events
+are one transaction there (`WriteOptions.log`, `DeleteOptions.log`), and the reconcile is one
+transaction under `RECONCILE_LOCK`; this process sends and gets plaintext only.
+These five have a rolling-deploy fallback:
 `src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` from the start with back-off
 (1 s doubling to 30 s) until every one is listed, and until then each stays on SQL, for an API
 pod older than the routes. The small stores (#5299 step 5, `src/api/crudStores.ts`
@@ -378,7 +384,8 @@ opens every one and seals it again byte for byte).
     the row that names a blob and releases after the row is gone, and `reconcile`, on the
     sweeper's tick hourly (a failed or `no_connection` run is tried again at the next tick),
     on one replica at a time (`RECONCILE_LOCK` on a `database.locks` connection), releases what cascades, `forgetSubject` and crashes left and holds
-    a row no hold names; no trigger;
+    a row no hold names; no trigger; once the API lists area `workspace` all of this runs on the
+    API instead, above;
     `test/workspaceBlobs.backend.e2e.test.ts` runs it against the real API on moto,
     `backend/tests/support/workspace_backend.py`). Only on `store_backend` local do they stay
     in Postgres, one `ai_session_file_bytes` row per sha256 that every file with those bytes

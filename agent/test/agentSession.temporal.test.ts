@@ -24,7 +24,9 @@ import {
   OPEN_INPUT_UPDATE,
   TAB_RECONNECTED_UPDATE,
   OWNER_CHANGED_SIGNAL,
+  PLACEMENT_MOVED,
   SESSION_GATE_ACTIVITIES as GATE,
+  SESSION_GONE,
   RELEASE_WORKER_ACTIVITY,
   SEND_MESSAGE_UPDATE,
   SESSION_FINISH_ACTIVITY,
@@ -642,6 +644,45 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     await handleOf(id).result()
   })
 
+  it('a placement cut off because another took the turn (PlacementMoved) is placed again, restarted, at most three times; the words then say why, never "Activity task failed" (#6387)', async () => {
+    const id = randomUUID()
+    const moved = (input: SessionTurnInput) =>
+      ApplicationFailure.retryable(`session ${input.sessionId}'s placement ${input.attempt} was cut off: the turn was placed on another worker`, PLACEMENT_MOVED)
+    // t1: its first placement is cut off, the next one runs it. t2: every placement is cut off.
+    let t1Moved = false
+    runTurn = async (input) => {
+      if (input.turnId === 't1' && t1Moved) return { status: 'done', hostQueue: HOST }
+      if (input.turnId === 't1') t1Moved = true
+      throw moved(input)
+    }
+    const placed = (turnId: string) => turns.filter((t) => t.turnId === turnId).map((t) => [t.attempt?.split(':')[1], t.continuation?.kind])
+    await send(env.client, id, message('t1'))
+    const t1Run = await runIdOf(id)
+    await poll(() => finished.map((f) => f.outcome), ['done'])
+    expect(placed('t1')).toEqual([['0', undefined], ['1', 'restarted']])
+    await poll(async () => handleOf(id).query(TURN_QUERY), null)
+    await record('placement_moved', id, t1Run)
+    await send(env.client, id, message('t2'))
+    await poll(() => finished.map((f) => f.outcome), ['done', 'failed'])
+    expect(placed('t2')).toEqual([['0', undefined], ['1', 'restarted'], ['2', 'restarted']])
+    expect(finished[1]?.message).toBe('the turn could not be placed on a worker: another placement took the turn over (3 tries); send the message again')
+    await handleOf(id).signal('end')
+    await handleOf(id).result()
+  })
+
+  it('a placement whose turn ended (SessionGone) is never placed again: the turn fails with the cause, never "Activity task failed" (#6387)', async () => {
+    const id = randomUUID()
+    runTurn = async (input) => {
+      throw ApplicationFailure.nonRetryable(`session ${input.sessionId}'s placement ${input.attempt} was cut off: the turn ended without this placement`, SESSION_GONE)
+    }
+    await send(env.client, id, message('t1'))
+    await poll(() => finished.map((f) => f.outcome), ['failed'])
+    expect(turns).toHaveLength(1)
+    expect(finished[0]?.message).toBe(`session ${id}'s placement ${turns[0]!.attempt} was cut off: the turn ended without this placement`)
+    await handleOf(id).signal('end')
+    await handleOf(id).result()
+  })
+
   it('refuses open_input for a turn that is not running, `stale`', async () => {
     const id = randomUUID()
     await send(env.client, id, message('t1'))
@@ -718,7 +759,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       for (const [name, history] of Object.entries(recorded)) await writeFile(new URL(`${name}.json`, FIXTURES), `${historyToJSON(history)}\n`)
     }
     const names = (await readdir(FIXTURES)).filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -'.json'.length))
-    expect(names).toEqual(expect.arrayContaining(['turn', 'ended', 'park_respond', 'end_while_finishing', 'full_home', 'attention_tab', 'park_record']))
+    expect(names).toEqual(expect.arrayContaining(['turn', 'ended', 'park_respond', 'end_while_finishing', 'full_home', 'attention_tab', 'park_record', 'placement_moved']))
     const fixtures = await Promise.all(
       names.map(async (name) => ({
         workflowId: `fixture-${name}`,

@@ -55,7 +55,7 @@ import {
 } from './protocol.js'
 import { SessionBlobs, type StoredBlob } from './blobs.js'
 import { PgHttpBodies } from './httpBodies.js'
-import { SessionFiles } from '../workspace/store.js'
+import { SessionFiles, type WorkspaceFiles } from '../workspace/store.js'
 import { SessionEdits } from './edits.js'
 import { forkEventCut, transcriptCut } from './forkPoint.js'
 import type { TitleResolver } from './sdkEvents.js'
@@ -792,7 +792,7 @@ export type SessionManagerDeps = {
    * `save_to_workspace` writes, and what a fork copies. One over `sql` (caps from
    * `settings`) when omitted.
    */
-  workspace?: SessionFiles
+  workspace?: WorkspaceFiles
   /**
    * A session's background tasks (src/background/): every turn gets the session's CronCreate
    * and the rest (each not off under `builtin:claude-code`) in place of Claude Code's own,
@@ -1050,7 +1050,7 @@ export class SessionManager {
   private readonly touched: SessionResources
   /** The images tool results carried (#782), read by `blob`. */
   private readonly blobs: SessionBlobs
-  private readonly files: SessionFiles
+  private readonly files: WorkspaceFiles
   /** Assembles each turn's query options (turnRunner.ts). */
   private readonly runner: TurnRunner
   /**

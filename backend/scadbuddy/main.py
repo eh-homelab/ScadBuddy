@@ -1204,9 +1204,9 @@ def _grant_and_rotate_at_start(state: AppState) -> None:
 
 def _rotate_agent_secrets(state: AppState) -> None:
     """#5299 D5: with the previous KEK mounted, the agent's Claude credentials, payload
-    keys, Web Push keys and notification channel tokens sealed under it are sealed again
-    under the current one (`agent_data/rotation.py`), as the agent did at its own start.
-    Logged, never fatal."""
+    keys, Web Push keys, notification channel tokens and the workspace's principal file
+    keys sealed under it are sealed again under the current one (`agent_data/rotation.py`),
+    as the agent did at its own start. Logged, never fatal."""
     current = kek_at(state.settings.secret_key_file)
     previous = kek_at(state.settings.secret_key_previous_file)
     if state.settings.secret_key_previous_file is not None and previous is None:

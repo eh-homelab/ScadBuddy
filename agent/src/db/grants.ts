@@ -26,11 +26,14 @@ type Grants = Readonly<Record<string, readonly string[]>>
  * it serves over its CRUD routes (#5299 step 5, `api/crud_agent_stores.py` and
  * `api/crud_agent_notify.py`): the activity kinds, the browser's approved origins, the
  * session tabs, tab owners and tab images, the pairings, the MCP tokens, and the Web Push
- * records and notification channels, which it seals, opens and re-wraps with the KEK. */
+ * records and notification channels, which it seals, opens and re-wraps with the KEK. And the
+ * workspace files (#5299 step 7, `api/crud_agent_workspace.py`): their rows and shared bytes
+ * (locked FOR KEY SHARE and FOR UPDATE, which need UPDATE), each write's `workspace.file`
+ * events with the session's `event_seq` bump and its row lock (UPDATE on `ai_sessions`). */
 export const API_AI_GRANTS: Grants = {
   ai_payload_keys: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   ai_forgotten_subjects: ['SELECT', 'INSERT'],
-  ai_sessions: ['SELECT'],
+  ai_sessions: ['SELECT', 'UPDATE'],
   ai_mcp_tokens: ['SELECT', 'INSERT', 'UPDATE'],
   ai_settings: ['SELECT', 'INSERT', 'UPDATE'],
   ai_credentials: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
@@ -48,6 +51,9 @@ export const API_AI_GRANTS: Grants = {
   ai_push_subscriptions: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   ai_notifications_sent: ['SELECT', 'INSERT', 'DELETE'],
   ai_notify_channels: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  ai_session_files: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  ai_session_file_bytes: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  ai_session_events: ['SELECT', 'INSERT'],
 }
 
 /** The projects worker's role: it holds no database (ScadBuddy#5298), so the agent takes back
