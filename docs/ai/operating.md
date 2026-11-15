@@ -922,11 +922,18 @@ The agent owns and migrates its `ai_*` tables (spec §9;
 The migration advisory lock key is "SCADAGNT", distinct from the backend's "SCADBDDY"
 (the comment on `MIGRATION_LOCK` in `migrations.ts`).
 
-The agent also reads the backend's flow tables, which the backend migrates. Its
-database role needs `UPDATE` on `workflow_runs`, not only `SELECT`: every flow tool call
-reads its run `FOR SHARE` (`PgFlowRuns.startedBy`, `agent/src/temporal/flowRuns.ts`), and
-Postgres requires `UPDATE` for that lock. A role narrowed to `SELECT` fails every flow
-tool call, as a lookup error the activity retries until it gives up.
+The agent also reads the backend's flow tables, which the backend migrates. It asks the
+backend over its CRUD routes (`/api/v1/internal/crud/agent/`, area `flows`,
+`agent/src/flows/backendReads.ts`, #5299) once `GET …/crud/agent/areas` lists the area,
+and reads them over SQL only until then, while an API pod older than the routes answers.
+Over SQL its database role needs `UPDATE` on `workflow_runs`, not only `SELECT`: every
+flow tool call reads its run `FOR SHARE` (`PgFlowRuns.startedBy`,
+`agent/src/temporal/flowRuns.ts`), and Postgres requires `UPDATE` for that lock. A role
+narrowed to `SELECT` fails every flow tool call, as a lookup error the activity retries
+until it gives up. Through the route the backend takes that lock itself. The gate's grant
+check (`agent/src/gate/store.ts` `grantInput`) still reads `flow_grants` and
+`flow_grant_uses` over SQL, under the grant row's share lock, so the role keeps `UPDATE`
+on `flow_grants`.
 
 ## 8. Per-query limits
 
@@ -1686,7 +1693,7 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
 - Only on `store_backend` local (no content store; the routes answer 404) do the bytes
   stay in Postgres, in plaintext: one row of `ai_session_file_bytes` per sha256, which
   every file with those bytes names (`bytes_sha256`). A fork's row names the parent's, so
-  here too no bytes are copied (#4212); a row no file names any more is deleted after a
+  here too no bytes are copied (#4212), save a row an older agent kept inline whose bytes do not match its sha256, which is copied inline; a row no file names any more is deleted after a
   write or delete, on the sweep, and when its session is forgotten. On any other backend a write is refused
   (`unavailable`, HTTP 503 on the panel's Files routes) and nothing is kept in plaintext
   when the agent has no `SCADBUDDY_SECRET_KEY_FILE`, when the backend cannot mint the URLs

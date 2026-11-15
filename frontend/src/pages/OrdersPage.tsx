@@ -33,6 +33,12 @@ const SOURCES = [
   { value: 'storefront', label: 'Storefront' },
 ]
 const UNSUBMITTED = 'unsubmitted'
+/** #6133 (spec 2026-11-13 §11): a storefront customer's own models and things to buy. */
+const MODEL_FILTERS = [
+  { value: 'own_model', label: 'Own model' },
+  { value: 'purchase_pending', label: 'Purchase pending' },
+  { value: 'import_stuck', label: 'Import stuck' },
+] as const
 
 /**
  * #5327 (job cost spec §6.2): the margin as a percent, the money in the tooltip; `≈` when a
@@ -261,6 +267,14 @@ export function OrdersPage() {
               chips: [{ value: UNSUBMITTED, label: 'Unsubmitted carts' }],
               selected: query.unsubmitted ? [UNSUBMITTED] : [],
               onChange: ([on]) => onChange({ ...query, unsubmitted: on === UNSUBMITTED }),
+            },
+            {
+              key: 'models',
+              label: "Customer's models",
+              multiple: true,
+              chips: [...MODEL_FILTERS],
+              selected: MODEL_FILTERS.filter((f) => query[f.value]).map((f) => f.value),
+              onChange: (on) => onChange({ ...query, ...Object.fromEntries(MODEL_FILTERS.map((f) => [f.value, on.includes(f.value)])) }),
             },
           ]}
           filtered={isOrdersFiltered(query)}

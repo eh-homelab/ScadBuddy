@@ -75,6 +75,7 @@ import {
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 import { Spinner } from './ui/spinner'
+import { useLoadAppLinks } from '../lib/appLinks'
 import { useLoadBambuddyLinks } from '../lib/bambuddyLinks'
 import { useLoadDisplayUnit } from '../lib/loadDisplayUnit'
 import { leaveFullscreen } from '../lib/useFullscreen'
@@ -133,6 +134,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   )
   useLoadDisplayUnit()
   useLoadBambuddyLinks()
+  useLoadAppLinks()
   // #254 — navigate, snapshot and the click/fill fallbacks, on every route.
   useGlobalAgentTools()
   const ai = useAiAvailability()

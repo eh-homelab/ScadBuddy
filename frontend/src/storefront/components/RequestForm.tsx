@@ -1,8 +1,10 @@
 import { useId, useRef, useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
-import { ActionKey, StoreError, errorText, store } from '../api/client'
+import { ActionKey, StoreError, errorText, store, type PurchaseLink } from '../api/client'
 import { useDraftChanged } from '../draftCount'
 import { forgetTurnstileSiteKey, useTurnstileSiteKey } from '../turnstile'
+import { purchaseLinksProblem, sentPurchaseLinks } from '../models'
+import { PurchaseLinks } from './PurchaseLinks'
 import { Turnstile } from './Turnstile'
 
 /** The edge's caps (`storefront/wire.py`): the page says so before a byte is sent. */
@@ -20,19 +22,22 @@ function filesProblem(files: readonly File[]): string | null {
 
 /**
  * "Ask for a design" (spec §5.4): a text and up to ten photos, videos or PDFs, added to the
- * visitor's order as a request. One `Idempotency-Key` per request: sent again after a
+ * visitor's order as a request, with up to five things to buy (#6133, spec 2026-11-13
+ * §10.1). One `Idempotency-Key` per request: sent again after a
  * failure, the same text and files are the same request to the shop.
  */
 export function RequestForm() {
   const id = useId()
   const [text, setText] = useState('')
   const [files, setFiles] = useState<File[]>([])
+  const [buy, setBuy] = useState<PurchaseLink[]>([])
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [sent, setSent] = useState(false)
   const key = useRef(new ActionKey())
   const draftChanged = useDraftChanged()
   const problem = filesProblem(files)
+  const buyProblem = purchaseLinksProblem(buy)
   // The bot check (spec §5.8): a widget while it is on, and a new token after each send.
   const [token, setToken] = useState<string | null>(null)
   const [widget, setWidget] = useState(0)
@@ -42,21 +47,23 @@ export function RequestForm() {
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
-    if (problem || needsCheck) return
+    if (problem || buyProblem || needsCheck) return
     if (!text.trim() && files.length === 0) {
       setError('Tell us what to make, or add a photo.')
       return
     }
-    const what = JSON.stringify([text, files.map((f) => [f.name, f.size, f.lastModified])])
+    const purchaseLinks = sentPurchaseLinks(buy)
+    const what = JSON.stringify([text, files.map((f) => [f.name, f.size, f.lastModified]), purchaseLinks])
     setSending(true)
     setError(null)
     try {
-      const draft = await store.addRequest(text, files, key.current.for(what), token)
+      const draft = await store.addRequest(text, files, key.current.for(what), token, purchaseLinks)
       key.current.done()
       draftChanged(draft)
       setSent(true)
       setText('')
       setFiles([])
+      setBuy([])
     } catch (caught) {
       // Refused for its bot check: the check may have been turned on since the key was read.
       if (caught instanceof StoreError && caught.slug === 'bot_check_failed') forgetTurnstileSiteKey()
@@ -125,13 +132,14 @@ export function RequestForm() {
           </ul>
         )}
       </div>
+      <PurchaseLinks links={buy} onChange={setBuy} />
       {siteKey && <Turnstile siteKey={siteKey} action="request" onToken={setToken} resetKey={widget} />}
       {error && (
         <p className="sf-error" role="alert">
           {error}
         </p>
       )}
-      <button type="submit" className="sf-button" disabled={sending || problem !== null || needsCheck}>
+      <button type="submit" className="sf-button" disabled={sending || problem !== null || buyProblem !== null || needsCheck}>
         {sending ? 'Sending…' : 'Send request'}
       </button>
     </form>

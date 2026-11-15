@@ -9,6 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { colourProblems, emptyDraft, fixColour, isSupport, isSupportOnly, lockedValue, MAX_TEXT_LENGTH, nearestFilaments, offerable, schemaBound, shownParams, titleColours, withoutWords, type ListingDraft } from './listingDraft'
+import { ListingPictures, type LivePictures, type MediaState } from './ListingPictures'
 
 /**
  * #5282 (spec 2026-11-02 §5.3), #6131 (design 2026-11-13 §5) — one storefront listing in
@@ -28,6 +29,15 @@ export interface ListingEditorProps {
   schema: CustomizerSchema | undefined
   filaments: readonly Filament[]
   media: readonly MediaView[]
+  /** #6213 — the pictures the public site shows now (`LivePictures`). */
+  live?: LivePictures
+  /** #6213 — whether `media` has been read yet. */
+  mediaState?: MediaState
+  /**
+   * #6213 — a picture uploaded in the editor: the template as it left it and the new
+   * image's id, which the page adds to the listing as it is when the upload ends.
+   */
+  onPictureUploaded?: (model: ModelSummary, id: string) => void
 }
 
 /** Where the price book's filaments are added (Settings → Printing → Orders). */
@@ -212,6 +222,9 @@ function ParamRow({ param, draft, schema, filaments, onChange }: { param: Param;
   const bound = draft.params[param.name]
   const value = lockedValue(draft, param)
   const why = bound ? null : whyNotOffered(param, draft, schema, filaments)
+  // #6152: a label that says "support" or "interface" makes a support setting, which the
+  // saved body locks (`listingInput`), as publish refuses to offer it.
+  const supportLabel = bound !== undefined && !isSupport(param) && isSupport(param, bound.label)
 
   function lock() {
     const { [param.name]: _dropped, ...params } = draft.params
@@ -252,6 +265,9 @@ function ParamRow({ param, draft, schema, filaments, onChange }: { param: Param;
         />
       )}
       {why && <p className="text-xs text-muted-foreground">{why}</p>}
+      {supportLabel && (
+        <p className="text-xs text-destructive">A label with “support” or “interface” makes this a support setting: a customer never sees it. Change the label.</p>
+      )}
     </li>
   )
 }
@@ -370,7 +386,7 @@ function DesignLine({ draft, onChange, models, versions }: Pick<ListingEditorPro
   )
 }
 
-export function ListingEditor({ draft, onChange, models, versions, schema, filaments, media }: ListingEditorProps) {
+export function ListingEditor({ draft, onChange, models, versions, schema, filaments, media, live = null, mediaState = 'ready', onPictureUploaded }: ListingEditorProps) {
   const id = useId()
   const params = shownParams(schema)
   const offered = params.filter((param) => draft.params[param.name])
@@ -402,32 +418,15 @@ export function ListingEditor({ draft, onChange, models, versions, schema, filam
           <Label htmlFor={`${id}-description`}>Description</Label>
           <Textarea id={`${id}-description`} value={draft.description} maxLength={5000} rows={3} onChange={(event) => onChange({ ...draft, description: event.target.value })} />
         </div>
-        <div className="flex flex-col gap-1" role="group" aria-label="Pictures">
-          <span className="text-sm font-medium">Pictures</span>
-          {media.length === 0 ? (
-            <p className="text-xs text-muted-foreground">This design has no pictures or videos yet. Add one on its page.</p>
-          ) : (
-            <ul className="flex flex-wrap gap-x-4 gap-y-1">
-              {media.map((item) => {
-                const name = item.caption || item.file
-                return (
-                  <li key={item.id}>
-                    <label className="flex items-center gap-2 text-sm">
-                      <Checkbox
-                        checked={draft.media_ids.includes(item.id)}
-                        aria-label={`Show ${name}`}
-                        onCheckedChange={(on) =>
-                          onChange({ ...draft, media_ids: on === true ? [...draft.media_ids, item.id] : draft.media_ids.filter((m) => m !== item.id) })
-                        }
-                      />
-                      {name}
-                    </label>
-                  </li>
-                )
-              })}
-            </ul>
-          )}
-        </div>
+        <ListingPictures
+          slug={draft.slug}
+          media={media}
+          mediaState={mediaState}
+          chosen={draft.media_ids}
+          live={live}
+          onChange={(media_ids) => onChange({ ...draft, media_ids })}
+          onUploaded={(model, id) => onPictureUploaded?.(model, id)}
+        />
       </section>
 
       <section className="flex flex-col gap-2" aria-label="What the customer chooses">
@@ -481,6 +480,11 @@ export function ListingEditor({ draft, onChange, models, versions, schema, filam
             </ul>
           )}
         </div>
+        {/* #6152: every colour of an order is of one material; the customer picks it once. */}
+        <label className="flex items-center gap-2 text-sm">
+          <Checkbox checked={draft.one_material} onCheckedChange={(on) => onChange({ ...draft, one_material: on === true })} />
+          One material for every colour
+        </label>
       </section>
 
       {locked.length > 0 && (

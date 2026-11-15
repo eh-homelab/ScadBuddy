@@ -325,6 +325,10 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   order_purchase_record: () => [],
   order_purchase_update: () => [],
   order_purchase_decline: () => [],
+  // A customer's models (#6133 PR 4): the order's audit line records them.
+  order_item_source_decline: () => [],
+  order_item_source_check_again: () => [],
+  order_item_source_retry_import: () => [],
   // Parts (#5543): a part's stock line and the order's audit line record them.
   part_stock_add: () => [],
   order_item_parts_set: () => [],
@@ -511,6 +515,17 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   copy_library_files: (_input, result) => {
     const id = str(field(result, 'copy_id'))
     return id ? setting(`library_copy:${id}`) : []
+  },
+  // #6119: each library file a MakerWorld import made. Bambuddy's file only when Bambuddy
+  // downloaded it (`bambuddy_was_existing` false); on native, ScadBuddy's file only when the copy
+  // stored new bytes (`copied`). Nothing while it still runs (no ids yet).
+  import_makerworld_model: (_input, result) => {
+    const made: string[] = []
+    const native = field(result, 'library') === 'native' && field(result, 'copied') === true ? bambuddyId(field(result, 'library_file_id')) : null
+    if (native) made.push(native)
+    const bambuddy = field(result, 'bambuddy_was_existing') === false ? bambuddyId(field(result, 'bambuddy_library_file_id')) : null
+    if (bambuddy) made.push(bambuddy)
+    return made.map((id) => ({ type: libraryFileType(id), id, action: 'created' as const }))
   },
   // #2167: only the files Bambuddy deleted or restored; a skipped one was not touched.
   delete_library_files: (_input, result) => libraryFiles(field(result, 'deleted'), 'deleted'),

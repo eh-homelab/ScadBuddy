@@ -102,11 +102,13 @@ from scadbuddy.orders.models import (
     Fulfilment,
     ItemKind,
     LibraryFileRef,
+    ModelRequestColours,
     Money,
     Order,
     OrderEvent,
     OrderFilter,
     OrderItem,
+    OrderItemSource,
     OrderProject,
     OrderSource,
     OrderStatus,
@@ -198,6 +200,9 @@ LIST_PARAMS = frozenset(
         "margin_state",
         "source",
         "unsubmitted",
+        "own_model",
+        "purchase_pending",
+        "import_stuck",
         "cursor",
         "limit",
     }
@@ -564,6 +569,11 @@ class OrderDetail(BaseModel):
     projects: list[OrderProject] = Field(default_factory=list)
     #: The order's payment requests, oldest first (#4957).
     payment_requests: list[PaymentRequestView] = Field(default_factory=list)
+    #: A storefront customer's files and links on its request items, by item and position
+    #: (#6133, spec 2026-11-13 §11): the "Customer's models" panel and the purchases.
+    sources: list[OrderItemSource] = Field(default_factory=list)
+    #: The colours each own-model request item asked for (#6133).
+    model_requests: list[ModelRequestColours] = Field(default_factory=list)
 
 
 class OrderRow(Order):
@@ -718,6 +728,9 @@ async def list_orders(
     margin_state: Annotated[list[MarginState] | None, Query()] = None,
     source: OrderSource | None = None,
     unsubmitted: bool = False,
+    own_model: bool = False,
+    purchase_pending: bool = False,
+    import_stuck: bool = False,
     cursor: str | None = None,
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
 ) -> OrderPage:
@@ -734,7 +747,10 @@ async def list_orders(
     ``sku:<sku>`` or ``custom``) are a profit report row's orders (job cost spec §6.4).
     ``source`` is where an order was made: ``back_office`` or ``storefront`` (#5282).
     The storefront's unsubmitted carts are left out; ``unsubmitted=true`` lists only
-    them. A cart has no ``number`` and no ``customer_id`` (both null)."""
+    them. A cart has no ``number`` and no ``customer_id`` (both null). ``own_model=true``
+    lists only orders with a customer's own-model request, ``purchase_pending=true`` only
+    those with a thing to buy not yet priced, and ``import_stuck=true`` only those with a
+    file whose import is stuck (#6133, spec 2026-11-13 §11)."""
     _no_nul(request)
     _unknown(request, LIST_PARAMS)
     try:
@@ -757,6 +773,9 @@ async def list_orders(
         product=wanted,
         source=source,
         unsubmitted=unsubmitted,
+        own_model=own_model,
+        purchase_pending=purchase_pending,
+        import_stuck=import_stuck,
     )
     if cursor is not None:
         try:
@@ -1199,6 +1218,8 @@ async def get_order(order_id: str, orders: OrdersDep) -> OrderDetail:
             attachments=store.attachments(order.id),
             projects=store.projects(order.id),
             payment_requests=requests,
+            sources=store.item_sources(order.id),
+            model_requests=store.model_request_colours(order.id),
         )
 
     detail = await asyncio.to_thread(read)

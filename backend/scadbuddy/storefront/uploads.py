@@ -140,7 +140,8 @@ def checked_purchase_links(sent: str) -> list[PurchaseLinkAsk]:
     """A design request's things to buy, from their part's JSON: a list of at most
     `MAX_PURCHASE_LINKS` objects, each a ``url`` and an optional ``note``. Refusals: 422
     ``draft_body_invalid`` for text that is not such a list, ``too_many_links``, and
-    ``link_invalid`` (with ``index``) for an entry of another shape or past a cap."""
+    ``link_invalid`` (with ``index``) for an entry of another shape, past a cap, or with
+    text UTF-8 cannot carry (a lone surrogate)."""
     try:
         found = json.loads(sent)
     except (ValueError, RecursionError):
@@ -152,9 +153,15 @@ def checked_purchase_links(sent: str) -> list[PurchaseLinkAsk]:
     links = []
     for index, entry in enumerate(found):
         try:
-            links.append(PurchaseLinkAsk.model_validate(entry))
-        except ValidationError:
+            link = PurchaseLinkAsk.model_validate(entry)
+            # `json.loads` takes a lone surrogate escape, which UTF-8 cannot carry: the
+            # edge's forwarded part and the CRUD side's insert would fail on it (review
+            # of #6200).
+            link.url.encode()
+            link.note.encode()
+        except (ValidationError, UnicodeEncodeError):
             raise link_invalid(index) from None
+        links.append(link)
     return links
 
 

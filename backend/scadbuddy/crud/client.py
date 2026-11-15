@@ -432,8 +432,10 @@ class CrudClient(_Base):
         params: Mapping[str, str] | None = None,
         headers: Mapping[str, str] | None = None,
         budget: float | None = None,
+        content: bytes | None = None,
     ) -> CrudStream:
-        """``request``'s retries and refusals, with the body of a success still unread."""
+        """``request``'s retries and refusals, with the body of a success still unread.
+        ``content`` is a JSON body, sent again on each retry."""
         call = _Call(self, path, budget)
         while True:
             started = time.perf_counter()
@@ -444,7 +446,7 @@ class CrudClient(_Base):
                 # decode a gzipped body to more bytes than that length declares.
                 plain = {"Accept-Encoding": "identity", **(headers or {})}
                 sent = http.build_request(
-                    method, path, params=params, **self._kwargs(None, None, None, plain)
+                    method, path, params=params, **self._kwargs(None, None, None, plain, content)
                 )
                 response = await http.send(sent, stream=True)
             except httpx.TransportError as error:

@@ -234,7 +234,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   that has it (`project.offers_host_functions`). A flow's payloads are sealed per run
   (`payload_codec.py`, `flows_client.py`), so flows need `SCADBUDDY_SECRET_KEY_FILE`.
 - `backend/scadbuddy/flows/` — flow versions and runs (`store.py`: `workflow_definitions`,
-  `workflow_runs`, the latter written only by the run's workflow), `typecheck.py` (a
+  `workflow_runs`, the latter written only by the run's workflow), `agent_reads.py` (the
+  agent's questions about the flow tables, read only, for `api/crud_agent.py` area `flows`,
+  #5299 D7: the queries the agent ran over SQL, which `agent/src/flows/backendReads.ts`
+  `SqlFlowRunReads` keeps a copy of until every API pod serves the routes), `typecheck.py` (a
   script's check at registration and at each start), `history.py` (a Reset's preview: the
   outward sends past a point, by activity id), `component.py` (`FLOWS`; runs the
   `projects` worker in-process with `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` or
@@ -526,6 +529,22 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `SCADBUDDY_SERVICE_TOKEN_FILE` or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`; it refuses to
   start without the KEK or a proof, and ignores `SCADBUDDY_DATABASE_URL` with a warning
   (`core/settings.py` `NoDatabaseSettings`).
+- MakerWorld import (#6119, #1254): `api/makerworld.py` (`/makerworld/status`, `/resolve`,
+  `/import`) calls Bambuddy's own MakerWorld routes with the API's key
+  (`BambuddyClient.makerworld_*`; Bambuddy's 400 for a link it refuses is a 422). The
+  assistant imports only through these routes (agent `get_makerworld_status`,
+  `resolve_makerworld_url`, `import_makerworld_model`): the agent worker has no route to
+  Bambuddy and never holds its key. The `makerworld-import` flow (stored in the
+  database, not in this repo) still posts to Bambuddy's `/api/v1/makerworld/import`
+  directly until its `import_one` is changed to call `import_makerworld_model`. The import is the `makerworld_import` operation on the
+  `library` queue (`makerworld/operations.py`): Bambuddy downloads the 3MF (up to
+  `MAKERWORLD_IMPORT_TIMEOUT`), then on `library_backend` native `makerworld/imports.py`
+  copies it into the native library as a `bb_to_sb` copy does
+  (`print_library/copy.py` `copy_file_to_native`: skipped for bytes it holds), so
+  `library_file_id` is the id the order and print routes take. `folder_id` is a native
+  folder (refused 422 on `bambuddy`); `bambuddy_folder_id` is Bambuddy's, such as a print
+  project's `folder_id`. A resolve on native maps Bambuddy's earlier imports to native
+  files by SHA-256.
 - Import print (#4698): `bambuddy/print_import.py` finds every place an archive's 3MF can
   be (the archive's file and slicer project, Bambuddy library files by name and hash, the
   printer's storage only when asked) and reads the one chosen; `api/print_imports.py`
@@ -1516,7 +1535,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   counts only links of items not `cancelled` (`store.py` `pending_purchases`; a reopen
   brings the link back) and refuses `_accept_quote` (every caller), `_accept_order` (so `_accepted_by_the_last`
   writes `order.accept_skipped`) and a `balance` payment request; a `deposit` request
-  is not gated. The customer's order view offers no accept while one is pending
+  is not gated. The customer's order view offers no accept while one is pending, and
+  no answer to a `together` item's design, whose accept accepts the quote too
   (`order_page.py` `_Rows.purchase_pending`). Routes `api/order_purchases.py`: `GET
   /orders/{id}/purchases`, `POST …/purchases/{source}/record` (201, 200 for a repeat),
   `PATCH …/purchases/{source}`, `POST …/purchases/{source}/decline`, the three writes
@@ -1525,10 +1545,33 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `order_purchase_update`, `order_purchase_decline` (write). A design request takes up
   to `MAX_PURCHASE_LINKS` things to buy too: the multipart part `purchase_links`, a JSON
   list of `{url, note}` that both sides read with `storefront/uploads.py`
-  `checked_purchase_links` (`too_many_links`, `link_invalid` with `index`,
-  `draft_body_invalid`); the CRUD side holds each link to `checked_link` and stores it
+  `checked_purchase_links` (`too_many_links`, `link_invalid` with `index`, also for a
+  lone surrogate, `draft_body_invalid`); the CRUD side holds each link to `checked_link` and stores it
   as a `pending` `manual` purchase source (`model_requests.checked_purchase_links`,
   `insert_links`).
+  The UI's routes (#6133 PR 4, spec §4.3, §7 "Serving the preview", §10.5, §11): a
+  preview is served only by a route that sends `storefront/wire.py` `PREVIEW_HEADERS`
+  (`image/png`, `inline`, `nosniff`, `private, no-cache`), never a presigned URL; the
+  CRUD side reads it (`intake.read_preview`, capped at `MAX_PREVIEW_BYTES`) and the edge
+  streams it (`routes.py` `_relayed_preview`, any refusal a 404 with no body). The cart's
+  is `GET …/draft/sources/{id}/preview` (the visitor's unsubmitted cart only,
+  `intake.draft_preview`); the order page's is `POST …/order/sources/{id}/preview` with the
+  reader in the body (`order_page.preview`). `GET …/models/colours` lists the price book's
+  filaments with no price (the edge keeps `FILAMENT_FIELDS`). Submit refuses a cart with a
+  refused or expired file, 409 `model_file_refused` with `sources` (`submit.py`
+  `_no_refused_file`). The customer's view gains `charges` and `items[].sources`
+  (`CustomerSource`; `customer_reason` only for `ENDED`, `order_page.CUSTOMER_REASONS`). The
+  back office: `api/order_sources.py` (`…/sources/{source}/preview`, `/download` (a
+  presigned GET of the frozen copy, 5 minutes, an attachment), `/check`
+  (`Lifecycle.recheck_source`, then `intake.start_checks`), `/decline`
+  (`Lifecycle.decline_source`, then `poke` `declined`) and `/retry-import`
+  (`Lifecycle.retry_import`, then `poke` `retry`); no `Idempotency-Key`, a repeat writes
+  nothing). `GET /orders/{id}` adds `sources` (`OrderItemSource`, `OrderStore.item_sources`,
+  with `import_stuck` and the reason `models.py` `IMPORT_STUCK`, an hour past the submit)
+  and `model_requests`; `GET /orders` takes `own_model`, `purchase_pending` and
+  `import_stuck`. Agent `order_item_source_decline`, `order_item_source_check_again`,
+  `order_item_source_retry_import` (write); the preview and download are the page's
+  (`coverage.ts`).
 - Storefront accounts (#5283, spec 2026-11-02 §5.2): `orders/storefront/accounts.py`, a
   passwordless sign-in on the caller's connection (migration `…_storefront_accounts.sql`).
   - `request_code` makes a sixteen-character code from `CODE_ALPHABET` (Crockford's

@@ -22,6 +22,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.settings import Settings
+from scadbuddy.orders.component import ORDERS, OrdersComponent
 from scadbuddy.orders.storefront import renders as renders_module
 from scadbuddy.orders.storefront.renders import RENDER_FAILED, store_render
 from scadbuddy.render.job_models import Job, QueueFullError, now
@@ -38,6 +39,7 @@ from scadbuddy.workflows.commands import (
 from tests.api.conftest import set_fake_env
 from tests.api.test_storefront_listings import (  # noqa: F401  (fixtures)
     BOOK,
+    SOURCE,
     _state,
     client,
     create,
@@ -47,6 +49,7 @@ from tests.api.test_storefront_listings import (  # noqa: F401  (fixtures)
     template,
 )
 from tests.api.test_storefront_public import CRUD, TOKEN_A, bearer
+from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -1108,3 +1111,272 @@ def test_a_slow_record_read_never_blocks_the_loop(
         gate.set()
         first.join(30)
     assert answers[slow["id"]] == 200
+
+
+# -- picks (#6152) -----------------------------------------------------------------------
+
+
+def _filament(client: TestClient, colour: str, cost: str, material: str = "PLA") -> str:  # noqa: F811
+    """A filament of the book; its brand is its cost, so two of one colour may stand."""
+    made = client.post(
+        f"{BOOK}/filaments",
+        json={
+            "material": material,
+            "brand": f"Brand {cost}",
+            "colour": colour,
+            "cost_per_kg": cost,
+            "density_g_cm3": "1.24",
+        },
+    )
+    assert made.status_code in (200, 201), made.text
+    filament_id: str = made.json()["id"]
+    return filament_id
+
+
+@pytest.fixture
+def two_reds(
+    client: TestClient,  # noqa: F811
+    template: dict[str, Any],  # noqa: F811
+    dense_red: str,
+) -> tuple[dict[str, Any], str, str]:
+    """A published listing whose colour a visitor picks, with two red filaments of one
+    hex: the cheap one first, a dear one second. Also its two filament ids."""
+    dear_red = _filament(client, "#FF0000", "400")
+    settings = client.put("/api/v1/settings", json={"storefront_render_concurrency": 20})
+    assert settings.status_code == 200, settings.text
+    body = listing_body(
+        template,
+        dense_red,
+        params={
+            "width": {"kind": "number", "min": 20, "max": 80, "step": 1},
+            "colour": {"kind": "choice", "choices": ["#FF0000"]},
+        },
+        colours=[dense_red, dear_red],
+    )
+    return publish(client, create(client, body)["id"]), dense_red, dear_red
+
+
+def _picked(listing: dict[str, Any], picks: dict[str, str]) -> dict[str, Any]:
+    return {**render_body(listing, {"width": 40, "colour": "#FF0000"}), "picks": picks}
+
+
+def test_each_visitor_is_priced_at_its_own_pick(
+    crud: CrudCaller, two_reds: tuple[dict[str, Any], str, str]
+) -> None:
+    """Two visitors share one render of the same values, and each row keeps its own pick:
+    the estimate prices the slot at the picked filament, not the first of its colour."""
+    listing, cheap, dear = two_reds
+    first = crud.post("/renders", json=_picked(listing, {"colour": cheap}), key=uuid.uuid4().hex)
+    assert first.status_code == 202, first.text
+    job = wait_done(crud, TOKEN_A, first.json()["id"])
+    assert job["status"] == "done", job
+    second = crud.post(
+        "/renders", token=TOKEN_B, json=_picked(listing, {"colour": dear}), key=uuid.uuid4().hex
+    )
+    assert second.status_code == 202, second.text
+    assert second.json()["id"] == job["id"]
+    cheap_price = crud.get(f"/renders/{job['id']}/estimate").json()["price_minor"]
+    dear_price = crud.get(f"/renders/{job['id']}/estimate", token=TOKEN_B).json()["price_minor"]
+    assert dear_price > cheap_price
+
+
+@pytest.mark.parametrize("pick", ["width", "colour"])
+def test_a_pick_that_is_not_the_value_is_422(
+    crud: CrudCaller, two_reds: tuple[dict[str, Any], str, str], pick: str
+) -> None:
+    """A pick names an offered colour parameter and a listing filament of its value."""
+    listing, cheap, _ = two_reds
+    picks = {"width": cheap} if pick == "width" else {"colour": "no-such-filament"}
+    body = {**render_body(listing, {"colour": "#FF0000"}), "picks": picks}
+    r = crud.post("/renders", json=body, key=uuid.uuid4().hex)
+    assert r.status_code == 422, r.text
+    problem = r.json()
+    assert problem["type"] == STOREFRONT_PROBLEMS + "input_outside_listing"
+    assert (problem["name"], problem["reason"]) == (f"picks.{pick}", "colour")
+
+
+def test_add_to_order_fills_the_slots_from_the_picks(
+    crud: CrudCaller, two_reds: tuple[dict[str, Any], str, str]
+) -> None:
+    """The page sends no slots: the CRUD side reads the visitor's render and gives each
+    slot the picked filament of its colour."""
+    listing, _, dear = two_reds
+    body = _picked(listing, {"colour": dear})
+    rendered = crud.post("/renders", json=body, key=uuid.uuid4().hex)
+    assert rendered.status_code == 202, rendered.text
+    job = wait_done(crud, TOKEN_A, rendered.json()["id"])
+    assert job["colors"], job
+    added = crud.post("/draft/items", json=body, key=uuid.uuid4().hex)
+    assert added.status_code == 200, added.text
+    orders: OrdersComponent = _state(crud.api).components.get(ORDERS)
+    [stored] = orders.store.items(added.json()["id"])
+    assert [(c.slot, c.filament_id) for c in stored.colours] == [
+        (slot, dear) for slot, colour in enumerate(job["colors"]) if colour.upper() == "#FF0000"
+    ]
+    assert stored.colours
+
+
+def test_add_to_order_fills_an_unpicked_slot_from_the_first_filament_of_its_colour(
+    crud: CrudCaller, two_reds: tuple[dict[str, Any], str, str]
+) -> None:
+    """A colour left at the shop's choice still names a filament on the order line: the
+    first listing filament of the slot's colour, so the shop need not pick it (#6152)."""
+    listing, cheap, _ = two_reds
+    body = render_body(listing, {"width": 40, "colour": "#FF0000"})
+    rendered = crud.post("/renders", json=body, key=uuid.uuid4().hex)
+    assert rendered.status_code == 202, rendered.text
+    job = wait_done(crud, TOKEN_A, rendered.json()["id"])
+    assert job["status"] == "done", job
+    added = crud.post("/draft/items", json=body, key=uuid.uuid4().hex)
+    assert added.status_code == 200, added.text
+    orders: OrdersComponent = _state(crud.api).components.get(ORDERS)
+    [stored] = orders.store.items(added.json()["id"])
+    assert stored.colours
+    assert [(c.slot, c.filament_id) for c in stored.colours] == [
+        (slot, cheap) for slot, colour in enumerate(job["colors"]) if colour.upper() == "#FF0000"
+    ]
+
+
+def test_add_to_order_refuses_a_slot_of_another_material_on_a_one_material_listing(
+    client: TestClient,  # noqa: F811
+    crud: CrudCaller,
+    template: dict[str, Any],  # noqa: F811
+    dense_red: str,
+) -> None:
+    """The picks are PLA, but the add names a PETG slot filament: the order would mix
+    materials, so the add is 422 ``listing_mixed_material`` (#6152)."""
+    petg_red = _filament(client, "#FF0000", "30", "PETG")
+    body = listing_body(
+        template,
+        dense_red,
+        params={"colour": {"kind": "choice", "choices": ["#FF0000"]}},
+        colours=[dense_red, petg_red],
+        one_material=True,
+    )
+    listing = publish(client, create(client, body)["id"])
+    picked = {**render_body(listing, {"colour": "#FF0000"}), "picks": {"colour": dense_red}}
+    rendered = crud.post("/renders", json=picked, key=uuid.uuid4().hex)
+    assert rendered.status_code == 202, rendered.text
+    assert wait_done(crud, TOKEN_A, rendered.json()["id"])["status"] == "done"
+    mixed = {**picked, "colours": {"0": petg_red}}
+    added = crud.post("/draft/items", json=mixed, key=uuid.uuid4().hex)
+    assert added.status_code == 422, added.text
+    assert added.json()["type"] == STOREFRONT_PROBLEMS + "listing_mixed_material"
+
+
+def test_add_to_order_with_picks_waits_for_the_render(
+    crud: CrudCaller, two_reds: tuple[dict[str, Any], str, str]
+) -> None:
+    """With no done render the slots are unknown, and the picks would be lost: 409
+    ``render_pending`` (#6152)."""
+    listing, _, dear = two_reds
+    added = crud.post("/draft/items", json=_picked(listing, {"colour": dear}), key=uuid.uuid4().hex)
+    assert added.status_code == 409, added.text
+    assert added.json()["type"] == STOREFRONT_PROBLEMS + "render_pending"
+
+
+def test_a_listing_never_offers_support(
+    client: TestClient,  # noqa: F811
+    crud: CrudCaller,
+    template: dict[str, Any],  # noqa: F811
+    dense_red: str,
+) -> None:
+    """A ``one_material`` listing is shown so, and a support filament is never shown and
+    never a pick (#6152)."""
+    petg_blue = _filament(client, "#0000FF", "30", "PETG")
+    pla_blue = _filament(client, "#0000FF", "30", "PLA")
+    support = _filament(client, "#FF0000", "30", "PVA")
+    body = listing_body(
+        template,
+        dense_red,
+        params={"colour": {"kind": "choice", "choices": ["#FF0000", "#0000FF"]}},
+        colours=[dense_red, petg_blue, pla_blue, support],
+        one_material=True,
+    )
+    listing = publish(client, create(client, body)["id"])
+    shown = crud.get(f"/listings/{listing['id']}")
+    assert shown.status_code == 200, shown.text
+    assert shown.json()["one_material"] is True
+    assert support not in [f["id"] for f in shown.json()["colours"]]
+    blue = render_body(listing, {"colour": "#0000FF"})
+    assert (
+        crud.post("/renders", json={**blue, "picks": {"colour": pla_blue}}, key=uuid.uuid4().hex)
+    ).status_code == 202
+    support_pick = {**render_body(listing, {"colour": "#FF0000"}), "picks": {"colour": support}}
+    r = crud.post("/renders", json=support_pick, key=uuid.uuid4().hex)
+    assert r.status_code == 422, r.text
+    assert r.json()["name"] == "picks.colour"
+
+
+def test_a_one_material_listing_refuses_a_default_of_another_material(
+    client: TestClient,  # noqa: F811
+    crud: CrudCaller,
+    template: dict[str, Any],  # noqa: F811
+    dense_red: str,
+) -> None:
+    """Two colour parameters: ``trim`` left at its default red, which only a PLA filament
+    has, and ``colour`` picked PETG blue. One order cannot be of one material, so the
+    render and the add are 422 ``listing_mixed_material``."""
+    source = SOURCE.replace(
+        "// %%LISTING%%\n", '// %%LISTING%% %%TWO_COLOURS%%\ntrim = "#FF0000"; // color\n'
+    )
+    made = client.post("/api/v1/models", json={"name": "Two", "source": source}, headers=press())
+    assert made.status_code == 201, made.text
+    slug = made.json()["slug"]
+    commit = client.get(f"/api/v1/models/{slug}").json()["version"]
+    petg_blue = _filament(client, "#0000FF", "30", "PETG")
+    choices = {"kind": "choice", "choices": ["#FF0000", "#0000FF"]}
+    body = listing_body(
+        {"slug": slug, "commit": commit, "media_id": template["media_id"]},
+        dense_red,
+        params={"colour": choices, "trim": choices},
+        colours=[dense_red, petg_blue],
+        media_ids=[],
+        one_material=True,
+    )
+    listing = publish(client, create(client, body)["id"])
+    mixed = {**render_body(listing, {"colour": "#0000FF"}), "picks": {"colour": petg_blue}}
+    for path in ("/renders", "/draft/items"):
+        r = crud.post(path, json=mixed, key=uuid.uuid4().hex)
+        assert r.status_code == 422, r.text
+        assert r.json()["type"] == STOREFRONT_PROBLEMS + "listing_mixed_material"
+    # All PLA passes.
+    same = {**render_body(listing, {"colour": "#FF0000"}), "picks": {"colour": dense_red}}
+    assert crud.post("/renders", json=same, key=uuid.uuid4().hex).status_code == 202
+
+
+def test_two_filaments_of_one_colour_are_refused_at_the_render(
+    client: TestClient,  # noqa: F811
+    crud: CrudCaller,
+    two_reds: tuple[dict[str, Any], str, str],
+    template: dict[str, Any],  # noqa: F811
+    dense_red: str,
+) -> None:
+    """Two colour parameters, both red, picked at two red filaments. A slot shows only a
+    colour, so it prints from one filament: the render refuses the pair with 422
+    ``pick_colour_clash``, so the visitor learns it before the add (#6152)."""
+    _, cheap, dear = two_reds
+    source = SOURCE.replace(
+        "// %%LISTING%%\n", '// %%LISTING%% %%TWO_COLOURS%%\ntrim = "#FF0000"; // color\n'
+    )
+    made = client.post("/api/v1/models", json={"name": "Two", "source": source}, headers=press())
+    assert made.status_code == 201, made.text
+    slug = made.json()["slug"]
+    commit = client.get(f"/api/v1/models/{slug}").json()["version"]
+    choices = {"kind": "choice", "choices": ["#FF0000"]}
+    body = listing_body(
+        {"slug": slug, "commit": commit, "media_id": template["media_id"]},
+        dense_red,
+        params={"colour": choices, "trim": choices},
+        colours=[cheap, dear],
+        media_ids=[],
+    )
+    listing = publish(client, create(client, body)["id"])
+    values = render_body(listing, {"colour": "#FF0000", "trim": "#FF0000"})
+    clash = {**values, "picks": {"colour": cheap, "trim": dear}}
+    r = crud.post("/renders", json=clash, key=uuid.uuid4().hex)
+    assert r.status_code == 422, r.text
+    assert r.json()["type"] == STOREFRONT_PROBLEMS + "pick_colour_clash"
+    assert r.json()["name"] == "picks.trim"
+    same = {**values, "picks": {"colour": dear, "trim": dear}}
+    assert crud.post("/renders", json=same, key=uuid.uuid4().hex).status_code == 202

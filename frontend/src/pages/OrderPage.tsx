@@ -3,6 +3,7 @@ import { Link, useLocation, useParams, useSearchParams } from 'react-router'
 import { api } from '../api/client'
 import type { ItemPartRow, OrderDetail, OrderItemDetail, OrderItemPatch } from '../api/types'
 import { RevisionsPanel } from '../components/orders/RevisionsPanel'
+import { CustomerModels } from '../components/orders/CustomerModels'
 import { AddItemDialog } from '../components/orders/AddItemDialog'
 import { addMode, isCart, itemOpen, OPEN_FOR_EDITS, priceOpen, TAKES_ITEMS } from '../components/orders/afterAcceptance'
 import { ChargesEditor } from '../components/orders/ChargesEditor'
@@ -234,12 +235,18 @@ export function OrderPage() {
   const addresses = customer.data?.addresses ?? []
   const orderProject = detail.projects?.find((p) => p.item_id == null)
 
+  const pendingPurchases = (detail.sources ?? []).filter((s) => s.purpose === 'purchase' && s.status === 'pending').length
   return (
     <div className="h-full overflow-y-auto" data-testid="order-page">
       <div className="mx-auto flex max-w-5xl flex-col gap-4 px-4 py-6">
         <div className="flex flex-wrap items-center gap-3">
           <h1 className="text-xl font-semibold tracking-tight">{order.number ?? 'Cart'}</h1>
           <OrderStatusBadge status={order.status} onHold={order.on_hold} />
+          {pendingPurchases > 0 && (
+            <Badge variant="outline" className="border-warn/40 text-warn">
+              Purchase pending ({pendingPurchases})
+            </Badge>
+          )}
           <MarginBadge state={costs.data?.order_id === order.id ? costs.data.margin_state : null} />
           <span className="text-sm text-muted-foreground">
             for{' '}
@@ -873,6 +880,7 @@ function ItemDrawer({
           </>
         )}
       </dl>
+      <CustomerModels detail={detail} itemId={item.id} onChanged={onChanged} />
       <RevisionsPanel order={order} item={item} attachments={detail.attachments.filter((a) => a.item_id === item.id)} onChanged={onChanged} />
       {parts && <ItemPartsEditor orderId={order.id} item={item} rows={parts} editable={!ENDED.has(order.status) && item.status !== 'fulfilled'} onChanged={onChanged} />}
       {/* A visitor's cart (#5282) has no price or print section, so no menu action opens one. */}

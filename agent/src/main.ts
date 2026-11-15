@@ -33,6 +33,7 @@ import { BackgroundTaskStore } from './background/store.js'
 import { runCronPasses, temporalTaskRunner } from './background/temporal.js'
 import { connectDatabase } from './db.js'
 import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js'
+import { CrudEventLogReads } from './events/eventLogReads.js'
 import { PgEventListener } from './events/pgListener.js'
 import { DEFAULT_STATE_DIR, pluginCacheDir } from './harness/options.js'
 import { OWN_PLUGIN_DIR } from './harness/ownPlugin.js'
@@ -60,6 +61,8 @@ import {
   withServiceCredential,
 } from './api/serviceCredential.js'
 import { untilBackendAnswers } from './api/backendUp.js'
+import { CrudAreas, READ_AREAS } from './api/crudAreas.js'
+import { CrudFlowRunReads, gatedFlowRunReads, SqlFlowRunReads } from './flows/backendReads.js'
 import { BrowserSessions } from './auth/browserSession.js'
 import { sealBackfill } from './sessions/sealBackfill.js'
 import { ApprovalActions } from './approvals/mcp.js'
@@ -324,9 +327,23 @@ const backend = createBackendClient(
   serviceCredential ? serviceCredentialMiddleware(serviceCredential) : undefined,
 )
 
+// #5299 D7: the agent's reads of the backend's tables (the event log, flow runs, their
+// decisions and grants) go through the backend's CRUD routes once the API lists their areas,
+// read from the start and again with back-off until it does (api/crudAreas.ts); over SQL until
+// then, as an API pod older than the routes needs during a rolling deploy.
+const crudFetch = serviceCredential ? withServiceCredential(globalThis.fetch, serviceCredential, config.backendUrl) : globalThis.fetch
+const crudAreas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: READ_AREAS })
+crudAreas.start()
+const crudEventLog = new CrudEventLogReads(config.backendUrl, { fetch: crudFetch })
+const flowReads = database
+  ? gatedFlowRunReads(new SqlFlowRunReads(database.sql), new CrudFlowRunReads(config.backendUrl, { fetch: crudFetch }), () => crudAreas.has('flows'))
+  : undefined
+
 // The event bus (spec §7, #264): LISTEN on `scadbuddy_events` on a connection
 // of its own, retried in the background, feeding MCP resource subscriptions.
-const events = config.databaseUrl ? new PgEventListener(config.databaseUrl) : undefined
+const events = config.databaseUrl
+  ? new PgEventListener(config.databaseUrl, { eventLog: () => (crudAreas.has('events') ? crudEventLog : undefined) })
+  : undefined
 // The pending-input tables' change ticks (#815, gate/changes.ts), for the badge's stream.
 const pendingChanges = events ? new PendingChanges(events) : undefined
 // This replica's own queue: a pinned turn tool's calls (#2320), a classic session's
@@ -598,6 +615,7 @@ const sessions =
     ? new SessionManager({
         memory,
         sql: database.sql,
+        flowReads,
         paths,
         ...(dataKeys ? { payloadKeys: dataKeys } : {}),
         ...(settings ? { settings } : {}),
@@ -774,8 +792,8 @@ const durableToolDeps: ToolActivityDeps | undefined = temporal
   ? {
       services: toolServices,
       sessions: new PgSessionOwners(temporal.sql),
-      approvals: new PgApprovalRecords(temporal.sql),
-      flows: new PgFlowRuns(temporal.sql),
+      approvals: new PgApprovalRecords(temporal.sql, flowReads),
+      flows: new PgFlowRuns(temporal.sql, flowReads),
       audit,
       currentTiers: liveTokenTiers(tokens),
       // A result's images, for the durable segment's view_tool_images (#2320).
@@ -878,7 +896,7 @@ const turnToolDeps = temporal
   ? {
       sessions: new PgSessionOwners(temporal.sql),
       // A flow's tool(name, ...) reaches the same tools, as the run's starter (#2320).
-      flows: new PgFlowRuns(temporal.sql),
+      flows: new PgFlowRuns(temporal.sql, flowReads),
       servers: turnServers({
         ...(durableRemotePlugins ? { remotePlugins: durableRemotePlugins } : {}),
         access: accessResolver,
@@ -898,7 +916,7 @@ const turnToolDeps = temporal
       }),
       hostQueue: HOST_QUEUE,
       clients: turnClients,
-      approvals: new PgApprovalRecords(temporal.sql),
+      approvals: new PgApprovalRecords(temporal.sql, flowReads),
       audit,
       currentTiers: liveTokenTiers(tokens),
       blobs: new SessionBlobs(temporal.sql),
@@ -1030,7 +1048,7 @@ const temporalWorker =
           ...turnToolActivities(turnToolDeps),
           default: turnToolActivity(turnToolDeps),
           // A flow's agent(...) and ask_session(...) (#1057, 6g): beside the tools, never one.
-          ...flowSessionActivities({ sql: temporal.sql, flows: new PgFlowRuns(temporal.sql) }),
+          ...flowSessionActivities({ sql: temporal.sql, flows: new PgFlowRuns(temporal.sql, flowReads) }),
           ...operationActivities(commandKinds, operationStore),
           ...(background ?? {}),
         },
@@ -1365,6 +1383,7 @@ async function stop(): Promise<void> {
   stopTabHosting?.()
   stopSweeper?.()
   stopEscalationSweeper?.()
+  crudAreas.stop()
   stopOrphanSweep?.()
   stopPluginSessionSweep?.()
   stopDurableSweep?.()

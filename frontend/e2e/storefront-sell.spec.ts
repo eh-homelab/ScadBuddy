@@ -18,7 +18,9 @@ test.describe('sell on storefront', () => {
 
     // Filled in: the title, the picture, the name the customer types, the geometry set.
     await expect(page.getByLabel('Title', { exact: true })).toHaveValue('Name Keychain')
-    await expect(page.getByRole('checkbox', { name: 'Show thumbnail.png' })).toBeChecked()
+    const picture = page.getByTestId('listing-picture')
+    await expect(picture).toHaveCount(1)
+    await expect(picture.getByRole('img', { name: 'thumbnail.png' })).toBeVisible()
     const preview = page.getByTestId('listing-preview')
     await expect(preview.getByLabel('Name on the tag')).toBeVisible()
     await expect(preview.getByLabel('Text size')).toHaveCount(0)
@@ -34,6 +36,8 @@ test.describe('sell on storefront', () => {
 
     await page.getByTestId('listing-actions').getByRole('button', { name: 'Publish' }).click()
     await expect(page.getByTestId('storefront-listing-page').getByText('Published', { exact: true })).toBeVisible()
+    // #6213 — the picture the public site now shows is marked live.
+    await expect(picture.getByText('Live', { exact: true })).toBeVisible()
     await page.getByRole('link', { name: 'Back to listings' }).click()
     await expect(page.getByTestId('storefront-listing')).toContainText('Published')
   })

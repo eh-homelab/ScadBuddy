@@ -1352,7 +1352,9 @@ jobs:
     needs: [layout, lfs-fixtures]
     if: ${{ needs.layout.outputs.image == 'true' && needs.layout.outputs.run_backend == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    # A shard's image build takes about 4 minutes and its tests 25 to 36 (2026-11-14, #6214 and #6211);
+    # at 40 a slow runner cancelled shards at 98% with no failed test.
+    timeout-minutes: 55
     strategy:
       fail-fast: false
       matrix:

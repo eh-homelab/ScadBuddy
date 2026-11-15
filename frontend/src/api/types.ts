@@ -414,6 +414,15 @@ export type CustomerPatch = Partial<Schemas['CustomerPatch']>
 export type Order = Schemas['Order']
 export type OrderStatus = Order['status']
 export type OrderDetail = Schemas['OrderDetail']
+/** #6133 — a storefront customer's file or link on a request item, as the back office reads it. */
+export type OrderItemSource = Schemas['OrderItemSource']
+/** #6133 — the colours an own-model request asked for. */
+export type ModelRequestColours = Schemas['ModelRequestColours']
+/** #6133 — a thing to buy for the customer (`GET /orders/{id}/purchases`). */
+export type PurchaseSource = Schemas['PurchaseSource']
+export type PurchaseRecordInput = Defaulted<Schemas['PurchaseRecordInput'], 'cost_kind' | 'note'>
+export type PurchaseUpdateInput = Partial<Schemas['PurchaseUpdateInput']>
+export type SourceDownload = Schemas['SourceDownload']
 export type OrderItem = Schemas['OrderItem']
 export type OrderItemStatus = OrderItem['status']
 /** An item with its quotes and fulfilment attempts, as `GET /orders/{id}` lists them. */
@@ -521,7 +530,10 @@ export type MachineRateInputs = {
 /** #5282 (spec 2026-11-02 §5.3) — a storefront listing, as the back office's Storefront page edits it. */
 /** Every field is always sent: the ones the spec marks optional have defaults. */
 export type StorefrontListing = Required<Schemas['Listing']>
-export type StorefrontListingInput = Defaulted<Schemas['ListingInput'], 'description' | 'params' | 'fixed' | 'colours' | 'media_ids'>
+export type StorefrontListingInput = Defaulted<
+  Schemas['ListingInput'],
+  'description' | 'params' | 'fixed' | 'colours' | 'media_ids' | 'one_material'
+>
 export type ListingBound = Schemas['NumberBound'] | Schemas['ChoiceBound'] | Schemas['TextBound']
 /** #6157 — one row of the back office's list, and a page of them. */
 export type StorefrontListingRow = Schemas['ListingRow']

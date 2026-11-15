@@ -8,7 +8,7 @@ import { delay, HttpResponse, http } from 'msw'
 import { Route, Routes, useLocation, useNavigate, useParams } from 'react-router'
 import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import type { Output } from '../api/types'
-import { bbox, keychainSchema, models, outputs, prints } from '../mocks/fixtures'
+import { bbox, keychainSchema, models, outputs, prints, settings } from '../mocks/fixtures'
 import { addMockOutput, mockOutput, problem } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { fakeRealtime } from '../lib/realtime.fake'
@@ -283,6 +283,36 @@ describe('HistoryPage', () => {
     expect(within(await row('Nova')).getByRole('link', { name: 'in library #8790' })).toHaveAttribute(
       'href',
       'https://bambuddy.internal.nullreference.io/library',
+    )
+  })
+
+  // #6212 — ScadBuddy has two hostnames, each beside one of Bambuddy's web URLs.
+  it.each([
+    ['scadbuddy.internal.nullreference.io', 'https://bambuddy.internal.nullreference.io'],
+    ['scadbuddy.sso.nullreference.io', 'https://bambuddy.sso.nullreference.io'],
+  ])('deep-links into the Bambuddy beside the host the page is on (%s)', async (host, bambuddy) => {
+    noPrints()
+    server.use(
+      http.get('/api/v1/settings', () =>
+        HttpResponse.json({
+          ...settings,
+          bambuddy_url: 'http://bambuddy.bambuddy.svc.cluster.local:8000',
+          bambuddy_web_urls: 'https://bambuddy.internal.nullreference.io, https://bambuddy.sso.nullreference.io/',
+        }),
+      ),
+    )
+    vi.stubGlobal('location', { ...window.location, hostname: host })
+    onTestFinished(() => {
+      vi.unstubAllGlobals()
+    })
+    render()
+    expect(within(await row('Reagan')).getByRole('link', { name: 'queued #4471' })).toHaveAttribute(
+      'href',
+      `${bambuddy}/queue/4471`,
+    )
+    expect(within(await row('Nova')).getByRole('link', { name: 'in library #8790' })).toHaveAttribute(
+      'href',
+      `${bambuddy}/library`,
     )
   })
 

@@ -2,6 +2,7 @@ import { http, HttpResponse } from 'msw'
 import type { CustomerOrder, Draft, Listing, ListingCard, StoreEstimate, StoreRender } from '../../storefront/api/client'
 import { keychainGlb } from '../glb'
 import { problem } from '../handlers'
+import { advanceChecks, modelsOrderOf } from './storefrontModels'
 
 /**
  * #5282 (spec 2026-11-02 §5.1-§5.4; backend `storefront/routes.py`): the public page's edge,
@@ -36,11 +37,12 @@ export const KEYCHAIN: Listing = {
   description: 'A keychain with your name raised on it, in two colours.',
   params: {
     name: { kind: 'text', label: 'Name', group: '', colour: false, max_length: 20 },
-    size: { kind: 'number', label: 'Length (mm)', group: '', colour: false, min: 40, max: 80, step: 5 },
-    base_colour: { kind: 'choice', label: 'Base colour', group: '', colour: true, choices: ['#1B6CA8', '#E8532F'] },
+    size: { kind: 'number', label: 'Length (mm)', group: '', colour: false, min: 40, max: 80, step: 5, default: 60 },
+    base_colour: { kind: 'choice', label: 'Base colour', group: '', colour: true, choices: ['#1B6CA8', '#E8532F'], default: '#1b6ca8' },
   },
   colours: [BLUE, ORANGE],
   media: [],
+  one_material: false,
   updated_at: '2026-11-07T12:00:00Z',
 }
 
@@ -53,10 +55,44 @@ export const TAG: Listing = {
   },
   colours: [],
   media: [],
+  one_material: false,
   updated_at: '2026-11-07T12:00:00Z',
 }
 
-const LISTINGS = [KEYCHAIN, TAG]
+export const CHARM_ID = 'l3'
+const PETG_TEAL = { id: 'f-petg-teal', colour: '#1C8C8C', colour_name: 'Teal', material: 'PETG' }
+const PETG_RUST = { id: 'f-petg-rust', colour: '#C0502A', colour_name: 'Rust', material: 'PETG' }
+
+/** #6152: a listing whose colours are of one material, which the visitor chooses once. */
+export const CHARM: Listing = {
+  id: CHARM_ID,
+  title: 'Bag charm',
+  description: 'A charm in two colours of one material.',
+  params: {
+    body_colour: {
+      kind: 'choice',
+      label: 'Body colour',
+      group: '',
+      colour: true,
+      choices: [BLUE.colour, ORANGE.colour, PETG_TEAL.colour, PETG_RUST.colour],
+      default: BLUE.colour,
+    },
+    rim_colour: {
+      kind: 'choice',
+      label: 'Rim colour',
+      group: '',
+      colour: true,
+      choices: [BLUE.colour, ORANGE.colour, PETG_TEAL.colour, PETG_RUST.colour],
+      default: BLUE.colour,
+    },
+  },
+  colours: [BLUE, ORANGE, PETG_TEAL, PETG_RUST],
+  media: [],
+  one_material: true,
+  updated_at: '2026-11-07T12:00:00Z',
+}
+
+const LISTINGS = [KEYCHAIN, TAG, CHARM]
 
 /** A listing as the public list shows it (#6154): its first picture, and whether it can be ordered. */
 export function card(listing: Listing): ListingCard {
@@ -100,7 +136,7 @@ let draft: Draft | null = null
 let renders = new Map<string, { render: StoreRender; polls: number }>()
 let serial = 0
 
-function save(): void {
+export function save(): void {
   try {
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(draft))
   } catch {
@@ -116,16 +152,16 @@ function load(): void {
   }
 }
 
-function next(): string {
+export function next(): string {
   serial += 1
   return serial.toString(16).padStart(32, '0')
 }
 
-function refused(status: number, slug: string, detail: string) {
+export function refused(status: number, slug: string, detail: string) {
   return problem(status, status === 404 ? 'Not Found' : 'Unprocessable Content', detail, { type: PROBLEMS + slug })
 }
 
-function keyMissing(request: Request) {
+export function keyMissing(request: Request) {
   return request.headers.get('Idempotency-Key')
     ? null
     : refused(428, 'idempotency_key_required', 'Send an Idempotency-Key with this request.')
@@ -136,6 +172,8 @@ interface Body {
   listing_updated_at?: string
   values?: Record<string, unknown>
   colours?: Record<string, string>
+  /** The filament picked for each colour parameter (#6152). */
+  picks?: Record<string, string>
   quantity?: number
 }
 
@@ -149,6 +187,27 @@ function outside(body: Body): Response | Listing {
     if (bound.kind === 'choice' && !bound.choices.includes(value as string)) {
       return refused(422, 'input_outside_listing', 'This choice is not offered for this listing.')
     }
+  }
+  // #6152: a pick is a listing filament of the parameter's value (`checked_picks`), and a
+  // `one_material` listing's picks share one material (`check_one_material`).
+  const materials = new Set<string>()
+  const byColour = new Map<string, string>()
+  for (const [name, id] of Object.entries(body.picks ?? {})) {
+    const filament = listing.colours.find((f) => f.id === id)
+    const value = body.values?.[name]
+    if (!filament || typeof value !== 'string' || filament.colour.toLowerCase() !== value.toLowerCase()) {
+      return refused(422, 'input_outside_listing', 'This choice is not offered for this listing.')
+    }
+    // Two picks of one colour name one filament (`checked_picks`, 422 `pick_colour_clash`).
+    const held = byColour.get(filament.colour.toLowerCase()) ?? filament.id
+    if (held !== filament.id) {
+      return refused(422, 'pick_colour_clash', 'Two of your colours are one colour of two filaments. A colour prints from one filament: pick the same one for both.')
+    }
+    byColour.set(filament.colour.toLowerCase(), filament.id)
+    materials.add(filament.material.toLowerCase())
+  }
+  if (listing.one_material && materials.size > 1) {
+    return refused(422, 'listing_mixed_material', 'Every colour of this design must be of one material. Pick colours of one material.')
   }
   const archived = Object.values(listing.params).some((p) => p.kind === 'choice' && p.colour && p.choices.length === 0)
   if (archived) return refused(422, 'input_outside_listing', 'This choice is not offered for this listing.')
@@ -206,7 +265,7 @@ async function orderOf(request: Request): Promise<CustomerOrder | Response> {
     : new HttpResponse(null, { status: 404 })
 }
 
-function ensureDraft(): Draft {
+export function ensureDraft(): Draft {
   draft ??= { id: 'draft-1', currency: 'USD', minor_exponent: 2, items: [], shipping_options: SHIPPING }
   return draft
 }
@@ -274,7 +333,11 @@ export const handlers = [
       ? HttpResponse.json(ESTIMATE)
       : refused(404, 'render_not_found', 'There is no such render.'),
   ),
-  http.get(`${base}/draft`, () => HttpResponse.json(draft)),
+  http.get(`${base}/draft`, () => {
+    // A cart read moves each model check on (`storefrontModels.ts`).
+    if (draft) advanceChecks(draft)
+    return HttpResponse.json(draft)
+  }),
   http.post(`${base}/draft/items`, async ({ request }) => {
     const missing = keyMissing(request)
     if (missing) return missing
@@ -327,6 +390,9 @@ export const handlers = [
     return HttpResponse.json(submitted)
   }),
   http.post(`${base}/order/view`, async ({ request }) => {
+    // The token `models` opens `storefrontModels.ts`'s order.
+    const models = await modelsOrderOf(request)
+    if (models) return HttpResponse.json(models)
     const found = await orderOf(request)
     return found instanceof Response ? found : HttpResponse.json(found)
   }),

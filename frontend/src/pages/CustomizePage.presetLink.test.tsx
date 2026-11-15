@@ -330,8 +330,13 @@ describe('Copy link (#1022)', () => {
     expect(screen.queryByTestId('preset-link-copy')).toBeNull()
   })
 
-  it('uses the configured public URL when one is set', async () => {
-    setMockSettings({ ...mockSettings(), public_url: 'https://scad.example/' })
+  // #6232 — the link is on the host the user is on, not the public URL's.
+  it("uses the page's host, not the configured public URL", async () => {
+    setMockSettings({ ...mockSettings(), public_url: 'https://scadbuddy.internal.nullreference.io/' })
+    vi.stubGlobal('location', new URL('https://scadbuddy.sso.nullreference.io/m/name-keychain'))
+    onTestFinished(() => {
+      vi.unstubAllGlobals()
+    })
     const { user } = render('/m/name-keychain')
     const writeText = stubClipboard()
     const select = await picker()
@@ -339,7 +344,9 @@ describe('Copy link (#1022)', () => {
     await user.click(screen.getByRole('button', { name: 'More for preset Tiny' }))
     await user.click(await screen.findByRole('menuitem', { name: 'Copy link to preset Tiny' }))
     await waitFor(() =>
-      expect(writeText).toHaveBeenCalledWith('https://scad.example/m/name-keychain?preset=template-tiny'),
+      expect(writeText).toHaveBeenCalledWith(
+        'https://scadbuddy.sso.nullreference.io/m/name-keychain?preset=template-tiny',
+      ),
     )
   })
 

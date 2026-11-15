@@ -17,6 +17,8 @@ type Value = boolean | number | string
 const HIDDEN_GROUP = 'Hidden'
 /** The longest text a customer may type (`orders/storefront/wire.py` `MAX_TEXT_LENGTH`). */
 const MAX_TEXT_LENGTH = 200
+/** A support material (`orders/storefront/wire.py` `SUPPORT_MATERIAL`, `frontend/src/storefront/params.ts`): change all together. */
+const SUPPORT_MATERIAL = /support|pva|bvoh|hips/i
 
 export interface ListingDefaults {
   params: Record<string, Bound>
@@ -64,8 +66,8 @@ export function offeredFilaments(colourValues: readonly unknown[], filaments: re
  * (at most the schema's `max_length`, capped at 200) and every colour are the customer's
  * (the owner: "why can't I specify colors"), the rest, support settings always (`isSupport`), is locked at its value. A colour is
  * locked only by the caller, or when the price book has no filament to offer
- * (`offeredFilaments`). A customer who picks no colour gets the template's default
- * (`orders/storefront/inputs.py` `listing_values`), which must be a listing filament's:
+ * (`offeredFilaments`). A customer who picks no colour gets the listing's default, else the
+ * template's (`orders/storefront/inputs.py` `listing_values`, #6144), which must be a listing filament's:
  * `colourProblems` names one that is not.
  */
 export function defaultsFor(schema: Schema, filaments: readonly Filament[], values: Readonly<Record<string, Value>> = {}): ListingDefaults {
@@ -100,7 +102,11 @@ export function defaultsFor(schema: Schema, filaments: readonly Filament[], valu
   return { params, fixed, colours: [...offered, ...new Set(support)].map((filament) => filament.id) }
 }
 
-/** A colour publish would refuse: a locked colour, or an offered one's default, that no listing filament has. */
+/**
+ * A colour publish would refuse: a locked colour, or an offered one's default, that no listing
+ * filament has. An offered colour's default is the listing's `default`, else the template's, as
+ * publish checks it (`effective_default`, #6144).
+ */
 export interface ColourProblem {
   name: string
   label: string
@@ -111,7 +117,8 @@ export function colourProblems(listing: ListingDefaults, schema: Schema, filamen
   const listed = filaments.filter((filament) => listing.colours.includes(filament.id))
   return shownParams(schema).flatMap((param) => {
     if (param.type !== 'color') return []
-    const value = listing.params[param.name] ? param.initial : (listing.fixed[param.name] ?? param.initial)
+    const offered = listing.params[param.name]
+    const value = offered ? (offered.default ?? param.initial) : (listing.fixed[param.name] ?? param.initial)
     if (typeof value !== 'string' || filamentOf(value, listed)) return []
     return [{ name: param.name, label: param.caption || param.name, colour: value }]
   })
@@ -120,7 +127,7 @@ export function colourProblems(listing: ListingDefaults, schema: Schema, filamen
 /**
  * The body a save sends, as the page's `listingInput` writes it: a support parameter is never
  * offered (`isSupport`), and each offered colour takes the listing filaments' colours but a
- * colour only a support parameter uses.
+ * colour only a support parameter uses and a support material's colour.
  */
 export function withColourChoices(listing: ListingDefaults, schema: Schema, filaments: readonly Filament[]): Pick<ListingDefaults, 'params' | 'fixed'> {
   const byName = new Map((schema.parameters ?? []).map((param) => [param.name, param]))
@@ -153,7 +160,11 @@ export function withColourChoices(listing: ListingDefaults, schema: Schema, fila
     const same = listed.filter((filament) => sameColour(filament.colour, colour))
     return same.length > 0 && same.every((filament) => supportOnlyFilaments.includes(filament))
   })
-  const colours = listed.map((filament) => filament.colour).filter((colour) => !supportOnly.some((support) => sameColour(support, colour)))
+  // #6152: never the colour of a support material, which publish refuses on offer.
+  const colours = listed
+    .filter((filament) => !SUPPORT_MATERIAL.test(filament.material))
+    .map((filament) => filament.colour)
+    .filter((colour) => !supportOnly.some((support) => sameColour(support, colour)))
   for (const name of Object.keys(params)) {
     if (byName.get(name)?.type === 'color') params[name] = { kind: 'choice', choices: colours }
   }

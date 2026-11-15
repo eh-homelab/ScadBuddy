@@ -422,7 +422,11 @@ on shutdown.
   one job. An identical OpenSCAD run (same template, revision, file and
   parameters) is rendered once and its piece kept in the blob store
   (`/data/blobs/`), so a later job that needs it reuses it; a piece no job
-  references is removed after `SCADBUDDY_JOB_TTL`.
+  references is removed after `SCADBUDDY_JOB_TTL` (a day while it is 0, which keeps renders forever).
+  - `SCADBUDDY_JOB_TTL` (seconds, `86400` by default): how long a settled render job
+    and its files are kept. `0` keeps settled renders and their files forever (#6236).
+    The blob sweep and the revision-export prune still wait a day at `0`, never 0
+    seconds, so that a write that has not recorded its reference yet is safe.
   - `SCADBUDDY_RENDER_QUEUE_MAX` (0 = no limit): set, a request that would be a new
     job while that many already wait gets 503 with `Retry-After`. A request that
     matches a job still open (pending or running) joins it and is never refused, and
@@ -1543,7 +1547,8 @@ workers restart.
   and ScadBuddy deletes only inside a `Work/` folder of the inbox folder Settings
   names. Changing that folder leaves the previous one's `Work/` files for you to delete.
   Any file in a ScadBuddy `Work/` folder that ScadBuddy did not upload, such as one
-  dropped there by hand, is deleted once it is older than `SCADBUDDY_JOB_TTL`: keep
+  dropped there by hand, is deleted once it is older than `SCADBUDDY_JOB_TTL`
+  (a day while it is 0, which keeps renders forever): keep
   your own files elsewhere.
   The same goes for the Bambuddy URL: folders are recorded per instance, so pointing
   ScadBuddy at another Bambuddy makes new folders there and never deletes by the old
@@ -1569,7 +1574,8 @@ workers restart.
   - On the workers, set `SCADBUDDY_ASSET_SWEEP_INTERVAL` short, e.g. `900`. On that
     interval, and **only** then, a worker trims its cache to
     `SCADBUDDY_WORKER_CACHE_MAX_BYTES` (least recently used first), removes the
-    revision exports it has not used for `SCADBUDDY_JOB_TTL` (a day by default), and
+    revision exports it has not used for `SCADBUDDY_JOB_TTL` (a day by default, and
+    a day while it is 0, which keeps renders forever), and
     removes the uploads it has not used for `SCADBUDDY_ASSET_SWEEP_GRACE` (at least an
     hour; it fetches one again when a render names it). `0` (or unset) does not
     stop that pass: the worker falls back to a fixed 300 s.
@@ -1581,7 +1587,7 @@ workers restart.
     | the cache after a trim | `SCADBUDDY_WORKER_CACHE_MAX_BYTES` | 10 GiB |
     | one interval's new pieces | render slots × (interval ÷ time per piece) × piece size, e.g. 2 × (900 s ÷ 30 s) × 20 MiB | 1.2 GiB |
     | uploads fetched (`assets/`) | last use: those a render named within `SCADBUDDY_ASSET_SWEEP_GRACE`; in practice no more than the API's `SCADBUDDY_ASSET_MAX_TOTAL_BYTES` | 1 GB |
-    | revision exports (`cache/`) | last use: the template revisions rendered within `SCADBUDDY_JOB_TTL` | measure |
+    | revision exports (`cache/`) | last use: the template revisions rendered within `SCADBUDDY_JOB_TTL` (a day while it is 0, which keeps renders forever) | measure |
     | fonts (`fonts/`) and library checkouts (`libraries/`) | nothing: the families and libraries the rendered templates name, kept for the pod's life | measure |
     | **sum; `sizeLimit` with slack** | 10 + 1.2 + 0.93 (1 GB) ≈ 12.1 GiB, plus the measured rows (~1 GiB on a typical worker) ≈ 13.1 GiB | **`14Gi`: ~0.9 GiB of slack** |
 
@@ -1666,7 +1672,7 @@ workers restart.
   ([S3's HeadObject permissions](https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadObject.html)).
   Uploads above 64 MiB go as multipart ([S3's limits](https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html)).
   An object whose upload never got a row (a crash between the two) is removed by the
-  blob sweep once it is older than `SCADBUDDY_JOB_TTL`.
+  blob sweep once it is older than `SCADBUDDY_JOB_TTL` (a day while it is 0, which keeps renders forever).
 
   **Switching a store that already holds blobs.** Changing `store_backend` alone would
   leave every existing piece, snapshot and upload behind, so the move is two phases:

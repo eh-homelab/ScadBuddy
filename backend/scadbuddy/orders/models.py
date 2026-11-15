@@ -404,6 +404,12 @@ class OrderFilter(BaseModel):
     source: OrderSource | None = None
     #: False leaves out the unsubmitted storefront drafts; True lists only those.
     unsubmitted: bool = False
+    #: Only orders with a customer's own-model request (#6133, spec 2026-11-13 §11).
+    own_model: bool = False
+    #: Only orders with a thing to buy the shop has not priced (`purchase_pending`).
+    purchase_pending: bool = False
+    #: Only orders with a source whose import is stuck (`IMPORT_STUCK`).
+    import_stuck: bool = False
 
 
 # -- line items (§3.3) ------------------------------------------------------------------
@@ -815,6 +821,83 @@ class PurchaseSource(BaseModel):
     cost_entry_id: str | None = None
     charge_id: str | None = None
     shop_note: str = ""
+
+
+#: A file's check by the intake worker (spec 2026-11-13 §7).
+SourceCheckStatus = Literal["checking", "ready", "refused", "failed"]
+#: A print source's state; a purchase link's is `PurchaseStatus`.
+SourceStatus = Literal[
+    "open", "imported", "manual", "declined", "pending", "recorded", "not_needed"
+]
+SourceLinkType = Literal["makerworld", "printables", "thingiverse", "manual"]
+#: The status reason of a staged file's source whose import has not finished an hour after
+#: the submit (spec 2026-11-13 §8.1). The watcher's import child sets it (#6133 PR 5); the
+#: back office shows "Import stuck" and "Retry import", which sends the watcher ``retry``.
+#: It is the shop's: the customer's order page never shows it.
+IMPORT_STUCK = "The import has not finished an hour after the order was sent."
+
+
+class OrderItemSource(BaseModel):
+    """A file or a link of a storefront customer's request item, as the back office reads
+    it (#6133, spec 2026-11-13 §5.3, §11). ``url`` is text only: nothing fetches it.
+    ``staged`` is true while a file's frozen copy waits in the staging area (a download
+    is a presigned GET of it then). ``has_preview`` says the check stored a preview,
+    which ``GET …/sources/{id}/preview`` serves. ``import_stuck`` is true while
+    ``status_reason`` is the watcher's stuck reason (``model_requests.IMPORT_STUCK``).
+    ``amount_minor`` and ``cost_kind`` are a recorded purchase's."""
+
+    id: str
+    order_id: str
+    item_id: str
+    position: int
+    kind: Literal["file", "link"]
+    purpose: Literal["print", "purchase"]
+    filename: str | None = None
+    size: int | None = None
+    media_type: str | None = None
+    url: str | None = None
+    link_type: SourceLinkType | None = None
+    canonical: str | None = None
+    note: str = ""
+    check_status: SourceCheckStatus | None = None
+    check_reason: str | None = None
+    facts: dict[str, Any] | None = None
+    sha256: str | None = None
+    has_preview: bool = False
+    staged: bool = False
+    status: SourceStatus
+    status_reason: str | None = None
+    import_stuck: bool = False
+    library_file_id: int | None = None
+    result_item_id: str | None = None
+    amount_minor: Money | None = None
+    cost_kind: PurchaseCostKind | None = None
+    shop_note: str = ""
+
+
+class ModelRequestColours(BaseModel):
+    """The colours a customer asked for on an own-model request item: the shop's choice,
+    or price book filaments by id."""
+
+    item_id: str
+    shop_choice: bool = False
+    filaments: list[str] = Field(default_factory=list)
+
+
+class SourceDeclineInput(BaseModel):
+    """A print file or link the shop does not take, with its reason (the shop's own)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(default="", max_length=MAX_SHOP_NOTE)
+
+
+class SourceDownload(BaseModel):
+    """A presigned GET of a staged file's frozen copy, as an attachment, until
+    ``expires_at``. The query carries the signature: never log it."""
+
+    url: str
+    expires_at: datetime
 
 
 # -- attachments (§6.2, #4251) ----------------------------------------------------------

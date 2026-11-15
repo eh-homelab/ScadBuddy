@@ -23,11 +23,17 @@ from scadbuddy.api.deps import StateDep
 from scadbuddy.core.authorship import by_a_person
 from scadbuddy.core.problems import ApiError
 from scadbuddy.orders.component import OrdersDep
-from scadbuddy.orders.storefront.listings import listing_not_found, publish, unpublish
+from scadbuddy.orders.storefront.listings import (
+    change_media,
+    listing_not_found,
+    publish,
+    unpublish,
+)
 from scadbuddy.orders.storefront.mail import MailConnectionUnsetError
 from scadbuddy.orders.storefront.wire import (
     Listing,
     ListingInput,
+    ListingMediaUpdate,
     ListingMove,
     ListingOrder,
     ListingPage,
@@ -131,6 +137,26 @@ async def update_listing(listing_id: str, body: ListingUpdate, orders: OrdersDep
     )
 
 
+@router.put(
+    "/listings/{listing_id}/media",
+    response_model=Listing,
+    summary="Set a storefront listing's pictures",
+)
+async def set_listing_media(
+    listing_id: str, body: ListingMediaUpdate, orders: OrdersDep, state: StateDep
+) -> Listing:
+    """The listing's pictures (#6213): ``media_ids``, images of its template in the order
+    to show them, and nothing else changed. A draft stays a draft; a published listing
+    is published again at once and stays live. 409 ``listing_changed`` unless
+    ``updated_at`` is the listing's; 422 ``listing_media_unknown``,
+    ``listing_media_not_image`` or ``listing_media_duplicate`` (``name`` is the id); a
+    republish refused answers as ``POST …/publish`` does, with ``pictures_saved: true``:
+    the pictures are kept and the public site shows what was last published."""
+    return await change_media(
+        state, orders.listings, listing_id, body.media_ids, expected_updated_at=body.updated_at
+    )
+
+
 @router.post(
     "/listings/{listing_id}/publish",
     response_model=Listing,
@@ -141,7 +167,8 @@ async def publish_listing(listing_id: str, orders: OrdersDep, state: StateDep) -
     the public site with what a visitor's render needs (the schema, the source
     snapshot, the media). 409 ``storefront_needs_s3`` unless the store is S3; 422 names
     the fault (``listing_param_unknown``, ``listing_bounds_outside_schema``,
-    ``listing_fixed_invalid``, ``listing_colour_unknown``, ``listing_media_unknown``,
+    ``listing_fixed_invalid``, ``listing_default_invalid``, ``listing_colour_unknown``,
+    ``listing_media_unknown``,
     ``listing_reference``, ``listing_pipeline_unsupported``); 409 ``listing_publishing``
     while another publish of it runs; 503 ``listing_publish_busy`` while this process
     runs as many publishes as it allows."""

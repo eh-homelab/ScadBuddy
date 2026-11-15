@@ -203,7 +203,10 @@ all (`createApp()`, [`agent/src/app.ts`](../../agent/src/app.ts)).
   backoff (500 ms to 30 s) and logs each failure. On reconnect it replays the backend's
   `events` log after the last `seq` it knows (backend
   [`pg_events.py`](../../backend/scadbuddy/core/pg_events.py); pruned by
-  `SCADBUDDY_EVENT_LOG_RETENTION_*`), skipping ids it already delivered. More than 1000
+  `SCADBUDDY_EVENT_LOG_RETENTION_*`), skipping ids it already delivered. It reads the log
+  through the backend's CRUD routes (`…/crud/agent/events/head` and `…/crud/agent/events`,
+  #5299) once the API lists area `events`, and over SQL on its listening connection
+  until then ([`eventLogReads.ts`](../../agent/src/events/eventLogReads.ts)). More than 1000
   missed events, or a log it cannot read, makes it log
   `event bus: resyncing followers: …` and send every subscription an update plus one
   `list_changed`, so clients re-read.
@@ -219,8 +222,8 @@ all (`createApp()`, [`agent/src/app.ts`](../../agent/src/app.ts)).
   older than the place shows the bound was broken; the listener then logs
   `event bus: resyncing followers: a replayed event's transaction was open more than …`
   and resyncs every subscriber (the ASSUMPTION and GUARD comments in `pgListener.ts`).
-- **Schemas.** The listener reads `events` through the connection's `search_path`, so
-  the agent and the backend must share a schema; channels are per database, so two
+- **Schemas.** Over SQL the listener reads `events` through the connection's
+  `search_path`, so the agent and the backend must share a schema; channels are per database, so two
   deployments sharing a database would hear each other (the same caveat the backend's
   `pg_events.py` states).
 
