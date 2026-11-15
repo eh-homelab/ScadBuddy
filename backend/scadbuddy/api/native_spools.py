@@ -15,6 +15,7 @@ from uuid import UUID
 from fastapi import APIRouter, Response, status
 
 from scadbuddy.core.problems import ApiError
+from scadbuddy.filament.spools import SpoolInUseError
 from scadbuddy.spools.component import Spools, SpoolsDep
 from scadbuddy.spools.native import (
     NativeSpool,
@@ -117,10 +118,17 @@ async def patch_native_spool(
     status_code=status.HTTP_204_NO_CONTENT,
     response_class=Response,
     summary="Forget one of ScadBuddy's own spools",
-    description="Gone for good; archive it instead to keep its record. 404 for no such spool.",
+    description=(
+        "Gone for good; archive it instead to keep its record. 404 for no such spool, 409 "
+        "when a print has ended on it (its ledger keeps that print)."
+    ),
 )
 async def delete_native_spool(spools: SpoolsDep, spool_id: UUID) -> Response:
-    if not await asyncio.to_thread(native_provider(spools).store.delete, spool_id):
+    try:
+        deleted = await asyncio.to_thread(native_provider(spools).store.delete, spool_id)
+    except SpoolInUseError as error:
+        raise ApiError(status.HTTP_409_CONFLICT, str(error)) from None
+    if not deleted:
         raise _missing(spool_id)
     await _refreshed(spools)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

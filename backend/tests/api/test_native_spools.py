@@ -73,3 +73,18 @@ def test_a_spool_is_kept_and_its_record_cached_at_once(client: TestClient) -> No
 def test_what_no_spool_has_is_refused(client: TestClient) -> None:
     for body in ({"colour": "red"}, {"remaining_g": -1}, {"tray_uuid": "zz"}, {"weight": 1}):
         assert client.post(URL, json=body).status_code == 422, body
+
+
+def test_a_spool_a_print_ended_on_is_not_deleted(client: TestClient) -> None:
+    spool = client.post(URL, json={"material": "PLA", "remaining_g": 100}).json()
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    with state.components.get(SPOOLS).store._pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO filament_spool_events (spool_id, kind, source, delta_g, ref_kind, ref_id)"
+            " VALUES (%s, 'print_ended', 'print_actual', -5, 'print_run', 'r/p/1')",
+            (spool["id"],),
+        )
+    path = f"{URL}/{spool['id']}"
+    refused = client.delete(path)
+    assert refused.status_code == 409, refused.text
+    assert client.get(path).status_code == 200

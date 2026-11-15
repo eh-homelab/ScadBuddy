@@ -238,8 +238,7 @@ async def test_a_start_saves_what_it_uses_of_the_native_spools_once(pg_pool: PgP
         await ActivityEnvironment().run(LanActivities(deps).lan_print, input)
     with pg_pool.connection() as conn:
         uses = conn.execute(
-            "SELECT run_id, subtask_name, slot_id, spool_id, grams FROM native_spool_uses"
+            "SELECT ref_id, spool_id, delta_g FROM filament_spool_events"
+            " WHERE kind = 'print_started'"
         ).fetchall()
-    assert uses == [
-        {"run_id": "run-1", "subtask_name": NAME, "slot_id": 1, "spool_id": spool.id, "grams": 12.5}
-    ]
+    assert uses == [{"ref_id": f"run-1/{NAME}/1", "spool_id": spool.id, "delta_g": -12.5}]

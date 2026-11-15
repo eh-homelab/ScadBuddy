@@ -1,7 +1,8 @@
 """ScadBuddy's own inventory as a spool provider (#4643, tier B of #3818; plan 2026-10-18
 D1 names it the second provider, after Bambuddy's, `bambuddy/spool_providers.py`).
 
-Its records are ``native_spools`` (`spools/native.py`), which a person keeps; the refresh
+Its records are ScadBuddy's own spools (`spools/native.py`, over the ``filament_*``
+tables since #6261), which a person keeps; the refresh
 (`workflows/spool_refresh.py`) copies the unarchived ones into ``spool_provider_records``
 as every provider's are, and a write through ``/api/v1/native-spools`` refreshes it at
 once (`api/native_spools.py`), so the overlay never shows an edit late. It reads
