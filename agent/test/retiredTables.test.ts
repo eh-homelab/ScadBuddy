@@ -15,11 +15,32 @@ const SQL_NAMING = new RegExp(String.raw`\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+(?:
 
 /**
  * Where `text`'s SQL names a retired table, as `line: text` of the keyword's line. Comment lines
- * (`//`, and a doc comment's `*`) are blanked first, keeping the line numbers.
+ * are blanked first, keeping the line numbers: a line that starts with `//`, and every line of a
+ * block comment that starts a line (`/*` or `/**` up to its `*\/`, keeping the code after it). A line that only starts with
+ * `*` is code, such as a select list's `* FROM`.
  */
 function naming(text: string): string[] {
   const lines = text.split('\n')
-  const code = lines.map((line) => (/^\s*(?:\/\/|\*)/.test(line) ? '' : line)).join('\n')
+  let inBlock = false
+  const code = lines
+    .map((line) => {
+      const t = line.trim()
+      if (inBlock) {
+        const end = t.indexOf('*/')
+        inBlock = end < 0
+        // The closing line keeps the code after the `*\/`.
+        return end < 0 ? '' : t.slice(end + 2)
+      }
+      if (t.startsWith('//')) return ''
+      if (t.startsWith('/*')) {
+        const end = t.indexOf('*/', 2)
+        inBlock = end < 0
+        // A block that ends on its own line keeps the code after it.
+        return end < 0 ? '' : t.slice(end + 2)
+      }
+      return line
+    })
+    .join('\n')
   return [...code.matchAll(SQL_NAMING)].map((match) => {
     const line = code.slice(0, match.index).split('\n').length
     return `${line}: ${lines[line - 1]!.trim()}`
@@ -45,8 +66,14 @@ describe('the backend tables whose grants the API took back', () => {
     expect(naming('const [row] = await sql`SELECT max(seq) FROM events`')).toHaveLength(1)
     expect(naming('await sql`\n  SELECT steps\n    FROM\n      workflow_runs r WHERE id = ${id}`')).toEqual(['3: FROM'])
     expect(naming('UPDATE\nworkflow_run_decisions SET x = 1')).toEqual(['1: UPDATE'])
+    // A select list's `*` that starts a line is SQL, not a doc comment.
+    expect(naming('await sql`SELECT\n  * FROM events`')).toEqual(['2: * FROM events`'])
+    expect(naming('/**\n * Reads\n * FROM events, in a doc comment.\n */\nconst x = 1')).toEqual([])
+    expect(naming('/* FROM events */ const y = 1')).toEqual([])
+    expect(naming('/* a note */ const y = await sql`SELECT 1 FROM workflow_runs`')).toHaveLength(1)
+    expect(naming('/* note\n*/ const r = await sql`SELECT * FROM events`')).toEqual(['2: */ const r = await sql`SELECT * FROM events`'])
     // Prose and comments name them too, and are not SQL.
-    expect(naming('// reads FROM events through the routes\n * JOIN workflow_runs in a doc comment')).toEqual([])
+    expect(naming('// reads FROM events through the routes\n/**\n * JOIN workflow_runs in a doc comment\n */')).toEqual([])
     expect(naming('the events log, read from the workflow_runs projection')).toEqual([])
     expect(naming('SELECT 1 FROM events_archive JOIN flow_grants g ON true')).toEqual([])
   })

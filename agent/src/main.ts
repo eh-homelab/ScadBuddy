@@ -332,8 +332,9 @@ const backend = createBackendClient(
 )
 
 // #5299 D7: the agent's reads of the backend's tables (the event log, flow runs, their
-// decisions and grants) go only through the backend's CRUD routes (areas `events` and `flows`);
-// the API takes back the agent's grants on the event log, flow runs and decisions.
+// decisions and grants) go only through the backend's CRUD routes (areas `events` and
+// `flows`), with no SQL fallback (test/retiredTables.test.ts). `crudFetch` is made above,
+// with the step 4 areas.
 const flowReads = new CrudFlowRunReads(config.backendUrl, { fetch: crudFetch })
 
 // The event bus (spec §7, #264): LISTEN on `scadbuddy_events` on a connection
