@@ -679,6 +679,18 @@ describe('the queue (#6386)', () => {
     expect(run([queue(2, ['q2'])], refused).sessions.s1?.queueRefusals).toEqual({})
   })
 
+  it('counts nothing for a remove or edit refused after its message left the queue: only the error shows', () => {
+    // q1 started (or another tab removed it); the refusal of this tab's remove arrives after.
+    const left = run([queue(1, ['q1', 'q2']), queue(2, ['q2'])], started)
+    const late = run([server({ type: 'error', sessionId: 's1', code: 'not_queued', message: 'it started', queuedId: 'q1' })], left)
+    expect(late.sessions.s1?.queueRefusals).toBeUndefined()
+    expect(late.sessions.s1?.queued?.map((q) => q.id)).toEqual(['q2'])
+    expect(late.sessions.s1?.items.at(-1)).toMatchObject({ kind: 'error' })
+    // The entry still waiting counts as before.
+    const edit = run([server({ type: 'error', sessionId: 's1', code: 'queue_full', message: 'too long', queuedId: 'q2' })], late)
+    expect(edit.sessions.s1?.queueRefusals).toEqual({ q2: 1 })
+  })
+
   it('clears the queue for a replay, which rebuilds it from the log', () => {
     const queued = run([queue(1, ['q1'])], started)
     const replaying = run([{ type: 'select', sessionId: 's1' }], queued)

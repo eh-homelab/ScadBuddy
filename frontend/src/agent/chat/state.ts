@@ -594,11 +594,11 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
       // other error touches a sent answer, which may already have been accepted.
       const reopen = (s: SessionState, id: string): SessionState =>
         mapItems(s, (i) => (i.kind === 'question' && i.id === id && i.state === 'sent' ? { ...i, state: 'pending' } : i))
-      // #6386: a refused remove or edit of a queued message: that entry's buttons work again.
-      const refused = (s: SessionState, id: string): SessionState => ({
-        ...s,
-        queueRefusals: { ...s.queueRefusals, [id]: (s.queueRefusals?.[id] ?? 0) + 1 },
-      })
+      // #6386: a refused remove or edit of a queued message: that entry's buttons work again. One
+      // refused after its entry left the queue (it started, or another tab removed it) counts for
+      // nothing: no entry shows it, and only the error is shown.
+      const refused = (s: SessionState, id: string): SessionState =>
+        s.queued?.some((q) => q.id === id) ? { ...s, queueRefusals: { ...s.queueRefusals, [id]: (s.queueRefusals?.[id] ?? 0) + 1 } } : s
       if (event.sessionId && state.sessions[event.sessionId]) {
         return patchSession(state, event.sessionId, (s) =>
           push(event.questionId ? reopen(s, event.questionId) : event.queuedId ? refused(s, event.queuedId) : s, {

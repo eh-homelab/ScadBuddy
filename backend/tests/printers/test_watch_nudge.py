@@ -29,8 +29,7 @@ from scadbuddy.printers.reports import (
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.printers.watch import WatchActivities
 from scadbuddy.rack.usage import LanUsage
-from scadbuddy.workflows.printer_watch import PrinterWatchInput
-from tests.printers.test_watch import FINISH_X, RUNNING_X, Lan, Settles
+from tests.printers.test_watch import FINISH_X, RUNNING_X, Lan, Settles, run_until
 
 PID = "p1"
 RUNNING_Y = {"gcode_state": "RUNNING", "subtask_name": "y", "mc_percent": 1}
@@ -102,13 +101,8 @@ def _watches(lan: Lan, reports: Reports, nudge: Hangs, rack: Settles) -> WatchAc
     )
 
 
-async def _run_for(watches: WatchActivities, seconds: float) -> None:
-    env = ActivityEnvironment()
-    task = asyncio.ensure_future(env.run(watches.printer_watch, PrinterWatchInput(printer_id=PID)))
-    await asyncio.sleep(seconds)
-    env.cancel()
-    with pytest.raises(BaseException):  # noqa: B017 - cancelled, however the env says it
-        await task
+def _failed(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if "nudge failed" in r.getMessage()]
 
 
 async def test_a_hanging_nudge_never_holds_back_the_next_report_or_its_settle() -> None:
@@ -116,7 +110,12 @@ async def test_a_hanging_nudge_never_holds_back_the_next_report_or_its_settle() 
     out `NUDGE_TIMEOUT` (10 s) behind ``x``'s nudge."""
     lan = Lan(subscribes=True, deltas=[RUNNING_X, FINISH_X, RUNNING_Y])
     reports, nudges, rack = Reports(), Hangs(), Settles()
-    await _run_for(_watches(lan, reports, nudges, rack), 0.4)
+    await run_until(
+        ActivityEnvironment(),
+        _watches(lan, reports, nudges, rack),
+        PID,
+        lambda: len(reports.written) == 3 and len(nudges.seen) == 2 and bool(rack.ended),
+    )
 
     assert reports.written == [RUNNING_X, FINISH_X, RUNNING_Y]
     assert [(printer, name) for printer, name, _, _ in rack.ended] == [(PID, "x")]
@@ -134,7 +133,12 @@ async def test_a_nudge_past_its_timeout_is_cancelled_and_logged(
     lan = Lan(subscribes=True, deltas=[RUNNING_X, RUNNING_Y])
     reports, nudges, rack = Reports(), Hangs(), Settles()
     with caplog.at_level(logging.WARNING, logger=watch_module.__name__):
-        await _run_for(_watches(lan, reports, nudges, rack), 0.4)
+        await run_until(
+            ActivityEnvironment(),
+            _watches(lan, reports, nudges, rack),
+            PID,
+            lambda: len(nudges.cancelled) == 2 and len(_failed(caplog)) == 2,
+        )
 
     assert reports.written == [RUNNING_X, RUNNING_Y]
     assert nudges.cancelled == ["x", "y"]
@@ -146,7 +150,9 @@ async def test_a_nudge_in_flight_ends_with_its_attempt() -> None:
     Schedule's pass takes the job."""
     lan = Lan(subscribes=True, deltas=[RUNNING_X])
     reports, nudges, rack = Reports(), Hangs(), Settles()
-    await _run_for(_watches(lan, reports, nudges, rack), 0.2)
+    await run_until(
+        ActivityEnvironment(), _watches(lan, reports, nudges, rack), PID, lambda: bool(nudges.seen)
+    )
     await asyncio.sleep(0)
 
     assert nudges.cancelled == ["x"]
@@ -158,7 +164,12 @@ async def test_a_start_carries_its_reports_time_and_plate_gcode() -> None:
     started = {**RUNNING_X, "gcode_file": "/data/Metadata/plate_2.gcode"}
     lan = Lan(subscribes=True, deltas=[started])
     reports, nudges, rack = Reports(), Hangs(), Settles()
-    await _run_for(_watches(lan, reports, nudges, rack), 0.2)
+    await run_until(
+        ActivityEnvironment(),
+        _watches(lan, reports, nudges, rack),
+        PID,
+        lambda: bool(nudges.starts),
+    )
 
     [start] = nudges.starts
     assert start.subtask_name == "x"
@@ -200,10 +211,15 @@ async def test_a_bounded_read_that_gives_up_is_logged_and_the_watch_goes_on(
         nudge=nudger.nudge,
     )
     with caplog.at_level(logging.WARNING, logger=watch_module.__name__):
-        await _run_for(watches, 0.4)
+        await run_until(
+            ActivityEnvironment(),
+            watches,
+            PID,
+            lambda: len(reports.written) == 3 and len(_failed(caplog)) == 2,
+        )
 
     assert reports.written == [RUNNING_X, FINISH_X, RUNNING_Y]
     assert started == [], "no pass starts when the printer read fails"
-    failed = [r for r in caplog.records if "nudge failed" in r.getMessage()]
+    failed = _failed(caplog)
     assert len(failed) == 2
     assert all(r.exc_info and isinstance(r.exc_info[1], type(error)) for r in failed)

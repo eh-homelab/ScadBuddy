@@ -1,6 +1,6 @@
 import { CrudReadError, crudRead, crudResponse } from '../api/crudRead.js'
 import type { SavedBodies, SavedMeta } from '../harness/httpRequest.js'
-import { BLOB_NAME, type SessionImage, type SessionImages, type StoredBlob, type TurnFence } from './blobs.js'
+import { BLOB_NAME, type MadeImages, type SessionImage, type SessionImages, type StoredBlob, type TurnFence } from './blobs.js'
 import { IMAGE_MEDIA_TYPES, type ImageMediaType } from './images.js'
 
 // A session's images and saved HTTP bodies over the API's CRUD routes (#5299 step 7; backend
@@ -16,6 +16,11 @@ export const IMAGES_PER_WRITE = 8
 const WRITE_TIMEOUT_MS = 60_000
 
 export type CrudBlobsOptions = { fetch?: typeof fetch }
+
+/** A write's answer (backend `BlobsStored`): `at` is ISO 8601 in UTC to the microsecond. */
+type Written = { stored: boolean; created?: string[]; at?: string | null }
+
+const fenceOf = (fence: TurnFence) => ({ attempt: fence.attempt, turn_id: fence.turnId })
 
 function imageForm(meta: object, images: readonly SessionImage[]): FormData {
   const form = new FormData()
@@ -39,14 +44,14 @@ export class CrudSessionBlobs implements SessionImages {
     this.#fetch = options.fetch ?? globalThis.fetch
   }
 
-  async #write(sessionId: string, images: readonly SessionImage[], extra: object): Promise<boolean> {
+  async #write(sessionId: string, images: readonly SessionImage[], extra: object): Promise<Written> {
     const meta = { session_id: sessionId, images: images.map((i) => ({ name: i.name, media_type: i.mediaType })), ...extra }
     const response = await crudResponse(this.#fetch, this.#base, `the images of session ${sessionId}`, '/session-blobs', {
       method: 'POST',
       body: imageForm(meta, images),
       timeoutMs: WRITE_TIMEOUT_MS,
     })
-    return ((await response.json()) as { stored: boolean }).stored
+    return (await response.json()) as Written
   }
 
   async put(sessionId: string, images: readonly SessionImage[], toolUseId?: string): Promise<void> {
@@ -56,9 +61,34 @@ export class CrudSessionBlobs implements SessionImages {
       await this.#write(sessionId, images, { tool_use_id: toolUseId })
       return
     }
+    await this.putMade(sessionId, images)
+  }
+
+  /**
+   * Each batch is its own transaction, so each answers what it made with its own `at`: a name a
+   * later batch made is deleted against that batch's time, never an earlier one's.
+   */
+  async putMade(sessionId: string, images: readonly SessionImage[]): Promise<MadeImages[]> {
+    const made: MadeImages[] = []
     for (let i = 0; i < images.length; i += IMAGES_PER_WRITE) {
-      await this.#write(sessionId, images.slice(i, i + IMAGES_PER_WRITE), {})
+      const written = await this.#write(sessionId, images.slice(i, i + IMAGES_PER_WRITE), {})
+      if (written.created?.length && written.at) made.push({ names: written.created, at: written.at })
     }
+    return made
+  }
+
+  async delete(sessionId: string, made: MadeImages, fence?: TurnFence): Promise<string[]> {
+    const names = made.names.filter((name) => BLOB_NAME.test(name))
+    const deleted: string[] = []
+    for (let i = 0; i < names.length; i += IMAGES_PER_WRITE) {
+      const body = { session_id: sessionId, names: names.slice(i, i + IMAGES_PER_WRITE), before: made.at, ...(fence ? { fence: fenceOf(fence) } : {}) }
+      const answer = await crudRead<{ ran: boolean; deleted: string[] }>(this.#fetch, this.#base, `the images of session ${sessionId}`, '/session-blobs/deletes', {
+        method: 'POST',
+        body,
+      })
+      deleted.push(...answer.deleted)
+    }
+    return deleted.sort()
   }
 
   /**
@@ -68,10 +98,10 @@ export class CrudSessionBlobs implements SessionImages {
    * reads it).
    */
   async putIf(sessionId: string, images: readonly SessionImage[], fence: TurnFence): Promise<boolean> {
-    const extra = { fence: { attempt: fence.attempt, turn_id: fence.turnId } }
-    if (images.length === 0) return this.#write(sessionId, images, extra)
+    const extra = { fence: fenceOf(fence) }
+    if (images.length === 0) return (await this.#write(sessionId, images, extra)).stored
     for (let i = 0; i < images.length; i += IMAGES_PER_WRITE) {
-      if (!(await this.#write(sessionId, images.slice(i, i + IMAGES_PER_WRITE), extra))) return false
+      if (!(await this.#write(sessionId, images.slice(i, i + IMAGES_PER_WRITE), extra)).stored) return false
     }
     return true
   }

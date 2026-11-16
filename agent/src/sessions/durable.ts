@@ -49,7 +49,9 @@ import { event, type Owner, type QueuedEntry, type SentImage, type ServerEvent, 
 //   turn id) appends it to the workflow's queue. The workflow starts it as its own turn when the
 //   turn before it ends; `user.turn` is written then. `removeQueued` and `editQueued` change an
 //   entry until it starts; `queue` reads the log's last `session.queue`, which the workflow
-//   writes after every change.
+//   writes after every change. The entry carries what its images' write made (`made`, #6413):
+//   the workflow deletes those images once it leaves the queue unrun, and a refused send
+//   (`queue_full`, `closed`) deletes them here.
 // - interrupt: the `interrupt_requested` flag the turn's replica reads, then the `interrupt`
 //   Signal, which is recorded even while no worker runs.
 // - handoff: after the owner change is committed, `cancel_input`, best-effort, and the new owner
@@ -397,7 +399,8 @@ export class DurableTurns {
     )
     if (!row) return undefined
     const { blobs, sent } = sentImageBlobs(turn.images)
-    await this.#blobs.put(id, blobs).catch(() => {
+    // What this write made goes with the entry, so it is deleted if the message never runs (#6413).
+    const made = await this.#blobs.putMade(id, blobs).catch(() => {
       throw new SessionError('unavailable', `the images for session ${id} could not be stored; send it again in a moment`)
     })
     const traceparent = traceparentOf(trace.getSpan(otelContext.active()))
@@ -415,6 +418,7 @@ export class DurableTurns {
       tiers: turn.tiers ? [...turn.tiers] : null,
       bare: turn.flow !== undefined || turn.withoutBackground === true,
       queued_at: new Date().toISOString(),
+      ...(made.length ? { made } : {}),
     }
     let answer: QueueAnswer
     try {
@@ -424,7 +428,16 @@ export class DurableTurns {
           .executeUpdate<QueueAnswer, [QueuedMessage]>(QUEUE_MESSAGE_UPDATE, { args: [queued], updateId: turn.turnId }),
       )
     } catch (err) {
-      throw queueRefusal(err, id, 'queue the message')
+      const refusal = queueRefusal(err, id, 'queue the message')
+      // Refused, it was never queued: what its write made goes. Any other failure may have queued it.
+      if (refusal.code === 'queue_full' || refusal.code === 'closed') {
+        for (const write of made) {
+          await this.#blobs.delete(id, write).catch(() => {
+            console.warn(`durable send: session ${id}: a refused message's images were not deleted`)
+          })
+        }
+      }
+      throw refusal
     }
     return this.#queuedTurn(id, turn.turnId, answer, Number(row.seq))
   }

@@ -756,6 +756,15 @@ describe('mock API: presets keep the server limits', () => {
     ).rejects.toMatchObject({ status: 422 })
   })
 
+  it("cleans every preset name with the server's whitespace rule, a rename too (#6459)", async () => {
+    const created = await api.createPreset('name-keychain', { name: ' a\u001cb ', params: {} })
+    expect(created.name).toBe('a b')
+    const renamed = await api.updatePreset('name-keychain', created.id, { name: 'c\u0085\u001fd' })
+    expect(renamed.name).toBe('c d')
+    const tagged = await api.updatePreset('name-keychain', created.id, { tags: ['x\u001cy', ' z\u0085 '] })
+    expect(tagged.tags).toEqual(['x y', 'z'])
+  })
+
   it('refuses a new preset once a template keeps as many as the server allows', async () => {
     const existing = Array.from({ length: MAX_PRESETS }, (_, index) => ({
       id: `${index}`.padStart(32, '0'),

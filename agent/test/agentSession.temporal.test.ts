@@ -12,7 +12,9 @@ import { sessionWorkflowId } from '../src/gate/durable.js'
 import { PENDING_INPUT_QUERY, RESPOND_UPDATE } from '../src/gate/names.js'
 import { openInput, type OpenInput, resolveInput, type ResolveInput } from '../src/gate/store.js'
 import type { Database } from '../src/db.js'
+import { SessionBlobs, sessionImage } from '../src/sessions/blobs.js'
 import { DurableTurns } from '../src/sessions/durable.js'
+import type { UserImage } from '../src/sessions/images.js'
 import { type SessionManager } from '../src/sessions/manager.js'
 import { RUNTIME_DEFAULTS } from '../src/sessions/runtimeSettings.js'
 import { TASK_QUEUE } from '../src/temporal/names.js'
@@ -31,6 +33,7 @@ import type {
   SessionTurnInput,
   SessionTurnResult,
 } from '../src/temporal/session/models.js'
+import { QUEUE_MAX } from '../src/temporal/session/models.js'
 import {
   ACQUIRE_WORKER_ACTIVITY,
   EDIT_QUEUED_UPDATE,
@@ -82,6 +85,9 @@ const queued = (turnId: string, words = turnId, extra: Partial<QueuedMessage> = 
   queued_at: '2026-11-15T00:00:00.000Z',
   ...extra,
 })
+
+/** What a queued message's images' write made (#6413), named after it. */
+const madeBy = (tag: string) => ({ names: [`${tag}.png`], at: '2026-11-15T00:00:00.000001Z' })
 
 function held(): { promise: Promise<void>; release: () => void } {
   let release!: () => void
@@ -1018,13 +1024,15 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       }
       await send(env.client, id, message('t1'))
       await poll(() => turns.length, 1)
-      await enqueue(id, queued('q1'))
-      await enqueue(id, queued('q2'))
+      await enqueue(id, queued('q1', 'q1', { made: [madeBy('q1')] }))
+      await enqueue(id, queued('q2', 'q2', { made: [madeBy('q2')] }))
       hold.release()
       await poll(() => finished.map((f) => f.turnId), ['t1', 'q1'])
       expect(begun).toEqual(['q1'])
       expect(finished.map((f) => f.next?.turn_id)).toEqual(['q1', 'q2'])
       await poll(() => queueWrites.at(-1)?.queue, [])
+      // Only the dropped head's images go: q1 ran (#6413).
+      await poll(() => queueWrites.flatMap((w) => w.drop ?? []), [madeBy('q2')])
       expect(turns.map((t) => t.turnId)).toEqual(['t1', 'q1'])
       await handleOf(id).signal('end')
       await handleOf(id).result()
@@ -1036,14 +1044,34 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       const hold = holdTurns()
       await send(env.client, id, message('t1'))
       await poll(() => turns.length, 1)
-      await enqueue(id, queued('q1'))
-      await enqueue(id, { ...queued('q2'), author: NEXT })
+      await enqueue(id, queued('q1', 'q1', { made: [madeBy('q1')] }))
+      await enqueue(id, { ...queued('q2', 'q2', { made: [madeBy('q2')] }), author: NEXT })
       await handleOf(id).signal(OWNER_CHANGED_SIGNAL, { owner: NEXT })
       await poll(() => queueOf(id), ['q2'])
+      // The dropped message's images go with the queue's next write (#6413); q2's stay.
+      await poll(() => queueWrites.flatMap((w) => w.drop ?? []), [madeBy('q1')])
       hold.release()
       await poll(() => finished.map((f) => f.turnId), ['t1', 'q2'])
       await handleOf(id).signal('end')
       await handleOf(id).result()
+      expect(queueWrites.flatMap((w) => w.drop ?? [])).toEqual([madeBy('q1')])
+    })
+
+    it('`end` drops the queue, and the images each waiting message made, in its one write (#6413)', async () => {
+      const id = randomUUID()
+      const hold = holdTurns()
+      await send(env.client, id, message('t1'))
+      await poll(() => turns.length, 1)
+      await enqueue(id, queued('q1', 'q1', { made: [madeBy('q1'), madeBy('q1-batch-2')] }))
+      await enqueue(id, queued('q2'))
+      await enqueue(id, queued('q3', 'q3', { made: [madeBy('q3')] }))
+      await poll(() => queueWrites.at(-1)?.version, 3)
+      expect(queueWrites.flatMap((w) => w.drop ?? [])).toEqual([])
+      await handleOf(id).signal('end')
+      hold.release()
+      await handleOf(id).result()
+      expect(turns.map((t) => t.turnId)).toEqual(['t1'])
+      expect(queueWrites.at(-1)).toMatchObject({ queue: [], drop: [madeBy('q1'), madeBy('q1-batch-2'), madeBy('q3')] })
     })
   })
 
@@ -1310,6 +1338,45 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       expect(await fifth.done).toMatchObject({ kind: 'failed', message: expect.stringMatching(/left the queue before it started/) })
       hold.release()
       expect(await fourth.done).toMatchObject({ kind: 'result' })
+    })
+
+    it('deletes the images a queued message made once it is removed or refused, and none another message holds (#6413)', async () => {
+      const m = await durableManager()
+      const real = sessionFinishActivities(db.sql, m.events, undefined, new SessionBlobs(db.sql))
+      finish = real[SESSION_FINISH_ACTIVITY]
+      begin = real[SESSION_BEGIN_TURN_ACTIVITY]
+      queueChanged = real[SESSION_QUEUE_CHANGED_ACTIVITY]
+      const hold = held()
+      runTurn = async () => {
+        await hold.promise
+        return { status: 'done', hostQueue: '' }
+      }
+      const pixel = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='
+      const png = (tag: string): UserImage => {
+        const bytes = Buffer.concat([Buffer.from(pixel, 'base64'), Buffer.from(tag)])
+        return { mediaType: 'image/png', bytes, preview: { mediaType: 'image/png', bytes: Buffer.concat([bytes, Buffer.from('-small')]) } }
+      }
+      const [a, b, c] = [png('a'), png('b'), png('c')]
+      const names = (image: UserImage) => [sessionImage('image/png', image.bytes).name, sessionImage('image/png', image.preview.bytes).name]
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
+      const stored = async () => (await db.sql<{ name: string }[]>`SELECT name FROM ai_session_blobs WHERE session_id = ${session.id}`).map((r) => r.name).sort()
+      await poll(() => turns.length, 1)
+      const kept = await m.send(session.id, browser, 'like this', { queue: true, images: [a] })
+      // Its write made only b's: a's were there already, and stay with `kept`.
+      const gone = await m.send(session.id, browser, 'or these', { queue: true, images: [a, b] })
+      expect(await stored()).toEqual([...names(a), ...names(b)].sort())
+      await m.removeQueued(session.id, browser, gone.turnId)
+      await poll(stored, names(a).sort())
+      // Refused when the queue is full: what its write made goes, before the caller hears it.
+      for (let i = 2; i < QUEUE_MAX + 1; i++) await m.send(session.id, browser, `filler ${i}`, { queue: true })
+      await expect(m.send(session.id, browser, 'one more', { queue: true, images: [c] })).rejects.toMatchObject({ code: 'queue_full' })
+      expect(await stored()).toEqual(names(a).sort())
+      hold.release()
+      expect(await turn!.done).toMatchObject({ kind: 'result' })
+      expect(await kept.done).toMatchObject({ kind: 'result' })
+      expect(turns[1]?.message?.images?.map((i) => i.name)).toEqual([names(a)[0]])
+      await poll(async () => (await m.queued(session.id, browser)).queue, [])
+      expect(await stored()).toEqual(names(a).sort())
     })
 
     it('forks a unified session from its transcript; with none written it refuses as classic does (plan Step 6.3)', async () => {

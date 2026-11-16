@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from '../src/db.js'
+import { SessionBlobs, sessionImage } from '../src/sessions/blobs.js'
 import { sessionFinishActivities } from '../src/temporal/session/finishActivity.js'
 import { QUEUED_DROPPED } from '../src/temporal/session/finishActivity.js'
 import type { QueuedMessage } from '../src/temporal/session/models.js'
@@ -143,6 +144,29 @@ describe.skipIf(!TEST_DATABASE_URL)(`session.finish_turn${TEST_DATABASE_URL ? ''
       expect((await m.events.read(session.id, 0, 1000)).at(-1)?.event).toMatchObject({ type: 'session.queue', version: 3, queue })
       expect(await m.queued(session.id, browser)).toEqual({ version: 3, queue })
       expect(await changed({ sessionId: randomUUID(), version: 1, queue })).toBe(false)
+    })
+
+    it('queue_changed deletes the images of the messages that left the queue unrun, after the event (#6413)', async () => {
+      const m = manager({ sql: db.sql, paths: await tempPaths() })
+      const { session } = await m.start(browser, { origin: 'chat', title: 'queued' })
+      const blobs = new SessionBlobs(db.sql)
+      const image = sessionImage('image/gif', Buffer.from('GIF89a-queued'))
+      const made = await blobs.putMade(session.id, [image])
+      expect(made).toHaveLength(1)
+      const deleted: string[] = []
+      const changed = sessionFinishActivities(db.sql, m.events, undefined, {
+        delete: async (id, dropped) => {
+          deleted.push(...(await blobs.delete(id, dropped)))
+          return deleted
+        },
+      })[SESSION_QUEUE_CHANGED_ACTIVITY]
+      expect(await changed({ sessionId: session.id, version: 1, queue: [], drop: made })).toBe(true)
+      expect(deleted).toEqual([image.name])
+      expect(await blobs.get(session.id, image.name)).toBeUndefined()
+      // A delete that fails loses only the images: the event is written.
+      const failing = sessionFinishActivities(db.sql, m.events, undefined, { delete: () => Promise.reject(new Error('down')) })[SESSION_QUEUE_CHANGED_ACTIVITY]
+      expect(await failing({ sessionId: session.id, version: 2, queue: [], drop: made })).toBe(true)
+      expect((await m.events.read(session.id, 0, 1000)).at(-1)?.event).toMatchObject({ type: 'session.queue', version: 2 })
     })
   })
 })

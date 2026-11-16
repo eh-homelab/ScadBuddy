@@ -8,12 +8,16 @@ its own SQL until then (D9). Bytes travel as bytes, never base64 (D8, #2479): a 
 as its body.
 
 - area ``session-blobs`` (``agent/src/sessions/blobs.ts`` ``SessionBlobs``): ``POST
-  …/session-blobs`` stores a session's images (one already there is left as it is), with
-  ``tool_use_id`` as a durable tool call's images (``ai_session_tool_images``, replaced
-  whole), and with ``fence`` only while the session's row still names that turn attempt
-  (``turnHost.ts``'s hold, checked ``FOR SHARE`` in the same transaction); ``GET
-  …/session-blobs`` one image by session and name, a fork's through its chain (an
-  ancestor's only when an event the fork reads names it).
+  …/session-blobs`` stores a session's images (one already there keeps its bytes, and its
+  ``created_at`` is set to the write's time), with ``tool_use_id`` as a durable tool call's
+  images (``ai_session_tool_images``, replaced whole), and with ``fence`` only while the
+  session's row still names that turn attempt (``turnHost.ts``'s hold, checked ``FOR SHARE``
+  in the same transaction); it answers the names it made and the latest ``created_at`` it
+  set. ``POST …/session-blobs/deletes`` deletes the named images that write made, when no
+  write has stored them since (``created_at`` at most ``before``, that answer's time) and no
+  tool call names them: a queued message's images once it leaves the queue unrun or is
+  refused (#6413), under the same ``fence``. ``GET …/session-blobs`` one image by session and
+  name, a fork's through its chain (an ancestor's only when an event the fork reads names it).
 - area ``attachments`` (``attachments/store.ts`` ``AttachmentStore``): ``POST
   …/attachments`` stages an image and its preview for an owner under the owner's lock and
   caps; ``POST …/attachments/resolve`` the metadata of the live ones named, ``GET
@@ -35,7 +39,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
@@ -185,6 +189,20 @@ class Stored(BaseModel):
     stored: bool
 
 
+class BlobsStored(Stored):
+    """A write of images: the names it made (none already there), and the latest
+    ``created_at`` it set, which a delete of those names takes as ``before``: ISO 8601 in UTC
+    to the microsecond (``utc_micros``), so the agent compares two as strings."""
+
+    created: list[str] = []
+    at: str | None = None
+
+
+def utc_micros(at: datetime) -> str:
+    """``at`` as ``YYYY-MM-DDTHH:MM:SS.ffffffZ``: the agent's ``blobs.ts`` gives the same shape."""
+    return at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
 # -- session blobs -------------------------------------------------------------------------
 
 
@@ -210,17 +228,29 @@ class BlobsMeta(_Body):
 
 def _insert_blobs(
     conn: psycopg.Connection[Any], session: UUID, images: list[tuple[str, str, bytes]]
-) -> None:
+) -> tuple[list[str], datetime | None]:
+    """Stores each image, or sets the time of one already there (its bytes stay): a later
+    write's time is always past an earlier one's, since a write of a name waits for the
+    transaction that holds its row. The names made, and the latest time set."""
+    created: list[str] = []
+    at: datetime | None = None
     for name, media_type, data in images:
-        conn.execute(
-            "INSERT INTO ai_session_blobs (session_id, name, media_type, data)"
-            " VALUES (%s, %s, %s, %s) ON CONFLICT (session_id, name) DO NOTHING",
+        row = conn.execute(
+            "INSERT INTO ai_session_blobs (session_id, name, media_type, data, created_at)"
+            " VALUES (%s, %s, %s, %s, clock_timestamp())"
+            " ON CONFLICT (session_id, name) DO UPDATE SET created_at = clock_timestamp()"
+            " RETURNING created_at, (xmax = 0) AS made",
             (session, name, media_type, data),
-        )
+        ).fetchone()
+        assert row is not None
+        if row["made"] and name not in created:
+            created.append(name)
+        at = row["created_at"] if at is None else max(at, row["created_at"])
+    return created, at
 
 
 @router.post("/session-blobs", name="crud_agent_session_blobs_put")
-async def session_blobs_put(request: Request, state: StateDep) -> Stored:
+async def session_blobs_put(request: Request, state: StateDep) -> BlobsStored:
     raw, files = await _multipart(request, IMAGES_PER_WRITE, IMAGES_PER_WRITE * IMAGE_BYTES_MAX)
     meta = _meta(BlobsMeta, raw)
     if meta.tool_use_id is not None and meta.fence is not None:
@@ -236,16 +266,10 @@ async def session_blobs_put(request: Request, state: StateDep) -> Stored:
         images.append((image.name, image.media_type, data))
     fence, tool_use_id = meta.fence, meta.tool_use_id
 
-    def run(conn: psycopg.Connection[Any]) -> bool:
-        if fence is not None:
-            held = conn.execute(
-                "SELECT 1 FROM ai_sessions WHERE id = %s AND turn_attempt = %s"
-                " AND durable_turn_id = %s FOR SHARE",
-                (meta.session_id, fence.attempt, fence.turn_id),
-            ).fetchone()
-            if held is None:
-                return False
-        _insert_blobs(conn, meta.session_id, images)
+    def run(conn: psycopg.Connection[Any]) -> BlobsStored:
+        if fence is not None and not _held(conn, meta.session_id, fence):
+            return BlobsStored(stored=False)
+        created, at = _insert_blobs(conn, meta.session_id, images)
         if tool_use_id is not None:
             conn.execute(
                 "DELETE FROM ai_session_tool_images WHERE session_id = %s AND tool_use_id = %s",
@@ -257,12 +281,62 @@ async def session_blobs_put(request: Request, state: StateDep) -> Stored:
                     " VALUES (%s, %s, %s, %s)",
                     (meta.session_id, tool_use_id, ord_, name),
                 )
-        return True
+        return BlobsStored(stored=True, created=created, at=None if at is None else utc_micros(at))
 
     try:
-        return Stored(stored=await _in_tx(state, run))
+        return await _in_tx(state, run)
     except psycopg.errors.ForeignKeyViolation:
         raise ApiError(status.HTTP_404_NOT_FOUND, "no such session") from None
+
+
+def _held(conn: psycopg.Connection[Any], session: UUID, fence: Fence) -> bool:
+    """Whether the session's row still names the fence's turn attempt, locked ``FOR SHARE``."""
+    return (
+        conn.execute(
+            "SELECT 1 FROM ai_sessions WHERE id = %s AND turn_attempt = %s"
+            " AND durable_turn_id = %s FOR SHARE",
+            (session, fence.attempt, fence.turn_id),
+        ).fetchone()
+        is not None
+    )
+
+
+class BlobDeletes(_Body):
+    session_id: UUID
+    names: list[Name] = Field(min_length=1, max_length=IMAGES_PER_WRITE)
+    #: The ``at`` of the write that made the names: one stored again since is kept.
+    before: datetime
+    fence: Fence | None = None
+
+
+class BlobsDeleted(BaseModel):
+    """Whether the delete ran (false only when its fence refused it), and what it deleted."""
+
+    ran: bool
+    deleted: list[str]
+
+
+@router.post("/session-blobs/deletes", name="crud_agent_session_blobs_delete")
+async def session_blobs_delete(body: BlobDeletes, state: StateDep) -> BlobsDeleted:
+    """Deletes the named images a write made, unless a write stored them again since (any
+    later write of a name sets its ``created_at`` past ``before``) or a tool call names them
+    (#6413). Only what that one write made is ever named: an image another message or turn
+    stored first was not made by it."""
+
+    def run(conn: psycopg.Connection[Any]) -> BlobsDeleted:
+        if body.fence is not None and not _held(conn, body.session_id, body.fence):
+            return BlobsDeleted(ran=False, deleted=[])
+        rows = conn.execute(
+            "DELETE FROM ai_session_blobs b WHERE b.session_id = %s AND b.name = ANY(%s)"
+            " AND b.created_at <= %s AND NOT EXISTS ("
+            " SELECT 1 FROM ai_session_tool_images t"
+            " WHERE t.session_id = b.session_id AND t.name = b.name)"
+            " RETURNING b.name",
+            (body.session_id, body.names, body.before),
+        ).fetchall()
+        return BlobsDeleted(ran=True, deleted=sorted(r["name"] for r in rows))
+
+    return await _in_tx(state, run)
 
 
 #: The events a fork takes that can name an image (``blobs.ts`` ``IMAGE_EVENT_TYPES``).

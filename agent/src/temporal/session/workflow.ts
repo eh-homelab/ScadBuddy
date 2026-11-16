@@ -41,6 +41,7 @@ import {
   QUEUE_FULL,
   QUEUE_MAX,
   type QueueAnswer,
+  type MadeBlobs,
   type QueueChangedInput,
   type QueuedMessage,
   type QueuedView,
@@ -132,7 +133,10 @@ import {
 // next entry starts after it. Each change is written as a `session.queue` event by
 // `session.queue_changed`, one at a time and in order. The queue is carried over a continue-as-new
 // and dropped by `end`; a handoff drops the entries the new owner did not send. Every command it
-// adds runs only for a non-empty queue, which no earlier history has (QUEUE_PATCH).
+// adds runs only for a non-empty queue, which no earlier history has (QUEUE_PATCH). The images an
+// entry's send made go with it when it leaves unrun (removed, dropped by a handoff or `end`, or
+// dropped at its claim): the next `session.queue_changed` deletes them (#6413), an input field
+// only, so no history replays otherwise.
 //
 // Parks (§5.4): the turn's activity sends `open_input` for each call it parks, and holds
 // while the entry is answered here (`respond`), times out or is cancelled; the answer
@@ -333,6 +337,11 @@ export async function AgentSession(started: SessionStart): Promise<void> {
     left.push(...ids)
     left.splice(0, Math.max(0, left.length - 2 * QUEUE_MAX))
   }
+  /** The images of the entries that left unrun since the last write (#6413). */
+  const unrun: MadeBlobs[] = [...(start.queue_unrun ?? [])]
+  const leftUnrun = (entries: readonly QueuedMessage[]): void => {
+    for (const q of entries) if (q.made) unrun.push(...q.made)
+  }
   /** The last version `session.queue_changed` wrote, and the write in flight. */
   let published = queueVersion
   let publishing: Promise<void> | undefined
@@ -404,7 +413,16 @@ export async function AgentSession(started: SessionStart): Promise<void> {
       try {
         while (published < queueVersion) {
           const version = queueVersion
-          await finish[SESSION_QUEUE_CHANGED_ACTIVITY]!({ sessionId: start.session_id, version, queue: queue.map(queuedView) } satisfies QueueChangedInput)
+          // Taken now: if the activity fails for good (or the history is reset), these images stay
+          // until the session is deleted. Best effort, as the delete is: an image left costs a row.
+          // Those not taken yet are carried over a continue-as-new (`queue_unrun`).
+          const drop = unrun.splice(0)
+          await finish[SESSION_QUEUE_CHANGED_ACTIVITY]!({
+            sessionId: start.session_id,
+            version,
+            queue: queue.map(queuedView),
+            ...(drop.length ? { drop } : {}),
+          } satisfies QueueChangedInput)
           published = version
         }
       } finally {
@@ -418,6 +436,8 @@ export async function AgentSession(started: SessionStart): Promise<void> {
       })
     publishing = run
   }
+  // Drops carried from the last run (#6413) are written, and their images deleted, at once.
+  if (unrun.length > 0) changed()
   const queueState = (): QueueState => ({ version: queueVersion, queue: queue.map(queuedView) })
   /** The index of a queued entry that may still change (not the head being started). */
   const waiting = (id: string): number => (id === starting ? -1 : queue.findIndex((q) => q.turn_id === id))
@@ -452,7 +472,7 @@ export async function AgentSession(started: SessionStart): Promise<void> {
   setHandler(
     removeQueuedUpdate,
     ({ id }: { id: string }): QueueState => {
-      queue.splice(waiting(id), 1)
+      leftUnrun(queue.splice(waiting(id), 1))
       leave(id)
       changed()
       return queueState()
@@ -495,7 +515,9 @@ export async function AgentSession(started: SessionStart): Promise<void> {
     gate.setOwner(owner)
     const kept = queue.filter((q) => q.turn_id === starting || mayStillSend(q.author, owner))
     if (kept.length !== queue.length) {
-      leave(...queue.filter((q) => !kept.includes(q)).map((q) => q.turn_id))
+      const gone = queue.filter((q) => !kept.includes(q))
+      leave(...gone.map((q) => q.turn_id))
+      leftUnrun(gone)
       queue.splice(0, queue.length, ...kept)
       changed()
     }
@@ -759,6 +781,7 @@ export async function AgentSession(started: SessionStart): Promise<void> {
     if (outcome !== 'started' && outcome !== 'dropped') return undefined
     const at = queue.findIndex((q) => q.turn_id === next.turn_id)
     if (at >= 0) queue.splice(at, 1)
+    if (outcome === 'dropped') leftUnrun([next])
     leave(next.turn_id)
     changed()
     return outcome === 'started' ? queuedTurnMessage(next) : undefined
@@ -792,6 +815,7 @@ export async function AgentSession(started: SessionStart): Promise<void> {
   function dropQueue(): void {
     if (queue.length === 0) return
     leave(...queue.map((q) => q.turn_id))
+    leftUnrun(queue)
     queue.length = 0
     changed()
   }
@@ -866,9 +890,11 @@ export async function AgentSession(started: SessionStart): Promise<void> {
         delete next.queue
         delete next.queue_version
         delete next.queue_left
+        delete next.queue_unrun
         delete next.message
         if (queueVersion > 0) Object.assign(next, { queue: [...queue], queue_version: queueVersion })
         if (left.length > 0) next.queue_left = [...left]
+        if (unrun.length > 0) next.queue_unrun = [...unrun]
         if (message !== undefined) {
           next.message = message
           // A Stop since the turn's end is for that message's turn.

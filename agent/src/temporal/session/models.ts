@@ -10,6 +10,12 @@ import type { Resolution } from './gate.js'
 
 export type ImageRef = { name: string; mediaType: string }
 
+/**
+ * The images a queued message's write made (sessions/blobs.ts `MadeImages`, #6413): the names
+ * not there before, and the write's time. Deleted once the message leaves the queue unrun.
+ */
+export type MadeBlobs = { names: string[]; at: string }
+
 /** The `send_message` Update's argument (durable.ts `DurableMessage`). */
 export type Message = {
   turn_id: string
@@ -41,6 +47,8 @@ export type QueuedMessage = Message & {
   tiers?: string[] | null
   bare?: boolean
   queued_at: string
+  /** The images its send made, one entry per write (#6413); none when they were all there before. */
+  made?: MadeBlobs[]
 }
 
 /** A queued message as the session's readers see it (the `queue` Query, the `session.queue` event): no page context, no claim columns. */
@@ -58,8 +66,11 @@ export type EditQueuedArgs = { id: string; words: string }
 /** The `queue` Query's answer, and what `session.queue_changed` writes. */
 export type QueueState = { version: number; queue: QueuedView[] }
 
-/** `session.queue_changed`'s argument: the queue as it is after a change. */
-export type QueueChangedInput = { sessionId: string } & QueueState
+/**
+ * `session.queue_changed`'s argument: the queue as it is after a change, and the images of the
+ * messages that left it unrun since the last write (#6413), which it deletes after the event.
+ */
+export type QueueChangedInput = { sessionId: string; drop?: MadeBlobs[] } & QueueState
 
 /**
  * `session.begin_turn`'s argument: the queue's head, which a message the workflow holds no turn
@@ -125,6 +136,8 @@ export type SessionStart = {
   queue_version?: number | null
   /** The ids that left the queue lately (started, removed or dropped), so an Update sent again does not queue one twice. */
   queue_left?: string[] | null
+  /** The images of messages that left the queue unrun whose delete was not yet sent (#6413). */
+  queue_unrun?: MadeBlobs[] | null
   /** A queued message the last turn's end started (the row is its turn's), carried to the run that runs it. */
   message?: Message | null
 }

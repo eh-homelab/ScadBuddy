@@ -29,6 +29,9 @@ class FakeApi {
   readonly seen: Seen[] = []
   fenced = true
   quotaFull = false
+  /** Each write's time, as the backend answers it: ISO 8601 in UTC to the microsecond. */
+  writes = 0
+  readonly times = new Map<string, string>()
 
   readonly fetch: typeof fetch = async (input, init) => {
     const request = new Request(input, init)
@@ -55,9 +58,26 @@ class FakeApi {
     const q = url.searchParams
     if (path === '/session-blobs' && request.method === 'POST') {
       const meta = seen.meta as { session_id: string; images: { name: string; media_type: string }[]; fence?: unknown }
-      if (meta.fence !== undefined && !this.fenced) return ok({ stored: false })
-      meta.images.forEach((image, i) => this.blobs.set(`${meta.session_id}|${image.name}`, { mediaType: image.media_type, bytes: files.get(`image${i}`) ?? Buffer.alloc(0) }))
-      return ok({ stored: true })
+      if (meta.fence !== undefined && !this.fenced) return ok({ stored: false, created: [], at: null })
+      const at = `2026-11-15T00:00:00.${String(++this.writes).padStart(6, '0')}Z`
+      const created: string[] = []
+      meta.images.forEach((image, i) => {
+        const key = `${meta.session_id}|${image.name}`
+        if (!this.blobs.has(key)) created.push(image.name)
+        this.blobs.set(key, { mediaType: image.media_type, bytes: files.get(`image${i}`) ?? Buffer.alloc(0) })
+        this.times.set(key, at)
+      })
+      return ok({ stored: true, created, at: meta.images.length ? at : null })
+    }
+    if (path === '/session-blobs/deletes') {
+      const body = json as { session_id: string; names: string[]; before: string; fence?: unknown }
+      if (body.fence !== undefined && !this.fenced) return ok({ ran: false, deleted: [] })
+      const deleted = body.names.filter((name) => {
+        const key = `${body.session_id}|${name}`
+        if (!this.blobs.has(key) || (this.times.get(key) ?? '') > body.before) return false
+        return this.blobs.delete(key)
+      })
+      return ok({ ran: true, deleted })
     }
     if (path === '/session-blobs') {
       const blob = this.blobs.get(`${q.get('session_id')}|${q.get('name')}`)
@@ -154,6 +174,29 @@ describe('CrudSessionBlobs', () => {
     expect(api.seen.at(-1)?.meta?.fence).toEqual({ attempt: 'run:1', turn_id: 't' })
     api.fenced = false
     expect(await blobs.putIf(SESSION, [image(1)], { attempt: 'run:2', turnId: 't' })).toBe(false)
+  })
+
+  it('answers what each write made with its own time, and deletes it unless a write stored it since (#6413)', async () => {
+    const api = new FakeApi()
+    const blobs = new CrudSessionBlobs(BASE, { fetch: api.fetch })
+    await blobs.put(SESSION, [image(0)])
+    const many = Array.from({ length: IMAGES_PER_WRITE + 2 }, (_, i) => image(i))
+    const made = await blobs.putMade(SESSION, many)
+    // image(0) was there before; each batch answers its own `at`.
+    expect(made).toEqual([
+      { names: many.slice(1, IMAGES_PER_WRITE).map((i) => i.name), at: '2026-11-15T00:00:00.000002Z' },
+      { names: many.slice(IMAGES_PER_WRITE).map((i) => i.name), at: '2026-11-15T00:00:00.000003Z' },
+    ])
+    await blobs.put(SESSION, [image(1)])
+    const deleted: string[] = []
+    for (const write of made) deleted.push(...(await blobs.delete(SESSION, write, { attempt: 'run:1', turnId: 't' })))
+    // Every name past the first batch goes too; only image(1), written again since, stays.
+    expect(deleted.sort()).toEqual(many.slice(2).map((i) => i.name).sort())
+    expect(api.seen.filter((s) => s.path === '/session-blobs/deletes')).toHaveLength(2)
+    expect(api.blobs.has(`${SESSION}|${image(1).name}`)).toBe(true)
+    expect(api.blobs.has(`${SESSION}|${image(IMAGES_PER_WRITE).name}`)).toBe(false)
+    expect(await blobs.putMade(SESSION, [image(0)])).toEqual([])
+    expect(await blobs.delete(SESSION, { names: ['../x.png'], at: made[0]!.at })).toEqual([])
   })
 
   it('sends a fenced write of more images than one write takes in fenced batches, and stops at a refusal', async () => {

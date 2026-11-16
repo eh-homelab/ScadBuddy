@@ -319,7 +319,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (areas `session-blobs`, `attachments`, `http-bodies`, #5299 step 7) is the agent's
   `sessions/blobs.ts`, `attachments/store.ts` and `sessions/httpBodies.ts` statement for
   statement: an image's name and signature checked from its bytes, a tool call's images
-  replaced whole, a fenced write checked `FOR SHARE`, a fork's read through its chain, an
+  replaced whole, a fenced write checked `FOR SHARE`, a queued message's images deleted by
+  `…/session-blobs/deletes` only when its own write made them and no write stored them since
+  (every write sets `created_at`, #6413), a fork's read through its chain, an
   attachment's caps under its owner's lock, a saved body read by range (tests
   `tests/crud/test_crud_agent_blobs.py`). `flows/forget.py` and `flows/images.py` run the same statements on the API's own
   tables, with no fallback for a database the agent never migrated (the API applies its files
