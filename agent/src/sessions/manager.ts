@@ -1572,7 +1572,10 @@ export class SessionManager {
    * log's transaction rolled back. No tombstone: no session takes that id again.
    */
   private async dropFailedFork(childId: string): Promise<void> {
-    await this.rows.discard(childId)
+    if (!(await this.rows.discard(childId))) {
+      // Gone already, or it logged an event after all: its row stays for the operator to see.
+      console.error(`session manager: the failed fork ${childId} was not discarded (no row, or its log has events)`)
+    }
   }
 
   async fork(
