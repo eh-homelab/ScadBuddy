@@ -420,6 +420,16 @@ class BlobIndex:
             ).fetchone()
         return bool(row and row["recorded"])
 
+    def names(self, ref: BlobRef) -> bool:
+        """Whether a row names ``ref`` as it is: the same object, kind, SHA-256 and size."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT EXISTS (SELECT 1 FROM store_blobs WHERE backend = %s AND backend_id = %s"
+                " AND sha256 = %s AND kind = %s AND size = %s) AS named",
+                (ref.backend, ref.backend_id, ref.sha256, ref.kind, ref.size),
+            ).fetchone()
+        return bool(row and row["named"])
+
     def stats(
         self,
         kinds: Sequence[str] | None,

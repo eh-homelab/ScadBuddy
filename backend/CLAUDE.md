@@ -26,7 +26,9 @@ the render worker's old role `scadbuddy_render` held (#5298 Task 22). The render
 worker also holds no KEK and runs only on a remote store (plan D11). Its blob-index
 routes take an allowlist (`api/crud_render.py` `RENDER_KEY`, `HELD_KEY`): it writes only
 a render job's own `piece` keys, never a meta key of the slicer's output mark
-(`SLICED_OUTPUT_META`, #6179), and its settings route never releases the full Bambuddy
+(`SLICED_OUTPUT_META`, #6179), an output only while its job runs (`_open_jobs_only`),
+and a ref only after the API read its object and found its SHA-256 (`_verified`, #6233).
+Its settings route never releases the full Bambuddy
 key (`withheld`; with no render key saved the worker gets none). Template `pipeline/`
 Python runs in the render worker's pod, and openscad and `openscad-lsp` run in the API's
 pod.
