@@ -110,6 +110,7 @@ async def claim_deny(body: ClaimDeny, state: StateDep) -> Claimed:
 
 class ReleaseDeny(_Body):
     request_id: RequestId
+    session: Name
     hop_until: datetime
 
 
@@ -119,11 +120,11 @@ class Done(BaseModel):
 
 @router.post("/escalations/release-deny", name="crud_agent_escalations_release_deny")
 async def release_deny(body: ReleaseDeny, state: StateDep) -> Done:
-    def run(conn: Any) -> bool:
-        escalations.release_deny(conn, body.request_id, body.hop_until)
-        return True
-
-    return Done(done=await _in_conn(state, run))
+    released = await _in_conn(
+        state,
+        lambda conn: escalations.release_deny(conn, body.request_id, body.session, body.hop_until),
+    )
+    return Done(done=released)
 
 
 class Count(BaseModel):

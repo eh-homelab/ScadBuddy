@@ -251,10 +251,10 @@ export class Escalations {
     // only a row still holding this claim (`hop_until = 'infinity'`), so keep that in
     // the WHERE (review #3018).
     const release = async () => {
-      if (crud) return await crud.releaseDeny(requestId, claim.hop_until)
+      if (crud) return await crud.releaseDeny(requestId, session, claim.hop_until)
       await this.#deps.sql`
-        UPDATE ai_pending_input SET hop_until = ${claim.hop_until}, hop_claimed_at = NULL
-        WHERE request_id = ${requestId} AND hop = 'parent' AND hop_until = 'infinity'`
+        UPDATE ai_pending_input SET hop_until = LEAST(${claim.hop_until}::timestamptz, expires_at), hop_claimed_at = NULL
+        WHERE request_id = ${requestId} AND hop = 'parent' AND parent_session = ${session}::uuid AND hop_until = 'infinity'`
     }
     let out: RespondOutcome
     try {
@@ -468,7 +468,14 @@ export class Escalations {
         await crud.skip(callsOf(session, claimed))
         return 0
       }
-      await crud.unclaim(callsOf(session, claimed))
+      try {
+        await crud.unclaim(callsOf(session, claimed))
+      } catch (lost) {
+        // The calls stay marked sent (each still reaches the person when its hop ends); say
+        // why the turn did not start before the hand back's own error replaces it.
+        console.error(`escalations: session ${session}'s delivery turn did not start (${err instanceof Error ? err.message : String(err)}), and its claim was not handed back`)
+        throw lost
+      }
       // Busy, or this replica cannot start a turn yet: a later tick sends them.
       if (err instanceof SessionError) return 0
       throw err

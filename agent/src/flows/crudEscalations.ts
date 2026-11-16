@@ -7,8 +7,9 @@ import { isUuid } from '../harness/stateDirs.js'
 // backend api/crud_agent_escalations.py, agent_data/escalations.py), area `escalations`:
 // Escalations' SQL on `ai_pending_input` and `ai_escalation_deliveries` (flows/escalations.ts),
 // and FlowQueue's read of a run's child entries (flows/queue.ts). Each caller uses its own SQL
-// until the API lists the area (D9). Who may answer stays Escalations' check; every write names
-// the parent session again, so it moves nothing of another session's.
+// until the API lists the area (D9). Who may answer stays Escalations' check; every write of an
+// answer or a delivery names the parent session again, so it moves nothing of another session's
+// (the hop's timeout sweep and the record of a run's own calls sent name none).
 //
 // Ids travel in the body or the query string, never the path. One no row can hold is not sent.
 
@@ -62,7 +63,7 @@ export interface EscalationRoutes {
   passUp(requestId: string, session: string, reason: string | undefined): Promise<boolean>
   /** The deadline before the claim, which `releaseDeny` puts back; undefined when nothing was claimed. */
   claimDeny(requestId: string, session: string): Promise<Date | undefined>
-  releaseDeny(requestId: string, hopUntil: Date): Promise<void>
+  releaseDeny(requestId: string, session: string, hopUntil: Date): Promise<void>
   moveDue(): Promise<number>
   waiting(graceS: number): Promise<WaitingRow[]>
   claim(calls: SessionCalls): Promise<string[]>
@@ -108,8 +109,11 @@ export class CrudEscalations implements EscalationRoutes {
     return hop_until === null ? undefined : new Date(hop_until)
   }
 
-  async releaseDeny(requestId: string, hopUntil: Date): Promise<void> {
-    await this.#call("a deny's claim released", '/escalations/release-deny', { body: wellFormed({ request_id: requestId, hop_until: hopUntil.toISOString() }) })
+  async releaseDeny(requestId: string, session: string, hopUntil: Date): Promise<void> {
+    if (!fits(requestId) || !isUuid(session)) return
+    await this.#call("a deny's claim released", '/escalations/release-deny', {
+      body: wellFormed({ request_id: requestId, session, hop_until: hopUntil.toISOString() }),
+    })
   }
 
   async moveDue(): Promise<number> {

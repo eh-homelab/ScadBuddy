@@ -107,7 +107,7 @@ describe('the escalations through the CRUD routes', () => {
       expect(out.outcome).toBe(denied ? 'denied' : 'with_person')
       expect(responded).toHaveLength(1)
       const released = api.seen.filter((s) => s.path === '/escalations/release-deny')
-      expect(released.map((s) => s.body)).toEqual(denied ? [] : [{ request_id: RID, hop_until: new Date(HOP_UNTIL).toISOString() }])
+      expect(released.map((s) => s.body)).toEqual(denied ? [] : [{ request_id: RID, session: PARENT, hop_until: new Date(HOP_UNTIL).toISOString() }])
     }
   })
 

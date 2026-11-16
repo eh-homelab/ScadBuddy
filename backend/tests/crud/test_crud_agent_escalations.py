@@ -142,12 +142,27 @@ def test_a_deny_claim_holds_the_entry_until_released(agent: Agent, tables: PgPoo
     assert agent.post("/escalations/move-due", {}) == {"moved": 0}
     [listed] = agent.get("/escalations/run-entries", flow_run_id="flow-1")["entries"]
     assert listed["hop_until"] == "infinity"
-    agent.post("/escalations/release-deny", {"request_id": rid, "hop_until": held})
+    # A release names the parent session too: another session's moves nothing.
+    other_release = {"request_id": rid, "session": str(uuid.uuid4()), "hop_until": held}
+    assert agent.post("/escalations/release-deny", other_release) == {"done": False}
+    assert _row(tables, rid)["claimed"] is True
+    release = {"request_id": rid, "session": parent, "hop_until": held}
+    assert agent.post("/escalations/release-deny", release) == {"done": True}
     assert _row(tables, rid)["claimed"] is False
     # Released, the deadline is a timestamp again, as text.
     [listed] = agent.get("/escalations/run-entries", flow_run_id="flow-1")["entries"]
     assert listed["hop_until"] != "infinity"
     assert datetime.fromisoformat(listed["hop_until"]) == datetime.fromisoformat(held)
+    # A release never parks the entry past its expiry.
+    assert agent.post("/escalations/claim-deny", claim)["hop_until"] is not None
+    far = {"request_id": rid, "session": parent, "hop_until": "2999-01-01T00:00:00+00:00"}
+    assert agent.post("/escalations/release-deny", far) == {"done": True}
+    [capped] = _sql(
+        tables,
+        "SELECT hop_until = expires_at AS capped FROM ai_pending_input WHERE request_id = %s",
+        (rid,),
+    )
+    assert capped["capped"] is True
     other = str(uuid.uuid4())
     assert agent.post("/escalations/claim-deny", {"request_id": rid, "session": other}) == {
         "hop_until": None

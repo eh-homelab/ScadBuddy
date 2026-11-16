@@ -4,10 +4,12 @@
 child entries, statement for statement, on ``ai_pending_input`` and ``ai_escalation_deliveries``.
 
 Who may answer a call is still the agent's check (the caller's session is the entry's parent,
-owned by the run's starter); every write here names the parent session again in its WHERE, so a
-caller that names another session moves nothing. A hop only moves up: a parent's pass up, the
-sweep's timeout and a skip set hop ``person``; a deny's claim holds the entry at ``infinity``
-until its release or its lease ends.
+owned by the run's starter); every write of an answer or a delivery (pass up, a deny's claim and
+release, a delivery's claim, hand back and skip) names the parent session again in its WHERE, so a
+caller that names another session moves nothing. The hop's timeout sweep and the record of a run's
+own calls sent are the agent's own housekeeping and name no session. A hop only moves up: a
+parent's pass up, the sweep's timeout and a skip set hop ``person``; a deny's claim holds the
+entry at ``infinity`` until its release or its lease ends.
 
 A delivery's claim is committed before its turn starts (over HTTP it cannot share the turn's
 transaction, as the agent's SQL did): the agent hands the claim back (``unclaim``) when the turn
@@ -82,13 +84,22 @@ def claim_deny(conn: Connection[Any], request_id: str, session: str) -> datetime
     return None if row is None else row["hop_until"]
 
 
-def release_deny(conn: Connection[Any], request_id: str, hop_until: datetime) -> None:
-    """The deadline put back, only on a row that still holds a deny's claim."""
-    conn.execute(
-        "UPDATE ai_pending_input SET hop_until = %s, hop_claimed_at = NULL"
-        " WHERE request_id = %s AND hop = 'parent' AND hop_until = 'infinity'",
-        (hop_until, request_id),
-    )
+def release_deny(conn: Connection[Any], request_id: str, session: str, hop_until: datetime) -> bool:
+    """The deadline put back, only on a row of ``session`` that still holds a deny's claim.
+
+    The deadline is never past the entry's ``expires_at``, so a release cannot park an entry. One
+    already past is kept: the claim may have outlived the deadline it took, and the sweep then
+    moves the entry to the person, as it would have without the claim.
+    """
+    if not gate._is_uuid(session):
+        return False
+    rows = conn.execute(
+        "UPDATE ai_pending_input SET hop_until = LEAST(%s, expires_at), hop_claimed_at = NULL"
+        " WHERE request_id = %s AND hop = 'parent' AND parent_session = %s::uuid"
+        " AND hop_until = 'infinity' RETURNING request_id",
+        (hop_until, request_id, session),
+    ).fetchall()
+    return len(rows) > 0
 
 
 def move_due(conn: Connection[Any]) -> int:

@@ -162,8 +162,9 @@ hold the session, with its cap, the summaries it replaces, its events and its au
 transaction. Test `test/crudQuestions.test.ts`. Area `escalations` (backend
 `api/crud_agent_escalations.py`, `src/flows/crudEscalations.ts`) takes `Escalations`' SQL on
 `ai_pending_input` and `ai_escalation_deliveries` and `FlowQueue.forRun`'s read of a run's child
-entries; who may answer is still checked here first, and every write names the parent session
-again. A delivery's claim is committed on the API before its turn starts, and handed back
+entries; who may answer is still checked here first, and every write of an answer or a delivery
+names the parent session again (the hop's timeout sweep and the record of a run's own calls sent
+name none). A delivery's claim is committed on the API before its turn starts, and handed back
 (`unclaim`) when the turn does not start; a process that dies between the two leaves the calls
 marked sent, and each still reaches the person when its hop ends. The parent's owner and the
 child's reasoning (`ai_sessions`, `ai_session_events`) stay SQL until the sessions move (step 9).
