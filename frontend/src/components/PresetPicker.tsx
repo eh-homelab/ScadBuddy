@@ -149,9 +149,18 @@ function skippedOf(schema: CustomizerSchema, preset: ParamPreset): Skipped[] {
   return applyPreset(schema, preset).skipped.map((name) => ({ name, value: stored[name] as ParamValue }))
 }
 
+/**
+ * What Python's `str.split()` splits on (`str.isspace()`, Python 3.12), which the server's
+ * `_clean_name` (`library/presets.py`) uses. Not JS's `\s`: that also takes U+FEFF, and
+ * lacks U+001C-U+001F and U+0085 (#6456).
+ */
+const PY_WHITESPACE =
+  // eslint-disable-next-line no-control-regex -- U+001C-U+001F are whitespace to Python
+  /[\t\n\v\f\r\u001c-\u001f \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+/
+
 /** A name as the server stores it: inner runs of whitespace collapsed, ends trimmed (#360). */
 function normaliseName(name: string): string {
-  return name.split(/\s+/).filter(Boolean).join(' ')
+  return name.split(PY_WHITESPACE).filter(Boolean).join(' ')
 }
 
 /** #360 — a short word after an action, kept until the values or UI state change. */
@@ -351,7 +360,11 @@ export function PresetPicker({
   // with none selected, values that are not the defaults. The UI state has no default
   // to compare with there: a template UI may seed its own (#1484).
   const unsaved = selection ? modified : !sameValues(values, defaultValues(schema))
-  /** #360 — a preset saved now would hold nothing: every value is the default, no UI state. */
+  /**
+   * #360 — a preset saved now would hold nothing: every value is the default, no UI state.
+   * Any UI state counts, a template UI's own seeded state too (#1484, #6456): the picker
+   * cannot tell that state from an edit, as the page does not pass what the UI seeded.
+   */
   const nothingDiffers =
     Object.keys(presetParams(schema, values)).length === 0 && Object.keys(extra).length === 0
 
@@ -398,6 +411,20 @@ export function PresetPicker({
     },
     [],
   )
+
+  /**
+   * #6456 — set while the picker itself puts the focus back on the select (the list or the
+   * question closing), so that focus opens no tooltip. Focus by the user still opens it.
+   */
+  const refocusing = useRef(false)
+  function refocusTrigger() {
+    refocusing.current = true
+    try {
+      trigger.current?.focus({ preventScroll: true })
+    } finally {
+      refocusing.current = false
+    }
+  }
 
   /** The latest pick: a migration answering after another pick is dropped. */
   const picking = useRef(0)
@@ -677,8 +704,11 @@ export function PresetPicker({
         ? 'Its values stay as they are: Update saves the ones on screen.'
         : "Saves the values that differ from the template's defaults, under a name to pick them by next time. " +
           'Values equal to a default are not stored, so the preset follows later changes to the defaults.'
-  /** #360 — the name as it will be stored, said when that is not what was typed. */
-  const normalisedName = normaliseName(name)
+  /**
+   * #360 — the name as it will be stored, said when that is not what was typed. A save
+   * sends `name.trim()` (JS's trim), which the server then cleans.
+   */
+  const normalisedName = normaliseName(name.trim())
   const statusText = modified ? `Changed from ${selected?.name ?? ''}` : (notice?.text ?? '')
 
   return (
@@ -697,13 +727,29 @@ export function PresetPicker({
           onValueChange={(id) => choose(id === NONE ? '' : id)}
           disabled={presetsState.loading && !presetsState.data}
         >
-          {/* #360 — a long name is cut off in a narrow panel: the whole of it on hover or focus. */}
+          {/* #360 — a long name is cut off in a narrow panel: the whole of it on hover or focus,
+              but not on the focus the picker gives back after a pick (#6456). */}
           <Hint content={selected?.name}>
-            <SelectTrigger ref={trigger} id="preset-select" className="min-w-40 flex-1">
+            <SelectTrigger
+              ref={trigger}
+              id="preset-select"
+              className="min-w-40 flex-1"
+              // Runs before the tooltip's own handler, which skips a prevented event.
+              onFocus={(event) => {
+                if (refocusing.current) event.preventDefault()
+              }}
+            >
               <SelectValue placeholder={presets.length === 0 ? 'No presets yet' : 'Choose a preset…'} />
             </SelectTrigger>
           </Hint>
-          <SelectContent position="popper">
+          <SelectContent
+            position="popper"
+            // Radix's own close focuses the trigger the same way; this marks it as ours.
+            onCloseAutoFocus={(event) => {
+              event.preventDefault()
+              refocusTrigger()
+            }}
+          >
             {selected && (
               <>
                 <SelectItem value={NONE}>No preset</SelectItem>
@@ -904,7 +950,7 @@ export function PresetPicker({
               />
               {normalisedName && normalisedName !== name.trim() && (
                 <p data-testid="preset-name-normalised" className="text-xs text-muted-foreground">
-                  Saved as “{normalisedName}”: repeated spaces become one.
+                  Saved as “{normalisedName}”: each run of spaces, tabs or line breaks becomes one space.
                 </p>
               )}
             </div>
@@ -982,7 +1028,7 @@ export function PresetPicker({
           // Opened from the select's list, which is gone by now: back to the select (#1457).
           onCloseAutoFocus={(event) => {
             event.preventDefault()
-            trigger.current?.focus()
+            refocusTrigger()
           }}
         >
           <AlertDialogHeader>

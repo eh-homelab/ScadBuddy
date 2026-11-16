@@ -63,9 +63,17 @@ async function savePresetNamed(user: ReturnType<typeof renderPage>['user'], name
 }
 
 /** The picker with values that follow each apply, as the customize page's do. */
-function Harness({ onApply }: { onApply: (values: ParamValues, extra: InputsExtra) => void }) {
+function Harness({
+  onApply,
+  seed,
+}: {
+  onApply: (values: ParamValues, extra: InputsExtra) => void
+  /** Given a setter a test calls as a template UI does, with no user event (#1775). */
+  seed?: (set: (update: (current: InputsExtra) => InputsExtra) => void) => void
+}) {
   const [values, setValues] = useState(() => defaultValues(keychainSchema))
   const [extra, setExtra] = useState<InputsExtra>({ tab: 'lid' })
+  seed?.(setExtra)
   return (
     <>
       <PresetPicker
@@ -1050,6 +1058,70 @@ describe('PresetPicker: the smaller gaps (#360)', () => {
     await selectOption(user, select, 'Old engraving')
     fireEvent.focus(select)
     expect(await screen.findByRole('tooltip')).toHaveTextContent('Old engraving')
+  })
+
+  it('leaves no tooltip open on the select after a pick, while focus still opens it', async () => {
+    const { user } = render()
+    const select = await picker()
+    await selectOption(user, select, 'Old engraving')
+    // Radix Select puts the focus back on its trigger as it closes: no tooltip for that.
+    expect(select).toHaveFocus()
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
+
+    fireEvent.blur(select)
+    fireEvent.focus(select)
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Old engraving')
+  })
+
+  it('says how a name is stored, with the whitespace the server collapses (#6456)', async () => {
+    const { user } = render()
+    await picker()
+    await changeAValue(user)
+    await user.click(screen.getByRole('button', { name: 'Save as preset…' }))
+    const dialog = screen.getByRole('dialog', { name: 'Save as preset' })
+    const field = within(dialog).getByRole('textbox', { name: 'Preset name' })
+    // Python's str.split() splits on U+001C-U+001F and U+0085, which JS's \s does not.
+    fireEvent.change(field, { target: { value: 'Mum\u001cand\u001f\u0085Dad' } })
+    expect(within(dialog).getByTestId('preset-name-normalised')).toHaveTextContent(
+      'Saved as “Mum and Dad”: each run of spaces, tabs or line breaks becomes one space.',
+    )
+    // ...and keeps U+FEFF, which JS's \s would split on.
+    fireEvent.change(field, { target: { value: 'Mum\ufeffDad' } })
+    expect(within(dialog).queryByTestId('preset-name-normalised')).not.toBeInTheDocument()
+    fireEvent.change(field, { target: { value: 'Mum\ufeff \tDad' } })
+    // Read raw: toHaveTextContent folds the text by JS's \s, U+FEFF included.
+    expect(within(dialog).getByTestId('preset-name-normalised').textContent).toContain('Saved as “Mum\ufeff Dad”')
+  })
+
+  it('reverts a preset with UI state, taking what the template UI seeds after as the preset\'s', async () => {
+    setMockPresets('name-keychain', [
+      ...(fixturePresets['name-keychain'] ?? []),
+      {
+        id: 'f'.repeat(32),
+        name: 'Lid',
+        origin: 'mine',
+        params: {},
+        inputs: { params: {}, tab: 'lid', v: 0 },
+        description: '',
+        tags: [],
+      },
+    ])
+    let setExtra!: (update: (current: InputsExtra) => InputsExtra) => void
+    const onApply = vi.fn()
+    const { user } = renderPage(<Harness onApply={onApply} seed={(set) => (setExtra = set)} />)
+    await selectOption(user, await picker(), 'Lid')
+    await user.click(screen.getByRole('button', { name: 'Change the UI state' }))
+    expect(screen.getByTestId('preset-modified')).toHaveTextContent('Changed from Lid')
+
+    await user.click(screen.getByRole('button', { name: 'Revert to preset Lid' }))
+    expect(onApply).toHaveBeenLastCalledWith(expect.anything(), { tab: 'lid', v: 0 })
+    expect(screen.queryByTestId('preset-modified')).not.toBeInTheDocument()
+    // The template UI answers the reverted inputs by seeding its own state, with no user event.
+    act(() => setExtra((current) => ({ ...current, seeded: true })))
+    expect(screen.queryByTestId('preset-modified')).not.toBeInTheDocument()
   })
 
   it('shows the name as it will be stored, and says defaults are not stored', async () => {
