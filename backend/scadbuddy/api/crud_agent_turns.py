@@ -12,7 +12,7 @@
 - ``GET …/sessions/{id}/turn`` (``grace_ms``): who runs the row's turn and where;
 - ``POST …/sessions/{id}/turn/placement``: a placement takes the turn (``turn_attempt``, which
   no other route writes) while the row runs it, and the transcript's mark;
-- ``POST …/sessions/{id}/turn/spend``: what a placement spent;
+- ``POST …/sessions/{id}/turn/spend``: what a placement spent, once per key;
 - ``POST …/sessions/{id}/turn/finish``: the turn's end while the row runs it, with the queue's
   head claimed, in one transaction; ``…/turn/begin``: the queue's head claimed alone;
 - ``POST …/sessions/{id}/turn/queue`` and ``GET`` it: the queue's ``session.queue`` event;
@@ -22,7 +22,9 @@
 Appended events are answered as ``logged`` (their JSON texts and seqs) for the agent's
 followers. The session id is the only id in a path, a UUID checked by its pattern; a turn id
 is a UUID too (``durable_turn_id``), and one that is not is refused 422 ``turn_id``, as the
-agent's SQL cast throws. Every body is bounded."""
+agent's SQL cast throws, and is read lowercase. Every body is bounded, and a write that
+waits past ``turns.LOCK_TIMEOUT_MS`` for its row's lock is refused 503 ``row_busy``, never
+committed late."""
 
 from __future__ import annotations
 
@@ -33,7 +35,7 @@ from typing import Annotated, Any, Literal
 
 import psycopg
 from fastapi import Depends, Path, Query, Request, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 from scadbuddy.agent_data import events as event_log
 from scadbuddy.agent_data import turns
@@ -68,6 +70,8 @@ TURNS_MAX = 1_000_000
 #: The sweep's grace (``RUNNING_GRACE_MS``, a test passes 0) and page (``BATCH``).
 GRACE_MS_MAX = 24 * 3600 * 1000
 STALE_MAX = 1000
+#: A spend's key: a token of the placement's own and a sequence number, or `end`.
+SPEND_KEY_MAX = ATTEMPT_MAX + 32
 
 SessionIdPath = Annotated[str, Path(pattern=UUID_PATTERN)]
 Status = Literal["running", "waiting_input", "waiting_approval", "idle", "done", "failed"]
@@ -102,38 +106,46 @@ async def _in_conn[T](state: Any, fn: Callable[[psycopg.Connection[Any]], T]) ->
         return await asyncio.to_thread(run)
     except event_log.SessionGoneError as err:
         raise ApiError(status.HTTP_404_NOT_FOUND, str(err), reason="session_gone") from None
-
-
-EventText = Annotated[str, Field(min_length=2, max_length=EVENT_CHARS_MAX)]
-TurnId = Annotated[str, Field(pattern=TURN_ID_PATTERN)]
-
-
-def _parsed(texts: list[str]) -> list[dict[str, Any]]:
-    """Each text a JSON object with a string ``type``: the log's reads parse it as ``jsonb``."""
-    out = []
-    for text in texts:
-        try:
-            event = json.loads(text)
-        except ValueError:
-            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "an event is not JSON") from None
-        if not isinstance(event, dict) or not isinstance(event.get("type"), str):
-            raise ApiError(
-                status.HTTP_422_UNPROCESSABLE_CONTENT, "an event is an object with a type"
-            )
-        out.append(event)
-    return out
-
-
-def _closing(texts: list[str]) -> list[dict[str, Any]]:
-    """A turn's closing events: the last one its ``session.status``, which the row takes."""
-    tail = _parsed(texts)
-    last = tail[-1]
-    if last.get("type") != "session.status" or last.get("status") not in ("idle", "failed"):
+    except psycopg.errors.LockNotAvailable:
         raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "a turn's closing events end with its session.status, idle or failed",
-        )
-    return tail
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "the session's row stayed locked; send the write again",
+            reason="row_busy",
+        ) from None
+
+
+def _event(text: str) -> str:
+    """A JSON object with a string ``type``: the log's reads parse it as ``jsonb``."""
+    try:
+        event = json.loads(text)
+    except ValueError:
+        raise ValueError("an event is not JSON") from None
+    if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+        raise ValueError("an event is an object with a type")
+    return text
+
+
+def _closes(texts: list[str]) -> list[str]:
+    """A turn's closing events: the last one its ``session.status``, which the row takes."""
+    last = json.loads(texts[-1])
+    if last.get("type") != "session.status" or last.get("status") not in ("idle", "failed"):
+        raise ValueError("a turn's closing events end with its session.status, idle or failed")
+    return texts
+
+
+def _queue(text: str) -> str:
+    if json.loads(text)["type"] != "session.queue":
+        raise ValueError("the event is a session.queue")
+    return text
+
+
+EventText = Annotated[str, Field(min_length=2, max_length=EVENT_CHARS_MAX), AfterValidator(_event)]
+#: A turn's closing events, the last one its status.
+Closing = Annotated[
+    list[EventText], Field(min_length=1, max_length=TAIL_MAX), AfterValidator(_closes)
+]
+#: Lowercase, as Postgres writes a ``uuid``, so the agent's comparisons hold.
+TurnId = Annotated[str, Field(pattern=TURN_ID_PATTERN), AfterValidator(str.lower)]
 
 
 class Author(_Body):
@@ -292,6 +304,8 @@ async def placement(session_id: SessionIdPath, body: Placement, state: StateDep)
 
 
 class Spend(_Body):
+    #: The write's own key: a resend of it under the same key adds nothing.
+    key: str = Field(min_length=1, max_length=SPEND_KEY_MAX)
     cost_usd: float = Field(ge=-USD_MAX, le=USD_MAX, allow_inf_nan=False)
     unpriced_usd: float = Field(ge=-USD_MAX, le=USD_MAX, allow_inf_nan=False)
     turns: int = Field(ge=-TURNS_MAX, le=TURNS_MAX)
@@ -307,7 +321,9 @@ class Written(BaseModel):
 async def spend(session_id: SessionIdPath, body: Spend, state: StateDep) -> Written:
     written = await _in_conn(
         state,
-        lambda c: turns.spend(c, session_id, body.cost_usd, body.unpriced_usd, body.turns),
+        lambda c: turns.spend(
+            c, session_id, body.cost_usd, body.unpriced_usd, body.turns, body.key
+        ),
     )
     return Written(written=written)
 
@@ -323,7 +339,6 @@ class Next(_Body):
 
 
 def _next(body: Next) -> dict[str, Any]:
-    _parsed(body.started)
     return {
         "turn_id": body.turn_id,
         "author": {"kind": body.author.kind, "id": body.author.id},
@@ -340,7 +355,7 @@ class Begun(BaseModel):
 
 class Finish(_Body):
     turn_id: TurnId
-    tail: list[EventText] = Field(min_length=1, max_length=TAIL_MAX)
+    tail: Closing
     next: Next | None = None
 
 
@@ -355,7 +370,7 @@ class Finished(BaseModel):
     "/sessions/{session_id}/turn/finish", name="crud_agent_turns_finish", dependencies=[Bounded]
 )
 async def finish(session_id: SessionIdPath, body: Finish, state: StateDep) -> Finished:
-    tail = _closing(body.tail)
+    tail = [json.loads(text) for text in body.tail]
     nxt = None if body.next is None else _next(body.next)
     ended, started = await _in_conn(
         state, lambda c: turns.finish(c, session_id, body.turn_id, tail, nxt)
@@ -381,7 +396,7 @@ async def begin(session_id: SessionIdPath, body: Begin, state: StateDep) -> Begu
 
 class QueueWrite(_Body):
     #: The ``session.queue`` event's JSON text.
-    event: EventText
+    event: Annotated[EventText, AfterValidator(_queue)]
 
 
 @router.post(
@@ -390,8 +405,6 @@ class QueueWrite(_Body):
 async def queue_changed(
     session_id: SessionIdPath, body: QueueWrite, state: StateDep
 ) -> MaybeLogged:
-    if _parsed([body.event])[0]["type"] != "session.queue":
-        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "the event is a session.queue")
     logged = await _in_conn(state, lambda c: turns.queue_changed(c, session_id, body.event))
     return MaybeLogged(logged=_wire(logged))
 
@@ -429,7 +442,7 @@ async def stale(
 class EndLost(_Body):
     #: The ``event_seq`` the sweep read: the row is ended only while it still is.
     event_seq: int = Field(ge=0)
-    tail: list[EventText] = Field(min_length=1, max_length=TAIL_MAX)
+    tail: Closing
 
 
 @router.post(
@@ -438,7 +451,6 @@ class EndLost(_Body):
     dependencies=[Bounded],
 )
 async def end_lost(session_id: SessionIdPath, body: EndLost, state: StateDep) -> MaybeLogged:
-    _closing(body.tail)
     logged = await _in_conn(
         state, lambda c: turns.end_lost(c, session_id, body.event_seq, body.tail)
     )

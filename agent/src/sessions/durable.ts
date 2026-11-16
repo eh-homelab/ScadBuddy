@@ -7,6 +7,7 @@ import {
 import { ApplicationFailure, WorkflowNotFoundError } from '@temporalio/common'
 import { context as otelContext, trace } from '@opentelemetry/api'
 import type { Sql } from 'postgres'
+import { CrudReadError } from '../api/crudRead.js'
 import { traceparentOf } from '../telemetry/trace.js'
 import type { Tier } from '../auth/principal.js'
 import type { FlowTurn } from '../tools/registry.js'
@@ -24,7 +25,7 @@ import type { EventLog } from './eventLog.js'
 import type { UserImage } from './images.js'
 import { SessionError, type SessionRecord, type Turn, type TurnOutcome } from './manager.js'
 import { event, type Owner, type QueuedEntry, type SentImage, type ServerEvent, type SessionStatus } from './protocol.js'
-import { PgTurnRows, type TurnRows } from './turnRows.js'
+import { PgTurnRows, type SendClaim, type SendClaimed, type TurnRows } from './turnRows.js'
 
 // A session's turns (unified runtime spec 2026-10-13 §5, plan Step 6.3): every session is an
 // AgentSession, `session-<id>` on `agent-sessions`; this service hands it the message and reads
@@ -321,7 +322,7 @@ export class DurableTurns {
     // session's): AgentSession. Every DurableSession row has its own, `unified` or `durable`
     // (the six closed ones, refused below: such a row's conversation is in its DurableSession's
     // history, not in `ai_session_entries`, so an AgentSession would run on with none of it).
-    const claimed = await this.#turns.sendClaim(id, {
+    const claimed = await this.#claim(id, {
       author: turn.author,
       turnId: turn.turnId,
       // The turn's tool activities run with these, cut to what the owner holds then (#2320).
@@ -592,6 +593,28 @@ export class DurableTurns {
       // Not accepted in time, or the call itself failed: Temporal may hold the Update
       // already and deliver it when a worker polls, so this is no refusal.
       throw new OutcomeUnknown()
+    }
+  }
+
+  /**
+   * The send's claim. When its answer is lost (no answer from the route: the claim may have
+   * committed), the row is read, and a claim of this turn is given back before the error is
+   * thrown, so the row does not run a turn no workflow was told of until the running sweep ends
+   * it. The status before is not known then: it is given back `idle`.
+   */
+  async #claim(id: string, claim: SendClaim): Promise<SendClaimed | undefined> {
+    try {
+      return await this.#turns.sendClaim(id, claim)
+    } catch (err) {
+      if (!(err instanceof CrudReadError && err.fromRoute)) {
+        const row = await this.#turns.state(id).catch(() => undefined)
+        if (row?.durable_turn_id === claim.turnId.toLowerCase()) {
+          await this.#giveBack(id, 'idle').catch(() => {
+            console.warn(`durable send: session ${id}'s claim could not be given back`)
+          })
+        }
+      }
+      throw err
     }
   }
 

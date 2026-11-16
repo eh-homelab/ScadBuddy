@@ -288,11 +288,89 @@ def test_a_placement_takes_the_turn_only_while_the_row_runs_it(
 
 def test_a_placements_spend_is_added_whoever_holds_the_row(agent: Agent, tables: PgPool) -> None:
     sid = _session(tables, cost=0.5)
-    body = {"cost_usd": 0.25, "unpriced_usd": 0.1, "turns": 2}
+    body = {"key": "run:1:0", "cost_usd": 0.25, "unpriced_usd": 0.1, "turns": 2}
     assert agent.post(f"/sessions/{sid}/turn/spend", body) == {"written": True}
     row = _row(tables, sid)
     assert (row["cost_usd"], row["unpriced_cost_usd"], row["turns"]) == (0.75, 0.1, 2)
     assert agent.post(f"/sessions/{uuid.uuid4()}/turn/spend", body) == {"written": False}
+
+
+def test_a_spend_sent_again_under_its_key_is_added_once(agent: Agent, tables: PgPool) -> None:
+    sid = _session(tables)
+    body = {"key": "run:1:0", "cost_usd": 0.25, "unpriced_usd": 0, "turns": 1}
+    # The answer to the first was lost: the placement sends the same write again.
+    assert agent.post(f"/sessions/{sid}/turn/spend", body) == {"written": True}
+    assert agent.post(f"/sessions/{sid}/turn/spend", body) == {"written": True}
+    assert (_row(tables, sid)["cost_usd"], _row(tables, sid)["turns"]) == (0.25, 1)
+    assert agent.post(f"/sessions/{sid}/turn/spend", {**body, "key": "run:1:1"})
+    assert (_row(tables, sid)["cost_usd"], _row(tables, sid)["turns"]) == (0.5, 2)
+    # A key older than the hour is let go at the session's next spend.
+    _sql(
+        tables,
+        "UPDATE ai_turn_spend_keys SET created_at = now() - interval '2 hours'"
+        " WHERE session_id = %s AND key = 'run:1:0'",
+        (sid,),
+    )
+    agent.post(f"/sessions/{sid}/turn/spend", {**body, "key": "run:2:0"})
+    keys = _sql(tables, "SELECT key FROM ai_turn_spend_keys WHERE session_id = %s", (sid,))
+    assert sorted(k["key"] for k in keys) == ["run:1:1", "run:2:0"]
+
+
+def test_a_write_that_waits_past_the_lock_timeout_is_refused(
+    agent: Agent, tables: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(turns, "LOCK_TIMEOUT_MS", 200)
+    turn = str(uuid.uuid4())
+    sid = _session(tables, status="running", turn=turn)
+    with tables.connection() as conn, conn.transaction():
+        conn.execute("SELECT 1 FROM ai_sessions WHERE id = %s FOR UPDATE", (sid,))
+        refused = agent.status(
+            "POST", f"/sessions/{sid}/turn/finish", {"turn_id": turn, "tail": _tail(sid)}
+        )
+    assert refused.status_code == 503
+    assert refused.json()["reason"] == "row_busy"
+    assert _row(tables, sid)["status"] == "running"
+    assert _events(tables, sid) == []
+
+
+def test_a_turn_id_is_read_lowercase(agent: Agent, tables: PgPool) -> None:
+    turn = str(uuid.uuid4())
+    sid = _session(tables, status="running", turn=turn)
+    placed = {"turn_id": turn.upper(), "attempt": "run:1", "mark_key": turn}
+    assert agent.post(f"/sessions/{sid}/turn/placement", placed) == {"mark": 0}
+    ended = agent.post(
+        f"/sessions/{sid}/turn/finish", {"turn_id": turn.upper(), "tail": _tail(sid)}
+    )
+    assert ended["ended"] is not None
+
+
+@pytest.mark.parametrize(
+    ("value", "text"),
+    [
+        (0.0, "0"),
+        (-0.0, "0"),
+        (5.0, "5"),
+        (0.1, "0.1"),
+        (0.30000000000000004, "0.30000000000000004"),
+        (1e-7, "1e-7"),
+        (1.5e-7, "1.5e-7"),
+        (1.234e-8, "1.234e-8"),
+        (0.000001, "0.000001"),
+        (1e20, "100000000000000000000"),
+        (123456789012345680000.0, "123456789012345680000"),
+        (1e21, "1e+21"),
+        (1.5e300, "1.5e+300"),
+        (-2.5e-10, "-2.5e-10"),
+        (float(2**53 + 2), "9007199254740994"),
+        (float("nan"), "null"),
+        (float("inf"), "null"),
+    ],
+)
+def test_numbers_are_written_as_javascript_writes_them(value: float, text: str) -> None:
+    assert turns.js_number(value) == text
+    assert turns.dumps({"type": "x", "n": value, "l": [value]}) == (
+        f'{{"type":"x","n":{text},"l":[{text}]}}'
+    )
 
 
 def test_a_turns_end_is_written_once_and_never_over_another_turn(
@@ -460,7 +538,10 @@ def test_the_bodies_and_ids_are_bounded(agent: Agent, tables: PgPool) -> None:
         ("/give-back", {"prior": "sideways"}),
         ("/placement", {"turn_id": turn, "attempt": "", "mark_key": turn}),
         ("/placement", {"turn_id": "../x", "attempt": "a", "mark_key": turn}),
-        ("/spend", {"cost_usd": float("1e9"), "unpriced_usd": 0, "turns": 0}),
+        ("/spend", {"key": "k", "cost_usd": float("1e9"), "unpriced_usd": 0, "turns": 0}),
+        ("/spend", {"cost_usd": 0, "unpriced_usd": 0, "turns": 0}),
+        ("/spend", {"key": "k" * 600, "cost_usd": 0, "unpriced_usd": 0, "turns": 0}),
+        ("/queue", {"event": _status(sid, "idle")}),
         ("/finish", {"turn_id": turn, "tail": []}),
         ("/finish", {"turn_id": turn, "tail": ["not json"]}),
         ("/finish", {"turn_id": turn, "tail": [_tail(sid)[0]]}),

@@ -17,6 +17,9 @@ the lineage's spend and budget read under the row's lock (``turnCore.ts`` ``word
 from __future__ import annotations
 
 import json
+import math
+from collections.abc import Iterator
+from contextlib import contextmanager
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Literal
 
@@ -33,6 +36,18 @@ QUEUED_DROPPED = "queued_message_dropped"
 PROTOCOL_VERSION = 1
 #: What a queue claim came to.
 Outcome = Literal["started", "busy", "dropped"]
+#: How long a write waits for its row's lock before it fails (``LockNotAvailable``, which the
+#: route answers 503 ``row_busy``): a write that waited past the agent's request (30 s) would
+#: commit after the agent gave up on it.
+LOCK_TIMEOUT_MS = 10_000
+
+
+@contextmanager
+def _write(conn: Connection[Any]) -> Iterator[None]:
+    """A write's transaction, its lock waits bounded by ``LOCK_TIMEOUT_MS``."""
+    with conn.transaction():
+        conn.execute(f"SET LOCAL lock_timeout = {int(LOCK_TIMEOUT_MS)}".encode())
+        yield
 
 
 class Logged:
@@ -46,20 +61,41 @@ class Logged:
         return {"events": self.texts, "seqs": self.seqs}
 
 
-def _plain(value: Any) -> Any:
-    """A float with no fraction as an int, as ``JSON.stringify`` writes it."""
-    if isinstance(value, float) and value.is_integer() and abs(value) < 2**53:
-        return int(value)
+def js_number(value: float) -> str:
+    """A float as ``JSON.stringify`` writes it (ECMA-262 ``Number::toString``): the shortest
+    digits that read back as it (Python's ``repr`` picks the same), in fixed notation for
+    1e-6 <= |x| < 1e21 and as ``1.5e+21`` or ``1e-7`` outside it; NaN and the infinities as
+    ``null``."""
+    if math.isnan(value) or math.isinf(value):
+        return "null"
+    if value == 0:
+        return "0"
+    exact = Decimal(repr(value)).normalize()
+    if Decimal("1e-6") <= abs(exact) < Decimal("1e21"):
+        return format(exact, "f")
+    sign, digits, exponent = exact.as_tuple()
+    assert isinstance(exponent, int)
+    text = "".join(map(str, digits)).rstrip("0") or "0"
+    power = len(digits) + exponent - 1
+    mantissa = text[0] + ("." + text[1:] if len(text) > 1 else "")
+    return ("-" if sign else "") + mantissa + "e" + ("+" if power >= 0 else "-") + str(abs(power))
+
+
+def _js(value: Any) -> str:
+    if value is None or value is True or value is False or isinstance(value, (int, str)):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, float):
+        return js_number(value)
     if isinstance(value, dict):
-        return {k: _plain(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_plain(v) for v in value]
-    return value
+        return "{" + ",".join(f"{_js(str(k))}:{_js(v)}" for k, v in value.items()) + "}"
+    if isinstance(value, (list, tuple)):
+        return "[" + ",".join(_js(v) for v in value) + "]"
+    raise TypeError(f"{type(value).__name__} is not JSON")
 
 
 def dumps(event: dict[str, Any]) -> str:
-    """``JSON.stringify``'s text of an event."""
-    return json.dumps(_plain(event), ensure_ascii=False, separators=(",", ":"))
+    """``JSON.stringify``'s text of an event: its numbers as JavaScript writes them."""
+    return _js(event)
 
 
 def usd(amount: float) -> str:
@@ -97,6 +133,18 @@ def send_claim(
 ) -> dict[str, Any] | None:
     """``durable.ts`` ``#send``'s claim: the row runs ``turn_id`` while ``author`` owns it and it
     is free, not done, archived or spent. The status before, and the runtime."""
+    with _write(conn):
+        return _send_claim(conn, session_id, author, tiers, turn_id, bare)
+
+
+def _send_claim(
+    conn: Connection[Any],
+    session_id: str,
+    author: tuple[str, str],
+    tiers: dict[str, Any] | None,
+    turn_id: str,
+    bare: bool,
+) -> dict[str, Any] | None:
     row: dict[str, Any] | None = conn.execute(
         (
             "WITH prior AS (SELECT status AS prior_status FROM ai_sessions WHERE id = %(id)s"
@@ -156,7 +204,7 @@ def state(conn: Connection[Any], session_id: str, grace_ms: int) -> dict[str, An
 def give_back(conn: Connection[Any], session_id: str, prior: str) -> Logged | None:
     """``durable.ts`` ``#giveBack``: a refused send's claim given back to ``prior``, with its
     ``session.status``, in one transaction; None when the row no longer runs."""
-    with conn.transaction():
+    with _write(conn):
         cur = conn.execute(
             "UPDATE ai_sessions SET status = %s, durable_turn_id = NULL, updated_at = now()"
             " WHERE id = %s AND status = 'running'",
@@ -170,12 +218,13 @@ def give_back(conn: Connection[Any], session_id: str, prior: str) -> Logged | No
 
 def interrupt(conn: Connection[Any], session_id: str) -> bool:
     """``durable.ts`` ``interrupt``'s flag, while a turn holds the row."""
-    cur = conn.execute(
-        "UPDATE ai_sessions SET interrupt_requested = true"
-        " WHERE id = %s AND durable_turn_id IS NOT NULL",
-        (session_id,),
-    )
-    return cur.rowcount > 0
+    with _write(conn):
+        cur = conn.execute(
+            "UPDATE ai_sessions SET interrupt_requested = true"
+            " WHERE id = %s AND durable_turn_id IS NOT NULL",
+            (session_id,),
+        )
+        return cur.rowcount > 0
 
 
 def placement(
@@ -183,33 +232,60 @@ def placement(
 ) -> int | None:
     """``turnHost.ts`` ``#claim``, the only writer of ``turn_attempt``: the placement takes the
     turn while the row runs it, and the transcript's mark is set once per ``mark_key``."""
-    row = conn.execute(
-        "UPDATE ai_sessions SET turn_attempt = %(attempt)s,"
-        " turn_mark = CASE WHEN turn_mark_turn = %(key)s THEN turn_mark ELSE ("
-        " SELECT coalesce(max(e.id), 0) FROM ai_session_entries e"
-        " WHERE e.session_id = ai_sessions.id::text AND e.subpath = ''"
-        " ) END,"
-        " turn_mark_turn = %(key)s"
-        " WHERE id = %(id)s AND durable_turn_id = %(turn)s"
-        " AND status IN ('running', 'waiting_approval', 'waiting_input')"
-        " RETURNING turn_mark::text",
-        {"attempt": attempt, "key": mark_key, "id": session_id, "turn": turn_id},
-    ).fetchone()
-    return None if row is None else int(row["turn_mark"])
+    with _write(conn):
+        row = conn.execute(
+            "UPDATE ai_sessions SET turn_attempt = %(attempt)s,"
+            " turn_mark = CASE WHEN turn_mark_turn = %(key)s THEN turn_mark ELSE ("
+            " SELECT coalesce(max(e.id), 0) FROM ai_session_entries e"
+            " WHERE e.session_id = ai_sessions.id::text AND e.subpath = ''"
+            " ) END,"
+            " turn_mark_turn = %(key)s"
+            " WHERE id = %(id)s AND durable_turn_id = %(turn)s"
+            " AND status IN ('running', 'waiting_approval', 'waiting_input')"
+            " RETURNING turn_mark::text",
+            {"attempt": attempt, "key": mark_key, "id": session_id, "turn": turn_id},
+        ).fetchone()
+        return None if row is None else int(row["turn_mark"])
+
+
+#: How long a spend's key is kept (``ai_turn_spend_keys``): far past a placement's resend.
+SPEND_KEY_TTL_S = 3600
 
 
 def spend(
-    conn: Connection[Any], session_id: str, cost_usd: float, unpriced_usd: float, turns: int
+    conn: Connection[Any],
+    session_id: str,
+    cost_usd: float,
+    unpriced_usd: float,
+    turns: int,
+    key: str,
 ) -> bool:
     """``turnHost.ts`` ``Spend.flush`` and ``#write``: what a placement spent, added whether or
-    not it still holds the row; False for a session that is gone."""
-    row = conn.execute(
-        "UPDATE ai_sessions SET cost_usd = cost_usd + %s, turns = turns + %s,"
-        " unpriced_cost_usd = unpriced_cost_usd + %s, updated_at = now()"
-        " WHERE id = %s RETURNING id",
-        (cost_usd, turns, unpriced_usd, session_id),
-    ).fetchone()
-    return row is not None
+    not it still holds the row, once per ``key`` (a resend of a write whose answer was lost adds
+    nothing); False for a session that is gone."""
+    # One statement: the row locked, the session's old keys let go, the key taken, and the spend
+    # added only when the key was new.
+    with _write(conn):
+        row = conn.execute(
+            "WITH s AS (SELECT id FROM ai_sessions WHERE id = %(id)s FOR UPDATE),"
+            " old AS (DELETE FROM ai_turn_spend_keys WHERE session_id = %(id)s"
+            " AND created_at < now() - make_interval(secs => %(ttl)s)),"
+            " k AS (INSERT INTO ai_turn_spend_keys (session_id, key) SELECT id, %(key)s FROM s"
+            " ON CONFLICT DO NOTHING RETURNING session_id),"
+            " u AS (UPDATE ai_sessions SET cost_usd = cost_usd + %(cost)s,"
+            " turns = turns + %(turns)s, unpriced_cost_usd = unpriced_cost_usd + %(unpriced)s,"
+            " updated_at = now() WHERE id IN (SELECT session_id FROM k) RETURNING id)"
+            " SELECT EXISTS (SELECT 1 FROM s) AS found, (SELECT count(*) FROM u) AS added",
+            {
+                "id": session_id,
+                "ttl": SPEND_KEY_TTL_S,
+                "key": key,
+                "cost": cost_usd,
+                "turns": turns,
+                "unpriced": unpriced_usd,
+            },
+        ).fetchone()
+        return row is not None and bool(row["found"])
 
 
 def _why_not(row: dict[str, Any], author: tuple[str, str]) -> str | None:
@@ -288,7 +364,7 @@ def finish(
     worded with the lineage's spend and budget, the status its last event names, then the
     queue's head claimed, in one transaction. None for an end already written, a turn the row no
     longer runs, or a session that is gone."""
-    with conn.transaction():
+    with _write(conn):
         row = conn.execute(
             (
                 f"SELECT ai_sessions.turns, {POOL_BUDGET} AS budget, {POOL_COST} AS spent"
@@ -316,14 +392,14 @@ def begin(
     conn: Connection[Any], session_id: str, nxt: dict[str, Any]
 ) -> tuple[Outcome, Logged | None]:
     """``session.begin_turn``: the queue's head claimed while no turn ran (#6386)."""
-    with conn.transaction():
+    with _write(conn):
         return claim_queued(conn, session_id, nxt)
 
 
 def queue_changed(conn: Connection[Any], session_id: str, text: str) -> Logged | None:
     """``session.queue_changed``: the queue after a change, as a ``session.queue`` event, under
     the row's lock; None for a session that is gone."""
-    with conn.transaction():
+    with _write(conn):
         row = conn.execute(
             "SELECT 1 FROM ai_sessions WHERE id = %s FOR UPDATE", (session_id,)
         ).fetchone()
@@ -361,7 +437,7 @@ def end_lost(
 ) -> Logged | None:
     """``durableSweep.ts`` ``endLostTurn``: the row set ``idle`` with ``tail`` while it still
     holds a turn and its ``event_seq`` is the one the sweep read; None otherwise."""
-    with conn.transaction():
+    with _write(conn):
         row = conn.execute(
             "UPDATE ai_sessions SET status = 'idle', durable_turn_id = NULL, updated_at = now()"
             " WHERE id = %s AND status = ANY(%s) AND event_seq = %s RETURNING id",

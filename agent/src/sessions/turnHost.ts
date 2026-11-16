@@ -1058,7 +1058,12 @@ export class TurnHost {
     const spent = end.result ? tally.costUsd - session.ownCostUsd : Math.max(tally.costUsd - session.ownCostUsd, runningUsd)
     const estimated = end.result ? end.cutUsd : spent
     const wrote = await spend.settled()
-    const written = await this.#turns.spend(session.id, { costUsd: spent - wrote, unpricedUsd: estimated - wrote, turns: tally.turns - session.turns })
+    const written = await this.#turns.spend(session.id, {
+      key: spend.endKey,
+      costUsd: spent - wrote,
+      unpricedUsd: estimated - wrote,
+      turns: tally.turns - session.turns,
+    })
     if (!written) return
     // #1922: what the turn cost, as its own audit row (audit/turn.ts turnCostEntry).
     await this.#deps.core.audit?.record(
@@ -1091,11 +1096,20 @@ export class TurnHost {
  * requests cost since the last (CoreTurn.runningUsd, the table's prices), to `cost_usd` and to
  * `unpriced_cost_usd` (Claude Code has priced none of it yet), whether or not the row is still
  * this placement's. The end (`TurnHost#write`) replaces it with the turn's own reckoning.
+ *
+ * Each write has a key of its own (`#token` and a sequence number). A write whose answer never
+ * came is sent again under its key before any new one, so one that committed while its answer was
+ * lost is added once (`SpendDelta.key`). The token is this object's, never the attempt id, which
+ * the next turn's first placement in a run shares.
  */
 class Spend {
   readonly turns: Pick<TurnRows, 'spend'>
   readonly id: string
+  readonly #token = randomUUID()
+  #seq = 0
   #written = 0
+  /** A write sent whose answer never came: sent again, under its key, before any other. */
+  #pending: { key: string; delta: number } | undefined
   #chain: Promise<void> = Promise.resolve()
   /** Set by `settled`: the end's write takes over, so a flush from a fence tick still in flight writes nothing. */
   #closed = false
@@ -1105,18 +1119,39 @@ class Spend {
     this.id = id
   }
 
+  /** The end's write's key (`TurnHost#write`). */
+  get endKey(): string {
+    return `${this.#token}:end`
+  }
+
   flush(runningUsd: number): void {
     this.#chain = this.#chain.then(async () => {
+      if (this.#closed) return
+      await this.#send()
       const delta = runningUsd - this.#written
-      if (this.#closed || delta <= 0) return
-      if (await this.turns.spend(this.id, { costUsd: delta, unpricedUsd: delta, turns: 0 })) this.#written += delta
+      if (delta <= 0) return
+      this.#pending = { key: `${this.#token}:${this.#seq++}`, delta }
+      await this.#send()
     }).catch(() => {})
   }
 
-  /** What was written, once the writes in flight have landed; no flush writes after it. */
+  async #send(): Promise<void> {
+    const pending = this.#pending
+    if (!pending) return
+    const written = await this.turns.spend(this.id, { key: pending.key, costUsd: pending.delta, unpricedUsd: pending.delta, turns: 0 })
+    this.#pending = undefined
+    if (written) this.#written += pending.delta
+  }
+
+  /**
+   * What was written, once the writes in flight have landed and a write whose answer was lost was
+   * sent again; no flush writes after it. Throws when that write's answer is lost again: the end
+   * cannot know what was written.
+   */
   async settled(): Promise<number> {
     await this.#chain
     this.#closed = true
+    await this.#send()
     return this.#written
   }
 }

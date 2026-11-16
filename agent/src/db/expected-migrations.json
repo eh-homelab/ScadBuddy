@@ -398,5 +398,9 @@
   {
     "id": "20261115T1613Z_session_queue_events",
     "sha256": "3df9ee67d19b1cf5c9fc5b1eb619d038aab8215f9f064f1672fa90d5e9edc423"
+  },
+  {
+    "id": "20261116T0730Z_turn_spend_keys",
+    "sha256": "5f7061dc01f34c544e28bf09490e1d5621ffc46d6980f27d22dcb7396c828378"
   }
 ]

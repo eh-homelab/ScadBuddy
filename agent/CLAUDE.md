@@ -102,11 +102,13 @@ of the row (area `session-turns`, #6449, `TURN_AREAS`, backend `api/crud_agent_t
 events in its transaction and its fence checked there: a send's claim and give-back, the
 queueable read, the turn's state read (a placement's hold, a Stop's read and flag, a resend's
 check), a placement's claim (the only writer of `turn_attempt`, only while the row runs the turn),
-its spend, the turn's end only while the row runs that turn (`durable_turn_id`; its closing events
+its spend (each write with a key of its own, sent again under that key when its answer was lost,
+so the API adds it once), the turn's end only while the row runs that turn (`durable_turn_id`; its closing events
 sent unworded and worded with the lineage's spend and budget under the row's lock) with the
 queue's head claimed in the same transaction, a head begun alone, the queue's `session.queue`
 event and its read, and the running sweep's page and its end of a lost turn (only at the
-`event_seq` it read); a turn id is sent only as a UUID. An edit writes the row with its events in
+`event_seq` it read); a turn id is sent only as a lowercase UUID. A send's claim whose answer
+was lost is read back and given back when the row runs that turn (`durable.ts` `#claim`). An edit writes the row with its events in
 one transaction and stays on SQL until #6449's part b. A
 session's transcript (area `transcripts`, part b, backend `api/crud_agent_transcripts.py`;
 `src/sessions/store.ts` `TranscriptRows`: `PgTranscriptRows`, and `src/sessions/crudTranscripts.ts`

@@ -62,8 +62,12 @@ export type TurnState = {
 /** A row in TURN_STATUSES as the sweep reads it: its claim (`event_seq`). */
 export type StaleRow = { id: string; event_seq: string }
 
-/** What a placement spent since its last write, added whoever holds the row. */
-export type SpendDelta = { costUsd: number; unpricedUsd: number; turns: number }
+/**
+ * What a placement spent since its last write, added whoever holds the row. `key` is the write's
+ * own: the route adds a key's write once, so a write sent again after its answer was lost is not
+ * counted twice (`ai_turn_spend_keys`). The SQL path, whose write is one statement, ignores it.
+ */
+export type SpendDelta = { key: string; costUsd: number; unpricedUsd: number; turns: number }
 
 export interface TurnRows {
   /** A send's claim (durable.ts `#send`), or undefined when the row cannot take it. */
@@ -310,10 +314,13 @@ const begun = (wire: WireBegun): Begun => {
   return { outcome: wire.outcome, ...(written ? { logged: written } : {}) }
 }
 
-/** A turn id as the routes take it: a UUID, as `durable_turn_id` is; anything else throws, as the SQL's cast does. */
+/**
+ * A turn id as the routes take it: a UUID, as `durable_turn_id` is, lowercase, as Postgres writes
+ * one; anything else throws, as the SQL's cast does.
+ */
 function turnIdOf(turnId: string): string {
   if (!isUuid(turnId)) throw new Error(`turn ${JSON.stringify(turnId)} is not a turn id`)
-  return turnId
+  return turnId.toLowerCase()
 }
 
 const nextBody = (next: NextClaim) => ({
@@ -391,7 +398,7 @@ export class CrudTurnRows implements TurnRows {
   }
 
   async spend(id: string, delta: SpendDelta): Promise<boolean> {
-    const body = { cost_usd: delta.costUsd, unpriced_usd: delta.unpricedUsd, turns: delta.turns }
+    const body = { key: delta.key, cost_usd: delta.costUsd, unpriced_usd: delta.unpricedUsd, turns: delta.turns }
     return (await this.#call<{ written: boolean }>(`the spend of session ${id}`, this.#path(id, '/spend'), body)).written
   }
 

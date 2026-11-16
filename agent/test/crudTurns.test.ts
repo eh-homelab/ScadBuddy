@@ -1,7 +1,11 @@
+import { randomUUID } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import { CrudAreas, TURN_AREAS } from '../src/api/crudAreas.js'
+import { CrudReadError } from '../src/api/crudRead.js'
 import { gated } from '../src/api/crudStores.js'
+import { type DurableTurn, DurableTurns } from '../src/sessions/durable.js'
 import type { EventLog } from '../src/sessions/eventLog.js'
+import type { SessionRecord } from '../src/sessions/manager.js'
 import { event } from '../src/sessions/protocol.js'
 import { CrudTurnRows, type TurnRows } from '../src/sessions/turnRows.js'
 import { sessionFinishActivities } from '../src/temporal/session/finishActivity.js'
@@ -121,6 +125,38 @@ describe('a turn\'s row writes over the CRUD routes', () => {
     const next = { turn_id: TURN, text: 't', words: 't', author: { ...BROWSER, label: 'You' }, images: [], system_append: null, queued_at: '' }
     expect(await begin({ sessionId: SESSION, next } as never)).toBe('busy')
     expect(committed).not.toHaveBeenCalled()
+  })
+
+  it('sends a spend with its key, and a turn id lowercase', async () => {
+    const api = new FakeApi()
+      .answer(`POST /sessions/${SESSION}/turn/spend`, { written: true })
+      .answer(`POST /sessions/${SESSION}/turn/placement`, { mark: 3 })
+    expect(await rows(api).spend(SESSION, { key: 'tok:0', costUsd: 0.25, unpricedUsd: 0.25, turns: 0 })).toBe(true)
+    expect(api.seen[0]?.body).toEqual({ key: 'tok:0', cost_usd: 0.25, unpriced_usd: 0.25, turns: 0 })
+    expect(await rows(api).placement(SESSION, TURN.toUpperCase(), 'run:1', TURN)).toBe(3)
+    expect(api.seen[1]?.body).toMatchObject({ turn_id: TURN })
+  })
+
+  it('gives back a send\'s claim whose answer was lost once the row shows it, and only then', async () => {
+    const session = { id: SESSION } as SessionRecord
+    const turn = { turnId: TURN.toUpperCase(), prompt: 'hi', text: 'hi', author: BROWSER, images: [], systemAppend: '' } as unknown as DurableTurn
+    const run = async (err: Error, holder: string | null) => {
+      const giveBack = vi.fn(async () => undefined)
+      const state = vi.fn(async () => ({ durable_turn_id: holder }))
+      const turns = { sendClaim: vi.fn(async () => Promise.reject(err)), state, giveBack } as unknown as TurnRows
+      const durable = new DurableTurns({ client: {} as never, sql: {} as never, events: {} as EventLog, turns })
+      await expect(durable.send(session, turn)).rejects.toBe(err)
+      return { giveBack, state }
+    }
+    // No answer: the claim may have committed. The row runs this turn, so it is given back.
+    const lost = await run(new CrudReadError('the claim: fetch failed'), TURN)
+    expect(lost.giveBack.mock.calls).toEqual([[SESSION, 'idle']])
+    // The row runs another turn: nothing is given back.
+    expect((await run(new CrudReadError('the claim: fetch failed'), randomUUID())).giveBack).not.toHaveBeenCalled()
+    // The route answered (its transaction rolled back): the row is not read.
+    const refused = await run(new CrudReadError('the claim: 503', 503, true), TURN)
+    expect(refused.state).not.toHaveBeenCalled()
+    expect(refused.giveBack).not.toHaveBeenCalled()
   })
 
   it('a refusal of the route throws, never reads as a fence that held', async () => {
