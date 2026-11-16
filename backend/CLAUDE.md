@@ -361,7 +361,16 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   step 9, part c): the agent's `PgOrderCostRows`, a report's writes each checking in its
   transaction that the caller's token holds the session's lease (`leases.py`
   `order-cost:<session id>`, whose acquire also tries the SQL pod's advisory lock) (tests
-  `tests/crud/test_crud_agent_order_costs.py`).
+  `tests/crud/test_crud_agent_order_costs.py`). `turns.py` is a durable turn's writes of its
+  session's row, for `api/crud_agent_turns.py` (area `session-turns`, #6449): the agent's
+  `PgTurnRows` statement for statement, each with its events (`events.py` `append_in`) in one
+  transaction: a send's claim and give-back, a placement's claim (the only writer of
+  `turn_attempt`, only while the row runs the turn), its spend, the turn's end only while the row
+  runs that turn (its closing events worded with the lineage's spend and budget read `FOR UPDATE`,
+  `word_tail`, as the agent's `wordTail`) with the queue's head claimed in the same transaction,
+  and the running sweep's end of a lost turn only at the `event_seq` it read (tests
+  `tests/crud/test_crud_agent_turns.py`; the agent's `test/turnRowsParity.pg.test.ts` runs one
+  scenario both ways).
 - The agent's small stores (#5299 step 5): `api/crud_agent_stores.py` (areas
   `activity-kinds`, `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`) and
   `api/crud_agent_notify.py` (area `notify`, sealed with the KEK under the agent's AAD), each

@@ -61,6 +61,13 @@ export const GATE_AREAS = ['gate', 'pending-input', 'audit', 'approvals', 'quest
  */
 export const SESSION_AREAS = ['sessions', 'session-resources', 'transcripts', 'session-events', 'session-order-costs'] as const
 
+/**
+ * The area of a durable turn's writes of its session's row, each with its events in one
+ * transaction and its fence checked there (#6449; backend api/crud_agent_turns.py;
+ * sessions/turnRows.ts).
+ */
+export const TURN_AREAS = ['session-turns'] as const
+
 export type CrudAreasOptions = {
   fetch?: typeof fetch
   /** The areas the agent waits for. */

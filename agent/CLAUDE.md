@@ -96,8 +96,18 @@ the whole row answers the record, a turn's claim and `poolRemainingUsd`, and an 
 limit and a fork's tombstone check run under their locks in the API's transaction) and what its
 calls touched (area `session-resources`, `src/sessions/touched.ts` `ResourceRows`) are #5299
 step 9, part a (`SESSION_AREAS`, backend `api/crud_agent_sessions.py`); a session id goes into a
-route's path only as a lowercase UUID, encoded (`rows.ts` `sessionPath`). A turn's claim, its end
-and an edit write the row with their events in one transaction, and stay on SQL until #6449. A
+route's path only as a lowercase UUID, encoded (`rows.ts` `sessionPath`). A durable turn's writes
+of the row (area `session-turns`, #6449, `TURN_AREAS`, backend `api/crud_agent_turns.py`;
+`src/sessions/turnRows.ts` `TurnRows`: `PgTurnRows`, `CrudTurnRows`) are one route each, its
+events in its transaction and its fence checked there: a send's claim and give-back, the
+queueable read, the turn's state read (a placement's hold, a Stop's read and flag, a resend's
+check), a placement's claim (the only writer of `turn_attempt`, only while the row runs the turn),
+its spend, the turn's end only while the row runs that turn (`durable_turn_id`; its closing events
+sent unworded and worded with the lineage's spend and budget under the row's lock) with the
+queue's head claimed in the same transaction, a head begun alone, the queue's `session.queue`
+event and its read, and the running sweep's page and its end of a lost turn (only at the
+`event_seq` it read); a turn id is sent only as a UUID. An edit writes the row with its events in
+one transaction and stays on SQL until #6449's part b. A
 session's transcript (area `transcripts`, part b, backend `api/crud_agent_transcripts.py`;
 `src/sessions/store.ts` `TranscriptRows`: `PgTranscriptRows`, and `src/sessions/crudTranscripts.ts`
 `CrudTranscriptRows`) is sealed and opened by the API under the session's data key with the
@@ -113,9 +123,9 @@ placement (`appendFenced`, `FOR UPDATE` in its transaction), the reads (a fork's
 in one snapshot, an inherited event addressed to the session here), a flow's turn reader
 (`turnEvents`) and a new fork's log (`forkLog`, under the parent's payload-key lock, shared).
 `EventLog` keeps its followers, wakes and 1 s polls (D4) over either. An append in a caller's own
-transaction (`append(…, tx)`: edits, a turn's end, the durable sweep, and, until the API lists
-their areas, the workspace, approvals and the gate) stays `appendEventsIn` on SQL until that caller
-moves (#6449). These fifteen have a
+transaction (`append(…, tx)`: edits, `PgTurnRows`, and, until the API lists their areas, the
+workspace, approvals and the gate) stays `appendEventsIn` on SQL until that caller moves (#6449).
+These sixteen have a
 rolling-deploy fallback:
 `src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` from the start with back-off
 (1 s doubling to 30 s) until every one is listed, and until then each stays on SQL, for an API

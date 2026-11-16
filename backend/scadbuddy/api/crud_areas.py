@@ -120,7 +120,12 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: the turn's placement holds the session), and the attention limit's count under its lease
 #: (`api/crud_agent_questions.py`). Its ``escalations`` area is ``…/agent/escalations/*``: a flow
 #: run's calls at the starting session's hop, passed up, denied, moved on its timeout and
-#: delivered, and a run's child entries for its queue (`api/crud_agent_escalations.py`).
+#: delivered, and a run's child entries for its queue (`api/crud_agent_escalations.py`). Its
+#: ``session-turns`` area is ``…/agent/sessions/{id}/turn`` with every route under it and
+#: ``…/agent/turns/stale``: a durable turn's writes of its session's row, each with its events
+#: in one transaction and its fence checked there (a send's claim and give-back, a Stop's flag, a
+#: placement's claim, its spend, the turn's end with the queue's head, the queue's event, and the
+#: running sweep's end of a lost turn; #6449, `api/crud_agent_turns.py`).
 CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "projects": ["flows", "operations", "payload-keys"],
     "render": ["settings", "jobs", "refs", "blob-index", "store-folders", "assets", "libraries"],
@@ -189,6 +194,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "approvals",
         "questions",
         "escalations",
+        "session-turns",
     ],
     "intake": ["sources"],
 }

@@ -46,7 +46,8 @@ type Grants = Readonly<Record<string, readonly string[]>>
  * `api/crud_agent_sessions.py`). And a session's transcript, sealed and opened by the API
  * (#5299 step 9, part b, `api/crud_agent_transcripts.py`), and its event log
  * (`api/crud_agent_events.py`), and the order items it revised and its spend's report
- * (part c, `api/crud_agent_order_costs.py`). */
+ * (part c, `api/crud_agent_order_costs.py`), and a durable turn's writes of its row with their
+ * events (#6449, `api/crud_agent_turns.py`). */
 export const API_AI_GRANTS: Grants = {
   ai_payload_keys: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   ai_forgotten_subjects: ['SELECT', 'INSERT'],
