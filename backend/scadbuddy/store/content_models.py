@@ -16,6 +16,12 @@ BlobData = bytes | BinaryIO
 _CHUNK = 1 << 20
 
 
+def content_key(kind: BlobKind, sha256: str) -> str:
+    """The content-addressed index key of ``kind``'s object of ``sha256``: the key
+    `ContentStore.put` gives a put that names none."""
+    return f"{kind}-{sha256}"
+
+
 def blob_digest(data: BlobData) -> tuple[str, int]:
     """``data``'s sha256 and size, a file read a chunk at a time and left at its start.
     Blocking: call it from a thread."""

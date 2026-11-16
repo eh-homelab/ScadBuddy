@@ -13,7 +13,8 @@ from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 from urllib.parse import urlsplit
 
 import httpx
@@ -21,8 +22,10 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from scadbuddy.api import crud_print
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.bambuddy.preview import MAX_SLICED_BYTES
+from scadbuddy.core.problems import ApiError
 from scadbuddy.core.secrets import load_kek
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import S3Settings
@@ -33,6 +36,7 @@ from scadbuddy.slicing.transfer import (
     PENDING_PREFIX,
     SLICED_OUTPUT_META,
     TRANSFER_HEADER,
+    TRANSFER_REFUSED,
     TRANSFER_TTL,
     PendingPut,
     TransferPuts,
@@ -243,6 +247,38 @@ def test_an_unmarked_put_keeps_the_output_mark(blob_client: TestClient) -> None:
     blob_client.portal.call(partial(content.put, "slice", b"same", name="input.3mf", scope=SCOPE))
     stat = blob_client.portal.call(content.stat, key)
     assert stat is not None and stat.meta == SLICED_OUTPUT_META
+
+
+def test_a_finished_slice_gets_a_read_url_and_a_forged_key_does_not(
+    blob_client: TestClient,
+) -> None:
+    """The real slice path (#6179): the slicer's PUT, then `finish_put`, and the print
+    worker's read URL of the key it answered. The same bytes, kind and mark under any
+    other key get none."""
+    put = _transfers(blob_client).mint_put()
+    assert _upload(blob_client, _path(put.url), put.url.headers, b"real").status_code == 204
+    key = _finish(blob_client, put, b"real")
+    slicing = cast(Any, SimpleNamespace(transfers=lambda: _transfers(blob_client)))
+    assert blob_client.portal is not None
+    ask = partial(crud_print.transfer_url, slicing=slicing)
+    url = blob_client.portal.call(ask, crud_print.TransferUrlAsk(key=key))
+    assert _path(url) == f"{INTERNAL_BLOBS}/{key}"
+    forged = "slice-forged"
+    blob_client.portal.call(
+        partial(
+            _content(blob_client).put,
+            "slice",
+            b"real",
+            name="sliced.3mf",
+            scope=SCOPE,
+            key=forged,
+            meta=dict(SLICED_OUTPUT_META),
+        )
+    )
+    with pytest.raises(ApiError) as refused:
+        blob_client.portal.call(ask, crud_print.TransferUrlAsk(key=forged))
+    assert refused.value.status == 403
+    assert refused.value.extensions["reason"] == TRANSFER_REFUSED
 
 
 def test_a_second_put_to_the_same_pending_key_upserts(blob_client: TestClient) -> None:

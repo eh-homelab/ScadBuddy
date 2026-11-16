@@ -66,6 +66,7 @@ from scadbuddy.library.settings_store import RenderStoreSettings, load_render_st
 from scadbuddy.render.inputs import legacy_inputs
 from scadbuddy.render.job_models import Job, JobNotFoundError, QueueFullError, StepInfo
 from scadbuddy.render.projection import PROJECT_POOL_TIMEOUT
+from scadbuddy.slicing.transfer import SLICED_OUTPUT_META
 from scadbuddy.store.assets import asset_key
 from scadbuddy.store.bambuddy import FolderFinder, FolderRole, Inbox, instance_key, render_target
 from scadbuddy.store.content_models import (
@@ -427,10 +428,12 @@ async def forget_geometry(geometry_key: str, state: StateDep, piece_key: str = Q
 # ledger row in the index write's transaction, inside the deadlock retry, so a victim
 # rolls back whole and is tried again whole. A key or object id may hold slashes. A put,
 # swap, mark, delete or stale delete is a 403 unless every key is a render job's
-# (`RENDER_KEY`), the ref it writes is a ``piece`` and no row it finds is of another kind;
-# a read is a 403 for a key or kind the worker does not read (`HELD_KEY`,
-# `READ_PREFIXES`, `READ_KINDS`, `FOUND_KINDS`). A touch is a 403 for any key but one the
-# worker holds or the snapshot it renders from (`HELD_KEY`, `TOUCHED_PREFIXES`).
+# (`RENDER_KEY`), the ref it writes is a ``piece``, no row it finds is of another kind,
+# and a put, swap or mark writes no meta key of the slicer's output mark
+# (`SLICED_OUTPUT_META`, #6179); a read is a 403 for a key or kind the worker does not
+# read (`HELD_KEY`, `READ_PREFIXES`, `READ_KINDS`, `FOUND_KINDS`). A touch is a 403 for
+# any key but one the worker holds or the snapshot it renders from (`HELD_KEY`,
+# `TOUCHED_PREFIXES`).
 
 
 class IndexPut(BaseModel):
@@ -508,16 +511,23 @@ def _owned(what: str) -> ApiError:
     return ApiError(status.HTTP_403_FORBIDDEN, what, reason=API_OWNED_KEY)
 
 
-def _worker_writable(*keys: str, ref: IndexedRef | None = None) -> None:
-    """Refuse a write of any key that is not a render job's (`RENDER_KEY`), or of a ref
-    that is not a ``piece``: a render credential could otherwise point a print library
-    file's key at its own 3MF, forge an upload's metadata for an adopt, or drop another
-    service's row and leave its object untracked."""
+def _worker_writable(
+    *keys: str, ref: IndexedRef | None = None, meta: dict[str, Any] | None = None
+) -> None:
+    """Refuse a write of any key that is not a render job's (`RENDER_KEY`), of a ref
+    that is not a ``piece``, or of ``meta`` that names a key of the slicer's output mark
+    (`SLICED_OUTPUT_META`, #6179): a render credential could otherwise point a print
+    library file's key at its own 3MF, forge an upload's metadata for an adopt, drop
+    another service's row and leave its object untracked, or forge the mark the print
+    worker's read URL needs."""
     foreign = sorted(key for key in keys if not RENDER_KEY.fullmatch(key))
     if foreign:
         raise _owned(f"The render worker does not store {foreign[0]!r}: the API writes that key.")
     if ref is not None and ref.kind != RENDER_KIND:
         raise _owned(f"The render worker stores pieces only, not a {ref.kind!r}.")
+    marked = sorted(set(meta or {}) & set(SLICED_OUTPUT_META))
+    if marked:
+        raise _owned(f"The render worker does not write {marked[0]!r}: the API marks it.")
 
 
 def _only_pieces(conn: Connection[DictRow], keys: list[str]) -> None:
@@ -624,9 +634,9 @@ async def index_mark(
     body: IndexMark, state: StateDep, idempotency_key: MaybeIdempotencyKey = None
 ) -> None:
     """R15: merge ``meta`` into the rows of ``keys`` on ``backend`` untouched since
-    ``cutoff``. A key that is not a render job's, or a row of another kind than a piece,
-    is a 403 ``api-owned-key``."""
-    _worker_writable(*body.keys)
+    ``cutoff``. A key that is not a render job's, a row of another kind than a piece, or
+    ``meta`` that names a key of `SLICED_OUTPUT_META` is a 403 ``api-owned-key``."""
+    _worker_writable(*body.keys, meta=body.meta)
 
     def mark(index: BlobIndex, conn: Connection[DictRow]) -> None:
         BlobIndex.mark_in(conn, body.keys, backend=body.backend, cutoff=body.cutoff, meta=body.meta)
@@ -658,8 +668,9 @@ async def index_put(
 ) -> Previous:
     """R14: point ``key`` at ``ref``; ``previous``, what it named before. A reuse of an
     object freed first is a 409 ``reuse-lost`` with nothing written; a key that is not a
-    render job's, or a ref or row of another kind than a piece, a 403 ``api-owned-key``."""
-    _worker_writable(key, ref=body.ref)
+    render job's, a ref or row of another kind than a piece, or ``meta`` that names a key
+    of `SLICED_OUTPUT_META`, a 403 ``api-owned-key``."""
+    _worker_writable(key, ref=body.ref, meta=body.meta)
 
     def put(index: BlobIndex, conn: Connection[DictRow]) -> dict[str, Any]:
         _only_pieces(conn, [key])
@@ -687,11 +698,12 @@ async def index_swap(
     key: str, body: IndexSwap, state: StateDep, idempotency_key: MaybeIdempotencyKey = None
 ) -> Swapped:
     """R14: point ``key`` at ``ref`` only if it still names ``expected`` (null: no row).
-    A key that is not a render job's, or a ref or row of another kind than a piece, is a
-    403 ``api-owned-key``. The row's kind is read in the swap's transaction before the
+    A key that is not a render job's, a ref or row of another kind than a piece, or
+    ``meta`` that names a key of `SLICED_OUTPUT_META` is a 403 ``api-owned-key``. The row's
+    kind is read in the swap's transaction before the
     swap, and checked again under the row's lock: a row that became another kind between
     the two is not rewritten (``swapped`` false)."""
-    _worker_writable(key, ref=body.ref)
+    _worker_writable(key, ref=body.ref, meta=body.meta)
 
     def swap(index: BlobIndex, conn: Connection[DictRow]) -> dict[str, Any]:
         _only_pieces(conn, [key])

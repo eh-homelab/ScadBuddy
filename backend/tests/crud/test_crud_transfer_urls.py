@@ -2,7 +2,8 @@
 32): ``POST …/print/transfer-urls`` answers the internal blob route's URL, signed under the
 API's KEK, only for a key the content index holds live as a slicer's output (kind
 ``slice`` with `SLICED_OUTPUT_META`), whether or not its `native_slices` row still stands;
-any other key (a slicer's input among them), and any other caller, is 403. The
+any other key (a slicer's input among them, and a marked slice under any key but the
+content-addressed one of its bytes, #6179), and any other caller, is 403. The
 print worker's `RemoteBlobs` asks the route, signs nothing, and reads a refusal as a file
 no longer stored."""
 
@@ -10,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import inspect
 import time
 from collections.abc import AsyncIterator
@@ -50,15 +52,16 @@ from scadbuddy.slicing.transfer import (
 )
 from scadbuddy.slicing.transfer_token import transfer_key, verify
 from scadbuddy.store.content import ContentStore
-from scadbuddy.store.content_models import BlobKind, BlobRef, BlobStat
+from scadbuddy.store.content_models import BlobKind, BlobRef, BlobStat, content_key
 from scadbuddy.worker import PRINT_CRUD_AREAS
 from scadbuddy.workflows.printing import HEARTBEAT, LAN_UPLOAD_TIMEOUT
 
 KEK_TEXT = base64.b64encode(b"\x32" * 32).decode()
 KEK = kek_from_base64(KEK_TEXT)
 INTERNAL = "http://api"
-KEY = "slice-" + "a" * 64
 SLICED = b"sliced 3mf bytes"
+#: The key the slicer's output is stored under: `ContentStore.put`'s, from its bytes.
+KEY = content_key(SLICE_KIND, hashlib.sha256(SLICED).hexdigest())
 
 
 class _Credentials:
@@ -103,7 +106,8 @@ class _Content:
         if key not in self.blobs:
             return None
         kind, data = self.blobs[key]
-        ref = BlobRef(sha256="0" * 64, kind=kind, backend="s3", backend_id=key, size=len(data))
+        sha256 = hashlib.sha256(data).hexdigest()
+        ref = BlobRef(sha256=sha256, kind=kind, backend="s3", backend_id=key, size=len(data))
         return BlobStat(key=key, ref=ref, slug=None, meta=self.meta, touched_at=datetime.now(UTC))
 
     async def get(self, ref: BlobRef) -> AsyncIterator[bytes]:
@@ -220,14 +224,36 @@ async def test_a_live_blob_of_another_kind_is_refused(tmp_path: Path, kind: Blob
     assert response.json()["reason"] == TRANSFER_REFUSED
 
 
-@pytest.mark.parametrize("name", ["input.3mf", "machine.json", "process.json", "filament_1.json"])
-async def test_a_slicers_input_of_kind_slice_is_refused(tmp_path: Path, name: str) -> None:
-    """The slicer's laid-out copy and preset files are stored as kind ``slice`` with no
-    mark (`workflows/slicing_activities.py`), so none of them gets a read URL."""
-    key = "slice-" + name.encode().hex().ljust(64, "0")[:64]
-    response = await _ask(_app(tmp_path, _live(key, marked=False)), key)
+async def test_a_slicers_input_of_kind_slice_is_refused(tmp_path: Path) -> None:
+    """The slicer's laid-out copy and preset files are stored as kind ``slice`` under
+    their content-addressed key with no mark (`workflows/slicing_activities.py`), so none
+    of them gets a read URL."""
+    response = await _ask(_app(tmp_path, _live(KEY, marked=False)), KEY)
     assert response.status_code == 403
     assert response.json()["reason"] == TRANSFER_REFUSED
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "slice-" + "b" * 64,  # another object's content-addressed key
+        "slice-" + hashlib.sha256(SLICED).hexdigest().upper(),
+        "slice-x",
+        KEY + "-1",
+        "workspace-" + hashlib.sha256(SLICED).hexdigest(),
+        "output-" + "a" * 32 + "-0",
+        "a" * 64,
+    ],
+)
+async def test_a_marked_slice_under_another_key_is_refused(tmp_path: Path, key: str) -> None:
+    """Kind ``slice`` and the mark under any key but ``slice-<its sha256>`` (#6179): a
+    worker that could write the kind or the mark under a key of its choice still mints
+    no URL for the content it chose."""
+    content = _live(key)
+    response = await _ask(_app(tmp_path, content), key)
+    assert response.status_code == 403
+    assert response.json()["reason"] == TRANSFER_REFUSED
+    assert content.asked == [key]
 
 
 def test_the_render_worker_cannot_put_or_mark_a_slice_key() -> None:

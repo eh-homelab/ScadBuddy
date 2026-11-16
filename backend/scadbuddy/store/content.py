@@ -38,6 +38,7 @@ from scadbuddy.store.content_models import (
     StoreFullError,
     StoreUsage,
     blob_digest,
+    content_key,
 )
 from scadbuddy.store.download_cache import DownloadCache, TooLargeError
 from scadbuddy.store.index import IndexesBlobs
@@ -183,7 +184,7 @@ class ContentStore:
         meta: dict[str, Any] | None = None,
     ) -> BlobRef:
         ref, reused = await self._store(kind, data, name=name, scope=scope)
-        key = key or f"{kind}-{ref.sha256}"
+        key = key or content_key(kind, ref.sha256)
         try:
             try:
                 previous = await asyncio.to_thread(

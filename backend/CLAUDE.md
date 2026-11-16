@@ -25,7 +25,8 @@ every start (`auth/revoke.py`, `agent/src/db/grants.ts` `revokeRole`), and the A
 the render worker's old role `scadbuddy_render` held (#5298 Task 22). The render
 worker also holds no KEK and runs only on a remote store (plan D11). Its blob-index
 routes take an allowlist (`api/crud_render.py` `RENDER_KEY`, `HELD_KEY`): it writes only
-a render job's own `piece` keys, and its settings route never releases the full Bambuddy
+a render job's own `piece` keys, never a meta key of the slicer's output mark
+(`SLICED_OUTPUT_META`, #6179), and its settings route never releases the full Bambuddy
 key (`withheld`; with no render key saved the worker gets none). Template `pipeline/`
 Python runs in the render worker's pod, and openscad and `openscad-lsp` run in the API's
 pod.
@@ -527,8 +528,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   the print worker's LAN read URL is minted by the API too, `POST …/print/transfer-urls`,
   always the internal route's, `READ_TTL`, only for a key the content index holds live as
   a slicer's output (`SLICE_KIND` with `SLICED_OUTPUT_META`, which `Transfers.finish_put`
-  merges and `store/index.py` `put_in` keeps; its row swept or not; never the slicer's
-  inputs), else 403 `transfer-refused`; ScadBuddy strips print-host credential keys
+  merges and `store/index.py` `put_in` keeps, under the content-addressed key of its
+  bytes, `store/content_models.py` `content_key`, #6179; its row swept or not; never the
+  slicer's inputs), else 403 `transfer-refused`; ScadBuddy strips print-host credential keys
   whenever it parses a preset, and never stores, forwards or writes them into a slicer
   file (`core/credentials.py` `strip_credentials`, applied at parse in `bambuddy/models.py`
   `LocalPresetDetail`, nested keys too); the API strips the kept presets an older build

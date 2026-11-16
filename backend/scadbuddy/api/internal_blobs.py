@@ -35,7 +35,7 @@ from scadbuddy.slicing.transfer import (
 )
 from scadbuddy.slicing.transfer_token import Method, TokenError, transfer_key, verify
 from scadbuddy.store.content import ContentStore
-from scadbuddy.store.content_models import BlobScope
+from scadbuddy.store.content_models import BlobScope, content_key
 
 router = APIRouter(prefix=INTERNAL_BLOBS.removeprefix("/api/v1"), include_in_schema=False)
 
@@ -109,7 +109,7 @@ async def put_blob(
     await asyncio.to_thread(
         TransferPuts(state.projection.pool).record,
         key,
-        key=f"{ref.kind}-{ref.sha256}",
+        key=content_key(ref.kind, ref.sha256),
         sha256=ref.sha256,
         size=ref.size,
     )

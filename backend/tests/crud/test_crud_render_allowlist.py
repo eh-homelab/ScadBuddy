@@ -16,6 +16,7 @@ from scadbuddy.api import crud_render
 from scadbuddy.api.deps import AppState
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import RenderStoreSettings
+from scadbuddy.slicing.transfer import SLICED_OUTPUT_META
 from scadbuddy.store.bambuddy import render_target
 from scadbuddy.store.content_models import BlobCorruptError, BlobKind, BlobRef, BlobStat
 
@@ -67,6 +68,64 @@ def test_a_ref_of_another_kind_is_refused(kind: BlobKind) -> None:
     with pytest.raises(ApiError) as refused:
         crud_render._worker_writable(RENDER[0], ref=_ref(kind))
     assert refused.value.status == 403
+
+
+@pytest.mark.parametrize("value", ["sliced", "other", None])
+def test_meta_that_names_the_slicers_output_mark_is_refused(value: str | None) -> None:
+    """The print worker's read URL needs `SLICED_OUTPUT_META`, which only the API's
+    `Transfers.finish_put` writes (#6179): a render credential writes no key of it, with
+    any value, beside any other meta."""
+    for key in SLICED_OUTPUT_META:
+        with pytest.raises(ApiError) as refused:
+            crud_render._worker_writable(RENDER[0], ref=_ref("piece"), meta={key: value})
+        assert refused.value.status == 403
+        assert refused.value.extensions["reason"] == crud_render.API_OWNED_KEY
+        with pytest.raises(ApiError):
+            crud_render._worker_writable(RENDER[0], meta={"dir": "x", key: value})
+    crud_render._worker_writable(RENDER[0], ref=_ref("piece"), meta={"dir": "x"})
+    crud_render._worker_writable(RENDER[0], ref=_ref("piece"), meta={})
+
+
+def _no_database(*_: object, **__: object) -> None:
+    raise AssertionError("the write reached the database")
+
+
+def _forged(route: str, kind: BlobKind, meta: dict[str, Any]) -> Awaitable[Any]:
+    """The route's write of ``RENDER[0]`` with ``kind`` and ``meta``, as a render
+    credential sends it."""
+    state = cast(AppState, SimpleNamespace())
+    ref = _ref(kind)
+    if route == "put":
+        body = crud_render.IndexPut(ref=ref, slug=None, meta=meta)
+        return crud_render.index_put(RENDER[0], body, state, "k")
+    if route == "swap":
+        swap = crud_render.IndexSwap(ref=ref, slug=None, meta=meta, expected=None)
+        return crud_render.index_swap(RENDER[0], swap, state, "k")
+    mark = crud_render.IndexMark(keys=[RENDER[0]], backend="s3", cutoff=_NOW, meta=meta)
+    return crud_render.index_mark(mark, state, "k")
+
+
+@pytest.mark.parametrize("route", ["put", "swap", "mark"])
+async def test_no_render_write_forges_the_slicers_output_mark(
+    route: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each index write the render credential reaches refuses the mark before it opens a
+    transaction (#6179)."""
+    monkeypatch.setattr(crud_render, "_indexed", _no_database)
+    with pytest.raises(ApiError) as refused:
+        await _forged(route, "piece", dict(SLICED_OUTPUT_META))
+    assert refused.value.status == 403
+    assert refused.value.extensions["reason"] == crud_render.API_OWNED_KEY
+
+
+@pytest.mark.parametrize("route", ["put", "swap"])
+async def test_no_render_write_stores_a_slice(route: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A put or swap of kind ``slice`` is refused before it opens a transaction, so a
+    render credential cannot write the kind a transfer URL needs."""
+    monkeypatch.setattr(crud_render, "_indexed", _no_database)
+    with pytest.raises(ApiError) as refused:
+        await _forged(route, "slice", {})
+    assert refused.value.extensions["reason"] == crud_render.API_OWNED_KEY
 
 
 def test_a_row_read_under_its_lock_of_another_kind_is_refused() -> None:
