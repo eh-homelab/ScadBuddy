@@ -9,6 +9,7 @@ commits with the index write, inside the API's deadlock retry."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import threading
 import uuid
 from collections.abc import AsyncIterator, Iterator
@@ -768,3 +769,46 @@ async def test_a_render_publishes_its_pieces_and_its_running_jobs_outputs_only(
         assert refused.value.problem["reason"] == "ref-mismatch"
     held = api_content.index.get(K)
     assert held is not None and held.ref == real.ref
+
+
+def _local_object(content: ContentStore, data: bytes) -> BlobRef:
+    """The ref of ``data`` at the object id its bytes give on the local backend."""
+    sha = hashlib.sha256(data).hexdigest()
+    return BlobRef(
+        sha256=sha, kind="piece", backend=content.name, backend_id=f"piece/{sha}", size=len(data)
+    )
+
+
+async def test_only_a_row_the_api_verified_spares_the_read(
+    api_content: ContentStore, pool: Pool
+) -> None:
+    """A row written before #6233, or by a path that did not hash, may name forged bytes:
+    a render write of its ref reads the object again, and refuses it. A ref the route
+    read and marked (`verified_at`) is not read again, even with its object gone. A
+    write that points the row at another object clears the mark."""
+    sql = BlobIndex(pool)
+    forged = _local_object(api_content, b"the real piece")
+    await overwrite_object(api_content, forged.backend_id, b"forged bytes!!")
+    sql.put(K1, forged, slug="demo", meta={})  # no mark: as a row from before #6233
+    true = await api_content.put("piece", b"another piece", name="p", scope=BlobScope(), key=K2)
+    with threaded_render_crud(pool, content=api_content) as client:
+        index = RemoteBlobIndex(client)
+        with pytest.raises(CrudRefusedError) as refused:
+            await asyncio.to_thread(index.put, K, forged, slug="demo", meta={}, reuse=True)
+        assert refused.value.status == 403
+        assert refused.value.problem["reason"] == "ref-mismatch"
+        assert sql.get(K) is None
+        # K2's row has no mark either (the API's own put): read once, then marked.
+        assert sql.vouched(true) == (False, False)
+        await asyncio.to_thread(index.put, K, true, slug="demo", meta={}, reuse=True)
+        assert sql.vouched(true) == (True, False)
+        await api_content.backend.remove(true.backend_id)
+        await asyncio.to_thread(
+            index.put, "act-" + "a" * 40, true, slug="demo", meta={}, reuse=True
+        )
+    sql.put(K, forged, slug="demo", meta={})
+    held = sql.get(K)
+    assert held is not None and held.ref == forged
+    with pool.connection() as conn:
+        row = conn.execute("SELECT verified_at FROM store_blobs WHERE key = %s", (K,)).fetchone()
+    assert row is not None and row["verified_at"] is None

@@ -30,6 +30,7 @@ from scadbuddy.store.content_models import (
     BlobStat,
 )
 from scadbuddy.store.local import LocalContentBackend
+from scadbuddy.store.s3 import S3ContentBackend
 
 _NOW = datetime(2026, 11, 14, tzinfo=UTC)
 
@@ -408,10 +409,12 @@ class _Conn:
     """The write's connection: ``open_jobs`` are the render jobs that run; every other
     query finds no row."""
 
-    def __init__(self, open_jobs: set[str]) -> None:
+    def __init__(self, open_jobs: set[str], queries: list[str]) -> None:
         self.open_jobs = open_jobs
+        self.queries = queries
 
     def execute(self, query: str, params: Any = None) -> _Rows:
+        self.queries.append(query)
         if "FROM render_jobs" in query:
             return _Rows([{"id": job} for job in params[0] if job in self.open_jobs])
         return _Rows([])
@@ -428,13 +431,16 @@ class _WriteIndex:
         return True
 
 
-def _written(monkeypatch: pytest.MonkeyPatch, open_jobs: set[str]) -> list[str]:
-    """Run each index write on a `_Conn` with ``open_jobs``; the routes whose write ran
-    to its end."""
+def _written(
+    monkeypatch: pytest.MonkeyPatch, open_jobs: set[str], queries: list[str] | None = None
+) -> list[str]:
+    """Run each index write on a `_Conn` with ``open_jobs``, its SQL kept in ``queries``;
+    the routes whose write ran to its end."""
     reached: list[str] = []
+    kept = [] if queries is None else queries
 
     def run(state: object, lock: str, key: str | None, route: str, body: object, write: Any) -> Any:
-        answer = write(_WriteIndex(), _Conn(open_jobs))
+        answer = write(_WriteIndex(), _Conn(open_jobs, kept))
         reached.append(route)
         return answer
 
@@ -485,101 +491,198 @@ async def test_a_running_jobs_output_and_any_piece_are_written(
     assert len(reached) == 2
 
 
-class _Named:
-    """The index rows `_verified` asks about: ``named`` is whether one names the ref."""
+class _Vouched:
+    """The rows `_verified` asks about (`BlobIndex.vouched`): whether one the API verified
+    names the ref, and whether one of another kind names its object."""
 
-    def __init__(self, named: bool) -> None:
-        self.named = named
+    def __init__(self, verified: bool = False, foreign: bool = False) -> None:
+        self.answer = (verified, foreign)
         self.asked: list[BlobRef] = []
 
-    def names(self, ref: BlobRef) -> bool:
+    def vouched(self, ref: BlobRef) -> tuple[bool, bool]:
         self.asked.append(ref)
-        return self.named
+        return self.answer
+
+
+class _Unread(LocalContentBackend):
+    """A local backend that must not be read."""
+
+    def __init__(self) -> None:
+        super().__init__(Path("/nonexistent/unread"))
+
+    def download(self, backend_id: str) -> AsyncGenerator[bytes]:
+        raise AssertionError(f"the API read {backend_id}")
+
+
+def _local_ref(data: bytes) -> BlobRef:
+    """The ref of ``data`` as the worker stores it on the local backend: its object id is
+    ``kind/sha256``."""
+    sha = hashlib.sha256(data).hexdigest()
+    return BlobRef(
+        sha256=sha, kind="piece", backend="local", backend_id=f"piece/{sha}", size=len(data)
+    )
 
 
 @pytest.fixture
-async def stored(tmp_path: Path) -> tuple[AppState, BlobRef]:
+async def stored(tmp_path: Path) -> tuple[AppState, BlobRef, LocalContentBackend]:
     """The API's store, holding the object of ``b"real piece"``, and its true ref."""
     backend = LocalContentBackend(tmp_path / "remote")
     data = b"real piece"
-    backend_id = await backend.upload("piece", data, name="p", scope=BlobScope())
-    ref = BlobRef(
-        sha256=hashlib.sha256(data).hexdigest(),
-        kind="piece",
-        backend="local",
-        backend_id=backend_id,
-        size=len(data),
-    )
+    ref = _local_ref(data)
+    assert await backend.upload("piece", data, name="p", scope=BlobScope()) == ref.backend_id
     content = ContentStore(backend, cast(Any, None))
-    return cast(AppState, SimpleNamespace(store=SimpleNamespace(content=content))), ref
+    return cast(AppState, SimpleNamespace(store=SimpleNamespace(content=content))), ref, backend
 
 
-def _forged_ref(ref: BlobRef, how: str) -> BlobRef:
-    if how == "sha256":
-        return ref.model_copy(update={"sha256": hashlib.sha256(b"forged").hexdigest()})
-    if how == "size":
-        return ref.model_copy(update={"size": ref.size - 1})
-    # An object the store does not hold.
-    return ref.model_copy(update={"backend_id": "piece/" + "f" * 64})
-
-
-@pytest.mark.parametrize("how", ["sha256", "size"])
+@pytest.mark.parametrize("how", ["bytes", "size"])
+@pytest.mark.parametrize("verified", [False, True])
 @pytest.mark.parametrize("route", ["put", "swap"])
 async def test_a_piece_whose_bytes_are_not_its_sha256_is_not_indexed(
     route: str,
     how: str,
-    stored: tuple[AppState, BlobRef],
+    verified: bool,
+    stored: tuple[AppState, BlobRef, LocalContentBackend],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The API reads the object and hashes it. It never trusts the worker's SHA-256, so a
+    """The API reads the object and hashes it: it never trusts the worker's SHA-256, so a
     render credential cannot index bytes of its own under another piece's SHA-256, which
-    a later put of that piece would reuse (#6233)."""
-    state, ref = stored
-    named = _Named(False)
-    monkeypatch.setattr(crud_render, "_index", lambda _: named)
+    a later put of that piece would reuse (#6233). ``bytes``: the object at the ref's id
+    holds other bytes (the S3 keys can write them there). A row that names the ref
+    without the API's mark (written before #6233) does not spare the read; only a
+    verified one does (``verified``, `test_a_verified_row_spares_the_read`)."""
+    state, ref, backend = stored
+    if how == "bytes":
+        (backend.root / ref.backend_id).write_bytes(b"forged piece")
+    else:
+        ref = ref.model_copy(update={"size": ref.size - 1})
+    rows = _Vouched(verified=False)
+    monkeypatch.setattr(crud_render, "_index", lambda _: rows)
     monkeypatch.setattr(crud_render, "_indexed", _no_database)
     with pytest.raises(ApiError) as refused:
-        await _write(route, RENDER[0], _forged_ref(ref, how), state)
+        await _write(route, RENDER[0], ref, state)
     assert refused.value.status == 403
     assert refused.value.extensions["reason"] == crud_render.REF_MISMATCH
-    assert len(named.asked) == 1
+    assert rows.asked == [ref]
+
+
+@pytest.mark.parametrize(
+    "backend_id",
+    [
+        "asset/" + hashlib.sha256(b"real piece").hexdigest(),
+        "piece/" + "f" * 64,
+        "workspace/" + hashlib.sha256(b"real piece").hexdigest(),
+    ],
+)
+@pytest.mark.parametrize("route", ["put", "swap"])
+async def test_a_ref_to_another_object_than_its_bytes_name_is_refused_unread(
+    route: str, backend_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A render credential cannot index a render key at another service's object whose
+    SHA-256 it knows (an upload's copy, a workspace file) and then read it as a piece: the
+    ref's object id must be the one its kind and SHA-256 give, checked before any read
+    or query (#6233)."""
+    ref = _local_ref(b"real piece").model_copy(update={"backend_id": backend_id})
+    content = ContentStore(cast(Any, _Unread()), cast(Any, None))
+    state = cast(AppState, SimpleNamespace(store=SimpleNamespace(content=content)))
+    monkeypatch.setattr(crud_render, "_index", _no_database)
+    monkeypatch.setattr(crud_render, "_indexed", _no_database)
+    with pytest.raises(ApiError) as refused:
+        await _write(route, RENDER[0], ref, state)
+    assert refused.value.status == 403
+    assert refused.value.extensions["reason"] == crud_render.REF_MISMATCH
+
+
+def test_an_s3_refs_object_is_the_one_its_bytes_name() -> None:
+    """On S3 every upload goes to `object_key` (`S3ContentBackend.upload`)."""
+    settings = SimpleNamespace(prefix="scadbuddy")
+    backend = S3ContentBackend.__new__(S3ContentBackend)
+    backend.settings = cast(Any, settings)
+    content = ContentStore(backend, cast(Any, None))
+    ref = _ref("piece").model_copy(update={"backend": "s3"})
+    assert crud_render._bound_object(content, ref) == f"scadbuddy/piece/{ref.sha256}"
+
+
+async def test_a_bambuddy_file_another_kinds_row_names_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bambuddy's ids are not named by the bytes, so a file a row of another kind names
+    (a print library file, a customer's file) is refused before it is read."""
+
+    class _Bambuddy:
+        backend = "bambuddy"
+
+        def download(self, backend_id: str) -> AsyncGenerator[bytes]:
+            raise AssertionError(f"the API read {backend_id}")
+
+    content = ContentStore(cast(Any, _Bambuddy()), cast(Any, None))
+    state = cast(AppState, SimpleNamespace(store=SimpleNamespace(content=content)))
+    ref = BlobRef(sha256="a" * 64, kind="piece", backend="bambuddy", backend_id="17", size=1)
+    monkeypatch.setattr(crud_render, "_index", lambda _: _Vouched(foreign=True))
+    monkeypatch.setattr(crud_render, "_indexed", _no_database)
+    with pytest.raises(ApiError) as refused:
+        await _write("put", RENDER[0], ref, state)
+    assert refused.value.extensions["reason"] == crud_render.REF_MISMATCH
 
 
 @pytest.mark.parametrize("route", ["put", "swap"])
 async def test_a_ref_to_an_object_that_is_gone_is_a_lost_reuse(
-    route: str, stored: tuple[AppState, BlobRef], monkeypatch: pytest.MonkeyPatch
+    route: str,
+    stored: tuple[AppState, BlobRef, LocalContentBackend],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The worker then stores its own copy again, as after any reuse of a freed object."""
-    state, ref = stored
-    monkeypatch.setattr(crud_render, "_index", lambda _: _Named(False))
+    state, _, _ = stored
+    monkeypatch.setattr(crud_render, "_index", lambda _: _Vouched())
     monkeypatch.setattr(crud_render, "_indexed", _no_database)
     with pytest.raises(ApiError) as refused:
-        await _write(route, RENDER[0], _forged_ref(ref, "object"), state)
+        await _write(route, RENDER[0], _local_ref(b"never stored"), state)
     assert refused.value.status == 409
     assert refused.value.extensions["reason"] == crud_render.REUSE_LOST
 
 
 @pytest.mark.parametrize("route", ["put", "swap"])
-async def test_a_true_ref_or_one_a_row_names_is_indexed(
-    route: str, stored: tuple[AppState, BlobRef], monkeypatch: pytest.MonkeyPatch
+async def test_a_true_ref_is_indexed_and_marked_verified(
+    route: str,
+    stored: tuple[AppState, BlobRef, LocalContentBackend],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A true ref is read and indexed. A ref a row already names (a reuse) is not read
-    again: its object can be gone, and the index's own reuse check answers that."""
-    state, ref = stored
-    reached = _written(monkeypatch, open_jobs=set())
-    monkeypatch.setattr(crud_render, "_index", lambda _: _Named(False))
+    """A true ref is read, indexed, and its row marked (`verified_at`), so the next write
+    that names it is not read again. Without a blob store nothing is read or marked."""
+    state, ref, _ = stored
+    queries: list[str] = []
+    reached = _written(monkeypatch, open_jobs=set(), queries=queries)
+    monkeypatch.setattr(crud_render, "_index", lambda _: _Vouched())
     await _write(route, RENDER[0], ref, state)
-    monkeypatch.setattr(crud_render, "_index", lambda _: _Named(True))
-    await _write(route, RENDER[0], _forged_ref(ref, "object"), state)
+    assert len(reached) == 1
+    assert any("SET verified_at" in query for query in queries)
+    queries.clear()
+    await _write(route, RENDER[0], ref, _NO_STORE)
     assert len(reached) == 2
+    assert not any("verified_at" in query for query in queries)
+
+
+@pytest.mark.parametrize("route", ["put", "swap"])
+async def test_a_verified_row_spares_the_read(
+    route: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A ref a verified row names (a reuse, a resend) costs one indexed query: its object
+    is not read, and can be gone (the index's own reuse check answers that)."""
+    content = ContentStore(cast(Any, _Unread()), cast(Any, None))
+    state = cast(AppState, SimpleNamespace(store=SimpleNamespace(content=content)))
+    queries: list[str] = []
+    reached = _written(monkeypatch, open_jobs=set(), queries=queries)
+    monkeypatch.setattr(crud_render, "_index", lambda _: _Vouched(verified=True))
+    await _write(route, RENDER[0], _local_ref(b"never stored"), state)
+    assert len(reached) == 1
+    assert any("SET verified_at" in query for query in queries)
 
 
 async def test_a_ref_on_another_backend_is_not_indexed(
-    stored: tuple[AppState, BlobRef], monkeypatch: pytest.MonkeyPatch
+    stored: tuple[AppState, BlobRef, LocalContentBackend], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Mid `/store/migrate` the API cannot read another backend's object to check it."""
-    state, ref = stored
-    monkeypatch.setattr(crud_render, "_index", lambda _: _Named(False))
+    state, ref, _ = stored
+    monkeypatch.setattr(crud_render, "_index", lambda _: _Vouched())
     monkeypatch.setattr(crud_render, "_indexed", _no_database)
     with pytest.raises(ApiError) as refused:
         await _write("put", RENDER[0], ref.model_copy(update={"backend": "s3"}), state)

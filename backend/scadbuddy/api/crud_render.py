@@ -70,6 +70,7 @@ from scadbuddy.render.projection import PROJECT_POOL_TIMEOUT
 from scadbuddy.slicing.transfer import SLICED_OUTPUT_META
 from scadbuddy.store.assets import asset_key
 from scadbuddy.store.bambuddy import FolderFinder, FolderRole, Inbox, instance_key, render_target
+from scadbuddy.store.content import ContentStore
 from scadbuddy.store.content_models import (
     BlobCorruptError,
     BlobMissingError,
@@ -79,6 +80,8 @@ from scadbuddy.store.content_models import (
 from scadbuddy.store.content_models import BlobRef as IndexedRef
 from scadbuddy.store.geometry import GeometryIndex
 from scadbuddy.store.index import BlobIndex
+from scadbuddy.store.local import LocalContentBackend
+from scadbuddy.store.s3 import S3ContentBackend, object_key
 
 logger = logging.getLogger(__name__)
 
@@ -446,8 +449,9 @@ async def forget_geometry(geometry_key: str, state: StateDep, piece_key: str = Q
 # and a put, swap or mark writes no meta key of the slicer's output mark
 # (`SLICED_OUTPUT_META`, #6179). A put, swap or mark of an output is a 403 ``job-closed``
 # unless its render job is open (`OUTPUT_KEY`, `OPEN_JOB_STATES`, #6233), and a put or
-# swap is a 403 ``ref-mismatch`` unless the API reads the ref's object as its SHA-256 and
-# size (`_verified`, #6233). A read is a 403 for a key or kind the worker does not read
+# swap is a 403 ``ref-mismatch`` unless the ref names the object its bytes are stored as
+# and the API reads that object as its SHA-256 and size, or a row it verified names it
+# (`_verified`, #6233). A read is a 403 for a key or kind the worker does not read
 # (`HELD_KEY`, `READ_PREFIXES`, `READ_KINDS`, `FOUND_KINDS`). A touch is a 403 for any
 # key but one the worker holds or the snapshot it renders from (`HELD_KEY`,
 # `TOUCHED_PREFIXES`).
@@ -588,24 +592,57 @@ def _open_jobs_only(conn: Connection[DictRow], keys: list[str]) -> None:
         )
 
 
-async def _verified(state: AppState, ref: IndexedRef) -> None:
-    """Refuse a ref whose object is not its SHA-256 and size (#6233). The API never
-    trusts the worker's SHA-256: a ref that no row names yet is read whole from the
-    API's store and hashed here. A ref a row already names (a reuse, or a resend) was
-    checked when that row was written, so it costs one indexed query and no read. With
-    no blob store (the local store), the API keeps no objects to read, and no render
+def _bound_object(content: ContentStore, ref: IndexedRef) -> str | None:
+    """The object key ``ref``'s SHA-256 and kind give on ``content``'s backend, which is
+    where every upload of those bytes goes (`store/s3.py` `object_key`, `store/local.py`
+    ``kind/sha256``); None on a backend whose ids are not named by the bytes (Bambuddy,
+    where every upload is a new library file)."""
+    backend = content.backend
+    if isinstance(backend, S3ContentBackend):
+        return object_key(backend.settings.prefix, ref.kind, ref.sha256)
+    if isinstance(backend, LocalContentBackend):
+        return f"{ref.kind}/{ref.sha256}"
+    return None
+
+
+async def _verified(state: AppState, ref: IndexedRef) -> bool:
+    """Refuse a ref whose object is not its SHA-256 and size (#6233); whether the API
+    vouches for it, so the write marks its row (`BlobIndex.mark_verified_in`).
+
+    The ref's object id must be the one its bytes name (`_bound_object`), checked before
+    any read: a render credential cannot index a render key at another service's object
+    whose SHA-256 it knows, and then read it as a piece. On Bambuddy, whose ids the bytes
+    do not name, a file that a row of another kind names is refused. The API never trusts
+    the worker's SHA-256: unless a row the API verified (`verified_at`) names the object
+    as the ref does, it reads the object whole from its own store and hashes it. A row
+    written before #6233, or by a path that did not hash, is read once, then marked.
+    With no blob store (the local store), the API keeps no objects to read, and no render
     worker runs (plan D11)."""
     content = state.store.content
     if content is None:
-        return
-    if await asyncio.to_thread(_index(state).names, ref):
-        return
+        return False
     if ref.backend != content.name:
         raise ApiError(
             status.HTTP_409_CONFLICT,
             f"The API's store is {content.name}, not {ref.backend}: it cannot check the object.",
             reason=OTHER_BACKEND,
         )
+    bound = _bound_object(content, ref)
+    if bound is not None and ref.backend_id != bound:
+        raise ApiError(
+            status.HTTP_403_FORBIDDEN,
+            "The ref names another object than its bytes are stored as.",
+            reason=REF_MISMATCH,
+        )
+    verified, foreign = await asyncio.to_thread(_index(state).vouched, ref)
+    if foreign:
+        raise ApiError(
+            status.HTTP_403_FORBIDDEN,
+            "Another kind's row names the ref's object.",
+            reason=REF_MISMATCH,
+        )
+    if verified:
+        return True
     digest, size = hashlib.sha256(), 0
     try:
         async with aclosing(content.backend.download(ref.backend_id)) as chunks:
@@ -630,6 +667,7 @@ async def _verified(state: AppState, ref: IndexedRef) -> None:
             "The ref's object is not its SHA-256 and size.",
             reason=REF_MISMATCH,
         )
+    return True
 
 
 def _worker_readable(key: str) -> None:
@@ -756,7 +794,7 @@ async def index_put(
     not run, a 403 ``job-closed``; a ref whose object is not its SHA-256 and size, a 403
     ``ref-mismatch`` (`_verified`)."""
     _worker_writable(key, ref=body.ref, meta=body.meta)
-    await _verified(state, body.ref)
+    verified = await _verified(state, body.ref)
 
     def put(index: BlobIndex, conn: Connection[DictRow]) -> dict[str, Any]:
         _only_pieces(conn, [key])
@@ -766,6 +804,8 @@ async def index_put(
         )
         # Read under the row's lock: a refusal rolls the put back.
         _kept_piece(previous)
+        if verified:
+            BlobIndex.mark_verified_in(conn, key, body.ref)
         return {"previous": _json(previous)}
 
     answer = await asyncio.to_thread(
@@ -793,7 +833,7 @@ async def index_swap(
     swap, and checked again under the row's lock: a row that became another kind between
     the two is not rewritten (``swapped`` false)."""
     _worker_writable(key, ref=body.ref, meta=body.meta)
-    await _verified(state, body.ref)
+    verified = await _verified(state, body.ref)
 
     def swap(index: BlobIndex, conn: Connection[DictRow]) -> dict[str, Any]:
         _only_pieces(conn, [key])
@@ -808,6 +848,8 @@ async def index_swap(
             reuse=body.reuse,
             only_kind=RENDER_KIND,
         )
+        if swapped and verified:
+            BlobIndex.mark_verified_in(conn, key, body.ref)
         return {"swapped": swapped}
 
     answer = await asyncio.to_thread(
