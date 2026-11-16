@@ -24,7 +24,7 @@ import {
 import { copyText } from '../lib/clipboard'
 import { appUrl } from '../lib/appLinks'
 import { presetPath } from '../lib/deeplink'
-import { normalisePresetName } from '../lib/presetName'
+import { normalisePresetText } from '../lib/presetName'
 import { useSubscription } from '../lib/realtime'
 import { useAsync } from '../lib/useAsync'
 import { useLatest } from '../lib/useLatest'
@@ -695,7 +695,7 @@ export function PresetPicker({
    * #360 — the name as it will be stored, said when that is not what was typed. A save
    * sends `name.trim()` (JS's trim), which the server then cleans.
    */
-  const normalisedName = normalisePresetName(name.trim())
+  const normalisedName = normalisePresetText(name.trim())
   const statusText = modified ? `Changed from ${selected?.name ?? ''}` : (notice?.text ?? '')
 
   return (

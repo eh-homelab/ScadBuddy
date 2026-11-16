@@ -80,7 +80,7 @@ import { resolveOptions } from '../lib/printOptions'
 import { keychainGlb } from './glb'
 import { aiPluginHandlers, resetAiPluginMocks } from './aiPlugins'
 import { choicesView } from './choices'
-import { normalisePresetName } from '../lib/presetName'
+import { normalisePresetText } from '../lib/presetName'
 import * as fixtures from './fixtures'
 import { UI_MODULES } from './templateUi'
 import { SLICED_REASON, mockLibraryObjects } from './libraryObjects'
@@ -1318,7 +1318,7 @@ export function cleanTags(tags: readonly string[]): string[] {
   const seen = new Set<string>()
   const cleaned: string[] = []
   for (const raw of tags) {
-    const tag = normalisePresetName(raw)
+    const tag = normalisePresetText(raw)
     // Upper then lower is the nearest JS gets to `str.casefold()` (ß with SS).
     const key = tag.toUpperCase().toLowerCase()
     if (tag && !seen.has(key)) {
@@ -1990,7 +1990,7 @@ export const handlers = [
         if (preset.name.length > MAX_PRESET_NAME) {
           return shapeRefusal(`a preset name is at most ${MAX_PRESET_NAME} characters`)
         }
-        const name = normalisePresetName(preset.name)
+        const name = normalisePresetText(preset.name)
         if (!name) return shapeRefusal('a preset needs a name')
         if (
           preset.id !== undefined &&
@@ -2567,7 +2567,7 @@ export const handlers = [
     const details = detailsRefusal(body.description, body.tags)
     if (details) return details
     if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
-    const name = normalisePresetName(body.name)
+    const name = normalisePresetText(body.name)
     if (paramsClash(body.params, body.inputs)) {
       return problem(422, 'Unprocessable Content', 'params and inputs.params disagree; send inputs only')
     }
@@ -2597,7 +2597,7 @@ export const handlers = [
     const source = (state.presets[slug] ?? []).find((p) => p.id === id)
     if (!source) return problem(404, 'Not Found', PRESET_GONE, { preset_id: id })
     const body = (await request.json()) as ParamPresetDuplicate
-    const name = normalisePresetName(body.name)
+    const name = normalisePresetText(body.name)
     const refused = presetRefusal(slug, name, source.params, null)
     if (refused) return refused
     // Everything but the name is the original's, its description and tags too.
@@ -2625,7 +2625,7 @@ export const handlers = [
     if (id.startsWith('template-')) return templatePresetRefusal(slug, id)
     const existing = (state.presets[slug] ?? []).find((p) => p.id === id)
     if (!existing) return problem(404, 'Not Found', PRESET_GONE, { preset_id: id })
-    const name = body.name != null ? normalisePresetName(body.name) : undefined
+    const name = body.name != null ? normalisePresetText(body.name) : undefined
     if (paramsClash(body.params, body.inputs)) {
       return problem(422, 'Unprocessable Content', 'params and inputs.params disagree; send inputs only')
     }

@@ -11,6 +11,6 @@ const PY_WHITESPACE =
  * A preset name or tag as the server stores it, `" ".join(text.split())`: inner runs of
  * whitespace collapsed, ends trimmed (#360; tags, `_clean_tags`, #6462).
  */
-export function normalisePresetName(name: string): string {
-  return name.split(PY_WHITESPACE).filter(Boolean).join(' ')
+export function normalisePresetText(text: string): string {
+  return text.split(PY_WHITESPACE).filter(Boolean).join(' ')
 }
