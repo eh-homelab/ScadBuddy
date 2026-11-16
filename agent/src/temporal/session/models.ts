@@ -47,8 +47,8 @@ export type QueuedMessage = Message & {
   tiers?: string[] | null
   bare?: boolean
   queued_at: string
-  /** The images its send made (#6413); none when they were all there before. */
-  made?: MadeBlobs
+  /** The images its send made, one entry per write (#6413); none when they were all there before. */
+  made?: MadeBlobs[]
 }
 
 /** A queued message as the session's readers see it (the `queue` Query, the `session.queue` event): no page context, no claim columns. */

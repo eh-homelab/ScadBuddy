@@ -112,22 +112,24 @@ export type StoredBlob = { mediaType: ImageMediaType; bytes: Buffer }
 export type TurnFence = { attempt: string; turnId: string }
 
 /**
- * What a write of images made (#6413): the names not there before, and a time no later write
+ * What one write of images made (#6413): the names not there before, and a time no later write
  * of one of them comes before (each write sets `created_at`), which `delete` takes as `before`.
- * No `at` when it made nothing.
  */
-export type MadeImages = { names: string[]; at?: string }
+export type MadeImages = { names: string[]; at: string }
 
 /** A session's images: `SessionBlobs` over SQL, `CrudSessionBlobs` over the API's routes. */
 export interface SessionImages {
   put(sessionId: string, images: readonly SessionImage[], toolUseId?: string): Promise<void>
-  /** `put`, answering what it made: a queued message's images, which `delete` takes back once it leaves the queue unrun. */
-  putMade(sessionId: string, images: readonly SessionImage[]): Promise<MadeImages>
   /**
-   * Deletes the images `made` names, unless a write stored one again since or a tool call names
+   * `put`, answering what it made, one entry per write (transaction) that made a name: a queued
+   * message's images, which `delete` takes back once it leaves the queue unrun.
+   */
+  putMade(sessionId: string, images: readonly SessionImage[]): Promise<MadeImages[]>
+  /**
+   * Deletes the images one write made, unless a write stored one again since or a tool call names
    * it; the names deleted. With `fence`, nothing unless the fence holds.
    */
-  delete(sessionId: string, made: Required<MadeImages>, fence?: TurnFence): Promise<string[]>
+  delete(sessionId: string, made: MadeImages, fence?: TurnFence): Promise<string[]>
   /** False when the fence refuses; over the API's routes a batch stored before the refusal stays (crudBlobs.ts). */
   putIf(sessionId: string, images: readonly SessionImage[], fence: TurnFence): Promise<boolean>
   get(sessionId: string, name: string): Promise<StoredBlob | undefined>
@@ -141,7 +143,8 @@ export class SessionBlobs implements SessionImages {
   }
 
   /**
-   * Stores a session's images; one already there (the same bytes) is left as it is.
+   * Stores a session's images; one already there (the same bytes) keeps its bytes, and its
+   * `created_at` is set to this write's time (#6413).
    * With `toolUseId`, a durable tool call's images (#2478): they are recorded as what
    * that call produced, in order, replacing what an earlier attempt of it recorded, so
    * follow_session can name them on its `tool.result`.
@@ -175,11 +178,12 @@ export class SessionBlobs implements SessionImages {
   }
 
   /** One transaction, so a later write of a name waits for it and sets a time past `at`. */
-  async putMade(sessionId: string, images: readonly SessionImage[]): Promise<MadeImages> {
-    return this.sql.begin((tx) => this.insert(tx, sessionId, images))
+  async putMade(sessionId: string, images: readonly SessionImage[]): Promise<MadeImages[]> {
+    const made = await this.sql.begin((tx) => this.insert(tx, sessionId, images))
+    return made.names.length && made.at !== undefined ? [{ names: made.names, at: made.at }] : []
   }
 
-  async delete(sessionId: string, made: Required<MadeImages>, fence?: TurnFence): Promise<string[]> {
+  async delete(sessionId: string, made: MadeImages, fence?: TurnFence): Promise<string[]> {
     const names = made.names.filter((name) => BLOB_NAME.test(name))
     if (names.length === 0) return []
     return this.sql.begin(async (tx) => {
@@ -198,7 +202,7 @@ export class SessionBlobs implements SessionImages {
    * Stores each image, or sets the time of one already there (its bytes stay): the names made,
    * and the latest time set (backend api/crud_agent_blobs.py `_insert_blobs`).
    */
-  private async insert(tx: TransactionSql, sessionId: string, images: readonly SessionImage[]): Promise<MadeImages> {
+  private async insert(tx: TransactionSql, sessionId: string, images: readonly SessionImage[]): Promise<{ names: string[]; at?: string }> {
     const names: string[] = []
     let at: string | undefined
     for (const image of images) {

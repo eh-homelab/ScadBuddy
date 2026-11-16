@@ -355,23 +355,24 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session ima
     const gif = (t: string) => sessionImage('image/gif', Buffer.from(`GIF89a-${t}`))
     const [mine, shared, tool, before] = [gif('mine'), gif('shared'), gif('tool'), gif('before')]
     await blobs.put(session.id, [before])
-    const made = await blobs.putMade(session.id, [mine, shared, tool, before])
-    expect(made.names).toEqual([mine.name, shared.name, tool.name])
+    const [made] = await blobs.putMade(session.id, [mine, shared, tool, before])
+    expect(made!.names).toEqual([mine.name, shared.name, tool.name])
     // Another message stores the same bytes after the write: they stay.
-    const again = await blobs.putMade(session.id, [shared])
-    expect(again.names).toEqual([])
-    expect(again.at! > made.at!).toBe(true)
+    expect(await blobs.putMade(session.id, [shared])).toEqual([])
+    const [row] = await db.sql<{ later: boolean }[]>`
+      SELECT created_at > ${made!.at}::text::timestamptz AS later FROM ai_session_blobs WHERE session_id = ${session.id} AND name = ${shared.name}`
+    expect(row?.later).toBe(true)
     // A tool call's record names one: it stays.
     await db.sql`INSERT INTO ai_session_tool_images (session_id, tool_use_id, ord, name) VALUES (${session.id}, 'toolu_a', 0, ${tool.name})`
-    expect(await blobs.delete(session.id, { names: made.names, at: made.at! })).toEqual([mine.name])
+    expect(await blobs.delete(session.id, made!)).toEqual([mine.name])
     expect(await blobs.get(session.id, mine.name)).toBeUndefined()
     for (const kept of [shared, tool, before]) expect(await blobs.get(session.id, kept.name)).toBeDefined()
     // Under a fence that no longer holds, nothing goes.
     const turnId = randomUUID()
     await db.sql`UPDATE ai_sessions SET turn_attempt = 'run:1', durable_turn_id = ${turnId} WHERE id = ${session.id}`
-    const late = await blobs.putMade(session.id, [mine])
-    expect(await blobs.delete(session.id, { names: late.names, at: late.at! }, { attempt: 'run:2', turnId })).toEqual([])
-    expect(await blobs.delete(session.id, { names: late.names, at: late.at! }, { attempt: 'run:1', turnId })).toEqual([mine.name])
+    const [late] = await blobs.putMade(session.id, [mine])
+    expect(await blobs.delete(session.id, late!, { attempt: 'run:2', turnId })).toEqual([])
+    expect(await blobs.delete(session.id, late!, { attempt: 'run:1', turnId })).toEqual([mine.name])
   })
 
   it('shows the call without its images when they cannot be stored', async () => {

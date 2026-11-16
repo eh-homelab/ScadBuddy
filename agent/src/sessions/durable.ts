@@ -413,7 +413,7 @@ export class DurableTurns {
       tiers: turn.tiers ? [...turn.tiers] : null,
       bare: turn.flow !== undefined || turn.withoutBackground === true,
       queued_at: new Date().toISOString(),
-      ...(made.at !== undefined && made.names.length ? { made: { names: made.names, at: made.at } } : {}),
+      ...(made.length ? { made } : {}),
     }
     let answer: QueueAnswer
     try {
@@ -425,10 +425,12 @@ export class DurableTurns {
     } catch (err) {
       const refusal = queueRefusal(err, id, 'queue the message')
       // Refused, it was never queued: what its write made goes. Any other failure may have queued it.
-      if (queued.made && (refusal.code === 'queue_full' || refusal.code === 'closed')) {
-        await this.#blobs.delete(id, queued.made).catch(() => {
-          console.warn(`durable send: session ${id}: a refused message's images were not deleted`)
-        })
+      if (refusal.code === 'queue_full' || refusal.code === 'closed') {
+        for (const write of made) {
+          await this.#blobs.delete(id, write).catch(() => {
+            console.warn(`durable send: session ${id}: a refused message's images were not deleted`)
+          })
+        }
       }
       throw refusal
     }

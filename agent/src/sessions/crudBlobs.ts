@@ -65,22 +65,19 @@ export class CrudSessionBlobs implements SessionImages {
   }
 
   /**
-   * Each batch is its own transaction: `at` is the earliest batch's, so no later write of a name
-   * comes before it (a name a later batch made may then be kept: a turn's images and previews are
-   * one batch).
+   * Each batch is its own transaction, so each answers what it made with its own `at`: a name a
+   * later batch made is deleted against that batch's time, never an earlier one's.
    */
-  async putMade(sessionId: string, images: readonly SessionImage[]): Promise<MadeImages> {
-    const names: string[] = []
-    let at: string | undefined
+  async putMade(sessionId: string, images: readonly SessionImage[]): Promise<MadeImages[]> {
+    const made: MadeImages[] = []
     for (let i = 0; i < images.length; i += IMAGES_PER_WRITE) {
       const written = await this.#write(sessionId, images.slice(i, i + IMAGES_PER_WRITE), {})
-      names.push(...(written.created ?? []).filter((name) => !names.includes(name)))
-      if (written.at && (at === undefined || written.at < at)) at = written.at
+      if (written.created?.length && written.at) made.push({ names: written.created, at: written.at })
     }
-    return at === undefined ? { names } : { names, at }
+    return made
   }
 
-  async delete(sessionId: string, made: Required<MadeImages>, fence?: TurnFence): Promise<string[]> {
+  async delete(sessionId: string, made: MadeImages, fence?: TurnFence): Promise<string[]> {
     const names = made.names.filter((name) => BLOB_NAME.test(name))
     const deleted: string[] = []
     for (let i = 0; i < names.length; i += IMAGES_PER_WRITE) {

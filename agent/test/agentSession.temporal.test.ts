@@ -86,6 +86,9 @@ const queued = (turnId: string, words = turnId, extra: Partial<QueuedMessage> = 
   ...extra,
 })
 
+/** What a queued message's images' write made (#6413), named after it. */
+const madeBy = (tag: string) => ({ names: [`${tag}.png`], at: '2026-11-15T00:00:00.000001Z' })
+
 function held(): { promise: Promise<void>; release: () => void } {
   let release!: () => void
   const promise = new Promise<void>((resolve) => {
@@ -1021,13 +1024,15 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       }
       await send(env.client, id, message('t1'))
       await poll(() => turns.length, 1)
-      await enqueue(id, queued('q1'))
-      await enqueue(id, queued('q2'))
+      await enqueue(id, queued('q1', 'q1', { made: [madeBy('q1')] }))
+      await enqueue(id, queued('q2', 'q2', { made: [madeBy('q2')] }))
       hold.release()
       await poll(() => finished.map((f) => f.turnId), ['t1', 'q1'])
       expect(begun).toEqual(['q1'])
       expect(finished.map((f) => f.next?.turn_id)).toEqual(['q1', 'q2'])
       await poll(() => queueWrites.at(-1)?.queue, [])
+      // Only the dropped head's images go: q1 ran (#6413).
+      await poll(() => queueWrites.flatMap((w) => w.drop ?? []), [madeBy('q2')])
       expect(turns.map((t) => t.turnId)).toEqual(['t1', 'q1'])
       await handleOf(id).signal('end')
       await handleOf(id).result()
@@ -1039,14 +1044,34 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       const hold = holdTurns()
       await send(env.client, id, message('t1'))
       await poll(() => turns.length, 1)
-      await enqueue(id, queued('q1'))
-      await enqueue(id, { ...queued('q2'), author: NEXT })
+      await enqueue(id, queued('q1', 'q1', { made: [madeBy('q1')] }))
+      await enqueue(id, { ...queued('q2', 'q2', { made: [madeBy('q2')] }), author: NEXT })
       await handleOf(id).signal(OWNER_CHANGED_SIGNAL, { owner: NEXT })
       await poll(() => queueOf(id), ['q2'])
+      // The dropped message's images go with the queue's next write (#6413); q2's stay.
+      await poll(() => queueWrites.flatMap((w) => w.drop ?? []), [madeBy('q1')])
       hold.release()
       await poll(() => finished.map((f) => f.turnId), ['t1', 'q2'])
       await handleOf(id).signal('end')
       await handleOf(id).result()
+      expect(queueWrites.flatMap((w) => w.drop ?? [])).toEqual([madeBy('q1')])
+    })
+
+    it('`end` drops the queue, and the images each waiting message made, in its one write (#6413)', async () => {
+      const id = randomUUID()
+      const hold = holdTurns()
+      await send(env.client, id, message('t1'))
+      await poll(() => turns.length, 1)
+      await enqueue(id, queued('q1', 'q1', { made: [madeBy('q1'), madeBy('q1-batch-2')] }))
+      await enqueue(id, queued('q2'))
+      await enqueue(id, queued('q3', 'q3', { made: [madeBy('q3')] }))
+      await poll(() => queueWrites.at(-1)?.version, 3)
+      expect(queueWrites.flatMap((w) => w.drop ?? [])).toEqual([])
+      await handleOf(id).signal('end')
+      hold.release()
+      await handleOf(id).result()
+      expect(turns.map((t) => t.turnId)).toEqual(['t1'])
+      expect(queueWrites.at(-1)).toMatchObject({ queue: [], drop: [madeBy('q1'), madeBy('q1-batch-2'), madeBy('q3')] })
     })
   })
 

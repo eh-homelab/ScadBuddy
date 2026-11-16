@@ -340,7 +340,7 @@ export async function AgentSession(started: SessionStart): Promise<void> {
   /** The images of the entries that left unrun since the last write (#6413). */
   const unrun: MadeBlobs[] = []
   const leftUnrun = (entries: readonly QueuedMessage[]): void => {
-    for (const q of entries) if (q.made) unrun.push(q.made)
+    for (const q of entries) if (q.made) unrun.push(...q.made)
   }
   /** The last version `session.queue_changed` wrote, and the write in flight. */
   let published = queueVersion
@@ -413,6 +413,8 @@ export async function AgentSession(started: SessionStart): Promise<void> {
       try {
         while (published < queueVersion) {
           const version = queueVersion
+          // Taken now: if the activity fails for good (or the history is reset), these images stay
+          // until the session is deleted. Best effort, as the delete is: an image left costs a row.
           const drop = unrun.splice(0)
           await finish[SESSION_QUEUE_CHANGED_ACTIVITY]!({
             sessionId: start.session_id,

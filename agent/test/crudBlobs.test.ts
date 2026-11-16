@@ -176,24 +176,27 @@ describe('CrudSessionBlobs', () => {
     expect(await blobs.putIf(SESSION, [image(1)], { attempt: 'run:2', turnId: 't' })).toBe(false)
   })
 
-  it('answers what a write made, and deletes it in bounded calls unless a write stored it since (#6413)', async () => {
+  it('answers what each write made with its own time, and deletes it unless a write stored it since (#6413)', async () => {
     const api = new FakeApi()
     const blobs = new CrudSessionBlobs(BASE, { fetch: api.fetch })
     await blobs.put(SESSION, [image(0)])
     const many = Array.from({ length: IMAGES_PER_WRITE + 2 }, (_, i) => image(i))
     const made = await blobs.putMade(SESSION, many)
-    // image(0) was there before; `at` is the first batch's, so no later write comes before it.
-    expect(made).toEqual({ names: many.slice(1).map((i) => i.name), at: '2026-11-15T00:00:00.000002Z' })
+    // image(0) was there before; each batch answers its own `at`.
+    expect(made).toEqual([
+      { names: many.slice(1, IMAGES_PER_WRITE).map((i) => i.name), at: '2026-11-15T00:00:00.000002Z' },
+      { names: many.slice(IMAGES_PER_WRITE).map((i) => i.name), at: '2026-11-15T00:00:00.000003Z' },
+    ])
     await blobs.put(SESSION, [image(1)])
-    const deleted = await blobs.delete(SESSION, { names: made.names, at: made.at! }, { attempt: 'run:1', turnId: 't' })
-    expect(deleted).toEqual(many.slice(2, IMAGES_PER_WRITE).map((i) => i.name).sort())
-    const calls = api.seen.filter((s) => s.path === '/session-blobs/deletes')
-    expect(calls).toHaveLength(2)
+    const deleted: string[] = []
+    for (const write of made) deleted.push(...(await blobs.delete(SESSION, write, { attempt: 'run:1', turnId: 't' })))
+    // Every name past the first batch goes too; only image(1), written again since, stays.
+    expect(deleted.sort()).toEqual(many.slice(2).map((i) => i.name).sort())
+    expect(api.seen.filter((s) => s.path === '/session-blobs/deletes')).toHaveLength(2)
     expect(api.blobs.has(`${SESSION}|${image(1).name}`)).toBe(true)
-    // The second batch's names were written after `at`: kept.
-    expect(api.blobs.has(`${SESSION}|${image(IMAGES_PER_WRITE).name}`)).toBe(true)
-    expect(await blobs.putMade(SESSION, [image(0)])).toEqual({ names: [], at: '2026-11-15T00:00:00.000005Z' })
-    expect(await blobs.delete(SESSION, { names: ['../x.png'], at: made.at! })).toEqual([])
+    expect(api.blobs.has(`${SESSION}|${image(IMAGES_PER_WRITE).name}`)).toBe(false)
+    expect(await blobs.putMade(SESSION, [image(0)])).toEqual([])
+    expect(await blobs.delete(SESSION, { names: ['../x.png'], at: made[0]!.at })).toEqual([])
   })
 
   it('sends a fenced write of more images than one write takes in fenced batches, and stops at a refusal', async () => {
