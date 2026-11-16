@@ -41,7 +41,7 @@ from starlette.datastructures import UploadFile
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from scadbuddy.agent_data import flow_blobs, forget
-from scadbuddy.agent_data.payload_keys import SUBJECT_PATTERN
+from scadbuddy.agent_data.payload_keys import SUBJECT_PATTERN, KeyNotHeldError
 from scadbuddy.agent_data.rotation import kek_at
 from scadbuddy.agent_data.workspace import Keks
 from scadbuddy.api.deps import StateDep
@@ -109,6 +109,11 @@ async def forget_subject(
             f"{subject} has forks, which take their ranges of its transcript first, and the API"
             " has no SCADBUDDY_SECRET_KEY_FILE.",
             reason=FORKS_TAKE_RANGES,
+        ) from None
+    except KeyNotHeldError as err:
+        # A transcript key sealed under a KEK the API does not hold: nothing is forgotten.
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE, str(err), reason="unavailable"
         ) from None
     return Forgotten(key=key)
 

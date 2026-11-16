@@ -144,9 +144,17 @@ export class ForkParentGone extends Error {}
  * API's CRUD routes (`crudEvents.ts` `CrudEventRows`, area `session-events`), each method one
  * statement or one transaction. An append with a caller's own transaction stays `appendEventsIn`.
  */
+/** A part of an append that has committed: its events and their seqs. */
+export type Committed = (events: readonly ServerEvent[], seqs: readonly number[]) => void
+
 export interface EventRows {
-  /** The events appended, their seqs; with `fence` only while the row names that placement (undefined otherwise). */
-  append(sessionId: string, events: readonly ServerEvent[], fence?: TurnFence): Promise<number[] | undefined>
+  /**
+   * The events appended, their seqs; with `fence` only while the row names that placement
+   * (undefined otherwise). `committed` hears each part as its transaction commits: all of them at
+   * once over SQL, a batch at a time over the API, so a refusal after some batches still tells the
+   * followers of those.
+   */
+  append(sessionId: string, events: readonly ServerEvent[], fence?: TurnFence, committed?: Committed): Promise<number[] | undefined>
   read(sessionId: string, afterSeq: number, limit: number): Promise<LoggedEvent[]>
   userTurnText(sessionId: string, turnId: string): Promise<string | undefined>
   lastSeq(sessionId: string): Promise<number>
@@ -166,13 +174,16 @@ export class PgEventRows implements EventRows {
     this.#sql = sql
   }
 
-  async append(sessionId: string, events: readonly ServerEvent[], fence?: TurnFence): Promise<number[] | undefined> {
-    if (!fence) return appendEventsIn(this.#sql, sessionId, events)
-    return this.#sql.begin(async (tx) => {
-      const [held] = await tx`
-        SELECT 1 FROM ai_sessions WHERE id = ${sessionId} AND turn_attempt = ${fence.attempt} AND durable_turn_id = ${fence.turnId} FOR UPDATE`
-      return held ? appendEventsIn(tx, sessionId, events) : undefined
-    })
+  async append(sessionId: string, events: readonly ServerEvent[], fence?: TurnFence, committed?: Committed): Promise<number[] | undefined> {
+    const seqs = !fence
+      ? await appendEventsIn(this.#sql, sessionId, events)
+      : await this.#sql.begin(async (tx) => {
+          const [held] = await tx`
+            SELECT 1 FROM ai_sessions WHERE id = ${sessionId} AND turn_attempt = ${fence.attempt} AND durable_turn_id = ${fence.turnId} FOR UPDATE`
+          return held ? appendEventsIn(tx, sessionId, events) : undefined
+        })
+    if (seqs && seqs.length > 0) committed?.(events, seqs)
+    return seqs
   }
 
   read(sessionId: string, afterSeq: number, limit: number): Promise<LoggedEvent[]> {
@@ -268,9 +279,8 @@ export class EventLog {
    */
   async append(sessionId: string, events: readonly ServerEvent[], tx?: TransactionSql): Promise<number[]> {
     if (tx) return appendEventsIn(tx, sessionId, events)
-    const seqs = events.length === 0 ? [] : ((await this.rows.append(sessionId, events)) ?? [])
-    if (seqs.length > 0) this.committed(sessionId, events, seqs)
-    return seqs
+    if (events.length === 0) return []
+    return (await this.rows.append(sessionId, events, undefined, (part, seqs) => this.committed(sessionId, part, seqs))) ?? []
   }
 
   /**
@@ -279,8 +289,7 @@ export class EventLog {
    */
   async appendFenced(sessionId: string, events: readonly ServerEvent[], fence: TurnFence): Promise<boolean> {
     if (events.length === 0) return true
-    const seqs = await this.rows.append(sessionId, events, fence)
-    if (seqs) this.committed(sessionId, events, seqs)
+    const seqs = await this.rows.append(sessionId, events, fence, (part, written) => this.committed(sessionId, part, written))
     return seqs !== undefined
   }
 

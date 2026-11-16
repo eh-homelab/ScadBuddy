@@ -70,7 +70,7 @@ export const API_AI_GRANTS: Grants = {
   ai_session_files: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   ai_session_file_bytes: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   ai_session_events: ['SELECT', 'INSERT'],
-  ai_session_blobs: ['SELECT', 'INSERT'],
+  ai_session_blobs: ['SELECT', 'INSERT', 'UPDATE'],
   ai_session_tool_images: ['SELECT', 'INSERT', 'DELETE'],
   ai_attachments: ['SELECT', 'INSERT', 'DELETE'],
   ai_session_http_bodies: ['SELECT', 'INSERT', 'DELETE'],

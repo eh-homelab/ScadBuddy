@@ -34,6 +34,7 @@ from fastapi import Depends, Path, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.agent_data import transcripts
+from scadbuddy.agent_data.payload_keys import KeyNotHeldError
 from scadbuddy.agent_data.rotation import kek_at
 from scadbuddy.agent_data.workspace import Keks
 from scadbuddy.api.deps import StateDep
@@ -49,10 +50,13 @@ PROJECT_KEY_MAX = 4096
 #: One append's entries: the SDK hands over a batch per message; this is far above one.
 ENTRIES_MAX = 1000
 #: One entry's JSON text, and one append's body. Claude Code writes a large tool result to a
-#: file of its own and keeps a pointer in the transcript; an image a user sends is at most
-#: ``IMAGE_BYTES_MAX`` (3.75 MB) as base64. The agent splits a batch to stay under the body's.
-ENTRY_CHARS_MAX = 16 * 1024 * 1024
-BODY_BYTES_MAX = 32 * 1024 * 1024
+#: file of its own and keeps a pointer in the transcript, but a tool result's images stay in
+#: the entry as base64: at most ``RESULT_IMAGES_MAX`` (8) of ``IMAGE_DATA_MAX`` (5 MB) each
+#: (the agent's ``sessions/blobs.ts`` and ``sessions/images.ts``), 40 MB, and a user's turn
+#: at most ``IMAGES_MAX`` (4) of them. The agent groups entries up to ``APPEND_BYTES_MAX``
+#: (30 MiB) a request and sends a larger entry alone, so the body's cap holds one such entry.
+ENTRY_CHARS_MAX = 48 * 1024 * 1024
+BODY_BYTES_MAX = 64 * 1024 * 1024
 #: The uuids a warm process wrote itself, which ``moved`` leaves out (the agent's ``own``);
 #: past this the agent recycles the process instead of asking.
 OWN_MAX = 20_000
@@ -93,7 +97,7 @@ async def _in_conn[T](state: Any, fn: Callable[[psycopg.Connection[Any]], T]) ->
         return await asyncio.to_thread(run)
     except transcripts.SubjectForgottenError as err:
         raise ApiError(status.HTTP_410_GONE, str(err), reason="forgotten") from None
-    except transcripts.KeyUnavailableError as err:
+    except (transcripts.KeyUnavailableError, KeyNotHeldError) as err:
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE, str(err), reason="unavailable"
         ) from None

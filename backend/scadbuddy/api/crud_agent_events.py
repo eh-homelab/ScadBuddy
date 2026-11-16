@@ -119,7 +119,12 @@ class Seqs(BaseModel):
 async def append(session_id: SessionIdPath, body: Append, state: StateDep) -> Seqs:
     texts = _checked(body.events)
     fence = None if body.fence is None else events.TurnFence(body.fence.attempt, body.fence.turn_id)
-    return Seqs(seqs=await _in_conn(state, lambda c: events.append(c, session_id, texts, fence)))
+    try:
+        seqs = await _in_conn(state, lambda c: events.append(c, session_id, texts, fence))
+    except psycopg.errors.InvalidTextRepresentation:
+        # As PgEventRows's cast of the turn id: a throw, never a quiet refusal.
+        raise ApiError(422, "the fence's turn id is not a UUID", reason="turn_id") from None
+    return Seqs(seqs=seqs)
 
 
 class Logged(BaseModel):

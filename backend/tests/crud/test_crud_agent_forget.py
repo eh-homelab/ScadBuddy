@@ -276,12 +276,17 @@ def test_forks_take_their_ranges_before_the_parent_goes(keyed: Agent, tables: Pg
     parent, child, grand, gone = uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     _session(tables, parent)
     image = _image()
+    other = _image(PNG + b"other")
     entries = [json.dumps({"type": "user", "uuid": f"p-{i}", "n": i}) for i in range(4)]
     logged = [
         json.dumps({"type": "session.started", "sessionId": str(parent)}),
         json.dumps({"type": "user.turn", "sessionId": str(parent), "text": "hi"}),
         json.dumps(
-            {"type": "tool.result", "sessionId": str(parent), "images": [{"name": image[0]}]}
+            {
+                "type": "tool.result",
+                "sessionId": str(parent),
+                "images": [{"name": image[0]}, {"name": other[0]}],
+            }
         ),
         json.dumps({"type": "user.turn", "sessionId": str(parent), "text": "late"}),
     ]
@@ -291,10 +296,19 @@ def test_forks_take_their_ranges_before_the_parent_goes(keyed: Agent, tables: Pg
             events.append_in(conn, str(parent), logged)
     _sql(
         tables,
-        "INSERT INTO ai_session_blobs (session_id, name, media_type, data) VALUES (%s, %s, %s, %s)",
+        "INSERT INTO ai_session_blobs (session_id, name, media_type, data, created_at)"
+        " VALUES (%s, %s, %s, %s, now() - interval '1 day')",
         (parent, *image),
     )
     _session(tables, child, parent, cut=3, event_cut=3)
+    # An image the fork already holds, as a queued message's write in it left it (#6413).
+    for owner in (parent, child):
+        _sql(
+            tables,
+            "INSERT INTO ai_session_blobs (session_id, name, media_type, data, created_at)"
+            " VALUES (%s, %s, %s, %s, now() - interval '2 days')",
+            (owner, *other),
+        )
     _session(tables, grand, child, cut=1, event_cut=1)
     _session(tables, gone, parent, cut=2, event_cut=3)
     with tables.connection() as conn:
@@ -323,9 +337,16 @@ def test_forks_take_their_ranges_before_the_parent_goes(keyed: Agent, tables: Pg
         tables, "SELECT inherited FROM ai_session_entries WHERE session_id = %s", (str(child),)
     )
     assert sorted(r["inherited"] for r in rows) == [False, True, True, True]
-    assert _sql(
-        tables, "SELECT name, data FROM ai_session_blobs WHERE session_id = %s", (child,)
-    ) == [{"name": image[0], "data": image[2]}]
+    blobs = _sql(
+        tables,
+        "SELECT name, data, created_at < now() - interval '1 hour' AS old"
+        " FROM ai_session_blobs WHERE session_id = %s",
+        (child,),
+    )
+    # A copied image keeps the parent's time; one the fork held is stamped by this write.
+    assert sorted((b["name"], b["data"], b["old"]) for b in blobs) == sorted(
+        [(image[0], image[2], True), (other[0], other[2], False)]
+    )
     for fork in (child, gone):
         assert _link(tables, fork) == {
             "fork_parent_id": None,

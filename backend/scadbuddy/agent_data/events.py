@@ -77,7 +77,7 @@ def append(
         if fence is not None:
             held = conn.execute(
                 "SELECT 1 FROM ai_sessions WHERE id = %s::uuid AND turn_attempt = %s"
-                " AND durable_turn_id::text = %s FOR UPDATE",
+                " AND durable_turn_id = %s::uuid FOR UPDATE",
                 (session_id, fence.attempt, fence.turn_id),
             ).fetchone()
             if held is None:
@@ -268,7 +268,8 @@ def blob_names(texts: list[str]) -> list[str]:
 
 def copy_fork_blobs(conn: Connection[Any], session_id: str, names: list[str]) -> None:
     """``blobs.ts`` ``copyForkBlobs``: the images ``names`` lists, found through the chain,
-    become rows of the session's own."""
+    become rows of the session's own; a new one keeps its ``created_at``, one the session
+    already has is stamped now (#6413)."""
     if not names:
         return
     conn.execute(
@@ -277,7 +278,9 @@ def copy_fork_blobs(conn: Connection[Any], session_id: str, names: list[str]) ->
             " created_at) SELECT DISTINCT ON (b.name) %(session)s::uuid, b.name, b.media_type,"
             " b.data, b.created_at FROM chain c JOIN ai_session_blobs b ON b.session_id = c.id"
             " WHERE c.depth > 0 AND b.name = ANY(%(names)s) ORDER BY b.name, c.depth"
-            " ON CONFLICT (session_id, name) DO NOTHING"
+            # An image the fork already holds is written again now: a queued message's images
+            # are deleted only up to its own write's time (#6413), so every write sets it.
+            " ON CONFLICT (session_id, name) DO UPDATE SET created_at = clock_timestamp()"
         ).encode(),
         {"session": session_id, "names": names},
     )

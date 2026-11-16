@@ -135,4 +135,24 @@ describe('an event log over the CRUD routes', () => {
     expect(await log.appendFenced(SESSION, [delta(SESSION, 'a')], { attempt: 'run:1', turnId: 't' })).toBe(true)
     expect(appended).toEqual([3])
   })
+
+  it('tells the followers of the batches that committed before a later one was refused', async () => {
+    let call = 0
+    const api = new FakeApi()
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+      call += 1
+      // The first batch of 1000 commits; the fence has turned by the second.
+      api.answer(`POST /sessions/${SESSION}/events`, { seqs: call === 1 ? Array.from({ length: 1000 }, (_, i) => i + 1) : null })
+      return api.fetch(input, init)
+    }
+    const heard: [number, number][] = []
+    const log = new EventLog(noSql, {
+      rows: new CrudEventRows(BASE, { fetch }),
+      onAppend: (_id, events, last) => heard.push([events.length, last]),
+    })
+    const events = Array.from({ length: 1001 }, (_, i) => delta(SESSION, String(i)))
+    expect(await log.appendFenced(SESSION, events, { attempt: 'run:1', turnId: 't' })).toBe(false)
+    expect(call).toBe(2)
+    expect(heard).toEqual([[1000, 1000]])
+  })
 })

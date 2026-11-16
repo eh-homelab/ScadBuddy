@@ -1,6 +1,6 @@
 import { CrudReadError, crudRead, wellFormed } from '../api/crudRead.js'
 import { appendBatches } from './crudTranscripts.js'
-import { type EventRows, ForkParentGone, type LoggedEvent, type TurnEvents, type TurnFence } from './eventLog.js'
+import { type Committed, type EventRows, ForkParentGone, type LoggedEvent, type TurnEvents, type TurnFence } from './eventLog.js'
 import type { ServerEvent } from './protocol.js'
 import { sessionPath } from './rows.js'
 
@@ -48,9 +48,10 @@ export class CrudEventRows implements EventRows {
    * the body's size is written as a prefix when the fence turns between two, as a placement cut off
    * between two SDK messages would leave it. Stops at the first refused (undefined).
    */
-  async append(sessionId: string, events: readonly ServerEvent[], fence?: TurnFence): Promise<number[] | undefined> {
+  async append(sessionId: string, events: readonly ServerEvent[], fence?: TurnFence, committed?: Committed): Promise<number[] | undefined> {
     const path = this.#path(sessionId, '/events')
     const seqs: number[] = []
+    let at = 0
     for (const batch of appendBatches(events.map((e) => JSON.stringify(e)))) {
       let written: { seqs: number[] | null }
       try {
@@ -65,6 +66,9 @@ export class CrudEventRows implements EventRows {
       }
       if (written.seqs === null) return undefined
       seqs.push(...written.seqs)
+      // This batch's transaction has committed, whatever a later one does.
+      if (written.seqs.length > 0) committed?.(events.slice(at, at + batch.length), written.seqs)
+      at += batch.length
     }
     return seqs
   }
