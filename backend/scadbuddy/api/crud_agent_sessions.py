@@ -3,7 +3,7 @@ under ``/api/v1/internal/crud/agent/``, for the ``agent`` credential only (`crud
 Each route is one method of the agent's store and runs its SQL, a transaction as one
 transaction (#5299 D2); the SQL is in ``agent_data/sessions.py``. The agent's stores
 (``agent/src/sessions/rows.ts`` `CrudSessionRows`, ``agent/src/sessions/touched.ts``
-`CrudSessionResources`) call these routes once ``…/areas`` lists the area, and their own SQL
+`CrudResourceRows`) call these routes once ``…/areas`` lists the area, and their own SQL
 until then (D9).
 
 Area ``sessions``, the ``ai_sessions`` row as the session manager reads and writes it:
@@ -154,7 +154,7 @@ class Owner(Who):
 
 
 class SessionRow(BaseModel):
-    """The row as the session manager reads it (``manager.ts`` ``COLUMNS``); timestamps are
+    """The row as the session manager reads it (``rows.ts`` ``COLUMNS``); timestamps are
     ISO 8601 in UTC at milliseconds."""
 
     id: str

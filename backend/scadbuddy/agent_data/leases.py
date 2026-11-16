@@ -22,6 +22,11 @@ Two kinds of key:
   starts a refresh while a lease holds is not refused: during a rolling deploy two
   replicas could spend one refresh token, and the loser marks the grant for a new
   sign-in.
+- ``attention-rate``: the attention requests' rate limit (``agent/src/gate/questions.ts``
+  ``attentionLimit``, #5299 step 10), held across the count and the workflow Update that opens
+  the entry, as the SQL path holds the transaction lock on
+  ``hashtextextended('scadbuddy:attention-rate', 0)``. An acquire also tries that lock as a
+  transaction lock: while an SQL pod counts, the lease is ``busy``.
 - ``order-cost:<session id>``: a session's report of its assistant spend to its orders
   (``agent/src/sessions/orderCosts.ts`` ``report``, #5299 step 9). It replaces the session
   advisory lock on ``hashtextextended('ai_session_order_costs:<session id>', 0)``, which an
@@ -50,12 +55,14 @@ MAX_TTL = 300.0
 #: The keys the agent may take: a listing's source, a remote plugin's name.
 KEY_PATTERN = (
     r"^(tool-listing:(remote:[a-z][a-z0-9-]{0,30}[a-z0-9]|package:[^\x00-\x1f]{1,400})"
-    r"|plugin-oauth:[a-z][a-z0-9-]{0,30}[a-z0-9]"
+    r"|plugin-oauth:[a-z][a-z0-9-]{0,30}[a-z0-9]|attention-rate"
     r"|order-cost:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
 )
 _KEY = re.compile(KEY_PATTERN)
 #: The prefix of the advisory lock key the SQL path takes (``access/listings.ts``).
 ADVISORY_PREFIX = "scadbuddy:ai_tool_listings:test:"
+#: The SQL path's attention rate lock (``agent/src/gate/questions.ts`` ``ATTENTION_RATE_LOCK``).
+ATTENTION_RATE_LOCK = "scadbuddy:attention-rate"
 #: The prefix of the advisory lock key the SQL path takes for a session's order-cost report
 #: (``sessions/orderCosts.ts`` ``LOCK_PREFIX``).
 ORDER_COST_PREFIX = "ai_session_order_costs:"
@@ -84,6 +91,8 @@ def acquire(
     lock = (
         ADVISORY_PREFIX + name
         if name is not None
+        else ATTENTION_RATE_LOCK
+        if key == "attention-rate"
         else ORDER_COST_PREFIX + key[len("order-cost:") :]
         if key.startswith("order-cost:")
         else None

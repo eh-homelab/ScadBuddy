@@ -6,6 +6,8 @@ import { state as orders } from './orders/state'
 // outputs, newest first, with the backend's filters and paging (`api/outputs.py`
 // `list_recent_outputs`). The mock's `q` matches the name or any `name=value` of the
 // params; the backend matches only the params that differ from the template's defaults.
+// The storefront slice run's outputs (`source` `storefront`) are left out unless
+// `include_storefront=true` (#6371).
 
 const DEFAULT_LIMIT = 50
 
@@ -22,6 +24,7 @@ export const handlers = [
     const tag = query.get('tag')?.toLocaleLowerCase()
     const q = query.get('q')?.toLocaleLowerCase()
     const ordered = query.get('ordered')
+    const storefront = query.get('include_storefront') === 'true'
     const tagged = tag === undefined ? null : new Set(mockModels().filter((m) => (m.tags ?? []).some((t) => t.toLocaleLowerCase() === tag)).map((m) => m.slug))
     const named = new Set(orders.items.map((i) => i.output_id).filter((id) => id !== null))
     const listed = [...mockDestinationState().outputs]
@@ -31,6 +34,7 @@ export const handlers = [
       .filter((o) => tagged === null || tagged.has(o.slug))
       .filter((o) => !q || [o.name ?? '', ...Object.entries(o.params ?? {}).map(([k, v]) => `${k}=${text(v)}`)].some((t) => t.toLocaleLowerCase().includes(q)))
       .filter((o) => ordered === null || (ordered === 'yes') === named.has(o.id))
+      .filter((o) => storefront || o.source === 'back_office')
       .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at) || b.id.localeCompare(a.id))
     const after = query.get('after')
     let start = 0

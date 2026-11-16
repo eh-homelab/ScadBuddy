@@ -23,7 +23,7 @@ from psycopg.types.json import Jsonb
 
 from scadbuddy.workflows.payload_codec import payload_key_lock
 
-#: A pending handoff offer, read as none once it has expired (``manager.ts`` ``LIVE_OFFER``).
+#: A pending handoff offer, read as none once it has expired (``rows.ts`` ``LIVE_OFFER``).
 LIVE_OFFER = "pending_owner_until > now()"
 #: The session whose budget this one spends from: itself, or a fork's lineage root (#823).
 _ROOT = "coalesce(ai_sessions.budget_root_id, ai_sessions.id)"
@@ -44,7 +44,7 @@ def _iso(column: str, name: str) -> str:
     return f"to_char({column} AT TIME ZONE 'UTC', {_MS}) AS {name}"
 
 
-#: The row as the session manager reads it (``manager.ts`` ``COLUMNS``), timestamps as text.
+#: The row as the session manager reads it (``rows.ts`` ``COLUMNS``), timestamps as text.
 COLUMNS = (
     "id::text AS id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id,"
     f" CASE WHEN {LIVE_OFFER} THEN pending_owner_kind END AS offer_kind,"
@@ -59,8 +59,9 @@ COLUMNS = (
     f" CASE WHEN archived_at IS NULL THEN NULL ELSE"
     f" to_char(archived_at AT TIME ZONE 'UTC', {_MS}) END AS archived_at"
 )
-#: What a turn's claim reads besides (``manager.ts`` ``ClaimRow``, ``runningDurableTurn``):
-#: ``claimed_at`` at Postgres's microseconds (``CLAIMED_AT``, #1383).
+#: What a turn's claim reads besides (``rows.ts`` ``TURN_COLUMNS``, for ``manager.ts``
+#: ``ClaimRow`` and ``runningDurableTurn``): ``claimed_at`` at Postgres's microseconds
+#: (``CLAIMED_AT``, #1383).
 TURN_COLUMNS = (
     "unpriced_cost_usd, agent_model, agent_effort, agent_type, background_tools, turn_flow,"
     " turn_tiers, durable_turn_id::text AS durable_turn_id,"
@@ -78,7 +79,7 @@ def get(conn: Connection[Any], session_id: str) -> dict[str, Any] | None:
 
 
 def like_literal(text: str) -> str:
-    """``text`` as a literal part of an ILIKE pattern (``manager.ts`` ``likeLiteral``)."""
+    """``text`` as a literal part of an ILIKE pattern (``rows.ts`` ``likeLiteral``)."""
     return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
@@ -94,7 +95,7 @@ def list_query(
     with_file: bool = False,
     limit: int = 100,
 ) -> tuple[str, dict[str, Any]]:
-    """``manager.ts`` ``listQuery``: the owner-or-creator-or-offered filter (none for the
+    """``rows.ts`` ``listQuery``: the owner-or-creator-or-offered filter (none for the
     browser user, ``principal`` None), then the filters, newest first."""
     where: list[str] = []
     params: dict[str, Any] = {}
@@ -199,10 +200,10 @@ def insert(
     background_tools: bool | None,
     limit: tuple[int, int] | None,
 ) -> str | None:
-    """Inserts the row (``manager.ts`` ``insert``), in one transaction: with ``limit`` (most
-    sessions, window in ms) under the owner's start lock and refused ``rate_limited`` past it;
-    a fork (``fork_of``: parent, cut) under its parent's lock, shared, and refused
-    ``forgotten`` once the parent is. None when it was inserted."""
+    """Inserts the row (``rows.ts`` ``PgSessionRows.insert``), in one transaction: with
+    ``limit`` (most sessions, window in ms) under the owner's start lock and refused
+    ``rate_limited`` past it; a fork (``fork_of``: parent, cut) under its parent's lock,
+    shared, and refused ``forgotten`` once the parent is. None when it was inserted."""
     with conn.transaction():
         if limit is not None:
             # Per owner, held until commit, so concurrent starts count each other.
@@ -260,7 +261,8 @@ def insert(
 def set_agent(
     conn: Connection[Any], session_id: str, model: str | None, effort: str | None, kind: str | None
 ) -> None:
-    """A Workflow agent's chat's own model, effort and subagent (``manager.ts`` ``startChild``)."""
+    """A Workflow agent's chat's own model, effort and subagent (``rows.ts`` ``setAgent``, for
+    ``manager.ts`` ``startChild``)."""
     conn.execute(
         "UPDATE ai_sessions SET agent_model = %s, agent_effort = %s, agent_type = %s WHERE id = %s",
         (model, effort, kind, session_id),
@@ -354,11 +356,11 @@ def raise_budget(
 
 
 def discard(conn: Connection[Any], session_id: str) -> bool:
-    """A fork that failed before it was announced (``manager.ts`` ``dropFailedFork``): its own
-    transcript rows, its row (whose cascade takes the rest) and its payload key, under the
-    key's lock. Only a session that has logged no event: a failed fork logs none (its log's
-    transaction rolled back), and nothing that was ever announced goes this way. Whether it
-    went."""
+    """A fork that failed before it was announced (``rows.ts`` ``discard``, for ``manager.ts``
+    ``dropFailedFork``): its own transcript rows, its row (whose cascade takes the rest) and
+    its payload key, under the key's lock. Only a session that has logged no event: a failed
+    fork logs none (its log's transaction rolled back), and nothing that was ever announced
+    goes this way. Whether it went."""
     with conn.transaction():
         # The lock a key's creation takes (payload_keys.py), held over the row's delete: a
         # creation that saw the row standing commits its key before this deletes it, and one

@@ -349,7 +349,7 @@ async def test_a_copy_from_before_the_tower_brim_is_not_reused(
     before = LibraryCopy(
         id=1,
         folder_id=FOLDER,
-        target_key=target.key.replace("#brim", "", 1),
+        target_key=target.key.replace("#brim#covers", "", 1),
         sliced=[SlicedCopy(id=98)],
     )
     uploads.copies[meta.id] = [before]
