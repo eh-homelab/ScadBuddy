@@ -124,7 +124,7 @@ export interface FarmArchivesQuery {
   project_id?: number
 }
 /** #4777 — `POST /orders/{id}/items/{item}/quotes/archive`. */
-export type ArchiveQuoteRequest = Schemas['ArchiveQuoteRequest']
+export type ArchiveQuoteRequest = Defaulted<Schemas['ArchiveQuoteRequest'], 'units'>
 export type ArrangeRequest = Schemas['ArrangeRequest']
 /** #3637 — one object of an arrange, maybe in other colours. */
 export type ArrangeObject = Schemas['ArrangeObject']
