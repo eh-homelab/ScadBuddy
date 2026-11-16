@@ -422,6 +422,24 @@ describe('AddItemDialog (#4251)', () => {
     await waitFor(() => expect(list.mock.lastCall?.[0]).toMatchObject({ tag: 'gift' }))
   })
 
+  it("lists the storefront's renders only when asked (#6371)", async () => {
+    addMockOutput({ ...fixtureOutputs[0]!, id: 'f'.repeat(32), name: 'Storefront: Name Keychain', source: 'storefront', params: {} })
+    const list = vi.spyOn(api, 'listRecentOutputs')
+    const { user } = renderPage(<AddItemDialog open orderId={ORDER_DRAFT} onAdded={() => {}} onClose={() => {}} />)
+    const dialog = screen.getByRole('dialog', { name: 'Add item' })
+    await user.click(within(dialog).getByRole('button', { name: 'Recent renders' }))
+    const rows = await within(dialog).findByRole('list', { name: 'Recent renders' })
+    await waitFor(() => expect(within(rows).getAllByRole('checkbox')).toHaveLength(3))
+    expect(within(rows).queryByTestId(`recent-${'f'.repeat(32)}`)).toBeNull()
+    expect(list.mock.lastCall?.[0]).not.toHaveProperty('include_storefront')
+    const toggle = within(dialog).getByRole('checkbox', { name: 'Show storefront renders' })
+    expect(toggle).not.toBeChecked()
+    await user.click(toggle)
+    await waitFor(() => expect(within(rows).getAllByRole('checkbox')).toHaveLength(4))
+    expect(within(rows).getByTestId(`recent-${'f'.repeat(32)}`)).toHaveTextContent('Storefront: Name Keychain')
+    expect(list.mock.lastCall?.[0]).toMatchObject({ include_storefront: true })
+  })
+
   it('asks before several renders change an accepted order, then adds them on the after-acceptance route (#4777)', async () => {
     const add = vi.spyOn(api, 'addOrderItemsAfterAcceptance')
     const onClose = vi.fn()

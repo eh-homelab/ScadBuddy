@@ -33,7 +33,13 @@ from scadbuddy.core.tracing import span
 from scadbuddy.library.catalogue import declares_pipeline
 from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.library.operations import answered_as_routes
-from scadbuddy.library.outputs import MODEL_NAME, hold_parts, release_parts, require_output
+from scadbuddy.library.outputs import (
+    BACK_OFFICE,
+    MODEL_NAME,
+    hold_parts,
+    release_parts,
+    require_output,
+)
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.print_library.component import PRINT_LIBRARY
@@ -212,6 +218,9 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
                     arranged_from=sources,
                     output_id=output_id,
                     print_settings=print_settings,
+                    # #6371: only the storefront slice run names one; `POST /outputs`'s
+                    # body cannot, so its outputs are the back office's.
+                    source=request.get("source", BACK_OFFICE),
                 )
         except Exception as error:
             # Not on cancellation: the write's thread cannot be stopped and may still

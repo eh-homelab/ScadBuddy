@@ -28,7 +28,9 @@ from scadbuddy.api.flows import (
     GRANT_BROWSER_ONLY,
     GRANT_INVALID,
     GRANT_STATE,
+    GrantView,
     agent_tool_tiers,
+    run_grant_view,
 )
 from scadbuddy.core.authorship import by_a_person, current_author, requester_record
 from scadbuddy.core.problems import ApiError
@@ -50,7 +52,7 @@ from scadbuddy.flow_triggers.store import (
 from scadbuddy.flows.definitions import ScriptMissingError
 from scadbuddy.flows.grants import GrantSpec, GrantStatus, validate_rules
 from scadbuddy.flows.inputs import InputsError, resolve_inputs
-from scadbuddy.flows.models import Definition
+from scadbuddy.flows.models import Definition, RunStatus
 from scadbuddy.orders.builtin_flow import move_after_approval
 from scadbuddy.workflows.flow_triggers import (
     delete_trigger_schedule,
@@ -69,6 +71,8 @@ TEMPORAL_DOWN = "https://scadbuddy.dev/problems/flow-trigger-schedule-unavailabl
 FIRES_SHOWN = 20
 #: The trigger list's views built at once.
 LIST_VIEWS_AT_ONCE = 8
+#: The most grant requests of each kind `GET /flow-grant-requests` lists (#6399).
+GRANT_REQUESTS_MAX = 100
 
 
 class StandingGrantView(BaseModel):
@@ -84,6 +88,9 @@ class StandingGrantView(BaseModel):
     revoked_at: datetime | None = None
     expires_at: datetime | None = None
     created_at: datetime
+    #: When it last started to wait for a person (#6399): its creation, or the trigger edit
+    #: that returned it to `requested`.
+    requested_at: datetime
     #: Approved, not revoked and not expired: each fire's run gets a grant from it.
     in_force: bool
 
@@ -259,7 +266,9 @@ def _grant_view(grant: StandingGrant | None) -> StandingGrantView | None:
     if grant is None:
         return None
     return StandingGrantView(
-        **grant.model_dump(exclude={"trigger_id"}), in_force=grant.in_force(datetime.now(UTC))
+        **grant.model_dump(exclude={"trigger_id", "requested_at"}),
+        requested_at=grant.requested_at or grant.created_at,
+        in_force=grant.in_force(datetime.now(UTC)),
     )
 
 
@@ -295,6 +304,71 @@ async def list_flow_triggers(
             return await _view(triggers, trigger)
 
     return list(await asyncio.gather(*(one(t) for t in listed)))
+
+
+class RunGrantRequest(BaseModel):
+    """A run's grant that waits for a person's decision (#6399)."""
+
+    run_id: str
+    run_status: RunStatus
+    name: str
+    #: Its flow's display name now, None when it has none.
+    display_name: str | None = None
+    #: Who started the run, as its row records it.
+    started_by: dict[str, Any]
+    grant: GrantView
+
+
+class GrantRequests(BaseModel):
+    """The grants that wait for a person's decision: the newest `GRANT_REQUESTS_MAX` of
+    each kind, and how many wait in all, so the page can say how many it does not show."""
+
+    #: How many run grants and standing grants wait in all; at most `GRANT_REQUESTS_MAX`
+    #: of each are listed.
+    runs_total: int
+    triggers_total: int
+
+    #: Requested run grants of runs that have not ended.
+    runs: list[RunGrantRequest]
+    #: Triggers whose standing grant is requested, each as `GET /flow-triggers/{id}`
+    #: shows it, with the `seen` an approval sends back.
+    triggers: list[TriggerView]
+
+
+@router.get(
+    "/flow-grant-requests",
+    response_model=GrantRequests,
+    summary="List the flow grants waiting for a decision",
+)
+async def list_flow_grant_requests(triggers: TriggersDep) -> GrantRequests:
+    """#6399: what the bell and the Activity page's "Needs you" list beside the agent's
+    pending input. Read as the other flow reads are; only a person decides each one
+    (`/workflow-runs/{id}/grant/approve`, `/flow-triggers/{id}/grant/approve`)."""
+    flows = triggers.flows
+    requested, runs_total = await flows.store.requested_grants(GRANT_REQUESTS_MAX)
+    names = await flows.definitions.display_names({run.name for _, run in requested})
+    runs = [
+        RunGrantRequest(
+            run_id=run.id,
+            run_status=run.status,
+            name=run.name,
+            display_name=names.get(run.name),
+            started_by=run.started_by,
+            grant=run_grant_view(grant, [], in_force=False),
+        )
+        for grant, run in requested
+    ]
+    listed, triggers_total = await triggers.store.requested_grant_triggers(GRANT_REQUESTS_MAX)
+    gate = asyncio.Semaphore(LIST_VIEWS_AT_ONCE)
+
+    async def one(trigger: Trigger) -> TriggerView:
+        async with gate:
+            return await _view(triggers, trigger)
+
+    views = await asyncio.gather(*(one(t) for t in listed))
+    return GrantRequests(
+        runs=runs, triggers=list(views), runs_total=runs_total, triggers_total=triggers_total
+    )
 
 
 @router.get("/flow-triggers/{trigger_id}", response_model=TriggerView, summary="Get a flow trigger")

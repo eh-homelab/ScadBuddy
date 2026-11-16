@@ -847,6 +847,7 @@ const outputsSeed: Omit<Output, 'failed_before_queueing'>[] = [
     created_at: '2026-09-21T19:31:00Z',
     has_thumbnail: true,
     sent_to_bambuddy: true,
+    source: 'back_office',
     params: {
       name: 'Reagan',
       font: 'Liberation Sans:style=Bold',
@@ -892,6 +893,7 @@ const outputsSeed: Omit<Output, 'failed_before_queueing'>[] = [
     created_at: '2026-09-20T11:22:00Z',
     has_thumbnail: false,
     sent_to_bambuddy: false,
+    source: 'back_office',
     params: {
       name: 'Nova',
       font: 'Liberation Sans:style=Bold',
@@ -928,6 +930,7 @@ const outputsSeed: Omit<Output, 'failed_before_queueing'>[] = [
     created_at: '2026-09-18T09:03:00Z',
     has_thumbnail: false,
     sent_to_bambuddy: false,
+    source: 'back_office',
     params: {
       name: 'Workshop',
       font: 'DejaVu Sans:style=Bold',

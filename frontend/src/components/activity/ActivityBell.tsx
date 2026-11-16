@@ -1,9 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { BellIcon } from 'lucide-react'
+import { useCallback, useContext, useEffect, useRef, useState } from 'react'
+import { BellIcon, BellRingIcon } from 'lucide-react'
 import { Link } from 'react-router'
 import { api } from '../../api/client'
 import type { Activity } from '../../api/types'
 import { DEFAULT_ACTIVITY_QUERY } from '../../lib/activityQuery'
+import { NEEDS_YOU_PATH, NeedsYouContext, needsYouLabel } from '../../lib/needsYou'
+import { cn } from '@/lib/utils'
+import { NeedsYouList } from './NeedsYou'
 import { getRealtime, readAgain, recordRead, useSubscription, type ReadRecord } from '../../lib/realtime'
 import { toast } from '../../lib/toast'
 import { Badge } from '@/components/ui/badge'
@@ -52,7 +55,8 @@ const finishedAt = (row: Activity): number => Date.parse(row.finished_at ?? '')
 /**
  * The header's bell: how many activity rows of the followed principals (the
  * `activity_follow` setting) finished since it was last opened, with a toast for each
- * as it finishes.
+ * as it finishes. #6399: first, every request that waits on the person (`lib/needsYou.ts`,
+ * the shell's `NeedsYouContext`), each with its answer, until it is answered.
  */
 export function ActivityBell() {
   const [follow, setFollow] = useState<string[] | null>(null)
@@ -185,6 +189,13 @@ export function ActivityBell() {
     setRows([])
   }
 
+  // #6399 — what waits on the person: listed first, counted until answered, never cleared by
+  // opening; only the finished rows are "seen".
+  const needsYou = useContext(NeedsYouContext)
+  const waiting = needsYou?.items?.length ?? 0
+  const label = ['Activity', needsYouLabel(waiting), count > 0 ? `${count} finished` : ''].filter(Boolean).join(', ')
+  const close = () => setListed(null)
+
   return (
     <Popover
       open={listed !== null}
@@ -197,20 +208,67 @@ export function ActivityBell() {
         markSeen()
       }}
     >
+      {/* Announced as it changes: the bell's own name is read only when it is focused. */}
+      <span data-testid="activity-bell-live" aria-live="polite" className="sr-only">
+        {needsYouLabel(waiting)}
+      </span>
       <PopoverTrigger asChild>
-        <Button variant="ghost" size="icon" aria-label={`Activity, ${count} finished`} className="relative">
-          <BellIcon aria-hidden="true" />
-          <Badge
-            data-testid="activity-bell-count"
-            hidden={count === 0}
-            className="pointer-events-none absolute -top-0.5 -right-0.5 h-4 min-w-4 px-1 text-[10px] leading-none tabular-nums"
+        {waiting > 0 ? (
+          // Hard to miss while anything waits: its own colour, a ringing bell and the count, and
+          // on a wider screen the words too; the name says it all for a screen reader.
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-label={label}
+            data-needs-you=""
+            className="relative h-8 gap-1.5 rounded-full bg-needs px-2.5 font-semibold text-needs-ink shadow-sm hover:bg-needs/85 hover:text-needs-ink focus-visible:ring-needs/50 aria-expanded:bg-needs/85 aria-expanded:text-needs-ink"
           >
-            {count}
-          </Badge>
-        </Button>
+            <BellRingIcon aria-hidden="true" />
+            <span className="hidden sm:inline">Needs you</span>
+            <span data-testid="activity-bell-needs" className="tabular-nums">
+              {waiting}
+            </span>
+            <Badge
+              data-testid="activity-bell-count"
+              hidden={count === 0}
+              className="pointer-events-none absolute -top-1 -right-1 h-4 min-w-4 px-1 text-[10px] leading-none tabular-nums ring-2 ring-background"
+            >
+              {count}
+            </Badge>
+          </Button>
+        ) : (
+          <Button variant="ghost" size="icon" aria-label={label} className="relative">
+            <BellIcon aria-hidden="true" />
+            <Badge
+              data-testid="activity-bell-count"
+              hidden={count === 0}
+              className="pointer-events-none absolute -top-0.5 -right-0.5 h-4 min-w-4 px-1 text-[10px] leading-none tabular-nums"
+            >
+              {count}
+            </Badge>
+          </Button>
+        )}
       </PopoverTrigger>
-      <PopoverContent align="end" className="w-80 max-w-[calc(100vw-2rem)] gap-1 p-1.5">
-        <p className="px-2 pt-1 pb-0.5 text-xs font-medium text-muted-foreground">Finished since you last looked</p>
+      <PopoverContent
+        align="end"
+        className={cn('max-w-[calc(100vw-2rem)] gap-1 p-1.5', waiting > 0 ? 'w-[26rem]' : 'w-80')}
+      >
+        {waiting > 0 && (
+          <section aria-labelledby="bell-needs-you" className="flex flex-col gap-1 pb-1">
+            <h2 id="bell-needs-you" className="flex items-center justify-between px-2 pt-1 text-xs font-semibold text-needs">
+              Needs you
+              <Link to={NEEDS_YOU_PATH} onClick={close} className="font-medium text-primary hover:underline">
+                See all
+              </Link>
+            </h2>
+            <div className="max-h-[min(24rem,60dvh)] overflow-y-auto pr-0.5">
+              <NeedsYouList compact onLeave={close} />
+            </div>
+          </section>
+        )}
+        <p className={cn('px-2 pt-1 pb-0.5 text-xs font-medium text-muted-foreground', waiting > 0 && 'border-t pt-1.5')}>
+          Finished since you last looked
+        </p>
         {listed === null || listed.length === 0 ? (
           <p className="px-2 py-2 text-[13px] text-muted-foreground">Nothing new has finished.</p>
         ) : (
