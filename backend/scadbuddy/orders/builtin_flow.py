@@ -143,7 +143,8 @@ async def ask(question):
 
 async def print_request(item):
     """The print dialog's body for `item`: its model's (or file's) remembered choices,
-    the dialog's defaults otherwise. Its spools are filled from the item's filaments. A
+    its remembered "Wait for the right colour" among them (#6304), the dialog's defaults
+    otherwise. Its spools are filled from the item's filaments. A
     library file's choices come from the library that serves, Bambuddy's or ScadBuddy's
     own (`api/library_print.py` `get_library_choices`). An accepted quote that records its
     print setup (#4673) prints with it, so nothing is sent or read: other choices than the
@@ -165,7 +166,12 @@ async def print_request(item):
         choices["tier"] = remembered["tier"]
     if remembered.get("process_name"):
         choices["process_name"] = remembered["process_name"]
-    request = {"filament_plan": {"slots": []}, "choices": choices}
+    plan = {"slots": []}
+    if remembered.get("force_colour_match") is not None:
+        # "Wait for the right colour" as the model or file remembers it (#6304). With
+        # nothing remembered, the plan's default applies: on.
+        plan["force_colour_match"] = remembered["force_colour_match"]
+    request = {"filament_plan": plan, "choices": choices}
     if view.get("printer_id") is not None:
         request["printer_id"] = view["printer_id"]
     elif remembered.get("printer"):
