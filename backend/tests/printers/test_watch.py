@@ -190,10 +190,20 @@ async def test_a_touch_claims_only_what_keepalive_proves(
     lan = Lan(subscribes=True)
     watches = WatchActivities(printers, reports, None, connect=lambda *a: cast(LanPrinter, lan))
     started = datetime.now(UTC)
-    # A touch stamps the later of the connect and `now - LINK_PROOF`; one stamped past
-    # ``started + LINK_PROOF`` is past the connect, so it is the `now - LINK_PROOF` stamp.
-    proof = started + timedelta(seconds=0.5)
-    await run_until(ActivityEnvironment(), watches, pid, lambda: _seen_at(reports, pid) > proof)
+    # A touch stamps the later of the connect and `now - LINK_PROOF`. Every touch before
+    # `now - LINK_PROOF` passes the connect stamps the same connect time, so a stamp later
+    # than the first touch's is a `now - LINK_PROOF` one, however late the connect came.
+    first: list[datetime] = []
+
+    def proven() -> bool:
+        seen_at = _seen_at(reports, pid)
+        if seen_at == LONG_AGO:
+            return False
+        if not first:
+            first.append(seen_at)
+        return seen_at > first[0]
+
+    await run_until(ActivityEnvironment(), watches, pid, proven)
     got = reports.get(pid)
     assert got is not None
     lag = datetime.now(UTC) - got[1]
@@ -460,7 +470,7 @@ async def test_the_watch_nudges_the_print_watcher_once_per_job_start(
         nudge=nudges.nudge,
     )
     # ``y`` is the last delta, so a nudge for it means every delta was handled.
-    await run_until(ActivityEnvironment(), watches, pid, lambda: len(nudges.seen) >= 2)
+    await run_until(ActivityEnvironment(), watches, pid, lambda: (pid, "y") in nudges.seen)
 
     assert nudges.seen == [(pid, "x"), (pid, "y")]
 
