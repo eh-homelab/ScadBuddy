@@ -79,8 +79,13 @@ import { blobNames } from './forkPoint.js'
 // resumes (warm.ts `restoredCostUsd`, measured in test/warmResumeCost.sdk.test.ts), so
 // the child does not take the parent's spend as its own.
 
-/** A condition an append is written under, checked in its transaction (`appendIf`). */
-export type AppendFence = (tx: TransactionSql) => Promise<boolean>
+/**
+ * The condition a turn placement's appends are written under (#5299 step 9, part b): the
+ * session's row still names this placement's `attempt` and either its turn or no turn at all
+ * (turnHost.ts `holdsOrLast`), checked `FOR SHARE` in the append's own transaction, here or on
+ * the API.
+ */
+export type AppendFence = { attempt: string; turnId: string }
 
 // `entry_type` is plaintext, so only a short token-like type is stored; anything else is NULL, never content.
 const ENTRY_TYPE = /^[a-z][a-z0-9_-]{0,63}$/
@@ -107,13 +112,55 @@ function subpathOf(key: { subpath?: string }): string {
   return key.subpath ?? ''
 }
 
-export class PostgresSessionStore implements SessionStore {
+/** Whether a main transcript is there to resume, and its own newest row with a uuid (warm.ts). */
+export type TranscriptHead = { exists: boolean; since: string | null }
+
+/**
+ * Where a session's transcript rows are kept (#5299 step 9, part b): `PgTranscriptRows`, the SQL
+ * the store ran itself, sealing and opening each entry with the session's data key, or
+ * `CrudTranscriptRows` (crudTranscripts.ts), the API's routes (area `transcripts`, backend
+ * api/crud_agent_transcripts.py), which seal and open there. main.ts picks one per call once the
+ * API lists the area (D9). Each method is one transaction.
+ */
+export interface TranscriptRows {
+  /** The entries in one transaction, only while `fence` holds; whether they were written. SubjectForgotten once forgotten. */
+  append(key: SessionKey, entries: SessionStoreEntry[], fence?: AppendFence): Promise<boolean>
+  /** The main transcript as it loads (a fork's through its chain, one snapshot); empty for none. */
+  transcript(sessionId: string): Promise<SessionStoreEntry[]>
+  /** A subagent transcript's entries; empty for none. */
+  subpath(sessionId: string, subpath: string): Promise<SessionStoreEntry[]>
+  /** The newest row without a uuid of this `type` in the key's transcript, or null. */
+  lastOfType(sessionId: string, subpath: string, type: string): Promise<SessionStoreEntry | null>
+  /** The working directory the main transcript's newest entry ran in. */
+  lastCwd(sessionId: string): Promise<string | undefined>
+  listSessions(projectKey: string): Promise<{ sessionId: string; mtime: number }[]>
+  /** Without `subpath`, the main transcript and its subagent transcripts. */
+  delete(sessionId: string, subpath?: string): Promise<void>
+  listSubkeys(sessionId: string): Promise<string[]>
+  head(sessionId: string): Promise<TranscriptHead>
+  /** Whether a row with a uuid not in `own` landed in the main transcript after row `since` (warm.ts `tailMoved`). */
+  moved(sessionId: string, since: string | null, own: readonly string[]): Promise<boolean>
+  /** Whether a user entry landed in the main transcript after row `mark` (turnHost.ts). */
+  userLanded(sessionId: string, mark: number): Promise<boolean>
+}
+
+/** The fence's check in `tx`, on the session's row, locked FOR SHARE. */
+async function fenceHolds(tx: TransactionSql, sessionId: string, fence: AppendFence): Promise<boolean> {
+  if (!isUuid(sessionId)) return false
+  const rows = await tx`
+    SELECT 1 FROM ai_sessions WHERE id = ${sessionId}::uuid AND turn_attempt = ${fence.attempt}
+      AND (durable_turn_id::text = ${fence.turnId} OR durable_turn_id IS NULL) FOR SHARE`
+  return rows.length > 0
+}
+
+/** The transcript's SQL (until the API lists area `transcripts`), sealing under the sessions' data keys. */
+export class PgTranscriptRows implements TranscriptRows {
   private readonly sql: Sql
   private readonly keys: PayloadKeys | undefined
   /** `keys` is the data keys of sessions; without them the store reads legacy plaintext but never appends. */
-  constructor(sql: Sql, options: { keys?: PayloadKeys } = {}) {
+  constructor(sql: Sql, keys: PayloadKeys | undefined) {
     this.sql = sql
-    this.keys = options.keys
+    this.keys = keys
   }
 
   private async keyOf(sessionId: string, create: boolean): Promise<Buffer> {
@@ -123,30 +170,7 @@ export class PostgresSessionStore implements SessionStore {
     return this.keys.keyFor(`session-${sessionId}`, create)
   }
 
-  /** The tail of each session's appends: the contract keeps append-call order, and a call's key lookup and id reservation are not one statement. */
-  private readonly appending = new Map<string, Promise<unknown>>()
-
-  async append(key: SessionKey, entries: SessionStoreEntry[]): Promise<void> {
-    await this.appendIf(key, entries)
-  }
-
-  /**
-   * `append`, only while `fence` holds, checked in the transaction that inserts the rows (an
-   * AgentSession placement that still holds its turn, sessions/turnHost.ts). Whether it was written.
-   */
-  async appendIf(key: SessionKey, entries: SessionStoreEntry[], fence?: AppendFence): Promise<boolean> {
-    if (entries.length === 0) return true
-    const turn = (this.appending.get(key.sessionId) ?? Promise.resolve()).then(() => this.appendNow(key, entries, fence))
-    const tail = turn.catch(() => {})
-    this.appending.set(key.sessionId, tail)
-    try {
-      return await turn
-    } finally {
-      if (this.appending.get(key.sessionId) === tail) this.appending.delete(key.sessionId)
-    }
-  }
-
-  private async appendNow(key: SessionKey, entries: SessionStoreEntry[], fence?: AppendFence): Promise<boolean> {
+  async append(key: SessionKey, entries: SessionStoreEntry[], fence?: AppendFence): Promise<boolean> {
     const subpath = subpathOf(key)
     const dek = await this.keyOf(key.sessionId, true)
     try {
@@ -181,7 +205,7 @@ export class PostgresSessionStore implements SessionStore {
         await tx`SELECT pg_advisory_xact_lock_shared(hashtext(${payloadKeyLock(subject)}))`
         const [forgotten] = await tx`SELECT 1 FROM ai_forgotten_subjects WHERE subject = ${subject}`
         if (forgotten) throw new SubjectForgotten(`${subject} was forgotten: its transcript is not written`)
-        if (fence && !(await fence(tx))) return false
+        if (fence && !(await fenceHolds(tx, key.sessionId, fence))) return false
         await tx`
           INSERT INTO ai_session_entries ${tx(rows, 'id', 'project_key', 'session_id', 'subpath', 'uuid', 'entry_type', 'sealed')}
           ON CONFLICT (session_id, subpath, uuid) WHERE uuid IS NOT NULL DO NOTHING`
@@ -192,42 +216,33 @@ export class PostgresSessionStore implements SessionStore {
     }
   }
 
-  async load(key: SessionKey): Promise<SessionStoreEntry[] | null> {
-    const subpath = subpathOf(key)
-    if (subpath === '') {
-      const entries = await transcriptOf(this.sql, (sessionId, create) => this.keyOf(sessionId, create), key.sessionId)
-      return entries.length === 0 ? null : entries
-    }
-    const rows = await this.sql<EntryRow[]>`
-      SELECT id::text AS id, uuid, entry, sealed FROM ai_session_entries
-      WHERE session_id = ${key.sessionId} AND subpath = ${subpath}
-      ORDER BY ai_session_entries.id`
-    if (rows.length === 0) return null
-    return this.opened(key.sessionId, subpath, rows)
+  transcript(sessionId: string): Promise<SessionStoreEntry[]> {
+    return transcriptOf(this.sql, (id, create) => this.keyOf(id, create), sessionId)
   }
 
-  /**
-   * The newest row without a uuid of this `type` in the key's transcript, or null. Found by the
-   * plaintext `entry_type`; a row from before sealing has none, so its text is matched instead.
-   */
-  async lastOfType(key: SessionKey, type: string): Promise<SessionStoreEntry | null> {
-    const subpath = subpathOf(key)
+  async subpath(sessionId: string, subpath: string): Promise<SessionStoreEntry[]> {
     const rows = await this.sql<EntryRow[]>`
       SELECT id::text AS id, uuid, entry, sealed FROM ai_session_entries
-      WHERE session_id = ${key.sessionId} AND subpath = ${subpath} AND uuid IS NULL AND NOT inherited
+      WHERE session_id = ${sessionId} AND subpath = ${subpath}
+      ORDER BY ai_session_entries.id`
+    return this.opened(sessionId, subpath, rows)
+  }
+
+  /** Found by the plaintext `entry_type`; a row from before sealing has none, so its text is matched instead. */
+  async lastOfType(sessionId: string, subpath: string, type: string): Promise<SessionStoreEntry | null> {
+    const rows = await this.sql<EntryRow[]>`
+      SELECT id::text AS id, uuid, entry, sealed FROM ai_session_entries
+      WHERE session_id = ${sessionId} AND subpath = ${subpath} AND uuid IS NULL AND NOT inherited
         AND (entry_type = ${type} OR (entry_type IS NULL AND entry LIKE ${`%"${type}"%`}))
       ORDER BY ai_session_entries.id DESC LIMIT 1`
-    return rows.length === 0 ? null : (await this.opened(key.sessionId, subpath, rows))[0]!
+    return rows.length === 0 ? null : (await this.opened(sessionId, subpath, rows))[0]!
   }
 
   /**
-   * The working directory the main transcript's newest entry ran in (Claude Code writes its
-   * `cwd` on each user and assistant entry), or undefined when no entry names one (#5867).
    * The session's own newest rows first; a session with none of its own yet (a fork before its
    * first turn) reads its transcript as it loads, through its parent's cut.
    */
   async lastCwd(sessionId: string): Promise<string | undefined> {
-    const cwdOf = (entries: SessionStoreEntry[]) => entries.findLast((e) => typeof e.cwd === 'string' && e.cwd !== '')?.cwd as string | undefined
     const rows = await this.sql<EntryRow[]>`
       SELECT id::text AS id, uuid, entry, sealed FROM ai_session_entries
       WHERE session_id = ${sessionId} AND subpath = '' AND NOT inherited
@@ -237,7 +252,7 @@ export class PostgresSessionStore implements SessionStore {
       const own = cwdOf((await this.opened(sessionId, '', rows)).reverse())
       if (own !== undefined) return own
     }
-    return cwdOf(await transcriptOf(this.sql, (id, create) => this.keyOf(id, create), sessionId))
+    return cwdOf(await this.transcript(sessionId))
   }
 
   private async opened(sessionId: string, subpath: string, rows: EntryRow[]): Promise<SessionStoreEntry[]> {
@@ -253,27 +268,152 @@ export class PostgresSessionStore implements SessionStore {
     return rows.map((row) => ({ sessionId: row.session_id, mtime: Number(row.mtime) }))
   }
 
-  async delete(key: SessionKey): Promise<void> {
-    // The main transcript takes its subagent transcripts with it.
-    if (key.subpath === undefined) {
-      await this.sql`DELETE FROM ai_session_entries WHERE session_id = ${key.sessionId}`
+  async delete(sessionId: string, subpath?: string): Promise<void> {
+    if (subpath === undefined) {
+      await this.sql`DELETE FROM ai_session_entries WHERE session_id = ${sessionId}`
     } else {
-      await this.sql`
-        DELETE FROM ai_session_entries WHERE session_id = ${key.sessionId} AND subpath = ${key.subpath}`
+      await this.sql`DELETE FROM ai_session_entries WHERE session_id = ${sessionId} AND subpath = ${subpath}`
     }
   }
 
-  async listSubkeys(key: { projectKey: string; sessionId: string }): Promise<string[]> {
+  async listSubkeys(sessionId: string): Promise<string[]> {
     const rows = await this.sql<{ subpath: string }[]>`
       SELECT DISTINCT subpath FROM ai_session_entries
-      WHERE session_id = ${key.sessionId} AND subpath <> ''
+      WHERE session_id = ${sessionId} AND subpath <> ''
       ORDER BY subpath`
     return rows.map((row) => row.subpath)
   }
 
+  async head(sessionId: string): Promise<TranscriptHead> {
+    const [[row], exists] = await Promise.all([
+      this.sql<{ since: string | null }[]>`
+        SELECT (SELECT max(id) FROM ai_session_entries
+          WHERE session_id = ${sessionId} AND subpath = '' AND uuid IS NOT NULL AND NOT inherited)::text AS since`,
+      transcriptExists(this.sql, sessionId),
+    ])
+    return { exists, since: row?.since ?? null }
+  }
+
+  async moved(sessionId: string, since: string | null, own: readonly string[]): Promise<boolean> {
+    const other = await this.sql<{ uuid: string }[]>`
+      SELECT uuid FROM ai_session_entries
+      WHERE session_id = ${sessionId} AND subpath = '' AND uuid IS NOT NULL AND NOT inherited
+        AND id > ${since ?? '0'}::bigint AND NOT (uuid = ANY(${[...own]}::text[]))
+      LIMIT 1`
+    return other.length > 0
+  }
+
+  async userLanded(sessionId: string, mark: number): Promise<boolean> {
+    const rows = await this.sql<{ typed: boolean; entry: string | null }[]>`
+      SELECT entry_type = 'user' AS typed, entry FROM ai_session_entries
+      WHERE session_id = ${sessionId} AND subpath = '' AND id > ${mark} AND NOT inherited
+        AND (entry_type = 'user' OR (entry_type IS NULL AND entry LIKE '%"user"%'))
+      ORDER BY id`
+    return rows.some((row) => {
+      if (row.typed) return true
+      try {
+        const parsed: unknown = JSON.parse(row.entry ?? '')
+        return typeof parsed === 'object' && parsed !== null && (parsed as { type?: unknown }).type === 'user'
+      } catch {
+        return false
+      }
+    })
+  }
+}
+
+/** The newest non-empty `cwd` of `entries` (Claude Code writes its `cwd` on each user and assistant entry). */
+export const cwdOf = (entries: SessionStoreEntry[]): string | undefined =>
+  entries.findLast((e) => typeof e.cwd === 'string' && e.cwd !== '')?.cwd as string | undefined
+
+export class PostgresSessionStore implements SessionStore {
+  private readonly rows: TranscriptRows
+  /**
+   * `keys` is the data keys of sessions; without them the store reads legacy plaintext but never
+   * appends. `rows` is where the rows are kept: `PgTranscriptRows` on `sql` when omitted, the
+   * API's routes once main.ts gates them in.
+   */
+  constructor(sql: Sql, options: { keys?: PayloadKeys; rows?: TranscriptRows } = {}) {
+    this.rows = options.rows ?? new PgTranscriptRows(sql, options.keys)
+  }
+
+  /** The tail of each session's appends: the contract keeps append-call order, and a call's key lookup and id reservation are not one statement. */
+  private readonly appending = new Map<string, Promise<unknown>>()
+
+  async append(key: SessionKey, entries: SessionStoreEntry[]): Promise<void> {
+    await this.appendIf(key, entries)
+  }
+
+  /**
+   * `append`, only while `fence` holds, checked in the transaction that inserts the rows (an
+   * AgentSession placement that still holds its turn, sessions/turnHost.ts). Whether it was written.
+   */
+  async appendIf(key: SessionKey, entries: SessionStoreEntry[], fence?: AppendFence): Promise<boolean> {
+    if (entries.length === 0) return true
+    const turn = (this.appending.get(key.sessionId) ?? Promise.resolve()).then(() => this.rows.append(key, entries, fence))
+    const tail = turn.catch(() => {})
+    this.appending.set(key.sessionId, tail)
+    try {
+      return await turn
+    } finally {
+      if (this.appending.get(key.sessionId) === tail) this.appending.delete(key.sessionId)
+    }
+  }
+
+  async load(key: SessionKey): Promise<SessionStoreEntry[] | null> {
+    const subpath = subpathOf(key)
+    const entries = subpath === '' ? await this.rows.transcript(key.sessionId) : await this.rows.subpath(key.sessionId, subpath)
+    return entries.length === 0 ? null : entries
+  }
+
+  /**
+   * The newest row without a uuid of this `type` in the key's transcript, or null. Found by the
+   * plaintext `entry_type`; a row from before sealing has none, so its text is matched instead.
+   */
+  lastOfType(key: SessionKey, type: string): Promise<SessionStoreEntry | null> {
+    return this.rows.lastOfType(key.sessionId, subpathOf(key), type)
+  }
+
+  /**
+   * The working directory the main transcript's newest entry ran in (Claude Code writes its
+   * `cwd` on each user and assistant entry), or undefined when no entry names one (#5867).
+   * The session's own newest rows first; a session with none of its own yet (a fork before its
+   * first turn) reads its transcript as it loads, through its parent's cut.
+   */
+  lastCwd(sessionId: string): Promise<string | undefined> {
+    return this.rows.lastCwd(sessionId)
+  }
+
+  listSessions(projectKey: string): Promise<{ sessionId: string; mtime: number }[]> {
+    return this.rows.listSessions(projectKey)
+  }
+
+  async delete(key: SessionKey): Promise<void> {
+    // The main transcript takes its subagent transcripts with it.
+    await this.rows.delete(key.sessionId, key.subpath)
+  }
+
+  listSubkeys(key: { projectKey: string; sessionId: string }): Promise<string[]> {
+    return this.rows.listSubkeys(key.sessionId)
+  }
+
   /** Whether this session has a transcript to resume (decides `sessionId` vs `resume`): rows of its own, or a fork's parent. */
   async exists(sessionId: string): Promise<boolean> {
-    return transcriptExists(this.sql, sessionId)
+    return (await this.rows.head(sessionId)).exists
+  }
+
+  /** Whether a transcript is there to resume, and its own newest row with a uuid (warm.ts `spawn`). */
+  head(sessionId: string): Promise<TranscriptHead> {
+    return this.rows.head(sessionId)
+  }
+
+  /** Whether another writer's row landed in the main transcript after `since` (warm.ts `tailMoved`). */
+  moved(sessionId: string, since: string | null, own: readonly string[]): Promise<boolean> {
+    return this.rows.moved(sessionId, since, own)
+  }
+
+  /** Whether a user entry landed in the main transcript after row `mark` (turnHost.ts). */
+  userLanded(sessionId: string, mark: number): Promise<boolean> {
+    return this.rows.userLanded(sessionId, mark)
   }
 }
 

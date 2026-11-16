@@ -31,6 +31,7 @@ from typing import Any, Literal
 from psycopg import Connection
 from psycopg.types.json import Jsonb
 
+from scadbuddy.agent_data import events as event_log
 from scadbuddy.agent_data.gate_canonical import response_hash
 from scadbuddy.agent_data.gate_validate import (
     GateEntry,
@@ -177,18 +178,8 @@ def _append(
     """The agent's ``appendEventsIn`` in this transaction; the batch goes into ``logged``."""
     if not events:
         return
-    texts = [_dumps(e) for e in events]
-    rows = conn.execute(
-        "WITH s AS (UPDATE ai_sessions SET event_seq = event_seq + %(n)s, updated_at = now()"
-        " WHERE id = %(id)s RETURNING event_seq - %(n)s AS base)"
-        " INSERT INTO ai_session_events (session_id, seq, event)"
-        " SELECT %(id)s, s.base + e.ord, e.event"
-        " FROM s, unnest(%(events)s::text[]) WITH ORDINALITY AS e(event, ord) RETURNING seq",
-        {"n": len(texts), "id": session_id, "events": texts},
-    ).fetchall()
-    if len(rows) != len(texts):
-        raise LookupError(f"session {session_id} does not exist")
-    logged.append(Logged(session_id, events, sorted(int(r["seq"]) for r in rows)))
+    seqs = event_log.append_in(conn, session_id, [_dumps(e) for e in events])
+    logged.append(Logged(session_id, events, seqs))
 
 
 def _resolved(

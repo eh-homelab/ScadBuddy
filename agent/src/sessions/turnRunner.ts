@@ -40,6 +40,7 @@ import type { WorkspaceFiles } from '../workspace/store.js'
 import { directoryNote } from './directoryNote.js'
 import type { EventLog } from './eventLog.js'
 import type { ClaimedSession, SessionManagerDeps, SessionRecord, TurnPrincipal } from './manager.js'
+import type { SessionRows } from './rows.js'
 import { event } from './protocol.js'
 import { scrubForLog } from './sdkEvents.js'
 import type { PostgresSessionStore } from './store.js'
@@ -95,6 +96,8 @@ export type TurnRunnerDeps = Pick<
   events: Pick<EventLog, 'append'>
   /** The workspace http_request's `save_to_workspace` writes to (#2329). */
   files: WorkspaceFiles
+  /** The sessions' rows (rows.ts): what is left of a session's budget. */
+  rows: Pick<SessionRows, 'get'>
 }
 
 /** Everything fixed at spawn that decides whether a warm process may serve a turn (spec §5.3 "Reuse rule"). */
@@ -801,7 +804,7 @@ export class TurnRunner {
                               },
                               // The row's cost moves at the turn's end, so what this turn's own queries spent comes off too.
                               remaining: async () => {
-                                const left = await poolRemainingUsd(this.deps.sql, id)
+                                const left = await poolRemainingUsd(this.deps.rows, id)
                                 return left === undefined ? undefined : left - (slot.current?.nested?.usd ?? 0)
                               },
                             }),

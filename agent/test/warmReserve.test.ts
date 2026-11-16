@@ -88,11 +88,8 @@ function process(): WarmQuery & { closed: () => boolean } {
 function cache(maxEntries: number) {
   let clock = 1_000
   const spawned = new Map<string, ReturnType<typeof process>>()
-  // A session with no transcript: spawn and the tail read find nothing.
-  const sql = (() => Promise.resolve([{ tail: null, resume: false }])) as unknown as Sql
   const warm = new WarmSessions({
-    sql,
-    store: { lastOfType: () => Promise.resolve(null) },
+    store: { lastOfType: () => Promise.resolve(null), head: () => Promise.resolve({ exists: false, since: null }), moved: () => Promise.resolve(false) },
     maxEntries,
     idleMs: 600_000,
     now: () => clock,
@@ -422,11 +419,9 @@ describe('a new start under the session`s own id (#6387)', () => {
     const cwd = await tempDir('moved-cwd-')
     const log = vi.fn()
     const started: HarnessRun[] = []
-    // `found`: whether the table holds a transcript to resume (transcriptExists).
-    const sql = (() => Promise.resolve([{ found, since: null }])) as unknown as Sql
+    // `found`: whether the table holds a transcript to resume (the store's `head`).
     const warm = new WarmSessions({
-      sql,
-      store: { lastOfType: () => Promise.resolve(null) },
+      store: { lastOfType: () => Promise.resolve(null), head: () => Promise.resolve({ exists: found, since: null }), moved: () => Promise.resolve(false) },
       maxEntries: 8,
       idleMs: 600_000,
       log,

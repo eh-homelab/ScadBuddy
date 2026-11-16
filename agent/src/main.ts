@@ -71,7 +71,7 @@ import {
   withServiceCredential,
 } from './api/serviceCredential.js'
 import { untilBackendAnswers } from './api/backendUp.js'
-import { BLOB_AREAS, CrudAreas, FORGET_AREAS, GATE_AREAS, SECRET_AREAS, TASK_AREAS, WORKSPACE_AREAS } from './api/crudAreas.js'
+import { BLOB_AREAS, CrudAreas, FORGET_AREAS, GATE_AREAS, SECRET_AREAS, SESSION_AREAS, TASK_AREAS, WORKSPACE_AREAS } from './api/crudAreas.js'
 import { CrudApprovals } from './approvals/crudApprovals.js'
 import { CrudAudit } from './audit/crudAudit.js'
 import { CrudPending } from './gate/crudPending.js'
@@ -102,7 +102,12 @@ import { drainRetains, type MemoryOptions } from './memory/hindsight.js'
 import { shutdown } from './shutdown.js'
 import { shutdownTelemetry, traceListener } from './telemetry/runtime.js'
 import { harnessTools } from './tools/harness.js'
-import { SessionResources } from './sessions/touched.js'
+import { CrudResourceRows, PgResourceRows, type ResourceRows, SessionResources } from './sessions/touched.js'
+import { CrudSessionRows, PgSessionRows, type SessionRows } from './sessions/rows.js'
+import { CrudTranscriptRows } from './sessions/crudTranscripts.js'
+import { CrudEventRows } from './sessions/crudEvents.js'
+import { type EventRows, PgEventRows } from './sessions/eventLog.js'
+import { PgTranscriptRows, type TranscriptRows } from './sessions/store.js'
 import { crudCostPoster, OrderCosts, touchedSinks } from './sessions/orderCosts.js'
 import { ALL_TOOLS } from './tools/index.js'
 import { CrudFlowBlobs, gatedFlowBlobs, PgFlowBlobs } from './temporal/flowBlobs.js'
@@ -131,6 +136,7 @@ import {
   FilePayloadStore,
   CrudPayloadKeys,
   gatedPayloadKeys,
+  type PayloadKeys,
   PgPayloadKeys,
   subjectDataConverter,
 } from './temporal/payloadCodec.js'
@@ -254,9 +260,10 @@ const serviceCredential: CredentialSource | undefined =
 // with those areas listed this process needs no KEK for them. So do the key deletes and a flow
 // run's images (#5299 step 6, area `forget`). A session's background tasks and the agent's
 // command record (#5299 step 8, `TASK_AREAS`) follow the same rule, and so do the tool-call
-// gate's writes (#5299 step 10, `GATE_AREAS`), but for a run grant's check, which only the API runs.
+// gate's writes (#5299 step 10, `GATE_AREAS`), but for a run grant's check, which only the API runs,
+// and the sessions' rows and what their calls touched (#5299 step 9, `SESSION_AREAS`).
 const crudFetch = serviceCredential ? withServiceCredential(globalThis.fetch, serviceCredential, config.backendUrl) : globalThis.fetch
-const crudAreas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: [...SECRET_AREAS, ...FORGET_AREAS, ...STORE_AREAS, ...WORKSPACE_AREAS, ...BLOB_AREAS, ...TASK_AREAS, ...GATE_AREAS] })
+const crudAreas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: [...SECRET_AREAS, ...FORGET_AREAS, ...STORE_AREAS, ...WORKSPACE_AREAS, ...BLOB_AREAS, ...TASK_AREAS, ...GATE_AREAS, ...SESSION_AREAS] })
 crudAreas.start()
 // The small stores (#5299 step 5, api/crudStores.ts): each through its CRUD routes once the API
 // lists its area, over SQL until then.
@@ -274,6 +281,21 @@ const httpBodies =
   (sql: Sql): HttpBodiesFor =>
   (sessionId) =>
     gated<SavedBodies>(new PgHttpBodies(sql, sessionId), new CrudHttpBodies(config.backendUrl, sessionId, { fetch: crudFetch }), () => crudAreas.has('http-bodies'))
+// The sessions' rows and what their calls touched (#5299 step 9, backend api/crud_agent_sessions.py):
+// over SQL on `sql` until the API lists areas `sessions` and `session-resources`.
+const crudSessionRows = new CrudSessionRows(config.backendUrl, { fetch: crudFetch })
+const sessionRows = (sql: Sql): SessionRows => gated<SessionRows>(new PgSessionRows(sql), crudSessionRows, () => crudAreas.has('sessions'))
+const crudResourceRows = new CrudResourceRows(config.backendUrl, { fetch: crudFetch })
+const resourceRows = (sql: Sql): ResourceRows => gated<ResourceRows>(new PgResourceRows(sql), crudResourceRows, () => crudAreas.has('session-resources'))
+// The transcripts (#5299 step 9, part b, backend api/crud_agent_transcripts.py): sealed and opened
+// here with the sessions' data keys over SQL until the API lists area `transcripts`, and by the API after.
+const crudTranscripts = new CrudTranscriptRows(config.backendUrl, { fetch: crudFetch })
+const transcriptRows = (sql: Sql, keys: PayloadKeys | undefined): TranscriptRows =>
+  gated<TranscriptRows>(new PgTranscriptRows(sql, keys), crudTranscripts, () => crudAreas.has('transcripts'))
+// The sessions' event logs (#5299 step 9, part b, backend api/crud_agent_events.py): over SQL until
+// the API lists area `session-events`. An append in a caller's own transaction stays SQL.
+const crudEvents = new CrudEventRows(config.backendUrl, { fetch: crudFetch })
+const eventRows = (sql: Sql): EventRows => gated<EventRows>(new PgEventRows(sql), crudEvents, () => crudAreas.has('session-events'))
 // The headless browser's approved origins (#982), over `sql` or through area `browser-origins`.
 const browserOriginsOn = (sql: Sql) =>
   new BrowserOrigins(sql, settings, { crud: new CrudSessionOrigins(crudTarget), use: storeArea('browser-origins') })
@@ -450,7 +472,7 @@ if (database && orderCosts && role.http) {
 }
 if (database && orderCosts) {
   toolServices.touched = touchedSinks(
-    new SessionResources(database.sql, (err) => console.error('session resources: could not record a call:', (err as Error).message)),
+    new SessionResources(resourceRows(database.sql), (err) => console.error('session resources: could not record a call:', (err as Error).message)),
     orderCosts,
   )
 }
@@ -616,7 +638,7 @@ if (backgroundClient && backgroundTasks) {
 // The approval routes and the expiry sweep also serve approvals left pending
 // by a restart.
 const runtime = await readStartSettings({ database, settings }, console.log)
-if (database && !dataKeys) console.warn('sessions: no secret key, so no session transcript can be written; sessions cannot run')
+if (database && !dataKeys) console.warn('sessions: no secret key, so no session transcript can be written until the API lists area `transcripts`')
 // Seals the transcripts written before sealing, in the background once migrations have applied; a failure is retried at the next start.
 if (role.http && database && dataKeys) {
   void database
@@ -653,6 +675,10 @@ const sessions =
     ? new SessionManager({
         memory,
         sql: database.sql,
+        rows: sessionRows(database.sql),
+        resourceRows: resourceRows(database.sql),
+        transcripts: transcriptRows(database.sql, dataKeys),
+        eventRows: eventRows(database.sql),
         pendingRoutes,
         approvalRoutes: { crud: new CrudApprovals(crudTarget), use: () => crudAreas.has('approvals') },
         questionRoutes: { crud: new CrudQuestions(crudTarget), use: () => crudAreas.has('questions') },
@@ -1121,7 +1147,7 @@ const temporalWorker =
           ...turnToolActivities(turnToolDeps),
           default: turnToolActivity(turnToolDeps),
           // A flow's agent(...) and ask_session(...) (#1057, 6g): beside the tools, never one.
-          ...flowSessionActivities({ sql: temporal.sql, flows: new PgFlowRuns(temporal.sql, flowReads) }),
+          ...flowSessionActivities({ sql: temporal.sql, flows: new PgFlowRuns(temporal.sql, flowReads), events: eventRows(temporal.sql) }),
           ...operationActivities(commandKinds, operationStore),
           ...(background ?? {}),
         },

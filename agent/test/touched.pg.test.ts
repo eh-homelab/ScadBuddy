@@ -7,7 +7,7 @@ import { createApp } from '../src/app.js'
 import type { Database } from '../src/db.js'
 import { originPolicy } from '../src/http/origins.js'
 import type { SessionManager } from '../src/sessions/manager.js'
-import { EXTRACTORS, type Extractor, MAX_TOUCHES_PER_CALL, RESOURCE_TYPES, SessionResources } from '../src/sessions/touched.js'
+import { EXTRACTORS, type Extractor, MAX_TOUCHES_PER_CALL, PgResourceRows, RESOURCE_TYPES, SessionResources } from '../src/sessions/touched.js'
 import { harnessPrincipal } from '../src/auth/principal.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
@@ -43,7 +43,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`session resources in Postgres${TEST_DATABAS
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     failures.length = 0
-    store = new SessionResources(db.sql, (err) => failures.push(err))
+    store = new SessionResources(new PgResourceRows(db.sql), (err) => failures.push(err))
     const { runner } = scriptedRunner(() => ({ reply: 'ok' }))
     m = manager({ sql: db.sql, paths: await tempPaths(), run: runner })
   })
@@ -154,7 +154,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`session resources in Postgres${TEST_DATABAS
 
   it('reports a row it cannot write, and never throws', async () => {
     const errors: unknown[] = []
-    const broken = new SessionResources(db.sql, (err) => errors.push(err))
+    const broken = new SessionResources(new PgResourceRows(db.sql), (err) => errors.push(err))
     // No such session: the foreign key refuses the row.
     await broken.record({
       sessionId: '33333333-3333-4333-8333-333333333333',
@@ -169,7 +169,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`session resources in Postgres${TEST_DATABAS
   it('reports a row the CHECK refuses through onError, and writes none of the call', async () => {
     const { session } = await m.start(browser, { origin: 'chat' })
     const errors: unknown[] = []
-    const broken = new SessionResources(db.sql, (err) => errors.push(err))
+    const broken = new SessionResources(new PgResourceRows(db.sql), (err) => errors.push(err))
     // An action outside the CHECK: the whole call's INSERT is refused, the valid row with it.
     const bad = { content: [{ type: 'text' as const, text: JSON.stringify({ id: 'p1' }) }] }
     const original = EXTRACTORS.save_preset!

@@ -17,6 +17,7 @@ import { ASK_USER, TIMEOUT_MIN_S, WAIT_FOR_USER } from '../src/gate/entry.js'
 import { durableRequestId } from '../src/gate/ids.js'
 import { TAB_WAIT_CALL } from '../src/sessions/attentionGate.js'
 import { CLAIMED_AT, resolveTabWaits, runningDurableTurn, type SessionManager, TAB_WAIT_S, TAB_WAITS_PER_TURN, waitForTab } from '../src/sessions/manager.js'
+import { PgSessionRows } from '../src/sessions/rows.js'
 import { browserTools } from '../src/tools/browser.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { SERVER_NAME } from '../src/tools/projections.js'
@@ -787,9 +788,9 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
     const [row] = await db.sql<{ turn: string; at: string }[]>`
       SELECT durable_turn_id::text AS turn, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at
       FROM ai_sessions WHERE id = ${session.id}`
-    const first = (await runningDurableTurn(db.sql, session.id, row!.turn))!.session.claimedAt
+    const first = (await runningDurableTurn(new PgSessionRows(db.sql), session.id, row!.turn))!.session.claimedAt
     await db.sql`UPDATE ai_sessions SET updated_at = now() + interval '1 minute' WHERE id = ${session.id}`
-    const later = (await runningDurableTurn(db.sql, session.id, row!.turn))!.session.claimedAt
+    const later = (await runningDurableTurn(new PgSessionRows(db.sql), session.id, row!.turn))!.session.claimedAt
     release()
     await turn!.done
     expect(later).toBe(first)

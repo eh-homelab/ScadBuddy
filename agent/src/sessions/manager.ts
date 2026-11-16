@@ -15,7 +15,7 @@ import type { Sql } from 'postgres'
 import type { BrowserOrigins } from '../browser/store.js'
 import type { Tier } from '../auth/principal.js'
 import type { Credential } from '../credentials.js'
-import { payloadKeyLock, type PayloadKeys } from '../temporal/payloadCodec.js'
+import type { PayloadKeys } from '../temporal/payloadCodec.js'
 import type { ProbeVerdict } from '../harness/credentialErrors.js'
 import type { CredentialSource } from '../harness/fallback.js'
 import type { HarnessPaths } from '../harness/options.js'
@@ -40,7 +40,7 @@ import { SERVER_NAME } from '../tools/projections.js'
 import type { FlowTurn, TabWait, Tool, WaitForTab } from '../tools/registry.js'
 import type { AuditContext, AuditDeps } from '../audit/log.js'
 import type { AppendHook } from './busEvents.js'
-import { EventLog, type LoggedEvent } from './eventLog.js'
+import { EventLog, type EventRows, ForkParentGone, type LoggedEvent } from './eventLog.js'
 import {
   canSee,
   event,
@@ -60,9 +60,10 @@ import { SessionFiles, type WorkspaceFiles } from '../workspace/store.js'
 import { SessionEdits } from './edits.js'
 import { forkEventCut, transcriptCut } from './forkPoint.js'
 import type { TitleResolver } from './sdkEvents.js'
-import { PostgresSessionStore } from './store.js'
+import { PostgresSessionStore, type TranscriptRows } from './store.js'
 import type { UserImage } from './images.js'
-import { type ResourceRef, SessionResources, type TouchedRecord } from './touched.js'
+import { PgResourceRows, type ResourceRows, SessionResources, type TouchedRecord } from './touched.js'
+import { type ListFilter, PgSessionRows, ROW_TITLE_MAX, type SessionRow, type SessionRows, type TurnRow } from './rows.js'
 import { type DurableGate, DurableUnavailable } from '../gate/durable.js'
 import type { DurableTurns, SessionRuntime } from './durable.js'
 import { PendingProjection, type PendingReads } from '../gate/projection.js'
@@ -75,7 +76,7 @@ import { TurnRunner } from './turnRunner.js'
 import { type WarmQuery, WarmSessions } from './warm.js'
 import { notifyWarmEvict } from './warmEvict.js'
 import type { TurnCoreDeps } from './turnCore.js'
-import { POOL_BUDGET, POOL_COST, systemAppend } from './turnShared.js'
+import { systemAppend } from './turnShared.js'
 import { FlowQueue } from '../flows/queue.js'
 
 // The session manager (#300, spec §6): durable, shared sessions that a human
@@ -150,6 +151,7 @@ import { FlowQueue } from '../flows/queue.js'
 export const SETTING_SESSION_MAX_TURNS = 'session_max_turns'
 export const SETTING_SESSION_BUDGET_USD = 'session_max_budget_usd'
 export { SESSION_MODES, type SessionMode } from './protocol.js'
+export { CLAIMED_AT, likeLiteral, type ListFilter, listQuery } from './rows.js'
 export { BROWSER_TOOLS_GUIDE, MEMORY_TEXT_MAX, memoryText, POOL_BUDGET, POOL_COST, recordMemoryActivity, SETTING_MODEL, systemAppend } from './turnShared.js'
 
 /** The largest session budget Settings takes, and the most a raise can take one session's budget to. */
@@ -497,22 +499,8 @@ export type ClaimedSession = SessionRecord & {
   claimedAt: string
 }
 
-/**
- * When the running turn was claimed (`turn_started_at`, the send's claim) as `claimedAt`:
- * ISO 8601 in UTC at Postgres's microseconds, whatever the connection's `DateStyle` and
- * `TimeZone` (a plain `::text` follows them). Not `updated_at`, which every event and status
- * change moves: each placement of the turn reads it again (#5050). A row no turn was claimed
- * on since `turn_started_at` came gives its `updated_at`.
- */
-export const CLAIMED_AT = `to_char(coalesce(turn_started_at, updated_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS claimed_at`
-
-/**
- * Whether the running turn is offered the background built-ins (#5870): the session keeps them
- * (`background_tools`) and its turn was not sent by a flow run (`turn_flow`, durable.ts `send`).
- */
-const BACKGROUND_TOOLS = '(background_tools AND NOT turn_flow) AS background_tools'
-
-type ClaimRow = Row & { unpriced_cost_usd: number; claimed_at: string; agent_model: string | null; agent_effort: EffortLevel | null; agent_type: string | null; background_tools: boolean }
+/** A claim's row: what a turn reads besides the record, `background_tools` as the turn is offered them. */
+type ClaimRow = SessionRow & { unpriced_cost_usd: number; claimed_at: string; agent_model: string | null; agent_effort: EffortLevel | null; agent_type: string | null; background_tools: boolean }
 
 const claimed = (row: ClaimRow): ClaimedSession => ({
   ...record(row),
@@ -530,21 +518,25 @@ const claimed = (row: ClaimRow): ClaimedSession => ({
  * (`durable_turn_id`, written by DurableTurns.send's claim), with the sender's tiers.
  */
 export async function runningDurableTurn(
-  sql: Sql,
+  rows: Pick<SessionRows, 'get'>,
   id: string,
   turnId: string,
 ): Promise<{ session: ClaimedSession; principal: TurnPrincipal } | undefined> {
-  if (!isUuid(id)) return undefined
+  const row = await rows.get(id)
+  if (!row || row.durable_turn_id !== turnId || !TURN_HOLDS.includes(row.status)) return undefined
   // A claim's shape, so a Workflow agent's model, effort and type assemble as its classic turns do.
-  const [row] = await sql.unsafe<(ClaimRow & { turn_tiers: { tiers?: Tier[] } | null })[]>(
-    `SELECT ${COLUMNS}, unpriced_cost_usd, agent_model, agent_effort, agent_type, ${BACKGROUND_TOOLS}, ${CLAIMED_AT}, turn_tiers FROM ai_sessions
-     WHERE id = $1 AND durable_turn_id = $2 AND status IN ('running', 'waiting_approval', 'waiting_input')`,
-    [id, turnId],
-  )
-  if (!row) return undefined
-  const tiers = row.turn_tiers?.tiers
-  return { session: claimed(row), principal: tiers ? { tiers } : {} }
+  const tiers = row.turn_tiers?.tiers as Tier[] | undefined
+  return { session: claimed({ ...row, background_tools: offeredBackground(row) }), principal: tiers ? { tiers } : {} }
 }
+
+/** The statuses a running durable turn holds the row in. */
+const TURN_HOLDS: readonly SessionStatus[] = ['running', 'waiting_approval', 'waiting_input']
+
+/**
+ * Whether the running turn is offered the background built-ins (#5870): the session keeps them
+ * (`background_tools`) and its turn was not sent by a flow run (`turn_flow`, durable.ts `send`).
+ */
+const offeredBackground = (row: TurnRow): boolean => row.background_tools && !row.turn_flow
 
 export type TurnOutcome =
   | { kind: 'result'; subtype: SDKResultMessage['subtype']; costUsd: number; turns: number }
@@ -622,38 +614,6 @@ export type SendOptions = {
 /** Who a turn's in-process tools act for, beyond the session's owner (SendOptions.tiers). */
 export type TurnPrincipal = { tiers?: readonly Tier[] }
 
-export type ListFilter = {
-  status?: SessionStatus
-  origin?: Origin
-  limit?: number
-  /** Only sessions whose tool calls touched it (#931, touched.ts `ResourceRef`). */
-  resource?: ResourceRef
-  /**
-   * Archived sessions (#1885): left out (`exclude`, the default, as the panel's list
-   * leaves them out), the only ones listed (`only`, the archive view), or both (`include`).
-   */
-  archived?: 'exclude' | 'only' | 'include'
-  /**
-   * #4703 — only sessions whose title, or the path of a file in whose workspace, holds this
-   * text, ignoring case (the workspace file picker's search). Matched before `limit`, so an
-   * older match is found.
-   */
-  search?: string
-  /**
-   * #4703 — the file kinds a target takes, as a file input's `accept` checked by
-   * routes/workspacePicker.ts (`.ext`, `type/subtype`, `type/*`, lowercase). It narrows
-   * `search`'s path match and `withFile` to those files. Empty or left out: any file.
-   */
-  accept?: readonly string[]
-  /** #4703 — only sessions whose workspace holds a file `accept` takes. Matched before `limit`. */
-  withFile?: boolean
-}
-
-/** `text` as a literal part of an ILIKE pattern: its `%`, `_` and backslash match themselves. */
-export function likeLiteral(text: string): string {
-  return text.replace(/[\\%_]/g, (c) => `\\${c}`)
-}
-
 /** Reads ai_settings; SettingsStore (credentials.ts) is one. */
 export type SettingsReader = { get<T>(key: string): Promise<T | undefined> }
 
@@ -706,6 +666,14 @@ export type SessionManagerDeps = {
   /** The API's `questions` routes (gate/crudQuestions.ts), which the questions take while `use()` holds. */
   questionRoutes?: { crud: QuestionRoutes; use: () => boolean } | undefined
   sql: Sql
+  /** The sessions' rows (`PgSessionRows` on `sql` when omitted; gated to the API's routes in main.ts, #5299 step 9). */
+  rows?: SessionRows
+  /** Where what a session's calls touched is kept (`PgResourceRows` on `sql` when omitted; gated in main.ts). */
+  resourceRows?: ResourceRows
+  /** Where the transcripts' rows are kept (`PgTranscriptRows` on `sql` with `payloadKeys` when omitted; gated in main.ts, #5299 step 9). */
+  transcripts?: TranscriptRows
+  /** Where the sessions' event logs are kept (`PgEventRows` on `sql` when omitted; gated in main.ts, #5299 step 9). */
+  eventRows?: EventRows
   /** The backend's flow tables, through its CRUD routes (flows/backendReads.ts, #5299 D7). */
   flowReads: FlowRunReads
   paths: HarnessPaths
@@ -878,48 +846,7 @@ export type SessionManagerDeps = {
   stderr?: (line: string) => void
 }
 
-type Row = {
-  id: string
-  origin: Origin
-  owner_kind: Owner['kind']
-  owner_id: string
-  owner_label: string
-  creator_kind: Owner['kind']
-  creator_id: string
-  offer_kind: Owner['kind'] | null
-  offer_id: string | null
-  offer_label: string | null
-  offer_until: Date | null
-  status: SessionStatus
-  title: string
-  tags: string[]
-  scope: Record<string, unknown>
-  parent_id: string | null
-  runtime: SessionRuntime | null
-  max_turns: number
-  budget_usd: number
-  cost_usd: number
-  pool_cost_usd: number
-  turns: number
-  turn_active: boolean
-  created_at: Date
-  updated_at: Date
-  archived_at: Date | null
-}
-
-/** A pending handoff offer, read as none once it has expired (the columns stay until the next change clears them). */
-const LIVE_OFFER = 'pending_owner_until > now()'
-
-const COLUMNS = `id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id,
-  CASE WHEN ${LIVE_OFFER} THEN pending_owner_kind END AS offer_kind,
-  CASE WHEN ${LIVE_OFFER} THEN pending_owner_id END AS offer_id,
-  CASE WHEN ${LIVE_OFFER} THEN pending_owner_label END AS offer_label,
-  CASE WHEN ${LIVE_OFFER} THEN pending_owner_until END AS offer_until,
-  status, title, tags, scope, parent_id, runtime, max_turns, ${POOL_BUDGET} AS budget_usd, cost_usd,
-  ${POOL_COST} AS pool_cost_usd, turns,
-  (runtime = 'unified' AND durable_turn_id IS NOT NULL) AS turn_active, created_at, updated_at, archived_at`
-
-function record(row: Row): SessionRecord {
+function record(row: SessionRow): SessionRecord {
   return {
     id: row.id,
     origin: row.origin,
@@ -966,75 +893,6 @@ export function titleFrom(prompt: string): string {
   return points.length > TITLE_MAX ? `${points.slice(0, TITLE_MAX - 1).join('')}…` : points.join('')
 }
 
-/**
- * The SQL behind `list()`, exported so a test can EXPLAIN it: the owner-or-
- * creator-or-offered filter is served by the ai_sessions_owner,
- * ai_sessions_creator (backend/scadbuddy/migrations_agent/20260928T0107Z_sessions.sql) and
- * ai_sessions_pending_owner (20260929T1825Z_session_handoff_offers.sql) indexes.
- */
-export function listQuery(principal: Owner, filter: ListFilter = {}): { text: string; params: (string | number)[] } {
-  const where: string[] = []
-  const params: (string | number)[] = []
-  if (principal.kind !== 'browser') {
-    params.push(principal.kind, principal.id)
-    where.push(
-      '((owner_kind = $1 AND owner_id = $2) OR (creator_kind = $1 AND creator_id = $2)' +
-        ` OR (pending_owner_kind = $1 AND pending_owner_id = $2 AND ${LIVE_OFFER}))`,
-    )
-  }
-  if (filter.status) {
-    params.push(filter.status)
-    where.push(`status = $${params.length}`)
-  }
-  if (filter.origin) {
-    params.push(filter.origin)
-    where.push(`origin = $${params.length}`)
-  }
-  const archived = filter.archived ?? 'exclude'
-  if (archived !== 'include') where.push(archived === 'only' ? 'archived_at IS NOT NULL' : 'archived_at IS NULL')
-  if (filter.resource) {
-    // Served by ai_session_resources_model / _resource (20261001T1824Z_session_resources.sql).
-    let match: string
-    if (filter.resource.type === 'model') {
-      params.push(filter.resource.id)
-      match = `r.model_slug = $${params.length}`
-    } else {
-      params.push(filter.resource.type, filter.resource.id)
-      match = `r.resource_type = $${params.length - 1} AND r.resource_id = $${params.length}`
-    }
-    where.push(`EXISTS (SELECT 1 FROM ai_session_resources r WHERE r.session_id = ai_sessions.id AND ${match})`)
-  }
-  // A file of the session that `accept` takes: by its primary key's prefix (`workspace`,
-  // ai_session_files), then its extension or media type, as workspacePicker.ts `accepts`.
-  // Its parameters only when a filter below uses them: an unused one has no type to infer.
-  const accepted: string[] = []
-  for (const entry of filter.search || filter.withFile ? (filter.accept ?? []) : []) {
-    if (entry.startsWith('.')) {
-      params.push(`%${likeLiteral(entry)}`)
-      accepted.push(`lower(f.path) LIKE $${params.length}`)
-    } else if (entry.endsWith('/*')) {
-      params.push(`${likeLiteral(entry.slice(0, -1))}%`)
-      accepted.push(`lower(f.media_type) LIKE $${params.length}`)
-    } else {
-      params.push(entry)
-      accepted.push(`lower(f.media_type) = $${params.length}`)
-    }
-  }
-  const fileWhere = (extra: string) =>
-    `EXISTS (SELECT 1 FROM ai_session_files f WHERE f.workspace = 'session:' || ai_sessions.id::text` +
-    `${accepted.length ? ` AND (${accepted.join(' OR ')})` : ''}${extra})`
-  if (filter.search) {
-    params.push(`%${likeLiteral(filter.search)}%`)
-    const n = params.length
-    where.push(`(title ILIKE $${n} OR ${fileWhere(` AND f.path ILIKE $${n}`)})`)
-  }
-  if (filter.withFile) where.push(fileWhere(''))
-  params.push(Math.min(Math.max(filter.limit ?? 100, 1), 500))
-  const text = `SELECT ${COLUMNS} FROM ai_sessions ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-       ORDER BY updated_at DESC LIMIT $${params.length}`
-  return { text, params }
-}
-
 /** What a send gets while the service drains for a restart (`drain`). */
 export const RESTARTING = 'the agent service is restarting; send again in a moment'
 
@@ -1070,6 +928,8 @@ export class SessionManager {
    * plugin or package change on any replica: warmEvict.ts; main.ts LISTENs).
    */
   readonly warm: WarmSessions
+  /** The sessions' rows (rows.ts): over SQL, or the API's CRUD routes once it lists area `sessions` (main.ts). */
+  readonly rows: SessionRows
   private readonly deps: SessionManagerDeps
   /** Set by `drain`: a restart is coming, so no new turn starts here. */
   private draining = false
@@ -1088,11 +948,16 @@ export class SessionManager {
 
   constructor(deps: SessionManagerDeps) {
     this.deps = deps
-    this.store = new PostgresSessionStore(deps.sql, deps.payloadKeys ? { keys: deps.payloadKeys } : {})
-    this.touched = new SessionResources(deps.sql)
+    this.store = new PostgresSessionStore(deps.sql, {
+      ...(deps.payloadKeys ? { keys: deps.payloadKeys } : {}),
+      ...(deps.transcripts ? { rows: deps.transcripts } : {}),
+    })
+    this.rows = deps.rows ?? new PgSessionRows(deps.sql)
+    this.touched = new SessionResources(deps.resourceRows ?? new PgResourceRows(deps.sql))
     this.blobs = deps.blobs ?? new SessionBlobs(deps.sql)
     this.files = deps.workspace ?? new SessionFiles(deps.sql, { settings: deps.settings })
     this.events = new EventLog(deps.sql, {
+      ...(deps.eventRows ? { rows: deps.eventRows } : {}),
       ...(deps.pollMs === undefined ? {} : { pollMs: deps.pollMs }),
       ...(deps.onAppend ? { onAppend: deps.onAppend } : {}),
     })
@@ -1111,7 +976,6 @@ export class SessionManager {
     const pending = new PendingProjection(deps.sql)
     this.projection = deps.pendingRoutes ? gated<PendingReads>(pending, deps.pendingRoutes.crud, deps.pendingRoutes.use) : pending
     this.warm = new WarmSessions({
-      sql: deps.sql,
       store: this.store,
       maxEntries: deps.warm?.maxEntries ?? DEFAULT_WARM_MAX_ENTRIES,
       idleMs: deps.warm?.idleMs ?? DEFAULT_WARM_IDLE_MS,
@@ -1138,8 +1002,10 @@ export class SessionManager {
       warm: this.warm,
       endBackground: (id, why) => this.deps.background?.tasks.endSession(id, why) ?? Promise.resolve(0),
     })
-    this.runner = new TurnRunner({ ...deps, store: this.store, events: this.events, files: this.files })
+    this.runner = new TurnRunner({ ...deps, rows: this.rows, store: this.store, events: this.events, files: this.files })
     this.turnCore = {
+      rows: this.rows,
+      transcripts: this.store,
       runner: this.runner,
       warm: this.warm,
       events: this.events,
@@ -1155,10 +1021,8 @@ export class SessionManager {
   // -- reads -------------------------------------------------------------------
 
   private async row(id: string): Promise<SessionRecord | undefined> {
-    // Anything but a canonical UUID would make Postgres throw on the uuid
-    // column; it is simply not a session, so not_found.
-    if (!isUuid(id)) return undefined
-    const [row] = await this.deps.sql.unsafe<Row[]>(`SELECT ${COLUMNS} FROM ai_sessions WHERE id = $1`, [id])
+    // Anything but a canonical UUID is simply not a session (rows.ts), so not_found.
+    const row = await this.rows.get(id)
     return row ? record(row) : undefined
   }
 
@@ -1178,13 +1042,10 @@ export class SessionManager {
       // process at each resync, and the next flow turn spawns one again (a cold start), rather
       // than a slot holding a process the session's own next turn cannot reuse. A session a flow
       // started or forked (background_tools false) already has the flow's shape, so its process stays.
-      const [row] = await this.deps.sql.unsafe<ClaimRow[]>(
-        `SELECT ${COLUMNS}, 0::float8 AS unpriced_cost_usd, agent_model, agent_effort, agent_type, background_tools, ${CLAIMED_AT} FROM ai_sessions WHERE id = $1`,
-        [entry.sessionId],
-      )
+      const row = await this.rows.get(entry.sessionId)
       if (!row) return undefined
       const parts = entry.turn.fingerprintParts
-      const fresh = await this.runner.assemble(claimed(row), parts.tiers ? { tiers: parts.tiers as Tier[] } : {}, {
+      const fresh = await this.runner.assemble(claimed({ ...row, unpriced_cost_usd: 0 }), parts.tiers ? { tiers: parts.tiers as Tier[] } : {}, {
         // A rate-limited credential is still the one a healthy process runs on.
         includeCooling: true,
       })
@@ -1233,9 +1094,7 @@ export class SessionManager {
 
   /** Newest first. */
   async list(principal: Owner, filter: ListFilter = {}): Promise<SessionRecord[]> {
-    const { text, params } = listQuery(principal, filter)
-    const rows = await this.deps.sql.unsafe<Row[]>(text, params)
-    return rows.map(record)
+    return (await this.rows.list(principal, filter)).map(record)
   }
 
   /** The panel's `sessions.snapshot` for a principal (the session picker). */
@@ -1313,63 +1172,42 @@ export class SessionManager {
     const from = options.budgetOf
     const budgetUsd = from ? from.budgetUsd : fresh
     const forkOf = fields.forkOf
-    const insert = async (sql: Sql) => {
-      await sql`
-        INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id,
-                                 status, title, tags, scope, parent_id, runtime, max_turns, budget_usd, budget_root_id,
-                                 fork_parent_id, fork_cut, background_tools)
-        VALUES (${id}, ${fields.origin}, ${principal.kind}, ${principal.id}, ${principal.label},
-                ${principal.kind}, ${principal.id}, 'idle', ${fields.title}, ${sql.array(fields.tags)},
-                ${sql.json(fields.scope as never)}, ${fields.parentId}, ${fields.runtime ?? null}, ${maxTurns}, ${budgetUsd},
-                ${from ? sql`(SELECT coalesce(budget_root_id, id) FROM ai_sessions WHERE id = ${from.id})` : null},
-                ${forkOf?.parentId ?? null}, ${forkOf?.cut ?? null},
-                ${
-                  fields.backgroundTools === false
-                    ? false
-                    : fields.parentId
-                      ? sql`coalesce((SELECT background_tools FROM ai_sessions WHERE id = ${fields.parentId}), true)`
-                      : true
-                })`
-    }
-    if (options.rateLimited || forkOf) {
-      await this.deps.sql.begin(async (tx) => {
-        if (options.rateLimited) {
-          // Per owner, held until commit, so concurrent starts count each other.
-          await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`ai_sessions.start:${principal.kind}:${principal.id}`}, 0))`
-          await this.withinNewSessionLimit(principal, tx as unknown as Sql)
-        }
-        if (forkOf) {
-          // Under the parent's lock, shared, as an append is (store.ts appendNow): a forget of the
-          // parent either went first, and its tombstone refuses the fork here, or waits for this to
-          // commit and then finds the fork to copy its range into (copyForkRanges).
-          const subject = `session-${forkOf.parentId}`
-          await tx`SELECT pg_advisory_xact_lock_shared(hashtext(${payloadKeyLock(subject)}))`
-          const [forgotten] = await tx`SELECT 1 FROM ai_forgotten_subjects WHERE subject = ${subject}`
-          if (forgotten) throw new SessionError('not_found', `session ${forkOf.parentId} was forgotten; it cannot be forked`)
-        }
-        await insert(tx as unknown as Sql)
-      })
-    } else {
-      await insert(this.deps.sql)
-    }
+    const refused = await this.rows.insert({
+      id,
+      origin: fields.origin,
+      owner: principal,
+      title: fields.title,
+      tags: fields.tags,
+      scope: fields.scope,
+      parentId: fields.parentId,
+      runtime: fields.runtime ?? null,
+      maxTurns,
+      budgetUsd,
+      ...(from ? { budgetOf: from.id } : {}),
+      ...(forkOf ? { forkOf } : {}),
+      ...(fields.backgroundTools === false ? { backgroundTools: false as const } : {}),
+      ...(options.rateLimited ? { limit: this.newSessionLimit() } : {}),
+    })
+    if (refused === 'rate_limited') throw this.rateLimited()
+    if (refused === 'forgotten') throw new SessionError('not_found', `session ${forkOf?.parentId} was forgotten; it cannot be forked`)
     const session = await this.row(id)
     if (!session) throw new Error(`session ${id} vanished after insert`)
     return session
   }
 
-  /** Throws `rate_limited` when `principal` has made MAX_NEW_SESSIONS in the window. */
-  private async withinNewSessionLimit(principal: Owner, sql: Sql): Promise<void> {
-    const { max, windowMs } = this.deps.newSessions ?? { max: MAX_NEW_SESSIONS, windowMs: NEW_SESSION_WINDOW_MS }
-    const [recent] = await sql<{ n: number }[]>`
-      SELECT count(*)::int AS n FROM ai_sessions
-      WHERE owner_kind = ${principal.kind} AND owner_id = ${principal.id}
-        AND created_at > now() - (${windowMs} * interval '1 millisecond')`
-    if ((recent?.n ?? 0) >= max) {
-      throw new SessionError(
-        'rate_limited',
-        `too many new sessions: at most ${max} per ${Math.round(windowMs / 1000)} s; wait and try again`,
-      )
-    }
+  private newSessionLimit(): { max: number; windowMs: number } {
+    return this.deps.newSessions ?? { max: MAX_NEW_SESSIONS, windowMs: NEW_SESSION_WINDOW_MS }
+  }
+
+  private rateLimited(): SessionError {
+    const { max, windowMs } = this.newSessionLimit()
+    return new SessionError('rate_limited', `too many new sessions: at most ${max} per ${Math.round(windowMs / 1000)} s; wait and try again`)
+  }
+
+  /** Throws `rate_limited` when `principal` has made MAX_NEW_SESSIONS in the window (a precheck: the insert's count under the lock holds). */
+  private async withinNewSessionLimit(principal: Owner): Promise<void> {
+    const { max, windowMs } = this.newSessionLimit()
+    if ((await this.rows.startedRecently(principal, windowMs)) >= max) throw this.rateLimited()
   }
 
   async start(
@@ -1415,12 +1253,12 @@ export class SessionManager {
 
   /**
    * Whether session `id`'s running turn is offered the background built-ins (#5870,
-   * BACKGROUND_TOOLS): what a session it starts, forks or sends a turn to inherits
+   * `offeredBackground`): what a session it starts, forks or sends a turn to inherits
    * (tools/sessions.ts). False for a session that is gone.
    */
   async keepsBackgroundTools(id: string): Promise<boolean> {
-    const [row] = await this.deps.sql.unsafe<{ background_tools: boolean }[]>(`SELECT ${BACKGROUND_TOOLS} FROM ai_sessions WHERE id = $1`, [id])
-    return row?.background_tools ?? false
+    const row = await this.rows.get(id)
+    return row ? offeredBackground(row) : false
   }
 
   /**
@@ -1446,9 +1284,7 @@ export class SessionManager {
     )
     const agent = options.agent
     if (agent && (agent.model || agent.effort || agent.type)) {
-      await this.deps.sql`
-        UPDATE ai_sessions SET agent_model = ${agent.model ?? null}, agent_effort = ${agent.effort ?? null}, agent_type = ${agent.type ?? null}
-         WHERE id = ${id}`
+      await this.rows.setAgent(id, { model: agent.model ?? null, effort: agent.effort ?? null, type: agent.type ?? null })
     }
     await this.events.append(id, [
       event({ type: 'session.started', sessionId: id, origin: session.origin, owner: session.owner, title: session.title, budgetUsd: session.budgetUsd, mode: session.mode }),
@@ -1660,13 +1496,7 @@ export class SessionManager {
     if (!target && !sameOwner(actor, session.owner)) {
       throw new SessionError('forbidden', `only the owner of session ${id} or the one it is offered to can cancel the offer`)
     }
-    const { to } = session.offer
-    const rows = await this.deps.sql`
-      UPDATE ai_sessions
-      SET pending_owner_kind = NULL, pending_owner_id = NULL, pending_owner_label = NULL,
-          pending_owner_until = NULL, updated_at = now()
-      WHERE id = ${id} AND pending_owner_kind = ${to.kind} AND pending_owner_id = ${to.id} AND pending_owner_until > now()`
-    if (rows.count === 0) return false
+    if (!(await this.rows.cancelOffer(id, session.offer.to))) return false
     await this.announceOwner(id)
     return true
   }
@@ -1674,12 +1504,7 @@ export class SessionManager {
   private async offer(session: SessionRecord, to: Owner): Promise<SessionRecord> {
     const ttlMs = this.deps.handoffOfferTtlMs ?? HANDOFF_OFFER_TTL_MS
     // Conditional on the owner read above, as a transfer is.
-    const rows = await this.deps.sql`
-      UPDATE ai_sessions
-      SET pending_owner_kind = ${to.kind}, pending_owner_id = ${to.id}, pending_owner_label = ${to.label},
-          pending_owner_until = now() + (${ttlMs} * interval '1 millisecond'), updated_at = now()
-      WHERE id = ${session.id} AND owner_kind = ${session.owner.kind} AND owner_id = ${session.owner.id}`
-    if (rows.count === 0) throw new SessionError('busy', `session ${session.id} changed owner meanwhile; try again`)
+    if (!(await this.rows.offer(session.id, session.owner, to, ttlMs))) throw new SessionError('busy', `session ${session.id} changed owner meanwhile; try again`)
     await this.announceOwner(session.id)
     return this.get(session.id, session.owner)
   }
@@ -1691,16 +1516,7 @@ export class SessionManager {
     const durable = !sameOwner(session.owner, to) ? this.durableTurns : undefined
     // Conditional on the owner read above (and, accepting, on the offer still
     // being the live one to `to`), so two concurrent handoffs cannot both apply.
-    const offerStill = options.accepting
-      ? this.deps.sql`AND pending_owner_kind = ${to.kind} AND pending_owner_id = ${to.id} AND pending_owner_until > now()`
-      : this.deps.sql``
-    const rows = await this.deps.sql`
-      UPDATE ai_sessions
-      SET owner_kind = ${to.kind}, owner_id = ${to.id}, owner_label = ${to.label},
-          pending_owner_kind = NULL, pending_owner_id = NULL, pending_owner_label = NULL,
-          pending_owner_until = NULL, updated_at = now()
-      WHERE id = ${id} AND owner_kind = ${session.owner.kind} AND owner_id = ${session.owner.id} ${offerStill}`
-    if (rows.count === 0) {
+    if (!(await this.rows.transfer(id, session.owner, to, options.accepting === true))) {
       throw new SessionError(
         options.accepting ? 'invalid' : 'busy',
         options.accepting
@@ -1757,20 +1573,17 @@ export class SessionManager {
    * is a `resource` row on the child (action `session_fork`).
    */
   /**
-   * Removes a fork that failed before it was announced: any transcript rows of its own (not
-   * keyed to it; a fork made since Step 6.5 has none before its first turn), its row (whose cascade takes the rest), and the payload key its transcript or its
-   * files were sealed under. No tombstone: no session takes that id again.
+   * Removes a fork that failed before it was announced (rows.ts `discard`): any transcript rows
+   * of its own (not keyed to it; a fork made since Step 6.5 has none before its first turn), its
+   * row (whose cascade takes the rest), and the payload key its transcript or its files were
+   * sealed under, in one transaction under the key's lock. Only while it has logged no event: its
+   * log's transaction rolled back. No tombstone: no session takes that id again.
    */
   private async dropFailedFork(childId: string): Promise<void> {
-    await this.deps.sql`DELETE FROM ai_session_entries WHERE session_id = ${childId}`
-    await this.deps.sql.begin(async (tx) => {
-      // The lock a key's creation takes (payloadCodec.ts), held over the row's delete too: a
-      // creation that saw the row standing commits its key before this deletes it, and one
-      // after this commit sees no row and makes none.
-      await tx`SELECT pg_advisory_xact_lock(hashtext(${payloadKeyLock(`session-${childId}`)}))`
-      await tx`DELETE FROM ai_sessions WHERE id = ${childId}`
-      await tx`DELETE FROM ai_payload_keys WHERE subject = ${`session-${childId}`}`
-    })
+    if (!(await this.rows.discard(childId))) {
+      // Gone already, or it logged an event after all: its row stays for the operator to see.
+      console.error(`session manager: the failed fork ${childId} was not discarded (no row, or its log has events)`)
+    }
   }
 
   async fork(
@@ -1823,11 +1636,11 @@ export class SessionManager {
         { costUsd: parent.costUsd, budgetUsd: parent.budgetUsd },
       )
     }
-    const title = options.title?.trim() || `${parent.title || 'session'} (fork)`
+    const title = (options.title?.trim() || `${parent.title || 'session'} (fork)`).slice(0, ROW_TITLE_MAX)
     // A fork is a new session and counts against the same limit as a start (PR #715
     // review). Checked first too, so a refused fork leaves nothing behind; the
     // insert's check under the lock is the one that holds.
-    await this.withinNewSessionLimit(principal, this.deps.sql)
+    await this.withinNewSessionLimit(principal)
     // A fork keeps its parent's background_tools (insert), and a flow's fork none (#5870).
     const fields = {
       origin: options.origin ?? parent.origin,
@@ -1868,24 +1681,16 @@ export class SessionManager {
       mode: child.mode,
     })
     const idle = event({ type: 'session.status', sessionId: childId, status: 'idle' })
-    let seqs: number[]
     try {
-      seqs = await this.deps.sql.begin(async (tx) => {
-        // Under the parent's lock, shared, as the insert was: a forget of the parent since the insert
-        // has copied the child's transcript and cleared its link, and the log it reads through is gone.
-        await tx`SELECT pg_advisory_xact_lock_shared(hashtext(${payloadKeyLock(`session-${id}`)}))`
-        const [linked] = await tx`SELECT 1 FROM ai_sessions WHERE id = ${childId}::uuid AND fork_parent_id = ${id}::uuid`
-        if (!linked) throw new SessionError('not_found', `session ${id} was forgotten while it was forked`)
-        const first = await this.events.append(childId, [started], tx)
-        await this.events.inheritThrough(childId, eventCut, tx)
-        return [...first, ...(await this.events.append(childId, [idle], tx))]
-      })
+      // Under the parent's lock, shared, as the insert was (eventLog.ts `forkLog`): a forget of the
+      // parent since the insert has copied the child's transcript and cleared its link.
+      await this.events.forkLog(childId, id, eventCut, [started], [idle])
     } catch (err) {
       // A fork with no log is no fork: it goes whole, as one whose files could not be copied.
       await this.dropFailedFork(childId)
+      if (err instanceof ForkParentGone) throw new SessionError('not_found', err.message)
       throw err
     }
-    this.events.committed(childId, [started, idle], seqs)
     // Recorded once the child is complete (#2159): a fork that failed after the insert has only
     // the failures-only mount's `error` row (app.ts), never an `ok` one beside it.
     if (options.audit) {
@@ -1936,16 +1741,9 @@ export class SessionManager {
     }
     // One statement on the lineage's root, so two raises add up and the owner cannot change
     // in between; the owner checked is this session's, which need not be the root's.
-    const [hit] = await this.deps.sql.unsafe<{ id: string; budget_usd: number }[]>(
-      `UPDATE ai_sessions r SET budget_usd = round((r.budget_usd + $2)::numeric, 2)::double precision, updated_at = now()
-         FROM ai_sessions s
-        WHERE s.id = $1 AND s.owner_kind = $3 AND (s.owner_id = $4 OR s.owner_kind = 'browser') AND r.id = coalesce(s.budget_root_id, s.id)
-          AND round((r.budget_usd + $2)::numeric, 2) <= $5
-       RETURNING s.id, r.budget_usd`,
-      [id, add, principal.kind, principal.id, MAX_SESSION_BUDGET_USD],
-    )
-    const row = hit ? await this.row(id) : undefined
-    if (!hit || !row) {
+    const after = await this.rows.raiseBudget(id, principal, add, MAX_SESSION_BUDGET_USD)
+    const row = after === undefined ? undefined : await this.row(id)
+    if (after === undefined || !row) {
       const now = (await this.row(id)) ?? session
       throw sameOwner(principal, now.owner)
         ? new SessionError(
@@ -1955,9 +1753,8 @@ export class SessionManager {
         : new SessionError('busy', `session ${id} changed owner meanwhile; try again`)
     }
     const raised = row
-    // The before and after this raise made, from its own UPDATE: the read above may
+    // The before and after this raise made, from its own UPDATE (`after`): the read above may
     // already show a later raise (#1650).
-    const after = hit.budget_usd
     await this.deps.audit?.record({
       kind: 'settings',
       action: 'session_budget_usd',

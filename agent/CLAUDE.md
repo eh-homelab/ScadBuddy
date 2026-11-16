@@ -87,7 +87,33 @@ and a Workflow's journal and child chats (area `background-tasks`, `src/backgrou
 (area `operations`, `src/operations/store.ts` `CrudOperations`; the API writes the operation's
 activity row in its transaction) are #5299 step 8 (`TASK_AREAS`, backend
 `api/crud_agent_tasks.py`); their bodies go through `crudRead.ts` `wellFormed`, since the API
-refuses a lone surrogate. These ten have a rolling-deploy fallback:
+refuses a lone surrogate. A session's row as the session manager reads and writes it (area
+`sessions`, `src/sessions/rows.ts` `SessionRows`: `PgSessionRows`, `CrudSessionRows`; one read of
+the whole row answers the record, a turn's claim and `poolRemainingUsd`, and an insert's owner
+limit and a fork's tombstone check run under their locks in the API's transaction) and what its
+calls touched (area `session-resources`, `src/sessions/touched.ts` `ResourceRows`) are #5299
+step 9, part a (`SESSION_AREAS`, backend `api/crud_agent_sessions.py`); a session id goes into a
+route's path only as a lowercase UUID, encoded (`rows.ts` `sessionPath`). A turn's claim, its end
+and an edit write the row with their events in one transaction, and stay on SQL until part c. A
+session's transcript (area `transcripts`, part b, backend `api/crud_agent_transcripts.py`;
+`src/sessions/store.ts` `TranscriptRows`: `PgTranscriptRows`, and `src/sessions/crudTranscripts.ts`
+`CrudTranscriptRows`) is sealed and opened by the API under the session's data key with the
+agent's AAD, so its entries travel as their JSON text; an append is one route per batch
+(`appendBatches`: at most 1000 entries and about 30 MiB), each batch its own transaction with the
+tombstone check and the turn's fence (`AppendFence`, `{ attempt, turnId }`, checked `FOR SHARE`),
+and a fork's transcript, its head, its tail check (`moved`) and whether a user entry landed are
+each one read in one snapshot on the API. `PostgresSessionStore` keeps the per-session append order
+over either. A session's event log (area `session-events`, part b, backend
+`api/crud_agent_events.py`; `src/sessions/eventLog.ts` `EventRows`: `PgEventRows`, and
+`src/sessions/crudEvents.ts` `CrudEventRows`): an append, a turn's append fenced on its
+placement (`appendFenced`, `FOR UPDATE` in its transaction), the reads (a fork's through its chain
+in one snapshot, an inherited event addressed to the session here), a flow's turn reader
+(`turnEvents`) and a new fork's log (`forkLog`, under the parent's payload-key lock, shared).
+`EventLog` keeps its followers, wakes and 1 s polls (D4) over either. An append in a caller's own
+transaction (`append(…, tx)`: edits, a turn's end, the durable sweep, and, until the API lists
+their areas, the workspace, approvals and the gate) stays `appendEventsIn` on SQL until that caller
+moves. These fourteen have a
+rolling-deploy fallback:
 `src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` from the start with back-off
 (1 s doubling to 30 s) until every one is listed, and until then each stays on SQL, for an API
 pod older than the routes. The small stores (#5299 step 5, `src/api/crudStores.ts`

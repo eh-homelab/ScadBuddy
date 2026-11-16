@@ -50,7 +50,19 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: ``…/agent/background-tasks`` and every route under it, a session's background tasks, a
 #: Monitor's events and a Workflow's journal and child chats; its ``operations`` area is
 #: ``…/agent/operations`` and every route under it, ``ai_operations`` with its activity row
-#: (#5299 step 8, `api/crud_agent_tasks.py`). The print ``uploads``
+#: (#5299 step 8, `api/crud_agent_tasks.py`). Its ``sessions`` area is ``…/agent/sessions``,
+#: ``…/agent/session-starts`` and every route under ``…/agent/sessions/{id}`` but
+#: ``…/resources``: a session's row as the session manager reads and writes it (its insert
+#: under the owner's start lock, a fork's under its parent's, the handoff, the budget, a
+#: failed fork discarded); its ``session-resources`` area is ``…/agent/sessions/{id}/resources``,
+#: what a session's tool calls touched (#5299 step 9, `api/crud_agent_sessions.py`). Its
+#: ``transcripts`` area is ``…/agent/transcripts`` and ``…/agent/sessions/{id}/entries``,
+#: ``…/transcript``, ``…/cwd`` and ``…/subkeys`` with every route under them: a session's
+#: transcript, sealed and opened on the API, a fork's read through its chain (#5299 step 9,
+#: `api/crud_agent_transcripts.py`). Its ``session-events`` area is
+#: ``…/agent/sessions/{id}/events`` and ``…/fork-log`` with every route under them: a session's
+#: event log, a fork's read through its chain (#5299 step 9, `api/crud_agent_events.py`). The
+#: print ``uploads``
 #: area also covers ``…/print/slices`` and ``…/print/slice-starts`` (#5298 Task 25). Its
 #: ``previews`` area also covers ``…/print/project-targets``, ``…/print/folderless`` and
 #: ``…/print/destination-touches`` (#5298 Task 26). Its ``copy-leases`` area is
@@ -161,6 +173,10 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "plugin-packages",
         "background-tasks",
         "operations",
+        "sessions",
+        "session-resources",
+        "transcripts",
+        "session-events",
         "gate",
         "pending-input",
         "audit",

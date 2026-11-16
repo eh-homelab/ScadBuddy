@@ -40,17 +40,22 @@ type Grants = Readonly<Record<string, readonly string[]>>
  * own table (`agent_leases`, a backend migration), so they need no grant here. And a
  * session's background tasks, a Monitor's events, a Workflow's journal and child chats, and the
  * agent's command record with its activity row (#5299 step 8,
- * `api/crud_agent_tasks.py`; `ai_sessions` is read for a Workflow's open child chats). */
+ * `api/crud_agent_tasks.py`; `ai_sessions` is read for a Workflow's open child chats). And a
+ * session's row as the session manager reads and writes it, a failed fork discarded with its
+ * transcript rows and its key, and what its tool calls touched (#5299 step 9,
+ * `api/crud_agent_sessions.py`). And a session's transcript, sealed and opened by the API
+ * (#5299 step 9, part b, `api/crud_agent_transcripts.py`), and its event log
+ * (`api/crud_agent_events.py`). */
 export const API_AI_GRANTS: Grants = {
   ai_payload_keys: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   ai_forgotten_subjects: ['SELECT', 'INSERT'],
-  ai_sessions: ['SELECT', 'UPDATE'],
+  ai_sessions: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   ai_mcp_tokens: ['SELECT', 'INSERT', 'UPDATE'],
   ai_settings: ['SELECT', 'INSERT', 'UPDATE'],
   ai_credentials: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   ai_audit: ['INSERT'],
   ai_flow_blobs: ['SELECT', 'INSERT', 'DELETE'],
-  ai_session_entries: ['SELECT'],
+  ai_session_entries: ['SELECT', 'INSERT', 'DELETE'],
   ai_operations: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   ai_activity_kinds: ['SELECT', 'INSERT', 'UPDATE'],
   ai_browser_session_origins: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
@@ -80,12 +85,15 @@ export const API_AI_GRANTS: Grants = {
   ai_background_events: ['SELECT', 'INSERT', 'UPDATE'],
   ai_workflow_calls: ['SELECT', 'INSERT'],
   ai_workflow_children: ['SELECT', 'INSERT'],
+  ai_session_resources: ['SELECT', 'INSERT'],
 }
 
-/** The sequences behind the API's inserts: `ai_background_events.seq` is a `bigserial`, whose
- * `nextval` needs USAGE (the other tables' ids are given or `GENERATED … AS IDENTITY`). */
+/** The sequences behind the API's inserts: `ai_background_events.seq` and `ai_session_entries.id`
+ * are `bigserial`s, whose `nextval` needs USAGE (the other tables' ids are given or
+ * `GENERATED … AS IDENTITY`). */
 export const API_AI_SEQUENCE_GRANTS: Grants = {
   ai_background_events_seq_seq: ['USAGE'],
+  ai_session_entries_id_seq: ['USAGE'],
 }
 
 /** The projects worker's role: it holds no database (ScadBuddy#5298), so the agent takes back

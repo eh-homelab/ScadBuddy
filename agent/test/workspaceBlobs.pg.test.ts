@@ -470,6 +470,10 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
   describe('review of 10b6be073', () => {
     it("deletes a failed fork's row under its key's lock, so no key creation reads it as standing", async () => {
       const { session: child } = await m.start(browser, { origin: 'chat' })
+      // A failed fork has no log of its own (its events are written only once it is whole), and a
+      // discard deletes only such a row (#5299 step 9: never a session with a log).
+      await db.sql`DELETE FROM ai_session_events WHERE session_id = ${child.id}`
+      await db.sql`UPDATE ai_sessions SET event_seq = 0 WHERE id = ${child.id}`
       const subject = `session-${child.id}`
       let release!: () => void
       const held = new Promise<void>((resolve) => (release = resolve))

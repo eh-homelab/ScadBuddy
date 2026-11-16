@@ -2,13 +2,14 @@ import { randomUUID } from 'node:crypto'
 import type { SDKResultMessage } from '@anthropic-ai/claude-agent-sdk'
 import { ApplicationFailure } from '@temporalio/common'
 import { context as otelContext } from '@opentelemetry/api'
-import type { Sql, TransactionSql } from 'postgres'
+import type { Sql } from 'postgres'
 import type { GateTrace } from '../approvals/service.js'
 import { contextFrom } from '../telemetry/trace.js'
 import { turnCostEntry } from '../audit/turn.js'
 import { redact, WAIT_FOR_USER } from '../gate/entry.js'
 import { refusal } from '../gate/refusal.js'
 import { INPUT_CHANNEL } from '../gate/store.js'
+import type { AppendFence } from './store.js'
 import { type AttentionSpec, answeredText, BACK_REPLIES, DEFAULT_REPLIES, RECONNECTED_TEXT, timedOutText } from '../harness/attention.js'
 import type { ApprovalGate, ApprovalVerdict } from '../harness/permissions.js'
 import type { FinishedCall } from '../tools/activityProjection.js'
@@ -274,30 +275,6 @@ const PARK_HOLD_S = 300
 /** A tab wait's quick reply that ends the turn's tab waits (sessions/manager.ts waitForTab's CARRY_ON). */
 const CARRY_ON = 'Carry on without the tab'
 
-/**
- * Whether a user entry landed in `id`'s main transcript after row `mark`. A sealed row says so in
- * its plaintext `entry_type`; a row from before sealing has none, so its own top-level `type` is
- * read (a substring match would take an assistant entry that quotes one). An unparseable legacy
- * row is no user entry. A row copied in from a forgotten parent (store.ts `inherited`) is none of
- * this session's turns, whatever its id.
- */
-export async function userEntryLanded(sql: Sql, id: string, mark: number): Promise<boolean> {
-  const rows = await sql<{ typed: boolean; entry: string | null }[]>`
-    SELECT entry_type = 'user' AS typed, entry FROM ai_session_entries
-    WHERE session_id = ${id} AND subpath = '' AND id > ${mark} AND NOT inherited
-      AND (entry_type = 'user' OR (entry_type IS NULL AND entry LIKE '%"user"%'))
-    ORDER BY id`
-  return rows.some((row) => {
-    if (row.typed) return true
-    try {
-      const parsed: unknown = JSON.parse(row.entry ?? '')
-      return typeof parsed === 'object' && parsed !== null && (parsed as { type?: unknown }).type === 'user'
-    } catch {
-      return false
-    }
-  })
-}
-
 export class TurnHost {
   readonly #deps: TurnHostDeps
   #stopping = false
@@ -432,7 +409,7 @@ export class TurnHost {
     const parked = input.continuation?.kind === 'parked' ? input.continuation.calls : undefined
     // A parked continuation marks the transcript for itself: its outcome message goes in once.
     const mark = await this.#claim(id, turnId, attempt, parked?.length ? `${turnId}/${parked[0]!.requestId}` : turnId)
-    const claim = mark === undefined ? undefined : await runningDurableTurn(sql, id, turnId)
+    const claim = mark === undefined ? undefined : await runningDurableTurn(this.#deps.core.rows, id, turnId)
     if (mark === undefined || !claim) throw ApplicationFailure.nonRetryable(`session ${id} is not running turn ${turnId}`, SESSION_GONE)
     const { session, principal } = claim
     // §5.5: resumed with the restart message only once the turn's prompt is in the transcript;
@@ -484,22 +461,10 @@ export class TurnHost {
       return undefined
     }
     /**
-     * This placement still holds its turn: checked, row locked, in each write's own transaction.
-     * The turn as well as the attempt: an attempt id is the run's and the cycle's, so the next
-     * turn's first placement in the same run carries this one's, and the turn ended leaves it.
+     * The transcript's fence (store.ts `AppendFence`): this placement holds the row, or is the
+     * session's last placement and no turn runs, checked FOR SHARE in each append's transaction.
      */
-    const holds = async (tx: TransactionSql, lock: 'share' | 'update') => {
-      const rows = lock === 'share'
-        ? await tx`SELECT 1 FROM ai_sessions WHERE id = ${id} AND turn_attempt = ${attempt} AND durable_turn_id = ${turnId} FOR SHARE`
-        : await tx`SELECT 1 FROM ai_sessions WHERE id = ${id} AND turn_attempt = ${attempt} AND durable_turn_id = ${turnId} FOR UPDATE`
-      return rows.length > 0
-    }
-    const holdsOrLast = async (tx: TransactionSql) => {
-      const rows = await tx`
-        SELECT 1 FROM ai_sessions WHERE id = ${id} AND turn_attempt = ${attempt}
-          AND (durable_turn_id = ${turnId} OR durable_turn_id IS NULL) FOR SHARE`
-      return rows.length > 0
-    }
+    const holdsOrLast: AppendFence = { attempt, turnId }
     // A process of the session's left here by an earlier placement writes under this one now.
     // `durable_turn_id IS NULL` lets it write between turns: what keeps a stale placement from
     // writing after a later turn on another replica has ended is that each placement's
@@ -541,7 +506,7 @@ export class TurnHost {
         // last placement and no turn runs: what Claude Code writes as it exits between turns
         // (`last-prompt`, `cost-state`, warm.ts DRAIN_MS) lands as a classic process's does,
         // and never once another turn has the session.
-        this.#deps.core.warm.fence(entry, (tx) => holdsOrLast(tx))
+        this.#deps.core.warm.fence(entry, holdsOrLast)
         if (fenced()) void this.#deps.core.warm.cut(entry, 'the placement was cut off')
         control.heartbeat({ pushed: true })
       },
@@ -552,11 +517,11 @@ export class TurnHost {
       // A tool result's images, and its events, only while this placement holds the turn, checked with the write.
       // `holds(tx, 'share')`'s check, run on whichever side stores the images.
       storeImages: (images) => this.#deps.images.putIf(id, images, { attempt, turnId }),
-      appendEvents: async (batch) => {
-        const written = await sql.begin(async (tx) => ((await holds(tx, 'update')) ? await events.append(id, batch, tx) : undefined))
-        if (written) events.committed(id, batch, written)
-        return written !== undefined
-      },
+      // This placement still holds its turn: checked, row locked, in the append's own transaction, on
+      // whichever side keeps the log (eventLog.ts `appendFenced`). The turn as well as the attempt: an
+      // attempt id is the run's and the cycle's, so the next turn's first placement in the same run
+      // carries this one's, and the turn ended leaves it.
+      appendEvents: (batch) => events.appendFenced(id, batch, { attempt, turnId }),
     }))
     // The fence: still the row's placement and turn, and what it has spent so far written. A
     // Stop's flag (DurableTurns.interrupt) ends the turn here, on this tick: the workflow's
@@ -1061,7 +1026,7 @@ export class TurnHost {
 
   /** Whether a user entry (the turn's prompt, or a tool result after it) landed in the main transcript after the mark. */
   async #landed(id: string, mark: number): Promise<boolean> {
-    return userEntryLanded(this.#deps.sql, id, mark)
+    return this.#deps.core.transcripts.userLanded(id, mark)
   }
 
   /**

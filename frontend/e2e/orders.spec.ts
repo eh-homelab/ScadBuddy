@@ -155,6 +155,24 @@ test.describe('orders', () => {
     await expect(lines).toContainText('Filament')
   })
 
+  // The item drawer is a modal Sheet, whose scroll lock cancels every wheel outside it:
+  // the dialog it opens is portalled beside it, and its body must still scroll.
+  test('the quote dialog opened from the item drawer scrolls with the wheel', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 600 })
+    await page.goto('/orders')
+    await page.getByRole('link', { name: 'ORD-2026-3', exact: true }).click()
+    await page.getByRole('table', { name: 'Line items' }).getByRole('button', { name: 'Name Keychain' }).click()
+    await page.getByRole('dialog', { name: 'Name Keychain' }).getByTestId('quote-from-slice').click()
+    const dialog = page.getByRole('dialog', { name: 'Quote from a slice' })
+    await expect(dialog.getByRole('combobox', { name: /^Filament for slot/ }).first()).toBeVisible()
+    const body = dialog.getByTestId('print-body')
+    await expect.poll(() => body.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true)
+    const box = (await body.boundingBox())!
+    await page.mouse.move(box.x + 10, box.y + 50)
+    await page.mouse.wheel(0, 300)
+    await expect.poll(() => body.evaluate((el) => el.scrollTop)).toBeGreaterThan(0)
+  })
+
   // #4693 — a link to a line item opens the order with that item marked and open, and
   // opening a row puts it in the URL.
   test('opens a line item from a link to it', async ({ page }) => {
