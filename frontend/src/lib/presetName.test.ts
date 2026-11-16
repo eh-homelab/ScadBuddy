@@ -7,6 +7,6 @@ describe('normalisePresetName (#6459)', () => {
     // Whitespace to Python, not to JS's \s.
     expect(normalisePresetName('a\u001cb\u001fc\u0085d')).toBe('a b c d')
     // Whitespace to JS's \s, not to Python: kept.
-    expect(normalisePresetName('a﻿b')).toBe('a﻿b')
+    expect(normalisePresetName('a\ufeffb')).toBe('a\ufeffb')
   })
 })

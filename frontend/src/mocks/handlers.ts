@@ -2625,7 +2625,7 @@ export const handlers = [
     if (id.startsWith('template-')) return templatePresetRefusal(slug, id)
     const existing = (state.presets[slug] ?? []).find((p) => p.id === id)
     if (!existing) return problem(404, 'Not Found', PRESET_GONE, { preset_id: id })
-    const name = body.name?.trim().replace(/\s+/g, ' ')
+    const name = body.name != null ? normalisePresetName(body.name) : undefined
     if (paramsClash(body.params, body.inputs)) {
       return problem(422, 'Unprocessable Content', 'params and inputs.params disagree; send inputs only')
     }
