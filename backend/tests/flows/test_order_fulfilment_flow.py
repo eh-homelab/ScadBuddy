@@ -1013,12 +1013,16 @@ def test_the_remembered_colour_match_is_sent(remembered: bool, kind: str) -> Non
 @pytest.mark.parametrize("kind", ["model", "library_file"])
 def test_nothing_remembered_leaves_the_colour_match_to_the_default(kind: str) -> None:
     """#6304: with nothing remembered the flow sends no `force_colour_match`, so the
-    plan's default (on, #6218) applies, as in the print dialog. A library file too (#6505)."""
+    plan's default (on, #6218) applies, as in the print dialog. A library file too (#6505),
+    its choices read by its file (#6511)."""
     item = _item("a")
+    source: dict[str, Any] = {"output_id": "o"}
     if kind == "library_file":
         item = {**item, "kind": "library_file", "output_id": None, "library_file": {"id": 7}}
+        source = {"library_file_id": 7}
     host = _Host([item], [_OK], [])
     host.run()
+    assert host.sources == [source]
     assert host.printed == ["a"]
     assert host.requests[0]["filament_plan"] == {"slots": []}
 
