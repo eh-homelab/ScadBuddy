@@ -16,7 +16,7 @@ BlobData = bytes | BinaryIO
 _CHUNK = 1 << 20
 
 
-def content_key(kind: BlobKind, sha256: str) -> str:
+def content_index_key(kind: BlobKind, sha256: str) -> str:
     """The content-addressed index key of ``kind``'s object of ``sha256``: the key
     `ContentStore.put` gives a put that names none."""
     return f"{kind}-{sha256}"

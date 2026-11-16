@@ -52,7 +52,7 @@ from scadbuddy.slicing.transfer import (
 )
 from scadbuddy.slicing.transfer_token import transfer_key, verify
 from scadbuddy.store.content import ContentStore
-from scadbuddy.store.content_models import BlobKind, BlobRef, BlobStat, content_key
+from scadbuddy.store.content_models import BlobKind, BlobRef, BlobStat, content_index_key
 from scadbuddy.worker import PRINT_CRUD_AREAS
 from scadbuddy.workflows.printing import HEARTBEAT, LAN_UPLOAD_TIMEOUT
 
@@ -61,7 +61,7 @@ KEK = kek_from_base64(KEK_TEXT)
 INTERNAL = "http://api"
 SLICED = b"sliced 3mf bytes"
 #: The key the slicer's output is stored under: `ContentStore.put`'s, from its bytes.
-KEY = content_key(SLICE_KIND, hashlib.sha256(SLICED).hexdigest())
+KEY = content_index_key(SLICE_KIND, hashlib.sha256(SLICED).hexdigest())
 
 
 class _Credentials:

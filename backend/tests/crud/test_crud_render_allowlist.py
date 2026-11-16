@@ -105,15 +105,23 @@ def _forged(route: str, kind: BlobKind, meta: dict[str, Any]) -> Awaitable[Any]:
     return crud_render.index_mark(mark, state, "k")
 
 
+# The mark itself, and each of its keys with another value beside other meta (#6513).
+_FORGED_META = [
+    dict(SLICED_OUTPUT_META),
+    *({"dir": "x", key: "other"} for key in SLICED_OUTPUT_META),
+]
+
+
+@pytest.mark.parametrize("meta", _FORGED_META)
 @pytest.mark.parametrize("route", ["put", "swap", "mark"])
 async def test_no_render_write_forges_the_slicers_output_mark(
-    route: str, monkeypatch: pytest.MonkeyPatch
+    route: str, meta: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Each index write the render credential reaches refuses the mark before it opens a
-    transaction (#6179)."""
+    transaction (#6179), whatever the value and whatever meta is beside it."""
     monkeypatch.setattr(crud_render, "_indexed", _no_database)
     with pytest.raises(ApiError) as refused:
-        await _forged(route, "piece", dict(SLICED_OUTPUT_META))
+        await _forged(route, "piece", meta)
     assert refused.value.status == 403
     assert refused.value.extensions["reason"] == crud_render.API_OWNED_KEY
 

@@ -535,7 +535,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   always the internal route's, `READ_TTL`, only for a key the content index holds live as
   a slicer's output (`SLICE_KIND` with `SLICED_OUTPUT_META`, which `Transfers.finish_put`
   merges and `store/index.py` `put_in` keeps, under the content-addressed key of its
-  bytes, `store/content_models.py` `content_key`, #6179; its row swept or not; never the
+  bytes, `store/content_models.py` `content_index_key`, #6179; its row swept or not; never the
   slicer's inputs), else 403 `transfer-refused`; ScadBuddy strips print-host credential keys
   whenever it parses a preset, and never stores, forwards or writes them into a slicer
   file (`core/credentials.py` `strip_credentials`, applied at parse in `bambuddy/models.py`
