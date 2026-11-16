@@ -52,6 +52,18 @@ def test_object_key_is_prefix_kind_sha() -> None:
     assert object_key("p", "font", "ab") == "p/font/ab"
 
 
+async def test_the_fixture_bucket_is_served(s3: S3Settings) -> None:
+    """The `s3` fixture makes its bucket through moto's internals (#6301). A moto release
+    that moves them fails here, not as a `NoSuchBucket` in another test (#6495)."""
+    backend = S3ContentBackend(s3)
+    try:
+        client = await backend.client()
+        listed = await client.list_buckets()
+        assert [bucket["Name"] for bucket in listed["Buckets"]] == [s3.bucket]
+    finally:
+        await backend.aclose()
+
+
 async def test_the_client_retries_in_standard_mode_by_default(s3: S3Settings) -> None:
     backend = S3ContentBackend(s3)
     try:
