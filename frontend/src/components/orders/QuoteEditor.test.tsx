@@ -7,11 +7,22 @@ import { printersState } from '../../mocks/features/printers'
 import { mockSettings, resetMockState, setMockSettings } from '../../mocks/handlers'
 import { FILAMENT_PETG, FILAMENT_PLA, ITEM_DRAFT, ORDER_DRAFT, item } from '../../mocks/features/orders/state'
 import { selectOption } from '../../test/select'
+import { readSpec } from '../../test/spec'
 import { renderPage } from '../../test/utils'
 import { CHECK_DEBOUNCE_MS, QuoteEditor } from './QuoteEditor'
 import { NO_SLICE_SOURCE } from './itemActions'
 import { groupName } from './printSetups'
 import type { SliceQuoteRun } from './useSliceQuotes'
+
+/** `ArchiveQuoteRequest.units`'s `maximum` in the exported spec: the backend's
+ * `ARCHIVE_UNITS_MAX`, read rather than restated (#6500). */
+function specArchiveUnitsMax(): number {
+  const { json, path } = readSpec()
+  const spec = json as { components?: { schemas?: { ArchiveQuoteRequest?: { properties?: { units?: { maximum?: unknown } } } } } }
+  const max = spec.components?.schemas?.ArchiveQuoteRequest?.properties?.units?.maximum
+  if (typeof max !== 'number') throw new Error(`ArchiveQuoteRequest.units.maximum not in the spec at ${path}`)
+  return max
+}
 
 /** Long enough for a debounced price check to be sent and its answer to land. */
 const settled = () => new Promise((resolve) => setTimeout(resolve, 2 * CHECK_DEBOUNCE_MS))
@@ -111,6 +122,36 @@ describe('QuoteEditor · a quote from a slice (#4250)', () => {
     await user.click(quote)
     await waitFor(() => expect(onChanged).toHaveBeenCalled())
     expect(quoted).toHaveBeenCalledWith(ORDER_DRAFT, added.id, { filaments: Object.fromEntries(added.colours.map((c) => [String(c.slot), c.filament_id ?? FILAMENT_PLA])) })
+  })
+
+  it('quotes one unit when the print made several (#6500)', async () => {
+    const added = await api.addOrderItem(ORDER_DRAFT, { archive_id: 9101, quantity: 1 })
+    const onChanged = vi.fn()
+    const quoted = vi.spyOn(api, 'quoteItemFromArchive')
+    const { user } = renderPage(
+      <QuoteEditor orderId={ORDER_DRAFT} itemId={added.id} currency="USD" exponent={2} quotes={[]} editable onChanged={onChanged} item={added} slice={{ start: vi.fn(), dismiss: vi.fn() }} />,
+    )
+    await user.click(screen.getByTestId('quote-from-print'))
+    const form = screen.getByRole('group', { name: 'Quote from the print' })
+    const units = within(form).getByLabelText('Units this print made')
+    expect(units).toHaveValue(1)
+    expect(units).toHaveAttribute('min', '1')
+    expect(units).toHaveAttribute('max', String(specArchiveUnitsMax()))
+    const quote = within(form).getByRole('button', { name: 'Quote' })
+    for (const slot of within(form).queryAllByRole('combobox', { name: /^Filament for slot/ })) {
+      if (quote.hasAttribute('disabled')) await selectOption(user, slot, /^Bambu PLA/)
+    }
+    // An empty count or one out of bounds sends nothing.
+    await user.clear(units)
+    expect(quote).toBeDisabled()
+    await user.type(units, '1001')
+    expect(quote).toBeDisabled()
+    await user.clear(units)
+    await user.type(units, '4')
+    await waitFor(() => expect(quote).toBeEnabled())
+    await user.click(quote)
+    await waitFor(() => expect(onChanged).toHaveBeenCalled())
+    expect(quoted).toHaveBeenCalledWith(ORDER_DRAFT, added.id, { filaments: Object.fromEntries(added.colours.map((c) => [String(c.slot), c.filament_id ?? FILAMENT_PLA])), units: 4 })
   })
 
   it('offers no quote from a print to an item from elsewhere (#4777)', () => {

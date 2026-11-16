@@ -3,17 +3,22 @@ import { api } from '../../api/client'
 import type { OrderItem } from '../../api/types'
 import { useAsync } from '../../lib/useAsync'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { filamentLabel } from './FilamentsEditor'
 import { refusalText } from './refusal'
+
+/** The most units one run may name (`quote.py` `ARCHIVE_UNITS_MAX`). */
+const UNITS_MAX = 1000
 
 /**
  * "Quote from the print" (#4777, order operations spec 2026-11-07 §3.2): an `archive`
  * quote of an item taken from a past print, priced from what that print used (every plate
  * archive of its run, the slicer's grams and the actual time) at the price book in force,
  * with no re-slice. Each colour slot takes a price-book filament, as a slice quote's do; an
- * item with no slots yet takes one filament for every slot the print used.
+ * item with no slots yet takes one filament for every slot the print used. A print that
+ * made several units of the item names them (#6500): the quote then prices one unit.
  */
 export function ArchiveQuote({
   orderId,
@@ -34,14 +39,17 @@ export function ArchiveQuote({
     Object.fromEntries(colours.flatMap((c) => (c.filament_id ? [[String(c.slot), c.filament_id]] : []))),
   )
   const [every, setEvery] = useState('')
+  const [units, setUnits] = useState('1')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const ready = colours.length > 0 ? colours.every((c) => value[String(c.slot)]) : every !== ''
+  const count = /^\d+$/.test(units) ? Number(units) : NaN
+  const unitsValid = count >= 1 && count <= UNITS_MAX
+  const ready = unitsValid && (colours.length > 0 ? colours.every((c) => value[String(c.slot)]) : every !== '')
 
   async function quote() {
     // An item with no slots yet names one filament, which the backend gives every slot
     // the print used (`ArchiveQuoteRequest.filament_id`).
-    const body = colours.length > 0 ? { filaments: value } : { filament_id: every }
+    const body = { ...(colours.length > 0 ? { filaments: value } : { filament_id: every }), ...(count > 1 ? { units: count } : {}) }
     setBusy(true)
     setError(null)
     try {
@@ -91,6 +99,25 @@ export function ArchiveQuote({
           {picker(`archive-filament-${itemId}`, 'Filament for every slot', every, setEvery)}
         </div>
       )}
+      <div className="flex flex-wrap items-center gap-2">
+        <Label htmlFor={`archive-units-${itemId}`}>Units this print made</Label>
+        <Input
+          id={`archive-units-${itemId}`}
+          type="number"
+          inputMode="numeric"
+          min={1}
+          max={UNITS_MAX}
+          step={1}
+          className="w-24"
+          aria-invalid={!unitsValid}
+          aria-describedby={`archive-units-hint-${itemId}`}
+          value={units}
+          onChange={(e) => setUnits(e.target.value)}
+        />
+        <span id={`archive-units-hint-${itemId}`} className="text-xs text-muted-foreground">
+          {unitsValid ? 'The quote prices one unit: the grams and time divided by this.' : `Enter a whole number from 1 to ${UNITS_MAX}.`}
+        </span>
+      </div>
       <div className="flex gap-2">
         <Button type="button" size="sm" disabled={busy || !ready} onClick={() => void quote()}>
           Quote

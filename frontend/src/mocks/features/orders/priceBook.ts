@@ -513,12 +513,23 @@ export const handlers = [
       }
       const used = run.flatMap((p) => p!.slots.filter((s) => s.used_g > 0).map((s) => String(s.slot_id - 1)))
       const filaments: Record<string, string> = { ...(body.filament_id ? Object.fromEntries(used.map((slot) => [slot, body.filament_id!])) : {}), ...(body.filaments ?? {}) }
+      // `past_prints.py` `_per_unit` (#6336): the run made `units` units, so each plate's
+      // grams (to the hundredth) and seconds (to the whole second) are one unit's share.
+      // 1000 is `quote.py` `ARCHIVE_UNITS_MAX`.
+      const units = body.units ?? 1
+      if (!Number.isInteger(units) || units < 1 || units > 1000) return fieldProblem(request, 'units', 'Input should be from 1 to 1000')
+      const share = (value: number, places: number) => Math.round((value / units) * 10 ** places) / 10 ** places
       const plates = run.map((p) => ({
         index: p!.plate_id ?? 1,
-        print_seconds: p!.actual_time_seconds ?? p!.print_time_seconds ?? 0,
-        filaments: p!.slots.filter((s) => s.used_g > 0).map((s) => ({ slot: s.slot_id - 1, used_g: s.used_g })),
+        print_seconds: Math.max(share(p!.actual_time_seconds ?? p!.print_time_seconds ?? 0, 0), 1),
+        filaments: p!.slots.filter((s) => s.used_g > 0).map((s) => ({ slot: s.slot_id - 1, used_g: share(s.used_g, 2) })),
         archive_id: p!.id,
       }))
+      const light = units > 1 && plates.find((plate) => plate.filaments.every((f) => f.used_g === 0))
+      if (light) {
+        const msg = `archive ${light.archive_id} records too little filament for ${units} units: each unit's share rounds to 0.00 g, so it cannot price the item`
+        return problem(request, 422, msg, PROBLEMS + 'archive_plate', { archive_id: light.archive_id, errors: [{ loc: ['body', 'units'], msg }] })
+      }
       notEnded(order)
       if (found.colours.length === 0) {
         // A library file item takes the slots the print used.

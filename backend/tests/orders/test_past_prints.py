@@ -24,10 +24,12 @@ from scadbuddy.orders.lifecycle import NewLibraryItem, NewModelItem
 from scadbuddy.orders.models import ColourSlot, LibraryFileRef, OrderItem
 from scadbuddy.orders.past_prints import (
     ArchiveQuoteRequest,
+    _per_unit,
     archive_colours,
     copied_file,
     quote_from_archive,
 )
+from scadbuddy.orders.pricing import ArchivePlate, PlateFilament
 from scadbuddy.orders.problems import PROBLEMS
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.store.refs import BlobRefs
@@ -524,3 +526,24 @@ def test_archive_colours_take_every_used_slot() -> None:
     slots = [ArchiveSlot(slot_id=1, used_g=2.0, color="#123456"), ArchiveSlot(slot_id=3)]
     plates = [plate(1).model_copy(update={"slots": slots})]
     assert [(s.slot, s.colour) for s in archive_colours(plates, {0: "f"})] == [(0, "#123456")]
+
+
+def test_a_run_whose_units_round_every_slot_to_no_grams_is_refused() -> None:
+    # 0.004 g a unit rounds to 0.00 g in every slot: the quote would price no filament.
+    light = ArchivePlate(
+        index=1,
+        print_seconds=600,
+        archive_id=81,
+        filaments=[
+            PlateFilament(slot=0, used_g=Decimal("4")),
+            PlateFilament(slot=1, used_g=Decimal("2")),
+        ],
+    )
+    with pytest.raises(ApiError) as refused:
+        _per_unit(light, 1000)
+    assert (refused.value.status, refused.value.type) == (422, PROBLEMS + "archive_plate")
+    assert refused.value.extensions["errors"][0]["loc"] == ["body", "units"]
+    assert "1000 units" in refused.value.detail
+    # One slot that keeps a hundredth of a gram still prices.
+    kept = _per_unit(light, 800)
+    assert [f.used_g for f in kept.filaments] == [Decimal("0.01"), Decimal("0.00")]
