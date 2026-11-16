@@ -1773,7 +1773,7 @@ export function PrintPicker({
           <DialogTitle>{quoting ? 'Quote from a slice' : itemPrint ? 'Print the line item' : batch ? batch.title : queue ? 'Queue' : 'Print'}</DialogTitle>
           {description && <DialogDescription>{description}</DialogDescription>}
         </DialogHeader>
-        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4" data-testid="print-body">
       {result ? (
         <QueuedPanel
           result={{ ...result, warnings: shown(result.warnings) }}
