@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { api, type ApiError } from '../../../api/client'
 import { mockSettings, resetMockState, setMockSettings } from '../../handlers'
+import { PAST_PRINTS } from './pastPrints'
 import { FILAMENT_PLA, ORDER_DRAFT, OUTPUT_REAGAN, PROBLEMS, state } from './state'
 
 // #4777, order operations spec 2026-11-07 §3.2: the mock answers a past print's item and
@@ -67,6 +68,21 @@ describe('past prints mock (#4777)', () => {
     expect([light?.status, light?.problem?.type]).toEqual([422, PROBLEMS + 'archive_plate'])
     const none = await failure(api.quoteItemFromArchive(ORDER_DRAFT, item.id, { filaments, units: 0 }))
     expect(none?.status).toBe(422)
+  })
+
+  it('rounds a unit\'s grams half up exactly, as the backend\'s Decimal does (#6508)', async () => {
+    const item = await api.addOrderItem(ORDER_DRAFT, { archive_id: 9101, quantity: 1 })
+    const filaments = Object.fromEntries(item.colours.map((c) => [String(c.slot), FILAMENT_PLA]))
+    // 0.29 g over 2 units is 0.145 g: half up gives 0.15, where a float rounds to 0.14.
+    const slot = PAST_PRINTS.find((p) => p.id === 9102)!.slots[0]!
+    const before = slot.used_g
+    slot.used_g = 0.29
+    try {
+      const quote = await api.quoteItemFromArchive(ORDER_DRAFT, item.id, { filaments, units: 2 })
+      expect((quote.plates[1]!.filaments as { used_g: string }[]).map((f) => f.used_g)).toEqual(['0.15'])
+    } finally {
+      slot.used_g = before
+    }
   })
 
   it('measures an attempt from an accepted archive quote, as from a slice quote', async () => {

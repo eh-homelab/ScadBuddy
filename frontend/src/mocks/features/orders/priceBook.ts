@@ -518,7 +518,13 @@ export const handlers = [
       // 1000 is `quote.py` `ARCHIVE_UNITS_MAX`.
       const units = body.units ?? 1
       if (!Number.isInteger(units) || units < 1 || units > 1000) return fieldProblem(request, 'units', 'Input should be from 1 to 1000')
-      const share = (value: number, places: number) => Math.round((value / units) * 10 ** places) / 10 ** places
+      // Half up on exact integers, as the backend's `Decimal` `ROUND_HALF_UP` is: a float
+      // `Math.round(0.29 / 2 * 100)` gives 14, not 15 (#6508). Values have six places or fewer.
+      const share = (value: number, places: number) => {
+        const scaled = BigInt(Math.round(value * 1e6)) * 10n ** BigInt(places)
+        const whole = BigInt(1e6 * units)
+        return Number((2n * scaled + whole) / (2n * whole)) / 10 ** places
+      }
       const plates = run.map((p) => ({
         index: p!.plate_id ?? 1,
         print_seconds: Math.max(share(p!.actual_time_seconds ?? p!.print_time_seconds ?? 0, 0), 1),

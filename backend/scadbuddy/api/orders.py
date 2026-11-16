@@ -2594,7 +2594,7 @@ async def quote_item_from_archive(
     ``not_linked``; 422 ``archive_id`` for an item taken from no past print and none
     named, or an archive that is not the item's print (not taken from it, and printed by
     neither its output nor its library file), ``archive_plate`` for an archive that records
-    no grams or time."""
+    no grams or time, or for ``units`` that round every slot of a plate to 0.00 g."""
     check_path(order_id, item_id)
     by = current_actor()
     before = await service.service.request_ids(order_id)
