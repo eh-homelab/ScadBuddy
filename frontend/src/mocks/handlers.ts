@@ -1318,7 +1318,7 @@ export function cleanTags(tags: readonly string[]): string[] {
   const seen = new Set<string>()
   const cleaned: string[] = []
   for (const raw of tags) {
-    const tag = raw.trim().replace(/\s+/g, ' ')
+    const tag = normalisePresetName(raw)
     // Upper then lower is the nearest JS gets to `str.casefold()` (ß with SS).
     const key = tag.toUpperCase().toLowerCase()
     if (tag && !seen.has(key)) {

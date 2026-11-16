@@ -7,7 +7,10 @@ const PY_WHITESPACE =
   // eslint-disable-next-line no-control-regex -- U+001C-U+001F are whitespace to Python
   /[\t\n\v\f\r\u001c-\u001f \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+/
 
-/** A name as the server stores it: inner runs of whitespace collapsed, ends trimmed (#360). */
+/**
+ * A preset name or tag as the server stores it, `" ".join(text.split())`: inner runs of
+ * whitespace collapsed, ends trimmed (#360; tags, `_clean_tags`, #6462).
+ */
 export function normalisePresetName(name: string): string {
   return name.split(PY_WHITESPACE).filter(Boolean).join(' ')
 }

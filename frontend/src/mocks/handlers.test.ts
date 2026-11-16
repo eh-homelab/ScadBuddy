@@ -761,6 +761,8 @@ describe('mock API: presets keep the server limits', () => {
     expect(created.name).toBe('a b')
     const renamed = await api.updatePreset('name-keychain', created.id, { name: 'c\u0085\u001fd' })
     expect(renamed.name).toBe('c d')
+    const tagged = await api.updatePreset('name-keychain', created.id, { tags: ['x\u001cy', ' z\u0085 '] })
+    expect(tagged.tags).toEqual(['x y', 'z'])
   })
 
   it('refuses a new preset once a template keeps as many as the server allows', async () => {
