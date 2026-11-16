@@ -9,9 +9,12 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
+from pydantic import ValidationError
 
 from scadbuddy.orders.models import Filament, PricingPolicy
+from scadbuddy.orders.past_prints import _per_unit
 from scadbuddy.orders.pricing import (
+    ArchivePlate,
     Plate,
     PlateFilament,
     PricingError,
@@ -19,6 +22,7 @@ from scadbuddy.orders.pricing import (
     price,
     to_minor,
 )
+from scadbuddy.orders.quote import ARCHIVE_UNITS_MAX, ArchiveQuoteRequest
 
 NOW = datetime(2026, 10, 22, tzinfo=UTC)
 
@@ -205,3 +209,36 @@ def test_the_rough_estimate_in_grams() -> None:
     grams = estimate_grams([Decimal("10000"), 5000.0], Decimal("1.24"), Decimal("1.15"))
     assert grams == Decimal("21.39")
     assert to_minor(grams * Decimal("25.5") / 1000, "USD") == 55
+
+
+def test_an_archive_run_of_two_units_prices_one_unit() -> None:
+    """#6336: a plate that held two units prices one unit at half the run's grams and
+    seconds. The setup line stays per plate, the labour line per item."""
+    run = [ArchivePlate(archive_id=264, **plate.model_dump()) for plate in plates()]
+    one = price([_per_unit(p, 2) for p in run], USD_BOOK, POLICY, currency="USD", quantity=2)
+    assert [(line.kind, line.amount_minor) for line in one.lines] == [
+        # 11.17 g (6.1725 to the hundredth, + 5) x 25.50 / 1000 = 0.284835 -> 0.28
+        ("filament", 28),
+        # 1.5 g x 19.99 / 1000 = 0.029985 -> 0.03
+        ("filament", 3),
+        # 2700 s = 0.75 h x 1.50 = 1.125 -> 1.13
+        ("machine_time", 113),
+        ("setup", 75),
+        ("setup", 75),
+        ("labour", 200),
+        # 15 % of 494 = 74.1 -> 74
+        ("markup", 74),
+    ]
+    assert (one.unit_cost_minor, one.total_minor) == (144, 2 * 568)
+    # One unit is the run itself.
+    assert [_per_unit(p, 1) for p in run] == run
+
+
+def test_an_archive_quote_refuses_fewer_than_one_unit() -> None:
+    assert ArchiveQuoteRequest().units == 1
+    for units in (0, ARCHIVE_UNITS_MAX + 1):
+        with pytest.raises(ValidationError) as refused:
+            ArchiveQuoteRequest(units=units)
+        (error,) = refused.value.errors()
+        assert error["loc"] == ("units",)
+        assert error["type"] in {"greater_than_equal", "less_than_equal"}

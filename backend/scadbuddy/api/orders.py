@@ -2584,9 +2584,11 @@ async def quote_item_from_archive(
     """An `archive` quote (#4777, order operations spec §3.2): priced from what a past
     print used, at the price book in force, with no re-slice. Every plate archive of the
     print run is read (grams per slot as the slicer estimated them, the actual seconds,
-    else the estimate); the body's filaments are written on the item as a slice quote's
-    are. Refused as a slice quote's check is (404, 409 ``order_not_open``,
-    ``item_not_open``, 422 ``filaments``, ``price_book``), and 409
+    else the estimate), and its grams and seconds divided by ``units``, the units of the
+    item the run made (default 1, #6336), so the quote prices one unit; the body's
+    filaments are written on the item as a slice quote's are. Refused as a slice quote's
+    check is (404, 409 ``order_not_open``, ``item_not_open``, 422 ``filaments``,
+    ``price_book``), and 409
     ``archive_plates_missing`` (a plate of the run has no archive),
     ``archive_not_succeeded`` (a failed or cancelled print), ``archive_gone``,
     ``not_linked``; 422 ``archive_id`` for an item taken from no past print and none

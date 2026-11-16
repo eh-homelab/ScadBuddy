@@ -9,7 +9,8 @@ per archive, reused while it is there). The item keeps ``origin_archive_ids``.
 An ``archive`` quote (:func:`quote_from_archive`) prices the item from what the print
 used, at the price book in force, with no re-slice: every plate archive of the print run
 (``print_sends`` by run, ``print_links`` by queue item), grams per slot from each
-archive's ``filament_slots`` and seconds from its actual time, else its estimate. It
+archive's ``filament_slots`` and seconds from its actual time, else its estimate, each
+divided by the units of the item the run made (``units``, default 1, #6336). It
 refuses 409 ``archive_plates_missing`` (a plate of the run has no archive),
 ``archive_not_succeeded`` (an archive that did not complete) and ``archive_gone``.
 
@@ -22,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Mapping, Sequence
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -38,7 +39,7 @@ from scadbuddy.orders.integrations import (
 )
 from scadbuddy.orders.lifecycle import Lifecycle, LifecycleError
 from scadbuddy.orders.models import Actor, ColourSlot, LibraryFileRef, OrderItem, Quote
-from scadbuddy.orders.pricing import ArchivePlate, PlateFilament
+from scadbuddy.orders.pricing import GRAMS_SHOWN, ArchivePlate, PlateFilament
 from scadbuddy.orders.problems import PROBLEMS, refused
 from scadbuddy.orders.quote import (
     ArchiveQuoteRequest,
@@ -249,6 +250,23 @@ def _plate(facts: ArchiveFacts, index: int) -> ArchivePlate:
     )
 
 
+def _per_unit(plate: ArchivePlate, units: int) -> ArchivePlate:
+    """``plate``'s share of one unit when the run made ``units`` units of the item
+    (#6336): its grams to the hundredth and its seconds to the whole second, each
+    rounded half up. A plate of one unit is the plate itself."""
+    if units == 1:
+        return plate
+    filaments = [
+        PlateFilament(
+            slot=used.slot,
+            used_g=(used.used_g / units).quantize(GRAMS_SHOWN, rounding=ROUND_HALF_UP),
+        )
+        for used in plate.filaments
+    ]
+    seconds = int((Decimal(plate.print_seconds) / units).quantize(Decimal(1), ROUND_HALF_UP))
+    return plate.model_copy(update={"filaments": filaments, "print_seconds": max(seconds, 1)})
+
+
 async def quote_from_archive(
     lifecycle: Lifecycle,
     integrations: OrderIntegrations,
@@ -262,9 +280,11 @@ async def quote_from_archive(
     ``order_not_open``/``item_not_open``, 422 ``filaments``/``price_book``), then every
     plate archive of the print run read, the body's filaments written on the item (or,
     on a library file item with no slots, the slots the print used), priced and
-    recorded (`Lifecycle.record_archive_quote`). The run is priced as one unit of the item:
-    `ArchiveFacts` carries no count of the units a plate held, so a run of several overstates
-    the unit cost."""
+    recorded (`Lifecycle.record_archive_quote`). The run made ``request.units`` units of
+    the item (#6336, default 1): each plate's grams and seconds are divided by it before
+    pricing, so the filament and machine time lines, the markup and the rounding are one
+    unit's, and the quote's plates record one unit's share. The setup line stays per
+    plate and the labour line per item, as a slice quote prices them."""
     store = lifecycle.store
     _, policy, _ = await asyncio.to_thread(book.policy)
     # `filament_id` stands for every slot the print used, which only its archives name:
@@ -314,7 +334,9 @@ async def quote_from_archive(
                 archive_status=facts.status,
             )
         archives.append(facts)
-        plates.append(_plate(facts, facts.plate_id or plate_id or position))
+        plates.append(
+            _per_unit(_plate(facts, facts.plate_id or plate_id or position), request.units)
+        )
     used = {slot.slot_id - 1 for a in archives for slot in a.slots if slot.used_g}
     filaments = dict(request.filaments)
     if request.filament_id is not None:

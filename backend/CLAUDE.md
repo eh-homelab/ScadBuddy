@@ -1601,14 +1601,15 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   its print run's other linked plates, `OrderStore.archive_run_plates`). Quote source
   `archive`: `POST …/items/{item}/quotes/archive` (`ArchiveQuoteRequest`: `archive_id`,
   default the item's first origin, one of its origins or printed by its output or library
-  file, else 422; `filaments`; `filament_id` for every slot the print used), `quote_from_archive`: the slice quote's
+  file, else 422; `filaments`; `filament_id` for every slot the print used; `units`, the
+  units of the item the run made, 1 to `ARCHIVE_UNITS_MAX`, default 1, #6336), `quote_from_archive`: the slice quote's
   check, then every plate archive of the run (`print_sends` by `run_id`, `print_links` by
   queue item; 409 `archive_plates_missing` for a plate with none, `archive_not_succeeded` for
   a status other than `completed`, `archive_gone`), grams per slot from
   `extra_data.filament_slots` (slot id less one), the actual seconds else the estimate, each
-  plate an `ArchivePlate` naming its archive, recorded by `Lifecycle.record_archive_quote`
-  (the whole run is one unit: a run that printed several units, on one plate or as copies,
-  overstates the unit cost: `ArchiveFacts` carries no count of the units a plate held)
+  plate an `ArchivePlate` naming its archive, its grams and seconds divided by `units`
+  (`_per_unit`: grams to the hundredth, seconds to the second, half up; the setup line
+  stays per plate and the labour line per item), recorded by `Lifecycle.record_archive_quote`
   (no sliced file; printing it re-slices, as a manual quote). A library file item with no
   slots gets the slots the print used (`archive_colours`). Job cost reads an `archive`
   quote's plates as a slice quote's, and a `storefront` quote's too (`models.py`

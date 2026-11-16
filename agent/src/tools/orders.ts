@@ -2002,7 +2002,10 @@ export const orderTools: Tool[] = [
       'storefront cart is refused `order_not_submitted` first. `archive` (#4777): priced from what a past print used, ' +
       'with no re-slice: every plate archive of its print run, grams per slot as the slicer estimated them and the ' +
       "actual seconds, at the price book in force, each slot at `filaments`' filament (written onto the item first). " +
-      '`archive_id` defaults to the first archive the item was taken from (order_item_add `archive_id`). Refused ' +
+      '`archive_id` defaults to the first archive the item was taken from (order_item_add `archive_id`). `units` ' +
+      '(default 1) is the number of units of the item the print run made: the run\'s grams and seconds are divided ' +
+      'by it, so a plate that held 2 units prices one unit at half the run. Set it whenever the run made more than ' +
+      'one unit, or the unit price is too high by that factor. Refused ' +
       '409 `archive_plates_missing` (a plate of the run has no archive), `archive_not_succeeded` (a failed or ' +
       'cancelled print: quote by slice or by hand) and `archive_gone`. When the unit price leaves a margin below the thin ' +
       "threshold against the model's real cost per unit in its last fulfilled jobs, the answer adds " +
@@ -2034,6 +2037,13 @@ export const orderTools: Tool[] = [
           filament_id: ID.optional().describe(
             'For an item with no colour slots yet (a library file item): the filament of every slot the print used',
           ),
+          units: z
+            .number()
+            .int()
+            .min(1)
+            .max(1000)
+            .optional()
+            .describe('The units of the item the print run made (default 1): its grams and seconds are divided by it'),
         })
         .strict()
         .optional(),

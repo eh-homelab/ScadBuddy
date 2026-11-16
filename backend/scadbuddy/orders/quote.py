@@ -189,19 +189,26 @@ def print_setup(request: SliceQuoteRequest) -> dict[str, Any]:
     return request.model_dump(mode="json", include=set(SETUP_FIELDS))
 
 
+#: The most units an `archive` quote's print run can have made (#6336).
+ARCHIVE_UNITS_MAX = 1000
+
+
 class ArchiveQuoteRequest(BaseModel):
     """`POST /orders/{id}/items/{item}/quotes/archive` (#4777, order operations spec
     §3.2): the past print to price the item from (``archive_id``: one the item was taken
     from, or one its output or library file printed; omitted, the first archive it was
     taken from) and the price-book filament of each colour slot, as a slice quote's
     ``filaments``. ``filament_id`` prices every slot the print used that ``filaments``
-    does not name, for an item with no slots yet (a library file item)."""
+    does not name, for an item with no slots yet (a library file item). ``units`` is the
+    number of units of the item the print run made (#6336): the run's grams and seconds
+    are divided by it, so a plate that held two units prices one unit at half the run."""
 
     model_config = ConfigDict(extra="forbid")
 
     archive_id: int | None = Field(default=None, ge=1)
     filaments: dict[int, str] = Field(default_factory=dict)
     filament_id: str | None = None
+    units: int = Field(default=1, ge=1, le=ARCHIVE_UNITS_MAX)
 
 
 class QuoteError(ValueError):

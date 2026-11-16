@@ -332,9 +332,47 @@ async def test_a_two_plate_print_is_priced_from_both_archives(
     for line in quote.lines:
         lines[line.kind] = lines.get(line.kind, 0) + line.amount_minor
     assert (lines["filament"], lines["machine_time"], lines["setup"]) == (28 + 15, 175, 100)
+    # With no units named, the run made one unit (#6336): the quote prices the whole run.
+    assert quote.unit_cost_minor == 28 + 15 + 175
     assert shop.get_item().status == "quoted"
     unit = _unit(quote)
     assert unit is not None and unit.grams == Decimal("19.0")
+
+
+async def test_a_run_of_two_units_prices_one_unit_at_half_the_run(
+    shop: QuoteShop, pool: PgPool
+) -> None:
+    subject = f"output:{OUTPUT}"
+    send(pool, subject, "run-1", 51, 1, 81)
+    send(pool, subject, "run-1", 52, 2, 82)
+    seam = Seam(
+        plate(81),
+        plate(82, plate_id=2, actual_seconds=None, slots=[{"slot_id": 1, "used_g": 4.0}]),
+    )
+    with shop.rows.transaction() as conn:
+        conn.execute("UPDATE order_items SET output_id = %s WHERE id = %s", (OUTPUT, shop.item.id))
+    request = archive_request(shop, 82).model_copy(update={"units": 2})
+    quote = await quote_from_archive(
+        shop.lifecycle, seam, Book(), shop.order.id, shop.item.id, request, BY
+    )
+    # Each plate records one unit's share: half its seconds and half its grams.
+    assert [(p["index"], p["print_seconds"], p["archive_id"]) for p in quote.plates] == [
+        (1, 900, 81),
+        (2, 1200, 82),
+    ]
+    assert [[(f["slot"], f["used_g"]) for f in p["filaments"]] for p in quote.plates] == [
+        [(0, "5.00"), (1, "2.50")],
+        [(0, "2.00")],
+    ]
+    # 7 g PLA at 20/kg, 2.5 g PETG at 30/kg (7.5 rounds up), 2100 s at 1.5/h (87.5
+    # rounds up). The setup fee stays one per plate.
+    lines: dict[str, int] = {}
+    for line in quote.lines:
+        lines[line.kind] = lines.get(line.kind, 0) + line.amount_minor
+    assert (lines["filament"], lines["machine_time"], lines["setup"]) == (14 + 8, 88, 100)
+    assert quote.unit_cost_minor == 14 + 8 + 88
+    unit = _unit(quote)
+    assert unit is not None and unit.grams == Decimal("9.50")
 
 
 async def test_an_item_quotes_from_the_archive_it_was_taken_from(
