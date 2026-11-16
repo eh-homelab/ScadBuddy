@@ -187,8 +187,8 @@ function ownEntry(run: { id: string; workflow_run_id: string }, steps: readonly 
 
 /**
  * A hop's deadline for the queue. A deny's claim holds it at `infinity` (an Invalid Date from the
- * SQL), which is no time to show: the entry is read with none, as the run page and the panel show
- * an entry at the starting session with no deadline ("with this session").
+ * SQL), which is no time to show: the entry is read with none. The panel then says "with this
+ * session" and the run page's card "With the session that started the run", each with no time.
  */
 const iso = (d: Date | string | null): string | null =>
   d === null ? null : typeof d === 'string' ? d : Number.isNaN(d.getTime()) ? null : d.toISOString()

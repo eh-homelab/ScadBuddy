@@ -268,6 +268,17 @@ describe('WorkflowRunPage', () => {
     expect(words).toHaveTextContent('Printer 5 is idle, so I will print the box there.')
   })
 
+  // #5299: while the starting session's deny is being sent, the agent reads the call with no
+  // deadline. The card says where it waits, with no time.
+  it("says a child's call held by a deny in flight is with the starting session, with no time", async () => {
+    const [child] = childEntries('run-escalated')
+    setFlowRunChildren('run-escalated', [{ ...child!, hop: 'parent', hop_until: null }])
+    render('run-escalated')
+    const card = await screen.findByRole('region', { name: 'Waiting for approval: print_output' })
+    expect(card).toHaveTextContent('With the session that started the run; you may decide it now.')
+    expect(card).not.toHaveTextContent('until')
+  })
+
   it("decides a child session's call through the agent, and keeps that decision for the person", async () => {
     const sent: { id: string; body: unknown }[] = []
     server.use(
