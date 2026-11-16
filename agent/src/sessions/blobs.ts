@@ -255,7 +255,9 @@ async function getThroughChain(sql: Sql | TransactionSql, sessionId: string, nam
 /**
  * Before the parent of `sessionId` goes (store.ts `copyForkRanges`, in forgetSubject's
  * transaction, before the link is cleared): the images `names` lists (forkPoint.ts `blobNames`
- * of the events `copyForkEvents` copied), found through its chain, become rows of its own.
+ * of the events `copyForkEvents` copied), found through its chain, become rows of its own. One
+ * it holds already (a queued message's write made it) gets this copy's time, as every write
+ * does (#6413): the copied events name it now, so that message's `delete` must not take it.
  */
 export async function copyForkBlobs(tx: TransactionSql, sessionId: string, names: readonly string[]): Promise<void> {
   if (names.length === 0) return
@@ -266,5 +268,5 @@ export async function copyForkBlobs(tx: TransactionSql, sessionId: string, names
       FROM chain c JOIN ai_session_blobs b ON b.session_id = c.id
      WHERE c.depth > 0 AND b.name = ANY(${names as string[]})
      ORDER BY b.name, c.depth
-    ON CONFLICT (session_id, name) DO NOTHING`
+    ON CONFLICT (session_id, name) DO UPDATE SET created_at = clock_timestamp()`
 }

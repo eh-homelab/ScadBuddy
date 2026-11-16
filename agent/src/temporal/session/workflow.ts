@@ -338,7 +338,7 @@ export async function AgentSession(started: SessionStart): Promise<void> {
     left.splice(0, Math.max(0, left.length - 2 * QUEUE_MAX))
   }
   /** The images of the entries that left unrun since the last write (#6413). */
-  const unrun: MadeBlobs[] = []
+  const unrun: MadeBlobs[] = [...(start.queue_unrun ?? [])]
   const leftUnrun = (entries: readonly QueuedMessage[]): void => {
     for (const q of entries) if (q.made) unrun.push(...q.made)
   }
@@ -415,6 +415,7 @@ export async function AgentSession(started: SessionStart): Promise<void> {
           const version = queueVersion
           // Taken now: if the activity fails for good (or the history is reset), these images stay
           // until the session is deleted. Best effort, as the delete is: an image left costs a row.
+          // Those not taken yet are carried over a continue-as-new (`queue_unrun`).
           const drop = unrun.splice(0)
           await finish[SESSION_QUEUE_CHANGED_ACTIVITY]!({
             sessionId: start.session_id,
@@ -435,6 +436,8 @@ export async function AgentSession(started: SessionStart): Promise<void> {
       })
     publishing = run
   }
+  // Drops carried from the last run (#6413) are written, and their images deleted, at once.
+  if (unrun.length > 0) changed()
   const queueState = (): QueueState => ({ version: queueVersion, queue: queue.map(queuedView) })
   /** The index of a queued entry that may still change (not the head being started). */
   const waiting = (id: string): number => (id === starting ? -1 : queue.findIndex((q) => q.turn_id === id))
@@ -887,9 +890,11 @@ export async function AgentSession(started: SessionStart): Promise<void> {
         delete next.queue
         delete next.queue_version
         delete next.queue_left
+        delete next.queue_unrun
         delete next.message
         if (queueVersion > 0) Object.assign(next, { queue: [...queue], queue_version: queueVersion })
         if (left.length > 0) next.queue_left = [...left]
+        if (unrun.length > 0) next.queue_unrun = [...unrun]
         if (message !== undefined) {
           next.message = message
           // A Stop since the turn's end is for that message's turn.

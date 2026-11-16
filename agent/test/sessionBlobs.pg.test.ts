@@ -195,6 +195,21 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session ima
     expect((await get(`/api/v1/ai/sessions/${child.id}/blobs/${NAME}`)).status).toBe(200)
   })
 
+  it("keeps an image a fork's copied events name when a queued message that made it in the fork is dropped (#6413)", async () => {
+    const id = await withImage()
+    await m.store.append({ projectKey: 'p', sessionId: id }, [{ type: 'user', uuid: 'u1', message: {} }])
+    const child = await m.fork(id, browser)
+    // A message queued in the fork with the same image: its write makes the fork's own row.
+    const blobs = new SessionBlobs(db.sql)
+    const [made] = await blobs.putMade(child.id, [sessionImage('image/png', Buffer.from(PNG, 'base64'))])
+    expect(made?.names).toEqual([NAME])
+    // Forgetting the parent copies the image the fork's events name: a write, so it gets a later time.
+    await forgetSubject({ sql: db.sql, keys: testPayloadKeys(db.sql) }, `session-${id}`)
+    // The queued message is dropped: the image stays, as the copied events name it.
+    expect(await blobs.delete(child.id, made!)).toEqual([])
+    expect((await get(`/api/v1/ai/sessions/${child.id}/blobs/${NAME}`)).status).toBe(200)
+  })
+
   it('a fork whose parent is forgotten between its insert and its log goes whole (#4212)', async () => {
     const id = await withImage()
     await m.store.append({ projectKey: 'p', sessionId: id }, [{ type: 'user', uuid: 'u1', message: {} }])

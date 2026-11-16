@@ -136,6 +136,8 @@ export type SessionStart = {
   queue_version?: number | null
   /** The ids that left the queue lately (started, removed or dropped), so an Update sent again does not queue one twice. */
   queue_left?: string[] | null
+  /** The images of messages that left the queue unrun whose delete was not yet sent (#6413). */
+  queue_unrun?: MadeBlobs[] | null
   /** A queued message the last turn's end started (the row is its turn's), carried to the run that runs it. */
   message?: Message | null
 }
