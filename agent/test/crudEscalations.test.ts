@@ -192,6 +192,30 @@ describe('a delivery through the CRUD routes', () => {
     expect(logged.some((l) => l.includes('did not start (busy)') && l.includes('not handed back'))).toBe(true)
   })
 
+  it('logs why the session cannot be asked when the skip fails too', async () => {
+    const { api, service } = delivering(() => Promise.reject(new SessionError('budget_exhausted', 'no')))
+    api.routes.set('POST /escalations/skip', () => ({ status: 500, body: {} }))
+    const logged: string[] = []
+    const error = console.error
+    console.error = (...args: unknown[]) => void logged.push(args.map(String).join(' '))
+    try {
+      await expect(service.deliver()).rejects.toThrow()
+    } finally {
+      console.error = error
+    }
+    expect(logged.some((l) => l.includes('cannot be asked (budget_exhausted)'))).toBe(true)
+  })
+
+  it("skips a call whose session changed hands to the person, through the API, naming the parent", async () => {
+    let sent = 0
+    const { api, service } = delivering(async () => void sent++)
+    api.routes.set('POST /escalations/waiting', () => ({ body: { calls: [{ ...WAITING, parent_principal: 'mcp:someone-else' }] } }))
+    expect(await service.deliver()).toBe(0)
+    expect(sent).toBe(0)
+    expect(api.seen.find((s) => s.path === '/escalations/skip')!.body).toEqual(CALLS)
+    expect(api.paths()).not.toContain('POST /escalations/claim')
+  })
+
   it('sends at most IDS_MAX ids a list, and hands back the earlier batches when a later claim fails', async () => {
     const { api, routes } = escalations()
     const own = Array.from({ length: 1001 }, (_, i) => `durable:${PARENT}:run-1:toolu_${i}`)

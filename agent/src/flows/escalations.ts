@@ -465,7 +465,14 @@ export class Escalations {
       await withinHold(send(session, owner.owner, text, owner.tiers), this.#deps.claimHoldMs ?? CLAIM_HOLD_MS)
     } catch (err) {
       if (err instanceof SessionError && err.code !== 'busy' && err.code !== 'unavailable') {
-        await crud.skip(callsOf(session, claimed))
+        try {
+          await crud.skip(callsOf(session, claimed))
+        } catch (lost) {
+          // As a failed hand back below: the calls stay marked sent and reach the person when
+          // their hop ends; say why the parent's turn never happened.
+          console.error(`escalations: session ${session} cannot be asked (${err.code}), and its calls were not passed to the person`)
+          throw lost
+        }
         return 0
       }
       try {
