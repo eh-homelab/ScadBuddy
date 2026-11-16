@@ -376,8 +376,8 @@ def moved(conn: Connection[Any], session_id: str, since: int | None, own: list[s
 
 
 def user_landed(conn: Connection[Any], session_id: str, mark: int) -> bool:
-    """``turnHost.ts`` ``userEntryLanded``: whether a user entry landed in the main transcript
-    after row ``mark``; a legacy row's own top-level ``type`` is read."""
+    """``store.ts`` ``userLanded`` (for ``turnHost.ts``): whether a user entry landed in the
+    main transcript after row ``mark``; a legacy row's own top-level ``type`` is read."""
     rows = conn.execute(
         "SELECT entry_type = 'user' AS typed, entry FROM ai_session_entries"
         " WHERE session_id = %s AND subpath = '' AND id > %s AND NOT inherited"
