@@ -16,6 +16,7 @@ import {
 import {
   applyPreset,
   parsePresetTags,
+  presetParams,
   presetDescriptionProblem,
   presetInputs,
   presetTagsProblem,
@@ -148,6 +149,18 @@ function skippedOf(schema: CustomizerSchema, preset: ParamPreset): Skipped[] {
   return applyPreset(schema, preset).skipped.map((name) => ({ name, value: stored[name] as ParamValue }))
 }
 
+/** A name as the server stores it: inner runs of whitespace collapsed, ends trimmed (#360). */
+function normaliseName(name: string): string {
+  return name.split(/\s+/).filter(Boolean).join(' ')
+}
+
+/** #360 — a short word after an action, kept until the values or UI state change. */
+interface Notice {
+  text: string
+  values: ParamValues
+  extra: InputsExtra
+}
+
 function message(caught: unknown): string {
   return caught instanceof ApiError ? caught.detail : String(caught)
 }
@@ -233,6 +246,15 @@ export function PresetPicker({
   const [confirmingUpdate, setConfirmingUpdate] = useState(false)
   /** #1022 — the link Copy link copied, or offered to copy by hand where it could not. */
   const [copied, setCopied] = useState<{ id: string; url: string; ok: boolean } | null>(null)
+  /** #360 — the Update in flight, for its spinner: `busy` covers the dialogs' writes too. */
+  const [updating, setUpdating] = useState(false)
+  /** #360 — "Saved as X.", "Updated X." or what "No preset" leaves, until the next change. */
+  const [notice, setNotice] = useState<Notice | null>(null)
+  if (notice && (!sameValues(values, notice.values) || !sameJson(extra, notice.extra))) setNotice(null)
+
+  function say(text: string, shown: ParamValues = values, shownExtra: InputsExtra = extra) {
+    setNotice({ text, values: shown, extra: shownExtra })
+  }
 
   /**
    * #357 — the presets changed elsewhere (another tab, the assistant): read them again.
@@ -260,6 +282,7 @@ export function PresetPicker({
     setSelection(null)
     setSkipped([])
     setNaming(null)
+    setNotice(null)
     setError(DELETED_ELSEWHERE)
   }
 
@@ -269,6 +292,7 @@ export function PresetPicker({
     setSeenReset(resetKey)
     setSelection(null)
     setSkipped([])
+    setNotice(null)
     setError(null)
   }
 
@@ -327,6 +351,9 @@ export function PresetPicker({
   // with none selected, values that are not the defaults. The UI state has no default
   // to compare with there: a template UI may seed its own (#1484).
   const unsaved = selection ? modified : !sameValues(values, defaultValues(schema))
+  /** #360 — a preset saved now would hold nothing: every value is the default, no UI state. */
+  const nothingDiffers =
+    Object.keys(presetParams(schema, values)).length === 0 && Object.keys(extra).length === 0
 
   /**
    * #359 — a pick replaces every value on screen, so with unsaved edits it asks first.
@@ -378,8 +405,11 @@ export function PresetPicker({
   /** Applies `preset`, or with none clears the selection and leaves the values alone. */
   async function pick(preset: ParamPreset | undefined) {
     setError(null)
+    setNotice(null)
     const turn = ++picking.current
     if (!preset) {
+      // #360 — the values are left as they are, which nothing on screen said.
+      if (selection) say('No preset selected. The values on screen stay as they are.')
       setSelection(null)
       setSkipped([])
       return
@@ -398,6 +428,14 @@ export function PresetPicker({
     setSkipped(applied.skipped.map((name) => ({ name, value: storedParams[name] as ParamValue })))
     setSettling(true)
     onApply(applied.values, applied.extra)
+  }
+
+  /** #360 — puts the selected preset's values and UI state back, undoing the edits since. */
+  function revert() {
+    if (!selection) return
+    setNotice(null)
+    setSettling(true)
+    onApply(selection.applied, selection.extra)
   }
 
   /**
@@ -482,7 +520,7 @@ export function PresetPicker({
   async function saveAs(event?: FormEvent) {
     event?.preventDefault()
     const chosen = name.trim()
-    if (!chosen || busy || pinned) return
+    if (!chosen || busy || pinned || nothingDiffers) return
     setNameError(null)
     const described = details()
     if (!described) return
@@ -497,6 +535,7 @@ export function PresetPicker({
       setSelection({ preset: created, applied: values, extra })
       setSkipped([])
       setNaming(null)
+      say(`Saved as ${created.name}.`)
     } catch (caught) {
       refused(caught)
     } finally {
@@ -572,7 +611,9 @@ export function PresetPicker({
     }
     setConfirmingUpdate(false)
     setBusy(true)
+    setUpdating(true)
     setError(null)
+    setNotice(null)
     try {
       const updated = await api.updatePreset(slug, selected.id, {
         inputs: presetInputs(schema, values, extra),
@@ -580,11 +621,13 @@ export function PresetPicker({
       presetsState.setData(presets.map((preset) => (preset.id === updated.id ? updated : preset)))
       setSelection({ preset: updated, applied: values, extra })
       setSkipped([])
+      say(`Updated ${updated.name}.`)
     } catch (caught) {
       if (gone(caught)) lost(selected.id)
       else setError(message(caught))
     } finally {
       setBusy(false)
+      setUpdating(false)
     }
   }
 
@@ -632,7 +675,11 @@ export function PresetPicker({
       ? `The copy is a saved preset of yours to change, with ${selected?.name ?? 'the original'}'s values, description and tags. The original stays as it is.`
       : naming === 'details'
         ? 'Its values stay as they are: Update saves the ones on screen.'
-        : "Saves the values that differ from the template's defaults, under a name to pick them by next time."
+        : "Saves the values that differ from the template's defaults, under a name to pick them by next time. " +
+          'Values equal to a default are not stored, so the preset follows later changes to the defaults.'
+  /** #360 — the name as it will be stored, said when that is not what was typed. */
+  const normalisedName = normaliseName(name)
+  const statusText = modified ? `Changed from ${selected?.name ?? ''}` : (notice?.text ?? '')
 
   return (
     <div data-testid="preset-picker" className="flex flex-col gap-2 border-b px-3 py-2.5">
@@ -650,9 +697,12 @@ export function PresetPicker({
           onValueChange={(id) => choose(id === NONE ? '' : id)}
           disabled={presetsState.loading && !presetsState.data}
         >
-          <SelectTrigger ref={trigger} id="preset-select" className="min-w-40 flex-1">
-            <SelectValue placeholder={presets.length === 0 ? 'No presets yet' : 'Choose a preset…'} />
-          </SelectTrigger>
+          {/* #360 — a long name is cut off in a narrow panel: the whole of it on hover or focus. */}
+          <Hint content={selected?.name}>
+            <SelectTrigger ref={trigger} id="preset-select" className="min-w-40 flex-1">
+              <SelectValue placeholder={presets.length === 0 ? 'No presets yet' : 'Choose a preset…'} />
+            </SelectTrigger>
+          </Hint>
           <SelectContent position="popper">
             {selected && (
               <>
@@ -689,8 +739,10 @@ export function PresetPicker({
               size="sm"
               onClick={() => void update()}
               disabled={busy}
+              aria-busy={updating || undefined}
               aria-label={`Update preset ${selected?.name ?? ''}`}
             >
+              {updating && <Spinner />}
               Update
             </Button>
           )}
@@ -741,16 +793,33 @@ export function PresetPicker({
           buttons it wrapped word by word into a narrow column, and a long name pushed it
           out of the panel.
           #351 — always in the page, so "Changed from …" is announced as it appears;
-          out of the flow while empty, so it adds no gap. */}
-      <Hint content={modified ? `Changed from ${selected?.name ?? ''}` : undefined}>
-        <p
-          role="status"
-          data-testid={modified ? 'preset-modified' : undefined}
-          className={modified ? 'min-w-0 truncate text-xs text-muted-foreground' : 'sr-only'}
-        >
-          {modified && <>Changed from {selected?.name}</>}
-        </p>
-      </Hint>
+          out of the flow while empty, so it adds no gap.
+          #360 — it also says what Save, Update and "No preset" did, until the next change,
+          and Revert sits beside "Changed from …". */}
+      <div className={statusText ? 'flex min-w-0 items-center gap-2' : 'contents'}>
+        <Hint content={modified ? statusText : undefined}>
+          <p
+            role="status"
+            data-testid={modified ? 'preset-modified' : notice ? 'preset-notice' : undefined}
+            className={statusText ? 'min-w-0 truncate text-xs text-muted-foreground' : 'sr-only'}
+          >
+            {statusText}
+          </p>
+        </Hint>
+        {modified && (
+          <Button
+            type="button"
+            variant="outline"
+            size="xs"
+            className="shrink-0"
+            onClick={revert}
+            disabled={busy}
+            aria-label={`Revert to preset ${selected?.name ?? ''}`}
+          >
+            Revert
+          </Button>
+        )}
+      </div>
 
       {copied && copied.id === selected?.id && (
         <p role="status" data-testid="preset-link-copy" className="min-w-0 text-xs text-muted-foreground">
@@ -833,6 +902,11 @@ export function PresetPicker({
                 aria-invalid={invalidField === 'name' || undefined}
                 aria-describedby={invalidField === 'name' && nameError ? dialogErrorId : undefined}
               />
+              {normalisedName && normalisedName !== name.trim() && (
+                <p data-testid="preset-name-normalised" className="text-xs text-muted-foreground">
+                  Saved as “{normalisedName}”: repeated spaces become one.
+                </p>
+              )}
             </div>
             {naming !== 'duplicate' && (
               <>
@@ -868,6 +942,11 @@ export function PresetPicker({
                 </div>
               </>
             )}
+            {naming === 'save' && nothingDiffers && (
+              <p data-testid="preset-nothing-differs" className="text-sm text-muted-foreground">
+                Nothing differs from the defaults. Change a value to save it as a preset.
+              </p>
+            )}
             {nameError && (
               <p id={dialogErrorId} role="alert" className="text-sm text-destructive">
                 {nameError}
@@ -878,7 +957,11 @@ export function PresetPicker({
             <Button type="button" variant="outline" onClick={closeNaming} disabled={busy}>
               Cancel
             </Button>
-            <Button type="submit" form={`${fieldIds}-form`} disabled={busy || !name.trim()}>
+            <Button
+              type="submit"
+              form={`${fieldIds}-form`}
+              disabled={busy || !name.trim() || (naming === 'save' && nothingDiffers)}
+            >
               {busy && <Spinner />}
               {naming === 'duplicate' ? 'Duplicate' : 'Save'}
             </Button>
