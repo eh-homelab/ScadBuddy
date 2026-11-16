@@ -14,6 +14,7 @@ import { event } from '../src/sessions/protocol.js'
 import { RESTARTED_PROMPT, restartedPrompt } from '../src/sessions/turnHost.js'
 import { forgetSubject } from '../src/sessions/forget.js'
 import { finishedToolCalls, toolCallResult, toolCallStarter } from '../src/tools/activityProjection.js'
+import { PgSessionReads } from '../src/sessions/sessionReads.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { defineTool, json, text, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { toolCallTools } from '../src/tools/toolCalls.js'
@@ -294,7 +295,7 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`a turn's tool
     const start = toolCallStarter({ client, blobs: new SessionBlobs(db.sql), queue })
     await start({ sessionId: session.id, toolUseId: 'toolu_01Done_a', tool: 'probe', input: { n: 41 }, signal: new AbortController().signal })
     expect(ran).toHaveLength(1)
-    const finished = await finishedToolCalls({ sql: db.sql, client }, session.id, turnId)
+    const finished = await finishedToolCalls({ reads: new PgSessionReads(db.sql), client }, session.id, turnId)
     expect(finished).toEqual([{ id: 'toolu_01Done_a', name: 'mcp__scadbuddy__probe', ok: true }])
     const prompt = restartedPrompt(finished)
     expect(prompt).not.toBe(RESTARTED_PROMPT)
@@ -316,7 +317,7 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`a turn's tool
     expect(JSON.stringify((await readBack!.execute({ call_id: 'toolu_01Lost_b' }, ctx(session.id))).content)).toContain('no finished result')
     await expect(readBack!.execute({ call_id: 'toolu_01Done_a' }, ctx(undefined))).rejects.toThrow('in none')
     // Reading it again runs nothing: the call ran once.
-    await finishedToolCalls({ sql: db.sql, client }, session.id, turnId)
+    await finishedToolCalls({ reads: new PgSessionReads(db.sql), client }, session.id, turnId)
     expect(ran).toHaveLength(1)
     expect(restartedPrompt([])).toBe(RESTARTED_PROMPT)
   }, 120_000)

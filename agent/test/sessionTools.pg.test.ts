@@ -10,6 +10,7 @@ import { PgEventListener } from '../src/events/pgListener.js'
 import { ResourceHub } from '../src/resources/hub.js'
 import { BROWSER_USER } from '../src/routes/approvals.js'
 import { followSessionEvents, SessionEventPublisher } from '../src/sessions/busEvents.js'
+import { PgPublisher } from '../src/sessions/publish.js'
 import type { SessionManager, TurnPrincipal } from '../src/sessions/manager.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { runTool } from '../src/tools/registry.js'
@@ -86,7 +87,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
       options: { audit?: AuditLog } = {},
     ) {
       const tokens = new InMemoryTokenStore()
-      const publisher = new SessionEventPublisher(db.sql, { throttleMs: 10 })
+      const publisher = new SessionEventPublisher(new PgPublisher(db.sql), { throttleMs: 10 })
       const { runner, runs, prompts } = scriptedRunner(turns)
       const principals: TurnPrincipal[] = []
       const sessions = manager({
@@ -497,11 +498,11 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
     it('wakes a watcher on another replica through the bus, not the poll', async () => {
       const paths = await tempPaths()
       const slow = 60_000
-      const pubA = new SessionEventPublisher(db.sql, { throttleMs: 10 })
+      const pubA = new SessionEventPublisher(new PgPublisher(db.sql), { throttleMs: 10 })
       const { runner } = scriptedRunner(() => ({ reply: 'from replica A' }))
       const replicaA = manager({ sql: db.sql, paths, run: runner, pollMs: slow, onAppend: pubA.onAppend })
       const other = connectDatabase(url, { searchPath: schema })
-      const pubB = new SessionEventPublisher(other.sql, { throttleMs: 10 })
+      const pubB = new SessionEventPublisher(new PgPublisher(other.sql), { throttleMs: 10 })
       const replicaB: SessionManager = manager({ sql: other.sql, paths, pollMs: slow, onAppend: pubB.onAppend })
       const bus = await listener()
       const stopWake = followSessionEvents(bus, replicaB.events, pubB.replica)

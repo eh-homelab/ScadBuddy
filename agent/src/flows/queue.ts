@@ -1,5 +1,6 @@
 import type { Sql } from 'postgres'
 import { flowRequestId, parseRequestId } from '../gate/ids.js'
+import { PgSessionReads, type SessionReads } from '../sessions/sessionReads.js'
 import type { FlowRunReads, QueueHop, StepRow, WaitingOn } from './backendReads.js'
 import type { EscalationRoutes } from './crudEscalations.js'
 
@@ -106,36 +107,11 @@ export function childStep(steps: readonly StepRow[], sessionId: string): QueueSt
  * the log's last `scan` events (not logged yet: `follow_session` writes it a moment
  * after the call parks).
  */
-export async function childReasoning(sql: Sql, requestId: string, scan = REASONING_SCAN): Promise<string | undefined> {
+export async function childReasoning(reads: Pick<SessionReads, 'reasoningDeltas'>, requestId: string, scan = REASONING_SCAN): Promise<string | undefined> {
   const parsed = parseRequestId(requestId)
   if (parsed?.store !== 'durable') return ''
-  const { sessionId, toolUseId } = parsed
-  // The window's floor, from the log's last seq (a backward step on its primary key), and
-  // the call's `tool.call` above it, in one query: a call not logged yet costs one read a
-  // tick, not three (#2842).
-  const [found] = await sql<{ floor: string; seq: string | null }[]>`
-    WITH top AS (
-      SELECT coalesce(max(seq), 0) - ${scan} AS floor FROM ai_session_events WHERE session_id = ${sessionId}::uuid)
-    SELECT top.floor, (
-      SELECT seq FROM ai_session_events
-       WHERE session_id = ${sessionId}::uuid AND seq > top.floor AND strpos(event, ${toolUseId}) > 0
-         AND event::jsonb ->> 'type' = 'tool.call' AND event::jsonb ->> 'id' = ${toolUseId}
-       ORDER BY seq DESC LIMIT 1) AS seq
-      FROM top`
-  if (!found?.seq) return undefined
-  const floor = found.floor
-  const call = { seq: found.seq }
-  const [start] = await sql<{ seq: string }[]>`
-    SELECT seq FROM ai_session_events
-     WHERE session_id = ${sessionId}::uuid AND seq > ${floor} AND seq < ${call.seq}
-       AND strpos(event, '"user.turn"') > 0 AND event::jsonb ->> 'type' = 'user.turn'
-     ORDER BY seq DESC LIMIT 1`
-  const rows = await sql<{ message: string | null; delta: string | null }[]>`
-    SELECT event::jsonb ->> 'messageId' AS message, event::jsonb ->> 'delta' AS delta
-      FROM ai_session_events
-     WHERE session_id = ${sessionId}::uuid AND seq < ${call.seq} AND seq > ${start?.seq ?? floor}
-       AND strpos(event, '"assistant.text.delta"') > 0 AND event::jsonb ->> 'type' = 'assistant.text.delta'
-     ORDER BY seq`
+  const rows = await reads.reasoningDeltas(parsed.sessionId, parsed.toolUseId, scan)
+  if (rows === undefined) return undefined
   const parts: string[] = []
   let last: string | null | undefined
   for (const r of rows) {
@@ -198,15 +174,23 @@ export class FlowQueue {
   readonly #reads: FlowRunReads
 
   readonly #routes: { crud: Pick<EscalationRoutes, 'runEntries'>; use: () => boolean } | undefined
+  readonly #sessionReads: Pick<SessionReads, 'reasoningDeltas'>
 
   /**
    * `reads`: the backend's flow tables, through its CRUD routes (backendReads.ts). `routes`: a
    * run's child entries through the API once it lists area `escalations` (#5299 step 10).
+   * `sessionReads`: a child's reasoning (`gated` in main.ts; SQL on `sql` when omitted).
    */
-  constructor(sql: Sql, reads: FlowRunReads, routes?: { crud: Pick<EscalationRoutes, 'runEntries'>; use: () => boolean }) {
+  constructor(
+    sql: Sql,
+    reads: FlowRunReads,
+    routes?: { crud: Pick<EscalationRoutes, 'runEntries'>; use: () => boolean },
+    sessionReads: Pick<SessionReads, 'reasoningDeltas'> = new PgSessionReads(sql),
+  ) {
     this.#sql = sql
     this.#reads = reads
     this.#routes = routes
+    this.#sessionReads = sessionReads
   }
 
   async #children(runId: string): Promise<ChildRow[]> {
@@ -231,7 +215,7 @@ export class FlowQueue {
     for (const w of run.waiting_on) entries.push(ownEntry(run, steps, w))
     const children = await this.#children(run.id)
     // Side by side: the run page and the starter's panel both poll this.
-    const reasonings = await Promise.all(children.map((c) => childReasoning(this.#sql, c.request_id)))
+    const reasonings = await Promise.all(children.map((c) => childReasoning(this.#sessionReads, c.request_id)))
     for (const [i, c] of children.entries()) {
       entries.push({
         source: 'child',

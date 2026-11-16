@@ -20,6 +20,7 @@ import {
 import { type BusEvent } from '../src/events/bus.js'
 import { PgEventListener } from '../src/events/pgListener.js'
 import { followSessionEvents, SessionEventPublisher } from '../src/sessions/busEvents.js'
+import { PgPublisher } from '../src/sessions/publish.js'
 import { EventLog } from '../src/sessions/eventLog.js'
 import { gateDb, sessionGateActivities } from '../src/temporal/session/gateActivities.js'
 import { SESSION_GATE_ACTIVITIES } from '../src/temporal/session/names.js'
@@ -301,7 +302,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
 
       /** A replica: its event log, its publisher, and (with `bus`) its own LISTEN consumer. */
       async function replica(options: { bus?: boolean } = {}) {
-        const publisher = new SessionEventPublisher(sql, { throttleMs: 10 })
+        const publisher = new SessionEventPublisher(new PgPublisher(sql), { throttleMs: 10 })
         const log = new EventLog(sql, { pollMs: SLOW, onAppend: publisher.onAppend })
         closers.push(() => publisher.close())
         const heard: BusEvent[] = []
@@ -361,7 +362,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       })
 
       it("publishes through main.ts's log of its own when there is no session manager", async () => {
-        const publisher = new SessionEventPublisher(sql, { throttleMs: 10 })
+        const publisher = new SessionEventPublisher(new PgPublisher(sql), { throttleMs: 10 })
         closers.push(() => publisher.close())
         const sid = await newSession(sql)
         expect(await sessionGateActivities(gateDb(sql, undefined, publisher.onAppend))[SESSION_GATE_ACTIVITIES.open](open(sid))).toBe(true)

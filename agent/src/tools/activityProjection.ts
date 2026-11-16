@@ -6,7 +6,7 @@ import type { CallApproval } from '../harness/seamLedger.js'
 import { TOOL_USE_META, toolContextFor } from '../telemetry/trace.js'
 import { type Client, WorkflowFailedError, WorkflowNotFoundError } from '@temporalio/client'
 import { WorkflowExecutionAlreadyStartedError } from '@temporalio/common'
-import type { Sql } from 'postgres'
+import type { SessionReads } from '../sessions/sessionReads.js'
 import type { SessionImages } from '../sessions/blobs.js'
 import { failureClass, traceparentOf } from '../telemetry/trace.js'
 import { TASK_QUEUE, TURN_TOOL_PREFIX } from '../temporal/names.js'
@@ -205,21 +205,6 @@ async function startEagerly(
   return deps.client.workflow.getHandle(options.workflowId)
 }
 
-/** The tool_use ids of a session's calls that have a `tool.call` and no `tool.result` in its events, since its seq `afterSeq`. */
-async function openCalls(sql: Sql, sessionId: string, afterSeq: number): Promise<{ id: string; name: string }[]> {
-  const rows = await sql<{ type: string; id: string; name: string | null }[]>`
-    SELECT event::jsonb->>'type' AS type, event::jsonb->>'id' AS id, event::jsonb->>'name' AS name
-      FROM ai_session_events
-     WHERE session_id = ${sessionId} AND seq > ${afterSeq} AND event::jsonb->>'type' IN ('tool.call', 'tool.result')
-     ORDER BY seq`
-  const open = new Map<string, string>()
-  for (const row of rows) {
-    if (row.type === 'tool.call') open.set(row.id, row.name ?? '')
-    else open.delete(row.id)
-  }
-  return [...open].map(([id, name]) => ({ id, name }))
-}
-
 /** A ToolCall that completed before a restart, for the restart message (turnHost.ts): which call, and whether it succeeded. Never what it returned. */
 export type FinishedCall = { id: string; name: string; ok: boolean }
 
@@ -230,12 +215,8 @@ export type FinishedCall = { id: string; name: string; ok: boolean }
  * workflow is still open, failed, or was never started (an in-process call) is left out: the
  * message says those are to be checked.
  */
-export async function finishedToolCalls(deps: { sql: Sql; client: Client }, sessionId: string, turnId: string): Promise<FinishedCall[]> {
-  const [start] = await deps.sql<{ seq: string }[]>`
-    SELECT seq FROM ai_session_events
-     WHERE session_id = ${sessionId} AND event::jsonb->>'type' = 'user.turn' AND event::jsonb->>'turnId' = ${turnId}
-     ORDER BY seq DESC LIMIT 1`
-  const calls = await openCalls(deps.sql, sessionId, start ? Number(start.seq) : 0)
+export async function finishedToolCalls(deps: { reads: Pick<SessionReads, 'openCalls'>; client: Client }, sessionId: string, turnId: string): Promise<FinishedCall[]> {
+  const calls = await deps.reads.openCalls(sessionId, turnId)
   const out: FinishedCall[] = []
   for (const call of calls) {
     const handle = deps.client.workflow.getHandle(toolCallWorkflowId(sessionId, call.id))
@@ -268,8 +249,8 @@ export async function toolCallResult(deps: { client: Client; blobs: Pick<Session
  * result, and every execution of its id prefix still running, which a call started just before
  * its `tool.call` event was written is, all at once.
  */
-export async function terminateOpenToolCalls(deps: { sql: Sql; client: Client }, sessionId: string, reason: string): Promise<void> {
-  const ids = new Set((await openCalls(deps.sql, sessionId, 0)).map((call) => toolCallWorkflowId(sessionId, call.id)))
+export async function terminateOpenToolCalls(deps: { reads: Pick<SessionReads, 'openCalls'>; client: Client }, sessionId: string, reason: string): Promise<void> {
+  const ids = new Set((await deps.reads.openCalls(sessionId)).map((call) => toolCallWorkflowId(sessionId, call.id)))
   const prefix = toolCallWorkflowId(sessionId, '')
   try {
     for await (const execution of deps.client.workflow.list({ query: `WorkflowId STARTS_WITH "${prefix}" AND ExecutionStatus = "Running"` })) {

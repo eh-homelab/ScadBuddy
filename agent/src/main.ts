@@ -71,7 +71,7 @@ import {
   withServiceCredential,
 } from './api/serviceCredential.js'
 import { untilBackendAnswers } from './api/backendUp.js'
-import { BLOB_AREAS, CrudAreas, FORGET_AREAS, GATE_AREAS, SECRET_AREAS, SESSION_AREAS, TASK_AREAS, TURN_AREAS, WORKSPACE_AREAS } from './api/crudAreas.js'
+import { BLOB_AREAS, CrudAreas, FORGET_AREAS, GATE_AREAS, SECRET_AREAS, SESSION_AREAS, TASK_AREAS, TURN_AREAS, WORKSPACE_AREAS, REST_AREAS } from './api/crudAreas.js'
 import { CrudApprovals } from './approvals/crudApprovals.js'
 import { CrudAudit } from './audit/crudAudit.js'
 import { CrudPending } from './gate/crudPending.js'
@@ -97,6 +97,8 @@ import { CrudPairingStore, type PairingStore, PostgresPairingStore } from './bri
 import { CHAT_FRAME_MAX, startHeartbeat } from './routes/chat.js'
 import { storedModel } from './routes/model.js'
 import { followSessionEvents, SessionEventPublisher } from './sessions/busEvents.js'
+import { CrudPublisher, PgPublisher, type Publisher } from './sessions/publish.js'
+import { CrudSessionReads, PgSessionReads, type SessionReads } from './sessions/sessionReads.js'
 import { resolveTabWaits, SessionManager, type SessionManagerDeps, SETTING_MODEL } from './sessions/manager.js'
 import { readStartSettings, wireRuntimeSync } from './sessions/runtimeSync.js'
 import { drainRetains, type MemoryOptions } from './memory/hindsight.js'
@@ -114,7 +116,7 @@ import { ALL_TOOLS } from './tools/index.js'
 import { CrudFlowBlobs, gatedFlowBlobs, PgFlowBlobs } from './temporal/flowBlobs.js'
 import { PgFlowRuns } from './temporal/flowRuns.js'
 import { flowSessionActivities } from './temporal/flowSessions.js'
-import { decidedCalls, gateActivities, PgApprovalRecords, PgSessionOwners, type ToolActivityDeps, toolActivities, toolCallActivities } from './temporal/toolActivities.js'
+import { decidedCalls, gateActivities, PgApprovalRecords, RowSessionOwners, type ToolActivityDeps, toolActivities, toolCallActivities } from './temporal/toolActivities.js'
 import { finishedToolCalls, toolCallResult, type ToolCallStarter, toolCallStarter } from './tools/activityProjection.js'
 import { TASK_QUEUE } from './temporal/names.js'
 import { sessionFinishActivities } from './temporal/session/finishActivity.js'
@@ -265,7 +267,7 @@ const serviceCredential: CredentialSource | undefined =
 // gate's writes (#5299 step 10, `GATE_AREAS`), but for a run grant's check, which only the API runs,
 // and the sessions' rows and what their calls touched (#5299 step 9, `SESSION_AREAS`).
 const crudFetch = serviceCredential ? withServiceCredential(globalThis.fetch, serviceCredential, config.backendUrl) : globalThis.fetch
-const crudAreas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: [...SECRET_AREAS, ...FORGET_AREAS, ...STORE_AREAS, ...WORKSPACE_AREAS, ...BLOB_AREAS, ...TASK_AREAS, ...GATE_AREAS, ...SESSION_AREAS, ...TURN_AREAS] })
+const crudAreas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: [...SECRET_AREAS, ...FORGET_AREAS, ...STORE_AREAS, ...WORKSPACE_AREAS, ...BLOB_AREAS, ...TASK_AREAS, ...GATE_AREAS, ...SESSION_AREAS, ...REST_AREAS, ...TURN_AREAS] })
 crudAreas.start()
 // The small stores (#5299 step 5, api/crudStores.ts): each through its CRUD routes once the API
 // lists its area, over SQL until then.
@@ -298,6 +300,12 @@ const transcriptRows = (sql: Sql, keys: PayloadKeys | undefined): TranscriptRows
 // the API lists area `session-events`. An append in a caller's own transaction stays SQL.
 const crudEvents = new CrudEventRows(config.backendUrl, { fetch: crudFetch })
 const eventRows = (sql: Sql): EventRows => gated<EventRows>(new PgEventRows(sql), crudEvents, () => crudAreas.has('session-events'))
+// The NOTIFYs sent outside a store's write and a session's last event reads (#6501, backend
+// api/crud_agent_publish.py): over SQL until the API lists areas `publish` and `session-reads`.
+const crudPublisher = new CrudPublisher(crudTarget)
+const publisher = (sql: Sql): Publisher => gated<Publisher>(new PgPublisher(sql), crudPublisher, () => crudAreas.has('publish'))
+const crudSessionReads = new CrudSessionReads(crudTarget)
+const sessionReads = (sql: Sql): SessionReads => gated<SessionReads>(new PgSessionReads(sql), crudSessionReads, () => crudAreas.has('session-reads'))
 // A durable turn's writes of its session's row with their events (#6449, backend
 // api/crud_agent_turns.py): a send's claim, a placement's, its spend, the turn's end with the
 // queue's head and the sweep's end of a lost turn, over SQL until the API lists area `session-turns`.
@@ -616,7 +624,7 @@ const tokens =
 // `session.*` on the event bus (#300, sessions/busEvents.ts): every event-log
 // append is announced on `scadbuddy_events`, and this replica's LISTEN
 // consumer (below) wakes its followers for sessions other replicas write.
-const sessionEvents = database ? new SessionEventPublisher(database.sql) : undefined
+const sessionEvents = database ? new SessionEventPublisher(publisher(database.sql)) : undefined
 
 // A session's background tasks (CronCreate, ScheduleWakeup, Monitor, TaskStop), in either mode:
 // a recurring cron job a Schedule, any other a `BackgroundTask` workflow, on agent-tools, that
@@ -688,6 +696,8 @@ const sessions =
         resourceRows: resourceRows(database.sql),
         transcripts: transcriptRows(database.sql, dataKeys),
         eventRows: eventRows(database.sql),
+        sessionReads: sessionReads(database.sql),
+        publish: publisher(database.sql),
         pendingRoutes,
         approvalRoutes: { crud: new CrudApprovals(crudTarget), use: () => crudAreas.has('approvals') },
         questionRoutes: { crud: new CrudQuestions(crudTarget), use: () => crudAreas.has('questions') },
@@ -899,9 +909,9 @@ const SESSION_HOST_QUEUE = sessionHostQueue(replicaIdentity())
 const durableToolDeps: ToolActivityDeps | undefined = temporal
   ? {
       services: toolServices,
-      sessions: new PgSessionOwners(temporal.sql),
+      sessions: new RowSessionOwners(sessionRows(temporal.sql)),
       approvals: new PgApprovalRecords(temporal.sql, flowReads, pendingRoutes),
-      flows: new PgFlowRuns(temporal.sql, flowReads),
+      flows: new PgFlowRuns(temporal.sql, flowReads, sessionRows(temporal.sql)),
       audit,
       currentTiers: liveTokenTiers(tokens),
       // A result's images, for the durable segment's view_tool_images (#2320).
@@ -948,7 +958,7 @@ const turnHost =
         ...(durableToolDeps ? { runCall: decidedCalls(ALL_TOOLS, durableToolDeps) } : {}),
         // A restarted turn's calls that finished as ToolCall workflows (Step 9.2), read with the client below.
         finishedCalls: (sessionId: string, turnId: string) =>
-          temporalClient ? finishedToolCalls({ sql: temporal.sql, client: temporalClient }, sessionId, turnId) : Promise.resolve([]),
+          temporalClient ? finishedToolCalls({ reads: sessionReads(temporal.sql), client: temporalClient }, sessionId, turnId) : Promise.resolve([]),
         // A `done` summary, posted as a classic turn's (#5003).
         questions: sessions.questions,
         // The session's working directory, a copy of its workspace placed for each turn and written back at its end (Step 9.5).
@@ -1004,9 +1014,9 @@ toolServices.messaging = pluginMessaging({
 })
 const turnToolDeps = temporal
   ? {
-      sessions: new PgSessionOwners(temporal.sql),
+      sessions: new RowSessionOwners(sessionRows(temporal.sql)),
       // A flow's tool(name, ...) reaches the same tools, as the run's starter (#2320).
-      flows: new PgFlowRuns(temporal.sql, flowReads),
+      flows: new PgFlowRuns(temporal.sql, flowReads, sessionRows(temporal.sql)),
       servers: turnServers({
         ...(durableRemotePlugins ? { remotePlugins: durableRemotePlugins } : {}),
         access: accessResolver,
@@ -1139,7 +1149,7 @@ const temporalWorker =
           ...toolCallActivities(ALL_TOOLS, durableToolDeps),
           ...gateActivities({
             audit,
-            sessions: new PgSessionOwners(temporal.sql),
+            sessions: new RowSessionOwners(sessionRows(temporal.sql)),
             workspace,
             // A tool that resolves what it names parks that, by name (#4442).
             tools: ALL_TOOLS,
@@ -1158,7 +1168,7 @@ const temporalWorker =
           ...turnToolActivities(turnToolDeps),
           default: turnToolActivity(turnToolDeps),
           // A flow's agent(...) and ask_session(...) (#1057, 6g): beside the tools, never one.
-          ...flowSessionActivities({ sql: temporal.sql, flows: new PgFlowRuns(temporal.sql, flowReads), events: eventRows(temporal.sql) }),
+          ...flowSessionActivities({ sql: temporal.sql, sessions: sessionRows(temporal.sql), flows: new PgFlowRuns(temporal.sql, flowReads, sessionRows(temporal.sql)), events: eventRows(temporal.sql) }),
           ...operationActivities(commandKinds, operationStore),
           ...(background ?? {}),
         },

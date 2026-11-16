@@ -439,6 +439,12 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `parent` for the session named), the hop's timeout sweep, and a delivery's claim, hand back and
   skip, with the record of a run's own calls sent. Who may answer stays the agent's check. Tests
   `tests/crud/test_crud_agent_escalations.py`.
+  `api/crud_agent_publish.py` (areas `publish` and `session-reads`, #6501): the NOTIFYs the
+  agent sent outside a store's write, a `session.*` bus event on `scadbuddy_events` (each field
+  checked, so the payload stays small) and a warm eviction on `scadbuddy_warm_evict`; and two
+  reads of a session's own events in `agent_data/events.py`, its open calls (`open_calls`) and a
+  child's text before a call (`reasoning_deltas`), the agent's statements. Tests
+  `tests/crud/test_crud_agent_publish.py`.
 - `backend/scadbuddy/flow_triggers/` — runs started on a schedule or an event (#2484,
   spec 2026-10-11 §12): `store.py` (`flow_triggers`, their standing grants and fires),
   `fire.py` (the `flow_trigger_fire` activity on the `library` queue), `events.py` (the

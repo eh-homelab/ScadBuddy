@@ -7,6 +7,7 @@ import { terminateOpenToolCalls, workflowNotFound as notFound } from '../tools/a
 import { dropPayloadKey, type PayloadKeys, payloadKeyLock, subjectOf, sweepBridgeKeys } from '../temporal/payloadCodec.js'
 import { dropUnnamedBytes } from '../workspace/store.js'
 import { copyForkRanges, ForksNeedKeys, hasForks } from './store.js'
+import { PgSessionReads } from './sessionReads.js'
 import { notifyWarmEvict } from './warmEvict.js'
 
 // forgetSubject (spec 2026-10-01 §6.5, plan 5c Ruling 12): the one operation every
@@ -101,7 +102,7 @@ export async function forgetSubject(deps: ForgetDeps, subject: string): Promise<
   if (sessionId !== undefined && !deps.crud && !deps.keys && (await hasForks(deps.sql, sessionId))) throw new ForksNeedKeys(sessionId)
   deps.keys?.forget(subject)
   if (sessionId !== undefined) await endBackgroundTasks(deps, sessionId)
-  if (sessionId !== undefined && deps.client) await terminateOpenToolCalls({ sql: deps.sql, client: deps.client }, sessionId, 'forgotten (forgetSubject)')
+  if (sessionId !== undefined && deps.client) await terminateOpenToolCalls({ reads: new PgSessionReads(deps.sql), client: deps.client }, sessionId, 'forgotten (forgetSubject)')
   // The tombstone with the deletion: no encoder still running for the subject (a
   // workflow task or an activity before the termination below) can make it a new key.
   const answered = deps.crud ? await deps.crud.forget(subject) : 'forks'

@@ -52,6 +52,23 @@ describe('past prints mock (#4777)', () => {
     expect(stranger?.status).toBe(422)
   })
 
+  it('prices one unit when the run made several, and refuses a unit that rounds to no grams (#6500)', async () => {
+    const item = await api.addOrderItem(ORDER_DRAFT, { archive_id: 9101, quantity: 1 })
+    const filaments = Object.fromEntries(item.colours.map((c) => [String(c.slot), FILAMENT_PLA]))
+    // `past_prints.py` `_per_unit`: each plate's grams to the hundredth and its seconds to
+    // the whole second, divided by the units the run made.
+    const quote = await api.quoteItemFromArchive(ORDER_DRAFT, item.id, { filaments, units: 8 })
+    expect(quote.plates.map((p) => [p.print_seconds, (p.filaments as { used_g: string }[]).map((f) => f.used_g)])).toEqual([
+      [413, ['1.5']],
+      [413, ['0.5']],
+    ])
+    // Plate 2's 4 g over 1000 units is 0.004 g a unit: it rounds to 0.00 g.
+    const light = await failure(api.quoteItemFromArchive(ORDER_DRAFT, item.id, { filaments, units: 1000 }))
+    expect([light?.status, light?.problem?.type]).toEqual([422, PROBLEMS + 'archive_plate'])
+    const none = await failure(api.quoteItemFromArchive(ORDER_DRAFT, item.id, { filaments, units: 0 }))
+    expect(none?.status).toBe(422)
+  })
+
   it('measures an attempt from an accepted archive quote, as from a slice quote', async () => {
     const item = await api.addOrderItem(ORDER_DRAFT, { archive_id: 9103, quantity: 1 })
     const quote = await api.quoteItemFromArchive(ORDER_DRAFT, item.id, { filament_id: FILAMENT_PLA })

@@ -8,6 +8,8 @@ import { contextFrom, withSpan } from '../telemetry/trace.js'
 import { type Tier, TIERS } from '../auth/principal.js'
 import { imageOfBlock, RESULT_IMAGES_MAX, type SessionImage } from '../sessions/blobs.js'
 import type { Owner } from '../sessions/protocol.js'
+import { PgSessionRows, type SessionRows } from '../sessions/rows.js'
+import { isUuid } from '../harness/stateDirs.js'
 import { withApprovalLine } from '../approvals/service.js'
 import {
   effectiveTool,
@@ -63,31 +65,32 @@ export interface SessionOwners {
   ownerOf(sessionId: string): Promise<(Owner & { turnTiers?: readonly Tier[] | null; turnId?: string | null }) | undefined>
 }
 
-export class PgSessionOwners implements SessionOwners {
-  private readonly sql: Sql
+/** A session's owner from its row (sessions/rows.ts `SessionRows.get`, `gated` in main.ts). */
+export class RowSessionOwners implements SessionOwners {
+  readonly #rows: Pick<SessionRows, 'get'>
 
-  constructor(sql: Sql) {
-    this.sql = sql
+  constructor(rows: Pick<SessionRows, 'get'>) {
+    this.#rows = rows
   }
 
   async ownerOf(sessionId: string): Promise<(Owner & { turnTiers: readonly Tier[] | null; turnId: string | null }) | undefined> {
-    const [row] = await this.sql<
-      {
-        owner_kind: Owner['kind']
-        owner_id: string
-        owner_label: string
-        turn_tiers: { by?: { kind?: string; id?: string }; tiers?: unknown } | null
-        durable_turn_id: string | null
-      }[]
-    >`
-      SELECT owner_kind, owner_id, owner_label, turn_tiers, durable_turn_id FROM ai_sessions WHERE id = ${sessionId}`
+    // An id that is no UUID throws, as the SQL's uuid cast did.
+    if (!isUuid(sessionId)) throw new Error(`session ${JSON.stringify(sessionId)} is not a session id`)
+    const row = await this.#rows.get(sessionId)
     if (!row) return undefined
     // Only the sender's own tiers, while it still owns the session (a handoff since
     // leaves the new owner its default), and only tiers there are.
-    const sent = row.turn_tiers
+    const sent = row.turn_tiers as { by?: { kind?: string; id?: string }; tiers?: unknown } | null
     const mine = sent?.by?.kind === row.owner_kind && sent.by.id === row.owner_id && Array.isArray(sent.tiers)
     const turnTiers = mine ? TIERS.filter((t) => (sent.tiers as unknown[]).includes(t)) : null
     return { kind: row.owner_kind, id: row.owner_id, label: row.owner_label, turnTiers, turnId: row.durable_turn_id }
+  }
+}
+
+/** `RowSessionOwners` on the session rows' SQL (tests, and a process with no API). */
+export class PgSessionOwners extends RowSessionOwners {
+  constructor(sql: Sql) {
+    super(new PgSessionRows(sql))
   }
 }
 

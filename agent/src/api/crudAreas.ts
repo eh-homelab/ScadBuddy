@@ -62,6 +62,13 @@ export const GATE_AREAS = ['gate', 'pending-input', 'audit', 'approvals', 'quest
 export const SESSION_AREAS = ['sessions', 'session-resources', 'transcripts', 'session-events', 'session-order-costs'] as const
 
 /**
+ * The NOTIFYs sent outside a store's write (a `session.*` bus event, a warm eviction) and a
+ * session's last event reads (its open calls, a child's reasoning) (#6501; backend
+ * api/crud_agent_publish.py; sessions/publish.ts, sessions/sessionReads.ts).
+ */
+export const REST_AREAS = ['publish', 'session-reads'] as const
+
+/**
  * The area of a durable turn's writes of its session's row, each with its events in one
  * transaction and its fence checked there (#6449; backend api/crud_agent_turns.py;
  * sessions/turnRows.ts).

@@ -253,7 +253,8 @@ def _plate(facts: ArchiveFacts, index: int) -> ArchivePlate:
 def _per_unit(plate: ArchivePlate, units: int) -> ArchivePlate:
     """``plate``'s share of one unit when the run made ``units`` units of the item
     (#6336): its grams to the hundredth and its seconds to the whole second, each
-    rounded half up. A plate of one unit is the plate itself."""
+    rounded half up. A plate of one unit is the plate itself. 422 ``archive_plate`` when
+    every slot's share rounds to no grams, which would price the filament at nothing."""
     if units == 1:
         return plate
     filaments = [
@@ -263,6 +264,18 @@ def _per_unit(plate: ArchivePlate, units: int) -> ArchivePlate:
         )
         for used in plate.filaments
     ]
+    if not any(used.used_g for used in filaments):
+        message = (
+            f"archive {plate.archive_id} records too little filament for {units} units:"
+            " each unit's share rounds to 0.00 g, so it cannot price the item"
+        )
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            message,
+            type_=PROBLEMS + "archive_plate",
+            archive_id=plate.archive_id,
+            errors=[{"loc": ["body", "units"], "msg": message}],
+        )
     seconds = int((Decimal(plate.print_seconds) / units).quantize(Decimal(1), ROUND_HALF_UP))
     return plate.model_copy(update={"filaments": filaments, "print_seconds": max(seconds, 1)})
 

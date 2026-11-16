@@ -284,3 +284,74 @@ def copy_fork_blobs(conn: Connection[Any], session_id: str, names: list[str]) ->
         ).encode(),
         {"session": session_id, "names": names},
     )
+
+
+def open_calls(conn: Connection[Any], session_id: str, turn_id: str | None) -> list[dict[str, str]]:
+    """``tools/activityProjection.ts`` ``openCalls``: the session's own calls with a
+    ``tool.call`` and no ``tool.result``, oldest first, each ``{id, name}``. With ``turn_id``,
+    those after that turn's last ``user.turn`` (``finishedToolCalls``; after seq 0 when it is not
+    logged); without, every one (``terminateOpenToolCalls``). One statement: one snapshot."""
+    rows = conn.execute(
+        (
+            "WITH start AS (SELECT coalesce((SELECT seq FROM ai_session_events"
+            " WHERE %(turn)s::text IS NOT NULL AND " + _USER_TURN + " ORDER BY seq DESC LIMIT 1),"
+            " 0) AS seq)"
+            " SELECT e.event::jsonb->>'type' AS type, e.event::jsonb->>'id' AS id,"
+            " e.event::jsonb->>'name' AS name"
+            " FROM ai_session_events e, start WHERE e.session_id = %(session)s::uuid"
+            " AND e.seq > start.seq AND e.event::jsonb->>'type' IN ('tool.call', 'tool.result')"
+            " ORDER BY e.seq"
+        ).encode(),
+        {"session": session_id, "turn": turn_id},
+    ).fetchall()
+    calls: dict[str, str] = {}
+    for row in rows:
+        if row["type"] == "tool.call":
+            calls[row["id"]] = row["name"] or ""
+        else:
+            calls.pop(row["id"], None)
+    return [{"id": i, "name": n} for i, n in calls.items()]
+
+
+def reasoning_deltas(
+    conn: Connection[Any], session_id: str, tool_use_id: str, scan: int
+) -> list[dict[str, str | None]] | None:
+    """``flows/queue.ts`` ``childReasoning``'s reads, statement for statement: the
+    ``assistant.text.delta`` events (``message``, ``delta``) since the turn's last ``user.turn``
+    before the call's ``tool.call``, oldest first, within the log's last ``scan`` events; None
+    when that ``tool.call`` is not among them."""
+    params: dict[str, Any] = {"session": session_id, "id": tool_use_id, "scan": scan}
+    found = conn.execute(
+        (
+            b"WITH top AS (SELECT coalesce(max(seq), 0) - %(scan)s AS floor"
+            b" FROM ai_session_events WHERE session_id = %(session)s::uuid)"
+            b" SELECT top.floor, (SELECT seq FROM ai_session_events"
+            b" WHERE session_id = %(session)s::uuid AND seq > top.floor"
+            b" AND strpos(event, %(id)s) > 0 AND event::jsonb ->> 'type' = 'tool.call'"
+            b" AND event::jsonb ->> 'id' = %(id)s ORDER BY seq DESC LIMIT 1) AS seq FROM top"
+        ),
+        params,
+    ).fetchone()
+    if found is None or found["seq"] is None:
+        return None
+    params.update(floor=found["floor"], call=found["seq"])
+    start = conn.execute(
+        (
+            b"SELECT seq FROM ai_session_events WHERE session_id = %(session)s::uuid"
+            b" AND seq > %(floor)s AND seq < %(call)s AND strpos(event, '\"user.turn\"') > 0"
+            b" AND event::jsonb ->> 'type' = 'user.turn' ORDER BY seq DESC LIMIT 1"
+        ),
+        params,
+    ).fetchone()
+    params["from"] = start["seq"] if start is not None else found["floor"]
+    rows = conn.execute(
+        (
+            b"SELECT event::jsonb ->> 'messageId' AS message, event::jsonb ->> 'delta' AS delta"
+            b" FROM ai_session_events WHERE session_id = %(session)s::uuid"
+            b" AND seq < %(call)s AND seq > %(from)s"
+            b" AND strpos(event, '\"assistant.text.delta\"') > 0"
+            b" AND event::jsonb ->> 'type' = 'assistant.text.delta' ORDER BY seq"
+        ),
+        params,
+    ).fetchall()
+    return [{"message": r["message"], "delta": r["delta"]} for r in rows]

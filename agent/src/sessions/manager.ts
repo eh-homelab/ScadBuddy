@@ -75,7 +75,8 @@ import type { FlowRunReads } from '../flows/backendReads.js'
 import { Escalations } from '../flows/escalations.js'
 import { TurnRunner } from './turnRunner.js'
 import { type WarmQuery, WarmSessions } from './warm.js'
-import { notifyWarmEvict } from './warmEvict.js'
+import { PgPublisher, type Publisher } from './publish.js'
+import { PgSessionReads, type SessionReads } from './sessionReads.js'
 import type { TurnCoreDeps } from './turnCore.js'
 import { systemAppend } from './turnShared.js'
 import { FlowQueue } from '../flows/queue.js'
@@ -677,6 +678,10 @@ export type SessionManagerDeps = {
   transcripts?: TranscriptRows
   /** Where the sessions' event logs are kept (`PgEventRows` on `sql` when omitted; gated in main.ts, #5299 step 9). */
   eventRows?: EventRows
+  /** A child's reasoning before its call (`PgSessionReads` on `sql` when omitted; gated in main.ts, #6501). */
+  sessionReads?: SessionReads
+  /** A warm process's eviction on every replica (`PgPublisher` on `sql` when omitted; gated in main.ts, #6501). */
+  publish?: Pick<Publisher, 'warmEvict'>
   /** The backend's flow tables, through its CRUD routes (flows/backendReads.ts, #5299 D7). */
   flowReads: FlowRunReads
   paths: HarnessPaths
@@ -985,11 +990,14 @@ export class SessionManager {
       ...(deps.run ? { start: startedQuery(deps.run) } : {}),
       ...(deps.warm?.log ? { log: deps.warm.log } : {}),
     })
-    this.queue = new FlowQueue(deps.sql, deps.flowReads, deps.escalationRoutes)
+    const sessionReads = deps.sessionReads ?? new PgSessionReads(deps.sql)
+    this.queue = new FlowQueue(deps.sql, deps.flowReads, deps.escalationRoutes, sessionReads)
     this.escalations = new Escalations({
       sql: deps.sql,
       reads: deps.flowReads,
       routes: deps.escalationRoutes,
+      sessions: this.rows,
+      sessionReads,
       durable: () => this.durable,
       ...(deps.currentTiers ? { currentTiers: deps.currentTiers } : {}),
       // A delivery turn (#2482): as the owner, with the tiers its owner holds now.
@@ -1542,7 +1550,7 @@ export class SessionManager {
     // fingerprint, and its question gate is the browser user's): gone here and
     // on every other replica (spec 2026-10-13 §5.3, warmEvict.ts).
     void this.warm.evict(id, 'handed off')
-    await notifyWarmEvict(this.deps.sql, id)
+    await (this.deps.publish ?? new PgPublisher(this.deps.sql)).warmEvict(id)
     return this.get(id, to)
   }
 
