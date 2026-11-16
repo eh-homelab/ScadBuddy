@@ -12,7 +12,6 @@ from collections.abc import AsyncIterator, Iterator
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
-import httpx
 import pytest
 from psycopg import Connection
 from psycopg.rows import DictRow, dict_row
@@ -124,7 +123,13 @@ def moto_s3() -> Iterator[S3Settings]:
         access_key_id="testing",
         secret_access_key="testing",
     )
-    httpx.put(f"{settings.endpoint}/sb-test").raise_for_status()
+    # A call, not `PUT /sb-test`, for the reason the reset below is one: on a loaded runner
+    # that request missed httpx's 5 s read timeout in setup (#6301). The bucket is the one
+    # the request made: same account, region and ACL.
+    from moto.core.models import DEFAULT_ACCOUNT_ID
+    from moto.s3.models import s3_backends
+
+    s3_backends[DEFAULT_ACCOUNT_ID]["aws"].create_bucket(settings.bucket, "us-east-1")
     try:
         yield settings
     finally:
