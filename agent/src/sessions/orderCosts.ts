@@ -429,6 +429,7 @@ export class OrderCosts implements TouchedSink {
   }
 }
 
+/** One TouchedSink that reports each call to every sink in turn. */
 export function touchedSinks(...sinks: TouchedSink[]): TouchedSink {
   return { record: async (call) => void (await Promise.all(sinks.map((s) => s.record(call)))) }
 }

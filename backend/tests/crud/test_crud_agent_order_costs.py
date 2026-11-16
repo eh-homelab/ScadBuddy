@@ -173,6 +173,25 @@ def test_a_report_runs_under_the_sessions_lease(agent: Agent, tables: PgPool) ->
     assert agent.post(f"{path}/report", {"token": token}) == {"report": None}
 
 
+def test_a_share_past_the_budget_is_sent_and_read_back_to_send_again(
+    agent: Agent, tables: PgPool
+) -> None:
+    # The SDK stops a query only once it is over its budget, so the spend can pass the largest
+    # budget; the share is taken whatever its size, as the SQL path takes it.
+    sid = _session(tables, cost=100.4)
+    path = f"/sessions/{sid}/order-costs"
+    agent.post(path, {"order_id": "o1", "order_item_id": "i1"})
+    token = _lease(tables, sid)
+    assert token is not None
+    assert agent.post(f"{path}/report", {"token": token})["report"]["cost"] == 100.4
+    agent.post(
+        f"{path}/attempt", {"token": token, "order_id": "o1", "items": ["i1"], "amount_usd": 100.4}
+    )
+    # No answer came: the next report reads the share it sent, as a number, to send it again.
+    pending = agent.post(f"{path}/report", {"token": token})["report"]["pending"]
+    assert pending == [{"order_id": "o1", "order_item_id": "i1", "attempted_usd": 100.4}]
+
+
 def test_a_write_under_a_lost_lease_is_refused(agent: Agent, tables: PgPool) -> None:
     sid = _session(tables)
     path = f"/sessions/{sid}/order-costs"
@@ -235,7 +254,7 @@ def test_the_bodies_and_ids_are_bounded(agent: Agent, tables: PgPool) -> None:
         ("/report", {"token": "not-a-uuid"}),
         ("/attempt", {"token": token, "order_id": "o", "items": [], "amount_usd": 1}),
         ("/attempt", {"token": token, "order_id": "o", "items": ["i"], "amount_usd": -1}),
-        ("/attempt", {"token": token, "order_id": "o", "items": ["i"], "amount_usd": 101}),
+        ("/attempt", {"token": token, "order_id": "o", "items": ["i"], "amount_usd": "inf"}),
         ("/settle", {"token": token, "order_id": "o", "outcome": "lost"}),
     ):
         agent.post(f"{path}{route}", body, expect=422)

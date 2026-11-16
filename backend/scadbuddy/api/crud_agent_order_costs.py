@@ -38,8 +38,6 @@ ID_MAX = 200
 #: The items of one order a report names, and the sessions one sweep reports.
 ITEMS_MAX = 1000
 SWEEP_MAX = 100
-#: A share is a part of a session's spend, which its budget bounds (``BUDGET_MAX_USD``).
-AMOUNT_MAX_USD = 100.0
 
 #: The largest body: an attempt naming every item of an order.
 BODY_BYTES_MAX = 512 * 1024
@@ -150,7 +148,10 @@ class Attempt(_Body):
     token: UUID
     order_id: Id
     items: list[Id] = Field(min_length=1, max_length=ITEMS_MAX)
-    amount_usd: float = Field(ge=0, le=AMOUNT_MAX_USD)
+    #: No upper bound: a session's spend can pass its budget (the SDK stops a query only once
+    #: it is over), and the SQL path took any share. Finite only, as ``double precision``
+    #: would keep an infinity.
+    amount_usd: float = Field(ge=0, allow_inf_nan=False)
 
 
 @router.post(

@@ -94,8 +94,10 @@ async function endBackgroundTasks(deps: ForgetDeps, sessionId: string): Promise<
 export async function forgetSubject(deps: ForgetDeps, subject: string): Promise<Forgotten> {
   if (subjectOf(subject) !== subject) throw new Error(`${subject} is not a session-<uuid> or flow-<uuid> subject`)
   const sessionId = subject.startsWith('session-') ? subject.slice('session-'.length) : undefined
-  // Said before anything ends; the check that holds is copyForkRanges's, under the lock. With the
-  // API's route the API copies the ranges under its own KEK, so none is needed here.
+  // Without the API's route, said before anything ends; the check that holds is copyForkRanges's,
+  // under the lock. With the route the API decides under its lock and copies the ranges with its
+  // own KEK. Only an API with no KEK refuses (`forks-take-ranges`), and then the fallback below
+  // throws ForksNeedKeys after the tasks have ended: the subject stays, and the forget can run again.
   if (sessionId !== undefined && !deps.crud && !deps.keys && (await hasForks(deps.sql, sessionId))) throw new ForksNeedKeys(sessionId)
   deps.keys?.forget(subject)
   if (sessionId !== undefined) await endBackgroundTasks(deps, sessionId)
