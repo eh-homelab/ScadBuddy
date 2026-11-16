@@ -126,18 +126,35 @@ export class CrudEscalations implements EscalationRoutes {
 
   async claim(calls: SessionCalls): Promise<string[]> {
     if (!isUuid(calls.session)) return []
-    const { claimed } = await this.#call<{ claimed: string[] }>('a delivery claimed', '/escalations/claim', { body: wellFormed(this.#calls(calls)) })
+    // A batch at a time (the API's `IDS_MAX`). A batch that fails hands back what the earlier
+    // ones claimed, so a failed claim leaves nothing claimed, as one call did.
+    const claimed: string[] = []
+    try {
+      for (const batch of this.#batches(calls)) {
+        const { claimed: won } = await this.#call<{ claimed: string[] }>('a delivery claimed', '/escalations/claim', { body: wellFormed(batch) })
+        claimed.push(...won)
+      }
+    } catch (err) {
+      if (claimed.length > 0) {
+        const back = new Set(claimed)
+        const held = { session: calls.session, child: calls.child.filter((id) => back.has(id)), own: calls.own.filter((id) => back.has(id)) }
+        await this.unclaim(held).catch(() => undefined)
+      }
+      throw err
+    }
     return claimed
   }
 
   async unclaim(calls: SessionCalls): Promise<void> {
     if (!isUuid(calls.session)) return
-    await this.#call('a delivery handed back', '/escalations/unclaim', { body: wellFormed(this.#calls(calls)) })
+    for (const batch of this.#batches(calls)) await this.#call('a delivery handed back', '/escalations/unclaim', { body: wellFormed(batch) })
   }
 
   async skip(calls: SessionCalls): Promise<void> {
     if (!isUuid(calls.session)) return
-    await this.#call('the calls a session cannot be asked about', '/escalations/skip', { body: wellFormed(this.#calls(calls)) })
+    for (const batch of this.#batches(calls)) {
+      await this.#call('the calls a session cannot be asked about', '/escalations/skip', { body: wellFormed(batch) })
+    }
   }
 
   async deliveries(after: string, limit: number): Promise<string[]> {
@@ -170,8 +187,15 @@ export class CrudEscalations implements EscalationRoutes {
     return entries.map((e) => ({ ...e, created_at: new Date(e.created_at), expires_at: new Date(e.expires_at) }))
   }
 
-  #calls(calls: SessionCalls): { session: string; child: string[]; own: string[] } {
-    return { session: calls.session, child: calls.child.filter(fits), own: calls.own.filter(fits) }
+  /** A session's calls in bodies of at most `IDS_MAX` ids a list. */
+  #batches(calls: SessionCalls): SessionCalls[] {
+    const child = calls.child.filter(fits)
+    const own = calls.own.filter(fits)
+    const out: SessionCalls[] = []
+    for (let i = 0; i < Math.max(child.length, own.length, 1); i += IDS_MAX) {
+      out.push({ session: calls.session, child: child.slice(i, i + IDS_MAX), own: own.slice(i, i + IDS_MAX) })
+    }
+    return out
   }
 }
 

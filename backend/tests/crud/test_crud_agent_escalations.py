@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
+from datetime import datetime
 from typing import Any
 
 import pytest
@@ -143,6 +144,10 @@ def test_a_deny_claim_holds_the_entry_until_released(agent: Agent, tables: PgPoo
     assert listed["hop_until"] == "infinity"
     agent.post("/escalations/release-deny", {"request_id": rid, "hop_until": held})
     assert _row(tables, rid)["claimed"] is False
+    # Released, the deadline is a timestamp again, as text.
+    [listed] = agent.get("/escalations/run-entries", flow_run_id="flow-1")["entries"]
+    assert listed["hop_until"] != "infinity"
+    assert datetime.fromisoformat(listed["hop_until"]) == datetime.fromisoformat(held)
     other = str(uuid.uuid4())
     assert agent.post("/escalations/claim-deny", {"request_id": rid, "session": other}) == {
         "hop_until": None

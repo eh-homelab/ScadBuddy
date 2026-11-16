@@ -177,6 +177,42 @@ describe('a delivery through the CRUD routes', () => {
     await expect(service.deliver()).rejects.toThrow('boom')
     expect(api.paths()).toContain('POST /escalations/unclaim')
   })
+
+  it('sends at most IDS_MAX ids a list, and hands back the earlier batches when a later claim fails', async () => {
+    const { api, routes } = escalations()
+    const own = Array.from({ length: 1001 }, (_, i) => `durable:${PARENT}:run-1:toolu_${i}`)
+    const bodies: { child: string[]; own: string[] }[] = []
+    api.routes.set('POST /escalations/claim', (seen) => {
+      const body = seen.body as { child: string[]; own: string[] }
+      bodies.push(body)
+      return { body: { claimed: [...body.child, ...body.own] } }
+    })
+    expect(await routes.crud.claim({ session: PARENT, child: [RID], own })).toHaveLength(1002)
+    expect(bodies.map((b) => [b.child.length, b.own.length])).toEqual([
+      [1, 1000],
+      [0, 1],
+    ])
+    let calls = 0
+    api.routes.set('POST /escalations/claim', (seen) => {
+      calls += 1
+      if (calls === 2) return { status: 500, body: {} }
+      const body = seen.body as { child: string[]; own: string[] }
+      return { body: { claimed: [...body.child, ...body.own] } }
+    })
+    const back: string[] = []
+    api.routes.set('POST /escalations/unclaim', (seen) => {
+      back.push(...(seen.body as { own: string[] }).own)
+      return { body: {} }
+    })
+    await expect(routes.crud.claim({ session: PARENT, child: [], own })).rejects.toThrow()
+    expect(back).toEqual(own.slice(0, 1000))
+    for (const route of ['unclaim', 'skip'] as const) {
+      api.seen = []
+      api.routes.set(`POST /escalations/${route}`, () => ({ body: {} }))
+      await routes.crud[route]({ session: PARENT, child: [], own })
+      expect(api.seen.map((s) => (s.body as { own: string[] }).own.length)).toEqual([1000, 1])
+    }
+  })
 })
 
 describe("a run's queue through the CRUD routes", () => {

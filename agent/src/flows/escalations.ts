@@ -381,9 +381,6 @@ export class Escalations {
         await this.#skip(session, calls)
         continue
       }
-      // The claim and the turn are one transaction: a process that dies before the turn
-      // started leaves nothing claimed, and the next tick sends them. A concurrent replica
-      // skips the rows this one holds.
       // A child's reasoning, read before the claim: a durable child's call whose
       // `tool.call` is not logged yet (`follow_session` writes it a moment later) waits for
       // a later tick rather than go up with none, since it is sent only once. Past
@@ -409,6 +406,9 @@ export class Escalations {
         }
         continue
       }
+      // On the SQL path the claim and the turn are one transaction: a process that dies before
+      // the turn started leaves nothing claimed, and the next tick sends them. A concurrent
+      // replica skips the rows this one holds.
       let claimed: Waiting[] = []
       try {
         await this.#deps.sql.begin(async (tx) => {
