@@ -185,7 +185,13 @@ function ownEntry(run: { id: string; workflow_run_id: string }, steps: readonly 
   }
 }
 
-const iso = (d: Date | string | null): string | null => (d === null ? null : typeof d === 'string' ? d : d.toISOString())
+/**
+ * A hop's deadline for the queue. A deny's claim holds it at `infinity` (an Invalid Date from the
+ * SQL), which is no time to show: the entry is read with none, as the run page and the panel show
+ * an entry at the starting session with no deadline ("with this session").
+ */
+const iso = (d: Date | string | null): string | null =>
+  d === null ? null : typeof d === 'string' ? d : Number.isNaN(d.getTime()) ? null : d.toISOString()
 
 export class FlowQueue {
   readonly #sql: Sql
@@ -206,8 +212,8 @@ export class FlowQueue {
   async #children(runId: string): Promise<ChildRow[]> {
     if (this.#routes?.use()) {
       const rows = await this.#routes.crud.runEntries(runId)
-      // An ISO time as the SQL's Date gave it; `infinity` (a deny's claim) as it is.
-      const at = (s: string | null) => (s === null || Number.isNaN(Date.parse(s)) ? s : new Date(s).toISOString())
+      // An ISO time as the SQL's Date gave it; `infinity` (a deny's claim) is no time: `iso` shows none.
+      const at = (s: string | null) => (s === null || Number.isNaN(Date.parse(s)) ? null : new Date(s).toISOString())
       return rows.map((r) => ({ ...r, hop_until: at(r.hop_until), hops: (r.hops as QueueHop[] | null) ?? null }))
     }
     return await this.#sql<ChildRow[]>`

@@ -178,6 +178,20 @@ describe('a delivery through the CRUD routes', () => {
     expect(api.paths()).toContain('POST /escalations/unclaim')
   })
 
+  it("logs why the turn did not start when the hand back fails too, and reports the hand back's failure", async () => {
+    const { api, service } = delivering(() => Promise.reject(new SessionError('busy', 'busy')))
+    api.routes.set('POST /escalations/unclaim', () => ({ status: 500, body: {} }))
+    const logged: string[] = []
+    const error = console.error
+    console.error = (...args: unknown[]) => void logged.push(args.map(String).join(' '))
+    try {
+      await expect(service.deliver()).rejects.toThrow()
+    } finally {
+      console.error = error
+    }
+    expect(logged.some((l) => l.includes('did not start (busy)') && l.includes('not handed back'))).toBe(true)
+  })
+
   it('sends at most IDS_MAX ids a list, and hands back the earlier batches when a later claim fails', async () => {
     const { api, routes } = escalations()
     const own = Array.from({ length: 1001 }, (_, i) => `durable:${PARENT}:run-1:toolu_${i}`)
@@ -216,7 +230,7 @@ describe('a delivery through the CRUD routes', () => {
 })
 
 describe("a run's queue through the CRUD routes", () => {
-  it("reads the run's child entries, a deny's claim as infinity", async () => {
+  it("reads the run's child entries, a deny's claim (infinity) with no deadline", async () => {
     const { api, routes } = escalations()
     const row = {
       request_id: RID,
@@ -236,7 +250,7 @@ describe("a run's queue through the CRUD routes", () => {
     api.routes.set('GET /escalations/run-entries', () => ({ body: { entries: [row, { ...row, request_id: `${RID}2`, hop_until: HOP_UNTIL }] } }))
     const queue = await new FlowQueue(sessionsOnly, reads, routes).forRun('flow-1')
     const children = queue!.entries.filter((e) => e.source === 'child')
-    expect(children.map((e) => (e as { hop_until: string | null }).hop_until)).toEqual(['infinity', new Date(HOP_UNTIL).toISOString()])
+    expect(children.map((e) => (e as { hop_until: string | null }).hop_until)).toEqual([null, new Date(HOP_UNTIL).toISOString()])
     expect(api.seen[0]!.path).toBe('/escalations/run-entries?flow_run_id=flow-1')
   })
 })

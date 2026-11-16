@@ -196,7 +196,7 @@ export class CrudEscalations implements EscalationRoutes {
     const child = calls.child.filter(fits)
     const own = calls.own.filter(fits)
     const out: SessionCalls[] = []
-    for (let i = 0; i < Math.max(child.length, own.length, 1); i += IDS_MAX) {
+    for (let i = 0; i < Math.max(child.length, own.length); i += IDS_MAX) {
       out.push({ session: calls.session, child: child.slice(i, i + IDS_MAX), own: own.slice(i, i + IDS_MAX) })
     }
     return out
