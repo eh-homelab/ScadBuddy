@@ -187,6 +187,8 @@ export const PendingInputSchema = z.object({
       requested_by: z.object({ label: z.string() }).nullable().optional().catch(undefined),
       expires_at: z.string().nullable().optional().catch(undefined),
       input_hash: z.string().nullable().optional().catch(undefined),
+      /** #6399 — when it began to wait (a flow run's call: when its run last moved, when it has no time of its own). */
+      created_at: z.string().optional().catch(undefined),
       /** A durable entry past its timer whose worker has not resolved it yet: not waiting on anyone. */
       expiring: z.boolean().optional(),
       /** #2482 — a flow run's entry: at hop `parent` it waits for the starting session, not yet for the user. */

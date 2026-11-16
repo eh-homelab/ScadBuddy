@@ -1,5 +1,6 @@
 import type { Sql } from 'postgres'
 import { describe, expect, it } from 'vitest'
+import { responseHash } from '../src/gate/canonical.js'
 import { CrudGate, REQUEST_ID_MAX } from '../src/gate/crudStore.js'
 import { decideInput, denyInput, type GateDb, grantInput, openInput, type OpenInput, readInput, resolveInput } from '../src/gate/store.js'
 import { RespondRefusal } from '../src/gate/validate.js'
@@ -185,6 +186,18 @@ describe('the gate through the CRUD routes', () => {
       [true, 'run-1'],
     ])
     expect(told).toEqual([[SID, [STATUS], [9]]])
+    // The response's hash as the person sent it, before `wellFormed` (#3724), as a resolve sends it.
+    expect(api.seen[0]?.body?.response_hash).toBe(responseHash({ kind: 'approval', decision: 'approve' }))
+  })
+
+  it('hashes a decided response as it was sent, before its strings are made well formed', async () => {
+    const api = new FakeApi()
+    const { db: gate } = db(api)
+    const raw = { kind: 'answer', answers: ['\ud83d'] }
+    api.answers.push({ refused: null, workflow: false, live_check: null, decided: { kind: 'answer', outcome: 'answered' }, logged: [] })
+    await decideInput(gate, { requestId: RID, response: raw, responder: ME, role: 'browser' })
+    expect(api.seen[0]?.body?.response_hash).toBe(responseHash(raw))
+    expect(api.seen[0]?.body?.response).toEqual({ kind: 'answer', answers: ['�'] })
   })
 
   it("is stale when the row's run has ended, and writes nothing", async () => {
@@ -217,5 +230,16 @@ describe('the gate through the CRUD routes', () => {
     const { db: gate } = db(api)
     api.answers.push(new Response('Not Found', { status: 404 }))
     await expect(openInput(gate, open)).rejects.toThrow('no CRUD route answered')
+  })
+
+  it('parks a call for a person when the API has no grant route yet, and never grants it', async () => {
+    const api = new FakeApi()
+    const { db: gate } = db(api)
+    const grant = { requestId: RID, sessionId: SID, tool: 't', summary: '', inputHash: 'b'.repeat(64), grantId: 'g1', requestedBy: ME }
+    api.answers.push(new Response('Not Found', { status: 404 }))
+    expect(await grantInput(gate, grant)).toBe(false)
+    // The route's own refusal is not that: it still fails the call, for the activity to retry.
+    api.answers.push(new Response('{"detail":"no"}', { status: 404, headers: { 'x-scadbuddy-crud': '1' } }))
+    await expect(grantInput(gate, grant)).rejects.toThrow('the backend refused')
   })
 })

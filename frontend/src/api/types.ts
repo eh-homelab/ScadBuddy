@@ -106,6 +106,8 @@ export interface RecentOutputsQuery {
   q?: string
   /** `yes`: only outputs an order item names; `no`: only the others. */
   ordered?: 'yes' | 'no'
+  /** #6371: also the outputs the storefront's slice run saved; left out by default. */
+  include_storefront?: boolean
 }
 /**
  * #4777 — one Bambuddy archive (a past print, ScadBuddy's or not) and how it went, and
@@ -259,6 +261,9 @@ export type FlowGrantView = Schemas['GrantView']
 export type FlowGrantUse = Schemas['GrantUseView']
 /** #2484 — a flow trigger: a schedule or an event that starts runs of a pinned version. */
 export type FlowTrigger = Schemas['TriggerView']
+/** #6399 — the run and trigger grants that wait for a person's decision. */
+export type FlowGrantRequests = Schemas['GrantRequests']
+export type FlowRunGrantRequest = Schemas['RunGrantRequest']
 export type FlowTriggerCreate = Schemas['TriggerCreate']
 export type FlowTriggerUpdate = Schemas['TriggerUpdate']
 export type FlowTriggerSchedule = Schemas['ScheduleTiming']

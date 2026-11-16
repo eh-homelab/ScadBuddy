@@ -9,6 +9,10 @@ import type { AttentionNotice } from './attention'
  * `components/assistant/NotificationsOffer.tsx`), never on load. A click on a notification
  * focuses this tab and opens the request's session in the panel.
  *
+ * #6399: the shell adds the requests no session holds (`lib/needsYou.ts` `needsYouNotices`: a
+ * flow run's or a trigger's requested grant, an agent asking to pair with a tab), each with the
+ * `href` a click opens: the Activity page's "Needs you".
+ *
  * Only an open tab can notify from here; with every tab closed, Web Push does (`webPush.ts`,
  * `public/push-sw.js`). Each notification is tagged with its request id, so several ScadBuddy
  * tabs, and the push worker, raising the same request replace one another rather than stacking.
@@ -38,6 +42,11 @@ export function noticeTitle(reason: string): string {
       return 'The assistant is blocked'
     case 'approval':
       return 'The assistant needs your approval'
+    // #6399 — requests no session holds: a flow's grant, an agent asking to pair with a tab.
+    case 'grant':
+      return 'A flow asks for a grant'
+    case 'pairing':
+      return 'An agent asks to use ScadBuddy'
     default:
       return 'The assistant needs you'
   }
@@ -57,7 +66,8 @@ const bodyOf = (message: string) => (message.length > NOTICE_BODY_MAX ? `${messa
 export function useAttentionNotifications(
   notices: readonly AttentionNotice[] | null,
   enabled: boolean,
-  onOpen: (sessionId: string | null) => void,
+  /** A click: the request's session, or (#6399) the page a request no session holds is answered on. */
+  onOpen: (sessionId: string | null, href?: string) => void,
 ): void {
   const seen = useRef<Set<string> | null>(null)
   const shown = useRef(new Map<string, Notification>())
@@ -95,7 +105,8 @@ export function useAttentionNotifications(
       notification.onclick = () => {
         window.focus()
         notification.close()
-        open.current(notice.sessionId)
+        if (notice.href) open.current(notice.sessionId, notice.href)
+        else open.current(notice.sessionId)
       }
       shown.current.set(notice.id, notification)
     }

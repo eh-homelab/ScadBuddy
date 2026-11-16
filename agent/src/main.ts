@@ -1,5 +1,6 @@
 import { pendingInput } from './routes/pendingInput.js'
-import { pendingNotices, NotificationDispatcher } from './notify/dispatcher.js'
+import { pendingNotices, NotificationDispatcher, WAITING_POLL_MS } from './notify/dispatcher.js'
+import { crudGrantRequests, crudPollLease, pairingRequests, waitingNotices } from './notify/waiting.js'
 import { pushHostsOf, SETTING_PUSH_HOSTS } from './notify/pushEgress.js'
 import { CrudPushStore, type PushRepo, PushStore } from './notify/pushStore.js'
 import { ChannelStore, CrudChannelRows } from './notify/channels.js'
@@ -71,6 +72,10 @@ import {
 } from './api/serviceCredential.js'
 import { untilBackendAnswers } from './api/backendUp.js'
 import { BLOB_AREAS, CrudAreas, FORGET_AREAS, GATE_AREAS, SECRET_AREAS, TASK_AREAS, WORKSPACE_AREAS } from './api/crudAreas.js'
+import { CrudApprovals } from './approvals/crudApprovals.js'
+import { CrudAudit } from './audit/crudAudit.js'
+import { CrudPending } from './gate/crudPending.js'
+import { CrudQuestions } from './gate/crudQuestions.js'
 import { CrudGate } from './gate/crudStore.js'
 import { gated, STORE_AREAS, type StoreArea } from './api/crudStores.js'
 import { CrudFlowRunReads } from './flows/backendReads.js'
@@ -259,6 +264,8 @@ const crudTarget = { baseUrl: config.backendUrl, fetch: crudFetch }
 const storeArea = (area: StoreArea) => () => crudAreas.has(area)
 // The tool-call gate's routes (#5299 step 10, backend api/crud_agent_gate.py).
 const gateRoutes = { crud: new CrudGate(crudTarget), use: () => crudAreas.has('gate') }
+// The gate's pending input and responses beyond its writers (#5299 step 10, area `pending-input`).
+const pendingRoutes = { crud: new CrudPending(crudTarget), use: () => crudAreas.has('pending-input') }
 // A session's images, the staged attachments and the saved http_request bodies (#5299 step 7,
 // backend api/crud_agent_blobs.py): over SQL on `sql` until the API lists their areas.
 const crudBlobs = new CrudSessionBlobs(config.backendUrl, { fetch: crudFetch })
@@ -283,6 +290,8 @@ const audit = database
       sql: database.sql,
       settings: (): SettingsStore | undefined => settings,
       ...(kek.ok ? { hashKey: approvalHashKey(kek.kek) } : {}),
+      // #5299 step 10: the API's `audit` routes once it lists the area.
+      routes: { crud: new CrudAudit(crudTarget), use: () => crudAreas.has('audit') },
       onError: (err, entry) =>
         console.error(`audit log: could not record ${entry.kind} ${entry.action}:`, (err as Error).message),
     })
@@ -409,8 +418,9 @@ const toolServices: ToolServices = {
 // The browser bridge (#254, bridge/hub.ts): the tabs connected over
 // /api/v1/ai/bridge, which the browser_* tools drive; MCP clients pair with
 // one through `ai_browser_pairings` (spec §8.5).
+const pairingStore = database ? gated<PairingStore>(new PostgresPairingStore(database.sql), new CrudPairingStore(crudTarget), storeArea('pairings')) : undefined
 const tabs = new TabHub({
-  pairings: database ? gated<PairingStore>(new PostgresPairingStore(database.sql), new CrudPairingStore(crudTarget), storeArea('pairings')) : undefined,
+  pairings: pairingStore,
   relay: tabRelay,
   // A durable session's browser_* calls run on whichever replica took the
   // activity, so the tab its chat socket paired is read from Postgres (#2086).
@@ -643,6 +653,9 @@ const sessions =
     ? new SessionManager({
         memory,
         sql: database.sql,
+        pendingRoutes,
+        approvalRoutes: { crud: new CrudApprovals(crudTarget), use: () => crudAreas.has('approvals') },
+        questionRoutes: { crud: new CrudQuestions(crudTarget), use: () => crudAreas.has('questions') },
         blobs: sessionImages(database.sql),
         httpBodies: httpBodies(database.sql),
         browserOrigins: browserOriginsOn(database.sql),
@@ -851,7 +864,7 @@ const durableToolDeps: ToolActivityDeps | undefined = temporal
   ? {
       services: toolServices,
       sessions: new PgSessionOwners(temporal.sql),
-      approvals: new PgApprovalRecords(temporal.sql, flowReads),
+      approvals: new PgApprovalRecords(temporal.sql, flowReads, pendingRoutes),
       flows: new PgFlowRuns(temporal.sql, flowReads),
       audit,
       currentTiers: liveTokenTiers(tokens),
@@ -891,6 +904,7 @@ const turnHost =
     ? new TurnHost({
         core: sessions.turnCore,
         sql: temporal.sql,
+        pendingRoutes,
         images: sessionImages(temporal.sql),
         hostQueue: SESSION_HOST_QUEUE,
         ...(events ? { listen: (channel: string, onNotify: (payload: string) => void) => events.listenAlso(channel, onNotify) } : {}),
@@ -975,7 +989,7 @@ const turnToolDeps = temporal
       }),
       hostQueue: HOST_QUEUE,
       clients: turnClients,
-      approvals: new PgApprovalRecords(temporal.sql, flowReads),
+      approvals: new PgApprovalRecords(temporal.sql, flowReads, pendingRoutes),
       audit,
       currentTiers: liveTokenTiers(tokens),
       blobs: sessionImages(temporal.sql),
@@ -1225,6 +1239,7 @@ if (sessions && temporalClient && payloadKeys && database) {
     blobs: sessionImages(database.sql),
     events: sessions.events,
     audit,
+    pendingRoutes,
     // A unified session is ready while some replica hosts its turns (§5.2), this one or a worker's (§14.3).
   })
 }
@@ -1246,7 +1261,7 @@ const stopDurableSweep =
 // Every 30 s: ai_pending_input rows whose workflow run ended without resolving them.
 const stopOrphanSweep =
   role.http && sessions && temporalClient
-    ? new PendingInputSweep({ sql: database!.sql, describe: temporalDescriber(temporalClient), events: sessions.events, audit }).start(
+    ? new PendingInputSweep({ sql: database!.sql, describe: temporalDescriber(temporalClient), events: sessions.events, audit, routes: pendingRoutes }).start(
         APPROVAL_SWEEP_MS,
         {
           ...(database ? { ready: database.ready } : {}),
@@ -1311,6 +1326,12 @@ const pushDispatcher =
     ? new NotificationDispatcher({
         store: pushStore,
         notices: async (owner) => pendingNotices(await pendingInput(sessions, owner)),
+        // #6399: the flow grants (the API's, through area `notify`) and the pairing requests.
+        waiting: waitingNotices([
+          crudGrantRequests(crudTarget, storeArea('notify')),
+          ...(pairingStore ? [pairingRequests(pairingStore)] : []),
+        ]),
+        pollLease: crudPollLease(crudTarget, storeArea('notify')),
         // RFC 8292 §2.1: who the push service may contact about these messages.
         subject: config.publicUrl ?? 'mailto:scadbuddy@localhost',
         // The push-service allowlist, as Settings last saved it (notify/pushEgress.ts).
@@ -1322,6 +1343,8 @@ const pushDispatcher =
 if (pushDispatcher && database) {
   pendingChanges?.subscribe(() => pushDispatcher.wake())
   void database.untilReady().then(() => pushDispatcher.wake())
+  // Nothing here hears a flow grant or a pairing request change (#6399): a pass now and then.
+  setInterval(() => pushDispatcher.wake('waiting'), WAITING_POLL_MS).unref()
 }
 
 const app = !role.http

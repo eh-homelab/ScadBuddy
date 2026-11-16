@@ -45,6 +45,12 @@ const PAGES = [
   '/ui-gallery',
 ]
 
+/**
+ * #6399 — the tab title leads with what waits on the person, "(2) Parts · ScadBuddy": the mocks
+ * hold an agent's requested run grant and a requested standing grant.
+ */
+const waiting = (title: string) => new RegExp(`^(\\(\\d+\\) )?${title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`)
+
 for (const path of PAGES) {
   test(`${path} names its tab from its heading`, async ({ page }) => {
     await page.goto(path)
@@ -54,17 +60,17 @@ for (const path of PAGES) {
 
 test('/orders/profit is the profit report, not an order', async ({ page }) => {
   await page.goto('/orders/profit')
-  await expect(page).toHaveTitle('Profit by model · ScadBuddy')
+  await expect(page).toHaveTitle(waiting('Profit by model · ScadBuddy'))
 })
 
 test('/prints/queue/260 is the queue item, not a print', async ({ page }) => {
   await page.goto('/prints/queue/260')
-  await expect(page).toHaveTitle('Bracket.gcode.3mf · ScadBuddy')
+  await expect(page).toHaveTitle(waiting('Bracket.gcode.3mf · ScadBuddy'))
 })
 
 test('/orders/parts is the parts inventory, not an order', async ({ page }) => {
   await page.goto('/orders/parts')
-  await expect(page).toHaveTitle('Parts · ScadBuddy')
+  await expect(page).toHaveTitle(waiting('Parts · ScadBuddy'))
 })
 
 test('covers every route App.tsx declares', () => {

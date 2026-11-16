@@ -141,6 +141,9 @@ export class CrudGate implements GateRoutes {
       role: args.role,
       check_live: args.checkLive,
       live_run: args.liveRun ?? null,
+      // Of the response as the person sent it, as the SQL path hashed it: `wellFormed` below can
+      // change a lone surrogate, and a retry compares against this hash (#3724).
+      response_hash: responseHash(args.response),
     }
     const a = await this.#call<WireDecide>('a response decided', '/gate/decide', { body: wellFormed(body) })
     if (a.refused) {

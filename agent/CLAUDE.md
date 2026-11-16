@@ -129,11 +129,37 @@ builds the session events, writes them with the rows, the status, the audit row 
 `scadbuddy_input` NOTIFY in one transaction, and answers them (`logged`), which the store hands
 to `EventLog.committed`. `decideInput` runs the validator on the API; with `live` the API first
 answers the row's run (`live_check`), writing nothing, and the store asks Temporal, then asks
-again naming the run it found. `grantInput` always calls the API (no SQL fallback: it reads the
-backend's `flow_grants`). A request id goes in the body or the query, never the path, and one
+again naming the run it found; it sends its hash of the response as the person sent it, as a
+resolve does (#3724). `grantInput` always calls the API (no SQL fallback: it reads the
+backend's `flow_grants`); an API with no such route yet (an agent that rolled first) answers no
+grant, so the call parks for a person. A request id goes in the body or the query, never the path, and one
 over `REQUEST_ID_MAX` is answered as never asked with no call. Tests `test/crudGate.test.ts` and
 `test/gateBackend.pg.test.ts` (the API's port writes the same rows and events as the SQL; it
-runs `backend/` with `uv`, as the agent-durable parity test does). A route's
+runs `backend/` with `uv`, as the agent-durable parity test does). Area `pending-input`
+(backend `api/crud_agent_pending.py`, `src/gate/crudPending.ts` `CrudPending`) takes the rest of
+the gate's SQL on `ai_pending_input` and `ai_input_responses` the same way: `PendingProjection`'s
+reads (`SessionManager.projection` is `gated`), the orphan sweep and a Stop's cancels
+(`cancelOrphanedEntries` with `routes`; each entry one transaction on the API, an approval's
+audit row in it), `TurnHost`'s held-call read and its parked call's span mark (fenced on the API:
+it lands only while the turn's `turn_attempt` and `durable_turn_id` hold the session, read `FOR
+SHARE` in the mark's transaction), and `PgApprovalRecords`' approval read. Test
+`test/crudPending.test.ts`. Area `audit` (backend `api/crud_agent_audit.py`,
+`src/audit/crudAudit.ts`) takes `AuditLog`'s write, list and prune; a write the API refuses or
+never answers goes to `onError`, as a failed SQL write did. Test `test/crudAudit.test.ts`. Area
+`approvals` (backend `api/crud_agent_approvals.py`, `src/approvals/crudApprovals.ts`) takes
+`ApprovalService`'s SQL; its access checks run here first, as before. A decision on the API
+carries the span started here from the row as read (a decision that loses never ends it, so
+never exports it), and its audit row is written in the decision's transaction, not by `AuditLog`.
+Test `test/crudApprovals.test.ts`. Area `questions` (backend `api/crud_agent_questions.py`,
+`src/gate/crudQuestions.ts`) takes `QuestionService`'s SQL: the reads, a summary's dismissal (its
+events and audit row in one transaction on the API), the attention count (read only while this
+process holds the lease `attention-rate`, which the API grants only while no SQL-path pod holds
+`ATTENTION_RATE_LOCK`; a busy lease is tried again until the rate lock's wait, and a lost lease,
+a busy one past the wait or an API error refuses the request, never lets it through), and a turn's
+`done` post: the facts are read through the API, the summary is written here with the turn's
+secrets redacted, and the post lands only while the turn's `turn_attempt` and `durable_turn_id`
+hold the session, with its cap, the summaries it replaces, its events and its audit rows in one
+transaction. Test `test/crudQuestions.test.ts`. A route's
 answer counts only with `X-ScadBuddy-Crud: 1`; any other failure takes the read's existing
 error path (a lookup failure the activity retries, a 500, a resync). A session's successful `order_item_revision_add` (or
 `_after_acceptance`) is an `ai_session_order_costs` row (`src/sessions/orderCosts.ts`

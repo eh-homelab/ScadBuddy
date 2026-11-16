@@ -5,6 +5,7 @@ the quote tests' fakes; the rows are Postgres."""
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Collection
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -159,6 +160,26 @@ async def test_a_storefront_price_equals_the_back_office_quote_to_the_cent(
     assert row.printer == "p-1"
     assert (row.print_seconds, row.grams) == (7200, {"0": "22.5", "1": "5.0"})
     assert slicer.subjects == ["storefront_price:" + "a" * 64]
+
+
+async def test_the_slice_run_saves_its_output_as_the_storefronts(
+    shop: Shop, prices: SlicePrices
+) -> None:
+    """#6371: the run saves the variant's render with ``source`` ``storefront``, so the
+    back office's Recent renders leave it out."""
+    bodies: list[dict[str, object]] = []
+
+    async def create_output(body: dict[str, object]) -> dict[str, object]:
+        bodies.append(body)
+        return {"id": "out-sf", "colors": ["#ff0000", "#00ff00"]}
+
+    slicer = FakeSlicer({1: sliced_plate(1, 3600, [10.0, 5.0])})
+    run = replace(slice_run(shop, prices, slicer), create_output=create_output)
+    row = await price_variant(run, variant_of(shop))
+    assert row.status == "done"
+    [body] = bodies
+    assert body["source"] == "storefront"
+    assert str(body["name"]).startswith("Storefront: ")
 
 
 async def test_a_done_variant_is_never_sliced_again(

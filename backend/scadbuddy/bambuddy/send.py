@@ -498,7 +498,7 @@ def _recoloured_covers(payload: bytes, colours: Sequence[str] | None) -> bytes:
     except Exception as error:  # the covers are cosmetic; the print goes on
         logger.warning(
             "the 3MF's covers could not be redrawn in the spools' colours",
-            extra={"error": type(error).__name__},
+            extra={"error": type(error).__name__, "detail": str(error)},
         )
         return payload
 

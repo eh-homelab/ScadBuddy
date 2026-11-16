@@ -22,6 +22,11 @@ Two kinds of key:
   starts a refresh while a lease holds is not refused: during a rolling deploy two
   replicas could spend one refresh token, and the loser marks the grant for a new
   sign-in.
+- ``attention-rate``: the attention requests' rate limit (``agent/src/gate/questions.ts``
+  ``attentionLimit``, #5299 step 10), held across the count and the workflow Update that opens
+  the entry, as the SQL path holds the transaction lock on
+  ``hashtextextended('scadbuddy:attention-rate', 0)``. An acquire also tries that lock as a
+  transaction lock: while an SQL pod counts, the lease is ``busy``.
 
 A holder names its lease by a token of its own. An acquire by the holder answers it held;
 a renew or release sent again renews or deletes what the first did. A lease past its
@@ -43,11 +48,13 @@ MAX_TTL = 300.0
 #: The keys the agent may take: a listing's source, a remote plugin's name.
 KEY_PATTERN = (
     r"^(tool-listing:(remote:[a-z][a-z0-9-]{0,30}[a-z0-9]|package:[^\x00-\x1f]{1,400})"
-    r"|plugin-oauth:[a-z][a-z0-9-]{0,30}[a-z0-9])$"
+    r"|plugin-oauth:[a-z][a-z0-9-]{0,30}[a-z0-9]|attention-rate)$"
 )
 _KEY = re.compile(KEY_PATTERN)
 #: The prefix of the advisory lock key the SQL path takes (``access/listings.ts``).
 ADVISORY_PREFIX = "scadbuddy:ai_tool_listings:test:"
+#: The SQL path's attention rate lock (``agent/src/gate/questions.ts`` ``ATTENTION_RATE_LOCK``).
+ATTENTION_RATE_LOCK = "scadbuddy:attention-rate"
 
 
 def valid_key(key: str) -> bool:
@@ -70,10 +77,12 @@ def acquire(
     transaction. ``wait`` (seconds) bounds the wait for an SQL pod's grant row lock; past
     it the lease is busy."""
     name = advisory_name(key)
+    lock = ATTENTION_RATE_LOCK if key == "attention-rate" else None
     if name is not None:
+        lock = ADVISORY_PREFIX + name
+    if lock is not None:
         row = conn.execute(
-            "SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0)) AS held",
-            (ADVISORY_PREFIX + name,),
+            "SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0)) AS held", (lock,)
         ).fetchone()
         if row is None or not _first(row):
             return None
