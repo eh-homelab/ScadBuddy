@@ -80,6 +80,7 @@ import { resolveOptions } from '../lib/printOptions'
 import { keychainGlb } from './glb'
 import { aiPluginHandlers, resetAiPluginMocks } from './aiPlugins'
 import { choicesView } from './choices'
+import { normalisePresetName } from '../lib/presetName'
 import * as fixtures from './fixtures'
 import { UI_MODULES } from './templateUi'
 import { SLICED_REASON, mockLibraryObjects } from './libraryObjects'
@@ -1989,7 +1990,7 @@ export const handlers = [
         if (preset.name.length > MAX_PRESET_NAME) {
           return shapeRefusal(`a preset name is at most ${MAX_PRESET_NAME} characters`)
         }
-        const name = preset.name.trim().replace(/\s+/g, ' ')
+        const name = normalisePresetName(preset.name)
         if (!name) return shapeRefusal('a preset needs a name')
         if (
           preset.id !== undefined &&
@@ -2566,7 +2567,7 @@ export const handlers = [
     const details = detailsRefusal(body.description, body.tags)
     if (details) return details
     if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
-    const name = body.name.trim().replace(/\s+/g, ' ')
+    const name = normalisePresetName(body.name)
     if (paramsClash(body.params, body.inputs)) {
       return problem(422, 'Unprocessable Content', 'params and inputs.params disagree; send inputs only')
     }
@@ -2596,7 +2597,7 @@ export const handlers = [
     const source = (state.presets[slug] ?? []).find((p) => p.id === id)
     if (!source) return problem(404, 'Not Found', PRESET_GONE, { preset_id: id })
     const body = (await request.json()) as ParamPresetDuplicate
-    const name = body.name.trim().replace(/\s+/g, ' ')
+    const name = normalisePresetName(body.name)
     const refused = presetRefusal(slug, name, source.params, null)
     if (refused) return refused
     // Everything but the name is the original's, its description and tags too.

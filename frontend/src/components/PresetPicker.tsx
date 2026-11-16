@@ -24,6 +24,7 @@ import {
 import { copyText } from '../lib/clipboard'
 import { appUrl } from '../lib/appLinks'
 import { presetPath } from '../lib/deeplink'
+import { normalisePresetName } from '../lib/presetName'
 import { useSubscription } from '../lib/realtime'
 import { useAsync } from '../lib/useAsync'
 import { useLatest } from '../lib/useLatest'
@@ -147,20 +148,6 @@ function describeSkipped(skipped: readonly Skipped[]): string {
 function skippedOf(schema: CustomizerSchema, preset: ParamPreset): Skipped[] {
   const stored = splitInputs(preset.inputs, preset.params).params
   return applyPreset(schema, preset).skipped.map((name) => ({ name, value: stored[name] as ParamValue }))
-}
-
-/**
- * What Python's `str.split()` splits on (`str.isspace()`, Python 3.12), which the server's
- * `_clean_name` (`library/presets.py`) uses. Not JS's `\s`: that also takes U+FEFF, and
- * lacks U+001C-U+001F and U+0085 (#6456).
- */
-const PY_WHITESPACE =
-  // eslint-disable-next-line no-control-regex -- U+001C-U+001F are whitespace to Python
-  /[\t\n\v\f\r\u001c-\u001f \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+/
-
-/** A name as the server stores it: inner runs of whitespace collapsed, ends trimmed (#360). */
-function normaliseName(name: string): string {
-  return name.split(PY_WHITESPACE).filter(Boolean).join(' ')
 }
 
 /** #360 — a short word after an action, kept until the values or UI state change. */
@@ -708,7 +695,7 @@ export function PresetPicker({
    * #360 — the name as it will be stored, said when that is not what was typed. A save
    * sends `name.trim()` (JS's trim), which the server then cleans.
    */
-  const normalisedName = normaliseName(name.trim())
+  const normalisedName = normalisePresetName(name.trim())
   const statusText = modified ? `Changed from ${selected?.name ?? ''}` : (notice?.text ?? '')
 
   return (
