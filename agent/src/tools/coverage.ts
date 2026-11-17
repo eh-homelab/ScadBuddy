@@ -6,6 +6,16 @@ import type { Operation } from './registry.js'
 
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
+  ...(
+    [
+      'POST /api/v1/filament/invoices/{invoice_id}/file',
+      'GET /api/v1/filament/invoices/{invoice_id}/file',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      "A multipart upload and a binary download; the assistant reaches an invoice's file as a blob pointer in #6267.",
+  })),
   {
     operation: 'GET /api/v1/filament/spools/{spool_id}/presets',
     reason: "A spool's effective slicer presets (#6262); the assistant reads them in filament_spool_get's answer, and the Filament page shows them on the spool.",

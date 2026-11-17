@@ -8,9 +8,13 @@ from __future__ import annotations
 import asyncio
 from uuid import UUID
 
-from fastapi import APIRouter, Response, status
+from fastapi import APIRouter, Request, Response, status
+from fastapi.responses import FileResponse
 
+from scadbuddy.api import media as media_api
+from scadbuddy.api.deps import PathsDep, StateDep
 from scadbuddy.api.filament import actor
+from scadbuddy.api.order_attachments import INERT, NOSNIFF
 from scadbuddy.auth.component import CallerDep
 from scadbuddy.core.problems import ApiError
 from scadbuddy.filament import purchasing_models as pm
@@ -27,6 +31,7 @@ from scadbuddy.filament.suppliers import (
     ProductRefError,
     SupplierExistsError,
 )
+from scadbuddy.orders import attachments
 
 router = APIRouter(prefix="/filament", tags=["filament"])
 
@@ -416,3 +421,107 @@ async def delete_invoice(filament: FilamentDep, invoice_id: UUID) -> Response:
     if not gone:
         raise _no_invoice(invoice_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# -- an invoice's file ------------------------------------------------------------------
+
+#: A second upload replaces the file at the same URL, so it is never `immutable` (ruling F2).
+FILE_CACHE = "private, no-cache"
+
+
+@router.post(
+    "/invoices/{invoice_id}/file",
+    response_model=pm.FileRef,
+    summary="Attach a file to an invoice",
+    description=(
+        "A PDF or a photo, as one multipart `file` part up to `media_upload_max_bytes` "
+        "(`GET /settings`). A second upload replaces the first. A confirmed invoice accepts "
+        "a file. 404 for no such invoice (before a byte is read), 422 for no file, an empty "
+        "one, or one that is not a PDF or a photo (judged by its bytes, never its name)."
+    ),
+    responses={413: {"description": "Larger than the upload limit in Settings"}},
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "multipart/form-data": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["file"],
+                        "properties": {"file": {"type": "string", "format": "binary"}},
+                    }
+                }
+            },
+        }
+    },
+)
+async def put_invoice_file(
+    invoice_id: UUID,
+    request: Request,
+    filament: FilamentDep,
+    state: StateDep,
+    paths: PathsDep,
+) -> pm.FileRef:
+    if await asyncio.to_thread(filament.invoices.get, invoice_id) is None:
+        raise _no_invoice(invoice_id)
+    received = await media_api.receive_upload(request, paths.cache)
+    try:
+        path = received.files.get("file")
+        if path is None or received.sizes["file"] == 0:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "the upload has no `file` part, or it is empty",
+            )
+        name = attachments.clean_filename(received.filenames.get("file", ""))
+        with path.open("rb") as handle:
+            kind, media_type = attachments.sniff(handle.read(attachments.SNIFF_BYTES), name)
+            if kind not in ("document", "image"):
+                raise ApiError(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    "an invoice's file is a PDF or a photo",
+                )
+            handle.seek(0)
+            key = await attachments.keep_file(
+                state.store.blobs, handle, received.hashes["file"].hexdigest()
+            )
+        size = received.sizes["file"]
+    finally:
+        received.discard()
+    made = await asyncio.to_thread(
+        filament.invoices.set_file, invoice_id, key=key, name=name, media_type=media_type, size=size
+    )
+    if made is None:
+        raise _no_invoice(invoice_id)
+    return made
+
+
+@router.get(
+    "/invoices/{invoice_id}/file",
+    response_class=FileResponse,
+    responses={200: {"content": {"*/*": {}}}, 404: {"description": "No file, or it is gone"}},
+    summary="An invoice's file",
+    description=(
+        "The PDF or photo, inline, under its name. Not cached: a new upload replaces it at "
+        "this URL. 404 for no such invoice, no file, or a file the store has lost."
+    ),
+)
+async def get_invoice_file(
+    invoice_id: UUID, filament: FilamentDep, state: StateDep
+) -> FileResponse:
+    found = await asyncio.to_thread(filament.invoices.file_key, invoice_id)
+    if found is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"invoice {invoice_id} has no file")
+    key, ref = found
+    path = await attachments.blob_path(state.store.blobs, key)
+    if path is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"the file of invoice {invoice_id} is gone")
+    headers = {"Cache-Control": FILE_CACHE, **NOSNIFF}
+    if ref.media_type != "application/pdf":
+        headers |= INERT
+    return FileResponse(
+        path,
+        media_type=ref.media_type,
+        filename=ref.name,
+        content_disposition_type="inline",
+        headers=headers,
+    )

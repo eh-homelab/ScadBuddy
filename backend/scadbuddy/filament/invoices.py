@@ -97,6 +97,21 @@ class InvoiceStore:
         with self._pool.connection() as conn:
             return self._detail(conn, invoice_id)
 
+    def file_key(self, invoice_id: UUID) -> tuple[str, pm.FileRef] | None:
+        """The blob key and pointer of the invoice's file; None for no invoice or no file."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT file_key, file_name, file_media_type, file_size FROM filament_invoices"
+                " WHERE id = %s AND file_key IS NOT NULL",
+                (invoice_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        ref = pm.FileRef(
+            name=row["file_name"], media_type=row["file_media_type"], size=row["file_size"]
+        )
+        return row["file_key"], ref
+
     def list(self, *, supplier_id: UUID | None = None, status: str | None = None) -> _Invoices:
         where: list[str] = []
         args: list[Any] = []
@@ -298,6 +313,30 @@ class InvoiceStore:
             )
             conn.execute("DELETE FROM filament_invoices WHERE id = %s", (invoice_id,))
         return True
+
+    def set_file(
+        self, invoice_id: UUID, *, key: str, name: str, media_type: str, size: int
+    ) -> pm.FileRef | None:
+        """Keep ``key`` as the invoice's file, replacing a previous one: the old hold goes
+        and the new one comes in the same transaction. A confirmed invoice accepts a file
+        (Decision 10). None for no such invoice."""
+        with self._pool.connection() as conn, conn.transaction():
+            if self._lock(conn, invoice_id) is None:
+                return None
+            conn.execute(
+                "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
+                (_HOLDER, str(invoice_id)),
+            )
+            conn.execute(
+                "INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES (%s, %s, %s)",
+                (key, _HOLDER, str(invoice_id)),
+            )
+            conn.execute(
+                "UPDATE filament_invoices SET file_key = %s, file_name = %s,"
+                " file_media_type = %s, file_size = %s, updated_at = now() WHERE id = %s",
+                (key, name, media_type, size, invoice_id),
+            )
+        return pm.FileRef(name=name, media_type=media_type, size=size)
 
     @staticmethod
     def _lock(conn: Conn, invoice_id: UUID) -> Row | None:

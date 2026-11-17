@@ -9,6 +9,7 @@ from uuid import uuid4
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
+from httpx import Response
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -299,3 +300,120 @@ def test_the_invoice_list_filters_by_supplier_and_status(
         i["id"] for i in client.get(f"{URL}/invoices", params={"status": "confirmed"}).json()
     ] == [second["id"]]
     assert client.get(f"{URL}/invoices", params={"status": "bogus"}).status_code == 422
+
+
+# -- an invoice's file ------------------------------------------------------------------
+
+PDF = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+
+
+def _draft(client: TestClient, number: str = "F1") -> str:
+    made = client.post(f"{URL}/invoices", json=_invoice_body(_supplier(client), number=number))
+    assert made.status_code == 201, made.text
+    return str(made.json()["id"])
+
+
+def _send(client: TestClient, invoice_id: str, data: bytes, name: str) -> Response:
+    return client.post(f"{URL}/invoices/{invoice_id}/file", files={"file": (name, data)})
+
+
+def _holds(pg_conninfo: str, invoice_id: str) -> list[str]:
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT key FROM blob_refs WHERE holder_kind = 'filament_invoice' AND holder_id = %s",
+            (invoice_id,),
+        ).fetchall()
+    return [r[0] for r in rows]
+
+
+def test_a_pdf_is_kept_and_listed(client: TestClient, pg_conninfo: str) -> None:
+    invoice_id = _draft(client)
+    sent = _send(client, invoice_id, PDF, "inv.pdf")
+    pointer = {"name": "inv.pdf", "media_type": "application/pdf", "size": len(PDF)}
+    assert sent.status_code == 200, sent.text
+    assert sent.json() == pointer
+    got = client.get(f"{URL}/invoices/{invoice_id}/file")
+    assert got.content == PDF
+    assert got.headers["content-type"] == "application/pdf"
+    assert got.headers["content-disposition"].startswith("inline")
+    assert client.get(f"{URL}/invoices/{invoice_id}").json()["file"] == pointer
+    assert len(_holds(pg_conninfo, invoice_id)) == 1
+
+
+def test_a_photo_is_kept(client: TestClient) -> None:
+    invoice_id = _draft(client)
+    sent = _send(client, invoice_id, PNG, "scan.png")
+    assert sent.json()["media_type"] == "image/png"
+    got = client.get(f"{URL}/invoices/{invoice_id}/file")
+    assert got.content == PNG
+    assert "sandbox" in got.headers["content-security-policy"]
+
+
+@pytest.mark.parametrize(
+    ("data", "name"),
+    [
+        (b"<html><script>alert(1)</script></html>", "invoice.pdf"),
+        (b'<svg xmlns="http://www.w3.org/2000/svg"><script>1</script></svg>', "invoice.svg"),
+        (b"", "empty.pdf"),
+    ],
+    ids=["html", "svg", "empty"],
+)
+def test_a_file_that_is_no_pdf_or_photo_is_refused(
+    client: TestClient, pg_conninfo: str, data: bytes, name: str
+) -> None:
+    invoice_id = _draft(client)
+    assert _send(client, invoice_id, data, name).status_code == 422
+    assert _holds(pg_conninfo, invoice_id) == []
+    assert client.get(f"{URL}/invoices/{invoice_id}").json()["file"] is None
+    assert client.get(f"{URL}/invoices/{invoice_id}/file").status_code == 404
+
+
+def test_a_second_file_replaces_the_first(client: TestClient, pg_conninfo: str) -> None:
+    invoice_id = _draft(client)
+    _send(client, invoice_id, PDF, "a.pdf")
+    first = _holds(pg_conninfo, invoice_id)
+    _send(client, invoice_id, PNG, "b.png")
+    second = _holds(pg_conninfo, invoice_id)
+    assert len(second) == 1
+    assert second != first
+    assert client.get(f"{URL}/invoices/{invoice_id}/file").content == PNG
+
+
+def test_the_file_is_served_uncached(client: TestClient) -> None:
+    invoice_id = _draft(client)
+    _send(client, invoice_id, PDF, "inv.pdf")
+    got = client.get(f"{URL}/invoices/{invoice_id}/file")
+    assert got.headers["cache-control"] == "private, no-cache"
+    assert "immutable" not in got.headers["cache-control"]
+    assert got.headers["x-content-type-options"] == "nosniff"
+
+
+def test_a_confirmed_invoice_takes_a_file(client: TestClient, pg_conninfo: str) -> None:
+    invoice_id = _draft(client)
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE filament_invoices SET status = 'confirmed' WHERE id = %s", (invoice_id,)
+        )
+    assert _send(client, invoice_id, PDF, "inv.pdf").status_code == 200
+
+
+def test_deleting_a_draft_releases_its_blob(client: TestClient, pg_conninfo: str) -> None:
+    invoice_id = _draft(client)
+    _send(client, invoice_id, PDF, "inv.pdf")
+    assert len(_holds(pg_conninfo, invoice_id)) == 1
+    assert client.delete(f"{URL}/invoices/{invoice_id}").status_code == 204
+    assert _holds(pg_conninfo, invoice_id) == []
+
+
+def test_the_pointer_has_no_bytes(client: TestClient) -> None:
+    invoice_id = _draft(client)
+    _send(client, invoice_id, PDF, "inv.pdf")
+    shown = client.get(f"{URL}/invoices/{invoice_id}")
+    assert "file_key" not in shown.text
+    assert "base64" not in shown.text
+
+
+def test_a_missing_invoice_is_404_before_the_body_is_read(client: TestClient) -> None:
+    assert _send(client, MISSING, PDF, "inv.pdf").status_code == 404
+    assert client.get(f"{URL}/invoices/{MISSING}/file").status_code == 404
