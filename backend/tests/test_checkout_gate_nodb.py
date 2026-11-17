@@ -214,13 +214,16 @@ async def test_a_renewal_that_blocks_past_the_ttl(kind: str) -> None:
     assert set(cue.asked) == {0.6 / 3}
 
 
+#: What `_renewed` logs when a renewal finds its row gone (`libraries.py`).
+LOST = "a renewal found its row gone; the block that held it ends"
+
+
 def _lost(records: Sequence[logging.LogRecord]) -> list[tuple[str, str]]:
     """The row and holder of each renewal logged as having found its row gone."""
     return [
         (record.__dict__["row"], record.__dict__["holder"])
         for record in records
-        if record.levelno == logging.ERROR
-        and record.getMessage() == "a renewal found its row gone; the block that held it ends"
+        if record.levelno == logging.ERROR and record.getMessage() == LOST
     ]
 
 
@@ -416,11 +419,7 @@ async def test_a_pin_lost_while_the_inner_slot_is_released_ends_with_an_error(
         error reach the outer one, before the renewal's coroutine sent the cancel."""
 
         def emit(self, record: logging.LogRecord) -> None:
-            if (
-                record.__dict__.get("row") == "pin hold"
-                and record.getMessage()
-                == "a renewal found its row gone; the block that held it ends"
-            ):
+            if record.__dict__.get("row") == "pin hold" and record.getMessage() == LOST:
                 pin_lost.set()
 
     class _LateSlots(_Slots):
