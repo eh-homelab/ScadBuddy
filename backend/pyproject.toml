@@ -107,6 +107,10 @@ disallow_untyped_decorators = false
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# A test that runs this long dumps every thread's stack and goes on: no test fails by
+# it. A deadlock then names its test in the log, not only a shard stopped at the job
+# limit (#6531). The slowest test takes about 60 s on CI (`.test_durations`).
+faulthandler_timeout = 600
 markers = [
     "requires_openscad: needs a real openscad binary on PATH",
     "requires_git: needs a real git binary on PATH",
