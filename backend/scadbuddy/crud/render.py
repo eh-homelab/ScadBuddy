@@ -44,9 +44,10 @@ sent again is the same row (ON CONFLICT), a use stamps the row again.
 and `InstallSlots` (the render leases, pin holds and install slots) over the routes, with
 the same names, signatures and answers. The worker chooses each token, so every take and
 claim is natural; a take that waits on the API's removal keeps waiting (`REMOVAL_RUNNING`),
-as the SQL take waited on `REMOVAL_LOCK`. A renew the API refuses (no row of that token,
-a slot another token holds) is a `CrudRefusedError`, which the renewing loop logs, as it
-logs any failed renewal; the SQL path renewed nothing there silently. A slot's release
+as the SQL take waited on `REMOVAL_LOCK`. A renew the API refuses because the row is gone
+(`NO_LEASE`, `NO_HOLD`) or another token holds it (`NOT_HOLDER`) returns False, as the SQL
+renew does; `_renewed` then ends the block with `HoldLostError`. Any other refusal is still
+raised, and the renewing loop logs it as a failed renewal. A slot's release
 that finds another token on it (`NOT_HOLDER`: ours lapsed and was taken) is released,
 as the SQL path's was.
 """
