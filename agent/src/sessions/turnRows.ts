@@ -397,10 +397,12 @@ export class CrudTurnRows implements TurnRows {
     try {
       answer = await this.#call<{ logged: WireLogged | null }>(step, path, { prior, turn_id: turnIdOf(turnId) })
     } catch (error) {
-      // An API pod older than the fence (during a roll) refuses `turn_id` (422, its body forbids
-      // extra fields): give back unfenced, as that pod's route does, rather than leave the row
-      // running until the sweep.
-      if (!(error instanceof CrudReadError && error.fromRoute && error.status === 422)) throw error
+      // An API pod older than the fence (during a roll) refuses `turn_id` (422 naming that field,
+      // its body forbids extra fields): give back unfenced, as that pod's route does, rather than
+      // leave the row running until the sweep. Any other refusal keeps the fence and throws.
+      if (!(error instanceof CrudReadError && error.fromRoute && error.status === 422 && error.fields.includes('body.turn_id'))) {
+        throw error
+      }
       answer = await this.#call<{ logged: WireLogged | null }>(step, path, { prior })
     }
     return parsed(answer.logged)

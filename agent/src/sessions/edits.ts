@@ -38,7 +38,9 @@ import { notifyWarmEvict } from './warmEvict.js'
 // changes between the two calls (a turn claimed, a call parked) can still refuse the second with
 // the workflow told, and a 503 or a lost answer on the told send, tried twice, leaves the
 // workflow told and the row not done: either way a later send reads it `closed`, as one did on SQL after a commit that
-// failed past the signal, and the edit sent again marks it done.
+// failed past the signal, and the edit sent again marks it done. When the told send's first answer
+// is lost after it committed, the retry finds the row already archived and answers no dismissed
+// `done` summaries, so those dismissals (their events committed on the API) get no audit row here.
 
 export type SessionEdit = { title?: string; done?: true; archived?: boolean }
 
