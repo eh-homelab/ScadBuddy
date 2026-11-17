@@ -356,7 +356,14 @@ Writes went on against the old schema meanwhile, so a row may no longer fit. If 
 fits, the repair writes the `record_types` row. If one does not, the repair leaves
 `record_types` on the old commit, writes a git commit that puts back the schema in force,
 and logs the type and the first 20 failing ids. So `record_types` is the schema in force,
-and no version is in force before every stored row fitted it under the lock. This is not
+and no version is in force before every stored row fitted it under the lock.
+
+The fit check (§5.1) runs `resolve_inputs` on up to 10,000 bodies while it holds the
+exclusive lock, and each call has its own patterns budget (P7). So the check has one
+total deadline, `FIT_CHECK_DEADLINE_S`, 10 s **(call)**. Past it, the registration (or
+the repair) stops, writes nothing, and answers 409 `fit_check_too_slow` (the repair logs
+it and puts back the schema in force, as for a row that does not fit). Writes to the type
+wait at most that long. This is not
 `flows/reconcile.py`'s repair, which indexes a commit and re-checks nothing. A registration whose
 transaction fails after its git commit, while the API still runs, starts the same repair
 at once and answers 503.
@@ -386,6 +393,11 @@ The check, in the API, on every write, before any SQL write:
 
 1. The type exists (404 `record_type_not_found`).
 2. The body is at most 64 KiB as sent (413).
+2a. A create only: the type holds fewer than 10,000 rows (§5.1), else 409
+   `record_type_full`. The create counts the rows after it locks the type's
+   `record_types` row `FOR UPDATE`, inside the shared lock of §5.4, so two creates of one
+   type count one after the other and cannot both pass at 9,999. Replaces and deletes do
+   not take that row lock.
 3. The body is checked and filled by `flows/inputs.py` `resolve_inputs` against the
    type's newest schema: unknown keys refused, types, bounds, enums and patterns checked
    within the patterns' time budget, defaults filled (P7). A failure is 422 with one
