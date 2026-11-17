@@ -560,9 +560,14 @@ credential and from other customers' files (`intake_worker/hardening.py`, `confi
   1. `unshare(CLONE_NEWUSER | CLONE_NEWNET | CLONE_NEWNS | CLONE_NEWPID)` with its own uid
      and gid mapped to themselves: a network namespace with only a loopback device that is down
      ([network_namespaces(7)](https://man7.org/linux/man-pages/man7/network_namespaces.7.html)),
-     and a mount namespace where an empty tmpfs (mode 0) covers the spool and the job's box
-     is bind-mounted onto `<spool>/box` inside it, the process's new working directory
+     and a mount namespace where an empty tmpfs covers the spool and the job's box is
+     bind-mounted onto `<spool>/box` inside it, the process's new working directory
      ([mount_namespaces(7)](https://man7.org/linux/man-pages/man7/mount_namespaces.7.html)).
+     That tmpfs is mode 0111, search only, so the parser lists nothing there but reaches
+     its box by the absolute path `<spool>/box`, which is also its `TMPDIR`
+     (`runner.child_env`). At mode 0 every absolute path through it failed with `EACCES`,
+     `tempfile` found no usable folder, and every STL check crashed in prod (#6523,
+     measured 2026-11-17; CI missed it because its `/tmp` is writable).
      The bind matters: a working directory left below the covered spool still reached a
      sibling job by `../../<job>`, which the cover alone does not stop (found by
      `test_a_confined_child_reaches_only_its_own_box`, 2026-11-14). It then forks the
