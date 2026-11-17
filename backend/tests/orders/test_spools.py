@@ -40,8 +40,8 @@ from scadbuddy.orders.spools import (
 )
 from scadbuddy.orders.store import OrderStore, SpoolLink
 from tests.conftest import PgPool
-from tests.filament.test_invoice_confirm import _Shop as _PurchasingShop
 from tests.orders.test_lifecycle import BY, Shop
+from tests.support.purchasing import Shop as _PurchasingShop
 from tests.support.sb_rows import sb_spool
 
 NOW = datetime(2026, 11, 3, tzinfo=UTC)

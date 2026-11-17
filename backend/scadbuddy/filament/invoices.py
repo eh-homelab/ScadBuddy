@@ -18,6 +18,7 @@ from psycopg import Connection, errors
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
+from pydantic import ValidationError
 
 from scadbuddy.filament import models as m
 from scadbuddy.filament import purchasing_models as pm
@@ -30,7 +31,7 @@ from scadbuddy.filament.invoice_money import (
     spool_cost_per_kg,
     tax_per_line,
 )
-from scadbuddy.filament.spools import FilamentSpoolStore
+from scadbuddy.filament.spools import FilamentSpoolStore, SpoolInUseError, SpoolTypelessError
 from scadbuddy.filament.types import SpoolTypeStore
 from scadbuddy.orders.currency import minor_exponent
 
@@ -39,6 +40,16 @@ Row = Mapping[str, Any]
 _Ids = list[UUID]
 _Invoices = list[pm.Invoice]
 _Claimed = list[tuple[UUID, int | None]]
+_Made = dict[str, tuple[UUID, int]]
+_SKU_MAX = 128
+#: What a line's spool or type writes can be refused with; each is a 409 naming the line.
+_WRITE_REFUSALS = (
+    errors.IntegrityError,
+    errors.DataError,
+    SpoolTypelessError,
+    SpoolInUseError,
+    ValidationError,
+)
 
 _UNIT = Decimal("0.0001")
 _COMPUTED = {"minor_exponent", "difference", "reconciles", "line_count", "file"}
@@ -416,8 +427,9 @@ class InvoiceStore:
             if abs(diff) > RECONCILE_TOLERANCE:
                 raise InvoiceNotReconciledError(diff)
             who = f"invoice:{invoice_id}"
+            made: _Made = {}
             for line in lines:
-                self._confirm_line(conn, head, line, who)
+                self._confirm_line(conn, head, line, who, made)
             conn.execute(
                 "UPDATE filament_invoices SET status = 'confirmed', confirmed_at = now(),"
                 " updated_at = now() WHERE id = %s",
@@ -430,9 +442,9 @@ class InvoiceStore:
         assert found is not None
         return found
 
-    def _confirm_line(self, conn: Conn, head: Row, line: Row, who: str) -> None:
+    def _confirm_line(self, conn: Conn, head: Row, line: Row, who: str, made: _Made) -> None:
         position: int = line["position"]
-        type_id, label_g = self._line_type(conn, line)
+        type_id, label_g = self._line_type(conn, line, made)
         product_id, pack_size = self._line_product(conn, head, line, type_id)
         known = self._claimed(conn, line, type_id)
         touched: _Ids = []
@@ -460,8 +472,8 @@ class InvoiceStore:
                         ref_id=line["id"],
                     )
                 )
-        except (errors.ForeignKeyViolation, errors.UniqueViolation, ValueError) as exc:
-            raise InvoiceLineError(position, f"its spools cannot be written ({exc})") from None
+        except _WRITE_REFUSALS as exc:
+            raise InvoiceLineError(position, f"its spools cannot be written ({exc})") from exc
         conn.execute(
             "UPDATE filament_spools SET invoice_line_id = %s, updated_at = now()"
             " WHERE id = ANY(%s)",
@@ -484,9 +496,10 @@ class InvoiceStore:
             (type_id, product_id, line["id"]),
         )
 
-    def _line_type(self, conn: Conn, line: Row) -> tuple[UUID, int]:
+    def _line_type(self, conn: Conn, line: Row, made: _Made) -> tuple[UUID, int]:
         """The line's type id and its label weight in grams; a ``proposed_type`` is made
-        here when the line names no type."""
+        here when the line names no type. A code an earlier line of this confirm made is that
+        line's type (``made``)."""
         position: int = line["position"]
         if line["type_id"] is not None:
             row = conn.execute(
@@ -498,25 +511,30 @@ class InvoiceStore:
             return row["id"], row["label_weight_g"]
         if line["proposed_type"] is None:
             raise InvoiceLineError(position, "it has no spool type and proposes none")
-        body = m.SpoolTypeCreate.model_validate(line["proposed_type"])
+        try:
+            body = m.SpoolTypeCreate.model_validate(line["proposed_type"])
+        except ValidationError as exc:
+            raise InvoiceLineError(position, f"its proposed spool type is invalid ({exc})") from exc
+        key = body.code.upper()
+        if key in made:
+            return made[key]
         try:
             # A savepoint: the failed insert must not poison the outer transaction's
             # error, though the caller rolls back whatever follows.
             with conn.transaction():
-                made = self._types.create_on(conn, body)
-        except errors.UniqueViolation:
+                created = self._types.create_on(conn, body)
+        except errors.UniqueViolation as exc:
             raise InvoiceLineError(
                 position, f"a spool type like '{body.code}' already exists; choose it instead"
-            ) from None
-        except errors.ForeignKeyViolation:
+            ) from exc
+        except errors.ForeignKeyViolation as exc:
             raise InvoiceLineError(
                 position, "its proposed spool type names a catalog row that does not exist"
-            ) from None
-        except TypeTempError as exc:
-            raise InvoiceLineError(
-                position, f"its proposed spool type is invalid ({exc})"
-            ) from None
-        return made.id, made.label_weight_g
+            ) from exc
+        except (errors.IntegrityError, errors.DataError, TypeTempError) as exc:
+            raise InvoiceLineError(position, f"its proposed spool type is invalid ({exc})") from exc
+        made[key] = (created.id, created.label_weight_g)
+        return made[key]
 
     @staticmethod
     def _line_product(conn: Conn, head: Row, line: Row, type_id: UUID) -> tuple[UUID, int]:
@@ -526,24 +544,35 @@ class InvoiceStore:
         if line["supplier_product_id"] is not None:
             found = conn.execute(
                 f"SELECT {_PRODUCT_COLUMNS} FROM filament_supplier_products"
-                " WHERE id = %s AND supplier_id = %s",
+                " WHERE id = %s AND supplier_id = %s AND archived_at IS NULL",
                 (line["supplier_product_id"], head["supplier_id"]),
             ).fetchone()
             if found is None:
-                raise InvoiceLineError(position, "its supplier product is not this supplier's")
+                raise InvoiceLineError(
+                    position, "its supplier product is archived or not this supplier's"
+                )
         else:
             sku = line["sku"] or line["description"]
-            found = conn.execute(
+            if len(sku) > _SKU_MAX:
+                raise InvoiceLineError(
+                    position,
+                    f"it has no SKU and its description is over {_SKU_MAX} characters: set a SKU",
+                )
+            find = (
                 f"SELECT {_PRODUCT_COLUMNS} FROM filament_supplier_products"
-                " WHERE supplier_id = %s AND upper(sku) = upper(%s) AND archived_at IS NULL",
-                (head["supplier_id"], sku),
-            ).fetchone()
+                " WHERE supplier_id = %s AND upper(sku) = upper(%s) AND archived_at IS NULL"
+            )
+            found = conn.execute(find, (head["supplier_id"], sku)).fetchone()
             if found is None:
                 found = conn.execute(
                     "INSERT INTO filament_supplier_products (supplier_id, type_id, sku)"
-                    f" VALUES (%s, %s, %s) RETURNING {_PRODUCT_COLUMNS}",
+                    " VALUES (%s, %s, %s) ON CONFLICT (supplier_id, upper(sku))"
+                    f" WHERE archived_at IS NULL DO NOTHING RETURNING {_PRODUCT_COLUMNS}",
                     (head["supplier_id"], type_id, sku),
                 ).fetchone()
+            if found is None:
+                # A concurrent confirm made the same SKU first: read its row.
+                found = conn.execute(find, (head["supplier_id"], sku)).fetchone()
         assert found is not None
         if found["type_id"] != type_id:
             raise InvoiceLineError(position, "its supplier product is for another spool type")
@@ -557,6 +586,12 @@ class InvoiceStore:
         ids: _Ids = line["update_spool_ids"]
         if not ids:
             return []
+        if len(ids) > line["quantity"]:
+            raise InvoiceLineError(
+                position, f"it fills {len(ids)} spools but its quantity is {line['quantity']}"
+            )
+        if len(set(ids)) != len(ids):
+            raise InvoiceLineError(position, "it names a spool twice")
         rows = {
             row["id"]: row
             for row in conn.execute(
