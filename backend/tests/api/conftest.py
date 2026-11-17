@@ -42,6 +42,7 @@ from tests.support.deployment import (
     BUILD_SERVES_TIMEOUT,
     wait_until_build_serves,
 )
+from tests.support.sb_rows import seed_app_sb_spools
 from tests.support.store import content, pool, s3  # noqa: F401
 from tests.support.temporal import (
     WorkflowReaper,
@@ -303,6 +304,25 @@ def _reaper_client(reaper: WorkflowReaper) -> Client:
 def client(app: FastAPI) -> Iterator[TestClient]:
     with TestClient(app) as test_client:
         yield test_client
+
+
+@pytest.fixture
+def recorded_sb_spools(request: pytest.FixtureRequest) -> None:
+    """Bambuddy's recorded spools (``inventory-spools.json``) as SB spools of the same
+    numbers, linked to them: the Bambuddy path's picker offers SB spools (#6262 Task 7),
+    so a test that plans with the recording's ids needs them. Seeded through the app the
+    test already drives (a module's own ``*_client`` before ``client``), never a new one:
+    a second app would run a second worker on the same task queues. A test that asks for
+    no app fixture seeds nothing. ``@pytest.mark.sb_offset(n)`` numbers them n past their
+    Bambuddy ids."""
+    # Each named fixture is in the test's closure already, so reading it makes nothing new.
+    names = [n for n in request.fixturenames if n.endswith("_client") and not n.startswith("_")]
+    names += ["client"] if "client" in request.fixturenames else []
+    apps = (request.getfixturevalue(name) for name in names)
+    app = next((value for value in apps if isinstance(value, TestClient)), None)
+    marker = request.node.get_closest_marker("sb_offset")
+    if app is not None:
+        seed_app_sb_spools(app, offset=marker.args[0] if marker else 0)
 
 
 @pytest.fixture

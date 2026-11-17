@@ -47,9 +47,14 @@ from tests.api.test_send import API, configure, upload_route
 from tests.slicing.conftest import PROFILES
 from tests.support.fake_slicer import INTERNAL, FakeSlicer, fake_slicer_worker
 from tests.support.operations import press
+from tests.support.sb_rows import seed_app_sb_spools
 from tests.support.sliced3mf import sliced_3mf
 
-pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
+pytestmark = [
+    pytest.mark.requires_postgres,
+    pytest.mark.requires_temporal,
+    pytest.mark.usefixtures("recorded_sb_spools"),
+]
 
 #: The copy the run uploads (``upload_route``), which the native slice reads back.
 COPY = 41
@@ -553,6 +558,7 @@ def test_the_bambuddy_preview_is_unchanged(
     profiles = dialog_profiles(tmp_path / "profiles")
     app_settings = _settings(settings, s3, kek_file, profiles, slicer_backend="bambuddy")
     for client in _open(app_settings):
+        seed_app_sb_spools(client)
         output_id = prepared(client, model)
         started = start(client, output_id)
         assert (started["job_id"], started["slicer"]) == (9, "bambuddy")
@@ -571,6 +577,7 @@ def test_native_library_with_native_slicer(
     profiles = dialog_profiles(tmp_path / "profiles")
     app_settings = _settings(settings, s3, kek_file, profiles, library_backend="native")
     for client in _open(app_settings):
+        seed_app_sb_spools(client)
         with fake_slicer_worker(client, settings.temporal_task_queue_slicer) as fake:
             output_id = prepared(client, model)
             started = start(client, output_id)
@@ -656,6 +663,7 @@ def test_the_library_preview_on_the_native_slicer(
     with respx.mock as router:
         router.route(host="127.0.0.1").pass_through()
         for client in _open(_settings(settings, s3, kek_file, profiles)):
+            seed_app_sb_spools(client)
             configure(client)
             one_color(89)
             flow_copy_routes()
@@ -705,6 +713,7 @@ def test_a_preset_the_image_lacks_is_422(
     vendor["machine_list"] = [e for e in vendor["machine_list"] if e["name"] != "Dialog GM042"]
     vendor_file.write_text(json.dumps(vendor))
     for client in _open(_settings(settings, s3, kek_file, profiles)):
+        seed_app_sb_spools(client)
         op = _post(client, prepared(client, model))
         assert (op["status"], op["error"]["status"]) == ("failed", 422), op
         assert "printer preset" in op["error"]["detail"]
@@ -722,6 +731,7 @@ def test_a_broken_profiles_tree_is_503(
     profiles = dialog_profiles(tmp_path / "profiles")
     (profiles / "BBL" / "process" / "Dialog GP243.json").write_text("{not json")
     for client in _open(_settings(settings, s3, kek_file, profiles)):
+        seed_app_sb_spools(client)
         op = _post(client, prepared(client, model))
         assert (op["status"], op["error"]["status"]) == ("failed", 503), op
 

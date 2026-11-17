@@ -6,8 +6,9 @@ import { ALL_TOOLS } from '../src/tools/index.js'
 import { runTool, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
 
-// #1912 (#251's farm-context tier): the queue, aggregate stats, every Bambuddy archive
-// with its outcome, and the spool inventory, read through backend/scadbuddy/api/farm.py.
+// #1912 (#251's farm-context tier): the queue, aggregate stats and every Bambuddy archive
+// with its outcome, read through backend/scadbuddy/api/farm.py; the spool inventory and a
+// spool's summary are ScadBuddy's own (#6262 Task 9, backend/scadbuddy/api/filament.py).
 
 const server = setupServer()
 beforeAll(() => server.listen({ onUnhandledFrame: 'error' }))
@@ -36,9 +37,15 @@ const FARM_TOOLS = {
   get_print_stats: 'GET /api/v1/farm/stats',
   get_printers_now: 'GET /api/v1/print/printers/now',
   list_print_archives: 'GET /api/v1/farm/archives',
-  get_spool_inventory: 'GET /api/v1/farm/inventory',
-  get_spool_summary: 'GET /api/v1/farm/spools/{spool_id}/summary',
 } as const
+
+/** The spool tools read ScadBuddy's own spools, not Bambuddy (#6262 Task 9). */
+const SPOOL_TOOLS = {
+  get_spool_inventory: 'GET /api/v1/filament/inventory',
+  get_spool_summary: 'GET /api/v1/filament/spools/{spool_id}/summary',
+} as const
+
+const SPOOL = '3f2b8c1e-6d4a-4f1b-9a7e-2c5d8e9f0a1b'
 
 /** The query string each call sent, by path. */
 function capture(path: string, body: unknown): URLSearchParams[] {
@@ -61,6 +68,15 @@ describe('farm-context tools (#1912)', () => {
     expect(t.bambuddyScope).toEqual(['Read Status'])
     expect(t.routes).toEqual([route])
     expect(t.source).toMatch(/Bambuddy/)
+  })
+
+  it.each(Object.entries(SPOOL_TOOLS))('%s reads ScadBuddy, needing no Bambuddy scope', (name, route) => {
+    const t = tool(name)
+    expect(t.risk).toBe('read')
+    expect(t.readOnly).toBe(true)
+    expect(t.bambuddyScope).toEqual([])
+    expect(t.routes).toEqual([route])
+    expect(t.source).toMatch(/ScadBuddy/)
   })
 
   it('lists the queue with its filters, paging in the agent', async () => {
@@ -195,19 +211,24 @@ describe('farm-context tools (#1912)', () => {
   })
 
   it('reads the inventory, archived spools only when asked', async () => {
-    const seen = capture('/api/v1/farm/inventory', { spools: [], slots: [] })
+    const seen = capture('/api/v1/filament/inventory', { spools: [], trays: [] })
     await runTool(tool('get_spool_inventory'), {}, ctx())
-    await runTool(tool('get_spool_inventory'), { include_archived: true, printer_id: 1 }, ctx())
-    expect(seen.map((q) => Object.fromEntries(q))).toEqual([{}, { include_archived: 'true', printer_id: '1' }])
+    await runTool(tool('get_spool_inventory'), { include_archived: true }, ctx())
+    expect(seen.map((q) => Object.fromEntries(q))).toEqual([{}, { include_archived: 'true' }])
   })
 
-  it('summarises one spool, pricing grams only when asked (#785)', async () => {
-    const seen = capture('/api/v1/farm/spools/15/summary', { spool: { id: 15 }, filament: { spool_count: 2 } })
-    const result = await runTool(tool('get_spool_summary'), { spool_id: 15 }, ctx())
-    await runTool(tool('get_spool_summary'), { spool_id: 15, grams: 12.5 }, ctx())
+  it('summarises one SB spool by its uuid, pricing grams only when asked (#785)', async () => {
+    const seen = capture(`/api/v1/filament/spools/${SPOOL}/summary`, {
+      spool: { spool: { id: SPOOL, number: 4 } },
+      filament: { spool_count: 2 },
+    })
+    const result = await runTool(tool('get_spool_summary'), { spool_id: SPOOL }, ctx())
+    await runTool(tool('get_spool_summary'), { spool_id: SPOOL, grams: 12.5 }, ctx())
     expect(result.isError).toBeFalsy()
     expect(JSON.stringify(firstText(result))).toContain('spool_count')
     expect(seen.map((q) => Object.fromEntries(q))).toEqual([{}, { grams: '12.5' }])
+    // A Bambuddy spool id is not an SB spool's.
+    expect(() => tool('get_spool_summary').parse({ spool_id: 15 })).toThrow()
   })
 
   it("passes the backend's scope problem through", async () => {

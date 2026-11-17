@@ -173,7 +173,13 @@ describe('filament spool tools', () => {
     ['filament_spool_list', 'read'],
     ['filament_spool_get', 'read'],
     ['filament_spool_events', 'read'],
+    ['filament_tag_list', 'read'],
+    ['filament_tag_get', 'read'],
+    ['filament_ledger_list', 'read'],
+    ['filament_summary', 'read'],
     ['filament_spool_upsert', 'write'],
+    ['filament_spool_set_presets', 'write'],
+    ['filament_spool_set_k_values', 'write'],
     ['filament_spool_archive', 'write'],
     ['filament_spool_delete', 'write'],
     ['filament_spool_bind_tag', 'write'],
@@ -198,6 +204,41 @@ describe('filament spool tools', () => {
     expect(firstText(await runTool(tool('filament_spool_get'), { spool_id: ROW }, ctx()))).toEqual({ id: ROW })
     const events = await runTool(tool('filament_spool_events'), { spool_id: ROW }, ctx())
     expect(firstText(events)).toEqual([{ kind: 'created' }])
+  })
+
+  it('reads the tags, a page of the ledger and the summary', async () => {
+    const queries: string[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/filament/tags`, ({ request }) => {
+        queries.push(new URL(request.url).search)
+        return HttpResponse.json([{ id: ROW }])
+      }),
+      http.get(`${BACKEND}/api/v1/filament/tags/${ROW}`, () => HttpResponse.json({ id: ROW, history: [] })),
+      http.get(`${BACKEND}/api/v1/filament/events`, ({ request }) => {
+        queries.push(new URL(request.url).search)
+        return HttpResponse.json({ events: [], next_cursor: null })
+      }),
+      http.get(`${BACKEND}/api/v1/filament/summary`, () => HttpResponse.json({ spools: 2 })),
+    )
+    const tags = await runTool(tool('filament_tag_list'), { include_unbound: true }, ctx())
+    expect(firstText(tags)).toEqual([{ id: ROW }])
+    expect(firstText(await runTool(tool('filament_tag_get'), { tag_id: ROW }, ctx()))).toEqual({ id: ROW, history: [] })
+    const page = await runTool(tool('filament_ledger_list'), { spool_id: ROW, cursor: 'abc', limit: 2 }, ctx())
+    expect(firstText(page)).toEqual({ events: [], next_cursor: null })
+    expect(firstText(await runTool(tool('filament_summary'), {}, ctx()))).toEqual({ spools: 2 })
+    expect(queries).toEqual(['?include_unbound=true', `?spool_id=${ROW}&cursor=abc&limit=2`])
+  })
+
+  it('reads the ledger between a since and an until', async () => {
+    const queries: string[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/filament/events`, ({ request }) => {
+        queries.push(new URL(request.url).search)
+        return HttpResponse.json({ events: [], next_cursor: null })
+      }),
+    )
+    await runTool(tool('filament_ledger_list'), { since: '2026-11-01T00:00:00Z', until: '2026-11-02T00:00:00Z', limit: 5 }, ctx())
+    expect(queries).toEqual(['?since=2026-11-01T00%3A00%3A00Z&until=2026-11-02T00%3A00%3A00Z&limit=5'])
   })
 
   it('adds a spool, edits it, archives it and deletes another', async () => {
@@ -228,6 +269,25 @@ describe('filament spool tools', () => {
     const deleted = await runTool(tool('filament_spool_delete'), { spool_id: ROW }, ctx())
     expect(firstText(deleted)).toEqual({ deleted: ROW })
     expect(calls).toEqual([['add', fields], ['edit', { rgba: null }], ['archive', { archived: true }], ['delete']])
+  })
+
+  it("replaces a spool's own presets and K values", async () => {
+    const calls: unknown[] = []
+    server.use(
+      http.put(`${SPOOL}/presets`, async ({ request }) => {
+        calls.push(['presets', await request.json()])
+        return HttpResponse.json([])
+      }),
+      http.put(`${SPOOL}/k-values`, async ({ request }) => {
+        calls.push(['k', await request.json()])
+        return HttpResponse.json([])
+      }),
+    )
+    const presets = [{ printer_model: 'H2C', nozzle_diameter: '0.4', slicer_filament: 'P1' }]
+    const k_values = [{ printer_id: ROW, extruder: 0, nozzle_diameter: '0.4', k_value: '0.02' }]
+    expect((await runTool(tool('filament_spool_set_presets'), { spool_id: ROW, presets }, ctx())).isError).toBeFalsy()
+    expect((await runTool(tool('filament_spool_set_k_values'), { spool_id: ROW, k_values }, ctx())).isError).toBeFalsy()
+    expect(calls).toEqual([['presets', presets], ['k', k_values]])
   })
 
   it('says why a spool that printed is not deleted', async () => {
@@ -329,6 +389,57 @@ describe('filament location tools', () => {
     const imported = await runTool(tool('filament_bambuddy_import'), {}, ctx())
     expect(firstText(imported)).toEqual(report)
     expect(calls).toBe(1)
+  })
+
+  it('previews a CSV import without writing, as a read tool', async () => {
+    expect(tool('filament_spool_import').risk).toBe('write')
+    expect(tool('filament_spool_import').gated).toBe(false)
+    expect(tool('filament_spool_import_preview').risk).toBe('read')
+    const preview = { rows: [{ line: 2, action: 'create', number: null, changes: {}, error: null }] }
+    const sent: { body: unknown; key: string | null }[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/filament/spools/import`, async ({ request }) => {
+        sent.push({ body: await request.json(), key: request.headers.get('Idempotency-Key') })
+        return HttpResponse.json(preview)
+      }),
+    )
+    const rows = [{ material: 'PLA', brand: 'Sunlu' }]
+    const result = await runTool(tool('filament_spool_import_preview'), { rows }, ctx())
+    expect(firstText(result)).toEqual(preview)
+    expect(sent).toEqual([{ body: { rows, dry_run: true }, key: null }])
+  })
+
+  it('imports after a clean preview, with one Idempotency-Key', async () => {
+    const preview = { rows: [{ line: 2, action: 'create', number: null, changes: {}, error: null }] }
+    const done = { rows: [{ line: 2, action: 'create', number: 7, changes: {}, error: null }] }
+    const sent: { body: { dry_run: boolean }; key: string | null }[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/filament/spools/import`, async ({ request }) => {
+        const body = (await request.json()) as { dry_run: boolean }
+        sent.push({ body, key: request.headers.get('Idempotency-Key') })
+        return HttpResponse.json(body.dry_run ? preview : done)
+      }),
+    )
+    const result = await runTool(tool('filament_spool_import'), { rows: [{ material: 'PLA' }] }, ctx())
+    expect(firstText(result)).toEqual(done)
+    expect(sent.map((s) => s.body.dry_run)).toEqual([true, false])
+    expect(sent[1]?.key).toMatch(/^[0-9a-f]{32,64}$/)
+  })
+
+  it('writes nothing when the preview holds an error', async () => {
+    const preview = { rows: [{ line: 2, action: 'error', number: null, changes: {}, error: 'no spool #9' }] }
+    let writes = 0
+    server.use(
+      http.post(`${BACKEND}/api/v1/filament/spools/import`, async ({ request }) => {
+        const body = (await request.json()) as { dry_run: boolean }
+        if (!body.dry_run) writes += 1
+        return HttpResponse.json(preview)
+      }),
+    )
+    const result = await runTool(tool('filament_spool_import'), { rows: [{ number: '9' }] }, ctx())
+    expect(result.isError).toBe(true)
+    expect(JSON.stringify(result.content)).toContain('line 2: no spool #9')
+    expect(writes).toBe(0)
   })
 
   it('says when no Bambuddy is configured', async () => {

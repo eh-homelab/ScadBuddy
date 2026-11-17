@@ -1,4 +1,4 @@
-"""The shop slice profile's choices (#6153, #6255 review): the options route on
+"""The shop slice profile's choices (#6153, #6255 review): the options route off
 Bambuddy's path, and the spools of a native route, which are the loaded trays."""
 
 from __future__ import annotations
@@ -6,7 +6,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
@@ -16,6 +15,7 @@ from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.models import PrinterCreate
 from tests.api.test_settings_runtime import _state
+from tests.support.sb_rows import seed_app_sb_spools
 
 OPTIONS = "/api/v1/storefront/slice-profile/options"
 
@@ -26,15 +26,17 @@ def _printer(client: TestClient) -> str:
 
 
 @respx.mock
-def test_the_options_list_bambuddys_spools_for_a_printer(client: TestClient) -> None:
+def test_the_options_list_scadbuddys_spools_for_a_printer(client: TestClient) -> None:
+    """#6262 Task 7: off a native route the options are SB spools by number, with no
+    read of Bambuddy's spools."""
     printer = _printer(client)
     client.put("/api/v1/settings", json={"bambuddy_url": "https://bambuddy.test"})
-    respx.get("https://bambuddy.test/api/v1/inventory/spools").mock(
-        return_value=httpx.Response(
-            200, json=[{"id": 7, "material": "PLA", "brand": "Bambu", "color_name": "Red"}]
-        )
+    seed_app_sb_spools(
+        client, [{"id": 7, "material": "PLA", "brand": "Bambu", "color_name": "Red"}]
     )
+    bambuddys = respx.get("https://bambuddy.test/api/v1/inventory/spools")
     answer = client.get(OPTIONS, params={"printer": printer})
+    assert not bambuddys.called
     assert answer.status_code == 200, answer.text
     spools = answer.json()["spools"]
     assert [(s["spool_id"], s["material"]) for s in spools] == [(7, "PLA")]
@@ -61,14 +63,10 @@ async def test_a_native_route_offers_its_loaded_trays(monkeypatch: pytest.Monkey
     async def a_route(*_: Any, **__: Any) -> Any:
         return route
 
-    async def no_overlay(*_: Any, **__: Any) -> dict[str, Any]:
-        return {}
-
     tray = SimpleNamespace(
         spool_id=-3, material="PETG", colour="#00FF00", label="Bambu", color_name="Green"
     )
     monkeypatch.setattr(storefront_slice, "dialog_route", a_route)
-    monkeypatch.setattr(storefront_slice, "status_overlay", no_overlay)
     monkeypatch.setattr(storefront_slice, "loaded_trays", lambda *_: [tray])
 
     class Store:

@@ -522,3 +522,32 @@ def test_retry_after_keeps_only_a_delay_or_an_http_date(
     """#2037: the peer's header is carried into a problem's detail, so only what RFC
     9110 allows, at a bounded length, is kept."""
     assert retry_after(header) == kept
+
+
+@respx.mock
+async def test_the_spool_catalog_is_read_from_the_inventory(bambuddy: BambuddyClient) -> None:
+    """``GET /inventory/catalog`` (1.2.6b1 ``CatalogEntry``): the empty-spool entries."""
+    route = respx.get(f"{API}/inventory/catalog").mock(
+        return_value=httpx.Response(200, json=recording("inventory-catalog.json"))
+    )
+
+    catalog = await bambuddy.spool_catalog()
+
+    assert route.called
+    assert [(e.id, e.name, e.weight) for e in catalog] == [
+        (5, "Bambu reusable", 250),
+        (6, "Bambu cardboard", 212),
+        (7, "Generic plastic", 140),
+    ]
+
+
+@respx.mock
+async def test_the_spool_catalog_declares_read_status(bambuddy: BambuddyClient) -> None:
+    respx.get(f"{API}/inventory/catalog").mock(
+        return_value=httpx.Response(403, json={"detail": "Missing permission"})
+    )
+
+    with pytest.raises(ApiError) as caught:
+        await bambuddy.spool_catalog()
+
+    assert caught.value.extensions["required_scope"] == Scope.READ_STATUS.value

@@ -57,7 +57,7 @@ from tests.support.operations import press
 from tests.support.printers import linked_printer
 from tests.test_clearance import two_objects_3mf
 
-pytestmark = pytest.mark.requires_postgres
+pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("recorded_sb_spools")]
 
 API = f"{BASE}/api/v1"
 

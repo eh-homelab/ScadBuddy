@@ -1,6 +1,7 @@
 import { useEffect, useId, useState } from 'react'
-import { api, ApiError } from '../../api/client'
-import type { InventorySpool } from '../../api/types'
+import { ApiError } from '../../api/client'
+import { getInventory } from '../../api/filament'
+import type { FilamentInventorySpool } from '../../api/types'
 import { trayPlace } from '../../lib/filaments'
 import { spoolColour, spoolName, spoolValue } from '../../lib/filamentColour'
 import { ClearSwatch, Swatch } from '../print/Swatch'
@@ -11,17 +12,17 @@ import { Skeleton } from '@/components/ui/skeleton'
 type State =
   | { kind: 'loading' }
   | { kind: 'failed'; message: string }
-  | { kind: 'open'; spools: InventorySpool[] }
+  | { kind: 'open'; spools: FilamentInventorySpool[] }
 
 /** Loaded spools first, then the fullest. */
-function order(a: InventorySpool, b: InventorySpool): number {
+function order(a: FilamentInventorySpool, b: FilamentInventorySpool): number {
   if (!!a.loaded !== !!b.loaded) return a.loaded ? -1 : 1
-  return b.remaining_g - a.remaining_g
+  return (b.spool.grams_left ?? 0) - (a.spool.grams_left ?? 0)
 }
 
 /**
- * #1026 — take a colour parameter's hex from a filament in Bambuddy's inventory, so the
- * preview shows what will actually print. The inventory is read when the list is shown
+ * #1026 — take a colour parameter's hex from one of ScadBuddy's spools (#6262 Task 9: its
+ * effective `#RRGGBBAA`), so the preview shows what will actually print. The inventory is read when the list is shown
  * (the colour popover opens), never on page load. A clear spool with no recorded tint
  * has no colour to take and is listed disabled; a translucent one gives its tint. `onPick`
  * gets the hex and the parameter value (`spoolValue`: with the alpha of a translucent spool).
@@ -45,15 +46,15 @@ export function FilamentColourPicker({
   // never lands anywhere.
   useEffect(() => {
     let live = true
-    api.getSpoolInventory().then(
+    getInventory().then(
       (view) => {
-        if (live) setState({ kind: 'open', spools: [...(view.spools ?? [])].filter((s) => !s.archived).sort(order) })
+        if (live) setState({ kind: 'open', spools: [...(view.spools ?? [])].filter((row) => !row.spool.archived_at).sort(order) })
       },
       (cause: unknown) => {
         if (!live) return
         setState({
           kind: 'failed',
-          message: cause instanceof ApiError ? cause.detail : "Bambuddy's filaments could not be read.",
+          message: cause instanceof ApiError ? cause.detail : "The spools could not be read.",
         })
       },
     )
@@ -64,7 +65,7 @@ export function FilamentColourPicker({
 
   if (state.kind === 'loading') {
     return (
-      <div role="status" aria-label="Reading Bambuddy's filaments" className="flex flex-col gap-1.5 p-1">
+      <div role="status" aria-label="Reading the spools" className="flex flex-col gap-1.5 p-1">
         <Skeleton className="h-7 w-full" />
         <Skeleton className="h-7 w-full" />
       </div>
@@ -77,7 +78,7 @@ export function FilamentColourPicker({
       </p>
     )
   }
-  if (state.spools.length === 0) return <p className="px-1 text-xs text-muted-foreground">Bambuddy has no spools.</p>
+  if (state.spools.length === 0) return <p className="px-1 text-xs text-muted-foreground">ScadBuddy has no spools.</p>
 
   return (
     <Command className="rounded-lg! border p-0">
@@ -85,26 +86,28 @@ export function FilamentColourPicker({
       <CommandList label={`Filaments for ${label}`} className="max-h-60">
         <CommandEmpty>No filament matches.</CommandEmpty>
         <CommandGroup>
-          {state.spools.map((spool) => {
-            const colour = spoolColour(spool)
-            const name = spoolName(spool)
-            const chosen = colour !== null && (alpha ? spoolValue(spool) : colour.hex) === value
+          {state.spools.map((row) => {
+            const { spool } = row
+            // The effective colour: the spool's own, else its filament type's.
+            const look = { rgba: spool.effective?.rgba ?? spool.rgba }
+            const colour = spoolColour(look)
+            const name = spoolName(row)
+            const chosen = colour !== null && (alpha ? spoolValue(look) : colour.hex) === value
             // The printer too: on a farm, two spools can both be in AMS-A slot 1.
-            const where = spool.loaded ? trayPlace(spool.loaded, { printer: true }) : null
+            const where = row.loaded ? trayPlace(row.loaded, { printer: true }) : null
+            const grams = spool.grams_left === null ? null : `${Math.round(spool.grams_left)} g`
             const detail =
               colour === null
-                ? 'clear, no tint recorded'
-                : [colour.translucent ? 'translucent' : null, where, `${Math.round(spool.remaining_g)} g`]
-                    .filter(Boolean)
-                    .join(' · ')
+                ? `#${spool.number} · clear, no tint recorded`
+                : [`#${spool.number}`, colour.translucent ? 'translucent' : null, where, grams].filter(Boolean).join(' · ')
             return (
               <CommandItem
                 key={spool.id}
-                value={`${spool.id} ${name} ${detail}`}
+                value={`${spool.number} ${name} ${detail}`}
                 disabled={colour === null}
                 data-checked={chosen}
                 onSelect={() => {
-                  const picked = spoolValue(spool)
+                  const picked = spoolValue(look)
                   if (colour && picked) onPick(colour.hex, picked)
                 }}
                 className="text-xs"

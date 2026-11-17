@@ -1,6 +1,7 @@
 """The Bambuddy recorder (``e2e-stack/bambuddy-recorder/recorder.py``, #3818 tier A,
 Task 12): the hot-path stack's ``bambuddy_url``. It answers the overlay refresh's two
-inventory reads, fails everything else with 599, and lists every Bambuddy request."""
+inventory reads and the pull's catalog read, fails everything else with 599, and lists
+every Bambuddy request."""
 
 import importlib.util
 import json
@@ -73,6 +74,10 @@ def test_the_inventory_reads_are_answered(recorder: str) -> None:
     status, assignments = _call(f"{recorder}/api/v1/inventory/assignments/")
     assert status == 200
     assert assignments == json.loads((RECORDINGS / "inventory-assignments.json").read_text())
+
+    status, catalog = _call(f"{recorder}/api/v1/inventory/catalog")
+    assert status == 200
+    assert catalog == json.loads((RECORDINGS / "inventory-catalog.json").read_text())
 
 
 def test_anything_else_fails_and_everything_is_listed(recorder: str) -> None:

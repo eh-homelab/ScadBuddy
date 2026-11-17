@@ -13,6 +13,7 @@ import {
   printPath,
   printSequence,
   processOverrides,
+  sbPlanIds,
   setupPhrase,
   slotChoice,
   supportsChoice,
@@ -674,7 +675,7 @@ const sliceQuote = z
           'and a printer a run reaches over the LAN is sliced for with no Bambuddy call',
       ),
     filament_plan: z
-      .object({ slots: z.array(slotChoice), force_colour_match: z.boolean().default(true) })
+      .object({ slots: z.array(slotChoice), force_colour_match: z.boolean().default(true), ids: sbPlanIds })
       .describe('One spool per slot (slot_id from 1), as the print dialog sends it'),
     choices: printChoices,
     filaments: z
@@ -2855,18 +2856,19 @@ export const orderTools: Tool[] = [
   }),
   defineTool({
     name: 'price_book_import_spools',
-    label: "Import filaments from Bambuddy's spools",
+    label: "Import filaments from ScadBuddy's spools",
     description:
-      "Make or update the price book's filament records from Bambuddy's spool inventory: one record per filament " +
-      '(material, subtype, brand and colour), made when the book has none, else given the most recent priced ' +
-      "spool's cost per kilogram; `min_cost_per_kg`/`max_cost_per_kg` show the spread when the spools' prices " +
+      "Make or update the price book's filament records from ScadBuddy's own spools: one record per filament " +
+      '(effective material, subtype, brand and `#RRGGBBAA`, so an opaque and a translucent spool of one hue are ' +
+      'two records), made when the book has none, else given the most recent priced spool\'s cost per kilogram ' +
+      "(the highest spool number); `spool_ids` are spool numbers; `min_cost_per_kg`/`max_cost_per_kg` show the spread when the spools' prices " +
       'differ. A record keeps its link to its spools, so a colour set by hand makes no second record; the import sets ' +
       "a record's colour, alpha, stops and effect only while its `colour_source` is `import`. " +
-      'A filament known only by its colour name, with no priced spool, or whose colour another record of its ' +
-      'material, subtype and brand already has (`colour_taken`), is `skipped` with its `reason`. A matched record ' +
-      "whose spools' colour another record of its names holds keeps its own colour, alpha, stops and effect, and " +
-      'comes back `updated` or `unchanged` with `reason` `colour_taken`. ' +
-      "Only when Bambuddy is linked (price_book_get's `spool_import`); else `not_linked`. Quotes never read spools.",
+      'A filament known only by its colour name, with no priced spool, or whose colour and alpha another record ' +
+      'of its material, subtype and brand already has (`colour_taken`), is `skipped` with its `reason`. A matched ' +
+      "record whose spools' colour another record of its names holds keeps its own colour, alpha, stops and " +
+      'effect, and comes back `updated` or `unchanged` with `reason` `colour_taken`. Needs no Bambuddy. Quotes ' +
+      'never read spools.',
     input: z.object({}),
     risk: 'write',
     routes: ['POST /api/v1/orders/price-book/import-spools'],
@@ -2878,11 +2880,12 @@ export const orderTools: Tool[] = [
     name: 'price_book_fill_densities',
     label: 'Fill empty filament densities',
     description:
-      'Give every price-book filament with no density the one its Bambuddy spools link to: the preset id ' +
-      "(the spool's slicer preset, then its K-profile's, then its AMS tray's) gives Bambuddy's local preset or " +
-      "the Bambu Studio vendor preset's `filament_density`, then Bambuddy's filament catalogue. Never " +
-      "overwrites a density that is set. Each row is filled with its `density_profile` (the source) or has no " +
-      "`density_g_cm3` (no source: enter it with price_book_set). Only when Bambuddy is linked; else `not_linked`.",
+      "Give every price-book filament with no density the one ScadBuddy's spools of its material, subtype, " +
+      "brand and `#RRGGBBAA` give: the newest spool's own effective density, else the `filament_density` of " +
+      "its slicer preset id (Bambuddy's local preset while Bambuddy is linked, else the Bambu Studio vendor " +
+      "preset), else that of the preset id (`tray_info_idx`) the tray holding it reports. Never overwrites a " +
+      'density that is set. Each row is filled with its `density_profile` ' +
+      '(the source) or has no `density_g_cm3` (no source: enter it with price_book_set). Needs no Bambuddy.',
     input: z.object({}),
     risk: 'write',
     routes: ['POST /api/v1/orders/price-book/fill-densities'],

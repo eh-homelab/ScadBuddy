@@ -33,7 +33,7 @@ from tests.api.test_print_supports import overrides, routes
 from tests.api.test_send import upload_route
 from tests.bambuddy.conftest import recording
 
-pytestmark = pytest.mark.requires_postgres
+pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("recorded_sb_spools")]
 
 #: The tower settings as every Bambu process preset has them (``fdm_process_common``).
 PRESET = {"enable_prime_tower": "1", "wipe_tower_no_sparse_layers": "0"}

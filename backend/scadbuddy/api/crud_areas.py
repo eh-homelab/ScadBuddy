@@ -75,12 +75,18 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: (#4699 phase 4). Its ``printers`` area is every other ``…/print/printers`` route (the
 #: reads, a printer's access code, a virtual printer's sync) and ``…/print/reports``
 #: (#5298 Task 29). Its ``rack`` area is ``…/print/rack``, the rack hotends' usage
-#: (#5298 Task 30). Its ``spools`` area is ``…/print/spools``, ``…/print/native-spools``,
-#: ``…/print/held-presets`` and ``…/print/native-slices`` (#5298 Task 31). Its
+#: (#5298 Task 30). Its ``spools`` area is ``…/print/held-presets`` and
+#: ``…/print/native-slices`` (#5298 Task 31; its ``…/print/spools`` routes went with the
+#: spool overlay, #6262 Task 12). Its
 #: ``transfer-urls`` area is ``…/print/transfer-urls``, a LAN print's read URL of a
 #: native slice's file (#5298 Task 32). Its ``access-codes`` area is
 #: ``…/print/access-codes`` and ``…/access-codes/virtual-printer``: whether the API opens
-#: access codes, and a virtual printer's sealed code opened (#5298 Task 33). The intake
+#: access codes, and a virtual printer's sealed code opened (#5298 Task 33). Its
+#: ``filament`` area is ``…/print/filament/trays``, ``…/filament/presets``,
+#: ``…/filament/print-uses`` and ``…/filament/print-uses/settle``: a native run's SB
+#: spools and what its LAN starts use of them (#6262 Task 6); and ``…/filament/rows`` and
+#: ``…/filament/bb-to-sb``, the Bambuddy path's SB spools (Task 7). An area of its own, so a
+#: print worker that books there waits for an API that serves them. The intake
 #: ``sources`` area is ``…/intake/sources/{id}/read``, ``…/preview`` and ``…/check``: a
 #: customer's staged file, checked by the intake worker (#6133). The agent's small stores
 #: (#5299 step 5, `api/crud_agent_stores.py`): its ``activity-kinds`` area is
@@ -165,6 +171,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "spools",
         "transfer-urls",
         "access-codes",
+        "filament",
     ],
     "storefront": [
         "listings",

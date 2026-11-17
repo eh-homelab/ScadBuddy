@@ -1,5 +1,5 @@
 """Issue #1912 — the farm-context reads: the queue, aggregate stats, every archive with
-its outcome, and the spool inventory with each loaded slot's remaining grams.
+its outcome. (The spool inventory is ScadBuddy's own since #6262 Task 9.)
 
 Recorded from the live Bambuddy 1.2.6b1 (recordings/README.md). Bambuddy gates every one
 of these reads on ``can_read_status`` (``auth.py``'s ``QUEUE_READ``, ``STATS_READ``,
@@ -15,7 +15,6 @@ import respx
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.errors import SCOPE_PROBLEM, Scope
-from scadbuddy.bambuddy.farm import inventory_view
 from scadbuddy.core.problems import ApiError
 from tests.bambuddy.conftest import BASE_URL, recording
 
@@ -125,101 +124,3 @@ async def test_archive_outcomes_read_every_archive_with_its_outcome(
     assert [row.status for row in rows] == ["printing", "completed", "archived"]
     assert rows[1].print_name == "Bambu Bed Scraper"
     assert rows[1].filament_used_grams is not None
-
-
-@respx.mock
-async def test_the_inventory_joins_spools_to_their_slots_and_remaining_grams(
-    bambuddy: BambuddyClient,
-) -> None:
-    spools = respx.get(f"{API}/inventory/spools").mock(
-        return_value=httpx.Response(200, json=recording("inventory-spools.json"))
-    )
-    respx.get(f"{API}/inventory/assignments").mock(
-        return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
-    )
-    respx.get(f"{API}/printers/").mock(
-        return_value=httpx.Response(200, json=recording("printers.json"))
-    )
-    respx.get(f"{API}/printers/1/inventory-remain").mock(
-        return_value=httpx.Response(200, json=recording("inventory-remain.json"))
-    )
-
-    view = await inventory_view(bambuddy, include_archived=True)
-
-    assert spools.calls.last.request.url.params["include_archived"] == "true"
-    assert len(view.spools) == 12
-    loaded = next(spool for spool in view.spools if spool.id == 9)
-    assert loaded.loaded is not None
-    assert (loaded.loaded.printer_id, loaded.loaded.ams_id, loaded.loaded.tray_id) == (1, 0, 1)
-    assert loaded.remaining_g == 1000.0
-    shelf = [spool for spool in view.spools if spool.loaded is None]
-    assert len(shelf) == 12 - 5
-    slot = next(slot for slot in view.slots if slot.global_tray_id == 4)
-    assert (slot.printer_id, slot.printer_name, slot.ams_id, slot.tray_id) == (
-        1,
-        "3DP-31B-598",
-        1,
-        0,
-    )
-    assert slot.spool_id == 7
-    assert slot.remaining_g == pytest.approx(877.49, abs=0.01)
-    assert (slot.brand, slot.material, slot.color_name, slot.rgba) == (
-        "Inland",
-        "PLA",
-        "White",
-        "E3E5E5FF",
-    )
-    assert slot.extruder == 0
-    assert len(view.slots) == 5
-
-
-@respx.mock
-async def test_the_inventory_of_one_printer_still_places_spools_loaded_elsewhere(
-    bambuddy: BambuddyClient,
-) -> None:
-    """``printer_id`` narrows the slots, never the placements: a spool loaded in another
-    printer must not read as free (review on #1996)."""
-    respx.get(f"{API}/inventory/spools").mock(
-        return_value=httpx.Response(200, json=recording("inventory-spools.json"))
-    )
-    elsewhere = {
-        "id": 99,
-        "spool_id": 2,
-        "printer_id": 5,
-        "printer_name": "Other",
-        "ams_id": 0,
-        "tray_id": 2,
-    }
-    assignments = respx.get(f"{API}/inventory/assignments").mock(
-        return_value=httpx.Response(200, json=[*recording("inventory-assignments.json"), elsewhere])
-    )
-    printer = respx.get(f"{API}/printers/1").mock(
-        return_value=httpx.Response(200, json=recording("printer.json"))
-    )
-    remain = respx.get(f"{API}/printers/1/inventory-remain").mock(
-        return_value=httpx.Response(200, json=recording("inventory-remain.json"))
-    )
-
-    view = await inventory_view(bambuddy, printer_id=1)
-
-    assert printer.called and remain.called
-    assert "printer_id" not in assignments.calls.last.request.url.params
-    assert {slot.printer_id for slot in view.slots} == {1}
-    spool = next(spool for spool in view.spools if spool.id == 2)
-    assert spool.loaded is not None
-    assert (spool.loaded.printer_id, spool.loaded.printer_name) == (5, "Other")
-
-
-@respx.mock
-async def test_an_inactive_printer_is_not_asked_for_its_slots(bambuddy: BambuddyClient) -> None:
-    respx.get(f"{API}/inventory/spools").mock(return_value=httpx.Response(200, json=[]))
-    respx.get(f"{API}/inventory/assignments").mock(return_value=httpx.Response(200, json=[]))
-    respx.get(f"{API}/printers/").mock(
-        return_value=httpx.Response(
-            200, json=[{"id": 2, "name": "Old", "model": "X1C", "is_active": False}]
-        )
-    )
-
-    view = await inventory_view(bambuddy)
-
-    assert view.slots == []

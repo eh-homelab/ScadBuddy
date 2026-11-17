@@ -61,7 +61,7 @@ from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 from tests.support.no_bambuddy import forbid_bambuddy
 from tests.support.operations import press
 
-pytestmark = pytest.mark.requires_postgres
+pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("recorded_sb_spools")]
 
 
 def _native_settings(settings: Settings, s3: S3Settings, **extra: Any) -> Settings:

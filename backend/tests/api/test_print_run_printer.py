@@ -36,7 +36,11 @@ def serial_listing() -> None:
     )
 
 
-pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
+pytestmark = [
+    pytest.mark.requires_postgres,
+    pytest.mark.requires_temporal,
+    pytest.mark.usefixtures("recorded_sb_spools"),
+]
 
 
 def registry(client: TestClient) -> PrinterStore:

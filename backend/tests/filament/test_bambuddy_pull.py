@@ -4,31 +4,49 @@ changed since the last pull."""
 
 from __future__ import annotations
 
+import asyncio
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
+import httpx
 import pytest
 import respx
 from psycopg.types.json import Jsonb
 
 from scadbuddy.bambuddy.models import Spool as BbSpool
-from scadbuddy.filament.bambuddy_pull import pull, read_and_pull, scheduled_pull
+from scadbuddy.bambuddy.models import SpoolCatalogEntry
+from scadbuddy.core.settings import FilamentSync
+from scadbuddy.filament.bambuddy_pull import (
+    pull,
+    read_and_pull,
+    read_assignments,
+    read_catalog,
+    scheduled_pull,
+)
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.component import Filament
+from scadbuddy.filament.inventory import FilamentInventory
 from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.models import (
+    InsertType,
     InsertTypeCreate,
     Material,
     SpoolCreate,
     SpoolPatch,
     SpoolTypeCreate,
+    SpoolTypePatch,
 )
+from scadbuddy.filament.presets import PoolSpoolPresets
+from scadbuddy.filament.print_uses import SlotUse, record_uses, settle_uses
 from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.filament.types import SpoolTypeStore
 from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.spools.native import NativeSpoolStore, SpoolUse
+from scadbuddy.operations.kinds import CHECK_ON_BAMBUDDY
 from tests.conftest import PgPool
+from tests.support.pg_waits import wait_for_blocked
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -43,6 +61,8 @@ def _filament(pool: PgPool) -> Filament:
         types=SpoolTypeStore(pool),
         spools=FilamentSpoolStore(pool),
         locations=LocationStore(pool),
+        inventory=FilamentInventory(pool),
+        presets=PoolSpoolPresets(pool),
     )
 
 
@@ -162,9 +182,335 @@ def test_a_bb_spool_whose_tag_sb_holds_is_linked_not_duplicated(pg_pool: PgPool)
     assert (spool.id, spool.grams_left, spool.note) == (held.id, 500, "mine")
 
 
-def test_a_bb_spool_whose_record_link_names_an_sb_spool_is_linked(pg_pool: PgPool) -> None:
-    """A native spool migrated onto its physical spool's id, which the BB record is
-    linked to (`spool_record_links`), is that BB spool, tag or not."""
+def test_a_linked_spool_given_its_first_type_drops_its_migrated_presets(
+    pg_pool: PgPool,
+) -> None:
+    f = _filament(pg_pool)
+    kind = f.types.create(
+        SpoolTypeCreate(
+            code="GFA00-RED", material_id=_pla(pg_pool), rgba="#FF0000", label_weight_g=1000
+        )
+    )
+    held = f.spools.create(SpoolCreate(material_id=_pla(pg_pool)), actor="ann")
+    f.spools.bind_tag(held.id, tray_uuid=TRAY, kind="bambu_mifare", actor="ann")
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO filament_spool_presets (spool_id, printer_model, nozzle_diameter,"
+            " slicer_filament, migrated) VALUES (%s, 'H2C', '0.4', 'P1', true)",
+            (held.id,),
+        )
+    pull(f, [bb(material_number="gfa00-red")], now=NOW)
+    spool = f.spools.get(held.id)
+    assert spool is not None and spool.type_id == kind.id
+    assert f.spools.presets(held.id) == []
+    (synced,) = [e for e in f.spools.events(held.id) if e.kind == "synced_from_bb"]
+    before, after = synced.data["changes"]["presets"]
+    assert ([r["slicer_filament"] for r in before], after) == (["P1"], [])
+
+
+def _own_presets(pool: PgPool, spool: UUID) -> list[tuple[str, str, str | None, bool]]:
+    with pool.connection() as conn:
+        return [
+            (r["nozzle_diameter"], r["slicer_filament"], r["slicer_filament_name"], r["migrated"])
+            for r in conn.execute(
+                "SELECT * FROM filament_spool_presets WHERE spool_id = %s ORDER BY nozzle_diameter",
+                (spool,),
+            )
+        ]
+
+
+def test_a_bb_spools_preset_is_the_sb_spools_where_it_has_none(pg_pool: PgPool) -> None:
+    """#6262 Task 7 ruling R1: Bambuddy's ``slicer_filament`` and its name become the
+    SB spool's ``migrated`` H2C rows at every nozzle size, a person's own row kept, and
+    a later pull follows Bambuddy's change on the migrated rows only."""
+    f = _filament(pg_pool)
+    report = pull(f, [bb(slicer_filament="GFA00", slicer_filament_name="Bambu PLA Basic")], now=NOW)
+    (spool,) = f.spools.list()
+    assert spool.type_id is None and report.needs_type == 1
+    assert _own_presets(pg_pool, spool.id) == [
+        (size, "GFA00", "Bambu PLA Basic", True) for size in ("0.2", "0.4", "0.6", "0.8")
+    ]
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_spool_presets SET slicer_filament = 'MINE',"
+            " slicer_filament_name = NULL, migrated = false"
+            " WHERE spool_id = %s AND nozzle_diameter = '0.4'",
+            (spool.id,),
+        )
+    pull(
+        f,
+        [
+            bb(
+                slicer_filament="GFA05",
+                slicer_filament_name="Bambu PLA Silk",
+                updated_at="2026-11-14T11:00:00",
+            )
+        ],
+        now=NOW,
+    )
+    assert _own_presets(pg_pool, spool.id) == [
+        ("0.2", "GFA05", "Bambu PLA Silk", True),
+        ("0.4", "MINE", None, False),
+        ("0.6", "GFA05", "Bambu PLA Silk", True),
+        ("0.8", "GFA05", "Bambu PLA Silk", True),
+    ]
+
+
+def _set_row(pool: PgPool, spool: UUID, size: str, value: str, *, migrated: bool) -> None:
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_spool_presets SET slicer_filament = %s,"
+            " slicer_filament_name = %s, migrated = %s"
+            " WHERE spool_id = %s AND nozzle_diameter = %s",
+            (value, f"{value} name", migrated, spool, size),
+        )
+
+
+def _preset_events(f: Filament, spool: UUID) -> list[Any]:
+    return [e for e in f.spools.events(spool) if "presets" in (e.data or {}).get("changes", {})]
+
+
+def test_a_migrated_row_bambuddy_did_not_write_survives_a_pull(pg_pool: PgPool) -> None:
+    """#6262 Task 7 re-review I-1: a ``migrated`` row the native API or the native
+    migration wrote holds a person's choice; a pull with another Bambuddy value leaves
+    it, and rewrites only the rows that still hold Bambuddy's last value."""
+    f = _filament(pg_pool)
+    pull(f, [bb(slicer_filament="GFA00", slicer_filament_name="Bambu PLA Basic")], now=NOW)
+    (spool,) = f.spools.list()
+    _set_row(pg_pool, spool.id, "0.4", "NATIVE", migrated=True)
+
+    pull(
+        f,
+        [
+            bb(
+                slicer_filament="GFA05",
+                slicer_filament_name="Bambu PLA Silk",
+                updated_at=_bb_time(1),
+            )
+        ],
+        now=NOW,
+    )
+
+    assert _own_presets(pg_pool, spool.id) == [
+        ("0.2", "GFA05", "Bambu PLA Silk", True),
+        ("0.4", "NATIVE", "NATIVE name", True),
+        ("0.6", "GFA05", "Bambu PLA Silk", True),
+        ("0.8", "GFA05", "Bambu PLA Silk", True),
+    ]
+
+
+def test_a_bambuddy_clear_deletes_only_the_rows_holding_its_last_value(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    pull(f, [bb(slicer_filament="GFA00", slicer_filament_name="Bambu PLA Basic")], now=NOW)
+    (spool,) = f.spools.list()
+    _set_row(pg_pool, spool.id, "0.4", "NATIVE", migrated=True)
+    _set_row(pg_pool, spool.id, "0.6", "MINE", migrated=False)
+
+    pull(f, [bb(slicer_filament=None, updated_at=_bb_time(1))], now=NOW)
+
+    assert _own_presets(pg_pool, spool.id) == [
+        ("0.4", "NATIVE", "NATIVE name", True),
+        ("0.6", "MINE", "MINE name", False),
+    ]
+
+
+def test_an_unchanged_pull_writes_no_preset_and_no_event(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    sent = bb(slicer_filament="GFA00", slicer_filament_name="Bambu PLA Basic")
+    pull(f, [sent], now=NOW)
+    (spool,) = f.spools.list()
+
+    def written() -> list[tuple[str, str]]:
+        with pg_pool.connection() as conn:
+            return [
+                (r["nozzle_diameter"], r["xmin"])
+                for r in conn.execute(
+                    "SELECT nozzle_diameter, xmin::text AS xmin FROM filament_spool_presets"
+                    " WHERE spool_id = %s ORDER BY nozzle_diameter",
+                    (spool.id,),
+                )
+            ]
+
+    rows, events = written(), len(f.spools.events(spool.id))
+    report = pull(f, [sent], now=NOW)
+
+    assert written() == rows
+    assert len(f.spools.events(spool.id)) == events
+    assert report.updated == 0
+
+
+def test_a_preset_change_is_an_update_with_one_event(pg_pool: PgPool) -> None:
+    """A pull whose only change is Bambuddy's preset counts as an update and records
+    one event with the spool's own rows before and after (``changes.presets``)."""
+    f = _filament(pg_pool)
+    pull(f, [bb(slicer_filament="GFA00", slicer_filament_name="Bambu PLA Basic")], now=NOW)
+    (spool,) = f.spools.list()
+    first = _preset_events(f, spool.id)
+
+    report = pull(
+        f,
+        [
+            bb(
+                slicer_filament="GFA05",
+                slicer_filament_name="Bambu PLA Silk",
+                updated_at=_bb_time(1),
+            )
+        ],
+        now=NOW,
+    )
+
+    assert report.updated_ids == [spool.id]
+    [event] = _preset_events(f, spool.id)[len(first) :]
+    before, after = event.data["changes"]["presets"]
+    assert {row["slicer_filament"] for row in before} == {"GFA00"}
+    assert {row["slicer_filament"] for row in after} == {"GFA05"}
+
+
+def test_the_preset_sync_waits_for_a_persons_edit_and_keeps_it(pg_pool: PgPool) -> None:
+    """#6262 Task 7 re-review 2 I-A: the pull locks the spool before it reads its rows,
+    so a person's edit in flight (`set_presets` holds the spool's lock) is waited for,
+    then seen and kept. Bambuddy's ``updated_at`` is unchanged, the common pull, where
+    nothing else takes the spool's lock."""
+    f = _filament(pg_pool)
+    pull(f, [bb(slicer_filament="GFA00", slicer_filament_name="Bambu PLA Basic")], now=NOW)
+    (spool,) = f.spools.list()
+    workers = ThreadPoolExecutor(1)
+    try:
+        with pg_pool.connection() as conn, conn.transaction():
+            conn.execute("SELECT 1 FROM filament_spools WHERE id = %s FOR UPDATE", (spool.id,))
+            conn.execute(
+                "DELETE FROM filament_spool_presets WHERE spool_id = %s"
+                " AND nozzle_diameter = '0.4'",
+                (spool.id,),
+            )
+            conn.execute(
+                "INSERT INTO filament_spool_presets (spool_id, printer_model, nozzle_diameter,"
+                " slicer_filament, slicer_filament_name, migrated)"
+                " VALUES (%s, 'H2C', '0.4', 'MINE', 'MINE name', false)",
+                (spool.id,),
+            )
+            pulled = workers.submit(
+                pull,
+                f,
+                [bb(slicer_filament="GFA05", slicer_filament_name="Bambu PLA Silk")],
+                now=NOW,
+            )
+            wait_for_blocked(pg_pool)  # the pull is waiting on the spool's lock
+            assert not pulled.done()
+        pulled.result(timeout=60)
+    finally:
+        workers.shutdown(wait=True)
+
+    assert _own_presets(pg_pool, spool.id) == [
+        ("0.2", "GFA05", "Bambu PLA Silk", True),
+        ("0.4", "MINE", "MINE name", False),
+        ("0.6", "GFA05", "Bambu PLA Silk", True),
+        ("0.8", "GFA05", "Bambu PLA Silk", True),
+    ]
+
+
+def test_a_preset_a_person_deletes_stays_deleted(pg_pool: PgPool) -> None:
+    """Re-review 2 I-B: a key with no row is filled only when Bambuddy's value changed
+    since it last sent one, so a person's deletion survives an unchanged pull (no
+    event, not an update); Bambuddy's next change fills it again."""
+    f = _filament(pg_pool)
+    pull(f, [bb(slicer_filament="GFA00", slicer_filament_name="Bambu PLA Basic")], now=NOW)
+    (spool,) = f.spools.list()
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "DELETE FROM filament_spool_presets WHERE spool_id = %s AND nozzle_diameter = '0.4'",
+            (spool.id,),
+        )
+    events = len(_preset_events(f, spool.id))
+
+    report = pull(
+        f,
+        [
+            bb(
+                slicer_filament="GFA00",
+                slicer_filament_name="Bambu PLA Basic",
+                updated_at=_bb_time(1),
+            )
+        ],
+        now=NOW,
+    )
+
+    assert [size for size, *_ in _own_presets(pg_pool, spool.id)] == ["0.2", "0.6", "0.8"]
+    assert len(_preset_events(f, spool.id)) == events
+    assert report.updated == 0
+
+    pull(
+        f,
+        [
+            bb(
+                slicer_filament="GFA05",
+                slicer_filament_name="Bambu PLA Silk",
+                updated_at=_bb_time(2),
+            )
+        ],
+        now=NOW,
+    )
+    assert _own_presets(pg_pool, spool.id) == [
+        (size, "GFA05", "Bambu PLA Silk", True) for size in ("0.2", "0.4", "0.6", "0.8")
+    ]
+
+
+def test_a_link_with_no_last_value_fills_only_its_empty_keys(pg_pool: PgPool) -> None:
+    """Re-review 2 M-1: a link from before the last value was kept (NULL), on a spool
+    with ``migrated`` rows from the native migration or the native API: its empty keys
+    are filled once, and no row is rewritten."""
+    f = _filament(pg_pool)
+    pull(f, [bb()], now=NOW)
+    (spool,) = f.spools.list()
+    with pg_pool.connection() as conn:
+        for size in ("0.4", "0.6"):
+            conn.execute(
+                "INSERT INTO filament_spool_presets (spool_id, printer_model, nozzle_diameter,"
+                " slicer_filament, slicer_filament_name, migrated)"
+                " VALUES (%s, 'H2C', %s, 'NATIVE', 'NATIVE name', true)",
+                (spool.id, size),
+            )
+
+    pull(
+        f,
+        [
+            bb(
+                slicer_filament="GFA00",
+                slicer_filament_name="Bambu PLA Basic",
+                updated_at=_bb_time(1),
+            )
+        ],
+        now=NOW,
+    )
+
+    assert _own_presets(pg_pool, spool.id) == [
+        ("0.2", "GFA00", "Bambu PLA Basic", True),
+        ("0.4", "NATIVE", "NATIVE name", True),
+        ("0.6", "NATIVE", "NATIVE name", True),
+        ("0.8", "GFA00", "Bambu PLA Basic", True),
+    ]
+
+
+def test_a_typed_spool_takes_no_preset_from_bambuddy(pg_pool: PgPool) -> None:
+    """R1 with F27: a spool's type gives its presets; a pull adds no migrated row over
+    it (one the type's first assignment would have dropped)."""
+    f = _filament(pg_pool)
+    f.types.create(
+        SpoolTypeCreate(
+            code="GFA00-RED", material_id=_pla(pg_pool), rgba="#FF0000", label_weight_g=1000
+        )
+    )
+    pull(f, [bb(material_number="gfa00-red", slicer_filament="GFA00")], now=NOW)
+    (spool,) = f.spools.list()
+    assert spool.type_id is not None
+    assert _own_presets(pg_pool, spool.id) == []
+
+
+def test_a_retired_record_link_is_not_read(pg_pool: PgPool) -> None:
+    """#6262 Task 12 (F18): the overlay's record links are no longer read. A migration
+    carried each Bambuddy one onto `filament_bb_links`
+    (`20261116T0034Z_filament_plan_spool_numbers.sql`), so a record link alone, with no
+    tag, names no spool: the BB spool is a new one."""
     f = _filament(pg_pool)
     with pg_pool.connection() as conn:
         physical = conn.execute(
@@ -181,9 +527,9 @@ def test_a_bb_spool_whose_record_link_names_an_sb_spool_is_linked(pg_pool: PgPoo
             (physical["id"],),
         )
     report = pull(f, [bb(tray_uuid=None, tag_uid=None)], now=NOW)
-    assert (report.created, report.linked) == (0, 1)
-    assert report.linked_ids == [physical["id"]]
-    assert len(f.spools.list()) == 1
+    assert (report.created, report.linked) == (1, 0)
+    assert report.created_ids != [physical["id"]]
+    assert len(f.spools.list()) == 2
 
 
 def test_a_second_pull_changes_nothing(pg_pool: PgPool) -> None:
@@ -247,7 +593,22 @@ def test_a_bb_value_gone_never_clears_sb(pg_pool: PgPool) -> None:
 
 async def test_a_scheduled_pull_with_no_bambuddy_is_skipped(pg_pool: PgPool) -> None:
     f = _filament(pg_pool)
-    assert await scheduled_pull(f, lambda: StoredSettings()) == "skipped"
+    assert await scheduled_pull(f, lambda: StoredSettings(), FilamentSync) == "skipped"
+    assert f.spools.list() == []
+
+
+async def test_off_skips_the_pull(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    with respx.mock(assert_all_called=False) as router:
+        spools = router.get(f"{BB}/api/v1/inventory/spools").respond(
+            json=[bb().model_dump(mode="json")]
+        )
+        assert (
+            await scheduled_pull(f, lambda: settings, lambda: FilamentSync(spools="off"))
+            == "skipped"
+        )
+        assert not spools.called
     assert f.spools.list() == []
 
 
@@ -258,7 +619,7 @@ async def test_a_scheduled_pull_with_bambuddy_down_is_a_logged_no_op(
     settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
     with respx.mock() as router:
         router.get(f"{BB}/api/v1/inventory/spools").respond(503)
-        assert await scheduled_pull(f, lambda: settings) == "failed"
+        assert await scheduled_pull(f, lambda: settings, FilamentSync) == "failed"
     assert "could not pull Bambuddy's spools" in caplog.text
     assert f.spools.list() == []
 
@@ -268,9 +629,10 @@ async def test_a_pull_reads_bambuddy_and_imports(pg_pool: PgPool) -> None:
     settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
     with respx.mock() as router:
         router.get(f"{BB}/api/v1/inventory/spools").respond(json=[bb().model_dump(mode="json")])
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
         report = await read_and_pull(f, settings)
         assert report.created == 1
-        assert await scheduled_pull(f, lambda: settings) == "pulled"
+        assert await scheduled_pull(f, lambda: settings, FilamentSync) == "pulled"
 
 
 def test_a_bb_unlock_never_clears_an_sb_lock(pg_pool: PgPool) -> None:
@@ -433,33 +795,6 @@ def test_an_archived_holder_with_an_open_binding_gives_up_its_tag(pg_pool: PgPoo
     assert f.spools.open_binding(old.id) is None
 
 
-def test_an_archived_spool_the_record_link_names_is_left_alone(pg_pool: PgPool) -> None:
-    f = _filament(pg_pool)
-    with pg_pool.connection() as conn:
-        physical = conn.execute(
-            "INSERT INTO physical_spools DEFAULT VALUES RETURNING id"
-        ).fetchone()
-        assert physical is not None
-        conn.execute(
-            "INSERT INTO filament_spools (id, material_id, archived_at) VALUES (%s, %s, now())",
-            (physical["id"], _pla(pg_pool)),
-        )
-        conn.execute(
-            "INSERT INTO spool_record_links (provider, record_id, physical_spool_id, linked_by)"
-            " VALUES ('bambuddy', '7', %s, 'rfid')",
-            (physical["id"],),
-        )
-    for _ in range(2):
-        report = pull(f, [bb(tray_uuid=None, tag_uid=None)], now=NOW)
-        assert (report.created, report.linked, report.archived) == (0, 0, 1)
-        assert report.archived_ids == [physical["id"]]
-    spool = f.spools.get(physical["id"])
-    assert spool is not None
-    assert spool.archived_at is not None
-    assert f.spools.events(physical["id"]) == []
-    assert len(f.spools.list(include_archived=True)) == 1
-
-
 def test_a_linked_spool_archived_in_sb_takes_nothing(pg_pool: PgPool) -> None:
     f = _filament(pg_pool)
     (made,) = pull(f, [bb(updated_at=_bb_time(-2))], now=NOW).created_ids
@@ -523,6 +858,7 @@ async def test_a_malformed_bb_row_is_skipped_and_counted(
     rows = [bb().model_dump(mode="json"), {"id": 99, "material": None}, "nonsense"]
     with respx.mock() as router:
         router.get(f"{BB}/api/v1/inventory/spools").respond(json=rows)
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
         report = await read_and_pull(f, settings)
     assert (report.created, report.invalid, report.invalid_bb_ids) == (1, 2, [99])
     assert "is not a spool; skipped" in caplog.text
@@ -543,6 +879,11 @@ def _lan_run(pool: PgPool, *names: str) -> None:
         )
 
 
+def _use(spool_id: UUID, grams: float) -> list[SlotUse]:
+    """Slot 1's use of ``spool_id``, its plate started now."""
+    return [SlotUse(slot_id=1, spool_id=spool_id, grams=grams, plate_started_at=datetime.now(UTC))]
+
+
 def _now_in_bb() -> str:
     """Bambuddy's time for now (naive UTC), after every event booked so far."""
     return datetime.now(UTC).replace(tzinfo=None).isoformat()
@@ -552,14 +893,13 @@ def test_a_pull_between_two_plates_counts_each_plate_once(pg_pool: PgPool) -> No
     """BB deducts plate ``a`` as it ends; a pull then anchors on a value that holds it,
     and the run's settle at its end takes off plate ``b`` only."""
     f = _filament(pg_pool)
-    native = NativeSpoolStore(pg_pool)
     (made,) = pull(f, [bb(updated_at=_bb_time(-3))], now=NOW).created_ids
     _lan_run(pg_pool, "a", "b")
-    native.record_uses(RUN, "a", [SpoolUse(slot_id=1, spool_id=made, grams=50)])
+    record_uses(pg_pool, RUN, "a", _use(made, 50))
     # Plate a ends, BB takes its 50 g off, and the pull reads that before plate b.
     pull(f, [bb(weight_used=150.0, updated_at=_now_in_bb())], now=NOW)
-    native.record_uses(RUN, "b", [SpoolUse(slot_id=1, spool_id=made, grams=30)])
-    native.settle_uses(RUN, ["done", "done"])
+    record_uses(pg_pool, RUN, "b", _use(made, 30))
+    settle_uses(pg_pool, RUN, ["done", "done"])
     spool = f.spools.get(made)
     assert spool is not None
     assert spool.grams_left == 1000 - 150 - 30
@@ -567,15 +907,561 @@ def test_a_pull_between_two_plates_counts_each_plate_once(pg_pool: PgPool) -> No
 
 def test_a_bb_update_before_the_settle_counts_the_plate_once(pg_pool: PgPool) -> None:
     f = _filament(pg_pool)
-    native = NativeSpoolStore(pg_pool)
     (made,) = pull(f, [bb(updated_at=_bb_time(-3))], now=NOW).created_ids
     _lan_run(pg_pool, "a")
-    native.record_uses(RUN, "a", [SpoolUse(slot_id=1, spool_id=made, grams=50)])
+    record_uses(pg_pool, RUN, "a", _use(made, 50))
     pull(f, [bb(weight_used=150.0, updated_at=_now_in_bb())], now=NOW)
-    native.settle_uses(RUN, ["done"])
+    settle_uses(pg_pool, RUN, ["done"])
     spool = f.spools.get(made)
     assert spool is not None
     assert spool.grams_left == 850
     # BB's next write, after a later plate, still anchors.
     pull(f, [bb(weight_used=200.0, updated_at=_now_in_bb())], now=NOW)
     assert f.spools.get(made).grams_left == 800  # type: ignore[union-attr]
+
+
+def test_a_persons_row_matching_bambuddys_value_is_kept(pg_pool: PgPool) -> None:
+    """Task 7 re-review 3: a person's row (not migrated) is never Bambuddy's, even when
+    it holds Bambuddy's last value, so Bambuddy's next change leaves it alone."""
+    f = _filament(pg_pool)
+    pull(f, [bb(slicer_filament="GFA00", slicer_filament_name="Bambu PLA Basic")], now=NOW)
+    (spool,) = f.spools.list()
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_spool_presets SET migrated = false"
+            " WHERE spool_id = %s AND nozzle_diameter = '0.4'",
+            (spool.id,),
+        )
+
+    pull(
+        f,
+        [
+            bb(
+                slicer_filament="GFA05",
+                slicer_filament_name="Bambu PLA Silk",
+                updated_at=_bb_time(1),
+            )
+        ],
+        now=NOW,
+    )
+
+    assert _own_presets(pg_pool, spool.id) == [
+        ("0.2", "GFA05", "Bambu PLA Silk", True),
+        ("0.4", "GFA00", "Bambu PLA Basic", False),
+        ("0.6", "GFA05", "Bambu PLA Silk", True),
+        ("0.8", "GFA05", "Bambu PLA Silk", True),
+    ]
+
+
+@respx.mock
+async def test_the_assignment_read_names_bambuddy_only_while_it_waits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task 9 fix round 3: `read_assignments` is a `waiting_on_bambuddy` wait. Its own
+    `ASSIGNMENTS_TIMEOUT` ends the wait (no assignments, the flag cleared), so a check
+    that goes on is not blamed on Bambuddy later; a cancel inside it (the check's budget
+    running out) leaves the flag set, so that timeout names Bambuddy."""
+
+    monkeypatch.setattr("scadbuddy.filament.bambuddy_pull.ASSIGNMENTS_TIMEOUT", 0.5)
+
+    async def hang(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(30)
+        return httpx.Response(200, json=[])
+
+    respx.get("https://bambuddy.test/api/v1/inventory/assignments").mock(side_effect=hang)
+    settings = StoredSettings(bambuddy_url="https://bambuddy.test", bambuddy_api_key="bb_test")
+    waiting = [False]
+    token = CHECK_ON_BAMBUDDY.set(waiting)
+    try:
+        started = time.monotonic()
+        assert await read_assignments(settings) == []
+        assert time.monotonic() - started < 10  # far under the 30 s hang
+        assert waiting == [False]
+
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.2):
+                await read_assignments(settings)
+        assert waiting == [True]
+    finally:
+        CHECK_ON_BAMBUDDY.reset(token)
+
+
+def _entry(entry_id: int = 5, name: str = "Bambu reusable", weight: int = 250) -> SpoolCatalogEntry:
+    return SpoolCatalogEntry(id=entry_id, name=name, weight=weight)
+
+
+def _insert_types(f: Filament) -> list[InsertType]:
+    return [r for r in f.catalog.list("insert-types") if isinstance(r, InsertType)]
+
+
+def test_a_bb_catalog_entry_becomes_an_insert_type(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    pull(f, [], now=NOW, catalog=[_entry()])
+    (kind,) = _insert_types(f)
+    assert (kind.name, kind.empty_weight_g, kind.bb_catalog_id) == ("Bambu reusable", 250, 5)
+    assert kind.insert_material_id is None
+
+
+def test_a_second_pull_reuses_it(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    pull(f, [], now=NOW, catalog=[_entry()])
+    pull(f, [], now=NOW, catalog=[_entry(name="Bambu reusable v2", weight=260)])
+    (kind,) = _insert_types(f)
+    assert kind.bb_catalog_id == 5
+    # The pull creates and links; it never rewrites a type a person may have edited.
+    assert (kind.name, kind.empty_weight_g) == ("Bambu reusable", 250)
+
+
+def test_an_unlinked_insert_type_of_the_same_name_is_linked(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    own = f.catalog.create(
+        "insert-types", InsertTypeCreate(name="bambu REUSABLE", empty_weight_g=240)
+    ).model_dump()
+    pull(f, [], now=NOW, catalog=[_entry()])
+    (kind,) = _insert_types(f)
+    assert (kind.id, kind.bb_catalog_id, kind.empty_weight_g) == (own["id"], 5, 240)
+
+
+def test_a_spool_takes_its_core_weight_insert_type(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    typed = f.types.create(
+        SpoolTypeCreate(
+            code="GFA00-RED", material_id=_pla(pg_pool), rgba="#FF0000FF", label_weight_g=1000
+        )
+    )
+    catalog = [_entry(5, "Bambu reusable", 250), _entry(6, "Bambu cardboard", 212)]
+    none: dict[str, Any] = {"tag_uid": None, "tray_uuid": None}
+    report = pull(
+        f,
+        [
+            bb(id=1, core_weight_catalog_id=5, **none),
+            bb(id=2, material_number="GFA00-RED", core_weight_catalog_id=6, **none),
+        ],
+        now=NOW,
+        catalog=catalog,
+    )
+    inserts = {k.bb_catalog_id: k.id for k in _insert_types(f)}
+    by_id = {s.id: s for s in f.spools.list()}
+    typeless, with_type = (by_id[i] for i in report.created_ids)
+    assert typeless.type_id is None and typeless.insert_type_id == inserts[5]
+    assert with_type.type_id == typed.id and with_type.insert_type_id == inserts[6]
+    # The type's own insert type is no override.
+    f.types.update(typed.id, SpoolTypePatch(insert_type_id=inserts[5]))
+    same = pull(
+        f,
+        [bb(id=3, material_number="GFA00-RED", core_weight_catalog_id=5, **none)],
+        now=NOW,
+        catalog=catalog,
+    )
+    spool = f.spools.get(same.created_ids[0])
+    assert spool is not None
+    assert (spool.type_id, spool.insert_type_id) == (typed.id, None)
+
+
+@respx.mock
+async def test_a_failed_catalog_read_pulls_the_spools_anyway(
+    pg_pool: PgPool, caplog: pytest.LogCaptureFixture
+) -> None:
+    f = _filament(pg_pool)
+    pull(f, [], now=NOW, catalog=[_entry()])
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    respx.get(f"{BB}/api/v1/inventory/spools").respond(
+        json=[bb(core_weight_catalog_id=5).model_dump(mode="json")]
+    )
+    route = respx.get(f"{BB}/api/v1/inventory/catalog")
+    route.respond(503)
+    report = await read_and_pull(f, settings)
+    assert (report.catalog_failed, report.created) == (True, 1)
+    assert "no spool catalog from Bambuddy" in caplog.text
+    # An answer of another shape is a failed read too, and a good read says so.
+    route.respond(200, json={"not": "a list"})
+    assert (await read_and_pull(f, settings)).catalog_failed is True
+    route.respond(200, json=[{"id": 5, "name": "Bambu reusable", "weight": 250}])
+    assert (await read_and_pull(f, settings)).catalog_failed is False
+    (kind,) = _insert_types(f)
+    assert kind.bb_catalog_id == 5
+
+
+# -- fix round 1: linked spools, a fractional weight, skipped entries, read_catalog -----
+
+_NO_TAGS: dict[str, Any] = {"tag_uid": None, "tray_uuid": None}
+
+
+def _linked_untyped(f: Filament, **over: Any) -> UUID:
+    """A BB spool pulled before any catalog was known: linked, with no insert type."""
+    (made,) = pull(
+        f, [bb(id=1, updated_at="2026-11-14T10:00:00", **_NO_TAGS | over)], now=NOW
+    ).created_ids
+    return made
+
+
+def _own_insert(f: Filament, spool: UUID) -> UUID | None:
+    got = f.spools.get(spool)
+    assert got is not None
+    return got.insert_type_id
+
+
+def test_a_linked_spool_takes_bbs_insert_type_on_the_next_pull(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    made = _linked_untyped(f, core_weight_catalog_id=5)
+    assert _own_insert(f, made) is None
+    # The spool was read with entry 5 while no catalog was mapped; BB's row did not move (same
+    # updated_at). Mapped now, the entry reaches the spool.
+    report = pull(
+        f,
+        [bb(id=1, updated_at="2026-11-14T10:00:00", core_weight_catalog_id=5, **_NO_TAGS)],
+        now=NOW,
+        catalog=[_entry()],
+    )
+    (kind,) = _insert_types(f)
+    assert _own_insert(f, made) == kind.id
+    assert report.updated_ids == [made]
+    # Nothing moves again.
+    again = pull(
+        f,
+        [bb(id=1, updated_at="2026-11-14T10:00:00", core_weight_catalog_id=5, **_NO_TAGS)],
+        now=NOW,
+        catalog=[_entry()],
+    )
+    assert again.updated_ids == []
+
+
+def test_a_bb_catalog_change_reaches_a_linked_spool(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    catalog = [_entry(5, "Bambu reusable", 250), _entry(6, "Bambu cardboard", 212)]
+    made = _linked_untyped(f, core_weight_catalog_id=5)
+    pull(
+        f,
+        [bb(id=1, updated_at="2026-11-14T10:00:00", core_weight_catalog_id=5, **_NO_TAGS)],
+        now=NOW,
+        catalog=catalog,
+    )
+    inserts = {k.bb_catalog_id: k.id for k in _insert_types(f)}
+    assert _own_insert(f, made) == inserts[5]
+    pull(
+        f,
+        [bb(id=1, updated_at="2026-11-14T11:00:00", core_weight_catalog_id=6, **_NO_TAGS)],
+        now=NOW,
+        catalog=catalog,
+    )
+    assert _own_insert(f, made) == inserts[6]
+
+
+def test_a_persons_insert_type_edit_is_kept(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    catalog = [_entry(5, "Bambu reusable", 250), _entry(6, "Bambu cardboard", 212)]
+    made = _linked_untyped(f, core_weight_catalog_id=5)
+    pull(
+        f,
+        [bb(id=1, updated_at="2026-11-14T10:00:00", core_weight_catalog_id=5, **_NO_TAGS)],
+        now=NOW,
+        catalog=catalog,
+    )
+    own = f.catalog.create(
+        "insert-types", InsertTypeCreate(name="Mine", empty_weight_g=100)
+    ).model_dump()
+    # The person's edit is after BB's change.
+    f.spools.update(made, SpoolPatch(insert_type_id=own["id"]), actor="ann")
+    pull(
+        f,
+        [bb(id=1, updated_at="2026-11-14T10:30:00", core_weight_catalog_id=6, **_NO_TAGS)],
+        now=NOW,
+        catalog=catalog,
+    )
+    assert _own_insert(f, made) == own["id"]
+
+
+def test_a_persons_insert_type_survives_a_later_catalog_mapping(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    made = _linked_untyped(f, core_weight_catalog_id=5)
+    own = f.catalog.create(
+        "insert-types", InsertTypeCreate(name="Mine", empty_weight_g=100)
+    ).model_dump()
+    f.spools.update(made, SpoolPatch(insert_type_id=own["id"]), actor="ann")
+    pull(
+        f,
+        [bb(id=1, updated_at="2026-11-14T10:00:00", core_weight_catalog_id=5, **_NO_TAGS)],
+        now=NOW,
+        catalog=[_entry()],
+    )
+    assert _own_insert(f, made) == own["id"]
+
+
+def test_a_spool_linked_by_tag_takes_bbs_insert_type(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    mine = f.spools.create(SpoolCreate(material_id=_pla(pg_pool)), actor="ann")
+    f.spools.bind_tag(mine.id, tray_uuid=TRAY, kind="bambu_mifare", actor="ann")
+    report = pull(f, [bb(core_weight_catalog_id=5)], now=NOW, catalog=[_entry()])
+    assert report.linked_ids == [mine.id]
+    (kind,) = _insert_types(f)
+    assert _own_insert(f, mine.id) == kind.id
+
+
+def test_a_fractional_catalog_weight_is_rounded_not_refused(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    entry = SpoolCatalogEntry.model_validate({"id": 5, "name": "Half", "weight": 212.5})
+    pull(f, [], now=NOW, catalog=[entry])
+    (kind,) = _insert_types(f)
+    assert kind.empty_weight_g == 213
+
+
+def test_a_name_clash_and_a_weightless_entry_are_skipped_and_counted(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    catalog = [_entry(5, "Bambu reusable", 250), _entry(6, "BAMBU reusable", 212)]
+    report = pull(f, [], now=NOW, catalog=[*catalog, _entry(7, "Nothing", 0)])
+    assert report.catalog_skipped == 2
+    (kind,) = _insert_types(f)
+    assert kind.bb_catalog_id == 5
+    # A spool naming the skipped entry gets no insert type.
+    (made,) = pull(
+        f, [bb(id=2, core_weight_catalog_id=6, **_NO_TAGS)], now=NOW, catalog=catalog
+    ).created_ids
+    assert _own_insert(f, made) is None
+
+
+def test_an_archived_insert_type_is_no_spools_insert_type(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    pull(f, [], now=NOW, catalog=[_entry()])
+    (kind,) = _insert_types(f)
+    f.catalog.archive("insert-types", kind.id, True)
+    (made,) = pull(
+        f, [bb(id=3, core_weight_catalog_id=5, **_NO_TAGS)], now=NOW, catalog=[_entry()]
+    ).created_ids
+    assert _own_insert(f, made) is None
+    # And the entry is not made again beside the archived one.
+    assert f.catalog.list("insert-types") == []
+
+
+def test_an_empty_catalog_maps_nothing_and_skips_nothing(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    assert pull(f, [], now=NOW, catalog=[]).catalog_skipped == 0
+    assert _insert_types(f) == []
+
+
+@pytest.mark.parametrize(
+    ("answer", "text"),
+    [
+        (httpx.Response(200, text="not json"), "another shape"),
+        (httpx.Response(200, json=[{"id": "x"}]), "another shape"),
+    ],
+)
+@respx.mock
+async def test_a_garbled_catalog_read_is_none_and_logged(
+    answer: httpx.Response, text: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    respx.get(f"{BB}/api/v1/inventory/catalog").mock(return_value=answer)
+    assert await read_catalog(settings) is None
+    assert text in caplog.text
+
+
+@respx.mock
+async def test_a_slow_catalog_read_is_none_within_its_timeout(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def hang(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(30)
+        return httpx.Response(200, json=[])
+
+    monkeypatch.setattr("scadbuddy.filament.bambuddy_pull.CATALOG_TIMEOUT", 0.2)
+    respx.get(f"{BB}/api/v1/inventory/catalog").mock(side_effect=hang)
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    assert await read_catalog(settings) is None
+    assert "no answer within" in caplog.text
+
+
+# -- fix round 2 -----------------------------------------------------------------------
+
+_SAME = "2026-11-14T10:00:00"
+
+
+def _strip_key(f: Filament, spool: UUID) -> None:
+    """Make the spool's readings those of a pull before the catalog id was kept."""
+    with f.spools.transaction() as conn:
+        conn.execute(
+            "UPDATE filament_spool_events SET data = data #- '{bb,core_weight_catalog_id}'"
+            " WHERE spool_id = %s AND kind = 'synced_from_bb'",
+            (spool,),
+        )
+
+
+def _synced_events(f: Filament, spool: UUID) -> list[Any]:
+    return [e for e in f.spools.events(spool) if e.kind == "synced_from_bb"]
+
+
+def _row(core: int | None, stamp: str = _SAME) -> BbSpool:
+    return bb(id=1, updated_at=stamp, core_weight_catalog_id=core, **_NO_TAGS)
+
+
+def test_a_reading_with_no_catalog_id_is_read_once_and_the_event_is_booked(
+    pg_pool: PgPool,
+) -> None:
+    f = _filament(pg_pool)
+    made = _linked_untyped(f, core_weight_catalog_id=5)
+    _strip_key(f, made)
+    events = len(_synced_events(f, made))
+    report = pull(f, [_row(5)], now=NOW, catalog=[_entry()])
+    (kind,) = _insert_types(f)
+    assert report.updated_ids == [made]
+    assert _own_insert(f, made) == kind.id
+    booked = _synced_events(f, made)
+    assert len(booked) == events + 1
+    assert "core_weight_catalog_id" in booked[-1].data["bb"]
+    assert booked[-1].data["changes"] == {"insert_type_id": [None, str(kind.id)]}
+    # The next pull sees the key: nothing is looked at again.
+    assert pull(f, [_row(5)], now=NOW, catalog=[_entry()]).updated_ids == []
+    assert len(_synced_events(f, made)) == events + 1
+
+
+def test_a_reading_with_no_catalog_id_is_read_once_with_no_catalog_at_all(
+    pg_pool: PgPool,
+) -> None:
+    f = _filament(pg_pool)
+    made = _linked_untyped(f)
+    _strip_key(f, made)
+    assert pull(f, [_row(None)], now=NOW).updated_ids == [made]
+    assert pull(f, [_row(None)], now=NOW).updated_ids == []
+
+
+def test_a_reading_with_no_catalog_id_keeps_a_persons_insert_type(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    made = _linked_untyped(f, core_weight_catalog_id=5)
+    own = f.catalog.create(
+        "insert-types", InsertTypeCreate(name="Mine", empty_weight_g=100)
+    ).model_dump()
+    f.spools.update(made, SpoolPatch(insert_type_id=own["id"]), actor="ann")
+    _strip_key(f, made)
+    events = len(_synced_events(f, made))
+    pull(f, [_row(5)], now=NOW, catalog=[_entry()])
+    assert _own_insert(f, made) == own["id"]
+    assert len(_synced_events(f, made)) == events + 1
+    assert pull(f, [_row(5)], now=NOW, catalog=[_entry()]).updated_ids == []
+
+
+def test_a_persons_cleared_insert_type_stays_cleared(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    made = _linked_untyped(f, core_weight_catalog_id=5)
+    pull(f, [_row(5)], now=NOW, catalog=[_entry()])
+    assert _own_insert(f, made) is not None
+    f.spools.update(made, SpoolPatch(insert_type_id=None), actor="ann")
+    assert _own_insert(f, made) is None
+    assert pull(f, [_row(5)], now=NOW, catalog=[_entry()]).updated_ids == []
+    assert _own_insert(f, made) is None
+
+
+def test_bb_moving_to_the_types_own_insert_type_clears_the_override(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    typed = f.types.create(
+        SpoolTypeCreate(
+            code="GFA00-RED", material_id=_pla(pg_pool), rgba="#FF0000FF", label_weight_g=1000
+        )
+    )
+    catalog = [_entry(5, "Bambu reusable", 250), _entry(6, "Bambu cardboard", 212)]
+    row = {"material_number": "GFA00-RED", "id": 1, **_NO_TAGS}
+    (made,) = pull(
+        f,
+        [bb(updated_at=_SAME, core_weight_catalog_id=6, **row)],
+        now=NOW,
+        catalog=catalog,
+    ).created_ids
+    inserts = {k.bb_catalog_id: k.id for k in _insert_types(f)}
+    assert _own_insert(f, made) == inserts[6]
+    f.types.update(typed.id, SpoolTypePatch(insert_type_id=inserts[5]))
+    pull(
+        f,
+        [bb(updated_at="2026-11-14T11:00:00", core_weight_catalog_id=5, **row)],
+        now=NOW,
+        catalog=catalog,
+    )
+    assert _own_insert(f, made) is None
+
+
+def test_an_unmapped_catalog_entry_is_applied_once_it_is_mapped(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    catalog = [_entry(5, "Bambu reusable", 250), _entry(6, "Bambu cardboard", 212)]
+    made = _linked_untyped(f, core_weight_catalog_id=5)
+    pull(f, [_row(5)], now=NOW, catalog=[catalog[0]])
+    inserts = {k.bb_catalog_id: k.id for k in _insert_types(f)}
+    assert _own_insert(f, made) == inserts[5]
+    # BB moves to 6 while its entry is not mapped (a failed catalog read).
+    pull(f, [_row(6, "2026-11-14T11:00:00")], now=NOW)
+    assert _own_insert(f, made) == inserts[5]
+    # The entry is mapped on the next pull, BB's row unmoved: BB's value is applied.
+    pull(f, [_row(6, "2026-11-14T11:00:00")], now=NOW, catalog=catalog)
+    inserts = {k.bb_catalog_id: k.id for k in _insert_types(f)}
+    assert _own_insert(f, made) == inserts[6]
+    assert pull(f, [_row(6, "2026-11-14T11:00:00")], now=NOW, catalog=catalog).updated_ids == []
+
+
+def test_a_skipped_entry_warns_exactly_once(
+    pg_pool: PgPool, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("scadbuddy.filament.bambuddy_pull._WARNED_SKIPS", set())
+    f = _filament(pg_pool)
+    catalog = [_entry(5, "Bambu reusable", 250), _entry(6, "Bambu REUSABLE", 212)]
+    with caplog.at_level("DEBUG"):
+        pull(f, [], now=NOW, catalog=catalog)
+        pull(f, [], now=NOW, catalog=catalog)
+    warned = [r for r in caplog.records if r.levelname == "WARNING" and "skipped" in r.message]
+    assert len(warned) == 1
+    assert "get no insert type" in caplog.text
+
+
+# -- fix round 3 -----------------------------------------------------------------------
+
+
+def _mine(f: Filament) -> UUID:
+    made = f.catalog.create(
+        "insert-types", InsertTypeCreate(name="Mine", empty_weight_g=100)
+    ).model_dump()
+    return UUID(str(made["id"]))
+
+
+def test_a_recorded_none_moving_to_a_mapped_id_replaces_an_older_person_choice(
+    pg_pool: PgPool,
+) -> None:
+    f = _filament(pg_pool)
+    made = _linked_untyped(f)
+    f.spools.update(made, SpoolPatch(insert_type_id=_mine(f)), actor="ann")
+    # BB's change is after the person's edit (BB's clock is ahead of the database's).
+    pull(f, [_row(6, _bb_time(1))], now=NOW, catalog=[_entry(6, "Bambu cardboard", 212)])
+    (kind,) = [k for k in _insert_types(f) if k.bb_catalog_id == 6]
+    assert _own_insert(f, made) == kind.id
+
+
+def test_a_recorded_none_moving_to_a_mapped_id_keeps_a_later_person_choice(
+    pg_pool: PgPool,
+) -> None:
+    f = _filament(pg_pool)
+    made = _linked_untyped(f)
+    mine = _mine(f)
+    f.spools.update(made, SpoolPatch(insert_type_id=mine), actor="ann")
+    # BB's change is before the person's edit.
+    pull(f, [_row(6, "2026-11-14T11:00:00")], now=NOW, catalog=[_entry(6, "Bambu cardboard", 212)])
+    assert _own_insert(f, made) == mine
+
+
+def test_an_unmapped_entry_with_no_last_id_leaves_the_key_absent(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    made = _linked_untyped(f, core_weight_catalog_id=5)
+    _strip_key(f, made)
+    events = len(_synced_events(f, made))
+    for _ in range(2):
+        assert pull(f, [_row(5)], now=NOW).updated_ids == []
+    assert len(_synced_events(f, made)) == events
+    assert "core_weight_catalog_id" not in _synced_events(f, made)[-1].data["bb"]
+    # Mapped later, BB's row unmoved: the first-read rule fills the spool.
+    pull(f, [_row(5)], now=NOW, catalog=[_entry()])
+    (kind,) = _insert_types(f)
+    assert _own_insert(f, made) == kind.id
+    assert pull(f, [_row(5)], now=NOW, catalog=[_entry()]).updated_ids == []
+
+
+def test_a_first_read_keeps_a_persons_clear(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    made = _linked_untyped(f, core_weight_catalog_id=5)
+    f.spools.update(made, SpoolPatch(insert_type_id=_mine(f)), actor="ann")
+    f.spools.update(made, SpoolPatch(insert_type_id=None), actor="ann")
+    _strip_key(f, made)
+    pull(f, [_row(5)], now=NOW, catalog=[_entry()])
+    assert _own_insert(f, made) is None

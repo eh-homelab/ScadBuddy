@@ -1378,7 +1378,7 @@ describe('library print', () => {
 
   const runBody: PrintRunRequest = {
     printer_id: 1,
-    filament_plan: { slots: [], force_colour_match: false },
+    filament_plan: { slots: [], force_colour_match: false, ids: 'sb' },
     choices: {
       nozzles: DEFAULT_NOZZLES,
       tier: 'standard',

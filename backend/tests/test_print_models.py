@@ -15,6 +15,7 @@ from scadbuddy.bambuddy.part_settings import PartSettings
 from scadbuddy.bambuddy.print_run import PreparedPlates, PrintRunRequest, PrintRunResult, run_path
 from scadbuddy.bambuddy.resolver import NozzleChoice, PrintChoices
 from scadbuddy.bambuddy.runs import run_key
+from scadbuddy.operations.kinds import operation_key
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.status import STALE_AFTER
 from scadbuddy.workflows.print_models import PrintRunInput, SourceSpec
@@ -102,6 +103,40 @@ def test_a_part_settings_requests_key_is_what_it_was_before_5627() -> None:
         run_key("o" * 32, sent)
         == "3c3db79c76bb5c29227a3696c3354f884f20e88d2bfb1f2eff8650493bc81d56"
     )
+
+
+def test_a_plans_bambuddy_ids_key_as_they_did_before_6262() -> None:
+    """#6262 Task 7 review I1: a plan's ``ids`` default (``"bb"``) is left out of both
+    keys, so a retry that spans the deploy joins its run; ``"sb"`` is a new key."""
+    slots = [{"slot_id": 1, "spool_id": 5}]
+    bb = request(printer_id=1, filament_plan={"slots": slots, "ids": "bb"})
+    sb = request(printer_id=1, filament_plan={"slots": slots, "ids": "sb"})
+    # The key the model before the field gave this body, computed with `run_key` at
+    # 7526a2db9, the commit before Task 7 (re-review M-3).
+    before = "31ada27f898071ef5bcc1add6a6202b4a9bb78eef54482061a7ce1a67bcff1fe"
+    assert run_key("o" * 32, bb) == before
+    assert run_key("o" * 32, sb) != before
+
+    def op(kind: str, body: dict[str, object]) -> str:
+        return operation_key(kind, "o" * 32, body, "r")
+
+    sent: dict[str, object] = {"printer_id": 1, "filament_plan": {"slots": slots}}
+    assert op("print", {**sent, "filament_plan": {"slots": slots, "ids": "bb"}}) == op(
+        "print", sent
+    )
+    assert op("print", {**sent, "filament_plan": {"slots": slots, "ids": "sb"}}) != op(
+        "print", sent
+    )
+    # Re-review M-d: the preview slice holds the request one level down.
+    preview: dict[str, object] = {"output_id": "o" * 32, "request": sent}
+    assert op(
+        "preview_slice",
+        {**preview, "request": {**sent, "filament_plan": {"slots": slots, "ids": "bb"}}},
+    ) == op("preview_slice", preview)
+    assert op(
+        "preview_slice",
+        {**preview, "request": {**sent, "filament_plan": {"slots": slots, "ids": "sb"}}},
+    ) != op("preview_slice", preview)
 
 
 def test_a_run_result_with_part_settings_crosses_the_converter_whole() -> None:

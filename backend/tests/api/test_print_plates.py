@@ -36,6 +36,8 @@ from tests.support.operations import press
 from tests.support.printers import linked_printer
 from tests.test_bambu3mf import add_plate
 
+pytestmark = pytest.mark.usefixtures("recorded_sb_spools")
+
 
 def _output_3mf(paths: DataPaths, output_id: str) -> Path:
     [path] = paths.outputs.glob(f"*/{output_id}/model.3mf")

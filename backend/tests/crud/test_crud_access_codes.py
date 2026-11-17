@@ -138,8 +138,9 @@ def _sealed(kek: Kek, *, vp_id: int | None = None, key: str = "k1") -> tuple[str
 
 def test_the_area_is_served_and_awaited() -> None:
     assert "access-codes" in PRINT_CRUD_AREAS
-    # Appended, so an older API's list is a prefix of a newer one's.
-    assert CRUD_AREAS["print"][-1] == "access-codes"
+    # Appended, so an older API's list is a prefix of a newer one's; #6262's
+    # ``filament`` came after it.
+    assert CRUD_AREAS["print"][-2:] == ["access-codes", "filament"]
 
 
 # -- whether the API opens access codes -------------------------------------------------

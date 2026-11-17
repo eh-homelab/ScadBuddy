@@ -100,7 +100,7 @@ describe('orders mock (#4249)', () => {
     })
     const body = {
       printer_id: 1,
-      filament_plan: { force_colour_match: false },
+      filament_plan: { force_colour_match: false, ids: 'sb' as const },
       choices: { nozzles: [{ size: '0.4' as const, flow: 'standard' as const }], tier: 'standard' as const, bed_type: 'Textured PEI Plate' },
     }
     const attempt = await api.printItem(ORDER_ACCEPTED, ITEM_APPROVED, body)

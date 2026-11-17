@@ -138,7 +138,7 @@ export function printRunBody({
   return {
     ...(registryPrinter ? { printer: registryPrinter } : {}),
     printer_id: printerId,
-    filament_plan: { slots: plan, force_colour_match: forceColourMatch },
+    filament_plan: { slots: plan, force_colour_match: forceColourMatch, ids: 'sb' },
     choices: printChoices,
     ...(copies === null ? {} : { copies }),
     ...plateFields(plate),

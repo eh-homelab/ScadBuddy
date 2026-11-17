@@ -15,14 +15,10 @@ type FilamentOptions struct {
 	library_file_id FilamentOptions_FilamentOptions_library_file_idable
 	// The nozzles property
 	nozzles []NozzleInfoable
-	// The overlay_notes property
-	overlay_notes []string
 	// The printer_id property
 	printer_id FilamentOptions_FilamentOptions_printer_idable
 	// The printer_name property
 	printer_name FilamentOptions_FilamentOptions_printer_nameable
-	// The provider_labels property
-	provider_labels FilamentOptions_provider_labelsable
 	// The shelf property
 	shelf []SpoolOptionable
 	// The slots property
@@ -376,22 +372,6 @@ func (m *FilamentOptions) GetFieldDeserializers() map[string]func(i878a80d2330e8
 		}
 		return nil
 	}
-	res["overlay_notes"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
-		val, err := n.GetCollectionOfPrimitiveValues("string")
-		if err != nil {
-			return err
-		}
-		if val != nil {
-			res := make([]string, len(val))
-			for i, v := range val {
-				if v != nil {
-					res[i] = *(v.(*string))
-				}
-			}
-			m.SetOverlayNotes(res)
-		}
-		return nil
-	}
 	res["printer_id"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetObjectValue(CreateFilamentOptions_FilamentOptions_printer_idFromDiscriminatorValue)
 		if err != nil {
@@ -409,16 +389,6 @@ func (m *FilamentOptions) GetFieldDeserializers() map[string]func(i878a80d2330e8
 		}
 		if val != nil {
 			m.SetPrinterName(val.(FilamentOptions_FilamentOptions_printer_nameable))
-		}
-		return nil
-	}
-	res["provider_labels"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
-		val, err := n.GetObjectValue(CreateFilamentOptions_provider_labelsFromDiscriminatorValue)
-		if err != nil {
-			return err
-		}
-		if val != nil {
-			m.SetProviderLabels(val.(FilamentOptions_provider_labelsable))
 		}
 		return nil
 	}
@@ -553,12 +523,6 @@ func (m *FilamentOptions) GetNozzles() []NozzleInfoable {
 	return m.nozzles
 }
 
-// GetOverlayNotes gets the overlay_notes property value. The overlay_notes property
-// returns a []string when successful
-func (m *FilamentOptions) GetOverlayNotes() []string {
-	return m.overlay_notes
-}
-
 // GetPrinterId gets the printer_id property value. The printer_id property
 // returns a FilamentOptions_FilamentOptions_printer_idable when successful
 func (m *FilamentOptions) GetPrinterId() FilamentOptions_FilamentOptions_printer_idable {
@@ -569,12 +533,6 @@ func (m *FilamentOptions) GetPrinterId() FilamentOptions_FilamentOptions_printer
 // returns a FilamentOptions_FilamentOptions_printer_nameable when successful
 func (m *FilamentOptions) GetPrinterName() FilamentOptions_FilamentOptions_printer_nameable {
 	return m.printer_name
-}
-
-// GetProviderLabels gets the provider_labels property value. The provider_labels property
-// returns a FilamentOptions_provider_labelsable when successful
-func (m *FilamentOptions) GetProviderLabels() FilamentOptions_provider_labelsable {
-	return m.provider_labels
 }
 
 // GetShelf gets the shelf property value. The shelf property
@@ -645,12 +603,6 @@ func (m *FilamentOptions) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0
 			return err
 		}
 	}
-	if m.GetOverlayNotes() != nil {
-		err := writer.WriteCollectionOfStringValues("overlay_notes", m.GetOverlayNotes())
-		if err != nil {
-			return err
-		}
-	}
 	{
 		err := writer.WriteObjectValue("printer_id", m.GetPrinterId())
 		if err != nil {
@@ -659,12 +611,6 @@ func (m *FilamentOptions) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0
 	}
 	{
 		err := writer.WriteObjectValue("printer_name", m.GetPrinterName())
-		if err != nil {
-			return err
-		}
-	}
-	{
-		err := writer.WriteObjectValue("provider_labels", m.GetProviderLabels())
 		if err != nil {
 			return err
 		}
@@ -778,11 +724,6 @@ func (m *FilamentOptions) SetNozzles(value []NozzleInfoable) {
 	m.nozzles = value
 }
 
-// SetOverlayNotes sets the overlay_notes property value. The overlay_notes property
-func (m *FilamentOptions) SetOverlayNotes(value []string) {
-	m.overlay_notes = value
-}
-
 // SetPrinterId sets the printer_id property value. The printer_id property
 func (m *FilamentOptions) SetPrinterId(value FilamentOptions_FilamentOptions_printer_idable) {
 	m.printer_id = value
@@ -791,11 +732,6 @@ func (m *FilamentOptions) SetPrinterId(value FilamentOptions_FilamentOptions_pri
 // SetPrinterName sets the printer_name property value. The printer_name property
 func (m *FilamentOptions) SetPrinterName(value FilamentOptions_FilamentOptions_printer_nameable) {
 	m.printer_name = value
-}
-
-// SetProviderLabels sets the provider_labels property value. The provider_labels property
-func (m *FilamentOptions) SetProviderLabels(value FilamentOptions_provider_labelsable) {
-	m.provider_labels = value
 }
 
 // SetShelf sets the shelf property value. The shelf property
@@ -843,10 +779,8 @@ type FilamentOptionsable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetLibraryFileId() FilamentOptions_FilamentOptions_library_file_idable
 	GetNozzles() []NozzleInfoable
-	GetOverlayNotes() []string
 	GetPrinterId() FilamentOptions_FilamentOptions_printer_idable
 	GetPrinterName() FilamentOptions_FilamentOptions_printer_nameable
-	GetProviderLabels() FilamentOptions_provider_labelsable
 	GetShelf() []SpoolOptionable
 	GetSlots() []SlotNeedable
 	GetSource() *FilamentOptions_source
@@ -857,10 +791,8 @@ type FilamentOptionsable interface {
 	GetWarnings() []FilamentWarningable
 	SetLibraryFileId(value FilamentOptions_FilamentOptions_library_file_idable)
 	SetNozzles(value []NozzleInfoable)
-	SetOverlayNotes(value []string)
 	SetPrinterId(value FilamentOptions_FilamentOptions_printer_idable)
 	SetPrinterName(value FilamentOptions_FilamentOptions_printer_nameable)
-	SetProviderLabels(value FilamentOptions_provider_labelsable)
 	SetShelf(value []SpoolOptionable)
 	SetSlots(value []SlotNeedable)
 	SetSource(value *FilamentOptions_source)

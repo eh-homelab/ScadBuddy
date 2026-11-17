@@ -52,10 +52,15 @@ from tests.api.test_versions import SLUG, upload
 from tests.conftest import write_openscad_3mf
 from tests.support.fake_slicer import FakeSlicer, fake_slicer_worker
 from tests.support.operations import press
+from tests.support.sb_rows import seed_app_sb_spools
 from tests.support.sliced3mf import sliced_3mf
 from tests.test_bambu3mf import add_plate
 
-pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_git]
+pytestmark = [
+    pytest.mark.requires_postgres,
+    pytest.mark.requires_git,
+    pytest.mark.usefixtures("recorded_sb_spools"),
+]
 
 #: The copy the dialog's path uploads (``upload_route``).
 COPY = 41
@@ -688,6 +693,7 @@ def native(
         copy_routes(router, COPY, b"PK\x03\x04 the item's laid-out copy")
         two_colours(fake_openscad)
         for client in _open(_settings(settings, s3, kek_file, profiles)):
+            seed_app_sb_spools(client)
             configure(client)
             with fake_slicer_worker(client, settings.temporal_task_queue_slicer) as fake:
                 yield client, fake

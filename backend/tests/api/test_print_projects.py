@@ -17,6 +17,7 @@ from tests.api.test_send import BASE, configure, make_output
 from tests.bambuddy.conftest import recording
 from tests.support.operations import press, subjects
 
+pytestmark = pytest.mark.usefixtures("recorded_sb_spools")
 API = f"{BASE}/api/v1"
 
 

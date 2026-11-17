@@ -91,17 +91,11 @@ from scadbuddy.bambuddy.filaments import (
     Inventory,
     family,
     normalise_colour,
-    read_inventory,
 )
-from scadbuddy.bambuddy.models import (
-    FlowType,
-    NozzleChoice,
-    PrinterStatus,
-    Spool,
-    SpoolAssignment,
-)
+from scadbuddy.bambuddy.models import FlowType, NozzleChoice, PrinterStatus
 from scadbuddy.bambuddy.trays import tray_label, tray_material_colour, tray_of_spool_id
 from scadbuddy.core.problems import ApiError
+from scadbuddy.filament.models import Spool
 from scadbuddy.render.bambu3mf import FilamentMap
 
 #: ``NozzleVolumeType`` as Bambu Studio numbers it (``PrintConfig.cpp``).
@@ -297,29 +291,28 @@ _BAMBU_BRANDS = frozenset({"bambu", "bambu lab", "bambulab"})
 
 
 def spool_name(spool: Spool) -> str:
-    """A spool as a person names it: "Mistletoe Green" for Bambu's own, "Inland Black"
-    for another brand's, else its material."""
-    colour = (spool.color_name or "").strip()
-    brand = (spool.brand or "").strip()
+    """An SB spool as a person names it: "Mistletoe Green" for Bambu's own, "Inland
+    Black" for another brand's, else its material (its effective values, #6262)."""
+    colour = (spool.effective.colour_name or "").strip()
+    brand = (spool.names.brand or "").strip()
     if colour and brand and brand.lower() not in _BAMBU_BRANDS:
         return f"{brand} {colour}"
-    return colour or " ".join(part for part in (brand, spool.material) if part)
+    return colour or " ".join(part for part in (brand, spool.names.material) if part)
 
 
 def plan_inputs(
     plan: FilamentPlan,
-    spools: Sequence[Spool],
-    assignments: Sequence[SpoolAssignment],
+    inventory: Inventory,
     status: PrinterStatus | None,
     printer_id: int,
 ) -> list[PlanInput]:
-    """One :class:`PlanInput` per slot of ``plan``, from the inventory and where each
-    spool is loaded on ``printer_id``."""
-    by_id = {spool.id: spool for spool in spools}
+    """One :class:`PlanInput` per slot of ``plan``, from the SB spools a plan names by
+    number (#6262 Task 7) and the tray each is in on Bambuddy printer ``printer_id``."""
+    by_id = {row.spool.number: row.spool for row in inventory}
     loaded = {
-        assignment.spool_id: assignment
-        for assignment in assignments
-        if assignment.printer_id == printer_id
+        row.spool.number: row.loaded
+        for row in inventory
+        if row.loaded is not None and row.loaded.bambuddy_printer_id == printer_id
     }
     found: list[PlanInput] = []
     for slot in sorted(plan.slots, key=lambda each: each.slot_id):
@@ -342,8 +335,8 @@ def plan_inputs(
         found.append(
             PlanInput(
                 slot_id=slot.slot_id,
-                material=spool.material if spool else None,
-                colour=normalise_colour(spool.rgba) if spool else None,
+                material=spool.names.material if spool else None,
+                colour=normalise_colour(spool.effective.rgba) if spool else None,
                 name=spool_name(spool) if spool else None,
                 rests=extruder_of(where.ams_id, where.tray_id, status) if where else None,
             )
@@ -360,18 +353,15 @@ async def plan_for(
     by_hand: Mapping[int, Side] | None = None,
     inventory: Inventory | None = None,
 ) -> NozzlePlan | None:
-    """:func:`plan_nozzles` for a print request: the inventory and its assignments,
-    read here unless ``inventory`` has them, and nothing read when there is nothing to
-    plan."""
+    """:func:`plan_nozzles` for a print request, over the SB spools its caller read
+    (`filaments.read_inventory`, #6262 Task 7); nothing is planned when there is nothing
+    to plan. A plan with slots and no inventory is a caller's mistake: a 500."""
     if _offered_sides(status, nozzles) is None or not plan.slots:
         return None
     if inventory is None:
-        if client is None:
-            raise ApiError(
-                http.HTTP_500_INTERNAL_SERVER_ERROR,
-                "the inventory is Bambuddy's, and a native run has no client to read it",
-            )
-        inventory = await read_inventory(client)
-    spools, assignments = inventory
-    inputs = plan_inputs(plan, spools, assignments, status, printer_id)
+        raise ApiError(
+            http.HTTP_500_INTERNAL_SERVER_ERROR,
+            "a nozzle plan was asked for a plan's spools without the spools read",
+        )
+    inputs = plan_inputs(plan, inventory, status, printer_id)
     return plan_nozzles(status, nozzles, inputs, by_hand)

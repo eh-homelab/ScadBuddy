@@ -323,11 +323,10 @@ export type NewBatchFile = Schemas['NewBatchFile']
 /** #2951 — Queue all stopped to answer in time: go on from `next_position`. */
 export type BatchQueueProgress = Schemas['BatchQueueProgress']
 export type TrayAssigned = Schemas['TrayAssigned']
-/** #3818 — a provider's record of a spool, as the overlay keeps it (Task 6c). */
-export type SpoolSnapshot = Schemas['SpoolSnapshot']
-/** #3818 — the native manual link's body: a physical spool, or one provider's record. */
+/** #3818, #6262 — the native manual link's body: the SB spool (`spool_id`). */
 export type TraySpoolLink = Schemas['TraySpoolLink']
-export type TraySpool = Schemas['TraySpool-Output']
+/** #6261 — a ScadBuddy spool (`GET /filament/spools/{id}`). */
+export type FilamentSpool = Schemas['Spool']
 export type RackSentPick = Schemas['RackSentPick']
 export type RackAlgorithm = NonNullable<Schemas['ChoicesView']['rack_algorithm']>
 export type PrinterRackAlgorithm = Schemas['PrinterRackAlgorithm']
@@ -373,9 +372,11 @@ export type LibraryFolderUpdate = Schemas['LibraryFolderUpdate']
 export type LibraryFileObjects = Schemas['LibraryFileObjects']
 export type LibraryFileObject = Schemas['LibraryFileObject']
 
-/** #2351 — Bambuddy's spool inventory and loaded slots, read through `/farm/inventory`. */
-export type InventoryView = Schemas['InventoryView']
-export type InventorySpool = Schemas['InventorySpool']
+/** #6262 Task 9 — ScadBuddy's spools and the registry printers' trays (`GET /filament/inventory`). */
+export type FilamentInventoryView = Schemas['FilamentInventoryView']
+export type FilamentInventorySpool = Schemas['FilamentInventorySpool']
+/** The registry printer and AMS tray an SB spool is in. */
+export type TrayPlace = Schemas['TrayPlace']
 
 /**
  * #89 — run tracking.
@@ -566,10 +567,6 @@ export type ListingBound = Schemas['NumberBound'] | Schemas['ChoiceBound'] | Sch
 /** #6157 — one row of the back office's list, and a page of them. */
 export type StorefrontListingRow = Schemas['ListingRow']
 export type StorefrontListingPage = Schemas['ListingPage']
-/** ScadBuddy's own spools (#4643), the native spool provider's records; not Bambuddy's inventory. */
-export type NativeSpool = Schemas['NativeSpool']
-export type NativeSpoolCreate = Schemas['NativeSpoolCreate']
-export type NativeSpoolPatch = Schemas['NativeSpoolPatch']
 export type PricingPolicy = Schemas['PricingPolicy']
 /** `PUT /orders/price-book`: the whole policy, and the estimate's factor when sent. */
 export type PolicyUpdate = Defaulted<Schemas['PolicyUpdate'], 'rough_estimate_factor'>

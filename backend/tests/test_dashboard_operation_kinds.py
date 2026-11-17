@@ -33,6 +33,7 @@ def _kinds(queue: str) -> set[str]:
         archive_cache=none,
         printers=none,
         reports=none,
+        sb_spools=none,
     ) + flow_kinds(none, None, None)
     return {kind.name for kind in kinds if kind.queue == queue}
 
