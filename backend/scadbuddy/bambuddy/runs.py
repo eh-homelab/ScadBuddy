@@ -447,9 +447,11 @@ class PrintRunStore:
 
     async def transferable(self, key: str) -> bool:
         """Whether ``key`` is a sliced file of a run in use (#6122): a print-run hold of
-        such a run names it, or a completed `native_slices` row of its subject does (a
-        run's slice before its hold, as a run from before the hold has it). What the
-        print worker's read URL asks (`api/crud_print.py` `transfer_url`)."""
+        such a run names it, or a completed `native_slices` row of its subject does while
+        the run's result marks it a LAN run (``path`` ``native``) with prints still to
+        start (#6586). The row is the fallback of a LAN run from before the hold; a
+        Bambuddy-queue run, which reads no transfer URL, grants no row. What the print
+        worker's read URL asks (`api/crud_print.py` `transfer_url`)."""
         return await asyncio.to_thread(self._transferable, key)
 
     async def running_executions(self, older_than: timedelta) -> list[tuple[str, str, str]]:
@@ -741,7 +743,8 @@ class PrintRunStore:
                 f" AND {in_use})"
                 " OR EXISTS (SELECT 1 FROM native_slices s JOIN print_runs p"
                 " ON p.output_id = s.subject WHERE s.sliced_blob_key = %(key)s"
-                f" AND s.status = 'completed' AND {in_use}) AS ok".encode(),
+                f" AND s.status = 'completed' AND {in_use}"
+                " AND p.result->>'path' = 'native') AS ok".encode(),
                 {"key": key, "holder": RUN_HOLDER},
             ).fetchone()
         return bool(row and row["ok"])

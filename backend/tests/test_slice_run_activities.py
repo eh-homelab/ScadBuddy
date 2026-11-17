@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -354,12 +355,20 @@ async def test_a_native_sliced_upload_left_unanswered_is_taken(tmp_path: Path) -
     assert native.uploads == []
 
 
+@pytest.mark.parametrize("taken", [True, False])
 @pytest.mark.parametrize("run_id", ["run-7", None])
 async def test_slice_run_holds_the_file_for_a_lan_run_only(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run_id: str | None
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    run_id: str | None,
+    taken: bool,
 ) -> None:
     """#6122: a LAN run's ``slice_run`` holds the sliced file for the run, so the print
-    worker's read URL of it follows the run; a run that names none holds nothing."""
+    worker's read URL of it follows the run; a run that names none holds nothing. A hold
+    not taken (the run ended first) is logged at DEBUG with the run and the key (#6586),
+    so a later ``transfer-refused`` can be explained."""
+    caplog.set_level(logging.DEBUG, logger=slicing_activities.__name__)
     run = _activities(tmp_path)
     run.slicing = SimpleNamespace(refs=SimpleNamespace(pool="the pool"))  # type: ignore[assignment]
     at = datetime(2026, 11, 17)
@@ -388,7 +397,7 @@ async def test_slice_run_holds_the_file_for_a_lan_run_only(
 
     def hold(*args: Any) -> bool:
         held.append(args)
-        return True
+        return taken
 
     monkeypatch.setattr(run, "_started", started)
     monkeypatch.setattr(slicing_activities, "hold_run_file", hold)
@@ -400,3 +409,9 @@ async def test_slice_run_holds_the_file_for_a_lan_run_only(
 
     assert sliced == NativeSliced(slice_id=9, preset_key="k", sliced_blob_key=key)
     assert held == ([] if run_id is None else [("the pool", run_id, key)])
+    logged = [r.getMessage() for r in caplog.records if r.name == slicing_activities.__name__]
+    if run_id is not None and not taken:
+        [message] = logged
+        assert run_id in message and key in message
+    else:
+        assert logged == []

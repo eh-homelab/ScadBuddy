@@ -572,7 +572,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   that is a sliced file of a run in use (`bambuddy/runs.py` `PrintRunStore.transferable`,
   #6122: the run's `print_run` hold in `blob_refs`, which `slice_run` takes for a LAN run,
   the run's end drops and `reap_run_holds` sweeps, or a completed slice row of its
-  subject; the hold outlives the row), else 403 `transfer-refused`; ScadBuddy strips print-host credential keys
+  subject while the run's result marks it a LAN run with prints still to start, #6586; the hold outlives the row), else 403 `transfer-refused`; ScadBuddy strips print-host credential keys
   whenever it parses a preset, and never stores, forwards or writes them into a slicer
   file (`core/credentials.py` `strip_credentials`, applied at parse in `bambuddy/models.py`
   `LocalPresetDetail`, nested keys too); the API strips the kept presets an older build

@@ -401,7 +401,10 @@ class RunActivities:
             key = result.sliced_blob_key
         if input.run_id is not None:
             # A LAN run's own file (#6122), held while the slice's row still holds it.
-            await asyncio.to_thread(hold_run_file, self.slicing.refs.pool, input.run_id, key)
+            held = await asyncio.to_thread(hold_run_file, self.slicing.refs.pool, input.run_id, key)
+            if not held:
+                # The run ended first (#6586): its read URL of the key is then refused.
+                logger.debug("print run %s ended before it held %s", input.run_id, key)
         return NativeSliced(slice_id=row.id, preset_key=row.preset_key, sliced_blob_key=key)
 
     async def _started(self, input: SliceRunInput) -> NativeSlice:
