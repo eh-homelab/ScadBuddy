@@ -62,7 +62,7 @@ class Scope(StrEnum):
     MANAGE_INVENTORY = "Manage Inventory"
     #: Bambuddy's ``settings:update``, which a virtual printer's writes need (#4747). No
     #: API key can hold it: it is admin-only and absent from ``_APIKEY_SCOPE_BY_PERMISSION``
-    #: (``backend/app/core/auth.py`` lines 79-82, maziggy/bambuddy v1.3.0b1-daily.20261025),
+    #: (``backend/app/core/auth.py`` line 90, maziggy/bambuddy v1.3.1),
     #: so such a write works only while Bambuddy's auth is off.
     ADMIN_SETTINGS = "Settings (admin only)"
 

@@ -5446,10 +5446,9 @@
         "requires_setup": false
       }
     },
-    "settings_auto_add_unknown_rfid": {
+    "settings": {
       "url": "/api/v1/settings/",
-      "status": 200,
-      "value": true
+      "status": 200
     },
     "spoolbuddy_devices": {
       "url": "/api/v1/spoolbuddy/devices",
