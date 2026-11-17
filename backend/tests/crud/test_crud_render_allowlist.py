@@ -578,6 +578,25 @@ async def test_a_committed_write_is_replayed_after_its_job_settled(
 
 
 @pytest.mark.parametrize("route", ["put", "swap"])
+async def test_a_key_reused_for_another_write_is_a_422_before_the_job_check(
+    route: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ledger is read first (#6538), so a key stored for another body is the 422 the
+    worker's `_write` falls back on (`KEY_PROBLEM`), not the settled job's 403, and the
+    store is not read (#6541)."""
+    content = ContentStore(cast(Any, _Unread()), cast(Any, None))
+    ref, other = _local_ref(b"output"), _local_ref(b"another output")
+    answer: dict[str, Any] = {"previous": None} if route == "put" else {"swapped": True}
+    state = _jobs_state(set(), content, {"k": _reply(route, _OUTPUT, other, answer)})
+    monkeypatch.setattr(crud_render, "_index", _no_database)
+    monkeypatch.setattr(crud_render, "_indexed", _no_database)
+    with pytest.raises(ApiError) as refused:
+        await _write(route, _OUTPUT, ref, state)
+    assert refused.value.status == 422
+    assert refused.value.type == idempotency.KEY_PROBLEM
+
+
+@pytest.mark.parametrize("route", ["put", "swap"])
 async def test_a_job_that_settles_after_the_first_check_is_refused_in_the_write(
     route: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
