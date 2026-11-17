@@ -49,6 +49,9 @@ from scadbuddy.printers.models import PrinterRow
 #: A printer whose last report is older than this is offline (Review Focus 5).
 STALE_AFTER = timedelta(seconds=90)
 
+#: The states that show the printer running a plate (OpenBambuAPI ``mqtt.md``).
+RUNNING = frozenset({"PREPARE", "SLICING", "RUNNING", "PAUSE"})
+
 
 def is_fresh(seen_at: datetime, now: datetime) -> bool:
     """Whether a LAN report seen at ``seen_at`` still answers for its printer: the one

@@ -10,6 +10,7 @@ the tray shows what it showed when the spool was linked (`filament/inventory.py`
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -158,31 +159,38 @@ class LocationStore:
         race: the loser of the insert reads the winner's row. A tray is found by its printer,
         AMS unit and tray alone; its ``label`` is only a name and may repeat. An unknown printer is
         `CatalogRefError`."""
+        with self._pool.connection() as conn:
+            return self.ensure_ams_on(conn, printer_id, ams_id, tray_id, label=label)
+
+    @staticmethod
+    def ensure_ams_on(
+        conn: Conn, printer_id: UUID, ams_id: int, tray_id: int, *, label: str
+    ) -> m.Location:
+        """`ensure_ams` on ``conn``, in the caller's transaction (`filament/capture.py`)."""
         select = (
             f"SELECT {_COLUMNS} FROM filament_locations WHERE printer_id = %s AND ams_id = %s"
             " AND tray_id = %s AND archived_at IS NULL"
         )
         key = (printer_id, ams_id, tray_id)
         try:
-            with self._pool.connection() as conn:
+            found = conn.execute(select, key).fetchone()
+            if found is None:
+                kind = conn.execute(
+                    "SELECT id FROM filament_location_kinds WHERE ams AND archived_at IS NULL"
+                    " ORDER BY sort_order, upper(name), id LIMIT 1"
+                ).fetchone()
+                if kind is None:
+                    raise NoAmsKindError()
+                found = conn.execute(
+                    "INSERT INTO filament_locations"
+                    " (name, kind_id, printer_id, ams_id, tray_id) VALUES (%s, %s, %s, %s, %s)"
+                    " ON CONFLICT (printer_id, ams_id, tray_id)"
+                    " WHERE printer_id IS NOT NULL AND archived_at IS NULL DO NOTHING"
+                    f" RETURNING {_COLUMNS}",
+                    (label, kind["id"], *key),
+                ).fetchone()
+            if found is None:
                 found = conn.execute(select, key).fetchone()
-                if found is None:
-                    kind = conn.execute(
-                        "SELECT id FROM filament_location_kinds WHERE ams AND archived_at IS NULL"
-                        " ORDER BY sort_order, upper(name), id LIMIT 1"
-                    ).fetchone()
-                    if kind is None:
-                        raise NoAmsKindError()
-                    found = conn.execute(
-                        "INSERT INTO filament_locations"
-                        " (name, kind_id, printer_id, ams_id, tray_id) VALUES (%s, %s, %s, %s, %s)"
-                        " ON CONFLICT (printer_id, ams_id, tray_id)"
-                        " WHERE printer_id IS NOT NULL AND archived_at IS NULL DO NOTHING"
-                        f" RETURNING {_COLUMNS}",
-                        (label, kind["id"], *key),
-                    ).fetchone()
-                if found is None:
-                    found = conn.execute(select, key).fetchone()
         except errors.UniqueViolation:
             raise LocationExistsError() from None
         except errors.ForeignKeyViolation:
@@ -200,13 +208,19 @@ class LocationStore:
 
     @staticmethod
     def move_on(
-        conn: Conn, spool_id: UUID, location_id: UUID | None, *, actor: str
+        conn: Conn,
+        spool_id: UUID,
+        location_id: UUID | None,
+        *,
+        actor: str,
+        at: datetime | None = None,
     ) -> m.SpoolEvent | None:
         """`move` on ``conn``, in the caller's transaction (`filament/inventory.py`
         `FilamentInventory.link`). A move through `move`/`move_on` clears the spool's
         ``tray_fingerprint``: what a tray showed when the spool was placed there says
         nothing of its new place. A printer merge (`repoint_printer_locations`) keeps it,
-        since the spool stays in the same tray."""
+        since the spool stays in the same tray. ``at`` is when it happened (a report's
+        time, `filament/capture.py`); with none the ledger books it now."""
         spool = conn.execute(
             "SELECT location_id FROM filament_spools WHERE id = %s FOR UPDATE", (spool_id,)
         ).fetchone()
@@ -232,6 +246,7 @@ class LocationStore:
             spool_id,
             "moved",
             actor=actor,
+            at=at,
             data={"from": before, "to": location_id},
         )
 

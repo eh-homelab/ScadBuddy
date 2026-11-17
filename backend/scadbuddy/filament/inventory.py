@@ -126,8 +126,6 @@ class _Keys:
             return self.by_tray_uuid[tray.tray_uuid], "tag"
         if tray.tag_uid is not None and tray.tag_uid in self.by_tag_uid:
             return self.by_tag_uid[tray.tag_uid], "tag"
-        if tray.tray_uuid is not None or tray.tag_uid is not None:
-            return None, None
         fingerprint = tray_fingerprint(tray.material, tray.rgba or tray.colour)
         for spool_id, stored in self.placed.get((printer_id, tray.ams_id, tray.tray_id), []):
             if stored == fingerprint:
@@ -148,19 +146,75 @@ class FilamentInventory:
         )
         self._locations = LocationStore(pool)
 
+    @staticmethod
+    def holder_on(
+        conn: Conn, printer_id: UUID, seen: SeenTray
+    ) -> tuple[UUID | None, FoundBy | None]:
+        """The unarchived spool in ``seen`` (a filled tray of ``printer_id``) and how it was
+        found, on ``conn`` (`trays` and `filament/capture.py` both call it). An open binding
+        of the tray's ``tray_uuid``, then of its ``tag_uid``: ``"tag"``. Else the spool
+        placed at the tray whose ``tray_fingerprint`` equals the tray's: ``"link"``, for a
+        tray with no keys and for one whose keys no binding holds (#6263 preflight C5, the
+        AMS rescan). Else none."""
+        for column, key in (("tray_uuid", seen.tray_uuid), ("tag_uid", seen.tag_uid)):
+            if key is None:
+                continue
+            row = conn.execute(
+                "SELECT b.spool_id FROM filament_tags t"
+                " JOIN filament_tag_bindings b ON b.tag_id = t.id AND b.unbound_at IS NULL"
+                " JOIN filament_spools s ON s.id = b.spool_id AND s.archived_at IS NULL"
+                f" WHERE t.{column} = %s",
+                (key,),
+            ).fetchone()
+            if row is not None:
+                return row["spool_id"], "tag"
+        placed = conn.execute(
+            "SELECT s.id FROM filament_spools s JOIN filament_locations l ON l.id = s.location_id"
+            " WHERE l.printer_id = %s AND l.ams_id = %s AND l.tray_id = %s"
+            " AND l.archived_at IS NULL AND s.archived_at IS NULL AND s.tray_fingerprint = %s"
+            " ORDER BY s.updated_at DESC, s.id LIMIT 1",
+            (
+                printer_id,
+                seen.ams_id,
+                seen.tray_id,
+                tray_fingerprint(seen.material, seen.rgba or seen.colour),
+            ),
+        ).fetchone()
+        return (None, None) if placed is None else (placed["id"], "link")
+
+    @staticmethod
+    def place_on(
+        conn: Conn,
+        spool_id: UUID,
+        location_id: UUID,
+        seen: SeenTray,
+        *,
+        actor: str,
+        at: datetime | None = None,
+    ) -> m.SpoolEvent | None:
+        """Put ``spool_id`` in the tray place ``location_id`` and remember what ``seen``
+        shows there (`LocationStore.move_on`, then ``tray_fingerprint``); `link` and
+        `filament/capture.py` call it."""
+        moved = LocationStore.move_on(conn, spool_id, location_id, actor=actor, at=at)
+        conn.execute(
+            "UPDATE filament_spools SET tray_fingerprint = %s WHERE id = %s",
+            (tray_fingerprint(seen.material, seen.rgba or seen.colour), spool_id),
+        )
+        return moved
+
     def trays(self, printer_id: UUID, seen: Sequence[SeenTray]) -> TrayView:
         """``seen`` (``printer_id``'s reported trays) with the SB spool each holds, and
         the shelf. Every other registry printer's latest report is resolved too, so a
         spool another printer holds is not on the shelf."""
         with self._pool.connection() as conn:
             keys = _Keys(conn)
+            own = [(tray, *self.holder_on(conn, printer_id, tray)) for tray in seen]
         held = {
             spool_id
             for other, trays in self._others(printer_id)
             for spool_id, _ in (keys.hold(other, tray) for tray in trays)
             if spool_id is not None
         }
-        own = [(tray, *keys.hold(printer_id, tray)) for tray in seen]
         held |= {spool_id for _, spool_id, _ in own if spool_id is not None}
         spools = {spool.id: spool for spool in self._spools.list()}
         return TrayView(
@@ -454,13 +508,9 @@ class FilamentInventory:
             for row in rows:
                 if row["id"] != spool_id:
                     LocationStore.move_on(conn, row["id"], None, actor=actor)
-            LocationStore.move_on(conn, spool_id, place.id, actor=actor)
+            self.place_on(conn, spool_id, place.id, seen, actor=actor)
             if uid is not None or tray is not None:
                 FilamentSpoolStore.bind_on(conn, spool_id, uid, tray, kind, False, actor)
-            conn.execute(
-                "UPDATE filament_spools SET tray_fingerprint = %s WHERE id = %s",
-                (tray_fingerprint(material, seen.rgba or seen.colour), spool_id),
-            )
             linked = FilamentSpoolStore.read(conn, spool_id, defaults=defaults)
         assert linked is not None
         return linked

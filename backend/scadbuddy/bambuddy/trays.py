@@ -305,9 +305,25 @@ def seen_trays(status: PrinterStatus) -> list[SeenTray]:
             colour=normalise_colour(tray.tray_color),
             tray_info_idx=(tray.tray_info_idx or "").strip() or None,
             rgba=tray_rgba(tray.tray_color),
+            remain=_remain(ams_id, tray),
         )
         for ams_id, tray in _sorted_trays(status)
     ]
+
+
+def _remain(ams_id: int, tray: AmsTray) -> int | None:
+    """The AMS's remaining percent, only where it is the spool's own: a tray with RFID
+    keys, not an external holder (whose ``remain`` is 0 in `lan-report-h2c.json`), whose
+    report sent the key (`AmsTray.remain` is 0 when it did not) and not ``-1`` (#6263
+    preflight C4)."""
+    if (
+        ams_id == EXTERNAL
+        or "remain" not in tray.model_fields_set
+        or tray.remain < 0
+        or (clean_tray_uuid(tray.tray_uuid) is None and clean_tag_uid(tray.tag_uid) is None)
+    ):
+        return None
+    return tray.remain
 
 
 def tray_rgba(raw: str | None) -> str | None:
