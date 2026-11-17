@@ -5,11 +5,11 @@ and pulls Bambuddy's spools; the spool providers and their overlay are gone."""
 from __future__ import annotations
 
 import uuid
-from types import SimpleNamespace
-from typing import Any
 from collections.abc import AsyncIterator
 from contextlib import suppress
 from datetime import timedelta
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from temporalio import activity
