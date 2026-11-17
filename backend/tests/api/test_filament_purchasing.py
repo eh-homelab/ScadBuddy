@@ -141,3 +141,36 @@ def test_missing_rows_are_404(client: TestClient) -> None:
     )
     assert client.post(f"{URL}/products/{ghost}/prices", json={"price": "1"}).status_code == 404
     assert client.delete(f"{URL}/prices/{ghost}").status_code == 404
+
+
+def test_null_for_a_required_field_is_422(client: TestClient) -> None:
+    supplier_id = _supplier(client)
+    product_id = _product(client, supplier_id, _type(client))
+    assert client.patch(f"{URL}/suppliers/{supplier_id}", json={"name": None}).status_code == 422
+    for field in ("type_id", "sku", "pack_size"):
+        refused = client.patch(f"{URL}/products/{product_id}", json={field: None})
+        assert refused.status_code == 422, field
+
+
+def test_a_restore_onto_a_taken_name_or_sku_is_409(client: TestClient) -> None:
+    first = _supplier(client)
+    client.patch(f"{URL}/suppliers/{first}", json={"archived": True})
+    _supplier(client)
+    assert client.patch(f"{URL}/suppliers/{first}", json={"archived": False}).status_code == 409
+    supplier_id = _supplier(client, "Other")
+    type_id = _type(client)
+    one = _product(client, supplier_id, type_id)
+    client.patch(f"{URL}/products/{one}", json={"archived": True})
+    _product(client, supplier_id, type_id)
+    assert client.patch(f"{URL}/products/{one}", json={"archived": False}).status_code == 409
+
+
+def test_the_type_history_marks_archived_rows(client: TestClient) -> None:
+    type_id = _type(client)
+    supplier_id = _supplier(client)
+    product_id = _product(client, supplier_id, type_id)
+    client.post(f"{URL}/products/{product_id}/prices", json={"price": "5"})
+    client.patch(f"{URL}/products/{product_id}", json={"archived": True})
+    client.patch(f"{URL}/suppliers/{supplier_id}", json={"archived": True})
+    (point,) = client.get(f"{URL}/types/{type_id}/prices").json()
+    assert (point["product_archived"], point["supplier_archived"]) == (True, True)

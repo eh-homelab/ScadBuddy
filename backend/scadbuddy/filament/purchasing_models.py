@@ -96,6 +96,8 @@ class TypePricePoint(PricePoint):
     supplier_id: UUID
     supplier_name: str
     sku: str
+    supplier_archived: bool = False
+    product_archived: bool = False
 
 
 class ProductCreate(_In):

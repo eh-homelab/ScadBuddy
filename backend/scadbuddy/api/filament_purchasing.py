@@ -114,11 +114,12 @@ async def patch_supplier(
 async def list_products(
     filament: FilamentDep, supplier_id: UUID, include_archived: bool = False
 ) -> list[pm.SupplierProduct]:
-    if await asyncio.to_thread(filament.suppliers.get, supplier_id) is None:
-        raise _no_supplier(supplier_id)
-    return await asyncio.to_thread(
+    found = await asyncio.to_thread(
         filament.suppliers.products, supplier_id, include_archived=include_archived
     )
+    if found is None:
+        raise _no_supplier(supplier_id)
+    return found
 
 
 @router.post(
@@ -154,7 +155,8 @@ async def create_product(
     description=(
         "One row per unarchived product, by type code: the product, its type, its newest "
         "and previous price points, and `change_pct`, the change of the price per kg from "
-        "the previous point to the newest (`null` without two points). 404 for no such supplier."
+        "the previous point to the newest, in percent to one decimal (`null` without two points). "
+        "404 for no such supplier."
     ),
 )
 async def price_sheet(filament: FilamentDep, supplier_id: UUID) -> list[pm.PriceSheetRow]:
@@ -249,7 +251,8 @@ async def delete_price(filament: FilamentDep, price_id: UUID) -> Response:
     summary="Read a spool type's price history",
     description=(
         "Every price point of the type's supplier products, newest first, with the supplier "
-        "and SKU. 404 for no such type."
+        "and SKU. Points of archived products and suppliers stay, so the history stays true; "
+        "`product_archived` and `supplier_archived` mark them. 404 for no such type."
     ),
 )
 async def type_prices(filament: FilamentDep, type_id: UUID) -> list[pm.TypePricePoint]:

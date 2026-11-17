@@ -151,6 +151,24 @@ def test_the_sheet_has_none_for_one_point(pg_pool: PgPool) -> None:
     assert store.price_sheet(UUID(int=9)) is None
 
 
+def test_the_change_is_one_decimal_rounded_half_up(pg_pool: PgPool) -> None:
+    store = _store(pg_pool)
+    product_id = _product(store, pg_pool)
+    product = store.product(product_id)
+    assert product is not None
+    for price, day in (("30", date(2026, 10, 1)), ("31", date(2026, 11, 1))):
+        store.add_price(product_id, PricePointCreate(price=Decimal(price), on_date=day))
+    (third,) = store.price_sheet(product.supplier_id) or []
+    assert third.change_pct == Decimal("3.3")
+    other = _product(store, pg_pool, sku="SKU-2")
+    for price, day in (("40", date(2026, 10, 1)), ("40.02", date(2026, 11, 1))):
+        store.add_price(other, PricePointCreate(price=Decimal(price), on_date=day))
+    changed = store.product(other)
+    assert changed is not None
+    (half,) = store.price_sheet(changed.supplier_id) or []
+    assert half.change_pct == Decimal("0.1")
+
+
 def test_an_invoice_price_is_not_deletable(pg_pool: PgPool) -> None:
     store = _store(pg_pool)
     product_id = _product(store, pg_pool)
@@ -201,3 +219,43 @@ def test_a_types_price_history_spans_its_suppliers(pg_pool: PgPool) -> None:
         ("A", "a", Decimal("20.0000")),
     ]
     assert store.type_prices(UUID(int=9)) == []
+
+
+def test_the_type_history_keeps_archived_rows_and_marks_them(pg_pool: PgPool) -> None:
+    store = _store(pg_pool)
+    type_id = _type(pg_pool)
+    live = store.create(SupplierCreate(name="Live"))
+    gone = store.create(SupplierCreate(name="Gone"))
+    kept = store.add_product(live.id, ProductCreate(type_id=type_id, sku="k"))
+    old = store.add_product(live.id, ProductCreate(type_id=type_id, sku="o"))
+    other = store.add_product(gone.id, ProductCreate(type_id=type_id, sku="g"))
+    assert kept is not None
+    assert old is not None
+    assert other is not None
+    for product in (kept, old, other):
+        store.add_price(product.id, PricePointCreate(price=Decimal("20")))
+    store.update_product(old.id, ProductPatch(archived=True))
+    store.update(gone.id, SupplierPatch(archived=True))
+    flags = {p.sku: (p.product_archived, p.supplier_archived) for p in store.type_prices(type_id)}
+    assert flags == {"k": (False, False), "o": (True, False), "g": (False, True)}
+
+
+def test_products_of_a_missing_supplier_is_none(pg_pool: PgPool) -> None:
+    assert _store(pg_pool).products(UUID(int=9)) is None
+
+
+def test_a_restore_onto_a_taken_name_or_sku_is_refused(pg_pool: PgPool) -> None:
+    store = _store(pg_pool)
+    type_id = _type(pg_pool)
+    first = store.create(SupplierCreate(name="Acme"))
+    store.update(first.id, SupplierPatch(archived=True))
+    store.create(SupplierCreate(name="Acme"))
+    with pytest.raises(SupplierExistsError):
+        store.update(first.id, SupplierPatch(archived=False))
+    supplier = store.create(SupplierCreate(name="Other"))
+    one = store.add_product(supplier.id, ProductCreate(type_id=type_id, sku="X"))
+    assert one is not None
+    store.update_product(one.id, ProductPatch(archived=True))
+    assert store.add_product(supplier.id, ProductCreate(type_id=type_id, sku="x")) is not None
+    with pytest.raises(ProductExistsError):
+        store.update_product(one.id, ProductPatch(archived=False))

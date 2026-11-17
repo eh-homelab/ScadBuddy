@@ -103,4 +103,25 @@ describe('filament purchasing tools', () => {
     await runTool(tool('filament_product_upsert'), { product_id: PRODUCT, fields: {}, archived: true }, ctx())
     expect(seen).toEqual([{ type_id: TYPE, sku: 'A' }, { archived: true }])
   })
+
+  it('refuses archived without an id, and a product with no parent', async () => {
+    const supplier = await runTool(tool('filament_supplier_upsert'), { fields: { name: 'A' }, archived: true }, ctx())
+    expect(supplier.isError).toBe(true)
+    const noParent = await runTool(tool('filament_product_upsert'), { fields: { sku: 'A' } }, ctx())
+    expect(noParent.isError).toBe(true)
+    const noArchive = await runTool(
+      tool('filament_product_upsert'),
+      { supplier_id: SUPPLIER, fields: {}, archived: true },
+      ctx(),
+    )
+    expect(noArchive.isError).toBe(true)
+  })
+
+  it('deletes a manual price and answers its id', async () => {
+    const PRICE = '8d6f3c1e-0000-4000-8000-000000006604'
+    server.use(http.delete(`${FILAMENT}/prices/${PRICE}`, () => new HttpResponse(null, { status: 204 })))
+    expect(firstText(await runTool(tool('filament_price_delete'), { price_id: PRICE }, ctx()))).toEqual({
+      deleted: PRICE,
+    })
+  })
 })

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 from uuid import UUID
 
@@ -95,7 +95,8 @@ def _change_pct(newest: pm.PricePoint | None, previous: pm.PricePoint | None) ->
         or not previous.price_per_kg
     ):
         return None
-    return (newest.price_per_kg - previous.price_per_kg) / previous.price_per_kg * 100
+    pct = (newest.price_per_kg - previous.price_per_kg) / previous.price_per_kg * 100
+    return pct.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
 
 
 def _sets(patch: Any) -> tuple[list[str], list[Any]]:
@@ -178,9 +179,12 @@ class SuppliersStore:
 
     # -- products -----------------------------------------------------------------------
 
-    def products(self, supplier_id: UUID, *, include_archived: bool = False) -> _Products:
+    def products(self, supplier_id: UUID, *, include_archived: bool = False) -> _Products | None:
+        """The supplier's products by SKU; ``None`` for no such supplier."""
         where = "" if include_archived else " AND p.archived_at IS NULL"
         with self._pool.connection() as conn:
+            if self._supplier(conn, supplier_id) is None:
+                return None
             rows = conn.execute(
                 f"SELECT {_PRODUCT_COLUMNS} FROM filament_supplier_products p"
                 f" WHERE p.supplier_id = %s{where} ORDER BY upper(p.sku), p.id",
@@ -298,7 +302,9 @@ class SuppliersStore:
     def type_prices(self, type_id: UUID) -> _TypePrices:
         with self._pool.connection() as conn:
             rows = conn.execute(
-                f"SELECT {_PRICE_COLUMNS}, p.supplier_id, s.name AS supplier_name, p.sku"
+                f"SELECT {_PRICE_COLUMNS}, p.supplier_id, s.name AS supplier_name, p.sku,"
+                " s.archived_at IS NOT NULL AS supplier_archived,"
+                " p.archived_at IS NOT NULL AS product_archived"
                 f"{_PRICE_FROM}"
                 " JOIN filament_suppliers s ON s.id = p.supplier_id"
                 f" WHERE p.type_id = %s{_PRICE_ORDER}",
@@ -311,6 +317,8 @@ class SuppliersStore:
                     "supplier_id": row["supplier_id"],
                     "supplier_name": row["supplier_name"],
                     "sku": row["sku"],
+                    "supplier_archived": row["supplier_archived"],
+                    "product_archived": row["product_archived"],
                 }
             )
             for row in rows
