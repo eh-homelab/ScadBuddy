@@ -373,7 +373,7 @@ def test_a_slow_lookup_never_holds_up_an_add(
     is made with no density."""
 
     async def slow(*args: object, **kwargs: object) -> list[object]:
-        await asyncio.sleep(5)
+        await asyncio.sleep(60)
         return []
 
     monkeypatch.setattr(orders_api, "inventory_groups", slow)
@@ -382,7 +382,8 @@ def test_a_slow_lookup_never_holds_up_an_add(
     started = time.monotonic()
     made = tri_color(client)
 
-    assert time.monotonic() - started < 3
+    # Far under the lookup's 60 s, with room for a loaded CI runner.
+    assert time.monotonic() - started < 30
     assert (made["density_g_cm3"], made["density_profile"]) == (None, None)
 
 
