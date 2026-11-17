@@ -163,27 +163,34 @@ def test_a_renew_moves_the_leases_expiry(
     pool: Pool, client: CrudSyncClient, tmp_path: Path
 ) -> None:
     """Checked on the row, not on wall-clock timing: a renew sets a fresh TTL from the
-    database's now, past the take's."""
-    leases = RemoteCheckoutLeases(client, ttl=1.0)
+    database's now, past the take's. The lease is still live when it renews; a lapsed
+    one is not renewed (#6560)."""
+    leases = RemoteCheckoutLeases(client, ttl=10.0)
     token = leases.take(JOB, [_checkout(tmp_path)])
     with pool.connection() as conn:
-        # Its TTL spent, as if a second had passed: a renew must move it forward.
+        # Half its TTL spent, as if five seconds had passed: a renew must move it forward.
         conn.execute(
-            "UPDATE library_leases SET expires_at = expires_at - interval '1 second'"
+            "UPDATE library_leases SET expires_at = expires_at - interval '5 seconds'"
             " WHERE token = %s",
             (token,),
         )
     spent = _expires(pool, token)
-    leases.renew(token)
-    assert _expires(pool, token) >= spent + timedelta(seconds=1)
+    assert leases.renew(token)
+    assert _expires(pool, token) >= spent + timedelta(seconds=5)
 
 
 async def test_a_rendering_gate_renews_its_lease(
     pool: Pool, client: CrudSyncClient, tmp_path: Path
 ) -> None:
-    """The gate renews through the routes while the render runs: waited for on the row,
-    with a wide margin, not at a wall-clock time."""
-    worker = CheckoutGate(RemoteCheckoutLeases(client, ttl=1.0))
+    """The gate renews through the routes while the render runs: renewed on cue and
+    waited for on the row, not at a wall-clock time. The TTL is the default, so no
+    runner stall lapses the lease before the cue (a lapsed lease ends the block, #6560)."""
+    cue: asyncio.Queue[None] = asyncio.Queue()
+
+    async def on_cue(delay: float) -> None:
+        await cue.get()
+
+    worker = CheckoutGate(RemoteCheckoutLeases(client), sleep=on_cue)
 
     def expiry() -> datetime:
         with pool.connection() as conn:
@@ -195,6 +202,7 @@ async def test_a_rendering_gate_renews_its_lease(
 
     async with worker.rendering(JOB, [_checkout(tmp_path)]):
         first = await asyncio.to_thread(expiry)
+        cue.put_nowait(None)
         async with asyncio.timeout(20):
             while await asyncio.to_thread(expiry) <= first:
                 await asyncio.sleep(0.05)
@@ -252,16 +260,23 @@ def test_a_token_held_for_another_lease_is_refused(pool: Pool, client: CrudSyncC
 
 
 def test_a_renew_names_a_live_token_and_a_release_is_natural(client: CrudSyncClient) -> None:
+    """A renew with no row is the route's 404, which the worker's renew answers as
+    False, so its gate ends the block that lost it (#6560)."""
     leases = RemoteCheckoutLeases(client)
+    unknown = uuid.uuid4()
     with pytest.raises(CrudRefusedError) as refused:
-        leases.renew(uuid.uuid4())
+        client.request("PUT", f"{BASE}/leases/{unknown}", json={"ttl_s": 60})
     assert (refused.value.status, refused.value.problem.get("reason")) == (404, "no-lease")
+    with pytest.raises(CrudRefusedError) as refused:
+        client.request("PUT", f"{BASE}/pin-holds/{unknown}", json={"ttl_s": 60})
+    assert (refused.value.status, refused.value.problem.get("reason")) == (404, "no-hold")
+    assert leases.renew(unknown) is False
+    assert leases.renew_pin(unknown) is False
     token = leases.take(JOB, [Path("/libraries/BOSL2") / ("c" * 40)])
-    leases.renew(token)
+    assert leases.renew(token) is True
     leases.drop(token)
     leases.drop(token)  # sent again after a lost answer: nothing left, a success
-    with pytest.raises(CrudRefusedError):
-        leases.renew(token)
+    assert leases.renew(token) is False
 
 
 def test_ttl_is_bounded(client: CrudSyncClient) -> None:
@@ -359,14 +374,16 @@ def test_a_slot_is_renewed_and_released_only_by_its_token(client: CrudSyncClient
     slot = slots.claim(mine)
     assert slot is not None
     with pytest.raises(CrudRefusedError) as refused:
-        slots.renew(slot, theirs)
+        client.request("PUT", f"{BASE}/install-slots/{slot}?token={theirs}")
     assert (refused.value.status, refused.value.problem.get("reason")) == (409, "not-holder")
+    # The worker's renew answers that 409 as False (#6560).
+    assert slots.renew(slot, theirs) is False
     with pytest.raises(CrudRefusedError) as refused:
         client.request("DELETE", f"{BASE}/install-slots/{slot}?token={theirs}")
     assert (refused.value.status, refused.value.problem.get("reason")) == (409, "not-holder")
     # The worker's release of a slot another token holds: its own lapsed, so released.
     slots.drop(slot, theirs)
-    slots.renew(slot, mine)
+    assert slots.renew(slot, mine) is True
     slots.drop(slot, mine)
     slots.drop(slot, mine)  # sent again: the slot is free, nothing of anyone's taken
     assert slots.claim(theirs) is not None
