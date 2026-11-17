@@ -169,11 +169,20 @@ describe('a turn\'s row writes over the CRUD routes', () => {
     const old: typeof fetch = async (input, init) => {
       const body = JSON.parse(await new Request(input, init).text()) as Record<string, unknown>
       calls++
-      if ('turn_id' in body) return new Response(JSON.stringify({ detail: 'extra' }), { status: 422, headers: { 'x-scadbuddy-crud': '1' } })
+      if ('turn_id' in body) return new Response(JSON.stringify({ detail: 'the request did not match the expected shape', errors: [{ loc: ['body', 'turn_id'], msg: 'Extra inputs are not permitted' }] }), { status: 422, headers: { 'x-scadbuddy-crud': '1' } })
       return new Response(JSON.stringify({ logged: { events: [JSON.stringify(status('idle'))], seqs: [4] } }), { headers: { 'x-scadbuddy-crud': '1' } })
     }
     expect(await new CrudTurnRows(BASE, { fetch: old }).giveBack(SESSION, 'idle', TURN)).toEqual({ events: [status('idle')], seqs: [4] })
     expect(calls).toBe(2)
+    // A 422 that names another field is no older pod: the fence is kept and the refusal thrown.
+    let other = 0
+    const refused: typeof fetch = async () => {
+      other++
+      const problem = { detail: 'the request did not match the expected shape', errors: [{ loc: ['body', 'prior'], msg: 'bad' }] }
+      return new Response(JSON.stringify(problem), { status: 422, headers: { 'x-scadbuddy-crud': '1' } })
+    }
+    await expect(new CrudTurnRows(BASE, { fetch: refused }).giveBack(SESSION, 'idle', TURN)).rejects.toThrow(/422/)
+    expect(other).toBe(1)
   })
 
   it('a refusal of the route throws, never reads as a fence that held', async () => {
