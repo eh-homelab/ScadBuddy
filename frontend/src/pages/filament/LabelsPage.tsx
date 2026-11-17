@@ -1,5 +1,6 @@
 import { ChevronLeftIcon, PrinterIcon } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Link, useSearchParams } from 'react-router'
 import { getSpool, type SpoolDetail } from '../../api/filament'
 import { Label } from '../../components/filament/Label'
@@ -20,24 +21,24 @@ function storedLayout(): Layout {
 }
 
 /**
- * Print rules: only the label area prints. Everything else is hidden by `visibility`, and
- * the area moves to the page's corner, so the app chrome leaves no gap and its scroll boxes
- * clip nothing. A roll prints one label per page of the label's own size; a sheet packs
- * them on the paper's own size with a margin.
+ * Print rules: the labels print from a copy in `#label-print-root`, a child of `<body>`
+ * (a portal), and every other child of `<body>` is `display: none`, so the app shell, its
+ * header and its scroll boxes leave no gap or clip. The copy is hidden on screen. A roll
+ * prints one label per page of the label's own size (each wrapper a little shorter than the
+ * page, so rounding adds no blank page); a sheet packs them on the paper with a margin.
  */
 const printCss = (layout: Layout) => `
+#label-print-root { display: none; }
 @media print {
-  body * { visibility: hidden !important; }
-  #label-print, #label-print * { visibility: visible !important; }
-  #label-print { position: absolute; left: 0; top: 0; }
+  body > *:not(#label-print-root) { display: none !important; }
+  #label-print-root { display: block !important; background: white; }
   ${
     layout === 'roll'
       ? `@page { size: ${LABEL_WIDTH_MM}mm ${LABEL_HEIGHT_MM}mm; margin: 0; }
-  #label-print { display: block; }
-  #label-print > * { break-after: page; }
-  #label-print > *:last-child { break-after: auto; }`
+  #label-print-root > * { height: ${LABEL_HEIGHT_MM - 0.5}mm; overflow: hidden; break-after: page; }
+  #label-print-root > *:last-child { break-after: auto; }`
       : `@page { margin: 10mm; }
-  #label-print { display: flex; flex-wrap: wrap; gap: 2mm; width: 190mm; }`
+  #label-print-root { display: flex !important; flex-wrap: wrap; gap: 2mm; width: 190mm; }`
   }
 }`
 
@@ -63,10 +64,11 @@ export function LabelsPage() {
   const [loaded, setLoaded] = useState<Loaded | null>(null)
 
   useEffect(() => {
-    if (tooMany || ids.length === 0) return
+    const wanted = key.split(',').filter(Boolean)
+    if (tooMany || wanted.length === 0) return
     let live = true
     void Promise.all(
-      ids.map(async (id) => {
+      wanted.map(async (id) => {
         try {
           const spool = await getSpool(id)
           return { spool, svg: await qrSvg(labelPayload(spool.id)) }
@@ -85,8 +87,6 @@ export function LabelsPage() {
     return () => {
       live = false
     }
-    // `key` stands for `ids`.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, tooMany])
 
   const choose = (next: string) => {
@@ -146,14 +146,24 @@ export function LabelsPage() {
           </p>
         )}
 
-        <div id="label-print" className="flex flex-wrap gap-3 rounded-md bg-muted/40 p-3 print:bg-transparent print:p-0">
+        <div className="flex flex-wrap gap-3 rounded-md bg-muted/40 p-3">
           {labels.map(({ spool, svg }) => (
-            <div key={spool.id} className="outline outline-1 outline-dashed outline-border print:outline-none">
+            <div key={spool.id} className="outline outline-1 outline-dashed outline-border">
               <Label spool={spool} svg={svg} />
             </div>
           ))}
         </div>
       </div>
+      {createPortal(
+        <div id="label-print-root" aria-hidden="true">
+          {labels.map(({ spool, svg }) => (
+            <div key={spool.id}>
+              <Label spool={spool} svg={svg} testId="print-label" />
+            </div>
+          ))}
+        </div>,
+        document.body,
+      )}
     </div>
   )
 }

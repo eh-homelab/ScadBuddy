@@ -21,4 +21,12 @@ describe('a spool label', () => {
     expect(screen.getByTestId('label').getAttribute('style')).toMatch(/width: 50mm; height: 25mm/)
     expect(screen.getByText(name)).toHaveClass('truncate')
   })
+
+  it('shrinks the number so #10000 fits the text column', () => {
+    const big = { ...spool('Red'), number: 10000 } as SpoolDetail
+    render(<Label spool={big} svg="<svg></svg>" />)
+    const size = parseFloat(screen.getByText('#10000').style.fontSize)
+    expect(size).toBeLessThan(9)
+    expect(size * 0.62 * '#10000'.length).toBeLessThanOrEqual(22.01)
+  })
 })

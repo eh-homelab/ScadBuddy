@@ -28,8 +28,10 @@ describe('the labels page', () => {
     renderPage(<LabelsPage />, { route: '/filament/labels?ids=a,b' })
     expect(screen.getByRole('heading', { level: 1, name: 'Spool labels' })).toBeInTheDocument()
     await waitFor(() => expect(screen.getAllByTestId('label')).toHaveLength(2))
-    expect(screen.getByText('#1')).toBeInTheDocument()
-    expect(screen.getByText('#2')).toBeInTheDocument()
+    expect(screen.getAllByTestId('label').map((label) => label.textContent)).toEqual([expect.stringContaining('#1'), expect.stringContaining('#2')])
+    // The print copy, a child of <body> that the print rules show alone.
+    expect(screen.getAllByTestId('print-label')).toHaveLength(2)
+    expect(document.getElementById('label-print-root')?.parentElement).toBe(document.body)
   })
 
   it('refuses more than 100 labels and draws none', () => {

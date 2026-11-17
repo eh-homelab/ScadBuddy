@@ -102,3 +102,16 @@ test.describe('the spool page at 390 px', () => {
     expect(after).toBeLessThanOrEqual(clientAfter)
   })
 })
+
+// #6264 — the print rules of /filament/labels, through Chromium's own PDF: a roll prints one
+// page per label, a sheet packs three labels on one page.
+const pages = (pdf: Buffer) => (pdf.toString('latin1').match(/\/Type\s*\/Page[^s]/g) ?? []).length
+
+test('the labels page prints one roll page per label, and a sheet on one page', async ({ page }) => {
+  await page.goto(`/filament/labels?ids=${[1, 2, 3].map(spoolId).join(',')}`)
+  await expect(page.getByTestId('label')).toHaveCount(3)
+  expect(pages(await page.pdf({ preferCSSPageSize: true }))).toBe(3)
+
+  await page.getByRole('radio', { name: 'Sheet' }).click()
+  expect(pages(await page.pdf({ preferCSSPageSize: true }))).toBe(1)
+})
