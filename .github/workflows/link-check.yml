@@ -45,7 +45,16 @@ jobs:
       #   (#5856; checked 2026-11-11, the orders v2 page's HTML has no
       #   orders_patch). Other PayPal links are still checked, and the next two
       #   steps check the excluded pages themselves, without their fragments
-      #   (#6084).
+      #   (#6084);
+      #   www.paypal.com help articles (/<country>/cshelp/) answer 403 to any
+      #   client without a browser's cookies, a browser User-Agent included
+      #   (#6518; checked 2026-11-17 with curl, the eCheck article in README.md);
+      #   GitHub issue and PR comment anchors (#issuecomment-<id>): on a long
+      #   thread GitHub serves the first and last comments and loads the rest in
+      #   the browser, so a live comment's anchor is not in the HTML (#6518;
+      #   checked 2026-11-17, #5283 has 31 comments and its page has no
+      #   issuecomment-6757727525, which the API still serves). Other links to
+      #   those threads, with no comment anchor, are still checked.
       - name: lychee
         id: lychee
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
@@ -61,6 +70,8 @@ jobs:
             --exclude '^https://github\.com/(orgs/)?WonderForgeLabs([/?#]|$)'
             --exclude '^https?://[^/]*\.internal\.nullreference\.io'
             --exclude '^https://developer\.paypal\.com/docs/api/[^#]*#'
+            --exclude '^https://www\.paypal\.com/[a-z]{2}/cshelp/'
+            --exclude '^https://github\.com/[^#]+#issuecomment-[0-9]+$'
             'docs/**/*.md' README.md CLAUDE.md '**/SKILL.md'
             backend/CLAUDE.md frontend/CLAUDE.md agent/CLAUDE.md agent-durable/CLAUDE.md
             tools/go/CLAUDE.md workers/rust/CLAUDE.md e2e-stack/CLAUDE.md models/CLAUDE.md
