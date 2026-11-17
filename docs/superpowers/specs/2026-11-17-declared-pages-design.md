@@ -166,7 +166,8 @@ Both file routes use the checks of P2 unchanged. Phase 1 (§10) moves `UI_MEDIA_
 `core/ui_files.py`, so the template routes and the page routes share one copy.
 
 The bus gets `page.changed` `{name}` on the collection topic `pages` and the topic
-`page:<name>` (P10), so the nav and an open page see a new version.
+`page:<name>` (P10), so the nav and an open page see a new version. `api/realtime.py`
+gains `pages` in `COLLECTION_TOPICS` and `page:<name>` in `_TOPIC`.
 
 ### 3.4 Mounting
 
@@ -303,9 +304,12 @@ with `_` in place of `-`, `[a-z][a-z0-9_]{0,62}`.
   `flows/inputs.py` `schema_problems` on it. The subset has no nested object, so a record
   is flat: scalars and arrays of scalars. A link to another record is a `string` id; the
   store does not check it (§6).
-- A new version must accept every stored row of the type. The API checks each stored
-  body against the new schema in the registration's transaction, under the type's lock,
-  and refuses with 409 `records_do_not_fit` and the first 20 failing ids. So a version
+- A new version must accept every stored row of the type. The registration runs in one
+  Postgres transaction that takes the type's lock exclusively (§5.4). In it, the API
+  checks each stored body against the new schema and refuses with 409
+  `records_do_not_fit` and the first 20 failing ids. Then it commits the version to git,
+  writes the `record_types` row (§5.2), and commits the transaction, which releases the
+  lock. So a version
   can add an optional field, widen a bound or add an `enum` value; it cannot rename a
   field that rows hold. **(call)** A type holds at most 10,000 rows, so this check stays
   bounded.
@@ -320,6 +324,13 @@ dashboard over the same intake.
 A migration (`<ts>_records.sql`) adds:
 
 ```sql
+CREATE TABLE record_types (
+  type        text        PRIMARY KEY,
+  commit      text        NOT NULL,   -- the newest version's commit in data/pages
+  schema      jsonb       NOT NULL,   -- that version's schema, the one writes check
+  updated_at  timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE TABLE records (
   type          text        NOT NULL,
   id            uuid        NOT NULL,
@@ -333,7 +344,17 @@ CREATE TABLE records (
   page          text,                   -- the X-ScadBuddy-Page label, when sent
   PRIMARY KEY (type, id)
 );
+CREATE INDEX records_newest ON records (type, created_at DESC, id);
 ```
+
+Git keeps every version of a type's schema. `record_types` keeps the newest one, so a
+write reads the schema it checks against in its own transaction (§5.4). A git commit
+whose `record_types` row was never written (the API stopped between the two) is indexed
+at the next start, as `flows/reconcile.py` does for a flow version.
+
+`records_newest` serves the list's order and cursor. A `where` filter is a scan of the
+type's rows in that index: a type holds at most 10,000 rows (§5.1), so the scan is
+bounded, and no index on `body` is added. **(call)**
 
 `records/store.py` reads and writes it on the shared `scadbuddy-rows` pool
 (`rows/component.py`; `backend/CLAUDE.md` "Postgres pools", #5226). No other process
@@ -360,15 +381,32 @@ The check, in the API, on every write, before any SQL write:
    type's newest schema: unknown keys refused, types, bounds, enums and patterns checked
    within the patterns' time budget, defaults filled (P7). A failure is 422 with one
    error per field, each with its JSON Pointer.
-4. Then the insert or update, with `schema_commit` set to that schema's commit, in one
-   transaction with the bus event `record.changed` `{type, id, deleted?}` on the topics
+4. Then the insert or update, with `schema_commit` set to that schema's commit, in the
+   transaction of §5.4, with the bus event `record.changed` `{type, id, deleted?}` on the topics
    `records:<type>` and `record:<type>:<id>` (P10; the topic pattern gains both).
+
+### 5.4 Writes and a new schema do not race
+
+Every record write (create, replace, delete) runs in one transaction that first takes
+the type's lock in shared mode: `pg_advisory_xact_lock_shared` on a key derived from
+`records:<type>`. Under it, the write reads the `record_types` row, checks the body
+against that schema (§5.3 step 3), and writes the row with that row's `commit` as
+`schema_commit`. A registration takes the same key with `pg_advisory_xact_lock`
+(exclusive), so it waits for the writes in flight, and writes wait for it. The
+registration writes `record_types` and commits before it releases the lock (§5.1). So a
+write checks against the schema that was newest when it took the lock, and no row that
+a registration checked can change before the new schema is in force. Step 3 runs inside
+the lock, but its patterns stay within the time budget of P7, so a write holds the
+shared lock for at most that budget plus the insert.
+
+### 5.5 Reads
 
 A read returns the body with its keys in the schema's order, not the stored order (P17),
 plus `id`, `version`, `schema_commit` and the four stamps.
 
-The agent gets the same routes as tools (`record_list`, `record_get` at `read`;
-`record_put`, `record_delete` at `write`), and `page_list`, `page_get`, `page_register`
+The agent gets the same routes as tools (`record_list`, `record_get` and
+`record_type_get` at `read`; `record_put`, `record_delete` and `record_type_register` at
+`write`), and `page_list`, `page_get`, `page_register`
 at `read` and `write`, through the API like every agent tool.
 
 ## 6. Why orders is first-party React, not a declared page
@@ -489,14 +527,16 @@ usable on its own. None starts before the owner approves this spec and lifts the
    `core/ui_files.py` from `api/template_ui.py`. The tests of both move with them, and
    `TemplateUi.test.tsx` passes unchanged.
 2. **Pages** (backend, frontend, agent). `PageHistory`, `pages_repo_head`, `pages` in the off-box push, the routes of
-   §3.3, `page.changed`, the shell's `/p/:name/*` and nav, `PageUi`, Host API v2 without
+   §3.3, `page.changed` and its two topics in `api/realtime.py`, the shell's `/p/:name/*` and nav, `PageUi`, Host API v2 without
    `records` (`api.request`, `flows`, `realtime`, `files`, `navigate`, `describe`),
    `UI_API_CURRENT` 2, the assistant's confirm (§7.4), agent `page_list`, `page_get`,
    `page_register`, mocks under `src/mocks/features/pages/`, the edge's 404 test and the
    lint list (§8).
-3. **Records** (backend, frontend, agent). The `records` migration, record types in
-   `_types/`, `records/store.py`, the routes of §5.3 with the check at the route,
-   `record.changed` and its topics, `host.records`, agent `record_*`, mocks.
+3. **Records** (backend, frontend, agent). The `record_types` and `records` migration,
+   record types in `_types/` with the routes of §5.1 and their reconcile, `records/store.py`,
+   the routes of §5.3 with the check at the route and the lock of §5.4,
+   `record.changed` and its topics, `host.records`, agent `record_*` and
+   `record_type_*`, mocks.
 4. **Host elements** (frontend). `<sb-table>`, `<sb-filter-bar>`, `<sb-drawer>`,
    `<sb-record-form>`; a template's `api: 2` with `records`.
 5. **Authoring** (docs, agent). The guide's "Pages" section, the served `host.d.ts`,
