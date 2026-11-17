@@ -10,7 +10,7 @@ import contextlib
 import logging
 import threading
 import uuid
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Iterator, Sequence
 from pathlib import Path
 
 import pytest
@@ -350,10 +350,14 @@ async def test_a_cancel_from_outside_is_not_taken_for_a_lost_hold() -> None:
 async def test_a_pin_and_a_slot_lost_in_one_tick_end_with_an_error(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A fetch holds an install slot inside a pin (`CheckoutFetcher.fetch`). When both
-    are lost in one tick, the inner block takes the outer one's cancel for one from
-    outside and lets it through; the outer block still ends with `HoldLostError`, both
-    rows are released and the task is not left cancelling (#6560)."""
+    """A fetch holds an install slot inside a pin (`CheckoutFetcher.fetch`), and both are
+    lost at once (#6560). The two renewals share one cue and run in threads, so the
+    order is not fixed: the slot's loss can land first, the pin's can, or both cancels
+    can arrive before the block runs and count as one. On every path the fetch ends with
+    `HoldLostError`, each loss a renewal saw is logged once, the pin is released and the
+    task is not left cancelling. The order where the pin is lost while the inner block
+    already ends is fixed in
+    `test_a_pin_lost_while_the_inner_slot_is_released_ends_with_an_error`."""
     renewals = _Renewals()
     cue = _Cue(renewals)
     rows, slots = _Rows(renewals), _Slots(renewals)
@@ -382,6 +386,15 @@ async def test_a_pin_and_a_slot_lost_in_one_tick_end_with_an_error(
     assert current.cancelling() == 0
 
 
+@contextlib.contextmanager
+def _removed(handler: logging.Handler) -> Iterator[None]:
+    """Remove ``handler`` from the library's logger at the end."""
+    try:
+        yield
+    finally:
+        logging.getLogger(libraries.__name__).removeHandler(handler)
+
+
 async def test_a_pin_lost_while_the_inner_slot_is_released_ends_with_an_error(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -396,9 +409,20 @@ async def test_a_pin_lost_while_the_inner_slot_is_released_ends_with_an_error(
     loop = asyncio.get_running_loop()
     pin_lost = threading.Event()
 
+    class _PinLoss(logging.Handler):
+        """Set when the pin's renewal logs its loss: it cancels the block in the same
+        step, so the cancel is sent before the release below returns. A flag set in the
+        renew's thread came too early: the release could return, and the inner block's
+        error reach the outer one, before the renewal's coroutine sent the cancel."""
+
+        def emit(self, record: logging.LogRecord) -> None:
+            if record.__dict__.get("row") == "pin hold":
+                pin_lost.set()
+
     class _LateSlots(_Slots):
         def drop(self, slot: int, token: uuid.UUID) -> object:
-            # Lose the pin now, and let its renewal land before the release returns.
+            # Lose the pin now, and let its renewal cancel the block before the release
+            # returns.
             rows.held.clear()
             loop.call_soon_threadsafe(pin_cue.go)
             if not pin_lost.wait(10):
@@ -409,14 +433,11 @@ async def test_a_pin_lost_while_the_inner_slot_is_released_ends_with_an_error(
     gate = CheckoutGate(rows, sleep=pin_cue)
     permits = InstallPermits(1, slots=slots, ttl=0.6, sleep=slot_cue)
 
-    def renew_pin(token: uuid.UUID) -> bool:
-        held = _Rows.renew_pin(rows, token)
-        if not held:
-            pin_lost.set()
-        return held
-
-    rows.renew_pin = renew_pin  # type: ignore[method-assign]
+    handler = _PinLoss(logging.ERROR)
+    logging.getLogger(libraries.__name__).addHandler(handler)
     with (
+        contextlib.closing(handler),
+        _removed(handler),
         caplog.at_level(logging.ERROR, logger=libraries.__name__),
         pytest.raises(HoldLostError) as raised,
     ):
