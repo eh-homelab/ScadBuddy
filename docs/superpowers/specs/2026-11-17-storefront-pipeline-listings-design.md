@@ -78,7 +78,12 @@ Each fact names where and how it was measured. "Read" means a read of the code o
 8. **A pipeline job's result is its first output.** `workflows/pipelines.py` records
    `result=ctx.outputs[0].result, outputs=ctx.outputs`, and `Job.outputs` lists every
    output (`render/job_models.py`). A pipeline may call `ctx.output` more than once
-   (pipelines spec §5.2). Read.
+   (pipelines spec §5.2). Each output's `JobResult` is built by `workflows/outputs.py`
+   (the end of `build_output`, which `pipeline_activities.py` `write_output` runs):
+   `model_3mf` is the one multi-plate 3MF of the output (every plate,
+   `write_plates_3mf`), and `colors` is the same `colours` list that writer is given, so
+   it lists the whole output's colours in that 3MF's slot order. `preview_glb` holds the
+   first plate only (`write_glb(list(plates[0].parts), …)`). Read.
 9. **The slice price.** `slice_price.py` `price_variant` renders the variant through
    `output_for_reference`, with `source=STOREFRONT`, so the output stays out of Recent
    renders (#6371, merged in 8de2907a9). It slices every plate through
@@ -409,6 +414,25 @@ also when:
 `line_prices.py` `reprice` applies the same two rules at submit, so a cart line never
 keeps a firm price for a design the listing no longer sells.
 
+**The slots of a pipeline render.** `renders.py` `variant_of` takes the slots from
+`job.result.colors` and the price key's digest from `job.result.model_3mf`, and the
+slice slices the output that `output_for_reference` saves from that job. For a pipeline
+job with one output, `result` is that output's: `model_3mf` is the whole kit's 3MF, every
+plate, and `colors` lists that 3MF's colours in its slot order (fact 8). So the key, the
+slot filaments and the slice all describe the same file. PR 3 tests this (§10.1),
+because a per-piece list would give a wrong price with no error.
+
+**No promise of a price.** A visitor's line may still be priced by hand on any visit, as
+for every listing: after #6581 a variant has no price while the profile printer's status
+cannot be read (`printer_opening` answers None), and a slice that fails gives none
+either. A whole dollhouse slices for longer than a keychain, so a status blip during the
+wait is more likely to cost that visitor the firm price. The design adds no retry of its
+own for this.
+
+**The preview shows the first plate.** `preview_glb` is the first plate only (fact 8),
+so a kit's preview shows part of the kit. The storefront shows it as it is; a kit-wide
+preview is not in this design.
+
 ### 7.3 The slice price
 
 The slice run itself needs no pipeline-specific change. `price_variant` renders the
@@ -432,7 +456,8 @@ not yet on `main`):
   preset goes in `choices.filament_overrides`, and the 3MF gives the colour.
 
 A pipeline variant goes through `plan_variant` and `slice_request` unchanged, with the
-`PrinterOpening` of the profile's printer. #6581 also changes `price_key`; this design
+`PrinterOpening` of the profile's printer. The remembered choices `opening_choices`
+takes are read by the listing's slug, as for any listing. #6581 also changes `price_key`; this design
 adds nothing to the key, because the 3MF's sha256 already differs when the inputs
 differ. Publish's `check_sliceable` (`listings.py`, 422
 `listing_material_unsliceable`) applies to a pipeline listing as it is: after #6581 it
@@ -503,6 +528,10 @@ A listing pins a commit (fact 11). Here that means:
   `input_outside_listing`, and never reaches `inputs`.
 - `render_estimate` and `reprice`: `none` for a job whose inputs other than `params`
   differ from the snapshot, and for a job with two outputs.
+- PR 3, the slots of a pipeline render: a fixture pipeline that packs two pieces of
+  different colours onto two plates. The job's `result.colors` lists every colour of
+  both plates in the 3MF's slot order, `result.model_3mf` is the file the slice run
+  reads, and `variant_of` gives one slot filament per colour of the whole kit.
 - One `requires_temporal` API test with a small pipeline fixture template (fake
   openscad, as `tests/api` renders): publish, a visitor's render through the storefront
   render route, then the order item's render, both with the listing's inputs.
@@ -552,7 +581,8 @@ until the step that makes it safe.
    only the estimate read starts a slice, and in this PR it starts none for a pipeline
    render. No pipeline listing could be published before this PR, so no such row exists.
    Each pipeline line is therefore "priced by hand", and `reprice` finds no row at
-   submit either.
+   submit either. `prepare.py` and the `PrepareListing` workflow start no slice: they
+   only render (checked by reading both on `main`, and by scadify on #6581's tree).
 3. **`feat(storefront): price a pipeline listing`** (backend). The two rules of §7.2 in
    `render_estimate` and `reprice`, the slice request through #6581's `plan_variant`
    and `slice_request` (§7.3), and the slice-price test for a pipeline variant. **It
@@ -573,13 +603,20 @@ Then the prod checks of §10.4, as a comment on #5701.
 2. **The schema file.** Must a pipeline template declare `pipeline.inputs` before it can
    be listed (this design)? The other choice is to list any pipeline and check nothing
    but the size, which trusts the shop's inputs to the template's own clamping.
-3. **Render cost.** A visitor's render of a pipeline listing is one job, but it fans out
+3. **Render and slice cost.** A visitor's render of a pipeline listing is one job, but it fans out
    to one openscad run per distinct piece: 11 or 12 for a one-storey dollhouse (12
    unless it has no windows or every opening glazed, because `pipeline.py`
    `house_pieces` leaves out an entry whose count is 0; counted by reading it). The
    render limits count jobs (`storefront_renders_per_minute`, `…_per_day`,
    `storefront_render_concurrency`). Should a pipeline render count as more than one,
    for example by its pieces?
+   The slice is the larger cost. A kit's price is one slice of a multi-plate 3MF, and it
+   holds one of the `storefront_slices_concurrent` places (`SlicePrices.claim(...,
+   limit=)`) for much longer than a keychain's slice. While it runs, other visitors'
+   prices wait ("Working out the price…"). This design counts a pipeline variant as one
+   slice, as any variant. That is acceptable while kits are few, since a variant is
+   sliced once and its price is kept by key. Should a kit slice instead take more than
+   one place, or run on a place of its own?
 4. **Several outputs.** This design prices a render with more than one output by hand
    (§7.2). Should publish instead refuse a listing whose pipeline can make several
    outputs? Publish cannot know that without a render.
