@@ -1175,7 +1175,8 @@ async def scheduled_pull(
     store: Filament, load: Callable[[], StoredSettings], sync: Callable[[], FilamentSync]
 ) -> Outcome:
     """The Schedule's pull (`SpoolRefresh`): ``skipped`` with ``filament_sync.spools``
-    ``off`` or no BB URL, ``failed`` when BB or the store fails (logged, never raised),
+    ``off`` (no spool pulled, no usage row booked) or no BB URL,
+    ``failed`` when BB or the store fails (logged, never raised),
     else ``pulled``. ``sync`` reads the setting as it is now (#6262 Task 13)."""
     if (await asyncio.to_thread(sync)).spools == "off":
         logger.info("Bambuddy's spools are not pulled: the Filament sync is off")

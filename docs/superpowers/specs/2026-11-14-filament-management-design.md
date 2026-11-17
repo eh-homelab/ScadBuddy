@@ -422,7 +422,7 @@ Low-cardinality labels only: material, brand, location, not the spool id.
   grams per spool, and the watcher imports it while the print still runs, before
   any actual exists. A usage row is what BB deducted from each spool. When SB and
   BB both record one plate, BB's grams count (§5.5 rule 3). The booking runs
-  inside the pull, so it obeys #6262's `filament_bb_pull` setting. The per-type
+  inside the pull, so it obeys #6262's `filament_sync.spools` setting. The per-type
   sync settings are #6265's.
   The reasons are in `docs/superpowers/plans/2026-11-15-filament-capture.md`,
   "Decisions this plan makes", with the measurements of 2026-11-15 in §8.2.

@@ -108,7 +108,7 @@ measure. The design below rests on these facts:
   `SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test`;
   `uv run --frozen ruff check . && uv run --frozen ruff format --check . && uv run --frozen mypy`.
 - Out of scope: per-type sync settings and SB→BB push. Both are #6265's, as the epic's
-  table says. The gate that exists today is #6262's `filament_bb_pull` setting
+  table says. The gate that exists today is #6262's `filament_sync.spools` setting
   (`off` | `bb_to_sb`). The BB usage booking runs inside `read_and_pull`, so it obeys
   that setting. Do not read any other sync setting here. The AMS weight sync button
   (#6268) is out of scope too.
@@ -202,7 +202,7 @@ rulings. "Cost" is what the ruling costs if it is wrong.
 | C8 | The stub (B8). | Task 8 | Hang. |
 | C9 | One shared helper `bambuddy/models.py` `as_utc`, used by `Spool`, `SpoolUsage` and `match_archive` for `Archive.completed_at`. | Task 7 | `TypeError` on every pull. |
 | C10 | The end-to-end test links the spool in a first pull at t0, then pulls at t1 with `updated_at == created_at`. | Task 7 | A regression in rule 1 passes CI. |
-| C11 | Per-type sync settings are #6265's (the epic's table). Today's gate is #6262's `filament_bb_pull`, and the usage booking obeys it. | Global Constraints | A weights-only "off" cannot stop usage rows until #6265. |
+| C11 | Per-type sync settings are #6265's (the epic's table). Today's gate is #6262's `filament_sync.spools`, and the usage booking obeys it. | Global Constraints | A weights-only "off" cannot stop usage rows until #6265. |
 | C12, C13 | Spec §6, §5.5 and §8.2 are changed in Task 1A, before any code. | Task 1A | Review blocks on a spec contradiction. |
 | C14 | The source rewrite is safe on prod data; no recompute. | Task 4 | None found. |
 | C15 | The pull logs `usage_booked`. The PR body says the first pull books up to 200 historic usage rows, and that paired historic plates then take BB's grams. | Tasks 7, 9 | A surprised owner; no data loss. |
@@ -225,7 +225,7 @@ rulings. "Cost" is what the ruling costs if it is wrong.
 | D11 | Merge both `Operation` entries and models. | Task 7 | None. |
 | D12 | Moot (C16). | Task 5 | None. |
 | D13 | No edit to the print activities. | — | None. |
-| D14 | The usage booking obeys `filament_bb_pull`; tested once after the rebase. | Task 7 | Usage booked with the pull "off". |
+| D14 | The usage booking obeys `filament_sync.spools`; tested once after the rebase. | Task 7 | Usage booked with the pull "off". |
 
 ## Review Focus
 
@@ -499,7 +499,7 @@ The rules the walk adds to #6261's (spec §5.5, as Task 1A wrote it):
   `usage_booked` and `usage_unlinked`, and log `usage_booked` per pull (preflight C15). A
   failure of the usage read or its booking is logged and leaves the spool pull's report
   standing.
-- After the rebase onto #6262: the booking runs only when `filament_bb_pull` lets the
+- After the rebase onto #6262: the booking runs only when `filament_sync.spools` lets the
   pull run (preflight D14). It runs inside the pull, so it adds no check of its own.
 
 - [ ] **Step 1: Write the failing tests:**
@@ -511,7 +511,7 @@ The rules the walk adds to #6261's (spec §5.5, as Task 1A wrote it):
   - `test_bb_reading_and_usage_of_one_write_count_once` (preflight C10): link the BB spool in a first pull at t0. Then pull a second time, with the BB spool's `updated_at` equal to a usage row's `created_at` at t1 > t0, and `weight_used` holding that row → `grams_left == label − weight_used`, not that minus the row.
   - `test_an_sb_plate_and_its_usage_row_count_once`: an SB `print_started`/`print_ended` of job J (`ref_kind` `PRINT_RUN`, through `ledger.record`) at T; a usage row J at T − 1 s, and a BB reading at T − 1 s → `grams_left` equals the BB value.
   - `test_spool_usage_reads_and_skips_a_bad_row` (client test with `httpx.MockTransport`, as the file's other reads do).
-  - After the rebase onto #6262: `test_usage_is_not_booked_with_the_pull_off` (`filament_bb_pull = "off"` → no `bb_usage` event).
+  - After the rebase onto #6262: `test_usage_is_not_booked_with_the_pull_off` (`filament_sync = {spools: "off"}` → no `bb_usage` event).
 - [ ] **Step 2: Run** → FAIL.
 - [ ] **Step 3: Implement.** Rewrite the `bambuddy_pull.py` docstring's last paragraph:
   the reading sits at BB's `updated_at`, and BB's usage rows sit at their `created_at`,
@@ -702,4 +702,4 @@ test. If one is missing or differs, stop and report.
 - Merge of main (#6262, PR #6550): one walk. `ledger.basis` holds all of #6263's rules (the delta-first order at one instant, the paired-plate rule, the anchor's own clock) and returns `GramsBasis(anchor, deltas)`. `grams_left` calls `basis` and takes the deltas off the anchor, so the UI's anchor and deltas agree with `grams_left` by construction (D1). `basis` sorts by `(at, delta before reading, seq)`: #6262's `seq` breaks the ties that were insert order. A paired job's `bb_usage` event is in `GramsBasis.deltas`; its skipped `print_run` events are not. Cost if wrong: the UI's basis and `grams_left` could differ; `test_basis_matches_grams_left` pins them.
 - Merge of main: the `ref_kind` constants live once in `ledger.py`, `Final`-typed: `PRINT_RUN`, `PRINT_STARTED`, `PRINT_ENDED`, `PRINT_ESTIMATE`, `PRINT_ACTUAL` (#6262 Task 6; the same meaning as #6263's) and `BB_USAGE`, `BB_SPOOL`, `BB_REFS` (#6263). #6263's second `PRINT_RUN` definition is gone.
 - Merge of main: `20261115T0706Z_filament_capture.sql` sorts before 17 files that main added. It depends only on `filament_spool_events` (`20261114T1301Z`, `20261115T0029Z`). No later main file writes a `print_run` or `bb_scale` event (`20261116T0547Z_filament_carry_tray_links.sql` writes `moved` events only), so the order is safe.
-- Merge of main: the pull's gate is #6262's `filament_sync.spools` (`scheduled_pull`'s `sync`), not `filament_bb_pull`. The usage booking runs inside `read_and_pull`, so `spools` "off" stops it too (D14 holds; #6265 splits it).
+- Merge of main: the pull's gate is #6262's `filament_sync.spools` (`scheduled_pull`'s `sync`), not `filament_sync.spools`. The usage booking runs inside `read_and_pull`, so `spools` "off" stops it too (D14 holds; #6265 splits it).

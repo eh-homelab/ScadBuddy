@@ -379,7 +379,8 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
         # -- Filament (#6262) -----------------------------------------------------------
         "filament_sync": SettingDoc(
             "Spools",
-            "Off, Bambuddy's spools are never pulled and ScadBuddy's own are the only ones."
+            "Off, Bambuddy's spools are never pulled, its usage rows are never booked and"
+            " ScadBuddy's own spools are the only ones."
             " Bambuddy \u2192 ScadBuddy copies Bambuddy's spools in on the schedule below;"
             " ScadBuddy never writes to Bambuddy.",
         ),

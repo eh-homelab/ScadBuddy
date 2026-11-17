@@ -613,6 +613,21 @@ async def test_off_skips_the_pull(pg_pool: PgPool) -> None:
     assert f.spools.list() == []
 
 
+async def test_usage_is_not_booked_with_the_pull_off(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    with respx.mock(assert_all_called=False) as router:
+        usage = router.get(f"{BB}/api/v1/inventory/usage").respond(json=[])
+        spools = router.get(f"{BB}/api/v1/inventory/spools").respond(json=[])
+        assert (
+            await scheduled_pull(f, lambda: settings, lambda: FilamentSync(spools="off"))
+            == "skipped"
+        )
+        assert not usage.called
+        assert not spools.called
+    assert f.spools.list() == []
+
+
 async def test_a_scheduled_pull_with_bambuddy_down_is_a_logged_no_op(
     pg_pool: PgPool, caplog: pytest.LogCaptureFixture
 ) -> None:
