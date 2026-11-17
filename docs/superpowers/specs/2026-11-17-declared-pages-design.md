@@ -94,7 +94,8 @@ data/pages/
 - `PageHistory(GitRepo)` (`backend/scadbuddy/pages/repository.py`) is `FlowHistory`'s
   shape: one commit per version, an optional message and body, and a Postgres lock that
   carries HEAD (`pages_repo_head`, a migration, and `repo_lock.py` `pages_coordinator`).
-  The off-box push (`git_remote/`, #4974) covers it as it covers flows.
+  The off-box push (`git_remote/`, #4974) pushes the `models` and `flows` repositories
+  only (`git_remote/component.py:29-31`); phase 2 adds `pages` to that map.
 - A version is the whole `<name>/` tree at one commit. A version never changes.
 - A page is deleted by a commit that removes `<name>/`. A restore brings it back as a new
   version, as for flows.
@@ -472,7 +473,7 @@ usable on its own. None starts before the owner approves this spec and lifts the
    behaviour change). `template-ui/UiMount.tsx` from `TemplateUi.tsx`;
    `core/ui_files.py` from `api/template_ui.py`. The tests of both move with them, and
    `TemplateUi.test.tsx` passes unchanged.
-2. **Pages** (backend, frontend, agent). `PageHistory`, `pages_repo_head`, the routes of
+2. **Pages** (backend, frontend, agent). `PageHistory`, `pages_repo_head`, `pages` in the off-box push, the routes of
    §3.3, `page.changed`, the shell's `/p/:name/*` and nav, `PageUi`, Host API v2 without
    `records` (`api.request`, `flows`, `realtime`, `files`, `navigate`, `describe`),
    `UI_API_CURRENT` 2, the assistant's confirm (§7.4), agent `page_list`, `page_get`,
