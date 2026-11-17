@@ -303,7 +303,8 @@ export const filamentPurchasingTools: Tool[] = [
       'type_id?, ...}`. With `invoice_id`, edit a draft: the `fields` given change and, when `lines` is sent, it ' +
       'replaces every line. Tax and shipping are spread over the lines on each write: give `line_tax` on every ' +
       'line or on none (422 for some). Money is a decimal string. 409 for a taken number (`existing_invoice_id`) ' +
-      'or a confirmed invoice. Only what the user says. Writes ScadBuddy only.',
+      'or a confirmed invoice. An edit with both `fields` and `lines` is two requests: if the second fails, the ' +
+      'header change stays. Only what the user says. Writes ScadBuddy only.',
     input: z.object({
       invoice_id: z.string().uuid().optional().describe("An invoice's `id`; omit to add"),
       fields: z.record(z.string(), z.unknown()).default({}).describe('The invoice header fields'),

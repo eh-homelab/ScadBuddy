@@ -788,7 +788,7 @@ export const handlers = [
     const raw = await request.json()
     const extra = extraKeys(raw, FIELDS.typeCreate)
     if (extra) return extra
-    const body = normalised(raw as S['SpoolTypeCreate'])
+    const body = normalised(raw as S['SpoolTypeCreate-Input'])
     const refused = typeRefusal(body)
     if (refused) return refused
     const made = linkPriceBook({

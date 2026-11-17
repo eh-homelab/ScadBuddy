@@ -280,3 +280,22 @@ def test_a_draft_deletes_and_a_confirmed_one_is_a_409(client: TestClient, pg_con
     assert client.put(f"{url}/lines", json=[]).status_code == 409
     assert client.patch(url, json={"shipping": "1"}).status_code == 409
     assert client.patch(url, json={"note": "paid"}).status_code == 200
+
+
+def test_the_invoice_list_filters_by_supplier_and_status(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    one, two = _supplier(client, "One"), _supplier(client, "Two")
+    first = client.post(f"{URL}/invoices", json=_invoice_body(one, number="A")).json()
+    second = client.post(f"{URL}/invoices", json=_invoice_body(two, number="B")).json()
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE filament_invoices SET status = 'confirmed' WHERE id = %s", (second["id"],)
+        )
+    assert [i["id"] for i in client.get(f"{URL}/invoices", params={"supplier_id": one}).json()] == [
+        first["id"]
+    ]
+    assert [
+        i["id"] for i in client.get(f"{URL}/invoices", params={"status": "confirmed"}).json()
+    ] == [second["id"]]
+    assert client.get(f"{URL}/invoices", params={"status": "bogus"}).status_code == 422

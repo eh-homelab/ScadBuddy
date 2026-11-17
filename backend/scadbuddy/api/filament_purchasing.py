@@ -1,6 +1,7 @@
 """`/api/v1/filament` purchasing (#6266, epic #6260): suppliers, their products, price
-points, the price sheet and a type's price history, over `filament/suppliers.py`. Money is
-a `Decimal` and goes over the wire as a string."""
+points, the price sheet and a type's price history, over `filament/suppliers.py`, and
+invoice drafts, over `filament/invoices.py`. Money is a `Decimal` and goes over the wire as
+a string."""
 
 from __future__ import annotations
 
@@ -314,6 +315,7 @@ async def list_invoices(
     "/invoices",
     response_model=pm.InvoiceDetail,
     status_code=status.HTTP_201_CREATED,
+    responses={409: {"model": pm.InvoiceConflict}},
     summary="Add an invoice draft",
     description=(
         "A draft from the header and optionally its `lines`. Tax and shipping are spread over "
@@ -329,7 +331,7 @@ async def create_invoice(
 ) -> pm.InvoiceDetail:
     try:
         made, new = await asyncio.to_thread(filament.invoices.create, body, actor=actor(caller))
-    except (DuplicateInvoiceError, InvoiceConfirmedError, *_INVOICE_ERRORS) as exc:
+    except (DuplicateInvoiceError, *_INVOICE_ERRORS) as exc:
         raise _invoice_error(exc) from None
     if not new:
         response.status_code = status.HTTP_200_OK
@@ -354,6 +356,7 @@ async def get_invoice(filament: FilamentDep, invoice_id: UUID) -> pm.InvoiceDeta
 @router.patch(
     "/invoices/{invoice_id}",
     response_model=pm.InvoiceDetail,
+    responses={409: {"model": pm.InvoiceConflict}},
     summary="Change an invoice",
     description=(
         "Only the fields sent change; the lines' tax and cost are worked out again. A "

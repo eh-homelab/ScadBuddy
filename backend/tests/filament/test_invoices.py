@@ -257,3 +257,12 @@ def test_the_list_is_newest_first_and_filters(pg_pool: PgPool) -> None:
     assert [i.id for i in store.list(supplier_id=one)] == [old.id]
     _confirm(pg_pool, old.id)
     assert [i.id for i in store.list(status="confirmed")] == [old.id]
+
+
+def test_a_header_only_draft_has_no_lines(pg_pool: PgPool) -> None:
+    store = _store(pg_pool)
+    invoice = _make(store, _body(_supplier(pg_pool), lines=[]))
+    assert invoice.lines == []
+    assert invoice.line_count == 0
+    assert invoice.difference == D("107.0000")
+    assert store.get(invoice.id) == invoice

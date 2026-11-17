@@ -17,6 +17,7 @@ from uuid import UUID
 
 from pydantic import AfterValidator, BaseModel, Field, StringConstraints, model_validator
 
+from scadbuddy.core.problems import Problem
 from scadbuddy.filament.models import Name, Note, SpoolTypeCreate, Text, _In, _Patch, _Row
 
 
@@ -194,6 +195,13 @@ class InvoiceLine(_Row):
     update_spool_ids: list[UUID]
     unit_cost: Decimal | None = None
     spool_ids: list[UUID] = Field(default_factory=list)
+
+
+class InvoiceConflict(Problem):
+    """The 409 of an invoice write: ``existing_invoice_id`` names the invoice that has the
+    number; it is absent when the invoice is confirmed (frozen)."""
+
+    existing_invoice_id: UUID | None = None
 
 
 class InvoiceCreate(_In):

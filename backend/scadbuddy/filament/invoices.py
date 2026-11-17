@@ -207,8 +207,10 @@ class InvoiceStore:
                 invoice_id: UUID = row["id"]
                 self._replace(conn, invoice_id, body.lines)
                 made = self._detail(conn, invoice_id)
-        except errors.UniqueViolation as exc:
-            if exc.diag.constraint_name == "filament_invoices_import_run" and run is not None:
+        except errors.UniqueViolation:
+            # Postgres names the first index that fails, which may be the number's: a
+            # retry of a numbered invoice meets both. The run id wins.
+            if run is not None:
                 raced = self._by_run(run)
                 if raced is not None:
                     return raced, False
@@ -260,9 +262,11 @@ class InvoiceStore:
                     self._recompute(conn, invoice_id)
                 return self._detail(conn, invoice_id)
         except errors.UniqueViolation:
-            assert supplier_id is not None
-            taken = self._taken(supplier_id, patch.number, invoice_id)
+            taken = (
+                None if supplier_id is None else self._taken(supplier_id, patch.number, invoice_id)
+            )
             if taken is None:
+                # Not the number index (the only unique index an update can break).
                 raise
             raise DuplicateInvoiceError(taken) from None
 
