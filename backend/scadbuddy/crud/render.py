@@ -44,8 +44,8 @@ sent again is the same row (ON CONFLICT), a use stamps the row again.
 and `InstallSlots` (the render leases, pin holds and install slots) over the routes, with
 the same names, signatures and answers. The worker chooses each token, so every take and
 claim is natural; a take that waits on the API's removal keeps waiting (`REMOVAL_RUNNING`),
-as the SQL take waited on `REMOVAL_LOCK`. A renew the API refuses because the row is gone
-(`NO_LEASE`, `NO_HOLD`) or another token holds it (`NOT_HOLDER`) returns False, as the SQL
+as the SQL take waited on `REMOVAL_LOCK`. A renew the API refuses because the row is gone or
+lapsed (`NO_LEASE`, `NO_HOLD`) or another token holds it (`NOT_HOLDER`) returns False, as the SQL
 renew does; `_renewed` then ends the block with `HoldLostError`. Any other refusal is still
 raised, and the renewing loop logs it as a failed renewal. A slot's release
 that finds another token on it (`NOT_HOLDER`: ours lapsed and was taken) is released,
@@ -125,7 +125,8 @@ FOLDER_LOCKED = "folder-locked"
 REMOVAL_RUNNING = "removal-running"
 #: `api/crud_render.py` `NOT_HOLDER`: a slot another token holds.
 NOT_HOLDER = "not-holder"
-#: `api/crud_render.py` `NO_LEASE`, `NO_HOLD`: a renew of a lease or a hold with no row.
+#: `api/crud_render.py` `NO_LEASE`, `NO_HOLD`: a renew of a lease or a hold with no live
+#: row (gone, or lapsed).
 NO_LEASE = "no-lease"
 NO_HOLD = "no-hold"
 #: A take's wait for its answer: the route's `LEASE_LOCK_WAIT` (2 s) and a pool wait
