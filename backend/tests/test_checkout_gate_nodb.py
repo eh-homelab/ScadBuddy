@@ -347,6 +347,94 @@ async def test_a_cancel_from_outside_is_not_taken_for_a_lost_hold() -> None:
     assert rows.held == set()
 
 
+async def test_a_pin_and_a_slot_lost_in_one_tick_end_with_an_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A fetch holds an install slot inside a pin (`CheckoutFetcher.fetch`). When both
+    are lost in one tick, the inner block takes the outer one's cancel for one from
+    outside and lets it through; the outer block still ends with `HoldLostError`, both
+    rows are released and the task is not left cancelling (#6560)."""
+    renewals = _Renewals()
+    cue = _Cue(renewals)
+    rows, slots = _Rows(renewals), _Slots(renewals)
+    gate = CheckoutGate(rows, sleep=cue)
+    permits = InstallPermits(1, slots=slots, ttl=0.6, sleep=cue)
+    with (
+        caplog.at_level(logging.ERROR, logger=libraries.__name__),
+        pytest.raises(HoldLostError),
+    ):
+        async with gate.pinning(), permits.permit():
+            await reaches(lambda: len(cue.asked), 2)
+            rows.held.clear()
+            slots.held[0] = uuid.uuid4()
+            cue.go()
+            cue.go()
+            # The deadline only ends a test whose block is never ended.
+            async with asyncio.timeout(10):
+                await asyncio.Event().wait()
+    # Each loss that a renewal saw before the blocks ended is logged once.
+    lost = [row for row, _ in _lost(caplog.records)]
+    assert lost and set(lost) <= {"pin hold", "library install slot"}
+    assert len(lost) == len(set(lost))
+    assert rows.held == set()
+    current = asyncio.current_task()
+    assert current is not None
+    assert current.cancelling() == 0
+
+
+async def test_a_pin_lost_while_the_inner_slot_is_released_ends_with_an_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The slot inside a pin is lost first; the pin is lost while the inner block is
+    already ending, during the slot's release (#6585 review). The inner block takes back
+    its own cancel before it awaits anything, so the pin's cancel is the only one left,
+    and the outer block takes it back: the fetch ends with `HoldLostError`, not a plain
+    cancel, and the task is not left cancelling."""
+    renewals = _Renewals()
+    pin_cue, slot_cue = _Cue(renewals), _Cue(renewals)
+    rows = _Rows(renewals)
+    loop = asyncio.get_running_loop()
+    pin_lost = threading.Event()
+
+    class _LateSlots(_Slots):
+        def drop(self, slot: int, token: uuid.UUID) -> object:
+            # Lose the pin now, and let its renewal land before the release returns.
+            rows.held.clear()
+            loop.call_soon_threadsafe(pin_cue.go)
+            if not pin_lost.wait(10):
+                raise TimeoutError("the pin's renewal never came")
+            return super().drop(slot, token)
+
+    slots = _LateSlots(renewals)
+    gate = CheckoutGate(rows, sleep=pin_cue)
+    permits = InstallPermits(1, slots=slots, ttl=0.6, sleep=slot_cue)
+
+    def renew_pin(token: uuid.UUID) -> bool:
+        held = _Rows.renew_pin(rows, token)
+        if not held:
+            pin_lost.set()
+        return held
+
+    rows.renew_pin = renew_pin  # type: ignore[method-assign]
+    with (
+        caplog.at_level(logging.ERROR, logger=libraries.__name__),
+        pytest.raises(HoldLostError) as raised,
+    ):
+        async with gate.pinning(), permits.permit():
+            await reaches(lambda: len(pin_cue.asked) + len(slot_cue.asked), 2)
+            slots.held[0] = uuid.uuid4()
+            # Only the slot's renewal is cued: the pin's waits for the release.
+            slot_cue.go()
+            async with asyncio.timeout(10):
+                await asyncio.Event().wait()
+    assert raised.value.row == "pin hold"
+    assert [row for row, _ in _lost(caplog.records)] == ["library install slot", "pin hold"]
+    assert rows.held == set()
+    current = asyncio.current_task()
+    assert current is not None
+    assert current.cancelling() == 0
+
+
 async def test_a_lost_hold_is_a_503_to_try_again() -> None:
     """A route or an operation whose hold was lost answers a 503 that says so, not the
     500 of an unexpected error (#6560)."""
