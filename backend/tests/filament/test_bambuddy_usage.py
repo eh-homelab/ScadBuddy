@@ -18,7 +18,9 @@ from scadbuddy.filament.bambuddy_pull import pull, read_and_pull
 from scadbuddy.filament.bambuddy_usage import book_usage
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.component import Filament
+from scadbuddy.filament.inventory import FilamentInventory
 from scadbuddy.filament.locations import LocationStore
+from scadbuddy.filament.presets import PoolSpoolPresets
 from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.filament.types import SpoolTypeStore
 from scadbuddy.library.settings_store import StoredSettings
@@ -39,6 +41,8 @@ def _filament(pool: PgPool) -> Filament:
         types=SpoolTypeStore(pool),
         spools=FilamentSpoolStore(pool),
         locations=LocationStore(pool),
+        inventory=FilamentInventory(pool),
+        presets=PoolSpoolPresets(pool),
     )
 
 
@@ -221,6 +225,7 @@ async def test_a_pull_books_bambuddys_usage_rows(pg_pool: PgPool) -> None:
     with respx.mock() as router:
         router.get(f"{BB}/api/v1/inventory/spools").respond(json=[bb().model_dump(mode="json")])
         router.get(f"{BB}/api/v1/inventory/usage").respond(json=rows)
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
         router.get(f"{BB}/api/v1/archives/").respond(
             json=[{"id": 248, "printer_id": 1, "completed_at": ended}]
         )
@@ -244,6 +249,7 @@ async def test_rows_that_would_not_book_read_no_archives(pg_pool: PgPool) -> Non
     with respx.mock(assert_all_called=False) as router:
         router.get(f"{BB}/api/v1/inventory/spools").respond(json=[bb().model_dump(mode="json")])
         router.get(f"{BB}/api/v1/inventory/usage").respond(json=rows)
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
         archives = router.get(f"{BB}/api/v1/archives/").respond(json=[])
         report = await read_and_pull(f, settings)
     assert not archives.called
@@ -262,6 +268,7 @@ async def test_a_failed_unbooked_query_leaves_the_pull_standing(
     with respx.mock(assert_all_called=False) as router:
         router.get(f"{BB}/api/v1/inventory/spools").respond(json=[bb().model_dump(mode="json")])
         router.get(f"{BB}/api/v1/inventory/usage").respond(json=[usage().model_dump(mode="json")])
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
         report = await read_and_pull(f, settings)
     assert report.created == 1
     assert "could not find Bambuddy's unbooked usage rows" in caplog.text
@@ -305,6 +312,7 @@ async def test_a_failed_usage_read_leaves_the_pull_standing(
     with respx.mock() as router:
         router.get(f"{BB}/api/v1/inventory/spools").respond(json=[bb().model_dump(mode="json")])
         router.get(f"{BB}/api/v1/inventory/usage").respond(503)
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
         report = await read_and_pull(f, settings)
     assert (report.created, report.usage_booked) == (1, 0)
     assert "could not read Bambuddy's usage rows" in caplog.text
@@ -319,6 +327,7 @@ async def test_a_failed_archive_read_still_books_the_rows(
     with respx.mock() as router:
         router.get(f"{BB}/api/v1/inventory/spools").respond(json=[bb().model_dump(mode="json")])
         router.get(f"{BB}/api/v1/inventory/usage").respond(json=[usage().model_dump(mode="json")])
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
         router.get(f"{BB}/api/v1/archives/").respond(503)
         report = await read_and_pull(f, settings)
     assert report.usage_booked == 1
