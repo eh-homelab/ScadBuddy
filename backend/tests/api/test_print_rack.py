@@ -775,7 +775,7 @@ def test_an_unreadable_usage_still_previews_the_rack_without_logging_a_serial(
         assert not [s for s in INVENTED_SERIALS if s in text], record.getMessage()
         # ScadBuddy's own records carry no traceback. Another library's may: on a slow
         # runner Temporal's deadlock detector logs one with its own (#6529).
-        if record.name.split(".")[0] == "scadbuddy":
+        if record.name == "scadbuddy" or record.name.startswith("scadbuddy."):
             assert record.exc_info is None and record.exc_text is None, record.getMessage()
     assert not [s for s in INVENTED_SERIALS if s in response.text]
     # The real fallback reaches the guard (#1086 review, finding 4).
