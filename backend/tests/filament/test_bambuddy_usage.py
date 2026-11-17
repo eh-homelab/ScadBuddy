@@ -13,7 +13,7 @@ import respx
 
 from scadbuddy.bambuddy.models import Archive, SpoolUsage
 from scadbuddy.bambuddy.models import Spool as BbSpool
-from scadbuddy.filament import bambuddy_usage, ledger
+from scadbuddy.filament import bambuddy_usage, capture, ledger
 from scadbuddy.filament.bambuddy_pull import pull, read_and_pull
 from scadbuddy.filament.bambuddy_usage import book_usage
 from scadbuddy.filament.catalog import CatalogStore
@@ -334,3 +334,24 @@ async def test_a_failed_archive_read_still_books_the_rows(
     assert "could not read Bambuddy's archives" in caplog.text
     (event,) = _usage_events(f, spool)
     assert event.data["bb_archive_id"] is None
+
+
+def test_the_spools_are_locked_in_id_order_before_any_booking(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    f = _filament(pg_pool)
+    made = pull(f, [bb(id=7), bb(id=8)], now=NOW).created_ids
+    by_bb = {7: made[0], 8: made[1]}
+    high_first = max(by_bb, key=lambda k: str(by_bb[k]))
+    low = min(by_bb, key=lambda k: str(by_bb[k]))
+    rows = [usage(id=1, spool_id=high_first), usage(id=2, spool_id=low), usage(id=3, spool_id=7)]
+    locked: list[list[UUID]] = []
+    real = capture.lock
+
+    def spy(conn: Any, spool_ids: Any) -> None:
+        locked.append(list(spool_ids))
+        real(conn, spool_ids)
+
+    monkeypatch.setattr(capture, "lock", spy)
+    assert _book(f, rows).booked == 3
+    assert locked == [sorted(by_bb.values())]

@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from uuid import UUID
 
 from scadbuddy.bambuddy.models import Archive, SpoolUsage, as_utc
-from scadbuddy.filament import ledger
+from scadbuddy.filament import capture, ledger
 from scadbuddy.filament.ledger import Conn
 
 logger = logging.getLogger(__name__)
@@ -121,9 +121,17 @@ def book_usage(
     """Book ``rows`` on ``conn``'s transaction, as the module says (`_books`). A row of
     a BB spool with no link is counted ``unlinked``; a row of an archived SB spool is
     counted neither way. Each row is booked in its own savepoint: one that fails is
-    logged and skipped, and the rest are booked."""
+    logged and skipped, and the rest are booked. The spools it books are locked first, in
+    id order, as `capture.lock` does for a report write, so the two cannot deadlock."""
     report = UsageReport()
     links = _links(conn, rows)
+    spools = {
+        link.spool_id
+        for row in rows
+        if (link := links.get(row.spool_id)) is not None and _books(row, link)
+    }
+    if spools:
+        capture.lock(conn, sorted(spools))
     for row in rows:
         link = links.get(row.spool_id)
         if row.weight_used > 0 and link is None:
