@@ -57,10 +57,10 @@ export function wellFormed(value: unknown): unknown {
   return value
 }
 
-/** The `detail`, `reason` and refused fields (`errors[].loc`, backend crud/guard.py) of a problem response. */
+/** The `detail`, `reason` and, on a 422, refused fields (`errors[].loc`, backend crud/guard.py) of a problem response. */
 async function problemOf(response: Response): Promise<{ detail: string; reason?: string; fields: string[] }> {
   const body = (await response.json().catch(() => undefined)) as { detail?: unknown; reason?: unknown; errors?: unknown } | undefined
-  const errors = Array.isArray(body?.errors) ? (body.errors as unknown[]) : []
+  const errors = response.status === 422 && Array.isArray(body?.errors) ? (body.errors as unknown[]) : []
   const fields = errors.flatMap((e) => {
     const loc = (e as { loc?: unknown } | null)?.loc
     return Array.isArray(loc) ? [loc.map(String).join('.')] : []
