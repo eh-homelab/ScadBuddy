@@ -54,6 +54,8 @@ const PAGES = [
   '/filament/locations',
   '/filament/catalog',
   '/filament/ledger',
+  // Spool labels (#6264): two seeded spools.
+  `/filament/labels?ids=${spoolId(1)},${spoolId(2)}`,
   // The component gallery (#3653): in the mocked build only, which this spec runs on.
   '/ui-gallery',
 ]

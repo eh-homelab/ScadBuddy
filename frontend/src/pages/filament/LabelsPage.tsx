@@ -1,0 +1,159 @@
+import { ChevronLeftIcon, PrinterIcon } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
+import { Link, useSearchParams } from 'react-router'
+import { getSpool, type SpoolDetail } from '../../api/filament'
+import { Label } from '../../components/filament/Label'
+import { LABEL_HEIGHT_MM, LABEL_WIDTH_MM, labelPayload, MAX_LABELS, qrSvg } from '../../components/filament/labelSheet'
+import { Button } from '@/components/ui/button'
+import { Label as FieldLabel } from '@/components/ui/label'
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+
+type Layout = 'roll' | 'sheet'
+const LAYOUT_KEY = 'scadbuddy.labels.layout'
+
+function storedLayout(): Layout {
+  try {
+    return localStorage.getItem(LAYOUT_KEY) === 'sheet' ? 'sheet' : 'roll'
+  } catch {
+    return 'roll'
+  }
+}
+
+/**
+ * Print rules: only the label area prints. Everything else is hidden by `visibility`, and
+ * the area moves to the page's corner, so the app chrome leaves no gap and its scroll boxes
+ * clip nothing. A roll prints one label per page of the label's own size; a sheet packs
+ * them on the paper's own size with a margin.
+ */
+const printCss = (layout: Layout) => `
+@media print {
+  body * { visibility: hidden !important; }
+  #label-print, #label-print * { visibility: visible !important; }
+  #label-print { position: absolute; left: 0; top: 0; }
+  ${
+    layout === 'roll'
+      ? `@page { size: ${LABEL_WIDTH_MM}mm ${LABEL_HEIGHT_MM}mm; margin: 0; }
+  #label-print { display: block; }
+  #label-print > * { break-after: page; }
+  #label-print > *:last-child { break-after: auto; }`
+      : `@page { margin: 10mm; }
+  #label-print { display: flex; flex-wrap: wrap; gap: 2mm; width: 190mm; }`
+  }
+}`
+
+interface Loaded {
+  key: string
+  labels: { spool: SpoolDetail; svg: string }[]
+  failed: string[]
+}
+
+/**
+ * #6264 — `/filament/labels?ids=<id>,<id>`: spool labels to print. Each spool is read
+ * again (the ids are the page's only input) and drawn at 50 x 25 mm with its number and a
+ * QR code of `scadbuddy:spool:<id>`. The layout, `roll` (one label per page, for a label
+ * printer) or `sheet` (packed on paper), is remembered in this browser.
+ */
+export function LabelsPage() {
+  const [params] = useSearchParams()
+  const raw = params.get('ids') ?? ''
+  const ids = useMemo(() => [...new Set(raw.split(',').map((id) => id.trim()).filter(Boolean))], [raw])
+  const tooMany = ids.length > MAX_LABELS
+  const key = ids.join(',')
+  const [layout, setLayout] = useState<Layout>(storedLayout)
+  const [loaded, setLoaded] = useState<Loaded | null>(null)
+
+  useEffect(() => {
+    if (tooMany || ids.length === 0) return
+    let live = true
+    void Promise.all(
+      ids.map(async (id) => {
+        try {
+          const spool = await getSpool(id)
+          return { spool, svg: await qrSvg(labelPayload(spool.id)) }
+        } catch {
+          return id
+        }
+      }),
+    ).then((results) => {
+      if (!live) return
+      setLoaded({
+        key,
+        labels: results.filter((r): r is Loaded['labels'][number] => typeof r !== 'string'),
+        failed: results.filter((r): r is string => typeof r === 'string'),
+      })
+    })
+    return () => {
+      live = false
+    }
+    // `key` stands for `ids`.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, tooMany])
+
+  const choose = (next: string) => {
+    const chosen: Layout = next === 'sheet' ? 'sheet' : 'roll'
+    setLayout(chosen)
+    try {
+      localStorage.setItem(LAYOUT_KEY, chosen)
+    } catch {
+      // Blocked storage: the choice holds for this visit only.
+    }
+  }
+
+  const ready = !tooMany && loaded?.key === key ? loaded : null
+  const labels = ready?.labels ?? []
+
+  return (
+    <div className="h-full overflow-y-auto">
+      <style>{printCss(layout)}</style>
+      <div className="mx-auto max-w-4xl px-4 py-6">
+        <Link to="/filament/spools" className="mb-3 inline-flex items-center gap-1 text-[13px] text-muted-foreground hover:text-foreground">
+          <ChevronLeftIcon className="size-3.5" /> Spools
+        </Link>
+        <header className="mb-5 flex flex-wrap items-center gap-3">
+          <div className="min-w-0 flex-1">
+            <h1 className="text-lg font-semibold tracking-tight">Spool labels</h1>
+            <p className="text-[13px] text-muted-foreground">
+              {tooMany ? '' : ids.length === 0 ? 'No spools chosen.' : `${labels.length} of ${ids.length} ready, ${LABEL_WIDTH_MM} x ${LABEL_HEIGHT_MM} mm each.`}
+            </p>
+          </div>
+          <RadioGroup value={layout} onValueChange={choose} aria-label="Layout" className="flex w-auto items-center gap-4">
+            <span className="flex items-center gap-1.5">
+              <RadioGroupItem value="roll" id="layout-roll" />
+              <FieldLabel htmlFor="layout-roll" className="text-[13px]">
+                Roll
+              </FieldLabel>
+            </span>
+            <span className="flex items-center gap-1.5">
+              <RadioGroupItem value="sheet" id="layout-sheet" />
+              <FieldLabel htmlFor="layout-sheet" className="text-[13px]">
+                Sheet
+              </FieldLabel>
+            </span>
+          </RadioGroup>
+          <Button type="button" size="sm" disabled={labels.length === 0} onClick={() => window.print()}>
+            <PrinterIcon /> Print
+          </Button>
+        </header>
+
+        {tooMany && (
+          <p role="alert" className="mb-4 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px] text-warn">
+            Print at most {MAX_LABELS} labels at a time
+          </p>
+        )}
+        {ready && ready.failed.length > 0 && (
+          <p role="alert" className="mb-4 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px] text-warn">
+            {ready.failed.length === 1 ? 'One spool' : `${ready.failed.length} spools`} could not be read and {ready.failed.length === 1 ? 'has' : 'have'} no label: {ready.failed.join(', ')}
+          </p>
+        )}
+
+        <div id="label-print" className="flex flex-wrap gap-3 rounded-md bg-muted/40 p-3 print:bg-transparent print:p-0">
+          {labels.map(({ spool, svg }) => (
+            <div key={spool.id} className="outline outline-1 outline-dashed outline-border print:outline-none">
+              <Label spool={spool} svg={svg} />
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}

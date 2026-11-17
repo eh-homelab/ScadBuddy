@@ -1,4 +1,4 @@
-import { ArchiveIcon, ArchiveRestoreIcon, ChevronLeftIcon, Trash2Icon } from 'lucide-react'
+import { ArchiveIcon, ArchiveRestoreIcon, ChevronLeftIcon, PrinterIcon, Trash2Icon } from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Link, useLocation, useParams } from 'react-router'
 import { api, ApiError } from '../../api/client'
@@ -548,6 +548,13 @@ export function SpoolPage() {
         {!creating && saved?.archived_at && (
           <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void act(async () => { await archiveSpool(spoolKey, false); await reload(true) })}>
             <ArchiveRestoreIcon /> Restore
+          </Button>
+        )}
+        {!creating && saved && (
+          <Button asChild variant="outline" size="sm">
+            <Link to={`/filament/labels?ids=${saved.id}`}>
+              <PrinterIcon /> Print label
+            </Link>
           </Button>
         )}
         <Button type="button" variant="ghost" size="sm" disabled={busy || !dirty} onClick={() => { setDraft(base); setError(null) }}>
