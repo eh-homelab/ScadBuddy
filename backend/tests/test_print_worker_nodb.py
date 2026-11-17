@@ -484,6 +484,10 @@ async def test_a_bambuddy_send_runs_on_a_worker_with_no_database_and_no_kek(
     under the API's copy lease, and the API records the copy."""
     monkeypatch.delenv("SCADBUDDY_DATABASE_URL", raising=False)
     monkeypatch.delenv("SCADBUDDY_SECRET_KEY_FILE", raising=False)
+    # Nor the Bambuddy URL or key: the worker reads them from the API's settings route
+    # only, never its own environment (#6189).
+    monkeypatch.delenv("SCADBUDDY_BAMBUDDY_URL", raising=False)
+    monkeypatch.delenv("SCADBUDDY_BAMBUDDY_API_KEY", raising=False)
     api_store.save(
         SettingsPatch(bambuddy_url=BAMBUDDY, bambuddy_api_key="s3cret", library_folder_id=2)
     )
