@@ -19,11 +19,15 @@ from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
+from scadbuddy.filament import models as m
 from scadbuddy.filament import purchasing_models as pm
+from scadbuddy.filament.catalog import TypeTempError
 from scadbuddy.filament.invoice_money import (
     RECONCILE_TOLERANCE,
     allocate,
     difference,
+    price_per_pack,
+    spool_cost_per_kg,
     tax_per_line,
 )
 from scadbuddy.filament.spools import FilamentSpoolStore
@@ -34,6 +38,7 @@ Conn = Connection[DictRow]
 Row = Mapping[str, Any]
 _Ids = list[UUID]
 _Invoices = list[pm.Invoice]
+_Claimed = list[tuple[UUID, int | None]]
 
 _UNIT = Decimal("0.0001")
 _COMPUTED = {"minor_exponent", "difference", "reconciles", "line_count", "file"}
@@ -69,6 +74,47 @@ class InvoiceConfirmedError(ValueError):
         super().__init__("a confirmed invoice cannot be changed; edit its spools instead")
 
 
+class InvoiceNoLinesError(ValueError):
+    """An invoice with no lines has nothing to confirm."""
+
+    def __init__(self) -> None:
+        super().__init__("an invoice with no lines cannot be confirmed")
+
+
+class InvoiceCurrencyError(ValueError):
+    """Only an invoice in the shop's currency is confirmed (Decision 6)."""
+
+    def __init__(self, currency: str, shop: str) -> None:
+        super().__init__(
+            f"the invoice is in {currency} but the shop's currency is {shop}: "
+            "change the shop's currency or retype the invoice"
+        )
+
+
+class InvoiceNotReconciledError(ValueError):
+    """The total is further from the lines and shipping than the tolerance (Decision 7)."""
+
+    def __init__(self, diff: Decimal) -> None:
+        super().__init__(
+            f"the total is {diff} away from the lines plus shipping; "
+            f"confirm needs it within {RECONCILE_TOLERANCE}"
+        )
+        self.difference = diff
+
+
+class InvoiceLineError(ValueError):
+    """A line cannot be confirmed: nothing is written."""
+
+    def __init__(self, position: int, reason: str) -> None:
+        super().__init__(f"line {position}: {reason}")
+        self.position = position
+        self.reason = reason
+
+
+_PRODUCT_COLUMNS = "id, type_id, pack_size"
+_REF_KIND = "invoice_line"
+
+
 def _sets(patch: pm.InvoicePatch) -> tuple[list[str], list[Any]]:
     columns = [n for n in pm.InvoicePatch.model_fields if n in patch.model_fields_set]
     return [f"{n} = %s" for n in columns], [getattr(patch, n) for n in columns]
@@ -77,7 +123,7 @@ def _sets(patch: pm.InvoicePatch) -> tuple[list[str], list[Any]]:
 class InvoiceStore:
     """The invoice tables over a pool whose connections autocommit and return dict rows.
     ``shop_currency`` is read on each use; ``spools`` and ``types`` are what confirm
-    (Task 6) writes through. Synchronous: callers run it in a thread."""
+    writes through. Synchronous: callers run it in a thread."""
 
     def __init__(
         self,
@@ -203,7 +249,7 @@ class InvoiceStore:
 
     def create(self, body: pm.InvoiceCreate, *, actor: str) -> tuple[pm.InvoiceDetail, bool]:
         """``(invoice, made)``; ``made`` is false when ``import_run_id`` matched one.
-        ``actor`` is for the events of Task 6's confirm: a draft records none."""
+        ``actor`` is unused: a draft records no event (confirm's carry ``invoice:<id>``)."""
         run = body.import_run_id
         if run is not None:
             found = self._by_run(run)
@@ -337,6 +383,206 @@ class InvoiceStore:
                 (key, name, media_type, size, invoice_id),
             )
         return pm.FileRef(name=name, media_type=media_type, size=size)
+
+    # -- confirm ------------------------------------------------------------------------
+
+    def confirm(self, invoice_id: UUID, *, actor: str) -> tuple[pm.InvoiceDetail, bool] | None:
+        """Turn a draft into types, supplier products, spools with their cost, and price
+        points, in one transaction (Decisions 3, 4, 9, 11-13). ``(invoice, confirmed_now)``;
+        false when it was already confirmed (nothing more is made); ``None`` for no such
+        invoice. A refusal is a typed `ValueError` and nothing is written."""
+        shop = self._shop_currency()
+        with self._pool.connection() as conn, conn.transaction():
+            head = conn.execute(
+                "SELECT id, supplier_id, status, currency, invoice_date, subtotal, shipping,"
+                " total FROM filament_invoices WHERE id = %s FOR UPDATE",
+                (invoice_id,),
+            ).fetchone()
+            if head is None:
+                return None
+            if head["status"] == "confirmed":
+                return self._detail_of(conn, invoice_id), False
+            lines = conn.execute(
+                "SELECT id, position, description, sku, quantity, line_total, allocated_cost,"
+                " type_id, supplier_product_id, proposed_type, update_spool_ids"
+                " FROM filament_invoice_lines WHERE invoice_id = %s ORDER BY position",
+                (invoice_id,),
+            ).fetchall()
+            if not lines:
+                raise InvoiceNoLinesError()
+            if head["currency"] != shop:
+                raise InvoiceCurrencyError(head["currency"], shop)
+            diff = difference(head["total"], [row["line_total"] for row in lines], head["shipping"])
+            if abs(diff) > RECONCILE_TOLERANCE:
+                raise InvoiceNotReconciledError(diff)
+            who = f"invoice:{invoice_id}"
+            for line in lines:
+                self._confirm_line(conn, head, line, who)
+            conn.execute(
+                "UPDATE filament_invoices SET status = 'confirmed', confirmed_at = now(),"
+                " updated_at = now() WHERE id = %s",
+                (invoice_id,),
+            )
+            return self._detail_of(conn, invoice_id), True
+
+    def _detail_of(self, conn: Conn, invoice_id: UUID) -> pm.InvoiceDetail:
+        found = self._detail(conn, invoice_id)
+        assert found is not None
+        return found
+
+    def _confirm_line(self, conn: Conn, head: Row, line: Row, who: str) -> None:
+        position: int = line["position"]
+        type_id, label_g = self._line_type(conn, line)
+        product_id, pack_size = self._line_product(conn, head, line, type_id)
+        known = self._claimed(conn, line, type_id)
+        touched: _Ids = []
+        try:
+            for spool_id, own_label_g in known:
+                grams = own_label_g or label_g
+                cost = spool_cost_per_kg(line["allocated_cost"], line["quantity"], grams)
+                self._spools.update_on(
+                    conn,
+                    spool_id,
+                    m.SpoolPatch(type_id=type_id, cost_per_kg=cost),
+                    actor=who,
+                    ref_kind=_REF_KIND,
+                    ref_id=line["id"],
+                )
+                touched.append(spool_id)
+            cost = spool_cost_per_kg(line["allocated_cost"], line["quantity"], label_g)
+            for _ in range(line["quantity"] - len(known)):
+                touched.append(
+                    self._spools.create_on(
+                        conn,
+                        m.SpoolCreate(type_id=type_id, cost_per_kg=cost, grams_left=label_g),
+                        actor=who,
+                        ref_kind=_REF_KIND,
+                        ref_id=line["id"],
+                    )
+                )
+        except (errors.ForeignKeyViolation, errors.UniqueViolation, ValueError) as exc:
+            raise InvoiceLineError(position, f"its spools cannot be written ({exc})") from None
+        conn.execute(
+            "UPDATE filament_spools SET invoice_line_id = %s, updated_at = now()"
+            " WHERE id = ANY(%s)",
+            (line["id"], touched),
+        )
+        conn.execute(
+            "INSERT INTO filament_price_points (product_id, price, currency, on_date, source,"
+            " invoice_line_id) VALUES (%s, %s, %s, %s, 'invoice', %s)",
+            (
+                product_id,
+                price_per_pack(line["line_total"], line["quantity"], pack_size),
+                head["currency"],
+                head["invoice_date"],
+                line["id"],
+            ),
+        )
+        conn.execute(
+            "UPDATE filament_invoice_lines SET type_id = %s, supplier_product_id = %s,"
+            " updated_at = now() WHERE id = %s",
+            (type_id, product_id, line["id"]),
+        )
+
+    def _line_type(self, conn: Conn, line: Row) -> tuple[UUID, int]:
+        """The line's type id and its label weight in grams; a ``proposed_type`` is made
+        here when the line names no type."""
+        position: int = line["position"]
+        if line["type_id"] is not None:
+            row = conn.execute(
+                "SELECT id, label_weight_g FROM filament_spool_types WHERE id = %s",
+                (line["type_id"],),
+            ).fetchone()
+            if row is None:
+                raise InvoiceLineError(position, "its spool type no longer exists")
+            return row["id"], row["label_weight_g"]
+        if line["proposed_type"] is None:
+            raise InvoiceLineError(position, "it has no spool type and proposes none")
+        body = m.SpoolTypeCreate.model_validate(line["proposed_type"])
+        try:
+            # A savepoint: the failed insert must not poison the outer transaction's
+            # error, though the caller rolls back whatever follows.
+            with conn.transaction():
+                made = self._types.create_on(conn, body)
+        except errors.UniqueViolation:
+            raise InvoiceLineError(
+                position, f"a spool type like '{body.code}' already exists; choose it instead"
+            ) from None
+        except errors.ForeignKeyViolation:
+            raise InvoiceLineError(
+                position, "its proposed spool type names a catalog row that does not exist"
+            ) from None
+        except TypeTempError as exc:
+            raise InvoiceLineError(
+                position, f"its proposed spool type is invalid ({exc})"
+            ) from None
+        return made.id, made.label_weight_g
+
+    @staticmethod
+    def _line_product(conn: Conn, head: Row, line: Row, type_id: UUID) -> tuple[UUID, int]:
+        """The supplier product the line prices: the one it names, else the supplier's by
+        ``upper(sku)`` (the line's ``sku``, else its ``description``), else a new one."""
+        position: int = line["position"]
+        if line["supplier_product_id"] is not None:
+            found = conn.execute(
+                f"SELECT {_PRODUCT_COLUMNS} FROM filament_supplier_products"
+                " WHERE id = %s AND supplier_id = %s",
+                (line["supplier_product_id"], head["supplier_id"]),
+            ).fetchone()
+            if found is None:
+                raise InvoiceLineError(position, "its supplier product is not this supplier's")
+        else:
+            sku = line["sku"] or line["description"]
+            found = conn.execute(
+                f"SELECT {_PRODUCT_COLUMNS} FROM filament_supplier_products"
+                " WHERE supplier_id = %s AND upper(sku) = upper(%s) AND archived_at IS NULL",
+                (head["supplier_id"], sku),
+            ).fetchone()
+            if found is None:
+                found = conn.execute(
+                    "INSERT INTO filament_supplier_products (supplier_id, type_id, sku)"
+                    f" VALUES (%s, %s, %s) RETURNING {_PRODUCT_COLUMNS}",
+                    (head["supplier_id"], type_id, sku),
+                ).fetchone()
+        assert found is not None
+        if found["type_id"] != type_id:
+            raise InvoiceLineError(position, "its supplier product is for another spool type")
+        return found["id"], found["pack_size"]
+
+    @staticmethod
+    def _claimed(conn: Conn, line: Row, type_id: UUID) -> _Claimed:
+        """The spools the line fills in, each with its own label weight, if it has one;
+        every one is checked first (Decision 11)."""
+        position: int = line["position"]
+        ids: _Ids = line["update_spool_ids"]
+        if not ids:
+            return []
+        rows = {
+            row["id"]: row
+            for row in conn.execute(
+                "SELECT id, archived_at, invoice_line_id, cost_per_kg, type_id, label_weight_g"
+                " FROM filament_spools WHERE id = ANY(%s) ORDER BY id FOR UPDATE",
+                (ids,),
+            ).fetchall()
+        }
+        known: _Claimed = []
+        for spool_id in ids:
+            row = rows.get(spool_id)
+            if row is None:
+                reason = "does not exist"
+            elif row["archived_at"] is not None:
+                reason = "is archived"
+            elif row["invoice_line_id"] is not None:
+                reason = "already belongs to an invoice line"
+            elif row["cost_per_kg"] is not None:
+                reason = "already has its own cost"
+            elif row["type_id"] is not None and row["type_id"] != type_id:
+                reason = "has another spool type"
+            else:
+                known.append((spool_id, row["label_weight_g"]))
+                continue
+            raise InvoiceLineError(position, f"spool {spool_id} {reason}")
+        return known
 
     @staticmethod
     def _lock(conn: Conn, invoice_id: UUID) -> Row | None:

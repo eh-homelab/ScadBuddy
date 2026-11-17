@@ -126,22 +126,28 @@ class SpoolTypeStore:
         return [m.TypeKValue.model_validate(row) for row in rows]
 
     def create(self, body: m.SpoolTypeCreate) -> m.SpoolType:
-        data = body.model_dump()
-        check_temps(data)
-        names = list(data)
         try:
             with self._orders.transaction() as conn:
-                row = conn.execute(
-                    f"INSERT INTO filament_spool_types ({', '.join(names)})"
-                    f" VALUES ({', '.join('%s' for _ in names)}) RETURNING {_TYPE_COLUMNS}",
-                    [data[name] for name in names],
-                ).fetchone()
-                assert row is not None
-                row = self._link_price_book(conn, row, changed=True)
+                return self.create_on(conn, body)
         except errors.UniqueViolation:
             raise CatalogExistsError() from None
         except errors.ForeignKeyViolation:
             raise CatalogRefError() from None
+
+    def create_on(self, conn: Conn, body: m.SpoolTypeCreate) -> m.SpoolType:
+        """`create` on ``conn``, in the caller's transaction (confirming an invoice,
+        #6266). A duplicate or a missing catalog row is the driver's `UniqueViolation` or
+        `ForeignKeyViolation`; `create` maps them."""
+        data = body.model_dump()
+        check_temps(data)
+        names = list(data)
+        row = conn.execute(
+            f"INSERT INTO filament_spool_types ({', '.join(names)})"
+            f" VALUES ({', '.join('%s' for _ in names)}) RETURNING {_TYPE_COLUMNS}",
+            [data[name] for name in names],
+        ).fetchone()
+        assert row is not None
+        row = self._link_price_book(conn, row, changed=True)
         return m.SpoolType.model_validate(row)
 
     def update(self, type_id: UUID, patch: m.SpoolTypePatch) -> m.SpoolType | None:

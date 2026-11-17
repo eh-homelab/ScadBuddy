@@ -23,6 +23,10 @@ from scadbuddy.filament.invoice_money import InvoiceMathError, MixedLineTaxError
 from scadbuddy.filament.invoices import (
     DuplicateInvoiceError,
     InvoiceConfirmedError,
+    InvoiceCurrencyError,
+    InvoiceLineError,
+    InvoiceNoLinesError,
+    InvoiceNotReconciledError,
     InvoiceRefError,
 )
 from scadbuddy.filament.suppliers import (
@@ -421,6 +425,38 @@ async def delete_invoice(filament: FilamentDep, invoice_id: UUID) -> Response:
     if not gone:
         raise _no_invoice(invoice_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/invoices/{invoice_id}/confirm",
+    response_model=pm.InvoiceDetail,
+    summary="Confirm an invoice",
+    description=(
+        "Turns a draft into spools in one transaction: new spool types for lines that propose "
+        "one, supplier products by SKU, each line's `quantity` spools (or fewer new ones when "
+        "the line fills the spools in `update_spool_ids`) with a `cost_per_kg` from the line's "
+        "allocated cost, and one price point per line. Confirming a confirmed invoice answers "
+        "200 with it and makes nothing more. 404 for no such invoice. 409, with nothing "
+        "written, for an invoice with no lines, one not in the shop's currency, one whose "
+        "total is more than 0.05 from its lines plus shipping, or a line that cannot be "
+        "confirmed (the message names the line)."
+    ),
+)
+async def confirm_invoice(
+    filament: FilamentDep, caller: CallerDep, invoice_id: UUID
+) -> pm.InvoiceDetail:
+    try:
+        done = await asyncio.to_thread(filament.invoices.confirm, invoice_id, actor=actor(caller))
+    except (
+        InvoiceNoLinesError,
+        InvoiceCurrencyError,
+        InvoiceNotReconciledError,
+        InvoiceLineError,
+    ) as exc:
+        raise _conflict(exc) from None
+    if done is None:
+        raise _no_invoice(invoice_id)
+    return done[0]
 
 
 # -- an invoice's file ------------------------------------------------------------------

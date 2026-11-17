@@ -417,10 +417,19 @@ class FilamentSpoolStore:
         assert made is not None
         return made
 
-    def create_on(self, conn: Conn, body: m.SpoolCreate, *, actor: str) -> UUID:
+    def create_on(
+        self,
+        conn: Conn,
+        body: m.SpoolCreate,
+        *,
+        actor: str,
+        ref_kind: str | None = None,
+        ref_id: UUID | None = None,
+    ) -> UUID:
         """`create` on ``conn``, in the caller's transaction (`filament/csv_import.py`):
         the new spool's id. A row it names that does not exist is the driver's
-        `ForeignKeyViolation`."""
+        `ForeignKeyViolation`. ``ref_kind`` and ``ref_id`` go on the ``created`` event
+        (an invoice line's, #6266); a retry of one pair books nothing twice."""
         data = body.model_dump(exclude={"grams_left"})
         names = list(data)
         row = conn.execute(
@@ -437,6 +446,8 @@ class FilamentSpoolStore:
             "created",
             source="person" if body.grams_left is not None else None,
             absolute_g=body.grams_left,
+            ref_kind=ref_kind,
+            ref_id=None if ref_id is None else str(ref_id),
             actor=actor,
         )
         return spool_id
@@ -460,10 +471,20 @@ class FilamentSpoolStore:
         except errors.ForeignKeyViolation:
             raise CatalogRefError() from None
 
-    def update_on(self, conn: Conn, spool_id: UUID, patch: m.SpoolPatch, *, actor: str) -> bool:
+    def update_on(
+        self,
+        conn: Conn,
+        spool_id: UUID,
+        patch: m.SpoolPatch,
+        *,
+        actor: str,
+        ref_kind: str | None = None,
+        ref_id: UUID | None = None,
+    ) -> bool:
         """`update` on ``conn``, in the caller's transaction (`filament/csv_import.py`);
         false for no such spool. A row it names that does not exist is the driver's
-        `ForeignKeyViolation`."""
+        `ForeignKeyViolation`. ``ref_kind`` and ``ref_id`` go on the ``edited`` event
+        (an invoice line's, #6266); a retry of one pair books nothing twice."""
         sent = [n for n in _WRITABLE if n in patch.model_fields_set]
         if patch.archived:
             # The tag before the spool, as every writer of bindings takes them.
@@ -500,7 +521,15 @@ class FilamentSpoolStore:
                 dropped = p.drop_migrated(conn, spool_id)
                 if dropped is not None:
                     changes["presets"] = dropped
-            ledger.record(conn, spool_id, "edited", actor=actor, data={"changes": changes})
+            ledger.record(
+                conn,
+                spool_id,
+                "edited",
+                ref_kind=ref_kind,
+                ref_id=None if ref_id is None else str(ref_id),
+                actor=actor,
+                data={"changes": changes},
+            )
         if patch.archived is not None:
             self._archive(conn, current, patch.archived, actor)
         return True

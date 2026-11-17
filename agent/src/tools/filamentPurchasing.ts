@@ -3,7 +3,8 @@ import { ok } from './call.js'
 import { defineTool, json, ToolError, type Tool } from './registry.js'
 
 // Filament purchasing (#6266, epic #6260): suppliers, their products, price points and invoice drafts.
-// Write tier: nothing leaves ScadBuddy. A price is per pack, with tax, a decimal string.
+// Write tier: nothing leaves ScadBuddy. Confirming an invoice is outward: it makes spools and costs.
+// A price is per pack, with tax, a decimal string.
 // Routes: backend/scadbuddy/api/filament_purchasing.py.
 
 const SOURCE = "ScadBuddy's filament purchasing records"
@@ -352,6 +353,32 @@ export const filamentPurchasingTools: Tool[] = [
       }
       return json(result)
     },
+  }),
+
+  defineTool({
+    name: 'filament_invoice_confirm',
+    label: 'Confirm a filament invoice',
+    description:
+      'Confirm a draft invoice: it makes the spools of every line (`quantity` of them, or fewer new ones when a ' +
+      'line fills the spools in `update_spool_ids`), each with a `cost_per_kg` from the line cost, any new spool ' +
+      'type or supplier product, and one price point per line, in one transaction. A confirmed invoice is frozen. ' +
+      'Confirming it again changes nothing. 409, with nothing written, for no lines, a currency other than the ' +
+      "shop's, a total more than 0.05 off its lines plus shipping, or a line that cannot be confirmed. Only when " +
+      'the user asks to confirm.',
+    input: z.object({ invoice_id: z.string().uuid() }),
+    risk: 'outward',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/invoices/{invoice_id}/confirm'],
+    summarize: ({ invoice_id }) => `Confirm invoice ${invoice_id}`,
+    handler: async ({ invoice_id }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/filament/invoices/{invoice_id}/confirm', {
+            params: { path: { invoice_id } },
+          }),
+          `confirm invoice ${invoice_id}`,
+        ),
+      ),
   }),
 
   defineTool({

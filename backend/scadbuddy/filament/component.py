@@ -31,7 +31,7 @@ class Filament:
     presets: PoolSpoolPresets
     #: Suppliers, their products and price points (#6266).
     suppliers: SuppliersStore
-    #: Invoice drafts, and later their confirmation (#6266).
+    #: Invoice drafts and their confirmation into spools and costs (#6266).
     invoices: InvoiceStore
     #: Bambuddy's tray assignments, as this app last read them (#6580).
     assignments: AssignmentsCache = field(default_factory=AssignmentsCache)

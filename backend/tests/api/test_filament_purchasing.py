@@ -439,3 +439,85 @@ def test_an_upload_with_no_file_part_is_422(client: TestClient) -> None:
     invoice_id = _draft(client)
     answer = client.post(f"{URL}/invoices/{invoice_id}/file", files={"note": (None, "not a file")})
     assert answer.status_code == 422, answer.text
+
+
+# -- confirming an invoice --------------------------------------------------------------
+
+
+def _confirmable(client: TestClient, **over: object) -> str:
+    tag = uuid4().hex[:6]
+    type_id = _type(client, f"T-{tag}")
+    line = {"description": "A00-B01", "quantity": 2, "unit_price": "20.00", "type_id": type_id}
+    fields: dict[str, object] = {
+        "subtotal": "40.00",
+        "shipping": "0",
+        "tax": "2.80",
+        "total": "42.80",
+        "lines": [line],
+    }
+    body = _invoice_body(_supplier(client, f"S-{tag}"), **(fields | over))
+    made = client.post(f"{URL}/invoices", json=body)
+    assert made.status_code == 201, made.text
+    return str(made.json()["id"])
+
+
+def test_confirming_makes_spools_and_a_repeat_is_200(client: TestClient) -> None:
+    invoice_id = _confirmable(client)
+    done = client.post(f"{URL}/invoices/{invoice_id}/confirm")
+    assert done.status_code == 200, done.text
+    body = done.json()
+    assert body["status"] == "confirmed"
+    assert len(body["lines"][0]["spool_ids"]) == 2
+    spool = client.get(f"{URL}/spools/{body['lines'][0]['spool_ids'][0]}").json()
+    assert spool["cost_per_kg"] == "21.4000"
+    again = client.post(f"{URL}/invoices/{invoice_id}/confirm")
+    assert again.status_code == 200
+    assert again.json()["lines"][0]["spool_ids"] == body["lines"][0]["spool_ids"]
+
+
+def test_confirming_a_missing_invoice_is_404(client: TestClient) -> None:
+    assert client.post(f"{URL}/invoices/{MISSING}/confirm").status_code == 404
+
+
+def test_confirming_an_empty_or_unreconciled_or_foreign_invoice_is_409(client: TestClient) -> None:
+    supplier = _supplier(client)
+    empty = client.post(
+        f"{URL}/invoices",
+        json=_invoice_body(supplier, number="E", lines=[], subtotal="0", total="0", tax="0"),
+    ).json()
+    assert client.post(f"{URL}/invoices/{empty['id']}/confirm").status_code == 409
+    off = _confirmable(client, total="43.00")
+    refused = client.post(f"{URL}/invoices/{off}/confirm")
+    assert refused.status_code == 409
+    assert "0.20" in refused.text
+    foreign = _confirmable(client, currency="EUR")
+    assert client.post(f"{URL}/invoices/{foreign}/confirm").status_code == 409
+    assert client.get(f"{URL}/invoices/{foreign}").json()["status"] == "draft"
+
+
+def test_a_duplicate_proposed_type_is_a_409_naming_the_line(client: TestClient) -> None:
+    _type(client, "PLA-WHT")
+    material = next(
+        m["id"] for m in client.get(f"{URL}/catalog/materials").json() if m["name"] == "PLA"
+    )
+    proposed = {
+        "code": "PLA-WHT",
+        "material_id": material,
+        "rgba": "#FFFFFF",
+        "label_weight_g": 1000,
+    }
+    body = _invoice_body(
+        _supplier(client),
+        subtotal="40.00",
+        shipping="0",
+        tax="0",
+        total="40.00",
+        lines=[
+            {"description": "x", "quantity": 1, "unit_price": "40.00", "proposed_type": proposed}
+        ],
+    )
+    made = client.post(f"{URL}/invoices", json=body).json()
+    refused = client.post(f"{URL}/invoices/{made['id']}/confirm")
+    assert refused.status_code == 409, refused.text
+    assert "line 1" in refused.text
+    assert client.get(f"{URL}/invoices/{made['id']}").json()["status"] == "draft"

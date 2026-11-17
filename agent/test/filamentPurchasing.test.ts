@@ -52,6 +52,11 @@ describe('filament purchasing tools', () => {
     expect(tool(name).gated).toBe(false)
   })
 
+  it('filament_invoice_confirm is outward tier, and a gated call', () => {
+    expect(tool('filament_invoice_confirm').risk).toBe('outward')
+    expect(tool('filament_invoice_confirm').gated).toBe(true)
+  })
+
   it('adds a manual price with the price as a string', async () => {
     const bodies: unknown[] = []
     server.use(
@@ -173,5 +178,28 @@ describe('filament purchasing tools', () => {
     expect(firstText(await runTool(tool('filament_invoice_delete'), { invoice_id: INVOICE }, ctx()))).toEqual({
       deleted: INVOICE,
     })
+  })
+
+  it('confirms an invoice by posting to its confirm route', async () => {
+    const INVOICE = '8d6f3c1e-0000-4000-8000-000000006606'
+    const posted: string[] = []
+    server.use(
+      http.post(`${FILAMENT}/invoices/${INVOICE}/confirm`, () => {
+        posted.push(INVOICE)
+        return HttpResponse.json({ id: INVOICE, status: 'confirmed' })
+      }),
+    )
+    // An outward call parks for approval; lowered to write, it runs and reaches the route.
+    const lowered = {
+      of: async () => ({ tier: 'write' as const, disabled: false }),
+      disabled: async () => new Set<string>(),
+    }
+    const result = await runTool(tool('filament_invoice_confirm'), { invoice_id: INVOICE }, {
+      ...ctx(),
+      ...services({ toolOverrides: lowered }),
+    })
+    expect(result.isError).toBeFalsy()
+    expect(posted).toEqual([INVOICE])
+    expect(firstText(result)).toMatchObject({ status: 'confirmed' })
   })
 })
