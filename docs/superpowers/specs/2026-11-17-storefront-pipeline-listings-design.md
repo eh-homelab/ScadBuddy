@@ -587,7 +587,10 @@ until the step that makes it safe.
    the snapshot and its `pipeline` docstring (`wire.py` says "Always false for now";
    it becomes "true for a pipeline template"); `listing_reference`; `render_estimate`
    answers `none` for every pipeline render in this PR, so nothing is priced yet.
-   Retires `listing_pipeline_unsupported`. It touches neither `slice_price.py` nor
+   Retires `listing_pipeline_unsupported`, with every copy of the code: the docstrings
+   in `api/storefront.py` (line 181) and `orders/storefront/listings.py` (lines 11, 893
+   and 1016), and the mock in `frontend/src/pages/StorefrontListingPage.test.tsx`
+   (line 187). It touches neither `slice_price.py` nor
    `line_prices.py`. That is safe for the cart: a line is firm only when the add finds a
    `done` price row for its key (`slice_price.py` `firm_price`, which starts no slice),
    only the estimate read starts a slice, and in this PR it starts none for a pipeline
