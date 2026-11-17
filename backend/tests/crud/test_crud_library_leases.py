@@ -252,16 +252,23 @@ def test_a_token_held_for_another_lease_is_refused(pool: Pool, client: CrudSyncC
 
 
 def test_a_renew_names_a_live_token_and_a_release_is_natural(client: CrudSyncClient) -> None:
+    """A renew with no row is the route's 404, which the worker's renew answers as
+    False, so its gate ends the block that lost it (#6560)."""
     leases = RemoteCheckoutLeases(client)
+    unknown = uuid.uuid4()
     with pytest.raises(CrudRefusedError) as refused:
-        leases.renew(uuid.uuid4())
+        client.request("PUT", f"{BASE}/leases/{unknown}", json={"ttl_s": 60})
     assert (refused.value.status, refused.value.problem.get("reason")) == (404, "no-lease")
+    with pytest.raises(CrudRefusedError) as refused:
+        client.request("PUT", f"{BASE}/pin-holds/{unknown}", json={"ttl_s": 60})
+    assert (refused.value.status, refused.value.problem.get("reason")) == (404, "no-hold")
+    assert leases.renew(unknown) is False
+    assert leases.renew_pin(unknown) is False
     token = leases.take(JOB, [Path("/libraries/BOSL2") / ("c" * 40)])
-    leases.renew(token)
+    assert leases.renew(token) is True
     leases.drop(token)
     leases.drop(token)  # sent again after a lost answer: nothing left, a success
-    with pytest.raises(CrudRefusedError):
-        leases.renew(token)
+    assert leases.renew(token) is False
 
 
 def test_ttl_is_bounded(client: CrudSyncClient) -> None:
@@ -359,14 +366,16 @@ def test_a_slot_is_renewed_and_released_only_by_its_token(client: CrudSyncClient
     slot = slots.claim(mine)
     assert slot is not None
     with pytest.raises(CrudRefusedError) as refused:
-        slots.renew(slot, theirs)
+        client.request("PUT", f"{BASE}/install-slots/{slot}?token={theirs}")
     assert (refused.value.status, refused.value.problem.get("reason")) == (409, "not-holder")
+    # The worker's renew answers that 409 as False (#6560).
+    assert slots.renew(slot, theirs) is False
     with pytest.raises(CrudRefusedError) as refused:
         client.request("DELETE", f"{BASE}/install-slots/{slot}?token={theirs}")
     assert (refused.value.status, refused.value.problem.get("reason")) == (409, "not-holder")
     # The worker's release of a slot another token holds: its own lapsed, so released.
     slots.drop(slot, theirs)
-    slots.renew(slot, mine)
+    assert slots.renew(slot, mine) is True
     slots.drop(slot, mine)
     slots.drop(slot, mine)  # sent again: the slot is free, nothing of anyone's taken
     assert slots.claim(theirs) is not None

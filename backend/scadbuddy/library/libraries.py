@@ -463,13 +463,13 @@ class SharedLeases(Protocol):
 
     def take(self, holder: str, checkouts: Sequence[Path]) -> uuid.UUID: ...
 
-    def renew(self, token: uuid.UUID) -> object: ...
+    def renew(self, token: uuid.UUID) -> bool: ...
 
     def drop(self, token: uuid.UUID) -> None: ...
 
     def take_pin(self) -> uuid.UUID: ...
 
-    def renew_pin(self, token: uuid.UUID) -> object: ...
+    def renew_pin(self, token: uuid.UUID) -> bool: ...
 
     def drop_pin(self, token: uuid.UUID) -> None: ...
 
@@ -725,10 +725,25 @@ async def _in_thread(
         await asyncio.to_thread(manager.__exit__, None, None, None)
 
 
+class HoldLostError(RuntimeError):
+    """A renewal found its row gone: the row lapsed, or another holder took it (#6560).
+    The block that held it is ended with this, so it does not go on without its hold:
+    a pin's checkout may be removed under it, and an install slot may be another
+    clone's."""
+
+    def __init__(self, row: str, holder: str) -> None:
+        super().__init__(
+            f"this {row} ({holder}) lapsed before it was renewed, so it no longer "
+            "keeps other work out; try again"
+        )
+        self.row = row
+        self.holder = holder
+
+
 @contextlib.asynccontextmanager
 async def _renewed(
     ttl: float,
-    renew: Callable[[], object],
+    renew: Callable[[], bool],
     drop: Callable[[], object],
     what: str,
     holder: str,
@@ -737,26 +752,71 @@ async def _renewed(
 ) -> AsyncIterator[None]:
     """A row already taken, renewed every third of its TTL until the block exits, and
     then dropped. ``sleep`` is the wait before each renewal: a test sets it to renew
-    when it says so (#6527)."""
+    when it says so (#6527).
+
+    A renewal that finds the row gone (``renew()`` False) is logged as an error and
+    cancels the task that runs the block; the block then ends with
+    :class:`HoldLostError`, even when it catches that cancel and finishes (#6560). The
+    row is not taken again, and its drop changes nothing that another holder took. A
+    renewal that fails (the database does not answer) is logged, and the next one still
+    comes."""
+    block = asyncio.current_task()
+    assert block is not None
+    lost = False
 
     async def renewing() -> None:
+        nonlocal lost
         while True:
             await sleep(ttl / 3)
             try:
-                await asyncio.to_thread(renew)
+                held = await asyncio.to_thread(renew)
             except Exception:
                 logger.exception("could not renew a row", extra={"row": what, "holder": holder})
+                continue
+            if not held:
+                lost = True
+                logger.error(
+                    "a renewal found its row gone; the block that held it ends",
+                    extra={"row": what, "holder": holder},
+                )
+                block.cancel()
+                return
 
     task = asyncio.create_task(renewing())
     try:
-        yield
-    finally:
+        try:
+            yield
+        except BaseException as error:
+            # Once cancelled, the renewal changes nothing more: it runs on this loop, and
+            # its next step raises the cancel.
+            task.cancel()
+            if lost:
+                await _without_own_cancel(block)
+                raise HoldLostError(what, holder) from error
+            raise
         task.cancel()
+        if lost:
+            await _without_own_cancel(block)
+            raise HoldLostError(what, holder)
+    finally:
         try:
             await asyncio.to_thread(drop)
         except Exception:
             # It lapses at its expiry instead.
             logger.exception("could not release a row", extra={"row": what, "holder": holder})
+
+
+async def _without_own_cancel(block: asyncio.Task[Any]) -> None:
+    """Take back the cancel a lost renewal sent ``block``. One it has not received yet
+    is received here; a cancel someone else sent ``block`` still raises."""
+    block.uncancel()
+    try:
+        await asyncio.sleep(0)
+    except asyncio.CancelledError:
+        if block.cancelling():
+            raise
+    if block.cancelling():
+        raise asyncio.CancelledError
 
 
 @contextlib.asynccontextmanager
@@ -804,7 +864,7 @@ class InstallSlots(Protocol):
 
     def claim(self, token: uuid.UUID) -> int | None: ...
 
-    def renew(self, slot: int, token: uuid.UUID) -> object: ...
+    def renew(self, slot: int, token: uuid.UUID) -> bool: ...
 
     def drop(self, slot: int, token: uuid.UUID) -> object: ...
 
