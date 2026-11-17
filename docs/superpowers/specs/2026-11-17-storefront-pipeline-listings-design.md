@@ -604,9 +604,12 @@ Then the prod checks of §10.4, as a comment on #5701.
    be listed (this design)? The other choice is to list any pipeline and check nothing
    but the size, which trusts the shop's inputs to the template's own clamping.
 3. **Render and slice cost.** A visitor's render of a pipeline listing is one job, but it fans out
-   to one openscad run per distinct piece: 11 or 12 for a one-storey dollhouse (12
-   unless it has no windows or every opening glazed, because `pipeline.py`
-   `house_pieces` leaves out an entry whose count is 0; counted by reading it). The
+   to one openscad run per entry of `pipeline.py` `house_pieces` (each entry has its own
+   `piece` and `course`, so its own piece key): 11 or 12 for a one-storey house, 14 or 15
+   for two or three storeys. `house_pieces` leaves out an entry whose count is 0, such as
+   the window wall of a house with no windows. Measured on 2026-11-17 by calling
+   `house_pieces` from `models/dollhouse-kit/pipeline/pipeline.py` for every house within
+   `LIMITS` (cols 1-4, rows 1-3, windows 0-14, per storey count). The
    render limits count jobs (`storefront_renders_per_minute`, `…_per_day`,
    `storefront_render_concurrency`). Should a pipeline render count as more than one,
    for example by its pieces?
