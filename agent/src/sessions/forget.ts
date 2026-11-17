@@ -1,16 +1,17 @@
 import type { Client } from '@temporalio/client'
 import type { Sql } from 'postgres'
 import { CrudReadError, crudRead } from '../api/crudRead.js'
+import type { CrudAreas } from '../api/crudAreas.js'
 import { crudOf, type CrudTarget } from '../api/crudStores.js'
 import { backgroundWorkflowId } from '../background/service.js'
-import { BackgroundTaskStore } from '../background/store.js'
+import { BackgroundTaskStore, CrudBackgroundTasks } from '../background/store.js'
 import { unscheduleTask } from '../background/temporal.js'
 import { terminateOpenToolCalls, workflowNotFound as notFound } from '../tools/activityProjection.js'
 import { dropPayloadKey, type PayloadKeys, payloadKeyLock, subjectOf, sweepBridgeKeys } from '../temporal/payloadCodec.js'
 import { dropUnnamedBytes } from '../workspace/store.js'
 import { copyForkRanges, ForksNeedKeys, hasForks } from './store.js'
 import { sessionPath } from './rows.js'
-import { PgSessionReads, type SessionReads } from './sessionReads.js'
+import { CrudSessionReads, PgSessionReads, type SessionReads } from './sessionReads.js'
 import { notifyWarmEvict } from './warmEvict.js'
 
 // forgetSubject (spec 2026-10-01 §6.5, plan 5c Ruling 12): the one operation every
@@ -122,7 +123,7 @@ export async function forgetSubject(deps: ForgetDeps, subject: string): Promise<
   // workflow task or an activity before the termination below) can make it a new key.
   const answered = deps.crud ? await deps.crud.forget(subject) : 'forks'
   // An API with no KEK whose forks take transcript entries, while step 3 is the API's: no SQL here.
-  if (answered === 'forks' && deps.crud && deps.rows && sessionId !== undefined) throw new ForksNeedKeys(sessionId, true)
+  if (answered === 'forks' && deps.crud && deps.rows && sessionId !== undefined) throw new ForksNeedKeys(sessionId, { terminated: deps.client !== undefined })
   const key =
     answered !== 'forks'
       ? answered
@@ -312,5 +313,28 @@ export function gatedKeyDeletes(pg: KeyDeletes, crud: KeyDeletes, useCrud: () =>
   return {
     dropBridgeKey: (subject) => (useCrud() ? crud : pg).dropBridgeKey(subject),
     sweep: () => (useCrud() ? crud : pg).sweep(),
+  }
+}
+
+/** The areas the operator's forget (`forget-subject.ts`) asks the API for (#6501). */
+export const FORGET_CLI_AREAS = ['forget', 'background-tasks', 'session-reads', 'forget-rows'] as const
+
+/**
+ * The forget's routes as the API lists them, for `forget-subject.ts`: the key transaction once
+ * `forget` is listed; the background tasks per call; a session's open calls once
+ * `session-reads` is; and step 3's rows only when both `forget` and `forget-rows` are, so a
+ * forget never deletes, through the API, the rows of a session it did not tombstone there.
+ */
+export function forgetRoutes(
+  areas: Pick<CrudAreas, 'has'>,
+  target: CrudTarget,
+  sql: Sql,
+): Pick<ForgetDeps, 'crud' | 'tasks' | 'reads' | 'rows'> {
+  const crud = areas.has('forget') ? new CrudSubjectKeys(target.baseUrl, { fetch: target.fetch }) : undefined
+  return {
+    crud,
+    tasks: new BackgroundTaskStore(sql, { crud: new CrudBackgroundTasks(target.baseUrl, { fetch: target.fetch }), use: () => areas.has('background-tasks') }),
+    reads: areas.has('session-reads') ? new CrudSessionReads(target) : undefined,
+    rows: crud && areas.has('forget-rows') ? new CrudForgetRows(target) : undefined,
   }
 }

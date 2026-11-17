@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { CrudAreas } from '../src/api/crudAreas.js'
-import { dataHealthOf, ledgerOf } from '../src/api/dataHealth.js'
+import { checkData, dataHealthOf, ledgerOf } from '../src/api/dataHealth.js'
 import { aiStatus } from '../src/aiStatus.js'
 import { BrowserSessions, CrudSessionLookup, sessionIdHash } from '../src/auth/browserSession.js'
 import { awaitMigrations, crudLedger, EXPECTED_MIGRATIONS, MigrationChecksumError, MigrationsPendingError } from '../src/db/schema.js'
@@ -153,29 +153,43 @@ describe("health's probe of the agent's data", () => {
       { get complete() { return complete }, answers: () => Promise.resolve(api) },
       (m) => logged.push(m),
     )
-    const status = async (ok: boolean) => (await aiStatus({ database: health, credentials: {} } as never, ok)).ai
+    const status = async () => {
+      const data = await checkData(health)
+      return (await aiStatus({ database: health, credentials: {} } as never, data?.ok, data?.apiUnanswered)).ai
+    }
     api = false
     expect(await health.ping()).toBe(true) // the API is not asked until every area is listed
     complete = true
-    expect(await health.ping()).toBe(false)
-    expect(health.apiUnanswered()).toBe(true)
-    expect(await status(false)).toBe("unavailable (the API does not answer the agent's CRUD areas)")
+    expect(await health.check()).toEqual({ ok: false, apiUnanswered: true })
+    expect(await status()).toBe("unavailable (the API does not answer the agent's CRUD areas)")
     api = true
     expect(await health.ping()).toBe(true)
-    pg = false
-    expect(await health.ping()).toBe(false)
-    expect(health.apiUnanswered()).toBe(false)
-    expect(await status(false)).toBe('unavailable (database unreachable)')
-    expect(logged).toEqual(["health: the API does not answer the agent's CRUD areas", "health: the API answers the agent's CRUD areas again"])
     // The API stops answering, then Postgres goes down: the status names the database.
-    pg = true
     api = false
-    expect(await health.ping()).toBe(false)
-    expect(health.apiUnanswered()).toBe(true)
+    expect(await health.check()).toEqual({ ok: false, apiUnanswered: true })
     pg = false
-    expect(await health.ping()).toBe(false)
-    expect(health.apiUnanswered()).toBe(false)
-    expect(await status(false)).toBe('unavailable (database unreachable)')
+    expect(await health.check()).toEqual({ ok: false, apiUnanswered: false })
+    expect(await status()).toBe('unavailable (database unreachable)')
+    expect(logged).toEqual([
+      "health: the API does not answer the agent's CRUD areas",
+      "health: the API answers the agent's CRUD areas again",
+      "health: the API does not answer the agent's CRUD areas",
+    ])
+  })
+
+  it('names the failure of its own probe, whatever another probe meanwhile found', async () => {
+    let releasePg: (ok: boolean) => void = () => undefined
+    const pings: Promise<boolean>[] = [new Promise<boolean>((resolve) => (releasePg = resolve)), Promise.resolve(true)]
+    const health = dataHealthOf(
+      { ping: () => pings.shift() ?? Promise.resolve(true), ready: () => Promise.resolve(true) },
+      { complete: true, answers: () => Promise.resolve(false) },
+      () => undefined,
+    )
+    const slow = health.check() // Postgres down, answered last
+    const fast = await health.check() // Postgres up, the API silent
+    releasePg(false)
+    expect(fast).toEqual({ ok: false, apiUnanswered: true })
+    expect(await slow).toEqual({ ok: false, apiUnanswered: false })
   })
 
   it('reads the ledger through the API once it lists migrations, over SQL until then', async () => {

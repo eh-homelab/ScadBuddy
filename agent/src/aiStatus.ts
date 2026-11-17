@@ -55,13 +55,15 @@ async function within<T>(promise: Promise<T>, ms: number): Promise<T | typeof TI
 export async function aiStatus(
   deps: Pick<AppDeps, 'database' | 'credentials' | 'kek' | 'healthTimeoutMs'>,
   dbOk: boolean | undefined,
+  /** The probe failed on the API, not on Postgres (api/dataHealth.ts `checkData`). */
+  apiUnanswered = false,
 ): Promise<{ ai: AiStatus; credential: CredentialState; recoversAt?: string }> {
   if (dbOk === undefined || !deps.database || !deps.credentials) {
     return { ai: 'disabled (no database)', credential: 'unknown' }
   }
   if (!dbOk) {
     // Once the API lists every area, health asks it too (api/dataHealth.ts): name which failed.
-    if (deps.database.apiUnanswered?.()) return { ai: "unavailable (the API does not answer the agent's CRUD areas)", credential: 'unknown' }
+    if (apiUnanswered) return { ai: "unavailable (the API does not answer the agent's CRUD areas)", credential: 'unknown' }
     return { ai: 'unavailable (database unreachable)', credential: 'unknown' }
   }
   // Both steps are bounded: ready() may be waiting for the API to apply the
