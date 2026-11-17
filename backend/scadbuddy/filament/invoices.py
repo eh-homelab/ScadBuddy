@@ -573,7 +573,8 @@ class InvoiceStore:
             if found is None:
                 # A concurrent confirm made the same SKU first: read its row.
                 found = conn.execute(find, (head["supplier_id"], sku)).fetchone()
-        assert found is not None
+        if found is None:
+            raise InvoiceLineError(position, "the product changed while confirming; try again")
         if found["type_id"] != type_id:
             raise InvoiceLineError(position, "its supplier product is for another spool type")
         return found["id"], found["pack_size"]
