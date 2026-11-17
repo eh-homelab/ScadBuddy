@@ -1082,8 +1082,12 @@ async def read_catalog(settings: StoredSettings) -> list[SpoolCatalogEntry] | No
         except ApiError as error:
             logger.warning("no spool catalog from Bambuddy: %s", error.detail)
         except ValueError as error:
-            # A pydantic ValidationError (another shape) or a JSONDecodeError (no JSON).
-            logger.warning("no spool catalog from Bambuddy: an answer of another shape: %s", error)
+            # A pydantic ValidationError (another shape) or a JSONDecodeError (no JSON). Only
+            # the type is logged: a ValidationError's text quotes Bambuddy's values (#6580).
+            logger.warning(
+                "no spool catalog from Bambuddy: an answer of another shape (%s)",
+                type(error).__name__,
+            )
     return None
 
 
@@ -1112,9 +1116,11 @@ async def try_assignments(settings: StoredSettings) -> list[SpoolAssignment] | N
         except ApiError as error:
             logger.warning("no tray assignments from Bambuddy: %s", error.detail)
         except ValueError as error:
-            # A pydantic ValidationError (another shape) or a JSONDecodeError (no JSON).
+            # A pydantic ValidationError (another shape) or a JSONDecodeError (no JSON). Only
+            # the type is logged: a ValidationError's text quotes Bambuddy's values (#6580).
             logger.warning(
-                "no tray assignments from Bambuddy: an answer of another shape: %s", error
+                "no tray assignments from Bambuddy: an answer of another shape (%s)",
+                type(error).__name__,
             )
     return None
 
