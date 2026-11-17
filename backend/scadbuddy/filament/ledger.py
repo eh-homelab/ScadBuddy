@@ -16,8 +16,7 @@ The order is when things physically happened (§8.2, "Consumption is counted onc
 event that names its time (``at``) keeps it: a BB weighing or drying at BB's time, BB's
 state (``synced_from_bb``) at the BB row's ``updated_at``, a BB usage row at its
 ``created_at``, a print's ``print_started`` when the printer takes the plate and its
-``print_ended`` at the report that shows the plate's timed end (from Task 5 of #6263;
-until then `filament/print_uses.py` books it at the plate's start). An event
+``print_ended`` at the report that shows the plate's timed end (`filament/prints.py`). An event
 with no ``at`` is booked now: the clock's time, but never earlier than a microsecond
 after the spool's newest event, so a clock that steps back (WSL's does) cannot put an
 event before the one it follows. That guard only moves an event booked now, never a
