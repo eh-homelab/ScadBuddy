@@ -166,6 +166,10 @@ class SliceRunInput(BaseModel):
     plate_id: int
     #: The run's subject, which the dialog's slice of the same copy shares (Ruling C2).
     subject: str
+    #: A LAN run's id (#6122): `slice_run` holds the sliced file for it, so the print
+    #: worker's read URL of the file follows the run. ``None`` for a run that prints
+    #: through Bambuddy's queue, and in a history from before `RUN_HOLD_PATCH`.
+    run_id: str | None = None
 
 
 class NativeSliced(BaseModel):

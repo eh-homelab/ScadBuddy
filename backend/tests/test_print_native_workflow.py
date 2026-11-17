@@ -228,6 +228,8 @@ class NativeFake(Fake):
         self.slice_keys: list[str] = []
         #: The plan's `lan_require_plate_clear` (#4939).
         self.plate_clear = False
+        #: The run each `slice_run` was asked to hold its file for (#6122), in turn.
+        self.holds_for: list[str | None] = []
 
     @activity.defn(name="print_record")
     async def record(self, input: RecordInput) -> list[PlateSend]:
@@ -260,6 +262,7 @@ class NativeFake(Fake):
     @activity.defn(name=SLICE_RUN_ACTIVITY)
     async def slice_run(self, input: SliceRunInput) -> NativeSliced:
         self.calls.append(f"slice_run:{input.plate_id}")
+        self.holds_for.append(input.run_id)
         # A slice swept since the last `slice_run` is sliced again, into a new blob.
         key = self.slice_keys.pop(0) if self.slice_keys else BLOB
         return NativeSliced(slice_id=5, preset_key="k", sliced_blob_key=key)
@@ -510,6 +513,30 @@ async def test_a_native_path_planned_without_the_checks_mark_queues_in_bambuddy(
     assert "enqueue:1" in fake.calls
     assert fake_lan.received()["ftps"] == [] and fake_lan.project_files() == []
     assert [outcome.lan for outcome in fake.outcomes] == [None]
+    # #6122: a run that queues in Bambuddy holds no file for the print worker's read.
+    assert fake.holds_for == [None]
+
+
+async def test_a_lan_run_holds_its_sliced_file(
+    client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
+) -> None:
+    """#6122: a LAN run's ``slice_run`` is sent the run's id, so the file it slices is
+    held for the run and the print worker's read URL of it follows the run."""
+    fake, run = await _run(client, pg_pool, registry_native, blobs=Blobs())
+    assert run.status == "succeeded"
+    assert fake.holds_for == [run.id]
+
+
+async def test_a_lan_runs_later_copy_holds_its_file_for_the_run(
+    client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
+) -> None:
+    """#6122: ``PrintLanSequence`` joins each later copy's slice for the same run, so a
+    slice made again after the sweep is held for the run too."""
+    fake, run = await _run(
+        client, pg_pool, registry_native, blobs=Blobs(), copies=2, reports=FakeReports(fake_lan)
+    )
+    assert run.status == "succeeded"
+    assert fake.holds_for == [run.id, run.id]
 
 
 async def test_bambuddy_path_is_unchanged(client: Client) -> None:

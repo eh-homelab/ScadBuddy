@@ -8,7 +8,6 @@ only reads."""
 from __future__ import annotations
 
 import asyncio
-import time
 from typing import Annotated, Any, cast
 from uuid import UUID
 
@@ -27,6 +26,7 @@ from scadbuddy.crud.idempotency import (
     required_key,
 )
 from scadbuddy.filament import models as m
+from scadbuddy.filament.assignments_cache import AssignmentsCache
 from scadbuddy.filament.bambuddy_pull import PullReport, read_and_pull, try_assignments
 from scadbuddy.filament.catalog import (
     CATALOGS,
@@ -774,24 +774,9 @@ async def get_summary(filament: FilamentDep) -> m.InventorySummary:
     return await asyncio.to_thread(filament.spools.summary)
 
 
-#: How long a read of Bambuddy's assignments serves the next requests (I-1 of the final
-#: review of #6262), and how long after a failed or timed-out read none is tried again:
-#: the page and the hover card then wait on Bambuddy at most once per window, not on
-#: every load.
-ASSIGNMENTS_FRESH_SECONDS = 5.0
-ASSIGNMENTS_BACKOFF_SECONDS = 30.0
-_now = time.monotonic
-_assignments_lock = asyncio.Lock()
-#: The BB URL read, when, and what it answered (``None``: it failed, serve no assignments).
-_assignments_seen: tuple[str, float, list[SpoolAssignment] | None] | None = None
-
-
-async def _assignments(store: SettingsStore) -> list[SpoolAssignment]:
-    """Bambuddy's tray assignments (`try_assignments`), read at most once per
-    `ASSIGNMENTS_FRESH_SECONDS`, one read at a time; after a failed read, none for
-    `ASSIGNMENTS_BACKOFF_SECONDS` without asking Bambuddy again. 503 when the settings
-    cannot be read, as when the spools cannot."""
-    global _assignments_seen
+async def _assignments(store: SettingsStore, cache: AssignmentsCache) -> list[SpoolAssignment]:
+    """Bambuddy's tray assignments, through the filament component's `AssignmentsCache`.
+    503 when the settings cannot be read, as when the spools cannot."""
     try:
         settings = await asyncio.to_thread(store.load)
     except DATABASE_ERRORS as error:
@@ -800,17 +785,7 @@ async def _assignments(store: SettingsStore) -> list[SpoolAssignment]:
         ) from error
     if not settings.bambuddy_url:
         return []
-    async with _assignments_lock:
-        seen = _assignments_seen
-        if seen is not None and seen[0] == settings.bambuddy_url:
-            window = (
-                ASSIGNMENTS_FRESH_SECONDS if seen[2] is not None else ASSIGNMENTS_BACKOFF_SECONDS
-            )
-            if _now() - seen[1] < window:
-                return seen[2] or []
-        found = await try_assignments(settings)
-        _assignments_seen = (settings.bambuddy_url, _now(), found)
-        return found or []
+    return await cache.get(settings, try_assignments)
 
 
 @router.get(
@@ -833,7 +808,7 @@ async def _assignments(store: SettingsStore) -> list[SpoolAssignment]:
 async def get_inventory(
     filament: FilamentDep, store: SettingsStoreDep, include_archived: bool = False
 ) -> m.FilamentInventoryView:
-    assignments = await _assignments(store)
+    assignments = await _assignments(store, filament.assignments)
     return await asyncio.to_thread(
         filament.inventory.view, include_archived=include_archived, bb_assignments=assignments
     )
@@ -862,7 +837,7 @@ async def get_spool_summary(
         Query(ge=0, description="Grams to price at this spool's cost, e.g. a plate's use"),
     ] = None,
 ) -> m.FilamentSpoolSummary:
-    assignments = await _assignments(store)
+    assignments = await _assignments(store, filament.assignments)
     found = await asyncio.to_thread(filament.inventory.summary, spool_id, grams, assignments)
     if found is None:
         raise _no_spool(spool_id)

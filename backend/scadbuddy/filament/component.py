@@ -3,11 +3,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Annotated
 
 from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
+from scadbuddy.filament.assignments_cache import AssignmentsCache
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.inventory import FilamentInventory, PoolSbSpoolReads
 from scadbuddy.filament.locations import LocationStore
@@ -26,6 +27,8 @@ class Filament:
     inventory: FilamentInventory
     #: What a print's plan reads of SB spools' presets (#6262 F1, `resolve_plates`).
     presets: PoolSpoolPresets
+    #: Bambuddy's tray assignments, as this app last read them (#6580).
+    assignments: AssignmentsCache = field(default_factory=AssignmentsCache)
 
     @property
     def reads(self) -> PoolSbSpoolReads:

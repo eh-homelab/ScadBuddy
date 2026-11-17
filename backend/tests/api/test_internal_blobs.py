@@ -25,12 +25,17 @@ from pydantic import ValidationError
 from scadbuddy.api import crud_print
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.bambuddy.preview import MAX_SLICED_BYTES
+from scadbuddy.bambuddy.print_run import PrintRunResult
+from scadbuddy.bambuddy.runs import hold_run_file
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.secrets import load_kek
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.main import create_app
+from scadbuddy.orders.lifecycle import QUOTE_HOLDER
 from scadbuddy.slicing.models import TransferUrl
+from scadbuddy.slicing.store import NativeSliceStore
 from scadbuddy.slicing.transfer import (
     INTERNAL_BLOBS,
     PENDING_PREFIX,
@@ -48,6 +53,7 @@ from scadbuddy.slicing.transfer_token import TokenError, TransferToken, sign, tr
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.content_models import BlobMissingError, BlobScope
 from scadbuddy.store.index import Pool
+from scadbuddy.store.refs import BlobRefs
 from tests.support.store import local_content
 
 pytestmark = pytest.mark.requires_postgres
@@ -253,14 +259,13 @@ def test_a_finished_slice_gets_a_read_url_and_a_forged_key_does_not(
     blob_client: TestClient,
 ) -> None:
     """The real slice path (#6179): the slicer's PUT, then `finish_put`, and the print
-    worker's read URL of the key it answered. The same bytes, kind and mark under any
-    other key get none."""
-    put = _transfers(blob_client).mint_put()
-    assert _upload(blob_client, _path(put.url), put.url.headers, b"real").status_code == 204
-    key = _finish(blob_client, put, b"real")
-    slicing = cast(Any, SimpleNamespace(transfers=lambda: _transfers(blob_client)))
+    worker's read URL of the key it answered, for the LAN run that holds it (#6122). The
+    same bytes, kind and mark under any other key get none."""
+    key = _sliced_output(blob_client, b"real")
     assert blob_client.portal is not None
-    ask = partial(crud_print.transfer_url, slicing=slicing)
+    run = _running_run(blob_client, "run-real")
+    assert hold_run_file(_state(blob_client).projection.pool, run, key)
+    ask = _ask(blob_client)
     url = blob_client.portal.call(ask, crud_print.TransferUrlAsk(key=key))
     assert _path(url) == f"{INTERNAL_BLOBS}/{key}"
     forged = "slice-forged"
@@ -275,10 +280,97 @@ def test_a_finished_slice_gets_a_read_url_and_a_forged_key_does_not(
             meta=dict(SLICED_OUTPUT_META),
         )
     )
+    # Held by the run too, so only the key's own content address refuses it.
+    hold_run_file(_state(blob_client).projection.pool, run, forged)
+    _refused(blob_client, forged)
+
+
+def _sliced_output(client: TestClient, data: bytes) -> str:
+    """``data`` as the slicer's output: its PUT, then `finish_put`, which marks it."""
+    put = _transfers(client).mint_put()
+    assert _upload(client, _path(put.url), put.url.headers, data).status_code == 204
+    return _finish(client, put, data)
+
+
+def _running_run(client: TestClient, run_id: str, subject: str = "a" * 32) -> str:
+    assert client.portal is not None
+    run = client.portal.call(
+        partial(
+            _state(client).print_runs.store.insert_accepted,
+            run_id,
+            subject=PrintSubject.output(subject),
+            key=run_id,
+            slug="demo",
+            workflow_id=f"print-{run_id}",
+            workflow_run_id="w1",
+            retention=None,
+        )
+    )
+    return str(run.id)
+
+
+def _ask(client: TestClient) -> Callable[[crud_print.TransferUrlAsk], Any]:
+    slicing = cast(Any, SimpleNamespace(transfers=lambda: _transfers(client)))
+    return partial(crud_print.transfer_url, slicing=slicing, runs=_state(client).print_runs)
+
+
+def _refused(client: TestClient, key: str) -> None:
+    assert client.portal is not None
     with pytest.raises(ApiError) as refused:
-        blob_client.portal.call(ask, crud_print.TransferUrlAsk(key=forged))
+        client.portal.call(_ask(client), crud_print.TransferUrlAsk(key=key))
     assert refused.value.status == 403
     assert refused.value.extensions["reason"] == TRANSFER_REFUSED
+
+
+def test_only_a_lan_runs_own_sliced_file_gets_a_read_url(blob_client: TestClient) -> None:
+    """#6122's acceptance, on the real store and Postgres: a preview slice (the print
+    dialog's, whose subject no run prints), an order quote's slice and a slicer's input
+    get no URL; a running LAN run's file does after the sweep deleted its slice's row,
+    and stops once the run's last print started."""
+    assert blob_client.portal is not None
+    state = _state(blob_client)
+    pool = state.projection.pool
+    slices = NativeSliceStore(pool)
+
+    async def completed(subject: str, key: str) -> None:
+        row = await slices.start(
+            workflow_id=f"slice-{key}",
+            subject=subject,
+            library_file_id=1,
+            plate_id=1,
+            preset_key="k",
+        )
+        await slices.finish(
+            row.id, status="completed", sliced_blob_key=key, failure=None, warnings=[]
+        )
+
+    preview = _sliced_output(blob_client, b"preview")
+    blob_client.portal.call(completed, "b" * 32, preview)
+    quote = _sliced_output(blob_client, b"quote")
+    BlobRefs(pool).add(quote, QUOTE_HOLDER, "quote-1")
+    slicer_input = _put(blob_client, b"input")
+    lan = _sliced_output(blob_client, b"lan run")
+    blob_client.portal.call(completed, "a" * 32, lan)
+    run = _running_run(blob_client, "run-lan")
+    assert hold_run_file(pool, run, lan)
+    assert hold_run_file(pool, run, slicer_input)
+    for key in (preview, quote, slicer_input):
+        _refused(blob_client, key)
+    # The slice sweep deletes the row; the run, with a print still to start, holds on.
+    blob_client.portal.call(partial(state.print_runs.store.succeed, run, "demo", _lan_result([2])))
+    with pool.connection() as conn:
+        conn.execute("DELETE FROM native_slices WHERE sliced_blob_key = %s", (lan,))
+    url = blob_client.portal.call(_ask(blob_client), crud_print.TransferUrlAsk(key=lan))
+    assert _path(url) == f"{INTERNAL_BLOBS}/{lan}"
+    # Its last print started: the run's end drops its hold.
+    blob_client.portal.call(
+        partial(state.print_runs.store.update_result, run, "demo", _lan_result([]))
+    )
+    _refused(blob_client, lan)
+
+
+def _lan_result(waiting: list[int]) -> PrintRunResult:
+    return PrintRunResult(library_file_id=1, copies=2, path="native", lan_waiting=waiting)
 
 
 def test_a_second_put_to_the_same_pending_key_upserts(blob_client: TestClient) -> None:

@@ -190,7 +190,8 @@ LEASE_LOCK_WAIT = 2.0
 REMOVAL_RUNNING = "removal-running"
 #: A lease taken under a token that holds another lease: `crud/render.py` `TOKEN_TAKEN`.
 TOKEN_TAKEN = "token-taken"
-#: A renew of a lease or a hold with no row: `crud/render.py` `NO_LEASE`, `NO_HOLD`.
+#: A renew of a lease or a hold with no live row (gone, or lapsed): `crud/render.py`
+#: `NO_LEASE`, `NO_HOLD`.
 NO_LEASE = "no-lease"
 NO_HOLD = "no-hold"
 #: A renew or release of an install slot another token holds: `crud/render.py`
@@ -1340,7 +1341,8 @@ async def take_lease(body: LeaseTake, state: StateDep) -> None:
 
 @router.put("/leases/{token}", name="crud_render_renew_lease")
 async def renew_lease(token: uuid.UUID, body: Ttl, state: StateDep) -> None:
-    """R22: the lease's rows live ``ttl_s`` more; a 404 ``no-lease`` when it has none."""
+    """R22: the lease's rows live ``ttl_s`` more; a 404 ``no-lease`` when it has no live
+    row (gone, or lapsed)."""
     if not await asyncio.to_thread(_leases(state).renew, token, ttl=body.ttl_s):
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such lease.", reason=NO_LEASE)
 
@@ -1365,7 +1367,8 @@ async def take_pin_hold(body: PinHoldTake, state: StateDep) -> None:
 
 @router.put("/pin-holds/{token}", name="crud_render_renew_pin_hold")
 async def renew_pin_hold(token: uuid.UUID, body: Ttl, state: StateDep) -> None:
-    """R23: the hold lives ``ttl_s`` more; a 404 ``no-hold`` when it has no row."""
+    """R23: the hold lives ``ttl_s`` more; a 404 ``no-hold`` when it has no live row
+    (gone, or lapsed)."""
     if not await asyncio.to_thread(_leases(state).renew_pin, token, ttl=body.ttl_s):
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such pin hold.", reason=NO_HOLD)
 

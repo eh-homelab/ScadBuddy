@@ -26,7 +26,7 @@ from scadbuddy.bambuddy.commits import upload_into
 from scadbuddy.bambuddy.errors import is_transient
 from scadbuddy.bambuddy.models import LibraryFile
 from scadbuddy.bambuddy.print_run import NATIVE_SLICER_UNAVAILABLE, PlannedRun
-from scadbuddy.bambuddy.runs import PrintRunError
+from scadbuddy.bambuddy.runs import PrintRunError, hold_run_file
 from scadbuddy.bambuddy.send import folder_listing, same_bytes
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.heartbeat import heartbeating
@@ -391,17 +391,21 @@ class RunActivities:
         # come before the wait.
         row = await heartbeating(self._started(input))
         if row.status == "completed" and row.sliced_blob_key is not None:
-            return NativeSliced(
-                slice_id=row.id, preset_key=row.preset_key, sliced_blob_key=row.sliced_blob_key
-            )
-        result = await self._waited(row.workflow_id)
-        if result.status == "completed" and result.sliced_blob_key is not None:
-            return NativeSliced(
-                slice_id=row.id, preset_key=row.preset_key, sliced_blob_key=result.sliced_blob_key
-            )
-        failure = result.failure or "The slice failed."
-        code = result.failure_status or (422 if result.refused else 502)
-        raise _run_failed(code, "The slice failed", failure)
+            key = row.sliced_blob_key
+        else:
+            result = await self._waited(row.workflow_id)
+            if result.status != "completed" or result.sliced_blob_key is None:
+                failure = result.failure or "The slice failed."
+                code = result.failure_status or (422 if result.refused else 502)
+                raise _run_failed(code, "The slice failed", failure)
+            key = result.sliced_blob_key
+        if input.run_id is not None:
+            # A LAN run's own file (#6122), held while the slice's row still holds it.
+            held = await asyncio.to_thread(hold_run_file, self.slicing.refs.pool, input.run_id, key)
+            if not held:
+                # The run ended first (#6586): its read URL of the key is then refused.
+                logger.debug("print run %s ended before it held %s", input.run_id, key)
+        return NativeSliced(slice_id=row.id, preset_key=row.preset_key, sliced_blob_key=key)
 
     async def _started(self, input: SliceRunInput) -> NativeSlice:
         """The slice started, or the dialog's joined: its row."""
