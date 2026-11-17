@@ -89,8 +89,8 @@ data/pages/
   _types/<type>.json      a record type's schema (§5.1)
 ```
 
-- `<name>` is a slug, `[a-z0-9][a-z0-9-]{0,62}`. `_types` cannot be a page name, because
-  a name never starts with `_`.
+- `<name>` is a slug, `[a-z0-9][a-z0-9-]{0,62}`. `_types` and `_host` (§9) cannot
+  be page names, because a name never starts with `_`.
 - `PageHistory(GitRepo)` (`backend/scadbuddy/pages/repository.py`) is `FlowHistory`'s
   shape: one commit per version, an optional message and body, and a Postgres lock that
   carries HEAD (`pages_repo_head`, a migration, and `repo_lock.py` `pages_coordinator`).
@@ -117,7 +117,10 @@ data/pages/
 - `title`: the shell's heading and the nav label, 1 to 60 characters.
 - `nav`: whether the shell lists the page in its navigation. A page is always reachable
   at `/p/<name>`.
-- `module`: a file under `ui/`, default `ui/index.js`.
+- `module`: a file under `ui/`, as a path from the page's directory, default
+  `ui/index.js`. The file routes of §3.3 take a path relative to `ui/`, so the shell
+  drops the `ui/` prefix before it builds the URL, as `TemplateUi.tsx:108` does for a
+  template.
 - `records`: the record types (§5) the page reads or writes. The host gives the page
   `host.records.<type>` for these types only.
 - `flows`: the flows the page may start through `host.flows.start`. **(call)** This list
@@ -128,7 +131,8 @@ The route is always `/p/<name>`. The orders spec §9 put `"route"` in the file. 
 drops it: a second name for the same page adds a check and no use.
 
 The API checks `page.json` when a version is registered: a JSON object, the keys above
-only, each type and flow name a slug, each named record type present at that commit, the
+only, each flow name a page-style slug (`[a-z0-9][a-z0-9-]{0,62}`), each record type
+name a type slug (`[a-z][a-z0-9_]{0,62}`, §5.1), each named record type present at that commit, the
 module present under `ui/` with a servable suffix (P2). A failure is 422 and writes no
 commit.
 
@@ -136,12 +140,20 @@ commit.
 
 All are under `/api/v1`, on the API (the CRUD service), with the viewer's own auth (§7.1).
 
-- `GET /pages` — each page's name, title, `nav`, newest version and commit.
-- `GET /pages/{name}` — the declaration at the newest version, and the versions.
+- `GET /pages` — each page's name, title, `nav`, newest version and commit, and its
+  mountable version (§7.4).
+- `GET /pages/{name}` — the declaration at the mountable version, the mountable commit,
+  and every version with its author and whether a person confirmed it. The mountable
+  version is the newest version that a person wrote or confirmed (§7.4).
 - `POST /pages` — a new version: `{name, files: {path: text}, message?, body?}`, with an
-  `Idempotency-Key`. The files replace the whole `<name>/` tree. Text files only (the
-  suffixes of P2 except the images and the font); images and fonts come by
-  `POST /pages/{name}/files` as bytes, one per call, under the same checks.
+  `Idempotency-Key`. The text files sent replace every text file of the `<name>/` tree
+  (a text file not sent is deleted). Text files only (the suffixes of P2 except the
+  images and the font). The binary files (images and fonts) carry over unchanged.
+- `PUT /pages/{name}/files/{path}` and `DELETE …/files/{path}` — one binary file, as
+  bytes, under the same checks. Each call is a version of its own.
+- `POST /pages/{name}/versions/{commit}/confirm` — a person confirms a version the
+  assistant wrote (§7.4). An agent author is refused 403, as `auth/routes.py` refuses
+  agents on its `person` routes.
 - `POST /pages/{name}/restore` `{commit}` — a new version with that commit's tree.
 - `DELETE /pages/{name}` — a delete commit.
 - `GET /pages/{name}/ui/{path}` — a file of the live tree, `no-cache`.
@@ -159,7 +171,8 @@ The bus gets `page.changed` `{name}` on the collection topic `pages` and the top
 ### 3.4 Mounting
 
 The shell gains one route, `/p/:name/*`. It reads `GET /pages/{name}`, loads
-`/api/v1/pages/{name}/versions/{commit}/ui/<module>` and mounts it.
+`/api/v1/pages/{name}/versions/{commit}/ui/{path}` for the mountable commit (§3.3), with
+`{path}` the declaration's `module` less its `ui/` prefix, and mounts it.
 
 Phase 1 extracts the loader from `TemplateUi.tsx` into `template-ui/UiMount.tsx`:
 
@@ -417,7 +430,8 @@ Kept from template UIs (pipelines spec §4.2, §9):
 - the page CSP of `api/static.py`, unchanged.
 
 Not added: no iframe sandbox, no per-route allowlist for pages, no person-only mark on
-the page or record routes. The back office is reached only through the LAN gateway and
+the page or record routes except the confirm of §7.4, which an agent must not make for
+itself. The back office is reached only through the LAN gateway and
 Pomerium (`docs/security/trust-boundaries.md` "Zones"). The owner decided not to add
 lockdowns of routes reachable only there.
 
@@ -460,7 +474,8 @@ also need a sandbox decision that this spec does not make.
 - The authoring guide (`get_authoring_guide`) gains a "Pages" section: the layout, the
   declaration, Host API v2, the host elements, the record routes, and the limits.
 - A `.d.ts` for Host API v2 and the API's types, generated with the frontend's
-  `gen:api`, is served at `GET /pages/_host/host.d.ts` for editors and the assistant.
+  `gen:api`, is served at `GET /pages/_host/host.d.ts` for editors (`_host` is never a page
+  name, §3.1) and the assistant.
 - `models/CLAUDE.md`'s template checks do not cover pages. A page has no `verify.sh`.
 
 ## 10. Phases
