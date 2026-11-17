@@ -151,9 +151,10 @@ settings trust the whole pod CIDR: `SCADBUDDY_TRUSTED_PROXIES` and
    pointed at another service's object and read as a piece. Then the API reads the
    object from its own store and checks the ref's SHA-256 and size, unless a row the API
    verified (`store_blobs.verified_at`, set only by `_verified`, cleared when a write
-   points the row at another object) names it. So no row the render credential writes
-   names bytes that are not its SHA-256, and a row from before #6233 is read once on its
-   next reuse. On Bambuddy a library file that no row names at all (one a person put
+   points the row at another object) names it. So the API checks a ref's bytes when it
+   first reads its object, and a row from before #6233 is read once on its next reuse.
+   After that check the S3 keys (gap 3) can still rewrite the object, and a verified row
+   is not read again until a write points it at another object. On Bambuddy a library file that no row names at all (one a person put
    there) is not covered by that check. What is left: a piece's key is computable from
    its template, revision and parameters (`workflows/models.py` `piece_key`; an `act-`
    key likewise, `template_out_key`), not from its bytes, so a render credential can
