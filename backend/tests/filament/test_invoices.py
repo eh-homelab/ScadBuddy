@@ -266,3 +266,34 @@ def test_a_header_only_draft_has_no_lines(pg_pool: PgPool) -> None:
     assert invoice.line_count == 0
     assert invoice.difference == D("107.0000")
     assert store.get(invoice.id) == invoice
+
+
+def test_set_file_on_a_missing_invoice_is_none_and_holds_nothing(pg_pool: PgPool) -> None:
+    store = _store(pg_pool)
+    ghost = uuid4()
+    assert (
+        store.set_file(
+            ghost, key="attachment-x", name="a.pdf", media_type="application/pdf", size=1
+        )
+        is None
+    )
+    with pg_pool.connection() as conn:
+        held = conn.execute(
+            "SELECT count(*) AS n FROM blob_refs WHERE holder_kind = 'filament_invoice'"
+            " AND holder_id = %s",
+            (str(ghost),),
+        ).fetchone()
+    assert held is not None
+    assert held["n"] == 0
+
+
+def test_file_key_is_none_until_a_file_is_set(pg_pool: PgPool) -> None:
+    store = _store(pg_pool)
+    invoice = _make(store, _body(_supplier(pg_pool)))
+    assert store.file_key(invoice.id) is None
+    assert store.file_key(uuid4()) is None
+    made = store.set_file(
+        invoice.id, key="attachment-x", name="a.pdf", media_type="application/pdf", size=7
+    )
+    assert made is not None
+    assert store.file_key(invoice.id) == ("attachment-x", made)

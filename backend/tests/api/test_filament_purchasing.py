@@ -11,6 +11,8 @@ import pytest
 from fastapi.testclient import TestClient
 from httpx import Response
 
+from tests.api.test_settings_runtime import _state
+
 pytestmark = pytest.mark.requires_postgres
 
 URL = "/api/v1/filament"
@@ -315,7 +317,8 @@ def _draft(client: TestClient, number: str = "F1") -> str:
 
 
 def _send(client: TestClient, invoice_id: str, data: bytes, name: str) -> Response:
-    return client.post(f"{URL}/invoices/{invoice_id}/file", files={"file": (name, data)})
+    sent: Response = client.post(f"{URL}/invoices/{invoice_id}/file", files={"file": (name, data)})
+    return sent
 
 
 def _holds(pg_conninfo: str, invoice_id: str) -> list[str]:
@@ -417,3 +420,22 @@ def test_the_pointer_has_no_bytes(client: TestClient) -> None:
 def test_a_missing_invoice_is_404_before_the_body_is_read(client: TestClient) -> None:
     assert _send(client, MISSING, PDF, "inv.pdf").status_code == 404
     assert client.get(f"{URL}/invoices/{MISSING}/file").status_code == 404
+
+
+def test_a_file_past_the_media_upload_limit_is_413(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    invoice_id = _draft(client)
+    state = _state(client)
+    monkeypatch.setattr(
+        state, "settings", state.settings.model_copy(update={"media_upload_max_bytes": 10})
+    )
+    answer = _send(client, invoice_id, PDF, "inv.pdf")
+    assert answer.status_code == 413, answer.text
+    assert "an invoice's file is at most" in answer.json()["detail"]
+
+
+def test_an_upload_with_no_file_part_is_422(client: TestClient) -> None:
+    invoice_id = _draft(client)
+    answer = client.post(f"{URL}/invoices/{invoice_id}/file", files={"note": (None, "not a file")})
+    assert answer.status_code == 422, answer.text
