@@ -110,7 +110,9 @@ each figure, the person chooses which one prices. The choice is remembered.
   or cost (§2.1). **(call)** A wear part may also name a Bambuddy task (`bambuddy_task`,
   for example a custom "Replace nozzle" type). Then each log row of that task is imported
   as a replacement of the part, at the part's typed cost until the person enters the real
-  one.
+  one. A task that a wear part names is left out of the maintenance list and adds nothing
+  to the maintenance part of the rate, so the part is never counted twice. The breakdown
+  lists it under the wear part (`why` `wear_part`).
 - ScadBuddy never writes to Bambuddy. It does not mark a task done there when a person
   logs one in ScadBuddy **(call)**: one place owns each fact. On a linked printer, the
   Settings form says "Mark tasks done in Bambuddy; ScadBuddy reads them" and offers no
@@ -126,7 +128,9 @@ each figure, the person chooses which one prices. The choice is remembered.
   build its own counter in this issue. §8 asks the owner whether to add one from the LAN
   watch's RUNNING time later.
 - Hours are kept to 0.1 h (`numeric(10, 1)`), as the intervals are. Bambuddy's floats are
-  rounded half up, as `machine_rate.py` `_hours` does today.
+  rounded half up to 0.1, as `machine_rate.py` `_hours` does today. A counter reading
+  keeps 0 (a new helper, not `_hours`, which answers `None` for an interval that rounds to
+  0): a first event at 0.0 h has a known counter.
 
 ### 3.3 The rule: per-hour actuals
 
@@ -158,7 +162,7 @@ actual `15.00 / (35.0 + 37.9 + 123.7) = 15.00 / 196.6 = 0.0763` per hour.
 **A wear part's actual per hour:**
 
 ```
-replacements = the last N replacements of the part, newest first
+replacements = the last N replacements of the part that have hours_used, newest first
 hours_used_r = hours the removed part ran: hours_at(r) - hours_at(r-1),
                or the hours typed on r
 actual       = sum(cost_r) / sum(hours_used_r)
@@ -167,7 +171,8 @@ actual       = sum(cost_r) / sum(hours_used_r)
 - `cost_r` is what the new part cost. In a steady state that equals what the removed part
   cost. **(call)** This keeps one cost per row and needs no pairing of rows.
 - A first replacement with no earlier one and no typed hours has no `hours_used`. It
-  counts only its cost later, as the start of the next part's life.
+  adds neither its cost nor hours to any sum. It only marks where the next part's life
+  starts: its `hours_at` is the base of the next replacement's `hours_used`.
 
 **Fewer than N:**
 
@@ -198,7 +203,10 @@ today (`RATE_PLACES`). The breakdown still adds up to its rate.
 
 - A linked printer's log is read through the orders seam (`orders/integrations.py`,
   `orders/bambuddy.py`), a new client method `maintenance_history(item_id)` (scope
-  `Read Status`, operation `maintenance.history`). The prod key reads it (§2.1).
+  `Read Status`, operation `maintenance.history`). The prod key reads it (§2.1). The
+  seam's `MaintenanceTask` gains two fields from the same per-printer read: `item_id`
+  (Bambuddy's `id` of the task on the printer, which the history route takes) and
+  `current_hours` (the counter, which the view and the replacement form show).
 - Reads happen at three times. (1) The Settings view of a printer (`GET
   /printers/{id}/machine-rate`), after the live task read it already makes. (2) A "Read
   from Bambuddy" button (`POST …/machine-rate/import`). (3) A new housekeeping sweep,
@@ -278,6 +286,9 @@ ALTER TABLE printer_maintenance_costs
     CHECK (priced_by IN ('estimate', 'actual'));
 ```
 
+- `source` is the writer's key for a typed row (as job cost's), and
+  `bambuddy:<history id>` for an imported row, so both kinds fill the `NOT NULL` column
+  and a retry or a second import writes once.
 - Events name their task or part by name, as the cost rows do (`printer_wear_parts` and
   `printer_maintenance_costs` are replaced whole by `PUT`, so they have no stable id). A
   rename in the editor sends `renamed_from`, and `MachineRateStore.replace` moves that
@@ -323,7 +334,8 @@ no customer), and `machine_rate_get` shows the actuals.
 - `compute` takes each row's events and `priced_by`. Each `MaintenancePart` and
   `WearPartRate` gains `basis` (`estimate` or `actual`), `estimate_per_hour`,
   `actual_per_hour` (null with none), `have`, `need`, and `why` for an actual not used
-  (`too_few`, `no_events`). `per_hour` stays the figure that prices. The breakdown gains
+  (`too_few`, `no_events`). `per_hour` stays the figure that prices. `NotCounted` gains
+  `wear_part` (§3.1). The breakdown gains
   `actuals` (true when any part has `basis` `actual`) and `actuals_window`.
 - A quote's `machine_rate_breakdown` (jsonb) records all of it, so a quote shows which
   parts priced from actuals and never moves later. Quotes recorded before read
