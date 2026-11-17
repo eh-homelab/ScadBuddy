@@ -732,7 +732,8 @@ class HoldLostError(RuntimeError):
     took it (#6560).
     The block that held it is ended with this, so it does not go on without its hold:
     a pin's checkout may be removed under it, and an install slot may be another
-    clone's."""
+    clone's. A pin that ran its commit in a thread (`to_thread_to_end`) can land and
+    still end with this, so a pin sent again must be safe to repeat."""
 
     def __init__(self, row: str, holder: str) -> None:
         super().__init__(
@@ -792,12 +793,12 @@ async def _renewed(
         except BaseException as error:
             # Once cancelled, the renewal changes nothing more: it runs on this loop, and
             # its next step raises the cancel.
-            task.cancel()
+            await _stopped(task)
             if lost:
                 await _without_own_cancel(block)
                 raise HoldLostError(what, holder) from error
             raise
-        task.cancel()
+        await _stopped(task)
         if lost:
             await _without_own_cancel(block)
             raise HoldLostError(what, holder)
@@ -809,11 +810,21 @@ async def _renewed(
             logger.exception("could not release a row", extra={"row": what, "holder": holder})
 
 
+async def _stopped(task: asyncio.Task[None]) -> None:
+    """Cancel the renewal and wait until it has ended, so it logs nothing after the
+    drop. `asyncio.wait` does not raise the renewal's own cancel, and a cancel sent to
+    the caller still raises."""
+    task.cancel()
+    await asyncio.wait([task])
+
+
 async def _without_own_cancel(block: asyncio.Task[Any]) -> None:
     """Take back the cancel a lost renewal sent ``block``. One it has not received yet
     is received here; a cancel someone else sent ``block`` still raises."""
     block.uncancel()
     try:
+        # On Python 3.12 `uncancel` does not clear a cancel that was sent and not yet
+        # received; this await receives it, so it does not reach the caller later.
         await asyncio.sleep(0)
     except asyncio.CancelledError:
         if block.cancelling():
@@ -909,7 +920,12 @@ class InstallSlotRows:
         return None
 
     def renew(self, slot: int, token: uuid.UUID) -> bool:
-        """Whether ``token`` still held ``slot``."""
+        """Whether ``token`` still held ``slot``.
+
+        Unlike a lease or a pin hold (`renew`, `renew_pin`), a slot that lapsed is
+        renewed while no one has claimed it: a claim takes a lapsed slot only by writing
+        its own token, so until then no other clone has used it, and after that this
+        renew finds another token (#6560)."""
         with self.pool.connection() as conn:
             cur = conn.execute(
                 "UPDATE library_install_slots"

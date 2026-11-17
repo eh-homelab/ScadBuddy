@@ -347,6 +347,41 @@ async def test_a_cancel_from_outside_is_not_taken_for_a_lost_hold() -> None:
     assert rows.held == set()
 
 
+async def test_a_pin_and_a_slot_lost_in_one_tick_end_with_an_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A fetch holds an install slot inside a pin (`CheckoutFetcher.fetch`). When both
+    are lost in one tick, the inner block takes the outer one's cancel for one from
+    outside and lets it through; the outer block still ends with `HoldLostError`, both
+    rows are released and the task is not left cancelling (#6560)."""
+    renewals = _Renewals()
+    cue = _Cue(renewals)
+    rows, slots = _Rows(renewals), _Slots(renewals)
+    gate = CheckoutGate(rows, sleep=cue)
+    permits = InstallPermits(1, slots=slots, ttl=0.6, sleep=cue)
+    with (
+        caplog.at_level(logging.ERROR, logger=libraries.__name__),
+        pytest.raises(HoldLostError),
+    ):
+        async with gate.pinning(), permits.permit():
+            await reaches(lambda: len(cue.asked), 2)
+            rows.held.clear()
+            slots.held[0] = uuid.uuid4()
+            cue.go()
+            cue.go()
+            # The deadline only ends a test whose block is never ended.
+            async with asyncio.timeout(10):
+                await asyncio.Event().wait()
+    # Each loss that a renewal saw before the blocks ended is logged once.
+    lost = [row for row, _ in _lost(caplog.records)]
+    assert lost and set(lost) <= {"pin hold", "library install slot"}
+    assert len(lost) == len(set(lost))
+    assert rows.held == set()
+    current = asyncio.current_task()
+    assert current is not None
+    assert current.cancelling() == 0
+
+
 async def test_a_lost_hold_is_a_503_to_try_again() -> None:
     """A route or an operation whose hold was lost answers a 503 that says so, not the
     500 of an unexpected error (#6560)."""
