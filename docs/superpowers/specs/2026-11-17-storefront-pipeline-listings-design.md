@@ -198,7 +198,8 @@ inputs: dict[str, JsonValue] = Field(default_factory=dict)
 inputs_version: int = 0
 ```
 
-`pipeline` is now true for a pipeline template.
+`pipeline` is now true for a pipeline template, so its docstring ("Always false for
+now: publish refuses a pipeline template") is rewritten in the same PR.
 
 Storage: one new migration adds `storefront_listings.inputs jsonb NOT NULL DEFAULT '{}'`
 and `inputs_v integer` (null allowed). The snapshot is in its jsonb column already, so it
@@ -526,9 +527,16 @@ until the step that makes it safe.
    change.
 2. **`feat(storefront): list a pipeline template with fixed inputs`** (backend). The
    migration (`inputs`, `inputs_v`); the wire fields; publish's checks and migration;
-   the snapshot; `listing_reference`; `render_estimate` answers `none` for every pipeline
-   render in this PR, so nothing is priced yet. Retires `listing_pipeline_unsupported`.
-   It touches neither `slice_price.py` nor `line_prices.py`.
+   the snapshot and its `pipeline` docstring (`wire.py` says "Always false for now";
+   it becomes "true for a pipeline template"); `listing_reference`; `render_estimate`
+   answers `none` for every pipeline render in this PR, so nothing is priced yet.
+   Retires `listing_pipeline_unsupported`. It touches neither `slice_price.py` nor
+   `line_prices.py`. That is safe for the cart: a line is firm only when the add finds a
+   `done` price row for its key (`slice_price.py` `firm_price`, which starts no slice),
+   only the estimate read starts a slice, and in this PR it starts none for a pipeline
+   render. No pipeline listing could be published before this PR, so no such row exists.
+   Each pipeline line is therefore "priced by hand", and `reprice` finds no row at
+   submit either.
 3. **`feat(storefront): price a pipeline listing`** (backend). The two rules of §7.2 in
    `render_estimate` and `reprice`, the slice request from the shared builder, and the
    slice-price test for a pipeline variant. **It lands after scadify's slice-price PR
@@ -550,7 +558,9 @@ Then the prod checks of §10.4, as a comment on #5701.
    be listed (this design)? The other choice is to list any pipeline and check nothing
    but the size, which trusts the shop's inputs to the template's own clamping.
 3. **Render cost.** A visitor's render of a pipeline listing is one job, but it fans out
-   to one openscad run per distinct piece: 12 for any one-storey dollhouse, counted by reading `house_pieces` (fact 2). The
+   to one openscad run per distinct piece: 11 or 12 for a one-storey dollhouse (12
+   unless it has no windows or every opening glazed, because `pipeline.py`
+   `house_pieces` leaves out an entry whose count is 0; counted by reading it). The
    render limits count jobs (`storefront_renders_per_minute`, `…_per_day`,
    `storefront_render_concurrency`). Should a pipeline render count as more than one,
    for example by its pieces?
