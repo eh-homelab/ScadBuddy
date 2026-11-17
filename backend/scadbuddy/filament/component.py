@@ -15,6 +15,7 @@ from scadbuddy.filament.invoices import InvoiceStore
 from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.presets import PoolSpoolPresets
 from scadbuddy.filament.print_uses import PoolPrintUses, print_use_hook
+from scadbuddy.filament.shopping import ShoppingStore
 from scadbuddy.filament.spools import FilamentDefaults, FilamentSpoolStore
 from scadbuddy.filament.suppliers import SuppliersStore
 from scadbuddy.filament.types import SpoolTypeStore
@@ -33,6 +34,8 @@ class Filament:
     suppliers: SuppliersStore
     #: Invoice drafts and their confirmation into spools and costs (#6266).
     invoices: InvoiceStore
+    #: The spools a person means to buy (#6266).
+    shopping: ShoppingStore
     #: Bambuddy's tray assignments, as this app last read them (#6580).
     assignments: AssignmentsCache = field(default_factory=AssignmentsCache)
 
@@ -77,6 +80,7 @@ def _build(core: Core, components: Components) -> Filament:
         presets=PoolSpoolPresets(pool),
         suppliers=SuppliersStore(pool, shop_currency),
         invoices=InvoiceStore(pool, shop_currency, spools, types),
+        shopping=ShoppingStore(pool),
     )
 
 

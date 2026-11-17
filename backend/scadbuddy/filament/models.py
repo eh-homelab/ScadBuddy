@@ -1199,7 +1199,7 @@ class SpoolDetail(Spool):
     in_use: bool = False
     #: The invoice line it was bought on; ``None`` for a spool no invoice made.
     invoice: SpoolInvoiceRef | None = None
-    #: The unarchived products of its type, by supplier name.
+    #: The unarchived products of unarchived suppliers for its type, by supplier name.
     type_suppliers: list[SpoolTypeSupplier] = Field(default_factory=list)
 
 

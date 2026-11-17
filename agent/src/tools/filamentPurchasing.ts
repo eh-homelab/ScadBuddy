@@ -415,4 +415,108 @@ export const filamentPurchasingTools: Tool[] = [
       return json({ deleted: invoice_id })
     },
   }),
+
+  defineTool({
+    name: 'filament_shopping_list',
+    label: 'Read the filament shopping list',
+    description:
+      'The spools the user means to buy: pending items first, then the newest. Each has its `material`, ' +
+      '`subtype`, `brand`, `colour_name`, `quantity_spools`, `note` and `status` (`pending` or `purchased`). ' +
+      'Only one `status` when given.',
+    input: z.object({ status: z.enum(['pending', 'purchased']).optional() }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/shopping-list'],
+    handler: async ({ status }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/shopping-list', { params: { query: { status } } }),
+          'read the shopping list',
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_shopping_add',
+    label: 'Add to the filament shopping list',
+    description:
+      'Add a spool to buy. Give `type_id` (filament_type_list): its material, subtype, brand and colour name ' +
+      'fill what you leave out. Or give `material`, and any of `subtype`, `brand`, `colour_name`. ' +
+      '`quantity_spools` is 1 to 1000, default 1. 422 for neither a type nor a material, or a type that does ' +
+      'not exist. Only what the user says. Writes ScadBuddy only.',
+    input: z.object({
+      type_id: z.string().uuid().optional(),
+      material: z.string().optional(),
+      subtype: z.string().optional(),
+      brand: z.string().optional(),
+      colour_name: z.string().optional(),
+      quantity_spools: z.number().int().min(1).max(1000).optional(),
+      note: z.string().optional(),
+    }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/shopping-list'],
+    summarize: ({ material, type_id }) => `Add ${material ?? type_id ?? 'a spool'} to the shopping list`,
+    handler: async (body, { backend }) =>
+      json(await ok(backend.POST('/api/v1/filament/shopping-list', { body: body as never }), 'add to the shopping list')),
+  }),
+
+  defineTool({
+    name: 'filament_shopping_update',
+    label: 'Change a shopping list item',
+    description:
+      'Change one item: only what is given changes. `status: purchased` marks it bought; `pending` puts it back. ' +
+      '`quantity_spools` is 1 to 1000. `note: null` clears the note. 404 for no such item. Only what the user ' +
+      'says. Writes ScadBuddy only.',
+    input: z.object({
+      item_id: z.string().uuid(),
+      status: z.enum(['pending', 'purchased']).optional(),
+      quantity_spools: z.number().int().min(1).max(1000).optional(),
+      note: z.string().nullable().optional(),
+    }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['PATCH /api/v1/filament/shopping-list/{item_id}'],
+    summarize: ({ item_id }) => `Change shopping list item ${item_id}`,
+    handler: async ({ item_id, ...body }, { backend }) =>
+      json(
+        await ok(
+          backend.PATCH('/api/v1/filament/shopping-list/{item_id}', { params: { path: { item_id } }, body }),
+          `change shopping list item ${item_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_shopping_remove',
+    label: 'Remove from the shopping list',
+    description:
+      'Remove one item (`item_id`), or with no `item_id` clear the list: only the purchased items with ' +
+      '`purchased_only: true`, else every item. Only when the user asks. Writes ScadBuddy only.',
+    input: z.object({
+      item_id: z.string().uuid().optional().describe('One item to remove; omit to clear'),
+      purchased_only: z.boolean().default(false).describe('With no item_id: clear only purchased items'),
+    }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['DELETE /api/v1/filament/shopping-list/{item_id}', 'DELETE /api/v1/filament/shopping-list'],
+    summarize: ({ item_id, purchased_only }) =>
+      item_id ? `Remove shopping list item ${item_id}` : purchased_only ? 'Clear purchased items' : 'Clear the shopping list',
+    handler: async ({ item_id, purchased_only }, { backend }) => {
+      if (item_id === undefined) {
+        return json(
+          await ok(
+            backend.DELETE('/api/v1/filament/shopping-list', { params: { query: { purchased_only } } }),
+            'clear the shopping list',
+          ),
+        )
+      }
+      if (purchased_only) throw new ToolError('purchased_only clears the list; give no item_id with it')
+      await ok(
+        backend.DELETE('/api/v1/filament/shopping-list/{item_id}', { params: { path: { item_id } } }),
+        `remove shopping list item ${item_id}`,
+      )
+      return json({ removed: 1 })
+    },
+  }),
 ]

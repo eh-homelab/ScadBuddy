@@ -535,3 +535,45 @@ def test_a_duplicate_proposed_type_is_a_409_naming_the_line(client: TestClient) 
     assert refused.status_code == 409, refused.text
     assert "line 1" in refused.text
     assert client.get(f"{URL}/invoices/{made['id']}").json()["status"] == "draft"
+
+
+def test_a_zero_quantity_is_a_422(client: TestClient) -> None:
+    refused = client.post(f"{URL}/shopping-list", json={"material": "PLA", "quantity_spools": 0})
+    assert refused.status_code == 422
+    item = client.post(f"{URL}/shopping-list", json={"material": "PLA"}).json()
+    zero = client.patch(f"{URL}/shopping-list/{item['id']}", json={"quantity_spools": 0})
+    assert zero.status_code == 422
+    null = client.patch(f"{URL}/shopping-list/{item['id']}", json={"status": None})
+    assert null.status_code == 422
+
+
+def test_an_item_with_neither_type_nor_material_is_a_422(client: TestClient) -> None:
+    assert client.post(f"{URL}/shopping-list", json={"note": "x"}).status_code == 422
+    assert client.post(f"{URL}/shopping-list", json={"type_id": MISSING}).status_code == 422
+
+
+def test_the_shopping_list_is_added_changed_filtered_and_cleared(client: TestClient) -> None:
+    type_id = _type(client)
+    from_type = client.post(f"{URL}/shopping-list", json={"type_id": type_id, "quantity_spools": 3})
+    assert from_type.status_code == 201, from_type.text
+    assert from_type.json()["material"] == "PLA"
+    assert from_type.json()["quantity_spools"] == 3
+    other = client.post(f"{URL}/shopping-list", json={"material": "PETG"}).json()
+    bought = client.patch(f"{URL}/shopping-list/{other['id']}", json={"status": "purchased"})
+    assert bought.status_code == 200
+    assert bought.json()["purchased_at"] is not None
+    assert [i["status"] for i in client.get(f"{URL}/shopping-list").json()] == [
+        "pending",
+        "purchased",
+    ]
+    only = client.get(f"{URL}/shopping-list", params={"status": "purchased"}).json()
+    assert [i["id"] for i in only] == [other["id"]]
+    assert client.get(f"{URL}/shopping-list", params={"status": "bogus"}).status_code == 422
+    cleared = client.delete(f"{URL}/shopping-list", params={"purchased_only": "true"})
+    assert (cleared.status_code, cleared.json()) == (200, {"removed": 1})
+    pending_id = from_type.json()["id"]
+    assert client.delete(f"{URL}/shopping-list/{pending_id}").status_code == 204
+    assert client.delete(f"{URL}/shopping-list/{pending_id}").status_code == 404
+    assert client.patch(f"{URL}/shopping-list/{pending_id}", json={"note": "x"}).status_code == 404
+    client.post(f"{URL}/shopping-list", json={"material": "ABS"})
+    assert client.delete(f"{URL}/shopping-list").json() == {"removed": 1}

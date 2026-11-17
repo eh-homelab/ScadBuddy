@@ -1,7 +1,7 @@
 """`/api/v1/filament` purchasing (#6266, epic #6260): suppliers, their products, price
 points, the price sheet and a type's price history, over `filament/suppliers.py`, and
-invoice drafts, over `filament/invoices.py`. Money is a `Decimal` and goes over the wire as
-a string."""
+invoice drafts, over `filament/invoices.py`, and the shopping list, over
+`filament/shopping.py`. Money is a `Decimal` and goes over the wire as a string."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Request, Response, status
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 from scadbuddy.api import media as media_api
 from scadbuddy.api.deps import PathsDep, StateDep
@@ -29,6 +30,7 @@ from scadbuddy.filament.invoices import (
     InvoiceNotReconciledError,
     InvoiceRefError,
 )
+from scadbuddy.filament.shopping import ShoppingRefError
 from scadbuddy.filament.suppliers import (
     PriceFromInvoiceError,
     ProductExistsError,
@@ -50,6 +52,10 @@ def _no_product(product_id: UUID) -> ApiError:
 
 def _no_invoice(invoice_id: UUID) -> ApiError:
     return ApiError(status.HTTP_404_NOT_FOUND, f"no invoice {invoice_id}")
+
+
+def _no_item(item_id: UUID) -> ApiError:
+    return ApiError(status.HTTP_404_NOT_FOUND, f"no shopping list item {item_id}")
 
 
 def _unprocessable(exc: ValueError) -> ApiError:
@@ -578,3 +584,89 @@ async def get_invoice_file(
         content_disposition_type="inline",
         headers=headers,
     )
+
+
+# -- the shopping list ------------------------------------------------------------------
+
+
+class Removed(BaseModel):
+    removed: int
+
+
+@router.get(
+    "/shopping-list",
+    response_model=list[pm.ShoppingItem],
+    summary="The shopping list",
+    description=(
+        "The spools to buy: pending items first, then the newest. Only one `status` "
+        "(`pending` or `purchased`) when given."
+    ),
+)
+async def list_shopping(
+    filament: FilamentDep, status: pm.ShoppingStatus | None = None
+) -> list[pm.ShoppingItem]:
+    return await asyncio.to_thread(filament.shopping.list, status=status)
+
+
+@router.post(
+    "/shopping-list",
+    response_model=pm.ShoppingItem,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add to the shopping list",
+    description=(
+        "A spool to buy, by `type_id` (its material, subtype, brand and colour name fill what "
+        "the body leaves out) or by `material` and any of `subtype`, `brand`, `colour_name`. "
+        "`quantity_spools` is 1 to 1000, default 1. 422 for neither a type nor a material, "
+        "for a bad quantity, or for a type that does not exist."
+    ),
+)
+async def add_shopping(filament: FilamentDep, body: pm.ShoppingItemCreate) -> pm.ShoppingItem:
+    try:
+        return await asyncio.to_thread(filament.shopping.add, body)
+    except ShoppingRefError as exc:
+        raise _unprocessable(exc) from None
+
+
+@router.delete(
+    "/shopping-list",
+    response_model=Removed,
+    summary="Clear the shopping list",
+    description=(
+        "Remove every item, or only the purchased ones with `purchased_only=true`. "
+        "Answers how many it `removed`."
+    ),
+)
+async def clear_shopping(filament: FilamentDep, purchased_only: bool = False) -> Removed:
+    count = await asyncio.to_thread(filament.shopping.clear, purchased_only=purchased_only)
+    return Removed(removed=count)
+
+
+@router.patch(
+    "/shopping-list/{item_id}",
+    response_model=pm.ShoppingItem,
+    summary="Change a shopping list item",
+    description=(
+        "Only the fields sent change: `status` (`purchased` stamps `purchased_at`, `pending` "
+        "clears it), `quantity_spools` and `note` (`null` clears it). 404 for none, 422 for "
+        "a bad value."
+    ),
+)
+async def update_shopping(
+    filament: FilamentDep, item_id: UUID, body: pm.ShoppingItemPatch
+) -> pm.ShoppingItem:
+    found = await asyncio.to_thread(filament.shopping.update, item_id, body)
+    if found is None:
+        raise _no_item(item_id)
+    return found
+
+
+@router.delete(
+    "/shopping-list/{item_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Remove a shopping list item",
+    description="404 for none.",
+)
+async def remove_shopping(filament: FilamentDep, item_id: UUID) -> Response:
+    if not await asyncio.to_thread(filament.shopping.remove, item_id):
+        raise _no_item(item_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

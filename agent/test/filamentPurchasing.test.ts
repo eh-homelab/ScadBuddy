@@ -47,6 +47,10 @@ describe('filament purchasing tools', () => {
     ['filament_invoice_get', 'read'],
     ['filament_invoice_upsert', 'write'],
     ['filament_invoice_delete', 'write'],
+    ['filament_shopping_list', 'read'],
+    ['filament_shopping_add', 'write'],
+    ['filament_shopping_update', 'write'],
+    ['filament_shopping_remove', 'write'],
   ])('%s is %s tier, never gated', (name, risk) => {
     expect(tool(name).risk).toBe(risk)
     expect(tool(name).gated).toBe(false)
@@ -201,5 +205,55 @@ describe('filament purchasing tools', () => {
     expect(result.isError).toBeFalsy()
     expect(posted).toEqual([INVOICE])
     expect(firstText(result)).toMatchObject({ status: 'confirmed' })
+  })
+
+  it('reads, adds and changes shopping list items', async () => {
+    const ITEM = '8d6f3c1e-0000-4000-8000-000000006606'
+    let seen: string | null = null
+    server.use(
+      http.get(`${FILAMENT}/shopping-list`, ({ request }) => {
+        seen = new URL(request.url).searchParams.get('status')
+        return HttpResponse.json([])
+      }),
+      http.post(`${FILAMENT}/shopping-list`, async ({ request }) => {
+        expect(await request.json()).toEqual({ type_id: TYPE, quantity_spools: 2 })
+        return HttpResponse.json({ id: ITEM }, { status: 201 })
+      }),
+      http.patch(`${FILAMENT}/shopping-list/${ITEM}`, async ({ request }) => {
+        expect(await request.json()).toEqual({ status: 'purchased', note: null })
+        return HttpResponse.json({ id: ITEM })
+      }),
+    )
+    expect(firstText(await runTool(tool('filament_shopping_list'), { status: 'pending' }, ctx()))).toEqual([])
+    expect(seen).toBe('pending')
+    expect(
+      firstText(await runTool(tool('filament_shopping_add'), { type_id: TYPE, quantity_spools: 2 }, ctx())),
+    ).toEqual({ id: ITEM })
+    expect(
+      firstText(
+        await runTool(tool('filament_shopping_update'), { item_id: ITEM, status: 'purchased', note: null }, ctx()),
+      ),
+    ).toEqual({ id: ITEM })
+  })
+
+  it('removes one shopping list item or clears the list', async () => {
+    const ITEM = '8d6f3c1e-0000-4000-8000-000000006607'
+    let purchasedOnly: string | null = null
+    server.use(
+      http.delete(`${FILAMENT}/shopping-list/${ITEM}`, () => new HttpResponse(null, { status: 204 })),
+      http.delete(`${FILAMENT}/shopping-list`, ({ request }) => {
+        purchasedOnly = new URL(request.url).searchParams.get('purchased_only')
+        return HttpResponse.json({ removed: 2 })
+      }),
+    )
+    expect(firstText(await runTool(tool('filament_shopping_remove'), { item_id: ITEM }, ctx()))).toEqual({
+      removed: 1,
+    })
+    expect(
+      firstText(await runTool(tool('filament_shopping_remove'), { purchased_only: true }, ctx())),
+    ).toEqual({ removed: 2 })
+    expect(purchasedOnly).toBe('true')
+    const both = await runTool(tool('filament_shopping_remove'), { item_id: ITEM, purchased_only: true }, ctx())
+    expect(both.isError).toBe(true)
   })
 })

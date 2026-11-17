@@ -30,6 +30,7 @@ from scadbuddy.filament.models import (
     SpoolTypeCreate,
 )
 from scadbuddy.filament.presets import PoolSpoolPresets
+from scadbuddy.filament.shopping import ShoppingStore
 from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.filament.suppliers import SuppliersStore
 from scadbuddy.filament.types import SpoolTypeStore
@@ -50,6 +51,7 @@ def _filament(pool: PgPool) -> Filament:
         presets=PoolSpoolPresets(pool),
         suppliers=SuppliersStore(pool, lambda: "USD"),
         invoices=InvoiceStore(pool, lambda: "USD", spools, types),
+        shopping=ShoppingStore(pool),
     )
 
 
