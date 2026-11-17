@@ -109,10 +109,11 @@ each figure, the person chooses which one prices. The choice is remembered.
 - **A replaced wear part:** typed in ScadBuddy, with its real cost. Bambuddy has no part
   or cost (§2.1). **(call)** A wear part may also name a Bambuddy task (`bambuddy_task`,
   for example a custom "Replace nozzle" type). Then each log row of that task is imported
-  as a replacement of the part, at the part's typed cost until the person enters the real
-  one. A task that a wear part names is left out of the maintenance list and adds nothing
-  to the maintenance part of the rate, so the part is never counted twice. The breakdown
-  lists it under the wear part (`why` `wear_part`).
+  as a replacement of the part with no cost (`cost` null). Until the person enters the
+  real cost, such a row is priced at the part's typed cost as it is then, and the figure
+  is marked `partly_typed`. A task that a wear part names stays in the maintenance list
+  but is not counted (`counted` false, `why` `wear_part`), so it adds nothing to the
+  maintenance part of the rate and the part is never counted twice.
 - ScadBuddy never writes to Bambuddy. It does not mark a task done there when a person
   logs one in ScadBuddy **(call)**: one place owns each fact. On a linked printer, the
   Settings form says "Mark tasks done in Bambuddy; ScadBuddy reads them" and offers no
@@ -140,7 +141,7 @@ hours, not a mean of per-gap rates). A short gap then cannot swing the figure.
 **A task's actual per hour:**
 
 ```
-gaps      = the last N gaps between two events of the task, newest first
+gaps      = the last N usable gaps between two events of the task, newest first
 gap_i     = hours_at(event_i) - hours_at(event_i-1)
 cost_i    = minutes_i x labour rate / 60 + consumables_i        (event_i's own figures)
 actual    = sum(cost_i) / sum(gap_i)
@@ -150,8 +151,12 @@ actual    = sum(cost_i) / sum(gap_i)
   the typed consumables. The figure is then marked `partly_typed`.
 - The first event of a task opens no gap. Its counter before is unknown: Bambuddy's
   counter started when Bambuddy first saw the printer, not when the task was last done.
-- A gap of 0 h or less (two events at one counter reading, or a counter reset) is
-  skipped and named in the breakdown (`skipped_gaps`).
+- A gap of 0 h or less (two events at one counter reading, or a counter reset) is not
+  usable. It is skipped and named in the breakdown (`skipped_gaps`).
+- **The window is N usable gaps, not N + 1 events.** `compute` walks back from the
+  newest event until it has N usable gaps or runs out of events. A skipped gap does not
+  count toward N, so the window then holds more than N + 1 events. "k of N" counts usable
+  gaps. A part's window is the same: N replacements that have `hours_used`.
 - The actual also gives an **actual interval** (`sum(gap_i) / count`) and an **actual
   cost per occurrence** (`sum(cost_i) / count`), shown beside the typed ones.
 
@@ -169,7 +174,9 @@ actual       = sum(cost_r) / sum(hours_used_r)
 ```
 
 - `cost_r` is what the new part cost. In a steady state that equals what the removed part
-  cost. **(call)** This keeps one cost per row and needs no pairing of rows.
+  cost. **(call)** This keeps one cost per row and needs no pairing of rows. A row with no
+  cost (an import not yet priced, §3.1) uses the part's typed cost at compute time, and
+  the figure is marked `partly_typed`.
 - A first replacement with no earlier one and no typed hours has no `hours_used`. It
   adds neither its cost nor hours to any sum. It only marks where the next part's life
   starts: its `hours_at` is the base of the next replacement's `hours_used`.
@@ -179,8 +186,8 @@ actual       = sum(cost_r) / sum(hours_used_r)
 - With at least one gap (task) or one replacement with hours (part), the actual is shown
   as "k of N".
 - **(call)** It prices only once it has N. Until then a figure set to "actual" prices at
-  its estimate and the breakdown says why (`basis` `estimate`, `why` `too_few`, `have`
-  k). A rate does not jump on one odd event.
+  its estimate and the breakdown says why (`basis` `estimate`, `actual_why` `too_few`,
+  `have` k). A rate does not jump on one odd event.
 - N is a per-printer setting, `actuals_window`, default 3, from 1 to 20. A person can set
   1 to use actuals at once.
 
@@ -261,7 +268,8 @@ CREATE TABLE printer_wear_replacements (
   hours_at numeric(10, 1) CHECK (hours_at >= 0),
   -- Typed: the removed part's hours. Null: from `hours_at` and the replacement before.
   hours_used numeric(10, 1) CHECK (hours_used > 0),
-  cost numeric(14, 4) NOT NULL CHECK (cost >= 0),
+  -- Null: not entered yet (an import); the part's typed cost prices it (`partly_typed`).
+  cost numeric(14, 4) CHECK (cost >= 0),
   notes text CHECK (length(notes) <= 1000),
   origin text NOT NULL CHECK (origin IN ('bambuddy', 'typed')),
   bambuddy_history_id integer,
@@ -310,7 +318,8 @@ own server-side client through the orders seam; the key never reaches the browse
   wear part and task gains `priced_by`, and `renamed_from`. Each part gains
   `bambuddy_task`.
 - `GET /printers/{id}/machine-rate`: the view gains `actuals`: per part and per task, its
-  events (the last `actuals_window + 1`, newest first), the actual per hour, the actual
+  events (those in the window of §3.3, N usable gaps with the skipped ones between them,
+  newest first, so the list and "k of N" always agree with `compute`), the actual per hour, the actual
   interval or hours used, `have` and `need`, `partly_typed`, `skipped_gaps`; and
   `events_read_at`, `current_hours` (Bambuddy's counter, linked only) and `orphaned`.
 - `GET /printers/{id}/machine-rate/events?kind=task|part&name=&cursor=`: every event,
@@ -319,7 +328,7 @@ own server-side client through the orders seam; the key never reaches the browse
   `source` for a retry. A task event on a linked printer is 409
   `maintenance_from_bambuddy` (§3.1).
 - `PATCH /printers/{id}/machine-rate/events/{event_id}`: `minutes`, `consumables`,
-  `cost`, `hours_at`, `hours_used`, `notes`. An imported event's `performed_at` and
+  `cost` (null clears it back to the typed cost), `hours_at`, `hours_used`, `notes`. An imported event's `performed_at` and
   `bambuddy_history_id` stay as read.
 - `DELETE /printers/{id}/machine-rate/events/{event_id}`: a typed event only. An imported
   one is 409 `imported_event` (the next import would bring it back).
@@ -333,9 +342,12 @@ no customer), and `machine_rate_get` shows the actuals.
 
 - `compute` takes each row's events and `priced_by`. Each `MaintenancePart` and
   `WearPartRate` gains `basis` (`estimate` or `actual`), `estimate_per_hour`,
-  `actual_per_hour` (null with none), `have`, `need`, and `why` for an actual not used
-  (`too_few`, `no_events`). `per_hour` stays the figure that prices. `NotCounted` gains
-  `wear_part` (§3.1). The breakdown gains
+  `actual_per_hour` (null with none), `have`, `need`, `partly_typed`, and a new field
+  `actual_why: Literal["too_few", "no_events"] | None` for an actual not used. It is apart
+  from today's `MaintenancePart.why` (`NotCounted`, `orders/models.py`), which keeps its one
+  meaning, "listed and not counted", and gains `wear_part` (§3.1). A task that is not
+  counted and has too few events carries both reasons. `WearPartRate` has no `why` and
+  gains only `actual_why`. `per_hour` stays the figure that prices. The breakdown gains
   `actuals` (true when any part has `basis` `actual`) and `actuals_window`.
 - A quote's `machine_rate_breakdown` (jsonb) records all of it, so a quote shows which
   parts priced from actuals and never moves later. Quotes recorded before read
@@ -437,9 +449,12 @@ Maintenance tasks   (Mark tasks done in Bambuddy; ScadBuddy reads them.)
 ## 10. Tests
 
 - `compute` vectors (pure, `backend/tests/orders/test_machine_rate.py`): the ratio of sums; N
-  from 1 to 3; fewer than N (`too_few`, estimate prices); a zero or negative gap skipped;
-  the first event opens no gap; an event with no minutes uses the typed ones
-  (`partly_typed`); a part with typed `hours_used`; rounding adds up to the rate; prod's
+  from 1 to 3; fewer than N (`actual_why` `too_few`, estimate prices); a zero or negative
+  gap skipped and the window then reaching one event further back; a task not counted with
+  too few events (`why` and `actual_why` both set); the first event opens no gap; an event
+  with no minutes uses the typed ones (`partly_typed`); an imported replacement with no
+  cost priced at the typed cost (`partly_typed`); a part with typed `hours_used`; a task
+  named by a wear part not counted (`why` `wear_part`); rounding adds up to the rate; prod's
   Clean Build Plate numbers (§3.3) as a fixture.
 - Store (`requires_postgres`, `backend/tests/orders/test_machine_rate_store.py`): import idempotent by `bambuddy_history_id`; a typed
   retry by `source` writes once; a rename moves events; an orphaned name is listed;
