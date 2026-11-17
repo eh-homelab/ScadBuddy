@@ -4,7 +4,7 @@ from uuid import uuid4
 import pytest
 from pydantic import TypeAdapter
 
-from scadbuddy.filament.colour import Rgba, is_translucent, normalise_rgba
+from scadbuddy.filament.colour import Rgba, is_translucent, normalise_rgba, same_opacity
 from scadbuddy.filament.models import (
     BrandCreate,
     BrandPatch,
@@ -39,6 +39,28 @@ def test_bad_colour_raises(bad: str) -> None:
 def test_translucent() -> None:
     assert is_translucent("#FFFFFF80")
     assert not is_translucent("#FFFFFFFF")
+
+
+#: The vectors `frontend/src/lib/rgba.test.ts` "sameOpacity" checks too (#6262 F11):
+#: the dialog's `seedPlan` and this helper must agree. Change both lists together.
+SAME_OPACITY = [
+    ("#FFFFFF", "#FFFFFF80", False),
+    ("#FFFFFF", None, True),
+    (None, None, True),
+    ("#FFFFFFFF", "#FFFFFF", True),
+    ("#FFFFFF80", "#00000010", True),
+    (None, "#FFFFFF80", False),
+    ("#FFFFFF80", None, False),
+    ("#ffffff80", "#FFFFFFFE", True),
+]
+
+
+@pytest.mark.parametrize(("left", "right", "same"), SAME_OPACITY)
+def test_same_opacity(left: str | None, right: str | None, same: bool) -> None:
+    """Spec §5.1, plan Decision 12: ``#RRGGBB`` and ``None`` read as opaque; false when
+    exactly one side is translucent."""
+    assert same_opacity(left, right) is same
+    assert same_opacity(right, left) is same
 
 
 def test_rgba_type_normalises() -> None:

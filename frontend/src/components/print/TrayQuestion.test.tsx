@@ -1,7 +1,7 @@
 import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
-import type { SpoolOption, UnknownTray } from '../../api/types'
+import type { FilamentSpool, SpoolOption, UnknownTray } from '../../api/types'
 import { howFull, linkKey, linkOf, useDeclinedTrays } from '../../lib/trays'
 import { TrayQuestion } from './TrayQuestion'
 
@@ -48,6 +48,18 @@ describe('TrayQuestion (#2164)', () => {
     expect(assign).toHaveBeenCalledWith(1, 3, 3, 16)
   })
 
+  it("posts the SB spool's number on Bambuddy's path, and names ScadBuddy when it fails (#6262)", async () => {
+    // On Bambuddy's path an option's spool_id is the SB spool's number (build_options).
+    const sb: SpoolOption = { ...black, spool_id: 7, sb_number: 7, sb_spool_id: '8d6f3c1e-0000-4000-8000-000000000007' }
+    const assign = vi.spyOn(api, 'assignTraySpool').mockRejectedValue(new Error('offline'))
+    render(<TrayQuestion printerId={1} tray={{ ...tray, candidates: [7] }} spools={[sb]} onAssigned={vi.fn()} onDecline={vi.fn()} />)
+    expect(screen.getByText(/spool #7/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Yes, that one' }))
+    expect(await screen.findByText('ScadBuddy could not record it.')).toBeInTheDocument()
+    expect(assign).toHaveBeenCalledWith(1, 3, 3, 7)
+    assign.mockRestore()
+  })
+
   it('remembers a no until the tray changes', () => {
     const { result, rerender } = renderHook(({ trays }) => useDeclinedTrays(1, trays), { initialProps: { trays: [tray] } })
     expect(result.current.open).toEqual([tray])
@@ -68,32 +80,45 @@ describe('TrayQuestion (#2164)', () => {
   })
 })
 
-// #3818 (plan 2026-10-18 D1) — on a native run the question links a provider's record
-// through ScadBuddy's own tray route, never Bambuddy's assignment.
+// #3818 (plan 2026-10-18 D1), #6262 Task 4 — on a native run the question places an SB
+// spool through ScadBuddy's own tray route, never Bambuddy's assignment.
 describe('TrayQuestion on the native path', () => {
   const printer = '00000000-0000-4000-8000-0000000000c2'
-  const record: SpoolOption = {
-    ...black,
-    storage_location: null,
-    records: { bambuddy: { record_id: '27', brand: 'Inland', name: 'Black', remaining_g: 515 } },
-  }
+  const SB = '7a2c1f0e-0000-4000-8000-000000000009'
+  const placed = { id: SB, number: 9 } as FilamentSpool
+  const record: SpoolOption = { ...black, storage_location: null, sb_spool_id: SB, sb_number: 16 }
 
-  it("names a candidate's records by their provider's own label (#4516)", () => {
+  it('names a candidate by its SB spool number (#6262)', () => {
     render(
       <TrayQuestion
         native={{ printer }}
         tray={{ ...tray, candidates: [16] }}
-        spools={[record]}
-        providerLabels={{ bambuddy: 'Bambuddy (garage)' }}
+        spools={[{ ...record, sb_number: 7 }]}
         onAssigned={vi.fn()}
         onDecline={vi.fn()}
       />,
     )
-    expect(screen.getByText(/Bambuddy \(garage\)'s record/)).toBeInTheDocument()
+    expect(screen.getByText(/spool #7/)).toBeInTheDocument()
   })
 
-  it('links the record through PUT …/trays/{ams}/{tray}/spool and re-reads', async () => {
-    const link = vi.spyOn(api, 'linkTraySpool').mockResolvedValue({ ams_id: 3, tray_id: 3, records: {} })
+  it('draws a candidate in RGBA and links a spool with no type to its page (#6262)', () => {
+    render(
+      <TrayQuestion
+        native={{ printer }}
+        tray={{ ...tray, candidates: [16] }}
+        spools={[{ ...record, rgba: '#1A1A1A80', needs_type: true }]}
+        onAssigned={vi.fn()}
+        onDecline={vi.fn()}
+      />,
+    )
+    const chips = screen.getAllByTestId('rgba-swatch')
+    expect(chips.some((chip) => chip.getAttribute('data-colour') === '#1A1A1A80')).toBe(true)
+    const badge = screen.getByRole('link', { name: 'Needs type' })
+    expect(badge.getAttribute('href')).toMatch(new RegExp(`/filament/spools/${SB}$`))
+  })
+
+  it('posts {spool_id: <uuid>} to PUT …/trays/{ams}/{tray}/spool and re-reads', async () => {
+    const link = vi.spyOn(api, 'linkTraySpool').mockResolvedValue(placed)
     const assign = vi.spyOn(api, 'assignTraySpool')
     const onAssigned = vi.fn()
     render(
@@ -106,53 +131,41 @@ describe('TrayQuestion on the native path', () => {
       />,
     )
     expect(screen.getByText('AMS-D slot 4 has black PLA, but no spool record is linked to it.')).toBeInTheDocument()
-    expect(screen.getByText(/Bambuddy's record/)).toBeInTheDocument()
+    expect(screen.getByText(/spool #16/)).toBeInTheDocument()
     expect(screen.queryByText(/Bambuddy's inventory/)).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Yes, that one' }))
-    await waitFor(() => expect(onAssigned).toHaveBeenCalled())
-    expect(link).toHaveBeenCalledWith(printer, 3, 3, { provider: 'bambuddy', record_id: '27' })
+    await waitFor(() => expect(onAssigned).toHaveBeenCalledWith({ spool_id: SB }))
+    expect(link).toHaveBeenCalledWith(printer, 3, 3, { spool_id: SB })
     expect(assign).not.toHaveBeenCalled()
   })
 
-  it('names the physical spool when the candidate has one', async () => {
-    const link = vi.spyOn(api, 'linkTraySpool').mockResolvedValue({ ams_id: 3, tray_id: 3, records: {} })
-    const spool = { ...record, physical_spool_id: '7a2c1f0e-0000-4000-8000-000000000009' }
-    render(
-      <TrayQuestion native={{ printer }} tray={{ ...tray, candidates: [16] }} spools={[spool]} onAssigned={vi.fn()} onDecline={vi.fn()} />,
-    )
-    fireEvent.click(screen.getByRole('button', { name: 'Yes, that one' }))
-    await waitFor(() =>
-      expect(link).toHaveBeenCalledWith(printer, 3, 3, { physical_spool_id: '7a2c1f0e-0000-4000-8000-000000000009' }),
-    )
-  })
-
-  it('says so, and reports nothing linked, when the picked spool lost its record', async () => {
+  it('says so, and reports nothing linked, when the picked spool lost its SB spool', async () => {
     const link = vi.spyOn(api, 'linkTraySpool')
     const onAssigned = vi.fn()
-    const other = { ...record, spool_id: 18, records: { bambuddy: { record_id: '28' } } }
+    const other = { ...record, spool_id: 18, sb_spool_id: '7a2c1f0e-0000-4000-8000-000000000010' }
     const props = { native: { printer }, tray, onAssigned, onDecline: vi.fn() }
     const { rerender } = render(<TrayQuestion {...props} spools={[record, other]} />)
-    // A re-read drops the picked spool's record; the pick stays on it.
-    rerender(<TrayQuestion {...props} spools={[{ ...record, records: {} }, other]} />)
+    // A re-read drops the picked candidate's spool; the pick stays on it.
+    rerender(<TrayQuestion {...props} spools={[{ ...record, sb_spool_id: null }, other]} />)
     fireEvent.click(screen.getByRole('button', { name: /^Yes/ }))
     expect(await screen.findByRole('alert')).toHaveTextContent('ScadBuddy has no record of that spool to link.')
     expect(link).not.toHaveBeenCalled()
     expect(onAssigned).not.toHaveBeenCalled()
   })
 
-  // #4511 item 4 — a shelf row's `spool_id` is its place in one answer, not the spool.
-  it('keys a link on the record, never the positional shelf id, across a re-read', async () => {
-    const first = { ...record, spool_id: 16, records: { bambuddy: { record_id: '27' } } }
-    const second = { ...record, spool_id: 18, color_name: 'Grey', records: { bambuddy: { record_id: '28' } } }
+  // #4511 item 4 — a link is keyed on the SB spool, never the row's `spool_id`.
+  it('keys a link on the SB spool, never the positional shelf id, across a re-read', async () => {
+    const grey = '7a2c1f0e-0000-4000-8000-000000000010'
+    const first = { ...record, spool_id: 16 }
+    const second = { ...record, spool_id: 18, color_name: 'Grey', sb_spool_id: grey }
     expect(linkOf(first)).toEqual(linkOf({ ...first, spool_id: 41 }))
-    expect(linkKey(linkOf({ ...first, spool_id: 41 }))).toBe('record:bambuddy:27')
-    expect(linkKey(linkOf({ ...first, physical_spool_id: 'p-1' }))).toBe('spool:p-1')
+    expect(linkKey(linkOf(first))).toBe(`spool:${SB}`)
 
-    const link = vi.spyOn(api, 'linkTraySpool').mockResolvedValue({ ams_id: 3, tray_id: 3, records: {} })
+    const link = vi.spyOn(api, 'linkTraySpool').mockResolvedValue(placed)
     const onAssigned = vi.fn()
     const props = { native: { printer }, onAssigned, onDecline: vi.fn() }
     const { rerender } = render(<TrayQuestion {...props} tray={{ ...tray, candidates: [16, 18] }} spools={[first, second]} />)
-    // The re-read numbers the same two records the other way round.
+    // The re-read numbers the same two spools the other way round.
     rerender(
       <TrayQuestion
         {...props}
@@ -161,13 +174,19 @@ describe('TrayQuestion on the native path', () => {
       />,
     )
     fireEvent.click(screen.getByRole('button', { name: 'Yes, this one' }))
-    await waitFor(() => expect(onAssigned).toHaveBeenCalledWith({ provider: 'bambuddy', record_id: '27' }))
-    expect(link).toHaveBeenCalledWith(printer, 3, 3, { provider: 'bambuddy', record_id: '27' })
+    await waitFor(() => expect(onAssigned).toHaveBeenCalledWith({ spool_id: SB }))
+    expect(link).toHaveBeenCalledWith(printer, 3, 3, { spool_id: SB })
   })
 
-  it('offers no candidate it could not link', () => {
+  it('offers no candidate with no SB spool', () => {
     render(
-      <TrayQuestion native={{ printer }} tray={{ ...tray, candidates: [16] }} spools={[black]} onAssigned={vi.fn()} onDecline={vi.fn()} />,
+      <TrayQuestion
+        native={{ printer }}
+        tray={{ ...tray, candidates: [16] }}
+        spools={[{ ...record, sb_spool_id: null }]}
+        onAssigned={vi.fn()}
+        onDecline={vi.fn()}
+      />,
     )
     expect(screen.queryByRole('button', { name: /^Yes/ })).not.toBeInTheDocument()
   })

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { api } from '../../api/client'
 import type { OrderItem } from '../../api/types'
 import { useAsync } from '../../lib/useAsync'
+import { AppLink } from '../AppLink'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -79,7 +80,7 @@ export function ArchiveQuote({
   return (
     <fieldset className="flex flex-col gap-2 rounded-md border p-2" aria-label="Quote from the print">
       <legend className="px-1 text-sm font-medium">Quote from the print</legend>
-      {book.data && filaments.length === 0 && <p className="text-xs text-warn">The price book has no filaments yet: add them in Settings, Orders.</p>}
+      {book.data && filaments.length === 0 && <p className="text-xs text-warn">The price book has no filaments yet: add them in <AppLink href="/filament/types" className="underline">Filament → Types</AppLink>.</p>}
       {colours.length > 0 ? (
         colours.map((colour) => {
           const id = `archive-filament-${itemId}-${colour.slot}`

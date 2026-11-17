@@ -225,6 +225,20 @@ same way, `vite.config.ts`).
   its answer says the print is in Activity (`prints.ts` `lanPrintsActivityPath`), as a
   model's Prints tab does when the model has such a print (`PrintsPage.tsx`
   `LanPrintsNote`).
+- `frontend/src/pages/filament/` and `components/filament/` — the Filament section (#6262, spec
+  2026-11-14 §10). `/filament` opens Spools; the tabs are Spools, Types, Tags, Locations, Catalog and
+  Ledger (`tabs.ts` lists Suppliers, Invoices, Metrics and Shopping list as not available until
+  #6266 and #6269). `/filament/spools/:id` (`SpoolPage`: sections, a "Go to section" select below
+  1024 px, `OverrideField` with "Reset to type", `RgbaColourField` with Opaque, Translucent and
+  Clear presets, `TagPanel` with "Tag is on spool #N — Move it here") and `/filament/types/:id`
+  (`TypePage`). The Spools tab imports a CSV (`SpoolImport`: a dry run, Import is off while any
+  line is an error). The price book is edited on Filament → Types, not in Settings; the ledger
+  tab asks `GET /filament/events` with `since` and `until`. Settings keeps a Filament section for
+  configuration (`pages/settings/sections/filament.tsx`); the old anchors `#native-spools` and
+  `#inventory` land on it. Colour is `#RRGGBBAA` (`lib/rgba.ts`). Mocks:
+  `src/mocks/features/filament/` (`seed.ts` has 12 spools that cover the cases). e2e:
+  `e2e/filament.spec.ts`, plus `hot-path.spec.ts` (SB spool numbers in the trays, no Bambuddy
+  call), `settings.spec.ts` and `page-titles.spec.ts`.
 - "Needs you" (#6399): `lib/needsYou.ts` is every request that waits on the person in one list
   (the agent's pending input, `attention.ts` `WaitingEntry`; the flow grants of
   `GET /api/v1/flow-grant-requests`; the tab's pairing requests, from `AgentLink`'s

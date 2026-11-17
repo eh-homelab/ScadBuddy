@@ -38,6 +38,7 @@ import time
 import types
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import (
     Annotated,
@@ -90,7 +91,14 @@ from scadbuddy.core.secrets import (
     open_secret,
     seal_secret,
 )
-from scadbuddy.core.settings import ENV_SEEDED, SECRET_FIELDS, Settings, check_value, env_var
+from scadbuddy.core.settings import (
+    ENV_SEEDED,
+    SECRET_FIELDS,
+    FilamentSync,
+    Settings,
+    check_value,
+    env_var,
+)
 from scadbuddy.library.asset_fetch import DEFAULT_ASSET_FETCH_DOMAINS, normalise_domain
 from scadbuddy.library.catalogue import PrintSequence
 from scadbuddy.orders.message_models import MessagingBinding
@@ -857,6 +865,10 @@ class SettingsPatch(BaseModel):
     event_log_retention_rows: int | None = None
     flow_approval_timeout_seconds: int | None = None
     spool_overlay_refresh_seconds: int | None = None
+    #: The Filament section (#6262 Task 13): see `core.settings.FilamentSync`.
+    filament_sync: FilamentSync | None = None
+    filament_low_stock_pct: int | None = Field(default=None, ge=0, le=100)
+    filament_default_cost_per_kg: Decimal | None = Field(default=None, ge=0)
     log_level: str | None = None
     temporal_ui_url: str | None = None
 
@@ -1644,9 +1656,8 @@ class SettingsReader(Protocol):
     def plate_clear_required(self) -> bool: ...
 
 
-#: The sealed settings the print worker gets opened (#5298, plan D8): the Bambuddy key,
-#: which is also the Bambuddy spool provider's key (`bambuddy/spool_providers.py`). No
-#: other spool provider has a key. `print_projection` leaves every other sealed field null.
+#: The sealed settings the print worker gets opened (#5298, plan D8): the Bambuddy key.
+#: `print_projection` leaves every other sealed field null.
 PRINT_SECRETS = frozenset({"bambuddy_api_key"})
 #: The S3 store's connection, which the print worker never reads (it reaches blobs
 #: through the API's routes): `print_projection` answers each as null, or as its default

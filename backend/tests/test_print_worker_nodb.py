@@ -38,11 +38,11 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.settings import NoDatabaseSettings, Settings
 from scadbuddy.crud import listener
 from scadbuddy.crud.print import (
+    RemoteFilamentTrays,
     RemoteHeldPresets,
     RemoteNativeSlices,
-    RemoteNativeSpools,
     RemotePrinterStore,
-    RemoteSpoolStore,
+    RemotePrintUses,
 )
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.settings_store import SettingsPatch, SettingsStore
@@ -51,7 +51,6 @@ from scadbuddy.printers.models import LanLink, PrinterCreate
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.rack.usage import RackUsageStore
 from scadbuddy.render.glb import BoundingBox
-from scadbuddy.spools.spool_providers import native_provider
 from scadbuddy.worker import PrintWorkerDeps, build_print_deps
 from scadbuddy.workflows.print_models import (
     LAN_PRINT_ACTIVITY,
@@ -135,8 +134,8 @@ async def test_it_builds_with_no_database_and_holds_no_pool(
             if getattr(fn, "__temporal_activity_definition").name == "print_check"
         ]
         print_deps = check.__self__.d  # type: ignore[attr-defined]
-        assert isinstance(print_deps.spools.store, RemoteSpoolStore)
-        assert isinstance(native_provider(print_deps.spools).store, RemoteNativeSpools)
+        # A native run's SB spools through the API (#6262 Task 6).
+        assert isinstance(print_deps.sb_spools, RemoteFilamentTrays)
         assert print_deps.native is not None
         assert isinstance(print_deps.native.profiles.held, RemoteHeldPresets)
         [lan] = [
@@ -144,7 +143,7 @@ async def test_it_builds_with_no_database_and_holds_no_pool(
             for fn in deps.activities
             if getattr(fn, "__temporal_activity_definition").name == "lan_print"
         ]
-        assert isinstance(lan.__self__.d.native_spools, RemoteNativeSpools)  # type: ignore[attr-defined]
+        assert isinstance(lan.__self__.d.uses, RemotePrintUses)  # type: ignore[attr-defined]
         # With no KEK, a LAN print still reads its sliced file: the API mints the URL
         # (#5298 Task 32).
         assert settings.secret_key_file is None
@@ -174,6 +173,8 @@ async def test_a_native_slice_starts_through_the_api(
     try:
         [kwargs] = built
         assert isinstance(kwargs["native_slices"], RemoteNativeSlices)
+        # Its SB spools through the API too (#6262 Task 6).
+        assert isinstance(kwargs["sb_spools"], RemoteFilamentTrays)
     finally:
         await deps.aclose()
 

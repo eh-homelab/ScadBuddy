@@ -75,7 +75,9 @@ the rest recorded stopped). The sequence's own histories of the first three are 
 ``print_lan_sequence_histories/``. ``PLATE_CLEAR_PATCH`` (#4939) waits for the
 ``plate_cleared`` signal before each later copy of a run planned with ``plate_clear``:
 ``lan_plate_clear`` (three copies, two confirmations, the first after a stale one),
-both histories. It is AUTO_UPGRADE on the print worker and may run
+both histories. ``RUN_HOLD_PATCH`` (#6122) sends ``slice_run`` a LAN run's id, so the
+run holds its sliced files: ``lan_run_holds`` (two copies, both printed, each slice
+held for the run), both histories. It is AUTO_UPGRADE on the print worker and may run
 for days, so a change to its commands goes behind ``workflow.patched`` as ``PrintRun``'s
 does.
 """
@@ -142,6 +144,7 @@ SEQUENCE_HISTORIES = Path(__file__).parent / "fixtures" / "print_lan_sequence_hi
         "lan_later_start_failed",
         "lan_cancelled_during_succeed",
         "lan_plate_clear",
+        "lan_run_holds",
     ],
 )
 async def test_print_run_replays_its_recorded_history(name: str) -> None:
@@ -152,7 +155,13 @@ async def test_print_run_replays_its_recorded_history(name: str) -> None:
 
 @pytest.mark.parametrize(
     "name",
-    ["lan_copies", "lan_cancelled_while_waiting", "lan_later_start_failed", "lan_plate_clear"],
+    [
+        "lan_copies",
+        "lan_cancelled_while_waiting",
+        "lan_later_start_failed",
+        "lan_plate_clear",
+        "lan_run_holds",
+    ],
 )
 async def test_lan_sequence_replays_its_recorded_history(name: str) -> None:
     text = (SEQUENCE_HISTORIES / f"{name}.json").read_text()

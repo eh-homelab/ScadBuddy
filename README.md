@@ -50,7 +50,7 @@ multi-colour rules, connecting Bambuddy and each feature.
   the slice (every plate's grams and time at the price book's filaments and rates, kept
   with the sliced file it was read from), fulfilled, shipped and closed, with an audit
   line per order; a rough estimate from a render's volume before anything is sliced; the
-  pages under Orders, the price book in Settings, and the assistant's `order_*` and
+  pages under Orders, the price book on the Filament page's Types tab, and the assistant's `order_*` and
   `price_book_*` tools (phases 1 and 2 of #4248).
 - **Fonts**: the image's fonts, plus any Google Fonts family, which is installed on
   demand.
@@ -1295,19 +1295,26 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   printer's with a 503 (#5298 Task 33). The rack hotends' usage
   goes through them too (`…/rack`; a LAN start's picks, a queue item's picks, a settled print's rows and a LAN
   start's settles take an `Idempotency-Key`), so the worker holds no rack pool. Through
-  them too go the spools a native run's overlay reads and the native provider re-caches, ScadBuddy's
-  own spools and what a LAN start uses of them, the kept copy of Bambuddy's local presets
-  and a native slice's start (`…/spools`, `…/native-spools`, `…/held-presets`,
-  `…/native-slices`; a provider's records and a run's settle take an `Idempotency-Key`).
+  them too go the SB spool in each of a native run's trays and their presets, what a LAN
+  start uses of them, the kept copy of Bambuddy's local presets and a native slice's start,
+  and the SB spools Bambuddy's path offers and maps a plan by (`…/filament/trays`,
+  `…/filament/presets`, `…/filament/print-uses`, `…/filament/rows`, `…/filament/bb-to-sb`,
+  area `filament`;
+  `…/held-presets`, `…/native-slices`; a start's uses and a run's settle take an
+  `Idempotency-Key`).
   A LAN print reads a native slice's sliced 3MF by a URL the API mints for it
   (`…/transfer-urls`, #5298 Task 32): the internal blob route's, its token signed under
   the API's KEK and good for 10 minutes, on every `store_backend`, so the pod reaches the
   API only. The API mints one only for a key its content index holds live as a slicer's
-  output (kind `slice` with the mark the slice's record step gives it), whether or not the
-  slice's row was swept since (6 h after it finished: a run's later plates start after
-  the earlier ones print). So the print worker can read any live sliced output (a run's,
-  the print dialog's or an order quote's); a print-run hold on its file would narrow that
-  to the run's own. The slicer's inputs share kind `slice` but are refused. ScadBuddy
+  output (kind `slice` with the mark the slice's record step gives it), and only for a
+  sliced file of a run in use: a running run, or a LAN run with prints still to start
+  (#6122). The run's hold names the file (holder kind `print_run` in `blob_refs`, taken by
+  `slice_run` for a LAN run and dropped where the run ends; a housekeeping sweep drops
+  what an end left), or a completed slice row of the run's subject does. The hold outlives
+  the slice's row, which the sweep deletes 6 h after it finished: a run's later plates
+  start after the earlier ones print. The print dialog's slice and an order quote's get
+  no URL unless a run of their subject is in use. The slicer's inputs share kind `slice`
+  but are refused. ScadBuddy
   strips print-host credential keys (`printhost_apikey`, `printhost_password`,
   `printhost_user`, and any key naming an API key, password, secret or token, at any
   depth) whenever it parses a preset, and never stores, forwards or writes them into a
@@ -1324,7 +1331,8 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   503 `store_unavailable`, which the worker retries. The worker signs nothing. It does
   not `LISTEN`. It waits until the API lists every area in `worker.py` `PRINT_CRUD_AREAS` (`settings`, `runs`, `operations`,
   `events`, `printer-ensure`, `reprints`, `uploads`, `previews`, `copy-leases`, `links`,
-  `lan-imports`, `printers`, `rack`, `spools`, `transfer-urls` and `access-codes`) before
+  `lan-imports`, `printers`, `rack`, `spools`, `transfer-urls`, `access-codes` and
+  `filament`) before
   it serves. Its
   build id is `SCADBUDDY_REVISION`, stamped in the image.
 - **Versioning:** the worker deployment `scadbuddy-print`, made current at start as the
@@ -2272,11 +2280,13 @@ checked per run from the settings as they are then (`printers/hot_path.py`
    answers).
 
 `bambuddy_url` may stay set. A native run never builds a Bambuddy client; what still
-calls Bambuddy are the housekeeping sweeps and the spool providers' refresh (the
-`scadbuddy-spool-providers-<queue>` Schedule, `spool_overlay_refresh_seconds` (restart),
-300 s by default), on their own traces, and any run whose printer's path is `bambuddy`. The
-dialog's filament step reads the loaded trays from the LAN report and lays the cached
-spool records over them; an overlay older than 30 minutes shows trays only, with a note.
+calls Bambuddy are the housekeeping sweeps and the spool refresh, which pulls Bambuddy's
+spools into ScadBuddy's own (the `scadbuddy-spool-providers-<queue>` Schedule,
+`spool_overlay_refresh_seconds` (restart), 300 s by default; Settings → Printing → Filament, where
+`filament_sync.spools` `off` turns the pull off), on their own traces, and
+any run whose printer's path is `bambuddy`. The
+dialog's filament step reads the loaded trays from the LAN report, each with the
+ScadBuddy spool it holds (found by its RFID tag or a person's tray link, #6262).
 The same refresh keeps a copy of Bambuddy's local presets (its OrcaSlicer imports,
 #4645), which the dialog offers and the native slicer slices from; one imported or
 edited in Bambuddy is there after the next refresh. Bambu Cloud user presets are not

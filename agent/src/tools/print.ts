@@ -405,6 +405,11 @@ export function partSettingsPhrase(settings: Record<string, Record<string, unkno
 }
 
 export const slotChoice = z.object({ slot_id: z.number().int(), spool_id: z.number().int() })
+/** A plan's `ids` (#6262 Task 7): its positive spool ids are ScadBuddy spool numbers, as get_print_filaments lists them. */
+export const sbPlanIds = z
+  .literal('sb')
+  .default('sb')
+  .describe('What the spool ids name: ScadBuddy spool numbers (get_print_filaments), always "sb"')
 export const presetRef = z.object({
   source: z.enum(['orca_cloud', 'cloud', 'local', 'standard']),
   id: z.string().min(1),
@@ -737,7 +742,8 @@ export const printTools: Tool[] = [
     name: 'get_print_filaments',
     label: "Read the print dialog's filaments",
     description:
-      "Bambuddy's spool inventory joined to where each spool is loaded and, with `printer_id`, the " +
+      "ScadBuddy's spools, each by its number (`spool_id`, what `filament_plan` names), joined to the tray it " +
+      "is loaded in (a printer's report, else Bambuddy's assignment of its linked spool) and, with `printer_id`, the " +
       'remaining grams per slot and the mounted nozzles — plus what this output\'s (or library file\'s) plate ' +
       '(or, with `all_plates`, every plate) needs and a suggested spool per slot.',
     input: withSource({
@@ -746,7 +752,7 @@ export const printTools: Tool[] = [
         .optional()
         .describe(
           "A registry printer's `id` (list_printers): on a printer a run reaches over the LAN the spools are " +
-            "its loaded trays, each a negative `spool_id`, with the spool providers' records over them.",
+            "its loaded trays, each a negative `spool_id`, with the ScadBuddy spool it holds (`sb_spool_id`, `sb_number`).",
         ),
       plate_id: z.number().int().min(1).optional(),
       all_plates: z.boolean().optional(),
@@ -1762,7 +1768,7 @@ export const printTools: Tool[] = [
         copies: args.copies ?? null,
         plate_id: args.plate_id,
         all_plates: args.all_plates,
-        filament_plan: { slots, force_colour_match: forceColourMatch ?? true },
+        filament_plan: { slots, force_colour_match: forceColourMatch ?? true, ids: 'sb' as const },
         choices: {
           nozzles: chosenNozzles,
           tier: chosenTier ?? null,

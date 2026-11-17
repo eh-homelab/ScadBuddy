@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import timedelta
+from decimal import Decimal
 from typing import Any, Literal, Self
 
 import psycopg
@@ -51,9 +52,11 @@ from scadbuddy.core.settings import (
     BOOTSTRAP_FIELDS,
     ENV_SEEDED,
     Applies,
+    FilamentSync,
     Settings,
     env_var,
 )
+from scadbuddy.filament.component import FilamentDep
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.presets import PresetStore, TemplatePresetsUnreadableError
 from scadbuddy.library.settings_store import (
@@ -76,7 +79,6 @@ from scadbuddy.orders.money import DepositRule, ShippingOption
 from scadbuddy.orders.storefront.slice_profile import StorefrontSliceProfile
 from scadbuddy.print_watch.component import AUTO_IMPORTS
 from scadbuddy.printers.component import Printers, PrintersDep
-from scadbuddy.spools.component import SpoolsDep
 from scadbuddy.workflows.commands import (
     TemporalRefusedError,
     TemporalUnavailableError,
@@ -289,6 +291,9 @@ class SettingsView(BaseModel):
     event_log_retention_rows: int
     flow_approval_timeout_seconds: int
     spool_overlay_refresh_seconds: int
+    filament_sync: FilamentSync = Field(default_factory=FilamentSync)
+    filament_low_stock_pct: int = 20
+    filament_default_cost_per_kg: Decimal | None = None
     log_level: str
     #: The Temporal web UI, which Settings → Administration links to (#668).
     temporal_ui_url: str | None = None
@@ -610,7 +615,7 @@ async def put_settings(
     state: StateDep,
     ops: OperationsDep,
     registry: PrintersDep,
-    spools: SpoolsDep,
+    filament: FilamentDep,
 ) -> SettingsView:
     """Saves the fields given; a ``null`` clears one and ``reset`` puts one back on the
     deployment's value. A live field applies before this answers, here and (through
@@ -627,7 +632,7 @@ async def put_settings(
     patch = await asyncio.to_thread(_default_printer, patch, registry)
     if patch.storefront_slice_profile is not None:
         pending = await asyncio.to_thread(_pending, store, patch)
-        await check_profile(patch.storefront_slice_profile, pending, registry, spools)
+        await check_profile(patch.storefront_slice_profile, pending, registry, filament.inventory)
     if patch.operation_retention_seconds is not None:
         await _check_operation_retention(store, ops, patch.operation_retention_seconds)
     if patch.git_remote_token and store.kek is None:

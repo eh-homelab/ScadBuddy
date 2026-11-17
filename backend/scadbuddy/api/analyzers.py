@@ -82,6 +82,8 @@ from scadbuddy.core.events import AnalyzerDecisionEvent, EventBus, emit
 from scadbuddy.core.gitrepo import COMMIT_ID_PATTERN
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import DATABASE_ERRORS, DATABASE_UNAVAILABLE_PROBLEM, ApiError
+from scadbuddy.filament.component import FilamentDep
+from scadbuddy.filament.inventory import FilamentInventory, SbSpoolReads
 from scadbuddy.library.catalogue import Catalogue, declares_pipeline
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputMeta, OutputStore, require_output
 from scadbuddy.library.settings_store import ModelPrintChoices, SettingsStore, StoredSettings
@@ -94,7 +96,6 @@ from scadbuddy.render.provenance import source_version
 from scadbuddy.render.read_budget import ReadBudget, budget_of
 from scadbuddy.render.runner import OpenSCADError, with_defaults
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
-from scadbuddy.spools.component import Spools, SpoolsDep
 from scadbuddy.store.download_cache import DownloadCache
 
 logger = logging.getLogger(__name__)
@@ -382,9 +383,12 @@ async def analysis_context(
     downloads: DownloadCache | None = None,
     native: NativeLibrary | None = None,
     printers: Printers | None = None,
-    spools: Spools | None = None,
+    inventory: FilamentInventory | None = None,
     schema: SchemaAt | None = None,
+    reads: SbSpoolReads | None = None,
 ) -> AnalysisContext:
+    """``inventory`` reads the SB spool in a native route's trays; ``reads`` the SB
+    spools Bambuddy's path offers (#6262 Task 7)."""
     slug, params, meta = await asyncio.to_thread(_subject, target, outputs, catalogue)
     if meta is None and target.output_id is None and slug is not None:
         meta = await _newest_render(slug, params, outputs, schema)
@@ -405,6 +409,7 @@ async def analysis_context(
         budget=budget,
         downloads=downloads,
         native=native,
+        reads=reads,
     )
     route: RunRoute | None = None
     #: Why the named registry printer cannot be judged (gone, a disagreeing pair): the
@@ -413,7 +418,7 @@ async def analysis_context(
     if (
         request.printer is not None
         and printers is not None
-        and spools is not None
+        and inventory is not None
         and native_backends(settings)
     ):
         # `dialog_route`'s own resolution, with the refusal kept for the report.
@@ -431,10 +436,10 @@ async def analysis_context(
         else:
             route = resolved if resolved.native else None
     if route is not None:
-        assert spools is not None
-        # The dialog's own native reads (#4629): the trays from the LAN report, the spools
-        # from the overlay, the file from the native library; no Bambuddy call.
-        on_route, spool_records = route, spools
+        assert inventory is not None
+        # The dialog's own native reads (#4629): the trays from the LAN report, the SB
+        # spool in each (#6262), the file from the native library; no Bambuddy call.
+        on_route, trays_held = route, inventory
 
         async def trays() -> FilamentOptions | None:
             source: PrintSource
@@ -455,7 +460,7 @@ async def analysis_context(
             return await native_filaments(
                 source,
                 on_route,
-                spool_records,
+                trays_held,
                 plate_id=request.plate_id,
                 all_plates=request.all_plates,
                 plate_ids=request.plate_ids,
@@ -568,7 +573,7 @@ async def post_run(
     state: StateDep,
     library: PrintLibraryDep,
     printers: PrintersDep,
-    spools: SpoolsDep,
+    filament: FilamentDep,
 ) -> AnalysisReport:
     """Judge an output or a configuration against the print request it would go out
     with (the spool-first base, #335: printer, filament plan, nozzles, quality, plate).
@@ -599,8 +604,9 @@ async def post_run(
         downloads_of(state),
         await library.serving_native(),
         printers,
-        spools,
+        filament.inventory,
         schema=schema,
+        reads=filament.reads,
     )
     try:
         stored = await asyncio.to_thread(decisions.list, scopes=context.scopes())
@@ -630,7 +636,7 @@ async def post_preview(
     state: StateDep,
     library: PrintLibraryDep,
     printers: PrintersDep,
-    spools: SpoolsDep,
+    filament: FilamentDep,
 ) -> FixPreview:
     """The fix's whole diff, where each line would land, whether it can be applied yet,
     and the fingerprint an apply confirms against (diff, scope, subject and base).
@@ -649,8 +655,9 @@ async def post_preview(
         downloads_of(state),
         await library.serving_native(),
         printers,
-        spools,
+        filament.inventory,
         schema=schema,
+        reads=filament.reads,
     )
     diagnostic, fix = _find_fix(context, body)
     scope = _fix_scope(context, diagnostic, body.scope)
@@ -682,7 +689,7 @@ async def post_apply(
     state: StateDep,
     library: PrintLibraryDep,
     printers: PrintersDep,
-    spools: SpoolsDep,
+    filament: FilamentDep,
 ) -> Decision:
     """Record the fix as accepted at ``scope``: its diff joins the effective diff
     (``accepted_changes``) of every later run in that scope while the diff is unchanged.
@@ -712,8 +719,9 @@ async def post_apply(
         downloads_of(state),
         await library.serving_native(),
         printers,
-        spools,
+        filament.inventory,
         schema=schema,
+        reads=filament.reads,
     )
     diagnostic, fix = _find_fix(context, body)
     scope = _fix_scope(context, diagnostic, body.scope)

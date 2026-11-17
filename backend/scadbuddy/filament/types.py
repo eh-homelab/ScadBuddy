@@ -18,6 +18,7 @@ from psycopg import Connection, errors
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
+from scadbuddy.filament import ledger
 from scadbuddy.filament import models as m
 from scadbuddy.filament.catalog import (
     CatalogExistsError,
@@ -169,11 +170,29 @@ class SpoolTypeStore:
                 ).fetchone()
                 assert row is not None
                 row = self._link_price_book(conn, row, changed=bool(set(columns) & _PRICED))
+                if (
+                    "label_weight_g" in columns
+                    and current["label_weight_g"] != patch.label_weight_g
+                ):
+                    self._refresh_spools(conn, type_id)
         except errors.UniqueViolation:
             raise CatalogExistsError() from None
         except errors.ForeignKeyViolation:
             raise CatalogRefError() from None
         return m.SpoolType.model_validate(row)
+
+    @staticmethod
+    def _refresh_spools(conn: Conn, type_id: UUID) -> None:
+        """A type's label weight reads into its spools' ``grams_left`` (an AMS percentage
+        is a share of it), so each unarchived spool that does not set its own is
+        recomputed, locked in id order."""
+        rows = conn.execute(
+            "SELECT id FROM filament_spools WHERE type_id = %s AND label_weight_g IS NULL"
+            " AND archived_at IS NULL ORDER BY id FOR UPDATE",
+            (type_id,),
+        ).fetchall()
+        for row in rows:
+            ledger.refresh_derived(conn, row["id"])
 
     def archive(self, type_id: UUID, archived: bool) -> m.SpoolType | None:
         """Take a type off the lists (``True``), freeing its code, or put it back."""

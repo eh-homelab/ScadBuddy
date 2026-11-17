@@ -223,10 +223,10 @@ def test_leases_pins_and_install_slots_go_through_the_api(owner: Pool, tmp_path:
     with threaded_render_crud(owner) as client:
         leases = RemoteCheckoutLeases(client)
         token = leases.take("job-1", [tmp_path / "BOSL2" / ("c" * 40)])
-        leases.renew(token)
+        assert leases.renew(token)
         leases.drop(token)
         pin = leases.take_pin()
-        leases.renew_pin(pin)
+        assert leases.renew_pin(pin)
         leases.drop_pin(pin)
         permits = InstallPermits(2, slots=RemoteInstallSlots(client))
         claimed = permits.claim()

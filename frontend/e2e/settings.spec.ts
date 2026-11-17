@@ -161,6 +161,14 @@ test.describe('settings', () => {
       }
     }
   })
+
+  // #6262 — the spool inventory and "ScadBuddy's spools" moved to the Filament page; their
+  // old anchor lands on the Filament section of the Printing area, which stays configuration.
+  test('/settings#native-spools lands on the Filament section (#6262)', async ({ page }) => {
+    await page.goto('/settings#native-spools')
+    await expect(page).toHaveURL(/\/settings\/printing#filament$/)
+    await expect(page.getByRole('region', { name: 'Filament' })).toBeVisible()
+  })
 })
 
 // #1035 — the About section's deployment-values table held unbroken tokens (a comma-joined

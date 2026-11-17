@@ -376,10 +376,28 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "Temporal UI URL",
             "The Temporal web UI, where render workflows can be inspected. Empty shows no link.",
         ),
+        # -- Filament (#6262) -----------------------------------------------------------
+        "filament_sync": SettingDoc(
+            "Spools",
+            "Off, Bambuddy's spools are never pulled and ScadBuddy's own are the only ones."
+            " Bambuddy \u2192 ScadBuddy copies Bambuddy's spools in on the schedule below;"
+            " ScadBuddy never writes to Bambuddy.",
+        ),
         "spool_overlay_refresh_seconds": SettingDoc(
-            "Refresh the spool providers' records every",
-            "Bambuddy's spool records, copied on a schedule of their own so a print never"
-            " waits on Bambuddy. 0 turns the refresh off.",
+            "Pull from Bambuddy every",
+            "How often Bambuddy's spools are pulled and its local presets kept, on a schedule"
+            " of their own so a print never waits on Bambuddy. 0 turns both off. A change"
+            " applies at the next start.",
+        ),
+        "filament_low_stock_pct": SettingDoc(
+            "Low stock below, percent",
+            "A spool is low when it has less than this percent of its label weight left,"
+            " unless the spool sets its own. 0 to 100.",
+        ),
+        "filament_default_cost_per_kg": SettingDoc(
+            "Default cost per kg",
+            "What a kilogram of filament costs when its spool and type name no cost, in the"
+            " shop's currency, such as 24.50. Empty sets none.",
         ),
         # -- Diagnostics ---------------------------------------------------------------
         "log_level": SettingDoc(

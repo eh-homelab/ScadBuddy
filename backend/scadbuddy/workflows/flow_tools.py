@@ -750,7 +750,9 @@ async def queue_print(
 ) -> PrintOutcome:
     """Once a person approves it, slice and queue `source` ({"output_id": ...} or
     {"file_id": ...}) with `request`, the print dialog's body (`filament_plan`,
-    `choices`, ...), and wait until the run settles. A line item's source,
+    `choices`, ...; send `filament_plan.ids: "sb"` with the ScadBuddy spool numbers
+    the reads return, as a plan without `ids` names Bambuddy's), and wait until the
+    run settles. A line item's source,
     {"order_id": ..., "order_item_id": ...}, prints the item's accepted quote, every
     plate, the copies still to make: the request's spools are filled from the item's
     filaments and must be of them. Refused before it starts, the outcome is `refused`

@@ -294,7 +294,7 @@ describe('ListingEditor (#5282, #6131)', () => {
     await user.click(screen.getByRole('switch', { name: 'Customer can change Plate' }))
     const problems = screen.getByTestId('colour-problems')
     expect(problems).toHaveTextContent('Plate is #1B6CA8')
-    expect(within(problems).getByRole('link', { name: 'add one to the price book' })).toHaveAttribute('href', '/settings/printing#orders')
+    expect(within(problems).getByRole('link', { name: 'add one to the price book' })).toHaveAttribute('href', '/filament/types')
     await user.click(within(problems).getByRole('combobox', { name: 'Filament for Plate' }))
     await user.click(await screen.findByRole('option', { name: 'PLA Red' }))
     expect(last(seen).fixed['body_color']).toBe('#FF0000')

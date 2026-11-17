@@ -3,7 +3,7 @@ import { expect, test, type Page } from '@playwright/test'
 /**
  * #3818 (plan 2026-10-18 Task 11, AC3 and AC6) — the hot path with no Bambuddy, msw-mocked
  * (`src/mocks/features/hotPath.ts`): render, the print dialog's native slice with its
- * progress, the trays with Bambuddy's records over them, a print to a LAN-linked H2C and
+ * progress, the trays with the SB spools they hold (#6262), a print to a LAN-linked H2C and
  * its card on the Prints page. The mock answers every Bambuddy-only route 409, so any 409
  * is a component still asking Bambuddy.
  */
@@ -48,24 +48,24 @@ test.describe('native hot path (msw)', () => {
     await expect(progress).toHaveAttribute('value', '60')
     await expect(dialog.getByTestId('slice-time')).toHaveText('30m')
 
-    // The trays, with Bambuddy's record of the spool in the tagged one over it (D1).
+    // The trays, each with the SB spool it holds (D1, #6262).
     await expect(dialog.getByTestId('filament-slot-1')).toContainText('PLA blue in AMS-A slot 1')
     await expect(dialog.getByTestId('filament-slot-1')).toContainText('81%')
-    await expect(dialog.getByTestId('filament-slot-1')).toContainText('Bambuddy: Bambu Lab Blue · 812 g')
+    await expect(dialog.getByTestId('filament-slot-1')).toContainText('Spool #1: Bambu Lab Blue · 812 g')
     // Projects are Bambuddy's (D6): none is named, asked for or offered.
     await expect(dialog.getByText(/project/i)).toHaveCount(0)
     await expect(dialog.getByText('Filed under:')).toContainText('the template’s folder')
 
-    // The untagged tray's question links Bambuddy's unlinked record through ScadBuddy's route.
+    // The untagged tray's question places the shelf's SB spool through ScadBuddy's route.
     const question = dialog.getByTestId('tray-question-0-1')
     await expect(question).toContainText('AMS-A slot 2 has pink PLA, but no spool record is linked to it.')
     const link = page.waitForRequest(
       (request) => request.method() === 'PUT' && /\/printers\/[^/]+\/trays\/0\/1\/spool$/.test(request.url()),
     )
     await question.getByRole('button', { name: 'Yes, that one' }).click()
-    expect((await link).postDataJSON()).toEqual({ provider: 'bambuddy', record_id: '27' })
+    expect((await link).postDataJSON()).toEqual({ spool_id: '7a2c1f0e-0000-4000-8000-000000000002' })
     await expect(question).toHaveCount(0)
-    await expect(dialog.getByTestId('filament-slot-2')).toContainText('Bambuddy: Elegoo Pink · 640 g')
+    await expect(dialog.getByTestId('filament-slot-2')).toContainText('Spool #2: Pink · 640 g')
 
     await dialog.getByRole('button', { name: 'Print', exact: true }).click()
     await expect(dialog.getByTestId('queued-items')).toContainText('Sliced and sent to H2C over the LAN')
@@ -93,7 +93,7 @@ test.describe('native hot path (msw)', () => {
     await expect(page.getByTestId('now-printing').getByText('H2C', { exact: true })).toBeVisible()
     // One Bambuddy-only route asked on purpose, and one 409 of another kind.
     const statuses = await page.evaluate(async () => {
-      const refused = await fetch('/api/v1/farm/inventory')
+      const refused = await fetch('/api/v1/print/printers/1/camera')
       // A name already taken: the duplicate route's own 409, nothing to do with Bambuddy.
       const other = await fetch('/api/v1/models/name-keychain/duplicate', {
         method: 'POST',
@@ -103,27 +103,6 @@ test.describe('native hot path (msw)', () => {
       return [refused.status, other.status]
     })
     expect(statuses).toEqual([409, 409])
-    await expect.poll(() => bambuddy).toEqual([expect.stringMatching(/\/api\/v1\/farm\/inventory$/)])
-  })
-
-  test('a stale overlay shows the trays with a note, and still prints', async ({ page }) => {
-    await page.addInitScript(() => localStorage.setItem('sb-mock-hot-path-stale', '1'))
-    const bambuddy = bambuddyCalls(page)
-    const dialog = await openDialog(page)
-
-    await expect(dialog.getByTestId('overlay-notes')).toContainText(
-      "Bambuddy's spool records are from 13:40 UTC; showing the trays only.",
-    )
-    await expect(dialog.getByTestId('filament-slot-1')).toContainText('PLA blue in AMS-A slot 1')
-    await expect(dialog.getByTestId('filament-slot-1')).not.toContainText('Bambuddy:')
-    // Nothing to link while the records are stale: no question.
-    await expect(dialog.getByTestId('tray-question-0-1')).toHaveCount(0)
-
-    // Three reads, each on the event the mock sends two seconds after the one before
-    // (#265), before it lands.
-    await expect(dialog.getByTestId('slice-time')).toHaveText('30m', { timeout: 15_000 })
-    await dialog.getByRole('button', { name: 'Print', exact: true }).click()
-    await expect(dialog.getByTestId('queued-items')).toContainText('Sliced and sent to H2C over the LAN')
-    expect(bambuddy).toEqual([])
+    await expect.poll(() => bambuddy).toEqual([expect.stringMatching(/\/api\/v1\/print\/printers\/1\/camera$/)])
   })
 })

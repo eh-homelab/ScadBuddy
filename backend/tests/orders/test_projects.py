@@ -14,15 +14,15 @@ from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
 
 import scadbuddy.orders.projects as projects_module
+from scadbuddy.bambuddy.models import SpoolAssignment
 from scadbuddy.core.problems import ApiError
 from scadbuddy.orders.integrations import (
     NOT_LINKED,
     ArchiveFacts,
     ArchiveMedia,
     CopiedMedia,
+    LocalDensity,
     MaintenanceTask,
-    ShelfSpool,
-    SpoolGroup,
 )
 from scadbuddy.orders.printing import print_item
 from scadbuddy.orders.projects import ensure_projects, item_project, item_project_name
@@ -53,10 +53,10 @@ class Projects:
         self.asked.append(project_id)
         return project_id not in self.deleted
 
-    async def spool_inventory(self) -> list[ShelfSpool]:
+    async def local_densities(self) -> dict[str, LocalDensity]:
         raise AssertionError("not asked")
 
-    async def spool_groups(self) -> list[SpoolGroup]:
+    async def spool_assignments(self) -> list[SpoolAssignment]:
         raise AssertionError("not asked")
 
     async def maintenance_tasks(self, printer_id: int) -> list[MaintenanceTask]:

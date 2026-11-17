@@ -59,22 +59,16 @@ export function howFull(spool: SpoolOption): string | null {
 }
 
 /**
- * #3818 — what the native link names for a candidate: its physical spool, else its first
- * provider record (the overlay's priority order). `null` for a candidate with neither.
+ * #3818, #6262 — what the native link names for a candidate: its SB spool
+ * (`{spool_id}`, the shelf row's `sb_spool_id`). `null` for a candidate with none.
  */
 export function linkOf(spool: SpoolOption): TraySpoolLink | null {
-  if (spool.physical_spool_id) return { physical_spool_id: spool.physical_spool_id }
-  const [provider, record] = Object.entries(spool.records ?? {})[0] ?? []
-  return provider && record ? { provider, record_id: record.record_id } : null
+  return spool.sb_spool_id ? { spool_id: spool.sb_spool_id } : null
 }
 
 /**
- * #3818 — a link's identity, the same across reads: the physical spool, else the
- * provider's record. Never the shelf row's `spool_id`, which is only its place in one
- * answer and may name another record after a re-read.
+ * #3818 — a link's identity, the same across reads: the SB spool's id.
  */
 export function linkKey(link: TraySpoolLink | null): string | null {
-  if (!link) return null
-  if (link.physical_spool_id) return `spool:${link.physical_spool_id}`
-  return link.provider && link.record_id ? `record:${link.provider}:${link.record_id}` : null
+  return link ? `spool:${link.spool_id}` : null
 }

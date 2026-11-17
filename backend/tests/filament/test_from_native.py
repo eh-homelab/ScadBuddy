@@ -68,7 +68,7 @@ def test_native_spools_uses_and_tags_are_copied(pg_conninfo: str) -> None:
             " VALUES ('r2', 's', 1, %s, 3)",
             (live[0],),
         )
-        migrate(conn)
+        migrate(conn, MIGRATIONS[: _index("filament_presets_per_nozzle")])
 
         spools = conn.execute(
             "SELECT s.id, s.rgba, s.grams_left, s.label_weight_g, s.note, s.type_id,"

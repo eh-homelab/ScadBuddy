@@ -38,10 +38,8 @@ from scadbuddy.printers.store import (
     SerialTakenError,
     SerialUnknownError,
 )
-from scadbuddy.spools.store import SpoolStore
 from tests.conftest import PgPool
 from tests.printers.conftest import RecordingBus
-from tests.spools.test_store import NOW, record, tray
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -289,8 +287,10 @@ def test_ids_are_uuids_and_a_malformed_id_is_not_found(printers: PrinterStore) -
 
 def test_every_reference_to_a_printer_is_merged(pg_pool: PgPool) -> None:
     """I7: every foreign key to `printers.id` is in `PRINTER_REFERENCES`, so a merge
-    repoints it. A table that names a printer without one (#4180's `tray_spool_links`,
-    Task 8's activity attribution) must add itself too."""
+    repoints it. A table that names a printer without one (Task 8's activity
+    attribution) must add itself too. The retired overlay's ``tray_spool_links`` is left
+    out: nothing reads it since #6262 Task 12, and the PR that drops it drops this
+    exception."""
     with pg_pool.connection() as conn:
         rows = conn.execute(
             "SELECT cl.relname AS t, a.attname AS c FROM pg_constraint co"
@@ -303,8 +303,7 @@ def test_every_reference_to_a_printer_is_merged(pg_pool: PgPool) -> None:
     listed = {
         (ref.table, ref.column) for ref in PRINTER_REFERENCES if isinstance(ref, PrinterReference)
     }
-    assert ("tray_spool_links", "printer_id") in fks  # #4190
-    assert fks <= listed
+    assert fks - {("tray_spool_links", "printer_id")} <= listed
 
 
 def test_a_synthetic_row_merges_into_the_row_holding_the_serial(
@@ -524,7 +523,7 @@ def _two_rows(printers: PrinterStore) -> tuple[str, str]:
 def test_a_repoint_hook_runs_inside_the_merge_transaction(
     printers: PrinterStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """N2: a reference with a key of its own (#4180's ``tray_spool_links``) registers a
+    """N2: a reference with a key of its own (an AMS tray place, #6261) registers a
     hook, called with the merge's connection while both rows still exist."""
     gone, kept = _two_rows(printers)
     calls: list[tuple[str, str, bool, bool]] = []
@@ -604,65 +603,3 @@ def test_an_unlink_racing_an_ensure_stays_unlinked(printers: PrinterStore) -> No
                 done.result(timeout=10)
         printers.ensure_bambuddy(100 + attempt, serial=serial, name="P", model=None)
         assert printers.require(row.id).bambuddy_printer_id is None
-
-
-# ── #4190: tray links follow their printer ──────────────────────────────────────────
-
-
-async def test_a_merge_repoints_the_tray_links(printers: PrinterStore, pg_pool: PgPool) -> None:
-    """The synthetic row's tray links move to the row it merges into, in the merge's
-    transaction; a tray both link keeps the kept row's (`repoint_tray_links`)."""
-    spools = SpoolStore(pg_pool)
-    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model=None)
-    mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
-    await spools.replace_records("bambuddy", [record("1"), record("2"), record("3")], NOW)
-    await spools.link(uuid.UUID(synthetic.id), tray(0, 0), provider="bambuddy", record_id="1")
-    await spools.link(uuid.UUID(synthetic.id), tray(0, 1), provider="bambuddy", record_id="2")
-    await spools.link(uuid.UUID(mine.id), tray(0, 1), provider="bambuddy", record_id="3")
-
-    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model=None)
-
-    assert printers.get(synthetic.id) is None
-    with pg_pool.connection() as conn:
-        links = conn.execute(
-            "SELECT printer_id::text AS p, tray_id FROM tray_spool_links ORDER BY tray_id"
-        ).fetchall()
-    assert [(row["p"], row["tray_id"]) for row in links] == [(mine.id, 0), (mine.id, 1)]
-    overlay = await spools.overlay(
-        uuid.UUID(mine.id), [tray(0, 0), tray(0, 1)], now=NOW, providers=["bambuddy"]
-    )
-    assert [t.records["bambuddy"].record_id for t in overlay.trays] == ["1", "3"]
-
-
-def _count(pool: PgPool, table: str) -> int:
-    with pool.connection() as conn:
-        found = conn.execute(f"SELECT count(*) AS n FROM {table}").fetchone()
-    assert found is not None
-    return int(found["n"])
-
-
-async def test_deleting_a_printer_deletes_its_tray_links(
-    printers: PrinterStore, pg_pool: PgPool
-) -> None:
-    """#4190: ``ON DELETE CASCADE``; the spools themselves stay."""
-    spools = SpoolStore(pg_pool)
-    row = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
-    await spools.replace_records("bambuddy", [record("1")], NOW)
-    await spools.link(uuid.UUID(row.id), tray(0, 0), provider="bambuddy", record_id="1")
-
-    printers.delete(row.id)
-
-    assert _count(pg_pool, "tray_spool_links") == 0
-    assert _count(pg_pool, "physical_spools") == 1
-
-
-def test_a_tray_link_names_a_registered_printer(pg_pool: PgPool) -> None:
-    with pg_pool.connection() as conn, pytest.raises(psycopg.errors.ForeignKeyViolation):
-        conn.execute(
-            "INSERT INTO physical_spools (id, material) VALUES (gen_random_uuid(), 'PLA')"
-            " RETURNING id"
-        )
-        conn.execute(
-            "INSERT INTO tray_spool_links (printer_id, ams_id, tray_id, physical_spool_id,"
-            " fingerprint) SELECT gen_random_uuid(), 0, 0, id, 'f' FROM physical_spools"
-        )

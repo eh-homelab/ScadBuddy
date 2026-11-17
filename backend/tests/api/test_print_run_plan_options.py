@@ -19,7 +19,7 @@ from tests.api.test_print_options_picker import remember
 from tests.api.test_print_run_choices import run_print, run_request, run_routes
 from tests.api.test_send import configure, make_output, upload_route
 
-pytestmark = pytest.mark.requires_postgres
+pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("recorded_sb_spools")]
 
 
 @respx.mock

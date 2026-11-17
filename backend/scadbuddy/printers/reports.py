@@ -16,7 +16,10 @@ one would miss.
 A write that shows a print running that was not running before it returns the start
 (`started_print`): the print watcher's LAN nudge (`print_watch/nudge.py`, #4699 phase 3).
 The row's ``running_subtask`` changes once per job, under the row's lock, so one job
-gives one start, also across a reconnect's ``pushall`` and a new attempt of the watch."""
+gives one start, also across a reconnect's ``pushall`` and a new attempt of the watch.
+
+A stored report reads as the printer's status through `report_status`, as the print
+dialog and the SB tray resolution (`filament/inventory.py`) read it."""
 
 from __future__ import annotations
 
@@ -29,10 +32,24 @@ from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
+from scadbuddy.bambuddy.models import PrinterStatus
+from scadbuddy.printers.lan_models import LanReport
+from scadbuddy.printers.models import PrinterRow
+from scadbuddy.printers.status import status_from_report
 from scadbuddy.printers.store import printer_uuid
 
 #: The states that show the printer running a plate (OpenBambuAPI ``mqtt.md``).
 RUNNING = frozenset({"PREPARE", "SLICING", "RUNNING", "PAUSE"})
+
+
+def report_status(
+    row: PrinterRow, report: tuple[dict[str, Any], datetime], *, now: datetime
+) -> PrinterStatus:
+    """``row``'s status from its stored report (`PrinterReportStore.get`)."""
+    data, seen_at = report
+    return status_from_report(
+        row, LanReport(serial=row.serial, received_at=seen_at, print=data), now=now
+    )
 
 
 @dataclass(frozen=True)

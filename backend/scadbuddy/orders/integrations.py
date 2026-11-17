@@ -13,6 +13,7 @@ every ``settings.changed``, so setting the URL later lights it up without a rest
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol
 
@@ -25,6 +26,7 @@ from scadbuddy.orders.models import FilamentEffect
 from scadbuddy.orders.problems import PROBLEMS
 
 if TYPE_CHECKING:
+    from scadbuddy.bambuddy.models import SpoolAssignment
     from scadbuddy.bambuddy.projects import FolderlessProjects
 
 
@@ -36,9 +38,10 @@ class LocalDensity(BaseModel):
 
 
 class SpoolGroup(BaseModel):
-    """One filament of the spool inventory (§8.3): every unarchived spool of the same
-    material, subtype, brand and colour, as ``bambuddy/farm.py`` ``_filament_key`` groups
-    them, in orders' own shape."""
+    """One filament of ScadBuddy's spools (§8.3, #6262 Task 9): every unarchived SB spool
+    of the same effective material, subtype, brand and ``#RRGGBBAA``
+    (`orders/spool_import.py` `spool_groups`), in orders' own shape. An opaque and a
+    translucent spool of one hue are two groups (#6316)."""
 
     material: str
     subtype: str | None = None
@@ -47,47 +50,62 @@ class SpoolGroup(BaseModel):
     #: ``#RRGGBB`` from the spools' ``rgba``; ``None`` for a group known only by its
     #: colour's name, which a record cannot carry as its colour.
     colour: str | None = None
-    #: The newest spool's ``rgba`` alpha byte (255 for a 6-digit ``rgba``), its
-    #: ``extra_colors`` as ``#RRGGBB``/``#RRGGBBAA`` stops and its ``effect_type`` (#6209).
+    #: The spools' ``rgba`` alpha byte (255 opaque), the newest spool's colour stops
+    #: (``#RRGGBBAA``) and effect (#6209).
     alpha: int = 255
     extra_colours: list[str] = Field(default_factory=list)
     effect: FilamentEffect | None = None
-    #: ``(spool id, cost_per_kg)`` of each spool, by id; a spool with no price has
-    #: ``None``. A higher id is a spool Bambuddy recorded later.
-    spools: list[tuple[int, float | None]] = Field(default_factory=list)
-    #: What gives a record its density (#6136, `orders/density.py` `resolve`):
-    #: the most recent spool's ``slicer_filament`` that names one (``GFA00``, or a
-    #: numeric local preset id); ``None`` when no spool names one.
+    #: ``(SB spool number, cost_per_kg)`` of each spool, by number; a spool with no
+    #: effective price has ``None``. A higher number is a spool made later.
+    spools: list[tuple[int, Decimal | None]] = Field(default_factory=list)
+    #: What gives a record its density (#6136, `orders/density.py` `resolve`): the
+    #: newest spool's effective preset id that names one (its H2C 0.4 preset first);
+    #: ``None`` when no spool names one.
     slicer_filament: str | None = None
-    #: The ``setting_id`` of each K-profile of the group's spools, newest spool first.
-    k_profile_settings: list[str] = Field(default_factory=list)
-    #: The ``tray_info_idx`` of the AMS tray a spool of the group is loaded in, read
-    #: only for the spools that name neither of the above; the group uses it only
-    #: after its own preset ids.
-    tray_info_idx: str | None = None
-    #: The Bambuddy local preset ``slicer_filament`` names, when it is one with a density.
+    #: The Bambuddy local preset ``slicer_filament`` names, when it is one with a density
+    #: (a preset the Bambuddy pull carried, #6262 Task 7 ruling R1).
     local_preset: LocalDensity | None = None
-    #: Bambuddy's catalogue ``density`` for the group's material, brand and colour,
-    #: when its entries of them whose ``name`` holds each word of the subtype give
-    #: exactly one.
-    catalogue_density: str | None = None
+    #: The newest spool's own effective density (its, else its type's, subtype's or
+    #: material's), before every preset (Task 9 review ruling).
+    spool_density: SpoolDensity | None = None
+    #: The preset id (``tray_info_idx``) of the tray a registry printer's latest report
+    #: holds the newest held spool in: the last step, after the spool's own presets.
+    tray_filament: str | None = None
+    #: The Bambuddy local preset ``tray_filament`` names, when it is one with a density.
+    tray_local_preset: LocalDensity | None = None
+
+    @property
+    def rgba(self) -> str | None:
+        """The group's ``#RRGGBBAA``; ``None`` for one with no colour."""
+        return None if self.colour is None else f"{self.colour.upper()}{self.alpha:02X}"
+
+
+class SpoolDensity(BaseModel):
+    """An SB spool's effective density, and its number, which the book names it by."""
+
+    number: int
+    density_g_cm3: str
 
 
 class ShelfSpool(BaseModel):
-    """One spool of the inventory and where it is loaded (§5.4 "Spools", #4251), in
-    orders' own shape."""
+    """One SB spool and where it is loaded (§5.4 "Spools", #4251, #6262 Task 9), in
+    orders' own shape (`orders/spools.py` `shelf_spools`)."""
 
+    #: The SB spool's ``number``, what a plan names it by (``ids`` ``"sb"``).
     id: int
     material: str
     subtype: str | None = None
     brand: str | None = None
-    #: ``#RRGGBB`` from its ``rgba``; None for one known only by its colour's name, which
-    #: is never taken for a record's colour.
-    colour: str | None = None
+    #: ``#RRGGBBAA``; None for one with no colour, which is never taken for a record's.
+    rgba: str | None = None
     remaining_g: float = 0.0
     archived: bool = False
-    #: The Bambuddy printer it is loaded in; None on the shelf.
-    loaded_printer_id: int | None = None
+    #: The registry printer it is loaded in; None on the shelf or in a printer the
+    #: registry does not hold.
+    loaded_printer: str | None = None
+    #: In a tray of any printer (a registry printer's, or Bambuddy's assignment to one
+    #: the registry does not hold); False on the shelf.
+    loaded: bool = False
 
 
 class ArchiveSlot(BaseModel):
@@ -165,24 +183,25 @@ class NotLinkedError(Exception):
 def not_linked() -> ApiError:
     return ApiError(
         status.HTTP_409_CONFLICT,
-        "Bambuddy is not linked: set its URL in Settings to import spools",
+        "Bambuddy is not linked: set its URL in Settings",
         type_=PROBLEMS + "not_linked",
     )
 
 
 class OrderIntegrations(Protocol):
-    #: Whether a Bambuddy is linked; the price book answers it as ``spool_import``.
+    #: Whether a Bambuddy is linked.
     @property
     def linked(self) -> bool: ...
 
-    async def spool_groups(self) -> list[SpoolGroup]:
-        """The spool inventory grouped by filament (§8.3); :class:`NotLinkedError`
-        without a Bambuddy."""
+    async def local_densities(self) -> dict[str, LocalDensity]:
+        """Bambuddy's local filament presets with a density, by the id an SB spool's
+        preset names them by (#6136); :class:`NotLinkedError` without a Bambuddy."""
         ...
 
-    async def spool_inventory(self) -> list[ShelfSpool]:
-        """Every spool and the printer it is loaded in (§5.4 "Spools");
-        :class:`NotLinkedError` without a Bambuddy."""
+    async def spool_assignments(self) -> list[SpoolAssignment]:
+        """Bambuddy's tray assignments, which place a linked SB spool no registry printer
+        reports (plan Decision 3, until #6263); none when Bambuddy refuses, so the spools
+        are placed by the reports alone. :class:`NotLinkedError` without a Bambuddy."""
         ...
 
     async def archive(self, archive_id: int) -> ArchiveFacts | None:
@@ -230,10 +249,10 @@ class NotLinked:
     def linked(self) -> bool:
         return False
 
-    async def spool_groups(self) -> list[SpoolGroup]:
+    async def local_densities(self) -> dict[str, LocalDensity]:
         raise NotLinkedError
 
-    async def spool_inventory(self) -> list[ShelfSpool]:
+    async def spool_assignments(self) -> list[SpoolAssignment]:
         raise NotLinkedError
 
     async def archive(self, archive_id: int) -> ArchiveFacts | None:

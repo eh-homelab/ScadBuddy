@@ -6,8 +6,9 @@ import { ALL_TOOLS } from '../src/tools/index.js'
 import { runTool, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
 
-// #3818 tier A Task 6c, #4336 review I2: the native path's manual tray link
-// (backend/scadbuddy/api/tray_spools.py), as write-tier tools: nothing leaves ScadBuddy.
+// #3818 tier A Task 6c, #4336 review I2, #6262 Task 4: the native path's manual tray link
+// of an SB spool (backend/scadbuddy/api/tray_spools.py), as write-tier tools: nothing
+// leaves ScadBuddy.
 
 const server = setupServer()
 beforeAll(() => server.listen({ onUnhandledFrame: 'error' }))
@@ -45,45 +46,28 @@ describe('tray spool tools', () => {
     expect(t.routes).toEqual([route])
   })
 
-  it('links a provider record, sending only the spool fields', async () => {
+  it('links an SB spool, sending only its spool_id', async () => {
     const bodies: unknown[] = []
     server.use(
       http.put(PATH, async ({ request }) => {
         bodies.push(await request.json())
-        return HttpResponse.json({
-          ams_id: 0,
-          tray_id: 1,
-          physical_spool_id: SPOOL,
-          linked_by: 'manual',
-          records: { bambuddy: { record_id: '16', brand: 'Inland' } },
-        })
+        return HttpResponse.json({ id: SPOOL, number: 7, location_id: '8d6f3c1e-0000-4000-8000-0000000000bb' })
       }),
     )
-    const result = await runTool(
-      tool('link_tray_spool'),
-      { printer_id: PRINTER, ams_id: 0, tray_id: 1, provider: 'bambuddy', record_id: '16' },
-      ctx(),
-    )
+    const result = await runTool(tool('link_tray_spool'), { printer_id: PRINTER, ams_id: 0, tray_id: 1, spool_id: SPOOL }, ctx())
     expect(result.isError).toBeFalsy()
-    expect(bodies).toEqual([{ provider: 'bambuddy', record_id: '16' }])
-    expect(firstText(result)).toMatchObject({ physical_spool_id: SPOOL, linked_by: 'manual' })
+    expect(bodies).toEqual([{ spool_id: SPOOL }])
+    expect(firstText(result)).toMatchObject({ id: SPOOL, number: 7 })
   })
 
-  it('links a physical spool', async () => {
-    const bodies: unknown[] = []
-    server.use(
-      http.put(PATH, async ({ request }) => {
-        bodies.push(await request.json())
-        return HttpResponse.json({ ams_id: 0, tray_id: 1, physical_spool_id: SPOOL, linked_by: 'manual', records: {} })
-      }),
-    )
-    const result = await runTool(
-      tool('link_tray_spool'),
-      { printer_id: PRINTER, ams_id: 0, tray_id: 1, physical_spool_id: SPOOL },
-      ctx(),
-    )
-    expect(result.isError).toBeFalsy()
-    expect(bodies).toEqual([{ physical_spool_id: SPOOL }])
+  it('refuses a spool id that is not a uuid, or a provider record, before calling the backend', async () => {
+    for (const input of [
+      { printer_id: PRINTER, ams_id: 0, tray_id: 1, spool_id: '16' },
+      { printer_id: PRINTER, ams_id: 0, tray_id: 1, provider: 'bambuddy', record_id: '16' },
+    ]) {
+      const result = await runTool(tool('link_tray_spool'), input, ctx())
+      expect(result.isError).toBe(true)
+    }
   })
 
   it("passes the backend's refusal back", async () => {
@@ -94,7 +78,7 @@ describe('tray spool tools', () => {
     )
     const result = await runTool(
       tool('link_tray_spool'),
-      { printer_id: PRINTER, ams_id: 0, tray_id: 1, provider: 'bambuddy', record_id: '16' },
+      { printer_id: PRINTER, ams_id: 0, tray_id: 1, spool_id: SPOOL },
       ctx(),
     )
     expect(result.isError).toBe(true)
