@@ -86,6 +86,57 @@ Anti-goals (the work fails even if it runs):
 - The BB API is the one measured on 2026-11-14: Bambuddy 1.2.6b1,
   `https://bambuddy.internal.nullreference.io/openapi.json`, 638 paths. The
   endpoints and schemas named below come from that spec.
+- **The RFID routes were re-measured on 2026-11-17 against Bambuddy 1.3.1** (the spec's
+  1.2.6b1 is out of date; the live instance moved). Method: read-only. `GET` requests and
+  one listen-only WebSocket that sent nothing, with no API key, against
+  `https://bambuddy.internal.nullreference.io`; Bambuddy's source read at tag
+  [`v1.3.1`](https://github.com/maziggy/bambuddy/tree/v1.3.1/backend/app). The recording is
+  `backend/tests/bambuddy/recordings/openapi/rfid-routes.json` (#6264).
+  - `GET /openapi.json`: 200, `info.version` 1.3.1. `GET /api/v1/auth/status`:
+    `{"auth_enabled": false, "requires_setup": false}`. Auth is off, so no key is needed and
+    override mode can write the setting.
+  - `GET /api/v1/settings/`: `auto_add_unknown_rfid` was `true` at that time.
+  - `GET /api/v1/spoolbuddy/devices`: 200, `[]`. No SpoolBuddy device is registered, so the
+    scan and write tests use recorded bodies.
+  - `GET /api/v1/inventory/spools/by-tag?tray_uuid=<a live tray_uuid>`: 200, a
+    `SpoolResponse` with `tag_type: "bambulab"` and `data_origin: "rfid_linked"`.
+    `?tag_uid=00000000`: 404 `{"detail": "Spool not found"}`. No argument: 400
+    `{"detail": "Provide tray_uuid and/or tag_uid"}`. The live inventory (106 spools) holds
+    `data_origin` `rfid_linked` on 33, `rfid_auto` on 7 and none on 66.
+  - `wss://.../api/v1/ws` with no token: handshake 101. In 15 s it sent 7 frames, all
+    `printer_status` (keys `type`, `printer_id`, `data`). No `spoolbuddy_*` frame came,
+    because no tag was scanned. The event fields are from the source (below).
+  - `data_origin` values that Bambuddy writes (`backend/app`, v1.3.1): `rfid_auto`
+    ([`services/spool_tag_matcher.py` line 265](https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/services/spool_tag_matcher.py#L265)),
+    `rfid_linked` ([same file, line 417](https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/services/spool_tag_matcher.py#L417)),
+    `nfc_link` ([`api/routes/inventory.py` line 2747](https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/inventory.py#L2747)
+    default, applied at lines 2856-2857) and `opentag3d`
+    ([`api/routes/spoolbuddy.py` line 1149](https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/spoolbuddy.py#L1149)).
+  - **Not measurable without a write, so taken from the source and tested only with respx:**
+    the 409 `tag_already_linked` body
+    ([`services/tag_conflict.py` lines 24-40](https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/services/tag_conflict.py#L24-L40),
+    raised at `inventory.py` lines 2815 and 2839), the clear by `PATCH` with null
+    (`inventory.py` lines 1700-1717, `model_dump(exclude_unset=True)`), the configure answer
+    and the write-tag answer (`spoolbuddy.py` lines 826-957).
+  - Scopes (Bambuddy's `Permission` in the route's dependency, mapped through
+    [`_APIKEY_SCOPE_BY_PERMISSION`](https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/core/auth.py#L90)
+    to an API-key flag; the last column is ScadBuddy's `Scope`, `bambuddy/errors.py`):
+
+    | Route | Bambuddy permission (line, v1.3.1) | Key flag | ScadBuddy `Scope` |
+    |---|---|---|---|
+    | `PATCH /inventory/spools/{id}/link-tag` | `INVENTORY_UPDATE` (`inventory.py` 2771) | `can_manage_inventory` | `MANAGE_INVENTORY` |
+    | `GET /inventory/spools/by-tag` | `INVENTORY_READ` or `INVENTORY_UPDATE` (`inventory.py` 1560) | `can_read_status` or `can_manage_inventory` | `MANAGE_INVENTORY` (the plan's choice; either flag opens it) |
+    | `PATCH /inventory/spools/{id}` (clear) | `INVENTORY_UPDATE` (`inventory.py` 1693) | `can_manage_inventory` | `MANAGE_INVENTORY` |
+    | `GET /settings/` | `SETTINGS_READ` (`settings.py` 344) | `can_read_status` | `READ_STATUS` |
+    | `PATCH /settings/` | `SETTINGS_UPDATE` (`settings.py` 552) | none: denied for every key (`core/auth.py` line 251) | `ADMIN_SETTINGS` |
+    | `POST /printers/{id}/slots/{ams}/{tray}/configure` | `PRINTERS_CONTROL` (`printers.py` 2963) | `can_control_printer` | `CONTROL_PRINTER` |
+    | `GET /spoolbuddy/devices` | `INVENTORY_READ` (`spoolbuddy.py` 280) | `can_read_status` | `READ_STATUS` |
+    | `POST /spoolbuddy/nfc/write-tag` | `INVENTORY_UPDATE` (`spoolbuddy.py` 830) | `can_manage_inventory` | `MANAGE_INVENTORY` |
+    | `POST /spoolbuddy/devices/{id}/cancel-write` | `INVENTORY_UPDATE` (`spoolbuddy.py` 1181) | `can_manage_inventory` | `MANAGE_INVENTORY` |
+    | `POST /auth/ws-token` | `WEBSOCKET_CONNECT` (`api/routes/auth.py` 672) | `can_read_status` | `READ_STATUS` (needed only while auth is on) |
+
+    `nfc/tag-scanned`, `nfc/tag-removed` and `nfc/write-result` are the SpoolBuddy daemon's
+    routes (`INVENTORY_UPDATE`, `spoolbuddy.py` 582, 813, 963); ScadBuddy does not call them.
 
 ## 4. Approaches
 
@@ -402,7 +453,11 @@ Low-cardinality labels only: material, brand, location, not the spool id.
      person turns override mode off, SB restores that value.
 - **NTAG tags.** SB reads scans and writes tags through BB's SpoolBuddy
   endpoints (`nfc/tag-scanned` as seen through BB, `nfc/write-tag`,
-  `nfc/write-result`). The tag carries OpenSpool data with the SB spool id.
+  `nfc/write-result`). The tag carries OpenTag3D data of the linked Bambuddy spool, not
+  OpenSpool data with the SB spool id: Bambuddy's write path encodes OpenTag3D v1 and v2
+  from its own spool and has no field for another id
+  ([`spoolbuddy.py` lines 826-957](https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/spoolbuddy.py#L826-L957),
+  v1.3.1). SB identifies the tag by its UID through its binding (kind `ntag_opentag`, §5.4).
   A direct reader in SB is out of scope until the BB path proves too limited.
 - **Labels.** Print labels with the spool number and a QR code of the spool id.
   BB parity with `/inventory/labels`.
