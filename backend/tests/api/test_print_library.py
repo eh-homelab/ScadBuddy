@@ -1512,6 +1512,70 @@ def test_a_library_files_check_fetches_the_file_once(
 
 
 @respx.mock
+def test_a_library_files_check_reads_the_printer_beside_prepare_run_and_each_read_once(
+    client: TestClient,
+) -> None:
+    """#4196: the slot refusals' printer and inventory-remain reads waited for the whole
+    of `prepare_run`. Here Bambuddy's printer list, which `prepare_run` reads, answers only
+    once both have been asked for, so a check that still read them after it hangs. Every
+    resource is read once."""
+    configure(client)
+    library_file(89)
+    run_routes()
+    printer_asked = asyncio.Event()
+    remain_asked = asyncio.Event()
+
+    def marks(asked: asyncio.Event, name: str) -> Any:
+        def answer(request: httpx.Request) -> httpx.Response:
+            asked.set()
+            return httpx.Response(200, json=recording(name))
+
+        return answer
+
+    printer = respx.get(f"{API}/printers/1").mock(side_effect=marks(printer_asked, "printer.json"))
+    remain = respx.get(f"{API}/printers/1/inventory-remain").mock(
+        side_effect=marks(remain_asked, "inventory-remain.json")
+    )
+
+    async def listed(request: httpx.Request) -> httpx.Response:
+        await printer_asked.wait()
+        await remain_asked.wait()
+        return httpx.Response(200, json=recording("printers.json"))
+
+    printers = respx.get(f"{API}/printers/").mock(side_effect=listed)
+    status = respx.get(f"{API}/printers/1/status").mock(
+        return_value=httpx.Response(200, json=recording("printer-status-rack.json"))
+    )
+    plates = respx.get(f"{API}/library/files/89/plates").mock(
+        return_value=httpx.Response(
+            200, json={**recording("library-plates-single.json"), "file_id": 89}
+        )
+    )
+    file_read = respx.get(f"{API}/library/files/89").mock(
+        return_value=httpx.Response(
+            200, json={"id": 89, "filename": "file-89.3mf", "file_type": "3mf", "file_hash": None}
+        )
+    )
+    download = respx.get(f"{API}/library/files/89/download").mock(
+        return_value=httpx.Response(200, content=library_3mf())
+    )
+
+    request = {
+        **body(),
+        "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}, {"slot_id": 2, "spool_id": 10}]},
+    }
+
+    check = client.post("/api/v1/print/library/89/check", json=request)
+
+    assert check.status_code == 200, check.text
+    counts = [
+        route.call_count
+        for route in (file_read, plates, download, printers, status, printer, remain)
+    ]
+    assert counts == [1] * 7
+
+
+@respx.mock
 def test_a_checks_slots_are_cached_so_a_check_refused_early_downloads_nothing(
     client: TestClient,
 ) -> None:
