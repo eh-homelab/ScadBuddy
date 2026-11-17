@@ -113,7 +113,9 @@ def _forget_rows(state: Any, session_id: str) -> int:
                 logger.warning(
                     "forget: unnamed workspace bytes left for the sweep (%s)", type(err).__name__
                 )
-        # A session's warm process, on whichever replica holds it (warmEvict.ts).
+        # A session's warm process, on whichever replica holds it (warmEvict.ts). Sent once the
+        # rows' transaction has committed, not in it: the pool is autocommit (`core/pg_pool.py`
+        # `row_pool`), so this NOTIFY is delivered as it runs.
         notify_warm_evict(conn, session_id)
     return int(entries + sessions)
 
