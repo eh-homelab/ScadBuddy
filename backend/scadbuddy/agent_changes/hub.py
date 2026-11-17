@@ -126,6 +126,8 @@ class ChangeStream:
         self.overflows = 0
 
     def offer(self, item: Item) -> None:
+        if self._items and self._items[0] is END:
+            return  # told to end: nothing after it is read, and nothing may push it out
         if isinstance(item, _End):
             # Past the bound too: a stream told to end must end, or it holds the server's drain.
             self._items.clear()

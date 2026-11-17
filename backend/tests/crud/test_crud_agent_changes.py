@@ -283,6 +283,19 @@ async def test_shutdown_ends_a_full_stream_too() -> None:
         await asyncio.wait_for(anext(source), PROMPTLY)
 
 
+async def test_changes_heard_after_shutdown_never_push_the_end_out() -> None:
+    """Turns keep publishing while uvicorn drains: a stalled stream told to end still ends."""
+    hub = ChangeHub(queue_max=2)
+    stream = hub.open("k")
+    source = frames(stream, FakeLog(), None)
+    await _take(source, 1)
+    hub.shutdown()
+    for i in range(5):
+        hub.publish(Change("scadbuddy_input", f"late{i}"))
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(anext(source), PROMPTLY)
+
+
 def test_the_signal_ends_the_streams_then_runs_the_servers_handler() -> None:
     import signal as signal_module
 
