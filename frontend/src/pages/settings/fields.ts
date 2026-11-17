@@ -2,13 +2,14 @@ import type { Settings, SettingsUpdate } from '../../api/types'
 
 /**
  * #2171 — the Settings sections that save runtime fields (`RUNTIME_FIELDS`, `HAND_LAID`).
- * `printers` and `inventory` own none, so they are not here.
+ * `printers` owns none, so it is not here.
  */
 export type SectionId =
   | 'connection'
   | 'printing'
   | 'print-watcher'
   | 'orders'
+  | 'filament'
   | 'projects'
   | 'uploads'
   | 'rendering'
@@ -167,10 +168,31 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     section: 'administration',
     kind: 'url',
   },
+  // #6262 Task 13 — the Filament section: how Bambuddy's spools reach ScadBuddy's own, and
+  // the two numbers a spool falls back on.
+  {
+    name: 'filament_sync',
+    section: 'filament',
+    kind: 'select',
+    choices: [
+      { value: 'off', label: 'Off' },
+      { value: 'bb_to_sb', label: 'Bambuddy \u2192 ScadBuddy' },
+    ],
+  },
   {
     name: 'spool_overlay_refresh_seconds',
-    section: 'administration',
+    section: 'filament',
     kind: 'seconds',
+  },
+  {
+    name: 'filament_low_stock_pct',
+    section: 'filament',
+    kind: 'count',
+  },
+  {
+    name: 'filament_default_cost_per_kg',
+    section: 'filament',
+    kind: 'text',
   },
   {
     name: 'media_upload_max_bytes',
@@ -428,6 +450,8 @@ export function serverValue(settings: Settings, name: FieldName): string {
     name === 'storefront_turnstile_secret'
   )
     return ''
+  // #6262 Task 13 — `filament_sync` is one object per data type; the form edits `spools`.
+  if (name === 'filament_sync') return settings.filament_sync?.spools ?? 'bb_to_sb'
   const value = (settings as Record<string, unknown>)[name]
   if (value === null || value === undefined) return ''
   return String(value)

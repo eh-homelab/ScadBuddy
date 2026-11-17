@@ -136,6 +136,12 @@ describe('agent route coverage', () => {
   })
 })
 
+describe('retired tools', () => {
+  it('test_native_spool_tools_are_gone', () => {
+    expect(ALL_TOOLS.filter((t) => t.name.startsWith('native_spool_')).map((t) => t.name)).toEqual([])
+  })
+})
+
 describe('tool labels', () => {
   it('gives every tool a label', () => {
     for (const t of ALL_TOOLS) {

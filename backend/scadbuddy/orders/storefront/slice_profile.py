@@ -1,15 +1,16 @@
 """The shop's slice profile (#6153, #6574): what a storefront variant is sliced with that
 a visitor cannot choose. It holds the registry printer, which routes the slice and prices
-machine time, and one filament preset per material. The slot's colour is the visitor's
-(the render's 3MF has it), and its price comes from the price-book filament the visitor
-picked.
+machine time, and one filament type per material (`filament/types.py`, #6262). The slot's
+colour is the visitor's (the render's 3MF has it), and its price comes from the
+price-book filament the visitor picked.
 
-The profile names no spool or tray (#6574). A slot is sliced as a back-office quote slices
-a slot with a filament that is not loaded: no spool, and the material's preset as the
-slot's Advanced preset (``choices.filament_overrides``), in the file's own colour
-(``bambuddy/resolver.py`` ``resolve``, ``unspooled``). So every slot has its own colour,
-and the slicer plans the real purges. A tray id moved when a spool was swapped; a preset
-does not.
+The profile names no spool, tray or preset (#6574). A slot is sliced with its type's
+preset for the H2C and the chosen nozzle (`filament_spool_type_presets`, the presets a
+spool of that type takes too), with no spool, in the file's own colour
+(``bambuddy/resolver.py`` ``resolve``, ``slot_presets``). So every slot has its own
+colour, and the slicer plans the real purges. A tray id moved when a spool was swapped,
+and a spool's colour is not the visitor's; a type's preset is neither. The profile keeps
+no copy of a preset: a change to the type's presets is the next price's.
 
 The profile holds no process, support, bed or nozzle setting. As in the back office, the
 template gives the support and process settings, and the print dialog's opening choices
@@ -20,16 +21,17 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Annotated
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
-from scadbuddy.bambuddy.models import PresetRef
 from scadbuddy.orders.storefront.wire import is_support
 
 if TYPE_CHECKING:
     from scadbuddy.bambuddy.resolver import PrintChoices
+    from scadbuddy.filament.models import EffectivePreset
     from scadbuddy.orders.quote import SliceQuoteRequest
 
 #: The most materials a profile names.
@@ -45,27 +47,27 @@ class StorefrontSliceProfile(BaseModel):
 
     #: The registry printer: it routes the slice and prices machine time.
     printer: str = Field(min_length=1, max_length=64)
-    #: Material (casefolded) to the filament preset a slot of it is sliced with, as the
-    #: print dialog's Advanced per-slot preset names it (``PrintChoices.filament_overrides``).
-    materials: dict[Material, PresetRef] = Field(default_factory=dict, max_length=MAX_MATERIALS)
+    #: Material (casefolded) to the filament type (`filament_spool_types.id`) whose
+    #: presets a slot of it is sliced with.
+    materials: dict[Material, UUID] = Field(default_factory=dict, max_length=MAX_MATERIALS)
 
     @field_validator("materials")
     @classmethod
-    def _casefolded(cls, materials: dict[str, PresetRef]) -> dict[str, PresetRef]:
-        folded: dict[str, PresetRef] = {}
-        for material, preset in materials.items():
+    def _casefolded(cls, materials: dict[str, UUID]) -> dict[str, UUID]:
+        folded: dict[str, UUID] = {}
+        for material, type_id in materials.items():
             key = material.casefold()
             if key in folded:
                 raise ValueError(f"two entries name the material {key!r}")
-            folded[key] = preset
+            folded[key] = type_id
         return folded
 
 
 class ProfileMissingMaterialError(LookupError):
-    """The profile names no filament preset for ``material``."""
+    """The profile names no filament type for ``material``."""
 
     def __init__(self, material: str) -> None:
-        super().__init__(f"the shop slice profile has no filament preset for {material!r}")
+        super().__init__(f"the shop slice profile has no filament type for {material!r}")
         self.material = material
 
 
@@ -75,47 +77,48 @@ def profile_digest(profile: StorefrontSliceProfile) -> str:
     return hashlib.sha256(body.encode()).hexdigest()
 
 
-def slot_presets(profile: StorefrontSliceProfile, slot_materials: Sequence[str]) -> list[PresetRef]:
-    """The filament preset of each slot (from 0) whose material is ``slot_materials[i]``.
-    `ProfileMissingMaterialError` for a material with no preset."""
-    presets: list[PresetRef] = []
+def slot_types(profile: StorefrontSliceProfile, slot_materials: Sequence[str]) -> list[UUID]:
+    """The filament type of each slot (from 0) whose material is ``slot_materials[i]``.
+    `ProfileMissingMaterialError` for a material with no type."""
+    types: list[UUID] = []
     for material in slot_materials:
-        preset = profile.materials.get(material.casefold())
-        if preset is None:
+        type_id = profile.materials.get(material.casefold())
+        if type_id is None:
             raise ProfileMissingMaterialError(material)
-        presets.append(preset)
-    return presets
+        types.append(type_id)
+    return types
 
 
-def slice_request(
-    profile: StorefrontSliceProfile, slot_materials: Sequence[str], choices: PrintChoices
-) -> SliceQuoteRequest:
-    """The slice quote's request for a variant whose slot ``i`` (from 0) is of
-    ``slot_materials[i]``: the profile's printer, the dialog's ``choices`` with each
-    slot's material preset as its Advanced preset, and no spool, so each slot is sliced
-    in the render's own colour for it (#6574). A back-office quote that names the same
-    presets and no spools sends this request. It sets no path, so the slice takes the
-    run's own route, and no supports, prime tower, print sequence or part settings, so
-    the template's apply. `ProfileMissingMaterialError` for a material with no preset."""
+def slot_presets(
+    types: Sequence[UUID], presets: Mapping[UUID, Sequence[EffectivePreset]]
+) -> dict[int, list[EffectivePreset]]:
+    """Each slot's filament type's presets, by slot id (from 1): what the resolver reads
+    for a slot with no spool (``resolve``'s ``slot_presets``). A type with no presets
+    gives an empty list, which the resolver refuses as a slot with no preset."""
+    return {index + 1: list(presets.get(type_id, ())) for index, type_id in enumerate(types)}
+
+
+def slice_request(profile: StorefrontSliceProfile, choices: PrintChoices) -> SliceQuoteRequest:
+    """The slice quote's request for a variant: the profile's printer, the dialog's
+    ``choices`` and no spool. Each slot's filament type's presets go beside it
+    (:func:`slot_presets`), so each slot is sliced with its type's preset in the render's
+    own colour (#6574). It sets no path, so the slice takes the run's own route, and no
+    supports, prime tower, print sequence or part settings, so the template's apply."""
     # Here, not at the top: the settings store imports this module, and the quote's
     # imports reach the settings store.
     from scadbuddy.bambuddy.filaments import FilamentPlan
     from scadbuddy.orders.quote import SliceQuoteRequest
 
-    presets = slot_presets(profile, slot_materials)
-    overrides = {index + 1: preset for index, preset in enumerate(presets)}
     return SliceQuoteRequest(
-        printer=profile.printer,
-        filament_plan=FilamentPlan(),
-        choices=choices.model_copy(update={"filament_overrides": overrides}),
+        printer=profile.printer, filament_plan=FilamentPlan(ids="sb"), choices=choices
     )
 
 
 def missing_materials(
     profile: StorefrontSliceProfile | None, materials: Iterable[str]
 ) -> list[str]:
-    """The materials of ``materials`` that are not support materials and have no preset
-    in ``profile``, each once (casefolded), in the order first seen. With no profile there
+    """The materials of ``materials`` that are not support materials and have no type in
+    ``profile``, each once (casefolded), in the order first seen. With no profile there
     is no slice price, so nothing is missing (#6153)."""
     if profile is None:
         return []

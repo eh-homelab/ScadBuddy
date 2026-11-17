@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Awaitable, Mapping
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,9 +62,10 @@ from scadbuddy.rack.usage import RackUsage, record_seen
 from scadbuddy.render.plate import bed_types_for
 from scadbuddy.slicing.catalogue import catalogue_for
 from scadbuddy.slicing.profiles import Profiles
-from scadbuddy.spools.models import Overlay
 
 if TYPE_CHECKING:
+    from scadbuddy.filament.inventory import SbSpoolReads
+    from scadbuddy.filament.models import TrayView
     from scadbuddy.printers.component import Printers
 
 logger = logging.getLogger(__name__)
@@ -267,6 +268,7 @@ async def choices_for(
     rack: RackUsage | None = None,
     native: Profiles | None = None,
     refresh_claim: RefreshClaim | None = None,
+    reads: SbSpoolReads | None = None,
 ) -> ChoicesView:
     """The dialog's choices, read in two waves (#2504): ``source`` and the printers
     together, then everything that needs the chosen printer together, its status read
@@ -278,7 +280,8 @@ async def choices_for(
     a few wasted reads on a rare path, for not waiting on the file every time. The
     rack's state is recorded by the second wave, so a failed catalogue read raises after
     it is written, not before (#2907). With ``native`` (the image's profiles) the
-    catalogue is theirs (``slicing/catalogue.py``), and no preset is read from Bambuddy."""
+    catalogue is theirs (``slicing/catalogue.py``), and no preset is read from Bambuddy.
+    The filament step offers ScadBuddy's own spools, read from ``reads`` (#6262 Task 7)."""
     presets = asyncio.ensure_future(
         # A native run's presets are the image's own: nothing read from Bambuddy, and
         # nothing kept under `cache` (#3818 tier A).
@@ -295,6 +298,7 @@ async def choices_for(
             remembered=remembered,
             printer_id=printer_id,
             rack=rack,
+            reads=reads,
         )
     finally:
         # A failed source or printer list answers without the catalogue; a catalogue
@@ -313,6 +317,7 @@ async def _choices(
     remembered: ModelPrintChoices | None,
     printer_id: int | None,
     rack: RackUsage | None,
+    reads: SbSpoolReads | None,
 ) -> ChoicesView:
     loaded, listed = await asyncio.gather(source, client.printers(), return_exceptions=True)
     ready = settled(loaded)
@@ -334,7 +339,9 @@ async def _choices(
     last: str | None = None
     if printer_id is None:
         read_presets, read = await asyncio.gather(
-            presets, filament_options(client, ready, printer_id=None), return_exceptions=True
+            presets,
+            filament_options(client, ready, printer_id=None, reads=reads),
+            return_exceptions=True,
         )
         catalogue = settled(read_presets)
         filaments = settled(read)
@@ -344,7 +351,7 @@ async def _choices(
             presets,
             _record_seen(rack, settings.registry_printer(printer_id), reading),
             _last_bed_type(client, printer_id),
-            filament_options(client, ready, printer_id=printer_id, status=reading),
+            filament_options(client, ready, printer_id=printer_id, status=reading, reads=reads),
             return_exceptions=True,
         )
         catalogue = settled(read_presets)
@@ -429,15 +436,15 @@ async def native_choices_for(
     remembered: ModelPrintChoices | None,
     profiles: Profiles | None,
     rows: list[PrinterRow],
-    overlay: Overlay | None,
-    provider_labels: Mapping[str, str],
+    held: TrayView | None,
     rack: RackUsage | None = None,
 ) -> ChoicesView:
     """:func:`choices_for` on a native run (#3818 tier A, plan 2026-10-18 D2-D5), with no
     Bambuddy call: the printers are the registry's ``rows`` that link one, the status is
     ``route``'s from the printer's LAN report (D4), the presets the image's (D5) and the
-    filaments the loaded trays with ``overlay`` over them (D1). No plate is preselected
-    from Bambuddy's archives: the remembered one is, as when those are unreadable."""
+    filaments the loaded trays with the SB spool ``held`` names in each (D1, #6262). No
+    plate is preselected from Bambuddy's archives: the remembered one is, as when those
+    are unreadable."""
     if profiles is None:
         raise ApiError(http.HTTP_503_SERVICE_UNAVAILABLE, NATIVE_SLICER_UNAVAILABLE)
     assert route.row is not None and route.status is not None, "a native route is a report's"
@@ -448,8 +455,7 @@ async def native_choices_for(
         source,
         printer_id=route.printer_id,
         trays_from=status,
-        overlay=overlay,
-        provider_labels=provider_labels,
+        held=held,
     )
     await record_seen(rack, route.row.id, status)
     printers = [
@@ -486,6 +492,7 @@ async def choices_for_output(
     catalogue_key: bytes | None,
     rack: RackUsage | None = None,
     refresh_claim: RefreshClaim | None = None,
+    reads: SbSpoolReads | None = None,
 ) -> ChoicesView:
     return await choices_for(
         client,
@@ -497,6 +504,7 @@ async def choices_for_output(
         catalogue_key=catalogue_key,
         rack=rack,
         refresh_claim=refresh_claim,
+        reads=reads,
     )
 
 

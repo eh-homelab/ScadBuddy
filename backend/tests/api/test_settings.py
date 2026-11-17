@@ -22,7 +22,7 @@ from temporalio.api.workflowservice.v1 import RegisterNamespaceRequest
 from scadbuddy.api import operations as operations_api
 from scadbuddy.api import settings as settings_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
-from scadbuddy.core.settings import Settings
+from scadbuddy.core.settings import FilamentSync, Settings
 from scadbuddy.library.settings_store import RECOVER_BAMBUDDY_LIBRARY_SQL, StoreNotReadyError
 from scadbuddy.main import create_app
 from scadbuddy.operations.component import OPERATIONS
@@ -35,6 +35,7 @@ from scadbuddy.workflows.commands import TemporalRefusedError
 from tests.api.conftest import read_stored
 from tests.api.test_settings_runtime import _state
 from tests.bambuddy.conftest import recording
+from tests.support.sb_rows import seed_app_type
 
 # The trailing slash is load-bearing: /api/v1/printers is a 404 on Bambuddy 1.2.5.5.
 PRINTERS_URL = "https://bambuddy.test/api/v1/printers/"
@@ -920,11 +921,11 @@ def _profile_printer(client: TestClient) -> str:
     return store.create(PrinterCreate(serial="01P00A0000000AA", name="Garage")).id
 
 
-def test_a_profile_names_a_preset_per_material(client: TestClient) -> None:
-    """#6574: the shop slice profile names the filament preset each material is sliced
-    with, casefolded; no spool is checked, as a preset needs no tray."""
+def test_a_profile_names_a_filament_type_per_material(client: TestClient) -> None:
+    """#6574: the shop slice profile names the filament type each material is sliced
+    with, casefolded; no spool is checked, as a type's preset needs no tray."""
     printer = _profile_printer(client)
-    pla = {"source": "standard", "id": "Bambu PLA Basic @BBL H2C"}
+    pla = str(seed_app_type(client, "PLA-W", "PLA", {"0.4": "Bambu PLA Basic @BBL H2C"}))
     saved = client.put(
         "/api/v1/settings",
         json={"storefront_slice_profile": {"printer": printer, "materials": {"PLA": pla}}},
@@ -942,6 +943,28 @@ def test_a_profile_names_a_preset_per_material(client: TestClient) -> None:
     assert refused.status_code == 422
     cleared = client.put("/api/v1/settings", json={"storefront_slice_profile": None})
     assert cleared.json()["storefront_slice_profile"] is None
+
+
+def test_profile_with_an_unknown_type_is_422(client: TestClient) -> None:
+    """#6574: each filament type of the profile is one not archived."""
+    printer = _profile_printer(client)
+    refused = client.put(
+        "/api/v1/settings",
+        json={
+            "storefront_slice_profile": {
+                "printer": printer,
+                "materials": {"PETG": str(uuid.uuid4())},
+            }
+        },
+    )
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["errors"][0]["loc"] == [
+        "body",
+        "storefront_slice_profile",
+        "materials",
+        "petg",
+    ]
+    assert client.get("/api/v1/settings").json()["storefront_slice_profile"] is None
 
 
 def test_profile_with_unknown_printer_is_422(client: TestClient) -> None:
@@ -1009,3 +1032,41 @@ def test_a_storefront_mail_setting_out_of_bounds_is_refused(
     client: TestClient, name: str, value: object
 ) -> None:
     assert client.put("/api/v1/settings", json={name: value}).status_code == 422
+
+
+def test_filament_settings_round_trip(client: TestClient) -> None:
+    body = client.get("/api/v1/settings").json()
+    assert body["filament_sync"] == {"spools": "bb_to_sb"}
+    assert body["filament_low_stock_pct"] == 20
+    assert body["filament_default_cost_per_kg"] is None
+    saved = client.put(
+        "/api/v1/settings",
+        json={
+            "filament_sync": {"spools": "off"},
+            "filament_low_stock_pct": 35,
+            "filament_default_cost_per_kg": "24.50",
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    again = client.get("/api/v1/settings").json()
+    assert again["filament_sync"] == {"spools": "off"}
+    assert again["filament_low_stock_pct"] == 35
+    assert Decimal(again["filament_default_cost_per_kg"]) == Decimal("24.50")
+    assert again["applies"]["filament_low_stock_pct"] == "live"
+    assert client.put("/api/v1/settings", json={"filament_low_stock_pct": 101}).status_code == 422
+    assert (
+        client.put("/api/v1/settings", json={"filament_default_cost_per_kg": "-1"}).status_code
+        == 422
+    )
+    for bad in ({"spools": "two_way"}, {"spools": "off", "extra": 1}):
+        assert client.put("/api/v1/settings", json={"filament_sync": bad}).status_code == 422
+
+
+def test_a_saved_sync_reads_back_as_a_filament_sync(client: TestClient) -> None:
+    """The path the spool refresh Schedule's pull takes (`main.py`)."""
+    assert (
+        client.put("/api/v1/settings", json={"filament_sync": {"spools": "off"}}).status_code == 200
+    )
+    read = _state(client).settings_store.read({"filament_sync"})["filament_sync"]
+    assert isinstance(read, FilamentSync)
+    assert read.spools == "off"

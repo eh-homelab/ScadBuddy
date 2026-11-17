@@ -109,7 +109,7 @@ describe('registry', () => {
   it('holds the spec §3.2 table, with Printers and Orders in Printing', () => {
     expect(AREAS.map((a) => [a.id, SECTION_REGISTRY.filter((s) => s.area === a.id).map((s) => s.id)])).toEqual([
       ['general', ['connection']],
-      ['printing', ['printing', 'print-watcher', 'printers', 'inventory', 'native-spools', 'orders', 'storefront-pricing', 'remembered', 'hotend-usage']],
+      ['printing', ['printing', 'print-watcher', 'printers', 'filament', 'orders', 'storefront-pricing', 'remembered', 'hotend-usage']],
       ['library', ['projects', 'uploads', 'fonts', 'libraries', 'git-remote', 'rendering', 'preview']],
       [
         'assistant',
@@ -130,6 +130,14 @@ describe('registry', () => {
       ['audits', ['audit-log']],
       ['system', ['diagnostics', 'sign-in', 'signed-in-sessions', 'access-tokens', 'service-credentials', 'payments', 'storefront-mail', 'administration', 'about']],
     ])
+  })
+
+  it('resolves the old spool anchors to Filament', () => {
+    for (const anchor of ['#native-spools', '#inventory']) {
+      expect(resolveLocation('/settings', anchor)).toEqual({ area: 'printing', hash: '#filament' })
+    }
+    expect(SECTION_REGISTRY.map((s) => s.title)).not.toContain('Spool inventory')
+    expect(SECTION_REGISTRY.map((s) => s.title)).not.toContain("ScadBuddy's spools")
   })
 
   it('sends every old anchor to a section that exists in its area', () => {

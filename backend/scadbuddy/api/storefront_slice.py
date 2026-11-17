@@ -1,44 +1,28 @@
 """The shop slice profile's choices and its check (#6153 PR C, #6574): the price-book
-materials, and the filament presets the print dialog offers on the profile's printer.
+materials, and the filament types (`filament/types.py`, #6262) whose presets a slot of a
+material is sliced with.
 
 No ``from __future__ import annotations``: FastAPI reads the dependency annotations at
 import time."""
 
 import asyncio
-from pathlib import Path
-from typing import Annotated
+from uuid import UUID
 
-from fastapi import APIRouter, Query, status
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, status
+from pydantic import BaseModel
 
-from scadbuddy.api.deps import PathsDep, SettingsStoreDep
-from scadbuddy.bambuddy.catalogue import (
-    Catalogue,
-    cached_catalogue,
-    catalogue_name_key,
-    catalogue_refresh_claim,
-)
-from scadbuddy.bambuddy.choices import FilamentPresetOption, filament_presets_by_size
-from scadbuddy.bambuddy.client import client_for
-from scadbuddy.bambuddy.print_run import dialog_route
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.settings_store import SettingsStore, StoredSettings
+from scadbuddy.filament.component import Filament, FilamentDep
+from scadbuddy.filament.models import Material
 from scadbuddy.orders.component import OrdersDep
 from scadbuddy.orders.storefront.slice_profile import StorefrontSliceProfile
 from scadbuddy.orders.storefront.wire import is_support
-from scadbuddy.printers.component import Printers, PrintersDep
-from scadbuddy.slicing.catalogue import catalogue_for
-from scadbuddy.slicing.component import SlicingDep
-from scadbuddy.slicing.profiles import Profiles
+from scadbuddy.printers.component import Printers
 
 router = APIRouter(prefix="/storefront/slice-profile", tags=["storefront"])
 
 #: Where a refusal of the profile points in a ``PUT /settings`` body.
 FIELD = "storefront_slice_profile"
-#: The nozzle size whose presets the editor offers: the dialog's default size
-#: (``extruders.default_nozzles``). A model remembered at another size is sliced at that
-#: size, and a preset that does not fit it gives no price.
-OFFERED_SIZE = "0.4"
 
 
 class ProfileMaterial(BaseModel):
@@ -49,53 +33,73 @@ class ProfileMaterial(BaseModel):
     support: bool
 
 
+class ProfileType(BaseModel):
+    """A filament type not archived (`filament_spool_types`), whose presets for the H2C
+    a slot of its material is sliced with (#6574)."""
+
+    id: UUID
+    code: str
+    #: The type's catalog material, as its name reads.
+    material: str
+    label: str
+
+
 class ProfileOptions(BaseModel):
     materials: list[ProfileMaterial]
-    #: The nozzle size ``presets`` fit.
-    nozzle_size: str = OFFERED_SIZE
-    #: The filament presets the print dialog's Advanced step offers on the printer for
-    #: ``nozzle_size``, by name (#6574). Empty with no printer named.
-    presets: list[FilamentPresetOption] = Field(default_factory=list)
+    #: The filament types a material can name (#6574), by code.
+    types: list[ProfileType]
 
 
-async def _catalogue(
-    settings: StoredSettings,
-    printers: Printers,
-    printer: str,
-    *,
-    store: SettingsStore,
-    paths_cache: Path,
-    profiles: Profiles | None,
-) -> Catalogue:
-    """The preset catalogue the dialog reads for ``printer``: the image's on a route a
-    run takes over the LAN, else Bambuddy's (kept between reads, as the dialog keeps it)."""
-    route = await dialog_route(
-        settings, printers.store, printers.reports, printer=printer, printer_id=None
-    )
-    if route is not None:
-        return await catalogue_for(None, native=profiles)
-    async with client_for(settings) as client:
-        return await cached_catalogue(
-            client,
-            paths_cache,
-            name_key=catalogue_name_key(store.kek),
-            refresh_claim=catalogue_refresh_claim(store.defaults.database_url),
+def _label(*parts: str | None) -> str:
+    return " ".join(part for part in parts if part)
+
+
+def _types(filament: Filament) -> list[ProfileType]:
+    """The types not archived, each with its material's name. Blocking."""
+    materials = {
+        row.id: row.name
+        for row in filament.catalog.list("materials", include_archived=True)
+        if isinstance(row, Material)
+    }
+    return [
+        ProfileType(
+            id=row.id,
+            code=row.code,
+            material=materials.get(row.material_id, ""),
+            label=_label(row.code, materials.get(row.material_id), row.colour_name),
         )
+        for row in filament.types.list()
+    ]
 
 
-def profile_errors(profile: StorefrontSliceProfile, known: bool) -> list[dict[str, object]]:
+def profile_errors(
+    profile: StorefrontSliceProfile, known: bool, types: set[UUID]
+) -> list[dict[str, object]]:
     """What is wrong with ``profile``, as a 422's ``errors``: a printer the registry does
-    not hold. A preset that does not fit the printer is the slice's to refuse, and the
-    variant then has no price."""
-    if known:
-        return []
-    return [{"loc": ["body", FIELD, "printer"], "msg": f"no printer {profile.printer}"}]
+    not hold, and a material whose filament type is not one of ``types`` (the types not
+    archived). A type with no preset for the nozzle gives that variant no price."""
+    errors: list[dict[str, object]] = []
+    if not known:
+        errors.append({"loc": ["body", FIELD, "printer"], "msg": f"no printer {profile.printer}"})
+    for material, type_id in profile.materials.items():
+        if type_id not in types:
+            errors.append(
+                {
+                    "loc": ["body", FIELD, "materials", material],
+                    "msg": f"no filament type {type_id} for {material}",
+                }
+            )
+    return errors
 
 
-async def check_profile(profile: StorefrontSliceProfile, printers: Printers) -> None:
-    """422 unless the profile's printer is in the registry (#6153)."""
+async def check_profile(
+    profile: StorefrontSliceProfile, printers: Printers, filament: Filament
+) -> None:
+    """422 unless the profile's printer is in the registry and each of its filament types
+    is one not archived (#6153, #6574)."""
     row = await asyncio.to_thread(printers.store.get, profile.printer)
-    errors = profile_errors(profile, row is not None)
+    types = await asyncio.to_thread(filament.types.list)
+    errors = profile_errors(profile, row is not None, {t.id for t in types})
     if errors:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -109,39 +113,18 @@ async def check_profile(profile: StorefrontSliceProfile, printers: Printers) -> 
     response_model=ProfileOptions,
     summary="What the shop slice profile can name",
 )
-async def get_options(
-    orders: OrdersDep,
-    store: SettingsStoreDep,
-    printers: PrintersDep,
-    paths: PathsDep,
-    slicing: SlicingDep,
-    printer: Annotated[str | None, Query(max_length=64)] = None,
-) -> ProfileOptions:
+async def get_options(orders: OrdersDep, filament: FilamentDep) -> ProfileOptions:
     """Each material of the price book's filaments not archived, with whether it is a
-    support material, and the filament presets the print dialog offers on registry
-    printer ``printer`` for a 0.4 mm nozzle (none without one; 422 for a printer the
-    registry does not hold)."""
+    support material, and the filament types not archived, whose presets a slot of a
+    material is sliced with (#6574)."""
     filaments = await asyncio.to_thread(orders.store.filaments)
     materials: dict[str, str] = {}
-    for filament in filaments:
-        materials.setdefault(filament.material.casefold(), filament.material)
-    presets: list[FilamentPresetOption] = []
-    if printer is not None:
-        if await asyncio.to_thread(printers.store.get, printer) is None:
-            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, f"no printer {printer}")
-        catalogue = await _catalogue(
-            await asyncio.to_thread(store.load),
-            printers,
-            printer,
-            store=store,
-            paths_cache=paths.cache,
-            profiles=slicing.profiles,
-        )
-        presets = filament_presets_by_size(catalogue).get(OFFERED_SIZE, [])
+    for book in filaments:
+        materials.setdefault(book.material.casefold(), book.material)
     return ProfileOptions(
         materials=[
             ProfileMaterial(material=material, support=is_support(material))
             for material in sorted(materials.values(), key=str.casefold)
         ],
-        presets=presets,
+        types=await asyncio.to_thread(_types, filament),
     )

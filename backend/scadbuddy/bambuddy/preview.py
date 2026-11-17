@@ -20,10 +20,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import aclosing
 from datetime import timedelta
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from fastapi import status
 from pydantic import BaseModel, Field
@@ -48,6 +48,7 @@ from scadbuddy.bambuddy.print_run import (
 from scadbuddy.bambuddy.print_source import PrintSource, bambuddy_client
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, PreviewSlice
 from scadbuddy.core.problems import ApiError
+from scadbuddy.filament.models import EffectivePreset, SbSpools
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.operations.kinds import await_to_end
 from scadbuddy.print_library.reads import LibraryReads, reads_for
@@ -56,6 +57,10 @@ from scadbuddy.slicing.catalogue import catalogue_for
 from scadbuddy.slicing.profiles import ProfileError, ProfileImageError
 from scadbuddy.slicing.start import NativeSliceStarter, start_native_slice
 from scadbuddy.slicing.store import NativeSliceStore, SliceSubjectError
+
+if TYPE_CHECKING:
+    # `filament.inventory` reads Postgres; the type only here, as `print_run` takes it.
+    from scadbuddy.filament.inventory import SbSpoolReads
 
 logger = logging.getLogger(__name__)
 
@@ -113,15 +118,22 @@ async def _planned(
     *,
     route: RunRoute | None = None,
     title: str | None = None,
-    unspooled: bool = False,
+    sb: SbSpools | None = None,
+    reads: SbSpoolReads | None = None,
+    slot_presets: Mapping[int, Sequence[EffectivePreset]] | None = None,
 ) -> PlannedRun:
     """The run's own layout, upload and presets for ``request``, never into a project.
-    ``unspooled`` is :func:`~scadbuddy.bambuddy.print_run.plan_run`'s.
+    ``slot_presets`` is :func:`~scadbuddy.bambuddy.print_run.plan_run`'s.
 
     On a native ``route`` (plan 2026-10-18 D2) it is the native run's plan, with no
     Bambuddy call (``client`` is ``None``, D3): its copy goes where the run's would with
     no folder chosen, the ``title``'s template folder, so a run of the same choices
-    queues this slice (#2169)."""
+    queues this slice (#2169). ``sb`` is the SB spool in each tray and their presets
+    (#6262), read as the run's plan reads them (`filament/inventory.py`
+    `read_sb_spools`), so it resolves as `/check` judges and as the run will. With no
+    ``sb`` (a read that failed, or a quote's preview until #6262 Task 9) it plans on the
+    trays alone. On Bambuddy's path the choices are the SB spools ``reads`` reads, as the
+    run's (#6262 Task 7)."""
     if source.is_sliced:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -163,7 +175,10 @@ async def _planned(
         reuse_slices=False,
         native=native,
         title=title,
-        unspooled=unspooled,
+        held=sb if lan else None,
+        presets=sb if lan else None,
+        reads=reads,
+        slot_presets=slot_presets,
     )
     if not planned.plates:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "There is no plate to slice.")
@@ -255,6 +270,8 @@ async def start_preview(
     route: RunRoute | None = None,
     title: str | None = None,
     fresh: bool = False,
+    sb: SbSpools | None = None,
+    reads: SbSpoolReads | None = None,
 ) -> PreviewStarted:
     """Lay out, upload and slice what ``request`` would print, as the run does, and
     record the slice for ``subject``; the first plate when every plate prints.
@@ -264,7 +281,9 @@ async def start_preview(
     change, and a copy filed in a project's folder is that project's record, never
     removed (#317), so trying spools would fill the project. A print into the project
     then slices its own copy."""
-    planned = await _planned(client, source, settings, request, native, route=route, title=title)
+    planned = await _planned(
+        client, source, settings, request, native, route=route, title=title, sb=sb, reads=reads
+    )
     return await _start_plate(
         client,
         settings,
@@ -294,19 +313,30 @@ async def start_preview_plates(
     native_reads: LibraryReads | None = None,
     route: RunRoute | None = None,
     title: str | None = None,
+    sb: SbSpools | None = None,
+    reads: SbSpoolReads | None = None,
+    slot_presets: Mapping[int, Sequence[EffectivePreset]] | None = None,
 ) -> list[PreviewStarted]:
     """:func:`start_preview` for every plate the source lays out (#4250 Ruling 2): a
     quote is the whole output's price, so ``request``'s ``plate_id``, ``plate_ids`` and
     ``all_plates`` are ignored and every plate is planned and sliced, each recorded for
     ``subject`` as the dialog records its one, on either slicer. One started slice per
     plate, in plate order. A plate that fails to start leaves the earlier plates'
-    records to the preview sweeps, as the dialog leaves its own. A quote may name a
-    filament that is not loaded (#6574): a slot with no spool and an Advanced preset
-    (``choices.filament_overrides``) is sliced with that preset in the file's own colour
-    for the slot."""
+    records to the preview sweeps, as the dialog leaves its own. A storefront price names
+    a filament that is not loaded (#6574): each slot in ``slot_presets`` has no spool and
+    is sliced with its filament type's preset in the file's own colour for the slot."""
     every = request.model_copy(update={"all_plates": True, "plate_ids": None, "plate_id": 1})
     planned = await _planned(
-        client, source, settings, every, native, route=route, title=title, unspooled=True
+        client,
+        source,
+        settings,
+        every,
+        native,
+        route=route,
+        title=title,
+        sb=sb,
+        reads=reads,
+        slot_presets=slot_presets,
     )
     return [
         await _start_plate(

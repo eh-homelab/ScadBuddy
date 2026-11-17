@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../../../api/client'
-import type { FilamentPresetOption, StorefrontSliceProfile } from '../../../api/types'
-import { refKey } from '../../../lib/printChoices'
+import type { ProfileType, StorefrontSliceProfile } from '../../../api/types'
 import { useAsync } from '../../../lib/useAsync'
 import { refusalText } from '../../../components/orders/refusal'
 import { StorefrontMaterials } from '../../../components/settings/StorefrontMaterials'
@@ -20,7 +19,7 @@ export const order = 45
 
 /**
  * #6153 — how the storefront slices a visitor's design to price it: the slices at once, and
- * the shop slice profile (a printer and a filament preset per material, #6574), which is saved on its own.
+ * the shop slice profile (a printer and a filament type per material, #6574), which is saved on its own.
  * #6258 — and the shop's default materials (`storefront_materials`), saved on their own.
  */
 export function Component() {
@@ -40,19 +39,18 @@ export function Component() {
   )
 }
 
-/** The presets to offer for `material`: those of that material, else every one. */
-function presetsFor(material: string, presets: readonly FilamentPresetOption[]): readonly FilamentPresetOption[] {
-  const same = presets.filter((preset) => preset.filament_type?.toLowerCase() === material.toLowerCase())
-  return same.length > 0 ? same : presets
+/** The types to offer for `material`: those of that material, else every one. */
+function typesFor(material: string, types: readonly ProfileType[]): readonly ProfileType[] {
+  const same = types.filter((type) => type.material.toLowerCase() === material.toLowerCase())
+  return same.length > 0 ? same : types
 }
 
 /**
  * #6153, #6574 — the shop slice profile (`storefront_slice_profile`): the registry printer that
- * routes the slice and prices machine time, and one filament preset per material of the price
- * book, from the presets the print dialog's Advanced step offers on that printer. A slot is
- * sliced with its material's preset in the visitor's colour, as a back-office quote slices a
- * filament that is not loaded. Support materials are listed apart: support is the shop's
- * choice, and a visitor never sees it.
+ * routes the slice and prices machine time, and one filament type per material of the price
+ * book. A slot is sliced with its type's preset for the printer's nozzle (Filament → Types), in
+ * the visitor's colour and with no spool, so the profile keeps no preset of its own. Support
+ * materials are listed apart: support is the shop's choice, and a visitor never sees it.
  */
 function SliceProfileEditor() {
   const settings = useAsync(() => api.getSettings(), [])
@@ -62,19 +60,18 @@ function SliceProfileEditor() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
-  const options = useAsync(() => api.storefrontSliceOptions(printer ?? undefined), [printer])
+  const options = useAsync(() => api.storefrontSliceOptions(), [])
 
   useEffect(() => {
     if (settings.data === undefined || chosen !== null) return
     const profile = settings.data.storefront_slice_profile
     setPrinter(profile?.printer ?? null)
-    setChosen(Object.fromEntries(Object.entries(profile?.materials ?? {}).map(([material, ref]) => [material, refKey(ref)])))
+    setChosen({ ...(profile?.materials ?? {}) })
   }, [settings.data, chosen])
 
   const picks = chosen ?? {}
   const materials = options.data?.materials ?? []
-  const offered = options.data?.presets ?? []
-  const size = options.data?.nozzle_size ?? '0.4'
+  const offered = options.data?.types ?? []
   const save = (profile: StorefrontSliceProfile | null) => {
     setBusy(true)
     setError(null)
@@ -86,9 +83,9 @@ function SliceProfileEditor() {
       .finally(() => setBusy(false))
   }
 
-  const presetRow = (material: string) => {
+  const typeRow = (material: string) => {
     const key = material.toLowerCase()
-    const choices = presetsFor(material, offered)
+    const choices = typesFor(material, offered)
     return (
       <div key={key} className="flex flex-col gap-1">
         <Label>{material}</Label>
@@ -99,13 +96,13 @@ function SliceProfileEditor() {
             setChosen({ ...picks, [key]: value })
           }}
         >
-          <SelectTrigger aria-label={`Filament preset for ${material}`} className="w-72">
-            <SelectValue placeholder="No preset" />
+          <SelectTrigger aria-label={`Filament type for ${material}`} className="w-72">
+            <SelectValue placeholder="No filament type" />
           </SelectTrigger>
           <SelectContent position="popper">
-            {choices.map((preset) => (
-              <SelectItem key={refKey(preset.ref)} value={refKey(preset.ref)}>
-                {preset.name}
+            {choices.map((type) => (
+              <SelectItem key={type.id} value={type.id}>
+                {type.label}
               </SelectItem>
             ))}
           </SelectContent>
@@ -118,7 +115,7 @@ function SliceProfileEditor() {
     <section aria-label="Shop slice profile" className="space-y-2 rounded-md border p-3">
       <h4 className="text-sm font-medium">Shop slice profile</h4>
       <p className="text-xs text-muted-foreground">
-        What a visitor cannot choose: the printer to slice for, and the filament preset each material is sliced with. Each colour slot is sliced in the visitor's colour, as a quote slices a filament that is not loaded, and priced at the price-book filament the visitor picks. The nozzles, quality and plate are the ones the print dialog opens on for the design on this printer. Publish refuses a listing with a material that has no preset here.
+        What a visitor cannot choose: the printer to slice for, and the filament type each material is sliced as. Each colour slot is sliced in the visitor's colour with the type's preset for the nozzle (set on Filament → Types), and priced at the price-book filament the visitor picks. The nozzles, quality and plate are the ones the print dialog opens on for the design on this printer. A type with no preset for that nozzle gives no price. Publish refuses a listing with a material that has no type here.
       </p>
       <form
         className="flex flex-col gap-3"
@@ -128,15 +125,15 @@ function SliceProfileEditor() {
             setError('Choose the printer to slice for.')
             return
           }
-          // Until this printer's presets are read, the form shows none: saving then would
-          // drop every stored preset (#6255 review).
+          // Until the types are read, the form shows none: saving then would drop every
+          // stored type (#6255 review).
           if (options.data === undefined) return
-          // Only the materials the editor lists, and only presets this printer offers: a
-          // preset the form does not show is never sent (#6255 review).
-          const byKey = new Map(offered.map((preset) => [refKey(preset.ref), preset.ref]))
+          // Only the materials the editor lists, and only types it offers: a type the form
+          // does not show is never sent (#6255 review).
+          const live = new Set(offered.map((type) => type.id))
           const named = materials.flatMap((m) => {
-            const ref = byKey.get(picks[m.material.toLowerCase()] ?? '')
-            return ref ? [[m.material.toLowerCase(), ref] as const] : []
+            const type = picks[m.material.toLowerCase()]
+            return type && live.has(type) ? [[m.material.toLowerCase(), type] as const] : []
           })
           save({ printer, materials: Object.fromEntries(named) })
         }}
@@ -147,8 +144,6 @@ function SliceProfileEditor() {
             value={printer ?? ''}
             onValueChange={(value) => {
               setSaved(false)
-              // Another printer may offer other presets: the old choices do not carry over.
-              if (value !== printer) setChosen({})
               setPrinter(value)
             }}
           >
@@ -164,29 +159,26 @@ function SliceProfileEditor() {
             </SelectContent>
           </Select>
         </div>
-        {printer === null ? (
-          <p className="text-[13px] text-muted-foreground">Choose the printer first: the presets are the ones the print dialog offers on it.</p>
-        ) : options.error ? (
+        {options.error ? (
           <p role="alert" className="text-[13px] text-warn">
             {refusalText(options.error)}
           </p>
         ) : (
           <>
-            <p className="text-xs text-muted-foreground">Presets for a {size} mm nozzle. A design remembered at another size gets no price until its preset fits.</p>
             <fieldset className="flex flex-col gap-2">
               <legend className="text-xs font-medium">Customer materials</legend>
-              {materials.filter((m) => !m.support).map((m) => presetRow(m.material))}
+              {materials.filter((m) => !m.support).map((m) => typeRow(m.material))}
             </fieldset>
             {materials.some((m) => m.support) && (
               <fieldset className="flex flex-col gap-2">
                 <legend className="text-xs font-medium">Support (internal)</legend>
-                {materials.filter((m) => m.support).map((m) => presetRow(m.material))}
+                {materials.filter((m) => m.support).map((m) => typeRow(m.material))}
               </fieldset>
             )}
           </>
         )}
         <div className="flex flex-wrap items-center gap-2">
-          <Button type="submit" size="sm" disabled={busy || settings.data === undefined || (printer !== null && options.data === undefined)}>
+          <Button type="submit" size="sm" disabled={busy || settings.data === undefined || options.data === undefined}>
             Save slice profile
           </Button>
           <Button

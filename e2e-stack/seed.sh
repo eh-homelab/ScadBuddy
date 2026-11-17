@@ -2,9 +2,9 @@
 #
 # Seed the hot-path stack (e2e-stack/compose.yaml, project sb-hotpath) for one mode:
 #
-#   seed.sh recorder   bambuddy_url is the recorder, which the overlay refresh reads
-#                      once; its list is then cleared, so what it sees afterwards is
-#                      the hot path alone (AC1)
+#   seed.sh recorder   bambuddy_url is the recorder, which the spool refresh's pull
+#                      reads once; its list is then cleared, so what it sees afterwards
+#                      is the hot path alone (AC1)
 #   seed.sh unset      no bambuddy_url at all (AC2)
 #
 # What it sets, in order (plan 2026-10-18 Task 13):
@@ -14,10 +14,11 @@
 #   3. the printer: POST /printers with the fake's serial, preferred_path native, then
 #      PUT /printers/{id}/lan with host `printer` and the access code (the LAN client's
 #      ports are fixed at 8883 and 990, `printers/lan.py`);
-#   4. recorder mode: the spool-providers Schedule triggered once and waited for in
-#      spool_provider_refreshes, then spool_overlay_refresh_seconds=0, which applies at
-#      a start (`core/settings.py`), so the app restarts once more and its Schedule is
-#      deleted; then the recorder's POST /__reset;
+#   4. recorder mode: the spool refresh's Schedule triggered once and its pull of
+#      Bambuddy's spools waited for (each recorder spool linked in filament_bb_links,
+#      #6262), then spool_overlay_refresh_seconds=0, which applies at a start
+#      (`core/settings.py`), so the app restarts once more and its Schedule is deleted;
+#      then the recorder's POST /__reset;
 #   5. the printer's POST /__reset, so its lists hold only what the test sends.
 #
 # run.sh calls it with the stack up. It talks to the app on SB_HOTPATH_API
@@ -129,19 +130,21 @@ printer_id="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["id"])' <
 call PUT "/printers/${printer_id}/lan" "{\"host\": \"printer\", \"access_code\": \"${access_code}\"}" >/dev/null
 
 if [ "$mode" = recorder ]; then
-  log "one spool-providers refresh from the recorder"
-  since="$(psql_value "SELECT now()")"
+  log "one spool refresh from the recorder: Bambuddy's spools pulled"
+  # Every spool the recorder lists, linked to the SB spool the pull made of it.
+  want="$(python3 -c 'import json, sys; print(len(json.load(open(sys.argv[1]))))' \
+    "$here/bambuddy-recorder/answers/inventory-spools.json")"
   "${compose[@]}" exec -T temporal temporal schedule trigger \
     --schedule-id "$spool_schedule" --address 127.0.0.1:7233 --namespace default >/dev/null
-  refreshed=""
+  pulled=""
   for _ in $(seq 1 60); do
-    refreshed="$(psql_value "SELECT count(*) FROM spool_provider_refreshes WHERE provider = 'bambuddy' AND refreshed_at > '${since}'")"
-    [ "${refreshed:-0}" -ge 1 ] && break
+    pulled="$(psql_value "SELECT count(*) FROM filament_bb_links")"
+    [ "${pulled:-0}" -ge "$want" ] && break
     sleep 1
   done
-  if [ "${refreshed:-0}" -lt 1 ]; then
-    echo "seed($mode): no bambuddy refresh recorded since ${since}:" >&2
-    psql_value "SELECT * FROM spool_provider_refreshes" >&2 || true
+  if [ "${pulled:-0}" -lt "$want" ]; then
+    echo "seed($mode): the pull linked ${pulled:-0} of the recorder's ${want} spools:" >&2
+    psql_value "SELECT bb_spool_id, linked_at FROM filament_bb_links" >&2 || true
     exit 1
   fi
   call PUT /settings '{"spool_overlay_refresh_seconds": 0}' >/dev/null

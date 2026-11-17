@@ -47,6 +47,7 @@ from scadbuddy.library.history import GitError
 from scadbuddy.library.libraries import (
     CLONE_TIMEOUT,
     COMMIT_PATTERN,
+    HoldLostError,
     LibraryCheckoutNotFoundError,
     LibraryDeclarationError,
     LibraryError,
@@ -73,7 +74,8 @@ def answered_as_routes[**P, R](
 ) -> Callable[P, Coroutine[Any, Any, R]]:
     """A model.json or a ``libraries`` declaration that cannot be read, or a pin whose
     checkout is gone, as the 409 every route answers it with (``api/models.py``,
-    ``install_library_handlers``), rather than the operation's unexpected 500."""
+    ``install_library_handlers``), rather than the operation's unexpected 500; and a
+    hold that lapsed while the pin ran as the routes' 503 (#6560)."""
 
     @wraps(fn)
     async def answered(*args: P.args, **kwargs: P.kwargs) -> R:
@@ -89,6 +91,8 @@ def answered_as_routes[**P, R](
             raise ApiError(
                 status.HTTP_409_CONFLICT, str(error.args[0]), title="Invalid Library Declaration"
             ) from None
+        except HoldLostError as error:
+            raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, str(error)) from None
 
     return answered
 

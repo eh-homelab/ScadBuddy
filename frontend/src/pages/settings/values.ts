@@ -201,6 +201,8 @@ export function toPatchValue(name: FieldName, raw: string, settings: Settings): 
   )
     return raw
   if (name === 'store_s3_path_style' || name === 'print_auto_import') return raw === 'true'
+  // #6262 Task 13 — one data type so far: spools (#6265 adds the others).
+  if (name === 'filament_sync') return { spools: raw }
   // #4699 — an empty list allows no source (each print goes to Unsorted imports) or skips no printer.
   if (name === 'print_auto_import_sources') return raw === '' ? [] : raw.split(',')
   if (name === 'print_auto_import_skip_printers') return raw === '' ? [] : raw.split(',').map(Number)

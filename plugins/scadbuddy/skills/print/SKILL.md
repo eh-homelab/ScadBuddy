@@ -101,7 +101,8 @@ plates with the one the printer's last print used, the model's remembered
 choices, and the filament step (slots, spools and a suggestion).
 
 The run body is `PrintRunRequest` in `backend/openapi.json`: `printer_id`,
-`filament_plan`, `choices`, `plate_id` / `all_plates`, `options`, `project_id`
+`filament_plan` (send `ids: "sb"` with the spool numbers from `get_print_filaments`;
+an omitted `ids` reads `spool_id` as a Bambuddy spool id, as old clients sent it), `choices`, `plate_id` / `all_plates`, `options`, `project_id`
 and `copies`. `choices` is `PrintChoices`: `nozzles` (one size for the job),
 `tier` (`fine` / `standard` / `draft`) or a `process_name`, `bed_type`, and any
 per-slot `filament_overrides` (spool-first spec §2).

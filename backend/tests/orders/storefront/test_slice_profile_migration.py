@@ -1,5 +1,5 @@
 """#6574: the migration that moves the stored shop slice profile from a spool per
-material to a filament preset per material."""
+material to a filament type per material."""
 
 from __future__ import annotations
 
@@ -26,22 +26,55 @@ def _profile(conn: psycopg.Connection[Any]) -> Any:
     return None if found is None else found["value"]
 
 
-def test_the_profile_keeps_its_printer_and_drops_each_spool(pg_conninfo: str) -> None:
-    """Prod's profile named loaded tray -1 for PLA. No table holds the preset a tray
-    slices with, so each material's entry is dropped and the printer is kept: the shop
-    sets each preset again. The new shape loads; running the file again changes
-    nothing."""
+def _spool(conn: psycopg.Connection[Any], number: int, *, typed: bool) -> str:
+    """SB spool #``number``, of a new PLA type when ``typed``; the type's id, or ''."""
+    row = conn.execute(
+        "INSERT INTO filament_materials (name) VALUES (%s) RETURNING id", (f"PLA {number}",)
+    ).fetchone()
+    assert row is not None
+    material = row["id"]
+    type_id = None
+    if typed:
+        made = conn.execute(
+            "INSERT INTO filament_spool_types (code, material_id, rgba, label_weight_g)"
+            " VALUES (%s, %s, '#FFFFFFFF', 1000) RETURNING id",
+            (f"T{number}", material),
+        ).fetchone()
+        assert made is not None
+        type_id = made["id"]
+    conn.execute(
+        "INSERT INTO filament_spools (number, type_id, material_id) OVERRIDING SYSTEM VALUE"
+        " VALUES (%s, %s, %s)",
+        (number, type_id, None if typed else material),
+    )
+    return "" if type_id is None else str(type_id)
+
+
+def test_each_sb_spool_becomes_its_type_and_the_rest_are_dropped(pg_conninfo: str) -> None:
+    """A profile names SB spool numbers since `20261116T0034Z`. Each becomes its spool's
+    filament type, whose presets the slot is now sliced with. A loaded tray (-1), a
+    number no spool has (15) and a spool with no type (9) are dropped; the printer is
+    kept. The new shape loads; running the file again changes nothing."""
     before = next(i for i, m in enumerate(MIGRATIONS) if m.id == MIGRATION.stem)
     with psycopg.connect(pg_conninfo, row_factory=dict_row) as conn:
         migrate(conn, MIGRATIONS[:before])
+        petg = _spool(conn, 7, typed=True)
+        _spool(conn, 9, typed=False)
         conn.execute(
             "INSERT INTO settings (name, value) VALUES ('storefront_slice_profile', %s::jsonb)",
-            (json.dumps({"printer": P1, "spools": {"pla": -1, "petg": 15}}),),
+            (
+                json.dumps(
+                    {
+                        "printer": P1,
+                        "spools": {"pla": -1, "petg": 7, "tpu": 15, "asa": 9},
+                    }
+                ),
+            ),
         )
         sql = MIGRATION.read_text()
         conn.execute(sql)
         moved = _profile(conn)
-        assert moved == {"printer": P1, "materials": {}}
+        assert moved == {"printer": P1, "materials": {"petg": petg}}
         assert StorefrontSliceProfile.model_validate(moved).printer == P1
         conn.execute(sql)
         assert _profile(conn) == moved
@@ -49,7 +82,7 @@ def test_the_profile_keeps_its_printer_and_drops_each_spool(pg_conninfo: str) ->
 
 def test_a_profile_of_the_new_shape_or_none_is_left_alone(pg_conninfo: str) -> None:
     before = next(i for i, m in enumerate(MIGRATIONS) if m.id == MIGRATION.stem)
-    new = {"printer": P1, "materials": {"pla": {"source": "standard", "id": "Bambu PLA"}}}
+    new = {"printer": P1, "materials": {"pla": "00000000-0000-4000-8000-0000000000a1"}}
     with psycopg.connect(pg_conninfo, row_factory=dict_row) as conn:
         migrate(conn, MIGRATIONS[:before])
         conn.execute(MIGRATION.read_text())

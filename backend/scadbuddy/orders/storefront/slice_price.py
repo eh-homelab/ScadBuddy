@@ -8,14 +8,16 @@ sliced by the print dialog's background slice (``orders/operations.py``
 ``PreviewSlicer``, the native slicer or Bambuddy's, as a quote routes it), and priced at
 the price book's policy and the machine rate of the profile's printer. The template gives
 the support and process settings, as for any output. The shop slice profile
-(``slice_profile.py``) gives only the printer and a filament preset per material. The
+(``slice_profile.py``) gives only the printer and a filament type per material. The
 rest is what the print dialog opens on for the model on that printer
 (``bambuddy/choices.py`` :func:`~scadbuddy.bambuddy.choices.opening_choices`, #6574): the
 remembered choices, else the defaults from the printer's live status, read as the dialog
 reads it (:func:`~scadbuddy.bambuddy.choices.printer_opening`). A printer whose status
 cannot be read gives no price (`STATUS_UNREAD`): a default would guess the nozzle flow.
-Each slot is sliced as a back-office quote slices a filament that is not loaded: its
-material's preset, in the visitor's colour (``slice_profile.py`` ``slice_request``).
+Each slot has no spool: it is sliced with its material's filament type's preset for the
+H2C and the chosen nozzle, as a spool of that type would be, in the visitor's colour
+(``slice_profile.py`` ``slot_presets``, ``bambuddy/resolver.py`` ``resolve``). A type
+with no preset for that nozzle gives no price (`NO_TYPE_PRESET`).
 
 One price per variant (:func:`price_key`): the render's 3MF content, each slot's
 price-book filament, colour and preset, the profile, the choices, and the price book and
@@ -43,19 +45,22 @@ import time
 import uuid
 import weakref
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal
+from uuid import UUID
 
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.bambuddy.choices import PrinterOpening, opening_choices, printer_opening
-from scadbuddy.bambuddy.resolver import PrintChoices
+from scadbuddy.bambuddy.resolver import PRINTER_MODEL, PrintChoices
 from scadbuddy.core.problems import ApiError
+from scadbuddy.filament.models import EffectivePreset
+from scadbuddy.filament.presets import preset_for
 from scadbuddy.library.outputs import STOREFRONT, storefront_output_id
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.orders.currency import minor_exponent
@@ -93,6 +98,7 @@ from scadbuddy.orders.storefront.slice_profile import (
     profile_digest,
     slice_request,
     slot_presets,
+    slot_types,
 )
 
 if TYPE_CHECKING:
@@ -117,13 +123,14 @@ PENDING_RETRY: Final = 2
 #: #6574: the owner's rule is no price when unsure, so a status not read is no price,
 #: never a guess at the nozzle flow.
 STATUS_UNREAD: Final = "the status of the shop slice profile's printer cannot be read"
+NO_TYPE_PRESET: Final = "a slot's filament type has no preset for the H2C and the nozzle"
 FILAMENT_GONE: Final = "a slot's filament is no longer in the price book"
 GEOMETRY_DIFFERS: Final = (
     "the variant rendered to another 3MF than the one its key names, so its price would"
     " not be for the design the visitor sees"
 )
 #: Every digest of a price key changes when this does.
-KEY_VERSION: Final = 2
+KEY_VERSION: Final = 3
 #: How long the live machine rate a key holds is read again only after: a page
 #: reads its price every `PENDING_RETRY` seconds while the slice runs, and each
 #: live read may ask Bambuddy for the printer's tasks.
@@ -380,18 +387,25 @@ def price_key(
     filaments: Sequence[Filament],
     profile: StorefrontSliceProfile,
     choices: PrintChoices,
+    presets: Mapping[int, Sequence[EffectivePreset]],
     currency: str,
     policy: PricingPolicy,
     machine_rate: str | None,
 ) -> str:
     """The sha256 of everything a variant's price rests on (owner, 2026-11-14; #6574: what
     the slicer gets): the 3MF's content, each slot's price-book filament as it is priced,
-    with its colour and the preset it is sliced with (a colour pair changes the purge),
-    the profile, the dialog's choices (each slot's preset among them), and the price
-    book's policy and the machine rate that prices it (the live rate of the profile's
-    printer, `MachineRates.for_quote`, #6153). `ProfileMissingMaterialError` for a slot
-    whose material has no preset."""
-    presets = slot_presets(profile, [f.material for f in filaments])
+    with its colour and its filament type's preset for the H2C and the chosen nozzle
+    (``presets``, by slot id; a colour pair changes the purge), the profile, the dialog's
+    choices, and the price book's policy and the machine rate that prices it (the live
+    rate of the profile's printer, `MachineRates.for_quote`, #6153)."""
+    size = choices.nozzles[0].size
+
+    def preset_of(slot_id: int) -> dict[str, Any] | None:
+        found = preset_for(presets.get(slot_id, ()), PRINTER_MODEL, size)
+        if found is None:
+            return None
+        return {"filament": found.slicer_filament, "name": found.slicer_filament_name}
+
     body = {
         "v": KEY_VERSION,
         "model": model_sha256,
@@ -401,9 +415,9 @@ def price_key(
                 "material": f.material,
                 "cost_per_kg": f.cost_per_kg,
                 "colour": f.colour.upper(),
-                "preset": preset.model_dump(mode="json"),
+                "preset": preset_of(index + 1),
             }
-            for f, preset in zip(filaments, presets, strict=True)
+            for index, f in enumerate(filaments)
         ],
         "profile": profile_digest(profile),
         "choices": choices.model_dump(mode="json"),
@@ -459,6 +473,9 @@ class SliceVariant(BaseModel):
     currency: str
     #: An operation started before #6574 names the profile's spools; they are not read.
     spools: list[int] = Field(default_factory=list)
+    #: Each slot's filament type's presets, by slot id (#6574): the slot has no spool and
+    #: is sliced with its type's preset (``resolver.resolve``'s ``slot_presets``).
+    slot_presets: dict[int, list[EffectivePreset]] = Field(default_factory=dict)
     #: The machine rate the estimate read put in the key, which prices the slice: the
     #: run never reads the rate again, so the key and the price use one rate (#6153).
     #: None prices machine time at the book's rate.
@@ -535,7 +552,9 @@ async def price_variant(run: SliceRun, variant: SliceVariant) -> PriceRow:
 
         sliced = await slice_and_price(
             run.slicer,
-            lambda: run.slicer.start(rendered.output_id, variant.slice, subject),
+            lambda: run.slicer.start(
+                rendered.output_id, variant.slice, subject, slot_presets=variant.slot_presets
+            ),
             subject,
             variant.slice,
             book=run.book,
@@ -583,13 +602,15 @@ def plan_variant(
     policy: PricingPolicy,
     machine_rate: MachineRateBreakdown | None,
     printer: PrinterOpening,
+    type_presets: Mapping[UUID, Sequence[EffectivePreset]],
 ) -> Planned | None:
     """The variant of ``reference``'s render with ``filaments`` on its slots (from 0),
     sliced with the choices the print dialog opens on for the model on the profile's
     printer (``printer``, as :func:`~scadbuddy.bambuddy.choices.printer_opening` read
-    it; #6574). None when it has no slice price: no shop slice profile, a slot's
-    material with no preset in it, or a printer status that could not be read
-    (`STATUS_UNREAD`)."""
+    it; #6574), each slot with its filament type's presets (``type_presets``, by type).
+    None when it has no slice price: no shop slice profile, a slot's material with no
+    type in it, a printer status that could not be read (`STATUS_UNREAD`), or a type with
+    no preset for the H2C and the chosen nozzle (`NO_TYPE_PRESET`)."""
     profile = settings.storefront_slice_profile
     if profile is None or not filaments:
         return None
@@ -600,14 +621,21 @@ def plan_variant(
         settings.model_print_choices.get(reference.slug), printer.status, printer.bed_type
     )
     try:
-        request = slice_request(profile, [f.material for f in filaments], choices)
+        types = slot_types(profile, [f.material for f in filaments])
     except ProfileMissingMaterialError:
         return None
+    presets = slot_presets(types, type_presets)
+    size = choices.nozzles[0].size
+    if any(preset_for(rows, PRINTER_MODEL, size) is None for rows in presets.values()):
+        logger.info("a storefront variant has no slice price: %s", NO_TYPE_PRESET)
+        return None
+    request = slice_request(profile, choices)
     key = price_key(
         model_sha256=model_sha256,
         filaments=filaments,
         profile=profile,
         choices=request.choices,
+        presets=presets,
         currency=currency,
         policy=policy,
         machine_rate=None if machine_rate is None else machine_rate.rate_per_hour,
@@ -621,6 +649,7 @@ def plan_variant(
             slice=request,
             slot_filaments=[f.id for f in filaments],
             currency=currency,
+            slot_presets=presets,
             machine_rate=machine_rate,
         ),
     )
@@ -669,9 +698,10 @@ async def _planned(
     filaments: Sequence[Filament] | None,
 ) -> Planned | None:
     """The variant's key and its operation's request, as the shop's settings, the price
-    book, the live machine rate and the printer's status stand now; None when it has no
-    slice price (a slot with no filament, no shop slice profile, a printer the registry
-    lacks or whose status cannot be read, or no preset for a slot's material)."""
+    book, the live machine rate, the printer's status and the filament types' presets
+    stand now; None when it has no slice price (a slot with no filament, no shop slice
+    profile, a printer the registry lacks or whose status cannot be read, or no type or
+    type preset for a slot's material)."""
     if filaments is None:
         return None
     orders = _orders(state)
@@ -687,6 +717,8 @@ async def _planned(
     if opening is None:
         logger.info("a storefront variant has no slice price: no printer %s", profile.printer)
         return None
+    wanted = {profile.materials.get(f.material.casefold()) for f in filaments}
+    type_presets = await read_type_presets(state, [t for t in wanted if t is not None])
     return plan_variant(
         settings=settings,
         reference=reference,
@@ -696,7 +728,37 @@ async def _planned(
         policy=policy,
         machine_rate=rate,
         printer=opening,
+        type_presets=type_presets,
     )
+
+
+async def read_type_presets(
+    state: AppState, type_ids: Sequence[UUID]
+) -> dict[UUID, list[EffectivePreset]]:
+    """Each filament type's presets (`filament_spool_type_presets`, #6262), as a spool of
+    the type with none of its own reads them (`filament/presets.py`
+    `effective_presets`), by type (#6574)."""
+    # Here, not at the top: the filament component imports the orders' modules.
+    from scadbuddy.filament.component import FILAMENT
+
+    types = state.components.get(FILAMENT).types
+
+    def read() -> dict[UUID, list[EffectivePreset]]:
+        return {
+            type_id: [
+                EffectivePreset(
+                    printer_model=row.printer_model,
+                    nozzle_diameter=row.nozzle_diameter,
+                    slicer_filament=row.slicer_filament,
+                    slicer_filament_name=row.slicer_filament_name,
+                    overridden=False,
+                )
+                for row in types.presets(type_id)
+            ]
+            for type_id in type_ids
+        }
+
+    return await asyncio.to_thread(read)
 
 
 async def firm_price(

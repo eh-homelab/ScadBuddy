@@ -55,8 +55,8 @@ export interface ListingEditorProps {
   refusal?: ListingRefusal | null
 }
 
-/** Where the price book's filaments are added (Settings → Printing → Orders). */
-export const PRICE_BOOK_PATH = '/settings/printing#orders'
+/** Where the price book's filaments are added (Filament → Types). */
+export const PRICE_BOOK_PATH = '/filament/types'
 
 function shown(value: ParamValue | undefined): string {
   if (value === undefined) return 'its default'

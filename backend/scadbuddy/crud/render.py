@@ -44,9 +44,10 @@ sent again is the same row (ON CONFLICT), a use stamps the row again.
 and `InstallSlots` (the render leases, pin holds and install slots) over the routes, with
 the same names, signatures and answers. The worker chooses each token, so every take and
 claim is natural; a take that waits on the API's removal keeps waiting (`REMOVAL_RUNNING`),
-as the SQL take waited on `REMOVAL_LOCK`. A renew the API refuses (no row of that token,
-a slot another token holds) is a `CrudRefusedError`, which the renewing loop logs, as it
-logs any failed renewal; the SQL path renewed nothing there silently. A slot's release
+as the SQL take waited on `REMOVAL_LOCK`. A renew the API refuses because the row is gone or
+lapsed (`NO_LEASE`, `NO_HOLD`) or another token holds it (`NOT_HOLDER`) returns False, as the SQL
+renew does; `_renewed` then ends the block with `HoldLostError`. Any other refusal is still
+raised, and the renewing loop logs it as a failed renewal. A slot's release
 that finds another token on it (`NOT_HOLDER`: ours lapsed and was taken) is released,
 as the SQL path's was.
 """
@@ -124,6 +125,10 @@ FOLDER_LOCKED = "folder-locked"
 REMOVAL_RUNNING = "removal-running"
 #: `api/crud_render.py` `NOT_HOLDER`: a slot another token holds.
 NOT_HOLDER = "not-holder"
+#: `api/crud_render.py` `NO_LEASE`, `NO_HOLD`: a renew of a lease or a hold with no live
+#: row (gone, or lapsed).
+NO_LEASE = "no-lease"
+NO_HOLD = "no-hold"
 #: A take's wait for its answer: the route's `LEASE_LOCK_WAIT` (2 s) and a pool wait
 #: (`tests/crud/test_crud_library_leases.py` checks that the two agree).
 TAKE_TIMEOUT = 2.0 + PROJECT_POOL_TIMEOUT
@@ -756,8 +761,18 @@ class RemoteCheckoutLeases:
         )
         return token
 
-    def renew(self, token: uuid.UUID) -> None:
-        self._client.request("PUT", f"{BASE}/leases/{token}", json={"ttl_s": self.ttl})
+    def _renew(self, path: str, gone: tuple[int, str]) -> bool:
+        """Whether the row was still there to renew: False for the API's ``gone``."""
+        try:
+            self._client.request("PUT", f"{BASE}{path}", json={"ttl_s": self.ttl})
+        except CrudRefusedError as error:
+            if (error.status, error.problem.get("reason")) == gone:
+                return False
+            raise
+        return True
+
+    def renew(self, token: uuid.UUID) -> bool:
+        return self._renew(f"/leases/{token}", (404, NO_LEASE))
 
     def drop(self, token: uuid.UUID) -> None:
         self._client.request("DELETE", f"{BASE}/leases/{token}")
@@ -767,8 +782,8 @@ class RemoteCheckoutLeases:
         self._take("/pin-holds", {"token": str(token), "ttl_s": self.ttl})
         return token
 
-    def renew_pin(self, token: uuid.UUID) -> None:
-        self._client.request("PUT", f"{BASE}/pin-holds/{token}", json={"ttl_s": self.ttl})
+    def renew_pin(self, token: uuid.UUID) -> bool:
+        return self._renew(f"/pin-holds/{token}", (404, NO_HOLD))
 
     def drop_pin(self, token: uuid.UUID) -> None:
         self._client.request("DELETE", f"{BASE}/pin-holds/{token}")
@@ -786,8 +801,15 @@ class RemoteInstallSlots:
         slot = response.json()["slot"]
         return None if slot is None else int(slot)
 
-    def renew(self, slot: int, token: uuid.UUID) -> None:
-        self._client.request("PUT", f"{BASE}/install-slots/{slot}?token={token}")
+    def renew(self, slot: int, token: uuid.UUID) -> bool:
+        """Whether ``token`` still held ``slot``: False once another token holds it."""
+        try:
+            self._client.request("PUT", f"{BASE}/install-slots/{slot}?token={token}")
+        except CrudRefusedError as error:
+            if (error.status, error.problem.get("reason")) != (409, NOT_HOLDER):
+                raise
+            return False
+        return True
 
     def drop(self, slot: int, token: uuid.UUID) -> None:
         """A slot another token holds is ours no longer: it lapsed and was taken."""

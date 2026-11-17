@@ -6,6 +6,7 @@ import type {
   SlotNeed,
   SpoolOption,
 } from '../api/types'
+import { sameOpacity } from './rgba'
 
 /**
  * View-model helpers for the filament picker (#87). No React and no fetching: the
@@ -41,23 +42,6 @@ export function trayChoiceLabel(spool: SpoolOption): string {
 }
 
 /**
- * A spool provider as a person reads it: its own label (`SpoolProvider.label`) when the
- * answer carries it (`FilamentOptions.provider_labels`, #4516), else Bambuddy's inventory
- * or another's key title-cased, its underscores read as spaces (`open_spool` is "Open Spool").
- */
-export function providerLabel(provider: string, labels?: Readonly<Record<string, string>>): string {
-  const own = labels?.[provider]
-  if (own) return own
-  if (provider === 'bambuddy') return 'Bambuddy'
-  if (provider === 'native') return 'ScadBuddy'
-  return provider
-    .split('_')
-    .filter(Boolean)
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(' ')
-}
-
-/**
  * `"Bambu Lab PLA Silk — Blue"`.
  *
  * Brand, subtype and colour name are each nullable on the wire — a spool added by hand
@@ -88,11 +72,12 @@ export function amsUnitLabel(amsId: number): string {
  * slot 1. The one wording for a loaded spool, in the print dialog and Settings alike.
  */
 export function trayPlace(
-  loaded: { printer_id: number; printer_name?: string | null; ams_id: number; tray_id: number },
+  loaded: { printer_id: number | string | null; printer_name?: string | null; ams_id: number; tray_id: number },
   { printer = false }: { printer?: boolean } = {},
 ): string {
   const place = `${amsUnitLabel(loaded.ams_id)} · slot ${loaded.tray_id + 1}`
-  return printer ? `${loaded.printer_name ?? `Printer ${loaded.printer_id}`} · ${place}` : place
+  if (!printer) return place
+  return `${loaded.printer_name ?? (loaded.printer_id === null ? 'A printer' : `Printer ${loaded.printer_id}`)} · ${place}`
 }
 
 /**
@@ -342,13 +327,18 @@ export function checkPlan(
  * slot, and the server's auto-match wherever nothing is remembered, the remembered spool
  * is no longer in the inventory, or its colour no longer fits the slot's (#933). Which
  * spools still fit is the server's call (`colour_matches`, the auto-match's own cut-off),
- * as the download's seed is (`seed_plan` in `bambuddy/filaments.py`).
+ * as the download's seed is (`seed_plan` in `bambuddy/filaments.py`). A remembered spool
+ * whose opacity differs from the slot's is not kept either (#6262, `sameOpacity`).
  */
 export function seedPlan(options: FilamentOptions, remembered: SlotChoice[]): SlotChoice[] {
+  const spools = new Map((options.spools ?? []).map((spool) => [spool.spool_id, spool]))
   return (options.slots ?? []).flatMap((slot) => {
     const fits = new Set(slot.colour_matches ?? [])
     const kept = remembered.find(
-      (choice) => choice.slot_id === slot.slot_id && fits.has(choice.spool_id),
+      (choice) =>
+        choice.slot_id === slot.slot_id &&
+        fits.has(choice.spool_id) &&
+        sameOpacity(slot.colour, spools.get(choice.spool_id)?.rgba),
     )
     const choice = kept ?? options.suggested?.find((entry) => entry.slot_id === slot.slot_id)
     return choice ? [{ ...choice }] : []

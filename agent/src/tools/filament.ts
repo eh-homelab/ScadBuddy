@@ -1,6 +1,7 @@
 import { z } from 'zod'
+import type { components } from '../api/schema.js'
 import { ok } from './call.js'
-import { defineTool, json, ToolError, type Tool } from './registry.js'
+import { defineTool, idempotencyKey, json, ToolError, type Tool } from './registry.js'
 
 // ScadBuddy's own filament inventory (#6261, epic #6260): the catalogs a spool type or a
 // spool picks from, the spool types, and the spools with their tags and ledger. Write
@@ -8,6 +9,38 @@ import { defineTool, json, ToolError, type Tool } from './registry.js'
 // Routes: backend/scadbuddy/api/filament.py.
 
 const SOURCE = "ScadBuddy's own filament inventory"
+
+type CsvRow = components['schemas']['CsvRow']
+
+/** The spools CSV's own columns (`filament/csv_import.py` `COLUMNS`, the `CsvRow` schema's keys). */
+const CSV_COLUMNS = [
+  'number',
+  'type',
+  'material',
+  'subtype',
+  'brand',
+  'category',
+  'effect',
+  'colour_name',
+  'rgba',
+  'extra_colours',
+  'diameter_mm',
+  'density_g_cm3',
+  'nozzle_temp_min',
+  'nozzle_temp_max',
+  'bed_temp_min',
+  'bed_temp_max',
+  'label_weight_g',
+  'insert_type',
+  'low_stock_pct',
+  'cost_per_kg',
+  'weight_locked',
+  'location',
+  'note',
+] as const satisfies readonly (keyof CsvRow)[]
+// Every column of the schema is named above: a new `CsvRow` field fails the typecheck here.
+const CSV_COLUMNS_COMPLETE: Exclude<keyof CsvRow, (typeof CSV_COLUMNS)[number]> extends never ? true : never = true
+void CSV_COLUMNS_COMPLETE
 
 const kind = z
   .enum([
@@ -22,6 +55,30 @@ const kind = z
     'location-kinds',
   ])
   .describe('Which catalog')
+
+const EVENT_KINDS = [
+  'created',
+  'loaded',
+  'unloaded',
+  'moved',
+  'print_started',
+  'print_ended',
+  'weighed',
+  'ams_reading',
+  'dried',
+  'edited',
+  'tag_bound',
+  'tag_unbound',
+  'archived',
+  'restored',
+  'synced_from_bb',
+] as const
+
+const csvRows = z
+  .array(z.record(z.string(), z.string().nullable()))
+  .min(1)
+  .max(5000)
+  .describe('One object per CSV row, column name to cell text')
 
 export const filamentTools: Tool[] = [
   defineTool({
@@ -236,7 +293,8 @@ export const filamentTools: Tool[] = [
     label: 'List filament spools',
     description:
       "ScadBuddy's spools (one physical reel each) by number, each with its `effective` values (its own " +
-      "override, else its type's), the fields it `overridden`, and `grams_left` from its ledger. " +
+      "override, else its type's), the fields it `overridden`, the `names` behind its ids, `low_stock`, and " +
+      '`grams_left` from its ledger. ' +
       '`needs_type: true` lists only spools with no type yet, `false` only typed ones. Archived spools only ' +
       'with `include_archived`.',
     input: z.object({
@@ -258,7 +316,12 @@ export const filamentTools: Tool[] = [
   defineTool({
     name: 'filament_spool_get',
     label: 'Read a spool',
-    description: 'One spool (archived too) with its effective values and `grams_left`.',
+    description:
+      'One spool (archived too) with its effective values, `names` (brand, material, subtype, category, effect, ' +
+      'insert type and place as text), `low_stock`, and: the `tag` bound now, the `last_tag` it had before with ' +
+      '`held_by` (the number of the spool that holds that tag now), its effective `presets` and `k_values`, the ' +
+      '`basis` of `grams_left` (the anchor reading and the deltas taken off it), and `in_use` (it has printed, so ' +
+      'it can be archived but not deleted).',
     input: z.object({ spool_id: z.string().uuid().describe("A spool's `id` from filament_spool_list") }),
     risk: 'read',
     source: SOURCE,
@@ -304,6 +367,80 @@ export const filamentTools: Tool[] = [
         ),
       )
     },
+  }),
+
+  defineTool({
+    name: 'filament_spool_set_presets',
+    label: "Set a spool's own slicer presets",
+    description:
+      "Replace a spool's own slicer filament presets with `presets` (the whole list): one per printer model " +
+      "and nozzle diameter. A spool's row for a key overrides its type's; an empty list resets the spool to " +
+      "its type's presets. The answer is the effective set (`overridden` marks the spool's own). Only what " +
+      'the user says. Writes ScadBuddy only.',
+    input: z.object({
+      spool_id: z.string().uuid(),
+      presets: z.array(
+        z.object({
+          printer_model: z.string().describe('A printer model, e.g. `H2C`'),
+          nozzle_diameter: z.string().describe('e.g. `0.4`'),
+          slicer_filament: z.string().describe("The slicer's filament id, e.g. `GFA00`"),
+          slicer_filament_name: z.string().optional(),
+        }),
+      ),
+    }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['PUT /api/v1/filament/spools/{spool_id}/presets'],
+    summarize: ({ spool_id, presets }) => `Set ${presets.length} own slicer preset(s) on spool ${spool_id}`,
+    handler: async ({ spool_id, presets }, { backend }) =>
+      json(
+        await ok(
+          backend.PUT('/api/v1/filament/spools/{spool_id}/presets', {
+            params: { path: { spool_id } },
+            body: presets,
+          }),
+          `set the presets of spool ${spool_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_spool_set_k_values',
+    label: "Set a spool's own pressure-advance values",
+    description:
+      "Replace a spool's own pressure-advance (K) values with `k_values` (the whole list): one per printer, " +
+      "extruder and nozzle diameter. A spool's row for a key overrides its type's; an empty list resets the " +
+      "spool to its type's values. The answer is the effective set (`overridden` marks the spool's own). " +
+      'Only what the user says. Writes ScadBuddy only.',
+    input: z.object({
+      spool_id: z.string().uuid(),
+      k_values: z.array(
+        z.object({
+          printer_id: z.string().uuid(),
+          extruder: z.number().int().min(0),
+          nozzle_diameter: z.string().describe('e.g. `0.4`'),
+          k_value: z.string().describe('A decimal, e.g. `0.02`'),
+          nozzle_type: z.string().optional(),
+          name: z.string().optional(),
+          cali_idx: z.number().int().optional(),
+          setting_id: z.string().optional(),
+        }),
+      ),
+    }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['PUT /api/v1/filament/spools/{spool_id}/k-values'],
+    summarize: ({ spool_id, k_values }) => `Set ${k_values.length} own K value(s) on spool ${spool_id}`,
+    handler: async ({ spool_id, k_values }, { backend }) =>
+      json(
+        await ok(
+          backend.PUT('/api/v1/filament/spools/{spool_id}/k-values', {
+            params: { path: { spool_id } },
+            body: k_values as never,
+          }),
+          `set the K values of spool ${spool_id}`,
+        ),
+      ),
   }),
 
   defineTool({
@@ -421,6 +558,87 @@ export const filamentTools: Tool[] = [
   }),
 
   defineTool({
+    name: 'filament_tag_list',
+    label: 'List spool tags',
+    description:
+      "ScadBuddy's spool tags (RFID or NFC), oldest first, each with its open `binding` and the `spool_number` " +
+      'it is on. A tag on no spool only with `include_unbound`.',
+    input: z.object({ include_unbound: z.boolean().default(false) }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/tags'],
+    handler: async ({ include_unbound }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/tags', { params: { query: { include_unbound } } }),
+          'list the tags',
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_tag_get',
+    label: 'Read a spool tag',
+    description: 'One tag with its open binding and every binding it has had, newest first. 404 for none.',
+    input: z.object({ tag_id: z.string().uuid().describe("A tag's `id` from filament_tag_list") }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/tags/{tag_id}'],
+    handler: async ({ tag_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/tags/{tag_id}', { params: { path: { tag_id } } }),
+          `read tag ${tag_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_ledger_list',
+    label: 'Read the filament ledger',
+    description:
+      "Every spool's events, newest first, each with its `spool_number`. Filter by `spool_id`, `kind`, `source`, " +
+      '`since` (an ISO time with its offset, included) and `until` (the same, excluded). A page holds up to `limit` events (at most 500); when ' +
+      '`next_cursor` is set, pass it back as `cursor` for the next page.',
+    input: z.object({
+      spool_id: z.string().uuid().optional(),
+      kind: z.enum(EVENT_KINDS).optional().describe('An event kind'),
+      source: z.enum(['ams_remain', 'scale', 'print_estimate', 'print_actual', 'person', 'bb']).optional(),
+      since: z.string().optional(),
+      until: z.string().optional(),
+      cursor: z.string().optional(),
+      limit: z.number().int().min(1).max(500).default(100),
+    }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/events'],
+    handler: async (query, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/events', {
+            params: { query },
+          }),
+          'read the ledger',
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_summary',
+    label: 'Summarise the filament inventory',
+    description:
+      "The unarchived spools in total: their number, grams left, the value of those grams at each spool's cost " +
+      'per kg (`null` when none has a cost), the stock by material, how many sit in an AMS tray, how many are ' +
+      'low on stock, and how many still need a type.',
+    input: z.object({}),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/summary'],
+    handler: async (_input, { backend }) =>
+      json(await ok(backend.GET('/api/v1/filament/summary'), 'summarise the inventory')),
+  }),
+
+  defineTool({
     name: 'filament_spool_add_event',
     label: 'Record a weighing or a drying',
     description:
@@ -532,6 +750,67 @@ export const filamentTools: Tool[] = [
           `move spool ${spool_id}`,
         ),
       ),
+  }),
+
+  defineTool({
+    name: 'filament_spool_import_preview',
+    label: 'Preview a spools CSV import',
+    description:
+      'What filament_spool_import would do with these CSV rows, and nothing written: create, update or error ' +
+      'per line, with `[before, after]` changes. Same rows and cell rules as filament_spool_import.',
+    input: z.object({ rows: csvRows }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/spools/import'],
+    summarize: ({ rows }) => `Preview a spools import of ${rows.length} rows`,
+    handler: async ({ rows }, ctx) =>
+      json(
+        await ok(
+          ctx.backend.POST('/api/v1/filament/spools/import', { body: { rows: rows as never, dry_run: true } }),
+          'preview the spools import',
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_spool_import',
+    label: 'Import spools from CSV rows',
+    description:
+      'Make or change spools from rows of a spools CSV (cells as text, under the export\'s column names: ' +
+      `${CSV_COLUMNS.join(', ')}). A row with a \`number\` changes that spool where a cell differs; an empty cell ` +
+      'changes nothing. A row with no `number` makes a spool (it needs a `type` code or a `material`). Material, ' +
+      'subtype, brand, category and effect names are added to their catalog when missing; `insert_type`, `type` ' +
+      'and `location` must exist (a location is a move). Derived columns (grams_left, last_used_at, ...) are ' +
+      'ignored. It previews first and writes only when no line is an error, all rows at once; to see the ' +
+      'preview alone, use filament_spool_import_preview. Only what the user says. Writes ScadBuddy only.',
+    input: z.object({ rows: csvRows }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/spools/import'],
+    summarize: ({ rows }) => `Import ${rows.length} spool rows`,
+    handler: async ({ rows }, ctx) => {
+      const preview = await ok(
+        ctx.backend.POST('/api/v1/filament/spools/import', { body: { rows: rows as never, dry_run: true } }),
+        'preview the spools import',
+      )
+      const errors = preview.rows.filter((r) => r.action === 'error')
+      if (errors.length > 0) {
+        throw new ToolError(
+          `Nothing was imported: ${errors.map((r) => `line ${r.line}: ${r.error ?? ''}`).join('; ')}`,
+        )
+      }
+      // One key per call: a re-send after a lost answer gets the first result and writes nothing.
+      const headers = { 'Idempotency-Key': idempotencyKey(ctx) }
+      return json(
+        await ok(
+          ctx.backend.POST('/api/v1/filament/spools/import', {
+            body: { rows: rows as never, dry_run: false },
+            headers,
+          }),
+          'import the spools',
+        ),
+      )
+    },
   }),
 
   defineTool({

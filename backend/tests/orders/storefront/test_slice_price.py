@@ -8,14 +8,16 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from uuid import UUID
 
 import pytest
 
 from scadbuddy.bambuddy.choices import PrinterOpening
 from scadbuddy.bambuddy.filaments import FilamentPlan
-from scadbuddy.bambuddy.models import NozzleChoice, PresetRef, PrinterStatus
+from scadbuddy.bambuddy.models import NozzleChoice, PrinterStatus
 from scadbuddy.bambuddy.resolver import PrintChoices
 from scadbuddy.core.problems import ApiError
+from scadbuddy.filament.models import EffectivePreset
 from scadbuddy.library.settings_store import ModelPrintChoices, StoredSettings
 from scadbuddy.orders.models import MachineRateBreakdown, PricingPolicy
 from scadbuddy.orders.quote import QuoteRun, SlicedPlate, SliceQuoteRequest, quote_run
@@ -54,9 +56,27 @@ from tests.orders.test_quote import (
 
 pytestmark = pytest.mark.requires_postgres
 
-PLA_PRESET = PresetRef(source="standard", id="Bambu PLA Basic @BBL H2C")
-PETG_PRESET = PresetRef(source="standard", id="Bambu PETG HF @BBL H2C")
-PROFILE = StorefrontSliceProfile(printer="p-1", materials={"pla": PLA_PRESET, "petg": PETG_PRESET})
+PLA_TYPE = UUID("00000000-0000-4000-8000-0000000000a1")
+PETG_TYPE = UUID("00000000-0000-4000-8000-0000000000a2")
+PROFILE = StorefrontSliceProfile(printer="p-1", materials={"pla": PLA_TYPE, "petg": PETG_TYPE})
+
+
+def _preset(size: str, filament: str) -> EffectivePreset:
+    return EffectivePreset(
+        printer_model="H2C",
+        nozzle_diameter=size,
+        slicer_filament=filament,
+        slicer_filament_name=None,
+        overridden=False,
+    )
+
+
+#: Each type's presets, as `filament_spool_type_presets` holds them (#6574).
+TYPE_PRESETS = {
+    PLA_TYPE: [_preset("0.4", "Bambu PLA Basic @BBL H2C"), _preset("0.6", "GFA00_06")],
+    PETG_TYPE: [_preset("0.4", "Bambu PETG HF @BBL H2C")],
+}
+SLOT_PRESETS = {1: TYPE_PRESETS[PLA_TYPE], 2: TYPE_PRESETS[PETG_TYPE]}
 CHOICES = PrintChoices(nozzles=[NozzleChoice(size="0.4")])
 #: An H2C with a High Flow 0.4 mm nozzle, as Bambuddy recorded it.
 STATUS = PrinterStatus.model_validate(recording("printer-status-rack.json"))
@@ -120,14 +140,11 @@ def variant_of(
         model_sha256=SHA,
         reference=item.reference,
         slice=SliceQuoteRequest(
-            printer="p-1",
-            filament_plan=FilamentPlan(),
-            choices=CHOICES.model_copy(
-                update={"filament_overrides": {1: PLA_PRESET, 2: PETG_PRESET}}
-            ),
+            printer="p-1", filament_plan=FilamentPlan(ids="sb"), choices=CHOICES
         ),
         slot_filaments=[shop.pla, shop.petg],
         currency="USD",
+        slot_presets=SLOT_PRESETS,
         machine_rate=machine_rate,
     )
 
@@ -154,6 +171,8 @@ async def test_a_storefront_price_equals_the_back_office_quote_to_the_cent(
     assert row.printer == "p-1"
     assert (row.print_seconds, row.grams) == (7200, {"0": "22.5", "1": "5.0"})
     assert slicer.subjects == ["storefront_price:" + "a" * 64]
+    # #6574: each slot's type's presets reach the slice.
+    assert slicer.slot_presets == [SLOT_PRESETS]
 
 
 async def test_the_slice_run_saves_its_output_as_the_storefronts(
@@ -260,6 +279,7 @@ def test_the_key_changes_with_the_book_the_rate_the_filaments_and_the_profile(
         "filaments": [pla, petg],
         "profile": PROFILE,
         "choices": CHOICES,
+        "presets": SLOT_PRESETS,
         "currency": "USD",
         "policy": POLICY,
         "machine_rate": "0.89",
@@ -271,9 +291,11 @@ def test_the_key_changes_with_the_book_the_rate_the_filaments_and_the_profile(
         {"filaments": [petg, pla]},
         {
             "profile": PROFILE.model_copy(
-                update={"materials": {"pla": PETG_PRESET, "petg": PETG_PRESET}}
+                update={"materials": {"pla": PETG_TYPE, "petg": PETG_TYPE}}
             )
         },
+        # #6574: a type's preset edited is what the slicer gets, so a new key.
+        {"presets": {**SLOT_PRESETS, 2: [_preset("0.4", "Generic PETG @BBL H2C")]}},
         {"choices": CHOICES.model_copy(update={"bed_type": "Cool Plate"})},
         {"currency": "EUR"},
         {"policy": PricingPolicy(machine_rate_per_hour="2", setup_fee="0.5")},
@@ -281,6 +303,9 @@ def test_the_key_changes_with_the_book_the_rate_the_filaments_and_the_profile(
     ]
     for change in changed:
         assert price_key(**{**base, **change}) != key, change
+    # A preset for another nozzle is not what this slice gets.
+    other = {**SLOT_PRESETS, 2: [*SLOT_PRESETS[2], _preset("0.6", "GFG99")]}
+    assert price_key(**{**base, "presets": other}) == key
     dearer = pla.model_copy(update={"cost_per_kg": "25"})
     assert price_key(**{**base, "filaments": [dearer, petg]}) != key
     # #6574: a slot's colour changes the purges, so it is in the key.
@@ -288,7 +313,7 @@ def test_the_key_changes_with_the_book_the_rate_the_filaments_and_the_profile(
     assert price_key(**{**base, "filaments": [recoloured, petg]}) != key
 
 
-def test_a_variant_with_no_profile_or_no_preset_for_a_material_has_no_plan(
+def test_a_variant_with_no_profile_type_or_type_preset_has_no_plan(
     shop: Shop,
 ) -> None:
     item = shop.get_item()
@@ -304,18 +329,22 @@ def test_a_variant_with_no_profile_or_no_preset_for_a_material_has_no_plan(
         "policy": POLICY,
         "machine_rate": None,
         "printer": OPENING,
+        "type_presets": TYPE_PRESETS,
     }
     assert plan_variant(settings=StoredSettings(), **asked) is None
     only_pla = StoredSettings(
-        storefront_slice_profile=StorefrontSliceProfile(
-            printer="p-1", materials={"pla": PLA_PRESET}
-        )
+        storefront_slice_profile=StorefrontSliceProfile(printer="p-1", materials={"pla": PLA_TYPE})
     )
     assert plan_variant(settings=only_pla, **asked) is None
-    planned = plan_variant(settings=StoredSettings(storefront_slice_profile=PROFILE), **asked)
+    profiled = StoredSettings(storefront_slice_profile=PROFILE)
+    # #6574: a type with no preset for the H2C and the nozzle the dialog opens on (0.4).
+    no_04 = {**TYPE_PRESETS, PETG_TYPE: [_preset("0.6", "GFG99")]}
+    assert plan_variant(settings=profiled, **{**asked, "type_presets": no_04}) is None
+    planned = plan_variant(settings=profiled, **asked)
     assert planned is not None
     assert planned.variant.slice.filament_plan.slots == []
-    assert planned.variant.slice.choices.filament_overrides == {1: PLA_PRESET, 2: PETG_PRESET}
+    assert planned.variant.slice.choices.filament_overrides == {}
+    assert planned.variant.slot_presets == SLOT_PRESETS
     assert planned.variant.slice.printer == "p-1"
     # The profile names no support or process setting: the template's apply.
     assert planned.variant.slice.supports is None
@@ -341,6 +370,7 @@ async def test_a_live_rate_change_is_a_new_key_and_the_old_price_is_not_reused(
         "currency": "USD",
         "policy": POLICY,
         "printer": OPENING,
+        "type_presets": TYPE_PRESETS,
     }
     dearer = RATE.model_copy(update={"rate_per_hour": "5.00"})
     old = plan_variant(**asked, machine_rate=RATE)
@@ -374,6 +404,7 @@ def _planned_choices(shop: Shop, settings: StoredSettings, opening: PrinterOpeni
         policy=POLICY,
         machine_rate=None,
         printer=opening,
+        type_presets=TYPE_PRESETS,
     )
     return None if planned is None else planned.variant.slice.choices
 

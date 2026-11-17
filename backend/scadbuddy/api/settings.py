@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import timedelta
+from decimal import Decimal
 from typing import Any, Literal, Self
 
 import psycopg
@@ -50,9 +51,11 @@ from scadbuddy.core.settings import (
     APPLIES,
     BOOTSTRAP_FIELDS,
     Applies,
+    FilamentSync,
     Settings,
     env_var,
 )
+from scadbuddy.filament.component import FilamentDep
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.presets import PresetStore, TemplatePresetsUnreadableError
 from scadbuddy.library.settings_store import (
@@ -200,7 +203,7 @@ class SettingsView(BaseModel):
     storefront_payment_instructions: str | None = None
     #: The messaging plugin tool bound to "customer messages" (#5660); null is none.
     orders_customer_messaging: MessagingBinding | None = None
-    #: The shop slice profile (#6153, #6574): the printer and a filament preset per
+    #: The shop slice profile (#6153, #6574): the printer and a filament type per
     #: material; null is none, and the storefront then shows no price.
     storefront_slice_profile: StorefrontSliceProfile | None = None
     #: Whether a fulfilled line item may be unfulfilled (#4953); on by default.
@@ -287,6 +290,9 @@ class SettingsView(BaseModel):
     event_log_retention_rows: int
     flow_approval_timeout_seconds: int
     spool_overlay_refresh_seconds: int
+    filament_sync: FilamentSync = Field(default_factory=FilamentSync)
+    filament_low_stock_pct: int = 20
+    filament_default_cost_per_kg: Decimal | None = None
     log_level: str
     #: The Temporal web UI, which Settings → Administration links to (#668).
     temporal_ui_url: str | None = None
@@ -588,6 +594,7 @@ async def put_settings(
     state: StateDep,
     ops: OperationsDep,
     registry: PrintersDep,
+    filament: FilamentDep,
 ) -> SettingsView:
     """Saves the fields given; a ``null`` clears one and ``reset`` puts one back on the
     deployment's value. A live field applies before this answers, here and (through
@@ -597,12 +604,13 @@ async def put_settings(
     client's ``printer_id`` (a Bambuddy id) is saved as the registry printer that links
     it; ``default_printer`` sent beside it wins. 422 for a ``default_printer`` the
     registry does not hold, and for a ``printer_id`` no registry printer links. 422 for a
-    ``storefront_slice_profile`` whose printer the registry does not hold (#6153)."""
+    ``storefront_slice_profile`` whose printer the registry does not hold, or that names a
+    filament type that is archived or gone (#6153, #6574)."""
     _mail_connection_by_a_person(patch)
     _print_watch_by_a_person(patch)
     patch = await asyncio.to_thread(_default_printer, patch, registry)
     if patch.storefront_slice_profile is not None:
-        await check_profile(patch.storefront_slice_profile, registry)
+        await check_profile(patch.storefront_slice_profile, registry, filament)
     if patch.operation_retention_seconds is not None:
         await _check_operation_retention(store, ops, patch.operation_retention_seconds)
     if patch.git_remote_token and store.kek is None:

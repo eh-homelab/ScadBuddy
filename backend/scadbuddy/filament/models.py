@@ -10,12 +10,14 @@ are typed so. Every colour is an `Rgba`: ``#rrggbb`` is stored as ``#RRGGBBFF``.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Any, ClassVar, Literal
 from uuid import UUID
 
 from pydantic import (
+    AfterValidator,
     AwareDatetime,
     BaseModel,
     ConfigDict,
@@ -27,6 +29,17 @@ from pydantic import (
 from scadbuddy.filament.colour import Rgba
 
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
+
+
+def _not_any(value: str) -> str:
+    if value == "*":
+        raise ValueError("name one printer model and nozzle diameter, not *")
+    return value
+
+
+#: A preset's printer model or nozzle diameter: one, never ``*`` for any (#6262; the
+#: 0706Z migration's CHECK refuses it too).
+PresetKey = Annotated[Name, AfterValidator(_not_any)]
 SortOrder = Annotated[int, Field(ge=-1_000_000, le=1_000_000)]
 Idx = Annotated[int, Field(ge=0, le=1000)]
 CaliIdx = Annotated[int, Field(ge=-1, le=1_000_000)]
@@ -260,6 +273,8 @@ class InsertType(_Catalog):
     empty_weight_g: int
     insert_material_id: UUID | None
     note: str | None
+    #: Bambuddy's spool catalog entry this type is (the pull sets it; read only).
+    bb_catalog_id: int | None = None
 
 
 class ColourCreate(_In):
@@ -445,8 +460,8 @@ class SpoolType(_Row):
 
 
 class TypePresetCreate(_In):
-    printer_model: Name
-    nozzle_diameter: Name
+    printer_model: PresetKey
+    nozzle_diameter: PresetKey
     slicer_filament: Name
     slicer_filament_name: Text | None = None
 
@@ -534,6 +549,35 @@ class SpoolKValue(BaseModel):
     name: str | None
     cali_idx: int | None
     setting_id: str | None
+
+
+class EffectivePreset(BaseModel):
+    """A slicer preset a spool is printed with: its own row for the key, else its type's.
+    ``overridden`` is true for a row of the spool's own. ``migrated`` is true for an own
+    row the presets-per-nozzle migration made and no person has changed: the spool's
+    first type drops it (`presets.drop_migrated`)."""
+
+    printer_model: str
+    nozzle_diameter: str
+    slicer_filament: str
+    slicer_filament_name: str | None
+    overridden: bool
+    migrated: bool = False
+
+
+class EffectiveKValue(BaseModel):
+    """A pressure-advance value a spool is printed with: its own row for the key, else
+    its type's. ``overridden`` is true for a row of the spool's own."""
+
+    printer_id: UUID
+    extruder: int
+    nozzle_diameter: str
+    nozzle_type: str | None
+    k_value: Decimal
+    name: str | None
+    cali_idx: int | None
+    setting_id: str | None
+    overridden: bool
 
 
 # -- spools ---------------------------------------------------------------------------
@@ -624,6 +668,18 @@ class SpoolPatch(_Patch):
     archived: bool | None = None
 
 
+class SpoolNames(BaseModel):
+    """The names behind a spool's effective ids, and its place's name."""
+
+    brand: str | None = None
+    material: str | None = None
+    subtype: str | None = None
+    category: str | None = None
+    effect: str | None = None
+    insert_type: str | None = None
+    location: str | None = None
+
+
 class Spool(_Row):
     number: int
     type_id: UUID | None
@@ -660,6 +716,230 @@ class Spool(_Row):
     effective: EffectiveValues = Field(default_factory=EffectiveValues)
     #: The names of the fields the spool overrides.
     overridden: list[str] = Field(default_factory=list)
+    #: The text of the effective catalog rows and of the spool's place.
+    names: SpoolNames = Field(default_factory=lambda: SpoolNames())
+    #: Server-computed (F3): the grams left are under the spool's effective low-stock
+    #: percentage of its label weight, else the default's. False when either is unknown.
+    low_stock: bool = False
+
+
+# -- the trays (`filament/inventory.py`) ----------------------------------------------
+
+#: How a tray's spool was found: its tag's binding, or a person's link.
+TrayFoundBy = Literal["tag", "link"]
+
+
+class TrayHolder(BaseModel):
+    """One reported tray and the SB spool in it, with how it was found."""
+
+    ams_id: int
+    tray_id: int
+    spool: Spool | None
+    found_by: TrayFoundBy | None
+
+
+class TrayView(BaseModel):
+    """A printer's reported trays, and the unarchived spools no printer holds. Here, not
+    in `filament/inventory.py`, so the print dialog's modules (`bambuddy/trays.py`) read
+    it without importing the inventory, which imports them (#6262 Task 5)."""
+
+    trays: list[TrayHolder]
+    shelf: list[Spool]
+
+
+class TrayPlace(BaseModel):
+    """The tray an SB spool is in (#6262 Task 7, `FilamentInventory.rows`): its
+    registry printer, that printer's Bambuddy id and name, and the tray. ``printer_id``
+    is ``None`` only for a Bambuddy assignment on a printer the registry has no row for
+    yet; ``bambuddy_printer_id`` is ``None`` for a printer reached over the LAN alone."""
+
+    printer_id: str | None
+    bambuddy_printer_id: int | None
+    printer_name: str | None
+    ams_id: int
+    tray_id: int
+
+
+class FilamentInventorySpool(BaseModel):
+    """An SB spool, the tray it is in, and the Bambuddy spool it is linked to
+    (`filament_bb_links`), as the Bambuddy path's print picker (#6262 Task 7) and
+    ``GET /filament/inventory`` (Task 9) read it. Named apart from Bambuddy's inventory
+    spool (plan F16)."""
+
+    spool: Spool
+    loaded: TrayPlace | None = None
+    bb_spool_id: int | None = None
+    #: The spool's effective presets (`presets.effective_presets`), so its row names the
+    #: preset it slices with on the chosen nozzle (#6262 Task 7 review R2).
+    presets: list[EffectivePreset] = Field(default_factory=list)
+
+
+class InventoryTray(BaseModel):
+    """One filled tray a registry printer's latest report shows (#6262 Task 9): its label,
+    the material and ``#RRGGBBAA`` it reports, and the SB spool it holds
+    (`FilamentInventory.view`), with how that spool was found."""
+
+    ams_id: int
+    tray_id: int
+    #: "AMS-A slot 1", as Bambu's own UI counts.
+    label: str
+    material: str | None = None
+    rgba: str | None = None
+    spool_id: UUID | None = None
+    spool_number: int | None = None
+    found_by: TrayFoundBy | None = None
+
+
+class PrinterTrays(BaseModel):
+    """A registry printer's reported trays, as its latest stored report shows them."""
+
+    printer_id: str
+    printer_name: str
+    trays: list[InventoryTray]
+
+
+class FilamentInventoryView(BaseModel):
+    """ScadBuddy's spools, each with the tray it is in, and every registry printer's
+    reported trays with the SB spool each holds (`GET /filament/inventory`, #6262 Task 9).
+    Named apart from Bambuddy's ``InventoryView`` (plan F16)."""
+
+    spools: list[FilamentInventorySpool]
+    trays: list[PrinterTrays]
+
+
+class SameFilamentPlace(BaseModel):
+    """Where one spool of a filament is loaded."""
+
+    spool_id: UUID
+    spool_number: int
+    loaded: TrayPlace
+
+
+class SameFilamentStock(BaseModel):
+    """Every unarchived SB spool of one filament: the same effective material, subtype,
+    brand and ``#RRGGBBAA`` (the colour's name for a spool with none). An opaque and a
+    translucent spool of one hue are two filaments (#6316)."""
+
+    material: str | None = None
+    subtype: str | None = None
+    brand: str | None = None
+    colour_name: str | None = None
+    rgba: str | None = None
+    spool_count: int
+    spool_numbers: list[int]
+    #: The spools' grams left (their ledgers), summed.
+    grams_left: float
+    #: Where the filament's spools are loaded, one row per loaded spool.
+    loaded: list[SameFilamentPlace]
+
+
+class FilamentSpoolSummary(BaseModel):
+    """What a filament hover card shows for one SB spool (#785, #6262 Task 9): its stock,
+    tray and price, and the stock of every spool of the same filament. Prices are the
+    spool's effective ``cost_per_kg``; every price and cost is ``None`` without one,
+    never a guess."""
+
+    spool: FilamentInventorySpool
+    cost_per_kg: Decimal | None = None
+    #: ``cost_per_kg`` / 1000, to six places.
+    price_per_g: float | None = None
+    #: What the grams left on this spool are worth, to four places.
+    value_left: float | None = None
+    #: ``grams`` x ``price_per_g``, when the caller asked about ``grams`` (a plate's use).
+    grams: float | None = None
+    grams_cost: float | None = None
+    filament: SameFilamentStock
+
+
+class HeldSpool(BaseModel):
+    """What a tray's picker row and its low-filament warnings read of the SB spool in it
+    (`bambuddy/trays.py` `loaded_trays`): its id and number, its effective brand and
+    colour names, ``rgba`` and label weight, and the ledger's grams. Nothing else, so
+    the background slice's request stays small (#6262, ``MAX_REQUEST_BYTES``)."""
+
+    id: UUID
+    number: int
+    needs_type: bool
+    brand: str | None = None
+    colour_name: str | None = None
+    rgba: str | None = None
+    grams_left: float | None = None
+    label_weight_g: int | None = None
+
+    @classmethod
+    def of(cls, spool: Spool) -> HeldSpool:
+        effective = spool.effective
+        return cls(
+            id=spool.id,
+            number=spool.number,
+            needs_type=spool.type_id is None,
+            brand=spool.names.brand,
+            colour_name=effective.colour_name,
+            rgba=effective.rgba,
+            grams_left=spool.grams_left,
+            label_weight_g=effective.label_weight_g,
+        )
+
+
+class HeldTray(BaseModel):
+    """One reported tray and the SB spool in it, as :class:`HeldSpool`."""
+
+    ams_id: int
+    tray_id: int
+    spool: HeldSpool
+
+
+class SbSpools(BaseModel):
+    """What a native run's plan reads of ScadBuddy's own spools, read on the API and
+    carried where no database is (#6262): the dialog's background slice runs on the print
+    worker (`bambuddy/operations.py` `preview_run`), so its route reads these first and
+    sends them in the operation's request, out of its key (``unkeyed``: the API's read,
+    not the client's request). ``trays`` are the trays that hold one; ``spool_presets``
+    the held spools' own, by SB number. It is a held view itself (:data:`HeldTrays`,
+    with no shelf: a plan's choices are the trays) and a `filament/presets.py`
+    `SpoolPresetSource`; a native plan has no Bambuddy client, so it names no Bambuddy
+    spool."""
+
+    trays: list[HeldTray] = Field(default_factory=list)
+    spool_presets: dict[int, list[EffectivePreset]] = Field(default_factory=dict)
+
+    @property
+    def shelf(self) -> list[Spool]:
+        return []
+
+    @classmethod
+    def of(
+        cls,
+        view: TrayView,
+        spool_presets: dict[int, list[EffectivePreset]],
+        printer_model: str,
+    ) -> SbSpools:
+        """``view``'s held trays, and only ``printer_model``'s preset rows: the plan reads
+        no other (`resolver.PRINTER_MODEL`), so other printers' rows never grow the
+        request."""
+        return cls(
+            trays=[
+                HeldTray(ams_id=tray.ams_id, tray_id=tray.tray_id, spool=HeldSpool.of(tray.spool))
+                for tray in view.trays
+                if tray.spool is not None
+            ],
+            spool_presets={
+                number: [row for row in rows if row.printer_model == printer_model]
+                for number, rows in spool_presets.items()
+            },
+        )
+
+    async def presets(self, numbers: Sequence[int]) -> dict[int, list[EffectivePreset]]:
+        rows = self.spool_presets
+        return {number: rows[number] for number in numbers if number in rows}
+
+    async def bb_spools(self, numbers: Sequence[int]) -> dict[int, int]:
+        return {}
+
+
+#: The SB spool in each tray as the print dialog's modules read it: the inventory's
+#: full view, or the background slice's :class:`SbSpools`.
+HeldTrays = TrayView | SbSpools
 
 
 # -- tags, bindings, the ledger -------------------------------------------------------
@@ -857,3 +1137,78 @@ class BbLink(BaseModel):
     bb_updated_at: datetime | None
     pushed_hash: str | None
     linked_at: datetime
+
+
+# -- reads for the Filament section (#6262) ----------------------------------------
+
+
+class GramsBasis(BaseModel):
+    """What a spool's ``grams_left`` is made of: the reading it anchors on and the
+    deltas taken off it, oldest first."""
+
+    anchor: SpoolEvent | None
+    deltas: list[SpoolEvent]
+
+
+class LastTag(BaseModel):
+    """The tag a spool had before, how its binding ended, and the number of the spool
+    that holds the tag now."""
+
+    tag: Tag
+    unbound_at: datetime
+    reason: str | None
+    held_by: int | None
+
+
+class SpoolDetail(Spool):
+    """A spool with what its page shows: its tags, effective presets and K values, the
+    basis of its grams and whether it ever printed."""
+
+    #: The tag bound to it now.
+    tag: Tag | None = None
+    last_tag: LastTag | None = None
+    presets: list[EffectivePreset] = Field(default_factory=list)
+    k_values: list[EffectiveKValue] = Field(default_factory=list)
+    basis: GramsBasis
+    #: Any ``print_started`` or ``print_ended`` event: the spool is archived, not deleted.
+    in_use: bool = False
+
+
+class TagRow(Tag):
+    binding: TagBinding | None = None
+    spool_number: int | None = None
+
+
+class TagDetail(TagRow):
+    #: Every binding of the tag, newest first.
+    history: list[TagBinding] = Field(default_factory=list)
+
+
+class LedgerRow(SpoolEvent):
+    spool_number: int
+
+
+class EventPage(BaseModel):
+    events: list[LedgerRow]
+    #: Opaque: pass it back as ``cursor`` for the next page; ``None`` on the last.
+    next_cursor: str | None = None
+
+
+class MaterialStock(BaseModel):
+    material: str | None
+    spools: int
+    grams_left: float
+
+
+class InventorySummary(BaseModel):
+    """The unarchived spools in total."""
+
+    spools: int
+    grams_left: float
+    #: Grams left at each spool's effective cost per kg; ``None`` when none has a cost.
+    value_left: Decimal | None
+    by_material: list[MaterialStock]
+    #: Spools whose place is a printer's tray (a location with ``printer_id`` set).
+    loaded: int
+    low_stock: int
+    needs_type: int

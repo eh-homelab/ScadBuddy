@@ -128,10 +128,27 @@ def operation_key(
     unkeyed: frozenset[str] = frozenset(),
 ) -> str:
     """The kind, its subject, the canonical body and the client's key (§4.2 step 1);
-    without the kind's ``unkeyed`` fields."""
+    without the kind's ``unkeyed`` fields, or a plan's default ``ids`` (`without_bb_ids`)."""
     keyed = {k: v for k, v in request.items() if k not in unkeyed} if unkeyed else request
-    canonical = json.dumps(keyed, sort_keys=True, separators=(",", ":"))
+    canonical = json.dumps(without_bb_ids(keyed), sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(f"{kind}\n{subject}\n{canonical}\n{request_id}".encode()).hexdigest()
+
+
+def without_bb_ids(body: dict[str, Any]) -> dict[str, Any]:
+    """``body`` without its ``filament_plan``'s ``ids`` when that is the default,
+    ``"bb"``: the key of a body from before #6262 Task 7, which had no ``ids``, so a
+    retry that spans the deploy joins its run (review I1). ``"sb"`` stays in the key. A
+    body that holds its print request one level down (the preview slice's ``request``)
+    is stripped there too (re-review M-d)."""
+    inner = body.get("request")
+    if isinstance(inner, dict):
+        stripped = without_bb_ids(inner)
+        if stripped is not inner:
+            body = {**body, "request": stripped}
+    plan = body.get("filament_plan")
+    if not isinstance(plan, dict) or plan.get("ids") != "bb":
+        return body
+    return {**body, "filament_plan": {k: v for k, v in plan.items() if k != "ids"}}
 
 
 class ThreadSteps:

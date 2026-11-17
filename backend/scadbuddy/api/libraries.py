@@ -58,6 +58,7 @@ from scadbuddy.library.libraries import (
     NAME_PATTERN,
     REF_PATTERN,
     CatalogueLibrary,
+    HoldLostError,
     LibraryDeclarationError,
     LibraryNotInstalledError,
     declared_libraries,
@@ -479,7 +480,8 @@ def install_library_handlers(app: FastAPI) -> None:
     """A model declaring a library that is not on the volume is a 409 from every
     route that resolves its source -- schema, render, check -- rather than each one
     catching it, or the 500 an uncaught one would be. So is one whose `libraries`
-    entry cannot be read: the model cannot render until it is pinned again."""
+    entry cannot be read: the model cannot render until it is pinned again. A pin's hold
+    or install slot that lapsed while the route ran is a 503 to try again (#6560)."""
 
     @app.exception_handler(LibraryNotInstalledError)
     async def _not_installed(request: Request, exc: LibraryNotInstalledError) -> JSONResponse:
@@ -493,3 +495,7 @@ def install_library_handlers(app: FastAPI) -> None:
             str(exc.args[0]),
             title="Invalid Library Declaration",
         )
+
+    @app.exception_handler(HoldLostError)
+    async def _hold_lost(request: Request, exc: HoldLostError) -> JSONResponse:
+        return problem_response(request, status.HTTP_503_SERVICE_UNAVAILABLE, str(exc))

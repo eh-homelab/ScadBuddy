@@ -14,7 +14,7 @@ type V1PrintLibraryItemFilamentsRequestBuilder struct {
 	i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.BaseRequestBuilder
 }
 
-// V1PrintLibraryItemFilamentsRequestBuilderGetQueryParameters as “/print/outputs/{id}/filaments“: on a native run (“printer“, D2) the printer's trays with the providers' records over them (D1), and no Bambuddy call.
+// V1PrintLibraryItemFilamentsRequestBuilderGetQueryParameters as “/print/outputs/{id}/filaments“: on a native run (“printer“, D2) the printer's trays with the SB spool in each (D1, #6262), and no Bambuddy call.
 type V1PrintLibraryItemFilamentsRequestBuilderGetQueryParameters struct {
 	All_plates       *bool   "uriparametername:\"all_plates\""
 	Max_objects      *int32  "uriparametername:\"max_objects\""
@@ -53,7 +53,7 @@ func NewV1PrintLibraryItemFilamentsRequestBuilder(rawUrl string, requestAdapter 
 	return NewV1PrintLibraryItemFilamentsRequestBuilderInternal(urlParams, requestAdapter)
 }
 
-// Get as “/print/outputs/{id}/filaments“: on a native run (“printer“, D2) the printer's trays with the providers' records over them (D1), and no Bambuddy call.
+// Get as “/print/outputs/{id}/filaments“: on a native run (“printer“, D2) the printer's trays with the SB spool in each (D1, #6262), and no Bambuddy call.
 // returns a FilamentOptionsable when successful
 // returns a HTTPValidationError error when the service returns a 422 status code
 func (m *V1PrintLibraryItemFilamentsRequestBuilder) Get(ctx context.Context, requestConfiguration *V1PrintLibraryItemFilamentsRequestBuilderGetRequestConfiguration) (i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.FilamentOptionsable, error) {
@@ -74,7 +74,7 @@ func (m *V1PrintLibraryItemFilamentsRequestBuilder) Get(ctx context.Context, req
 	return res.(i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.FilamentOptionsable), nil
 }
 
-// ToGetRequestInformation as “/print/outputs/{id}/filaments“: on a native run (“printer“, D2) the printer's trays with the providers' records over them (D1), and no Bambuddy call.
+// ToGetRequestInformation as “/print/outputs/{id}/filaments“: on a native run (“printer“, D2) the printer's trays with the SB spool in each (D1, #6262), and no Bambuddy call.
 // returns a *RequestInformation when successful
 func (m *V1PrintLibraryItemFilamentsRequestBuilder) ToGetRequestInformation(ctx context.Context, requestConfiguration *V1PrintLibraryItemFilamentsRequestBuilderGetRequestConfiguration) (*i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestInformation, error) {
 	requestInfo := i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewRequestInformationWithMethodAndUrlTemplateAndPathParameters(i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.GET, m.BaseRequestBuilder.UrlTemplate, m.BaseRequestBuilder.PathParameters)

@@ -25,4 +25,16 @@ def is_translucent(rgba: str) -> bool:
     return int(normalise_rgba(rgba)[7:9], 16) < 0xFF
 
 
+def same_opacity(left: str | None, right: str | None) -> bool:
+    """Whether two colours are both opaque or both translucent (spec §5.1, plan #6262
+    Decision 12): a translucent spool never matches an opaque one by colour alone.
+    ``#RRGGBB`` and ``None`` read as opaque. Mirrored by ``sameOpacity`` in
+    ``frontend/src/lib/rgba.ts``."""
+    return _translucent(left) == _translucent(right)
+
+
+def _translucent(colour: str | None) -> bool:
+    return colour is not None and is_translucent(colour)
+
+
 Rgba = Annotated[str, AfterValidator(normalise_rgba)]

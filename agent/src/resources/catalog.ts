@@ -290,7 +290,9 @@ export const RESOURCES: readonly ResourceDef[] = [
     template: 'scadbuddy://print/inventory',
     name: 'print-inventory',
     title: 'Spool inventory',
-    description: 'Every spool with what is left and where it is loaded, and each loaded slot with its remaining grams.',
+    description:
+      "ScadBuddy's spools with what is left and the tray each is in, and each registry printer's reported trays " +
+      'with the spool each holds.',
     mimeType: JSON_TYPE,
     tool: 'get_spool_inventory',
   },

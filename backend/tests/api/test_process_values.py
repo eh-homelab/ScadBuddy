@@ -17,7 +17,7 @@ from tests.api.test_print_run_choices import body, run_print, run_routes
 from tests.api.test_print_supports import routes
 from tests.api.test_send import configure, upload_route
 
-pytestmark = pytest.mark.requires_postgres
+pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("recorded_sb_spools")]
 
 CHOICES = {"nozzles": [{"size": "0.2"}], "tier": "fine"}
 

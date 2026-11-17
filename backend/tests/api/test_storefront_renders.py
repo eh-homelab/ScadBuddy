@@ -22,13 +22,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.bambuddy.choices import PrinterOpening
-from scadbuddy.bambuddy.models import PresetRef, PrinterStatus
+from scadbuddy.bambuddy.models import PrinterStatus
 from scadbuddy.bambuddy.preview import PreviewStarted
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import SettingsPatch
 from scadbuddy.orders import operations as order_operations
 from scadbuddy.orders.component import ORDERS, OrdersComponent
-from scadbuddy.orders.quote import SlicedPlate, SliceQuoteRequest
+from scadbuddy.orders.quote import SlicedPlate, SliceQuoteRequest, SlotPresets
 from scadbuddy.orders.storefront import renders as renders_module
 from scadbuddy.orders.storefront.renders import RENDER_FAILED, store_render
 from scadbuddy.orders.storefront.slice_profile import StorefrontSliceProfile
@@ -59,6 +59,7 @@ from tests.api.test_storefront_listings import (  # noqa: F401  (fixtures)
 from tests.api.test_storefront_public import CRUD, TOKEN_A, bearer
 from tests.bambuddy.conftest import recording
 from tests.support.operations import press
+from tests.support.sb_rows import seed_app_type
 from tests.support.sliced3mf import sliced_3mf
 
 pytestmark = pytest.mark.requires_postgres
@@ -438,15 +439,20 @@ class FakeSlicer:
     its sliced file ``file``, and every start kept."""
 
     file: ClassVar[bytes] = sliced_3mf(plates={1: (3600, [10.0])}, gcode={1: b"M620 S0A\n"})
-    started: ClassVar[list[tuple[str, SliceQuoteRequest, str]]] = []
+    started: ClassVar[list[tuple[str, SliceQuoteRequest, str, SlotPresets | None]]] = []
 
     def __init__(self, *_args: Any) -> None:
         pass
 
     async def start(
-        self, output_id: str, request: SliceQuoteRequest, subject: str
+        self,
+        output_id: str,
+        request: SliceQuoteRequest,
+        subject: str,
+        *,
+        slot_presets: SlotPresets | None = None,
     ) -> list[PreviewStarted]:
-        FakeSlicer.started.append((output_id, request, subject))
+        FakeSlicer.started.append((output_id, request, subject, slot_presets))
         return [PreviewStarted(job_id=1, plate_id=1)]
 
     async def poll(self, started: PreviewStarted, subject: str) -> SlicedPlate | None:
@@ -458,8 +464,9 @@ class FakeSlicer:
 
 @pytest.fixture
 def sliced(crud: CrudCaller, monkeypatch: pytest.MonkeyPatch) -> type[FakeSlicer]:
-    """The shop slice profile set (printer ``p-1``, a preset for PLA and PETG), a fake
-    slicer in `PreviewSlicer`'s place, and the printer's status read (#6574)."""
+    """The shop slice profile set (printer ``p-1``, a filament type for PLA and PETG, each
+    with an H2C 0.4 preset), a fake slicer in `PreviewSlicer`'s place, and the printer's
+    status read (#6574)."""
     import scadbuddy.orders.storefront.slice_price as slice_price
 
     monkeypatch.setattr(FakeSlicer, "started", [])
@@ -473,8 +480,8 @@ def sliced(crud: CrudCaller, monkeypatch: pytest.MonkeyPatch) -> type[FakeSlicer
     profile = StorefrontSliceProfile(
         printer="p-1",
         materials={
-            "pla": PresetRef(source="standard", id="Bambu PLA Basic @BBL H2C"),
-            "petg": PresetRef(source="standard", id="Bambu PETG HF @BBL H2C"),
+            "pla": seed_app_type(crud.api, "PLA-W", "PLA", {"0.4": "Bambu PLA Basic @BBL H2C"}),
+            "petg": seed_app_type(crud.api, "PETG-W", "PETG", {"0.4": "Bambu PETG HF @BBL H2C"}),
         },
     )
     _state(crud.api).settings_store.save(SettingsPatch(storefront_slice_profile=profile))
@@ -509,15 +516,18 @@ def test_the_price_is_a_slice_through_the_quote_path(
     assert est["grams"] == {"0": "10.0"} and est["print_seconds"] == 3600
     assert len(est["price_key"]) == 64
     assert "per kg" not in str(est) and "Markup" not in str(est)
-    [(output_id, request, subject)] = sliced.started
+    [(output_id, request, subject, slot_presets)] = sliced.started
     assert subject == f"storefront_price:{est['price_key']}"
-    # The profile gives the printer and the material's preset (no spool, #6574); the
-    # printer's status the nozzle flow; the template gives supports.
+    # The profile gives the printer and the material's filament type, whose preset the
+    # slot takes with no spool (#6574); the printer's status the nozzle flow; the
+    # template gives supports.
     assert request.printer == "p-1" and request.supports is None
     assert request.filament_plan.slots == []
-    assert request.choices.filament_overrides == {
-        1: PresetRef(source="standard", id="Bambu PLA Basic @BBL H2C")
-    }
+    assert request.choices.filament_overrides == {}
+    assert slot_presets is not None
+    assert [(p.nozzle_diameter, p.slicer_filament) for p in slot_presets[1]] == [
+        ("0.4", "Bambu PLA Basic @BBL H2C")
+    ]
     assert {n.flow for n in request.choices.nozzles} == {"high_flow"}
     with _state(crud.api).projection.pool.connection() as conn:
         row = conn.execute(
