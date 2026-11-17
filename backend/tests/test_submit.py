@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -45,7 +46,7 @@ from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.tracing import use_traceparent
 from scadbuddy.crud import render as crud_render_module
-from scadbuddy.crud.client import CrudSyncClient
+from scadbuddy.crud.client import CrudSyncClient, CrudUnavailableError
 from scadbuddy.crud.guard import CRUD_HEADERS
 from scadbuddy.crud.render import RemoteJobProjection
 from scadbuddy.library.assets import AssetStore
@@ -87,6 +88,7 @@ from scadbuddy.workflows.commands import (
 )
 from scadbuddy.workflows.models import (
     ACCEPT_ACTIVITY,
+    ACCEPT_TRANSIENT,
     CLAIMS_ACTIVITY,
     RELEASE_UPDATE,
     RENDER_UNSTARTABLE,
@@ -1816,13 +1818,15 @@ async def test_an_older_builds_start_renders_its_row_on_this_worker(
     assert described.status == WorkflowExecutionStatus.COMPLETED
 
 
-async def _still_accepting(make_service: ServiceFactory, deps: WorkerDeps) -> int:
+async def _still_accepting(
+    make_service: ServiceFactory, deps: WorkerDeps, acts: ProjectingActivities | None = None
+) -> int:
     """Submits once on ``deps`` and expects the request still accepting; how many accepts
-    the worker made."""
+    the worker made (through ``acts``, the plain projecting fakes by default)."""
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
         service = make_service(client, queue)
-        acts = ProjectingActivities(deps)
+        acts = ProjectingActivities(deps) if acts is None else acts
         async with _worker(client, queue, acts):
             with pytest.raises(CommandStillAcceptingError):
                 await service.submit(SLUG, {"width": _w()}, request_id=uuid.uuid4().hex)
@@ -1881,25 +1885,88 @@ async def test_a_database_outage_at_the_accept_route_is_still_accepting_not_a_50
     assert await _still_accepting(make_service, deps) >= ACCEPT_RETRY.maximum_attempts
 
 
-def _slow_accepts(
-    projection: JobProjection, monkeypatch: pytest.MonkeyPatch, slow: int
-) -> list[float]:
-    """The API's accept answers past the worker's wait (`ACCEPT_TIMEOUT`, and with it
-    `ACCEPT_BUDGET`, scaled down: no try follows a timed-out one in the same call) its
-    first ``slow`` times, then at once; each still writes. The calls' times."""
-    monkeypatch.setattr(crud_render_module, "ACCEPT_TIMEOUT", 0.5)
-    monkeypatch.setattr(crud_render_module, "ACCEPT_BUDGET", 0.25)
-    accept = projection.accept
-    calls: list[float] = []
+#: How long a held accept or a waiting retry waits at most: a guard so that a broken
+#: test fails instead of hanging. No outcome depends on it.
+HOLD_GUARD = 60.0
 
-    def slowly(*args: Any, **kwargs: Any) -> Job:
-        calls.append(time.monotonic())
-        if len(calls) <= slow:
-            time.sleep(1.0)
-        return accept(*args, **kwargs)
 
-    monkeypatch.setattr(projection, "accept", slowly)
-    return calls
+class SlowAccepts:
+    """The API's accept answers past the worker's wait its first ``slow`` times, then at
+    once; each still writes, before it waits. A slow call answers only after a worker
+    attempt fails later than the call arrived (or at `finish`), so no slow call can
+    answer the attempt in flight, however late its request reaches the handler: each
+    such attempt ends in a read timeout on any runner (#6547). `ACCEPT_TIMEOUT`, and with
+    it `ACCEPT_BUDGET`, are scaled down: no try follows a timed-out one in the same call."""
+
+    def __init__(self, projection: JobProjection, monkeypatch: pytest.MonkeyPatch, slow: float):
+        monkeypatch.setattr(crud_render_module, "ACCEPT_TIMEOUT", 0.5)
+        monkeypatch.setattr(crud_render_module, "ACCEPT_BUDGET", 0.25)
+        self._accept = projection.accept
+        self._slow = slow
+        self._calls = 0
+        self._failures = 0
+        self._finished = False
+        self._changed = threading.Condition()
+        #: Set once the first call has written its row.
+        self.written = threading.Event()
+        monkeypatch.setattr(projection, "accept", self._slowly)
+
+    def _slowly(self, *args: Any, **kwargs: Any) -> Job:
+        with self._changed:
+            self._calls += 1
+            slow = self._calls <= self._slow
+            seen = self._failures
+        job = self._accept(*args, **kwargs)
+        self.written.set()
+        if slow:
+            with self._changed:
+                self._changed.wait_for(
+                    lambda: self._failures > seen or self._finished, timeout=HOLD_GUARD
+                )
+        return job
+
+    def failed(self) -> None:
+        """A worker attempt failed: the calls held before it answer."""
+        with self._changed:
+            self._failures += 1
+            self._changed.notify_all()
+
+    def finish(self) -> None:
+        """Every held call answers."""
+        with self._changed:
+            self._finished = True
+            self._changed.notify_all()
+
+
+class SlowAcceptActivities(ProjectingActivities):
+    """The projecting fakes over `SlowAccepts`: each accept attempt's error, in order. A
+    retry waits for the first call's write, so it finds that row (and no slow call it
+    held can answer it)."""
+
+    def __init__(self, deps: WorkerDeps, slow: SlowAccepts) -> None:
+        super().__init__(deps)
+        self.slow = slow
+        self.errors: list[BaseException] = []
+
+    @activity.defn(name=ACCEPT_ACTIVITY)
+    async def render_accept(self, accept: AcceptRender) -> Job:
+        if activity.info().attempt > 1:
+            await asyncio.to_thread(self.slow.written.wait, HOLD_GUARD)
+        try:
+            return await super().render_accept(accept)
+        except BaseException as error:
+            self.errors.append(error)
+            self.slow.failed()
+            raise
+
+
+def _read_timeout(error: BaseException) -> bool:
+    """Whether ``error`` is the CRUD client's transport failure for a read timeout."""
+    return (
+        isinstance(error, CrudUnavailableError)
+        and error.failure == "transport"
+        and "ReadTimeout" in str(error)
+    )
 
 
 async def test_an_api_slow_on_every_accept_is_still_accepting_not_a_500(
@@ -1910,9 +1977,19 @@ async def test_an_api_slow_on_every_accept_is_still_accepting_not_a_500(
 ) -> None:
     """A read timeout fails the first attempts but passes on the last: a persistently
     slow API is a state that passes (`pipelines.ACCEPT_RETRY`)."""
-    calls = _slow_accepts(projection, monkeypatch, slow=ACCEPT_RETRY.maximum_attempts)
-    assert await _still_accepting(make_service, deps) == ACCEPT_RETRY.maximum_attempts
-    assert len(calls) == ACCEPT_RETRY.maximum_attempts
+    slow = SlowAccepts(projection, monkeypatch, slow=math.inf)
+    acts = SlowAcceptActivities(deps, slow)
+    try:
+        accepts = await _still_accepting(make_service, deps, acts)
+    finally:
+        slow.finish()
+    assert accepts == ACCEPT_RETRY.maximum_attempts
+    *retried, last = acts.errors
+    assert len(retried) == ACCEPT_RETRY.maximum_attempts - 1
+    assert all(_read_timeout(error) for error in retried), retried
+    # The last attempt's read timeout passes: still accepting, never render-unstartable.
+    assert isinstance(last, ApplicationError) and last.type == ACCEPT_TRANSIENT, last
+    assert last.__cause__ is not None and _read_timeout(last.__cause__), last.__cause__
 
 
 async def test_a_slow_first_accept_is_retried_in_the_same_run(
@@ -1922,17 +1999,21 @@ async def test_a_slow_first_accept_is_retried_in_the_same_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The retry finds the row the slow attempt committed, by its workflow ids."""
-    _slow_accepts(projection, monkeypatch, slow=1)
-    async with temporal_client() as client:
-        queue = f"t-{uuid.uuid4().hex[:8]}"
-        service = make_service(client, queue)
-        acts = ProjectingActivities(deps)
-        async with _worker(client, queue, acts):
-            job = await service.submit(SLUG, {"width": _w()})
-            await _settled(projection, job.id)
-        await service.aclose()
+    slow = SlowAccepts(projection, monkeypatch, slow=1)
+    acts = SlowAcceptActivities(deps, slow)
+    try:
+        async with temporal_client() as client:
+            queue = f"t-{uuid.uuid4().hex[:8]}"
+            service = make_service(client, queue)
+            async with _worker(client, queue, acts):
+                job = await service.submit(SLUG, {"width": _w()})
+                await _settled(projection, job.id)
+            await service.aclose()
+    finally:
+        slow.finish()
 
     assert acts.accepts == 2
+    assert len(acts.errors) == 1 and _read_timeout(acts.errors[0]), acts.errors
     with projection.pool.connection() as conn:
         rows = conn.execute(
             "SELECT id, workflow_run_id FROM render_jobs WHERE workflow_id = %s",
