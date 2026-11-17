@@ -5,6 +5,8 @@ and pulls Bambuddy's spools; the spool providers and their overlay are gone."""
 from __future__ import annotations
 
 import uuid
+from types import SimpleNamespace
+from typing import Any
 from collections.abc import AsyncIterator
 from contextlib import suppress
 from datetime import timedelta
@@ -19,7 +21,7 @@ from temporalio.client import (
 from temporalio.service import RPCError
 from temporalio.worker import Worker
 
-from scadbuddy.spools.activities import spool_activities
+from scadbuddy.spools.activities import capture_backstop_activity, spool_activities
 from scadbuddy.workflows.spool_refresh import (
     CAPTURE_ACTIVITY,
     FILAMENT_PULL_ACTIVITY,
@@ -125,6 +127,27 @@ async def test_a_failed_backstop_still_completes_the_run(client: Client) -> None
         )
     assert outcome == {}
     assert calls == ["held", "pull", "capture"]
+
+
+async def test_the_backstop_activity_answers_captured_or_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """It never raises: a store that fails answers ``failed``, one that works ``captured``."""
+    from scadbuddy.filament import capture
+
+    seen: list[list[str]] = []
+    monkeypatch.setattr(capture, "reconcile_all", lambda pool, ids, *, now: seen.append(list(ids)))
+    working = SimpleNamespace(
+        store=SimpleNamespace(list=lambda: [SimpleNamespace(id="p1")], pool=object())
+    )
+    assert await capture_backstop_activity(working)() == "captured"  # type: ignore[arg-type]
+    assert seen == [["p1"]]
+
+    def down() -> list[Any]:
+        raise RuntimeError("the database is down")
+
+    failing = SimpleNamespace(store=SimpleNamespace(list=down, pool=object()))
+    assert await capture_backstop_activity(failing)() == "failed"  # type: ignore[arg-type]
 
 
 async def test_the_retired_activities_answer_as_an_open_run_expects() -> None:

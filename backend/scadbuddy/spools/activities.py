@@ -70,7 +70,7 @@ def filament_pull_activity(
     return filament_bambuddy_pull
 
 
-def capture_backstop_activity(filament: Filament, printers: Printers) -> Callable[[], Any]:
+def capture_backstop_activity(printers: Printers) -> Callable[[], Any]:
     """``filament_capture_backstop``: every printer's latest fresh report reconciled with
     the ledger (`filament/capture.reconcile_all`), for what the printer watch missed. It
     is the successor of ``spool_trays_seen``, a no-op since #6262. It returns

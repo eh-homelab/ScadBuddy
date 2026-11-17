@@ -1856,7 +1856,7 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
             lambda: state.settings_store.read({"filament_sync"})["filament_sync"],
         ),
         # The printers' trays reconciled with the ledger, the watch's backstop (#6263).
-        capture_backstop_activity(state.components.get(FILAMENT), state.components.get(PRINTERS)),
+        capture_backstop_activity(state.components.get(PRINTERS)),
         # Bambuddy's local presets kept for native runs (#4645), on the spools' Schedule.
         held_presets_activity(
             lambda: HeldPresetStore(state.projection.pool), lambda: state.settings_store.load()
