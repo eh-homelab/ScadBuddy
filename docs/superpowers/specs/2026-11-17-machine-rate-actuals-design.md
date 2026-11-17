@@ -156,7 +156,10 @@ actual    = sum(cost_i) / sum(gap_i)
 - **The window is N usable gaps, not N + 1 events.** `compute` walks back from the
   newest event until it has N usable gaps or runs out of events. A skipped gap does not
   count toward N, so the window then holds more than N + 1 events. "k of N" counts usable
-  gaps. A part's window is the same: N replacements that have `hours_used`.
+  gaps. A part's window is the same: N replacements that have a usable `hours_used`. A
+  derived `hours_used` of 0 h or less (two replacements at one counter reading, or a
+  counter reset) is not usable: it is skipped and listed in the part's `skipped_gaps`, as
+  a task's gap is. A typed `hours_used` is always above 0 (its column's check).
 - The actual also gives an **actual interval** (`sum(gap_i) / count`) and an **actual
   cost per occurrence** (`sum(cost_i) / count`), shown beside the typed ones.
 
@@ -280,7 +283,7 @@ CREATE TABLE printer_wear_replacements (
   UNIQUE (printer, bambuddy_history_id)
 );
 CREATE INDEX printer_wear_replacements_part
-  ON printer_wear_replacements (printer, part, replaced_at DESC);
+  ON printer_wear_replacements (printer, part, hours_at DESC);
 
 ALTER TABLE printer_cost_profiles
   ADD COLUMN actuals_window integer NOT NULL DEFAULT 3
@@ -453,7 +456,8 @@ Maintenance tasks   (Mark tasks done in Bambuddy; ScadBuddy reads them.)
   gap skipped and the window then reaching one event further back; a task not counted with
   too few events (`why` and `actual_why` both set); the first event opens no gap; an event
   with no minutes uses the typed ones (`partly_typed`); an imported replacement with no
-  cost priced at the typed cost (`partly_typed`); a part with typed `hours_used`; a task
+  cost priced at the typed cost (`partly_typed`); a part with typed `hours_used`; a part's derived `hours_used` of 0 h
+  or less skipped and listed in `skipped_gaps`; a task
   named by a wear part not counted (`why` `wear_part`); rounding adds up to the rate; prod's
   Clean Build Plate numbers (§3.3) as a fixture.
 - Store (`requires_postgres`, `backend/tests/orders/test_machine_rate_store.py`): import idempotent by `bambuddy_history_id`; a typed
