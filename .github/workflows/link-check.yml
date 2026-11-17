@@ -43,12 +43,14 @@ jobs:
       #   builds its anchors in the browser, so the served HTML has none and
       #   --include-fragments reports "Cannot find fragment" for a live anchor
       #   (#5856; checked 2026-11-11, the orders v2 page's HTML has no
-      #   orders_patch). Other PayPal links are still checked, and the next two
-      #   steps check the excluded pages themselves, without their fragments
-      #   (#6084);
+      #   orders_patch). Other PayPal links, apart from the help articles below,
+      #   are still checked, and the next two steps check the excluded API pages
+      #   themselves, without their fragments (#6084);
       #   www.paypal.com help articles (/<country>/cshelp/) answer 403 to any
       #   client without a browser's cookies, a browser User-Agent included
-      #   (#6518; checked 2026-11-17 with curl, the eCheck article in README.md);
+      #   (#6518; checked 2026-11-17 with curl, the eCheck article in README.md).
+      #   Nothing checks those links now: check them by hand when editing a file
+      #   that has one (README.md today);
       #   GitHub issue and PR comment anchors (#issuecomment-<id>): on a long
       #   thread GitHub serves the first and last comments and loads the rest in
       #   the browser, so a live comment's anchor is not in the HTML (#6518;
