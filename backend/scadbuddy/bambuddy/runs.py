@@ -744,6 +744,8 @@ class PrintRunStore:
                 " OR EXISTS (SELECT 1 FROM native_slices s JOIN print_runs p"
                 " ON p.output_id = s.subject WHERE s.sliced_blob_key = %(key)s"
                 f" AND s.status = 'completed' AND {in_use}"
+                # Defence in depth (#6588): no Bambuddy-queue run writes `lan_waiting`
+                # today, so the `lan_waiting` half of `_in_use` already excludes one.
                 " AND p.result->>'path' = 'native') AS ok".encode(),
                 {"key": key, "holder": RUN_HOLDER},
             ).fetchone()
