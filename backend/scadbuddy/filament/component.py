@@ -11,6 +11,7 @@ from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.filament.assignments_cache import AssignmentsCache
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.inventory import FilamentInventory, PoolSbSpoolReads
+from scadbuddy.filament.invoices import InvoiceStore
 from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.presets import PoolSpoolPresets
 from scadbuddy.filament.print_uses import PoolPrintUses, print_use_hook
@@ -30,6 +31,8 @@ class Filament:
     presets: PoolSpoolPresets
     #: Suppliers, their products and price points (#6266).
     suppliers: SuppliersStore
+    #: Invoice drafts, and later their confirmation (#6266).
+    invoices: InvoiceStore
     #: Bambuddy's tray assignments, as this app last read them (#6580).
     assignments: AssignmentsCache = field(default_factory=AssignmentsCache)
 
@@ -63,14 +66,17 @@ def _build(core: Core, components: Components) -> Filament:
     # What a native print used is settled on its SB spools as the follow reads it settled
     # (#4643, #6262 Task 6); the follow is a core service and imports no feature.
     core.print_follower.on_read.append(print_use_hook(PoolPrintUses(pool)))
+    types = SpoolTypeStore(pool)
+    spools = FilamentSpoolStore(pool, defaults)
     return Filament(
         catalog=CatalogStore(pool),
-        types=SpoolTypeStore(pool),
-        spools=FilamentSpoolStore(pool, defaults),
+        types=types,
+        spools=spools,
         locations=LocationStore(pool),
         inventory=FilamentInventory(pool, defaults),
         presets=PoolSpoolPresets(pool),
         suppliers=SuppliersStore(pool, shop_currency),
+        invoices=InvoiceStore(pool, shop_currency, spools, types),
     )
 
 

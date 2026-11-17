@@ -43,6 +43,10 @@ describe('filament purchasing tools', () => {
     ['filament_price_add', 'write'],
     ['filament_price_delete', 'write'],
     ['filament_price_sheet', 'read'],
+    ['filament_invoice_list', 'read'],
+    ['filament_invoice_get', 'read'],
+    ['filament_invoice_upsert', 'write'],
+    ['filament_invoice_delete', 'write'],
   ])('%s is %s tier, never gated', (name, risk) => {
     expect(tool(name).risk).toBe(risk)
     expect(tool(name).gated).toBe(false)
@@ -122,6 +126,52 @@ describe('filament purchasing tools', () => {
     server.use(http.delete(`${FILAMENT}/prices/${PRICE}`, () => new HttpResponse(null, { status: 204 })))
     expect(firstText(await runTool(tool('filament_price_delete'), { price_id: PRICE }, ctx()))).toEqual({
       deleted: PRICE,
+    })
+  })
+
+  it('adds an invoice with its lines and edits one by header then lines', async () => {
+    const INVOICE = '8d6f3c1e-0000-4000-8000-000000006605'
+    const seen: unknown[] = []
+    server.use(
+      http.post(`${FILAMENT}/invoices`, async ({ request }) => {
+        seen.push(['POST', await request.json()])
+        return HttpResponse.json({ id: INVOICE }, { status: 201 })
+      }),
+      http.patch(`${FILAMENT}/invoices/${INVOICE}`, async ({ request }) => {
+        seen.push(['PATCH', await request.json()])
+        return HttpResponse.json({ id: INVOICE })
+      }),
+      http.put(`${FILAMENT}/invoices/${INVOICE}/lines`, async ({ request }) => {
+        seen.push(['PUT', await request.json()])
+        return HttpResponse.json({ id: INVOICE, lines: [] })
+      }),
+    )
+    const line = { description: 'PLA', quantity: 1, unit_price: '40.00' }
+    const made = await runTool(
+      tool('filament_invoice_upsert'),
+      { fields: { supplier_id: SUPPLIER, total: '40.00' }, lines: [line] },
+      ctx(),
+    )
+    expect(firstText(made)).toEqual({ id: INVOICE })
+    await runTool(
+      tool('filament_invoice_upsert'),
+      { invoice_id: INVOICE, fields: { shipping: '5.00' }, lines: [line] },
+      ctx(),
+    )
+    expect(seen).toEqual([
+      ['POST', { supplier_id: SUPPLIER, total: '40.00', lines: [line] }],
+      ['PATCH', { shipping: '5.00' }],
+      ['PUT', [line]],
+    ])
+    const nothing = await runTool(tool('filament_invoice_upsert'), { invoice_id: INVOICE }, ctx())
+    expect(nothing.isError).toBe(true)
+  })
+
+  it('deletes an invoice draft and answers its id', async () => {
+    const INVOICE = '8d6f3c1e-0000-4000-8000-000000006605'
+    server.use(http.delete(`${FILAMENT}/invoices/${INVOICE}`, () => new HttpResponse(null, { status: 204 })))
+    expect(firstText(await runTool(tool('filament_invoice_delete'), { invoice_id: INVOICE }, ctx()))).toEqual({
+      deleted: INVOICE,
     })
   })
 })

@@ -9,9 +9,17 @@ from uuid import UUID
 
 from fastapi import APIRouter, Response, status
 
+from scadbuddy.api.filament import actor
+from scadbuddy.auth.component import CallerDep
 from scadbuddy.core.problems import ApiError
 from scadbuddy.filament import purchasing_models as pm
 from scadbuddy.filament.component import FilamentDep
+from scadbuddy.filament.invoice_money import InvoiceMathError, MixedLineTaxError
+from scadbuddy.filament.invoices import (
+    DuplicateInvoiceError,
+    InvoiceConfirmedError,
+    InvoiceRefError,
+)
 from scadbuddy.filament.suppliers import (
     PriceFromInvoiceError,
     ProductExistsError,
@@ -28,6 +36,14 @@ def _no_supplier(supplier_id: UUID) -> ApiError:
 
 def _no_product(product_id: UUID) -> ApiError:
     return ApiError(status.HTTP_404_NOT_FOUND, f"no supplier product {product_id}")
+
+
+def _no_invoice(invoice_id: UUID) -> ApiError:
+    return ApiError(status.HTTP_404_NOT_FOUND, f"no invoice {invoice_id}")
+
+
+def _unprocessable(exc: ValueError) -> ApiError:
+    return ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc))
 
 
 def _conflict(exc: ValueError) -> ApiError:
@@ -259,3 +275,141 @@ async def type_prices(filament: FilamentDep, type_id: UUID) -> list[pm.TypePrice
     if await asyncio.to_thread(filament.types.get, type_id) is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no spool type {type_id}")
     return await asyncio.to_thread(filament.suppliers.type_prices, type_id)
+
+
+# -- invoices ---------------------------------------------------------------------------
+
+_INVOICE_ERRORS = (InvoiceRefError, MixedLineTaxError, InvoiceMathError)
+
+
+def _invoice_error(exc: ValueError) -> ApiError:
+    """The problem for what an invoice write refuses: a duplicate number carries the first
+    invoice's id as `existing_invoice_id`; a confirmed one is 409; the rest 422."""
+    if isinstance(exc, DuplicateInvoiceError):
+        return ApiError(
+            status.HTTP_409_CONFLICT, str(exc), existing_invoice_id=str(exc.existing_id)
+        )
+    if isinstance(exc, InvoiceConfirmedError):
+        return _conflict(exc)
+    return _unprocessable(exc)
+
+
+@router.get(
+    "/invoices",
+    response_model=list[pm.Invoice],
+    summary="List invoices",
+    description=(
+        "Newest `invoice_date` first. Filter by `supplier_id` and `status` (`draft` or "
+        "`confirmed`). Each invoice carries `difference` (its total less its lines and "
+        "shipping), `reconciles`, `line_count` and its `file` pointer."
+    ),
+)
+async def list_invoices(
+    filament: FilamentDep, supplier_id: UUID | None = None, status: pm.InvoiceStatus | None = None
+) -> list[pm.Invoice]:
+    return await asyncio.to_thread(filament.invoices.list, supplier_id=supplier_id, status=status)
+
+
+@router.post(
+    "/invoices",
+    response_model=pm.InvoiceDetail,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add an invoice draft",
+    description=(
+        "A draft from the header and optionally its `lines`. Tax and shipping are spread over "
+        "the lines on every write: all lines give a `line_tax`, or none does and the invoice "
+        "`tax` is spread by subtotal. A repeated `import_run_id` answers 200 with the first "
+        "invoice and applies nothing. 409 when the supplier has an invoice with the number "
+        "(the body's `existing_invoice_id` is that invoice), 422 for a missing supplier, type "
+        "or product, a mixed line tax or a bad field."
+    ),
+)
+async def create_invoice(
+    filament: FilamentDep, caller: CallerDep, body: pm.InvoiceCreate, response: Response
+) -> pm.InvoiceDetail:
+    try:
+        made, new = await asyncio.to_thread(filament.invoices.create, body, actor=actor(caller))
+    except (DuplicateInvoiceError, InvoiceConfirmedError, *_INVOICE_ERRORS) as exc:
+        raise _invoice_error(exc) from None
+    if not new:
+        response.status_code = status.HTTP_200_OK
+    return made
+
+
+@router.get(
+    "/invoices/{invoice_id}",
+    response_model=pm.InvoiceDetail,
+    summary="Read an invoice",
+    description=(
+        "The invoice with its lines, their costs and the spools made from them. 404 for none."
+    ),
+)
+async def get_invoice(filament: FilamentDep, invoice_id: UUID) -> pm.InvoiceDetail:
+    found = await asyncio.to_thread(filament.invoices.get, invoice_id)
+    if found is None:
+        raise _no_invoice(invoice_id)
+    return found
+
+
+@router.patch(
+    "/invoices/{invoice_id}",
+    response_model=pm.InvoiceDetail,
+    summary="Change an invoice",
+    description=(
+        "Only the fields sent change; the lines' tax and cost are worked out again. A "
+        "confirmed invoice accepts only `note` (409 otherwise). 404 for no such invoice, 409 "
+        "for a number the supplier has (with `existing_invoice_id`), 422 for a bad field or "
+        "a tax that cannot be spread."
+    ),
+)
+async def patch_invoice(
+    filament: FilamentDep, invoice_id: UUID, body: pm.InvoicePatch
+) -> pm.InvoiceDetail:
+    try:
+        changed = await asyncio.to_thread(filament.invoices.update, invoice_id, body)
+    except (DuplicateInvoiceError, InvoiceConfirmedError, *_INVOICE_ERRORS) as exc:
+        raise _invoice_error(exc) from None
+    if changed is None:
+        raise _no_invoice(invoice_id)
+    return changed
+
+
+@router.put(
+    "/invoices/{invoice_id}/lines",
+    response_model=pm.InvoiceDetail,
+    summary="Replace a draft's lines",
+    description=(
+        "The whole list of lines, in order. Tax and shipping are worked out again. 404 for no "
+        "such invoice, 409 for a confirmed one, 422 for a mixed line tax, a missing type or "
+        "product, or a bad field."
+    ),
+)
+async def put_invoice_lines(
+    filament: FilamentDep, invoice_id: UUID, body: list[pm.InvoiceLineIn]
+) -> pm.InvoiceDetail:
+    try:
+        changed = await asyncio.to_thread(filament.invoices.replace_lines, invoice_id, body)
+    except (InvoiceConfirmedError, *_INVOICE_ERRORS) as exc:
+        raise _invoice_error(exc) from None
+    if changed is None:
+        raise _no_invoice(invoice_id)
+    return changed
+
+
+@router.delete(
+    "/invoices/{invoice_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete an invoice draft",
+    description=(
+        "A draft only; its file's hold is released. 404 for no such invoice, 409 for a "
+        "confirmed one (archive its spools instead)."
+    ),
+)
+async def delete_invoice(filament: FilamentDep, invoice_id: UUID) -> Response:
+    try:
+        gone = await asyncio.to_thread(filament.invoices.delete, invoice_id)
+    except InvoiceConfirmedError as exc:
+        raise _conflict(exc) from None
+    if not gone:
+        raise _no_invoice(invoice_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

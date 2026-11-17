@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { ok } from './call.js'
 import { defineTool, json, ToolError, type Tool } from './registry.js'
 
-// Filament purchasing (#6266, epic #6260): suppliers, their products and price points.
+// Filament purchasing (#6266, epic #6260): suppliers, their products, price points and invoice drafts.
 // Write tier: nothing leaves ScadBuddy. A price is per pack, with tax, a decimal string.
 // Routes: backend/scadbuddy/api/filament_purchasing.py.
 
@@ -249,5 +249,127 @@ export const filamentPurchasingTools: Tool[] = [
           `read the price sheet of supplier ${supplier_id}`,
         ),
       ),
+  }),
+
+  defineTool({
+    name: 'filament_invoice_list',
+    label: 'List filament invoices',
+    description:
+      'Filament invoices, newest `invoice_date` first. Filter by `supplier_id` and `status` (`draft` or ' +
+      '`confirmed`). Each has `difference` (its total less its lines and shipping), `reconciles`, `line_count` ' +
+      'and a `file` pointer. Money is a decimal string.',
+    input: z.object({
+      supplier_id: z.string().uuid().optional(),
+      status: z.enum(['draft', 'confirmed']).optional(),
+    }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/invoices'],
+    handler: async ({ supplier_id, status }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/invoices', { params: { query: { supplier_id, status } } }),
+          'list the invoices',
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_invoice_get',
+    label: 'Read a filament invoice',
+    description:
+      'One invoice with its lines: each line has its tax, `line_total`, `allocated_cost` (with its share of ' +
+      'shipping), `unit_cost` and the `spool_ids` made from it.',
+    input: z.object({ invoice_id: z.string().uuid() }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/invoices/{invoice_id}'],
+    handler: async ({ invoice_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/invoices/{invoice_id}', { params: { path: { invoice_id } } }),
+          `read invoice ${invoice_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_invoice_upsert',
+    label: 'Add or edit a filament invoice draft',
+    description:
+      'Without `invoice_id`, add a draft: `fields` needs `supplier_id`, `invoice_date`, `currency`, `subtotal`, ' +
+      '`total`, and may have `number`, `shipping`, `tax`, `note` and `import_run_id` (a repeated one returns the ' +
+      'first invoice); `lines` are `{description, quantity, unit_price, line_subtotal?, line_tax?, sku?, ' +
+      'type_id?, ...}`. With `invoice_id`, edit a draft: the `fields` given change and, when `lines` is sent, it ' +
+      'replaces every line. Tax and shipping are spread over the lines on each write: give `line_tax` on every ' +
+      'line or on none (422 for some). Money is a decimal string. 409 for a taken number (`existing_invoice_id`) ' +
+      'or a confirmed invoice. Only what the user says. Writes ScadBuddy only.',
+    input: z.object({
+      invoice_id: z.string().uuid().optional().describe("An invoice's `id`; omit to add"),
+      fields: z.record(z.string(), z.unknown()).default({}).describe('The invoice header fields'),
+      lines: z.array(z.record(z.string(), z.unknown())).optional().describe('The whole list of lines'),
+    }),
+    risk: 'write',
+    source: SOURCE,
+    routes: [
+      'POST /api/v1/filament/invoices',
+      'PATCH /api/v1/filament/invoices/{invoice_id}',
+      'PUT /api/v1/filament/invoices/{invoice_id}/lines',
+    ],
+    summarize: ({ invoice_id, fields }) =>
+      invoice_id ? `Edit invoice ${invoice_id}` : `Add invoice ${String(fields['number'] ?? '')}`.trim(),
+    handler: async ({ invoice_id, fields, lines }, { backend }) => {
+      if (invoice_id === undefined) {
+        return json(
+          await ok(
+            backend.POST('/api/v1/filament/invoices', { body: { ...fields, lines: lines ?? [] } as never }),
+            'add an invoice',
+          ),
+        )
+      }
+      if (Object.keys(fields).length === 0 && lines === undefined) {
+        throw new ToolError('give fields or lines to change')
+      }
+      let result: unknown
+      if (Object.keys(fields).length > 0) {
+        result = await ok(
+          backend.PATCH('/api/v1/filament/invoices/{invoice_id}', {
+            params: { path: { invoice_id } },
+            body: fields as never,
+          }),
+          `edit invoice ${invoice_id}`,
+        )
+      }
+      if (lines !== undefined) {
+        result = await ok(
+          backend.PUT('/api/v1/filament/invoices/{invoice_id}/lines', {
+            params: { path: { invoice_id } },
+            body: lines as never,
+          }),
+          `replace the lines of invoice ${invoice_id}`,
+        )
+      }
+      return json(result)
+    },
+  }),
+
+  defineTool({
+    name: 'filament_invoice_delete',
+    label: 'Delete a filament invoice draft',
+    description:
+      'Delete a draft invoice and its lines. 409 for a confirmed invoice: archive its spools instead. Only ' +
+      'when the user asks. Writes ScadBuddy only.',
+    input: z.object({ invoice_id: z.string().uuid() }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['DELETE /api/v1/filament/invoices/{invoice_id}'],
+    summarize: ({ invoice_id }) => `Delete invoice ${invoice_id}`,
+    handler: async ({ invoice_id }, { backend }) => {
+      await ok(
+        backend.DELETE('/api/v1/filament/invoices/{invoice_id}', { params: { path: { invoice_id } } }),
+        `delete invoice ${invoice_id}`,
+      )
+      return json({ deleted: invoice_id })
+    },
   }),
 ]

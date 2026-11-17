@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
 
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
@@ -174,3 +175,108 @@ def test_the_type_history_marks_archived_rows(client: TestClient) -> None:
     client.patch(f"{URL}/suppliers/{supplier_id}", json={"archived": True})
     (point,) = client.get(f"{URL}/types/{type_id}/prices").json()
     assert (point["product_archived"], point["supplier_archived"]) == (True, True)
+
+
+# -- invoices ---------------------------------------------------------------------------
+
+
+def _invoice_body(supplier_id: str, **over: object) -> dict[str, object]:
+    return {
+        "supplier_id": supplier_id,
+        "invoice_date": "2026-11-01",
+        "currency": "USD",
+        "subtotal": "100.00",
+        "shipping": "10.00",
+        "tax": "7.00",
+        "total": "117.00",
+        "lines": [
+            {"description": "PLA white", "quantity": 1, "unit_price": "40.00"},
+            {"description": "PLA black", "quantity": 1, "unit_price": "60.00"},
+        ],
+        **over,
+    }
+
+
+def test_an_invoice_is_made_with_string_money(client: TestClient) -> None:
+    made = client.post(f"{URL}/invoices", json=_invoice_body(_supplier(client)))
+    assert made.status_code == 201, made.text
+    body = made.json()
+    assert body["reconciles"] is True
+    assert body["minor_exponent"] == 2
+    assert [line["allocated_cost"] for line in body["lines"]] == ["46.8000", "70.2000"]
+    assert body["lines"][0]["tax_basis"] == "receipt-wide 7.0%"
+    assert body["file"] is None
+    assert client.get(f"{URL}/invoices/{body['id']}").json() == body
+    assert [i["id"] for i in client.get(f"{URL}/invoices").json()] == [body["id"]]
+
+
+def test_mixed_line_tax_is_a_422(client: TestClient) -> None:
+    lines = [
+        {"description": "a", "quantity": 1, "unit_price": "40", "line_tax": "3"},
+        {"description": "b", "quantity": 1, "unit_price": "60"},
+    ]
+    refused = client.post(f"{URL}/invoices", json=_invoice_body(_supplier(client), lines=lines))
+    assert refused.status_code == 422, refused.text
+    assert client.get(f"{URL}/invoices").json() == []
+
+
+def test_the_same_number_twice_is_a_409_with_the_first_id(client: TestClient) -> None:
+    supplier = _supplier(client)
+    first = client.post(f"{URL}/invoices", json=_invoice_body(supplier, number="INV-1"))
+    assert first.status_code == 201
+    second = client.post(f"{URL}/invoices", json=_invoice_body(supplier, number="inv-1"))
+    assert second.status_code == 409, second.text
+    assert second.json()["existing_invoice_id"] == first.json()["id"]
+    assert len(client.get(f"{URL}/invoices").json()) == 1
+
+
+def test_a_number_edit_onto_a_taken_number_is_a_409(client: TestClient) -> None:
+    supplier = _supplier(client)
+    first = client.post(f"{URL}/invoices", json=_invoice_body(supplier, number="INV-1")).json()
+    draft = client.post(f"{URL}/invoices", json=_invoice_body(supplier)).json()
+    refused = client.patch(f"{URL}/invoices/{draft['id']}", json={"number": "INV-1"})
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["existing_invoice_id"] == first["id"]
+
+
+def test_a_second_import_run_id_is_a_200_with_the_first(client: TestClient) -> None:
+    supplier = _supplier(client)
+    first = client.post(f"{URL}/invoices", json=_invoice_body(supplier, import_run_id="r1"))
+    assert first.status_code == 201
+    again = client.post(
+        f"{URL}/invoices", json=_invoice_body(supplier, import_run_id="r1", lines=[])
+    )
+    assert again.status_code == 200, again.text
+    assert again.json()["id"] == first.json()["id"]
+    assert len(again.json()["lines"]) == 2
+
+
+def test_lines_are_replaced_and_a_missing_invoice_is_404(client: TestClient) -> None:
+    made = client.post(f"{URL}/invoices", json=_invoice_body(_supplier(client))).json()
+    put = client.put(
+        f"{URL}/invoices/{made['id']}/lines",
+        json=[{"description": "one", "quantity": 2, "unit_price": "50"}],
+    )
+    assert put.status_code == 200, put.text
+    assert put.json()["lines"][0]["allocated_cost"] == "117.0000"
+    assert put.json()["lines"][0]["unit_cost"] == "58.5000"
+    assert client.put(f"{URL}/invoices/{MISSING}/lines", json=[]).status_code == 404
+    assert client.get(f"{URL}/invoices/{MISSING}").status_code == 404
+    assert client.delete(f"{URL}/invoices/{MISSING}").status_code == 404
+
+
+def test_a_draft_deletes_and_a_confirmed_one_is_a_409(client: TestClient, pg_conninfo: str) -> None:
+    supplier = _supplier(client)
+    gone = client.post(f"{URL}/invoices", json=_invoice_body(supplier, number="G")).json()
+    assert client.delete(f"{URL}/invoices/{gone['id']}").status_code == 204
+    assert client.get(f"{URL}/invoices/{gone['id']}").status_code == 404
+    kept = client.post(f"{URL}/invoices", json=_invoice_body(supplier, number="K")).json()
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE filament_invoices SET status = 'confirmed' WHERE id = %s", (kept["id"],)
+        )
+    url = f"{URL}/invoices/{kept['id']}"
+    assert client.delete(url).status_code == 409
+    assert client.put(f"{url}/lines", json=[]).status_code == 409
+    assert client.patch(url, json={"shipping": "1"}).status_code == 409
+    assert client.patch(url, json={"note": "paid"}).status_code == 200
