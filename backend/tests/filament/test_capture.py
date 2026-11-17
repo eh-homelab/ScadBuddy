@@ -200,6 +200,40 @@ def _link(pool: PgPool, pid: str, spool: UUID, rgba: str = "#FF0000FF") -> None:
     )
 
 
+def test_a_loading_tray_keeps_an_untagged_spool(pg_pool: PgPool) -> None:
+    """SPOOL set and STEADY clear is a tray loading or scanning (`bambuddy/trays.py`
+    `spool_loaded`): no news, not an empty tray."""
+    spool = _spool(pg_pool)
+    pid, _ = _printer(pg_pool)
+    _link(pg_pool, pid, spool)
+    place = _tray_place(pg_pool, pid)
+    fingerprint = _row(pg_pool, spool)["tray_fingerprint"]
+    assert fingerprint is not None
+    before = len(_events(pg_pool, spool))
+    loading = _report(_tray(1, state=5))
+    assert _reconcile(pg_pool, pid, loading, T0 + timedelta(minutes=1)) == capture.CaptureResult()
+    steady = _report(_tray(1, remain=50))
+    assert _reconcile(pg_pool, pid, steady, T0 + timedelta(minutes=2)) == capture.CaptureResult()
+    assert len(_events(pg_pool, spool)) == before
+    assert _events(pg_pool, spool, "unloaded", "ams_reading") == []
+    row = _row(pg_pool, spool)
+    assert row["location_id"] == place
+    assert row["tray_fingerprint"] == fingerprint
+
+
+def test_a_loading_tray_keeps_a_tagged_spool_without_churn(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, tray_uuid=U1)
+    pid, _ = _printer(pg_pool)
+    _reconcile(pg_pool, pid, _report(_tray(1, U1, remain=50)))
+    before = len(_events(pg_pool, spool))
+    loading = _report(_tray(1, U1, remain=50, state=5))
+    assert _reconcile(pg_pool, pid, loading, T0 + timedelta(minutes=1)) == capture.CaptureResult()
+    steady = _report(_tray(1, U1, remain=50))
+    assert _reconcile(pg_pool, pid, steady, T0 + timedelta(minutes=2)) == capture.CaptureResult()
+    assert len(_events(pg_pool, spool)) == before
+    assert _row(pg_pool, spool)["location_id"] == _tray_place(pg_pool, pid)
+
+
 def test_unbound_keys_keep_the_placed_spool(pg_pool: PgPool) -> None:
     spool = _spool(pg_pool)
     pid, _ = _printer(pg_pool)

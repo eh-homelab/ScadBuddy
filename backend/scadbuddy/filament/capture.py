@@ -10,11 +10,13 @@ is ``loaded`` and moves in. Every event is timed at the report (``seen_at``), ne
 clock, so a resent report books nothing twice and a late one never reorders the ledger.
 
 A report that does not show an AMS unit says nothing of its trays, so they are left alone
-(a delta report, a printer mid-reconnect). A tray the report shows empty, in a unit it
-shows, is unloaded. The AMS's ``remain`` is a reading only for a tray with RFID keys that
-sent it (`bambuddy/trays.py` `seen_trays`), and one only when it moved since the spool's
-last reading: a report arrives about once a second, and the ledger's ``refresh_derived``
-fast path (`ledger._on_top`) keeps each one from re-walking the spool's history.
+(a delta report, a printer mid-reconnect). A tray the report shows loading or
+scanning (a material and the SPOOL bit, not STEADY) is no news either. A tray the report
+shows empty, in a unit it shows, is unloaded. The AMS's ``remain`` is a reading only for
+a tray with RFID keys that sent it (`bambuddy/trays.py` `seen_trays`), and one only when it
+moved since the spool's last reading: a report arrives about once a second, and the
+ledger's ``refresh_derived`` fast path (`ledger._on_top`) keeps each one from re-walking
+the spool's history.
 
 `trays_changed` tells the write in `printers/reports.py` whether any of this can have
 changed: it compares what a tray shows, never the humidity and temperature the report
@@ -37,7 +39,7 @@ from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.bambuddy.models import PrinterStatus
-from scadbuddy.bambuddy.trays import EXTERNAL, place_label, seen_trays
+from scadbuddy.bambuddy.trays import EXTERNAL, loading_trays, place_label, seen_trays
 from scadbuddy.filament import ledger, prints
 from scadbuddy.filament.inventory import FilamentInventory
 from scadbuddy.filament.locations import LocationStore
@@ -230,6 +232,7 @@ def reconcile(
     printer = UUID(printer_id)
     status = _status(row, report, seen_at)
     filled = {(t.ams_id, t.tray_id): t for t in seen_trays(status)}
+    loading = loading_trays(status)
     places: dict[tuple[int, int], UUID] = {}
     current: dict[UUID, list[UUID]] = {}
     for found in conn.execute(
@@ -247,6 +250,8 @@ def reconcile(
     result = CaptureResult()
     loaded_now: set[UUID] = set()
     for key in _walk(status, report, places):
+        if key in loading:
+            continue
         ams_id, tray_id = key
         seen = filled.get(key)
         holder, found_by = (

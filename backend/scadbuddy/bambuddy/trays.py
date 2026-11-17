@@ -147,6 +147,24 @@ def _filled(tray: AmsTray) -> bool:
     return True
 
 
+def _loading(tray: AmsTray) -> bool:
+    """A tray with a material and a spool that is loading or scanning: the SPOOL bit is
+    set, the STEADY bit is not (`spool_loaded`), and no presence bit says it is empty."""
+    return (
+        bool((tray.tray_type or "").strip())
+        and tray.exists is not False
+        and tray.state is not None
+        and bool(tray.state & TRAY_SPOOL)
+        and not spool_loaded(tray.state)
+    )
+
+
+def loading_trays(status: PrinterStatus) -> set[tuple[int, int]]:
+    """The ``(ams_id, tray_id)`` of every tray that is loading or scanning (`_loading`):
+    neither filled nor empty, so what holds it says nothing."""
+    return {(unit, tray.id) for unit, tray in _trays(status) if _loading(tray)}
+
+
 def _trays(status: PrinterStatus) -> list[tuple[int, AmsTray]]:
     found = [(unit.id, tray) for unit in status.ams for tray in unit.tray]
     # The external holders: vt_tray ids 254 and 255 are Ext-L and Ext-R, trays 0 and 1.
