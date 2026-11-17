@@ -163,27 +163,34 @@ def test_a_renew_moves_the_leases_expiry(
     pool: Pool, client: CrudSyncClient, tmp_path: Path
 ) -> None:
     """Checked on the row, not on wall-clock timing: a renew sets a fresh TTL from the
-    database's now, past the take's."""
-    leases = RemoteCheckoutLeases(client, ttl=1.0)
+    database's now, past the take's. The lease is still live when it renews; a lapsed
+    one is not renewed (#6560)."""
+    leases = RemoteCheckoutLeases(client, ttl=10.0)
     token = leases.take(JOB, [_checkout(tmp_path)])
     with pool.connection() as conn:
-        # Its TTL spent, as if a second had passed: a renew must move it forward.
+        # Half its TTL spent, as if five seconds had passed: a renew must move it forward.
         conn.execute(
-            "UPDATE library_leases SET expires_at = expires_at - interval '1 second'"
+            "UPDATE library_leases SET expires_at = expires_at - interval '5 seconds'"
             " WHERE token = %s",
             (token,),
         )
     spent = _expires(pool, token)
-    leases.renew(token)
-    assert _expires(pool, token) >= spent + timedelta(seconds=1)
+    assert leases.renew(token)
+    assert _expires(pool, token) >= spent + timedelta(seconds=5)
 
 
 async def test_a_rendering_gate_renews_its_lease(
     pool: Pool, client: CrudSyncClient, tmp_path: Path
 ) -> None:
-    """The gate renews through the routes while the render runs: waited for on the row,
-    with a wide margin, not at a wall-clock time."""
-    worker = CheckoutGate(RemoteCheckoutLeases(client, ttl=1.0))
+    """The gate renews through the routes while the render runs: renewed on cue and
+    waited for on the row, not at a wall-clock time. The TTL is the default, so no
+    runner stall lapses the lease before the cue (a lapsed lease ends the block, #6560)."""
+    cue: asyncio.Queue[None] = asyncio.Queue()
+
+    async def on_cue(delay: float) -> None:
+        await cue.get()
+
+    worker = CheckoutGate(RemoteCheckoutLeases(client), sleep=on_cue)
 
     def expiry() -> datetime:
         with pool.connection() as conn:
@@ -195,6 +202,7 @@ async def test_a_rendering_gate_renews_its_lease(
 
     async with worker.rendering(JOB, [_checkout(tmp_path)]):
         first = await asyncio.to_thread(expiry)
+        cue.put_nowait(None)
         async with asyncio.timeout(20):
             while await asyncio.to_thread(expiry) <= first:
                 await asyncio.sleep(0.05)

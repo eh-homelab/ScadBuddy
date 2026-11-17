@@ -562,11 +562,12 @@ class CheckoutLeases:
                 raise LeaseTokenTakenError(str(token))
 
     def renew(self, token: uuid.UUID, *, ttl: float | None = None) -> bool:
-        """Whether the lease still had a row to renew."""
+        """Whether the lease was still live: a lapsed row may have let a removal in
+        before any take swept it, so it is lost as a deleted one is (#6560)."""
         with self.pool.connection() as conn:
             cur = conn.execute(
                 "UPDATE library_leases SET expires_at = now() + make_interval(secs => %s)"
-                " WHERE token = %s",
+                " WHERE token = %s AND expires_at > now()",
                 (self.ttl if ttl is None else ttl, token),
             )
             return bool(cur.rowcount > 0)
@@ -596,11 +597,12 @@ class CheckoutLeases:
         return token
 
     def renew_pin(self, token: uuid.UUID, *, ttl: float | None = None) -> bool:
-        """Whether the hold still had a row to renew."""
+        """Whether the hold was still live: a lapsed row may have let a removal in
+        before any take swept it, so it is lost as a deleted one is (#6560)."""
         with self.pool.connection() as conn:
             cur = conn.execute(
                 "UPDATE library_pin_holds SET expires_at = now() + make_interval(secs => %s)"
-                " WHERE token = %s",
+                " WHERE token = %s AND expires_at > now()",
                 (self.ttl if ttl is None else ttl, token),
             )
             return bool(cur.rowcount > 0)
@@ -726,7 +728,8 @@ async def _in_thread(
 
 
 class HoldLostError(RuntimeError):
-    """A renewal found its row gone: the row lapsed, or another holder took it (#6560).
+    """A renewal found its row lost: the row lapsed (swept or not), or another holder
+    took it (#6560).
     The block that held it is ended with this, so it does not go on without its hold:
     a pin's checkout may be removed under it, and an install slot may be another
     clone's."""
