@@ -245,6 +245,7 @@ def reconcile(
     printing = isinstance(state, str) and state in RUNNING
     job = report.get("subtask_name") if printing else None
     result = CaptureResult()
+    loaded_now: set[UUID] = set()
     for key in _walk(status, report, places):
         ams_id, tray_id = key
         seen = filled.get(key)
@@ -256,6 +257,8 @@ def reconcile(
         loaded = False
         if holder not in here:
             for spool in here:
+                if spool in loaded_now:
+                    continue
                 assert place is not None
                 ledger.record(
                     conn,
@@ -288,6 +291,7 @@ def reconcile(
                 )
                 FilamentInventory.place_on(conn, holder, target.id, seen, actor=actor, at=seen_at)
                 loaded = True
+                loaded_now.add(holder)
                 result += CaptureResult(loaded=1)
         if (
             holder is not None

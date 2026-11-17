@@ -144,6 +144,19 @@ def test_a_swap_unloads_the_old_spool_and_loads_the_new(pg_pool: PgPool) -> None
     assert _row(pg_pool, b)["location_id"] == _tray_place(pg_pool, pid)
 
 
+def test_a_tagged_spool_moved_to_a_lower_tray_stays_loaded(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, tray_uuid=U1)
+    pid, _ = _printer(pg_pool)
+    _reconcile(pg_pool, pid, _report(_tray(2, U1)))
+    result = _reconcile(pg_pool, pid, _report(_tray(1, U1), {"id": "2"}), T0 + timedelta(minutes=1))
+    assert (result.loaded, result.unloaded) == (1, 0)
+    assert len(_events(pg_pool, spool, "loaded")) == 2
+    assert _events(pg_pool, spool, "unloaded") == []
+    row = _row(pg_pool, spool)
+    assert row["location_id"] == _tray_place(pg_pool, pid, tray_id=1)
+    assert row["tray_fingerprint"] == "PLA|#FF0000FF"
+
+
 def test_an_emptied_tray_unloads(pg_pool: PgPool) -> None:
     spool = _spool(pg_pool, tray_uuid=U1)
     pid, _ = _printer(pg_pool)
