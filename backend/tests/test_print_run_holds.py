@@ -125,23 +125,37 @@ async def test_a_preview_slice_a_quote_slice_and_a_slicers_input_are_not_transfe
     slicer_input = "slice-" + "4" * 64
     slice_id = await _sliced(jobs, OUTPUT, FILE)
     BlobRefs(jobs.pool).add(slicer_input, HOLDER, str(slice_id))
-    # A run of OUTPUT is in use: its own slice is its file, the input is not.
-    await _run(store)
+    # A LAN run of OUTPUT has prints to start: its own slice is its file, the input is not.
+    run = await _run(store)
+    await store.succeed(run.id, "demo", WAITING)
     assert not await store.transferable(preview)
     assert not await store.transferable(quote)
     assert not await store.transferable(slicer_input)
     assert await store.transferable(FILE)
 
 
-async def test_a_completed_slice_is_transferable_only_while_a_run_of_its_subject_is_in_use(
+async def test_a_completed_slice_is_transferable_only_while_a_lan_run_of_its_subject_waits(
     jobs: JobProjection, store: PrintRunStore
 ) -> None:
-    """A run's slice before its hold, as a run from before the hold reads it."""
+    """A LAN run from before the hold (#6122) reads its later copies' slices by their
+    rows: only while its result marks it a LAN run (``path`` ``native``) with prints
+    still to start (#6586)."""
     await _sliced(jobs, OUTPUT, FILE)
     assert not await store.transferable(FILE)
     run = await _run(store)
+    await store.succeed(run.id, "demo", WAITING)
     assert await store.transferable(FILE)
-    await store.succeed(run.id, "demo", DONE)
+    await store.update_result(run.id, "demo", DONE)
+    assert not await store.transferable(FILE)
+
+
+async def test_a_bambuddy_queue_run_in_use_grants_no_slice_of_its_subject(
+    jobs: JobProjection, store: PrintRunStore
+) -> None:
+    """#6586: a running run with no hold names no file. A Bambuddy-queue run never
+    reads a transfer URL, and a LAN run holds its file before its first start."""
+    await _sliced(jobs, OUTPUT, FILE)
+    await _run(store)
     assert not await store.transferable(FILE)
 
 
