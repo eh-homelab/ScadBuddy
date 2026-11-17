@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any, Final
 from uuid import UUID
 
@@ -35,7 +35,7 @@ from psycopg import Connection
 from psycopg.rows import DictRow
 
 from scadbuddy.bambuddy.models import PrinterStatus
-from scadbuddy.bambuddy.trays import EXTERNAL, seen_trays, tray_label
+from scadbuddy.bambuddy.trays import EXTERNAL, place_label, seen_trays
 from scadbuddy.filament import ledger, prints
 from scadbuddy.filament.inventory import FilamentInventory
 from scadbuddy.filament.locations import LocationStore
@@ -89,17 +89,22 @@ def _tray_row(ams_id: int, tray: Mapping[str, Any]) -> tuple[Any, ...]:
         material.strip() if isinstance(material, str) else None,
         tray.get("tray_color"),
         tray.get("remain"),
+        tray.get("state"),
     )
 
 
 def tray_projection(report: Mapping[str, Any]) -> tuple[tuple[Any, ...], ...]:
     """What the report shows in its trays: first the AMS unit ids, then per tray
-    ``(ams_id, tray_id, tray_uuid, tag_uid, material, colour, remain)``, from
+    ``(ams_id, tray_id, tray_uuid, tag_uid, material, colour, remain, state)``, from
     ``ams.ams[].tray[]``, ``vt_tray`` and ``vir_slot`` (the external holders are unit
-    255). The unit's humidity and temperature are left out: they change between reports
-    that change no tray (#6263 preflight C19)."""
+    255), and the unit ids come with ``ams.tray_exist_bits``. A tray's ``state`` and the
+    presence bits are in because `bambuddy/trays.py` `_filled` reads both: a pulled AMS-HT
+    spool keeps its ``tray_type`` and changes only those. The unit's humidity and
+    temperature are left out: they change between reports that change no tray (#6263
+    preflight C19)."""
     block = report.get("ams")
     units = _dicts(block.get("ams")) if isinstance(block, dict) else []
+    bits = block.get("tray_exist_bits") if isinstance(block, dict) else None
     ids: list[int] = []
     rows: list[tuple[Any, ...]] = []
     for unit in units:
@@ -113,7 +118,7 @@ def tray_projection(report: Mapping[str, Any]) -> tuple[tuple[Any, ...], ...]:
         _dicts(slots) if isinstance(slots, list) and slots else _dicts([report.get("vt_tray")])
     )
     rows += [_tray_row(EXTERNAL, tray) for tray in holders]
-    return (tuple(sorted(ids)), *sorted(rows, key=repr))
+    return ((tuple(sorted(ids)), bits), *sorted(rows, key=repr))
 
 
 def trays_changed(before: Mapping[str, Any] | None, after: Mapping[str, Any]) -> bool:
@@ -129,7 +134,11 @@ def _status(row: PrinterRow, report: Mapping[str, Any], at: datetime) -> Printer
 
 
 def touched(
-    conn: Conn, printer_id: str, report: Mapping[str, Any], ended_job: str | None
+    conn: Conn,
+    printer_id: str,
+    report: Mapping[str, Any],
+    ended_job: str | None,
+    seen_at: datetime,
 ) -> list[UUID]:
     """Every spool the plate end and the reconcile of one report can book on, by id: those
     with an open use of ``ended_job``, those in this printer's tray places, and those each
@@ -147,7 +156,7 @@ def touched(
     }
     row = PrinterStore.read_on(conn, printer_id)
     if row is not None:
-        for seen in seen_trays(_status(row, report, datetime.now(UTC))):
+        for seen in seen_trays(_status(row, report, seen_at)):
             holder, _ = FilamentInventory.holder_on(conn, UUID(printer_id), seen)
             if holder is not None:
                 found.add(holder)
@@ -160,10 +169,6 @@ def lock(conn: Conn, spool_ids: Sequence[UUID]) -> None:
         "SELECT 1 FROM filament_spools WHERE id = ANY(%s) ORDER BY id FOR UPDATE",
         (list(spool_ids),),
     ).fetchall()
-
-
-def _label(row: PrinterRow, ams_id: int, tray_id: int) -> str:
-    return f"{row.name} {tray_label(ams_id, tray_id)}"
 
 
 def _walk(
@@ -265,9 +270,7 @@ def reconcile(
                 )
                 result += CaptureResult(unloaded=1)
             if holder is not None and seen is not None:
-                label = (
-                    f"{row.name} external" if ams_id == EXTERNAL else _label(row, ams_id, tray_id)
-                )
+                label = place_label(row.name, ams_id, tray_id)
                 target = LocationStore.ensure_ams_on(conn, printer, ams_id, tray_id, label=label)
                 ledger.record(
                     conn,

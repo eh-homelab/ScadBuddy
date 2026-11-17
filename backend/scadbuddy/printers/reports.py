@@ -147,7 +147,7 @@ def _capture(
             lambda: capture.lock(
                 conn,
                 capture.touched(
-                    conn, printer_id, report, None if end is None else end.subtask_name
+                    conn, printer_id, report, None if end is None else end.subtask_name, seen_at
                 ),
             ),
         )

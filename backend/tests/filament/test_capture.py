@@ -14,7 +14,7 @@ import pytest
 
 from scadbuddy.filament import capture, prints
 from scadbuddy.filament.catalog import CatalogStore
-from scadbuddy.filament.inventory import FilamentInventory
+from scadbuddy.filament.inventory import FilamentInventory, _Keys
 from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.models import LocationCreate, LocationKind, Material, SpoolCreate
 from scadbuddy.filament.spools import FilamentSpoolStore
@@ -273,3 +273,116 @@ def test_a_tray_capture_that_raises_still_writes_the_report(
     (record,) = [r for r in caplog.records if r.message == prints.FILAMENT_CAPTURE_FAILED]
     assert record.__dict__["what"] == "trays" and record.__dict__["error"] == "RuntimeError"
     assert "secret detail" not in caplog.text
+
+
+def test_a_pulled_tray_that_only_loses_its_presence_bit_unloads(pg_pool: PgPool) -> None:
+    """An AMS-HT echoes a stale ``tray_type`` after its spool is pulled; only
+    ``tray_exist_bits`` says so (`bambuddy/trays.py` `_filled`)."""
+    spool = _spool(pg_pool, tray_uuid=U1)
+    pid, _ = _printer(pg_pool)
+    tray = _tray(1, U1)
+    present = {"ams": {"tray_exist_bits": "2", "ams": [{"id": "0", "tray": [tray]}]}}
+    pulled = {"ams": {"tray_exist_bits": "0", "ams": [{"id": "0", "tray": [tray]}]}}
+    assert capture.trays_changed(present, pulled) is True
+    assert _reconcile(pg_pool, pid, present).loaded == 1
+    assert _reconcile(pg_pool, pid, pulled, T0 + timedelta(minutes=1)).unloaded == 1
+    assert _row(pg_pool, spool)["location_id"] is None
+
+
+def test_a_tray_state_change_is_a_tray_change() -> None:
+    first = _report(_tray(1, U1))
+    second = copy.deepcopy(first)
+    second["ams"]["ams"][0]["tray"][0]["state"] = 9
+    assert capture.trays_changed(first, second) is True
+
+
+@pytest.mark.parametrize(
+    ("keys", "rgba", "found"),
+    [
+        ({"tray_uuid": U1}, "#FF0000FF", "tag"),
+        ({"tray_uuid": U3}, "#FF0000FF", "link"),
+        ({}, "#FF0000FF", "link"),
+        ({}, "#FF000080", None),
+        ({"tray_uuid": U3}, "#FF000080", None),
+    ],
+)
+def test_holder_on_and_the_batch_reader_agree(
+    pg_pool: PgPool, keys: dict[str, str], rgba: str, found: str | None
+) -> None:
+    tagged, placed = _spool(pg_pool, tray_uuid=U1), _spool(pg_pool)
+    pid, _ = _printer(pg_pool)
+    _link(pg_pool, pid, placed)
+    seen = SeenTray(
+        ams_id=0,
+        tray_id=1,
+        material="PLA",
+        colour=rgba[:7],
+        rgba=rgba,
+        **keys,  # type: ignore[arg-type]
+    )
+    with pg_pool.connection() as conn:
+        own = FilamentInventory.holder_on(conn, UUID(pid), seen)
+        other = _Keys(conn).hold(UUID(pid), seen)
+    expected = {"tag": tagged, "link": placed}.get(found or "")
+    assert own == other == (expected, found)
+
+
+def test_capture_and_link_name_a_place_alike(pg_pool: PgPool) -> None:
+    pid, _ = _printer(pg_pool)
+    spool = _spool(pg_pool, tray_uuid=U1)
+    _reconcile(pg_pool, pid, _report(_tray(1, U1), vt_tray=_tray(254, U2)))
+    ext = _spool(pg_pool, tray_uuid=U2)
+    _reconcile(pg_pool, pid, _report(_tray(1, U1), vt_tray=_tray(254, U2)), T0 + timedelta(1))
+    with pg_pool.connection() as conn:
+        names = {
+            r["tray_id"]: r["name"]
+            for r in conn.execute(
+                "SELECT ams_id, tray_id, name FROM filament_locations WHERE printer_id = %s"
+                " AND ams_id = 0",
+                (pid,),
+            ).fetchall()
+        }
+        external = conn.execute(
+            "SELECT name FROM filament_locations WHERE printer_id = %s AND ams_id = 255", (pid,)
+        ).fetchone()
+    assert names[1] == "H2C AMS-A slot 2"
+    assert external == {"name": "H2C External slot 1"}
+    assert spool != ext
+
+
+def _boom(*_: Any, **__: Any) -> None:
+    raise RuntimeError("secret detail")
+
+
+def test_a_lock_failure_skips_the_rest_and_still_writes_the_report(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    spool = _spool(pg_pool, tray_uuid=U1)
+    pid, reports = _printer(pg_pool)
+    monkeypatch.setattr(capture, "lock", _boom)
+    with caplog.at_level(logging.WARNING), pg_pool.connection() as conn, conn.transaction():
+        reports.advance_in(conn, pid, _report(_tray(1, U1)), T0)
+    assert reports.get(pid) is not None
+    (record,) = [r for r in caplog.records if r.message == prints.FILAMENT_CAPTURE_FAILED]
+    assert record.__dict__["what"] == "lock" and record.__dict__["error"] == "RuntimeError"
+    assert _events(pg_pool, spool, "loaded") == []
+    assert "secret detail" not in caplog.text
+
+
+def test_a_plate_end_failure_still_writes_the_report_and_the_trays(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    spool = _spool(pg_pool, tray_uuid=U1)
+    pid, reports = _printer(pg_pool)
+    job = {"subtask_name": "job-1"}
+    with pg_pool.connection() as conn, conn.transaction():
+        reports.advance_in(conn, pid, {"gcode_state": "RUNNING"} | job, T0)
+    monkeypatch.setattr(prints, "plate_ended", _boom)
+    done = _report(_tray(1, U1)) | {"gcode_state": "FINISH"} | job
+    with caplog.at_level(logging.WARNING), pg_pool.connection() as conn, conn.transaction():
+        reports.advance_in(conn, pid, done, T0 + timedelta(minutes=5))
+    stored = reports.get(pid)
+    assert stored is not None and stored[0]["gcode_state"] == "FINISH"
+    (record,) = [r for r in caplog.records if r.message == prints.FILAMENT_CAPTURE_FAILED]
+    assert record.__dict__["what"] == "plate_end"
+    assert len(_events(pg_pool, spool, "loaded")) == 1

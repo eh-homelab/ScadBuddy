@@ -28,7 +28,7 @@ from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.bambuddy.models import PrinterStatus, SpoolAssignment
-from scadbuddy.bambuddy.trays import seen_trays, tray_label
+from scadbuddy.bambuddy.trays import place_label, seen_trays, tray_label
 from scadbuddy.filament import models as m
 from scadbuddy.filament.colour import normalise_rgba
 from scadbuddy.filament.locations import LocationStore
@@ -488,7 +488,7 @@ class FilamentInventory:
         if printer is None:
             raise LookupError(f"no printer {printer_id}")
         place = self._locations.ensure_ams(
-            printer_id, ams_id, tray_id, label=f"{printer['name']} {tray_label(ams_id, tray_id)}"
+            printer_id, ams_id, tray_id, label=place_label(printer["name"], ams_id, tray_id)
         )
         with self._pool.connection() as conn, conn.transaction():
             _tray_lock(conn, printer_id, ams_id, tray_id)

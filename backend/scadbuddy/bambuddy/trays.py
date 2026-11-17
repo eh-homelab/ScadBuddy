@@ -115,6 +115,12 @@ def tray_label(ams_id: int, tray_id: int) -> str:
     return f"{unit_label(ams_id)} slot {tray_id + 1}"
 
 
+def place_label(printer_name: str, ams_id: int, tray_id: int) -> str:
+    """The name of a tray's place in the SB inventory: the printer and :func:`tray_label`.
+    `FilamentInventory.link` and `filament/capture.py` both make places, so one names them."""
+    return f"{printer_name} {tray_label(ams_id, tray_id)}"
+
+
 def spool_loaded(state: int) -> bool:
     """Whether ``state`` says a spool is in the slot and the tray is not loading or
     scanning: ha-bambulab's ``ams_tray_spool_loaded``, as cited at :data:`TRAY_SPOOL`."""
