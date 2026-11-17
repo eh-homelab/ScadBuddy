@@ -1124,6 +1124,8 @@ async def resolve_plates(
     plan: FilamentPlan,
     choices: PrintChoices,
     catalogue: Catalogue,
+    *,
+    unspooled: bool = False,
 ) -> tuple[list[Resolved], list[str]]:
     """Each plate resolved for ``plan``, and every slot refusal among them in the run's
     own words: what :func:`plan_run` refuses with, and what :func:`check_print` reports
@@ -1165,7 +1167,7 @@ async def resolve_plates(
     every: list[Resolved] = []
     errors: list[str] = []
     for plate_id, options in zip(plate_ids, per_plate, strict=True):
-        resolved = resolve(options, plan, choices, catalogue, spool_presets)
+        resolved = resolve(options, plan, choices, catalogue, spool_presets, unspooled=unspooled)
         for error in resolved.errors:
             message = (
                 f"Plate {plate_id}: {error.message}"
@@ -3181,8 +3183,12 @@ async def plan_run(
     title: str | None = None,
     overlay: Overlay | None = None,
     provider_labels: Mapping[str, str] | None = None,
+    unspooled: bool = False,
 ) -> PlannedRun:
     """Upload, then resolve every plate, before anything is sliced (spec §4).
+
+    With ``unspooled`` (a quote's slice, #6574) a slot with no spool and an Advanced
+    preset is sliced with that preset in the file's own colour (``resolver.resolve``).
 
     With ``slicer_backend`` ``native`` the plates are sliced by the native slicer
     (``native``, the image's profiles; a 503 without them), and a reprint reuses a
@@ -3371,7 +3377,7 @@ async def plan_run(
     if not native_run:
         per_plate = [with_trays(options, printer_status, printer_id) for options in per_plate]
     every, errors = await resolve_plates(
-        client, plate_ids, per_plate, request.filament_plan, choices, catalogue
+        client, plate_ids, per_plate, request.filament_plan, choices, catalogue, unspooled=unspooled
     )
     for plate_id, options, resolved in zip(plate_ids, per_plate, every, strict=True):
         if resolved.errors:

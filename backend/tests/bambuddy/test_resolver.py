@@ -413,3 +413,34 @@ def test_colours_and_bed_type_pass_through() -> None:
     )
     assert resolved.filament_colours == ["#112233"]
     assert resolved.bed_type == "Cool Plate"
+
+
+def test_a_quote_slices_a_slot_with_no_spool_with_its_advanced_preset_and_own_colour() -> None:
+    """#6574: a quote names a filament that is not loaded as a slot with no spool and an
+    Advanced preset; with ``unspooled`` it is sliced with that preset in the file's own
+    colour for the slot, so each slot keeps its colour. A print still needs a spool."""
+    override = PresetRef(source="cloud", id="GFSL99_22")
+    built = FilamentOptions(
+        library_file_id=41,
+        slots=[SlotNeed(slot_id=1, colour="#FF0000"), SlotNeed(slot_id=2, colour="#0000FF")],
+        spools=[],
+    )
+    choices = PrintChoices(
+        nozzles=[NozzleChoice(size="0.2")], filament_overrides={1: override, 2: override}
+    )
+    quoted = resolve(built, FilamentPlan(), choices, recorded(), {}, unspooled=True)
+    assert quoted.errors == []
+    assert quoted.filament_presets == [override, override]
+    assert quoted.filament_colours == ["#FF0000", "#0000FF"]
+    printed = resolve(built, FilamentPlan(), choices, recorded(), {})
+    assert [(e.kind, e.slot_id) for e in printed.errors] == [("no-choice", 1), ("no-choice", 2)]
+    # A slot with no spool and no preset of its own still has nothing to slice with.
+    bare = resolve(
+        built,
+        FilamentPlan(),
+        PrintChoices(nozzles=[NozzleChoice(size="0.2")], filament_overrides={1: override}),
+        recorded(),
+        {},
+        unspooled=True,
+    )
+    assert [(e.kind, e.slot_id) for e in bare.errors] == [("no-choice", 2)]

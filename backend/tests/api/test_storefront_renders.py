@@ -21,7 +21,8 @@ from typing import Any, ClassVar
 import pytest
 from fastapi.testclient import TestClient
 
-from scadbuddy.api.storefront_slice import ProfileSpool
+from scadbuddy.bambuddy.choices import PrinterOpening
+from scadbuddy.bambuddy.models import PresetRef, PrinterStatus
 from scadbuddy.bambuddy.preview import PreviewStarted
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import SettingsPatch
@@ -56,6 +57,7 @@ from tests.api.test_storefront_listings import (  # noqa: F401  (fixtures)
     template,
 )
 from tests.api.test_storefront_public import CRUD, TOKEN_A, bearer
+from tests.bambuddy.conftest import recording
 from tests.support.operations import press
 from tests.support.sliced3mf import sliced_3mf
 
@@ -456,21 +458,25 @@ class FakeSlicer:
 
 @pytest.fixture
 def sliced(crud: CrudCaller, monkeypatch: pytest.MonkeyPatch) -> type[FakeSlicer]:
-    """The shop slice profile set (printer ``p-1``, spool 9 for PLA and 5 for PETG), a
-    fake slicer in `PreviewSlicer`'s place, and the printer offering both."""
-    import scadbuddy.api.storefront_slice as storefront_slice
+    """The shop slice profile set (printer ``p-1``, a preset for PLA and PETG), a fake
+    slicer in `PreviewSlicer`'s place, and the printer's status read (#6574)."""
+    import scadbuddy.orders.storefront.slice_price as slice_price
 
     monkeypatch.setattr(FakeSlicer, "started", [])
     monkeypatch.setattr(order_operations, "PreviewSlicer", FakeSlicer)
+    status = PrinterStatus.model_validate(recording("printer-status-rack.json"))
 
-    async def offered(*_args: Any) -> list[ProfileSpool]:
-        return [
-            ProfileSpool(spool_id=9, material="PLA", label="PLA"),
-            ProfileSpool(spool_id=5, material="PETG", label="PETG"),
-        ]
+    async def opening(*_args: Any) -> PrinterOpening:
+        return PrinterOpening(status=status, bed_type="Textured PEI Plate")
 
-    monkeypatch.setattr(storefront_slice, "offered_spools", offered)
-    profile = StorefrontSliceProfile(printer="p-1", spools={"pla": 9, "petg": 5})
+    monkeypatch.setattr(slice_price, "printer_opening", opening)
+    profile = StorefrontSliceProfile(
+        printer="p-1",
+        materials={
+            "pla": PresetRef(source="standard", id="Bambu PLA Basic @BBL H2C"),
+            "petg": PresetRef(source="standard", id="Bambu PETG HF @BBL H2C"),
+        },
+    )
     _state(crud.api).settings_store.save(SettingsPatch(storefront_slice_profile=profile))
     return FakeSlicer
 
@@ -505,9 +511,14 @@ def test_the_price_is_a_slice_through_the_quote_path(
     assert "per kg" not in str(est) and "Markup" not in str(est)
     [(output_id, request, subject)] = sliced.started
     assert subject == f"storefront_price:{est['price_key']}"
-    # The profile gives the printer and the spool; the template gives supports.
+    # The profile gives the printer and the material's preset (no spool, #6574); the
+    # printer's status the nozzle flow; the template gives supports.
     assert request.printer == "p-1" and request.supports is None
-    assert [(s.slot_id, s.spool_id) for s in request.filament_plan.slots] == [(1, 9)]
+    assert request.filament_plan.slots == []
+    assert request.choices.filament_overrides == {
+        1: PresetRef(source="standard", id="Bambu PLA Basic @BBL H2C")
+    }
+    assert {n.flow for n in request.choices.nozzles} == {"high_flow"}
     with _state(crud.api).projection.pool.connection() as conn:
         row = conn.execute(
             "SELECT status, total_minor FROM storefront_slice_prices WHERE price_key = %s",
@@ -596,19 +607,20 @@ def test_a_slice_that_cannot_be_priced_gives_no_price(
     assert len(sliced.started) == 1
 
 
-def test_a_profile_spool_no_longer_offered_gives_no_price(
+def test_a_printer_status_not_read_gives_no_price(
     crud: CrudCaller,
     listing: dict[str, Any],
     sliced: type[FakeSlicer],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#6255 review: the tray's negative id moved, so the profile is checked first."""
-    import scadbuddy.api.storefront_slice as storefront_slice
+    """#6574: with no status the nozzle flow is not known, so there is no price (the
+    owner's rule: no price when unsure), and nothing is sliced."""
+    import scadbuddy.orders.storefront.slice_price as slice_price
 
-    async def swapped(*_args: Any) -> list[ProfileSpool]:
-        return [ProfileSpool(spool_id=-3, material="PLA", label="PLA")]
+    async def unread(*_args: Any) -> PrinterOpening:
+        return PrinterOpening(status=None, bed_type="Textured PEI Plate")
 
-    monkeypatch.setattr(storefront_slice, "offered_spools", swapped)
+    monkeypatch.setattr(slice_price, "printer_opening", unread)
     job = render_until_done(crud, TOKEN_A, listing, {"width": 43})
     assert priced(crud, job["id"])["source"] == "none"
     assert sliced.started == []

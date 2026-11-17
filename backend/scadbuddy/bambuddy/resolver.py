@@ -319,7 +319,14 @@ def resolve(
     choices: PrintChoices,
     catalogue: Catalogue,
     spool_presets: dict[int, list[SpoolFilamentPreset]],
+    *,
+    unspooled: bool = False,
 ) -> Resolved:
+    """Each slot's filament preset and colour, and the choices' presets. A slot needs a
+    spool, except with ``unspooled`` (a quote's slice, #6574): there a slot with no spool
+    and an Advanced preset (``choices.filament_overrides``) is sliced with that preset in
+    the file's own colour for the slot. That is how a quote names a filament that is not
+    loaded: a print still needs a spool for every slot."""
     chosen = _resolve_choices(choices, catalogue)
     warnings = list(chosen.warnings)
     errors = list(chosen.errors)
@@ -340,7 +347,7 @@ def resolve(
         # Not ``or -1``: a negative id is a tray chosen for itself (#2164).
         option = by_id.get(spool_id) if spool_id is not None else None
         colours[idx] = (option.colour if option else slot.colour) or "#FFFFFF"
-        if option is None:
+        if option is None and not (unspooled and slot.slot_id in choices.filament_overrides):
             # Not a preset problem, so Advanced cannot fix it: the slot needs a spool.
             errors.append(
                 FilamentWarning(
@@ -381,12 +388,12 @@ def resolve(
                     )
                 )
                 continue
-        elif option.spool_id < 0 and option.slicer_filament:
+        elif option is not None and option.spool_id < 0 and option.slicer_filament:
             # A tray chosen for itself: its tray_info_idx is the BBL preset's filament_id.
             ref = _by_filament_id(catalogue.filament, option.slicer_filament, printer)
-        if ref is None and option.spool_id < 0 and catalogue.is_native:
+        if ref is None and option is not None and option.spool_id < 0 and catalogue.is_native:
             ref = _record_preset(catalogue, option, printer)
-        if ref is None:
+        if ref is None and option is not None:
             own = [
                 row.slicer_filament
                 for row in spool_presets.get(option.spool_id, [])
@@ -453,7 +460,8 @@ def resolve(
                     kind="no-preset",
                     slot_id=slot.slot_id,
                     message=(
-                        f"{spool_label(option)} has no slicer preset for a {size} mm nozzle. "
+                        f"{spool_label(option) if option else f'Slot {slot.slot_id}'} has no"
+                        f" slicer preset for a {size} mm nozzle. "
                         "Pick one under Advanced."
                     ),
                 )

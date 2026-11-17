@@ -1,9 +1,8 @@
 import { HttpResponse, delay, http } from 'msw'
-import type { BambuddyStatus, ProfileSpool, Settings, StorefrontSliceProfile } from '../../api/types'
+import type { BambuddyStatus, FilamentPresetOption, Settings, StorefrontSliceProfile } from '../../api/types'
 import * as fixtures from '../fixtures'
 import { state as orders } from './orders/state'
 import { printersState } from './printers'
-import { SPOOL_INVENTORY } from './spoolInventory'
 import { forgetMockProjectTarget, forgetMockRemembered, mockRemembered, mockSettings, problem, setMockSettings } from '../handlers'
 
 /**
@@ -63,6 +62,13 @@ const NULLABLE = new Set([
   'storefront_turnstile_site_key',
   'storefront_turnstile_secret',
 ])
+/** #6574 — the 0.4 mm filament presets the options route offers (`api/storefront_slice.py`). */
+const PROFILE_PRESETS: FilamentPresetOption[] = [
+  { ref: { source: 'standard', id: 'Bambu PETG HF @BBL H2C' }, name: 'Bambu PETG HF @BBL H2C', filament_type: 'PETG' },
+  { ref: { source: 'standard', id: 'Bambu PLA Basic @BBL H2C' }, name: 'Bambu PLA Basic @BBL H2C', filament_type: 'PLA' },
+  { ref: { source: 'standard', id: 'Bambu PLA Matte @BBL H2C' }, name: 'Bambu PLA Matte @BBL H2C', filament_type: 'PLA' },
+]
+
 /** #6153 — backend `wire.py` `SUPPORT_MATERIAL`. */
 const SUPPORT_MATERIAL = /support|pva|bvoh|hips/i
 /** ISO 4217's codes with no minor unit (backend `orders/currency.py` `NO_MINOR_UNIT`). */
@@ -176,7 +182,7 @@ function putSettings(body: Record<string, unknown>) {
     // #6153 — `slice_profile.py` keeps each material casefolded.
     if (name === 'storefront_slice_profile' && value) {
       const profile = value as StorefrontSliceProfile
-      next[name] = { ...profile, spools: Object.fromEntries(Object.entries(profile.spools ?? {}).map(([m, id]) => [m.toLowerCase(), id])) }
+      next[name] = { ...profile, materials: Object.fromEntries(Object.entries(profile.materials ?? {}).map(([m, ref]) => [m.toLowerCase(), ref])) }
       continue
     }
     if (name === 'storefront_payment_instructions' && typeof value === 'string' && value.length > 2000) return refused(name, 'String should have at most 2000 characters')
@@ -320,25 +326,19 @@ export const handlers = [
     return response
   }),
 
-  // #6153 — the shop slice profile's choices (`api/storefront_slice.py`): the price book's
-  // materials, and Bambuddy's spools, as the mock's printers all run on Bambuddy's path.
+  // #6153, #6574 — the shop slice profile's choices (`api/storefront_slice.py`): the price
+  // book's materials, and the filament presets the dialog offers for a 0.4 mm nozzle.
   http.get(`${base}/storefront/slice-profile/options`, ({ request }) => {
     const materials = new Map<string, string>()
     for (const f of orders.filaments) if (!f.archived_at && !materials.has(f.material.toLowerCase())) materials.set(f.material.toLowerCase(), f.material)
     const printer = new URL(request.url).searchParams.get('printer')
     // As the route: 422 for a printer the registry does not hold.
     if (printer && !printersState().some((row) => row.id === printer)) return problem(422, 'Unprocessable Content', `no printer ${printer}`)
-    const spools: ProfileSpool[] = printer
-      ? SPOOL_INVENTORY.filter((spool) => !spool.archived).map((spool) => ({
-          spool_id: spool.id,
-          material: spool.material,
-          colour: spool.rgba ? `#${spool.rgba.slice(0, 6)}` : null,
-          label: `${[spool.brand, spool.material, spool.subtype, spool.color_name].filter(Boolean).join(' ')} (#${spool.id})`,
-        }))
-      : []
+    const presets = printer ? PROFILE_PRESETS : []
     return HttpResponse.json({
       materials: [...materials.values()].sort((a, b) => a.localeCompare(b)).map((material) => ({ material, support: SUPPORT_MATERIAL.test(material) })),
-      spools,
+      nozzle_size: '0.4',
+      presets,
     })
   }),
 

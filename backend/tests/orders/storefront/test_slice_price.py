@@ -4,7 +4,6 @@ the quote tests' fakes; the rows are Postgres."""
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Collection
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,8 +11,9 @@ from typing import Any
 
 import pytest
 
+from scadbuddy.bambuddy.choices import PrinterOpening
 from scadbuddy.bambuddy.filaments import FilamentPlan
-from scadbuddy.bambuddy.models import NozzleChoice, SlotChoice
+from scadbuddy.bambuddy.models import NozzleChoice, PresetRef, PrinterStatus
 from scadbuddy.bambuddy.resolver import PrintChoices
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import ModelPrintChoices, StoredSettings
@@ -24,7 +24,6 @@ from scadbuddy.orders.store import OrderStore
 from scadbuddy.orders.storefront.slice_price import (
     FILAMENT_GONE,
     GEOMETRY_DIFFERS,
-    PROFILE_STALE,
     SLICE_PRICE_KIND,
     SlicePrices,
     SliceRun,
@@ -35,10 +34,10 @@ from scadbuddy.orders.storefront.slice_price import (
     plan_variant,
     price_key,
     price_variant,
-    storefront_choices,
 )
 from scadbuddy.orders.storefront.slice_profile import StorefrontSliceProfile
 from scadbuddy.store.refs import BlobRefs
+from tests.bambuddy.conftest import recording
 from tests.conftest import PgPool
 from tests.orders.test_quote import (
     BY,
@@ -55,8 +54,13 @@ from tests.orders.test_quote import (
 
 pytestmark = pytest.mark.requires_postgres
 
-PROFILE = StorefrontSliceProfile(printer="p-1", spools={"pla": 9, "petg": 5})
+PLA_PRESET = PresetRef(source="standard", id="Bambu PLA Basic @BBL H2C")
+PETG_PRESET = PresetRef(source="standard", id="Bambu PETG HF @BBL H2C")
+PROFILE = StorefrontSliceProfile(printer="p-1", materials={"pla": PLA_PRESET, "petg": PETG_PRESET})
 CHOICES = PrintChoices(nozzles=[NozzleChoice(size="0.4")])
+#: An H2C with a High Flow 0.4 mm nozzle, as Bambuddy recorded it.
+STATUS = PrinterStatus.model_validate(recording("printer-status-rack.json"))
+OPENING = PrinterOpening(status=STATUS, bed_type="Textured PEI Plate")
 SHA = "e" * 64
 RATE = MachineRateBreakdown(
     printer="p-1",
@@ -79,19 +83,11 @@ def prices(pool: PgPool) -> SlicePrices:
     return SlicePrices(pool)
 
 
-def offering(spools: Collection[int] | None) -> Callable[[str], Awaitable[Collection[int] | None]]:
-    async def offered(printer: str) -> Collection[int] | None:
-        return spools
-
-    return offered
-
-
 def slice_run(
     shop: Shop,
     prices: SlicePrices,
     slicer: FakeSlicer,
     *,
-    offered: Collection[int] | None = (9, 5),
     book: Book | None = None,
     rendered: str | None = SHA,
 ) -> SliceRun:
@@ -109,7 +105,6 @@ def slice_run(
         renders=FakeRenders(),
         create_output=create_output,
         slicer=slicer,
-        offered=offering(offered),
         rendered_sha256=rendered_sha256,
         follow_every=0.0,
     )
@@ -126,14 +121,13 @@ def variant_of(
         reference=item.reference,
         slice=SliceQuoteRequest(
             printer="p-1",
-            filament_plan=FilamentPlan(
-                slots=[SlotChoice(slot_id=1, spool_id=9), SlotChoice(slot_id=2, spool_id=5)]
+            filament_plan=FilamentPlan(),
+            choices=CHOICES.model_copy(
+                update={"filament_overrides": {1: PLA_PRESET, 2: PETG_PRESET}}
             ),
-            choices=CHOICES,
         ),
         slot_filaments=[shop.pla, shop.petg],
         currency="USD",
-        spools=[9, 5],
         machine_rate=machine_rate,
     )
 
@@ -193,19 +187,14 @@ async def test_a_done_variant_is_never_sliced_again(
     assert len(slicer.subjects) == 1
 
 
-async def test_a_profile_spool_no_longer_offered_gives_no_price(
-    shop: Shop, prices: SlicePrices
-) -> None:
-    """#6255 review: a loaded tray's negative id moves when a spool is swapped, so the
-    profile is checked against what the printer offers before it prices."""
+async def test_an_operation_started_before_6574_still_runs(shop: Shop, prices: SlicePrices) -> None:
+    """An operation's request from before #6574 names the profile's spools; it is read,
+    and they are not."""
+    old = variant_of(shop, "b" * 64).model_dump(mode="json")
+    old["spools"] = [9, 5]
     slicer = FakeSlicer({1: sliced_plate(1, 3600, [10.0, 5.0])})
-    row = await price_variant(slice_run(shop, prices, slicer, offered=(9,)), variant_of(shop))
-    assert (row.status, row.failure, row.total_minor) == ("failed", PROFILE_STALE, None)
-    assert slicer.subjects == []
-    gone = await price_variant(
-        slice_run(shop, prices, slicer, offered=None), variant_of(shop, "b" * 64)
-    )
-    assert gone.failure == PROFILE_STALE
+    row = await price_variant(slice_run(shop, prices, slicer), SliceVariant.model_validate(old))
+    assert row.status == "done"
 
 
 async def test_an_archived_filament_gives_no_price(shop: Shop, prices: SlicePrices) -> None:
@@ -280,7 +269,11 @@ def test_the_key_changes_with_the_book_the_rate_the_filaments_and_the_profile(
     changed: list[dict[str, Any]] = [
         {"model_sha256": "f" * 64},
         {"filaments": [petg, pla]},
-        {"profile": PROFILE.model_copy(update={"spools": {"pla": 9, "petg": 6}})},
+        {
+            "profile": PROFILE.model_copy(
+                update={"materials": {"pla": PETG_PRESET, "petg": PETG_PRESET}}
+            )
+        },
         {"choices": CHOICES.model_copy(update={"bed_type": "Cool Plate"})},
         {"currency": "EUR"},
         {"policy": PricingPolicy(machine_rate_per_hour="2", setup_fee="0.5")},
@@ -290,9 +283,14 @@ def test_the_key_changes_with_the_book_the_rate_the_filaments_and_the_profile(
         assert price_key(**{**base, **change}) != key, change
     dearer = pla.model_copy(update={"cost_per_kg": "25"})
     assert price_key(**{**base, "filaments": [dearer, petg]}) != key
+    # #6574: a slot's colour changes the purges, so it is in the key.
+    recoloured = pla.model_copy(update={"colour": "#123456"})
+    assert price_key(**{**base, "filaments": [recoloured, petg]}) != key
 
 
-def test_a_variant_with_no_profile_or_no_spool_for_a_material_has_no_plan(shop: Shop) -> None:
+def test_a_variant_with_no_profile_or_no_preset_for_a_material_has_no_plan(
+    shop: Shop,
+) -> None:
     item = shop.get_item()
     assert item.reference is not None
     pla = shop.rows.filament(shop.pla)
@@ -305,15 +303,19 @@ def test_a_variant_with_no_profile_or_no_spool_for_a_material_has_no_plan(shop: 
         "currency": "USD",
         "policy": POLICY,
         "machine_rate": None,
+        "printer": OPENING,
     }
     assert plan_variant(settings=StoredSettings(), **asked) is None
     only_pla = StoredSettings(
-        storefront_slice_profile=StorefrontSliceProfile(printer="p-1", spools={"pla": 9})
+        storefront_slice_profile=StorefrontSliceProfile(
+            printer="p-1", materials={"pla": PLA_PRESET}
+        )
     )
     assert plan_variant(settings=only_pla, **asked) is None
     planned = plan_variant(settings=StoredSettings(storefront_slice_profile=PROFILE), **asked)
     assert planned is not None
-    assert planned.variant.spools == [9, 5]
+    assert planned.variant.slice.filament_plan.slots == []
+    assert planned.variant.slice.choices.filament_overrides == {1: PLA_PRESET, 2: PETG_PRESET}
     assert planned.variant.slice.printer == "p-1"
     # The profile names no support or process setting: the template's apply.
     assert planned.variant.slice.supports is None
@@ -338,6 +340,7 @@ async def test_a_live_rate_change_is_a_new_key_and_the_old_price_is_not_reused(
         "filaments": [pla, petg],
         "currency": "USD",
         "policy": POLICY,
+        "printer": OPENING,
     }
     dearer = RATE.model_copy(update={"rate_per_hour": "5.00"})
     old = plan_variant(**asked, machine_rate=RATE)
@@ -356,22 +359,57 @@ async def test_a_live_rate_change_is_a_new_key_and_the_old_price_is_not_reused(
     assert second.total_minor > first.total_minor
 
 
-def test_the_choices_are_the_dialogs_remembered_ones(shop: Shop) -> None:
+def _planned_choices(shop: Shop, settings: StoredSettings, opening: PrinterOpening) -> Any:
+    item = shop.get_item()
+    assert item.reference is not None
+    pla = shop.rows.filament(shop.pla)
+    petg = shop.rows.filament(shop.petg)
+    assert pla is not None and petg is not None
+    planned = plan_variant(
+        settings=settings.model_copy(update={"storefront_slice_profile": PROFILE}),
+        reference=item.reference,
+        model_sha256=SHA,
+        filaments=[pla, petg],
+        currency="USD",
+        policy=POLICY,
+        machine_rate=None,
+        printer=opening,
+    )
+    return None if planned is None else planned.variant.slice.choices
+
+
+def test_the_nozzle_flow_comes_from_the_printers_status(shop: Shop) -> None:
+    """#6574: with nothing remembered the variant is sliced on the nozzles the dialog
+    opens on, which the printer's live status gives (High Flow on this H2C), never a
+    standard-flow guess."""
+    choices = _planned_choices(shop, StoredSettings(), OPENING)
+    assert [(n.size, n.flow) for n in choices.nozzles] == [("0.4", "high_flow")] * 2
+    assert (choices.tier, choices.process_name) == ("standard", None)
+    assert choices.bed_type == "Textured PEI Plate"
+
+
+def test_the_remembered_process_is_used(shop: Shop) -> None:
+    """#6574: the model's remembered nozzles and process, as the dialog opens on them (a
+    remembered process opens with no tier)."""
     remembered = StoredSettings(
         model_print_choices={
-            "demo": ModelPrintChoices(
-                nozzles=[NozzleChoice(size="0.6", flow="high_flow")],
+            shop.get_item().reference.slug: ModelPrintChoices(  # type: ignore[union-attr]
+                nozzles=[NozzleChoice(size="0.4", flow="standard")],
                 tier="fine",
-                process_name="P",
+                process_name="0.16mm High Quality @BBL H2C",
             )
         }
     )
-    choices = storefront_choices(remembered, "demo", "p-1")
-    assert [n.size for n in choices.nozzles] == ["0.6", "0.6"]
-    assert (choices.tier, choices.process_name) == ("fine", "P")
-    fresh = storefront_choices(StoredSettings(), "demo", "p-1")
-    assert [(n.size, n.flow) for n in fresh.nozzles] == [("0.4", "standard")] * 2
-    assert fresh.tier == "standard"
+    choices = _planned_choices(shop, remembered, OPENING)
+    assert [(n.size, n.flow) for n in choices.nozzles] == [("0.4", "standard")] * 2
+    assert (choices.tier, choices.process_name) == (None, "0.16mm High Quality @BBL H2C")
+
+
+def test_a_printer_status_not_read_gives_no_price(shop: Shop) -> None:
+    """#6574, the owner's rule (no price when unsure): a status that cannot be read is
+    no plan, not a price at the standard-flow defaults."""
+    unread = PrinterOpening(status=None, bed_type="Textured PEI Plate")
+    assert _planned_choices(shop, StoredSettings(), unread) is None
 
 
 class UnavailableSlicer(FakeSlicer):

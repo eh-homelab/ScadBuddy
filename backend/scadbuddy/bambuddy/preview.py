@@ -113,8 +113,10 @@ async def _planned(
     *,
     route: RunRoute | None = None,
     title: str | None = None,
+    unspooled: bool = False,
 ) -> PlannedRun:
     """The run's own layout, upload and presets for ``request``, never into a project.
+    ``unspooled`` is :func:`~scadbuddy.bambuddy.print_run.plan_run`'s.
 
     On a native ``route`` (plan 2026-10-18 D2) it is the native run's plan, with no
     Bambuddy call (``client`` is ``None``, D3): its copy goes where the run's would with
@@ -161,6 +163,7 @@ async def _planned(
         reuse_slices=False,
         native=native,
         title=title,
+        unspooled=unspooled,
     )
     if not planned.plates:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "There is no plate to slice.")
@@ -297,9 +300,14 @@ async def start_preview_plates(
     ``all_plates`` are ignored and every plate is planned and sliced, each recorded for
     ``subject`` as the dialog records its one, on either slicer. One started slice per
     plate, in plate order. A plate that fails to start leaves the earlier plates'
-    records to the preview sweeps, as the dialog leaves its own."""
+    records to the preview sweeps, as the dialog leaves its own. A quote may name a
+    filament that is not loaded (#6574): a slot with no spool and an Advanced preset
+    (``choices.filament_overrides``) is sliced with that preset in the file's own colour
+    for the slot."""
     every = request.model_copy(update={"all_plates": True, "plate_ids": None, "plate_id": 1})
-    planned = await _planned(client, source, settings, every, native, route=route, title=title)
+    planned = await _planned(
+        client, source, settings, every, native, route=route, title=title, unspooled=True
+    )
     return [
         await _start_plate(
             client,

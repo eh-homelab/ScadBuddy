@@ -1,23 +1,25 @@
-"""The shop slice profile's choices (#6153, #6255 review): the options route on
-Bambuddy's path, and the spools of a native route, which are the loaded trays."""
+"""The shop slice profile's choices (#6153, #6574): the options route offers the filament
+presets the print dialog's Advanced step offers on the printer, read from Bambuddy's
+catalogue on its path and from the image's on a native route."""
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import Any
 
-import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
 
 from scadbuddy.api import storefront_slice
-from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.bambuddy.catalogue import Catalogue, PresetChoice
+from scadbuddy.bambuddy.models import PresetRef
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.models import PrinterCreate
 from tests.api.test_settings_runtime import _state
+from tests.bambuddy.test_choices_reads import _ok
 
 OPTIONS = "/api/v1/storefront/slice-profile/options"
+BAMBUDDY = "https://bambuddy.test/api/v1"
 
 
 def _printer(client: TestClient) -> str:
@@ -26,25 +28,24 @@ def _printer(client: TestClient) -> str:
 
 
 @respx.mock
-def test_the_options_list_bambuddys_spools_for_a_printer(client: TestClient) -> None:
+def test_the_options_list_the_dialogs_presets_for_a_printer(client: TestClient) -> None:
     printer = _printer(client)
     client.put("/api/v1/settings", json={"bambuddy_url": "https://bambuddy.test"})
-    respx.get("https://bambuddy.test/api/v1/inventory/spools").mock(
-        return_value=httpx.Response(
-            200, json=[{"id": 7, "material": "PLA", "brand": "Bambu", "color_name": "Red"}]
-        )
-    )
+    respx.get(f"{BAMBUDDY}/slicer/presets").mock(return_value=_ok("slicer-presets-h2c.json"))
+    respx.get(f"{BAMBUDDY}/local-presets/").mock(return_value=_ok("local-presets.json"))
     answer = client.get(OPTIONS, params={"printer": printer})
     assert answer.status_code == 200, answer.text
-    spools = answer.json()["spools"]
-    assert [(s["spool_id"], s["material"]) for s in spools] == [(7, "PLA")]
-    assert spools[0]["label"] == "Bambu PLA Red (#7)"
+    body = answer.json()
+    assert body["nozzle_size"] == "0.4"
+    names = [preset["name"] for preset in body["presets"]]
+    assert "Bambu PLA Basic @BBL H2C" in names
+    assert names == sorted(names, key=str.lower)
 
 
-def test_the_options_name_no_spool_without_a_printer(client: TestClient) -> None:
+def test_the_options_name_no_preset_without_a_printer(client: TestClient) -> None:
     answer = client.get(OPTIONS)
     assert answer.status_code == 200, answer.text
-    assert answer.json()["spools"] == []
+    assert answer.json()["presets"] == []
 
 
 def test_the_options_refuse_a_printer_the_registry_lacks(client: TestClient) -> None:
@@ -52,33 +53,34 @@ def test_the_options_refuse_a_printer_the_registry_lacks(client: TestClient) -> 
     assert answer.status_code == 422
 
 
-@pytest.mark.asyncio
-async def test_a_native_route_offers_its_loaded_trays(monkeypatch: pytest.MonkeyPatch) -> None:
-    """On a native route the spools are the loaded trays, with their (negative) ids."""
-    row = SimpleNamespace(id="p1", name="H2C")
-    route = SimpleNamespace(row=row, status=object(), printer_id=None)
+def test_a_native_route_offers_the_images_presets(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a native route the presets are the image's, and Bambuddy is not asked (respx
+    is not active, so a Bambuddy call would fail)."""
+    printer = _printer(client)
 
     async def a_route(*_: Any, **__: Any) -> Any:
-        return route
+        return object()
 
-    async def no_overlay(*_: Any, **__: Any) -> dict[str, Any]:
-        return {}
-
-    tray = SimpleNamespace(
-        spool_id=-3, material="PETG", colour="#00FF00", label="Bambu", color_name="Green"
+    pla = PresetChoice(
+        ref=PresetRef(source="standard", id="Bambu PLA Basic @BBL H2C"),
+        name="Bambu PLA Basic @BBL H2C",
+        filament_type="PLA",
+        compatible_printers=["Bambu Lab H2C 0.4 nozzle"],
     )
+
+    async def image_catalogue(*_: Any, **__: Any) -> Catalogue:
+        return Catalogue(printer=[], process=[], filament=[pla])
+
     monkeypatch.setattr(storefront_slice, "dialog_route", a_route)
-    monkeypatch.setattr(storefront_slice, "status_overlay", no_overlay)
-    monkeypatch.setattr(storefront_slice, "loaded_trays", lambda *_: [tray])
-
-    class Store:
-        def get(self, printer: str) -> Any:
-            return row if printer == "p1" else None
-
-    printers: Any = SimpleNamespace(store=Store(), reports=None)
-    offered = await storefront_slice.offered_spools(StoredSettings(), printers, None, "p1")  # type: ignore[arg-type]
-    assert offered is not None
-    assert [(s.spool_id, s.material, s.label) for s in offered] == [
-        (-3, "PETG", "Bambu PETG Green")
+    monkeypatch.setattr(storefront_slice, "catalogue_for", image_catalogue)
+    answer = client.get(OPTIONS, params={"printer": printer})
+    assert answer.status_code == 200, answer.text
+    assert answer.json()["presets"] == [
+        {
+            "ref": {"source": "standard", "id": "Bambu PLA Basic @BBL H2C"},
+            "name": "Bambu PLA Basic @BBL H2C",
+            "filament_type": "PLA",
+        }
     ]
-    assert await storefront_slice.offered_spools(StoredSettings(), printers, None, "p2") is None  # type: ignore[arg-type]

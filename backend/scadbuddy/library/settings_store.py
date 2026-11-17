@@ -502,8 +502,9 @@ class StoredSettings(BambuddyIds):
     #: The messaging plugin tool bound to "customer messages" (#5660); ``None`` is none,
     #: so `order_notify_customer` only composes. No secret: the plugin's stay in the agent.
     orders_customer_messaging: MessagingBinding | None = None
-    #: The shop slice profile (#6153): the printer and a spool per material a storefront
-    #: variant is sliced with. ``None`` slices nothing, so no visitor sees a price.
+    #: The shop slice profile (#6153, #6574): the printer and a filament preset per
+    #: material a storefront variant is sliced with. ``None`` slices nothing, so no
+    #: visitor sees a price.
     storefront_slice_profile: StorefrontSliceProfile | None = None
 
     #: Options scope (a model slug, or ``library:<file id>``, #1754) -> what the picker

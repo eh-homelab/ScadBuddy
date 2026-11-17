@@ -6,6 +6,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Awaitable, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -18,7 +19,7 @@ from scadbuddy.bambuddy.catalogue import (
     RefreshClaim,
     cached_catalogue,
 )
-from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.concurrent import settled
 from scadbuddy.bambuddy.extruders import default_nozzles, one_flow
 from scadbuddy.bambuddy.filaments import FilamentOptions
@@ -43,13 +44,14 @@ from scadbuddy.bambuddy.print_run import (
     NATIVE_SLICER_UNAVAILABLE,
     LanBlock,
     RunRoute,
+    dialog_route,
     filament_options,
     lan_printers,
     lan_reach,
     read_status,
 )
 from scadbuddy.bambuddy.print_source import OutputSource, PrintSource
-from scadbuddy.bambuddy.resolver import _SOURCE_ORDER, DEFAULT_BED, TIERS, Tier
+from scadbuddy.bambuddy.resolver import _SOURCE_ORDER, DEFAULT_BED, TIERS, PrintChoices, Tier
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputStore
@@ -81,10 +83,13 @@ __all__ = [
     "TierOption",
     "choices_for",
     "choices_for_output",
+    "dialog_bed_type",
     "installed_nozzles",
     "last_bed_type",
     "nozzle_warning",
+    "opening_choices",
     "plate_warning",
+    "printer_opening",
 ]
 
 
@@ -120,6 +125,10 @@ class ChoicesView(BaseModel):
     bed_type_labels: dict[str, str] = Field(default_factory=dict)
     last_bed_type: str | None = None
     bed_type: str = DEFAULT_BED
+    #: #6574: the choices the dialog opens on (:func:`opening_choices`): the model's
+    #: remembered nozzles, tier and process, else the printer's defaults, and
+    #: ``bed_type``. A storefront slice price is sliced with the same choices.
+    opening_choices: PrintChoices | None = None
     filaments: FilamentOptions
     #: Task 9 R5 — the filament presets each nozzle size takes, for Advanced mode's
     #: per-slot override. One row per name, the resolver's preferred tier winning.
@@ -160,6 +169,88 @@ def filament_presets_by_size(catalogue: Catalogue) -> dict[str, list[FilamentPre
             for row in sorted(best.values(), key=lambda row: row.name.lower())
         ]
     return out
+
+
+def dialog_bed_type(
+    settings: StoredSettings,
+    *,
+    last: str | None,
+    printer: str | None,
+    printer_id: int | None,
+) -> str:
+    """The plate the dialog opens on: the printer's last print's plate (``last``, from
+    Bambuddy's archives), else the plate remembered on the printer, else the default."""
+    return (
+        last or settings.bed_type_of(printer=printer, bambuddy_printer_id=printer_id) or DEFAULT_BED
+    )
+
+
+def opening_choices(
+    remembered: ModelPrintChoices | None, status: PrinterStatus | None, bed_type: str
+) -> PrintChoices:
+    """The choices the print dialog opens on for a subject on a printer (#6574): the
+    subject's remembered nozzles (one flow, #4272), tier and process
+    (``model_print_choices``), else the defaults from the printer's live ``status``
+    (``extruders.default_nozzles``: High Flow when the printer has a High Flow nozzle of
+    the size), and ``bed_type`` (:func:`dialog_bed_type`). A remembered process opens
+    with no tier, as the dialog does. The dialog (:func:`choices_for`) and a storefront
+    slice price (``orders/storefront/slice_price.py``) both use it."""
+    nozzles = one_flow(remembered.nozzles) if remembered and remembered.nozzles else None
+    process_name = remembered.process_name if remembered else None
+    tier: Tier | None = None
+    if process_name is None:
+        tier = (remembered.tier if remembered else None) or "standard"
+    return PrintChoices(
+        nozzles=nozzles or default_nozzles(status),
+        tier=tier,
+        process_name=process_name,
+        bed_type=bed_type,
+    )
+
+
+@dataclass(frozen=True)
+class PrinterOpening:
+    """What the dialog reads of a printer before it opens: its live status (``None``
+    when it cannot be read) and the plate it opens on."""
+
+    status: PrinterStatus | None
+    bed_type: str
+
+
+async def printer_opening(
+    settings: StoredSettings, printers: Printers, printer: str
+) -> PrinterOpening | None:
+    """Registry printer ``printer`` read as the dialog reads it (#6574): on a route a run
+    takes over the LAN, the status of its LAN report (``dialog_route``, as
+    ``api/printing.py`` ``opening_route`` does for a named printer, no Bambuddy call);
+    else Bambuddy's status of the printer it links and its last print's plate
+    (``choices_for``). ``None`` when the registry has no such printer. A printer that
+    links no Bambuddy printer and has no LAN route, or that Bambuddy cannot read, has
+    no status."""
+    row = await asyncio.to_thread(printers.store.get, printer)
+    if row is None:
+        return None
+    route = await dialog_route(
+        settings, printers.store, printers.reports, printer=row.id, printer_id=None
+    )
+    if route is not None and route.status is not None:
+        bed = dialog_bed_type(settings, last=None, printer=row.id, printer_id=route.printer_id)
+        return PrinterOpening(status=route.status, bed_type=bed)
+    printer_id = row.bambuddy_printer_id
+    if printer_id is None:
+        return PrinterOpening(status=None, bed_type=DEFAULT_BED)
+    try:
+        async with client_for(settings) as client:
+            status, last = await asyncio.gather(
+                read_status(client, printer_id), _last_bed_type(client, printer_id)
+            )
+    except ApiError:
+        # No Bambuddy configured, or it refused: no status, so no default is guessed.
+        logger.info("the printer's status cannot be read from Bambuddy")
+        return PrinterOpening(status=None, bed_type=DEFAULT_BED)
+    # As `choices_for` opens the dialog on Bambuddy's path: no registry printer is named.
+    bed = dialog_bed_type(settings, last=last, printer=None, printer_id=printer_id)
+    return PrinterOpening(status=status, bed_type=bed)
 
 
 async def choices_for(
@@ -299,11 +390,7 @@ def _view(
         )
         for size in SIZES
     }
-    bed = (
-        last
-        or settings.bed_type_of(printer=registry_printer, bambuddy_printer_id=printer_id)
-        or DEFAULT_BED
-    )
+    bed = dialog_bed_type(settings, last=last, printer=registry_printer, printer_id=printer_id)
     bed_types = list(bed_types_for(model))
     return ChoicesView(
         printer_id=printer_id,
@@ -319,6 +406,7 @@ def _view(
         processes=processes,
         last_bed_type=last,
         bed_type=bed,
+        opening_choices=opening_choices(remembered, status, bed),
         filaments=filaments,
         filament_presets=filament_presets_by_size(catalogue),
         # One flow, as the resolver requires (#4272): a pair remembered from before it

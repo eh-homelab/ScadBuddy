@@ -49,7 +49,6 @@ from scadbuddy.core.setting_docs import SETTING_DOCS
 from scadbuddy.core.settings import (
     APPLIES,
     BOOTSTRAP_FIELDS,
-    ENV_SEEDED,
     Applies,
     Settings,
     env_var,
@@ -76,7 +75,6 @@ from scadbuddy.orders.money import DepositRule, ShippingOption
 from scadbuddy.orders.storefront.slice_profile import StorefrontSliceProfile
 from scadbuddy.print_watch.component import AUTO_IMPORTS
 from scadbuddy.printers.component import Printers, PrintersDep
-from scadbuddy.spools.component import SpoolsDep
 from scadbuddy.workflows.commands import (
     TemporalRefusedError,
     TemporalUnavailableError,
@@ -202,8 +200,8 @@ class SettingsView(BaseModel):
     storefront_payment_instructions: str | None = None
     #: The messaging plugin tool bound to "customer messages" (#5660); null is none.
     orders_customer_messaging: MessagingBinding | None = None
-    #: The shop slice profile (#6153): the printer and a spool per material; null is none,
-    #: and the storefront then shows no price.
+    #: The shop slice profile (#6153, #6574): the printer and a filament preset per
+    #: material; null is none, and the storefront then shows no price.
     storefront_slice_profile: StorefrontSliceProfile | None = None
     #: Whether a fulfilled line item may be unfulfilled (#4953); on by default.
     orders_allow_unfulfil: bool = True
@@ -583,26 +581,6 @@ async def _check_operation_retention(
         )
 
 
-def _pending(store: SettingsStore, patch: SettingsPatch) -> StoredSettings:
-    """The stored settings as ``patch`` leaves them, for a check that reads the connection
-    this same PUT sets or resets (#6255): a given field takes the patch's value, a reset
-    one the deployment's (the environment's, else the default)."""
-    stored = store.load()
-    fields = StoredSettings.model_fields
-    update: dict[str, Any] = {}
-    for name in patch.reset:
-        if name in fields:
-            update[name] = (
-                getattr(store.defaults, name)
-                if name in ENV_SEEDED
-                else fields[name].get_default(call_default_factory=True)
-            )
-    for name in patch.model_fields_set & fields.keys():
-        if name != "reset":
-            update[name] = getattr(patch, name)
-    return stored.model_copy(update=update)
-
-
 @router.put("/settings", response_model=SettingsView, summary="Update the settings")
 async def put_settings(
     patch: SettingsPatch,
@@ -610,7 +588,6 @@ async def put_settings(
     state: StateDep,
     ops: OperationsDep,
     registry: PrintersDep,
-    spools: SpoolsDep,
 ) -> SettingsView:
     """Saves the fields given; a ``null`` clears one and ``reset`` puts one back on the
     deployment's value. A live field applies before this answers, here and (through
@@ -620,14 +597,12 @@ async def put_settings(
     client's ``printer_id`` (a Bambuddy id) is saved as the registry printer that links
     it; ``default_printer`` sent beside it wins. 422 for a ``default_printer`` the
     registry does not hold, and for a ``printer_id`` no registry printer links. 422 for a
-    ``storefront_slice_profile`` whose printer the registry does not hold, or whose spool
-    the print dialog does not offer on that printer (#6153)."""
+    ``storefront_slice_profile`` whose printer the registry does not hold (#6153)."""
     _mail_connection_by_a_person(patch)
     _print_watch_by_a_person(patch)
     patch = await asyncio.to_thread(_default_printer, patch, registry)
     if patch.storefront_slice_profile is not None:
-        pending = await asyncio.to_thread(_pending, store, patch)
-        await check_profile(patch.storefront_slice_profile, pending, registry, spools)
+        await check_profile(patch.storefront_slice_profile, registry)
     if patch.operation_retention_seconds is not None:
         await _check_operation_retention(store, ops, patch.operation_retention_seconds)
     if patch.git_remote_token and store.kek is None:
