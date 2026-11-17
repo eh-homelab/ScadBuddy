@@ -156,7 +156,9 @@ def _capture(
         steps.append(
             (
                 "plate_end",
-                lambda: prints.plate_ended(conn, end.subtask_name, report["gcode_state"], seen_at),
+                lambda: prints.plate_ended(
+                    conn, printer_id, end.subtask_name, report["gcode_state"], seen_at
+                ),
             )
         )
     if trays:

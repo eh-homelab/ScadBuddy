@@ -86,9 +86,18 @@ def open_for_run(conn: Conn, run_id: str) -> list[OpenUse]:
     return _open(conn, "e.ref_id LIKE %(prefix)s", {"prefix": f"{escaped}/%"})
 
 
-def open_for_job(conn: Conn, job: str) -> list[OpenUse]:
-    """The uses of one job still open, by `filament_spool_events_job`."""
-    return _open(conn, "(e.data ->> 'job') = %(job)s", {"job": job})
+def open_for_job(conn: Conn, printer_id: str, job: str) -> list[OpenUse]:
+    """The uses of one job still open, by `filament_spool_events_job`, on one printer: a
+    use whose run (``print_runs.printer``) names another printer is not matched, since
+    two printers can run a job of the same name. A run with no printer, or no run row,
+    is matched."""
+    return _open(
+        conn,
+        "(e.data ->> 'job') = %(job)s AND NOT EXISTS (SELECT 1 FROM print_runs r"
+        " WHERE r.id = split_part(e.ref_id, '/', 1)"
+        " AND r.printer IS NOT NULL AND r.printer <> %(printer)s::uuid)",
+        {"job": job, "printer": printer_id},
+    )
 
 
 def book_end(
@@ -118,8 +127,8 @@ def book_end(
     )
 
 
-def plate_ended(conn: Conn, subtask_name: str, state: str, at: datetime) -> None:
-    """Book the end of every open use of ``subtask_name``, at the report that shows it:
-    its grams when the printer says ``FINISH``, else none."""
-    for use in open_for_job(conn, subtask_name):
+def plate_ended(conn: Conn, printer_id: str, subtask_name: str, state: str, at: datetime) -> None:
+    """Book the end of every open use of ``subtask_name`` on ``printer_id``, at the report
+    that shows it: its grams when the printer says ``FINISH``, else none."""
+    for use in open_for_job(conn, printer_id, subtask_name):
         book_end(conn, use, applied=state == "FINISH", at=at, actor=PRINTER_WATCH, ended="report")

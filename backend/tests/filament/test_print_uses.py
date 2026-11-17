@@ -10,7 +10,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from psycopg.types.json import Jsonb
@@ -167,7 +167,7 @@ def test_the_settle_books_only_what_the_report_did_not(pg_pool: PgPool) -> None:
     record_uses(pg_pool, RUN, "a", [_use(spool, 10)])
     reported = datetime.now(UTC) + timedelta(minutes=5)
     with pg_pool.connection() as conn, conn.transaction():
-        prints.plate_ended(conn, "a", "FINISH", reported)
+        prints.plate_ended(conn, str(uuid4()), "a", "FINISH", reported)
     assert settle_uses(pg_pool, RUN, ["done"]) is False
     (end,) = [e for e in FilamentSpoolStore(pg_pool).events(spool) if e.kind == "print_ended"]
     assert (end.at, end.data["ended"]) == (reported, "report")
@@ -183,7 +183,7 @@ def test_a_reading_after_the_plates_end_is_not_taken_off_again(pg_pool: PgPool) 
     record_uses(pg_pool, RUN, "a", [_use(spool, 12, at=started_at)])
     ended_at = started_at + timedelta(seconds=1)
     with pg_pool.connection() as conn, conn.transaction():
-        prints.plate_ended(conn, "a", "FINISH", ended_at)
+        prints.plate_ended(conn, str(uuid4()), "a", "FINISH", ended_at)
         weighed = ended_at + timedelta(seconds=1)
         ledger.record(conn, spool, "weighed", source="scale", absolute_g=80, at=weighed)
     settle_uses(pg_pool, RUN, ["done"])

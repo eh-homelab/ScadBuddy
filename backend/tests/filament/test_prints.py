@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from psycopg.types.json import Jsonb
@@ -140,12 +140,13 @@ def test_a_plate_end_capture_that_raises_still_writes_the_report(
 
 def test_book_end_is_once_per_use(pg_pool: PgPool) -> None:
     spool = _start(pg_pool)
+    _, pid = _printer(pg_pool)
     with pg_pool.connection() as conn, conn.transaction():
-        (use,) = prints.open_for_job(conn, JOB)
+        (use,) = prints.open_for_job(conn, pid, JOB)
         assert prints.open_for_run(conn, RUN) == [use]
         assert prints.book_end(conn, use, applied=True, at=None, actor="x", ended="settle")
         assert prints.book_end(conn, use, applied=True, at=None, actor="x", ended="settle") is None
-        assert prints.open_for_job(conn, JOB) == []
+        assert prints.open_for_job(conn, pid, JOB) == []
     assert len(_ends(pg_pool, spool)) == 1
     assert ledger.PRINT_RUN == "print_run"
 
@@ -165,10 +166,32 @@ def test_an_untimed_end_with_a_reading_before_the_settle_is_the_accepted_upper_b
         ledger.record(
             conn, spool, "weighed", source="scale", absolute_g=60.0, at=t + timedelta(minutes=1)
         )
-        (use,) = prints.open_for_job(conn, JOB)
+        (use,) = prints.open_for_job(conn, pid, JOB)
         assert prints.book_end(conn, use, applied=True, at=None, actor="x", ended="settle")
     spool_row = FilamentSpoolStore(pg_pool).get(spool)
     assert spool_row is not None and spool_row.grams_left == 20.0  # 60 - 40, not 60
+
+
+def test_a_job_of_the_same_name_on_another_printer_is_not_matched(pg_pool: PgPool) -> None:
+    """Two printers can run a job of one name: the use of a run on printer A is open for
+    A's report, not for B's end of its own job J, which books nothing on A's spool."""
+    spool = _start(pg_pool)
+    _, pid_a = _printer(pg_pool)
+    printers = PrinterStore(pg_pool, KEK)
+    other = printers.create(PrinterCreate(serial="01P00A000000002", name="H2D"))
+    with pg_pool.connection() as conn, conn.transaction():
+        conn.execute(
+            "INSERT INTO print_runs (id, output_id, idempotency_key, status, printer)"
+            " VALUES (%s, 'out', 'k', 'running', %s)",
+            (RUN, pid_a),
+        )
+        assert [u.spool_id for u in prints.open_for_job(conn, pid_a, JOB)] == [spool]
+        assert prints.open_for_job(conn, other.id, JOB) == []
+        prints.plate_ended(conn, other.id, JOB, "FINISH", datetime.now(UTC))
+    assert _ends(pg_pool, spool) == []
+    with pg_pool.connection() as conn, conn.transaction():
+        prints.plate_ended(conn, pid_a, JOB, "FINISH", datetime.now(UTC))
+    assert len(_ends(pg_pool, spool)) == 1
 
 
 def test_a_row_written_without_data_job_is_found_by_its_ref(pg_pool: PgPool) -> None:
@@ -189,6 +212,6 @@ def test_a_row_written_without_data_job_is_found_by_its_ref(pg_pool: PgPool) -> 
         )
         (use,) = prints.open_for_run(conn, RUN)
         assert (use.job, use.ref_id) == (JOB, f"{RUN}/{JOB}/0")
-        assert prints.open_for_job(conn, JOB) == []  # the index lookup needs data.job
+        assert prints.open_for_job(conn, str(uuid4()), JOB) == []  # the index lookup needs data.job
         event = prints.book_end(conn, use, applied=True, at=None, actor="x", ended="settle")
     assert event is not None and event.data["job"] == JOB

@@ -9,7 +9,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -952,7 +952,7 @@ def _now_in_bb() -> str:
 def _report_end(pool: PgPool, subtask: str) -> None:
     """The printer's report that shows plate ``subtask`` finished, now (Task 5)."""
     with pool.connection() as conn, conn.transaction():
-        prints.plate_ended(conn, subtask, "FINISH", datetime.now(UTC))
+        prints.plate_ended(conn, str(uuid4()), subtask, "FINISH", datetime.now(UTC))
 
 
 def test_a_pull_between_two_plates_counts_each_plate_once(pg_pool: PgPool) -> None:

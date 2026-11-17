@@ -200,9 +200,11 @@ def _link(pool: PgPool, pid: str, spool: UUID, rgba: str = "#FF0000FF") -> None:
     )
 
 
-def test_a_loading_tray_keeps_an_untagged_spool(pg_pool: PgPool) -> None:
+@pytest.mark.parametrize("loading_state", [1, 5], ids=["legacy", "bitfield"])
+def test_a_loading_tray_keeps_an_untagged_spool(pg_pool: PgPool, loading_state: int) -> None:
     """SPOOL set and STEADY clear is a tray loading or scanning (`bambuddy/trays.py`
-    `spool_loaded`): no news, not an empty tray."""
+    `spool_loaded`; an older firmware's state 1, below ``TRAY_STATE_LEGACY_MAX``, reads
+    the same): no news, not an empty tray."""
     spool = _spool(pg_pool)
     pid, _ = _printer(pg_pool)
     _link(pg_pool, pid, spool)
@@ -210,7 +212,7 @@ def test_a_loading_tray_keeps_an_untagged_spool(pg_pool: PgPool) -> None:
     fingerprint = _row(pg_pool, spool)["tray_fingerprint"]
     assert fingerprint is not None
     before = len(_events(pg_pool, spool))
-    loading = _report(_tray(1, state=5))
+    loading = _report(_tray(1, state=loading_state))
     assert _reconcile(pg_pool, pid, loading, T0 + timedelta(minutes=1)) == capture.CaptureResult()
     steady = _report(_tray(1, remain=50))
     assert _reconcile(pg_pool, pid, steady, T0 + timedelta(minutes=2)) == capture.CaptureResult()
@@ -221,12 +223,15 @@ def test_a_loading_tray_keeps_an_untagged_spool(pg_pool: PgPool) -> None:
     assert row["tray_fingerprint"] == fingerprint
 
 
-def test_a_loading_tray_keeps_a_tagged_spool_without_churn(pg_pool: PgPool) -> None:
+@pytest.mark.parametrize("loading_state", [1, 5], ids=["legacy", "bitfield"])
+def test_a_loading_tray_keeps_a_tagged_spool_without_churn(
+    pg_pool: PgPool, loading_state: int
+) -> None:
     spool = _spool(pg_pool, tray_uuid=U1)
     pid, _ = _printer(pg_pool)
     _reconcile(pg_pool, pid, _report(_tray(1, U1, remain=50)))
     before = len(_events(pg_pool, spool))
-    loading = _report(_tray(1, U1, remain=50, state=5))
+    loading = _report(_tray(1, U1, remain=50, state=loading_state))
     assert _reconcile(pg_pool, pid, loading, T0 + timedelta(minutes=1)) == capture.CaptureResult()
     steady = _report(_tray(1, U1, remain=50))
     assert _reconcile(pg_pool, pid, steady, T0 + timedelta(minutes=2)) == capture.CaptureResult()

@@ -150,7 +150,7 @@ def touched(
     reported tray holds."""
     found: set[UUID] = set()
     if ended_job is not None:
-        found |= {use.spool_id for use in prints.open_for_job(conn, ended_job)}
+        found |= {use.spool_id for use in prints.open_for_job(conn, printer_id, ended_job)}
     found |= {
         row["id"]
         for row in conn.execute(
