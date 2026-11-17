@@ -661,6 +661,9 @@ jobs:
           turns="$(printf '%s' "$result" | jq -r '.num_turns // 0')"
           cost="$(printf '%s' "$result" | jq -r '.total_cost_usd // 0')"
           echo "subtype=$subtype is_error=$is_error num_turns=$turns total_cost_usd=$cost"
+          # The review's last words (#6570): a run that ends with no summary usually
+          # ends on a text-only turn, and without this the job log never shows it.
+          printf '%s' "$result" | jq -r '(.result // "") | .[0:2000]' | sed 's/^/last message: /'
           # A refused tool call can stop the review posting its summary while the
           # run still ends "success" (#918). Name each one, with the start of its input.
           printf '%s' "$result" | jq -r '(.permission_denials // [])[]
