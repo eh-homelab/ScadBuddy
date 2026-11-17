@@ -1,7 +1,7 @@
 # Storefront listings on pipeline templates (#5701)
 
 Date: 2026-11-17. Status: draft, for the owner's approval. Nothing is built before the
-owner approves it. The storefront session (scadify) reviews it too, because it changes
+owner approves it. The storefront session (scadify) reviews it too, because its #6581 changes
 the slice price at the same time (§7.3).
 
 Builds on:
@@ -416,12 +416,28 @@ reference through `output_for_reference`, which already takes whole inputs and m
 output `source=storefront` (#6371). It slices every plate of the multi-plate 3MF through
 `slice_and_price`.
 
-The slice request for a pipeline variant comes from **the shared slice-request builder
-from scadify's slice-price fix (PR to come)**, never from a third copy. That PR removes
-`storefront_choices`, changes `price_key`, and gives the profile a filament preset per
-material (`slice_profile.py`, `bambuddy/choices.py`). This design adds nothing to the
-key: the 3MF's sha256 already differs when the inputs differ. The work that touches
-`slice_price.py` or `line_prices.py` lands after scadify's PR merges (§11).
+The slice request for a pipeline variant is built as any variant's is after scadify's
+slice-price fix, #6581 (issue #6574), never by a third copy. The names below are as
+they will be once #6581 merges (read from the coordinator's summary of it, 2026-11-17;
+not yet on `main`):
+
+- `bambuddy/choices.py` `opening_choices(remembered: ModelPrintChoices | None, status:
+  PrinterStatus | None, bed_type: str) -> PrintChoices`, the one builder of the
+  dialog's opening choices, which replaces `slice_price.py` `storefront_choices`;
+- its helpers `dialog_bed_type(settings, *, last, printer, printer_id)` and
+  `async printer_opening(settings, printers, printer) -> PrinterOpening | None`, where
+  `PrinterOpening(status, bed_type)`;
+- in the storefront, `slice_price.py` `plan_variant(..., printer: PrinterOpening)`;
+- `slice_profile.py` `slice_request`, which sends no spools: each slot's material
+  preset goes in `choices.filament_overrides`, and the 3MF gives the colour.
+
+A pipeline variant goes through `plan_variant` and `slice_request` unchanged, with the
+`PrinterOpening` of the profile's printer. #6581 also changes `price_key`; this design
+adds nothing to the key, because the 3MF's sha256 already differs when the inputs
+differ. Publish's `check_sliceable` (`listings.py`, 422
+`listing_material_unsliceable`) applies to a pipeline listing as it is: after #6581 it
+names a material with no filament preset in the shop slice profile. The work that
+touches `slice_price.py` or `line_prices.py` lands after #6581 merges (§11).
 
 ## 8. Template changes (question 5)
 
@@ -538,9 +554,9 @@ until the step that makes it safe.
    Each pipeline line is therefore "priced by hand", and `reprice` finds no row at
    submit either.
 3. **`feat(storefront): price a pipeline listing`** (backend). The two rules of §7.2 in
-   `render_estimate` and `reprice`, the slice request from the shared builder, and the
-   slice-price test for a pipeline variant. **It lands after scadify's slice-price PR
-   merges**, and is rebased on it.
+   `render_estimate` and `reprice`, the slice request through #6581's `plan_variant`
+   and `slice_request` (§7.3), and the slice-price test for a pipeline variant. **It
+   lands after #6581 merges**, and is rebased on it.
 4. **`feat(storefront): set a listing's design inputs`** (frontend). The Design block,
    the "Set up the design" dialog, the schema form fallback, Sell's inputs, the refusal
    mapping, the mocks and the Playwright run. It can go up in parallel with 3, after 2.
