@@ -148,3 +148,47 @@ def test_book_end_is_once_per_use(pg_pool: PgPool) -> None:
         assert prints.open_for_job(conn, JOB) == []
     assert len(_ends(pg_pool, spool)) == 1
     assert ledger.PRINT_RUN == "print_run"
+
+
+def test_an_untimed_end_with_a_reading_before_the_settle_is_the_accepted_upper_bound(
+    pg_pool: PgPool,
+) -> None:
+    """The filament-capture spec's accepted limit (design.md line 325): a plate end no
+    report showed is booked at the settle's clock time, "an upper bound". A scale reading
+    taken after the true end and before the settle is then older than the end, so the
+    plate is taken off the reading once more."""
+    spool = _start(pg_pool)
+    reports, pid = _printer(pg_pool)
+    t = _running(pg_pool, reports, pid)
+    _advance(pg_pool, reports, pid, "RUNNING", t, job="other")  # moved on: untimed
+    with pg_pool.connection() as conn, conn.transaction():
+        ledger.record(
+            conn, spool, "weighed", source="scale", absolute_g=60.0, at=t + timedelta(minutes=1)
+        )
+        (use,) = prints.open_for_job(conn, JOB)
+        assert prints.book_end(conn, use, applied=True, at=None, actor="x", ended="settle")
+    spool_row = FilamentSpoolStore(pg_pool).get(spool)
+    assert spool_row is not None and spool_row.grams_left == 20.0  # 60 - 40, not 60
+
+
+def test_a_row_written_without_data_job_is_found_by_its_ref(pg_pool: PgPool) -> None:
+    """The migration backfills `data.job` once; a print worker of an older release
+    that books a start after it (a rolling deploy) writes none. The lookup by run reads
+    the job from the ``ref_id`` (``run/subtask/slot``) then, so the settle still
+    books it, and the end it books names the job."""
+    spool = _spool(pg_pool)
+    with pg_pool.connection() as conn, conn.transaction():
+        ledger.record(
+            conn,
+            spool,
+            "print_started",
+            source="print_estimate",
+            delta_g=-5.0,
+            ref_kind=ledger.PRINT_RUN,
+            ref_id=f"{RUN}/{JOB}/0",
+        )
+        (use,) = prints.open_for_run(conn, RUN)
+        assert (use.job, use.ref_id) == (JOB, f"{RUN}/{JOB}/0")
+        assert prints.open_for_job(conn, JOB) == []  # the index lookup needs data.job
+        event = prints.book_end(conn, use, applied=True, at=None, actor="x", ended="settle")
+    assert event is not None and event.data["job"] == JOB
