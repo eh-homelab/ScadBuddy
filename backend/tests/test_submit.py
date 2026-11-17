@@ -1896,7 +1896,8 @@ class SlowAccepts:
     attempt fails later than the call arrived (or at `finish`), so no slow call can
     answer the attempt in flight, however late its request reaches the handler: each
     such attempt ends in a read timeout on any runner (#6547). `ACCEPT_TIMEOUT`, and with
-    it `ACCEPT_BUDGET`, are scaled down: no try follows a timed-out one in the same call."""
+    it `ACCEPT_BUDGET`, are scaled down: no try follows a timed-out one in the same call.
+    ``slow`` is a float so that `math.inf` can mean that every call is slow."""
 
     def __init__(self, projection: JobProjection, monkeypatch: pytest.MonkeyPatch, slow: float):
         monkeypatch.setattr(crud_render_module, "ACCEPT_TIMEOUT", 0.5)
@@ -1941,7 +1942,8 @@ class SlowAccepts:
 class SlowAcceptActivities(ProjectingActivities):
     """The projecting fakes over `SlowAccepts`: each accept attempt's error, in order. A
     retry waits for the first call's write, so it finds that row (and no slow call it
-    held can answer it)."""
+    held can answer it). A retry that finds no write records an AssertionError that
+    says so."""
 
     def __init__(self, deps: WorkerDeps, slow: SlowAccepts) -> None:
         super().__init__(deps)
@@ -1950,9 +1952,11 @@ class SlowAcceptActivities(ProjectingActivities):
 
     @activity.defn(name=ACCEPT_ACTIVITY)
     async def render_accept(self, accept: AcceptRender) -> Job:
-        if activity.info().attempt > 1:
-            await asyncio.to_thread(self.slow.written.wait, HOLD_GUARD)
         try:
+            if activity.info().attempt > 1:
+                assert await asyncio.to_thread(self.slow.written.wait, HOLD_GUARD), (
+                    "a retry started, but no accept call has reached the handler"
+                )
             return await super().render_accept(accept)
         except BaseException as error:
             self.errors.append(error)
