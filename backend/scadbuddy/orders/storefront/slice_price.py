@@ -618,7 +618,7 @@ def plan_variant(
         logger.info("a storefront variant has no slice price: %s", STATUS_UNREAD)
         return None
     choices = opening_choices(
-        settings.model_print_choices.get(reference.slug), printer.status, printer.bed_type
+        settings.model_print_choices.get(reference.slug), printer.status, printer.bed_type(settings)
     )
     try:
         types = slot_types(profile, [f.material for f in filaments])

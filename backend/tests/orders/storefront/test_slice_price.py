@@ -18,7 +18,7 @@ from scadbuddy.bambuddy.models import NozzleChoice, PrinterStatus
 from scadbuddy.bambuddy.resolver import PrintChoices
 from scadbuddy.core.problems import ApiError
 from scadbuddy.filament.models import EffectivePreset
-from scadbuddy.library.settings_store import ModelPrintChoices, StoredSettings
+from scadbuddy.library.settings_store import ModelPrintChoices, PrinterPlate, StoredSettings
 from scadbuddy.orders.models import MachineRateBreakdown, PricingPolicy
 from scadbuddy.orders.quote import QuoteRun, SlicedPlate, SliceQuoteRequest, quote_run
 from scadbuddy.orders.rendering import RenderedOutput
@@ -80,7 +80,7 @@ SLOT_PRESETS = {1: TYPE_PRESETS[PLA_TYPE], 2: TYPE_PRESETS[PETG_TYPE]}
 CHOICES = PrintChoices(nozzles=[NozzleChoice(size="0.4")])
 #: An H2C with a High Flow 0.4 mm nozzle, as Bambuddy recorded it.
 STATUS = PrinterStatus.model_validate(recording("printer-status-rack.json"))
-OPENING = PrinterOpening(status=STATUS, bed_type="Textured PEI Plate")
+OPENING = PrinterOpening(status=STATUS, last="Textured PEI Plate")
 SHA = "e" * 64
 RATE = MachineRateBreakdown(
     printer="p-1",
@@ -419,6 +419,15 @@ def test_the_nozzle_flow_comes_from_the_printers_status(shop: Shop) -> None:
     assert choices.bed_type == "Textured PEI Plate"
 
 
+def test_a_kept_opening_reads_the_plate_remembered_after_it(shop: Shop) -> None:
+    """#6574 review: a printer opening kept for `RATE_TTL` reads the plate remembered on
+    the printer each time, so a plate remembered after the read is in the next price."""
+    kept = PrinterOpening(status=STATUS, printer="p1")
+    assert _planned_choices(shop, StoredSettings(), kept).bed_type == "Textured PEI Plate"
+    remembered = StoredSettings(printer_plates=[PrinterPlate(printer="p1", bed_type="Cool Plate")])
+    assert _planned_choices(shop, remembered, kept).bed_type == "Cool Plate"
+
+
 def test_the_remembered_process_is_used(shop: Shop) -> None:
     """#6574: the model's remembered nozzles and process, as the dialog opens on them (a
     remembered process opens with no tier)."""
@@ -439,7 +448,7 @@ def test_the_remembered_process_is_used(shop: Shop) -> None:
 def test_a_printer_status_not_read_gives_no_price(shop: Shop) -> None:
     """#6574, the owner's rule (no price when unsure): a status that cannot be read is
     no plan, not a price at the standard-flow defaults."""
-    unread = PrinterOpening(status=None, bed_type="Textured PEI Plate")
+    unread = PrinterOpening(status=None, last="Textured PEI Plate")
     assert _planned_choices(shop, StoredSettings(), unread) is None
 
 

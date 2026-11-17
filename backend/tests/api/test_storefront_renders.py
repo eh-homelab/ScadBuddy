@@ -474,7 +474,7 @@ def sliced(crud: CrudCaller, monkeypatch: pytest.MonkeyPatch) -> type[FakeSlicer
     status = PrinterStatus.model_validate(recording("printer-status-rack.json"))
 
     async def opening(*_args: Any) -> PrinterOpening:
-        return PrinterOpening(status=status, bed_type="Textured PEI Plate")
+        return PrinterOpening(status=status, last="Textured PEI Plate")
 
     monkeypatch.setattr(slice_price, "printer_opening", opening)
     profile = StorefrontSliceProfile(
@@ -628,7 +628,7 @@ def test_a_printer_status_not_read_gives_no_price(
     import scadbuddy.orders.storefront.slice_price as slice_price
 
     async def unread(*_args: Any) -> PrinterOpening:
-        return PrinterOpening(status=None, bed_type="Textured PEI Plate")
+        return PrinterOpening(status=None, last="Textured PEI Plate")
 
     monkeypatch.setattr(slice_price, "printer_opening", unread)
     job = render_until_done(crud, TOKEN_A, listing, {"width": 43})

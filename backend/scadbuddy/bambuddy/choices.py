@@ -212,10 +212,20 @@ def opening_choices(
 @dataclass(frozen=True)
 class PrinterOpening:
     """What the dialog reads of a printer before it opens: its live status (``None``
-    when it cannot be read) and the plate it opens on."""
+    when it cannot be read), its last print's plate (``last``, from Bambuddy) and the
+    printer the plate is remembered on. :meth:`bed_type` reads the remembered plate
+    each time, so a kept opening sees a plate remembered after it was read."""
 
     status: PrinterStatus | None
-    bed_type: str
+    last: str | None = None
+    printer: str | None = None
+    printer_id: int | None = None
+
+    def bed_type(self, settings: StoredSettings) -> str:
+        """The plate the dialog opens on (:func:`dialog_bed_type`)."""
+        return dialog_bed_type(
+            settings, last=self.last, printer=self.printer, printer_id=self.printer_id
+        )
 
 
 async def printer_opening(
@@ -235,11 +245,12 @@ async def printer_opening(
         settings, printers.store, printers.reports, printer=row.id, printer_id=None
     )
     if route is not None and route.status is not None:
-        bed = dialog_bed_type(settings, last=None, printer=row.id, printer_id=route.printer_id)
-        return PrinterOpening(status=route.status, bed_type=bed)
+        return PrinterOpening(status=route.status, printer=row.id, printer_id=route.printer_id)
+    # A LAN route whose report has no status yet falls through to Bambuddy's status of
+    # the printer it links, as the dialog falls back to Bambuddy's path.
     printer_id = row.bambuddy_printer_id
     if printer_id is None:
-        return PrinterOpening(status=None, bed_type=DEFAULT_BED)
+        return PrinterOpening(status=None)
     try:
         async with client_for(settings) as client:
             status, last = await asyncio.gather(
@@ -248,10 +259,9 @@ async def printer_opening(
     except ApiError:
         # No Bambuddy configured, or it refused: no status, so no default is guessed.
         logger.info("the printer's status cannot be read from Bambuddy")
-        return PrinterOpening(status=None, bed_type=DEFAULT_BED)
+        return PrinterOpening(status=None)
     # As `choices_for` opens the dialog on Bambuddy's path: no registry printer is named.
-    bed = dialog_bed_type(settings, last=last, printer=None, printer_id=printer_id)
-    return PrinterOpening(status=status, bed_type=bed)
+    return PrinterOpening(status=status, last=last, printer_id=printer_id)
 
 
 async def choices_for(

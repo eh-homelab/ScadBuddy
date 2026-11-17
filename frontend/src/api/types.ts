@@ -531,7 +531,7 @@ export type PaymentCreate = Defaulted<Schemas['PaymentCreate'], 'notes' | 'metho
  * way an order reaches its customer at a fixed price. */
 export type DepositRule = Schemas['DepositRule']
 export type ShippingOption = Schemas['ShippingOption']
-/** #6153 — the shop slice profile: a printer and a filament preset per material (#6574). */
+/** #6153 — the shop slice profile: a printer and a filament type per material (#6574). */
 export type StorefrontSliceProfile = Schemas['StorefrontSliceProfile']
 export type ProfileOptions = Schemas['ProfileOptions']
 export type ProfileType = Schemas['ProfileType']

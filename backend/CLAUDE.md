@@ -1848,7 +1848,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `ChoicesView.opening_choices`): the model's remembered nozzles, tier and process, else
   `default_nozzles` of the printer's live status, read as the dialog reads it
   (`printer_opening`: the LAN report on a native route, else Bambuddy's status and last
-  plate; `slice_price.py` `live_opening` keeps a read status `RATE_TTL`). A status that
+  plate; `slice_price.py` `live_opening` keeps a read status `RATE_TTL`; the plate
+  remembered on the printer is read each time, `PrinterOpening.bed_type`). A status that
   cannot be read gives no price (`STATUS_UNREAD`), never a standard-flow guess. One row
   per variant in `storefront_slice_prices`, keyed by `price_key` (`KEY_VERSION` 3): a
   sha256 of the render's 3MF content, the price-book filament per slot (id, material,

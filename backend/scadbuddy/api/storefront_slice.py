@@ -34,8 +34,9 @@ class ProfileMaterial(BaseModel):
 
 
 class ProfileType(BaseModel):
-    """A filament type not archived (`filament_spool_types`), whose presets for the H2C
-    a slot of its material is sliced with (#6574)."""
+    """A filament type not archived (`filament_spool_types`). A slot of its material is
+    sliced with its preset for the H2C and the nozzle the dialog opens on (#6574); a
+    type with no such preset gives no slice price (`NO_TYPE_PRESET`)."""
 
     id: UUID
     code: str
