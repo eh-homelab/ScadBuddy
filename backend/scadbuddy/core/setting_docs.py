@@ -387,7 +387,9 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
         "spool_overlay_refresh_seconds": SettingDoc(
             "Pull from Bambuddy every",
             "How often Bambuddy's spools are pulled and its local presets kept, on a schedule"
-            " of their own so a print never waits on Bambuddy. 0 turns both off. A change"
+            " of their own so a print never waits on Bambuddy. The same run reconciles each"
+            " printer's report with the filament ledger (the capture backstop). 0 turns all"
+            " three off. A change"
             " applies at the next start.",
         ),
         "filament_low_stock_pct": SettingDoc(

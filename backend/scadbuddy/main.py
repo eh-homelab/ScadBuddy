@@ -1934,7 +1934,8 @@ async def _set_up_housekeeping(
     spool_refresh: float,
 ) -> bool:
     """The housekeeping Schedules, the spool refresh (Bambuddy's kept presets and its
-    spools pulled, every ``spool_refresh`` seconds; 0: none, #3818, #6262) and the
+    spools pulled and the filament capture backstop, every ``spool_refresh`` seconds; 0:
+    none, #3818, #6262, #6263) and the
     preview backfill's (``previews``: the scheduler's render bound; None, previews off:
     none), retried until Temporal takes them: a frontend can answer the connect before
     it can create one. Each set-up triggers its Schedule, so the preview one comes last:
