@@ -15,6 +15,7 @@ from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.presets import PoolSpoolPresets
 from scadbuddy.filament.print_uses import PoolPrintUses, print_use_hook
 from scadbuddy.filament.spools import FilamentDefaults, FilamentSpoolStore
+from scadbuddy.filament.suppliers import SuppliersStore
 from scadbuddy.filament.types import SpoolTypeStore
 
 
@@ -27,6 +28,8 @@ class Filament:
     inventory: FilamentInventory
     #: What a print's plan reads of SB spools' presets (#6262 F1, `resolve_plates`).
     presets: PoolSpoolPresets
+    #: Suppliers, their products and price points (#6266).
+    suppliers: SuppliersStore
     #: Bambuddy's tray assignments, as this app last read them (#6580).
     assignments: AssignmentsCache = field(default_factory=AssignmentsCache)
 
@@ -53,6 +56,10 @@ def _build(core: Core, components: Components) -> Filament:
             cost_per_kg=read["filament_default_cost_per_kg"],
         )
 
+    def shop_currency() -> str:
+        # A settings read on a connection of its own, on each use (`defaults`' rule).
+        return core.settings_store.snapshot().runtime.orders_currency
+
     # What a native print used is settled on its SB spools as the follow reads it settled
     # (#4643, #6262 Task 6); the follow is a core service and imports no feature.
     core.print_follower.on_read.append(print_use_hook(PoolPrintUses(pool)))
@@ -63,6 +70,7 @@ def _build(core: Core, components: Components) -> Filament:
         locations=LocationStore(pool),
         inventory=FilamentInventory(pool, defaults),
         presets=PoolSpoolPresets(pool),
+        suppliers=SuppliersStore(pool, shop_currency),
     )
 
 
