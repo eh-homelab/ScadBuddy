@@ -14,6 +14,10 @@ RECONCILE_TOLERANCE = Decimal("0.05")
 _UNIT = Decimal("0.0001")
 
 
+class InvoiceMathError(ValueError):
+    """The numbers of an invoice cannot be worked out."""
+
+
 class MixedLineTaxError(ValueError):
     """Some lines of an invoice give a tax and others do not."""
 
@@ -27,6 +31,8 @@ def spread(total: Decimal, weights: Sequence[Decimal]) -> list[Decimal]:
 
     All-zero weights share equally. Ties go to the lowest index.
     """
+    if total < 0:
+        raise InvoiceMathError("cannot share a negative total")
     if not weights:
         return []
     total = _q(total)
@@ -55,8 +61,11 @@ def tax_per_line(
     if set_values:
         raise MixedLineTaxError("some lines give a tax and others do not")
     if invoice_tax > 0:
-        rate = invoice_tax / sum(subtotals, Decimal(0)) * 100
-        return spread(invoice_tax, subtotals), f"receipt-wide {rate:.1f}%"
+        subtotal_sum = sum(subtotals, Decimal(0))
+        if subtotal_sum == 0:
+            raise InvoiceMathError("tax on a receipt whose lines cost nothing")
+        rate = (invoice_tax / subtotal_sum * 100).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+        return spread(invoice_tax, subtotals), f"receipt-wide {rate}%"
     return [_q(Decimal(0)) for _ in subtotals], "none"
 
 

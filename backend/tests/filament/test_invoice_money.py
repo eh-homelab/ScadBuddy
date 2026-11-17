@@ -3,6 +3,8 @@ from decimal import Decimal as Dec
 import pytest
 
 from scadbuddy.filament.invoice_money import (
+    RECONCILE_TOLERANCE,
+    InvoiceMathError,
     MixedLineTaxError,
     allocate,
     difference,
@@ -74,3 +76,29 @@ def test_difference() -> None:
     lines = [Dec("30"), Dec("70")]
     assert difference(Dec("110"), lines, Dec("10")) == Dec("0.0000")
     assert difference(Dec("110.04"), lines, Dec("10")) == Dec("0.0400")
+
+
+def test_tax_on_free_lines_is_refused() -> None:
+    with pytest.raises(InvoiceMathError, match="cost nothing"):
+        tax_per_line([Dec("0"), Dec("0")], [None, None], Dec("1"))
+
+
+def test_a_fractional_rate_rounds_half_up() -> None:
+    _, basis = tax_per_line([Dec("40")], [None], Dec("2.90"))
+    assert basis == "receipt-wide 7.3%"
+    _, basis = tax_per_line([Dec("400")], [None], Dec("29"))
+    assert basis == "receipt-wide 7.3%"
+
+
+def test_a_negative_total_is_refused() -> None:
+    with pytest.raises(InvoiceMathError):
+        spread(Dec("-1"), [Dec(1)])
+
+
+def test_leftover_goes_by_remainder_not_index() -> None:
+    assert spread(Dec("0.0002"), [Dec(1), Dec(2)]) == [Dec("0.0001"), Dec("0.0001")]
+    assert spread(Dec("0.0001"), [Dec(1), Dec(2)]) == [Dec("0.0000"), Dec("0.0001")]
+
+
+def test_reconcile_tolerance_is_five_cents() -> None:
+    assert Dec("0.05") == RECONCILE_TOLERANCE
