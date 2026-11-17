@@ -792,13 +792,17 @@ async def _renewed(
             yield
         except BaseException as error:
             # Once cancelled, the renewal changes nothing more: it runs on this loop, and
-            # its next step raises the cancel.
-            await _stopped(task)
+            # its next step raises the cancel, so it logs nothing after the drop. It is
+            # not awaited: an await here, before the block takes back its own cancel,
+            # would let a second lost hold's cancel in first (#6585 review). A renew
+            # still running in its thread can land after the drop; it then finds no row
+            # and its answer is not read.
+            task.cancel()
             if lost:
                 await _without_own_cancel(block)
                 raise HoldLostError(what, holder) from error
             raise
-        await _stopped(task)
+        task.cancel()
         if lost:
             await _without_own_cancel(block)
             raise HoldLostError(what, holder)
@@ -808,14 +812,6 @@ async def _renewed(
         except Exception:
             # It lapses at its expiry instead.
             logger.exception("could not release a row", extra={"row": what, "holder": holder})
-
-
-async def _stopped(task: asyncio.Task[None]) -> None:
-    """Cancel the renewal and wait until it has ended, so it logs nothing after the
-    drop. `asyncio.wait` does not raise the renewal's own cancel, and a cancel sent to
-    the caller still raises."""
-    task.cancel()
-    await asyncio.wait([task])
 
 
 async def _without_own_cancel(block: asyncio.Task[Any]) -> None:
