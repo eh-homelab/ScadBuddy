@@ -577,3 +577,7 @@ def test_the_shopping_list_is_added_changed_filtered_and_cleared(client: TestCli
     assert client.patch(f"{URL}/shopping-list/{pending_id}", json={"note": "x"}).status_code == 404
     client.post(f"{URL}/shopping-list", json={"material": "ABS"})
     assert client.delete(f"{URL}/shopping-list").json() == {"removed": 1}
+
+
+def test_a_malformed_shopping_item_id_is_a_422(client: TestClient) -> None:
+    assert client.patch(f"{URL}/shopping-list/nope", json={"note": "x"}).status_code == 422

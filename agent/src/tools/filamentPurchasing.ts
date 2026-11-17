@@ -492,7 +492,7 @@ export const filamentPurchasingTools: Tool[] = [
     label: 'Remove from the shopping list',
     description:
       'Remove one item (`item_id`), or with no `item_id` clear the list: only the purchased items with ' +
-      '`purchased_only: true`, else every item. Only when the user asks. Writes ScadBuddy only.',
+      '`purchased_only: true`, else every item. Returns `{removed: n}`, the number removed. Only when the user asks. Writes ScadBuddy only.',
     input: z.object({
       item_id: z.string().uuid().optional().describe('One item to remove; omit to clear'),
       purchased_only: z.boolean().default(false).describe('With no item_id: clear only purchased items'),

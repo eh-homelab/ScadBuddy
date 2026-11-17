@@ -589,7 +589,7 @@ async def get_invoice_file(
 # -- the shopping list ------------------------------------------------------------------
 
 
-class Removed(BaseModel):
+class ShoppingRemoved(BaseModel):
     removed: int
 
 
@@ -629,16 +629,16 @@ async def add_shopping(filament: FilamentDep, body: pm.ShoppingItemCreate) -> pm
 
 @router.delete(
     "/shopping-list",
-    response_model=Removed,
+    response_model=ShoppingRemoved,
     summary="Clear the shopping list",
     description=(
         "Remove every item, or only the purchased ones with `purchased_only=true`. "
         "Answers how many it `removed`."
     ),
 )
-async def clear_shopping(filament: FilamentDep, purchased_only: bool = False) -> Removed:
+async def clear_shopping(filament: FilamentDep, purchased_only: bool = False) -> ShoppingRemoved:
     count = await asyncio.to_thread(filament.shopping.clear, purchased_only=purchased_only)
-    return Removed(removed=count)
+    return ShoppingRemoved(removed=count)
 
 
 @router.patch(

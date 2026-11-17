@@ -154,3 +154,14 @@ def test_clear_purchased_only_keeps_pending(pg_pool: PgPool) -> None:
     assert len(store.list()) == 2
     assert store.clear(purchased_only=False) == 2
     assert store.list() == []
+
+
+def test_an_archived_type_can_still_be_added(pg_pool: PgPool) -> None:
+    store = ShoppingStore(pg_pool)
+    type_id = _named_type(pg_pool)
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_spool_types SET archived_at = now() WHERE id = %s", (type_id,)
+        )
+    item = store.add(ShoppingItemCreate(type_id=type_id))
+    assert (item.material, item.type_id) == ("PLA", type_id)
