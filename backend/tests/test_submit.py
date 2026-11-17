@@ -1955,7 +1955,7 @@ class SlowAcceptActivities(ProjectingActivities):
         try:
             if activity.info().attempt > 1:
                 assert await asyncio.to_thread(self.slow.written.wait, HOLD_GUARD), (
-                    "a retry started, but no accept call has reached the handler"
+                    "a retry started, but no accept call has written its row"
                 )
             return await super().render_accept(accept)
         except BaseException as error:
