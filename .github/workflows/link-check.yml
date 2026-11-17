@@ -2,9 +2,10 @@
 # (#1926, from #259). Weekly and on demand only, never on a PR, so an external
 # site going down never blocks a merge; it is not a required check. A failure
 # opens (or leaves open) one issue. Fix the link, or exclude it in the args
-# below with a comment saying why. A GitHub comment anchor (#issuecomment-) is
-# already excluded from lychee and checked by the "GitHub comment anchors" step:
-# fix the link, or skip its repository in that step's `grep -vE`. The `release-asset-pins` job, on the same
+# below with a comment saying why. A GitHub comment anchor of the form
+# <owner>/<repo>/(issues|pull)/<n>#issuecomment-<id> is excluded from lychee and
+# checked by the "GitHub comment anchors" step: fix the link, or skip its
+# repository in that step's `grep -vE`. Other shapes are lychee's. The `release-asset-pins` job, on the same
 # schedule, checks the second URLs the release downloads fall back to (#5706).
 name: Link check
 
@@ -173,7 +174,7 @@ jobs:
             echo "already open"; exit 0
           fi
           gh issue create --title "$title" --label documentation --body \
-            "The weekly link check (\`.github/workflows/link-check.yml\`) found broken links in \`docs/\`, \`README.md\`, a \`CLAUDE.md\` or a \`SKILL.md\`: $RUN_URL (the job summary lists them). Fix each link, or exclude it in the workflow's lychee args with a comment giving the reason. A failing GitHub comment anchor (\`#issuecomment-\`) is already excluded from lychee: fix the link, or skip its repository in the \`grep -vE\` of the \"GitHub comment anchors\" step."
+            "The weekly link check (\`.github/workflows/link-check.yml\`) found broken links in \`docs/\`, \`README.md\`, a \`CLAUDE.md\` or a \`SKILL.md\`: $RUN_URL (the job summary lists them). Fix each link, or exclude it in the workflow's lychee args with a comment giving the reason. A failing GitHub comment anchor of the form \`<owner>/<repo>/(issues|pull)/<n>#issuecomment-<id>\` is excluded from lychee and checked by the \"GitHub comment anchors\" step: fix the link, or skip its repository in that step's \`grep -vE\`. A comment anchor of any other shape is lychee's: fix it or exclude it as above."
 
   # The release downloads fall back to a REST API asset URL (#5706), pinned by asset id
   # beside each version and sha256, or for the amd64 Temporal CLI to temporal.download.
