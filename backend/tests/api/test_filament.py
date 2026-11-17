@@ -14,10 +14,11 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from scadbuddy.api import filament as filament_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.filament import actor
 from scadbuddy.auth.models import ANONYMOUS, AuthSession, Person, PersonalToken, Service
+from scadbuddy.filament import assignments_cache
+from scadbuddy.filament.component import FILAMENT
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.printers.reports import PrinterReportStore
 from tests.api.test_send import API, configure
@@ -29,10 +30,9 @@ pytestmark = pytest.mark.requires_postgres
 URL = "/api/v1/filament/catalog"
 
 
-@pytest.fixture(autouse=True)
-def _no_assignments_cached(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each test reads Bambuddy's assignments afresh (the route caches them, I-1)."""
-    monkeypatch.setattr(filament_api, "_assignments_seen", None)
+def _forget_assignments(client: TestClient) -> None:
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    state.components.get(FILAMENT).assignments.seen = None
 
 
 MISSING = "00000000-0000-4000-8000-000000000001"
@@ -578,7 +578,7 @@ def test_inventory_places_a_linked_spool_by_bambuddys_assignment(
     assert summary["spool"]["loaded"]["printer_id"] == printer
 
     assignments.mock(return_value=httpx.Response(403, json={"detail": "no"}))
-    monkeypatch.setattr(filament_api, "_assignments_seen", None)
+    _forget_assignments(client)
     refused = client.get(INVENTORY)
     assert refused.status_code == 200, refused.text
     assert refused.json()["spools"][0]["loaded"] is None
@@ -614,7 +614,7 @@ def test_a_slow_or_garbled_assignment_read_places_by_the_reports_alone(
 
     monkeypatch.setattr("scadbuddy.filament.bambuddy_pull.ASSIGNMENTS_TIMEOUT", 0.3)
     route.mock(side_effect=hang)
-    monkeypatch.setattr(filament_api, "_assignments_seen", None)
+    _forget_assignments(client)
     started = time.monotonic()
     slow = client.get(INVENTORY)
     assert time.monotonic() - started < 10  # far under the 30 s hang
@@ -641,7 +641,7 @@ def test_the_assignments_are_cached_and_a_failure_is_not_retried_for_a_while(
     }
     seed_app_sb_spools(client, [bb], offset=100)
     clock = [1000.0]
-    monkeypatch.setattr(filament_api, "_now", lambda: clock[0])
+    monkeypatch.setattr(assignments_cache, "now", lambda: clock[0])
     place = {"id": 1, "spool_id": 15, "printer_id": 2, "ams_id": 0, "tray_id": 1}
     route = respx.get(f"{API}/inventory/assignments").mock(
         return_value=httpx.Response(200, json=[place | {"printer_name": "Workshop"}])

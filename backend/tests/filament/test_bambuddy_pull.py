@@ -25,6 +25,7 @@ from scadbuddy.filament.bambuddy_pull import (
     read_assignments,
     read_catalog,
     scheduled_pull,
+    try_assignments,
 )
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.component import Filament
@@ -1465,3 +1466,25 @@ def test_a_first_read_keeps_a_persons_clear(pg_pool: PgPool) -> None:
     _strip_key(f, made)
     pull(f, [_row(5)], now=NOW, catalog=[_entry()])
     assert _own_insert(f, made) is None
+
+
+@respx.mock
+async def test_a_payload_of_another_shape_logs_no_value_from_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#6580: a pydantic `ValidationError`'s text quotes the values Bambuddy sent; the
+    log names only the error type."""
+    secret = "SECRET-TRAY-VALUE-123"
+    respx.get("https://bambuddy.test/api/v1/inventory/assignments").mock(
+        return_value=httpx.Response(200, json=[{"id": secret, "spool_id": secret}])
+    )
+    respx.get("https://bambuddy.test/api/v1/inventory/catalog").mock(
+        return_value=httpx.Response(200, json=[{"id": secret, "name": 5, "weight": secret}])
+    )
+    settings = StoredSettings(bambuddy_url="https://bambuddy.test", bambuddy_api_key="bb_test")
+    with caplog.at_level("DEBUG"):
+        assert await try_assignments(settings) is None
+        assert await read_catalog(settings) is None
+    assert caplog.text.count("another shape") == 2
+    assert "ValidationError" in caplog.text
+    assert secret not in caplog.text
