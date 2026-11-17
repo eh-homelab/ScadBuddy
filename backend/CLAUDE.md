@@ -369,15 +369,22 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `tests/crud/test_crud_agent_order_costs.py`). `turns.py` is a durable turn's writes of its
   session's row, for `api/crud_agent_turns.py` (area `session-turns`, #6449): the agent's
   `PgTurnRows` statement for statement, each with its events (`events.py` `append_in`) in one
-  transaction: a send's claim and give-back, a placement's claim (the only writer of
-  `turn_attempt`, only while the row runs the turn), its spend (once per key, `ai_turn_spend_keys`,
-so a write sent again after its answer was lost is added once), the turn's end only while the row
+  transaction: a send's claim and its give-back (only while the row runs that turn), a
+  placement's claim (the only writer of `turn_attempt`, only while the row runs the turn), its
+  spend (once per key, `ai_turn_spend_keys`, so a write sent again after its answer was lost is
+  added once), the turn's end only while the row
   runs that turn (its closing events worded with the lineage's spend and budget read `FOR UPDATE`,
   `word_tail`, as the agent's `wordTail`) with the queue's head claimed in the same transaction,
   and the running sweep's end of a lost turn only at the `event_seq` it read; a write waits at most
-`LOCK_TIMEOUT_MS` (10 s) for the row's lock, else 503 `row_busy` (tests
+  `LOCK_TIMEOUT_MS` (10 s) for the row's lock, else 503 `row_busy`, and a call at most
+  `POOL_WAIT_S` (10 s) for a connection, else 503 `pool_busy` (tests
   `tests/crud/test_crud_agent_turns.py`; the agent's `test/turnRowsParity.pg.test.ts` runs one
-  scenario both ways).
+  scenario both ways). `edits.py` is an edit of a session, for `api/crud_agent_edits.py` (area
+  `session-edits`, #6449): the agent's `PgEditRows` transaction, under the row's lock and only
+  while the principal owns it, with its warm eviction, an archive's `done` summaries dismissed and
+  their events; a newly done session needs `told`, checked last (`untold`), so that answer means
+  the edit would pass: the agent then tells its workflow and sends it again (tests
+  `tests/crud/test_crud_agent_edits.py`; the agent's `test/editRowsParity.pg.test.ts`).
 - The agent's small stores (#5299 step 5): `api/crud_agent_stores.py` (areas
   `activity-kinds`, `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`) and
   `api/crud_agent_notify.py` (area `notify`, sealed with the KEK under the agent's AAD), each

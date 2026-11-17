@@ -366,7 +366,7 @@ export class DurableTurns {
         return this.#turn(id, turn.turnId, seq)
       }
       // The refusal is what the caller hears, whatever the give-back meets.
-      await this.#giveBack(id, claimed.prior_status).catch(() => {
+      await this.#giveBack(id, claimed.prior_status, turn.turnId).catch(() => {
         console.warn(`durable send: session ${id}'s claim could not be given back`)
       })
       throw err
@@ -608,7 +608,7 @@ export class DurableTurns {
       if (!(err instanceof CrudReadError && err.fromRoute)) {
         const row = await this.#turns.state(id).catch(() => undefined)
         if (row?.durable_turn_id === claim.turnId.toLowerCase()) {
-          await this.#giveBack(id, 'idle').catch(() => {
+          await this.#giveBack(id, 'idle', claim.turnId).catch(() => {
             console.warn(`durable send: session ${id}'s claim could not be given back`)
           })
         }
@@ -618,9 +618,9 @@ export class DurableTurns {
   }
 
   /** Gives back a claim whose message the workflow refused (Ruling 7), to the status it had. */
-  async #giveBack(id: string, prior: SessionStatus): Promise<void> {
-    // The status event in the give-back's transaction.
-    const logged = await this.#turns.giveBack(id, prior)
+  async #giveBack(id: string, prior: SessionStatus, turnId: string): Promise<void> {
+    // The status event in the give-back's transaction, only while the row runs this turn.
+    const logged = await this.#turns.giveBack(id, prior, turnId)
     if (logged) this.#events.committed(id, logged.events, logged.seqs)
   }
 

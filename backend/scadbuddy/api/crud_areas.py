@@ -140,6 +140,9 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: ``mcp-relay`` area is ``…/agent/mcp-relay/*``: the /mcp session directory, the relay's messages
 #: (a body row and its ``scadbuddy_mcp`` NOTIFY in one transaction) and their sweep (#5299 step
 #: 11, `api/crud_agent_mcp.py`).
+#: Its ``session-edits`` area is ``…/agent/sessions/{id}/edit``: a rename, marking a session done
+#: and archiving it, under the row's lock with its warm eviction, an archive's ``done`` summaries
+#: dismissed and their events in one transaction (#6449, `api/crud_agent_edits.py`).
 #: Its ``migrations`` area is ``…/agent/migrations/ledger``, the ledger rows of the files the
 #: agent expects, which it waits for at its start; its ``auth-sessions`` area is
 #: ``…/agent/auth-sessions/lookup``, a signed-in person's live session by its cookie's hash
@@ -221,6 +224,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "publish",
         "session-reads",
         "session-turns",
+        "session-edits",
         "migrations",
         "auth-sessions",
         "session-sweeps",

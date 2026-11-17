@@ -275,9 +275,9 @@ export class EventLog {
   /**
    * Appends events to a session's log; returns their seqs. The session row must exist.
    * With `tx`, the events are written in that transaction, so they commit with the
-   * change they report; the caller then calls `committed` once it has committed. Only a
-   * caller on SQL passes one (an edit, and the gate's SQL path until the API lists its areas);
-   * a turn's claim and end write theirs in turnRows.ts's transactions (#6449).
+   * change they report; the caller then calls `committed` once it has committed. Only the
+   * gate's SQL path passes one, until the API lists its areas; an edit and a turn's claim and end
+   * write theirs in edits.ts's and turnRows.ts's transactions (#6449).
    */
   async append(sessionId: string, events: readonly ServerEvent[], tx?: TransactionSql): Promise<number[]> {
     if (tx) return appendEventsIn(tx, sessionId, events)

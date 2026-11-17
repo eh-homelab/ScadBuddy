@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import type { UpgradeWebSocket } from 'hono/ws'
 import { aiStatus, type AiStatus, type CredentialState } from './aiStatus.js'
+import { checkData, type DataCheck } from './api/dataHealth.js'
 import type { AccessStore } from './access/store.js'
 import type { AuditRepo } from './audit/log.js'
 import type { Attachments } from './attachments/store.js'
@@ -38,7 +39,7 @@ export type Probe = () => Promise<boolean>
  */
 export interface AppDeps {
   /** Undefined when SCADBUDDY_DATABASE_URL is unset. */
-  database: { ping: Probe; ready: Probe; waitingForMigrations?: () => boolean; apiUnanswered?: () => boolean } | undefined
+  database: { ping: Probe; ready: Probe; waitingForMigrations?: () => boolean; check?: (timeoutMs?: number) => Promise<DataCheck> } | undefined
   backend: Probe
   /** The key-encryption key, or why there is none (secrets.ts `loadKek`). */
   kek: KekStatus
@@ -192,11 +193,9 @@ export function createApp(deps: AppDeps): AgentApp {
   // unreachable database or backend is REPORTED, not failed on, so a Postgres
   // blip does not restart the container.
   app.get('/healthz', async (c) => {
-    const [dbOk, backendOk] = await Promise.all([
-      deps.database ? deps.database.ping() : Promise.resolve(undefined),
-      deps.backend(),
-    ])
-    const { ai, credential } = await aiStatus(deps, dbOk)
+    const [data, backendOk] = await Promise.all([checkData(deps.database), deps.backend()])
+    const dbOk = data?.ok
+    const { ai, credential } = await aiStatus(deps, dbOk, data?.apiUnanswered)
     const body: Health = {
       status: 'ok',
       ai,

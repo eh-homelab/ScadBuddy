@@ -350,9 +350,6 @@ The Go and Rust commands and toolchain notes: `tools/go/CLAUDE.md`, `workers/rus
 - Frontend vitest tests can time out when the machine is under heavy load (e.g.
   several builds or agents at once). Re-run before debugging; a failure that repeats
   on an idle machine is real.
-- Backend: `test_submit.py::test_a_slow_first_accept_is_retried_in_the_same_run`
-  (`assert 3 == 2`) is timing-sensitive under CI load. Re-run the failed jobs once
-  before you debug it.
 
 ## Prod gotchas
 

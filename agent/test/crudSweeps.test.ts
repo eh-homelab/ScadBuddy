@@ -4,7 +4,8 @@ import path from 'node:path'
 import type { Sql } from 'postgres'
 import { describe, expect, it } from 'vitest'
 import { gated } from '../src/api/crudStores.js'
-import { CrudForgetRows, forgetSubject } from '../src/sessions/forget.js'
+import { CrudForgetRows, CrudSubjectKeys, forgetRoutes, forgetSubject } from '../src/sessions/forget.js'
+import { CrudSessionReads } from '../src/sessions/sessionReads.js'
 import { CrudSessionPresence, LIVE_IDS_MAX, PgSessionPresence, type SessionPresence } from '../src/sessions/presence.js'
 import { ForksNeedKeys } from '../src/sessions/store.js'
 import { sweepTurnDirs } from '../src/temporal/turnServers.js'
@@ -41,6 +42,7 @@ class FakeApi {
       return new Response(JSON.stringify({ ids: ids.filter((id) => this.live.has(id)) }), { headers })
     }
     if (path.endsWith('/forget-rows')) return new Response(JSON.stringify({ rows: 3 }), { headers })
+    if (path === '/background-tasks') return new Response(JSON.stringify({ tasks: [] }), { headers })
     return new Response(JSON.stringify({ detail: 'no route' }), { status: 404, headers })
   }
 }
@@ -146,7 +148,30 @@ describe("a forget's last rows over the CRUD route", () => {
         },
         `session-${SESSION}`,
       ),
-    ).rejects.toSatisfy((err: unknown) => err instanceof ForksNeedKeys && /were ended, but its key, transcript and rows remain/.test(err.message))
+    ).rejects.toSatisfy((err: unknown) => err instanceof ForksNeedKeys && /cancelled \(no Temporal client, so no workflow or tool call was terminated\), but its key, transcript and rows remain/.test(err.message))
     expect(api.seen).toEqual([])
+  })
+
+  it("the operator's forget takes step 3's rows from the API only with step 1 there", () => {
+    const routesWith = (...listed: string[]) => forgetRoutes({ has: (area: string) => listed.includes(area) }, target(new FakeApi()), noSql)
+    const none = routesWith()
+    expect([none.crud, none.reads, none.rows]).toEqual([undefined, undefined, undefined])
+    // forget-rows alone: the key transaction stays on SQL, so the rows do too.
+    expect(routesWith('forget-rows').rows).toBeUndefined()
+    const all = routesWith('forget', 'session-reads', 'forget-rows')
+    expect(all.crud).toBeInstanceOf(CrudSubjectKeys)
+    expect(all.reads).toBeInstanceOf(CrudSessionReads)
+    expect(all.rows).toBeInstanceOf(CrudForgetRows)
+    expect(routesWith('forget').rows).toBeUndefined()
+  })
+
+  it("the operator's forget lists a session's background tasks through the API once it lists them, over SQL until then", async () => {
+    let listed: string[] = []
+    const api = new FakeApi()
+    const { tasks } = forgetRoutes({ has: (area: string) => listed.includes(area) }, target(api), noSql)
+    await expect(tasks!.list(SESSION)).rejects.toThrow('ran SQL')
+    listed = ['background-tasks']
+    expect(await tasks!.list(SESSION)).toEqual([])
+    expect(api.seen.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /background-tasks'])
   })
 })
