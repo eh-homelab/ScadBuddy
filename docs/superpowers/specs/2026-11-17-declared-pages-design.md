@@ -357,7 +357,9 @@ fits, the repair writes the `record_types` row. If one does not, the repair leav
 `record_types` on the old commit, writes a git commit that puts back the schema in force,
 and logs the type and the first 20 failing ids. So `record_types` is the schema in force,
 and no version is in force before every stored row fitted it under the lock. This is not
-`flows/reconcile.py`'s repair, which indexes a commit and re-checks nothing.
+`flows/reconcile.py`'s repair, which indexes a commit and re-checks nothing. A registration whose
+transaction fails after its git commit, while the API still runs, starts the same repair
+at once and answers 503.
 
 `records_newest` serves the list's order and cursor. A `where` filter is a scan of the
 type's rows in that index: a type holds at most 10,000 rows (§5.1), so the scan is
