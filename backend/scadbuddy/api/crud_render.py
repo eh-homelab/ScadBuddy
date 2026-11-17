@@ -45,6 +45,7 @@ from scadbuddy.crud.idempotency import (
     Replay,
     idempotent_write,
     required_key,
+    stored,
 )
 from scadbuddy.library.assets import (
     ASSET_ID_PATTERN,
@@ -595,18 +596,33 @@ def _open_jobs_only(conn: Connection[DictRow], keys: list[str]) -> None:
         )
 
 
-async def _open_jobs_first(state: AppState, key: str) -> None:
-    """`_open_jobs_only` for an output's ``key``, before `_verified` reads its object: a
-    write to a settled job's output costs no GET and hash before its 403. The write's
-    transaction checks again, as the job can settle between the two checks."""
-    if OUTPUT_KEY.fullmatch(key) is None:
-        return
+async def _replayed_or_open(
+    state: AppState, key: str, idempotency_key: str | None, route: str, body: dict[str, Any]
+) -> Any | None:
+    """The answer stored under ``idempotency_key`` for ``route`` and ``body``, or None.
 
-    def check() -> None:
+    A put or swap that committed, whose answer was lost, gets that answer again when the
+    worker sends it again, also when the job settled since (#6538). Thus the ledger is
+    read first, before the job check and before `_verified` reads the object. A new key
+    then gets `_open_jobs_only` for an output's ``key``: a write to a settled job's
+    output costs no GET and hash before its 403. The write's transaction reads the
+    ledger and checks the job again, as a write can commit and the job can settle
+    between the two checks."""
+    output = OUTPUT_KEY.fullmatch(key) is not None
+    if idempotency_key is None and not output:
+        return None
+
+    def check() -> Any | None:
         with state.settings_store.pool.connection() as conn:
-            _open_jobs_only(conn, [key])
+            if idempotency_key is not None:
+                reply = stored(conn, "render", idempotency_key, route, body)
+                if reply is not None:
+                    return reply.body
+            if output:
+                _open_jobs_only(conn, [key])
+            return None
 
-    await asyncio.to_thread(check)
+    return await asyncio.to_thread(check)
 
 
 def _bound_object(content: ContentStore, ref: IndexedRef) -> str | None:
@@ -820,9 +836,13 @@ async def index_put(
     of `SLICED_OUTPUT_META`, a 403 ``api-owned-key``; an output of a render job that does
     not run, a 403 ``job-closed``; a ref whose object is not its SHA-256 and size, a 403
     ``ref-mismatch`` (`_verified`); a read the store fails, a 503 ``store-unavailable``.
+    A resend of a committed put gets its first answer, before the job check and the read.
     The job is checked before the read and again in the write's transaction."""
     _worker_writable(key, ref=body.ref, meta=body.meta)
-    await _open_jobs_first(state, key)
+    route, request = "PUT /blob-index/{key}", {"key": key, **body.model_dump(mode="json")}
+    replayed = await _replayed_or_open(state, key, idempotency_key, route, request)
+    if replayed is not None:
+        return Previous.model_validate(replayed)
     verified = await _verified(state, body.ref)
 
     def put(index: BlobIndex, conn: Connection[DictRow]) -> dict[str, Any]:
@@ -842,8 +862,8 @@ async def index_put(
         state,
         key,
         idempotency_key,
-        "PUT /blob-index/{key}",
-        {"key": key, **body.model_dump(mode="json")},
+        route,
+        request,
         put,
     )
     return Previous.model_validate(answer)
@@ -858,13 +878,18 @@ async def index_swap(
     ``meta`` that names a key of `SLICED_OUTPUT_META` is a 403 ``api-owned-key``; an
     output of a render job that does not run, a 403 ``job-closed``; a ref whose object is
     not its SHA-256 and size, a 403 ``ref-mismatch`` (`_verified`); a read the store
-    fails, a 503 ``store-unavailable``. The job is checked before the read and again in
+    fails, a 503 ``store-unavailable``. A resend of a committed swap gets its first
+    answer, before the job check and the read. The job is checked before the read and again in
     the write's transaction. The row's
     kind is read in the swap's transaction before the
     swap, and checked again under the row's lock: a row that became another kind between
     the two is not rewritten (``swapped`` false)."""
     _worker_writable(key, ref=body.ref, meta=body.meta)
-    await _open_jobs_first(state, key)
+    route = "POST /blob-index/{key}/swap"
+    request = {"key": key, **body.model_dump(mode="json")}
+    replayed = await _replayed_or_open(state, key, idempotency_key, route, request)
+    if replayed is not None:
+        return Swapped.model_validate(replayed)
     verified = await _verified(state, body.ref)
 
     def swap(index: BlobIndex, conn: Connection[DictRow]) -> dict[str, Any]:
@@ -889,8 +914,8 @@ async def index_swap(
         state,
         key,
         idempotency_key,
-        "POST /blob-index/{key}/swap",
-        {"key": key, **body.model_dump(mode="json")},
+        route,
+        request,
         swap,
     )
     return Swapped.model_validate(answer)

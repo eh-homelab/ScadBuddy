@@ -101,6 +101,11 @@ OTHER_BACKEND = "other-backend"
 #: below the pod network's speed. A read through the Bambuddy store is slower than S3.
 VERIFY_TIMEOUT_FLOOR = 10.0
 VERIFY_SECONDS_PER_MIB = 1.0
+#: The most a put or swap waits, whatever the ref's size (#6538). A render activity
+#: budgets one `TRANSFER` (180 s, `workflows/pipelines.py`) for each piece it moves, and
+#: a publish is the upload plus this index write. The upload and the API's read move the
+#: same bytes, so each gets half of that budget. A ref of 80 MiB or more waits this long.
+VERIFY_TIMEOUT_CEILING = 90.0
 #: `api/crud_render.py` `BAMBUDDY_UNAVAILABLE`.
 BAMBUDDY_UNAVAILABLE = "bambuddy-unavailable"
 #: `api/crud_render.py` `FORGETTABLE_PREFIXES` and `LIBRARY_PIECE_KEY`: the keys only the
@@ -393,8 +398,10 @@ class OtherBackendError(Exception):
 
 def verify_timeout(ref: BlobRef) -> float:
     """A put's or swap's wait for ``ref``: `VERIFY_TIMEOUT_FLOOR`, plus
-    `VERIFY_SECONDS_PER_MIB` for each whole MiB the API may read and hash."""
-    return VERIFY_TIMEOUT_FLOOR + (ref.size >> 20) * VERIFY_SECONDS_PER_MIB
+    `VERIFY_SECONDS_PER_MIB` for each whole MiB the API may read and hash, never past
+    `VERIFY_TIMEOUT_CEILING`."""
+    scaled = VERIFY_TIMEOUT_FLOOR + (ref.size >> 20) * VERIFY_SECONDS_PER_MIB
+    return min(scaled, VERIFY_TIMEOUT_CEILING)
 
 
 class RemoteBlobIndex:

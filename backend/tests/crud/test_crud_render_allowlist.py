@@ -20,6 +20,7 @@ from scadbuddy.api import crud_render
 from scadbuddy.api.deps import AppState
 from scadbuddy.auth.service_credentials import ServiceAuth
 from scadbuddy.core.problems import ApiError
+from scadbuddy.crud import idempotency
 from scadbuddy.crud import render as crud_worker
 from scadbuddy.crud.client import CrudSyncClient
 from scadbuddy.library.settings_store import RenderStoreSettings
@@ -35,6 +36,7 @@ from scadbuddy.store.content_models import (
 )
 from scadbuddy.store.local import LocalContentBackend
 from scadbuddy.store.s3 import S3ContentBackend
+from scadbuddy.workflows.pipelines import TRANSFER
 
 _NOW = datetime(2026, 11, 14, tzinfo=UTC)
 
@@ -410,17 +412,25 @@ class _Rows:
 
 
 class _Conn:
-    """The write's connection: ``open_jobs`` are the render jobs that run; every other
-    query finds no row."""
+    """The write's connection: ``open_jobs`` are the render jobs that run, ``replies``
+    the ledger's rows by Idempotency-Key; every other query finds no row."""
 
-    def __init__(self, open_jobs: set[str], queries: list[str]) -> None:
+    def __init__(
+        self,
+        open_jobs: set[str],
+        queries: list[str],
+        replies: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
         self.open_jobs = open_jobs
         self.queries = queries
+        self.replies = replies or {}
 
     def execute(self, query: str, params: Any = None) -> _Rows:
         self.queries.append(query)
         if "FROM render_jobs" in query:
             return _Rows([{"id": job} for job in params[0] if job in self.open_jobs])
+        if "FROM crud_requests" in query and params[1] in self.replies:
+            return _Rows([self.replies[params[1]]])
         return _Rows([])
 
     def transaction(self) -> contextlib.nullcontext[None]:
@@ -452,43 +462,54 @@ def _written(
     return reached
 
 
-def _write(route: str, key: str, ref: BlobRef, state: AppState) -> Awaitable[Any]:
+def _write(
+    route: str, key: str, ref: BlobRef, state: AppState, idempotency_key: str = "k"
+) -> Awaitable[Any]:
     """The route's write of ``key`` (beside a piece's key, for a mark) as a render
     credential sends it."""
     if route == "put":
         body = crud_render.IndexPut(ref=ref, slug="demo", meta={})
-        return crud_render.index_put(key, body, state, "k")
+        return crud_render.index_put(key, body, state, idempotency_key)
     if route == "swap":
         swap = crud_render.IndexSwap(ref=ref, slug="demo", meta={}, expected=None)
-        return crud_render.index_swap(key, swap, state, "k")
+        return crud_render.index_swap(key, swap, state, idempotency_key)
     mark = crud_render.IndexMark(keys=[RENDER[0], key], backend="s3", cutoff=_NOW, meta={})
-    return crud_render.index_mark(mark, state, "k")
-
-
-_NO_STORE = cast(AppState, SimpleNamespace(store=SimpleNamespace(content=None)))
+    return crud_render.index_mark(mark, state, idempotency_key)
 
 
 class _Pool:
-    """The API's pool for the job check before the write (`_open_jobs_first`)."""
+    """The API's pool for the reads before the write (`_replayed_or_open`): the ledger,
+    then the job check."""
 
-    def __init__(self, open_jobs: set[str]) -> None:
+    def __init__(
+        self, open_jobs: set[str], replies: dict[str, dict[str, Any]] | None = None
+    ) -> None:
         self.open_jobs = open_jobs
+        self.replies = replies
         self.queries: list[str] = []
 
     @contextlib.contextmanager
     def connection(self) -> Iterator[_Conn]:
-        yield _Conn(self.open_jobs, self.queries)
+        yield _Conn(self.open_jobs, self.queries, self.replies)
 
 
-def _jobs_state(open_jobs: set[str], content: object = None) -> AppState:
-    """A state whose pool knows ``open_jobs`` and whose store is ``content``."""
+def _jobs_state(
+    open_jobs: set[str],
+    content: object = None,
+    replies: dict[str, dict[str, Any]] | None = None,
+) -> AppState:
+    """A state whose pool knows ``open_jobs`` and the ledger's ``replies``, and whose
+    store is ``content``."""
     return cast(
         AppState,
         SimpleNamespace(
             store=SimpleNamespace(content=content),
-            settings_store=SimpleNamespace(pool=_Pool(open_jobs)),
+            settings_store=SimpleNamespace(pool=_Pool(open_jobs, replies)),
         ),
     )
+
+
+_NO_STORE = _jobs_state(set())
 
 
 @pytest.mark.parametrize("route", ["put", "swap", "mark"])
@@ -517,6 +538,41 @@ async def test_a_settled_jobs_output_is_refused_before_its_object_is_read(
     monkeypatch.setattr(crud_render, "_indexed", _no_database)
     with pytest.raises(ApiError) as refused:
         await _write(route, _OUTPUT, _local_ref(b"output"), _jobs_state(set(), content))
+    assert refused.value.status == 403
+    assert refused.value.extensions["reason"] == crud_render.JOB_CLOSED
+
+
+def _reply(route: str, key: str, ref: BlobRef, answer: dict[str, Any]) -> dict[str, Any]:
+    """The ledger's row of a committed put or swap of ``key`` (`_write`'s body)."""
+    if route == "put":
+        name = "PUT /blob-index/{key}"
+        body = crud_render.IndexPut(ref=ref, slug="demo", meta={}).model_dump(mode="json")
+    else:
+        name = "POST /blob-index/{key}/swap"
+        swap = crud_render.IndexSwap(ref=ref, slug="demo", meta={}, expected=None)
+        body = swap.model_dump(mode="json")
+    digest = idempotency._digest({"key": key, **body})
+    return {"route": name, "body_sha256": digest, "status": 200, "body": answer}
+
+
+@pytest.mark.parametrize("route", ["put", "swap"])
+async def test_a_committed_write_is_replayed_after_its_job_settled(
+    route: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A put or swap committed, its answer was lost, and the job settled before the
+    worker sent it again with the same Idempotency-Key: the resend gets the first answer,
+    with no job check and no read (#6538). A new key for the same write is still a 403
+    ``job-closed``, unread. The store must not be read, and no write may run."""
+    content = ContentStore(cast(Any, _Unread()), cast(Any, None))
+    ref = _local_ref(b"output")
+    answer: dict[str, Any] = {"previous": None} if route == "put" else {"swapped": True}
+    state = _jobs_state(set(), content, {"k": _reply(route, _OUTPUT, ref, answer)})
+    monkeypatch.setattr(crud_render, "_index", _no_database)
+    monkeypatch.setattr(crud_render, "_indexed", _no_database)
+    replayed = await _write(route, _OUTPUT, ref, state)
+    assert replayed.model_dump(mode="json") == answer
+    with pytest.raises(ApiError) as refused:
+        await _write(route, _OUTPUT, ref, state, idempotency_key="new")
     assert refused.value.status == 403
     assert refused.value.extensions["reason"] == crud_render.JOB_CLOSED
 
@@ -586,7 +642,7 @@ async def stored(tmp_path: Path) -> tuple[AppState, BlobRef, LocalContentBackend
     ref = _local_ref(data)
     assert await backend.upload("piece", data, name="p", scope=BlobScope()) == ref.backend_id
     content = ContentStore(backend, cast(Any, None))
-    return cast(AppState, SimpleNamespace(store=SimpleNamespace(content=content))), ref, backend
+    return _jobs_state(set(), content), ref, backend
 
 
 @pytest.mark.parametrize("how", ["bytes", "size"])
@@ -638,7 +694,7 @@ async def test_a_ref_to_another_object_than_its_bytes_name_is_refused_unread(
     or query (#6233)."""
     ref = _local_ref(b"real piece").model_copy(update={"backend_id": backend_id})
     content = ContentStore(cast(Any, _Unread()), cast(Any, None))
-    state = cast(AppState, SimpleNamespace(store=SimpleNamespace(content=content)))
+    state = _jobs_state(set(), content)
     monkeypatch.setattr(crud_render, "_index", _no_database)
     monkeypatch.setattr(crud_render, "_indexed", _no_database)
     with pytest.raises(ApiError) as refused:
@@ -670,7 +726,7 @@ async def test_a_bambuddy_file_another_kinds_row_names_is_refused(
             raise AssertionError(f"the API read {backend_id}")
 
     content = ContentStore(cast(Any, _Bambuddy()), cast(Any, None))
-    state = cast(AppState, SimpleNamespace(store=SimpleNamespace(content=content)))
+    state = _jobs_state(set(), content)
     ref = BlobRef(sha256="a" * 64, kind="piece", backend="bambuddy", backend_id="17", size=1)
     monkeypatch.setattr(crud_render, "_index", lambda _: _Vouched(foreign=True))
     monkeypatch.setattr(crud_render, "_indexed", _no_database)
@@ -723,7 +779,7 @@ async def test_a_verified_row_spares_the_read(
     """A ref a verified row names (a reuse, a resend) costs one indexed query: its object
     is not read, and can be gone (the index's own reuse check answers that)."""
     content = ContentStore(cast(Any, _Unread()), cast(Any, None))
-    state = cast(AppState, SimpleNamespace(store=SimpleNamespace(content=content)))
+    state = _jobs_state(set(), content)
     queries: list[str] = []
     reached = _written(monkeypatch, open_jobs=set(), queries=queries)
     monkeypatch.setattr(crud_render, "_index", lambda _: _Vouched(verified=True))
@@ -756,20 +812,40 @@ class _Failing(LocalContentBackend):
         yield b""  # pragma: no cover
 
 
+class _Dropped(LocalContentBackend):
+    """A backend whose read yields some chunks, then fails: a dropped stream. It counts
+    the chunks it sent."""
+
+    def __init__(self) -> None:
+        super().__init__(Path("/nonexistent/dropped"))
+        self.sent = 0
+
+    async def download(self, backend_id: str) -> AsyncGenerator[bytes]:
+        for chunk in (b"real ", b"pie"):
+            self.sent += 1
+            yield chunk
+        raise ConnectionError(f"the store dropped the read of {backend_id}")
+
+
+@pytest.mark.parametrize("failing", [_Failing, _Dropped])
 @pytest.mark.parametrize("route", ["put", "swap"])
 async def test_a_read_the_store_fails_is_a_transient_503(
-    route: str, monkeypatch: pytest.MonkeyPatch
+    route: str, failing: Callable[[], LocalContentBackend], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A store that fails the read answers a 503, which the worker retries, not a 500
-    (#6534)."""
-    content = ContentStore(cast(Any, _Failing()), cast(Any, None))
-    state = cast(AppState, SimpleNamespace(store=SimpleNamespace(content=content)))
+    (#6534). That holds before the first chunk, and after some chunks arrived (a dropped
+    stream, #6538)."""
+    backend = failing()
+    content = ContentStore(cast(Any, backend), cast(Any, None))
+    state = _jobs_state(set(), content)
     monkeypatch.setattr(crud_render, "_index", lambda _: _Vouched())
     monkeypatch.setattr(crud_render, "_indexed", _no_database)
     with pytest.raises(ApiError) as refused:
         await _write(route, RENDER[0], _local_ref(b"real piece"), state)
     assert refused.value.status == 503
     assert refused.value.extensions["reason"] == crud_render.STORE_UNAVAILABLE
+    if isinstance(backend, _Dropped):
+        assert backend.sent == 2
 
 
 # -- the worker's side of a verified write (#6534) ------------------------------------
@@ -833,12 +909,26 @@ def test_a_large_refs_write_waits_for_the_apis_read(route: str) -> None:
     default 10 s (#6534)."""
     seen: list[httpx.Request] = []
     index = _remote_index([_ok(route), _ok(route)], seen)
-    _send(index, route, _sized(256 << 20))
+    _send(index, route, _sized(64 << 20))
     _send(index, route, _sized(4096))
     large, small = (request.extensions["timeout"]["read"] for request in seen)
-    assert large == crud_worker.VERIFY_TIMEOUT_FLOOR + 256 * crud_worker.VERIFY_SECONDS_PER_MIB
+    assert large == crud_worker.VERIFY_TIMEOUT_FLOOR + 64 * crud_worker.VERIFY_SECONDS_PER_MIB
     assert large > 10.0
     assert small == crud_worker.VERIFY_TIMEOUT_FLOOR == 10.0
+
+
+@pytest.mark.parametrize("route", ["put", "swap"])
+def test_a_huge_refs_write_waits_no_longer_than_the_activity_allows(route: str) -> None:
+    """The wait stops at `VERIFY_TIMEOUT_CEILING`, half of one `TRANSFER`, the budget a
+    render activity has for each piece it publishes: the other half is for the upload
+    (#6538). Without the ceiling, a 256 MiB ref waited 266 s, past the 180 s."""
+    seen: list[httpx.Request] = []
+    index = _remote_index([_ok(route), _ok(route)], seen)
+    _send(index, route, _sized(256 << 20))
+    _send(index, route, _sized(4 << 30))
+    waits = [request.extensions["timeout"]["read"] for request in seen]
+    assert waits == [crud_worker.VERIFY_TIMEOUT_CEILING] * 2
+    assert TRANSFER.total_seconds() / 2 >= crud_worker.VERIFY_TIMEOUT_CEILING
 
 
 @pytest.mark.parametrize("route", ["put", "swap"])
