@@ -218,17 +218,24 @@ commit, without running template code:
 - `INPUTS_VERSION`, with `inputs_version_of` (fact 6);
 - the declared input schema, as data (`json.loads`).
 
-Then `_publish` checks, in this order, before the checks it makes today:
+Then `_publish` checks, in this order (first fault wins), before the checks it makes
+today. "Stored" is the row's `inputs` and `inputs_v` as the shop saved them, before any
+migration; "migrated" is the migration's result, or the stored inputs when no migration
+runs:
 
-| Fault | Status and code | `name` |
-| --- | --- | --- |
-| `inputs` is not empty, and the template has no pipeline | 422 `listing_inputs_unexpected` | `inputs` |
-| A pipeline template with no `pipeline.inputs`, or a file that is missing, too large or outside the subset | 422 `listing_inputs_undeclared` | `inputs` |
-| `inputs` has a `params` or `v` key | 422 `listing_inputs_reserved` | `inputs.params` or `inputs.v` |
-| `inputs` is larger than 16 KiB | 422 `listing_inputs_invalid`, `reason` `too_large` | `inputs` |
-| `inputs_v` is above the commit's `INPUTS_VERSION` | 422 `listing_inputs_invalid`, `reason` `newer` | `inputs` |
-| The template's `migrate` refuses the inputs | 422 `listing_inputs_migration_failed`, `detail` the template's message | `inputs` |
-| A value fails the schema | 422 `listing_inputs_invalid`, `reason` the failed keyword (`minimum`, `required`, `type`, `additional`, …) | the value's path, `inputs.house.cols` |
+| Order | Fault | Checked on | Status and code | `name` |
+| --- | --- | --- | --- | --- |
+| 1 | `inputs` is not empty, and the template has no pipeline | stored | 422 `listing_inputs_unexpected` | `inputs` |
+| 2 | A pipeline template with no `pipeline.inputs`, or a file that is missing, too large or outside the subset | the commit | 422 `listing_inputs_undeclared` | `inputs` |
+| 3 | `inputs` has a `params` or `v` key | stored, before the migration | 422 `listing_inputs_reserved` | `inputs.params` or `inputs.v` |
+| 4 | `inputs` is larger than 16 KiB | stored, before the migration | 422 `listing_inputs_invalid`, `reason` `too_large` | `inputs` |
+| 5 | `inputs_v` is above the commit's `INPUTS_VERSION` | stored | 422 `listing_inputs_invalid`, `reason` `newer` | `inputs` |
+| 6 | The template's `migrate` refuses the inputs (only when `inputs_v` is below the version) | stored | 422 `listing_inputs_migration_failed`, `detail` the template's message | `inputs` |
+| 7 | A value fails the schema | migrated | 422 `listing_inputs_invalid`, `reason` the failed keyword (`minimum`, `required`, `type`, `additional`, …) | the value's path, `inputs.house.cols` |
+
+The migrated inputs need no second reserved-key check: publish keeps only their keys
+other than `params` and `v` (below). Their size is checked again with row 7, since a
+migration can add keys (`reason` `too_large`). PR 2's tests check this order.
 
 The codes follow the `listing_*` style, and each carries `name`, so the editor shows it
 under the field it names (§5.4). `listing_pipeline_unsupported` goes: no route answers
@@ -357,9 +364,11 @@ This version is fixed-only. The customer changes no input.
   stay: colours and free text offered, the geometry locked.
 - A pipeline may ignore a parameter that the listing offers (the dollhouse sets `piece`,
   `course`, `width_units`, `depth_units` and `preview` itself, fact 2). The customer then
-  changes nothing by changing it. The dollhouse's own UI hides those parameters (`DRIVEN`,
-  group `Piece`), and the smart defaults lock them (they are geometry), so this does not
-  arise for the dollhouse. A general fix (a template naming the parameters its pipeline
+  changes nothing by changing it. For the dollhouse this does not arise. `preview` sits
+  under `/* [Hidden] */` (`models/dollhouse-kit/model.scad` lines 288-291), and
+  `shownParams` leaves the `Hidden` group out of a listing entirely. The dollhouse's own
+  UI hides the other four (`DRIVEN`, group `Piece`), and the smart defaults lock them,
+  because they are geometry. A general fix (a template naming the parameters its pipeline
   sets) is left to the owner (§12, question 5).
 
 A later version could let the customer change an input within bounds the shop sets
@@ -407,7 +416,10 @@ also when:
 
 - the job's inputs other than `params` differ from the listing's `snapshot.inputs`, or
   its `v` from `inputs_version`. That is the shop republishing other inputs at the same
-  commit. It extends today's slug-and-commit check (fact 9).
+  commit. It extends today's slug-and-commit check (fact 9). The comparison is deep
+  equality of the parsed JSON values (Python `==` on the dicts), never of their text:
+  a value read from `jsonb` comes back with its keys reordered (backend `CLAUDE.md`,
+  #6302), and a text comparison would take a correct firm price away.
 - the job has more than one output (`Job.outputs`, fact 8). The 3MF of the first output
   is not the whole product, so a firm price from it would be wrong.
 
@@ -584,7 +596,8 @@ until the step that makes it safe.
    submit either. `prepare.py` and the `PrepareListing` workflow start no slice: they
    only render (checked by reading both on `main`, and by scadify on #6581's tree).
 3. **`feat(storefront): price a pipeline listing`** (backend). The two rules of §7.2 in
-   `render_estimate` and `reprice`, the slice request through #6581's `plan_variant`
+   `render_estimate` and `reprice` (the inputs compared by deep equality of the parsed
+   values, not by key order), the slice request through #6581's `plan_variant`
    and `slice_request` (§7.3), and the slice-price test for a pipeline variant. **It
    lands after #6581 merges**, and is rebased on it.
 4. **`feat(storefront): set a listing's design inputs`** (frontend). The Design block,
