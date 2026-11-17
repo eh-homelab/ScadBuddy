@@ -464,8 +464,11 @@ not yet on `main`):
   `async printer_opening(settings, printers, printer) -> PrinterOpening | None`, where
   `PrinterOpening(status, bed_type)`;
 - in the storefront, `slice_price.py` `plan_variant(..., printer: PrinterOpening)`;
-- `slice_profile.py` `slice_request`, which sends no spools: each slot's material
-  preset goes in `choices.filament_overrides`, and the 3MF gives the colour.
+- `slice_profile.py` `slice_request(profile, choices)`, which sends no spools and takes
+  no slot materials. The shop slice profile maps each material to a filament type id,
+  and each slot's preset is that type's own (`filament/presets.py` `preset_for`). The
+  slots go as `SliceVariant.slot_presets`, then to `resolve(..., slot_presets=)`. The
+  3MF gives the colour.
 
 A pipeline variant goes through `plan_variant` and `slice_request` unchanged, with the
 `PrinterOpening` of the profile's printer. The remembered choices `opening_choices`
@@ -473,7 +476,8 @@ takes are read by the listing's slug, as for any listing. #6581 also changes `pr
 adds nothing to the key, because the 3MF's sha256 already differs when the inputs
 differ. Publish's `check_sliceable` (`listings.py`, 422
 `listing_material_unsliceable`) applies to a pipeline listing as it is: after #6581 it
-names a material with no filament preset in the shop slice profile. The work that
+refuses a material with no filament type in the shop slice profile (its text says
+"no filament type for"). The work that
 touches `slice_price.py` or `line_prices.py` lands after #6581 merges (§11).
 
 ## 8. Template changes (question 5)
