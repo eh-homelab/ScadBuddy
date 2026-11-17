@@ -475,6 +475,20 @@ def test_confirming_makes_spools_and_a_repeat_is_200(client: TestClient) -> None
     assert again.json()["lines"][0]["spool_ids"] == body["lines"][0]["spool_ids"]
 
 
+def test_supplier_stats_list_confirmed_suppliers_and_the_path_is_not_an_id(
+    client: TestClient,
+) -> None:
+    assert client.get(f"{URL}/suppliers/stats").json() == []
+    _confirmable(client)
+    done = _confirmable(client)
+    assert client.post(f"{URL}/invoices/{done}/confirm").status_code == 200
+    [row] = client.get(f"{URL}/suppliers/stats").json()
+    assert row["spool_count"] == 2
+    assert row["spend"] == "42.8000"
+    assert row["consumed_g"] == 0
+    assert row["remaining_g"] == 2000
+
+
 def test_confirming_a_missing_invoice_is_404(client: TestClient) -> None:
     assert client.post(f"{URL}/invoices/{MISSING}/confirm").status_code == 404
 

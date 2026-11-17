@@ -253,6 +253,21 @@ export const filamentPurchasingTools: Tool[] = [
   }),
 
   defineTool({
+    name: 'filament_supplier_stats',
+    label: 'Read supplier stats',
+    description:
+      'Per supplier with a confirmed invoice: `spool_count` (spools its invoices made), `remaining_g` (their ' +
+      'unarchived grams left), `consumed_g` (grams they used; a print\'s actual replaces its estimate) and ' +
+      '`spend` (the invoices\' `allocated_cost`, a decimal string). Most consumed first, then by name.',
+    input: z.object({}),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/suppliers/stats'],
+    handler: async (_input, { backend }) =>
+      json(await ok(backend.GET('/api/v1/filament/suppliers/stats', {}), 'read the supplier stats')),
+  }),
+
+  defineTool({
     name: 'filament_invoice_list',
     label: 'List filament invoices',
     description:

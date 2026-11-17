@@ -94,6 +94,21 @@ async def create_supplier(filament: FilamentDep, body: pm.SupplierCreate) -> pm.
 
 
 @router.get(
+    "/suppliers/stats",
+    response_model=list[pm.SupplierStats],
+    summary="Supplier stats",
+    description=(
+        "Per supplier with a confirmed invoice: `spool_count` (spools its invoices made), "
+        "`remaining_g` (their unarchived grams left), `consumed_g` (grams they used, by the "
+        "ledger's rule: a print's actual replaces its estimate) and `spend` (the invoices' "
+        "`allocated_cost`, a decimal string). Most consumed first, then by name."
+    ),
+)
+async def supplier_stats(filament: FilamentDep) -> list[pm.SupplierStats]:
+    return await asyncio.to_thread(filament.suppliers.stats)
+
+
+@router.get(
     "/suppliers/{supplier_id}",
     response_model=pm.Supplier,
     summary="Read a supplier",

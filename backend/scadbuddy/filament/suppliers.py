@@ -25,6 +25,7 @@ from scadbuddy.filament.invoice_money import price_per_kg
 Conn = Connection[DictRow]
 Row = Mapping[str, Any]
 _Suppliers = list[pm.Supplier]
+_Stats = list[pm.SupplierStats]
 _Products = list[pm.SupplierProduct]
 _Prices = list[pm.PricePoint]
 _TypePrices = list[pm.TypePricePoint]
@@ -257,6 +258,46 @@ class SuppliersStore:
             (product_ids,),
         ).fetchall()
         return {row["product_id"]: _price(row) for row in rows}
+
+    # -- stats --------------------------------------------------------------------------
+
+    def stats(self) -> _Stats:
+        """Per supplier with a confirmed invoice: the spools its invoices made, their
+        unarchived grams left, the grams they used and what the invoices cost. Used grams
+        follow the ledger's rule (`ledger.basis`): a ``print_actual`` delta, and a
+        ``print_estimate`` one only while no ``print_ended`` event has its ref. Sorted by
+        grams used, most first, then by name."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT s.id AS supplier_id, s.name AS supplier_name,"
+                " (SELECT count(*) FROM filament_spools sp"
+                "  JOIN filament_invoice_lines l ON l.id = sp.invoice_line_id"
+                "  JOIN filament_invoices i ON i.id = l.invoice_id"
+                "  WHERE i.supplier_id = s.id AND i.status = 'confirmed')::int AS spool_count,"
+                " COALESCE((SELECT sum(sp.grams_left) FROM filament_spools sp"
+                "  JOIN filament_invoice_lines l ON l.id = sp.invoice_line_id"
+                "  JOIN filament_invoices i ON i.id = l.invoice_id"
+                "  WHERE i.supplier_id = s.id AND i.status = 'confirmed'"
+                "  AND sp.archived_at IS NULL), 0)::float8 AS remaining_g,"
+                " COALESCE((SELECT sum(-e.delta_g) FROM filament_spool_events e"
+                "  JOIN filament_spools sp ON sp.id = e.spool_id"
+                "  JOIN filament_invoice_lines l ON l.id = sp.invoice_line_id"
+                "  JOIN filament_invoices i ON i.id = l.invoice_id"
+                "  WHERE i.supplier_id = s.id AND i.status = 'confirmed'"
+                "  AND e.delta_g IS NOT NULL AND (e.source = 'print_actual'"
+                "   OR (e.source = 'print_estimate' AND NOT EXISTS"
+                "    (SELECT 1 FROM filament_spool_events d WHERE d.spool_id = e.spool_id"
+                "     AND d.kind = 'print_ended' AND d.ref_id IS NOT NULL"
+                "     AND d.ref_id = e.ref_id AND d.ref_kind IS NOT DISTINCT FROM e.ref_kind)))"
+                "  ), 0)::float8 AS consumed_g,"
+                " (SELECT sum(l.allocated_cost) FROM filament_invoice_lines l"
+                "  JOIN filament_invoices i ON i.id = l.invoice_id"
+                "  WHERE i.supplier_id = s.id AND i.status = 'confirmed') AS spend"
+                " FROM filament_suppliers s WHERE EXISTS (SELECT 1 FROM filament_invoices i"
+                "  WHERE i.supplier_id = s.id AND i.status = 'confirmed')"
+                " ORDER BY consumed_g DESC, upper(s.name), s.id"
+            ).fetchall()
+        return [pm.SupplierStats.model_validate(row) for row in rows]
 
     # -- price points -------------------------------------------------------------------
 

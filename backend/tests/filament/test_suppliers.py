@@ -9,8 +9,10 @@ from uuid import UUID
 import pytest
 
 from scadbuddy.filament.catalog import CatalogStore
+from scadbuddy.filament.ledger import record
 from scadbuddy.filament.models import Material, SpoolTypeCreate, SpoolTypePatch
 from scadbuddy.filament.purchasing_models import (
+    InvoiceLineIn,
     PricePointCreate,
     ProductCreate,
     ProductPatch,
@@ -26,6 +28,7 @@ from scadbuddy.filament.suppliers import (
 )
 from scadbuddy.filament.types import SpoolTypeStore
 from tests.conftest import PgPool
+from tests.support.purchasing import Shop
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -259,3 +262,64 @@ def test_a_restore_onto_a_taken_name_or_sku_is_refused(pg_pool: PgPool) -> None:
     assert store.add_product(supplier.id, ProductCreate(type_id=type_id, sku="x")) is not None
     with pytest.raises(ProductExistsError):
         store.update_product(one.id, ProductPatch(archived=False))
+
+
+def _confirmed(shop: Shop, type_id: UUID, number: str) -> list[UUID]:
+    line = InvoiceLineIn(
+        description="A00",
+        quantity=2,
+        unit_price=Decimal(20),
+        line_subtotal=Decimal(40),
+        type_id=type_id,
+    )
+    done = shop.invoices.confirm(shop.draft([line], number=number).id, actor="ann")
+    assert done is not None
+    return done[0].lines[0].spool_ids
+
+
+def test_stats_count_spend_and_stock(pg_pool: PgPool) -> None:
+    shop = Shop(pg_pool)
+    type_id = shop.type_id()
+    first = _confirmed(shop, type_id, "R-1")
+    _confirmed(shop, type_id, "R-2")
+    shop.draft(
+        [
+            InvoiceLineIn(
+                description="D",
+                quantity=1,
+                unit_price=Decimal(40),
+                line_subtotal=Decimal(40),
+                type_id=type_id,
+            )
+        ],
+        number="R-DRAFT",
+    )
+    with pg_pool.connection() as conn:
+        record(
+            conn, first[0], "print_ended", source="print_actual", delta_g=-50,
+            ref_kind="print_run", ref_id="a",
+        )  # fmt: skip
+        record(
+            conn, first[0], "print_started", source="print_estimate", delta_g=-30,
+            ref_kind="print_run", ref_id="b",
+        )  # fmt: skip
+        record(
+            conn, first[0], "print_ended", source="print_actual", delta_g=None,
+            ref_kind="print_run", ref_id="b",
+        )  # fmt: skip
+        record(
+            conn, first[1], "print_started", source="print_estimate", delta_g=-7,
+            ref_kind="print_run", ref_id="c",
+        )  # fmt: skip
+    [row] = shop.suppliers.stats()
+    assert row.supplier_name == "Acme"
+    assert row.spool_count == 4
+    assert row.consumed_g == 57.0
+    assert row.spend == Decimal("85.6000")
+    assert row.remaining_g == 4000 - 57.0
+
+
+def test_a_supplier_with_only_drafts_is_left_out(pg_pool: PgPool) -> None:
+    shop = Shop(pg_pool)
+    shop.one(shop.type_id())
+    assert shop.suppliers.stats() == []

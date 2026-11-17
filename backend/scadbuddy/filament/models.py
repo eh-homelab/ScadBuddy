@@ -11,7 +11,7 @@ are typed so. Every colour is an `Rgba`: ``#rrggbb`` is stored as ``#RRGGBBFF``.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Any, ClassVar, Literal
 from uuid import UUID
@@ -1160,6 +1160,31 @@ class LastTag(BaseModel):
     held_by: int | None
 
 
+class SpoolInvoiceRef(BaseModel):
+    """The invoice line a spool was bought on (#6266); ``unit_cost`` is the line's
+    ``allocated_cost`` per spool."""
+
+    invoice_id: UUID
+    number: str | None
+    invoice_date: date
+    supplier_id: UUID
+    supplier_name: str
+    line_id: UUID
+    line_position: int
+    unit_cost: Decimal
+
+
+class SpoolTypeSupplier(BaseModel):
+    """A supplier that sells the spool's type: one unarchived product and its newest price."""
+
+    supplier_id: UUID
+    supplier_name: str
+    sku: str
+    product_url: str | None
+    newest_price: Decimal | None
+    price_per_kg: Decimal | None
+
+
 class SpoolDetail(Spool):
     """A spool with what its page shows: its tags, effective presets and K values, the
     basis of its grams and whether it ever printed."""
@@ -1172,6 +1197,10 @@ class SpoolDetail(Spool):
     basis: GramsBasis
     #: Any ``print_started`` or ``print_ended`` event: the spool is archived, not deleted.
     in_use: bool = False
+    #: The invoice line it was bought on; ``None`` for a spool no invoice made.
+    invoice: SpoolInvoiceRef | None = None
+    #: The unarchived products of its type, by supplier name.
+    type_suppliers: list[SpoolTypeSupplier] = Field(default_factory=list)
 
 
 class TagRow(Tag):
