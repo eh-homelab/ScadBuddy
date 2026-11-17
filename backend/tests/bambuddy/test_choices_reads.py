@@ -2,7 +2,8 @@
 which reads wait on which, and which are kept between opens.
 
 A gated route answers only once its partner has been asked, so a read that still waits
-on the one before it deadlocks and the test times out, rather than passing slowly."""
+on the one before it deadlocks and the test hangs, rather than passing slowly. No test
+waits on the wall clock (#6519): a slow runner makes a test slow, never a failure."""
 
 from __future__ import annotations
 
@@ -102,10 +103,9 @@ def _expire(cache: Path) -> None:
 
 async def _refreshes_done() -> None:
     """Wait for this process's background refreshes: the one place these tests reach
-    into the module's running reads (#4717 review). A refresh that hangs fails the test
-    within 5 s rather than stalling it."""
-    async with asyncio.timeout(5):
-        await asyncio.gather(*catalogue._refreshing.values())
+    into the module's running reads (#4717 review). A refresh that hangs stalls the
+    test; no wall-clock guard fails it on a slow runner (#6519)."""
+    await asyncio.gather(*catalogue._refreshing.values())
 
 
 class _HeldPresets:
@@ -140,9 +140,8 @@ def _count_shields(monkeypatch: pytest.MonkeyPatch) -> Callable[[int], Awaitable
     monkeypatch.setattr(asyncio, "shield", counting)
 
     async def until(n: int) -> None:
-        async with asyncio.timeout(5):
-            while shields < n:
-                await asyncio.sleep(0)
+        while shields < n:
+            await asyncio.sleep(0)
 
     return until
 
@@ -171,16 +170,15 @@ async def test_the_printer_reads_do_not_wait_on_the_preset_catalogue(
     )
     respx.get(f"{API}/local-presets/").mock(return_value=_ok("local-presets.json"))
 
-    async with asyncio.timeout(5):
-        view = await choices_for(
-            bambuddy,
-            _source(),
-            StoredSettings(),
-            remembered=None,
-            printer_id=1,
-            cache=tmp_path,
-            catalogue_key=None,
-        )
+    view = await choices_for(
+        bambuddy,
+        _source(),
+        StoredSettings(),
+        remembered=None,
+        printer_id=1,
+        cache=tmp_path,
+        catalogue_key=None,
+    )
 
     assert view.printer_id == 1
     assert view.processes["0.4"]
@@ -256,8 +254,7 @@ async def test_an_expired_catalogue_answers_at_once_and_is_read_again_behind_it(
     asked = asyncio.Event()
     respx.get(f"{API}/slicer/presets").mock(side_effect=_after(asked, "slicer-presets-h2c.json"))
 
-    async with asyncio.timeout(5):
-        stale = await cached_catalogue(bambuddy, tmp_path)
+    stale = await cached_catalogue(bambuddy, tmp_path)
     assert stale == first
     assert len(catalogue._refreshing) == 1
     # A second open while the read runs starts no other.
@@ -374,7 +371,7 @@ async def test_a_refresh_claim_that_cannot_reach_postgres_lets_the_replica_refre
         "postgresql://nobody@127.0.0.1:1/none"  # refused at once
     )
 
-    async with asyncio.timeout(10), claim(tmp_path / "v1-x.json") as granted:
+    async with claim(tmp_path / "v1-x.json") as granted:
         assert granted
     # A refresh that fails under it does not carry the connect error as its context
     # (#4938 review), which a later `exc_info` would print with the conninfo.
@@ -564,8 +561,7 @@ async def test_an_open_that_misses_the_kept_file_answers_what_this_process_read(
     caplog.set_level(logging.INFO, logger=catalogue.__name__)
 
     started = time.perf_counter()
-    async with asyncio.timeout(5):
-        read = await cached_catalogue(bambuddy, tmp_path)
+    read = await cached_catalogue(bambuddy, tmp_path)
     print(f"#4528: the open answered in {(time.perf_counter() - started) * 1000:.0f} ms")
 
     assert read == first
@@ -628,13 +624,11 @@ async def test_a_process_that_has_read_nothing_still_waits_on_its_first_read(
     respx.get(f"{API}/local-presets/").mock(return_value=_ok("local-presets.json"))
 
     opening = asyncio.ensure_future(cached_catalogue(bambuddy, tmp_path))
-    async with asyncio.timeout(5):
-        await held.asked.wait()
+    await held.asked.wait()
     assert not opening.done()
     held.release.set()
 
-    async with asyncio.timeout(5):
-        assert (await opening).process
+    assert (await opening).process
     assert held.started == 1
 
 
@@ -696,8 +690,7 @@ async def test_a_refresh_still_running_is_stopped_at_shutdown(
     await cached_catalogue(bambuddy, tmp_path)
     (task,) = catalogue._refreshing.values()
 
-    async with asyncio.timeout(5):
-        await catalogue.stop_refreshes()
+    await catalogue.stop_refreshes()
 
     assert task.cancelled()
     assert not catalogue._refreshing
@@ -778,8 +771,7 @@ async def test_opens_with_nothing_kept_share_one_read(
     opens = [asyncio.ensure_future(cached_catalogue(bambuddy, tmp_path)) for _ in range(3)]
     await waiting(3)
     held.release.set()
-    async with asyncio.timeout(5):
-        first, *rest = await asyncio.gather(*opens)
+    first, *rest = await asyncio.gather(*opens)
 
     assert rest == [first, first]
     assert held.started == 1
@@ -803,8 +795,7 @@ async def test_an_open_given_up_on_does_not_cancel_the_read_the_others_wait_on(
     given_up.cancel()
     held.release.set()
 
-    async with asyncio.timeout(5):
-        assert (await still).process
+    assert (await still).process
     assert given_up.cancelled()
     assert held.started == 1
     # Kept for the next open, though the one that started the read gave up on it.
@@ -823,8 +814,7 @@ async def test_a_shared_read_that_fails_fails_every_open_and_is_not_kept(
     opens = [asyncio.ensure_future(cached_catalogue(bambuddy, tmp_path)) for _ in range(2)]
     await waiting(2)
     held.release.set()
-    async with asyncio.timeout(5):
-        outcomes = await asyncio.gather(*opens, return_exceptions=True)
+    outcomes = await asyncio.gather(*opens, return_exceptions=True)
 
     assert all(isinstance(outcome, ApiError) for outcome in outcomes)
     assert held.started == 1
@@ -856,8 +846,7 @@ async def test_shutdown_stops_a_first_read_too(bambuddy: BambuddyClient, tmp_pat
     respx.get(f"{API}/slicer/presets").mock(side_effect=held)
     respx.get(f"{API}/local-presets/").mock(return_value=_ok("local-presets.json"))
     opening = asyncio.ensure_future(cached_catalogue(bambuddy, tmp_path))
-    async with asyncio.timeout(5):
-        await held.asked.wait()
+    await held.asked.wait()
     (reading,) = catalogue._reading.values()
 
     await catalogue.stop_refreshes()
@@ -933,8 +922,7 @@ async def test_the_spools_and_assignments_are_read_together(bambuddy: BambuddyCl
         side_effect=_marks(asked, "inventory-assignments.json")
     )
 
-    async with asyncio.timeout(5):
-        spools, assignments = await read_inventory(bambuddy)
+    spools, assignments = await read_inventory(bambuddy)
 
     assert spools and assignments
 
@@ -952,10 +940,9 @@ async def test_the_printer_and_its_remaining_filament_are_read_together(
         side_effect=_marks(asked, "inventory-remain.json")
     )
 
-    async with asyncio.timeout(5):
-        (options,) = await gather_plate_options(
-            bambuddy, library_file_id=62, printer_id=1, plate_ids=[1]
-        )
+    (options,) = await gather_plate_options(
+        bambuddy, library_file_id=62, printer_id=1, plate_ids=[1]
+    )
 
     assert options.slots
 
@@ -973,16 +960,15 @@ async def test_stalled_archives_cost_the_plate_preselection_not_the_dialog(
     never = asyncio.Event()
     respx.get(f"{API}/archives/").mock(side_effect=_after(never, "archives.json"))
 
-    async with asyncio.timeout(5):
-        view = await choices_for(
-            bambuddy,
-            _source(),
-            StoredSettings(),
-            remembered=None,
-            printer_id=1,
-            cache=tmp_path,
-            catalogue_key=None,
-        )
+    view = await choices_for(
+        bambuddy,
+        _source(),
+        StoredSettings(),
+        remembered=None,
+        printer_id=1,
+        cache=tmp_path,
+        catalogue_key=None,
+    )
 
     assert view.last_bed_type is None
     assert view.filaments.slots
@@ -1045,8 +1031,7 @@ async def test_the_checks_download_and_spools_do_not_wait_on_the_printer(
         }
     )
 
-    async with asyncio.timeout(5):
-        check = await check_print(bambuddy, cast(PrintSource, source), StoredSettings(), request)
+    check = await check_print(bambuddy, cast(PrintSource, source), StoredSettings(), request)
 
     assert check.errors == ["Bambuddy has no printer 1. Pick another printer."]
     assert source.cancelled
