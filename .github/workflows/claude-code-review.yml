@@ -347,6 +347,16 @@ jobs:
             with `git diff origin/<baseRefName>...HEAD -- <paths>` (the checkout
             has full history). Review the whole change that way.
 
+            **Commands you may run.** Bash runs only a single `git`, `gh`,
+            `jq`, `yq` or `shellcheck` command (a pipe into `jq` is fine). A
+            `for` loop, `cd`, `cat`, `sed`, `awk`, `head` or a pipe into
+            them is denied. Read a file with the Read tool, search with Grep
+            and Glob, and page a long diff with `git diff ... -- <paths>` per
+            group of files. A denied command ends nothing: rewrite it as an
+            allowed one and go on, then post the summary (on PR #6550 three
+            denials of `for`/`sed` commands ended the review with no summary,
+            #6570).
+
             Review this pull request for ScadBuddy — a self-hosted OpenSCAD
             customizer that reproduces MakerWorld's Parametric Model Maker
             inside Bambuddy. One container: a Python 3.12 / FastAPI backend that
