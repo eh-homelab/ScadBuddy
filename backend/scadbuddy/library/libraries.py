@@ -879,6 +879,8 @@ class InstallPermits:
     of ``library_install_slots``, renewed while its clone runs, so a crashed holder's
     lapses after one TTL. A queued install waits on the loop for this process's
     permits, then polls for a free slot.
+
+    ``sleep`` is the wait before each renewal of a slot (:func:`_renewed`).
     """
 
     def __init__(
@@ -889,11 +891,13 @@ class InstallPermits:
         slots: InstallSlots | None = None,
         ttl: float = LEASE_TTL,
         poll: float = POLL_INTERVAL,
+        sleep: Callable[[float], Awaitable[object]] = asyncio.sleep,
     ) -> None:
         self.limit = limit
         self.slots = slots if pool is None else InstallSlotRows(pool, limit, ttl=ttl)
         self.ttl = ttl
         self.poll = poll
+        self._sleep = sleep
         self._local = asyncio.Semaphore(limit)
 
     @contextlib.asynccontextmanager
@@ -912,6 +916,7 @@ class InstallPermits:
                 lambda: slots.drop(slot, token),
                 "library install slot",
                 str(token),
+                sleep=self._sleep,
             ):
                 yield
 
