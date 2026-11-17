@@ -20,7 +20,9 @@ export function dataHealthOf<D extends { ping(timeoutMs?: number): Promise<boole
   areas: Pick<CrudAreas, 'complete' | 'answers'>,
   log: (message: string) => void = (message) => console.warn(message),
 ): D & { check(timeoutMs?: number): Promise<DataCheck> } {
-  // Only for the log: the API's last answer, so each change is logged once.
+  // Only for the log: the API's last answer, so each change is logged once. A probe that does
+  // not ask the API (Postgres down, an area not listed) leaves it, so after an outage of both
+  // "answers again" is logged when the API next answers, not when the outage ends.
   let answered = true
   const check = async (timeoutMs?: number): Promise<DataCheck> => {
     // The database first: when it fails, the API is not asked and not named.

@@ -42,6 +42,7 @@ class FakeApi {
       return new Response(JSON.stringify({ ids: ids.filter((id) => this.live.has(id)) }), { headers })
     }
     if (path.endsWith('/forget-rows')) return new Response(JSON.stringify({ rows: 3 }), { headers })
+    if (path === '/background-tasks') return new Response(JSON.stringify({ tasks: [] }), { headers })
     return new Response(JSON.stringify({ detail: 'no route' }), { status: 404, headers })
   }
 }
@@ -162,5 +163,15 @@ describe("a forget's last rows over the CRUD route", () => {
     expect(all.reads).toBeInstanceOf(CrudSessionReads)
     expect(all.rows).toBeInstanceOf(CrudForgetRows)
     expect(routesWith('forget').rows).toBeUndefined()
+  })
+
+  it("the operator's forget lists a session's background tasks through the API once it lists them, over SQL until then", async () => {
+    let listed: string[] = []
+    const api = new FakeApi()
+    const { tasks } = forgetRoutes({ has: (area: string) => listed.includes(area) }, target(api), noSql)
+    await expect(tasks!.list(SESSION)).rejects.toThrow('ran SQL')
+    listed = ['background-tasks']
+    expect(await tasks!.list(SESSION)).toEqual([])
+    expect(api.seen.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /background-tasks'])
   })
 })
