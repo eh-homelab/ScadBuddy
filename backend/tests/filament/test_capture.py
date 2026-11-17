@@ -418,6 +418,24 @@ def test_a_lock_failure_skips_the_rest_and_still_writes_the_report(
     assert "secret detail" not in caplog.text
 
 
+def test_a_failed_lock_skips_the_plate_end_and_the_trays(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spool = _spool(pg_pool, tray_uuid=U1)
+    pid, reports = _printer(pg_pool)
+    job = {"subtask_name": "job-1"}
+    with pg_pool.connection() as conn, conn.transaction():
+        reports.advance_in(conn, pid, {"gcode_state": "RUNNING"} | job, T0)
+    ended: list[object] = []
+    monkeypatch.setattr(capture, "lock", _boom)
+    monkeypatch.setattr(prints, "plate_ended", lambda *args: ended.append(args))
+    done = _report(_tray(1, U1)) | {"gcode_state": "FINISH"} | job
+    with pg_pool.connection() as conn, conn.transaction():
+        reports.advance_in(conn, pid, done, T0 + timedelta(minutes=5))
+    assert ended == []
+    assert _events(pg_pool, spool, "loaded") == []
+
+
 def test_a_plate_end_failure_still_writes_the_report_and_the_trays(
     pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
