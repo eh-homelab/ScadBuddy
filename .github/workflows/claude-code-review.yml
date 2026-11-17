@@ -663,7 +663,12 @@ jobs:
           echo "subtype=$subtype is_error=$is_error num_turns=$turns total_cost_usd=$cost"
           # The review's last words (#6570): a run that ends with no summary usually
           # ends on a text-only turn, and without this the job log never shows it.
-          printf '%s' "$result" | jq -r '(.result // "") | .[0:2000]' | sed 's/^/last message: /'
+          # PR content can steer that text, so no line of it may run as a workflow
+          # command: control characters go, and commands are off while it prints.
+          stop="$(openssl rand -hex 16)"
+          echo "::stop-commands::$stop"
+          printf '%s' "$result" | jq -r '(.result // "") | .[0:2000] | gsub("[\r\u0000-\u0008\u000b-\u001f\u007f]"; " ")' | sed 's/^/last message: /'
+          echo "::$stop::"
           # A refused tool call can stop the review posting its summary while the
           # run still ends "success" (#918). Name each one, with the start of its input.
           printf '%s' "$result" | jq -r '(.permission_denials // [])[]
