@@ -1,5 +1,5 @@
 import type { Sql, TransactionSql } from 'postgres'
-import { crudRead, wellFormed } from '../api/crudRead.js'
+import { CrudReadError, crudRead, wellFormed } from '../api/crudRead.js'
 import { isUuid } from '../harness/uuid.js'
 import { appendEventsIn } from './eventLog.js'
 import { event, type ServerEvent, type SessionStatus } from './protocol.js'
@@ -391,8 +391,18 @@ export class CrudTurnRows implements TurnRows {
   }
 
   async giveBack(id: string, prior: SessionStatus, turnId: string): Promise<Logged | undefined> {
-    const body = { prior, turn_id: turnIdOf(turnId) }
-    const answer = await this.#call<{ logged: WireLogged | null }>(`a claim of session ${id} given back`, this.#path(id, '/give-back'), body)
+    const path = this.#path(id, '/give-back')
+    const step = `a claim of session ${id} given back`
+    let answer: { logged: WireLogged | null }
+    try {
+      answer = await this.#call<{ logged: WireLogged | null }>(step, path, { prior, turn_id: turnIdOf(turnId) })
+    } catch (error) {
+      // An API pod older than the fence (during a roll) refuses `turn_id` (422, its body forbids
+      // extra fields): give back unfenced, as that pod's route does, rather than leave the row
+      // running until the sweep.
+      if (!(error instanceof CrudReadError && error.fromRoute && error.status === 422)) throw error
+      answer = await this.#call<{ logged: WireLogged | null }>(step, path, { prior })
+    }
     return parsed(answer.logged)
   }
 

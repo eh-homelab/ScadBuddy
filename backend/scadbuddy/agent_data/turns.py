@@ -201,15 +201,19 @@ def state(conn: Connection[Any], session_id: str, grace_ms: int) -> dict[str, An
     return row
 
 
-def give_back(conn: Connection[Any], session_id: str, prior: str, turn_id: str) -> Logged | None:
+def give_back(
+    conn: Connection[Any], session_id: str, prior: str, turn_id: str | None
+) -> Logged | None:
     """``durable.ts`` ``#giveBack``: a refused send's claim of ``turn_id`` given back to
     ``prior``, with its ``session.status``, in one transaction; None when the row no longer runs
-    that turn (a turn claimed since is never ended by it)."""
+    that turn (a turn claimed since is never ended by it). With no ``turn_id`` (an agent pod older
+    than the fence, during a roll) the row is given back while it runs any turn, as before."""
     with write_transaction(conn):
         cur = conn.execute(
             "UPDATE ai_sessions SET status = %s, durable_turn_id = NULL, updated_at = now()"
-            " WHERE id = %s AND status = 'running' AND durable_turn_id = %s",
-            (prior, session_id, turn_id),
+            " WHERE id = %s AND status = 'running'"
+            " AND (%s::uuid IS NULL OR durable_turn_id = %s::uuid)",
+            (prior, session_id, turn_id, turn_id),
         )
         if cur.rowcount == 0:
             return None

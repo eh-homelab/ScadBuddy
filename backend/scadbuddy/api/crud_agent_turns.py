@@ -263,8 +263,9 @@ async def turn_state(
 
 class GiveBack(_Body):
     prior: Status
-    #: The claim's turn: the row is given back only while it runs it.
-    turn_id: TurnId
+    #: The claim's turn: the row is given back only while it runs it. Optional for an agent pod
+    #: older than the fence during a roll, which sends ``{prior}`` alone and gives back unfenced.
+    turn_id: TurnId | None = None
 
 
 class MaybeLogged(BaseModel):

@@ -216,6 +216,17 @@ def test_a_send_claims_a_free_row_and_gives_it_back(agent: Agent, tables: PgPool
     assert agent.post(f"/sessions/{sid}/turn/give-back", again_back)["logged"] is None
 
 
+def test_an_agent_older_than_the_fence_gives_back_unfenced(agent: Agent, tables: PgPool) -> None:
+    # During a roll an agent pod from before the fence sends `{prior}` alone: its claim is given
+    # back while the row runs any turn, as the route did before.
+    turn = str(uuid.uuid4())
+    sid = _session(tables, status="running", turn=turn)
+    logged = agent.post(f"/sessions/{sid}/turn/give-back", {"prior": "failed"})["logged"]
+    assert logged["seqs"] == [1]
+    row = _row(tables, sid)
+    assert (row["status"], row["durable_turn_id"]) == ("failed", None)
+
+
 @pytest.mark.parametrize(
     ("cols", "author"),
     [
@@ -566,7 +577,7 @@ def test_the_bodies_and_ids_are_bounded(agent: Agent, tables: PgPool) -> None:
             {"author": BROWSER, "turn_id": turn, "bare": False, "tiers": ["r"] * 17},
         ),
         ("/give-back", {"prior": "sideways", "turn_id": turn}),
-        ("/give-back", {"prior": "idle"}),
+        ("/give-back", {"prior": "idle", "turn_id": "t"}),
         ("/placement", {"turn_id": turn, "attempt": "", "mark_key": turn}),
         ("/placement", {"turn_id": "../x", "attempt": "a", "mark_key": turn}),
         ("/spend", {"key": "k", "cost_usd": float("1e9"), "unpriced_usd": 0, "turns": 0}),

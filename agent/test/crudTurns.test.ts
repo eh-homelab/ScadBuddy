@@ -159,6 +159,23 @@ describe('a turn\'s row writes over the CRUD routes', () => {
     expect(refused.giveBack).not.toHaveBeenCalled()
   })
 
+  it('gives back fenced on its turn, and unfenced to an API pod older than the fence', async () => {
+    const path = `POST /sessions/${SESSION}/turn/give-back`
+    const fenced = new FakeApi().answer(path, { logged: null })
+    expect(await rows(fenced).giveBack(SESSION, 'failed', TURN.toUpperCase())).toBeUndefined()
+    expect(fenced.seen.map((s) => s.body)).toEqual([{ prior: 'failed', turn_id: TURN }])
+    // An older API's body forbids `turn_id` (422): the claim is given back as that pod gives it.
+    let calls = 0
+    const old: typeof fetch = async (input, init) => {
+      const body = JSON.parse(await new Request(input, init).text()) as Record<string, unknown>
+      calls++
+      if ('turn_id' in body) return new Response(JSON.stringify({ detail: 'extra' }), { status: 422, headers: { 'x-scadbuddy-crud': '1' } })
+      return new Response(JSON.stringify({ logged: { events: [JSON.stringify(status('idle'))], seqs: [4] } }), { headers: { 'x-scadbuddy-crud': '1' } })
+    }
+    expect(await new CrudTurnRows(BASE, { fetch: old }).giveBack(SESSION, 'idle', TURN)).toEqual({ events: [status('idle')], seqs: [4] })
+    expect(calls).toBe(2)
+  })
+
   it('a refusal of the route throws, never reads as a fence that held', async () => {
     const api = new FakeApi().answer(`POST /sessions/${SESSION}/turn/placement`, { detail: 'down' }, 503)
     await expect(rows(api).placement(SESSION, TURN, 'run:1', TURN)).rejects.toThrow(/503/)

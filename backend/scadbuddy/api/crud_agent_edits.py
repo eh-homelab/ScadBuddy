@@ -71,6 +71,8 @@ class Edit(_Body):
 
 
 class Dismissed(BaseModel):
+    #: Every column is ``NOT NULL`` in ``ai_questions`` (``20261001T1826Z_questions.sql``,
+    #: ``20261003T1500Z_questions_tool.sql``).
     id: str
     turn_id: str
     tool: str

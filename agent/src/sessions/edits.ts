@@ -36,8 +36,8 @@ import { notifyWarmEvict } from './warmEvict.js'
 // means the edit would pass and nothing was written. Only then is the workflow told and the edit
 // sent again, told. A refusal, a 503 or a lost answer on the first call ends no workflow. What
 // changes between the two calls (a turn claimed, a call parked) can still refuse the second with
-// the workflow told, and a 503 or a lost answer on the second leaves the workflow told and the row
-// not done: either way a later send reads it `closed`, as one did on SQL after a commit that
+// the workflow told, and a 503 or a lost answer on the told send, tried twice, leaves the
+// workflow told and the row not done: either way a later send reads it `closed`, as one did on SQL after a commit that
 // failed past the signal, and the edit sent again marks it done.
 
 export type SessionEdit = { title?: string; done?: true; archived?: boolean }
@@ -208,7 +208,13 @@ export class CrudEditRows implements EditRows {
       answer = await send(false).catch(async (error: unknown) => {
         if (!(error instanceof CrudReadError && error.fromRoute && error.status === 409 && error.reason === 'untold')) throw error
         await endDurable(id)
-        return send(true)
+        // Told now: one more try of a told send whose answer was lost or that met a busy row or
+        // pool (503), so the window below is one failure wider at most.
+        return send(true).catch((again: unknown) => {
+          const answered = again instanceof CrudReadError && again.fromRoute
+          if (answered && again.status !== 503) throw again
+          return send(true)
+        })
       })
     } catch (error) {
       if (error instanceof CrudReadError && error.fromRoute) {

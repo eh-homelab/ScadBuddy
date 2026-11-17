@@ -68,6 +68,19 @@ describe('an edit over the CRUD route', () => {
     expect(end).not.toHaveBeenCalled()
   })
 
+  it('tries a told send once more when its answer was lost or the route was busy', async () => {
+    const untold: [number, unknown] = [409, { detail: 'refused', reason: 'untold' }]
+    const { seen, rows } = fakeApi(untold, [503, { detail: 'busy', reason: 'row_busy' }], [200, ok])
+    const end = vi.fn(async () => {})
+    await rows.edit(SESSION, { principal: BROWSER, done: true }, end)
+    expect(end).toHaveBeenCalledTimes(1)
+    expect(seen.map((s) => s.body.told)).toEqual([false, true, true])
+    // A refusal of the told send is not tried again.
+    const refused = fakeApi(untold, [409, { detail: 'refused', reason: 'busy_done' }], [200, ok])
+    await expect(refused.rows.edit(SESSION, { principal: BROWSER, done: true }, async () => {})).rejects.toMatchObject({ code: 'busy' })
+    expect(refused.seen.map((s) => s.body.told)).toEqual([false, true])
+  })
+
   it('writes nothing when the workflow cannot be told', async () => {
     const { seen, rows } = fakeApi([409, { detail: 'refused', reason: 'untold' }], [200, ok])
     const end = async () => {
