@@ -590,8 +590,12 @@ The storefront settled it, without a declared page (P14):
 
 So the step is in the lifecycle, and declared pages do not add a second path to it. A
 declared page that calls an accept route acts as the viewer, the shop, and the lifecycle
-refuses it on a storefront order as above. The orders spec §12 bullet now carries a note
-that points here.
+refuses it on a storefront order as above. This is not a guard against the page: "Accept
+for the customer" is a shop route, so a page can still call it through `host.api.request`
+(§7.2), as any back-office module can. The lifecycle then records it as the shop's accept
+for the customer, with its reason, in the audit row `item.accepted_for_customer`
+(`orders/lifecycle.py` `accept_for_customer`, `:4687-4700`). The orders spec §12 bullet now
+carries a note that points here.
 
 ## 12. Questions for the owner
 
