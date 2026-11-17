@@ -25,7 +25,9 @@ from scadbuddy.filament.purchasing_models import (
     InvoiceLineIn,
     PricePointCreate,
     ProductCreate,
+    ProductPatch,
     SupplierCreate,
+    SupplierPatch,
 )
 from scadbuddy.filament.spools import FilamentDefaults, FilamentSpoolStore
 from scadbuddy.filament.types import SpoolTypeStore
@@ -377,8 +379,12 @@ def test_the_detail_lists_the_types_suppliers(pg_pool: PgPool) -> None:
     second = shop.suppliers.add_product(other, ProductCreate(type_id=type_id, sku="B-1"))
     assert first is not None
     assert second is not None
-    gone = shop.suppliers.add_product(other, ProductCreate(type_id=type_id, sku="B-OLD"))
-    assert gone is not None
+    old = shop.suppliers.add_product(other, ProductCreate(type_id=type_id, sku="B-OLD"))
+    assert old is not None
+    shop.suppliers.update_product(old.id, ProductPatch(archived=True))
+    hidden = shop.suppliers.create(SupplierCreate(name="Gamma")).id
+    shop.suppliers.add_product(hidden, ProductCreate(type_id=type_id, sku="G-1"))
+    shop.suppliers.update(hidden, SupplierPatch(archived=True))
     shop.suppliers.add_price(first.id, PricePointCreate(price=Decimal("40")))
     shop.suppliers.add_price(second.id, PricePointCreate(price=Decimal("25")))
     shop.suppliers.add_price(second.id, PricePointCreate(price=Decimal("22.5")))
@@ -391,5 +397,24 @@ def test_the_detail_lists_the_types_suppliers(pg_pool: PgPool) -> None:
     assert rows == [
         ("Acme", "A-1", Decimal("40.0000"), Decimal("20.0000")),
         ("Beta", "B-1", Decimal("22.5000"), Decimal("22.5000")),
-        ("Beta", "B-OLD", None, None),
     ]
+
+
+def test_a_tie_unit_cost_agrees_on_the_spool_and_the_invoice_line(pg_pool: PgPool) -> None:
+    shop = Shop(pg_pool)
+    line = InvoiceLineIn(
+        description="T",
+        quantity=2,
+        unit_price=Decimal("0.5001"),
+        line_subtotal=Decimal("1.0001"),
+        line_tax=Decimal(0),
+        type_id=shop.type_id(),
+    )
+    draft = shop.draft([line], total="1.0001", subtotal="1.0001", tax="0")
+    done = shop.invoices.confirm(draft.id, actor="ann")
+    assert done is not None
+    detail = shop.spools.detail(done[0].lines[0].spool_ids[0])
+    assert detail is not None
+    assert detail.invoice is not None
+    assert done[0].lines[0].unit_cost == Decimal("0.5001")
+    assert detail.invoice.unit_cost == done[0].lines[0].unit_cost

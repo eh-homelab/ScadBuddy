@@ -281,7 +281,7 @@ def test_stats_count_spend_and_stock(pg_pool: PgPool) -> None:
     shop = Shop(pg_pool)
     type_id = shop.type_id()
     first = _confirmed(shop, type_id, "R-1")
-    _confirmed(shop, type_id, "R-2")
+    second = _confirmed(shop, type_id, "R-2")
     shop.draft(
         [
             InvoiceLineIn(
@@ -311,15 +311,29 @@ def test_stats_count_spend_and_stock(pg_pool: PgPool) -> None:
             conn, first[1], "print_started", source="print_estimate", delta_g=-7,
             ref_kind="print_run", ref_id="c",
         )  # fmt: skip
+        record(conn, second[0], "weighed", source="scale", absolute_g=800)
+        record(conn, second[0], "edited", source="person", absolute_g=790)
+        record(conn, second[1], "ams_reading", source="ams_remain", absolute_g=600)
+    shop.spools.archive(second[1], True, actor="ann")
     [row] = shop.suppliers.stats()
     assert row.supplier_name == "Acme"
+    assert not row.archived
     assert row.spool_count == 4
     assert row.consumed_g == 57.0
     assert row.spend == Decimal("85.6000")
-    assert row.remaining_g == 4000 - 57.0
+    assert row.remaining_g == 950 + 993 + 790  # the archived spool is not counted
 
 
 def test_a_supplier_with_only_drafts_is_left_out(pg_pool: PgPool) -> None:
     shop = Shop(pg_pool)
     shop.one(shop.type_id())
     assert shop.suppliers.stats() == []
+
+
+def test_stats_list_an_archived_supplier_marked(pg_pool: PgPool) -> None:
+    shop = Shop(pg_pool)
+    _confirmed(shop, shop.type_id(), "R-1")
+    shop.suppliers.update(shop.supplier_id, SupplierPatch(archived=True))
+    [row] = shop.suppliers.stats()
+    assert row.archived
+    assert row.spool_count == 2

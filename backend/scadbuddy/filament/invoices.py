@@ -30,6 +30,7 @@ from scadbuddy.filament.invoice_money import (
     price_per_pack,
     spool_cost_per_kg,
     tax_per_line,
+    unit_cost,
 )
 from scadbuddy.filament.spools import FilamentSpoolStore, SpoolInUseError, SpoolTypelessError
 from scadbuddy.filament.types import SpoolTypeStore
@@ -244,9 +245,7 @@ class InvoiceStore:
             pm.InvoiceLine.model_validate(
                 {
                     **line,
-                    "unit_cost": (line["allocated_cost"] / line["quantity"]).quantize(
-                        _UNIT, rounding=ROUND_HALF_UP
-                    ),
+                    "unit_cost": unit_cost(line["allocated_cost"], line["quantity"]),
                     "spool_ids": spools.get(line["id"], []),
                 }
             )

@@ -98,9 +98,11 @@ async def create_supplier(filament: FilamentDep, body: pm.SupplierCreate) -> pm.
     response_model=list[pm.SupplierStats],
     summary="Supplier stats",
     description=(
-        "Per supplier with a confirmed invoice: `spool_count` (spools its invoices made), "
-        "`remaining_g` (their unarchived grams left), `consumed_g` (grams they used, by the "
-        "ledger's rule: a print's actual replaces its estimate) and `spend` (the invoices' "
+        "Per supplier with a confirmed invoice, archived suppliers too (`archived`): "
+        "`spool_count` (every spool its invoices made, archived ones included), "
+        "`remaining_g` (grams left of the unarchived ones only), "
+        "`consumed_g` (grams they used, by the ledger's rule: a print's actual replaces its "
+        "estimate) and `spend` (the invoices' "
         "`allocated_cost`, a decimal string). Most consumed first, then by name."
     ),
 )

@@ -79,6 +79,11 @@ def spool_cost_per_kg(allocated_cost: Decimal, quantity: int, label_weight_g: in
     return _q(allocated_cost / quantity / (Decimal(label_weight_g) / 1000))
 
 
+def unit_cost(allocated_cost: Decimal, quantity: int) -> Decimal:
+    """What one spool of a line cost: its ``allocated_cost`` over ``quantity``."""
+    return _q(allocated_cost / quantity)
+
+
 def price_per_pack(line_total: Decimal, quantity: int, pack_size: int) -> Decimal:
     """The price of one pack: the line total over ``quantity`` units, times ``pack_size``."""
     return _q(line_total / quantity * pack_size)

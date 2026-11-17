@@ -256,8 +256,8 @@ export const filamentPurchasingTools: Tool[] = [
     name: 'filament_supplier_stats',
     label: 'Read supplier stats',
     description:
-      'Per supplier with a confirmed invoice: `spool_count` (spools its invoices made), `remaining_g` (their ' +
-      'unarchived grams left), `consumed_g` (grams they used; a print\'s actual replaces its estimate) and ' +
+      'Per supplier with a confirmed invoice, archived suppliers too (`archived`): `spool_count` (every spool its ' +
+      'invoices made, archived ones included), `remaining_g` (grams left of the unarchived ones only), `consumed_g` (grams they used; a print\'s actual replaces its estimate) and ' +
       '`spend` (the invoices\' `allocated_cost`, a decimal string). Most consumed first, then by name.',
     input: z.object({}),
     risk: 'read',

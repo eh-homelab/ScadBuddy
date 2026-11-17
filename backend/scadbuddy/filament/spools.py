@@ -26,7 +26,7 @@ from scadbuddy.filament import ledger
 from scadbuddy.filament import models as m
 from scadbuddy.filament import presets as p
 from scadbuddy.filament.catalog import CatalogRefError
-from scadbuddy.filament.invoice_money import price_per_kg
+from scadbuddy.filament.invoice_money import price_per_kg, unit_cost
 from scadbuddy.filament.types import TypeRowsDuplicateError, TypeTempError, effective, overridden
 from scadbuddy.spools.models import clean_tag_uid, clean_tray_uuid
 
@@ -285,7 +285,7 @@ class FilamentSpoolStore:
             line = conn.execute(
                 "SELECT i.id AS invoice_id, i.number, i.invoice_date, i.supplier_id,"
                 " sup.name AS supplier_name, l.id AS line_id, l.position AS line_position,"
-                " l.allocated_cost / l.quantity AS unit_cost"
+                " l.allocated_cost, l.quantity"
                 " FROM filament_spools s JOIN filament_invoice_lines l ON l.id = s.invoice_line_id"
                 " JOIN filament_invoices i ON i.id = l.invoice_id"
                 " JOIN filament_suppliers sup ON sup.id = i.supplier_id WHERE s.id = %s",
@@ -301,7 +301,8 @@ class FilamentSpoolStore:
                 "  WHERE pp.product_id = p.id"
                 "  ORDER BY pp.on_date DESC, pp.created_at DESC, pp.id LIMIT 1) n ON true"
                 " WHERE p.type_id = (SELECT type_id FROM filament_spools WHERE id = %s)"
-                " AND p.archived_at IS NULL ORDER BY upper(sup.name), upper(p.sku), p.id",
+                " AND p.archived_at IS NULL AND sup.archived_at IS NULL"
+                " ORDER BY upper(sup.name), upper(p.sku), p.id",
                 (spool_id,),
             ).fetchall()
             return m.SpoolDetail.model_validate(
@@ -310,7 +311,7 @@ class FilamentSpoolStore:
                     "invoice": None
                     if line is None
                     else m.SpoolInvoiceRef.model_validate(
-                        {**line, "unit_cost": line["unit_cost"].quantize(Decimal("0.0001"))}
+                        {**line, "unit_cost": unit_cost(line["allocated_cost"], line["quantity"])}
                     ),
                     "type_suppliers": [
                         m.SpoolTypeSupplier(

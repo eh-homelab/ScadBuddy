@@ -146,6 +146,7 @@ class SupplierStats(BaseModel):
     remaining_g: float
     consumed_g: float
     spend: Decimal
+    archived: bool = False
 
 
 # -- invoices ---------------------------------------------------------------------------

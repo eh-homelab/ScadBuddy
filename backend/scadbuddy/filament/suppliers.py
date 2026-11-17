@@ -262,14 +262,17 @@ class SuppliersStore:
     # -- stats --------------------------------------------------------------------------
 
     def stats(self) -> _Stats:
-        """Per supplier with a confirmed invoice: the spools its invoices made, their
-        unarchived grams left, the grams they used and what the invoices cost. Used grams
-        follow the ledger's rule (`ledger.basis`): a ``print_actual`` delta, and a
-        ``print_estimate`` one only while no ``print_ended`` event has its ref. Sorted by
-        grams used, most first, then by name."""
+        """Per supplier with a confirmed invoice: the spools its invoices made, the grams
+        they used and what the invoices cost. Archived suppliers are listed, marked
+        ``archived``; ``spool_count`` counts every spool bought, archived too, and
+        ``remaining_g`` the grams left of the unarchived ones only. Used grams follow the
+        ledger's rule (`ledger.basis`): a ``print_actual`` delta, and a ``print_estimate``
+        one only while no ``print_ended`` event has its ref. Sorted by grams used, most
+        first, then by name."""
         with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT s.id AS supplier_id, s.name AS supplier_name,"
+                " s.archived_at IS NOT NULL AS archived,"
                 " (SELECT count(*) FROM filament_spools sp"
                 "  JOIN filament_invoice_lines l ON l.id = sp.invoice_line_id"
                 "  JOIN filament_invoices i ON i.id = l.invoice_id"
