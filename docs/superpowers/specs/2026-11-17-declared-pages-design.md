@@ -349,8 +349,15 @@ CREATE INDEX records_newest ON records (type, created_at DESC, id);
 
 Git keeps every version of a type's schema. `record_types` keeps the newest one, so a
 write reads the schema it checks against in its own transaction (§5.4). A git commit
-whose `record_types` row was never written (the API stopped between the two) is indexed
-at the next start, as `flows/reconcile.py` does for a flow version.
+whose `record_types` row was never written (the API stopped between the two) is
+repaired at the next start, under the same rules as a registration: the repair takes the
+type's lock exclusively (§5.4) and checks every stored row against that commit's schema.
+Writes went on against the old schema meanwhile, so a row may no longer fit. If every row
+fits, the repair writes the `record_types` row. If one does not, the repair leaves
+`record_types` on the old commit, writes a git commit that puts back the schema in force,
+and logs the type and the first 20 failing ids. So `record_types` is the schema in force,
+and no version is in force before every stored row fitted it under the lock. This is not
+`flows/reconcile.py`'s repair, which indexes a commit and re-checks nothing.
 
 `records_newest` serves the list's order and cursor. A `where` filter is a scan of the
 type's rows in that index: a type holds at most 10,000 rows (§5.1), so the scan is
