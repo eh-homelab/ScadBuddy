@@ -121,7 +121,9 @@ jobs:
       # exist on the thread its link names. The REST API serves a comment by id
       # whatever the thread's length; its issue_url names the repository and the
       # thread, so an anchor copied onto the wrong thread, or onto an issue since
-      # transferred to another repository, fails too. The private repositories lychee
+      # transferred to another repository, fails too. So does a link to a repository
+      # since renamed: GitHub redirects it, but the link is stale; update it to the
+      # name issue_url gives (#6564). The private repositories lychee
       # excludes are skipped: the job's token cannot read them. Only a 404 fails the
       # step. Any other API error (a 5xx, a rate limit) is a warning, as lychee
       # accepts a 429, so an outage does not open a "broken links" issue. Each
@@ -153,7 +155,7 @@ jobs:
               if [ "${on,,}" = "${want,,}" ]; then
                 echo "ok $url"
               else
-                report error "$url: the comment is on $on, not $want"; bad=1
+                report error "$url: the comment is on $on, not $want (a wrong thread, or a moved or renamed repository: update the link)"; bad=1
               fi
             elif grep -q 'HTTP 404' gh-err.txt; then
               report error "$url: no such comment"; bad=1
