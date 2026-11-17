@@ -80,7 +80,7 @@ from scadbuddy.bambuddy.lost_slices import sweep_lost_slices
 from scadbuddy.bambuddy.output_reader import ContentBlobs, LocalOutputs
 from scadbuddy.bambuddy.preview import PREVIEW_GRACE, sweep_preview_slices
 from scadbuddy.bambuddy.print_source import MAX_DOWNLOAD_BYTES
-from scadbuddy.bambuddy.runs import PrintRunStore
+from scadbuddy.bambuddy.runs import PrintRunStore, reap_run_holds
 from scadbuddy.batches.component import PRINT_BATCHES
 from scadbuddy.core.authorship import AgentAuthorship
 from scadbuddy.core.logging import configure_logging
@@ -210,6 +210,7 @@ from scadbuddy.workflows.housekeeping import (
     PRINTER_WATCHES_SWEEP,
     QUOTE_HOLDS_SWEEP,
     REAP_SWEEP,
+    RUN_HOLDS_SWEEP,
     STOREFRONT_DRAFTS_SWEEP,
     STOREFRONT_MAIL_SWEEP,
     SWEEPS,
@@ -753,6 +754,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def auto_import_prints() -> None:
         await _heartbeating(_auto_import_prints_logged(state))
 
+    @activity.defn(name=RUN_HOLDS_SWEEP)
+    async def reap_print_run_holds() -> None:
+        await _heartbeating(_reap_run_holds_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -783,6 +788,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         sweep_storefront_drafts,
         send_storefront_mail,
         auto_import_prints,
+        reap_print_run_holds,
     ]
 
 
@@ -1414,6 +1420,17 @@ async def _reap_quote_holds_logged(state: AppState) -> None:
         raise
     if dropped:
         logger.info("reaped quote holds", extra={"count": dropped})
+
+
+async def _reap_run_holds_logged(state: AppState) -> None:
+    """#6122: the LAN runs' holds on their sliced files that a run's end left."""
+    try:
+        dropped = await asyncio.to_thread(reap_run_holds, state.refs.pool)
+    except Exception:
+        logger.exception("could not reap the print runs' sliced-file holds")
+        raise
+    if dropped:
+        logger.info("reaped print run holds", extra={"count": dropped})
 
 
 async def _reap_output_holds_logged(state: AppState) -> None:
