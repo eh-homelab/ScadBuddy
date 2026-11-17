@@ -7,7 +7,6 @@ book says where each came from, and the estimate says which density it used."""
 from __future__ import annotations
 
 import asyncio
-import time
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -369,21 +368,27 @@ def test_an_import_that_fills_only_the_density_is_an_update(client: TestClient) 
 def test_a_slow_lookup_never_holds_up_an_add(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#6148 review: the density lookup of an add has one deadline; past it the record
-    is made with no density."""
+    """#6148 review: the density lookup of an add has one deadline; past it the lookup
+    is cancelled and the record is made with no density. Checked by the cancel, not by
+    a time bound (#6593): a deadline that did not work would let the lookup end on its
+    own, and the test would fail on ``cancelled``, however fast the runner."""
+    cancelled = False
 
     async def slow(*args: object, **kwargs: object) -> list[object]:
-        await asyncio.sleep(60)
+        nonlocal cancelled
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
         return []
 
     monkeypatch.setattr(orders_api, "inventory_groups", slow)
     monkeypatch.setattr(orders_api, "DENSITY_LOOKUP_TIMEOUT", 0.2)
 
-    started = time.monotonic()
     made = tri_color(client)
 
-    # Far under the lookup's 60 s, with room for a loaded CI runner.
-    assert time.monotonic() - started < 30
+    assert cancelled
     assert (made["density_g_cm3"], made["density_profile"]) == (None, None)
 
 
