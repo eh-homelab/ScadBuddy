@@ -3,7 +3,7 @@ import type { BambuddyStatus, ProfileSpool, Settings, StorefrontSliceProfile } f
 import * as fixtures from '../fixtures'
 import { state as orders } from './orders/state'
 import { printersState } from './printers'
-import { SPOOL_INVENTORY } from './spoolInventory'
+import { inventoryRows } from './filament'
 import { forgetMockProjectTarget, forgetMockRemembered, mockRemembered, mockSettings, problem, setMockSettings } from '../handlers'
 
 /**
@@ -49,6 +49,7 @@ const NULLABLE = new Set([
   'default_plate',
   'google_fonts_api_key',
   'temporal_ui_url',
+  'filament_default_cost_per_kg',
   'store_s3_endpoint',
   'store_s3_bucket',
   'store_s3_access_key_id',
@@ -224,6 +225,16 @@ function putSettings(body: Record<string, unknown>) {
     if (name === 'storefront_mail_host' && typeof value === 'string' && (/[\s/@]/.test(value.trim()) || !value.trim())) {
       return refused(name, `Value error, ${envName(name)} is a host name, such as smtp.example.com`)
     }
+    // #6262 Task 13 — `FilamentSync` and the bounds of the two filament fields.
+    if (name === 'filament_sync' && !(value as { spools?: unknown } | null)?.spools?.toString().match(/^(off|bb_to_sb)$/)) {
+      return refused(name, "Input should be 'off' or 'bb_to_sb'")
+    }
+    if (name === 'filament_low_stock_pct' && typeof value === 'number' && value > 100) {
+      return refused(name, 'Input should be less than or equal to 100')
+    }
+    if (name === 'filament_default_cost_per_kg' && typeof value === 'string' && !/^\d+(\.\d+)?$/.test(value.trim())) {
+      return refused(name, 'Input should be greater than or equal to 0')
+    }
     if (name === 'temporal_ui_url' && typeof value === 'string' && !/^https?:\/\//.test(value)) {
       return refused(name, `Value error, ${envName(name)} must be an http(s) URL, not '${value}'`)
     }
@@ -321,7 +332,8 @@ export const handlers = [
   }),
 
   // #6153 — the shop slice profile's choices (`api/storefront_slice.py`): the price book's
-  // materials, and Bambuddy's spools, as the mock's printers all run on Bambuddy's path.
+  // materials, and ScadBuddy's spools by number (#6262 Task 7), as the mock's printers all
+  // run on Bambuddy's path.
   http.get(`${base}/storefront/slice-profile/options`, ({ request }) => {
     const materials = new Map<string, string>()
     for (const f of orders.filaments) if (!f.archived_at && !materials.has(f.material.toLowerCase())) materials.set(f.material.toLowerCase(), f.material)
@@ -329,11 +341,11 @@ export const handlers = [
     // As the route: 422 for a printer the registry does not hold.
     if (printer && !printersState().some((row) => row.id === printer)) return problem(422, 'Unprocessable Content', `no printer ${printer}`)
     const spools: ProfileSpool[] = printer
-      ? SPOOL_INVENTORY.filter((spool) => !spool.archived).map((spool) => ({
-          spool_id: spool.id,
-          material: spool.material,
-          colour: spool.rgba ? `#${spool.rgba.slice(0, 6)}` : null,
-          label: `${[spool.brand, spool.material, spool.subtype, spool.color_name].filter(Boolean).join(' ')} (#${spool.id})`,
+      ? inventoryRows().map(({ spool }) => ({
+          spool_id: spool.number,
+          material: spool.names?.material ?? '',
+          colour: spool.effective?.rgba ? spool.effective.rgba.slice(0, 7) : null,
+          label: `${[spool.names?.brand, spool.names?.material, spool.names?.subtype, spool.effective?.colour_name].filter(Boolean).join(' ')} (#${spool.number})`,
         }))
       : []
     return HttpResponse.json({

@@ -16,8 +16,8 @@ import { expect, test, type APIRequestContext } from '@playwright/test'
  *   E2E_PRINTER_URL    the fake printer's control port (`GET /__received`)
  *   E2E_RECORDER_URL   the recorder (`GET /__recorded`), in recorder mode
  *
- * With a URL set the native dialog's analyzers read the registry, the report and the
- * overlay, and the Prints page reads Bambuddy's queue and history only after its "Show
+ * With a URL set the native dialog's analyzers read the registry, the report and
+ * ScadBuddy's own spools (#6262), and the Prints page reads Bambuddy's queue and history only after its "Show
  * Bambuddy's queue and print history" button (#4629, #3745), so the recorder pass sees
  * no call at all.
  *
@@ -91,13 +91,13 @@ test.describe('native hot path (real stack)', () => {
     await progress
     await expect(dialog.getByTestId('slice-time')).toHaveText(/\d/, { timeout: 300_000 })
 
-    // The tagged tray holds the recorder's spool 2, linked by RFID from the refresh the
-    // seed ran: Bambuddy's record over it, read from Postgres, not from Bambuddy. With no
-    // Bambuddy there is no record.
+    // The tagged tray holds the SB spool the seed's refresh pulled from the recorder's
+    // spool 2 and bound to its RFID tag (#6262): its `#N` and name, read from Postgres,
+    // not from Bambuddy. With no Bambuddy nothing was pulled, so the tray holds none.
     if (mode === 'recorder') {
-      await expect(second).toContainText('Bambuddy: Bambu Lab Hot Pink')
+      await expect(second).toContainText(/Spool #\d+: .*Hot Pink/)
     } else {
-      await expect(second).not.toContainText('Bambuddy:')
+      await expect(second).not.toContainText('Spool #')
     }
 
     await dialog.getByRole('button', { name: 'Print', exact: true }).click()

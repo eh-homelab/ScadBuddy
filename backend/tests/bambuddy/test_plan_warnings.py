@@ -11,6 +11,7 @@ from scadbuddy.bambuddy.print_run import inlet_warnings, plan_warnings
 from scadbuddy.bambuddy.trays import tray_spool_id
 from tests.bambuddy.conftest import recording
 from tests.bambuddy.test_extruders import fts_status
+from tests.support.sb_rows import rows_of
 
 
 def spool(spool_id: int, material: str = "PLA", colour: str = "Black") -> Spool:
@@ -53,7 +54,7 @@ def plan(*spool_ids: int) -> FilamentPlan:
 def kinds(*spool_ids: int, assignments: list[SpoolAssignment]) -> list[tuple[str, int | None]]:
     shelf = [spool(1), spool(2, "TPU 95A"), spool(3, "PLA Matte", "Green"), spool(4)]
     found = plan_warnings(
-        plan(*spool_ids), (shelf, assignments), printer_id=1, printer_name=None, status=None
+        plan(*spool_ids), rows_of(shelf, assignments), printer_id=1, printer_name=None, status=None
     )
     return [(warning.kind, warning.slot_id) for warning in found]
 
@@ -62,7 +63,7 @@ def test_the_mosaic_plan_of_2461_is_flagged_twice() -> None:
     """A loaded PLA, an unloaded TPU 95A and a loaded PLA: Checks said nothing."""
     found = plan_warnings(
         plan(1, 2, 3),
-        (
+        rows_of(
             [spool(1), spool(2, "TPU 95A"), spool(3, "PLA Matte", "Green")],
             [loaded(1, 0), loaded(3, 1)],
         ),
@@ -78,7 +79,7 @@ def test_three_families_are_named_in_order() -> None:
     """#2733 review: the list wording past two families."""
     found = plan_warnings(
         plan(1, 2, 3),
-        (
+        rows_of(
             [spool(1), spool(2, "PETG"), spool(3, "TPU 95A")],
             [loaded(1, 0), loaded(2, 1), loaded(3, 2)],
         ),
@@ -112,7 +113,7 @@ def test_a_tray_chosen_as_itself_is_loaded_and_counts_by_its_material() -> None:
     )
     shelf = [spool(2, "TPU 95A")]
     found = plan_warnings(
-        tray_plan, (shelf, [loaded(2, 3)]), printer_id=1, printer_name=None, status=status
+        tray_plan, rows_of(shelf, [loaded(2, 3)]), printer_id=1, printer_name=None, status=status
     )
     assert [w.kind for w in found] == ["mixed-materials"]
     assert found[0].message.startswith("This print mixes TPU and PLA.")
@@ -122,7 +123,7 @@ def test_a_spool_in_another_printer_is_named_as_the_picker_names_it() -> None:
     """#2733 review: the check names the chosen printer, as the picker does."""
     found = plan_warnings(
         plan(4),
-        ([spool(4)], [loaded(4, 2, printer_id=2)]),
+        rows_of([spool(4)], [loaded(4, 2, printer_id=2)]),
         printer_id=1,
         printer_name="3DP-31B-598",
         status=None,
@@ -137,7 +138,7 @@ def test_a_spool_the_inventory_lacks_or_archived_says_nothing_here() -> None:
     archived = spool(2, "TPU 95A").model_copy(update={"archived_at": "2026-10-01T00:00:00Z"})
     found = plan_warnings(
         plan(1, 2, 99),
-        ([spool(1), archived], [loaded(1, 0)]),
+        rows_of([spool(1), archived], [loaded(1, 0)]),
         printer_id=1,
         printer_name=None,
         status=None,
@@ -162,7 +163,7 @@ def sides(*placed: tuple[int, str]) -> NozzlePlan:
 def mixed_message(nozzle_plan: NozzlePlan | None) -> str:
     found = plan_warnings(
         plan(1, 2),
-        ([spool(1), spool(2, "TPU 95A")], [loaded(1, 0), loaded(2, 1)]),
+        rows_of([spool(1), spool(2, "TPU 95A")], [loaded(1, 0), loaded(2, 1)]),
         printer_id=1,
         printer_name=None,
         status=None,
@@ -195,7 +196,7 @@ def test_an_offline_printers_tray_adds_no_material_to_the_mix() -> None:
     )
     found = plan_warnings(
         tray_plan,
-        ([spool(2, "TPU 95A")], [loaded(2, 3)]),
+        rows_of([spool(2, "TPU 95A")], [loaded(2, 3)]),
         printer_id=1,
         printer_name=None,
         status=None,
@@ -274,7 +275,7 @@ def test_checks_reads_each_spools_inlet_from_the_printer() -> None:
     ]
     found = plan_warnings(
         plan(1, 2),
-        (shelf, on_inlet_a),
+        rows_of(shelf, on_inlet_a),
         printer_id=1,
         printer_name=None,
         status=fts_status(),

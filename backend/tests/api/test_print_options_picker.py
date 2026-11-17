@@ -21,6 +21,7 @@ from tests.api.test_send import API, configure, make_output, upload_route
 from tests.bambuddy.conftest import recording
 from tests.support.printers import linked_printer
 
+pytestmark = pytest.mark.usefixtures("recorded_sb_spools")
 OPTIONS_ROUTE = "/api/v1/settings/print-options"
 
 

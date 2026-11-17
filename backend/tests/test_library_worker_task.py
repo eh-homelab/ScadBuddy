@@ -256,6 +256,8 @@ async def test_a_failing_sweep_fails_its_activity(
     monkeypatch.setattr(
         main, "reap_orphan_quote_holds", _broken(RuntimeError("the quote holds are gone"))
     )
+    # #6122: the LAN runs' holds an end left.
+    monkeypatch.setattr(main, "reap_run_holds", _broken(OSError("the database is gone")))
     monkeypatch.setattr(main, "sync_printers", _broken_async)
     # #4961: the deposit sync, which calls Plaid.
     monkeypatch.setattr(main, "sync_deposits", _broken_async)
@@ -409,6 +411,14 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
         return 0
 
     monkeypatch.setattr(main, "reap_orphan_quote_holds", slow_quote_holds)
+
+    # #6122: the LAN runs' holds an end left, one delete.
+    def slow_run_holds(refs: object) -> int:
+        time.sleep(0.1)
+        return 0
+
+    monkeypatch.setattr(main, "reap_run_holds", slow_run_holds)
+    state.refs = None
     # #5298: the CRUD routes' idempotency replies past their 24 h, one delete.
     monkeypatch.setattr(main, "_prune_crud_requests", lambda state: time.sleep(0.1))
 

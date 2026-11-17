@@ -29,7 +29,7 @@ from tests.api.test_send import BASE, configure, make_output
 from tests.support.operations import press
 from tests.support.printers import linked_printer
 
-pytestmark = pytest.mark.requires_postgres
+pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("recorded_sb_spools")]
 
 API = f"{BASE}/api/v1"
 

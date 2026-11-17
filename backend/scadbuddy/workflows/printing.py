@@ -325,6 +325,11 @@ LAN_WAIT_BOUND = timedelta(days=7)
 #: ``workflow.patched`` id of a LAN run that waits for a cleared plate before each later
 #: copy (#4939). Only a run planned with ``plate_clear`` asks, and no recorded run was.
 PLATE_CLEAR_PATCH = "print-lan-plate-clear"
+#: ``workflow.patched`` id of a LAN run's hold on its sliced files (#6122): ``slice_run``
+#: is sent the run's id and holds the file for it (`bambuddy/runs.py` `hold_run_file`),
+#: so the print worker's read URL of the file follows the run. A history from before it
+#: sends none; its run reads its file by the slice's row while that stands.
+RUN_HOLD_PATCH = "print-lan-run-holds-its-files"
 #: ``lan_wait`` only reads, so it is taken up again whenever it stops, within the bound:
 #: a heartbeat timeout (a worker that died) is retried too, and only the bound ends the
 #: wait (`_lan_failed`'s wait text).
@@ -354,6 +359,8 @@ class _PlateStarts:
         #: Whether the run caught a cancel and carried on; it then holds no repeat
         #: window, since Temporal drops a second cancel request (review #1316 2).
         self.cancel_absorbed = False
+        #: The run whose sliced files ``slice_run`` holds (`RUN_HOLD_PATCH`): a LAN run's.
+        self.hold_for: str | None = None
 
     async def _shielded[T](
         self, handle: workflow.ActivityHandle[T], patch: str = CANCEL_PATCH
@@ -403,6 +410,7 @@ class _PlateStarts:
                     plan=plate.plan,
                     plate_id=plate.plate_id,
                     subject=subject,
+                    run_id=self.hold_for,
                 ),
                 result_type=NativeSliced,
                 task_queue=planned.library_queue,
@@ -817,6 +825,8 @@ class PrintRunWorkflow(_PlateStarts):
             heartbeat_timeout=HEARTBEAT,
             retry_policy=READ_RETRY,
         )
+        if planned.lan_start and workflow.patched(RUN_HOLD_PATCH):
+            self.hold_for = accepted.run.id
         if (
             planned.lan_start
             and len(planned.plates) * planned.copies > 1
@@ -1161,6 +1171,8 @@ class LanSequenceWorkflow(_PlateStarts):
     @workflow.run
     async def run(self, sequence: LanSequenceInput) -> PrintRun:
         input, accepted, planned = sequence.input, sequence.accepted, sequence.planned
+        if workflow.patched(RUN_HOLD_PATCH):
+            self.hold_for = accepted.run.id
         result = sequence.result
         recorded = set(sequence.recorded)
         sent = sequence.sent
@@ -1202,8 +1214,9 @@ class LanSequenceWorkflow(_PlateStarts):
                 step = "start"
                 if native is not None and plate.plan is not None:
                     # Days may have passed: the slice's row, and its hold on the blob, is
-                    # swept `PREVIEW_GRACE` after it finished, and the blob a day later.
-                    # Joining it again keeps the blob, or slices the plate again.
+                    # swept `PREVIEW_GRACE` after it finished, and the blob a day later
+                    # unless the run holds it (`RUN_HOLD_PATCH`). Joining it again keeps
+                    # the blob, or slices the plate again.
                     native = await self._slice_run(planned, plate, input.subject)
                 taken = await self._start_lan(
                     input,

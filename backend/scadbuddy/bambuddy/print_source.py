@@ -202,7 +202,7 @@ class PrintSource(Protocol):
         nozzle_stats: list[str] | None = None,
         nozzle_volume_type: list[str] | None = None,
         filament_map: FilamentMap | None = None,
-        tray_colours: Mapping[int, str] | None = None,
+        chosen_colours: Mapping[int, str] | None = None,
         native_copy: bool = False,
         printer_model: str | None = None,
         attempt_since: datetime | None = None,
@@ -211,6 +211,7 @@ class PrintSource(Protocol):
         """The library file the run slices: laid out for the printer and copied into
         Bambuddy's library, or with ``native_copy`` into ScadBuddy's own (#3818 tier A
         Task 4), which needs no ``client`` and lays out for ``printer_model``.
+        ``chosen_colours`` is the colour of each id ``plan`` may name (`_spool_colours`).
         ``attempt_since`` is when the run's first attempt was scheduled: only a native
         upload made since then is an earlier attempt's (#4312 re-review N-a).
         ``part_settings`` are written into the copy as per-part overrides (#5571)."""
@@ -305,27 +306,18 @@ async def _fetch_once(source: _Fetching, client: BambuddyClient | None) -> _Fetc
     return _Fetched(payload, stated)
 
 
-async def _spool_colours(
-    client: BambuddyClient | None,
-    colours: list[str],
-    plan: FilamentPlan,
-    trays: Mapping[int, str] | None = None,
+def _spool_colours(
+    colours: list[str], plan: FilamentPlan, chosen: Mapping[int, str] | None = None
 ) -> list[str] | None:
-    """One colour per filament of the file: the chosen spool's, or the file's own for a
-    slot with no spool (#476). ``None`` when no spool is chosen at all, which leaves the
-    file in its own colours. Without a ``client`` (a native run, #3818) only trays are
-    chosen, so Bambuddy's spools are not read."""
+    """One colour per filament of the file: the chosen spool's (``chosen``, by the id the
+    plan names: an SB spool's number or a tray chosen for itself, #2164, #6262 Task 7), or
+    the file's own for a slot with no spool or none known (#476). ``None`` when no spool
+    is chosen at all, which leaves the file in its own colours."""
     if not plan.slots:
         return None
-    rgba: dict[int, str | None] = (
-        {spool.id: normalise_colour(spool.rgba) for spool in await client.spools()}
-        if client is not None
-        else {}
-    )
-    # A tray chosen for itself (#2164) prints in the tray's colour.
-    rgba.update(trays or {})
+    known = chosen or {}
     return [
-        rgba.get(plan.spool_for(index + 1) or 0) or colour for index, colour in enumerate(colours)
+        known.get(plan.spool_for(index + 1) or 0) or colour for index, colour in enumerate(colours)
     ]
 
 
@@ -583,7 +575,7 @@ class PrintPipeline:
         nozzle_stats: list[str] | None = None,
         nozzle_volume_type: list[str] | None = None,
         filament_map: FilamentMap | None = None,
-        tray_colours: Mapping[int, str] | None = None,
+        chosen_colours: Mapping[int, str] | None = None,
         native_copy: bool = False,
         printer_model: str | None = None,
         attempt_since: datetime | None = None,
@@ -602,7 +594,7 @@ class PrintPipeline:
                 nozzle_stats=nozzle_stats,
                 nozzle_volume_type=nozzle_volume_type,
                 filament_map=filament_map,
-                tray_colours=tray_colours,
+                chosen_colours=chosen_colours,
                 printer_model=printer_model,
                 attempt_since=attempt_since,
                 part_settings=part_settings,
@@ -636,7 +628,7 @@ class PrintPipeline:
             settings,
             printer_id=printer_id,
             nozzle_diameter=nozzle_size,
-            colours=await _spool_colours(client, list(self.colours), plan, tray_colours),
+            colours=_spool_colours(list(self.colours), plan, chosen_colours),
             nozzle_stats=nozzle_stats,
             nozzle_volume_type=nozzle_volume_type,
             filament_map=filament_map,
@@ -665,7 +657,7 @@ class PrintPipeline:
         nozzle_stats: list[str] | None,
         nozzle_volume_type: list[str] | None,
         filament_map: FilamentMap | None,
-        tray_colours: Mapping[int, str] | None,
+        chosen_colours: Mapping[int, str] | None,
         printer_model: str | None,
         attempt_since: datetime | None,
         part_settings: PartOverrides | None = None,
@@ -697,7 +689,7 @@ class PrintPipeline:
             settings,
             printer_id=printer_id,
             nozzle_diameter=nozzle_size,
-            colours=await _spool_colours(client, list(self.colours), plan, tray_colours),
+            colours=_spool_colours(list(self.colours), plan, chosen_colours),
             nozzle_stats=nozzle_stats,
             nozzle_volume_type=nozzle_volume_type,
             filament_map=filament_map,

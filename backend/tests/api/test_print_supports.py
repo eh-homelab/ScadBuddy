@@ -19,7 +19,7 @@ from tests.api.test_print_filaments import prepared, queue_route, slice_routes
 from tests.api.test_print_run_choices import body, declare_print_settings, run_print, run_routes
 from tests.api.test_send import BASE, upload_route
 
-pytestmark = pytest.mark.requires_postgres
+pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("recorded_sb_spools")]
 
 #: The support settings as ``0.20mm Standard @BBL H2C`` resolves them, with the angle
 #: as an extruder-variant list, so the shape is what decides the override's.

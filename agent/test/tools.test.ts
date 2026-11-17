@@ -666,7 +666,7 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       copies: 2,
       plate_id: 1,
       all_plates: false,
-      filament_plan: { slots: [{ slot_id: 1, spool_id: 12 }], force_colour_match: true },
+      filament_plan: { slots: [{ slot_id: 1, spool_id: 12 }], force_colour_match: true, ids: 'sb' },
       choices: {
         nozzles: [{ size: '0.6', flow: 'standard' }],
         tier: 'draft',

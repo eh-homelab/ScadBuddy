@@ -33,7 +33,7 @@ from tests.api.test_send import BASE, configure, make_output
 from tests.support.operations import press
 
 # Every test here reads or writes an output's upload records, which live in Postgres.
-pytestmark = pytest.mark.requires_postgres
+pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("recorded_sb_spools")]
 
 API = f"{BASE}/api/v1"
 INBOX = 2

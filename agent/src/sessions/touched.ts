@@ -356,7 +356,7 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   // answer links it there.
   storefront_listing_draft: () => [],
   storefront_listing_publish: () => [],
-  // The price book (#4250) is a record of its own, edited on the Settings page.
+  // The price book (#4250) is a record of its own, edited on the Filament page's Types tab.
   price_book_set: () => [],
   price_book_import_spools: () => [],
   price_book_fill_densities: () => [],
@@ -707,14 +707,10 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   // #6395: nor is a library file's association (the file and the model are unchanged).
   'associate_library_file',
   'remove_association',
-  // #3818: a tray's spool link is no recorded resource kind either (ScadBuddy's
-  // tray_spool_links; the spool and its providers' records are unchanged).
+  // #3818, #6262: a tray's spool link is no recorded resource kind either (it moves the
+  // SB spool to the tray's place, a `moved` ledger event; nothing else changes).
   'link_tray_spool',
   'unlink_tray_spool',
-  // ScadBuddy's own spools (#4643, filament_spools rows since #6261) are no recorded resource kind: the
-  // shelf lists them, and the overlay's cached copy follows each write.
-  'native_spool_upsert',
-  'native_spool_delete',
   // The filament inventory (#6261: catalogs, types, spools, tags, the ledger, locations)
   // is no recorded resource kind either; each spool's ledger is its own history.
   'filament_catalog_upsert',
@@ -722,6 +718,8 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'filament_type_set_presets',
   'filament_type_set_k_values',
   'filament_spool_upsert',
+  'filament_spool_set_presets',
+  'filament_spool_set_k_values',
   'filament_spool_archive',
   'filament_spool_delete',
   'filament_spool_bind_tag',
@@ -730,6 +728,7 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'filament_location_upsert',
   'filament_spool_move',
   'filament_bambuddy_import',
+  'filament_spool_import',
   // A re-pin's dry run (#1914): the pin and the history stay as they were. The candidate's
   // checkout is a cache on the volume, swept at boot when nothing pins it.
   'check_library_candidate',

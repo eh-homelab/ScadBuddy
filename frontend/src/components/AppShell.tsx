@@ -18,6 +18,7 @@ import {
   ReceiptIcon,
   SettingsIcon,
   SparklesIcon,
+  SpoolIcon,
   StoreIcon,
   WorkflowIcon,
 } from 'lucide-react'
@@ -107,6 +108,7 @@ const NAV = [
   { to: '/', label: 'Models', end: true, icon: BoxesIcon },
   { to: '/prints', label: 'Prints', end: false, icon: PrinterIcon },
   { to: '/library', label: 'Library', end: false, icon: LibraryBigIcon },
+  { to: '/filament', label: 'Filament', end: false, icon: SpoolIcon },
   { to: '/orders', label: 'Orders', end: false, icon: ReceiptIcon },
   { to: '/storefront', label: 'Storefront', end: false, icon: StoreIcon },
   { to: '/workflows', label: 'Workflows', end: false, icon: WorkflowIcon },

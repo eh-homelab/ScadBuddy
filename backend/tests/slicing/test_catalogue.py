@@ -17,9 +17,10 @@ from typing import Any, cast
 import pytest
 
 from scadbuddy.bambuddy.filaments import FilamentOptions, FilamentPlan, SlotNeed, SpoolOption
-from scadbuddy.bambuddy.models import PresetRef, SlotChoice, SpoolFilamentPreset
+from scadbuddy.bambuddy.models import PresetRef, SlotChoice
 from scadbuddy.bambuddy.resolver import NozzleChoice, PrintChoices, resolve
 from scadbuddy.bambuddy.trays import tray_spool_id
+from scadbuddy.filament.models import EffectivePreset
 from scadbuddy.slicing import catalogue as native
 from scadbuddy.slicing import profiles as profiles_module
 from scadbuddy.slicing.catalogue import (
@@ -181,7 +182,7 @@ def _spool_with_own_preset(profiles: Profiles, preset_id: str | None) -> Any:
     options = FilamentOptions(
         library_file_id=None,
         slots=[SlotNeed(slot_id=1, colour="#FFFFFF")],
-        spools=[SpoolOption(spool_id=7, material="PETG", colour="#FFFFFF")],
+        spools=[SpoolOption(spool_id=7, material="PETG", colour="#FFFFFF", sb_number=7)],
     )
     plan = FilamentPlan(slots=[SlotChoice(slot_id=1, spool_id=7)])
     own = (
@@ -189,8 +190,12 @@ def _spool_with_own_preset(profiles: Profiles, preset_id: str | None) -> Any:
         if preset_id is None
         else {
             7: [
-                SpoolFilamentPreset(
-                    printer_model="H2C", nozzle_diameter="0.4", slicer_filament=preset_id
+                EffectivePreset(
+                    printer_model="H2C",
+                    nozzle_diameter="0.4",
+                    slicer_filament=preset_id,
+                    slicer_filament_name=None,
+                    overridden=True,
                 )
             ]
         }

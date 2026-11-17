@@ -8,7 +8,14 @@ from types import MappingProxyType
 from typing import Any, Final, Literal
 from urllib.parse import urlsplit
 
-from pydantic import Field, ValidationError, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from scadbuddy.core.config import (
@@ -90,6 +97,15 @@ def check_approval_timeout(value: int, name: str) -> int:
 DEFAULT_CRUD_PORT = 8082
 #: A mail address as the storefront's sender takes it: one ``@``, no space or angle bracket.
 _ADDRESS = re.compile(r"[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+")
+
+
+class FilamentSync(BaseModel, extra="forbid"):
+    """Which way each kind of filament data moves between ScadBuddy and Bambuddy (spec
+    2026-11-14 §8). ``spools``: ``off`` leaves Bambuddy's spools alone; ``bb_to_sb`` pulls
+    them into ScadBuddy's own on the refresh Schedule. #6265 adds data types and the
+    values ``sb_to_bb`` and ``two_way``."""
+
+    spools: Literal["off", "bb_to_sb"] = "bb_to_sb"
 
 
 class Settings(BaseSettings):
@@ -704,10 +720,20 @@ class Settings(BaseSettings):
     # may set its own, and a run may override both.
     flow_approval_timeout_seconds: int = 0
     # SCADBUDDY_SPOOL_OVERLAY_REFRESH_SECONDS (#3818 tier A, plan 2026-10-18 Task 6b): how
-    # often the spool providers' records, and the kept copy of Bambuddy's local presets
-    # (#4645), are refreshed into Postgres, on their own Schedule
-    # (`workflows/spool_refresh.py`); 0 turns the refresh off.
+    # often the kept copy of Bambuddy's local presets (#4645) is refreshed and Bambuddy's
+    # spools are pulled into ScadBuddy's own (#6261), on their own Schedule
+    # (`workflows/spool_refresh.py`); 0 turns both off. The name is older than the spool
+    # overlay's removal (#6262 Task 12) and stays, so no stored setting moves.
     spool_overlay_refresh_seconds: int = Field(default=300, ge=0)
+    # SCADBUDDY_FILAMENT_SYNC (JSON), _FILAMENT_LOW_STOCK_PCT and
+    # _FILAMENT_DEFAULT_COST_PER_KG (#6262 Task 13): the Filament section's settings.
+    # `filament_sync.spools` "off" turns the pull of Bambuddy's spools off; a spool that
+    # sets no low-stock percentage is low under `filament_low_stock_pct` of its label
+    # weight; `filament_default_cost_per_kg`, in the shop's `orders_currency`, values a
+    # spool with no cost in the inventory summary (`filament/spools.py` `summary`).
+    filament_sync: FilamentSync = Field(default_factory=FilamentSync)
+    filament_low_stock_pct: int = Field(default=20, ge=0, le=100)
+    filament_default_cost_per_kg: Decimal | None = Field(default=None, ge=0)
 
     @field_validator("flow_approval_timeout_seconds")
     @classmethod
@@ -1052,8 +1078,12 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "preview_renders": "restart",
         # Decides at start whether the periodic sweep runs at all.
         "asset_sweep_interval": "restart",
-        # The spool providers' Schedule is set up at start, as the sweeps' is.
+        # The spool refresh's Schedule is set up at start, as the sweeps' is.
         "spool_overlay_refresh_seconds": "restart",
+        # Read from the store by each spool read, and by each pull of the Schedule.
+        "filament_sync": "live",
+        "filament_low_stock_pct": "live",
+        "filament_default_cost_per_kg": "live",
         # Attributes of the stores that read them on every use.
         "library_max_bytes": "live",
         "asset_max_total_bytes": "live",

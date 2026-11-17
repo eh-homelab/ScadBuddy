@@ -1,5 +1,4 @@
 import type {
-  InventoryView,
   PrintChoices,
   FilamentProfile,
   ProfilePreview,
@@ -142,8 +141,8 @@ import type {
   PreviewStarted,
   SlicePreview,
   TrayAssigned,
-  TraySpool,
   TraySpoolLink,
+  FilamentSpool,
   PrintRun,
   FlowDecided,
   FlowProposal,
@@ -220,9 +219,6 @@ import type {
   Filament,
   FilamentInput,
   FilamentPatch,
-  NativeSpool,
-  NativeSpoolCreate,
-  NativeSpoolPatch,
   Fulfilment,
   AttemptArchives,
   ArchiveCopy,
@@ -424,7 +420,8 @@ function modelFilterParams({ q, tags, origin }: Omit<ModelFilters, 'sort'>): URL
   return query
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+/** A JSON call to `API_BASE` + `path`; a non-2xx answer throws `ApiError`. Feature clients (`api/filament.ts`) build on it. */
+export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await requestWithStatus<T>(path, init)).body
 }
 
@@ -2178,18 +2175,6 @@ export const api = {
     return request<FilamentOptions>(`/print/outputs/${seg(outputId)}/filaments${suffix}`)
   },
 
-  /** #2351 — Bambuddy's spool inventory, each spool with where it is loaded. */
-  getSpoolInventory: (includeArchived = false) =>
-    request<InventoryView>(`/farm/inventory${includeArchived ? '?include_archived=true' : ''}`),
-  /** #4643 — ScadBuddy's own spools, the native spool provider's records. */
-  nativeSpools: (includeArchived = false) =>
-    request<NativeSpool[]>(`/native-spools${includeArchived ? '?include_archived=true' : ''}`),
-  createNativeSpool: (body: NativeSpoolCreate) =>
-    request<NativeSpool>('/native-spools', { method: 'POST', body: JSON.stringify(body) }),
-  updateNativeSpool: (id: string, body: NativeSpoolPatch) =>
-    request<NativeSpool>(`/native-spools/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
-  deleteNativeSpool: (id: string) => request<void>(`/native-spools/${seg(id)}`, { method: 'DELETE' }),
-
   /**
    * spec 2026-09-27 §3 — one read for the whole spool-first print dialog: printers,
    * installed nozzles, quality tiers and processes per nozzle size, plates with the
@@ -2274,7 +2259,8 @@ export const api = {
     `${API_BASE}/print/library/${fileId}/preview-slices/${jobId}/toolpath${slicerQuery(slicer)}`,
 
   /**
-   * #2164 — record in Bambuddy which spool is in a tray it had no spool for. Sent only
+   * #2164, #6262 — record which SB spool (by number) is in a tray Bambuddy had no spool
+   * for; ScadBuddy also writes Bambuddy's assignment for a linked spool. Sent only
    * on the person's own "yes".
    */
   assignTraySpool: (printerId: number, amsId: number, trayId: number, spoolId: number) =>
@@ -2448,11 +2434,12 @@ export const api = {
     request<PrinterRow>(`/printers/${seg(id)}/lan`, { method: 'PUT', body: JSON.stringify(body) }),
   unlinkPrinterLan: (id: string) => request<PrinterRow>(`/printers/${seg(id)}/lan`, { method: 'DELETE' }),
   /**
-   * #3818 — the native path's manual link: which physical spool, or which provider's
-   * record, is in an untagged tray. Writes ScadBuddy only, never Bambuddy's assignment.
+   * #3818, #6262 Task 4 — the native path's manual link: which SB spool is in an untagged
+   * tray; the answer is the spool, now in the tray's place. Writes ScadBuddy only, never
+   * Bambuddy's assignment.
    */
   linkTraySpool: (printer: string, amsId: number, trayId: number, body: TraySpoolLink) =>
-    request<TraySpool>(`/printers/${seg(printer)}/trays/${amsId}/${trayId}/spool`, {
+    request<FilamentSpool>(`/printers/${seg(printer)}/trays/${amsId}/${trayId}/spool`, {
       method: 'PUT',
       body: JSON.stringify(body),
     }),

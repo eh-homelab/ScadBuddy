@@ -1142,8 +1142,9 @@ class PriceBook(BaseModel):
     rough_estimate_factor: str
     #: The records not archived, by material, brand and colour.
     filaments: list[Filament]
-    #: Whether a Bambuddy is linked, so ``POST …/import-spools`` can run (§8.3, #4253).
-    spool_import: bool = False
+    #: Whether ``POST …/import-spools`` can run (§8.3, #4253): always, since it reads
+    #: ScadBuddy's own spools (#6262 Task 9), with or without a Bambuddy.
+    spool_import: bool = True
 
 
 SpoolImportAction = Literal["created", "updated", "unchanged", "skipped"]
@@ -1156,9 +1157,9 @@ class SpoolImportRow(BaseModel):
     #: Why a group was skipped: ``no_colour`` (its spools carry only a colour's name,
     #: and a record's colour is ``#RRGGBB``), ``no_price`` (no spool has a price),
     #: ``too_long`` (a name past a record's 100 characters) or ``colour_taken`` (another
-    #: record of its material, subtype and brand already has its RGB as its colour,
-    #: #6209). On a matched record, ``colour_taken`` says its colour, alpha, stops and
-    #: effect were kept: another record of its names has the spools' RGB.
+    #: record of its material, subtype and brand already has its colour and alpha,
+    #: #6209, #6316). On a matched record, ``colour_taken`` says its colour, alpha, stops
+    #: and effect were kept: another record of its names has the spools' colour and alpha.
     reason: Literal["no_colour", "no_price", "too_long", "colour_taken"] | None = None
     #: The newest spool's names. A matched record keeps its own: only its price changes.
     material: str
@@ -1168,7 +1169,7 @@ class SpoolImportRow(BaseModel):
     #: The record's colour after the import (#6209). A new record's, or a matched
     #: ``import`` record's, is the spools' RGB. A matched record keeps its own colour when
     #: a person set it (``colour_source`` ``manual``) or when ``_movers`` held it back
-    #: because another record of its names holds the spools' RGB (``reason``
+    #: because another record of its names holds the spools' colour and alpha (``reason``
     #: ``colour_taken``). A skipped group's is the spools' RGB (``None`` with no ``rgba``).
     colour: str | None = None
     alpha: int | None = None

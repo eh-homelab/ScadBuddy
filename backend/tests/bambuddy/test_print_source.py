@@ -32,7 +32,6 @@ from scadbuddy.bambuddy.models import (
     LibraryPlates,
     Printer,
     SlotChoice,
-    Spool,
 )
 from scadbuddy.bambuddy.print_links import PrintSend
 from scadbuddy.bambuddy.print_source import (
@@ -390,14 +389,14 @@ async def test_a_last_print_record_that_fails_does_not_fail_the_queued_plate(
 # --- #1752: one pipeline; a library file differs only in how its 3MF is obtained -------
 
 FOLDER, INBOX, ORIGIN = 30, 2, 41
-SPOOL_RGBA = "00C000FF"
+SPOOL_COLOUR = "#00C000"
 HIGH_FLOW = ["High Flow", "High Flow"]
 STATS = ["High Flow#1", "High Flow#0"]
 
 
 class _Bambuddy:
     """What the pipeline reads of Bambuddy, in memory: the file to download, the
-    printer it is laid out for, the spool chosen, the project's folder, and each folder's
+    printer it is laid out for, the project's folder, and each folder's
     files, which uploads add to."""
 
     def __init__(self, payload: bytes, *, listed: list[LibraryFile] | None = None) -> None:
@@ -413,9 +412,6 @@ class _Bambuddy:
 
     async def printers(self) -> list[Printer]:
         return [Printer(id=1, name="H2C", model="H2C")]
-
-    async def spools(self) -> list[Spool]:
-        return [Spool(id=9, material="PLA", rgba=SPOOL_RGBA)]
 
     async def folders_by_project(self, project_id: int) -> list[Folder]:
         return [Folder(id=FOLDER, name="Project", project_id=project_id)]
@@ -545,7 +541,8 @@ async def _print(
         cast(BambuddyClient, bambuddy),
         printer_id=1,
         nozzle_size="0.4",
-        plan=FilamentPlan(slots=[SlotChoice(slot_id=1, spool_id=9)]),
+        plan=FilamentPlan(ids="sb", slots=[SlotChoice(slot_id=1, spool_id=9)]),
+        chosen_colours={9: SPOOL_COLOUR},
         project_id=project_id,
         nozzle_stats=STATS,
         nozzle_volume_type=HIGH_FLOW,

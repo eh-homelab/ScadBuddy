@@ -389,3 +389,9 @@ Record each result in the same section:
   - If any call answers 403 with the Manage-Library-only key, the scope declared for it in
     `backend/scadbuddy/bambuddy/client.py` is wrong. Fix it there and in
     `backend/scadbuddy/bambuddy/errors.py`'s docstring.
+
+Added for #6262 (Bambuddy 1.2.6b1):
+
+| File | Source |
+|---|---|
+| `inventory-catalog.json` | `GET /api/v1/inventory/catalog`. Not a live recording: built by hand from the 1.2.6b1 OpenAPI `CatalogEntry {id, name, weight}` quoted in spec `2026-11-14-filament-management-design.md` §3; the names and weights are examples. |

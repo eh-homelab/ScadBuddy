@@ -34,7 +34,11 @@ from tests.api.test_settings_runtime import _state
 from tests.api.test_versions import SLUG
 from tests.support.operations import press
 
-pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_git]
+pytestmark = [
+    pytest.mark.requires_postgres,
+    pytest.mark.requires_git,
+    pytest.mark.usefixtures("recorded_sb_spools"),
+]
 
 #: The slice quote's Bambuddy, configured with a two-colour fake openscad.
 bambuddy = quote_bambuddy

@@ -39,7 +39,8 @@ class StorefrontSliceProfile(BaseModel):
     #: The registry printer: it routes the slice and prices machine time.
     printer: str = Field(min_length=1, max_length=64)
     #: Material (casefolded) to a spool id as the print dialog's ``filament_plan`` names
-    #: it: a Bambuddy spool, or a loaded tray's negative id on a native route.
+    #: it: an SB spool's number (#6262 Task 7), or a loaded tray's negative id on a
+    #: native route.
     spools: dict[Material, int] = Field(default_factory=dict, max_length=MAX_MATERIALS)
 
     @field_validator("spools")
@@ -88,7 +89,7 @@ def slice_request(
             raise ProfileMissingMaterialError(material)
         slots.append(SlotChoice(slot_id=index + 1, spool_id=spool))
     return SliceQuoteRequest(
-        printer=profile.printer, filament_plan=FilamentPlan(slots=slots), choices=choices
+        printer=profile.printer, filament_plan=FilamentPlan(slots=slots, ids="sb"), choices=choices
     )
 
 

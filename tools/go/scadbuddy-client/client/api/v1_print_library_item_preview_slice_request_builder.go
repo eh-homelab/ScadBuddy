@@ -14,7 +14,7 @@ type V1PrintLibraryItemPreviewSliceRequestBuilder struct {
 	i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.BaseRequestBuilder
 }
 
-// V1PrintLibraryItemPreviewSliceRequestBuilderPostQueryParameters as “/print/outputs/{id}/preview-slice“, for a file in Bambuddy's library (#2169), “fresh“ included (#4433).
+// V1PrintLibraryItemPreviewSliceRequestBuilderPostQueryParameters as “/print/outputs/{id}/preview-slice“, for a file in Bambuddy's library (#2169), “fresh“ included (#4433), and the SB spool in each tray on a native route (#6262).
 type V1PrintLibraryItemPreviewSliceRequestBuilderPostQueryParameters struct {
 	// Slice again, even when a finished slice of the same choices exists.
 	Fresh *bool "uriparametername:\"fresh\""
@@ -45,7 +45,7 @@ func NewV1PrintLibraryItemPreviewSliceRequestBuilder(rawUrl string, requestAdapt
 	return NewV1PrintLibraryItemPreviewSliceRequestBuilderInternal(urlParams, requestAdapter)
 }
 
-// Post as “/print/outputs/{id}/preview-slice“, for a file in Bambuddy's library (#2169), “fresh“ included (#4433).
+// Post as “/print/outputs/{id}/preview-slice“, for a file in Bambuddy's library (#2169), “fresh“ included (#4433), and the SB spool in each tray on a native route (#6262).
 // returns a PreviewStartedable when successful
 // returns a V1PrintLibraryItemPreviewSlicePreviewStarted428Error error when the service returns a 428 status code
 // returns a V1PrintLibraryItemPreviewSlicePreviewStarted4XXError error when the service returns a 4XX status code
@@ -74,7 +74,7 @@ func (m *V1PrintLibraryItemPreviewSliceRequestBuilder) Post(ctx context.Context,
 	return res.(i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.PreviewStartedable), nil
 }
 
-// ToPostRequestInformation as “/print/outputs/{id}/preview-slice“, for a file in Bambuddy's library (#2169), “fresh“ included (#4433).
+// ToPostRequestInformation as “/print/outputs/{id}/preview-slice“, for a file in Bambuddy's library (#2169), “fresh“ included (#4433), and the SB spool in each tray on a native route (#6262).
 // returns a *RequestInformation when successful
 func (m *V1PrintLibraryItemPreviewSliceRequestBuilder) ToPostRequestInformation(ctx context.Context, body i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.PrintRunRequestable, requestConfiguration *V1PrintLibraryItemPreviewSliceRequestBuilderPostRequestConfiguration) (*i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestInformation, error) {
 	requestInfo := i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewRequestInformationWithMethodAndUrlTemplateAndPathParameters(i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.POST, m.BaseRequestBuilder.UrlTemplate, m.BaseRequestBuilder.PathParameters)

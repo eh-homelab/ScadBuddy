@@ -141,7 +141,9 @@ traps table). A `#RRGGBB` value from an old row or a person reads as alpha
 
 Before #6261, SB dropped the alpha in several places; each changes:
 - `native_spools.colour` was `^#[0-9A-Fa-f]{6}$`; since #6261 native spools are
-  RGBA spools, and the native API shows the first 7 characters until #6262.
+  RGBA spools. The native API showed the first 7 characters until #6262 removed it (the
+  `/native-spools` routes are gone; the Filament section and the SB spool routes carry
+  `#RRGGBBAA`).
 - The tray fingerprint is `material|RRGGBB` (`spools/models.py:59-62`), so a
   clear and an opaque spool of one hue look alike.
 - The price book kept `#RRGGBB` (`orders/bambuddy.py:63-64`, `_colour`). #6209 closed
@@ -298,7 +300,8 @@ migration `20261114T1302Z` copied the old rows: an applied use as `print_ended`
 actual, so the sliced grams are the best actual known), a settled but unapplied
 use as `print_ended` with delta 0 (`basis = "not_applied"`), and an unsettled
 use as `print_started` / `print_estimate`, which the run's end then replaces.
-The old tables are dropped in #6262.
+The old tables are unread after #6262 and stay in the database; a follow-up PR drops
+them (#6262 removed their readers and writers, not the tables).
 
 ### 5.6 Locations
 

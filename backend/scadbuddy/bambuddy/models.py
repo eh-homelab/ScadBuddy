@@ -593,7 +593,7 @@ class AmsTray(BambuddyModel):
     #: The RFID tag's UID and the spool's UUID (#3818), all zeros for an untagged spool:
     #: OpenBambuAPI ``mqtt.md`` at ``cc383a2c``, the ``pushing.pushall`` example, and
     #: ``tests/bambuddy/recordings/printer-status-rack.json``. `spools.models` cleans them.
-    #: Read in the backend only, by the spool overlay (`trays.seen_trays`): never in a
+    #: Read in the backend only, by the SB tray resolution (`trays.seen_trays`): never in a
     #: status the API serves (#4336 review M6), so a dump of this model drops them.
     tag_uid: SkipJsonSchema[str | None] = Field(default=None, exclude=True)
     tray_uuid: SkipJsonSchema[str | None] = Field(default=None, exclude=True)
@@ -1139,6 +1139,18 @@ class SpoolFilamentPreset(BambuddyModel):
     nozzle_diameter: str | None = None
     slicer_filament: str
     slicer_filament_name: str | None = None
+
+
+class SpoolCatalogEntry(BambuddyModel):
+    """``GET /api/v1/inventory/catalog`` — one empty-spool entry (``CatalogEntry`` in
+    Bambuddy 1.2.6b1's OpenAPI, spec 2026-11-14 §3): ``weight`` is the empty spool's grams.
+    A spool's ``core_weight_catalog_id`` names one. Recording:
+    ``tests/bambuddy/recordings/inventory-catalog.json``."""
+
+    id: int
+    name: str
+    #: Grams; the pull rounds a fractional one to whole grams.
+    weight: int | float
 
 
 class SpoolAssignment(BambuddyModel):

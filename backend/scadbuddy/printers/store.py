@@ -21,18 +21,17 @@ that every foreign key to ``printers`` is listed), in one of two forms:
 - a `PrinterReference` with ``repoint``, a `RepointHook` ``hook(conn, merged, into)``,
   for a table whose key holds more than the printer and whose conflicts only it can
   settle. It runs on the merge's connection, inside its transaction, while both rows
-  still exist; raising undoes the merge. ``tray_spool_links`` (#4180, primary key
-  ``(printer_id, ams_id, tray_id)``) is registered this way with
-  ``spools.store.repoint_tray_links``, in which ``into``'s link wins (#4190). A bare
-  hook is accepted too, for a reference with no column to name: Task 8's print-run
-  activity facet is one (`_repoint_run_activity`). The filament inventory's AMS tray
-  places and K values (#6261) are registered with hooks in `filament/locations.py` and
-  `filament/types.py`.
+  still exist; raising undoes the merge. The filament inventory's AMS tray places and K
+  values (#6261) are registered this way, with hooks in `filament/locations.py` and
+  `filament/types.py`. A bare hook is accepted too, for a reference with no column to
+  name: Task 8's print-run activity facet is one (`_repoint_run_activity`).
 
 A table that names a printer also carries ``REFERENCES printers (id) ON DELETE
-CASCADE`` (``tray_spool_links``: 20261019T0304Z), so a delete takes its rows with it
-and the test above sees it; ``print_runs.printer`` is ``ON DELETE SET NULL`` instead
-(20261020T0327Z), since a run's history outlives its printer."""
+CASCADE``, so a delete takes its rows with it and the test above sees it;
+``print_runs.printer`` is ``ON DELETE SET NULL`` instead (20261020T0327Z), since a run's
+history outlives its printer. The retired spool overlay's tray links (#6262 Task 12) are
+not repointed: nothing reads them, the merge's delete of the gone row cascades to its
+own, and the test leaves that table out until the PR that drops it."""
 
 from __future__ import annotations
 
@@ -154,16 +153,9 @@ class PrinterReference:
     repoint: RepointHook | None = None
 
 
-def _repoint_tray_links(conn: Connection[DictRow], merged: str, into: str) -> None:
-    # Imported here: `spools` is a feature of its own, and the registry needs it only
-    # while merging.
-    from scadbuddy.spools.store import repoint_tray_links
-
-    repoint_tray_links(conn, uuid.UUID(merged), uuid.UUID(into))
-
-
 def _repoint_filament_locations(conn: Connection[DictRow], merged: str, into: str) -> None:
-    # Imported here, as `spools` is: the filament inventory is a feature of its own.
+    # Imported here: the filament inventory is a feature of its own, and the registry
+    # needs it only while merging.
     from scadbuddy.filament.locations import repoint_printer_locations
 
     repoint_printer_locations(conn, uuid.UUID(merged), uuid.UUID(into))
@@ -301,7 +293,6 @@ def _forget_settings(conn: Connection[DictRow], printer_id: str) -> None:
 #: later table keyed by ``printers.id``.
 PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
     PrinterReference("printer_reports", "printer_id", unique=True),
-    PrinterReference("tray_spool_links", "printer_id", repoint=_repoint_tray_links),
     # #3823 Task 8: the printer a run printed on, and its activity row's facet.
     PrinterReference("print_runs", "printer"),
     # #4747: the printer a Bambuddy virtual printer forwards to.

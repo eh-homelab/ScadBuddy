@@ -83,6 +83,7 @@ from scadbuddy.bambuddy.models import (
     SliceRequest,
     Spool,
     SpoolAssignment,
+    SpoolCatalogEntry,
     SpoolFilamentPreset,
     TimelapseInfo,
     TimelapseThumbnails,
@@ -228,6 +229,7 @@ Operation = Literal[
     "slicer.presets",
     "spools.assign",
     "spools.assignments",
+    "spools.catalog",
     "spools.filament_presets",
     "spools.list",
     "version",
@@ -830,6 +832,20 @@ class BambuddyClient:
             params={"printer_id": printer_id} if printer_id is not None else None,
         )
         return [SpoolAssignment.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def spool_catalog(self) -> list[SpoolCatalogEntry]:
+        """``GET /api/v1/inventory/catalog`` — Bambuddy's empty-spool catalog, which a
+        spool's ``core_weight_catalog_id`` names (``CatalogEntry`` in the 1.2.6b1 OpenAPI,
+        spec 2026-11-14 §3). The pull maps each entry to an insert type."""
+        what = "list the spool catalog"
+        response = await self._send(
+            "GET",
+            "/inventory/catalog",
+            scope=Scope.READ_STATUS,
+            operation="spools.catalog",
+            what=what,
+        )
+        return [SpoolCatalogEntry.model_validate(row) for row in self._rows(response, what=what)]
 
     async def assign_spool(
         self, *, spool_id: int, printer_id: int, ams_id: int, tray_id: int

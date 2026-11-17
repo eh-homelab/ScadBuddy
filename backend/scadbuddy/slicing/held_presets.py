@@ -5,11 +5,10 @@ Why a kept copy and not an import into ScadBuddy's own store: the presets are Ba
 records (its spool intake makes them from 3dfilamentprofiles, and a person edits them
 there), and its spools name them by id (``slicer_filament``). An import would be a
 second record of each to keep in step with the first, and the ids the spools name would
-mean nothing in it. A copy refreshed off the path keeps Bambuddy the one record, as the
-spool providers' cache does for its inventory (`spools/store.py`), and costs a native
-run nothing but a Postgres read.
+mean nothing in it. A copy refreshed off the path keeps Bambuddy the one record, and
+costs a native run nothing but a Postgres read.
 
-The refresh (:func:`refresh_held_presets`) runs on the spool providers' Schedule
+The refresh (:func:`refresh_held_presets`) runs on the spool refresh's Schedule
 (`workflows/spool_refresh.py`, ``held_presets_refresh``), every
 ``spool_overlay_refresh_seconds``, never on the hot path. It lists ``GET
 /local-presets/`` and reads ``GET /local-presets/{id}`` only for a preset it has not
@@ -17,7 +16,7 @@ kept, or whose ``updated_at`` moved since (Bambuddy's ``PUT`` rewrites a preset 
 the same id and moves it: :attr:`~scadbuddy.bambuddy.models.LocalPreset.updated_at`). A
 preset gone from the list is forgotten. One whose read fails is kept as it was, under its
 old stamp, so the next refresh reads it again. Without ``bambuddy_url`` it is skipped
-and the copy stays, as a spool provider's rows do. With the refresh off
+and the copy stays. With the refresh off
 (``spool_overlay_refresh_seconds`` 0) nothing would keep the copy current, so the API
 forgets it at its start (`slicing/component.py`, #4645 review): a ``local`` preset is
 then read from Bambuddy on every slice again, as before the copy, and a native run
@@ -276,10 +275,10 @@ async def refresh_held_presets(store: HeldPresetStore, client: BambuddyClient) -
 def held_presets_activity(
     store: Callable[[], HeldPresetStore], load: Callable[[], StoredSettings]
 ) -> Callable[[], Any]:
-    """``held_presets_refresh``, on the ``library`` worker beside the spool providers'
-    activities; ``store`` and ``load`` are asked at each run, as the app's state is set
-    up after its worker's activities are listed. Raises on a failed refresh, which the
-    workflow logs; the next tick is the retry."""
+    """``held_presets_refresh``, on the ``library`` worker beside the spool refresh's
+    other activities (`spools/activities.py`); ``store`` and ``load`` are asked at each
+    run, as the app's state is set up after its worker's activities are listed. Raises
+    on a failed refresh, which the workflow logs; the next tick is the retry."""
 
     @activity.defn(name=HELD_ACTIVITY)
     async def held_presets_refresh() -> Outcome:
