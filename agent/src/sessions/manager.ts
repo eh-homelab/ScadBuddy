@@ -57,7 +57,7 @@ import {
 import { SessionBlobs, type SessionImages, type StoredBlob } from './blobs.js'
 import { type HttpBodiesFor, pgHttpBodies } from './httpBodies.js'
 import { SessionFiles, type WorkspaceFiles } from '../workspace/store.js'
-import { SessionEdits } from './edits.js'
+import { SessionEdits, type EditRows } from './edits.js'
 import { forkEventCut, transcriptCut } from './forkPoint.js'
 import type { TitleResolver } from './sdkEvents.js'
 import { PostgresSessionStore, type TranscriptRows } from './store.js'
@@ -682,6 +682,8 @@ export type SessionManagerDeps = {
   sessionReads?: SessionReads
   /** A warm process's eviction on every replica (`PgPublisher` on `sql` when omitted; gated in main.ts, #6501). */
   publish?: Pick<Publisher, 'warmEvict'>
+  /** An edit's transaction (edits.ts `PgEditRows` on `sql` when omitted; gated in main.ts, #6449). */
+  editRows?: EditRows
   /** The backend's flow tables, through its CRUD routes (flows/backendReads.ts, #5299 D7). */
   flowReads: FlowRunReads
   paths: HarnessPaths
@@ -1007,6 +1009,7 @@ export class SessionManager {
     })
     this.edits = new SessionEdits({
       sql: deps.sql,
+      ...(deps.editRows ? { rows: deps.editRows } : {}),
       events: this.events,
       get: (id, principal) => this.get(id, principal),
       ...(deps.audit ? { audit: deps.audit } : {}),

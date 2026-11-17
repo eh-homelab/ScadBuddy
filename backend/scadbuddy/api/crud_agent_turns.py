@@ -23,8 +23,8 @@ Appended events are answered as ``logged`` (their JSON texts and seqs) for the a
 followers. The session id is the only id in a path, a UUID checked by its pattern; a turn id
 is a UUID too (``durable_turn_id``), and one that is not is refused 422 ``turn_id``, as the
 agent's SQL cast throws, and is read lowercase. Every body is bounded, and a write that
-waits past ``turns.LOCK_TIMEOUT_MS`` for its row's lock is refused 503 ``row_busy``, never
-committed late."""
+waits past ``turns.LOCK_TIMEOUT_MS`` for its row's lock is refused 503 ``row_busy`` (one past
+``POOL_WAIT_S`` for a connection 503 ``pool_busy``), never committed late."""
 
 from __future__ import annotations
 
@@ -34,6 +34,7 @@ from collections.abc import Callable
 from typing import Annotated, Any, Literal
 
 import psycopg
+import psycopg_pool
 from fastapi import Depends, Path, Query, Request, status
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
@@ -70,8 +71,14 @@ TURNS_MAX = 1_000_000
 #: The sweep's grace (``RUNNING_GRACE_MS``, a test passes 0) and page (``BATCH``).
 GRACE_MS_MAX = 24 * 3600 * 1000
 STALE_MAX = 1000
-#: A spend's key: a token of the placement's own and a sequence number, or `end`.
-SPEND_KEY_MAX = ATTEMPT_MAX + 32
+#: A spend's key: a token of the placement's own and a sequence number, or the placement's
+#: attempt and turn id and ``end``.
+SPEND_KEY_MAX = ATTEMPT_MAX + 64
+#: How long a call waits for a pooled connection. With the row's lock wait
+#: (``turns.LOCK_TIMEOUT_MS``) it stays under the agent's request (``sessions/turnRows.ts``
+#: ``ROW_WRITE_TIMEOUT_MS``, 30 s, for these routes and the edit's), so a write never commits after
+#: the agent gave up on it and read the row back. Change them together.
+POOL_WAIT_S = 10.0
 
 SessionIdPath = Annotated[str, Path(pattern=UUID_PATTERN)]
 Status = Literal["running", "waiting_input", "waiting_approval", "idle", "done", "failed"]
@@ -99,13 +106,19 @@ class _Body(BaseModel):
 
 async def _in_conn[T](state: Any, fn: Callable[[psycopg.Connection[Any]], T]) -> T:
     def run() -> T:
-        with state.settings_store.pool.connection() as conn:
+        with state.settings_store.pool.connection(timeout=POOL_WAIT_S) as conn:
             return fn(conn)
 
     try:
         return await asyncio.to_thread(run)
     except event_log.SessionGoneError as err:
         raise ApiError(status.HTTP_404_NOT_FOUND, str(err), reason="session_gone") from None
+    except psycopg_pool.PoolTimeout:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "no database connection was free; send the write again",
+            reason="pool_busy",
+        ) from None
     except psycopg.errors.LockNotAvailable:
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -250,6 +263,9 @@ async def turn_state(
 
 class GiveBack(_Body):
     prior: Status
+    #: The claim's turn: the row is given back only while it runs it. Optional for an agent pod
+    #: older than the fence during a roll, which sends ``{prior}`` alone and gives back unfenced.
+    turn_id: TurnId | None = None
 
 
 class MaybeLogged(BaseModel):
@@ -262,7 +278,9 @@ class MaybeLogged(BaseModel):
     dependencies=[Bounded],
 )
 async def give_back(session_id: SessionIdPath, body: GiveBack, state: StateDep) -> MaybeLogged:
-    logged = await _in_conn(state, lambda c: turns.give_back(c, session_id, body.prior))
+    logged = await _in_conn(
+        state, lambda c: turns.give_back(c, session_id, body.prior, body.turn_id)
+    )
     return MaybeLogged(logged=_wire(logged))
 
 

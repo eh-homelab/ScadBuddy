@@ -116,8 +116,15 @@ sent unworded and worded with the lineage's spend and budget under the row's loc
 queue's head claimed in the same transaction, a head begun alone, the queue's `session.queue`
 event and its read, and the running sweep's page and its end of a lost turn (only at the
 `event_seq` it read); a turn id is sent only as a lowercase UUID. A send's claim whose answer
-was lost is read back and given back when the row runs that turn (`durable.ts` `#claim`). An edit writes the row with its events in
-one transaction and stays on SQL until #6449's part b. A
+was lost is read back and given back when the row still runs that turn (`durable.ts` `#claim`;
+the give-back is fenced on the turn id). An edit of a session (area
+`session-edits`, backend `api/crud_agent_edits.py`; `src/sessions/edits.ts` `EditRows`:
+`PgEditRows`, `CrudEditRows`) is one transaction on the API: under the row's lock and only while
+the principal owns it, the rename, done and archive, the warm eviction, an archive's `done`
+summaries dismissed and their events. The edit is sent untold first, and the route refuses a newly
+done session not `told` (`untold`) only after every other check passed, writing nothing; only then
+is the workflow told and the edit sent again, so a refusal, a 503 or a lost answer on the first
+call ends no workflow, and nothing is written that the workflow was not told of. A
 session's transcript (area `transcripts`, part b, backend `api/crud_agent_transcripts.py`;
 `src/sessions/store.ts` `TranscriptRows`: `PgTranscriptRows`, and `src/sessions/crudTranscripts.ts`
 `CrudTranscriptRows`) is sealed and opened by the API under the session's data key with the
@@ -133,9 +140,9 @@ placement (`appendFenced`, `FOR UPDATE` in its transaction), the reads (a fork's
 in one snapshot, an inherited event addressed to the session here), a flow's turn reader
 (`turnEvents`) and a new fork's log (`forkLog`, under the parent's payload-key lock, shared).
 `EventLog` keeps its followers, wakes and 1 s polls (D4) over either. An append in a caller's own
-transaction (`append(…, tx)`: edits, `PgTurnRows`, and, until the API lists their areas, the
-workspace, approvals and the gate) stays `appendEventsIn` on SQL until that caller moves (#6449).
-These sixteen have a
+transaction (`PgTurnRows`, `PgEditRows`, and, until the API lists their areas, the workspace,
+approvals and the gate) stays `appendEventsIn` on SQL until that caller's area is listed.
+These seventeen have a
 rolling-deploy fallback:
 `src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` from the start with back-off
 (1 s doubling to 30 s) until every one is listed, and until then each stays on SQL, for an API

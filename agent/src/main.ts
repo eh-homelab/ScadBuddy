@@ -122,6 +122,7 @@ import { finishedToolCalls, toolCallResult, type ToolCallStarter, toolCallStarte
 import { TASK_QUEUE } from './temporal/names.js'
 import { sessionFinishActivities } from './temporal/session/finishActivity.js'
 import { CrudTurnRows, PgTurnRows, type TurnRows } from './sessions/turnRows.js'
+import { CrudEditRows, type EditRows, PgEditRows } from './sessions/edits.js'
 import { gateDb, sessionGateActivities } from './temporal/session/gateActivities.js'
 import { acquireActivities, liveHostQueues, releaseActivities } from './temporal/session/affinity.js'
 import { startHostWorkers, stopAfter } from './temporal/session/hostWorkers.js'
@@ -319,6 +320,10 @@ const sessionReads = (sql: Sql): SessionReads => gated<SessionReads>(new PgSessi
 // queue's head and the sweep's end of a lost turn, over SQL until the API lists area `session-turns`.
 const crudTurns = new CrudTurnRows(config.backendUrl, { fetch: crudFetch })
 const turnRows = (sql: Sql): TurnRows => gated<TurnRows>(new PgTurnRows(sql), crudTurns, () => crudAreas.has('session-turns'))
+// An edit of a session with its events (#6449, backend api/crud_agent_edits.py): over SQL until
+// the API lists area `session-edits`.
+const crudEdits = new CrudEditRows(config.backendUrl, { fetch: crudFetch })
+const editRows = (sql: Sql): EditRows => gated<EditRows>(new PgEditRows(sql), crudEdits, () => crudAreas.has('session-edits'))
 // Which sessions still have a row, for the directory sweeps (#6501): over SQL until the API lists area `session-sweeps`.
 const crudPresence = new CrudSessionPresence(crudTarget)
 const sessionPresence = (sql: Sql): SessionPresence =>
@@ -708,6 +713,7 @@ const sessions =
         eventRows: eventRows(database.sql),
         sessionReads: sessionReads(database.sql),
         publish: publisher(database.sql),
+        editRows: editRows(database.sql),
         pendingRoutes,
         approvalRoutes: { crud: new CrudApprovals(crudTarget), use: () => crudAreas.has('approvals') },
         questionRoutes: { crud: new CrudQuestions(crudTarget), use: () => crudAreas.has('questions') },

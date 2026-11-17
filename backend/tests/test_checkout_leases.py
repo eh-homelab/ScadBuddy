@@ -8,7 +8,7 @@ import contextlib
 import logging
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +17,7 @@ import pytest
 from scadbuddy.library import libraries
 from scadbuddy.library.libraries import CheckoutGate, CheckoutLeases, InstallPermits
 from tests.conftest import PgPool, open_pg_pool
+from tests.support.waits import reaches
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -331,15 +332,15 @@ async def test_a_live_pin_is_renewed_past_its_ttl(
                 for count in (1, 2):
                     seen = looks()
                     # The removal waits, and holds its pool's only connection.
-                    await _reaches(looks, seen + 1)
+                    await reaches(looks, seen + 1)
                     cue.put_nowait(None)
-                    await _reaches(lambda: len(renewed), count)
+                    await reaches(lambda: len(renewed), count)
                     assert renewed[-1]
                     renewed_until = await asyncio.to_thread(expiry)
                     assert renewed_until > held_until
                     held_until = renewed_until
                 seen = looks()
-                await _reaches(looks, seen + 1)
+                await reaches(looks, seen + 1)
                 assert not removed.is_set()
             await asyncio.wait_for(task, 10)
         assert removed.is_set()
@@ -351,13 +352,6 @@ async def test_a_live_pin_is_renewed_past_its_ttl(
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         api_pool.close()
-
-
-async def _reaches(count: Callable[[], int], at_least: int) -> None:
-    """Wait until ``count()`` is ``at_least``; the deadline only ends a test that hangs."""
-    async with asyncio.timeout(10):
-        while count() < at_least:
-            await asyncio.sleep(0.01)
 
 
 async def _enter_removal(gate: CheckoutGate) -> None:
@@ -402,19 +396,77 @@ async def test_installs_are_capped_across_processes(pg_pool: PgPool) -> None:
     assert entered.is_set()
 
 
-async def test_a_live_install_is_renewed_past_its_ttl(pg_pool: PgPool) -> None:
-    worker, api = InstallPermits(1, pg_pool, ttl=0.6), InstallPermits(1, pg_pool)
+async def test_a_live_install_is_renewed_past_its_ttl(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The test renews on cue and checks after each renewal lands, not at a wall-clock
+    time (#6546, as #6527 did for a pin): with a 0.6 s TTL and a fixed 1.5 s sleep, a
+    renewal that a loaded runner made late let the slot lapse. Each renewal must land
+    while the other process's install polls for the slot, and must move the slot's
+    expiry past the one it had. The TTL is the default, so no runner stall lapses the
+    slot between cues."""
+    cue: asyncio.Queue[None] = asyncio.Queue()
+    asked: list[float] = []
+
+    async def on_cue(delay: float) -> None:
+        asked.append(delay)
+        await cue.get()
+
+    worker = InstallPermits(1, pg_pool, sleep=on_cue)
+    api = InstallPermits(1, pg_pool, poll=0.01)
+    assert worker.slots is not None
+    renew, claim = worker.slots.renew, api.claim
+    renewed: list[object] = []
+    refused: list[None] = []
+
+    def counted(slot: int, token: Any) -> object:
+        found = renew(slot, token)
+        renewed.append(found)
+        return found
+
+    def watched() -> tuple[int, Any] | None:
+        claimed = claim()
+        if claimed is None:
+            refused.append(None)
+        return claimed
+
+    monkeypatch.setattr(worker.slots, "renew", counted)
+    monkeypatch.setattr(api, "claim", watched)
     entered = asyncio.Event()
 
     async def install() -> None:
         async with api.permit():
             entered.set()
 
-    async with worker.permit():
-        task = asyncio.create_task(install())
-        await asyncio.sleep(1.5)
-        assert not entered.is_set()
-    await asyncio.wait_for(task, 10)
+    def expiry() -> Any:
+        with pg_pool.connection() as conn:
+            row = conn.execute("SELECT expires_at FROM library_install_slots").fetchone()
+        assert row is not None
+        return row["expires_at"]
+
+    task: asyncio.Task[None] | None = None
+    try:
+        async with worker.permit():
+            held_until = await asyncio.to_thread(expiry)
+            task = asyncio.create_task(install())
+            for count in (1, 2):
+                # The other install found the slot held and still polls for it.
+                await reaches(lambda: len(refused), len(refused) + 1)
+                cue.put_nowait(None)
+                await reaches(lambda: len(renewed), count)
+                assert renewed[-1]
+                renewed_until = await asyncio.to_thread(expiry)
+                assert renewed_until > held_until
+                held_until = renewed_until
+            await reaches(lambda: len(refused), len(refused) + 1)
+            assert not entered.is_set()
+        await asyncio.wait_for(task, 10)
+    finally:
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    assert entered.is_set()
+    assert set(asked) == {worker.ttl / 3}
 
 
 async def test_a_crashed_installers_permit_expires(pg_pool: PgPool) -> None:
