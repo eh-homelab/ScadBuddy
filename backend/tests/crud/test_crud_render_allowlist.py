@@ -7,17 +7,21 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
-from collections.abc import AsyncGenerator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
+import httpx
 import pytest
 
 from scadbuddy.api import crud_render
 from scadbuddy.api.deps import AppState
+from scadbuddy.auth.service_credentials import ServiceAuth
 from scadbuddy.core.problems import ApiError
+from scadbuddy.crud import render as crud_worker
+from scadbuddy.crud.client import CrudSyncClient
 from scadbuddy.library.settings_store import RenderStoreSettings
 from scadbuddy.slicing.transfer import SLICED_OUTPUT_META
 from scadbuddy.store.bambuddy import render_target
@@ -464,6 +468,29 @@ def _write(route: str, key: str, ref: BlobRef, state: AppState) -> Awaitable[Any
 _NO_STORE = cast(AppState, SimpleNamespace(store=SimpleNamespace(content=None)))
 
 
+class _Pool:
+    """The API's pool for the job check before the write (`_open_jobs_first`)."""
+
+    def __init__(self, open_jobs: set[str]) -> None:
+        self.open_jobs = open_jobs
+        self.queries: list[str] = []
+
+    @contextlib.contextmanager
+    def connection(self) -> Iterator[_Conn]:
+        yield _Conn(self.open_jobs, self.queries)
+
+
+def _jobs_state(open_jobs: set[str], content: object = None) -> AppState:
+    """A state whose pool knows ``open_jobs`` and whose store is ``content``."""
+    return cast(
+        AppState,
+        SimpleNamespace(
+            store=SimpleNamespace(content=content),
+            settings_store=SimpleNamespace(pool=_Pool(open_jobs)),
+        ),
+    )
+
+
 @pytest.mark.parametrize("route", ["put", "swap", "mark"])
 async def test_an_output_of_a_job_that_does_not_run_is_not_written(
     route: str, monkeypatch: pytest.MonkeyPatch
@@ -472,8 +499,36 @@ async def test_an_output_of_a_job_that_does_not_run_is_not_written(
     nor those of a job that never was: only a running job's outputs are written (#6233)."""
     reached = _written(monkeypatch, open_jobs={"f" * 32})
     with pytest.raises(ApiError) as refused:
-        await _write(route, _OUTPUT, _ref("piece"), _NO_STORE)
+        await _write(route, _OUTPUT, _ref("piece"), _jobs_state({"f" * 32}))
     assert refused.value.status == 403
+    assert refused.value.extensions["reason"] == crud_render.JOB_CLOSED
+    assert reached == []
+
+
+@pytest.mark.parametrize("route", ["put", "swap"])
+async def test_a_settled_jobs_output_is_refused_before_its_object_is_read(
+    route: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The job check runs before `_verified` reads the object, so a write to a settled
+    job's output costs no GET and hash before its 403 (#6534). The store here must not be
+    read, and no row vouches for the ref, so a read would fail the test."""
+    content = ContentStore(cast(Any, _Unread()), cast(Any, None))
+    monkeypatch.setattr(crud_render, "_index", lambda _: _Vouched())
+    monkeypatch.setattr(crud_render, "_indexed", _no_database)
+    with pytest.raises(ApiError) as refused:
+        await _write(route, _OUTPUT, _local_ref(b"output"), _jobs_state(set(), content))
+    assert refused.value.status == 403
+    assert refused.value.extensions["reason"] == crud_render.JOB_CLOSED
+
+
+@pytest.mark.parametrize("route", ["put", "swap"])
+async def test_a_job_that_settles_after_the_first_check_is_refused_in_the_write(
+    route: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The write's transaction checks the job again: it can settle between the checks."""
+    reached = _written(monkeypatch, open_jobs=set())
+    with pytest.raises(ApiError) as refused:
+        await _write(route, _OUTPUT, _ref("piece"), _jobs_state({_JOB}))
     assert refused.value.extensions["reason"] == crud_render.JOB_CLOSED
     assert reached == []
 
@@ -483,7 +538,7 @@ async def test_a_running_jobs_output_and_any_piece_are_written(
     route: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     reached = _written(monkeypatch, open_jobs={_JOB})
-    await _write(route, _OUTPUT, _ref("piece"), _NO_STORE)
+    await _write(route, _OUTPUT, _ref("piece"), _jobs_state({_JOB}))
     assert len(reached) == 1
     reached = _written(monkeypatch, open_jobs=set())
     for key in RENDER[:2]:
@@ -688,3 +743,120 @@ async def test_a_ref_on_another_backend_is_not_indexed(
         await _write("put", RENDER[0], ref.model_copy(update={"backend": "s3"}), state)
     assert refused.value.status == 409
     assert refused.value.extensions["reason"] == crud_render.OTHER_BACKEND
+
+
+class _Failing(LocalContentBackend):
+    """A backend whose reads fail as an S3 or Bambuddy 5xx does."""
+
+    def __init__(self) -> None:
+        super().__init__(Path("/nonexistent/failing"))
+
+    async def download(self, backend_id: str) -> AsyncGenerator[bytes]:
+        raise ConnectionError(f"the store dropped the read of {backend_id}")
+        yield b""  # pragma: no cover
+
+
+@pytest.mark.parametrize("route", ["put", "swap"])
+async def test_a_read_the_store_fails_is_a_transient_503(
+    route: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A store that fails the read answers a 503, which the worker retries, not a 500
+    (#6534)."""
+    content = ContentStore(cast(Any, _Failing()), cast(Any, None))
+    state = cast(AppState, SimpleNamespace(store=SimpleNamespace(content=content)))
+    monkeypatch.setattr(crud_render, "_index", lambda _: _Vouched())
+    monkeypatch.setattr(crud_render, "_indexed", _no_database)
+    with pytest.raises(ApiError) as refused:
+        await _write(route, RENDER[0], _local_ref(b"real piece"), state)
+    assert refused.value.status == 503
+    assert refused.value.extensions["reason"] == crud_render.STORE_UNAVAILABLE
+
+
+# -- the worker's side of a verified write (#6534) ------------------------------------
+
+_CRUD = {"X-ScadBuddy-Crud": "1"}
+
+
+class _Token:
+    def token(self) -> str | None:
+        return "t"
+
+    def invalidate(self, token: str) -> None:
+        pass
+
+
+def _problem(status: int, reason: str) -> httpx.Response:
+    body = {"type": "about:blank", "title": "x", "status": status, "detail": "d", "reason": reason}
+    return httpx.Response(status, json=body, headers=_CRUD)
+
+
+def _remote_index(
+    answers: list[httpx.Response], seen: list[httpx.Request]
+) -> crud_worker.RemoteBlobIndex:
+    """A `RemoteBlobIndex` on a real `CrudSyncClient` whose API answers ``answers`` in
+    turn; each request it sends is kept in ``seen``."""
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return answers.pop(0)
+
+    client = CrudSyncClient(
+        "http://api.example",
+        "render",
+        ServiceAuth(_Token()),
+        transport=httpx.MockTransport(answer),
+        unavailable_budget=5.0,
+        backoff=0.01,
+    )
+    return crud_worker.RemoteBlobIndex(client)
+
+
+def _sized(size: int) -> BlobRef:
+    return _ref("piece").model_copy(update={"size": size})
+
+
+def _send(index: crud_worker.RemoteBlobIndex, route: str, ref: BlobRef) -> object:
+    if route == "put":
+        return index.put(RENDER[0], ref, slug="demo", meta={})
+    return index.swap(RENDER[0], ref, expected=None, slug="demo", meta={})
+
+
+def _ok(route: str) -> httpx.Response:
+    body = {"previous": None} if route == "put" else {"swapped": True}
+    return httpx.Response(200, json=body, headers=_CRUD)
+
+
+@pytest.mark.parametrize("route", ["put", "swap"])
+def test_a_large_refs_write_waits_for_the_apis_read(route: str) -> None:
+    """The API reads and hashes a new object before it answers a put or swap, so the
+    worker's wait grows with the ref's size. A small ref keeps the floor, the client's
+    default 10 s (#6534)."""
+    seen: list[httpx.Request] = []
+    index = _remote_index([_ok(route), _ok(route)], seen)
+    _send(index, route, _sized(256 << 20))
+    _send(index, route, _sized(4096))
+    large, small = (request.extensions["timeout"]["read"] for request in seen)
+    assert large == crud_worker.VERIFY_TIMEOUT_FLOOR + 256 * crud_worker.VERIFY_SECONDS_PER_MIB
+    assert large > 10.0
+    assert small == crud_worker.VERIFY_TIMEOUT_FLOOR == 10.0
+
+
+@pytest.mark.parametrize("route", ["put", "swap"])
+def test_a_ref_on_another_backend_names_the_old_backend(route: str) -> None:
+    """A 409 ``other-backend`` (a worker still on the old backend after a
+    `/store/migrate`) is a named error that says so, not a plain refusal (#6534)."""
+    index = _remote_index([_problem(409, crud_render.OTHER_BACKEND)], [])
+    with pytest.raises(crud_worker.OtherBackendError) as raised:
+        _send(index, route, _sized(1))
+    assert "another backend than the API's store" in str(raised.value)
+
+
+@pytest.mark.parametrize("route", ["put", "swap"])
+def test_a_store_that_fails_the_apis_read_is_tried_again(route: str) -> None:
+    """The client retries a 503 ``store-unavailable`` as a transient failure, with the
+    same Idempotency-Key, inside its budget (#6534)."""
+    seen: list[httpx.Request] = []
+    index = _remote_index([_problem(503, crud_render.STORE_UNAVAILABLE), _ok(route)], seen)
+    _send(index, route, _sized(1))
+    assert len(seen) == 2
+    assert seen[0].headers["Idempotency-Key"] == seen[1].headers["Idempotency-Key"]

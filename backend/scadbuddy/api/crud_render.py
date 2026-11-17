@@ -128,6 +128,9 @@ REF_MISMATCH = "ref-mismatch"
 #: A put or swap of a ref on another backend than the API's store (mid `/store/migrate`):
 #: a 409, as the API cannot read the object to check it.
 OTHER_BACKEND = "other-backend"
+#: A put or swap whose object the API's store did not read (an S3 or Bambuddy 5xx, a
+#: dropped connection): a 503, which the CRUD client retries as a transient failure.
+STORE_UNAVAILABLE = "store-unavailable"
 #: A library file's object that Arrange lays out (`bambuddy/library_objects.py`
 #: `piece_key`, stored by the API).
 LIBRARY_PIECE_KEY = re.compile(r"lib3-[0-9a-f]{48}-[0-9]+")
@@ -592,6 +595,20 @@ def _open_jobs_only(conn: Connection[DictRow], keys: list[str]) -> None:
         )
 
 
+async def _open_jobs_first(state: AppState, key: str) -> None:
+    """`_open_jobs_only` for an output's ``key``, before `_verified` reads its object: a
+    write to a settled job's output costs no GET and hash before its 403. The write's
+    transaction checks again, as the job can settle between the two checks."""
+    if OUTPUT_KEY.fullmatch(key) is None:
+        return
+
+    def check() -> None:
+        with state.settings_store.pool.connection() as conn:
+            _open_jobs_only(conn, [key])
+
+    await asyncio.to_thread(check)
+
+
 def _bound_object(content: ContentStore, ref: IndexedRef) -> str | None:
     """The object key ``ref``'s SHA-256 and kind give on ``content``'s backend, which is
     where every upload of those bytes goes (`store/s3.py` `object_key`, `store/local.py`
@@ -661,6 +678,16 @@ async def _verified(state: AppState, ref: IndexedRef) -> bool:
         raise ApiError(
             status.HTTP_403_FORBIDDEN, "The ref names no object of the store.", reason=REF_MISMATCH
         ) from None
+    except Exception as error:
+        logger.warning(
+            "the store did not read a ref's object",
+            extra={"backend": ref.backend, "error": type(error).__name__},
+        )
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "The API's store did not read the ref's object.",
+            reason=STORE_UNAVAILABLE,
+        ) from error
     if size != ref.size or digest.hexdigest() != ref.sha256:
         raise ApiError(
             status.HTTP_403_FORBIDDEN,
@@ -792,8 +819,10 @@ async def index_put(
     render job's, a ref or row of another kind than a piece, or ``meta`` that names a key
     of `SLICED_OUTPUT_META`, a 403 ``api-owned-key``; an output of a render job that does
     not run, a 403 ``job-closed``; a ref whose object is not its SHA-256 and size, a 403
-    ``ref-mismatch`` (`_verified`)."""
+    ``ref-mismatch`` (`_verified`); a read the store fails, a 503 ``store-unavailable``.
+    The job is checked before the read and again in the write's transaction."""
     _worker_writable(key, ref=body.ref, meta=body.meta)
+    await _open_jobs_first(state, key)
     verified = await _verified(state, body.ref)
 
     def put(index: BlobIndex, conn: Connection[DictRow]) -> dict[str, Any]:
@@ -828,11 +857,14 @@ async def index_swap(
     A key that is not a render job's, a ref or row of another kind than a piece, or
     ``meta`` that names a key of `SLICED_OUTPUT_META` is a 403 ``api-owned-key``; an
     output of a render job that does not run, a 403 ``job-closed``; a ref whose object is
-    not its SHA-256 and size, a 403 ``ref-mismatch`` (`_verified`). The row's
+    not its SHA-256 and size, a 403 ``ref-mismatch`` (`_verified`); a read the store
+    fails, a 503 ``store-unavailable``. The job is checked before the read and again in
+    the write's transaction. The row's
     kind is read in the swap's transaction before the
     swap, and checked again under the row's lock: a row that became another kind between
     the two is not rewritten (``swapped`` false)."""
     _worker_writable(key, ref=body.ref, meta=body.meta)
+    await _open_jobs_first(state, key)
     verified = await _verified(state, body.ref)
 
     def swap(index: BlobIndex, conn: Connection[DictRow]) -> dict[str, Any]:
