@@ -1050,8 +1050,12 @@ describe('pricing tools (#4250)', () => {
     ).toEqual(['read', 'write', 'write', 'write', 'read', 'write'])
   })
 
-  // #4253 §8.3
-  it('imports the filaments from spools', async () => {
+  // #4253 §8.3; #6262 Task 9: ScadBuddy's own spools, by number, kept apart by alpha
+  it("imports the filaments from ScadBuddy's spools, with no Bambuddy needed", async () => {
+    const described = tool('price_book_import_spools').description
+    expect(described).toContain("ScadBuddy's own spools")
+    expect(described).toContain('#RRGGBBAA')
+    expect(described).not.toContain('not_linked')
     const rows = [{ action: 'created', material: 'PLA', spool_ids: [3] }]
     let posted = 0
     server.use(
@@ -1065,7 +1069,8 @@ describe('pricing tools (#4250)', () => {
   })
 
   // #6136
-  it("fills the empty densities from Bambuddy's preset links", async () => {
+  it("fills the empty densities from ScadBuddy's spools", async () => {
+    expect(tool('price_book_fill_densities').description).not.toContain('not_linked')
     const rows = [
       {
         filament_id: FILAMENT,
@@ -1110,7 +1115,7 @@ describe('pricing tools (#4250)', () => {
     expect(body).toEqual({
       ...SLICE,
       printer,
-      filament_plan: { ...SLICE.filament_plan, force_colour_match: true },
+      filament_plan: { ...SLICE.filament_plan, force_colour_match: true, ids: 'sb' },
       choices: { nozzles: [{ size: '0.4', flow: 'standard' }] },
     })
     // #5352: the quote slices on the route its print will take.
@@ -1185,7 +1190,7 @@ describe('pricing tools (#4250)', () => {
     // Copies and plates are the item's: the tool sends none.
     expect(body).toEqual({
       ...dialog,
-      filament_plan: { ...dialog.filament_plan, force_colour_match: true },
+      filament_plan: { ...dialog.filament_plan, force_colour_match: true, ids: 'sb' },
       choices: { nozzles: [{ size: '0.4', flow: 'standard' }] },
     })
     expect(tool('order_item_print').summarize?.({ order_id: ORDER, item_id: ITEM, ...dialog } as never)).toContain(
@@ -1211,6 +1216,14 @@ describe('pricing tools (#4250)', () => {
     expect(line).toContain('without supports')
     expect(line).toContain('without a prime tower')
     expect(line).toContain('by object')
+    // #2998: any process setting goes as sent, omitted is the quote's, and the line names it.
+    expect(body).not.toHaveProperty('process_overrides')
+    const process_overrides = { skirt_loops: 0, wipe_tower_no_sparse_layers: true }
+    await tool('order_item_print').execute({ order_id: ORDER, item_id: ITEM, ...dialog, process_overrides }, ctx())
+    expect(body).toMatchObject({ process_overrides })
+    expect(
+      tool('order_item_print').summarize?.({ order_id: ORDER, item_id: ITEM, ...dialog, process_overrides } as never),
+    ).toContain('slicer settings skirt_loops=0, wipe_tower_no_sparse_layers=true')
     // #4673 PR 2: no choices or spools at all prints the accepted quote's whole setup.
     await tool('order_item_print').execute({ order_id: ORDER, item_id: ITEM }, ctx())
     expect(body).toEqual({})

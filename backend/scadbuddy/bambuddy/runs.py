@@ -54,6 +54,7 @@ from scadbuddy.core.events import Event, PrintRunEvent
 from scadbuddy.core.problems import DATABASE_ERRORS
 from scadbuddy.crud.client import CrudUnavailableError
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.operations.kinds import without_bb_ids
 from scadbuddy.printers.lan_models import LanStopped
 
 logger = logging.getLogger(__name__)
@@ -187,8 +188,11 @@ def run_key(output_id: str, request: PrintRunRequest) -> str:
         "printer",
         "path",
         "part_settings",
+        "process_overrides",
     )
     exclude = {name for name in optional if getattr(request, name) is None}
+    # #2998: what validation dropped never keys a run; the request slices without it.
+    exclude.add("dropped_settings")
     if request.printer_id is not None:
         exclude.add("printer")
     # #717: no profiles is the key from before the field existed.
@@ -197,7 +201,7 @@ def run_key(output_id: str, request: PrintRunRequest) -> str:
     # #284: no accepted fixes is the key from before the field existed.
     if not request.accepted_fixes:
         exclude.add("accepted_fixes")
-    body = request.model_dump(mode="json", exclude=exclude or None)
+    body = without_bb_ids(request.model_dump(mode="json", exclude=exclude or None))
     canonical = json.dumps(body, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(f"{output_id}\n{canonical}".encode()).hexdigest()
 

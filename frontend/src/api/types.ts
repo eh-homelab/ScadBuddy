@@ -106,6 +106,8 @@ export interface RecentOutputsQuery {
   q?: string
   /** `yes`: only outputs an order item names; `no`: only the others. */
   ordered?: 'yes' | 'no'
+  /** #6371: also the outputs the storefront's slice run saved; left out by default. */
+  include_storefront?: boolean
 }
 /**
  * #4777 — one Bambuddy archive (a past print, ScadBuddy's or not) and how it went, and
@@ -122,7 +124,7 @@ export interface FarmArchivesQuery {
   project_id?: number
 }
 /** #4777 — `POST /orders/{id}/items/{item}/quotes/archive`. */
-export type ArchiveQuoteRequest = Schemas['ArchiveQuoteRequest']
+export type ArchiveQuoteRequest = Defaulted<Schemas['ArchiveQuoteRequest'], 'units'>
 export type ArrangeRequest = Schemas['ArrangeRequest']
 /** #3637 — one object of an arrange, maybe in other colours. */
 export type ArrangeObject = Schemas['ArrangeObject']
@@ -196,10 +198,22 @@ export type PrintRunRequest = Schemas['PrintRunRequest']
  */
 export type RegistryRunRequest = PrintRunRequest & { printer?: string }
 export type PrintRunResult = Schemas['PrintRunResult']
-/** #5571, #5627 — a print's slicer settings for the parts of one filament slot. */
-export type PartSettings = Schemas['PartSettings']
+/**
+ * #5571, #5627, #2998 — a print's slicer settings for the parts of one filament slot: any
+ * Bambu Studio key. Open as the API's `PartSettings` is, with an unset key `null`: the
+ * schema's named keys take `null` and its other keys do not, so the dialog keeps one type
+ * for all, cast where a request is sent.
+ */
+export type PartSettings = Record<string, Schemas['PartSettings'][string] | null | undefined>
 /** #5627 — the settings per slot, keyed by the slot (from 1) as a string. */
 export type PartSettingsMap = Record<string, PartSettings>
+/**
+ * #2998 — any Bambu Studio process settings for a print, `{key: value}`: every key is
+ * accepted, and the slicer judges it (`backend/scadbuddy/bambuddy/process_overrides.py`).
+ */
+export type ProcessOverrides = NonNullable<PrintRunRequest['process_overrides']>
+/** #2998 — every value of the process preset a print's choices resolve to. */
+export type ProcessValues = Schemas['ProcessValues']
 /** #755, #760 — what the run would refuse for the dialog's choices, before Print. */
 export type PrintCheck = Schemas['PrintCheck']
 export type PrintRun = Schemas['PrintRun']
@@ -247,6 +261,9 @@ export type FlowGrantView = Schemas['GrantView']
 export type FlowGrantUse = Schemas['GrantUseView']
 /** #2484 — a flow trigger: a schedule or an event that starts runs of a pinned version. */
 export type FlowTrigger = Schemas['TriggerView']
+/** #6399 — the run and trigger grants that wait for a person's decision. */
+export type FlowGrantRequests = Schemas['GrantRequests']
+export type FlowRunGrantRequest = Schemas['RunGrantRequest']
 export type FlowTriggerCreate = Schemas['TriggerCreate']
 export type FlowTriggerUpdate = Schemas['TriggerUpdate']
 export type FlowTriggerSchedule = Schemas['ScheduleTiming']
@@ -306,11 +323,10 @@ export type NewBatchFile = Schemas['NewBatchFile']
 /** #2951 — Queue all stopped to answer in time: go on from `next_position`. */
 export type BatchQueueProgress = Schemas['BatchQueueProgress']
 export type TrayAssigned = Schemas['TrayAssigned']
-/** #3818 — a provider's record of a spool, as the overlay keeps it (Task 6c). */
-export type SpoolSnapshot = Schemas['SpoolSnapshot']
-/** #3818 — the native manual link's body: a physical spool, or one provider's record. */
+/** #3818, #6262 — the native manual link's body: the SB spool (`spool_id`). */
 export type TraySpoolLink = Schemas['TraySpoolLink']
-export type TraySpool = Schemas['TraySpool-Output']
+/** #6261 — a ScadBuddy spool (`GET /filament/spools/{id}`). */
+export type FilamentSpool = Schemas['Spool']
 export type RackSentPick = Schemas['RackSentPick']
 export type RackAlgorithm = NonNullable<Schemas['ChoicesView']['rack_algorithm']>
 export type PrinterRackAlgorithm = Schemas['PrinterRackAlgorithm']
@@ -328,6 +344,10 @@ export type LibraryListing = Schemas['LibraryListing']
 export type LibraryFileName = Schemas['LibraryFileName']
 export type LibraryEntry = Schemas['LibraryEntry']
 export type LibraryFileEntry = Schemas['LibraryFileEntry']
+export type Association = Schemas['Association']
+export type AssociationRelation = Association['relation']
+export type AssociationRequest = Schemas['AssociationRequest']
+export type Associations = Schemas['Associations']
 export type LibraryFolderView = Schemas['LibraryFolderView']
 export type LibrarySearch = Schemas['LibrarySearch']
 export type LibrarySearchHit = Schemas['LibrarySearchHit']
@@ -352,9 +372,11 @@ export type LibraryFolderUpdate = Schemas['LibraryFolderUpdate']
 export type LibraryFileObjects = Schemas['LibraryFileObjects']
 export type LibraryFileObject = Schemas['LibraryFileObject']
 
-/** #2351 — Bambuddy's spool inventory and loaded slots, read through `/farm/inventory`. */
-export type InventoryView = Schemas['InventoryView']
-export type InventorySpool = Schemas['InventorySpool']
+/** #6262 Task 9 — ScadBuddy's spools and the registry printers' trays (`GET /filament/inventory`). */
+export type FilamentInventoryView = Schemas['FilamentInventoryView']
+export type FilamentInventorySpool = Schemas['FilamentInventorySpool']
+/** The registry printer and AMS tray an SB spool is in. */
+export type TrayPlace = Schemas['TrayPlace']
 
 /**
  * #89 — run tracking.
@@ -536,16 +558,15 @@ export type MachineRateInputs = {
 export type StorefrontListing = Required<Schemas['Listing']>
 export type StorefrontListingInput = Defaulted<
   Schemas['ListingInput'],
-  'description' | 'params' | 'fixed' | 'colours' | 'media_ids' | 'one_material'
+  'description' | 'params' | 'fixed' | 'colours' | 'media_ids' | 'materials'
 >
+/** #6237 — a listing's colour combinations and how far their renders are; a prepare's answer. */
+export type ListingPrepareProgress = Schemas['PrepareProgress']
+export type ListingPrepareStarted = Schemas['PrepareStarted']
 export type ListingBound = Schemas['NumberBound'] | Schemas['ChoiceBound'] | Schemas['TextBound']
 /** #6157 — one row of the back office's list, and a page of them. */
 export type StorefrontListingRow = Schemas['ListingRow']
 export type StorefrontListingPage = Schemas['ListingPage']
-/** ScadBuddy's own spools (#4643), the native spool provider's records; not Bambuddy's inventory. */
-export type NativeSpool = Schemas['NativeSpool']
-export type NativeSpoolCreate = Schemas['NativeSpoolCreate']
-export type NativeSpoolPatch = Schemas['NativeSpoolPatch']
 export type PricingPolicy = Schemas['PricingPolicy']
 /** `PUT /orders/price-book`: the whole policy, and the estimate's factor when sent. */
 export type PolicyUpdate = Defaulted<Schemas['PolicyUpdate'], 'rough_estimate_factor'>
@@ -561,10 +582,11 @@ export type SliceQuoteRequest = Schemas['ItemSliceQuoteRequest']
 /** #4719 — `POST …/items/{item}/print`: the print dialog's printer, spools and choices; the
  * item's copies, plates and request id are the server's. `part_settings` (#5627): the dialog
  * sends the quote's own, so the body matches the background slice's; the server refuses
- * others (`requote_needed`), and a body with none prints with the quote's. */
+ * others (`requote_needed`), and a body with none prints with the quote's. `process_overrides`
+ * (#2998) the same. */
 export type OrderItemPrintRequest = Pick<
   RegistryRunRequest,
-  'printer' | 'printer_id' | 'filament_plan' | 'choices' | 'part_settings'
+  'printer' | 'printer_id' | 'filament_plan' | 'choices' | 'part_settings' | 'process_overrides'
 >
 export type OrderEstimate = Schemas['OrderEstimate']
 /** #5328, job cost spec §6.3 — `GET /orders/history/unit-cost`: the quote warning's history. */
@@ -595,6 +617,7 @@ export type ActivityDetail = Schemas['ActivityDetail']
 export type PrintDetail = Schemas['PrintDetail']
 /** #4698 — where an unlinked print's 3MF can be, and the models it may be a print of. */
 export type PrintSources = Schemas['PrintSources']
+export type LibraryFileSuggestion = Schemas['LibraryFileSuggestion']
 export type FoundSource = Schemas['FoundSource']
 export type PrintImportRequest = Schemas['ImportRequest']
 export type ImportedPrint = Schemas['ImportedPrint']

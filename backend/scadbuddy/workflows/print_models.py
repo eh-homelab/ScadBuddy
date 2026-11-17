@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field, field_serializer, model_validator
 from scadbuddy.bambuddy.dispatch import QueueOutcome, SlicePlan
 from scadbuddy.bambuddy.filaments import FilamentPlan, SpoolOption
 from scadbuddy.bambuddy.filaments3mf import LocalFilaments
-from scadbuddy.bambuddy.models import DEFAULT_ALGORITHM, RackAlgorithm
+from scadbuddy.bambuddy.models import DEFAULT_ALGORITHM, ProcessValue, RackAlgorithm
 from scadbuddy.bambuddy.part_settings import PartSettingsMap
 from scadbuddy.bambuddy.print_run import (
     PlannedRun,
@@ -77,7 +77,7 @@ class SourceSpec(BaseModel):
     #: Computed by ``print_accept`` before the record, so a model.json that refuses
     #: them refuses the run (#770).
     stem: str | None = None
-    print_settings: dict[str, str] = Field(default_factory=dict)
+    print_settings: dict[str, ProcessValue] = Field(default_factory=dict)
     #: The template's settings per slot (#5626, ``OutputNaming.part_settings``),
     #: computed there too; the request's ``part_settings`` are laid over them.
     part_settings: PartSettingsMap | None = None
@@ -295,7 +295,8 @@ class LanUploaded(BaseModel):
     #: keys the rack pick it sends by it. ``None`` in a history from before it.
     run_id: str | None = None
     #: The plate's grams per slot, read from the sliced 3MF (`slice_info.plate_grams`):
-    #: what ``lan_print`` saves the start's use of the native spools by (#4643). Empty
+    #: what ``lan_print`` books the start's use of the SB spools by (#4643, #6262: through
+    #: ``…/filament/print-uses``). Empty
     #: in a history from before it, or for a file that does not say.
     grams_by_slot: dict[int, float] = Field(default_factory=dict)
 

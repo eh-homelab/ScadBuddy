@@ -62,6 +62,23 @@ export function offeredFilaments(colourValues: readonly unknown[], filaments: re
 }
 
 /**
+ * #6258, #6302 review: the materials a draft allows, so it can publish even when the design's
+ * material is not one the shop's default (`storefront_materials`) allows. They are the
+ * materials of the listing's filaments, casefolded, support left out: PETG, then PLA, then the
+ * rest by name (the order the backend's migration `20261115T0346Z_listing_materials_backfill.sql`
+ * gives existing listings).
+ */
+export function draftMaterials(colours: readonly string[], filaments: readonly Filament[]): string[] {
+  const found = new Map<string, string>()
+  for (const id of colours) {
+    const material = filaments.find((filament) => filament.id === id)?.material.trim()
+    if (material && !SUPPORT_MATERIAL.test(material) && !found.has(material.toLowerCase())) found.set(material.toLowerCase(), material)
+  }
+  const rank = (folded: string) => (folded === 'petg' ? 0 : folded === 'pla' ? 1 : 2)
+  return [...found.keys()].sort((a, b) => rank(a) - rank(b) || (a < b ? -1 : a > b ? 1 : 0)).map((folded) => found.get(folded) as string)
+}
+
+/**
  * The listing's parameters and filaments from the commit's schema and the values: free text
  * (at most the schema's `max_length`, capped at 200) and every colour are the customer's
  * (the owner: "why can't I specify colors"), the rest, support settings always (`isSupport`), is locked at its value. A colour is
@@ -99,7 +116,21 @@ export function defaultsFor(schema: Schema, filaments: readonly Filament[], valu
     .filter((param) => param.type === 'color' && isSupport(param))
     .flatMap((param) => filamentOf(valueOf(param), priced) ?? [])
     .filter((filament) => !offered.includes(filament))
-  return { params, fixed, colours: [...offered, ...new Set(support)].map((filament) => filament.id) }
+  const colours = [...offered, ...new Set(support)].map((filament) => filament.id)
+  // #6144: an offered colour whose template default no colour on offer has starts at the value
+  // given, else the first colour on offer, so publish takes it (the page's `fittedDefault`).
+  const chosen = withColourChoices({ params, fixed, colours }, schema, filaments).params
+  for (const param of shown) {
+    const bound = chosen[param.name]
+    const own = params[param.name]
+    if (!own || param.type !== 'color' || bound?.kind !== 'choice') continue
+    const pickable = bound.choices
+    if (pickable.some((colour) => sameColour(colour, param.initial))) continue
+    const value = valueOf(param)
+    const start = pickable.find((colour) => sameColour(colour, value)) !== undefined ? value : pickable[0]
+    if (start !== undefined) params[param.name] = { ...own, default: start }
+  }
+  return { params, fixed, colours }
 }
 
 /**
@@ -166,7 +197,15 @@ export function withColourChoices(listing: ListingDefaults, schema: Schema, fila
     .map((filament) => filament.colour)
     .filter((colour) => !supportOnly.some((support) => sameColour(support, colour)))
   for (const name of Object.keys(params)) {
-    if (byName.get(name)?.type === 'color') params[name] = { kind: 'choice', choices: colours }
+    // A colour's choices are the filaments'; its own label (#6137) and default (#6144) stay.
+    const bound = params[name]
+    if (byName.get(name)?.type === 'color')
+      params[name] = {
+        kind: 'choice',
+        choices: colours,
+        ...(bound?.label ? { label: bound.label } : {}),
+        ...(bound?.default != null ? { default: bound.default } : {}),
+      }
   }
   return { params, fixed }
 }

@@ -39,6 +39,10 @@ export const LEGACY_ANCHORS: Readonly<Record<string, { area: AreaId; section: st
   'assistant-mcp': { area: 'mcp', section: 'mcp-auth-mode' },
   'assistant-plugins': { area: 'tools', section: 'packages' },
   plugins: { area: 'tools', section: 'packages' },
+  // #6262 — the spool inventory and ScadBuddy's spools editor moved to the Filament page;
+  // what stays in Settings is configuration.
+  inventory: { area: 'printing', section: 'filament' },
+  'native-spools': { area: 'printing', section: 'filament' },
   'assistant-audit': { area: 'audits', section: 'audit-log' },
 }
 

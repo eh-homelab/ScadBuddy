@@ -24,6 +24,7 @@ from scadbuddy.bambuddy.nozzle_plan import (
 from scadbuddy.bambuddy.resolver import PrintChoices
 from scadbuddy.render.bambu3mf import FilamentMap, state_nozzles
 from tests.bambuddy.test_extruders import fts_status, mapped_status
+from tests.support.sb_rows import rows_of, sb_spool
 
 HIGH_FLOW_04 = {"nozzle_type": "HH01", "nozzle_diameter": "0.4"}
 HF = [NozzleChoice(size="0.4", flow="high_flow")]
@@ -190,13 +191,13 @@ def test_a_family_is_the_materials_first_word() -> None:
 
 def test_a_spool_is_named_as_a_person_names_it() -> None:
     assert spool_name(
-        Spool(id=1, material="PLA", brand="Bambu Lab", color_name="Mistletoe Green")
+        sb_spool(1, material="PLA", brand="Bambu Lab", colour_name="Mistletoe Green")
     ) == ("Mistletoe Green")
     assert (
-        spool_name(Spool(id=2, material="PLA", brand="Inland", color_name="Black"))
+        spool_name(sb_spool(2, material="PLA", brand="Inland", colour_name="Black"))
         == "Inland Black"
     )
-    assert spool_name(Spool(id=3, material="PETG", brand="Generic")) == "Generic PETG"
+    assert spool_name(sb_spool(3, material="PETG", brand="Generic")) == "Generic PETG"
 
 
 def test_inputs_come_from_the_inventory_and_where_spools_rest() -> None:
@@ -204,7 +205,7 @@ def test_inputs_come_from_the_inventory_and_where_spools_rest() -> None:
     assignments = [SpoolAssignment(id=1, spool_id=1, printer_id=1, ams_id=2, tray_id=0)]
     plan = FilamentPlan.model_validate({"slots": [{"slot_id": 1, "spool_id": 1}]})
 
-    [found] = plan_inputs(plan, spools, assignments, fts_status(), printer_id=1)
+    [found] = plan_inputs(plan, rows_of(spools, assignments), fts_status(), printer_id=1)
 
     assert found == PlanInput(1, "PLA", "#3F8E43", "Mistletoe Green", rests=LEFT)
 

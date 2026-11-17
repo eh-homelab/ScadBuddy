@@ -92,7 +92,7 @@ def test_a_model_json_that_refuses_its_print_settings_is_named_not_raised(
     meta = state(client).outputs.get(output_id)
     model_json = state(client).paths.model_meta(model)
     body = json.loads(model_json.read_text()) if model_json.is_file() else {}
-    model_json.write_text(json.dumps({**body, "print_settings": {"not_a_setting": "1"}}))
+    model_json.write_text(json.dumps({**body, "print_settings": {"enable_support": {"on": "1"}}}))
 
     naming = asyncio.run(reader(client).naming(meta))
 

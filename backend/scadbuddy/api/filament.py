@@ -8,18 +8,26 @@ only reads."""
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Annotated, Any, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Body, Response, status
-from pydantic import BaseModel, ValidationError
+from fastapi import APIRouter, Body, Query, Response, status
+from pydantic import AwareDatetime, BaseModel, ValidationError
 
 from scadbuddy.api.deps import SettingsStoreDep
 from scadbuddy.auth.component import CallerDep
 from scadbuddy.auth.models import Caller, Person, PersonalToken, Service
-from scadbuddy.core.problems import ApiError
+from scadbuddy.bambuddy.models import SpoolAssignment
+from scadbuddy.core.problems import DATABASE_ERRORS, ApiError
+from scadbuddy.crud.idempotency import (
+    MaybeIdempotencyKey,
+    Replay,
+    idempotent_write,
+    required_key,
+)
 from scadbuddy.filament import models as m
-from scadbuddy.filament.bambuddy_pull import PullReport, read_and_pull
+from scadbuddy.filament.bambuddy_pull import PullReport, read_and_pull, try_assignments
 from scadbuddy.filament.catalog import (
     CATALOGS,
     CatalogExistsError,
@@ -27,18 +35,28 @@ from scadbuddy.filament.catalog import (
     CatalogSpec,
 )
 from scadbuddy.filament.component import FilamentDep
+from scadbuddy.filament.csv_import import (
+    ImportPreview,
+    ImportRefusedError,
+    SpoolCsvImport,
+    import_on,
+    import_rows,
+)
+from scadbuddy.filament.ledger import BadCursorError
 from scadbuddy.filament.locations import (
     LocationCycleError,
     LocationExistsError,
     MoveTargetError,
 )
 from scadbuddy.filament.spools import (
+    SpoolBambuddyLinkedError,
     SpoolInUseError,
     SpoolTypelessError,
     TagKeysClashError,
     TagUnnamedError,
 )
 from scadbuddy.filament.types import TypeRowsDuplicateError, TypeTempError
+from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.orders.store import FilamentExistsError
 
 router = APIRouter(prefix="/filament", tags=["filament"])
@@ -89,6 +107,7 @@ def _refused(exc: ValueError) -> ApiError:
             CatalogExistsError
             | FilamentExistsError
             | SpoolInUseError
+            | SpoolBambuddyLinkedError
             | TagKeysClashError
             | LocationExistsError
             | LocationCycleError,
@@ -306,8 +325,10 @@ _SPOOL_REFUSED = (
     TypeTempError,
     SpoolTypelessError,
     SpoolInUseError,
+    SpoolBambuddyLinkedError,
     TagUnnamedError,
     TagKeysClashError,
+    TypeRowsDuplicateError,
 )
 
 
@@ -332,8 +353,10 @@ def _no_spool(spool_id: UUID) -> ApiError:
     summary="List spools",
     description=(
         "The spools by number, each with its `effective` values (its own override, else its "
-        "type's, else its subtype's and material's print defaults) and the names of the "
-        "fields it `overridden`. `needs_type=true` keeps only spools with no type yet, "
+        "type's, else its subtype's and material's print defaults), the names of the "
+        "fields it `overridden`, the `names` behind its ids and `low_stock` (the grams left "
+        "are under its low-stock percentage of its label weight, else 20 %; false when "
+        "either weight is unknown). `needs_type=true` keeps only spools with no type yet, "
         "`false` only typed ones. Archived spools only with `include_archived`."
     ),
 )
@@ -364,14 +387,72 @@ async def create_spool(filament: FilamentDep, caller: CallerDep, body: m.SpoolCr
         raise _refused(exc) from None
 
 
+IMPORT_ROUTE = "POST /filament/spools/import"
+
+
+@router.post(
+    "/spools/import",
+    response_model=ImportPreview,
+    summary="Import spools from CSV rows",
+    description=(
+        "Rows of a spools CSV, parsed by the caller (cells as text, under the export's "
+        "column names). A row with a `number` changes that spool, only where a cell differs "
+        "from what it shows now; an empty cell changes nothing. A row with no `number` makes "
+        "a spool. Material, subtype, brand, category and effect names resolve in any case "
+        "and are added to their catalog when missing; `insert_type` and `type` (a spool "
+        "type's code) must exist; `location` must name exactly one unarchived place and is "
+        "a move. Derived columns (`grams_left`, `last_used_at`, ...) are ignored; any other "
+        "unknown column is a 422. `dry_run: true` answers what each row would do (`create`, "
+        "`update` or `error`, with its changes as `[before, after]`) and writes nothing. "
+        "`dry_run: false` writes every row in one transaction, and needs an "
+        "`Idempotency-Key` (428 without one): a retry with the same key answers the first "
+        "result and writes nothing, and the key with another body is a 422. A write with "
+        "any row in error is a 422 naming each line, and writes nothing."
+    ),
+)
+async def import_spools(
+    filament: FilamentDep,
+    caller: CallerDep,
+    body: SpoolCsvImport,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> ImportPreview:
+    who = actor(caller)
+    if body.dry_run:
+        return await asyncio.to_thread(import_rows, filament, body.rows, dry_run=True, actor=who)
+    # A person's key, under their own name: one person's key never replays another's.
+    key = f"{who}\x1f{required_key(idempotency_key)}"
+    asked = body.model_dump(mode="json")
+
+    def write() -> Replay:
+        with filament.spools.transaction() as conn:
+
+            def run() -> Replay:
+                done = import_on(conn, filament, body.rows, dry_run=False, actor=who)
+                return Replay(status.HTTP_200_OK, done.model_dump(mode="json"))
+
+            return idempotent_write(conn, "filament", key, IMPORT_ROUTE, asked, run)
+
+    try:
+        done = await asyncio.to_thread(write)
+    except ImportRefusedError as exc:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from None
+    return ImportPreview.model_validate(done.body)
+
+
 @router.get(
     "/spools/{spool_id}",
-    response_model=m.Spool,
+    response_model=m.SpoolDetail,
     summary="Read a spool",
-    description="One spool (archived too) with its effective values. 404 for none.",
+    description=(
+        "One spool (archived too) with its effective values and `names`, and what its page "
+        "shows: the `tag` bound now, the `last_tag` it had before and the number of the "
+        "spool that holds that one (`held_by`), its effective `presets` and `k_values`, the "
+        "`basis` of its `grams_left` (the anchor reading and the deltas taken off it), and "
+        "`in_use` (it has printed, so it is archived rather than deleted). 404 for none."
+    ),
 )
-async def get_spool(filament: FilamentDep, spool_id: UUID) -> m.Spool:
-    found = await asyncio.to_thread(filament.spools.get, spool_id)
+async def get_spool(filament: FilamentDep, spool_id: UUID) -> m.SpoolDetail:
+    found = await asyncio.to_thread(filament.spools.detail, spool_id)
     if found is None:
         raise _no_spool(spool_id)
     return found
@@ -408,9 +489,9 @@ async def patch_spool(
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Delete a spool",
     description=(
-        "Only a spool that never printed: its ledger, tag bindings and Bambuddy link go "
-        "with it. 404 for no such spool, 409 when its ledger holds a print; archive it "
-        "instead."
+        "Only a spool that never printed and has no Bambuddy link: its ledger and tag "
+        "bindings go with it. 404 for no such spool, 409 when its ledger holds a print or "
+        "Bambuddy links it (the next pull would make it again); archive it instead."
     ),
 )
 async def delete_spool(filament: FilamentDep, spool_id: UUID) -> Response:
@@ -494,6 +575,88 @@ async def unbind_tag(filament: FilamentDep, caller: CallerDep, tag_id: UUID) -> 
 
 
 @router.get(
+    "/spools/{spool_id}/presets",
+    response_model=list[m.EffectivePreset],
+    summary="Read a spool's slicer presets",
+    description=(
+        "The presets the spool prints with: one slicer filament per printer model and "
+        "nozzle diameter, the spool's own row for a key over its type's (`overridden` is "
+        "true for the spool's own). 404 for no such spool."
+    ),
+)
+async def get_spool_presets(filament: FilamentDep, spool_id: UUID) -> list[m.EffectivePreset]:
+    found = await asyncio.to_thread(filament.spools.presets, spool_id)
+    if found is None:
+        raise _no_spool(spool_id)
+    return found
+
+
+@router.put(
+    "/spools/{spool_id}/presets",
+    response_model=list[m.EffectivePreset],
+    summary="Replace a spool's own slicer presets",
+    description=(
+        "The whole list of the spool's own presets; the answer is the effective set. An "
+        "empty list resets the spool to its type's presets. Writes one `edited` event. "
+        "404 for no such spool, 422 for two rows with the same model and nozzle."
+    ),
+)
+async def put_spool_presets(
+    filament: FilamentDep, caller: CallerDep, spool_id: UUID, body: list[m.SpoolPresetCreate]
+) -> list[m.EffectivePreset]:
+    try:
+        saved = await asyncio.to_thread(
+            filament.spools.set_presets, spool_id, body, actor=actor(caller)
+        )
+    except _SPOOL_REFUSED as exc:
+        raise _refused(exc) from None
+    if saved is None:
+        raise _no_spool(spool_id)
+    return saved
+
+
+@router.get(
+    "/spools/{spool_id}/k-values",
+    response_model=list[m.EffectiveKValue],
+    summary="Read a spool's pressure-advance values",
+    description=(
+        "The K values the spool prints with: one per printer, extruder and nozzle diameter, "
+        "the spool's own row for a key over its type's (`overridden` is true for the "
+        "spool's own). 404 for no such spool."
+    ),
+)
+async def get_spool_k_values(filament: FilamentDep, spool_id: UUID) -> list[m.EffectiveKValue]:
+    found = await asyncio.to_thread(filament.spools.k_values, spool_id)
+    if found is None:
+        raise _no_spool(spool_id)
+    return found
+
+
+@router.put(
+    "/spools/{spool_id}/k-values",
+    response_model=list[m.EffectiveKValue],
+    summary="Replace a spool's own pressure-advance values",
+    description=(
+        "The whole list of the spool's own K values; the answer is the effective set. An "
+        "empty list resets the spool to its type's values. Writes one `edited` event. 404 "
+        "for no such spool, 422 for a printer that does not exist or a repeated key."
+    ),
+)
+async def put_spool_k_values(
+    filament: FilamentDep, caller: CallerDep, spool_id: UUID, body: list[m.SpoolKValueCreate]
+) -> list[m.EffectiveKValue]:
+    try:
+        saved = await asyncio.to_thread(
+            filament.spools.set_k_values, spool_id, body, actor=actor(caller)
+        )
+    except _SPOOL_REFUSED as exc:
+        raise _refused(exc) from None
+    if saved is None:
+        raise _no_spool(spool_id)
+    return saved
+
+
+@router.get(
     "/spools/{spool_id}/events",
     response_model=list[m.SpoolEvent],
     summary="Read a spool's ledger",
@@ -527,6 +690,182 @@ async def add_spool_event(
     if made is None:
         raise _no_spool(spool_id)
     return made
+
+
+@router.get(
+    "/tags",
+    response_model=list[m.TagRow],
+    summary="List tags",
+    description=(
+        "Every tag, oldest first, with its open `binding` and the `spool_number` it is on. "
+        "A tag on no spool only with `include_unbound`."
+    ),
+)
+async def list_tags(filament: FilamentDep, include_unbound: bool = False) -> list[m.TagRow]:
+    return await asyncio.to_thread(filament.spools.tags, include_unbound=include_unbound)
+
+
+@router.get(
+    "/tags/{tag_id}",
+    response_model=m.TagDetail,
+    summary="Read a tag",
+    description=(
+        "One tag with its open binding and every binding it has had, newest first. 404 for none."
+    ),
+)
+async def get_tag(filament: FilamentDep, tag_id: UUID) -> m.TagDetail:
+    found = await asyncio.to_thread(filament.spools.tag, tag_id)
+    if found is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no tag {tag_id}")
+    return found
+
+
+@router.get(
+    "/events",
+    response_model=m.EventPage,
+    summary="Read the ledger",
+    description=(
+        "Every spool's events, newest first by time then booking order, each with its "
+        "`spool_number`. Filter by `spool_id`, `kind`, `source` and `since` (a time with "
+        "its offset, included) and `until` (the same, excluded, so `since` and `until` give a "
+        "range that tiles). A page holds up to `limit` events (at most 500); `next_cursor` is "
+        "opaque, and passing it back as `cursor` gives the next page with no row lost or "
+        "repeated. 422 for a cursor no page gave."
+    ),
+)
+async def list_events(
+    filament: FilamentDep,
+    spool_id: UUID | None = None,
+    kind: m.EventKind | None = None,
+    source: m.EventSource | None = None,
+    since: AwareDatetime | None = None,
+    until: AwareDatetime | None = None,
+    cursor: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+) -> m.EventPage:
+    try:
+        return await asyncio.to_thread(
+            filament.spools.ledger,
+            spool_id=spool_id,
+            kind=kind,
+            source=source,
+            since=since,
+            until=until,
+            cursor=cursor,
+            limit=limit,
+        )
+    except BadCursorError as exc:
+        raise _refused(exc) from None
+
+
+@router.get(
+    "/summary",
+    response_model=m.InventorySummary,
+    summary="Summarise the inventory",
+    description=(
+        "The unarchived spools in total: their number, grams left, the value of those "
+        "grams at each spool's cost per kg (`null` when none has a cost), the stock by "
+        "material, how many sit in a printer's tray (a place with `printer_id` set), how "
+        "many are low on stock, and how many still need a type."
+    ),
+)
+async def get_summary(filament: FilamentDep) -> m.InventorySummary:
+    return await asyncio.to_thread(filament.spools.summary)
+
+
+#: How long a read of Bambuddy's assignments serves the next requests (I-1 of the final
+#: review of #6262), and how long after a failed or timed-out read none is tried again:
+#: the page and the hover card then wait on Bambuddy at most once per window, not on
+#: every load.
+ASSIGNMENTS_FRESH_SECONDS = 5.0
+ASSIGNMENTS_BACKOFF_SECONDS = 30.0
+_now = time.monotonic
+_assignments_lock = asyncio.Lock()
+#: The BB URL read, when, and what it answered (``None``: it failed, serve no assignments).
+_assignments_seen: tuple[str, float, list[SpoolAssignment] | None] | None = None
+
+
+async def _assignments(store: SettingsStore) -> list[SpoolAssignment]:
+    """Bambuddy's tray assignments (`try_assignments`), read at most once per
+    `ASSIGNMENTS_FRESH_SECONDS`, one read at a time; after a failed read, none for
+    `ASSIGNMENTS_BACKOFF_SECONDS` without asking Bambuddy again. 503 when the settings
+    cannot be read, as when the spools cannot."""
+    global _assignments_seen
+    try:
+        settings = await asyncio.to_thread(store.load)
+    except DATABASE_ERRORS as error:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "the settings could not be read; try again"
+        ) from error
+    if not settings.bambuddy_url:
+        return []
+    async with _assignments_lock:
+        seen = _assignments_seen
+        if seen is not None and seen[0] == settings.bambuddy_url:
+            window = (
+                ASSIGNMENTS_FRESH_SECONDS if seen[2] is not None else ASSIGNMENTS_BACKOFF_SECONDS
+            )
+            if _now() - seen[1] < window:
+                return seen[2] or []
+        found = await try_assignments(settings)
+        _assignments_seen = (settings.bambuddy_url, _now(), found)
+        return found or []
+
+
+@router.get(
+    "/inventory",
+    response_model=m.FilamentInventoryView,
+    summary="Spools and the trays they are in",
+    description=(
+        "Every spool by number, with its effective values (`rgba` is `#RRGGBBAA`), its "
+        "presets and the tray it is in (`loaded`: the tray a registry printer's latest "
+        "report holds it in, else the tray it was last linked to on a printer with no "
+        "report; `null` on the shelf), and its linked Bambuddy spool. `trays` is each "
+        "registry printer's reported trays, with the spool each holds and how it was found "
+        "(`tag` or `link`). Archived spools only with `include_archived`. While Bambuddy is "
+        "linked, a spool no registry printer reports is in the tray Bambuddy assigns its "
+        "linked Bambuddy spool to (`GET /inventory/assignments`; plan Decision 3, until "
+        "#6263); a failed read places the spools by the reports alone. Nothing else is read "
+        "from Bambuddy."
+    ),
+)
+async def get_inventory(
+    filament: FilamentDep, store: SettingsStoreDep, include_archived: bool = False
+) -> m.FilamentInventoryView:
+    assignments = await _assignments(store)
+    return await asyncio.to_thread(
+        filament.inventory.view, include_archived=include_archived, bb_assignments=assignments
+    )
+
+
+@router.get(
+    "/spools/{spool_id}/summary",
+    response_model=m.FilamentSpoolSummary,
+    summary="One spool's stock and price, and its filament's",
+    description=(
+        "What a filament hover card shows (#785): the spool's grams left, its tray and its "
+        "effective `cost_per_kg`, the value of what is left and, with `grams`, what those "
+        "grams cost; and every unarchived spool of the same filament (effective material, "
+        "subtype, brand and `#RRGGBBAA`, so a translucent spool is not an opaque one's) with "
+        "their total grams left and where they are loaded. An archived spool is still "
+        "summarised. With no cost per kg every price and cost is `null`. Each spool is placed "
+        "as `GET /filament/inventory` places it. 404 for no such spool."
+    ),
+)
+async def get_spool_summary(
+    filament: FilamentDep,
+    store: SettingsStoreDep,
+    spool_id: UUID,
+    grams: Annotated[
+        float | None,
+        Query(ge=0, description="Grams to price at this spool's cost, e.g. a plate's use"),
+    ] = None,
+) -> m.FilamentSpoolSummary:
+    assignments = await _assignments(store)
+    found = await asyncio.to_thread(filament.inventory.summary, spool_id, grams, assignments)
+    if found is None:
+        raise _no_spool(spool_id)
+    return found
 
 
 # -- locations ------------------------------------------------------------------------

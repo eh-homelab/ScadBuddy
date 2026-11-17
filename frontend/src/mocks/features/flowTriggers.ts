@@ -36,6 +36,7 @@ function standing(id: string, fields: Partial<FlowStandingGrant>): FlowStandingG
     approved_at: at(0),
     expires_at: spec.expires_at,
     created_at: at(0),
+    requested_at: at(0),
     in_force: true,
     ...fields,
   }
@@ -118,6 +119,11 @@ export function reset(): void {
 
 export function flowTriggerRequests(): readonly { path: string; body: Record<string, unknown> | null }[] {
   return requests
+}
+
+/** #6399 — the triggers whose standing grant waits for a person (`flows.ts` serves the read). */
+export function requestedTriggers(): FlowTrigger[] {
+  return triggers.filter((t) => t.grant?.status === 'requested' && !t.grant.revoked_at)
 }
 
 /** Change a trigger behind the page's back, as an assistant's edit would. */

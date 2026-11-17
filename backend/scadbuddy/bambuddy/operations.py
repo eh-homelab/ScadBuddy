@@ -52,6 +52,8 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.bambuddy.virtual_printers import virtual_printer_kinds
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
+from scadbuddy.filament.inventory import PoolSbSpoolReads, SbSpoolReads, read_sb_spools
+from scadbuddy.filament.models import SbSpools
 from scadbuddy.library.settings_store import SettingsReader
 from scadbuddy.operations.kinds import KindsBuild, OperationKind, waiting_on_bambuddy
 from scadbuddy.print_library.component import PRINT_LIBRARY
@@ -92,6 +94,7 @@ def bambuddy_kinds(core: Core, components: Components) -> list[OperationKind]:
         native=components.get(SLICING).starter,
         printers=components.get(PRINTERS).store,
         reports=components.get(PRINTERS).reports,
+        sb_spools=PoolSbSpoolReads.over(core.settings_store.pool),
     )
 
 
@@ -105,6 +108,7 @@ def bambuddy_kinds_over(
     archive_cache: ArchiveCache,
     printers: PrinterStore | None,
     reports: PrinterReportStore | None,
+    sb_spools: SbSpoolReads | None,
     library: NativeLibraries = no_native_copies,
     native_slices: NativeSliceStore | None = None,
     native: NativeSliceStarter | None = None,
@@ -115,7 +119,10 @@ def bambuddy_kinds_over(
     path from (plan 2026-10-18 D2); required, so neither process can leave a native
     printer's slice on Bambuddy's path by omission. ``reprints`` records the queue item a
     reprint queued (#3741): the API's own store, or the print worker's CRUD route, so
-    the worker writes no SQL for it (#5295); required for the same reason."""
+    the worker writes no SQL for it (#5295); required for the same reason. ``sb_spools``
+    reads the SB spool in each tray of a native printer's background slice and their
+    presets (#6262): the API's Postgres, or the print worker's CRUD routes; required too,
+    so no process slices a held spool on the tray's preset by omission."""
     cache = archive_cache
 
     async def no_check(request: dict[str, Any]) -> dict[str, Any]:
@@ -352,7 +359,9 @@ def bambuddy_kinds_over(
 
     async def assign_tray_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         """#2164: the person confirmed which spool is in a filled tray Bambuddy had no
-        spool for. Bambuddy upserts by tray, so a rerun records the same answer."""
+        spool for. Bambuddy upserts by tray, so a rerun records the same answer.
+        ``spool_id`` is Bambuddy's spool; the result names ``sb_number``, the SB spool the
+        person chose (#6262 Task 7 review M2), when the request carries it."""
         settings = await asyncio.to_thread(settings_store.load)
         async with client_for(settings) as client:
             assigned = await client.assign_spool(
@@ -362,7 +371,7 @@ def bambuddy_kinds_over(
                 tray_id=request["tray_id"],
             )
         return {
-            "spool_id": assigned.spool_id,
+            "spool_id": request.get("sb_number", assigned.spool_id),
             "printer_id": assigned.printer_id,
             "ams_id": assigned.ams_id,
             "tray_id": assigned.tray_id,
@@ -375,6 +384,10 @@ def bambuddy_kinds_over(
         slice, so its rerun can slice again."""
         settings = await asyncio.to_thread(settings_store.load)
         body = PrintRunRequest.model_validate(request["request"])
+        # The SB spool in each tray and their presets (#6262), as the route read them
+        # for a request from before the slice read its own (Task 5's, in flight across
+        # the deploy); a newer request has none, and the slice reads them below.
+        sb = SbSpools.model_validate(request["sb"]) if request.get("sb") else None
         # The run's own decision (plan 2026-10-18 D2): a native run's slice builds no
         # Bambuddy client (D3).
         route = await slice_route(
@@ -386,6 +399,11 @@ def bambuddy_kinds_over(
             asked=body.path,
         )
         lan = route is not None and route.native
+        if lan and sb is None:
+            # Read as the run's plan reads them (`workflows/print_activities.py`), so a
+            # run of these choices resolves the same presets and queues this slice.
+            assert route is not None
+            sb = await read_sb_spools(sb_spools, route.row, route.status)
         own = await library()
         # The native library a native run's copy goes into: the API's own
         # (`NativeLibrary`) or, on the print worker, its internal routes (`RemoteLibrary`).
@@ -442,6 +460,9 @@ def bambuddy_kinds_over(
                     native_reads=own,
                     route=route,
                     title=title,
+                    sb=sb,
+                    # Bambuddy's path offers the SB spools (#6262 Task 7), as the run's.
+                    reads=sb_spools,
                     # The dialog's Reslice (#4433): no finished slice answers it.
                     fresh=bool(request.get("fresh")),
                 )
@@ -465,8 +486,18 @@ def bambuddy_kinds_over(
         # start) routinely outlasts the command deadline (#2462). A rerun slices nothing
         # twice (`preview_run`), so a run Temporal timed out on its heartbeat is tried
         # again rather than recorded failed (#4635). A fresh start's rerun (Reslice,
-        # #4433) can slice again: that costs one slice and queues nothing.
-        OperationKind("preview_slice", no_check, preview_run, run_attempts=3, answers_running=True),
+        # #4433) can slice again: that costs one slice and queues nothing. ``sb`` (#6262
+        # Task 5) was the route's read of the SB spools, not the client's request: out of
+        # the key, so a repeat is its first answer whatever has changed since (§4.2). No
+        # route sends it since Task 6; it stays unkeyed for a request sent before.
+        OperationKind(
+            "preview_slice",
+            no_check,
+            preview_run,
+            run_attempts=3,
+            answers_running=True,
+            unkeyed=frozenset({"sb"}),
+        ),
         # Only ever a prelude (`output_delete`); a copy already gone counts as deleted,
         # so a retry deletes nothing twice.
         OperationKind(

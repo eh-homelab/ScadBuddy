@@ -5,7 +5,7 @@ import os
 import time
 import uuid
 import zipfile
-from collections.abc import Iterator
+from collections.abc import Container, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -42,6 +42,7 @@ from tests.support.deployment import (
     BUILD_SERVES_TIMEOUT,
     wait_until_build_serves,
 )
+from tests.support.sb_rows import seed_app_sb_spools
 from tests.support.store import content, pool, s3  # noqa: F401
 from tests.support.temporal import (
     WorkflowReaper,
@@ -190,11 +191,26 @@ class FakeAgentTools:
     def __init__(self) -> None:
         self.tiers: dict[str, str] = {}
         self.down = False
+        #: The tools a registered script may name (#6365); None: every name, so a test
+        #: that registers a script is not refused for a tool it does not list in `tiers`.
+        self.names: set[str] | None = None
 
     async def tool_tiers(self) -> dict[str, str]:
         if self.down:
             raise AgentToolsUnavailableError("connection refused")
         return dict(self.tiers)
+
+    async def tool_names(self) -> Container[str]:
+        if self.down:
+            raise AgentToolsUnavailableError("connection refused")
+        return _Every() if self.names is None else set(self.names)
+
+
+class _Every:
+    """Holds every name: an agent that has whatever tool a test's script names."""
+
+    def __contains__(self, _name: object) -> bool:
+        return True
 
 
 @pytest.fixture(autouse=True)
@@ -204,7 +220,11 @@ def agent_tools(monkeypatch: pytest.MonkeyPatch) -> FakeAgentTools:
     async def tool_tiers(_self: AgentTools) -> dict[str, str]:
         return await fake.tool_tiers()
 
+    async def tool_names(_self: AgentTools) -> Container[str]:
+        return await fake.tool_names()
+
     monkeypatch.setattr(AgentTools, "tool_tiers", tool_tiers)
+    monkeypatch.setattr(AgentTools, "tool_names", tool_names)
     return fake
 
 
@@ -284,6 +304,25 @@ def _reaper_client(reaper: WorkflowReaper) -> Client:
 def client(app: FastAPI) -> Iterator[TestClient]:
     with TestClient(app) as test_client:
         yield test_client
+
+
+@pytest.fixture
+def recorded_sb_spools(request: pytest.FixtureRequest) -> None:
+    """Bambuddy's recorded spools (``inventory-spools.json``) as SB spools of the same
+    numbers, linked to them: the Bambuddy path's picker offers SB spools (#6262 Task 7),
+    so a test that plans with the recording's ids needs them. Seeded through the app the
+    test already drives (a module's own ``*_client`` before ``client``), never a new one:
+    a second app would run a second worker on the same task queues. A test that asks for
+    no app fixture seeds nothing. ``@pytest.mark.sb_offset(n)`` numbers them n past their
+    Bambuddy ids."""
+    # Each named fixture is in the test's closure already, so reading it makes nothing new.
+    names = [n for n in request.fixturenames if n.endswith("_client") and not n.startswith("_")]
+    names += ["client"] if "client" in request.fixturenames else []
+    apps = (request.getfixturevalue(name) for name in names)
+    app = next((value for value in apps if isinstance(value, TestClient)), None)
+    marker = request.node.get_closest_marker("sb_offset")
+    if app is not None:
+        seed_app_sb_spools(app, offset=marker.args[0] if marker else 0)
 
 
 @pytest.fixture

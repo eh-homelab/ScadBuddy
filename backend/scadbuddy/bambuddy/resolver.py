@@ -21,7 +21,8 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Literal
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field
 
@@ -38,10 +39,11 @@ from scadbuddy.bambuddy.models import (
     NozzleChoice,
     NozzleSize,
     PresetRef,
-    PresetSource,
-    SpoolFilamentPreset,
     Tier,
 )
+
+if TYPE_CHECKING:
+    from scadbuddy.filament.models import EffectivePreset
 
 logger = logging.getLogger(__name__)
 
@@ -182,32 +184,18 @@ def _by_filament_id(rows: list[PresetChoice], filament_id: str, printer: str) ->
     )
 
 
-def _record_preset(catalogue: Catalogue, option: SpoolOption, printer: str) -> PresetRef | None:
-    """An untagged tray's preset from the spool providers' records of its spool (#3818
-    D1), in their priority order: Bambuddy's ``slicer_filament`` is a ``filament_id``
-    (``GFA00``) or a cloud ``setting_id`` (``GFSL99_20``), as
-    ``tests/bambuddy/recordings/inventory-spools.json`` shows, or a Bambuddy local
-    preset's id (all digits), which is the kept copy's preset when the catalogue offers it
-    (#4645); anything else is no native preset, and the slot falls back as any tray
-    does."""
-    for record in option.records.values():
-        if not record.preset:
-            continue
-        ref = _by_filament_id(catalogue.filament, record.preset, printer)
-        if ref is None:
-            source: PresetSource = "local" if _is_local_id(record.preset) else "cloud"
-            native = catalogue.native_ref(PresetRef(source=source, id=record.preset), "filament")
-            # An empty ``compatible_printers`` declares no restriction (`PresetChoice`),
-            # as a local preset may leave it.
-            fits = native is not None and any(
-                row.ref == native
-                and (not row.compatible_printers or printer in row.compatible_printers)
-                for row in catalogue.filament
-            )
-            ref = native if fits else None
-        if ref is not None:
-            return ref
-    return None
+def _own_preset(
+    spool_presets: Mapping[int, Sequence[EffectivePreset]], option: SpoolOption, size: str
+) -> EffectivePreset | None:
+    """The preset ``option``'s SB spool names for exactly the H2C and this nozzle size
+    (`filament.presets.preset_for`), by its number (#6262 F1; every option with an SB
+    spool has one, a tray's and a Bambuddy-path row's alike), or ``None``."""
+    # Here, not at the top: `filament.presets` reads this module's `PRINTER_MODEL`.
+    from scadbuddy.filament.presets import preset_for
+
+    if option.sb_number is None:
+        return None
+    return preset_for(spool_presets.get(option.sb_number, ()), PRINTER_MODEL, size)
 
 
 #: What a ref the image's catalogue does not hold is, by its source (#3818 D5): a
@@ -318,8 +306,12 @@ def resolve(
     plan: FilamentPlan,
     choices: PrintChoices,
     catalogue: Catalogue,
-    spool_presets: dict[int, list[SpoolFilamentPreset]],
+    spool_presets: Mapping[int, Sequence[EffectivePreset]],
 ) -> Resolved:
+    """Every slicer preset for ``plan`` on ``options``. ``spool_presets`` are each chosen
+    spool's effective presets (#6262 F1, `filament.presets.effective_presets`), keyed by
+    its SB number (``sb_number``); only the row of exactly the H2C and the chosen nozzle
+    is used."""
     chosen = _resolve_choices(choices, catalogue)
     warnings = list(chosen.warnings)
     errors = list(chosen.errors)
@@ -381,17 +373,11 @@ def resolve(
                     )
                 )
                 continue
-        elif option.spool_id < 0 and option.slicer_filament:
-            # A tray chosen for itself: its tray_info_idx is the BBL preset's filament_id.
-            ref = _by_filament_id(catalogue.filament, option.slicer_filament, printer)
-        if ref is None and option.spool_id < 0 and catalogue.is_native:
-            ref = _record_preset(catalogue, option, printer)
         if ref is None:
-            own = [
-                row.slicer_filament
-                for row in spool_presets.get(option.spool_id, [])
-                if row.printer_model == PRINTER_MODEL and row.nozzle_diameter == size
-            ]
+            # The spool's own preset for this nozzle first (#6262 F1): an SB spool's,
+            # a tray's included (its SB spool's, by number), the person's choice.
+            own_preset = _own_preset(spool_presets, option, size)
+            own = [] if own_preset is None else [own_preset.slicer_filament]
             if catalogue.is_native:
                 # A spool's preset is a preset name, a Bambu Cloud setting_id, a BBL
                 # filament_id (as a tray's tray_info_idx is) or a Bambuddy local id,
@@ -432,8 +418,19 @@ def resolve(
                     ),
                     None,
                 )
-            if ref is None and option.slicer_filament_name:
-                ref = _fits(catalogue.filament, f"{option.slicer_filament_name} @BBL H2C", printer)
+            if ref is None and option.spool_id < 0 and option.slicer_filament:
+                # A tray chosen for itself: its tray_info_idx is the BBL preset's
+                # filament_id, after its SB spool's own preset (#6262).
+                ref = _by_filament_id(catalogue.filament, option.slicer_filament, printer)
+            # Then a preset by name: the spool's own preset's (an id the catalogue does not
+            # hold, such as a pulled Bambuddy spool's BBL filament_id, #6262 Task 7), else
+            # the option's.
+            for name in (
+                own_preset.slicer_filament_name if own_preset is not None else None,
+                option.slicer_filament_name,
+            ):
+                if ref is None and name:
+                    ref = _fits(catalogue.filament, f"{name} @BBL H2C", printer)
             if ref is None:
                 ref = _fits(catalogue.filament, f"Generic {option.material} @BBL H2C", printer)
                 if ref is not None:

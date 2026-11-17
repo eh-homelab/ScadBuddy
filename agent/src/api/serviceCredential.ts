@@ -113,8 +113,6 @@ const TOKEN_TYPES = {
  */
 export const EXCHANGE_RETRY_FIRST_MS = 5_000
 export const EXCHANGE_RETRY_MAX_MS = 60_000
-/** An old backend answers 404: the view serves, and the exchange is tried again this much later. */
-export const FALLBACK_RETRY_MS = 60_000
 /** A 401 exchanges again at once, but never sooner than this after the last exchange. */
 export const REEXCHANGE_MIN_MS = 10_000
 const EXCHANGE_TIMEOUT_MS = 10_000
@@ -124,8 +122,6 @@ export type ExchangeOptions = {
   backendUrl: string
   proofFile: string
   proof: keyof typeof TOKEN_TYPES
-  /** The view, while the agent still has a database (§8 step 1). */
-  fallback?: CredentialSource
   fetchImpl?: typeof fetch
   /** Reads the proof file again before each exchange: the kubelet rotates a projected token. */
   readProof?: (path: string) => Promise<string>
@@ -140,7 +136,6 @@ export class ExchangeCredential implements CredentialSource {
   private nextTry = 0
   private delay = EXCHANGE_RETRY_FIRST_MS
   private exchangedAt: number | undefined
-  private onFallback = false
   /** Whether "waiting for the backend" was logged since the backend last answered. */
   private waiting = false
   private exchanging: Promise<void> | undefined
@@ -170,15 +165,11 @@ export class ExchangeCredential implements CredentialSource {
       await this.exchanging
     }
     if (this.token !== undefined && this.now() < this.expiresAt) return this.token
-    if (this.onFallback && this.options.fallback) return this.options.fallback.current()
     return undefined
   }
 
   invalidate(token: string): void {
-    if (token !== this.token) {
-      if (this.onFallback) this.options.fallback?.invalidate(token)
-      return
-    }
+    if (token !== this.token) return
     this.token = undefined
     this.nextTry = Math.max(this.now(), (this.exchangedAt ?? 0) + REEXCHANGE_MIN_MS)
   }
@@ -246,16 +237,9 @@ export class ExchangeCredential implements CredentialSource {
       this.renewAt = now + lifetime / 2
       this.nextTry = this.renewAt
       this.delay = EXCHANGE_RETRY_FIRST_MS
-      this.onFallback = false
       return
     }
     await response.body?.cancel()
-    if (response.status === 404 && this.options.fallback) {
-      if (!this.onFallback) this.log("the backend has no service-token exchange yet; the agent's credential is read from its view")
-      this.onFallback = true
-      this.nextTry = now + FALLBACK_RETRY_MS
-      return
-    }
     if (response.status === 429) {
       const wait = Number(response.headers.get('retry-after'))
       this.log("the agent's service-token exchange was rate limited")

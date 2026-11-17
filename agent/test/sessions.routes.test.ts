@@ -315,21 +315,43 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session rou
     expect(one.sessions).toHaveLength(1)
   })
 
-  it('answers 409 to a send while a turn runs, and interrupts it', async () => {
+  it('queues a send while a turn runs (#6386): read, edit and remove it before it starts; a Stop ends only the running turn', async () => {
     next = { hang: true }
     const res = await app.request('/api/v1/ai/sessions', { method: 'POST', headers: JSON_UI, body: JSON.stringify({ prompt: 'wait' }) })
     const { session } = (await res.json()) as { session: { id: string } }
-    const busy = await app.request(`/api/v1/ai/sessions/${session.id}/messages`, {
-      method: 'POST',
-      headers: JSON_UI,
-      body: JSON.stringify({ text: 'again' }),
-    })
-    expect(busy.status).toBe(409)
-    expect(((await busy.json()) as { detail: string }).detail).toMatch(/already running/)
-    const stop = await app.request(`/api/v1/ai/sessions/${session.id}/interrupt`, { method: 'POST', headers: UI })
+    const base = `/api/v1/ai/sessions/${session.id}`
+    const send = (text: string) => app.request(`${base}/messages`, { method: 'POST', headers: JSON_UI, body: JSON.stringify({ text }) })
+    const first = await send('first')
+    expect(first.status).toBe(202)
+    const firstBody = (await first.json()) as { turn_id: string; queued: boolean; position: number }
+    expect(firstBody).toEqual({ turn_id: expect.any(String), queued: true, position: 1 })
+    const second = (await (await send('second')).json()) as { turn_id: string; position: number }
+    expect(second.position).toBe(2)
+    const texts = async () => ((await (await app.request(`${base}/queue`, { headers: UI_READ })).json()) as { queue: { text: string }[] }).queue.map((q) => q.text)
+    await expect.poll(texts, { timeout: 20_000 }).toEqual(['first', 'second'])
+    // GET of the session lists it too.
+    expect(((await (await app.request(base, { headers: UI_READ })).json()) as { queue: unknown[] }).queue).toHaveLength(2)
+    const edit = await app.request(`${base}/queue/${second.turn_id}`, { method: 'PATCH', headers: JSON_UI, body: JSON.stringify({ text: 'second, edited' }) })
+    expect(edit.status).toBe(200)
+    expect(((await edit.json()) as { queue: { text: string }[] }).queue.map((q) => q.text)).toEqual(['first', 'second, edited'])
+    expect((await app.request(`${base}/queue/${second.turn_id}`, { method: 'PATCH', headers: JSON_UI, body: JSON.stringify({ text: '' }) })).status).toBe(400)
+    // A write from another site is refused, as every session write is.
+    expect((await app.request(`${base}/queue/${firstBody.turn_id}`, { method: 'DELETE', headers: UI_READ })).status).toBe(403)
+    const removed = await app.request(`${base}/queue/${firstBody.turn_id}`, { method: 'DELETE', headers: UI })
+    expect(((await removed.json()) as { queue: { text: string }[] }).queue.map((q) => q.text)).toEqual(['second, edited'])
+    const again = await app.request(`${base}/queue/${firstBody.turn_id}`, { method: 'DELETE', headers: UI })
+    expect(again.status).toBe(409)
+    // The Stop ends the running turn; the queued one starts after it.
+    next = { reply: 'done' }
+    const stop = await app.request(`${base}/interrupt`, { method: 'POST', headers: UI })
     expect(await stop.json()).toEqual({ interrupted: true })
+    await expect
+      .poll(async () => (await m.events.read(session.id, 0, 1000)).flatMap(({ event: e }) => (e.type === 'user.turn' ? [e.text] : [])), { timeout: 20_000 })
+      .toEqual(['wait', 'second, edited'])
     await waitIdle(session.id)
-  })
+    await expect.poll(texts, { timeout: 20_000 }).toEqual([])
+    // Two turns on the Temporal test server, with a continue-as-new between them.
+  }, 90_000)
 
   it('takes over a session another principal controls', async () => {
     const { session } = await m.start(agentA, { origin: 'mcp', title: 'theirs' })

@@ -6,8 +6,8 @@ answer, and only the routes that are Bambuddy's by nature say Settings has none.
 The app runs on the hot path's backends (D2: the S3 store, the native library and the
 native slicer, the fake slicer in the Rust worker's place); its one printer is a
 registry row linked over the LAN to the fake printer (`tests/support/fake_lan.py`),
-whose watch keeps its report fresh, and set to print natively. The spool providers'
-overlay is written once before the window opens, as its refresh would (outside AC1).
+whose watch keeps its report fresh, and set to print natively. The SB spool in its
+tagged tray is written once before the window opens (outside AC1, #6262).
 Inside `forbid_bambuddy`, the dialog's reads, the background slice, the run and the
 follow each answer; a call to Bambuddy fails the test, naming it."""
 
@@ -26,13 +26,28 @@ import trimesh
 from fastapi.testclient import TestClient
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from scadbuddy.bambuddy import print_run
+from scadbuddy.api import printing
+from scadbuddy.api.operations import run_operation
+from scadbuddy.bambuddy import preview, print_run
 from scadbuddy.bambuddy.catalogue import stop_refreshes
 from scadbuddy.bambuddy.filaments import gather_plate_options
 from scadbuddy.bambuddy.print_run import run_route
 from scadbuddy.bambuddy.trays import tray_spool_id
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
+from scadbuddy.filament.component import FILAMENT, Filament
+from scadbuddy.filament.inventory import PoolSbSpoolReads, read_sb_spools
+from scadbuddy.filament.models import (
+    EffectivePreset,
+    HeldSpool,
+    HeldTray,
+    Material,
+    SbSpools,
+    Spool,
+    SpoolCreate,
+    SpoolEventAdd,
+    SpoolPresetCreate,
+)
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.main import create_app
 from scadbuddy.print_library.ids import is_native_id
@@ -40,8 +55,6 @@ from scadbuddy.printers.component import PRINTERS, Printers
 from scadbuddy.printers.models import LanLink, PrinterCreate, PrinterPatch
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
 from scadbuddy.render.split import ColourPart
-from scadbuddy.spools.component import SPOOLS, Spools
-from scadbuddy.spools.models import Overlay, SpoolSnapshot
 from scadbuddy.workflows import print_activities
 from tests.api.conftest import follow_operation, set_fake_env
 from tests.api.test_customers import create as create_customer
@@ -156,11 +169,6 @@ def _printers(client: TestClient) -> Printers:
     return printers
 
 
-def _spools(client: TestClient) -> Spools:
-    spools: Spools = _state(client).components.get(SPOOLS)
-    return spools
-
-
 def _call(client: TestClient, fn: Any, *args: Any, **kwargs: Any) -> Any:
     assert client.portal is not None
 
@@ -197,23 +205,23 @@ def lan_row(
     return row.id
 
 
-def overlay(client: TestClient, *, at: datetime | None = None, remaining_g: float = 640.0) -> None:
-    """Bambuddy's record of the tagged spool, as the refresh writes it (outside AC1)."""
-    snapshot = SpoolSnapshot(
-        record_id="16",
-        material="PLA",
-        colour="#F5547C",
-        brand="Bambu",
-        remaining_g=remaining_g,
-        tray_uuid=TAGGED_UUID,
+def held_spool(client: TestClient, *, remaining_g: float = 640.0) -> Spool:
+    """SB spool #N in the tagged tray: pink PLA, weighed, its tag bound (#6262), as a
+    person or the Bambuddy pull leaves it (outside AC1)."""
+    filament: Filament = _state(client).components.get(FILAMENT)
+    pla = next(
+        row.id
+        for row in filament.catalog.list("materials")
+        if isinstance(row, Material) and row.name == "PLA"
     )
-    _call(
-        client,
-        _spools(client).store.replace_records,
-        "bambuddy",
-        [snapshot],
-        at or datetime.now(UTC),
+    spool = filament.spools.create(
+        SpoolCreate(material_id=pla, rgba="#F5547CFF", colour_name="Hot Pink"), actor="test"
     )
+    filament.spools.add_event(
+        spool.id, SpoolEventAdd(kind="weighed", grams=remaining_g), actor="test"
+    )
+    filament.spools.bind_tag(spool.id, tray_uuid=TAGGED_UUID, kind="bambu_mifare", actor="test")
+    return spool
 
 
 def run_body(row: str, filaments: dict[str, Any]) -> dict[str, Any]:
@@ -302,7 +310,7 @@ def test_a_native_run_makes_no_bambuddy_call(
     """A row Bambuddy does not reach prints natively too: it was refused before Task 9
     (`_not_on_bambuddy`)."""
     row = lan_row(native_app, fake_lan, bambuddy_printer_id=bambuddy_printer_id)
-    overlay(native_app)
+    spool = held_spool(native_app)
 
     with forbid_bambuddy(spans, BASE):
         output, choices, filaments, run = _dialog_and_run(native_app, model, row)
@@ -319,7 +327,9 @@ def test_a_native_run_makes_no_bambuddy_call(
     assert choices["printer_id"] == bambuddy_printer_id
     assert filaments["source"] == "trays"
     tagged = next(spool for spool in filaments["spools"] if spool["spool_id"] == TAGGED)
-    assert tagged["records"]["bambuddy"]["record_id"] == "16"
+    # The tagged tray names the SB spool it holds, read from ScadBuddy alone (#6262).
+    assert (tagged["sb_spool_id"], tagged["sb_number"]) == (str(spool.id), spool.number)
+    assert (tagged["remaining_g"], tagged["color_name"]) == (640.0, "Hot Pink")
     assert is_native_id(run["result"]["library_file_id"])
     assert run["result"]["path"] == "native"
     # The chosen trays reach the printer (AC4). No ``ams_mapping2``: the measured start
@@ -339,7 +349,7 @@ def test_a_native_run_of_two_copies_prints_both_and_asks_bambuddy_nothing(
     """#4541: refused before; the run starts the second copy once the printer reports
     the first finished, and the print settles once both have."""
     row = lan_row(native_app, fake_lan, bambuddy_printer_id=1)
-    overlay(native_app)
+    held_spool(native_app)
     with forbid_bambuddy(spans, BASE):
         output, _, _, run = _dialog_and_run(native_app, model, row, copies=2)
         assert run["status"] == "succeeded", run
@@ -363,6 +373,301 @@ def _a_colour_a_plate(paths: DataPaths, output: str) -> None:
     write_plates_3mf(plates, colours, output_3mf, thumbnails=None)
 
 
+def _preview_plans(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Each plan the background slice makes, as `preview._planned` gets it back."""
+    planned: list[Any] = []
+    plan = print_run.plan_run
+
+    async def plan_spy(*args: Any, **kwargs: Any) -> Any:
+        result = await plan(*args, **kwargs)
+        planned.append(result)
+        return result
+
+    monkeypatch.setattr(preview, "plan_run", plan_spy)
+    return planned
+
+
+def _own_preset(client: TestClient, spool: Spool) -> None:
+    """The spool's own H2C 0.4 preset, over its tray's ``tray_info_idx``."""
+    filament: Filament = _state(client).components.get(FILAMENT)
+    own = SpoolPresetCreate(
+        printer_model="H2C", nozzle_diameter="0.4", slicer_filament="Generic PLA @BBL H2C"
+    )
+    assert filament.spools.set_presets(spool.id, [own], actor="test") is not None
+
+
+def _preview(client: TestClient, output: str, body: dict[str, Any]) -> dict[str, Any]:
+    url = f"/api/v1/print/outputs/{output}/preview-slice"
+    started = client.post(url, json=body, headers=press())
+    assert started.status_code == 202, started.text
+    op = follow_operation(client, started.json(), timeout=60, poll=0.1)
+    assert op["status"] == "succeeded", op
+    return op
+
+
+def test_the_preview_slices_with_the_held_spools_own_preset(
+    native_app: TestClient,
+    model: str,
+    fake_lan: FakeLan,
+    slicer: FakeSlicer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6262: the background slice resolves as `/check` judges, with the SB spool in each
+    tray and its presets, read where it runs (`filament/inventory.py` `read_sb_spools`).
+    The tagged tray's spool names its own H2C 0.4 preset, over the tray's
+    ``tray_info_idx``; the preview's plan slices with that one."""
+    row = lan_row(native_app, fake_lan)
+    _own_preset(native_app, held_spool(native_app))
+    planned = _preview_plans(monkeypatch)
+    output = make_output(native_app, model)
+    filaments = native_app.get(f"/api/v1/print/outputs/{output}/filaments", params={"printer": row})
+    assert filaments.status_code == 200, filaments.text
+
+    _preview(native_app, output, run_body(row, filaments.json()))
+
+    (run,) = planned
+    presets = [ref.id for ref in run.plates[0].plan.filament_presets]
+    assert presets[0] == "Generic PLA @BBL H2C", presets
+
+
+def test_the_preview_request_carries_no_spool_hint(
+    native_app: TestClient, model: str, fake_lan: FakeLan, slicer: FakeSlicer
+) -> None:
+    """The background slice reads the SB spools where it runs, as the run does, so the
+    operation's request carries nothing volatile: no ``sb``, however the spools change."""
+    row = lan_row(native_app, fake_lan)
+    _own_preset(native_app, held_spool(native_app))
+    output = make_output(native_app, model)
+    filaments = native_app.get(f"/api/v1/print/outputs/{output}/filaments", params={"printer": row})
+
+    op = _preview(native_app, output, run_body(row, filaments.json()))
+
+    with _state(native_app).settings_store.pool.connection() as conn:
+        found = conn.execute("SELECT request FROM operations WHERE id = %s", (op["id"],))
+        request = found.fetchone()["request"]
+    assert "sb" not in request, request
+    assert "output_id" in request
+
+
+def test_a_preview_request_with_a_spool_hint_slices_with_it(
+    native_app: TestClient,
+    model: str,
+    fake_lan: FakeLan,
+    slicer: FakeSlicer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request recorded with the ``sb`` hint (in flight across the deploy, Task 5's
+    shape) slices with the hint, not a read of its own."""
+    row = lan_row(native_app, fake_lan)
+    spool = held_spool(native_app)
+    planned = _preview_plans(monkeypatch)
+    hint = SbSpools(
+        trays=[HeldTray(ams_id=0, tray_id=0, spool=HeldSpool.of(spool))],
+        spool_presets={
+            spool.number: [
+                EffectivePreset(
+                    printer_model="H2C",
+                    nozzle_diameter="0.4",
+                    slicer_filament="Generic PLA @BBL H2C",
+                    slicer_filament_name=None,
+                    overridden=True,
+                )
+            ]
+        },
+    )
+    sent = run_operation
+
+    async def with_hint(*args: Any, **kwargs: Any) -> Any:
+        kwargs["request"] = {**kwargs["request"], "sb": hint.model_dump(mode="json")}
+        return await sent(*args, **kwargs)
+
+    monkeypatch.setattr(printing, "run_operation", with_hint)
+    output = make_output(native_app, model)
+    filaments = native_app.get(f"/api/v1/print/outputs/{output}/filaments", params={"printer": row})
+
+    _preview(native_app, output, run_body(row, filaments.json()))
+
+    (run,) = planned
+    presets = [ref.id for ref in run.plates[0].plan.filament_presets]
+    assert presets[0] == "Generic PLA @BBL H2C", presets
+
+
+def test_a_repeat_under_one_key_is_the_first_answer_after_a_spool_changes(
+    native_app: TestClient, model: str, fake_lan: FakeLan, slicer: FakeSlicer
+) -> None:
+    """§4.2: a repeat is its first answer whatever has changed since. The request names
+    no SB spool (they are read where the slice runs), so a held spool weighed between
+    two sends of one ``Idempotency-Key`` starts nothing new."""
+    row = lan_row(native_app, fake_lan)
+    spool = held_spool(native_app)
+    filament: Filament = _state(native_app).components.get(FILAMENT)
+    output = make_output(native_app, model)
+    filaments = native_app.get(f"/api/v1/print/outputs/{output}/filaments", params={"printer": row})
+    body = run_body(row, filaments.json())
+    key = press()
+    url = f"/api/v1/print/outputs/{output}/preview-slice"
+
+    first = native_app.post(url, json=body, headers=key)
+    assert first.status_code == 202, first.text
+    filament.spools.add_event(spool.id, SpoolEventAdd(kind="weighed", grams=120), actor="test")
+    again = native_app.post(url, json=body, headers=key)
+
+    # 202 while the first slice runs, 200 once it has finished: either is the first answer.
+    assert again.status_code in (200, 202), again.text
+    assert again.json()["id"] == first.json()["id"]
+    follow_operation(native_app, first.json(), timeout=60, poll=0.1)
+
+
+def _run_plans(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, Any]]:
+    """Each plan the run makes (the ``print_plan`` activity), with the held view it got."""
+    planned: list[tuple[Any, Any]] = []
+    plan = print_run.plan_run
+
+    async def plan_spy(*args: Any, **kwargs: Any) -> Any:
+        result = await plan(*args, **kwargs)
+        planned.append((kwargs.get("held"), result))
+        return result
+
+    monkeypatch.setattr(print_activities, "plan_run", plan_spy)
+    return planned
+
+
+def test_the_worker_reads_tags_from_the_stored_report(
+    native_app: TestClient,
+    model: str,
+    spans: InMemorySpanExporter,
+    fake_lan: FakeLan,
+    slicer: FakeSlicer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The run's plan finds the tagged tray's SB spool by its tag, read from the
+    printer's stored report: the check's status crosses the history without the tray's
+    ``tray_uuid`` (`AmsTray`), so a plan read from it would find the tray empty."""
+    row = lan_row(native_app, fake_lan)
+    spool = held_spool(native_app)
+    planned = _run_plans(monkeypatch)
+
+    with forbid_bambuddy(spans, BASE):
+        _, _, _, run = _dialog_and_run(native_app, model, row)
+
+    assert run["status"] == "succeeded", run
+    ((held, _),) = planned
+    assert held is not None
+    assert [(t.ams_id, t.tray_id, t.spool.id) for t in held.trays] == [(0, 0, spool.id)]
+
+
+def test_a_failed_trays_read_still_prints(
+    native_app: TestClient,
+    model: str,
+    spans: InMemorySpanExporter,
+    fake_lan: FakeLan,
+    slicer: FakeSlicer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read of the SB spools that fails plans on the trays alone: never the run's
+    failure. The run's own read is counted, not the background slice's."""
+    row = lan_row(native_app, fake_lan)
+    held_spool(native_app)
+    planned = _run_plans(monkeypatch)
+    in_run = False
+    reads = 0
+
+    async def run_read(*args: Any) -> Any:
+        nonlocal in_run
+        in_run = True
+        try:
+            return await read_sb_spools(*args)
+        finally:
+            in_run = False
+
+    async def broken(*_: Any) -> Any:
+        nonlocal reads
+        reads += in_run
+        raise ConnectionError("the API is away")
+
+    monkeypatch.setattr(print_activities, "read_sb_spools", run_read)
+    monkeypatch.setattr(PoolSbSpoolReads, "trays", broken)
+
+    with forbid_bambuddy(spans, BASE):
+        _, _, _, run = _dialog_and_run(native_app, model, row)
+
+    assert run["status"] == "succeeded", run
+    ((held, _),) = planned
+    assert held is None
+    assert reads == 1
+
+
+def test_a_native_plan_warns_on_the_held_spools_grams(
+    native_app: TestClient,
+    model: str,
+    spans: InMemorySpanExporter,
+    fake_lan: FakeLan,
+    slicer: FakeSlicer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#4551: the run's low-filament warnings judge the held SB spool's grams, as the
+    dialog's do. The fake model's slots weigh nothing, so the spy gives each 10 g."""
+    row = lan_row(native_app, fake_lan)
+    held_spool(native_app, remaining_g=4)
+    planned: list[Any] = []
+    gather = gather_plate_options
+    planning = False
+    plan = print_run.plan_run
+
+    async def planning_spy(*args: Any, **kwargs: Any) -> Any:
+        nonlocal planning
+        planning = True
+        try:
+            result = await plan(*args, **kwargs)
+        finally:
+            planning = False
+        planned.append(result)
+        return result
+
+    async def weighed(*args: Any, **kwargs: Any) -> Any:
+        plates = await gather(*args, **kwargs)
+        if not planning:
+            return plates
+        return [
+            options.model_copy(
+                update={"slots": [s.model_copy(update={"used_grams": 10.0}) for s in options.slots]}
+            )
+            for options in plates
+        ]
+
+    monkeypatch.setattr(print_activities, "plan_run", planning_spy)
+    monkeypatch.setattr(print_run, "gather_plate_options", weighed)
+
+    with forbid_bambuddy(spans, BASE):
+        _, _, _, run = _dialog_and_run(native_app, model, row)
+
+    assert run["status"] == "succeeded", run
+    (result,) = planned
+    low = [w for w in result.warnings if w.kind == "low-filament"]
+    assert [w.slot_id for w in low] == [1], result.warnings
+    assert "about 4 g left" in low[0].message
+
+
+def test_the_preview_and_the_run_resolve_one_slice(
+    native_app: TestClient,
+    model: str,
+    spans: InMemorySpanExporter,
+    fake_lan: FakeLan,
+    slicer: FakeSlicer,
+) -> None:
+    """The preview and the run read the SB spools alike, so a run of the preview's
+    choices resolves the held spool's own preset too and queues the preview's slice:
+    the slicer runs once."""
+    row = lan_row(native_app, fake_lan)
+    _own_preset(native_app, held_spool(native_app))
+
+    with forbid_bambuddy(spans, BASE):
+        _, _, _, run = _dialog_and_run(native_app, model, row)
+
+    assert run["status"] == "succeeded", run
+    assert slicer.calls == 1
+
+
 def test_one_plate_of_several_slices_with_only_its_own_slots(
     native_app: TestClient,
     model: str,
@@ -376,7 +681,7 @@ def test_one_plate_of_several_slices_with_only_its_own_slots(
     slot of the file instead: nothing read the output's own slots in their process, and
     the native library's copy answers none, so every colour of the file counted as used."""
     row = lan_row(native_app, fake_lan)
-    overlay(native_app)
+    held_spool(native_app)
     output = make_output(native_app, model)
     _a_colour_a_plate(paths, output)
     body = {
@@ -409,74 +714,6 @@ def test_one_plate_of_several_slices_with_only_its_own_slots(
         run = accept_and_wait(native_app, output, body)
 
     assert run["status"] == "succeeded", run
-
-
-def test_a_native_runs_plan_lays_the_overlay_over_its_trays(
-    native_app: TestClient,
-    model: str,
-    spans: InMemorySpanExporter,
-    fake_lan: FakeLan,
-    slicer: FakeSlicer,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """#4551: the run's plan reads its trays with the spool overlay the dialog lays over
-    them, so its low-filament warnings judge the provider's grams (`filaments.check`),
-    and it still asks Bambuddy nothing. The fake model's slots weigh nothing, so what is
-    checked is the overlay each plate's trays are gathered with."""
-    planning = False
-    gathered: list[Overlay | None] = []
-    plan = print_run.plan_run
-    gather = gather_plate_options
-
-    async def plan_spy(*args: Any, **kwargs: Any) -> Any:
-        nonlocal planning
-        planning = True
-        try:
-            return await plan(*args, **kwargs)
-        finally:
-            planning = False
-
-    async def gather_spy(*args: Any, **kwargs: Any) -> Any:
-        if planning:
-            gathered.append(kwargs.get("overlay"))
-        return await gather(*args, **kwargs)
-
-    monkeypatch.setattr(print_activities, "plan_run", plan_spy)
-    monkeypatch.setattr(print_run, "gather_plate_options", gather_spy)
-    row = lan_row(native_app, fake_lan)
-    overlay(native_app, remaining_g=0.5)
-
-    with forbid_bambuddy(spans, BASE):
-        _, _, filaments, run = _dialog_and_run(native_app, model, row)
-
-    tagged = next(spool for spool in filaments["spools"] if spool["spool_id"] == TAGGED)
-    assert tagged["remaining_g"] == 0.5
-    assert run["status"] == "succeeded", run
-    (laid,) = gathered
-    assert laid is not None
-    records = [record for tray in laid.trays for record in tray.records.values()]
-    assert [(r.record_id, r.remaining_g) for r in records] == [("16", 0.5)]
-
-
-def test_a_stale_overlay_still_prints(
-    native_app: TestClient,
-    model: str,
-    spans: InMemorySpanExporter,
-    fake_lan: FakeLan,
-    slicer: FakeSlicer,
-) -> None:
-    """AC4b: an overlay older than `SPOOL_OVERLAY_STALE` is trays only, with a note."""
-    row = lan_row(native_app, fake_lan)
-    overlay(native_app, at=datetime.now(UTC) - timedelta(minutes=31))
-
-    with forbid_bambuddy(spans, BASE):
-        _, _, filaments, run = _dialog_and_run(native_app, model, row)
-
-    assert filaments["source"] == "trays"
-    assert filaments["overlay_notes"], filaments
-    assert all(not spool.get("records") for spool in filaments["spools"])
-    assert run["status"] == "succeeded", run
-    assert is_native_id(run["result"]["library_file_id"])
 
 
 def test_a_stale_report_runs_the_bambuddy_path(
@@ -556,9 +793,9 @@ def test_the_dialogs_analysis_on_the_native_row_asks_bambuddy_nothing(
 ) -> None:
     """The dialog's analyzers are on AC1's path (#4629): with ``bambuddy_url`` set and
     Bambuddy answering nothing, a run for the native row reads its printer from the
-    registry, its trays from the LAN report and its spools from the overlay."""
+    registry, its trays from the LAN report and its spools from ScadBuddy's own (#6262)."""
     row = lan_row(native_app, fake_lan)
-    overlay(native_app)
+    held_spool(native_app)
     output = make_output(native_app, model)
     filaments = native_app.get(f"/api/v1/print/outputs/{output}/filaments", params={"printer": row})
     assert filaments.status_code == 200, filaments.text
@@ -586,7 +823,7 @@ def test_a_quote_for_the_native_row_asks_bambuddy_nothing(
     for a printer a run reaches over the LAN its background slices build no Bambuddy
     client, with ``bambuddy_url`` set."""
     row = lan_row(native_app, fake_lan)
-    overlay(native_app)
+    held_spool(native_app)
     output = make_output(native_app, model)
     filaments = native_app.get(f"/api/v1/print/outputs/{output}/filaments", params={"printer": row})
     assert filaments.status_code == 200, filaments.text
@@ -620,6 +857,33 @@ def _quote_body(client: TestClient, model: str, row: str) -> tuple[str, dict[str
     item = add_item(client, order["id"], output_id=output, quantity=1)
     path = f"/api/v1/orders/{order['id']}/items/{item['id']}/quote"
     return path, {**dialog, "filaments": {"0": pla, "1": petg}}
+
+
+def test_a_native_quote_slices_with_the_held_spools_preset(
+    native_app: TestClient,
+    model: str,
+    fake_lan: FakeLan,
+    slicer: FakeSlicer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6262 Task 9: a quote's background slice on a native printer resolves with the SB
+    spool in each tray and its presets, as the dialog's preview does, so its grams, time
+    and price come from the preset the print will use: the tagged tray's spool names its
+    own H2C 0.4 preset, over the tray's ``tray_info_idx``."""
+    row = lan_row(native_app, fake_lan)
+    _own_preset(native_app, held_spool(native_app))
+    planned = _preview_plans(monkeypatch)
+    path, body = _quote_body(native_app, model, row)
+    slicer.sliced = sliced_plate(1, 3600, [12.5, 3.0])
+
+    started = native_app.post(path, json=body, headers=press())
+    assert started.status_code == 202, started.text
+    op = follow_operation(native_app, started.json(), timeout=120, poll=0.2)
+
+    assert op["status"] == "succeeded", op
+    (run,) = planned
+    presets = [ref.id for ref in run.plates[0].plan.filament_presets]
+    assert presets[0] == "Generic PLA @BBL H2C", presets
 
 
 def test_a_quote_naming_a_disagreeing_printer_is_refused_before_it_starts(
@@ -663,7 +927,7 @@ def test_the_native_analysis_names_a_plan_spool_the_trays_do_not_hold(
 ) -> None:
     """#4634 review: a plan slot whose spool is in no tray is named, not dropped."""
     row = lan_row(native_app, fake_lan)
-    overlay(native_app)
+    held_spool(native_app)
     output = make_output(native_app, model)
     filaments = native_app.get(f"/api/v1/print/outputs/{output}/filaments", params={"printer": row})
     assert filaments.status_code == 200, filaments.text
@@ -750,7 +1014,7 @@ def test_a_native_run_without_bambuddy(
     A client built anywhere on the way is `client_for`'s 409, which fails the read or
     the run. A row that also links a Bambuddy printer is native all the same."""
     row = lan_row(native_app, fake_lan, bambuddy_printer_id=bambuddy_printer_id)
-    overlay(native_app)
+    held_spool(native_app)
 
     with forbid_bambuddy(spans, BASE):
         output, choices, filaments, run = _dialog_and_run(native_app, model, row)
@@ -789,8 +1053,6 @@ def test_the_dialog_reads_answer_without_bambuddy(
     filaments = native_app.get(f"/api/v1/print/outputs/{output}/filaments")
     assert filaments.status_code == 200, filaments.text
     assert filaments.json()["source"] == "trays"
-    # No Bambuddy, so no note that its spool records are missing (#4601).
-    assert filaments.json()["overlay_notes"] == []
     # The check judges the body alone; one naming no printer has nothing to judge.
     checked = native_app.post(
         f"/api/v1/print/outputs/{output}/check",
@@ -879,8 +1141,8 @@ def test_a_library_check_naming_no_printer_answers_without_bambuddy(
 @NO_BAMBUDDY
 @pytest.mark.parametrize(
     "path",
-    ["/api/v1/print/printers/1/camera", "/api/v1/farm/inventory", "/api/v1/print/projects"],
-    ids=["camera", "inventory", "projects"],
+    ["/api/v1/print/printers/1/camera", "/api/v1/farm/stats", "/api/v1/print/projects"],
+    ids=["camera", "stats", "projects"],
 )
 def test_bambuddy_only_routes_still_say_why(native_app: TestClient, path: str) -> None:
     """A route that is Bambuddy's by nature keeps `client_for`'s 409 naming Settings."""

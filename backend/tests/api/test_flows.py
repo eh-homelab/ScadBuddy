@@ -26,6 +26,7 @@ from scadbuddy.flows.images import blob_context
 from scadbuddy.flows.keys import payload_keys
 from scadbuddy.main import create_app
 from scadbuddy.workflows import payload_codec
+from tests.api.conftest import FakeAgentTools
 from tests.support.agent_tables import AGENT_KEY_MIGRATIONS
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
@@ -82,6 +83,24 @@ def test_a_bad_script_is_refused_by_line_and_nothing_is_written(client: TestClie
     )
     assert response.status_code == 422
     assert [p["line"] for p in response.json()["problems"]] == [3]
+    assert client.get("/api/v1/workflows").json() == []
+
+
+def test_a_script_naming_a_tool_the_agent_lacks_is_refused_and_nothing_is_written(
+    client: TestClient, agent_tools: FakeAgentTools
+) -> None:
+    """#6365: makerworld-import version 2 named `resolve_makerworld_url` a day before
+    any agent had it, and its run failed on that call; the registration refuses it."""
+    agent_tools.names = {"list_models"}
+    response = client.post(
+        "/api/v1/workflows",
+        json={
+            "name": "early",
+            "script": script("await tool('list_models', {})", "await tool('not_yet', {})"),
+        },
+    )
+    assert response.status_code == 422, response.text
+    assert [p["line"] for p in response.json()["problems"]] == [4]
     assert client.get("/api/v1/workflows").json() == []
 
 
@@ -569,28 +588,6 @@ def test_an_image_whose_key_is_gone_is_404(
     monkeypatch.setattr(payload_codec, "time", SimpleNamespace(monotonic=lambda: later))
     response = client.get(f"/api/v1/workflow-runs/{run_id}/images/{name}")
     assert response.status_code == 404
-
-
-def test_a_run_is_forgotten_before_the_agent_made_its_images_table(
-    client: TestClient, pg_conninfo: str
-) -> None:
-    """#2578: the backend may deploy before the agent migrated; forgetting still deletes
-    the key and the run."""
-    definition = register(client, script("return 1"))
-    run_id = start(client, definition["id"], "early").json()["id"]
-    until(client, run_id, lambda v: v["status"] == "succeeded")
-    # pg_conninfo is this test's own schema, created for it and dropped after it: a rename
-    # an interrupted test never undoes breaks no other test.
-    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
-        conn.execute("ALTER TABLE ai_flow_blobs RENAME TO ai_flow_blobs_later")
-        try:
-            assert client.delete(f"/api/v1/workflow-runs/{run_id}").status_code == 204
-        finally:
-            conn.execute("ALTER TABLE ai_flow_blobs_later RENAME TO ai_flow_blobs")
-        assert conn.execute(
-            "SELECT count(*) FROM ai_payload_keys WHERE subject = %s", (f"flow-{run_id}",)
-        ).fetchone() == (0,)
-    assert client.get(f"/api/v1/workflow-runs/{run_id}").status_code == 404
 
 
 class TestWithoutAKey:

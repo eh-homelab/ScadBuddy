@@ -1,5 +1,7 @@
 import type { Sql, TransactionSql } from 'postgres'
+import { CrudReadError } from '../api/crudRead.js'
 import type { EventLog } from '../sessions/eventLog.js'
+import type { GateRoutes, Logged } from './crudStore.js'
 import type { InputEntry, InputOutcome, Owner, ServerEvent } from '../sessions/protocol.js'
 import { responseHash } from './canonical.js'
 import { parseRequestId } from './ids.js'
@@ -34,6 +36,15 @@ import { type GateEntry, RespondRefusal, type Role, validateRespond } from './va
 // waiting, a resolution back to `running`) is a `session.message`, throttled per session like
 // any other (busEvents.ts); `scadbuddy_input` above is what a parked call waits on, and it is
 // not. Python sends its NOTIFY inside the transaction, at once, under the id `agent-durable`.
+//
+// Since #5299 step 10 the API runs each of these writes as one route and one transaction
+// (gate/crudStore.ts `CrudGate`, backend api/crud_agent_gate.py and agent_data/gate.py, the SQL
+// and the events below statement for statement) once it lists area `gate` (`GateDb.useCrud`);
+// the batches of events it appended come back with the answer and are told to the event log
+// then, as after a transaction here. Until then the SQL below runs, for an API pod older than
+// the routes (#5299 D9). The run grant's check (grantInput) reads the backend's `flow_grants`
+// and `flow_grant_uses`, whose grants the API took back from the agent's role, so it runs only
+// on the API, area or not.
 
 const PROTOCOL_VERSION = 1
 export const INPUT_CHANNEL = 'scadbuddy_input'
@@ -43,8 +54,21 @@ const APPROVAL_SUMMARY_MAX = 500 + 200 + 1
 
 export type Responder = { kind: string; id: string; label: string }
 
-/** Where the gate writes: the database, and the event log its session events go through. */
-export type GateDb = { sql: Sql; events: EventLog }
+/**
+ * Where the gate writes: the database, and the event log its session events go through; the
+ * API's routes (`crud`), used for every write while `useCrud` holds and always for a grant.
+ */
+export type GateDb = { sql: Sql; events: EventLog; crud?: GateRoutes; useCrud?: () => boolean }
+
+/** The routes, when the API serves the gate's area. */
+function routesOf(db: GateDb): GateRoutes | undefined {
+  return db.crud && db.useCrud?.() ? db.crud : undefined
+}
+
+/** Tells the event log of the batches a route's transaction appended, as `transaction` does after its commit. */
+function told(db: GateDb, logged: readonly Logged[]): void {
+  for (const l of logged) db.events.committed(l.session_id, l.events, l.seqs)
+}
 type Hop = { hop: string; action: string; actor: string; at: string; reason?: string }
 
 export type OpenInput = {
@@ -365,6 +389,12 @@ async function audit(
  * the read shows exactly one entry for the call.
  */
 export async function openInput(db: GateDb, args: OpenInput): Promise<boolean> {
+  const routes = routesOf(db)
+  if (routes) {
+    const { opened, logged } = await routes.open(args)
+    told(db, logged)
+    return opened
+  }
   await transaction(db, async (w) => {
     const { tx } = w
     // The session first, as every resolution takes it (lockSessionOf).
@@ -449,29 +479,16 @@ export async function openInput(db: GateDb, args: OpenInput): Promise<boolean> {
  * No entry, no events: nothing is listed and nobody is notified.
  */
 export async function grantInput(db: GateDb, args: GrantInput): Promise<boolean> {
-  const responder = runGrantResponder(args.grantId)
-  return await transaction(db, async ({ tx }) => {
-    const holds = await tx`
-      SELECT 1 FROM flow_grants g JOIN flow_grant_uses u ON u.grant_id = g.id
-      WHERE g.id = ${args.grantId} AND u.request_id = ${args.requestId} AND u.session_id = ${args.sessionId}
-        AND u.input_hash = ${args.inputHash} AND g.status = 'approved' AND g.revoked_at IS NULL
-        AND now() < g.expires_at
-      FOR SHARE OF g`
-    if (holds.length === 0) return false
-    const inserted = await tx`
-      INSERT INTO ai_input_responses (request_id, session_id, kind, outcome, responder)
-      VALUES (${args.requestId}, ${args.sessionId}, 'approval', 'approved', ${tx.json(responder)})
-      ON CONFLICT (request_id) DO NOTHING RETURNING request_id`
-    if (inserted.length === 0) {
-      // A retried activity: the same grant's approval is there already.
-      const [held] = await tx<{ outcome: string; responder: Responder }[]>`
-        SELECT outcome, responder FROM ai_input_responses WHERE request_id = ${args.requestId}`
-      if (held === undefined) return false
-      return held.outcome === 'approved' && sameResponder(held.responder, responder)
-    }
-    await audit(tx, { ...stand(args), created_at: new Date().toISOString() }, 'approved', responder, null)
-    return true
-  })
+  // The check, the response row and its audit row are one transaction on the API (#5299 step 10).
+  if (!db.crud) throw new Error("the run grant's check runs on the API (#5299 step 10), and the gate has no route to it")
+  try {
+    return await db.crud.grant(args)
+  } catch (err) {
+    // An API older than this agent (a roll that reached the agent first) has no such route: the
+    // call is not granted and parks for a person, as any call the grant does not cover.
+    if (err instanceof CrudReadError && !err.fromRoute && err.status === 404) return false
+    throw err
+  }
 }
 
 /**
@@ -480,6 +497,8 @@ export async function grantInput(db: GateDb, args: GrantInput): Promise<boolean>
  * already (a retried activity writes nothing twice).
  */
 export async function denyInput(db: GateDb, args: DenyInput): Promise<boolean> {
+  const routes = routesOf(db)
+  if (routes) return await routes.deny(args)
   const responder = flowResponder(args.runId)
   return await transaction(db, async ({ tx }) => {
     const inserted = await tx`
@@ -494,7 +513,7 @@ export async function denyInput(db: GateDb, args: DenyInput): Promise<boolean> {
   })
 }
 
-function stand(args: GrantInput | DenyInput): Omit<Audited, 'created_at'> {
+function stand(args: DenyInput): Omit<Audited, 'created_at'> {
   return {
     request_id: args.requestId,
     session_id: args.sessionId,
@@ -503,10 +522,6 @@ function stand(args: GrantInput | DenyInput): Omit<Audited, 'created_at'> {
     input_hash: args.inputHash,
     summary: args.summary,
   }
-}
-
-function sameResponder(a: Responder, b: Responder): boolean {
-  return a.kind === b.kind && a.id === b.id && a.label === b.label
 }
 
 /**
@@ -521,6 +536,12 @@ async function lockSessionOf(tx: TransactionSql, requestId: string): Promise<voi
 
 /** Resolves the entry; false when it was gone (resolved by another, or never opened). */
 export async function resolveInput(db: GateDb, args: ResolveInput): Promise<boolean> {
+  const routes = routesOf(db)
+  if (routes) {
+    const { resolved, logged } = await routes.resolve(args)
+    told(db, logged)
+    return resolved
+  }
   return await transaction(db, async (w) => {
     const { tx } = w
     await lockSessionOf(tx, args.requestId)
@@ -558,6 +579,8 @@ export type Decided = { kind: 'approval' | 'answer'; outcome: InputOutcome } | '
  * respond Update refused it `resolving` instead, a window the record no longer has.
  */
 export async function decideInput(db: GateDb, args: DecideInput): Promise<Decided> {
+  const routes = routesOf(db)
+  if (routes) return await decideOnApi(db, routes, args)
   return await transaction(db, async (w) => {
     const { tx } = w
     await lockSessionOf(tx, args.requestId)
@@ -582,12 +605,49 @@ export async function decideInput(db: GateDb, args: DecideInput): Promise<Decide
   })
 }
 
+/** How many times decideOnApi asks again after finding a run live: a run that changes between asks is a Reset's. */
+const LIVE_CHECKS = 3
+
+/**
+ * decideInput on the API (#5299 step 10): the validator and the write under the row's lock there.
+ * With `live`, the API first answers which run the row is of, writing nothing; this asks Temporal,
+ * and asks the API again naming the run it found running, which then writes only if the row is
+ * still of that run. So a response the validator refuses still costs no call to Temporal.
+ */
+async function decideOnApi(db: GateDb, routes: GateRoutes, args: DecideInput): Promise<Decided> {
+  let liveRun: string | undefined
+  for (let ask = 0; ask <= LIVE_CHECKS; ask++) {
+    const answer = await routes.decide({
+      requestId: args.requestId,
+      response: args.response,
+      responder: args.responder,
+      role: args.role,
+      checkLive: args.live !== undefined,
+      ...(liveRun === undefined ? {} : { liveRun }),
+    })
+    if ('refused' in answer) throw new RespondRefusal(answer.refused.code, answer.refused.message)
+    if ('workflow' in answer) return 'workflow'
+    if ('decided' in answer) {
+      told(db, answer.logged)
+      return answer.decided
+    }
+    const { workflowId, runId } = answer.liveCheck
+    if (!args.live || !(await args.live(workflowId, runId))) {
+      throw new RespondRefusal('stale', `no pending input ${args.requestId}: its session's workflow run has ended`)
+    }
+    liveRun = runId
+  }
+  throw new RespondRefusal('stale', `no pending input ${args.requestId}: its session's workflow run kept changing`)
+}
+
 /** A request's resolution as its response row records it: what the workflow's `gate.read_input` returns. */
 export type InputRecord = { outcome: InputOutcome; response: unknown; responder: Responder; reason: string | null }
 
 /** The response row of `requestId`, or null while the request is open (or was never asked). */
-export async function readInput(sql: Sql, args: { requestId: string }): Promise<InputRecord | null> {
-  const [row] = await sql<InputRecord[]>`
+export async function readInput(db: GateDb, args: { requestId: string }): Promise<InputRecord | null> {
+  const routes = routesOf(db)
+  if (routes) return await routes.read(args.requestId)
+  const [row] = await db.sql<InputRecord[]>`
     SELECT outcome, response, responder, reason FROM ai_input_responses WHERE request_id = ${args.requestId}`
   return row ?? null
 }

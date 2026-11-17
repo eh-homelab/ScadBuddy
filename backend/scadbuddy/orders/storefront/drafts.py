@@ -1,18 +1,19 @@
 """A visitor's draft order (#5282, spec 2026-11-02 §5.4, plan Task 8).
 
-The draft is the visitor's cart: an order with ``source = 'storefront'``, no number and
-no customer until it is submitted (`Lifecycle.ensure_draft`). `add_listing_item` checks
-the visitor's values against the listing, never trusting the edge
-(`renders.py` `checked_choice`), and adds a model item with revision 1 from the listing's
-snapshot, titled as the listing, and records the names of the parameters the listing
-offered: the draft shows only those values, never the listing's locks or the template's
-other defaults. A draft holds at most `MAX_DRAFT_ITEMS` items. The add runs in one
-transaction with its ``Idempotency-Key``'s ledger row (`idempotent_write`), so a request
-the edge sends again after a lost answer adds one item. Each write looks up its key before
-any other work (`stored`): a retry of a write that committed answers with the order that
-write named, whatever changed since, and checks or makes nothing. `remove_item` does the
-same for a delete. The bus is told after the commit, of the order as the transaction left
-it.
+The draft is the visitor's cart: an order with ``source = 'storefront'``, no number and no
+customer until it is submitted (`Lifecycle.ensure_draft`). `add_listing_item` checks the
+visitor's values against the listing, never trusting the edge (`renders.py`
+`checked_choice`), and adds a model item with revision 1 from the listing's snapshot,
+titled as the listing, and records the names of the parameters the listing offered: the
+draft shows only those values, never the listing's locks or the template's other defaults.
+The add reads the line's firm price by its variant's key (`line_prices.py`, #6153), never
+from the browser, and the view shows it, or no number when the shop prices the line by
+hand. A draft holds at most `MAX_DRAFT_ITEMS` items. The add runs in one transaction with
+its ``Idempotency-Key``'s ledger row (`idempotent_write`), so a request the edge sends
+again after a lost answer adds one item. Each write looks up its key before any other work
+(`stored`): a retry of a write that committed answers with the order that write named,
+whatever changed since, and checks or makes nothing. `remove_item` does the same for a
+delete. The bus is told after the commit, of the order as the transaction left it.
 
 `add_request` adds a design request: a ``request`` item whose notes are the visitor's text,
 with each file as a ``reference`` attachment. What a file is comes from its bytes
@@ -50,6 +51,7 @@ from scadbuddy.orders.lifecycle import LifecycleError, NewModelItem, NewRequestI
 from scadbuddy.orders.models import Attachment, AttachmentKind, Order, OrderItem
 from scadbuddy.orders.store import item_subject
 from scadbuddy.orders.storefront.limits import RenderLimits
+from scadbuddy.orders.storefront.line_prices import LinePrices, price_of, variant_at_add
 from scadbuddy.orders.storefront.listings import PUBLIC_MEDIA_TTL, problem, public_content
 from scadbuddy.orders.storefront.model_requests import (
     checked_purchase_links,
@@ -261,6 +263,7 @@ async def _view(state: AppState, order: Order) -> DraftView:
         )
 
     rows, offered, files, listings, shipping, currency = await asyncio.to_thread(read)
+    prices = await asyncio.to_thread(LinePrices(state.projection.pool).of_order, order.id)
     sources = (
         await asyncio.to_thread(draft_sources, state, order.id)
         if any(item.kind == "request" for item in rows)
@@ -287,6 +290,14 @@ async def _view(state: AppState, order: Order) -> DraftView:
                         url=url,
                     )
                 )
+        line = prices.get(item.id)
+        firm = (
+            item.kind == "model"
+            and line is not None
+            and line.unit_price_minor is not None
+            and line.currency == currency
+        )
+        unit = line.unit_price_minor if firm and line is not None else None
         items.append(
             DraftItem(
                 id=item.id,
@@ -299,6 +310,9 @@ async def _view(state: AppState, order: Order) -> DraftView:
                 attachments=attachments,
                 own_model=sources.get(item.id, (False, []))[0],
                 sources=sources.get(item.id, (False, []))[1],
+                price="firm" if unit is not None else "by_hand",
+                unit_price_minor=unit,
+                total_minor=None if unit is None else unit * item.quantity,
             )
         )
     return DraftView(
@@ -307,6 +321,7 @@ async def _view(state: AppState, order: Order) -> DraftView:
         minor_exponent=minor_exponent(currency),
         items=items,
         shipping_options=shipping,
+        pay_now=bool(items) and all(item.price == "firm" for item in items),
     )
 
 
@@ -362,7 +377,8 @@ async def get_draft(state: AppState, visitor_id: str) -> DraftView | None:
 
 async def _render_colours(state: AppState, visitor_id: str, render_key: str) -> list[str] | None:
     """The slot colours of the visitor's own done render of ``render_key``, or None when
-    it has none (#6152): the add fills each slot the page left out from the picks."""
+    it has none (#6152): the add fills each slot the page left out with the filament of
+    its colour in the resolved material (#6258)."""
 
     def read() -> list[str] | None:
         visitor = VisitorStore(state.projection.pool).find(visitor_id)
@@ -389,19 +405,34 @@ async def add_listing_item(
     add: a model item with revision 1, titled as the listing. A retry of a committed add
     (the same key) answers its order as it is now and does nothing else. Refusals: 404
     ``listing_not_found``, 409 ``listing_changed``, 422 ``input_outside_listing`` (with
-    ``name`` and ``reason``), 422 ``listing_mixed_material``, 422 ``pick_colour_clash``
-    (with ``name``), 409 ``render_pending`` (`checked_choice`, #6152), 422
-    ``draft_full``, 409 ``draft_changed``."""
+    ``name`` and ``reason``), 422 ``listing_colours_clash`` (with ``parts``), 409
+    ``render_pending`` (`checked_choice`, #6152, #6258), 422 ``draft_full``, 409
+    ``draft_changed``. Each slot takes the filament of its colour in the one material
+    the visitor's colours resolve to (`inputs.py` `resolve_choice`)."""
     orders = _orders(state)
     asked = {"visitor": token_sha256(visitor_id), **body.model_dump(mode="json")}
     reply = await asyncio.to_thread(_stored, state, key, ADD_ROUTE, asked)
     if reply is not None:
         return await _answer(state, visitor_id, reply)
-    listing, resolved = await checked_choice(
-        orders, body, render_colours=lambda key: _render_colours(state, visitor_id, key)
+    shop = await asyncio.to_thread(lambda: state.settings_store.snapshot().runtime)
+    listing, resolved, choice = await checked_choice(
+        orders,
+        body,
+        shop.storefront_materials,
+        render_colours=lambda key: _render_colours(state, visitor_id, key),
     )
     visitor = await asyncio.to_thread(VisitorStore(state.projection.pool).ensure, visitor_id)
     by = visitor_actor(visitor)
+    # The line's firm price, read by its variant's key (#6153): never the browser's.
+    variant = await variant_at_add(
+        state,
+        visitor_id=visitor.id,
+        listing=listing,
+        render_key=resolved.reference.render_key,
+        colours=body.colours,
+        material=choice.material,
+    )
+    price = None if variant is None else await price_of(state, resolved.reference, variant)
     currency = await asyncio.to_thread(lambda: orders.price_book.policy()[0])
     entry = NewModelItem(
         resolved=resolved,
@@ -420,6 +451,8 @@ async def add_listing_item(
             # Under the order's lock, which the add took: a full draft takes nothing.
             if len(orders.store.items(draft.id, conn=conn)) > MAX_DRAFT_ITEMS:
                 raise draft_full()
+            if variant is not None:
+                LinePrices.record(conn, items[0].id, variant, price)
             order = orders.store.order(draft.id, conn=conn)
             assert order is not None
             changes.append((order, items))

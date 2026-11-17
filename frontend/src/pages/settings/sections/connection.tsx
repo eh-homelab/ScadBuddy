@@ -17,6 +17,7 @@ import { useSettingsConnectionAgent, useSettingsAgentField } from '../agentField
 import { useBambuddyResources } from '../bambuddyResources'
 import { useSettingsCache } from '../cache'
 import { FieldRow } from '../controls'
+import { docOf } from '../fields'
 import { FieldBadge, SavedSection } from '../formParts'
 import type { AreaId } from '../registry'
 import { useBackendSettings } from '../useBackendSettings'
@@ -159,7 +160,7 @@ export function Component() {
         </p>
       )}
 
-      <FieldRow id="bambuddy-url" label="Bambuddy URL" badge={<FieldBadge form={form} name="bambuddy_url" />} error={errors.bambuddy_url}>
+      <FieldRow id="bambuddy-url" {...docOf(form.settings, 'bambuddy_url')} badge={<FieldBadge form={form} name="bambuddy_url" />} error={errors.bambuddy_url}>
         <Input
           id="bambuddy-url"
           type="url"
@@ -172,10 +173,9 @@ export function Component() {
 
       <FieldRow
         id="bambuddy-web-urls"
-        label="Bambuddy web URLs"
+        {...docOf(form.settings, 'bambuddy_web_urls')}
         badge={<FieldBadge form={form} name="bambuddy_web_urls" />}
         error={errors.bambuddy_web_urls}
-        help="Where browsers reach Bambuddy, when the URL above is one only ScadBuddy's server can. Comma-separated: links use the first, or whichever of them ScadBuddy is opened inside."
       >
         <Input
           id="bambuddy-web-urls"
@@ -189,10 +189,9 @@ export function Component() {
 
       <FieldRow
         id="bambuddy-key"
-        label="API key"
+        {...docOf(form.settings, 'bambuddy_api_key')}
         badge={<FieldBadge form={form} name="bambuddy_api_key" />}
         error={errors.bambuddy_api_key}
-        help="Needs Read Status, Manage Library and Manage Queue; Manage Projects for projects, Manage Archives for print photos and Manage Inventory to record a tray's spool."
       >
         <div className="flex gap-2">
           <Input
@@ -225,10 +224,9 @@ export function Component() {
 
       <FieldRow
         id="bambuddy-render-key"
-        label="Render key"
+        {...docOf(form.settings, 'bambuddy_render_api_key')}
         badge={<FieldBadge form={form} name="bambuddy_render_api_key" />}
         error={errors.bambuddy_render_api_key}
-        help="A second key with Manage Library only. Render workers run template code and hold this key alone."
       >
         <div className="flex gap-2">
           <Input
@@ -272,10 +270,9 @@ export function Component() {
 
       <FieldRow
         id="public-url"
-        label="ScadBuddy’s own URL"
+        {...docOf(form.settings, 'public_url')}
         badge={<FieldBadge form={form} name="public_url" />}
         error={errors.public_url}
-        help="What Bambuddy links to. ScadBuddy cannot infer it — it sits behind a proxy."
       >
         <Input
           id="public-url"

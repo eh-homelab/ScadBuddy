@@ -21,11 +21,18 @@ export function acceptOperation(
   kind: Operation['kind'],
   subject: string,
   result: NonNullable<Operation['result']>,
+  /** #6324 — the run's failure instead: the operation ends `failed` with this 409 detail. */
+  failure?: string,
 ): HttpResponse<OperationAccepted> {
   const created = new Date().toISOString()
   const id = `op${(++nextOperation).toString(16).padStart(30, '0')}`
   const op = { id, kind, subject, status: 'running', created_at: created } as const
-  operations.set(id, { ...op, status: 'succeeded', finished_at: created, result: { ...result } })
+  operations.set(
+    id,
+    failure === undefined
+      ? { ...op, status: 'succeeded', finished_at: created, result: { ...result } }
+      : { ...op, status: 'failed', finished_at: created, error: { type: 'about:blank', title: 'Conflict', status: 409, detail: failure } },
+  )
   return HttpResponse.json({ ...op, repeated: false }, { status: 202 })
 }
 

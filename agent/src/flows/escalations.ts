@@ -6,10 +6,13 @@ import { DurableUnavailable, type RespondArgs, type RespondOutcome } from '../ga
 import { parseRequestId } from '../gate/ids.js'
 import { isUuid } from '../harness/stateDirs.js'
 import { wrapUntrustedText } from '../safety/untrusted.js'
-import { type FlowRunReads, type ParentHopCursor, SqlFlowRunReads, STILL_WAITING_BATCH } from './backendReads.js'
+import { type FlowRunReads, type ParentHopCursor, STILL_WAITING_BATCH } from './backendReads.js'
+import type { EscalationRoutes, SessionCalls } from './crudEscalations.js'
 import { childReasoning, childStep, FlowQueue, ownStep, type QueueStep } from './queue.js'
 import { SessionError } from '../sessions/manager.js'
 import type { Owner } from '../sessions/protocol.js'
+import { PgSessionRows, type SessionRow, type SessionRows } from '../sessions/rows.js'
+import { PgSessionReads, type SessionReads } from '../sessions/sessionReads.js'
 import { principalHeader } from '../tools/authorship.js'
 
 // A flow run's calls outside its grant, at the starting session (#2482, spec 2026-10-11
@@ -39,8 +42,8 @@ export type EscalationSend = (sessionId: string, owner: Owner, text: string, tie
 
 export type EscalationDeps = {
   sql: Sql
-  /** The backend's flow tables (backendReads.ts, #5299 D7); its SQL on `sql` by default. */
-  reads?: FlowRunReads | undefined
+  /** The backend's flow tables, through its CRUD routes (backendReads.ts, #5299 D7). */
+  reads: FlowRunReads
   /** The durable gate, when Temporal is configured. */
   durable: () => EscalationDurable | undefined
   /** How a delivery turn starts; without it nothing is delivered. */
@@ -59,6 +62,12 @@ export type EscalationDeps = {
    * token store over `sql`.
    */
   currentTiers?: ((owner: Owner) => Promise<readonly Tier[] | undefined>) | undefined
+  /** The API's routes, once it lists area `escalations` (#5299 step 10); the SQL above until then. */
+  routes?: { crud: EscalationRoutes; use: () => boolean } | undefined
+  /** The sessions' rows, for a parent's owner (`gated` in main.ts; `PgSessionRows` on `sql` when omitted). */
+  sessions?: Pick<SessionRows, 'get'> | undefined
+  /** A child's reasoning (`gated` in main.ts; `PgSessionReads` on `sql` when omitted). */
+  sessionReads?: Pick<SessionReads, 'reasoningDeltas'> | undefined
 }
 
 export const CLAIM_HOLD_MS = 30_000
@@ -150,6 +159,15 @@ async function withinHold(started: Promise<void>, ms: number): Promise<void> {
   }
 }
 
+/** `calls` as the API's routes take them: a child's (`durable:`) and a run's own. */
+function callsOf(session: string, calls: readonly Waiting[]): SessionCalls {
+  return {
+    session,
+    child: calls.filter((c) => c.child_session !== undefined).map((c) => c.request_id),
+    own: calls.filter((c) => c.child_session === undefined).map((c) => c.request_id),
+  }
+}
+
 /** One step of an entry's way up (`hops`, spec §4.6). */
 function step(action: string, actor: string, reason?: string): Record<string, string> {
   return { hop: 'parent', action, actor, at: new Date().toISOString(), ...(reason ? { reason } : {}) }
@@ -160,12 +178,22 @@ export class Escalations {
   readonly #queue: FlowQueue
   readonly #reads: FlowRunReads
   readonly #currentTiers: (owner: Owner) => Promise<readonly Tier[] | undefined>
+  readonly #sessions: Pick<SessionRows, 'get'>
+  readonly #sessionReads: Pick<SessionReads, 'reasoningDeltas'>
 
   constructor(deps: EscalationDeps) {
     this.#deps = deps
-    this.#reads = deps.reads ?? new SqlFlowRunReads(deps.sql)
-    this.#queue = new FlowQueue(deps.sql, this.#reads)
+    this.#reads = deps.reads
+    this.#sessions = deps.sessions ?? new PgSessionRows(deps.sql)
+    this.#sessionReads = deps.sessionReads ?? new PgSessionReads(deps.sql)
+    this.#queue = new FlowQueue(deps.sql, this.#reads, deps.routes, this.#sessionReads)
     this.#currentTiers = deps.currentTiers ?? liveTokenTiers(new PostgresTokenStore(deps.sql))
+  }
+
+  /** The API's routes once it lists area `escalations`, else undefined (the SQL). */
+  get #crud(): EscalationRoutes | undefined {
+    const routes = this.#deps.routes
+    return routes?.use() ? routes.crud : undefined
   }
 
   /**
@@ -195,6 +223,11 @@ export class Escalations {
       throw new EscalationError(422, "an agent tool's call is never narrowed: deny it, or pass it up to the person")
     }
     const actor = `session:${caller.session}`
+    const crud = this.#crud
+    if (action === 'pass_up' && crud) {
+      if (!(await crud.passUp(requestId, caller.session, options.reason))) throw new EscalationError(409, await this.#lost(requestId))
+      return { request_id: requestId, outcome: 'passed_up' }
+    }
     if (action === 'pass_up') {
       const moved = await this.#deps.sql`
         UPDATE ai_pending_input
@@ -214,19 +247,25 @@ export class Escalations {
     // the deny does not land, and a passed one is then moved by the next sweep. A claim
     // no release ever ends (the process died, or the release threw) is the person's once
     // it is older than `CLAIM_LEASE` (review #3018).
-    const [claim] = await this.#deps.sql<{ hop_until: Date }[]>`
-      UPDATE ai_pending_input p SET hop_until = 'infinity', hop_claimed_at = now()
-      FROM (SELECT request_id, hop_until FROM ai_pending_input WHERE request_id = ${requestId} FOR UPDATE) old
-      WHERE p.request_id = old.request_id AND p.hop = 'parent' AND p.parent_session = ${caller.session}::uuid
-        AND p.hop_until > now() AND p.hop_until <> 'infinity'
-      RETURNING old.hop_until`
+    const session = caller.session
+    const [claim] = crud
+      ? await crud.claimDeny(requestId, session).then((at) => (at === undefined ? [] : [{ hop_until: at }]))
+      : await this.#deps.sql<{ hop_until: Date }[]>`
+          UPDATE ai_pending_input p SET hop_until = 'infinity', hop_claimed_at = now()
+          FROM (SELECT request_id, hop_until FROM ai_pending_input WHERE request_id = ${requestId} FOR UPDATE) old
+          WHERE p.request_id = old.request_id AND p.hop = 'parent' AND p.parent_session = ${session}::uuid
+            AND p.hop_until > now() AND p.hop_until <> 'infinity'
+          RETURNING old.hop_until`
     if (!claim) throw new EscalationError(409, await this.#lost(requestId))
     // Safe on any outcome, an entry the workflow already resolved included: it writes
     // only a row still holding this claim (`hop_until = 'infinity'`), so keep that in
     // the WHERE (review #3018).
-    const release = () => this.#deps.sql`
-      UPDATE ai_pending_input SET hop_until = ${claim.hop_until}, hop_claimed_at = NULL
-      WHERE request_id = ${requestId} AND hop = 'parent' AND hop_until = 'infinity'`
+    const release = async () => {
+      if (crud) return await crud.releaseDeny(requestId, session, claim.hop_until)
+      await this.#deps.sql`
+        UPDATE ai_pending_input SET hop_until = LEAST(${claim.hop_until}::timestamptz, expires_at), hop_claimed_at = NULL
+        WHERE request_id = ${requestId} AND hop = 'parent' AND parent_session = ${session}::uuid AND hop_until = 'infinity'`
+    }
     let out: RespondOutcome
     try {
       // The child's workflow validates it as role `parent`: an approval of a run's call,
@@ -257,6 +296,8 @@ export class Escalations {
    * one a deny claimed more than `CLAIM_LEASE` ago and never released (review #3018).
    */
   async moveDue(): Promise<number> {
+    const crud = this.#crud
+    if (crud) return await crud.moveDue()
     const moved = await this.#deps.sql`
       UPDATE ai_pending_input
       SET hop = 'person', hop_until = NULL, hop_claimed_at = NULL,
@@ -289,7 +330,8 @@ export class Escalations {
     const pastGrace = new Set<string>()
     // Each session's oldest entry before any session's second: a backlog of one busy
     // session's entries never holds another session's out of the batch.
-    for (const r of await this.#deps.sql<
+    const crud = this.#crud
+    for (const r of crud ? await crud.waiting(UNLOGGED_GRACE_MS / 1000) : await this.#deps.sql<
       {
         request_id: string
         flow_run_id: string
@@ -349,9 +391,6 @@ export class Escalations {
         await this.#skip(session, calls)
         continue
       }
-      // The claim and the turn are one transaction: a process that dies before the turn
-      // started leaves nothing claimed, and the next tick sends them. A concurrent replica
-      // skips the rows this one holds.
       // A child's reasoning, read before the claim: a durable child's call whose
       // `tool.call` is not logged yet (`follow_session` writes it a moment later) waits for
       // a later tick rather than go up with none, since it is sent only once. Past
@@ -360,7 +399,7 @@ export class Escalations {
       await Promise.all(
         calls.map(async (c) => {
           if (c.child_session === undefined) return
-          const text = await childReasoning(this.#deps.sql, c.request_id)
+          const text = await childReasoning(this.#sessionReads, c.request_id)
           if (text !== undefined) reasoning.set(c.request_id, text)
           // Postgres's clock both stamps `created_at` and judges the grace (#3411): a
           // replica's skewed clock neither shortens nor stretches it.
@@ -369,6 +408,17 @@ export class Escalations {
       )
       const ready = calls.filter((c) => c.child_session === undefined || reasoning.has(c.request_id))
       if (ready.length === 0) continue
+      if (crud) {
+        try {
+          delivered += await this.#deliverThroughApi(crud, session, owner, ready, reasoning)
+        } catch (err) {
+          failures.push(err)
+        }
+        continue
+      }
+      // On the SQL path the claim and the turn are one transaction: a process that dies before
+      // the turn started leaves nothing claimed, and the next tick sends them. A concurrent
+      // replica skips the rows this one holds.
       let claimed: Waiting[] = []
       try {
         await this.#deps.sql.begin(async (tx) => {
@@ -398,6 +448,59 @@ export class Escalations {
   }
 
   /**
+   * One session's delivery through the API: the claim is committed there before the turn
+   * starts, so it cannot roll back with the turn as the SQL's did. A turn that does not start
+   * hands the claim back (`unclaim`), and a later tick sends the calls; a session that cannot be
+   * asked has them skipped, as the SQL's rollback then skip did. A process that dies between
+   * the claim and the turn leaves the calls marked sent: each still reaches the person when its
+   * hop ends, so the parent's turn is lost, never the call.
+   */
+  async #deliverThroughApi(
+    crud: EscalationRoutes,
+    session: string,
+    owner: { owner: Owner; tiers: Tier[] },
+    ready: Waiting[],
+    reasoning: ReadonlyMap<string, string>,
+  ): Promise<number> {
+    const send = this.#deps.send!
+    const won = new Set(await crud.claim(callsOf(session, ready)))
+    const claimed = ready.filter((c) => won.has(c.request_id))
+    if (claimed.length === 0) return 0
+    for (const c of claimed) {
+      const text = reasoning.get(c.request_id)
+      if (text !== undefined) c.reasoning = text
+    }
+    const text = `${DELIVERY_PREAMBLE}\n\n${wrapUntrustedText('escalation', 'flow runs this session started', JSON.stringify(claimed))}`
+    try {
+      await withinHold(send(session, owner.owner, text, owner.tiers), this.#deps.claimHoldMs ?? CLAIM_HOLD_MS)
+    } catch (err) {
+      if (err instanceof SessionError && err.code !== 'busy' && err.code !== 'unavailable') {
+        try {
+          await crud.skip(callsOf(session, claimed))
+        } catch (lost) {
+          // As a failed hand back below: the calls stay marked sent and reach the person when
+          // their hop ends; say why the parent's turn never happened.
+          console.error(`escalations: session ${session} cannot be asked (${err.code}), and its calls were not passed to the person`)
+          throw lost
+        }
+        return 0
+      }
+      try {
+        await crud.unclaim(callsOf(session, claimed))
+      } catch (lost) {
+        // The calls stay marked sent (each still reaches the person when its hop ends); say
+        // why the turn did not start before the hand back's own error replaces it.
+        console.error(`escalations: session ${session}'s delivery turn did not start (${err instanceof Error ? err.message : String(err)}), and its claim was not handed back`)
+        throw lost
+      }
+      // Busy, or this replica cannot start a turn yet: a later tick sends them.
+      if (err instanceof SessionError) return 0
+      throw err
+    }
+    return claimed.length
+  }
+
+  /**
    * Forgets the delivery record of a run's own call once it no longer waits at hop
    * `parent` (decided, passed up, or its run gone), so `ai_escalation_deliveries` holds
    * only calls still with a starter session. A record is never removed while its call
@@ -411,18 +514,22 @@ export class Escalations {
   async #prune(): Promise<void> {
     // A batch at a time, by request id: memory and each ask stay bounded however many there are.
     let after = ''
+    const crud = this.#crud
     for (;;) {
-      const held = (
-        await this.#deps.sql<{ request_id: string }[]>`
-          SELECT request_id FROM ai_escalation_deliveries WHERE request_id > ${after}
-           ORDER BY request_id LIMIT ${STILL_WAITING_BATCH}`
-      ).map((r) => r.request_id)
+      const held = crud
+        ? await crud.deliveries(after, STILL_WAITING_BATCH)
+        : (
+            await this.#deps.sql<{ request_id: string }[]>`
+              SELECT request_id FROM ai_escalation_deliveries WHERE request_id > ${after}
+               ORDER BY request_id LIMIT ${STILL_WAITING_BATCH}`
+          ).map((r) => r.request_id)
       if (held.length === 0) return
       const waiting = await this.#reads.stillAtParentHop(held)
       // A deployment without flows has no `workflow_runs`, and so no records either.
       if (waiting === undefined) return
       const gone = held.filter((id) => !waiting.has(id))
-      if (gone.length) await this.#deps.sql`DELETE FROM ai_escalation_deliveries WHERE request_id = ANY(${gone})`
+      if (gone.length && crud) await crud.forget(gone)
+      else if (gone.length) await this.#deps.sql`DELETE FROM ai_escalation_deliveries WHERE request_id = ANY(${gone})`
       if (held.length < STILL_WAITING_BATCH) return
       after = held.at(-1)!
     }
@@ -442,10 +549,13 @@ export class Escalations {
     do {
       const page = await this.#reads.parentHopApprovals(after, DELIVERY_RUNS)
       const ids = page.runs.flatMap((run) => run.calls.map((w) => `flow:${run.id}:${run.workflow_run_id}:${w.call_id}`))
+      const crud = this.#crud
       const sent = new Set(
         ids.length === 0
           ? []
-          : (
+          : crud
+            ? await crud.sent(ids)
+            : (
               await this.#deps.sql<{ request_id: string }[]>`
                 SELECT request_id FROM ai_escalation_deliveries WHERE request_id = ANY(${ids})`
             ).map((r) => r.request_id),
@@ -486,8 +596,7 @@ export class Escalations {
    * principal that owned the session when it parked; only entries naming this one are its.
    */
   async #parentOwner(session: string): Promise<{ owner: Owner; principal: string; tiers: Tier[] } | undefined> {
-    const [row] = await this.#deps.sql<{ owner_kind: Owner['kind']; owner_id: string; owner_label: string }[]>`
-      SELECT owner_kind, owner_id, owner_label FROM ai_sessions WHERE id = ${session}::uuid AND archived_at IS NULL`
+    const row = await this.#liveSession(session)
     if (!row) return undefined
     const owner: Owner = { kind: row.owner_kind, id: row.owner_id, label: row.owner_label }
     const principal = principalHeader(row.owner_id)
@@ -534,6 +643,8 @@ export class Escalations {
    * grouped it under (a record of a run gone since goes at the next prune).
    */
   async #skip(session: string, calls: Waiting[]): Promise<void> {
+    const crud = this.#crud
+    if (crud) return await crud.skip(callsOf(session, calls))
     const child = calls.filter((c) => c.child_session !== undefined).map((c) => c.request_id)
     if (child.length) {
       await this.#deps.sql`
@@ -568,6 +679,8 @@ export class Escalations {
   }
 
   async #entry(requestId: string): Promise<Entry | undefined> {
+    const crud = this.#crud
+    if (crud) return await crud.entry(requestId)
     const [row] = await this.#deps.sql<Entry[]>`
       SELECT session_id::text, hop, coalesce(hop_until <= now(), false) AS due, coalesce(hop_until = 'infinity', false) AS claimed,
              parent_session::text, parent_principal
@@ -580,11 +693,17 @@ export class Escalations {
     return (await this.#entry(requestId))?.claimed ? DENY_IN_FLIGHT : WITH_PERSON
   }
 
+  /** The session's row while it is not archived; a throw for an id that is no UUID, as the SQL's cast threw. */
+  async #liveSession(session: string): Promise<SessionRow | undefined> {
+    if (!isUuid(session)) throw new Error(`session ${JSON.stringify(session)} is not a session id`)
+    const row = await this.#sessions.get(session)
+    return row && row.archived_at === null ? row : undefined
+  }
+
   /** The caller's session is the parent, still owned by the run's starter, and the caller is its owner. */
   async #authorise(caller: EscalationCaller, parentSession: string, parentPrincipal: string): Promise<void> {
     if (caller.session !== parentSession) throw new EscalationError(403, NOT_PARENT)
-    const [owner] = await this.#deps.sql<{ owner_kind: string; owner_id: string }[]>`
-      SELECT owner_kind, owner_id FROM ai_sessions WHERE id = ${parentSession}::uuid AND archived_at IS NULL`
+    const owner = await this.#liveSession(parentSession)
     // Kind and id, as PendingProjection matches an owner (#2861): an id alone could name
     // another kind's principal.
     const who = ownerOf(caller.principal)

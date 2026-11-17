@@ -77,18 +77,61 @@ customize page "horrible". A Playwright walk on 2026-11-13 confirmed each point:
   Why picks and not slots: the slot order is known only after the render, and a hex
   alone cannot tell PLA from PETG.
 
+- **As built since #6258 (replaces `one_material` and `picks`).** One material per print
+  is always on. `ListingInput.materials: list[str]` holds the allowed materials in the
+  shop's order (casefolded, at most 16, repeats dropped); empty is the shop's default,
+  the live setting `storefront_materials` (default `["PETG", "PLA"]`).
+  `PublicListing.materials` is the effective list, and the public listing offers only
+  filaments of those materials. `picks` goes from `RenderBody` and `AddListingItem`: a
+  pick is the colour in `values`. `inputs.py` `resolve_choice` is the one rule the
+  render, the estimate and the add use: the colours the request gives fix the material
+  (the first allowed one that offers each of them, and of those the first that also
+  offers every untouched part's default, #6302 review); a colour it does not give keeps
+  the listing's default when that material offers it, else takes the closest colour the
+  material offers (`closest_colour.py`, CIEDE2000 with alpha, pinned by
+  `test-fixtures/storefront/closest-colour.json`). A default the request does not give is
+  never refused for its material: it moves. The start of a render answers the colour
+  values it settled (`StoreRender.values`, never the material), and the page shows them
+  for the parts the visitor did not set, and only while the visitor's choices are the ones
+  that start answered. Until then (and after a refused or failed start) the page shows its
+  own prediction of the same rule (`storefront/colours.ts` `colourPlan`, with the TS twin
+  `storefront/closestColour.ts`, which passes the same vectors); the reply wins over it.
+  The page sends only the visitor's own colours, never a moved one. Colours of no one material are 422
+  `listing_colours_clash` with `parts` (the visitor's colours and slots only). One rule
+  says which materials count (#6302 review): `inputs.py` `printable_materials`, the
+  allowed materials that offer each colour the shop locked (support aside) and a choice
+  of each offered colour parameter. The render chooses only among them, the public
+  listing and its card offer only their filaments and colours, and the prepare run
+  enumerates only them. Each slot takes the chosen material's filament of its colour.
+  Publish refuses a listing filament of a material it does not allow (422
+  `listing_material_not_allowed`; support filaments are not checked), and a listing with
+  no printable material (422 `listing_locked_colours_unprintable` with the locked
+  `names`). A listing that has none since (published before that check, or after the
+  materials or the price book changed) renders as 409 `listing_unavailable`, and its card
+  and page say `available: false`. Materials compare trimmed and casefolded. The render row
+  keeps the resolved `material`, which the estimate prices by. The back office sets a
+  listing's list in the editor's "Materials allowed" (an empty list shows as the shop's
+  default, with a way to choose the listing's own) and ticks its colours per allowed
+  material in "Colours on offer"; the shop's default is Settings → Storefront pricing →
+  "Storefront materials" (`components/storefront/MaterialOrder.tsx` is both lists).
+
 ### 5.2 Colour picker (frontend, `storefront/components/ColourPicker.tsx`)
 
-- Closed, a colour parameter is one row: label, the picked swatch, its name and
-  material. Tap opens a popover (sheet on a phone).
-- Open: a material filter (chips, hidden with one material or with `one_material`),
-  then a grid of round swatches, 40 px, each with its name under it. Search by name
+- Closed, a colour parameter is one row: label, the swatch and its name. Tap opens a
+  popover (sheet on a phone).
+- Open: a grid of round swatches, 40 px, each with its name under it. Search by name
   when there are more than 24.
-- Names: `colour_name` (else the hex). Material shows as a small tag. Two filaments with
-  the same name and material show the short hex after the name.
-- With `one_material`, a single "Material" control sits above the parameters; each
-  picker then lists only that material. Changing material re-picks each colour to the
-  nearest hex in the new material (RGB distance), and says so.
+- The customer never sees a material (owner ruling, #6258): no material filter, tag or
+  word on the row, in the grid or in a swatch's accessible name. A colour that two
+  materials offer is one swatch (`colours.ts` `colourSwatches`). Names: `colour_name`
+  (else the hex) with its finish ("Blue · Matte"), material words taken out. Two of one
+  such name show the brand, else the hex, after the name.
+- "Choose a colour, the plastic follows" (#6258): a pick of a colour that only another
+  material offers moves each part the visitor did not set, at once, to the closest colour
+  of that material among its choices; a part whose default that material offers keeps it.
+  A colour the visitor set never moves. Picks of no one material are the shop's 422
+  `listing_colours_clash`, and the page names the parts in `parts` ("The body colour and
+  the rim colour can't go together. …"). (The `one_material` control of #6152 is gone.)
 - Keyboard: arrow keys move through the grid, Enter picks, Escape closes.
 
 ### 5.3 Automatic render (frontend, `CustomizePage.tsx`)
@@ -110,6 +153,14 @@ Backend detail is in §5.6 (filled from the slice path map). The page shows
 "about $X for one" plus grams and print time from the slice. While the slice runs it
 shows "Working out the price…". If the slice fails, it falls back to the volume
 estimate and says "rough".
+
+**As built (#6153 PR A), by the owner's decisions of 2026-11-14 on #6153:** the slice
+price is firm, so the page shows "$X for one" and nothing else: no "about", no
+"confirmed after we check it", no grams and no print time. While the slice runs or
+waits it shows "Working out the price…". With no slice price (the slice failed, the
+shop has no slice profile, or a spool of the profile is no longer offered) it shows no
+number and no volume estimate: "We price this design by hand". A price still pending
+at the page's time limit is shown the same way.
 
 ### 5.5 Keeping choices (frontend, `storefront/customizeState.ts`)
 
@@ -155,6 +206,52 @@ Design:
    `source: "slice" | "volume"` and `print_seconds`. Until the slice is done, or if it
    fails, the volume estimate is shown, marked rough.
 6. **Retention.** Slices are swept with their render rows.
+
+**As built (#6153 PR A).** The owner's decisions of 2026-11-14 replace points 1 to 6:
+
+- **One pricing path.** The price is `orders/quote.py` `slice_and_price`, which a
+  back-office quote runs too: the variant rendered to an output
+  (`rendering.py` `output_for_reference`), sliced by the print dialog's background slice
+  (`PreviewSlicer`, the native slicer or Bambuddy's, as a quote routes it), each plate read
+  with `read_plate`, and priced with `price_plates` at the book's policy and the machine
+  rate of the profile's printer. No new subject kind, and no second formula.
+- **Profile.** The shop slice profile (#6255) names only the printer and a spool per
+  material. Support and process settings come from the template, as in the back office;
+  the nozzles, tier and process from the model's remembered dialog choices (else
+  Standard 0.4 mm), and the plate from the one remembered on the printer. Before it
+  slices, the run checks that the printer still offers each profile spool, else no price.
+- **One price per variant.** `storefront_slice_prices` holds one row per `price_key`: a
+  sha256 of the render's 3MF content, the price-book filament per slot, the profile, the
+  choices, and the book's policy and the printer's live machine rate (read once and carried to the slice, so the key and the price use one rate). A change to any of
+  them is a new key. The row holds no job id and no bytes, so it outlives the render
+  prune.
+- **Capacity.** The slice is the operation `storefront_slice_price` on the `library`
+  queue. The estimate read of the render on screen starts it; a re-read joins it. At most
+  `storefront_slices_concurrent` (default 1, live) run at once; the rest answer pending,
+  and the page reads again.
+- **Answer.** `StoreEstimate` is `source` `slice` (with the price), `pending` (with
+  `retry_after`) or `none`. Its `price_key`, `grams` and `print_seconds` are the shop's,
+  and the edge does not send them on.
+- **Checkout at the cached price (#6153 PR B, the owner's rulings of 2026-11-14).** The
+  server never takes a price from the browser. When the visitor adds a line, the CRUD
+  side makes the variant's `price_key` the same way as the estimate (the render's 3MF
+  sha256, the price-book filament per slot, the profile, the book and the live machine
+  rate) and reads its `done` row (`orders/storefront/line_prices.py`). The line keeps
+  what the key was made from in `storefront_item_prices`, with the price it showed.
+  The cart shows each line's firm price, or "The shop prices this by hand" and no
+  number. At checkout each line is priced again by a fresh key. A price that changed,
+  came or went is 409 `prices_changed`: the page loads the cart again and shows the new
+  prices before the customer pays. A line whose key has no `done` row now (a book or
+  rate change with no new slice, or a listing that moved to another design) has no firm
+  price: the cart then says the shop prices it, and the next submit goes to the shop's
+  check. When every line is firm, the submit asks no deposit, records a `storefront`
+  quote of each line (with the slice's seconds and grams for job cost; a fact the slice
+  row does not have is unknown, never zero), accepts them and the order as the
+  customer, and opens the balance request: the customer pays the firm total with no
+  check by the shop (`pay_now`). Otherwise the firm lines get their quotes, unaccepted,
+  and the order waits for the shop's check. The shop prices the other lines, the
+  customer accepts them, and the last accept opens one balance request for the whole
+  total. A mixed cart is never charged a part.
 
 This is the largest part; it ships last (PR D), after #6148.
 

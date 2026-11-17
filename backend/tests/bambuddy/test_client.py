@@ -552,3 +552,32 @@ async def test_spool_usage_reads_and_skips_a_bad_row(
     assert [(r.id, r.spool_id, r.weight_used) for r in rows] == [(457, 31, 75.1)]
     assert rows[0].created_at == datetime(2026, 11, 13, 8, 24, 44, 614397, tzinfo=UTC)
     assert "is not a usage row; skipped" in caplog.text
+
+
+@respx.mock
+async def test_the_spool_catalog_is_read_from_the_inventory(bambuddy: BambuddyClient) -> None:
+    """``GET /inventory/catalog`` (1.2.6b1 ``CatalogEntry``): the empty-spool entries."""
+    route = respx.get(f"{API}/inventory/catalog").mock(
+        return_value=httpx.Response(200, json=recording("inventory-catalog.json"))
+    )
+
+    catalog = await bambuddy.spool_catalog()
+
+    assert route.called
+    assert [(e.id, e.name, e.weight) for e in catalog] == [
+        (5, "Bambu reusable", 250),
+        (6, "Bambu cardboard", 212),
+        (7, "Generic plastic", 140),
+    ]
+
+
+@respx.mock
+async def test_the_spool_catalog_declares_read_status(bambuddy: BambuddyClient) -> None:
+    respx.get(f"{API}/inventory/catalog").mock(
+        return_value=httpx.Response(403, json={"detail": "Missing permission"})
+    )
+
+    with pytest.raises(ApiError) as caught:
+        await bambuddy.spool_catalog()
+
+    assert caught.value.extensions["required_scope"] == Scope.READ_STATUS.value

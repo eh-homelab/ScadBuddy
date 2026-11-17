@@ -17,7 +17,6 @@ import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './s
 // real ntfy server or Home Assistant was used.
 
 const KEK = kekFromBase64(Buffer.alloc(32, 7).toString('base64'))
-const OTHER_KEK = kekFromBase64(Buffer.alloc(32, 9).toString('base64'))
 const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-forwarded-proto': 'https' }
 const UI_READ = { host: 'scadbuddy.example', 'x-forwarded-proto': 'https', 'sec-fetch-site': 'same-origin' }
 const SESSION = '0b0e2c51-2f0a-4b8e-9c1e-1d6c1e1f2a3b'
@@ -118,10 +117,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`notification channels${TEST_DATABASE_URL ? 
     expect(await strict.list()).toEqual([])
   })
 
-  it('drops the token when the URL it was bound to changes, and re-wraps on rotation', async () => {
-    const before = new ChannelStore(db.sql, OTHER_KEK)
-    const id = await before.create({ kind: 'ntfy', name: 'Phone', url: `${base}/a`, token: 'tk_secret_ntfy_token' })
-    expect(await before.rewrapFrom(OTHER_KEK, KEK)).toEqual({ rewrapped: 1, failed: 0 })
+  it('drops the token when the URL it was bound to changes', async () => {
+    const id = await channels.create({ kind: 'ntfy', name: 'Phone', url: `${base}/a`, token: 'tk_secret_ntfy_token' })
     expect((await channels.list())[0]).toMatchObject({ has_token: true })
     await channels.update(id, { url: `${base}/b` })
     expect((await channels.list())[0]).toMatchObject({ url: `${base}/b`, has_token: false })

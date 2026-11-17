@@ -859,8 +859,9 @@ line (`attachment.added`, `attachment.caption`, `attachment.role`,
 `attachment.removed`). Only an image a browser draws (PNG, JPEG, WebP, GIF, AVIF) may
 be marked delivered. `order_items.delivered_attachment_id` (`ON DELETE SET NULL`) names
 the item's image a person marked as what was actually delivered; the
-order page shows it as the item's picture, before it the item's output's thumbnail, then
-its template's.
+order page shows it as the item's picture. With none marked, the picture is the item's
+newest finished-print photo (on the item or on one of its attempts, never a revision's
+file, #6392), then the item's output's thumbnail, then its template's.
 
 The original design follows.
 

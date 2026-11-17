@@ -6,7 +6,7 @@ import type { Owner } from '../sessions/protocol.js'
 import { BROWSER_USER } from '../routes/approvals.js'
 import { ChannelError, type ChannelMessage, type ChannelStore, type OpenChannel } from './channels.js'
 import { checkPushEndpoint, type PinnedEndpoint } from './pushEgress.js'
-import type { PushStore, PushSubscriptionRow } from './pushStore.js'
+import type { PushRepo, PushSubscriptionRow } from './pushStore.js'
 import { encryptPayload, vapidAuthorization } from './webPush.js'
 
 // #815 §3, the closed-tab channel: every request waiting on a person (an attention request,
@@ -23,12 +23,29 @@ import { encryptPayload, vapidAuthorization } from './webPush.js'
 // the address it checked, following no redirect. A pass has at most PUSH_CONCURRENCY pushes
 // in flight and starts none past PASS_DEADLINE_MS; a send is claimed only as it starts, so
 // what a pass did not reach is the next pass's.
+//
+// #6399: the requests outside the agent's pending input that wait on a person (a flow run's
+// grant, a trigger's standing grant, an agent's pairing request) are pushed the same way, to
+// a person's subscriptions (`PERSON_KINDS`) and to the channels. Nothing in this process
+// hears them change, so a pass also runs every WAITING_POLL_MS, reading only them, on the one
+// replica that holds the poll's lease (`pollLease`). Their notice
+// ids are the page's own (frontend `lib/needsYou.ts`), so the page's notification and the push
+// share a tag. Such a request has no ceiling (a standing grant waits until a person decides it),
+// but a claim is kept SENT_KEEP_DAYS only: so one is pushed only while it is younger than
+// WAITING_PUSH_WINDOW_MS, which is shorter. A claim made in that window outlives it, and once
+// the claim is swept the request is too old to be claimed again: one push per target, ever.
 
 /**
  * A request waiting on the user, as a push announces it. `reason` is an attention request's
  * own, `question` for a plain question, or `approval` for a parked call's decision.
  */
-export type AttentionNotice = { id: string; sessionId: string | null; reason: string }
+export type AttentionNotice = {
+  id: string
+  sessionId: string | null
+  reason: string
+  /** #6399: when a grant or pairing request started to wait (ms since the epoch); past WAITING_PUSH_WINDOW_MS it is not pushed. */
+  since?: number
+}
 
 /**
  * Every request in a pending-input page that waits on the person: approvals, plain questions
@@ -45,6 +62,28 @@ export function pendingNotices(page: PendingInputPage): AttentionNotice[] {
   })
 }
 
+/** The owners a flow grant or a pairing request is pushed to: only a person decides one. */
+export const PERSON_KINDS: ReadonlySet<Owner['kind']> = new Set(['browser', 'oidc'])
+
+/** How often a pass runs with no pending-input change, so a grant or pairing request is pushed. */
+export const WAITING_POLL_MS = 30_000
+/** The lease that makes one replica a timer window's poller: one row, taken again once it is this old. */
+export const WAITING_POLL_LEASE = 'waiting-poll'
+export const WAITING_POLL_LEASE_S = WAITING_POLL_MS / 1000 - 5
+
+/**
+ * How long after it started a grant or pairing request may be pushed: shorter than the claims'
+ * SENT_KEEP_DAYS (pushStore.ts, backend `crud_agent_notify.py`), so a swept claim is never
+ * claimed again.
+ */
+export const WAITING_PUSH_WINDOW_MS = 24 * 60 * 60_000
+
+/** The reasons whose request is answered on the Activity page's "Needs you", not in a session. */
+const NEEDS_YOU_REASONS: ReadonlySet<string> = new Set(['grant', 'pairing'])
+
+/** The page a grant or pairing request opens (frontend `lib/needsYou.ts` `NEEDS_YOU_PATH`). */
+export const NEEDS_YOU_PATH = '/activity#needs-you'
+
 /** How long a push service keeps an undelivered message: an attention request's default timeout (300 s) and then some. */
 export const PUSH_TTL_S = 900
 /** How many pushes a pass has in flight at once. */
@@ -55,9 +94,16 @@ export const PASS_DEADLINE_MS = 30_000
 export const PUSH_TIMEOUT_MS = 10_000
 
 export type NotificationDispatcherDeps = {
-  store: PushStore
+  store: PushRepo
   /** The requests waiting on `owner` now (`pendingNotices` of `pendingInput`). */
   notices: (owner: Owner) => Promise<AttentionNotice[]>
+  /** #6399: the flow grants and pairing requests waiting on a person now, told to `PERSON_KINDS` and the channels. */
+  waiting?: () => Promise<AttentionNotice[]>
+  /**
+   * #6399: takes the named poll's lease for `seconds` (backend `push_poll_lease`), true when
+   * this replica holds it. With none, every replica polls; the sends are still claimed once.
+   */
+  pollLease?: (name: string, seconds: number) => Promise<boolean>
   /** VAPID's `sub`: who the push service may contact (SCADBUDDY_PUBLIC_URL). */
   subject: string
   /** The push-service allowlist (pushEgress.ts `pushHostsOf` of the stored setting). */
@@ -67,45 +113,61 @@ export type NotificationDispatcherDeps = {
   pinEndpoint?: (endpoint: string) => Promise<PinnedEndpoint>
   /** A pass's deadline, PASS_DEADLINE_MS unless a test sets it. */
   passDeadlineMs?: number
-  /** The out-of-browser channels (channels.ts), told of what the browser user may see; none without the KEK. */
+  /** The out-of-browser channels (channels.ts), told of what the browser user may see; none without the database; with no KEK here, only once the API serves area `notify`. */
   channels?: ChannelStore | undefined
   /** SCADBUDDY_PUBLIC_URL: where a channel's link opens the session; no link without it. */
   publicUrl?: string | undefined
   log?: (message: string) => void
 }
 
-type Vapid = Awaited<ReturnType<PushStore['vapidKeys']>>
+type Vapid = Awaited<ReturnType<PushRepo['vapidKeys']>>
+
+/** What a pass reads: everything, or (a timer's wake) only the grant and pairing requests. */
+export type PassScope = 'all' | 'waiting'
 
 export class NotificationDispatcher {
   readonly #deps: NotificationDispatcherDeps
   #running: Promise<void> | undefined
-  #again = false
+  #again: PassScope | undefined
 
   constructor(deps: NotificationDispatcherDeps) {
     this.#deps = deps
   }
 
-  /** A pass now, or one more after the pass under way; never two at once in this process. */
-  wake(): void {
+  /**
+   * A pass now, or one more after the pass under way; never two at once in this process.
+   * `waiting` reads only the grant and pairing requests (the timer's wake): nothing else changed.
+   */
+  wake(scope: PassScope = 'all'): void {
     if (this.#running) {
-      this.#again = true
+      this.#again = this.#again === 'all' || scope === 'all' ? 'all' : 'waiting'
       return
     }
-    this.#running = this.pass()
+    this.#running = this.pass(scope)
       .catch((err: unknown) => this.#log(`web push: a pass failed (${(err as Error).message})`))
       .finally(() => {
         this.#running = undefined
-        if (this.#again) {
-          this.#again = false
-          this.wake()
-        }
+        const again = this.#again
+        this.#again = undefined
+        if (again) this.wake(again)
       })
   }
 
   /** Sends what has not been sent yet to every subscription and every enabled channel. */
-  async pass(): Promise<void> {
-    const subscriptions = await this.#deps.store.subscriptions()
-    const channels = (await this.#deps.channels?.enabled()) ?? []
+  async pass(scope: PassScope = 'all'): Promise<void> {
+    // A timer's pass runs on the one replica that holds the poll's lease (one row, upserted
+    // by the API), so N replicas make one read a window. A lease that cannot be read skips it.
+    if (scope === 'waiting' && this.#deps.pollLease) {
+      const held = await this.#deps.pollLease(WAITING_POLL_LEASE, WAITING_POLL_LEASE_S).catch(() => false)
+      if (!held) return
+    }
+    // A timer's pass with nothing young enough to push opens no subscription's keys.
+    const waiting = await this.#waiting()
+    if (scope === 'waiting' && waiting.length === 0) return
+    // With no KEK in this process, the records are reachable only once the API serves them (#5299 step 5).
+    const subscriptions = this.#deps.store.available?.() === false ? [] : await this.#deps.store.subscriptions()
+    const channelStore = this.#deps.channels?.available() === false ? undefined : this.#deps.channels
+    const channels = (await channelStore?.enabled()) ?? []
     if (subscriptions.length === 0 && channels.length === 0) return
     const deadline = AbortSignal.timeout(this.#deps.passDeadlineMs ?? PASS_DEADLINE_MS)
     const byOwner = new Map<string, { owner: Owner; subs: PushSubscriptionRow[] }>()
@@ -120,7 +182,9 @@ export class NotificationDispatcher {
     let hosts: readonly string[] | undefined
     let vapid: Promise<Vapid> | undefined
     for (const { owner, subs } of byOwner.values()) {
-      for (const notice of await this.#deps.notices(owner)) {
+      const own = scope === 'all' ? await this.#deps.notices(owner) : []
+      const notices = [...own, ...(PERSON_KINDS.has(owner.kind) ? waiting : [])]
+      for (const notice of notices) {
         for (const sub of subs) {
           jobs.push({
             notice,
@@ -136,7 +200,8 @@ export class NotificationDispatcher {
     }
     // Channels are the deployment's, set in Settings by the browser user: told what that user sees.
     if (channels.length > 0) {
-      for (const notice of await this.#deps.notices(BROWSER_USER)) {
+      const own = scope === 'all' ? await this.#deps.notices(BROWSER_USER) : []
+      for (const notice of [...own, ...waiting]) {
         for (const channel of channels) {
           jobs.push({ notice, target: `channel:${channel.id}`, run: () => this.#tell(channel, notice, deadline) })
         }
@@ -153,6 +218,21 @@ export class NotificationDispatcher {
     }
     await Promise.all(Array.from({ length: Math.min(PUSH_CONCURRENCY, jobs.length) }, worker))
     if (next < jobs.length) this.#log('notifications: a pass reached its deadline; the rest go on the next pass')
+  }
+
+  /**
+   * The grants and pairing requests now that are young enough to push (WAITING_PUSH_WINDOW_MS);
+   * none when the read fails, so the agent's own still go.
+   */
+  async #waiting(): Promise<AttentionNotice[]> {
+    if (!this.#deps.waiting) return []
+    try {
+      const oldest = Date.now() - WAITING_PUSH_WINDOW_MS
+      return (await this.#deps.waiting()).filter((n) => n.since !== undefined && n.since >= oldest)
+    } catch (err) {
+      this.#log(`notifications: the flow grants and pairing requests could not be read (${(err as Error).message})`)
+      return []
+    }
   }
 
   async #tell(channel: OpenChannel, notice: AttentionNotice, deadline: AbortSignal): Promise<void> {
@@ -215,6 +295,10 @@ export function noticeTitle(reason: string): string {
       return 'The assistant is blocked'
     case 'approval':
       return 'The assistant needs your approval'
+    case 'grant':
+      return 'A flow asks for a grant'
+    case 'pairing':
+      return 'An agent asks to use ScadBuddy'
     default:
       return 'The assistant needs you'
   }
@@ -228,14 +312,20 @@ export function sessionLink(publicUrl: string | undefined, sessionId: string | n
   return url.href
 }
 
+/** The page a notice's click opens: "Needs you" for a grant or pairing request, else its session. */
+export function noticeLink(publicUrl: string | undefined, notice: AttentionNotice): string | undefined {
+  if (!NEEDS_YOU_REASONS.has(notice.reason)) return sessionLink(publicUrl, notice.sessionId)
+  return publicUrl ? new URL(NEEDS_YOU_PATH, publicUrl).href : undefined
+}
+
 /** What a notification says to do (frontend `public/push-sw.js` `BODIES`). */
 export function noticeBody(reason: string): string {
-  return reason === 'approval' ? 'Open ScadBuddy to decide it.' : 'Open ScadBuddy to answer it.'
+  return reason === 'approval' || NEEDS_YOU_REASONS.has(reason) ? 'Open ScadBuddy to decide it.' : 'Open ScadBuddy to answer it.'
 }
 
 /** What a channel is sent for a request: its reason and a link, never its message or the call it would approve. */
 export function attentionMessage(notice: AttentionNotice, publicUrl: string | undefined): ChannelMessage {
-  const click = sessionLink(publicUrl, notice.sessionId)
+  const click = noticeLink(publicUrl, notice)
   return { title: noticeTitle(notice.reason), body: noticeBody(notice.reason), ...(click ? { click } : {}) }
 }
 

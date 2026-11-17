@@ -68,6 +68,9 @@ def test_every_env_seeded_field_is_shown_and_no_secret_is() -> None:
         ("asset_sweep_grace", 60, "SCADBUDDY_ASSET_SWEEP_GRACE must be at least 3600"),
         ("log_level", "loud", "SCADBUDDY_LOG_LEVEL must be one of"),
         ("bambuddy_web_urls", "https://ok.example, bambuddy.lan", "not an http\\(s\\) URL"),
+        ("storefront_materials", [" ", ""], "SCADBUDDY_STOREFRONT_MATERIALS needs at least one"),
+        ("storefront_materials", [f"M{n}" for n in range(17)], "at most 16 materials"),
+        ("storefront_materials", ["P" * 65], "at most 64 characters"),
     ],
 )
 def test_a_value_out_of_bounds_is_refused_by_name(name: str, value: object, message: str) -> None:
@@ -76,6 +79,11 @@ def test_a_value_out_of_bounds_is_refused_by_name(name: str, value: object, mess
 
 
 def test_a_value_in_bounds_is_coerced() -> None:
+    # #6258: stripped, repeats dropped casefolded, the first spelling kept, in order.
+    assert check_value("storefront_materials", [" PETG", "pla", "petg", "PLA "]) == [
+        "PETG",
+        "pla",
+    ]
     assert check_value("render_timeout", 5) == 5.0
     assert check_value("log_level", "debug") == "DEBUG"
     assert check_value("asset_max_count", 0) == 0

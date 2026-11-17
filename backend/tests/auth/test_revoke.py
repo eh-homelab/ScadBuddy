@@ -177,8 +177,8 @@ def test_a_table_dropped_from_a_callers_list_is_taken_back_at_start(
 ) -> None:
     """#5299: the agent's role held `blob_refs` for its trigger; `grant_role` never revokes,
     so the start takes the table back and leaves the rest of the list."""
-    assert RETIRED_GRANTS == {"scadbuddy_agent": ("blob_refs",)}
-    assert "blob_refs" not in AGENT_GRANTS
+    retired = RETIRED_GRANTS["scadbuddy_agent"]
+    assert set(retired).isdisjoint(AGENT_GRANTS)
     assert grant_role(conn, role, {**AGENT_GRANTS, "blob_refs": ("SELECT", "INSERT", "DELETE")})
     monkeypatch.setattr("scadbuddy.auth.revoke.RETIRED_ROLES", ())
     monkeypatch.setattr("scadbuddy.auth.revoke.RETIRED_GRANTS", {role: ("blob_refs",)})
@@ -188,6 +188,43 @@ def test_a_table_dropped_from_a_callers_list_is_taken_back_at_start(
     assert held["relations"] == set(AGENT_GRANTS)
     assert held["schema"]
     assert revoke_tables(conn, f"absent_{role}", ("blob_refs",)) == []
+
+
+def test_the_agent_keeps_no_backend_table(
+    conn: Conn, role: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5299: the agent reads the event log, flow runs and their decisions through the CRUD
+    routes (`api/crud_agent.py`, D7), and its gate's grant check runs on the API
+    (`api/crud_agent_gate.py`, step 10), so the start takes every one of those tables back."""
+    assert RETIRED_GRANTS == {
+        "scadbuddy_agent": (
+            "blob_refs",
+            "events",
+            "workflow_runs",
+            "workflow_run_decisions",
+            "flow_grants",
+            "flow_grant_uses",
+        )
+    }
+    assert AGENT_GRANTS == {}
+    # The role as an older API left it: the five tables of #5299 D7's list.
+    before = {
+        "flow_grants": ("SELECT", "UPDATE"),
+        "flow_grant_uses": ("SELECT",),
+        "events": ("SELECT",),
+        "workflow_runs": ("SELECT",),
+        "workflow_run_decisions": ("SELECT",),
+    }
+    assert grant_role(conn, role, before)
+    monkeypatch.setattr("scadbuddy.auth.revoke.RETIRED_ROLES", ())
+    monkeypatch.setattr(
+        "scadbuddy.auth.revoke.RETIRED_GRANTS", {role: RETIRED_GRANTS["scadbuddy_agent"]}
+    )
+    assert revoke_retired(conn) == [role]
+    assert revoke_retired(conn) == []
+    held = _held(conn, role)
+    assert held["relations"] == set()
+    assert held["schema"]
 
 
 def test_a_missing_role_is_no_op(conn: Conn) -> None:
@@ -208,9 +245,9 @@ def test_the_role_can_be_dropped_after_the_revoke(pg_conninfo: str, conn: Conn) 
 
 
 def test_only_what_this_connections_roles_granted_is_taken_back(conn: Conn, role: str) -> None:
-    """In the deployment the agent's role owns the `ai_*` tables and grants them itself
-    (`agent/src/db/grants.ts`); the API takes back only its own grants and the policies on
-    its own tables, and does not fail on the agent's."""
+    """Where the agent's role owns older `ai_*` tables and granted them (before #6501), the
+    API takes back only its own grants and the policies on its own tables, and does not fail
+    on the agent's."""
     suffix = uuid.uuid4().hex[:12]
     api, agent = f"api_{suffix}", f"agent_{suffix}"
     for name in (api, agent):

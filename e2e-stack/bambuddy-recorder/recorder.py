@@ -2,20 +2,25 @@
 Task 12).
 
 The stack's ``bambuddy_url`` points here, so a hot-path call to Bambuddy both fails
-(``599``, no status Bambuddy sends) and is listed. Two reads are answered, because the
-spool overlay's refresh makes them on its own Schedule, off the hot path (plan D1,
+(``599``, no status Bambuddy sends) and is listed. Three reads are answered, because the
+spool refresh's pull of Bambuddy's spools into ScadBuddy's own (#6261,
+``filament/bambuddy_pull.py``) reads them on its own Schedule, off the hot path (plan D1,
 Task 6b), and the stack's seed runs it once before resetting the list:
 
 - ``GET /api/v1/inventory/spools`` from ``answers/inventory-spools.json``, with spool
   ``RECORDER_TAGGED_SPOOL_ID`` (2) given the fake printer's tagged tray's ``tray_uuid``
-  and ``tag_uid`` (``e2e-stack/fake-printer/report.json``, AMS 0 tray 0), so the overlay
-  links it by RFID;
-- ``GET /api/v1/inventory/assignments`` from ``answers/inventory-assignments.json``.
+  and ``tag_uid`` (``e2e-stack/fake-printer/report.json``, AMS 0 tray 0), so its pulled
+  SB spool holds that tray by its tag;
+- ``GET /api/v1/inventory/assignments`` from ``answers/inventory-assignments.json``
+  (``read_assignments``, which places a linked SB spool no report shows);
+- ``GET /api/v1/inventory/catalog`` from ``answers/inventory-catalog.json`` (#6262: the pull
+  maps it to insert types; built by hand, see the recordings README).
 
-Both files are verbatim copies of ``backend/tests/bambuddy/recordings/`` (Bambuddy
-1.2.5.5, recorded 2026-09-23; that folder's README says how), copied because this
-image's build context is its own folder. A trailing slash and a query string do not
-change which path answers.
+The spools and assignments files are verbatim copies of ``backend/tests/bambuddy/recordings/``
+(Bambuddy 1.2.5.5, recorded 2026-09-23; that folder's README says how). The catalog file is a
+copy of that folder's hand-built ``inventory-catalog.json`` (1.2.6b1's shape, not a recording).
+All are copied because this image's build context is its own folder. A trailing slash and a
+query string do not change which path answers.
 
 Its own paths are never Bambuddy's ``/api/v1/*``: ``GET /__recorded`` answers
 ``[{"method", "path", "at"}...]`` for every other request, of any method, since the
@@ -53,6 +58,7 @@ def _answers(tagged_spool_id: int) -> dict[str, Any]:
     return {
         "/api/v1/inventory/spools": spools,
         "/api/v1/inventory/assignments": assignments,
+        "/api/v1/inventory/catalog": json.loads((ANSWERS / "inventory-catalog.json").read_text()),
     }
 
 

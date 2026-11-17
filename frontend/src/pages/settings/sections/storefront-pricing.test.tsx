@@ -22,10 +22,10 @@ describe('Settings → Storefront pricing (#6153)', () => {
     const profile = await screen.findByRole('region', { name: 'Shop slice profile' })
     await choose(user, within(profile).getByRole('combobox', { name: 'Printer for storefront prices' }), '3DP-31B-598')
     await choose(user, await within(profile).findByRole('combobox', { name: 'Spool for PLA' }), /Hot Pink/)
-    await choose(user, within(profile).getByRole('combobox', { name: 'Spool for PETG' }), /Clear/)
+    await choose(user, within(profile).getByRole('combobox', { name: 'Spool for PETG' }), /Insignia PETG Clear/)
     await user.click(within(profile).getByRole('button', { name: 'Save slice profile' }))
     await waitFor(() => expect(put).toHaveBeenCalled())
-    expect(put.mock.calls[0]?.[0]).toEqual({ storefront_slice_profile: { printer: H2C, spools: { pla: 2, petg: 15 } } })
+    expect(put.mock.calls[0]?.[0]).toEqual({ storefront_slice_profile: { printer: H2C, spools: { pla: 3, petg: 8 } } })
     expect(await within(profile).findByText('Saved.')).toBeInTheDocument()
     put.mockRestore()
   })
@@ -65,14 +65,14 @@ describe('Settings → Storefront pricing (#6153)', () => {
   })
 
   it('never sends a spool for a material the editor does not list', async () => {
-    setMockSettings({ ...mockSettings(), storefront_slice_profile: { printer: H2C, spools: { pla: 2, nylon: 2 } } })
+    setMockSettings({ ...mockSettings(), storefront_slice_profile: { printer: H2C, spools: { pla: 3, nylon: 3 } } })
     const put = vi.spyOn(api, 'putSettings')
     const { user } = renderSettingsSection(<StorefrontPricing />, { route })
     const profile = await screen.findByRole('region', { name: 'Shop slice profile' })
     await within(profile).findByRole('combobox', { name: 'Spool for PLA' })
     await user.click(within(profile).getByRole('button', { name: 'Save slice profile' }))
     await waitFor(() => expect(put).toHaveBeenCalled())
-    expect(put.mock.calls[0]?.[0]).toEqual({ storefront_slice_profile: { printer: H2C, spools: { pla: 2 } } })
+    expect(put.mock.calls[0]?.[0]).toEqual({ storefront_slice_profile: { printer: H2C, spools: { pla: 3 } } })
     put.mockRestore()
   })
 
@@ -84,7 +84,7 @@ describe('Settings → Storefront pricing (#6153)', () => {
   })
 
   it('keeps Save off until the stored printer\'s spools are read', async () => {
-    setMockSettings({ ...mockSettings(), storefront_slice_profile: { printer: H2C, spools: { pla: 2 } } })
+    setMockSettings({ ...mockSettings(), storefront_slice_profile: { printer: H2C, spools: { pla: 3 } } })
     const real = api.storefrontSliceOptions.bind(api)
     let release: () => void = () => {}
     const held = new Promise<void>((resolve) => {
@@ -103,5 +103,40 @@ describe('Settings → Storefront pricing (#6153)', () => {
     await within(profile).findByRole('combobox', { name: 'Spool for PLA' })
     expect(save).toBeEnabled()
     options.mockRestore()
+  })
+})
+
+describe('Settings → Storefront pricing: Storefront materials (#6258)', () => {
+  beforeEach(() => resetMockState())
+
+  const rows = (section: HTMLElement) => within(section).getAllByTestId('material-row').map((row) => row.getAttribute('data-material'))
+
+  it('shows the shop default in order, reorders, adds and removes, and saves the list', async () => {
+    const { user } = renderSettingsSection(<StorefrontPricing />, { route })
+    const section = await screen.findByRole('region', { name: 'Storefront materials' })
+    await waitFor(() => expect(rows(section)).toEqual(['PETG', 'PLA']))
+    await user.click(within(section).getByRole('button', { name: 'Move PLA up' }))
+    expect(rows(section)).toEqual(['PLA', 'PETG'])
+    // By keyboard: the moved row's other button has the focus.
+    expect(within(section).getByRole('button', { name: 'Move PLA down' })).toHaveFocus()
+    await user.click(within(section).getByRole('button', { name: 'Remove PETG' }))
+    expect(rows(section)).toEqual(['PLA'])
+    expect(within(section).getByRole('button', { name: 'Remove PLA' })).toBeDisabled()
+    // The price book's materials not on the list.
+    await choose(user, within(section).getByRole('combobox', { name: 'Add a material' }), 'PETG')
+    expect(rows(section)).toEqual(['PLA', 'PETG'])
+    await user.click(within(section).getByRole('button', { name: 'Save materials' }))
+    expect(await within(section).findByText('Saved.')).toBeInTheDocument()
+    expect(mockSettings().storefront_materials).toEqual(['PLA', 'PETG'])
+  })
+
+  it('says why a save is refused', async () => {
+    vi.spyOn(api, 'putSettings').mockRejectedValueOnce(new Error('SCADBUDDY_STOREFRONT_MATERIALS needs at least one material'))
+    const { user } = renderSettingsSection(<StorefrontPricing />, { route })
+    const section = await screen.findByRole('region', { name: 'Storefront materials' })
+    await waitFor(() => expect(rows(section)).toEqual(['PETG', 'PLA']))
+    await user.click(within(section).getByRole('button', { name: 'Save materials' }))
+    expect(await within(section).findByRole('alert')).toHaveTextContent('needs at least one material')
+    vi.restoreAllMocks()
   })
 })

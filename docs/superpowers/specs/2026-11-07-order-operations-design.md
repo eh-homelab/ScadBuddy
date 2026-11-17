@@ -83,6 +83,8 @@ Sources 1 (model → output), 3 (library file, #5544) and 5 (custom, #4954) are 
     of the run has no archive.
   - Grams per slot are the slicer's estimates from each archive (`filament_slots`);
     seconds are the actual print time when the archive succeeded, else the estimate.
+  - The body's `units` (default 1) is the number of units of the item the run made
+    (#6336). The run's grams and seconds are divided by it, so the quote prices one unit.
   - A failed or cancelled archive is not a quote source (`archive_not_succeeded`); slice
     and manual quotes stay available.
   - Job cost (§4.1 of its spec) treats an `archive` quote's grams as the quote's, so the
@@ -200,6 +202,10 @@ main (#5315, #5337, #5347), and #5280 is closed. scadify reviewed §5 against th
   `orders/quote.py` `print_setup`) and `filament_plan` are written with a slice quote and
   shown on `Quote`, so `order_get` lists them. A manual or archive quote has neither. The
   agent's `order_item_quote.slice` takes the three.
+- #2998: `SliceQuoteRequest` also takes `process_overrides` (any Bambu Studio process
+  key, `PrintRunRequest`'s type), which `preview_request` passes on and `print_setup`
+  records in `choices` beside the rest (`SETUP_FIELDS`); a quote recorded before has no
+  such key. It is in `QUOTED_SETUP` too, so it is filled and compared as below.
 - PR 2: the print reads the whole setup. An item's print or test print takes the body
   `ItemPrintRequest` (`orders/printing.py`: `choices` and `filament_plan` optional), and
   each of `QUOTED_SETUP` (every `choices` key above) and the spools it leaves out is the
@@ -264,6 +270,20 @@ main (#5315, #5337, #5347), and #5280 is closed. scadify reviewed §5 against th
   render made a colour slot names the way out (`RENDERED_SUPPORT_HINT`), and the
   pre-revision price-book check counts only the carried pins still in the book (#5761
   review).
+- #6324, as built: "Slice…" on an item with a design and no output (every storefront item)
+  is one press. The print dialog reads its choices, filaments and plates from an output
+  (`/print/outputs/{id}/…`), so the press first starts `POST …/items/{item}/render`, the
+  `order_item_render` operation on the `library` queue: `orders/rendering.py`
+  `output_for_reference` renders the item's reference (its commit, inputs, libraries and
+  colours) through `RenderService.submit` with `reuse_finished`, so a finished render of
+  its key is reused, saves the output and sets it on the item. That is not a design
+  change: the item keeps its revision and its quotes. The row and the drawer show the run
+  as "Rendering" until the dialog opens on the new output. Once the render has answered,
+  the run says so and offers "Stop waiting", since it waits on the order's read; when that
+  read fails, the run stays (detached) until a later read shows the output, and no dialog
+  opens by itself (`useSliceQuotes` `landed`). A failed render is the run's
+  error, where a failed slice quote shows (`quote-error`). The owner's ruling
+  (2026-11-15): "Slice should just render if it needs; don't make another step."
 
 ## 6. A derived machine rate (#4625)
 

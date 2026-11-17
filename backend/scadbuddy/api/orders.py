@@ -28,7 +28,15 @@ from typing import Annotated, Any, Literal, Self
 
 from fastapi import APIRouter, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from scadbuddy.api.activity import BAD_CURSOR, _no_nul, _unknown
 from scadbuddy.api.deps import (
@@ -51,7 +59,7 @@ from scadbuddy.api.operations import (
 from scadbuddy.api.printing import asked_by_api
 from scadbuddy.api.runtime import apply_runtime
 from scadbuddy.bambuddy.print_source import printable
-from scadbuddy.core.problems import ApiError
+from scadbuddy.core.problems import DATABASE_ERRORS, ApiError
 from scadbuddy.library.outputs import require_output
 from scadbuddy.library.settings_store import SettingsPatch, SettingsStore
 from scadbuddy.operations.component import OperationsDep
@@ -70,7 +78,7 @@ from scadbuddy.orders.costs import (
 from scadbuddy.orders.density import DensityTable, ProfileDensity, used_density
 from scadbuddy.orders.estimate import EstimatedPart, OrderEstimate, filament_estimate
 from scadbuddy.orders.history import UnitCostHistory, unit_cost_history
-from scadbuddy.orders.integrations import ArchiveMedia, NotLinkedError, not_linked
+from scadbuddy.orders.integrations import ArchiveMedia, SpoolGroup
 from scadbuddy.orders.lifecycle import (
     FulfilLine,
     FulfilmentInput,
@@ -129,6 +137,7 @@ from scadbuddy.orders.operations import (
     ORDER_ATTEMPT_COPY,
     ORDER_ITEM_PRINT,
     ORDER_ITEM_QUOTE,
+    ORDER_ITEM_RENDER,
 )
 from scadbuddy.orders.past_prints import NativeArchiveCopies, copied_file, quote_from_archive
 from scadbuddy.orders.printing import ItemPrintRequest, print_request_id
@@ -149,7 +158,7 @@ from scadbuddy.orders.report import (
     profit_report,
 )
 from scadbuddy.orders.revisions import RevisionAnswerInput, RevisionInput
-from scadbuddy.orders.spool_import import density_for
+from scadbuddy.orders.spool_import import density_for, inventory_groups
 from scadbuddy.orders.spool_import import fill_densities as fill_densities_in
 from scadbuddy.orders.spool_import import import_spools as import_spools_into
 from scadbuddy.orders.store import (
@@ -203,6 +212,8 @@ LIST_PARAMS = frozenset(
         "own_model",
         "purchase_pending",
         "import_stuck",
+        "ended_since",
+        "owing",
         "cursor",
         "limit",
     }
@@ -731,6 +742,8 @@ async def list_orders(
     own_model: bool = False,
     purchase_pending: bool = False,
     import_stuck: bool = False,
+    ended_since: AwareDatetime | None = None,
+    owing: bool = False,
     cursor: str | None = None,
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
 ) -> OrderPage:
@@ -750,7 +763,11 @@ async def list_orders(
     them. A cart has no ``number`` and no ``customer_id`` (both null). ``own_model=true``
     lists only orders with a customer's own-model request, ``purchase_pending=true`` only
     those with a thing to buy not yet priced, and ``import_stuck=true`` only those with a
-    file whose import is stuck (#6133, spec 2026-11-13 §11)."""
+    file whose import is stuck (#6133, spec 2026-11-13 §11). ``ended_since`` leaves out
+    the closed and cancelled orders that ended (``closed_at``, else ``cancelled_at``, else
+    ``updated_at``) before
+    it, keeping every open one; ``owing=true`` lists only orders with an ``open``,
+    ``pending`` or ``failed`` payment request (#6334)."""
     _no_nul(request)
     _unknown(request, LIST_PARAMS)
     try:
@@ -776,6 +793,8 @@ async def list_orders(
         own_model=own_model,
         purchase_pending=purchase_pending,
         import_stuck=import_stuck,
+        ended_since=ended_since,
+        owing=owing,
     )
     if cursor is not None:
         try:
@@ -868,16 +887,16 @@ async def put_price_book(
     return await asyncio.to_thread(orders.price_book.snapshot)
 
 
-#: How long a filament added by hand waits for its density from Bambuddy (#6148
-#: review): its reads are the spools, the local presets, the assignments with a status
-#: read per printer, and the catalogue, each with the client's own timeout.
+#: How long a filament added by hand waits for its density (#6148 review): its reads are
+#: ScadBuddy's spools and, for a spool preset that names one, Bambuddy's local presets,
+#: with the client's own timeout.
 DENSITY_LOOKUP_TIMEOUT = 10.0
 
 
 async def _vendor_densities(orders: OrdersComponent) -> DensityTable | None:
     """The image's vendor densities; ``None``, logged, when the image's tree cannot be
     read (a :class:`ProfileError`, or an ``OSError`` such as a tree with no ``VERSION``
-    file), so the add, the import and the fill go on with Bambuddy's sources only."""
+    file), so the add, the import and the fill go on with the spools' other sources."""
     try:
         return await asyncio.to_thread(orders.densities)
     except (ProfileError, OSError) as error:
@@ -886,18 +905,17 @@ async def _vendor_densities(orders: OrdersComponent) -> DensityTable | None:
 
 
 async def _hand_density(body: FilamentInput, orders: OrdersComponent) -> ProfileDensity | None:
-    """The density the inventory's spools of ``body``'s identity give; ``None`` when
-    Bambuddy refuses the spools' read or answers in another shape."""
+    """The density ScadBuddy's spools of ``body``'s identity give (its colour at its
+    alpha); ``None`` when they cannot be read."""
     try:
-        groups = await orders.integrations.spool_groups()
-    except ApiError as error:
-        logger.warning("a filament was added with no density: %s", error.detail)
-        return None
-    except ValidationError as error:
-        logger.warning("a filament was added with no density: %s", error)
+        groups = await inventory_groups(orders.inventory, orders.integrations)
+    except DATABASE_ERRORS as error:
+        logger.warning("a filament was added with no density: %s", type(error).__name__)
         return None
     densities = await _vendor_densities(orders)
-    return density_for(groups, densities, body.material, body.subtype, body.brand, body.colour)
+    return density_for(
+        groups, densities, body.material, body.subtype, body.brand, body.colour, body.alpha
+    )
 
 
 @router.post(
@@ -907,14 +925,14 @@ async def _hand_density(body: FilamentInput, orders: OrdersComponent) -> Profile
     summary="Add a filament to the price book",
 )
 async def create_filament(body: FilamentInput, orders: OrdersDep) -> Filament:
-    """409 ``filament_exists`` naming the record of the same material, subtype, brand
-    and colour (in any case). Sent with no density while a Bambuddy is linked, it takes
-    the one Bambuddy's spools of its identity give (#6136, `orders/density.py`), with
-    ``density_profile`` saying where from; none when no source gives one, when Bambuddy
-    does not answer, or when the lookup takes longer than ``DENSITY_LOOKUP_TIMEOUT``
-    (the add never waits on it to succeed)."""
+    """409 ``filament_exists`` naming the record of the same material, subtype, brand,
+    colour (in any case) and alpha. Sent with no density, it takes the one ScadBuddy's
+    spools of its identity give (#6136, #6262, `orders/density.py`), with
+    ``density_profile`` saying where from; none when no source gives one, when the
+    spools cannot be read, or when the lookup takes longer than
+    ``DENSITY_LOOKUP_TIMEOUT`` (the add never waits on it to succeed)."""
     profile = None
-    if body.density_g_cm3 is None and orders.integrations.linked:
+    if body.density_g_cm3 is None:
         try:
             found = await asyncio.wait_for(_hand_density(body, orders), DENSITY_LOOKUP_TIMEOUT)
         except TimeoutError:
@@ -988,22 +1006,25 @@ async def unarchive_filament(filament_id: str, orders: OrdersDep) -> Filament:
 @router.post(
     "/price-book/import-spools",
     response_model=SpoolImport,
-    summary="Import filament records from Bambuddy's spools",
+    summary="Import filament records from ScadBuddy's spools",
+    description=(
+        "One filament record per filament of ScadBuddy's own spools (§8.3, #4253, #6262):"
+        " every unarchived spool of the same effective material, subtype, brand and"
+        " `#RRGGBBAA`, so an opaque and a translucent spool of one hue are two records"
+        " (#6316). A record is made when the book has none of that identity, else given the"
+        " most recent priced spool's `cost_per_kg` (the highest number); a row's"
+        " `min_cost_per_kg` and `max_cost_per_kg` show the spread when its spools' prices"
+        " differ, and its `spool_ids` are SB spool numbers. A filament known only by its"
+        " colour's name, or with no priced spool, is `skipped` with its `reason`. Run on"
+        " click only: no quote reads the spools (Ruling 3). A record with no density gets"
+        " the newest spool's own density, else the one its slicer preset gives, else the"
+        " one its tray's reported preset gives (#6136, `orders/density.py`); a density a"
+        " record has is never changed. Needs no Bambuddy. 503 when ScadBuddy's spools"
+        " cannot be read."
+    ),
 )
 async def import_spools(orders: OrdersDep) -> SpoolImport:
-    """One filament record per filament of Bambuddy's spool inventory (§8.3, #4253):
-    made when the book has none of its material, subtype, brand and colour, else given
-    the most recent priced spool's ``cost_per_kg``; a row's ``min_cost_per_kg`` and
-    ``max_cost_per_kg`` show the spread when its spools' prices differ. A filament known
-    only by its colour's name, or with no priced spool, is ``skipped`` with its
-    ``reason``. Run on click only: no quote reads Bambuddy (Ruling 3). A record with no
-    density gets the one Bambuddy's link to its slicer preset gives (#6136,
-    `orders/density.py`); a density a record has is never changed. 409 ``not_linked``
-    without a Bambuddy URL."""
-    try:
-        groups = await orders.integrations.spool_groups()
-    except NotLinkedError:
-        raise not_linked() from None
+    groups = await _spool_groups(orders)
     densities = await _vendor_densities(orders)
     try:
         return await asyncio.to_thread(import_spools_into, orders.store, groups, densities)
@@ -1011,24 +1032,34 @@ async def import_spools(orders: OrdersDep) -> SpoolImport:
         raise _filament_exists(error) from None
 
 
+async def _spool_groups(orders: OrdersComponent) -> list[SpoolGroup]:
+    """`inventory_groups`; 503 when ScadBuddy's spools cannot be read."""
+    try:
+        return await inventory_groups(orders.inventory, orders.integrations)
+    except DATABASE_ERRORS as error:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "ScadBuddy's spools could not be read; try again",
+        ) from error
+
+
 @router.post(
     "/price-book/fill-densities",
     response_model=DensityFill,
-    summary="Fill the empty densities of the price book from Bambuddy",
+    summary="Fill the empty densities of the price book from ScadBuddy's spools",
+    description=(
+        "Every record not archived with no density gets the one ScadBuddy's spools of its"
+        " material, subtype, brand and `#RRGGBBAA` give (#6136, #6262, `orders/density.py`):"
+        " the newest spool's own effective density, else its slicer preset id's density"
+        " (Bambuddy's local preset while one is linked, else the image's Bambu Studio"
+        " preset), else that of the preset id its tray reports. One row per such record; a"
+        " row with no `density_g_cm3` is one no source covers, which still has none. A"
+        " density a record has is never changed. Needs no Bambuddy. 503 when ScadBuddy's"
+        " spools cannot be read."
+    ),
 )
 async def fill_densities(orders: OrdersDep) -> DensityFill:
-    """Every record not archived with no density gets the one Bambuddy's link to the
-    slicer preset gives (#6136, `orders/density.py`), read from the inventory's spools of
-    the record's material, subtype, brand and colour: their preset id (``slicer_filament``,
-    a K-profile's ``setting_id``, the AMS tray's ``tray_info_idx``), that preset's
-    density (Bambuddy's local preset, else the image's Bambu Studio preset), else
-    Bambuddy's filament catalogue. One row per such record; a row with no
-    ``density_g_cm3`` is one no source covers, which still has none. A density a record
-    has is never changed. 409 ``not_linked`` without a Bambuddy URL."""
-    try:
-        groups = await orders.integrations.spool_groups()
-    except NotLinkedError:
-        raise not_linked() from None
+    groups = await _spool_groups(orders)
     densities = await _vendor_densities(orders)
     return await asyncio.to_thread(fill_densities_in, orders.store, densities, groups)
 
@@ -2565,15 +2596,17 @@ async def quote_item_from_archive(
     """An `archive` quote (#4777, order operations spec §3.2): priced from what a past
     print used, at the price book in force, with no re-slice. Every plate archive of the
     print run is read (grams per slot as the slicer estimated them, the actual seconds,
-    else the estimate); the body's filaments are written on the item as a slice quote's
-    are. Refused as a slice quote's check is (404, 409 ``order_not_open``,
-    ``item_not_open``, 422 ``filaments``, ``price_book``), and 409
+    else the estimate), and its grams and seconds divided by ``units``, the units of the
+    item the run made (default 1, #6336), so the quote prices one unit; the body's
+    filaments are written on the item as a slice quote's are. Refused as a slice quote's
+    check is (404, 409 ``order_not_open``, ``item_not_open``, 422 ``filaments``,
+    ``price_book``), and 409
     ``archive_plates_missing`` (a plate of the run has no archive),
     ``archive_not_succeeded`` (a failed or cancelled print), ``archive_gone``,
     ``not_linked``; 422 ``archive_id`` for an item taken from no past print and none
     named, or an archive that is not the item's print (not taken from it, and printed by
     neither its output nor its library file), ``archive_plate`` for an archive that records
-    no grams or time."""
+    no grams or time, or for ``units`` that round every slot of a plate to 0.00 g."""
     check_path(order_id, item_id)
     by = current_actor()
     before = await service.service.request_ids(order_id)
@@ -2582,6 +2615,46 @@ async def quote_item_from_archive(
     )
     await service.service.link_opened(order_id, before)
     return quote
+
+
+@router.post(
+    "/{order_id}/items/{item_id}/render",
+    response_model=OrderItem,
+    summary="Render an item's design",
+    responses=OPERATION_RESPONSES,
+)
+async def render_item(
+    order_id: str,
+    item_id: str,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> OrderItem | JSONResponse:
+    """The ``order_item_render`` operation (#6324): render the item's design (its
+    reference's commit, inputs, libraries and colours) on the normal pipeline, reusing a
+    finished render of its render key, save the output and set it on the item, so the
+    print dialog has an output to slice. The item's own output is kept while it still
+    matches. Not a design change: the item keeps its revision and its quotes. Answered
+    202 once recorded; follow ``GET /operations/{id}`` to the item. A failed render is
+    the operation's error. Refused before anything runs: 404 for an unknown order or
+    item, 409 ``order_not_submitted`` (a storefront cart), ``item_library_file``,
+    ``item_custom``, ``item_has_no_design``, ``order_not_open`` and ``item_not_open``,
+    as the slice quote refuses them."""
+    check_path(order_id, item_id)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds[ORDER_ITEM_RENDER],
+        subject=subject_of(item_id),
+        request={
+            "order_id": order_id,
+            "item_id": item_id,
+            # Who it is for comes from the author header, never a body (Ruling 12).
+            "by": current_actor().model_dump(mode="json"),
+        },
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, OrderItem)
 
 
 @router.post(
@@ -2833,8 +2906,9 @@ async def print_item(
     test print), and ``requote_needed`` (no accepted quote, its output gone,
     or a slice quote whose sliced file is gone or no longer the file it priced, or a
     ``part_settings``, ``printer_id``, ``printer``, ``choices``, ``prime_tower``,
-    ``supports`` or ``print_sequence`` sent that the quote was not sliced with; each one
-    omitted, and an omitted ``path``, is the quote's, #5571, #4673; another ``path``
+    ``supports``, ``print_sequence`` or ``process_overrides`` sent that the quote was not
+    sliced with; each one omitted, and an omitted ``path``, is the quote's, #5571, #4673,
+    #2998; another ``path``
     slices again on its route, #5352); 422 ``print_setup_missing`` when the quote records
     no setup (manual, archive) and the body sends no ``choices`` or ``filament_plan``;
     and the print run's own refusals, as the print route answers them."""
@@ -2891,8 +2965,9 @@ async def test_print_item(
     print), and ``requote_needed`` (no slice quote of the revision,
     its sliced file gone or no longer the file it priced, the output gone, or a
     ``part_settings``, ``printer_id``, ``printer``, ``choices``, ``prime_tower``,
-    ``supports`` or ``print_sequence`` sent that the quote was not sliced with; each one
-    omitted, and an omitted ``path``, is the quote's, #5571, #4673; another ``path``
+    ``supports``, ``print_sequence`` or ``process_overrides`` sent that the quote was not
+    sliced with; each one omitted, and an omitted ``path``, is the quote's, #5571, #4673,
+    #2998; another ``path``
     slices again on its route, #5352); 422 ``print_setup_missing`` as ``POST …/print``
     answers it; and the print run's own refusals, as the print route answers them."""
     check_path(order_id, item_id, revision_id)

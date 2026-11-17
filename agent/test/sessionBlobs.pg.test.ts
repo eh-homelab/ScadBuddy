@@ -195,6 +195,21 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session ima
     expect((await get(`/api/v1/ai/sessions/${child.id}/blobs/${NAME}`)).status).toBe(200)
   })
 
+  it("keeps an image a fork's copied events name when a queued message that made it in the fork is dropped (#6413)", async () => {
+    const id = await withImage()
+    await m.store.append({ projectKey: 'p', sessionId: id }, [{ type: 'user', uuid: 'u1', message: {} }])
+    const child = await m.fork(id, browser)
+    // A message queued in the fork with the same image: its write makes the fork's own row.
+    const blobs = new SessionBlobs(db.sql)
+    const [made] = await blobs.putMade(child.id, [sessionImage('image/png', Buffer.from(PNG, 'base64'))])
+    expect(made?.names).toEqual([NAME])
+    // Forgetting the parent copies the image the fork's events name: a write, so it gets a later time.
+    await forgetSubject({ sql: db.sql, keys: testPayloadKeys(db.sql) }, `session-${id}`)
+    // The queued message is dropped: the image stays, as the copied events name it.
+    expect(await blobs.delete(child.id, made!)).toEqual([])
+    expect((await get(`/api/v1/ai/sessions/${child.id}/blobs/${NAME}`)).status).toBe(200)
+  })
+
   it('a fork whose parent is forgotten between its insert and its log goes whole (#4212)', async () => {
     const id = await withImage()
     await m.store.append({ projectKey: 'p', sessionId: id }, [{ type: 'user', uuid: 'u1', message: {} }])
@@ -340,14 +355,39 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session ima
     const { session } = await m.start(browser, { origin: 'chat' })
     const blobs = new SessionBlobs(db.sql)
     const image = sessionImage('image/png', Buffer.from(PNG, 'base64'))
-    const inTx = async (tx: { unsafe: (q: string) => Promise<unknown> }, answer: boolean) => {
-      await tx.unsafe('SELECT 1')
-      return answer
-    }
-    expect(await blobs.putIf(session.id, [image], (tx) => inTx(tx, false))).toBe(false)
+    const turnId = randomUUID()
+    await db.sql`UPDATE ai_sessions SET turn_attempt = 'run:1', durable_turn_id = ${turnId} WHERE id = ${session.id}`
+    expect(await blobs.putIf(session.id, [image], { attempt: 'run:2', turnId })).toBe(false)
+    expect(await blobs.putIf(session.id, [image], { attempt: 'run:1', turnId: randomUUID() })).toBe(false)
     expect(await blobs.get(session.id, NAME)).toBeUndefined()
-    expect(await blobs.putIf(session.id, [image], (tx) => inTx(tx, true))).toBe(true)
+    expect(await blobs.putIf(session.id, [image], { attempt: 'run:1', turnId })).toBe(true)
     expect((await blobs.get(session.id, NAME))?.mediaType).toBe('image/png')
+  })
+
+  it('deletes only what one write made and no write stored since, under its fence (#6413)', async () => {
+    const { session } = await m.start(browser, { origin: 'chat' })
+    const blobs = new SessionBlobs(db.sql)
+    const gif = (t: string) => sessionImage('image/gif', Buffer.from(`GIF89a-${t}`))
+    const [mine, shared, tool, before] = [gif('mine'), gif('shared'), gif('tool'), gif('before')]
+    await blobs.put(session.id, [before])
+    const [made] = await blobs.putMade(session.id, [mine, shared, tool, before])
+    expect(made!.names).toEqual([mine.name, shared.name, tool.name])
+    // Another message stores the same bytes after the write: they stay.
+    expect(await blobs.putMade(session.id, [shared])).toEqual([])
+    const [row] = await db.sql<{ later: boolean }[]>`
+      SELECT created_at > ${made!.at}::text::timestamptz AS later FROM ai_session_blobs WHERE session_id = ${session.id} AND name = ${shared.name}`
+    expect(row?.later).toBe(true)
+    // A tool call's record names one: it stays.
+    await db.sql`INSERT INTO ai_session_tool_images (session_id, tool_use_id, ord, name) VALUES (${session.id}, 'toolu_a', 0, ${tool.name})`
+    expect(await blobs.delete(session.id, made!)).toEqual([mine.name])
+    expect(await blobs.get(session.id, mine.name)).toBeUndefined()
+    for (const kept of [shared, tool, before]) expect(await blobs.get(session.id, kept.name)).toBeDefined()
+    // Under a fence that no longer holds, nothing goes.
+    const turnId = randomUUID()
+    await db.sql`UPDATE ai_sessions SET turn_attempt = 'run:1', durable_turn_id = ${turnId} WHERE id = ${session.id}`
+    const [late] = await blobs.putMade(session.id, [mine])
+    expect(await blobs.delete(session.id, late!, { attempt: 'run:2', turnId })).toEqual([])
+    expect(await blobs.delete(session.id, late!, { attempt: 'run:1', turnId })).toEqual([mine.name])
   })
 
   it('shows the call without its images when they cannot be stored', async () => {

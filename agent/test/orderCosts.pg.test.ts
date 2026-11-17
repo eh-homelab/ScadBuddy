@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createLockClient, type Database } from '../src/db.js'
 import { WriteTimeout } from '../src/db/bounded.js'
 import type { Risk } from '../src/tools/registry.js'
-import { OrderCosts, type AssistantCostReport, type ReportAnswer } from '../src/sessions/orderCosts.js'
+import { OrderCosts, PgOrderCostRows, type AssistantCostReport, type ReportAnswer } from '../src/sessions/orderCosts.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 
 // The assistant's spend on an order (#5330, job cost spec 2026-11-05 §4.4): a session that
@@ -37,8 +37,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`order costs in Postgres${TEST_DATABASE_URL 
     postTakes = 0
     failures.length = 0
     costs = new OrderCosts({
-      sql: db.sql,
-      locks: db.locks,
+      rows: new PgOrderCostRows(db.sql, db.locks),
       post: async (report, timeoutMs) => {
         posted.push(report)
         timeouts.push(timeoutMs)
@@ -148,8 +147,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`order costs in Postgres${TEST_DATABASE_URL 
     let release!: () => void
     const held = new Promise<void>((resolve) => (release = resolve))
     const slow = new OrderCosts({
-      sql: db.sql,
-      locks: db.locks,
+      rows: new PgOrderCostRows(db.sql, db.locks),
       post: async (report) => {
         posted.push(report)
         await held
@@ -185,8 +183,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`order costs in Postgres${TEST_DATABASE_URL 
     await revise(id, 'a', 'a1')
     // The second item's revision is recorded while the report of `a` waits for the backend.
     const racing = new OrderCosts({
-      sql: db.sql,
-      locks: db.locks,
+      rows: new PgOrderCostRows(db.sql, db.locks),
       post: async (report) => {
         posted.push(report)
         await revise(id, 'a', 'a2')
@@ -214,8 +211,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`order costs in Postgres${TEST_DATABASE_URL 
     let posting!: () => void
     const posted1 = new Promise<void>((resolve) => (posting = resolve))
     const slow = new OrderCosts({
-      sql: one,
-      locks,
+      rows: new PgOrderCostRows(one, locks),
       post: async () => {
         posting()
         await held
@@ -235,7 +231,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`order costs in Postgres${TEST_DATABASE_URL 
   it('reports nothing when every lock connection is out', async () => {
     const id = await session(1)
     await revise(id, 'a', 'a1')
-    const full = new OrderCosts({ sql: db.sql, locks: { take: async () => undefined, end: async () => {} }, post: async (r) => (posted.push(r), 'recorded') })
+    const full = new OrderCosts({ rows: new PgOrderCostRows(db.sql, { take: async () => undefined, end: async () => {} }), post: async (r) => (posted.push(r), 'recorded') })
     await full.report(id)
     expect(posted).toEqual([])
   })
@@ -243,7 +239,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`order costs in Postgres${TEST_DATABASE_URL 
   it('never holds a revision call up on its row', async () => {
     const id = await session(1)
     const late: unknown[] = []
-    const bounded = new OrderCosts({ sql: db.sql, locks: db.locks, post: async () => 'recorded', onError: (err) => late.push(err), waitMs: 200 })
+    const bounded = new OrderCosts({ rows: new PgOrderCostRows(db.sql, db.locks), post: async () => 'recorded', onError: (err) => late.push(err), waitMs: 200 })
     // Another transaction holds the table: the insert stalls.
     const blocker = postgres(url, { max: 1, onnotice: () => {} })
     let unlock!: () => void
@@ -269,7 +265,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`order costs in Postgres${TEST_DATABASE_URL 
     const ids = [await session(1), await session(1)]
     for (const [n, id] of ids.entries()) await revise(id, `o${n}`, `i${n}`)
     await db.sql`UPDATE ai_session_order_costs SET at = now() - interval '1 hour'`
-    const capped = new OrderCosts({ sql: db.sql, locks: db.locks, post: async (r) => (posted.push(r), 'recorded'), sweepLimit: 1 })
+    const capped = new OrderCosts({ rows: new PgOrderCostRows(db.sql, db.locks), post: async (r) => (posted.push(r), 'recorded'), sweepLimit: 1 })
     await capped.sweep()
     expect(posted).toHaveLength(1)
   })
@@ -278,7 +274,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`order costs in Postgres${TEST_DATABASE_URL 
     const stuck = [await session(0.00005), await session(0.00005), await session(0.00005)]
     for (const [n, id] of stuck.entries()) await revise(id, `s${n}`, `s${n}i`)
     await db.sql`UPDATE ai_session_order_costs SET at = now() - interval '2 hours'`
-    const capped = new OrderCosts({ sql: db.sql, locks: db.locks, post: async (r) => (posted.push(r), 'recorded'), sweepLimit: 2 })
+    const capped = new OrderCosts({ rows: new PgOrderCostRows(db.sql, db.locks), post: async (r) => (posted.push(r), 'recorded'), sweepLimit: 2 })
     await capped.sweep()
     await capped.sweep()
     expect(posted).toEqual([])

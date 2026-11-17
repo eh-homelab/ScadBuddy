@@ -1,6 +1,8 @@
 import type { Sql } from 'postgres'
 import { flowRequestId, parseRequestId } from '../gate/ids.js'
-import { type FlowRunReads, type QueueHop, SqlFlowRunReads, type StepRow, type WaitingOn } from './backendReads.js'
+import { PgSessionReads, type SessionReads } from '../sessions/sessionReads.js'
+import type { FlowRunReads, QueueHop, StepRow, WaitingOn } from './backendReads.js'
+import type { EscalationRoutes } from './crudEscalations.js'
 
 // A flow run's one queue (#2482, spec 2026-10-11 §4.5): everything of the run that waits
 // for a decision, from the three places it is recorded, in one read.
@@ -105,36 +107,11 @@ export function childStep(steps: readonly StepRow[], sessionId: string): QueueSt
  * the log's last `scan` events (not logged yet: `follow_session` writes it a moment
  * after the call parks).
  */
-export async function childReasoning(sql: Sql, requestId: string, scan = REASONING_SCAN): Promise<string | undefined> {
+export async function childReasoning(reads: Pick<SessionReads, 'reasoningDeltas'>, requestId: string, scan = REASONING_SCAN): Promise<string | undefined> {
   const parsed = parseRequestId(requestId)
   if (parsed?.store !== 'durable') return ''
-  const { sessionId, toolUseId } = parsed
-  // The window's floor, from the log's last seq (a backward step on its primary key), and
-  // the call's `tool.call` above it, in one query: a call not logged yet costs one read a
-  // tick, not three (#2842).
-  const [found] = await sql<{ floor: string; seq: string | null }[]>`
-    WITH top AS (
-      SELECT coalesce(max(seq), 0) - ${scan} AS floor FROM ai_session_events WHERE session_id = ${sessionId}::uuid)
-    SELECT top.floor, (
-      SELECT seq FROM ai_session_events
-       WHERE session_id = ${sessionId}::uuid AND seq > top.floor AND strpos(event, ${toolUseId}) > 0
-         AND event::jsonb ->> 'type' = 'tool.call' AND event::jsonb ->> 'id' = ${toolUseId}
-       ORDER BY seq DESC LIMIT 1) AS seq
-      FROM top`
-  if (!found?.seq) return undefined
-  const floor = found.floor
-  const call = { seq: found.seq }
-  const [start] = await sql<{ seq: string }[]>`
-    SELECT seq FROM ai_session_events
-     WHERE session_id = ${sessionId}::uuid AND seq > ${floor} AND seq < ${call.seq}
-       AND strpos(event, '"user.turn"') > 0 AND event::jsonb ->> 'type' = 'user.turn'
-     ORDER BY seq DESC LIMIT 1`
-  const rows = await sql<{ message: string | null; delta: string | null }[]>`
-    SELECT event::jsonb ->> 'messageId' AS message, event::jsonb ->> 'delta' AS delta
-      FROM ai_session_events
-     WHERE session_id = ${sessionId}::uuid AND seq < ${call.seq} AND seq > ${start?.seq ?? floor}
-       AND strpos(event, '"assistant.text.delta"') > 0 AND event::jsonb ->> 'type' = 'assistant.text.delta'
-     ORDER BY seq`
+  const rows = await reads.reasoningDeltas(parsed.sessionId, parsed.toolUseId, scan)
+  if (rows === undefined) return undefined
   const parts: string[] = []
   let last: string | null | undefined
   for (const r of rows) {
@@ -148,6 +125,23 @@ export async function childReasoning(sql: Sql, requestId: string, scan = REASONI
 }
 
 type OwnEntry = Extract<QueueEntry, { source: 'flow' }>
+
+/** A run's child entry (`ai_pending_input`), as `forRun` reads it. */
+type ChildRow = {
+  request_id: string
+  kind: 'approval' | 'answer'
+  session_id: string
+  tool: string
+  summary: string
+  input_hash: string | null
+  hop: 'parent' | 'person' | null
+  hop_until: Date | string | null
+  outside_reason: string | null
+  hops: QueueHop[] | null
+  created_at: Date
+  expires_at: Date
+  expiring: boolean
+}
 
 function ownEntry(run: { id: string; workflow_run_id: string }, steps: readonly StepRow[], w: WaitingOn): OwnEntry {
   return {
@@ -167,16 +161,49 @@ function ownEntry(run: { id: string; workflow_run_id: string }, steps: readonly 
   }
 }
 
-const iso = (d: Date | string | null): string | null => (d === null ? null : typeof d === 'string' ? d : d.toISOString())
+/**
+ * A hop's deadline for the queue. A deny's claim holds it at `infinity` (an Invalid Date from the
+ * SQL), which is no time to show: the entry is read with none. The panel then says "with this
+ * session" and the run page's card "With the session that started the run", each with no time.
+ */
+const iso = (d: Date | string | null): string | null =>
+  d === null ? null : typeof d === 'string' ? d : Number.isNaN(d.getTime()) ? null : d.toISOString()
 
 export class FlowQueue {
   readonly #sql: Sql
   readonly #reads: FlowRunReads
 
-  /** `reads`: the backend's flow tables (backendReads.ts); its SQL on `sql` by default. */
-  constructor(sql: Sql, reads?: FlowRunReads) {
+  readonly #routes: { crud: Pick<EscalationRoutes, 'runEntries'>; use: () => boolean } | undefined
+  readonly #sessionReads: Pick<SessionReads, 'reasoningDeltas'>
+
+  /**
+   * `reads`: the backend's flow tables, through its CRUD routes (backendReads.ts). `routes`: a
+   * run's child entries through the API once it lists area `escalations` (#5299 step 10).
+   * `sessionReads`: a child's reasoning (`gated` in main.ts; SQL on `sql` when omitted).
+   */
+  constructor(
+    sql: Sql,
+    reads: FlowRunReads,
+    routes?: { crud: Pick<EscalationRoutes, 'runEntries'>; use: () => boolean },
+    sessionReads: Pick<SessionReads, 'reasoningDeltas'> = new PgSessionReads(sql),
+  ) {
     this.#sql = sql
-    this.#reads = reads ?? new SqlFlowRunReads(sql)
+    this.#reads = reads
+    this.#routes = routes
+    this.#sessionReads = sessionReads
+  }
+
+  async #children(runId: string): Promise<ChildRow[]> {
+    if (this.#routes?.use()) {
+      const rows = await this.#routes.crud.runEntries(runId)
+      // An ISO time as the SQL's Date gave it; `infinity` (a deny's claim) is no time: `iso` shows none.
+      const at = (s: string | null) => (s === null || Number.isNaN(Date.parse(s)) ? null : new Date(s).toISOString())
+      return rows.map((r) => ({ ...r, hop_until: at(r.hop_until), hops: (r.hops as QueueHop[] | null) ?? null }))
+    }
+    return await this.#sql<ChildRow[]>`
+      SELECT request_id, kind, session_id::text, tool, summary, input_hash, hop, hop_until, outside_reason, hops,
+             created_at, expires_at, (expires_at <= now()) AS expiring
+        FROM ai_pending_input WHERE flow_run_id = ${runId} ORDER BY created_at, request_id`
   }
 
   /** The run's one queue, or undefined when there is no such run (or no flows on this deployment). */
@@ -186,28 +213,9 @@ export class FlowQueue {
     const steps = run.steps
     const entries: QueueEntry[] = []
     for (const w of run.waiting_on) entries.push(ownEntry(run, steps, w))
-    const children = await this.#sql<
-      {
-        request_id: string
-        kind: 'approval' | 'answer'
-        session_id: string
-        tool: string
-        summary: string
-        input_hash: string | null
-        hop: 'parent' | 'person' | null
-        hop_until: Date | null
-        outside_reason: string | null
-        hops: QueueHop[] | null
-        created_at: Date
-        expires_at: Date
-        expiring: boolean
-      }[]
-    >`
-      SELECT request_id, kind, session_id::text, tool, summary, input_hash, hop, hop_until, outside_reason, hops,
-             created_at, expires_at, (expires_at <= now()) AS expiring
-        FROM ai_pending_input WHERE flow_run_id = ${run.id} ORDER BY created_at, request_id`
+    const children = await this.#children(run.id)
     // Side by side: the run page and the starter's panel both poll this.
-    const reasonings = await Promise.all(children.map((c) => childReasoning(this.#sql, c.request_id)))
+    const reasonings = await Promise.all(children.map((c) => childReasoning(this.#sessionReads, c.request_id)))
     for (const [i, c] of children.entries()) {
       entries.push({
         source: 'child',

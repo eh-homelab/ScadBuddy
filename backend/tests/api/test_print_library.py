@@ -57,7 +57,7 @@ from tests.support.operations import press
 from tests.support.printers import linked_printer
 from tests.test_clearance import two_objects_3mf
 
-pytestmark = pytest.mark.requires_postgres
+pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("recorded_sb_spools")]
 
 API = f"{BASE}/api/v1"
 
@@ -490,6 +490,7 @@ def test_one_file_is_read_by_id_whatever_its_type_with_its_folder_path(
         "created_at": "2026-09-28T00:00:00Z",
         "output_id": None,
         "is_external": False,
+        "per_print": False,
         "folder_path": ["Supplies", "Storage"],
     }
     assert client.get("/api/v1/print/library/3999").status_code == 404

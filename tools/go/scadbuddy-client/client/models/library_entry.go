@@ -29,6 +29,8 @@ type LibraryEntry struct {
 	is_external *bool
 	// The output_id property
 	output_id LibraryEntry_LibraryEntry_output_idable
+	// The per_print property
+	per_print *bool
 	// The print_count property
 	print_count *int32
 	// The printable property
@@ -421,6 +423,8 @@ func NewLibraryEntry() *LibraryEntry {
 	m.SetHasThumbnail(&has_thumbnailValue)
 	is_externalValue := false
 	m.SetIsExternal(&is_externalValue)
+	per_printValue := false
+	m.SetPerPrint(&per_printValue)
 	print_countValue := int32(0)
 	m.SetPrintCount(&print_countValue)
 	slicedValue := false
@@ -540,6 +544,16 @@ func (m *LibraryEntry) GetFieldDeserializers() map[string]func(i878a80d2330e89d2
 		}
 		return nil
 	}
+	res["per_print"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetBoolValue()
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetPerPrint(val)
+		}
+		return nil
+	}
 	res["print_count"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetInt32Value()
 		if err != nil {
@@ -621,6 +635,12 @@ func (m *LibraryEntry) GetOutputId() LibraryEntry_LibraryEntry_output_idable {
 	return m.output_id
 }
 
+// GetPerPrint gets the per_print property value. The per_print property
+// returns a *bool when successful
+func (m *LibraryEntry) GetPerPrint() *bool {
+	return m.per_print
+}
+
 // GetPrintable gets the printable property value. The printable property
 // returns a *bool when successful
 func (m *LibraryEntry) GetPrintable() *bool {
@@ -691,6 +711,12 @@ func (m *LibraryEntry) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e
 	}
 	{
 		err := writer.WriteObjectValue("output_id", m.GetOutputId())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteBoolValue("per_print", m.GetPerPrint())
 		if err != nil {
 			return err
 		}
@@ -772,6 +798,11 @@ func (m *LibraryEntry) SetOutputId(value LibraryEntry_LibraryEntry_output_idable
 	m.output_id = value
 }
 
+// SetPerPrint sets the per_print property value. The per_print property
+func (m *LibraryEntry) SetPerPrint(value *bool) {
+	m.per_print = value
+}
+
 // SetPrintable sets the printable property value. The printable property
 func (m *LibraryEntry) SetPrintable(value *bool) {
 	m.printable = value
@@ -799,6 +830,7 @@ type LibraryEntryable interface {
 	GetId() *int32
 	GetIsExternal() *bool
 	GetOutputId() LibraryEntry_LibraryEntry_output_idable
+	GetPerPrint() *bool
 	GetPrintable() *bool
 	GetPrintCount() *int32
 	GetSliced() *bool
@@ -811,6 +843,7 @@ type LibraryEntryable interface {
 	SetId(value *int32)
 	SetIsExternal(value *bool)
 	SetOutputId(value LibraryEntry_LibraryEntry_output_idable)
+	SetPerPrint(value *bool)
 	SetPrintable(value *bool)
 	SetPrintCount(value *int32)
 	SetSliced(value *bool)

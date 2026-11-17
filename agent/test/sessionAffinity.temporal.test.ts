@@ -497,7 +497,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     pollUntil(() => env.client.workflow.getHandle(sessionWorkflowId(id)).query<string | null>('turn'), null)
   /** One run's history: the turn's run, never whichever run continued as new after it. */
   const historyTypes = async (id: string, runId: string) =>
-    (JSON.parse(historyToJSON(await env.client.workflow.getHandle(sessionWorkflowId(id), runId).fetchHistory())) as { events: { eventType: string; activityTaskTimedOutEventAttributes?: { failure?: { timeoutFailureInfo?: { timeoutType?: string } } } }[] }).events
+    (JSON.parse(historyToJSON(await env.client.workflow.getHandle(sessionWorkflowId(id), runId).fetchHistory())) as { events: { eventType: string; activityTaskTimedOutEventAttributes?: { failure?: { timeoutFailureInfo?: { timeoutType?: string } } }; timerStartedEventAttributes?: { startToFireTimeout?: string } }[] }).events
 
   it('the first turn acquires and later turns stay on home, on the warm process', async () => {
     const a = await replica('a')
@@ -684,6 +684,10 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     expect(performance.now() - began).toBeGreaterThanOrEqual(5_000)
     const timeouts = (await historyTypes(id, run)).filter((e) => e.eventType === 'EVENT_TYPE_ACTIVITY_TASK_TIMED_OUT')
     expect(timeouts.map((e) => e.activityTaskTimedOutEventAttributes?.failure?.timeoutFailureInfo?.timeoutType)).toEqual(['TIMEOUT_TYPE_SCHEDULE_TO_START'])
+    // The lost placement waits PLACEMENT_BACKOFF[0] before the next (#6353).
+    const timers = (await historyTypes(id, run)).filter((e) => e.eventType === 'EVENT_TYPE_TIMER_STARTED')
+    expect(timers.map((e) => String(e.timerStartedEventAttributes?.startToFireTimeout))).toEqual(['10s'])
+    expect(performance.now() - began).toBeGreaterThanOrEqual(15_000)
     expect(a.acquired + b.acquired).toBe(2)
     expect(b.acquired).toBe(1)
     expect(b.m.warm.size()).toBe(1)
@@ -1057,6 +1061,75 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     two.release()
     expect(await running).toMatchObject({ status: 'done' })
     expect(await said(b, id, 'late from B')).toBe(true)
+  })
+
+  /** How many session_turn placements, and how many failures of one, the run's history holds. */
+  async function placements(id: string, runId: string) {
+    type Event = { eventId: string; eventType: string; activityTaskScheduledEventAttributes?: { activityType?: { name?: string } }; activityTaskFailedEventAttributes?: { scheduledEventId?: string } }
+    const events = (await historyTypes(id, runId)) as Event[]
+    const turns = new Set(events.filter((e) => e.activityTaskScheduledEventAttributes?.activityType?.name === 'session_turn').map((e) => String(e.eventId)))
+    return { placed: turns.size, failed: events.filter((e) => turns.has(String(e.activityTaskFailedEventAttributes?.scheduledEventId))).length }
+  }
+
+  it.each([
+    ['after its message landed', false],
+    ['before any of its appends landed: the next process here starts anew under the session`s id', true],
+  ])('a placement cut off mid-turn because another placement claimed the row is placed again, and the turn ends well: no failure shown (%s) (#6387)', async (_when, nothingLanded) => {
+    const hold = latch()
+    slowGate = hold.promise
+    script = (r) =>
+      conversation(r).includes(RESTARTED_PROMPT) || (nothingLanded && fake.messageCalls().length > 1)
+        ? { text: 'carried on' }
+        : { toolUse: { name: 'mcp__stub__slow', input: { q: 'x' } } }
+    const a = await replica('a')
+    const { id, turn } = await startOn(a, 'do the slow thing')
+    const run = await runningRun(id)
+    await pollUntil(() => slowCalls, 1)
+    // After its message landed: a user entry is in the table, as the restart decision reads it
+    // (TurnHost #landed). The mirror's appends trail the call: CI, 2026-11-15, claimed before them,
+    // and the next placement sent the message again.
+    if (!nothingLanded) {
+      await pollUntil(
+        async () => Number((await db.sql<{ n: string }[]>`SELECT count(*)::text AS n FROM ai_session_entries WHERE session_id = ${id} AND subpath = '' AND entry_type = 'user'`)[0]!.n) > 0,
+        true,
+      )
+    }
+    // Another placement claims the row, as a stray session_turn's claim does (TurnHost #claim).
+    await db.sql`UPDATE ai_sessions SET turn_attempt = 'a-stray-placement' WHERE id = ${id}`
+    // Its appends fenced before any landed: the table holds no transcript, while this replica's
+    // Claude Code config dir still has the cut process's file of the session (CI, 2026-11-15:
+    // "Claude Code process exited with code 1", the id already in use).
+    if (nothingLanded) await db.sql`DELETE FROM ai_session_entries WHERE session_id = ${id}`
+    expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    await settled(id)
+    hold.release()
+    // The cut placement failed once, and the workflow placed the turn again, on the same replica.
+    expect(await placements(id, run)).toEqual({ placed: 2, failed: 1 })
+    expect(a.acquired).toBe(2)
+    // It resumed the transcript, or, with none in the table, sent the message itself.
+    const last = conversation(fake.messageCalls().at(-1)!)
+    if (nothingLanded) expect(last).not.toContain(RESTARTED_PROMPT)
+    else expect(last).toContain(RESTARTED_PROMPT)
+    expect(await said(a, id, 'carried on')).toBe(true)
+    expect(await types(a, id)).not.toContain('error')
+    expect((await db.sql<{ status: string }[]>`SELECT status FROM ai_sessions WHERE id = ${id}`)[0]?.status).toBe('idle')
+  })
+
+  it('a placement cut off mid-turn because its turn ended is never placed again (#6387)', async () => {
+    const hold = latch()
+    slowGate = hold.promise
+    script = () => ({ toolUse: { name: 'mcp__stub__slow', input: { q: 'x' } } })
+    const a = await replica('a')
+    const { id } = await startOn(a, 'do the slow thing')
+    const run = await runningRun(id)
+    await pollUntil(() => slowCalls, 1)
+    // The row runs another turn now: this one is over (TurnHost #holds `ended`).
+    await db.sql`UPDATE ai_sessions SET durable_turn_id = ${randomUUID()} WHERE id = ${id}`
+    // The workflow closes the turn, and continues as new.
+    await pollUntil(async () => (await runningRun(id)) !== run, true)
+    hold.release()
+    expect(await placements(id, run)).toEqual({ placed: 1, failed: 1 })
+    expect(a.acquired).toBe(1)
   })
 
   it('warm_max_per_replica 0: a turn is admitted and runs cold to its end (I2)', async () => {

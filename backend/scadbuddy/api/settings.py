@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import timedelta
+from decimal import Decimal
 from typing import Any, Literal, Self
 
 import psycopg
@@ -45,14 +46,17 @@ from scadbuddy.bambuddy.uploads import ProjectTarget
 from scadbuddy.core.authorship import by_a_person
 from scadbuddy.core.config import LibraryBackend, Slicer, StoreBackend
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.setting_docs import SETTING_DOCS
 from scadbuddy.core.settings import (
     APPLIES,
     BOOTSTRAP_FIELDS,
     ENV_SEEDED,
     Applies,
+    FilamentSync,
     Settings,
     env_var,
 )
+from scadbuddy.filament.component import FilamentDep
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.presets import PresetStore, TemplatePresetsUnreadableError
 from scadbuddy.library.settings_store import (
@@ -75,7 +79,6 @@ from scadbuddy.orders.money import DepositRule, ShippingOption
 from scadbuddy.orders.storefront.slice_profile import StorefrontSliceProfile
 from scadbuddy.print_watch.component import AUTO_IMPORTS
 from scadbuddy.printers.component import Printers, PrintersDep
-from scadbuddy.spools.component import SpoolsDep
 from scadbuddy.workflows.commands import (
     TemporalRefusedError,
     TemporalUnavailableError,
@@ -87,11 +90,33 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["settings"])
 
 
+class SettingFieldDoc(BaseModel):
+    """A setting's label and help (#887), from `core/setting_docs.py`."""
+
+    title: str
+    description: str
+    #: The variable that seeds it, or ``None`` for a setting only Settings stores.
+    env_var: str | None = None
+
+
+#: Every setting's doc, as `GET /settings` answers it and the spec's default shows it.
+FIELD_DOCS: dict[str, SettingFieldDoc] = {
+    name: SettingFieldDoc(
+        title=doc.title,
+        description=doc.description,
+        env_var=env_var(name) if name in Settings.model_fields else None,
+    )
+    for name, doc in SETTING_DOCS.items()
+}
+
+
 class BootstrapValue(BaseModel):
     """A setting the UI shows but cannot change (#322), and why."""
 
     name: str
     env_var: str
+    title: str
+    description: str
     #: As the process runs with it. The database URL is shown without its credentials.
     value: str | None
     source: Literal["env", "default"]
@@ -145,6 +170,10 @@ class SettingsView(BaseModel):
     storefront_slices_concurrent: int = 1
     storefront_draft_ttl_days: int = 30
     storefront_requests_enabled: bool = False
+    #: The materials a storefront print may be made of, in the shop's order (#6258).
+    storefront_materials: list[str] = Field(default_factory=lambda: ["PETG", "PLA"])
+    #: The most colour combinations one prepare of a listing queues (#6237).
+    storefront_prepare_cap: int = 256
     #: The storefront's mail (#5283): SMTP host, port, user, From and the TLS mode
     #: (`starttls`, `implicit` or `none`). The password is sealed apart
     #: (`GET /storefront/mail/password` says whether it is set).
@@ -262,6 +291,9 @@ class SettingsView(BaseModel):
     event_log_retention_rows: int
     flow_approval_timeout_seconds: int
     spool_overlay_refresh_seconds: int
+    filament_sync: FilamentSync = Field(default_factory=FilamentSync)
+    filament_low_stock_pct: int = 20
+    filament_default_cost_per_kg: Decimal | None = None
     log_level: str
     #: The Temporal web UI, which Settings → Administration links to (#668).
     temporal_ui_url: str | None = None
@@ -275,6 +307,9 @@ class SettingsView(BaseModel):
     #: The settings the UI cannot change, with their values.
     bootstrap: list[BootstrapValue] = Field(default_factory=list)
     about: AboutView | None = None
+    #: Every setting's label and help (#887), keyed by field name. The default carries
+    #: them all, so the exported spec holds them too (the frontend's mocks read them there).
+    docs: dict[str, SettingFieldDoc] = Field(default=FIELD_DOCS)
 
 
 class PrintOptionsView(BaseModel):
@@ -433,6 +468,8 @@ def _bootstrap(settings: Settings) -> list[BootstrapValue]:
             BootstrapValue(
                 name=name,
                 env_var=env_var(name),
+                title=SETTING_DOCS[name].title,
+                description=SETTING_DOCS[name].description,
                 value=None if value is None else str(value),
                 source="env" if name in settings.model_fields_set else "default",
                 reason=reason,
@@ -578,7 +615,7 @@ async def put_settings(
     state: StateDep,
     ops: OperationsDep,
     registry: PrintersDep,
-    spools: SpoolsDep,
+    filament: FilamentDep,
 ) -> SettingsView:
     """Saves the fields given; a ``null`` clears one and ``reset`` puts one back on the
     deployment's value. A live field applies before this answers, here and (through
@@ -595,7 +632,7 @@ async def put_settings(
     patch = await asyncio.to_thread(_default_printer, patch, registry)
     if patch.storefront_slice_profile is not None:
         pending = await asyncio.to_thread(_pending, store, patch)
-        await check_profile(patch.storefront_slice_profile, pending, registry, spools)
+        await check_profile(patch.storefront_slice_profile, pending, registry, filament.inventory)
     if patch.operation_retention_seconds is not None:
         await _check_operation_retention(store, ops, patch.operation_retention_seconds)
     if patch.git_remote_token and store.kek is None:
@@ -625,8 +662,10 @@ async def put_settings(
         # itself, under the lock a pass takes (#6011).
         await state.components.get(AUTO_IMPORTS).floor()
     apply_runtime(state, snapshot.runtime)
-    # This process sees its own write at once; workers within the source's TTL.
+    # This process sees its own write at once, `/healthz` too, which only reads what the
+    # source last read (#6354); workers within the source's TTL.
     state.store.source.invalidate()
+    await state.store.source.current()
     return _view(snapshot, state)
 
 

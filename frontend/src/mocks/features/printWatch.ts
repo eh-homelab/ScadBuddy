@@ -122,7 +122,7 @@ export const handlers = [
     if (!row) return problem(404, 'Not Found', `the print watcher has no print for archive ${id}`)
     if (row.state === 'dismissed') return HttpResponse.json(row satisfies AutoImport)
     const owner = archiveImports.get(id) ?? (row.state === 'linked' ? row.slug : undefined)
-    if (owner) return problem(409, 'Conflict', `archive ${id} is a print of model:${owner}, not in Unsorted imports`)
+    if (owner) return problem(409, 'Conflict', `archive ${id} is a print of ${owner.startsWith('library:') ? owner : `model:${owner}`}, not in Unsorted imports`)
     const dismissed: AutoImport = { ...row, state: 'dismissed', slug: null, matched_by: null, dismissed_at: new Date().toISOString() }
     rows = rows.map((r) => (r.archive_id === id ? dismissed : r))
     return HttpResponse.json(dismissed satisfies AutoImport)

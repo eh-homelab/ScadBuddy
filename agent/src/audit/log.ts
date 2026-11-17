@@ -5,6 +5,7 @@ import type { RiskTier } from '../harness/permissions.js'
 import { isUuid } from '../harness/stateDirs.js'
 import { RECORD_WAIT_MS, waitAtMost } from '../db/bounded.js'
 import { redact } from '../secrets.js'
+import type { AuditRoutes } from './crudAudit.js'
 
 // The audit log of AI actions (#258; spec §8.3 "the audit log records the
 // client IP", §8.6 "audit log", "redacted in logs and audit", §9 "the audit
@@ -67,7 +68,7 @@ import { redact } from '../secrets.js'
 // database blip stop every session; the table is in the same database as
 // everything the actions touch, so an outage stops those too.
 
-export const AUDIT_KINDS = ['tool_call', 'resource', 'approval', 'credential', 'plugin', 'settings', 'token', 'memory', 'http', 'question', 'turn'] as const
+export const AUDIT_KINDS = ['tool_call', 'resource', 'approval', 'credential', 'plugin', 'settings', 'token', 'memory', 'http', 'question', 'turn', 'payload_key'] as const
 export type AuditKind = (typeof AUDIT_KINDS)[number]
 export const AUDIT_OUTCOMES = ['ok', 'error', 'refused', 'denied'] as const
 export type AuditOutcome = (typeof AUDIT_OUTCOMES)[number]
@@ -286,6 +287,11 @@ export type AuditLogDeps = {
   onError?: (err: unknown, entry: AuditEntry) => void
   /** How long `record` waits for its row before it lets the action go on (db/bounded.ts). */
   waitMs?: number
+  /**
+   * The API's routes, area `audit` (audit/crudAudit.ts, #5299 step 10), used while `use()` holds;
+   * the SQL here otherwise.
+   */
+  routes?: { crud: AuditRoutes; use: () => boolean } | undefined
 }
 
 export class AuditLog implements AuditRepo {
@@ -313,6 +319,15 @@ export class AuditLog implements AuditRepo {
   }
 
   private async insert(entry: AuditEntry): Promise<void> {
+    const routes = this.deps.routes
+    if (routes?.use()) {
+      try {
+        await routes.crud.record(entry)
+      } catch (err) {
+        this.deps.onError?.(err, entry)
+      }
+      return
+    }
     const started = entry.startedAt ?? null
     const finished = entry.finishedAt ?? null
     const duration = started && finished ? Math.max(0, finished.getTime() - started.getTime()) : null
@@ -355,6 +370,7 @@ export class AuditLog implements AuditRepo {
   }
 
   async list(filter: AuditFilter = {}): Promise<AuditPage> {
+    if (this.deps.routes?.use()) return await this.deps.routes.crud.list(filter)
     const where: string[] = []
     const params: (string | number | Date)[] = []
     const add = (clause: (n: number) => string, value: string | number | Date) => {
@@ -407,6 +423,7 @@ export class AuditLog implements AuditRepo {
    */
   async prune(): Promise<number> {
     const days = await this.retentionDays()
+    if (this.deps.routes?.use()) return await this.deps.routes.crud.prune(days)
     return this.deps.sql.begin(async (tx) => {
       await tx`SELECT set_config('scadbuddy.audit_prune', 'on', true)`
       const deleted = await tx`DELETE FROM ai_audit WHERE at < now() - (${days} * interval '1 day')`

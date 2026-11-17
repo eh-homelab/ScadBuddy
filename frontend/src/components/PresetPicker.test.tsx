@@ -1,4 +1,4 @@
-import { act, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -49,6 +49,11 @@ function watchRenders(): Promise<{ inputs: { params: Record<string, unknown> } }
   return bodies
 }
 
+/** Moves the tag's name off its default, so a preset saved now holds something (#360). */
+async function changeAValue(user: ReturnType<typeof renderPage>['user']) {
+  await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'x')
+}
+
 /** Opens Save as preset, names it and saves. */
 async function savePresetNamed(user: ReturnType<typeof renderPage>['user'], name: string) {
   await user.click(await screen.findByRole('button', { name: 'Save as preset…' }))
@@ -58,9 +63,17 @@ async function savePresetNamed(user: ReturnType<typeof renderPage>['user'], name
 }
 
 /** The picker with values that follow each apply, as the customize page's do. */
-function Harness({ onApply }: { onApply: (values: ParamValues, extra: InputsExtra) => void }) {
+function Harness({
+  onApply,
+  seed,
+}: {
+  onApply: (values: ParamValues, extra: InputsExtra) => void
+  /** Given a setter a test calls as a template UI does, with no user event (#1775). */
+  seed?: (set: (update: (current: InputsExtra) => InputsExtra) => void) => void
+}) {
   const [values, setValues] = useState(() => defaultValues(keychainSchema))
   const [extra, setExtra] = useState<InputsExtra>({ tab: 'lid' })
+  seed?.(setExtra)
   return (
     <>
       <PresetPicker
@@ -365,6 +378,7 @@ describe('PresetPicker', () => {
   it('keeps the dialog open with the server\'s reason when the name is taken', async () => {
     const { user } = render()
     await picker()
+    await changeAValue(user)
     await user.click(screen.getByRole('button', { name: 'Save as preset…' }))
     const dialog = screen.getByRole('dialog', { name: 'Save as preset' })
     const name = within(dialog).getByRole('textbox', { name: 'Preset name' })
@@ -401,11 +415,27 @@ describe('PresetPicker', () => {
     // Not squeezed into the buttons' row, where it wrapped word by word.
     const update = screen.getByRole('button', { name: /^Update preset / })
     expect(note.parentElement).not.toBe(update.parentElement)
-    // Above them, one line, the whole name kept for the eye that hovers.
-    expect(note.compareDocumentPosition(update) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    // Below the select's row (#1023), so it appearing moves neither the select nor the
+    // buttons; one line, the whole name kept for the eye that hovers.
+    expect(note.compareDocumentPosition(update) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy()
     expect(note).toHaveClass('truncate')
     expect(note).toHaveAttribute('role', 'status')
     expect(note).toHaveTextContent('Changed from Mum')
+  })
+
+  it('keeps Save as preset on the select\'s row, with no row of its own (#1023)', async () => {
+    const { user } = render()
+    const select = await picker()
+    const saveAs = screen.getByRole('button', { name: 'Save as preset…' })
+    const row = screen.getByTestId('preset-bar')
+    expect(row.contains(select)).toBe(true)
+    expect(row.contains(saveAs)).toBe(true)
+    // Picked and changed, the preset's actions join the same bar (in a narrow panel they
+    // wrap to its second line, together: e2e/presets.spec.ts).
+    await selectOption(user, select, 'Mum')
+    await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'my')
+    expect(row.contains(screen.getByRole('button', { name: /^Update preset / }))).toBe(true)
+    expect(row.contains(screen.getByRole('button', { name: 'More for preset Mum' }))).toBe(true)
   })
 
   it('offers neither Update nor Delete on a preset the template ships', async () => {
@@ -435,6 +465,7 @@ describe('PresetPicker', () => {
   it('saves presets on a built-in template too', async () => {
     const { user } = render(BUILTIN_SLUG)
     await picker()
+    await changeAValue(user)
     await user.click(screen.getByRole('button', { name: 'Save as preset…' }))
     const dialog = screen.getByRole('dialog', { name: 'Save as preset' })
     await user.type(within(dialog).getByRole('textbox', { name: 'Preset name' }), 'Mine')
@@ -532,6 +563,7 @@ describe('PresetPicker', () => {
     const create = vi.spyOn(api, 'createPreset')
     const { user } = render()
     await picker()
+    await changeAValue(user)
     await user.click(screen.getByRole('button', { name: 'Save as preset…' }))
     const dialog = screen.getByRole('dialog', { name: 'Save as preset' })
     await user.type(within(dialog).getByRole('textbox', { name: 'Preset name' }), 'Bag tag')
@@ -548,7 +580,7 @@ describe('PresetPicker', () => {
     await waitFor(() => noDialog())
     expect(create).toHaveBeenCalledWith('name-keychain', {
       name: 'Bag tag',
-      inputs: { params: {} },
+      inputs: { params: { name: 'Reaganx' } },
       description: 'For **bags**.',
       tags: ['bags', 'big tag'],
     })
@@ -597,6 +629,7 @@ describe('PresetPicker', () => {
     const create = vi.spyOn(api, 'createPreset')
     const { user } = render()
     await picker()
+    await changeAValue(user)
     await user.click(screen.getByRole('button', { name: 'Save as preset…' }))
     const dialog = screen.getByRole('dialog', { name: 'Save as preset' })
     await user.type(within(dialog).getByRole('textbox', { name: 'Preset name' }), 'Many')
@@ -619,6 +652,7 @@ describe('PresetPicker', () => {
     const create = vi.spyOn(api, 'createPreset')
     const { user } = render()
     await picker()
+    await changeAValue(user)
     await user.click(screen.getByRole('button', { name: 'Save as preset…' }))
     const dialog = screen.getByRole('dialog', { name: 'Save as preset' })
     await user.type(within(dialog).getByRole('textbox', { name: 'Preset name' }), 'Long')
@@ -910,9 +944,200 @@ describe('PresetPicker', () => {
     const reset = screen.getByRole('button', { name: 'Reset to defaults' })
     await waitFor(() => expect(reset).toBeEnabled())
     await user.click(reset)
+    await changeAValue(user)
     await savePresetNamed(user, 'After reset')
     await waitFor(() => expect(saved).toHaveLength(2))
     expect(saved[1]?.inputs).not.toHaveProperty('tab')
+  })
+})
+
+describe('PresetPicker: the smaller gaps (#360)', () => {
+  beforeEach(() => resetMockState())
+
+  it('will not save a preset that holds nothing, and says why', async () => {
+    const create = vi.spyOn(api, 'createPreset')
+    const { user } = render()
+    await picker()
+    await user.click(screen.getByRole('button', { name: 'Save as preset…' }))
+    const dialog = screen.getByRole('dialog', { name: 'Save as preset' })
+    await user.type(within(dialog).getByRole('textbox', { name: 'Preset name' }), 'Plain')
+    expect(within(dialog).getByTestId('preset-nothing-differs')).toHaveTextContent(
+      'Nothing differs from the defaults',
+    )
+    const save = within(dialog).getByRole('button', { name: 'Save' })
+    expect(save).toBeDisabled()
+    await user.keyboard('{Enter}')
+    expect(create).not.toHaveBeenCalled()
+
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    await changeAValue(user)
+    await user.click(screen.getByRole('button', { name: 'Save as preset…' }))
+    const again = screen.getByRole('dialog', { name: 'Save as preset' })
+    await user.type(within(again).getByRole('textbox', { name: 'Preset name' }), 'Plain')
+    expect(within(again).queryByTestId('preset-nothing-differs')).not.toBeInTheDocument()
+    expect(within(again).getByRole('button', { name: 'Save' })).toBeEnabled()
+  })
+
+  it('says a preset was saved, until the next change', async () => {
+    const { user } = render()
+    await picker()
+    await changeAValue(user)
+    await savePresetNamed(user, 'Nova tag')
+
+    const notice = await screen.findByTestId('preset-notice')
+    expect(notice).toHaveAttribute('role', 'status')
+    expect(notice).toHaveTextContent('Saved as Nova tag.')
+    await changeAValue(user)
+    expect(screen.queryByTestId('preset-notice')).not.toBeInTheDocument()
+    expect(screen.getByTestId('preset-modified')).toHaveTextContent('Changed from Nova tag')
+  })
+
+  it('shows Update busy while it runs, then says it updated the preset', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    // Held until released, then answered by the mock's own handler (no response here).
+    server.use(
+      http.patch('/api/v1/models/:slug/presets/:id', async () => {
+        await gate
+      }),
+    )
+    const { user } = render()
+    await selectOption(user, await picker(), 'Mum')
+    await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'my')
+    const update = screen.getByRole('button', { name: 'Update preset Mum' })
+    await user.click(update)
+
+    expect(update).toHaveAttribute('aria-busy', 'true')
+    expect(update).toBeDisabled()
+    expect(update.querySelector('svg.animate-spin')).not.toBeNull()
+    // The spinner is decorative: the name stays what the e2e tests and agent tools use.
+    expect(update).toHaveAccessibleName('Update preset Mum')
+
+    release()
+    expect(await screen.findByTestId('preset-notice')).toHaveTextContent('Updated Mum.')
+    expect(screen.queryByTestId('preset-modified')).not.toBeInTheDocument()
+    await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), '!')
+    expect(screen.queryByTestId('preset-notice')).not.toBeInTheDocument()
+  })
+
+  it('reverts the edits to the selected preset from beside "Changed from"', async () => {
+    const { user } = render()
+    const select = await picker()
+    await selectOption(user, select, 'Mum')
+    const name = screen.getByRole('textbox', { name: 'Name on the tag' })
+    await user.type(name, 'my')
+    const note = screen.getByTestId('preset-modified')
+    const revert = screen.getByRole('button', { name: 'Revert to preset Mum' })
+    expect(note.parentElement).toBe(revert.parentElement)
+
+    await user.click(revert)
+    expect(name).toHaveValue('Mum')
+    expect(select).toHaveTextContent('Mum')
+    expect(screen.queryByTestId('preset-modified')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Revert to preset / })).not.toBeInTheDocument()
+  })
+
+  it('says the values stay as they are when "No preset" is chosen', async () => {
+    const { user } = render()
+    const select = await picker()
+    await selectOption(user, select, 'Mum')
+    await selectOption(user, select, 'No preset')
+
+    expect(select).toHaveTextContent(NONE_SHOWN)
+    expect(screen.getByTestId('preset-notice')).toHaveTextContent(
+      'No preset selected. The values on screen stay as they are.',
+    )
+    expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Mum')
+  })
+
+  it('names the selected preset in a tooltip on the select', async () => {
+    const { user } = render()
+    const select = await picker()
+    await selectOption(user, select, 'Old engraving')
+    fireEvent.focus(select)
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Old engraving')
+  })
+
+  it('leaves no tooltip open on the select after a pick, while focus still opens it', async () => {
+    const { user } = render()
+    const select = await picker()
+    await selectOption(user, select, 'Old engraving')
+    // Radix Select puts the focus back on its trigger as it closes: no tooltip for that.
+    expect(select).toHaveFocus()
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
+
+    fireEvent.blur(select)
+    fireEvent.focus(select)
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Old engraving')
+  })
+
+  it('says how a name is stored, with the whitespace the server collapses (#6456)', async () => {
+    const { user } = render()
+    await picker()
+    await changeAValue(user)
+    await user.click(screen.getByRole('button', { name: 'Save as preset…' }))
+    const dialog = screen.getByRole('dialog', { name: 'Save as preset' })
+    const field = within(dialog).getByRole('textbox', { name: 'Preset name' })
+    // Python's str.split() splits on U+001C-U+001F and U+0085, which JS's \s does not.
+    fireEvent.change(field, { target: { value: 'Mum\u001cand\u001f\u0085Dad' } })
+    expect(within(dialog).getByTestId('preset-name-normalised')).toHaveTextContent(
+      'Saved as “Mum and Dad”: each run of spaces, tabs or line breaks becomes one space.',
+    )
+    // ...and keeps U+FEFF, which JS's \s would split on.
+    fireEvent.change(field, { target: { value: 'Mum\ufeffDad' } })
+    expect(within(dialog).queryByTestId('preset-name-normalised')).not.toBeInTheDocument()
+    fireEvent.change(field, { target: { value: 'Mum\ufeff \tDad' } })
+    // Read raw: toHaveTextContent folds the text by JS's \s, U+FEFF included.
+    expect(within(dialog).getByTestId('preset-name-normalised').textContent).toContain('Saved as “Mum\ufeff Dad”')
+  })
+
+  it('reverts a preset with UI state, taking what the template UI seeds after as the preset\'s', async () => {
+    setMockPresets('name-keychain', [
+      ...(fixturePresets['name-keychain'] ?? []),
+      {
+        id: 'f'.repeat(32),
+        name: 'Lid',
+        origin: 'mine',
+        params: {},
+        inputs: { params: {}, tab: 'lid', v: 0 },
+        description: '',
+        tags: [],
+      },
+    ])
+    let setExtra!: (update: (current: InputsExtra) => InputsExtra) => void
+    const onApply = vi.fn()
+    const { user } = renderPage(<Harness onApply={onApply} seed={(set) => (setExtra = set)} />)
+    await selectOption(user, await picker(), 'Lid')
+    await user.click(screen.getByRole('button', { name: 'Change the UI state' }))
+    expect(screen.getByTestId('preset-modified')).toHaveTextContent('Changed from Lid')
+
+    await user.click(screen.getByRole('button', { name: 'Revert to preset Lid' }))
+    expect(onApply).toHaveBeenLastCalledWith(expect.anything(), { tab: 'lid', v: 0 })
+    expect(screen.queryByTestId('preset-modified')).not.toBeInTheDocument()
+    // The template UI answers the reverted inputs by seeding its own state, with no user event.
+    act(() => setExtra((current) => ({ ...current, seeded: true })))
+    expect(screen.queryByTestId('preset-modified')).not.toBeInTheDocument()
+  })
+
+  it('shows the name as it will be stored, and says defaults are not stored', async () => {
+    const { user } = render()
+    await picker()
+    await changeAValue(user)
+    await user.click(screen.getByRole('button', { name: 'Save as preset…' }))
+    const dialog = screen.getByRole('dialog', { name: 'Save as preset' })
+    expect(dialog).toHaveAccessibleDescription(/so the preset follows later changes to the defaults/)
+    const field = within(dialog).getByRole('textbox', { name: 'Preset name' })
+    await user.type(field, '  Mum   and  Dad ')
+    expect(within(dialog).getByTestId('preset-name-normalised')).toHaveTextContent('Saved as “Mum and Dad”')
+
+    await user.clear(field)
+    await user.type(field, 'Mum and Dad')
+    expect(within(dialog).queryByTestId('preset-name-normalised')).not.toBeInTheDocument()
   })
 })
 

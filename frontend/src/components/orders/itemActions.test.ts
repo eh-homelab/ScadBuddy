@@ -31,10 +31,11 @@ describe('itemActions (#4955)', () => {
     expect(keys(order(), item())).toEqual(['open', 'quote', 'duplicate', 'delete'])
   })
 
-  it("refuses a slice quote, with the drawer's reason, for an item with nothing rendered to slice", () => {
+  it("refuses a slice quote, with the drawer's reason, only for an item with no design to render or slice (#6324)", () => {
     const blocked = (i: OrderItemDetail) => itemActions(order(), i, { shipments: [], unfulfilAllowed: true }).find((a) => a.key === 'quote')?.blocked
     expect(blocked(item({ kind: 'request', reference: null, output_id: null }))).toBe(NO_SLICE_SOURCE)
-    expect(blocked(item({ output_id: null }))).toBe(NO_SLICE_SOURCE)
+    // A design with no output renders first, in the same Slice… press.
+    expect(blocked(item({ output_id: null }))).toBeNull()
     expect(blocked(item())).toBeNull()
     expect(blocked(item({ kind: 'library_file', reference: null, output_id: null, library_file: { id: 1, filename: 'a.3mf', library: 'native' } }))).toBeNull()
   })

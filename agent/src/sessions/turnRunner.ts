@@ -36,10 +36,11 @@ import { harnessToolName, toolPrefix } from '../plugins/registry.js'
 import type { CheckedPlugin } from '../plugins/registry.js'
 import { withSpan } from '../telemetry/trace.js'
 import { TurnTrace } from '../telemetry/turn.js'
-import type { SessionFiles } from '../workspace/store.js'
+import type { WorkspaceFiles } from '../workspace/store.js'
 import { directoryNote } from './directoryNote.js'
 import type { EventLog } from './eventLog.js'
 import type { ClaimedSession, SessionManagerDeps, SessionRecord, TurnPrincipal } from './manager.js'
+import type { SessionRows } from './rows.js'
 import { event } from './protocol.js'
 import { scrubForLog } from './sdkEvents.js'
 import type { PostgresSessionStore } from './store.js'
@@ -50,7 +51,7 @@ import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-
 import { type ProxiedTool, type ToolCallRequest, turnToolProxies } from '../tools/activityProjection.js'
 import { poolRemainingUsd, recordMemoryActivity, SETTING_MODEL, systemAppend } from './turnShared.js'
 import { createTurnSlot, NO_TURN, slotHooks, slotHttpContext, slotWebContext, type TurnContext, type TurnSlot } from './turnSlot.js'
-import { PgHttpBodies } from './httpBodies.js'
+import { pgHttpBodies } from './httpBodies.js'
 import { nestedQueries } from '../builtins/nested.js'
 import { browserGuard } from '../browser/guard.js'
 import { BrowserOrigins } from '../browser/store.js'
@@ -81,7 +82,9 @@ export type TurnRunnerDeps = Pick<
   | 'packageServers'
   | 'memory'
   | 'httpRequest'
+  | 'httpBodies'
   | 'sql'
+  | 'browserOrigins'
   | 'background'
   | 'sandbox'
   | 'nestedQueries'
@@ -92,7 +95,9 @@ export type TurnRunnerDeps = Pick<
   store: SessionStore & Pick<PostgresSessionStore, 'exists' | 'lastCwd'>
   events: Pick<EventLog, 'append'>
   /** The workspace http_request's `save_to_workspace` writes to (#2329). */
-  files: SessionFiles
+  files: WorkspaceFiles
+  /** The sessions' rows (rows.ts): what is left of a session's budget. */
+  rows: Pick<SessionRows, 'get'>
 }
 
 /** Everything fixed at spawn that decides whether a warm process may serve a turn (spec §5.3 "Reuse rule"). */
@@ -303,7 +308,7 @@ export class TurnRunner {
   async assemble(
     session: ClaimedSession,
     principal: TurnPrincipal,
-    options: { includeCooling?: boolean; parent?: Context } = {},
+    options: { includeCooling?: boolean; parent?: Context; turnId?: string } = {},
   ): Promise<AssembledTurn> {
     const id = session.id
     const slot = createTurnSlot()
@@ -346,7 +351,11 @@ export class TurnRunner {
       // after this point is redacted before it reaches the event log. Every
       // candidate's, since the turn may fall back to any of them.
       const candidates = await phase('credentials', () =>
-        this.deps.credentials.candidates(options.includeCooling ? { includeCooling: true } : undefined),
+        this.deps.credentials.candidates({
+          ...(options.includeCooling ? { includeCooling: true } : {}),
+          sessionId: id,
+          ...(options.turnId ? { turnId: options.turnId } : {}),
+        }),
       )
       secrets = candidates.map((c) => c.credential.secret)
       const builtInTools = this.deps.builtInTools
@@ -619,7 +628,7 @@ export class TurnRunner {
           ? httpRequestServer(
               slotHttpContext(
                 {
-                  saved: new PgHttpBodies(this.deps.sql, id),
+                  saved: (this.deps.httpBodies ?? pgHttpBodies(this.deps.sql))(id),
                   // save_to_workspace (#2329): the body becomes one of the session's files.
                   workspace: { files: this.deps.files, ref: { kind: 'session', sessionId: id } },
                   secrets: () => secrets,
@@ -681,7 +690,7 @@ export class TurnRunner {
         tierOf: proxies ? pluginTiers : tierOf,
         // The headless browser's lists (#982): every remote plugin's browser_* calls.
         browser: browserGuard({
-          store: new BrowserOrigins(this.deps.sql, this.deps.settings),
+          store: this.deps.browserOrigins ?? new BrowserOrigins(this.deps.sql, this.deps.settings),
           sessionId: id,
           plugins: remotePlugins.map((p) => p.name),
         }),
@@ -795,7 +804,7 @@ export class TurnRunner {
                               },
                               // The row's cost moves at the turn's end, so what this turn's own queries spent comes off too.
                               remaining: async () => {
-                                const left = await poolRemainingUsd(this.deps.sql, id)
+                                const left = await poolRemainingUsd(this.deps.rows, id)
                                 return left === undefined ? undefined : left - (slot.current?.nested?.usd ?? 0)
                               },
                             }),

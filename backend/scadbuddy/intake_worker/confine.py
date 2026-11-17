@@ -2,8 +2,9 @@
 ``python -I -S confine.py [--strict] [--box-fd N] [--cover DIR]... <hide> -- <program> [args...]``.
 
 Each ``--cover`` directory gets an empty tmpfs (mode 0) over it in the new mount
-namespace, as ``hide`` does: the sandbox covers its RPC token's directory, which sits on a
-read-only Secret volume it cannot unlink, so the parser cannot read the token by its path.
+namespace, as ``hide`` does (``hide``'s is mode 0111, step 1): the sandbox covers its RPC
+token's directory, which sits on a read-only Secret volume it cannot unlink, so the parser
+cannot read the token by its path.
 
 Its working directory is the job's box, or, with ``--box-fd``, the directory of that
 inherited descriptor, which it ``fchdir``s to and closes first. The sandbox
@@ -27,11 +28,14 @@ job, and the parser cannot leave the group (``setsid`` and ``setpgid`` are refus
    ([user_namespaces(7)](https://man7.org/linux/man-pages/man7/user_namespaces.7.html)): a
    network namespace with only a loopback device that is down
    ([network_namespaces(7)](https://man7.org/linux/man-pages/man7/network_namespaces.7.html)),
-   and a mount namespace where ``/`` is made private and an empty tmpfs (mode 0) covers
-   ``hide`` (the spool). Its working directory, its own job's box, is bind-mounted onto
-   ``<hide>/box`` inside that tmpfs and the process moves there, so ``..`` leads into the
-   tmpfs, never back down the real spool to another job: a working directory left below
-   the covered spool would still reach its siblings by ``..``
+   and a mount namespace where ``/`` is made private and an empty tmpfs covers ``hide``
+   (the spool). That tmpfs is mode 0111, search only: the parser cannot list it, but it
+   can reach its own box by its absolute path, which ``tempfile`` and the libraries the
+   check calls build from ``TMPDIR`` (mode 0 refused every such path with ``EACCES``, and
+   every STL check crashed in prod, #6523). Its working directory, its own job's box, is
+   bind-mounted onto ``<hide>/box`` inside that tmpfs and the process moves there, so
+   ``..`` leads into the tmpfs, never back down the real spool to another job: a working
+   directory left below the covered spool would still reach its siblings by ``..``
    ([mount_namespaces(7)](https://man7.org/linux/man-pages/man7/mount_namespaces.7.html);
    measured by `tests/intake_worker/test_runner.py`
    `test_a_confined_child_reaches_only_its_own_box`). The forked parser is PID 1 of its
@@ -241,7 +245,9 @@ def isolate(libc: ctypes.CDLL, hide: str, covers: tuple[str, ...] = ()) -> str |
     # bind mount's source must be a mount of the caller's own namespace.
     box = os.open(".", os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
-        if libc.mount(b"tmpfs", hide.encode(), b"tmpfs", flags, b"size=4k,mode=0") != 0:
+        # Search only (0111), not 0: the parser, which holds no capability, reaches its box
+        # by the absolute path <hide>/box, and lists nothing.
+        if libc.mount(b"tmpfs", hide.encode(), b"tmpfs", flags, b"size=4k,mode=0111") != 0:
             return _refused("mount(tmpfs over the spool)")
         inner = os.path.join(hide, "box")
         try:

@@ -1010,6 +1010,7 @@ async def test_the_dialogs_background_slice_takes_the_asked_path(
         archive_cache=unused,
         printers=unused,
         reports=unused,
+        sb_spools=unused,
     )
     (preview,) = [kind for kind in kinds if kind.name == "preview_slice"]
     request = run_request(printer_id=1, path="bambuddy").model_dump(mode="json")

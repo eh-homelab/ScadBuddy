@@ -7,7 +7,13 @@ this order:
 1. A `filament_bb_links` row names it: the SB spool takes what BB changed since the last
    pull. "Changed" compares BB's values with the ones the last pull saw, kept in the
    ``data.bb`` of the spool's newest ``synced_from_bb`` event; a BB row whose
-   ``updated_at`` is not past the link's ``bb_updated_at`` is not looked at. Per field
+   ``updated_at`` is not past the link's ``bb_updated_at`` is not looked at, except for
+   the insert type (below): a row whose last reading has no ``core_weight_catalog_id``
+   is read in full on each pull until the key is recorded (the event is booked with no
+   ref), which happens on the first pull where BB's id is mapped or None, or where the
+   row changed; while the id stays unmapped the key stays absent and nothing is booked.
+   A row whose catalog entry was mapped after it was read is checked for the insert
+   type. Per field
    the newer change wins (§8.2): a field SB edited (an ``edited`` event) after BB's
    ``updated_at`` keeps SB's value. A value BB no longer has never clears SB's, and the
    fields BB does not have (note, location, bed temperatures ...) are never touched. A
@@ -18,9 +24,7 @@ this order:
    ``scale`` reading (#6263): it is physical, so it counts under the lock (`_book`).
    A BB unlock clears the lock only when a pull set it (`_lock_from_bb`).
 2. Else an SB spool already is that spool: it holds the BB spool's ``tag_uid`` or
-   ``tray_uuid`` through an open binding, or the BB record's `spool_record_links` row
-   (provider ``bambuddy``) names it (a native spool migrated onto its physical spool's
-   id, `20261114T1302Z_filament_from_native.sql`). It is linked; a spool that needs a
+   ``tray_uuid`` through an open binding. It is linked; a spool that needs a
    type takes the one BB's values match, and one with no weight takes BB's.
 3. Else a new SB spool: its type by ``material_number`` (`SpoolTypeStore.match`), else
    by identity (brand, material, subtype, colour, label weight), else none (it needs a
@@ -29,8 +33,22 @@ this order:
    ``created`` event with a ``bb`` reading of what is left, and its link.
 
 Catalog names from BB (material, subtype, brand, category, effect) resolve by their upper
-case name, and are added when missing. BB's ``core_weight_catalog_id`` names a BB spool
-catalog entry that has no SB insert type yet, so the insert type is not pulled.
+case name, and are added when missing. BB's spool catalog (``GET /inventory/catalog``,
+`BambuddyClient.spool_catalog`) is mapped once per pull (`_insert_types`): an entry is the
+insert type that has its id as ``bb_catalog_id``, else the unlinked one of the same upper
+case name (now linked), else a new one (its weight, no insert material). A type that
+exists is never rewritten. A BB spool's ``core_weight_catalog_id`` (an unarchived mapped
+entry) sets the SB spool's insert type: when the spool is made, its own insert type when
+it has no spool type, else an override only when it differs from the spool type's; when
+it is linked, or read for the first time (the last reading has no such key), where the
+spool has none of its own, unless a person cleared it (an ``edited`` event naming
+``insert_type_id`` since the link); and when BB's value changed since the last reading (a
+recorded ``None`` is a value), as any moved field: BB's wins unless an ``edited`` event
+since BB's change names ``insert_type_id``, and moving to the spool type's own insert type
+clears the override. While the entry is not mapped the reading keeps the last id, or, with
+no last id, leaves the key absent, so the pull that maps it applies it. A
+catalog read that fails leaves the insert types alone and the spools are pulled
+(`PullReport.catalog_failed`).
 
 A pulled weight is an absolute reading at the BB row's ``updated_at``, not at the pull:
 BB's state is as of its last write (the ``created`` and every ``synced_from_bb`` event
@@ -45,6 +63,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -56,14 +75,18 @@ from psycopg.rows import DictRow
 from pydantic import BaseModel, Field, ValidationError
 
 from scadbuddy.bambuddy.client import client_for
-from scadbuddy.bambuddy.models import Archive, SpoolUsage
+from scadbuddy.bambuddy.models import Archive, SpoolAssignment, SpoolCatalogEntry, SpoolUsage
 from scadbuddy.bambuddy.models import Spool as BbSpool
+from scadbuddy.core.problems import ApiError
+from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament import bambuddy_usage, ledger
 from scadbuddy.filament import models as m
 from scadbuddy.filament.colour import normalise_rgba
 from scadbuddy.filament.component import Filament
+from scadbuddy.filament.presets import drop_migrated, own_presets
 from scadbuddy.filament.spools import FilamentSpoolStore, TagKeysClashError
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.operations.kinds import waiting_on_bambuddy
 from scadbuddy.spools.models import clean_tag_uid, clean_tray_uuid
 
 logger = logging.getLogger(__name__)
@@ -101,7 +124,12 @@ _PLAIN = (
     "weight_locked",
 )
 #: The snapshot fields that are no column: what is left, the tags and the product code.
-_NOT_COLUMNS = frozenset({"remaining_g", "tag_uid", "tray_uuid", "material_number"})
+_NOT_COLUMNS = frozenset(
+    {"remaining_g", "tag_uid", "tray_uuid", "material_number", "core_weight_catalog_id"}
+)
+#: The catalog entries already warned about as skipped, so a clash is told once a process.
+_WARNED_SKIPS: set[tuple[int, str]] = set()
+_WARNED_SKIPS_MAX = 1000
 
 Outcome = Literal["pulled", "skipped", "failed"]
 
@@ -111,7 +139,9 @@ class PullReport(BaseModel):
     those it made or linked still need a type, and how many it left alone because they
     are archived, with their ids; the BB spools it could not pull (each logged and rolled
     back); and the BB rows it could not read (each logged), with their ids when the row
-    had one."""
+    had one; whether BB's spool catalog failed (all or nothing: then no entry was mapped),
+    and how many of its entries were skipped (no name or weight, or a name another type
+    has), so a spool naming one gets no insert type."""
 
     created: int = 0
     linked: int = 0
@@ -119,6 +149,9 @@ class PullReport(BaseModel):
     needs_type: int = 0
     archived: int = 0
     invalid: int = 0
+    #: BB's spool catalog could not be read or mapped; the insert types were left alone.
+    catalog_failed: bool = False
+    catalog_skipped: int = 0
     created_ids: list[UUID] = Field(default_factory=list)
     linked_ids: list[UUID] = Field(default_factory=list)
     updated_ids: list[UUID] = Field(default_factory=list)
@@ -178,6 +211,7 @@ def snapshot(bb: BbSpool) -> dict[str, Any]:
         "tag_uid": clean_tag_uid(bb.tag_uid),
         "tray_uuid": clean_tray_uuid(bb.tray_uuid),
         "material_number": _text(bb.material_number),
+        "core_weight_catalog_id": bb.core_weight_catalog_id,
     }
 
 
@@ -186,13 +220,24 @@ def _column_value(field: str, value: Any) -> Any:
 
 
 def pull(
-    store: Filament, spools: Sequence[BbSpool], *, now: datetime, actor: str = ACTOR
+    store: Filament,
+    spools: Sequence[BbSpool],
+    *,
+    now: datetime,
+    actor: str = ACTOR,
+    catalog: Sequence[SpoolCatalogEntry] = (),
 ) -> PullReport:
     """Pull ``spools`` (BB's ``GET /inventory/spools``) into ``store``, as the module
-    says. ``now`` is the link's time, and its ``bb_updated_at`` when BB sends none;
-    ``actor`` is who the events name (a person's import, else ``bambuddy``). One BB spool
-    that fails is rolled back, logged and listed; the rest go on."""
+    says, after ``catalog`` (BB's spool catalog) is mapped to insert types. ``now`` is the
+    link's time, and its ``bb_updated_at`` when BB sends none; ``actor`` is who the events
+    name (a person's import, else ``bambuddy``). One BB spool that fails is rolled back,
+    logged and listed; the rest go on, as when the catalog fails."""
     report = PullReport()
+    try:
+        report.catalog_skipped = _insert_types(store, catalog)
+    except Exception:
+        logger.warning("could not map Bambuddy's spool catalog", exc_info=True)
+        report.catalog_failed = True
     for bb in spools:
         try:
             with store.spools.transaction() as conn:
@@ -217,6 +262,80 @@ def pull(
     return report
 
 
+def _insert_types(store: Filament, catalog: Sequence[SpoolCatalogEntry]) -> int:
+    """Make each entry an insert type, in one transaction under its own advisory lock
+    (``0`` is no BB spool id): the type with its ``bb_catalog_id``, else the unlinked one
+    of the same upper case name, which takes the id, else a new one. A type that exists
+    keeps its name and weight; a fractional weight is rounded to whole grams. An entry with
+    no name or no weight, or a name another type has, is skipped: how many is the answer
+    (warned once a process, then at debug)."""
+    if not catalog:
+        return 0
+    skipped = 0
+
+    def skip(entry: SpoolCatalogEntry, why: str) -> None:
+        nonlocal skipped
+        skipped += 1
+        key = (entry.id, why)
+        if len(_WARNED_SKIPS) > _WARNED_SKIPS_MAX:
+            _WARNED_SKIPS.clear()
+        log = logger.debug if key in _WARNED_SKIPS else logger.warning
+        _WARNED_SKIPS.add(key)
+        log(
+            "a Bambuddy spool catalog entry is skipped (%s); spools that name it get no "
+            "insert type",
+            why,
+            extra={"bb_catalog_id": entry.id},
+        )
+
+    with store.spools.transaction() as conn:
+        conn.execute("SELECT pg_advisory_xact_lock(%s, 0)", (_LOCK,))
+        for entry in catalog:
+            name = _text(entry.name)
+            grams = math.floor(entry.weight + 0.5)
+            if name is None or grams <= 0:
+                skip(entry, "no name or weight")
+                continue
+            if conn.execute(
+                "SELECT 1 FROM filament_insert_types WHERE bb_catalog_id = %s", (entry.id,)
+            ).fetchone():
+                continue
+            linked = conn.execute(
+                "UPDATE filament_insert_types SET bb_catalog_id = %s, updated_at = now()"
+                " WHERE upper(name) = upper(%s) AND archived_at IS NULL"
+                " AND bb_catalog_id IS NULL",
+                (entry.id, name),
+            )
+            if linked.rowcount:
+                continue
+            if conn.execute(
+                "SELECT 1 FROM filament_insert_types WHERE upper(name) = upper(%s)"
+                " AND archived_at IS NULL",
+                (name,),
+            ).fetchone():
+                skip(entry, "another type has its name")
+                continue
+            conn.execute(
+                "INSERT INTO filament_insert_types"
+                " (name, sort_order, empty_weight_g, bb_catalog_id)"
+                " VALUES (%s, %s, %s, %s)",
+                (name, _ADDED_SORT, grams, entry.id),
+            )
+    return skipped
+
+
+def _core_insert_type(conn: Conn, bb: BbSpool) -> UUID | None:
+    """The unarchived insert type BB's ``core_weight_catalog_id`` is, once the catalog is
+    mapped."""
+    if bb.core_weight_catalog_id is None:
+        return None
+    row = conn.execute(
+        "SELECT id FROM filament_insert_types WHERE bb_catalog_id = %s AND archived_at IS NULL",
+        (bb.core_weight_catalog_id,),
+    ).fetchone()
+    return None if row is None else row["id"]
+
+
 def _one(
     conn: Conn, store: Filament, bb: BbSpool, now: datetime, actor: str
 ) -> tuple[str, UUID, bool] | None:
@@ -236,7 +355,8 @@ def _one(
         # BB may not move ``updated_at`` for a weighing: its events are booked anyway,
         # once each.
         booked = _book(conn, spool_id, bb, actor)
-        return ("updated", spool_id, False) if changed or booked else None
+        presets = _bb_presets(conn, spool_id, bb, actor)
+        return ("updated", spool_id, False) if changed or booked or presets else None
     after = snapshot(bb)
     held = _holder(conn, after, bb.id)
     if held is not None:
@@ -245,10 +365,111 @@ def _one(
             return "archived", held_id, False
         typeless = _link(conn, store, bb, held_id, after, now, actor)
         _book(conn, held_id, bb, actor)
+        _bb_presets(conn, held_id, bb, actor)
         return "linked", held_id, typeless
     made, typeless = _create(conn, store, bb, after, now, actor)
     _book(conn, made, bb, actor)
+    _bb_presets(conn, made, bb, actor)
     return "created", made, typeless
+
+
+#: The H2C nozzle sizes a Bambuddy spool's one preset is written for (ruling R1).
+BB_PRESET_NOZZLES = ("0.2", "0.4", "0.6", "0.8")
+
+
+def _bb_presets(conn: Conn, spool_id: UUID, bb: BbSpool, actor: str) -> bool:
+    """A linked BB spool's ``slicer_filament`` (and its name) as the SB spool's own H2C
+    preset at every nozzle size, a ``migrated`` row (#6262 Task 7 ruling R1), so a plan
+    on Bambuddy's path finds the preset Bambuddy's spool named. True when a row changed.
+
+    The value Bambuddy sent last is kept on the link (``bb_slicer_filament`` and its
+    name). Nothing is written unless Bambuddy's value changed since then, so a preset a
+    person deleted stays deleted; a link with no last value (from before it was kept)
+    fills its empty keys once. On a change, a key is written only where the spool has no
+    row for it, or where its row still holds that last value; any other row (a
+    person's, or a ``migrated`` one the native API or the native migration wrote) is
+    never touched. A clear in Bambuddy deletes only the rows that still hold its last
+    value. Rows that change record one ``synced_from_bb`` event with the spool's own
+    rows before and after (``changes.presets``). A spool with a type takes none: its
+    type gives its presets (F27, `drop_migrated`).
+
+    The spool's row is locked first (after the pull's advisory lock and any tags, the
+    pull's order), as `FilamentSpoolStore.set_presets` locks it, so a person's edit in
+    flight is waited for and then seen (re-review 2 I-A)."""
+    # Here, not at the top: `filament.presets` reads `bambuddy.resolver`.
+    from scadbuddy.bambuddy.resolver import PRINTER_MODEL
+
+    conn.execute("SELECT 1 FROM filament_spools WHERE id = %s FOR UPDATE", (spool_id,))
+    sent = (
+        _text(bb.slicer_filament),
+        _text(bb.slicer_filament_name) if bb.slicer_filament else None,
+    )
+    link = conn.execute(
+        "SELECT l.bb_slicer_filament, l.bb_slicer_filament_name, s.type_id IS NOT NULL AS typed"
+        " FROM filament_bb_links l JOIN filament_spools s ON s.id = l.spool_id"
+        " WHERE l.spool_id = %s",
+        (spool_id,),
+    ).fetchone()
+    if link is None:
+        return False
+    last = (link["bb_slicer_filament"], link["bb_slicer_filament_name"])
+    conn.execute(
+        "UPDATE filament_bb_links SET bb_slicer_filament = %s, bb_slicer_filament_name = %s"
+        " WHERE spool_id = %s AND (bb_slicer_filament, bb_slicer_filament_name)"
+        " IS DISTINCT FROM (%s, %s)",
+        (*sent, spool_id, *sent),
+    )
+    if link["typed"] or sent == last:
+        return False
+    found = conn.execute(
+        "SELECT nozzle_diameter, slicer_filament, slicer_filament_name, migrated"
+        " FROM filament_spool_presets WHERE spool_id = %s AND printer_model = %s",
+        (spool_id, PRINTER_MODEL),
+    ).fetchall()
+    rows = {
+        row["nozzle_diameter"]: (row["slicer_filament"], row["slicer_filament_name"])
+        for row in found
+    }
+    migrated = {row["nozzle_diameter"] for row in found if row["migrated"]}
+    # Bambuddy's own rows: none, or migrated ones still holding what it sent last. A
+    # person's row (not migrated) is never Bambuddy's, even when its value matches.
+    ours = [
+        size
+        for size in BB_PRESET_NOZZLES
+        if size not in rows or (last[0] is not None and size in migrated and rows[size] == last)
+    ]
+    wanted = [size for size in ours if rows.get(size) != (sent if sent[0] else None)]
+    if not wanted:
+        return False
+    before = own_presets(conn, spool_id)
+    for size in wanted:
+        if sent[0] is None:
+            conn.execute(
+                "DELETE FROM filament_spool_presets WHERE spool_id = %s AND printer_model = %s"
+                " AND nozzle_diameter = %s",
+                (spool_id, PRINTER_MODEL, size),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO filament_spool_presets (spool_id, printer_model, nozzle_diameter,"
+                " slicer_filament, slicer_filament_name, migrated)"
+                " VALUES (%s, %s, %s, %s, %s, true)"
+                " ON CONFLICT (spool_id, printer_model, nozzle_diameter) DO UPDATE SET"
+                " slicer_filament = EXCLUDED.slicer_filament,"
+                " slicer_filament_name = EXCLUDED.slicer_filament_name",
+                (spool_id, PRINTER_MODEL, size, *sent),
+            )
+    ledger.record(
+        conn,
+        spool_id,
+        "synced_from_bb",
+        actor=actor,
+        data={
+            "bb_spool_id": bb.id,
+            "changes": {"presets": [before, own_presets(conn, spool_id)]},
+        },
+    )
+    return True
 
 
 # -- step 2: an SB spool that already is this BB spool ---------------------------------
@@ -274,9 +495,8 @@ def _tag_holders(conn: Conn, uid: str | None, tray: str | None) -> list[dict[str
 def _holder(conn: Conn, after: dict[str, Any], bb_id: int) -> tuple[UUID, bool] | None:
     """The SB spool that already is this BB spool, and whether it is archived: the
     unlinked, unarchived spool with the oldest binding of the BB spool's tag (an archived
-    one's tag is free to re-use: a new spool takes it), else the spool the BB record's
-    link names, archived or not. Keys that name two spools are logged, and the oldest
-    binding is kept."""
+    one's tag is free to re-use: a new spool takes it). Keys that name two spools are
+    logged, and the oldest binding is kept."""
     live = [
         h for h in _tag_holders(conn, after["tag_uid"], after["tray_uuid"]) if not h["archived"]
     ]
@@ -289,14 +509,7 @@ def _holder(conn: Conn, after: dict[str, Any], bb_id: int) -> tuple[UUID, bool] 
     if free:
         found: UUID = free[0]["spool_id"]
         return found, False
-    row = conn.execute(
-        "SELECT s.id, s.archived_at IS NOT NULL AS archived FROM spool_record_links r"
-        " JOIN filament_spools s ON s.id = r.physical_spool_id"
-        " WHERE r.provider = 'bambuddy' AND r.record_id = %s"
-        " AND NOT EXISTS (SELECT 1 FROM filament_bb_links l WHERE l.spool_id = s.id)",
-        (str(bb_id),),
-    ).fetchone()
-    return None if row is None else (row["id"], row["archived"])
+    return None
 
 
 def _link(
@@ -309,7 +522,8 @@ def _link(
     actor: str,
 ) -> bool:
     """Link the SB spool and keep what it has; a spool with no type takes the one BB's
-    values match, and one with no weight BB's. True when it still needs a type."""
+    values match (dropping its ``migrated`` presets, `presets.drop_migrated`), and one
+    with no weight BB's. True when it still needs a type."""
     current = conn.execute(
         "SELECT type_id, grams_left, weight_locked FROM filament_spools WHERE id = %s FOR UPDATE",
         (spool_id,),
@@ -326,6 +540,12 @@ def _link(
                 (type_id, spool_id),
             )
             changes["type_id"] = [None, type_id]
+            dropped = drop_migrated(conn, spool_id)
+            if dropped is not None:
+                changes["presets"] = dropped
+    insert = _backfill_insert_type(conn, spool_id, bb)
+    if insert is not None:
+        changes["insert_type_id"] = insert
     reading = after["remaining_g"]
     if current["grams_left"] is not None or current["weight_locked"]:
         reading = None
@@ -333,6 +553,50 @@ def _link(
     _synced(conn, spool_id, bb, after, changes, reading, actor, linked=True)
     FilamentSpoolStore.read(conn, spool_id, check=True)
     return type_id is None
+
+
+def _insert_state(conn: Conn, spool_id: UUID) -> tuple[UUID | None, UUID | None]:
+    """The spool's own insert type and its spool type's."""
+    row = conn.execute(
+        "SELECT s.insert_type_id AS own, t.insert_type_id AS typed FROM filament_spools s"
+        " LEFT JOIN filament_spool_types t ON t.id = s.type_id WHERE s.id = %s",
+        (spool_id,),
+    ).fetchone()
+    assert row is not None
+    return row["own"], row["typed"]
+
+
+def _insert_edited_since_link(conn: Conn, spool_id: UUID) -> bool:
+    """A person edited the spool's insert type (set or cleared it) after the link."""
+    return (
+        conn.execute(
+            "SELECT 1 FROM filament_spool_events e JOIN filament_bb_links l"
+            " ON l.spool_id = e.spool_id WHERE e.spool_id = %s AND e.kind = 'edited'"
+            " AND e.at > l.linked_at AND jsonb_typeof(e.data -> 'changes') = 'object'"
+            " AND e.data -> 'changes' ? 'insert_type_id' LIMIT 1",
+            (spool_id,),
+        ).fetchone()
+        is not None
+    )
+
+
+def _backfill_insert_type(conn: Conn, spool_id: UUID, bb: BbSpool) -> list[Any] | None:
+    """Set the insert type BB's ``core_weight_catalog_id`` names where the SB spool has
+    none of its own, it differs from the spool type's and no person cleared it since the
+    link: the change, or None. Never replaces a choice already made."""
+    insert_id = _core_insert_type(conn, bb)
+    if insert_id is None:
+        return None
+    # The row first, as a person's edit of it is: this read-then-write must not lose one.
+    conn.execute("SELECT 1 FROM filament_spools WHERE id = %s FOR UPDATE", (spool_id,))
+    own, typed = _insert_state(conn, spool_id)
+    if own is not None or typed == insert_id or _insert_edited_since_link(conn, spool_id):
+        return None
+    conn.execute(
+        "UPDATE filament_spools SET insert_type_id = %s, updated_at = now() WHERE id = %s",
+        (insert_id, spool_id),
+    )
+    return [None, insert_id]
 
 
 # -- step 3: a new SB spool ------------------------------------------------------------
@@ -347,6 +611,9 @@ def _create(
         typed = kind.model_dump()
         values = {c: v for c, v in values.items() if c not in typed or typed[c] != v}
         values["type_id"] = kind.id
+    insert_id = _core_insert_type(conn, bb)
+    if insert_id is not None and (kind is None or kind.insert_type_id != insert_id):
+        values["insert_type_id"] = insert_id
     if not values.get("weight_locked"):
         values.pop("weight_locked", None)
     names = list(values)
@@ -418,8 +685,7 @@ def _update(
     actor: str,
 ) -> bool:
     """True when the SB spool took anything from BB."""
-    if bb.updated_at is not None and pulled_at is not None and bb.updated_at <= pulled_at:
-        return False
+    unmoved = bb.updated_at is not None and pulled_at is not None and bb.updated_at <= pulled_at
     last = conn.execute(
         "SELECT data -> 'bb' AS bb FROM filament_spool_events"
         " WHERE spool_id = %s AND kind = 'synced_from_bb' AND data ? 'bb'"
@@ -427,7 +693,36 @@ def _update(
         (spool_id,),
     ).fetchone()
     before: dict[str, Any] = (last["bb"] if last is not None else None) or {}
+    insert_id = _core_insert_type(conn, bb)
+    # A row BB did not move is read in full only when its last reading has no catalog id
+    # (a pull before it was kept) or BB's id is mapped now and differs from the last one.
+    # Else it may still take the insert type of an entry mapped after it was read.
+    if (
+        unmoved
+        and "core_weight_catalog_id" in before
+        and (insert_id is None or bb.core_weight_catalog_id == before["core_weight_catalog_id"])
+    ):
+        insert = _backfill_insert_type(conn, spool_id, bb)
+        if insert is None:
+            return False
+        ledger.record(
+            conn,
+            spool_id,
+            "synced_from_bb",
+            actor=actor,
+            at=bb.updated_at,
+            data={"bb_spool_id": bb.id, "bb": before, "changes": {"insert_type_id": insert}},
+        )
+        return True
     after = snapshot(bb)
+    if insert_id is None and bb.core_weight_catalog_id is not None:
+        # Its entry is not mapped (the read failed, or it was skipped or archived): the
+        # reading keeps the last id, so the pull that maps it sees the change. With no
+        # last id the key stays absent, so the pull that maps it reads it for the first time.
+        if "core_weight_catalog_id" in before:
+            after["core_weight_catalog_id"] = before["core_weight_catalog_id"]
+        else:
+            del after["core_weight_catalog_id"]
     keys = (after["tag_uid"], after["tray_uuid"])
     retag = keys != (before.get("tag_uid"), before.get("tray_uuid")) and keys != (None, None)
     if retag:
@@ -473,6 +768,22 @@ def _update(
         kind = _match(conn, store, after)
         if kind is not None:
             changes["type_id"] = [None, kind.id]
+    if insert_id is not None and after["core_weight_catalog_id"] != before.get(
+        "core_weight_catalog_id"
+    ):
+        own, typed = _insert_state(conn, spool_id)
+        # A key the last reading does not have is read for the first time: only where the
+        # spool has none of its own, and a person has not cleared it since the link. A key
+        # it has (even None) moved: BB's value wins unless an ``edited`` event since BB's
+        # change names the field.
+        if "core_weight_catalog_id" not in before:
+            free = own is None and not _insert_edited_since_link(conn, spool_id)
+        else:
+            free = "insert_type_id" not in edited
+        # BB's own spool type's insert type is no override.
+        target = None if typed == insert_id else insert_id
+        if free and target != own:
+            changes["insert_type_id"] = [own, target]
     if changes:
         columns = list(changes)
         conn.execute(
@@ -489,7 +800,9 @@ def _update(
         reading = None
     elif locked:
         reading, weight = None, "locked"
-    _synced(conn, spool_id, bb, after, changes, reading, actor, weight=weight)
+    # A row BB did not move is read again: its event takes no ref, which the same stamp
+    # would otherwise share with the one it replaces (`ledger.record` drops a repeat).
+    _synced(conn, spool_id, bb, after, changes, reading, actor, weight=weight, ref=not unmoved)
     FilamentSpoolStore.read(conn, spool_id, check=True)
     return True
 
@@ -680,6 +993,7 @@ def _synced(
     *,
     linked: bool = False,
     weight: str | None = None,
+    ref: bool = True,
 ) -> None:
     """The ``synced_from_bb`` event, at BB's ``updated_at``: what BB said (the next
     pull's ``before``), what changed, and a ``bb`` reading when ``reading`` is set."""
@@ -688,7 +1002,7 @@ def _synced(
         data["linked"] = True
     if weight is not None:
         data["weight"] = {"skipped": weight, "bb_remaining_g": after["remaining_g"]}
-    stamp = bb.updated_at.isoformat() if bb.updated_at is not None else None
+    stamp = bb.updated_at.isoformat() if bb.updated_at is not None and ref else None
     ledger.record(
         conn,
         spool_id,
@@ -757,7 +1071,11 @@ async def read_and_pull(
             except Exception as error:
                 _failed("could not read Bambuddy's archives", error)
     spools, bad = parse_rows(rows)
-    report = await asyncio.to_thread(pull, store, spools, now=datetime.now(UTC), actor=actor)
+    catalog = await read_catalog(settings)
+    report = await asyncio.to_thread(
+        lambda: pull(store, spools, now=datetime.now(UTC), actor=actor, catalog=catalog or ())
+    )
+    report.catalog_failed = report.catalog_failed or catalog is None
     report.invalid = len(bad)
     report.invalid_bb_ids = [i for i in bad if i is not None]
     if usage:
@@ -790,9 +1108,78 @@ def _book_usage(
         return bambuddy_usage.book_usage(conn, usage, archives, actor=actor)
 
 
-async def scheduled_pull(store: Filament, load: Callable[[], StoredSettings]) -> Outcome:
-    """The Schedule's pull (`SpoolRefresh`): ``skipped`` with no BB URL, ``failed`` when
-    BB or the store fails (logged, never raised), else ``pulled``."""
+#: How long :func:`read_assignments` waits for Bambuddy. It runs inside an item print's
+#: check, whose whole budget is 6 s (`workflows/operation_activities.py`
+#: `CHECK_BUDGET_SECONDS`), so it may take at most part of it; the client's own 30 s
+#: would take all of it.
+ASSIGNMENTS_TIMEOUT = 2.5
+
+
+#: How long :func:`read_catalog` waits for Bambuddy: the catalog is the pull's second
+#: read, and a slow one must not hold the spools back (the client's own 30 s would).
+CATALOG_TIMEOUT = 5.0
+
+
+async def read_catalog(settings: StoredSettings) -> list[SpoolCatalogEntry] | None:
+    """Bambuddy's spool catalog (``GET /inventory/catalog``), or ``None``, logged, when
+    Bambuddy refuses, answers in another shape or no JSON (it has no such route before
+    1.2.6b1), or does not answer within :data:`CATALOG_TIMEOUT`: the pull then leaves the
+    insert types alone. Bounded and a wait on Bambuddy as `read_assignments` is."""
+    async with waiting_on_bambuddy():
+        try:
+            async with asyncio.timeout(CATALOG_TIMEOUT), client_for(settings) as client:
+                return await client.spool_catalog()
+        except TimeoutError:
+            logger.warning("no spool catalog from Bambuddy: no answer within %s s", CATALOG_TIMEOUT)
+        except ApiError as error:
+            logger.warning("no spool catalog from Bambuddy: %s", error.detail)
+        except ValueError as error:
+            # A pydantic ValidationError (another shape) or a JSONDecodeError (no JSON).
+            logger.warning("no spool catalog from Bambuddy: an answer of another shape: %s", error)
+    return None
+
+
+async def read_assignments(settings: StoredSettings) -> list[SpoolAssignment]:
+    """:func:`try_assignments`, with ``[]`` for a failed read."""
+    return await try_assignments(settings) or []
+
+
+async def try_assignments(settings: StoredSettings) -> list[SpoolAssignment] | None:
+    """Bambuddy's tray assignments (``GET /inventory/assignments``), which place a linked
+    SB spool where no registry printer reports it (plan Decision 3, until #6263): none
+    with no BB URL, and ``None``, logged, when Bambuddy refuses, answers in another shape or
+    no JSON, or does not answer within :data:`ASSIGNMENTS_TIMEOUT`, so the spools are
+    placed by the reports alone. The read is a wait on Bambuddy (`waiting_on_bambuddy`),
+    so a check cut short inside it names Bambuddy."""
+    if not settings.bambuddy_url:
+        return []
+    async with waiting_on_bambuddy():
+        try:
+            async with asyncio.timeout(ASSIGNMENTS_TIMEOUT), client_for(settings) as client:
+                return await client.spool_assignments()
+        except TimeoutError:
+            logger.warning(
+                "no tray assignments from Bambuddy: no answer within %s s", ASSIGNMENTS_TIMEOUT
+            )
+        except ApiError as error:
+            logger.warning("no tray assignments from Bambuddy: %s", error.detail)
+        except ValueError as error:
+            # A pydantic ValidationError (another shape) or a JSONDecodeError (no JSON).
+            logger.warning(
+                "no tray assignments from Bambuddy: an answer of another shape: %s", error
+            )
+    return None
+
+
+async def scheduled_pull(
+    store: Filament, load: Callable[[], StoredSettings], sync: Callable[[], FilamentSync]
+) -> Outcome:
+    """The Schedule's pull (`SpoolRefresh`): ``skipped`` with ``filament_sync.spools``
+    ``off`` or no BB URL, ``failed`` when BB or the store fails (logged, never raised),
+    else ``pulled``. ``sync`` reads the setting as it is now (#6262 Task 13)."""
+    if (await asyncio.to_thread(sync)).spools == "off":
+        logger.info("Bambuddy's spools are not pulled: the Filament sync is off")
+        return "skipped"
     settings = await asyncio.to_thread(load)
     if not settings.bambuddy_url:
         logger.info("no Bambuddy configured; its spools are not pulled")

@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import postgres, { type Sql } from 'postgres'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import type { GateRoutes } from '../src/gate/crudStore.js'
 import { durableRequestId } from '../src/gate/ids.js'
 import {
   decideInput,
@@ -19,6 +20,7 @@ import {
 import { type BusEvent } from '../src/events/bus.js'
 import { PgEventListener } from '../src/events/pgListener.js'
 import { followSessionEvents, SessionEventPublisher } from '../src/sessions/busEvents.js'
+import { PgPublisher } from '../src/sessions/publish.js'
 import { EventLog } from '../src/sessions/eventLog.js'
 import { gateDb, sessionGateActivities } from '../src/temporal/session/gateActivities.js'
 import { SESSION_GATE_ACTIVITIES } from '../src/temporal/session/names.js'
@@ -300,7 +302,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
 
       /** A replica: its event log, its publisher, and (with `bus`) its own LISTEN consumer. */
       async function replica(options: { bus?: boolean } = {}) {
-        const publisher = new SessionEventPublisher(sql, { throttleMs: 10 })
+        const publisher = new SessionEventPublisher(new PgPublisher(sql), { throttleMs: 10 })
         const log = new EventLog(sql, { pollMs: SLOW, onAppend: publisher.onAppend })
         closers.push(() => publisher.close())
         const heard: BusEvent[] = []
@@ -360,7 +362,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       })
 
       it("publishes through main.ts's log of its own when there is no session manager", async () => {
-        const publisher = new SessionEventPublisher(sql, { throttleMs: 10 })
+        const publisher = new SessionEventPublisher(new PgPublisher(sql), { throttleMs: 10 })
         closers.push(() => publisher.close())
         const sid = await newSession(sql)
         expect(await sessionGateActivities(gateDb(sql, undefined, publisher.onAppend))[SESSION_GATE_ACTIVITIES.open](open(sid))).toBe(true)
@@ -432,40 +434,28 @@ describe.skipIf(!TEST_DATABASE_URL)(
     })
 
     describe('grant', () => {
-      // The backend's tables (backend/scadbuddy/migrations/20261012T2029Z_flow_grants.sql),
-      // only the columns grantInput reads.
-      async function grantable(sid: string, requestId: string, hash: string): Promise<void> {
-        await sql`CREATE TABLE flow_grants (id text PRIMARY KEY, status text NOT NULL, revoked_at timestamptz, expires_at timestamptz)`
-        await sql`CREATE TABLE flow_grant_uses (request_id text PRIMARY KEY, grant_id text NOT NULL, session_id text, input_hash text NOT NULL)`
-        await sql`INSERT INTO flow_grants VALUES ('g1', 'approved', NULL, now() + interval '1 hour')`
-        await sql`INSERT INTO flow_grant_uses VALUES (${requestId}, 'g1', ${sid}, ${hash})`
-      }
-      const grant = (sid: string, requestId: string, hash: string) => ({
+      // The check reads the backend's flow_grants and flow_grant_uses, so it runs on the API alone
+      // (#5299 step 10): backend tests/crud/test_crud_agent_gate.py covers the check, its share lock
+      // and its refusals; here, that the store never runs it over SQL.
+      const grant = (sid: string, requestId: string) => ({
         requestId,
         sessionId: sid,
         tool: 'print_output',
         summary: 'box',
-        inputHash: hash,
+        inputHash: 'c'.repeat(64),
         grantId: 'g1',
         requestedBy: ME,
       })
 
-      it('records an approval only for the recorded use, once, and a retry is true', async () => {
+      it('goes to the API whether or not it serves the area, and never runs without it', async () => {
         const sid = await newSession(sql)
         const requestId = durableRequestId(sid, 'run-1', 'toolu_2')
-        await grantable(sid, requestId, 'c'.repeat(64))
-        expect(await grantInput(db, grant(sid, requestId, 'd'.repeat(64)))).toBe(false)
+        const asked: unknown[] = []
+        const crud = { grant: (args: unknown) => (asked.push(args), Promise.resolve(true)) } as unknown as GateRoutes
+        expect(await grantInput({ ...db, crud, useCrud: () => false }, grant(sid, requestId))).toBe(true)
+        expect(asked).toEqual([grant(sid, requestId)])
+        await expect(grantInput(db, grant(sid, requestId))).rejects.toThrow("the run grant's check runs on the API")
         expect(await count(sql, 'ai_input_responses')).toBe(0)
-        expect(await grantInput(db, grant(sid, requestId, 'c'.repeat(64)))).toBe(true)
-        expect(await grantInput(db, grant(sid, requestId, 'c'.repeat(64)))).toBe(true)
-        expect(await count(sql, 'ai_input_responses')).toBe(1)
-        expect(await count(sql, 'ai_audit')).toBe(1)
-        const [row] = await sql`SELECT outcome, responder FROM ai_input_responses`
-        expect(row).toMatchObject({ outcome: 'approved', responder: { kind: 'run_grant', id: 'g1', label: 'Run grant' } })
-        await sql`UPDATE flow_grants SET revoked_at = now()`
-        const other = durableRequestId(sid, 'run-1', 'toolu_3')
-        await sql`INSERT INTO flow_grant_uses VALUES (${other}, 'g1', ${sid}, ${'c'.repeat(64)})`
-        expect(await grantInput(db, grant(sid, other, 'c'.repeat(64)))).toBe(false)
       })
     })
 
@@ -619,7 +609,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`a recorded entry${TEST_DATABASE_URL ? '' : 
     await openInput(db, { ...o, gate: gate(o) })
     expect(await approve(o.requestId)).toEqual({ kind: 'approval', outcome: 'approved' })
     expect(await count(sql, 'ai_pending_input')).toBe(0)
-    expect(await readInput(sql, { requestId: o.requestId })).toEqual({ outcome: 'approved', response: { decision: 'approve' }, responder: ME, reason: null })
+    expect(await readInput(db, { requestId: o.requestId })).toEqual({ outcome: 'approved', response: { decision: 'approve' }, responder: ME, reason: null })
     expect((await events(sql, sid)).map((e) => e.type)).toEqual(['approval.required', 'input.requested', 'session.status', 'approval.resolved', 'input.resolved', 'session.status'])
     expect(await statusOf(sql, sid)).toBe('running')
     // Decided once: the next response finds no row.
@@ -663,6 +653,6 @@ describe.skipIf(!TEST_DATABASE_URL)(`a recorded entry${TEST_DATABASE_URL ? '' : 
     await openInput(db, o)
     expect(await approve(o.requestId)).toBe('workflow')
     expect(await count(sql, 'ai_pending_input')).toBe(1)
-    expect(await readInput(sql, { requestId: o.requestId })).toBeNull()
+    expect(await readInput(db, { requestId: o.requestId })).toBeNull()
   })
 })

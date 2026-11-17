@@ -90,6 +90,7 @@ function bigTopLevel(count: number, refuse: () => boolean = () => false, total =
     printable: true,
     sliced: false,
     is_external: false,
+    per_print: false,
   }))
   const asked: URLSearchParams[] = []
   server.use(

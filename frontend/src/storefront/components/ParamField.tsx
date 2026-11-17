@@ -1,20 +1,25 @@
 import { useId, useState } from 'react'
 import { ToggleGroup, ToggleGroupItem } from '../../components/ui/toggle-group'
 import type { Filament, ParamValue, PublicParam } from '../api/client'
-import { colourGone, filamentOf, nearestFilament, paramFilaments, parseNumber, startColour, textLength, valueProblem, valueText } from '../params'
+import { colourSwatches } from '../colours'
+import { colourGone, parseNumber, startColour, textLength, valueProblem, valueText } from '../params'
 import { ColourPicker } from './ColourPicker'
 
 interface Props {
   param: PublicParam
   /** The visitor's value; undefined while the shop's own stands. */
   value: ParamValue | undefined
+  /**
+   * The colour a colour part shows while the visitor sets none (#6258): the colour the shop
+   * settled (`StoreRender.values`), else the page's prediction (`colours.ts` `colourPlan`).
+   * It can be the closest colour of the material another part's pick fixes. Undefined:
+   * the shop's default.
+   */
+  shown?: ParamValue
   filaments: readonly Filament[]
+  /** The listing's allowed materials, first preferred: which filament draws a shared colour's swatch (#6215). */
+  materials?: readonly string[]
   onChange: (next: ParamValue | undefined) => void
-  /** A colour parameter's picked filament, by id (#6152). */
-  pick?: string
-  onPick?: (next: string | undefined) => void
-  /** With the listing's `one_material`: the one material a colour may be of. */
-  material?: string | null
 }
 
 const LABEL = 'mb-1.5 block p-0 font-semibold'
@@ -33,33 +38,26 @@ const INPUT =
  * with the theme's tokens only, so the back office's preview (StorefrontPage) shows the
  * same form in its own colours.
  */
-export function ParamField({ param, value, filaments, onChange, pick, onPick, material = null }: Props) {
+export function ParamField({ param, value, shown, filaments, materials, onChange }: Props) {
   const id = useId()
   const problem = valueProblem(param, value)
   const hintId = `${id}-hint`
 
   if (param.kind === 'choice' && param.colour) {
-    // #6152: a colour is a filament, picked in a grid of swatches; the value is its colour.
+    // #6152, #6258: a colour is picked in a grid of swatches, one per colour; the value is
+    // the colour, and the shop finds its filament in the one material of the print.
     const gone = colourGone(param)
-    const offered = paramFilaments(param, filaments, material)
-    const current = typeof value === 'string' ? filamentOf(offered, value) : undefined
-    // While no pick is set the row shows the shop's colour, the default an unpicked render
-    // takes (#6144). On a `one_material` listing it shows the colour `settleMaterial`
-    // sends: the shop's colour, else the nearest of the shown material, else its first (#6152).
-    const start = startColour(param)
-    const shop = start === undefined ? undefined : filamentOf(offered, start)
-    const fallback = material === null ? shop : (shop ?? (start === undefined ? offered[0] : nearestFilament(start, offered)))
+    // While no colour is set the row shows `shown` (#6258), else the shop's colour, the
+    // default an unpicked render takes (#6144).
+    const row = typeof value === 'string' ? value : typeof shown === 'string' ? shown : startColour(param)
     return (
       <div className="min-w-0" aria-describedby={hintId}>
         <ColourPicker
           label={param.label}
-          filaments={offered}
-          fallback={fallback}
-          value={pick ?? current?.id}
-          onChange={(next) => {
-            onChange(next?.colour)
-            onPick?.(next?.id)
-          }}
+          swatches={colourSwatches(param, filaments, materials)}
+          picked={value !== undefined}
+          shown={row}
+          onChange={(next) => onChange(next?.colour)}
         />
         <p id={hintId} className={gone ? BAD : HINT}>
           {gone

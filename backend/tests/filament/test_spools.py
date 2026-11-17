@@ -21,6 +21,7 @@ from scadbuddy.filament.models import (
 )
 from scadbuddy.filament.spools import (
     FilamentSpoolStore,
+    SpoolBambuddyLinkedError,
     SpoolInUseError,
     SpoolTypelessError,
     TagUnnamedError,
@@ -110,6 +111,31 @@ def test_an_edit_records_each_change(pg_pool: PgPool) -> None:
     assert _kinds(store, spool).count("edited") == 1
 
 
+def test_clearing_a_spools_colour_returns_it_to_its_types(pg_pool: PgPool) -> None:
+    """Review focus 5: `rgba: null` removes the spool's own colour, so the type's shows
+    through, `overridden` loses `rgba`, and the edit is one event."""
+    store = FilamentSpoolStore(pg_pool)
+    kind = SpoolTypeStore(pg_pool).create(
+        SpoolTypeCreate(
+            code="PLA-RED", material_id=_material(pg_pool), rgba="#FF0000", label_weight_g=1000
+        )
+    )
+    spool = store.create(SpoolCreate(type_id=kind.id), actor="ann").id
+    own = store.update(spool, SpoolPatch(rgba="#00FF00"), actor="ann")
+    assert own is not None
+    assert own.effective.rgba == "#00FF00FF"
+    assert "rgba" in own.overridden
+
+    reset = store.update(spool, SpoolPatch.model_validate({"rgba": None}), actor="bob")
+
+    assert reset is not None
+    assert reset.effective.rgba == "#FF0000FF"
+    assert "rgba" not in reset.overridden
+    edits = [e for e in store.events(spool) if e.kind == "edited"]
+    assert len(edits) == 2
+    assert edits[-1].data == {"changes": {"rgba": ["#00FF00FF", None]}}
+
+
 def test_rebinding_a_tag_moves_it(pg_pool: PgPool) -> None:
     store = FilamentSpoolStore(pg_pool)
     a, b = _spool(store, pg_pool), _spool(store, pg_pool)
@@ -128,6 +154,20 @@ def test_rebinding_a_tag_moves_it(pg_pool: PgPool) -> None:
     assert _kinds(store, b)[-1] == "tag_unbound"
     with pytest.raises(TagUnnamedError):
         store.bind_tag(a, tag_uid="0000", kind="other", actor="ann")
+
+
+def test_a_bambuddy_linked_spool_is_not_deleted(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    linked = _spool(store, pg_pool)
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO filament_bb_links (spool_id, bb_spool_id, bb_updated_at, linked_at)"
+            " VALUES (%s, 7, now(), now())",
+            (linked,),
+        )
+    with pytest.raises(SpoolBambuddyLinkedError):
+        store.delete(linked)
+    assert store.get(linked) is not None
 
 
 def test_a_spool_with_prints_is_not_deleted_but_one_without_is(pg_pool: PgPool) -> None:
@@ -228,4 +268,14 @@ def test_archiving_a_spool_takes_its_tag_off_and_restoring_binds_nothing(
     assert store.open_binding(spool) is None
     # The tag is free for another spool.
     other = _spool(store, pg_pool)
-    assert store.bind_tag(other, tag_uid="A1B2C3D4", kind="bambu_mifare", actor="ann")
+    taken = store.bind_tag(other, tag_uid="A1B2C3D4", kind="bambu_mifare", actor="ann")
+    assert taken is not None
+    # Restoring the first spool takes nothing from the one that holds the tag now.
+    before = _kinds(store, spool)
+    store.archive(spool, False, actor="ann")
+    held = store.open_binding(other)
+    assert held is not None and held.tag_id == taken.tag_id
+    assert store.open_binding(spool) is None
+    assert [k for k in _kinds(store, spool) if k.startswith("tag_")] == [
+        k for k in before if k.startswith("tag_")
+    ]

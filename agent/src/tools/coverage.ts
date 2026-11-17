@@ -7,6 +7,14 @@ import type { Operation } from './registry.js'
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
+    operation: 'GET /api/v1/filament/spools/{spool_id}/presets',
+    reason: "A spool's effective slicer presets (#6262); the assistant reads them in filament_spool_get's answer, and the Filament page shows them on the spool.",
+  },
+  {
+    operation: 'GET /api/v1/filament/spools/{spool_id}/k-values',
+    reason: "A spool's effective pressure-advance values (#6262); the assistant reads them in filament_spool_get's answer, and the Filament page shows them on the spool.",
+  },
+  {
     operation: 'GET /api/v1/storefront/slice-profile/options',
     reason: "The printers and spools the Storefront settings control offers for the shop's slice profile (#6153). The assistant reads the profile through get_settings; the shop sets it in Settings, Storefront pricing.",
   },
@@ -33,6 +41,14 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
     operation: 'PUT /api/v1/storefront/listings/{listing_id}/media',
     reason: "The Storefront page's pictures and a model media's \"Storefront…\" dialog (#6213); an agent tool follows with #5283.",
+  },
+  {
+    operation: 'GET /api/v1/storefront/listings/{listing_id}/prepare',
+    reason: "The Storefront editor's \"Prepare every colour combination\" shows the count and the progress (#6237); a back-office action, as publish is on the page.",
+  },
+  {
+    operation: 'POST /api/v1/storefront/listings/{listing_id}/prepare',
+    reason: "The Storefront editor's \"Prepare every colour combination\" (#6237): a person starts a run of up to storefront_prepare_cap renders, a few at a time, from the page.",
   },
   {
     operation: 'POST /api/v1/storefront/listings/{listing_id}/unpublish',
@@ -326,6 +342,12 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'agent-authored request.',
   },
   {
+    operation: 'GET /api/v1/flow-grant-requests',
+    reason:
+      'The grants waiting for a decision, for the bell and the Activity page\'s "Needs you" (#6399). Only a person ' +
+      'decides a grant; the assistant reads a run\'s grant with get_flow_run and a trigger\'s with get_flow_trigger.',
+  },
+  {
     operation: 'GET /api/v1/workflow-runs/{run_id}/proposals/{call_id}',
     reason:
       "A parent's narrowing beside the call it narrows, for the person to compare before approving it by " +
@@ -551,6 +573,13 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "A slice quote's plate image from its sliced file (#4673), which the item's print setups draw. The " +
       "agent reads each setup's plates, time, grams and choices from order_get; it has no use for the bytes.",
   },
+  {
+    operation: 'POST /api/v1/orders/{order_id}/items/{item_id}/render',
+    reason:
+      "The order page's Slice… renders an item with a design and no output first, so the print dialog has an " +
+      "output to open on (#6324). The agent's order_item_quote `slice` needs no dialog: its run renders the " +
+      'item itself when it has no matching output.',
+  },
   ...(
     [
       'GET /api/v1/print/outputs/{output_id}/preview-slices/{job_id}/toolpath',
@@ -597,8 +626,9 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
     operation: 'POST /api/v1/print/printers/{printer_id}/trays/{ams_id}/{tray_id}/spool',
     reason:
-      "Records in Bambuddy which spool is in an untagged tray (#2164), sent only on a person's own answer " +
-      "to the print dialog's question; an agent cannot see which spool is physically in the tray.",
+      'Records which ScadBuddy spool is in an untagged tray (#2164, #6262): its tray place first, then, for a ' +
+      "spool linked to Bambuddy's, Bambuddy's assignment. Sent only on a person's own answer to the print " +
+      "dialog's question; an agent cannot see which spool is physically in the tray.",
   },
   {
     operation: 'GET /api/v1/print/printers/{printer_id}/camera/stream',

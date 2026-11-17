@@ -1,6 +1,7 @@
 import type { Sql } from 'postgres'
-import { type FlowRunReads, SqlFlowRunReads } from '../flows/backendReads.js'
+import type { FlowRunReads } from '../flows/backendReads.js'
 import type { Owner } from '../sessions/protocol.js'
+import { PgSessionRows, type SessionRows } from '../sessions/rows.js'
 
 // A flow run's tool calls (#1057, plan 2026-10-09-durable-phase-6-flows.md Task D1):
 // ProjectWorkflow (`flow-<run id>`) calls a tool on `agent-tools` with activity id
@@ -72,14 +73,20 @@ function ownerOfPrincipal(id: string): Owner | undefined {
   return undefined
 }
 
+/** A session id as Postgres prints a uuid: the only spelling `id::text` matched. */
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
 export class PgFlowRuns implements FlowRuns {
-  readonly #sql: Sql
+  readonly #sessions: Pick<SessionRows, 'get'>
   readonly #reads: FlowRunReads
 
-  /** `reads`: the backend's flow tables (flows/backendReads.ts); its SQL on `sql` by default. */
-  constructor(sql: Sql, reads?: FlowRunReads) {
-    this.#sql = sql
-    this.#reads = reads ?? new SqlFlowRunReads(sql)
+  /**
+   * `reads`: the backend's flow tables, through its CRUD routes (flows/backendReads.ts).
+   * `sessions`: the sessions' rows, for a run a session started (`gated` in main.ts; SQL on `sql` when omitted).
+   */
+  constructor(sql: Sql, reads: FlowRunReads, sessions: Pick<SessionRows, 'get'> = new PgSessionRows(sql)) {
+    this.#sessions = sessions
+    this.#reads = reads
   }
 
   async startedBy(runId: string, execution: string): Promise<Owner | undefined> {
@@ -87,10 +94,8 @@ export class PgFlowRuns implements FlowRuns {
     // UPDATE while it starts the new execution, and opens it only after: the lock waits
     // for that, or the new execution's first call reads the old closed row and is
     // refused. It is taken by id alone, as a row a WHERE filters out is never waited on.
-    // The backend's route takes it in its own transaction (#5299 D7); the SQL fallback for an
-    // older API pod takes it on the agent's role, where FOR SHARE needs UPDATE on
-    // workflow_runs, not only SELECT. Every call also waits behind a writer's FOR UPDATE on
-    // the row (_project, _reset_run), which is held only briefly.
+    // The backend's route takes it in its own transaction (#5299 D7). Every call also waits
+    // behind a writer's FOR UPDATE on the row (_project, _reset_run), which is held only briefly.
     const row = await this.#reads.starter(runId, execution)
     if (row && !row.open && row.unrecorded) {
       // Closed, and this execution is neither the row's nor one a Reset replaced: a Reset
@@ -111,9 +116,9 @@ export class PgFlowRuns implements FlowRuns {
     }
     if (by.kind !== 'agent' || typeof by.principal !== 'string') return undefined
     // Started from a session: its owner, as that session's own turns run.
-    if (typeof by.session === 'string') {
-      const [session] = await this.#sql<{ owner_kind: Owner['kind']; owner_id: string; owner_label: string }[]>`
-        SELECT owner_kind, owner_id, owner_label FROM ai_sessions WHERE id::text = ${by.session}`
+    // Only a lowercase UUID, as `id::text = …` matched one: any other text names no session.
+    if (typeof by.session === 'string' && SESSION_ID.test(by.session)) {
+      const session = await this.#sessions.get(by.session)
       if (session) return { kind: session.owner_kind, id: session.owner_id, label: session.owner_label }
     }
     return ownerOfPrincipal(decoded(by.principal))

@@ -22,7 +22,7 @@ from temporalio.api.workflowservice.v1 import RegisterNamespaceRequest
 from scadbuddy.api import operations as operations_api
 from scadbuddy.api import settings as settings_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
-from scadbuddy.core.settings import Settings
+from scadbuddy.core.settings import FilamentSync, Settings
 from scadbuddy.library.settings_store import RECOVER_BAMBUDDY_LIBRARY_SQL, StoreNotReadyError
 from scadbuddy.main import create_app
 from scadbuddy.operations.component import OPERATIONS
@@ -35,6 +35,7 @@ from scadbuddy.workflows.commands import TemporalRefusedError
 from tests.api.conftest import read_stored
 from tests.api.test_settings_runtime import _state
 from tests.bambuddy.conftest import recording
+from tests.support.sb_rows import seed_app_sb_spools
 
 # The trailing slash is load-bearing: /api/v1/printers is a 404 on Bambuddy 1.2.5.5.
 PRINTERS_URL = "https://bambuddy.test/api/v1/printers/"
@@ -871,6 +872,8 @@ def test_a_bad_purchase_fee_is_refused(client: TestClient, name: str, value: obj
         ("storefront_render_concurrency", 0),
         ("storefront_draft_ttl_days", 0),
         ("storefront_renders_per_minute", 61),
+        ("storefront_prepare_cap", 0),
+        ("storefront_prepare_cap", 4097),
     ],
 )
 def test_a_storefront_limit_out_of_bounds_is_refused(
@@ -886,9 +889,19 @@ def test_the_storefront_settings_are_written_through_put(client: TestClient) -> 
         "storefront_render_concurrency": 4,
         "storefront_draft_ttl_days": 7,
         "storefront_requests_enabled": True,
+        "storefront_materials": ["PLA", "PETG-CF"],
+        "storefront_prepare_cap": 64,
     }
     body = client.put("/api/v1/settings", json=sent).json()
     assert {name: body[name] for name in sent} == sent
+
+
+def test_the_storefront_materials_default_and_apply_live(client: TestClient) -> None:
+    # #6258: the shop's order of preference, read by each storefront request.
+    body = client.get("/api/v1/settings").json()
+    assert body["storefront_materials"] == ["PETG", "PLA"]
+    assert body["applies"]["storefront_materials"] == "live"
+    assert client.put("/api/v1/settings", json={"storefront_materials": []}).status_code == 422
 
 
 def test_the_slice_concurrency_is_bounded_and_live(client: TestClient) -> None:
@@ -911,12 +924,11 @@ def _profile_printer(client: TestClient) -> str:
 @respx.mock
 def test_profile_with_unknown_spool_is_422(client: TestClient) -> None:
     """#6153: each spool of the shop slice profile is one the print dialog offers on its
-    printer; here Bambuddy's inventory, as the printer runs on Bambuddy's path."""
+    printer; here ScadBuddy's own spools by number, as the printer runs on Bambuddy's
+    path (#6262 Task 7)."""
     printer = _profile_printer(client)
     client.put("/api/v1/settings", json={"bambuddy_url": "https://bambuddy.test"})
-    respx.get("https://bambuddy.test/api/v1/inventory/spools").mock(
-        return_value=httpx.Response(200, json=[{"id": 7, "material": "PLA"}])
-    )
+    seed_app_sb_spools(client, [{"id": 7, "material": "PLA"}])
     refused = client.put(
         "/api/v1/settings",
         json={"storefront_slice_profile": {"printer": printer, "spools": {"PETG": 8}}},
@@ -942,16 +954,14 @@ def test_profile_with_unknown_spool_is_422(client: TestClient) -> None:
 
 @respx.mock
 def test_profile_is_checked_against_the_connection_sent_beside_it(client: TestClient) -> None:
-    """#6255 review: one PUT that sets the Bambuddy URL and the profile checks the spools
-    at the new URL, not the stored one."""
+    """#6255 review: one PUT that sets the Bambuddy URL and the profile checks the
+    profile with the new connection, not the stored one. Since #6262 Task 7 the spools
+    on Bambuddy's path are ScadBuddy's own, so neither URL's spools are read."""
     printer = _profile_printer(client)
     client.put("/api/v1/settings", json={"bambuddy_url": "https://old.test"})
-    respx.get("https://old.test/api/v1/inventory/spools").mock(
-        return_value=httpx.Response(200, json=[])
-    )
-    respx.get("https://new.test/api/v1/inventory/spools").mock(
-        return_value=httpx.Response(200, json=[{"id": 7, "material": "PLA"}])
-    )
+    seed_app_sb_spools(client, [{"id": 7, "material": "PLA"}])
+    old = respx.get("https://old.test/api/v1/inventory/spools")
+    new = respx.get("https://new.test/api/v1/inventory/spools")
     saved = client.put(
         "/api/v1/settings",
         json={
@@ -961,6 +971,7 @@ def test_profile_is_checked_against_the_connection_sent_beside_it(client: TestCl
     )
     assert saved.status_code == 200, saved.text
     assert saved.json()["storefront_slice_profile"] == {"printer": printer, "spools": {"pla": 7}}
+    assert not old.called and not new.called
 
 
 @respx.mock
@@ -1049,3 +1060,41 @@ def test_a_storefront_mail_setting_out_of_bounds_is_refused(
     client: TestClient, name: str, value: object
 ) -> None:
     assert client.put("/api/v1/settings", json={name: value}).status_code == 422
+
+
+def test_filament_settings_round_trip(client: TestClient) -> None:
+    body = client.get("/api/v1/settings").json()
+    assert body["filament_sync"] == {"spools": "bb_to_sb"}
+    assert body["filament_low_stock_pct"] == 20
+    assert body["filament_default_cost_per_kg"] is None
+    saved = client.put(
+        "/api/v1/settings",
+        json={
+            "filament_sync": {"spools": "off"},
+            "filament_low_stock_pct": 35,
+            "filament_default_cost_per_kg": "24.50",
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    again = client.get("/api/v1/settings").json()
+    assert again["filament_sync"] == {"spools": "off"}
+    assert again["filament_low_stock_pct"] == 35
+    assert Decimal(again["filament_default_cost_per_kg"]) == Decimal("24.50")
+    assert again["applies"]["filament_low_stock_pct"] == "live"
+    assert client.put("/api/v1/settings", json={"filament_low_stock_pct": 101}).status_code == 422
+    assert (
+        client.put("/api/v1/settings", json={"filament_default_cost_per_kg": "-1"}).status_code
+        == 422
+    )
+    for bad in ({"spools": "two_way"}, {"spools": "off", "extra": 1}):
+        assert client.put("/api/v1/settings", json={"filament_sync": bad}).status_code == 422
+
+
+def test_a_saved_sync_reads_back_as_a_filament_sync(client: TestClient) -> None:
+    """The path the spool refresh Schedule's pull takes (`main.py`)."""
+    assert (
+        client.put("/api/v1/settings", json={"filament_sync": {"spools": "off"}}).status_code == 200
+    )
+    read = _state(client).settings_store.read({"filament_sync"})["filament_sync"]
+    assert isinstance(read, FilamentSync)
+    assert read.spools == "off"

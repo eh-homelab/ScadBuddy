@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import type { Sql } from 'postgres'
 import { describe, expect, it } from 'vitest'
 import type { AuditEntry } from '../src/audit/log.js'
-import { BrowserSessions, personSessions, SESSION_COOKIE } from '../src/auth/browserSession.js'
+import { BrowserSessions, PgSessionLookup, personSessions, SESSION_COOKIE } from '../src/auth/browserSession.js'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { type CustomerMessaging, type MessagingConnection, pluginMessaging, type SendOutcome } from '../src/orders/messaging.js'
@@ -28,7 +28,7 @@ const SCHEMA = {
 
 function signedIn(): BrowserSessions {
   const sql = (() => Promise.resolve([{ principal: 'user:https://idp.test#alice', name: 'Alice', kind: 'login' }])) as unknown as Sql
-  return new BrowserSessions(sql)
+  return new BrowserSessions(new PgSessionLookup(sql))
 }
 
 function fake(outcome: SendOutcome = { status: 'sent' }) {

@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
 import type { SettingsReader } from '../approvals/service.js'
 import type { LockClient } from '../db.js'
+import { appendEventsIn } from '../sessions/eventLog.js'
+import type { ServerEvent } from '../sessions/protocol.js'
 import { WorkspaceBlobError, type WorkspaceBlobStore } from './blobs.js'
 import { newFileKey, openFile, sealFile, type WorkspaceSealing } from './sealing.js'
 
@@ -38,6 +40,14 @@ import { newFileKey, openFile, sealFile, type WorkspaceSealing } from './sealing
 // be sealed and stored (no KEK here, a backend that cannot mint the URLs or is too
 // old or unreachable) is refused `unavailable`: never kept in plaintext. Reads take
 // any. `moveToBlobs` moves the rows kept in Postgres to blobs (main.ts, at start).
+//
+// The rows are the API's (#5299 step 7, area `workspace`): once it lists the area,
+// `CrudSessionFiles` (workspace/crudStore.ts) reads and writes them through
+// `…/crud/agent/workspace/*` (backend api/crud_agent_workspace.py), which seals and opens each
+// file with the API's KEK and the session's payload key (D5), holds its blob in the row's own
+// transaction and logs its events there too. `SessionFiles` below is the SQL it ran itself
+// until then (D9); `gatedWorkspaceFiles` picks one per call. Both take the same
+// `WorkspaceFiles` interface.
 
 /** `ai_settings` key: the largest file (bytes). */
 export const WORKSPACE_FILE_MAX_SETTING = 'workspace_file_max_bytes'
@@ -127,7 +137,7 @@ export function withoutWorkspaceSize(input: Record<string, unknown>): Record<str
  * A lookup that fails says so on the card rather than failing the gate.
  */
 export async function withWorkspaceSize(
-  files: SessionFiles | undefined,
+  files: WorkspaceFiles | undefined,
   ws: WorkspaceRef | undefined,
   input: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
@@ -327,6 +337,12 @@ function positive(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : fallback
 }
 
+/** What a write's event says of the file (the panel's `workspace.file`): known before the write. */
+export type LoggedFile = Pick<WorkspaceFileInfo, 'path' | 'size' | 'mediaType' | 'sha256'>
+
+/** Called once the events a write or a delete logged have committed, with their seqs (EventLog `committed`). */
+export type EventsCommitted = (events: readonly ServerEvent[], seqs: readonly number[]) => void
+
 export type WriteOptions = {
   /** Stored as given; guessed from the bytes and the path when omitted. */
   mediaType?: string | undefined
@@ -336,12 +352,99 @@ export type WriteOptions = {
    * otherwise a `conflict`. Omitted, the write replaces whatever is there.
    */
   expectedSha256?: string | null | undefined
-  /** Runs in the write's transaction once the row is written, so what it writes commits with the file or not at all. */
-  alongside?: ((tx: TransactionSql, file: WorkspaceFileInfo) => Promise<void>) | undefined
+  /**
+   * Events of the session's log (a session's workspace only), written in the write's
+   * transaction, so they commit with the file or not at all; `committed` hears of them after.
+   */
+  log?: { events: (file: LoggedFile) => readonly ServerEvent[]; committed: EventsCommitted } | undefined
+}
+
+export type DeleteOptions = {
+  /** The sha256 the file must have now, else a `conflict`. */
+  expectedSha256?: string | undefined
+  /** Events of the session's log, written in the delete's transaction once the row is gone. */
+  log?: { events: readonly ServerEvent[]; committed: EventsCommitted } | undefined
+}
+
+/** What `reconcile` did, or why it did nothing. */
+export type Reconciled = { released: number; held: number; skipped?: ReconcileSkipped }
+
+/** The workspace files, over SQL (`SessionFiles`) or the API's CRUD routes (`CrudSessionFiles`). */
+export interface WorkspaceFiles {
+  /** The most files one workspace holds. */
+  readonly maxFiles: number
+  limits(): Promise<WorkspaceLimits>
+  fileCount(ws: WorkspaceRef): Promise<number>
+  bytesStatus(): Promise<WorkspaceBytesStatus>
+  list(ws: WorkspaceRef, prefix?: string): Promise<WorkspaceFileInfo[]>
+  usage(ws: WorkspaceRef): Promise<{ files: number; bytes: number }>
+  listSessions(sessionIds: readonly string[]): Promise<Map<string, (WorkspaceFileInfo & { sealed: boolean })[]>>
+  sealedUnreadable(): Promise<string | undefined>
+  stat(ws: WorkspaceRef, path: string): Promise<WorkspaceFileInfo | undefined>
+  read(ws: WorkspaceRef, path: string): Promise<WorkspaceFile | undefined>
+  chunks(ws: WorkspaceRef, path: string, expectedSha256: string, chunkBytes?: number): AsyncGenerator<Buffer>
+  write(ws: WorkspaceRef, path: string, bytes: Uint8Array, options?: WriteOptions): Promise<WorkspaceFileInfo>
+  delete(ws: WorkspaceRef, path: string, options?: DeleteOptions): Promise<boolean>
+  copy(fromSession: string, toSession: string): Promise<void>
+  moveToBlobs(batch?: number): Promise<{ moved: number; local: boolean }>
+  sweep(ttlMs?: number): Promise<number>
+  reconcile(graceMs?: number): Promise<Reconciled>
+  startSweeper(everyMs: number, options?: SweeperOptions): () => void
+}
+
+export type SweeperOptions = { ready?: () => Promise<boolean>; onError?: (err: unknown) => void }
+
+/** The caps: the fixed ones, then the settings, else the defaults (25 MB a file, 200 MB a workspace). */
+export async function limitsOf(fixed: Partial<WorkspaceLimits>, settings: SettingsReader | undefined): Promise<WorkspaceLimits> {
+  const [file, total] = await Promise.all([
+    fixed.fileMaxBytes ?? settings?.get<unknown>(WORKSPACE_FILE_MAX_SETTING),
+    fixed.workspaceMaxBytes ?? settings?.get<unknown>(WORKSPACE_MAX_SETTING),
+  ])
+  return {
+    fileMaxBytes: positive(file, DEFAULT_FILE_MAX_BYTES),
+    workspaceMaxBytes: positive(total, DEFAULT_WORKSPACE_MAX_BYTES),
+  }
 }
 
 /**
- * Takes the session's row lock first when an `alongside` will write to the session (its
+ * Sweeps `files` every `everyMs` once `ready` says the database is, and with `reconciles`
+ * reconciles the holds on the first tick past RECONCILE_EVERY_MS since the last; a reconcile
+ * that skipped `no_connection` or failed is tried again at the next tick. The returned
+ * function stops it.
+ */
+export function startWorkspaceSweeper(
+  files: Pick<WorkspaceFiles, 'sweep' | 'reconcile'>,
+  everyMs: number,
+  options: SweeperOptions & { reconciles: boolean },
+): () => void {
+  const ready = options.ready ?? (() => Promise.resolve(true))
+  let reconciledAt = 0
+  const tick = () => {
+    ready()
+      .then(async (ok) => {
+        if (!ok) return
+        await files.sweep()
+        if (!options.reconciles || Date.now() - reconciledAt < RECONCILE_EVERY_MS) return
+        reconciledAt = Date.now()
+        // No replica ran it this hour when no lock connection was free or it failed: try at the next tick.
+        let skipped: ReconcileSkipped | undefined
+        try {
+          skipped = (await files.reconcile()).skipped
+        } catch (err) {
+          reconciledAt = 0
+          throw err
+        }
+        if (skipped === 'no_connection') reconciledAt = 0
+      })
+      .catch(options.onError ?? (() => {}))
+  }
+  const timer = setInterval(tick, everyMs)
+  timer.unref()
+  return () => clearInterval(timer)
+}
+
+/**
+ * Takes the session's row lock first when a `log` will write to the session (its
  * event log bumps `ai_sessions.event_seq`): a session delete takes that row before it
  * cascades to the files, so both take the locks in the same order and never deadlock.
  */
@@ -405,15 +508,13 @@ async function collect(parts: AsyncIterable<Buffer>): Promise<Buffer> {
   return Buffer.concat(out)
 }
 
-export class SessionFiles {
+export class SessionFiles implements WorkspaceFiles {
   private readonly sql: Sql
   private readonly settings: SettingsReader | undefined
   private readonly fixed: Partial<WorkspaceLimits>
   private readonly blobs: WorkspaceBlobs | undefined
   private readonly onReleaseError: (message: string) => void
   private readonly locks: LockClient | undefined
-  /** When `reconcile` last ran on the sweeper's tick (ms). */
-  #reconciledAt = 0
   /** The most files one workspace holds (WORKSPACE_MAX_FILES; tests set fewer). */
   readonly maxFiles: number
 
@@ -582,14 +683,7 @@ export class SessionFiles {
 
   /** The caps now: the settings, else the defaults (25 MB a file, 200 MB a workspace). */
   async limits(): Promise<WorkspaceLimits> {
-    const [file, total] = await Promise.all([
-      this.fixed.fileMaxBytes ?? this.settings?.get<unknown>(WORKSPACE_FILE_MAX_SETTING),
-      this.fixed.workspaceMaxBytes ?? this.settings?.get<unknown>(WORKSPACE_MAX_SETTING),
-    ])
-    return {
-      fileMaxBytes: positive(file, DEFAULT_FILE_MAX_BYTES),
-      workspaceMaxBytes: positive(total, DEFAULT_WORKSPACE_MAX_BYTES),
-    }
+    return limitsOf(this.fixed, this.settings)
   }
 
   /** Every file's metadata, by path; only those under `prefix` (a directory, e.g. "downloads") when given. */
@@ -743,8 +837,10 @@ export class SessionFiles {
     const placed = await this.#place(ws, name, data, digest)
     let replaced: string | null = null
     let replacedBytes: string | null = null
+    let logged: { events: readonly ServerEvent[]; seqs: number[] } | undefined
+    const log = sessionId === null ? undefined : options.log
     const written = await this.sql.begin(async (tx) => {
-      if (options.alongside) await lockSession(tx, sessionId)
+      if (log) await lockSession(tx, sessionId)
       await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`scadbuddy:ai_session_files:${key}`}, 0))`
       const [current] = await tx<{ sha256: string; blob_key: string | null; bytes_sha256: string | null }[]>`
         SELECT sha256, blob_key, bytes_sha256 FROM ai_session_files WHERE workspace = ${key} AND path = ${name} FOR UPDATE`
@@ -799,11 +895,15 @@ export class SessionFiles {
           size = EXCLUDED.size, source = EXCLUDED.source, updated_at = now()
         RETURNING path, media_type, size, sha256, source, created_at, updated_at`
       const file = infoOf(row!)
-      await options.alongside?.(tx, file)
+      if (log && sessionId !== null) {
+        const events = log.events(file)
+        logged = { events, seqs: await appendEventsIn(tx, sessionId, events) }
+      }
       replaced = current?.blob_key ?? null
       replacedBytes = current?.bytes_sha256 ?? null
       return file
     })
+    if (log && logged) log.committed(logged.events, logged.seqs)
     // The old blob's hold goes once the row names the new one, and old bytes no file names go too.
     if (replaced !== null && replaced !== placed.blobKey) await this.#release(key, name, replaced)
     if (replacedBytes !== null && replacedBytes !== digest) await this.#dropBytes([replacedBytes])
@@ -812,19 +912,17 @@ export class SessionFiles {
 
   /**
    * Deletes a file; false when there was none. `conflict` when `expectedSha256` is given and does not hold.
-   * `alongside` runs in the delete's transaction once the row is gone.
+   * `log`'s events are written in the delete's transaction once the row is gone.
    */
-  async delete(
-    ws: WorkspaceRef,
-    path: string,
-    options: { expectedSha256?: string | undefined; alongside?: ((tx: TransactionSql) => Promise<void>) | undefined } = {},
-  ): Promise<boolean> {
+  async delete(ws: WorkspaceRef, path: string, options: DeleteOptions = {}): Promise<boolean> {
     const name = workspacePath(path)
     const { key, sessionId } = keyOf(ws)
     let released: string | null = null
     let releasedBytes: string | null = null
+    let seqs: number[] | undefined
+    const log = sessionId === null ? undefined : options.log
     const deleted = await this.sql.begin(async (tx) => {
-      if (options.alongside) await lockSession(tx, sessionId)
+      if (log) await lockSession(tx, sessionId)
       if (options.expectedSha256 === undefined) {
         const rows = await tx<{ blob_key: string | null; bytes_sha256: string | null }[]>`
           DELETE FROM ai_session_files WHERE workspace = ${key} AND path = ${name} RETURNING blob_key, bytes_sha256`
@@ -844,9 +942,10 @@ export class SessionFiles {
         released = row.blob_key
         releasedBytes = row.bytes_sha256
       }
-      await options.alongside?.(tx)
+      if (log && sessionId !== null) seqs = await appendEventsIn(tx, sessionId, log.events)
       return true
     })
+    if (log && seqs) log.committed(log.events, seqs)
     // The blob's hold goes once the row is gone, and its bytes once no file names them.
     if (released !== null) await this.#release(key, name, released)
     await this.#dropBytes([releasedBytes])
@@ -1034,7 +1133,7 @@ export class SessionFiles {
    * `no_connection` while no lock connection is free (the sweeper then tries again at its next
    * tick, not an hour later).
    */
-  async reconcile(graceMs = RECONCILE_GRACE_MS): Promise<{ released: number; held: number; skipped?: ReconcileSkipped }> {
+  async reconcile(graceMs = RECONCILE_GRACE_MS): Promise<Reconciled> {
     const store = this.blobs?.store
     if (!store) return { released: 0, held: 0 }
     if (!this.locks) return this.#reconcile(store, graceMs)
@@ -1086,34 +1185,8 @@ export class SessionFiles {
     return { released, held: holding }
   }
 
-  /**
-   * Sweeps every `everyMs` once `ready` says the database is, and reconciles the holds on the
-   * first tick past RECONCILE_EVERY_MS since the last; a reconcile that skipped
-   * `no_connection` or failed is tried again at the next tick. The returned function stops it.
-   */
-  startSweeper(everyMs: number, options: { ready?: () => Promise<boolean>; onError?: (err: unknown) => void } = {}): () => void {
-    const ready = options.ready ?? (() => Promise.resolve(true))
-    const tick = () => {
-      ready()
-        .then(async (ok) => {
-          if (!ok) return
-          await this.sweep()
-          if (!this.blobs || Date.now() - this.#reconciledAt < RECONCILE_EVERY_MS) return
-          this.#reconciledAt = Date.now()
-          // No replica ran it this hour when no lock connection was free or it failed: try at the next tick.
-          let skipped: ReconcileSkipped | undefined
-          try {
-            skipped = (await this.reconcile()).skipped
-          } catch (err) {
-            this.#reconciledAt = 0
-            throw err
-          }
-          if (skipped === 'no_connection') this.#reconciledAt = 0
-        })
-        .catch(options.onError ?? (() => {}))
-    }
-    const timer = setInterval(tick, everyMs)
-    timer.unref()
-    return () => clearInterval(timer)
+  /** The sweeper (`startWorkspaceSweeper`), reconciling only with a blob store. */
+  startSweeper(everyMs: number, options: SweeperOptions = {}): () => void {
+    return startWorkspaceSweeper(this, everyMs, { ...options, reconciles: this.blobs !== undefined })
   }
 }

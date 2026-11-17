@@ -51,8 +51,8 @@ agent sidecar, the agent worker and agent-durable), and the agent and the API sh
 tables through grants. The render, print and projects workers hold none: #5298 is done,
 and prod has no `scadbuddy_render`, `scadbuddy_print` or `scadbuddy_projects` role and no
 database secret in those pods (measured 2026-11-14, after eh-homelab/clusters#3555,
-#3566 and #3578). The API still revokes those roles at every start where they exist, and
-the agent what it granted `scadbuddy_projects`. Template Python still runs in the render
+#3566 and #3578). The API still revokes those roles at every start where they exist; the
+agent revokes nothing since #6501. Template Python still runs in the render
 worker's pod, which holds no database secret now but holds its `crud.render` credential,
 the S3 keys and the Bambuddy render key. Do the rest in this order: #5299 (the agent),
 #5297 (authenticate `/api/v1/internal/*`, then `enforce`), #5296 (untrusted code out of
@@ -74,7 +74,9 @@ the export. That's how the Dockerfile's `frontend` and `agent-build` stages use 
 from its `api-spec` stage. The frontend's `gen:api` also writes
 `src/storefront/api/schema.d.ts` (gitignored) from the storefront edge's spec
 (`export_openapi --storefront`, `backend/storefront-openapi.json`, gitignored), or from
-`SCADBUDDY_STOREFRONT_OPENAPI_JSON` when it is set (#5282). A frontend vitest run outside `pnpm test` (`pnpm exec vitest
+`SCADBUDDY_STOREFRONT_OPENAPI_JSON` when it is set (#5282). It also writes `src/api/settingDocs.json`
+(gitignored), every setting's label and help from the spec's `SettingsView.docs` default, which the
+mocks serve (#887; the text lives only in `backend/scadbuddy/core/setting_docs.py`). A frontend vitest run outside `pnpm test` (`pnpm exec vitest
 <file>`) needs `pnpm gen:api` first, or `SCADBUDDY_OPENAPI_JSON` set, because some unit
 tests read bounds from the exported spec (`components/settings/Printers.test.tsx`
 `specAccessCodeMax`, #4502). The `freshness` job no longer commits anything. It checks
@@ -298,6 +300,7 @@ The Go and Rust commands and toolchain notes: `tools/go/CLAUDE.md`, `workers/rus
 
 ## PR conventions
 
+- Print and slicer settings: never add an allowlist of keys or a named field per setting. Any Bambu Studio key goes through one generic `process_overrides` (decision on #2998). A shorthand choice that expands into `process_overrides` (such as `prime_tower`) is allowed. A new print or quote option is also a remembered choice with a toggle (#6219).
 - Conventional-commit titles (`feat(scope):`, `fix(scope):`, `docs:`, `ci:` …);
   Release Drafter labels and groups PRs by title. Body links the issue: `Fixes #N`.
 - Agent-authored changes and docs cite their sources (#259): every external fact gets
@@ -347,11 +350,6 @@ The Go and Rust commands and toolchain notes: `tools/go/CLAUDE.md`, `workers/rus
 - Frontend vitest tests can time out when the machine is under heavy load (e.g.
   several builds or agents at once). Re-run before debugging; a failure that repeats
   on an idle machine is real.
-- Backend: `test_a_cancelled_slice_is_recorded_cancelled` can error with
-  `httpx.ReadTimeout` on a slow runner (#6301). Re-run the shard.
-- Backend: `test_submit.py::test_a_slow_first_accept_is_retried_in_the_same_run`
-  (`assert 3 == 2`) is timing-sensitive under CI load. Re-run the failed jobs once
-  before you debug it.
 
 ## Prod gotchas
 

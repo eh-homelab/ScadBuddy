@@ -1,6 +1,5 @@
 import postgres, { type ReservedSql, type Sql } from 'postgres'
-import { grantBackendRoles } from './db/grants.js'
-import { type AwaitMigrationsOptions, awaitMigrations } from './db/schema.js'
+import { type AwaitMigrationsOptions, awaitMigrations, type LedgerReader, MigrationsPendingError, sqlLedger } from './db/schema.js'
 
 // The database is optional. With SCADBUDDY_DATABASE_URL unset the service still
 // starts and answers /healthz, but reports AI as disabled (spec §9, "No
@@ -159,10 +158,18 @@ export type ConnectOptions = {
   searchPath?: string
   /** `IDLE_TIMEOUT_SECONDS` unless set; tests shorten it. */
   idleTimeoutSeconds?: number
-  /** Where to report a failed `ready()` attempt (the error, never the URL). */
+  /**
+   * Where to report a failed `ready()` attempt (the error, never the URL). Not told of a
+   * MigrationsPendingError: the wait logs that once a wait itself.
+   */
   onMigrationError?: (err: unknown) => void
   /** How `ready()` reads `ai_migrations` (db/schema.ts): once an attempt unless `attempts` says otherwise. */
   awaitMigrations?: AwaitMigrationsOptions
+  /**
+   * Where `ready()` reads the ledger: the API's route once it lists area `migrations` (main.ts,
+   * #6501), this connection's SQL when omitted.
+   */
+  ledger?: (sql: Sql) => LedgerReader
   /**
    * Brings the schema in place of waiting for the API's migrations. Only the tests pass
    * it, to migrate a schema of their own (test/support/migrations.ts): the agent never
@@ -265,7 +272,7 @@ export function connectDatabase(url: string, options: ConnectOptions = {}): Data
     waiting = false
     await (options.schema
       ? options.schema(sql)
-      : awaitMigrations(sql, undefined, {
+      : awaitMigrations(options.ledger?.(sql) ?? sqlLedger(sql), undefined, {
           attempts: 1,
           ...options.awaitMigrations,
           log: (line) => {
@@ -277,13 +284,10 @@ export function connectDatabase(url: string, options: ConnectOptions = {}): Data
             if (!now) said = false
           },
         }))
-    // #5210: the backend's roles their `ai_*` tables. Never fatal: a role left ungranted
-    // waits or fails its own calls, and says which.
-    await grantBackendRoles(sql).catch((error: unknown) => {
-      console.error(`could not grant the backend's roles the ai_* tables: ${error instanceof Error ? error.message : String(error)}`)
-    })
     await options.afterMigrate?.(sql)
-  }, options.onMigrationError)
+  }, (err) => {
+    if (!(err instanceof MigrationsPendingError)) options.onMigrationError?.(err)
+  })
   return {
     sql,
     ping,

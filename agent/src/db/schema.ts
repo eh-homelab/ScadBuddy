@@ -1,4 +1,5 @@
 import type { Sql } from 'postgres'
+import { crudOf, type CrudTarget } from '../api/crudStores.js'
 import expected from './expected-migrations.json' with { type: 'json' }
 
 // The agent no longer migrates (#5299 D6): only the CRUD service may hold SQL access
@@ -25,7 +26,11 @@ export class MigrationChecksumError extends Error {
   override name = 'MigrationChecksumError'
 }
 
-/** The API had not applied every expected file when the wait ran out; `ready()` tries again on its next call. */
+/**
+ * The API had not applied every expected file when the wait ran out; `ready()` tries again
+ * on its next call. The wait has said so already, so `ready()` does not pass it to
+ * `onMigrationError`.
+ */
 export class MigrationsPendingError extends Error {
   override name = 'MigrationsPendingError'
 }
@@ -51,7 +56,7 @@ export const DEFAULT_AWAIT_INTERVAL_MS = 1_000
  * (from before #354's column, adopted by the API's next start) counts as applied.
  */
 export async function awaitMigrations(
-  sql: Sql,
+  read: LedgerReader,
   expected: readonly ExpectedMigration[] = EXPECTED_MIGRATIONS,
   options: AwaitMigrationsOptions = {},
 ): Promise<void> {
@@ -59,8 +64,11 @@ export async function awaitMigrations(
   const intervalMs = options.intervalMs ?? DEFAULT_AWAIT_INTERVAL_MS
   const log = options.log ?? ((line: string) => console.log(line))
   const missing: ExpectedMigration[] = []
+  let positional: boolean
   for (let attempt = 1; ; attempt++) {
-    const recorded = await readLedger(sql, expected)
+    const ledger = await read(expected)
+    positional = ledger === 'positional'
+    const recorded = ledger === 'positional' ? new Map<string, string | null>() : ledger
     missing.length = 0
     for (const migration of expected) {
       if (!recorded.has(migration.id)) {
@@ -80,8 +88,12 @@ export async function awaitMigrations(
     if (missing.length === 0) return
     if (attempt === 1) {
       log(
-        `waiting for the API to apply the agent's database migrations: ${missing.length} of ${expected.length} ` +
-          `not in ai_migrations yet (first ${missing[0]!.id})`,
+        positional
+          ? "waiting for the API to apply the agent's database migrations: ai_migrations is still keyed by " +
+              "position (before #491); the API's next start rewrites it, or stops if it holds a row main " +
+              "never had (see the API's log)"
+          : `waiting for the API to apply the agent's database migrations: ${missing.length} of ${expected.length} ` +
+              `not in ai_migrations yet (first ${missing[0]!.id})`,
       )
     }
     if (attempt >= attempts) break
@@ -89,14 +101,52 @@ export async function awaitMigrations(
   }
   throw new MigrationsPendingError(
     `the API has not applied ${missing.length} of the agent's ${expected.length} migrations ` +
-      `(first ${missing[0]!.id}) after ${attempts} reads of ai_migrations; is the API at this build or newer?`,
+      `(first ${missing[0]!.id}) ${attempts === 1 ? 'in' : `after ${attempts} reads of`} ai_migrations` +
+      (positional ? ' (still keyed by position, before #491)' : '') +
+      '; is the API at this build or newer?',
   )
 }
 
-/** The expected files' rows of the ledger, id to checksum; none while the API has not made the ledger. */
-async function readLedger(sql: Sql, expected: readonly ExpectedMigration[]): Promise<Map<string, string | null>> {
-  const [ledger] = await sql<{ found: boolean }[]>`SELECT to_regclass('ai_migrations') IS NOT NULL AS found`
+/** Reads the expected files' rows of the ledger (`readLedger`, below): SQL or the API's route. */
+export type LedgerReader = (expected: readonly ExpectedMigration[]) => Promise<Map<string, string | null> | 'positional'>
+
+/** `LedgerReader` over SQL (the agent's own connection). */
+export const sqlLedger =
+  (sql: Sql): LedgerReader =>
+  (expected) =>
+    readLedger(sql, expected)
+
+/** `LedgerReader` through the API's route (area `migrations`, backend api/crud_agent_start.py). */
+export function crudLedger(target: CrudTarget): LedgerReader {
+  const call = crudOf(target)
+  return async (expected) => {
+    const ledger = await call<{ found: boolean; keyed: boolean; rows: { id: string; checksum: string | null }[] }>(
+      "the agent's migrations",
+      '/migrations/ledger',
+      { method: 'POST', body: { ids: expected.map((m) => m.id) } },
+    )
+    if (!ledger.found) return new Map()
+    if (!ledger.keyed) return 'positional'
+    return new Map(ledger.rows.map((row) => [row.id, row.checksum]))
+  }
+}
+
+/**
+ * The expected files' rows of the ledger, id to checksum; none while the API has not made
+ * the ledger, and `positional` while it is still keyed by position (no `id` column, before
+ * #491), which the API's runner rewrites at its next start; a row main never had stops
+ * that start instead (AgentMigrationLedgerError).
+ */
+async function readLedger(
+  sql: Sql,
+  expected: readonly ExpectedMigration[],
+): Promise<Map<string, string | null> | 'positional'> {
+  const [ledger] = await sql<{ found: boolean; keyed: boolean }[]>`
+    SELECT to_regclass('ai_migrations') IS NOT NULL AS found,
+           EXISTS (SELECT 1 FROM pg_attribute
+                   WHERE attrelid = to_regclass('ai_migrations') AND attname = 'id' AND NOT attisdropped) AS keyed`
   if (!ledger?.found) return new Map()
+  if (!ledger.keyed) return 'positional'
   const ids = expected.map((m) => m.id)
   const rows = await sql<{ id: string; checksum: string | null }[]>`
     SELECT id, checksum FROM ai_migrations WHERE id = ANY(${ids}::text[])`

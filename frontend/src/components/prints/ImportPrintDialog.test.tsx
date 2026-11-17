@@ -219,6 +219,90 @@ describe('ImportPrintDialog', () => {
     expect(reads).toHaveLength(4)
   })
 
+  describe('onto a library file (#6394)', () => {
+    function nativeLibrary(): void {
+      const real = api.getSettings.bind(api)
+      vi.spyOn(api, 'getSettings').mockImplementation(async () => ({ ...(await real()), library_backend: 'native' }))
+    }
+
+    it('offers a library file only on ScadBuddy\'s own library', async () => {
+      const { dialog } = await openArchive(9104)
+      await within(dialog).findByRole('radiogroup', { name: 'Source' })
+      expect(within(dialog).getByRole('radio', { name: 'A model that exists' })).toBeInTheDocument()
+      expect(within(dialog).queryByRole('radio', { name: 'A file in the library' })).not.toBeInTheDocument()
+    })
+
+    it('links the print to the file the job name suggests', async () => {
+      nativeLibrary()
+      const imported = vi.spyOn(api, 'importPrint')
+      const { dialog, user, onImported } = await openArchive(9104)
+      const sources = await within(dialog).findByRole('radiogroup', { name: 'Source' })
+      await user.click(within(sources).getByRole('radio', { name: /The archive's file/ }))
+      await user.click(await within(dialog).findByRole('radio', { name: 'A file in the library' }))
+      const suggested = within(dialog).getByRole('group', { name: 'Suggested library files' })
+      expect(within(suggested).getByRole('button', { name: 'benchy_hull.3mf' })).toHaveAttribute('aria-pressed', 'true')
+      await user.click(within(dialog).getByRole('button', { name: 'Import' }))
+      const done = await within(dialog).findByTestId('import-done')
+      expect(done).toHaveTextContent('The print is now a print of library file 1000000501.')
+      expect(within(done).getByRole('link', { name: 'library file 1000000501' })).toHaveAttribute('href', '/library?file=1000000501')
+      expect(imported).toHaveBeenCalledWith(9104, {
+        source: { kind: 'archive', library_file_id: null, path: null },
+        library_file_id: 1_000_000_501,
+      })
+      expect(onImported).toHaveBeenCalledWith(expect.objectContaining({ subject: 'library:1000000501', slug: null }))
+    })
+
+    it('finds another file by name, and offers only ScadBuddy\'s own files, never a per-print copy', async () => {
+      nativeLibrary()
+      server.use(
+        http.get('/api/v1/print/library/search', () =>
+          HttpResponse.json({
+            query: 'vase',
+            all: true,
+            total: 2,
+            hidden: 0,
+            files: [
+              { id: 77, filename: 'vase_bambuddy.3mf', file_type: '3mf', has_thumbnail: false, is_external: false, print_count: 0 },
+              { id: 1_000_000_502, filename: 'vase_spiral.3mf', file_type: '3mf', has_thumbnail: false, is_external: false, print_count: 0 },
+              { id: 1_000_000_503, filename: 'vase_spiral_copy.3mf', file_type: '3mf', has_thumbnail: false, is_external: false, print_count: 0, per_print: true },
+            ],
+          }),
+        ),
+      )
+      const imported = vi.spyOn(api, 'importPrint')
+      const { dialog, user } = await openArchive(9105)
+      await within(dialog).findByRole('radiogroup', { name: 'Source' })
+      await user.click(await within(dialog).findByRole('radio', { name: 'A file in the library' }))
+      expect(within(dialog).getByText(/No file name matches the job/)).toBeInTheDocument()
+      expect(within(dialog).getByRole('button', { name: 'Import' })).toBeDisabled()
+      await user.type(within(dialog).getByLabelText('Find a file by name'), 'vase')
+      const found = await within(dialog).findByRole('group', { name: 'Library files found' })
+      expect(within(found).queryByRole('button', { name: 'vase_bambuddy.3mf' })).not.toBeInTheDocument()
+      expect(within(found).queryByRole('button', { name: 'vase_spiral_copy.3mf' })).not.toBeInTheDocument()
+      await user.click(within(found).getByRole('button', { name: 'vase_spiral.3mf' }))
+      await user.click(within(dialog).getByRole('button', { name: 'Import' }))
+      expect(await within(dialog).findByTestId('import-done')).toHaveTextContent('library file 1000000502')
+      expect(imported).toHaveBeenCalledWith(9105, expect.objectContaining({ library_file_id: 1_000_000_502 }))
+    })
+
+    it("shows the route's refusal of a run's per-print copy", async () => {
+      nativeLibrary()
+      const refusal = 'library file 1000000501 is a per-print copy a print run made, which ScadBuddy\'s sweep trashes: import onto the file it was copied from'
+      server.use(
+        http.post('/api/v1/print-imports/9104', () =>
+          HttpResponse.json({ type: 'about:blank', title: 'Unprocessable Content', status: 422, detail: refusal }, { status: 422 }),
+        ),
+      )
+      const { dialog, user } = await openArchive(9104)
+      const sources = await within(dialog).findByRole('radiogroup', { name: 'Source' })
+      await user.click(within(sources).getByRole('radio', { name: /The archive's file/ }))
+      await user.click(await within(dialog).findByRole('radio', { name: 'A file in the library' }))
+      await user.click(within(dialog).getByRole('button', { name: 'Import' }))
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent('is a per-print copy')
+      expect(within(dialog).queryByTestId('import-done')).not.toBeInTheDocument()
+    })
+  })
+
   it('follows a slow new model, then shows the import it made (#5992)', async () => {
     printRunPoll.intervalMs = 1
     const keys: (string | null)[] = []

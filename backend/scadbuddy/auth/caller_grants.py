@@ -15,10 +15,11 @@ A change to what a caller reads or writes changes its list in the same PR;
 `tests/auth/test_caller_grants.py` runs each caller's stores as a role holding exactly
 its list.
 
-The `ai_*` tables are the agent's: its role created them, so it owns them, and the agent
-grants what the API's role reads of them (`agent/src/db/grants.ts`). Since #5299 D6 the API
-applies the agent's migrations (`render/agent_migrations.py`), so a table a later file
-makes is the API's role's. The lists here hold the backend's relations only.
+The older `ai_*` tables were made by the agent's role, which owns them; since #5299 D6 the API
+applies the agent's migrations (`render/agent_migrations.py`), so a table a later file makes
+is the API's role's. The agent grants nothing since #6501: where the API and the agent connect
+as different roles, the API's role must own the `ai_*` tables. The lists here hold the
+backend's relations only.
 """
 
 from __future__ import annotations
@@ -37,30 +38,20 @@ logger = logging.getLogger(__name__)
 
 Grants = Mapping[str, tuple[str, ...]]
 
-_READ = ("SELECT",)
-
-#: What the agent (`agent/`) touches of the backend's. Its gate reads ``flow_grants`` and
-#: ``flow_grant_uses`` under the grant row's share lock (``agent/src/gate/store.ts``
-#: `grantInput`, until the gate moves here, #5299 step 10). Its other reads (the event log,
-#: flow runs, their decisions and grants) go through the CRUD routes of areas ``events``
-#: and ``flows`` (`api/crud_agent.py`, #5299 D7), over SQL only while an older API pod
-#: lacks them; once that deploy is done, ``events``, ``workflow_runs`` and
-#: ``workflow_run_decisions`` are unused here and their revoke follows in its own PR. Its
-#: workspace files' `blob_refs` holds go through the CRUD routes too; `auth/revoke.py`
-#: `RETIRED_GRANTS` takes back the table it once held.
-AGENT_GRANTS: Grants = {
-    "events": _READ,
-    "workflow_runs": _READ,
-    "workflow_run_decisions": _READ,
-    "flow_grants": ("SELECT", "UPDATE"),
-    "flow_grant_uses": _READ,
-}
+#: What the agent (`agent/`) touches of the backend's: nothing. Its gate's grant check, which
+#: read ``flow_grants`` and ``flow_grant_uses`` under the grant row's share lock, runs on the
+#: API (`api/crud_agent_gate.py`, area ``gate``, #5299 step 10); its other reads (the event
+#: log, flow runs, their decisions and grants) go through the CRUD routes of areas ``events``
+#: and ``flows`` (`api/crud_agent.py`, #5299 D7), and its workspace files' `blob_refs` holds
+#: through the CRUD routes too; `auth/revoke.py` `RETIRED_GRANTS` takes back the tables it
+#: once held.
+AGENT_GRANTS: Grants = {}
 
 GRANTS: Mapping[ServiceCaller, Grants] = {"agent": AGENT_GRANTS}
 
 #: `pg_advisory_xact_lock` key for `grant_role` and `auth/revoke.py` ("SCADRNDR" in ASCII,
 #: from when the render worker's role was the only one), so two API replicas starting
-#: together, or the API and the agent (`agent/src/db/grants.ts` `GRANT_LOCK`), never race.
+#: together never race. (The agent took it too until it stopped granting, #6501.)
 GRANT_LOCK = 0x5343_4144_524E_4452
 
 

@@ -7,7 +7,7 @@ import { QuestionError } from '../gate/questions.js'
 import { contextFrom } from '../telemetry/trace.js'
 import type { TabHub } from '../bridge/hub.js'
 import type { OriginPolicy } from '../http/origins.js'
-import { type AttachmentRef, AttachmentError, type AttachmentStore, type ResolvedAttachment } from '../attachments/store.js'
+import { type AttachmentRef, AttachmentError, type Attachments, type ResolvedAttachment } from '../attachments/store.js'
 import { type ClientMessage, isAnswerId, isSessionId, parseClientFrame, renderPageContext } from '../sessions/clientProtocol.js'
 import { checkedImages } from '../sessions/images.js'
 import { type SessionManager, SessionError } from '../sessions/manager.js'
@@ -130,7 +130,7 @@ export type ChatConnectionOptions = {
   /** The client's address, for the audit rows of what it does here (a question's answer, #1075). */
   clientIp?: string | undefined
   /** The panel's uploaded images (#1941), which a `user.message` names by id; without it such a message is refused. */
-  attachments?: AttachmentStore | undefined
+  attachments?: Attachments | undefined
   /**
    * Whether the signed-in session the socket was opened under is still live (#5217):
    * asked before every frame and every snapshot; undefined when it could not be read.
@@ -158,7 +158,7 @@ export type ChatRouteDeps = {
   /** The browser bridge's tabs (#254, bridge/hub.ts). */
   tabs?: Pick<TabHub, 'pairSession' | 'sessionTab' | 'pairSessionIfStill'> | undefined
   /** The panel's uploaded images (#1941, attachments/store.ts). */
-  attachments?: AttachmentStore | undefined
+  attachments?: Attachments | undefined
   /** The signed-in sessions (#4975 phase 5): a socket opened under one closes when it ends (#5217). */
   browserSessions?: BrowserSessions | undefined
   /** With `off`, a socket never re-checks its session, as before #5217. */
@@ -190,9 +190,11 @@ function errorEvent(
   sessionId: string | undefined,
   log: (m: string) => void,
   questionId?: string,
+  queuedId?: string,
 ): ServerEvent {
-  // A failed answer names its question (#940), so the panel re-opens that card only.
-  const where = { ...(sessionId ? { sessionId } : {}), ...(questionId ? { questionId } : {}) }
+  // A failed answer names its question (#940), so the panel re-opens that card only; a
+  // refused change to a queued message names it (#6386), so its buttons work again.
+  const where = { ...(sessionId ? { sessionId } : {}), ...(questionId ? { questionId } : {}), ...(queuedId ? { queuedId } : {}) }
   if (err instanceof SessionError || err instanceof ApprovalError || err instanceof QuestionError) {
     return event({ type: 'error', ...where, code: err.code, message: err.message })
   }
@@ -231,7 +233,7 @@ export class ChatConnection {
   /** The tab this panel is in, once it said (`tab.bind`). */
   private tabId: string | undefined
   private readonly clientIp: string | undefined
-  private readonly attachments: AttachmentStore | undefined
+  private readonly attachments: Attachments | undefined
   private readonly signedIn: (() => Promise<boolean | undefined>) | undefined
   private readonly signedOut: () => void
 
@@ -491,7 +493,8 @@ export class ChatConnection {
           }
           // Before the turn starts, so its first browser_* call already finds this tab.
           this.pairTab(id)
-          await otelContext.with(parent, () => this.sessions.send(id, this.principal, message.text, { context, ...images }))
+          // While a turn runs, the message waits in the session's queue (#6386): its `session.queue` event says so.
+          await otelContext.with(parent, () => this.sessions.send(id, this.principal, message.text, { context, ...images, queue: true }))
           await this.claim(id, attached)
           return
         }
@@ -516,6 +519,13 @@ export class ChatConnection {
         case 'session.interrupt':
           await this.sessions.interrupt(message.sessionId, this.principal)
           return
+        // The queue's change reaches the panel as the session's `session.queue` event.
+        case 'queue.remove':
+          await this.sessions.removeQueued(message.sessionId, this.principal, message.id)
+          return
+        case 'queue.edit':
+          await this.sessions.editQueued(message.sessionId, this.principal, message.id, message.text)
+          return
         case 'session.handoff':
           await this.sessions.handoff(message.sessionId, this.principal, this.principal)
           return
@@ -529,7 +539,15 @@ export class ChatConnection {
       if (sessionId && err instanceof SessionError && err.budget) {
         this.emit(event({ type: 'session.budget', sessionId, ...err.budget }))
       }
-      this.emit(errorEvent(err, sessionId, this.log, message.type === 'question.answer' ? message.id : undefined))
+      this.emit(
+        errorEvent(
+          err,
+          sessionId,
+          this.log,
+          message.type === 'question.answer' ? message.id : undefined,
+          message.type === 'queue.remove' || message.type === 'queue.edit' ? message.id : undefined,
+        ),
+      )
     }
   }
 

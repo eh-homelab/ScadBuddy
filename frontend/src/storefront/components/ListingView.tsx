@@ -1,7 +1,7 @@
-import { ToggleGroup, ToggleGroupItem } from '../../components/ui/toggle-group'
-import { useId, type ElementType } from 'react'
+import { useMemo, type ElementType } from 'react'
 import type { Listing, ParamValue } from '../api/client'
-import { listingMaterials, listingUnavailable } from '../params'
+import { colourPlan } from '../colours'
+import { listingUnavailable } from '../params'
 import { ParamField } from './ParamField'
 
 export type ParamValues = Record<string, ParamValue>
@@ -10,17 +10,15 @@ export interface ListingViewProps {
   listing: Listing
   /** Only the values the visitor set: a field with none shows the shop's choice. */
   values: ParamValues
+  /**
+   * The colour values the latest render start answered (`StoreRender.values`) for the
+   * values on screen. A part the visitor did not set shows them; they win over the page's
+   * prediction (#6258).
+   */
+  settled?: ParamValues
   onChange: (name: string, next: ParamValue | undefined) => void
   /** The title's heading level: 1 on the public page, 2 inside the back office's preview. */
   headingLevel?: 1 | 2
-  /** The filament picked for each colour parameter, by id (#6152). */
-  picks?: Record<string, string>
-  onPick?: (name: string, next: string | undefined) => void
-  /** With `one_material`: the material chosen; null or absent is the listing's first. */
-  material?: string | null
-  onMaterial?: (next: string) => void
-  /** What changed when the material did, said under the control. */
-  materialNote?: string | null
 }
 
 /**
@@ -30,27 +28,18 @@ export interface ListingViewProps {
  * Storefront page as its live preview, so the shop sees the customer's form. It fetches
  * nothing and is styled with the theme's tokens only.
  *
+ * #6258: "choose a colour, the plastic follows". A pick of a colour that only another
+ * material offers moves each part the visitor did not set to the closest colour of that
+ * material at once (`colours.ts` `colourPlan`, the page's copy of the shop's rule). A part
+ * whose default that material offers keeps it. A colour the visitor set never moves.
+ *
  * Everything the shop typed (title, description, captions, labels) renders as React text,
  * never as HTML (spec §5.8).
  */
-export function ListingView({
-  listing,
-  values,
-  onChange,
-  headingLevel = 1,
-  picks,
-  onPick,
-  material,
-  onMaterial,
-  materialNote,
-}: ListingViewProps) {
-  const id = useId()
+export function ListingView({ listing, values, settled, onChange, headingLevel = 1 }: ListingViewProps) {
   const Heading: ElementType = headingLevel === 1 ? 'h1' : 'h2'
   const params = Object.entries(listing.params)
-  const materials = listingMaterials(listing)
-  const shownMaterial = material ?? materials[0] ?? null
-  // #6152: one Material control above the colours, only when it chooses something.
-  const oneMaterial = listing.one_material && materials.length > 1
+  const plan = useMemo(() => colourPlan(listing, values), [listing, values])
   return (
     <article className="flex min-w-0 flex-col gap-5">
       <header className="flex flex-col gap-2">
@@ -82,48 +71,14 @@ export function ListingView({
       )}
       {params.length > 0 ? (
         <form className="grid gap-[18px]" aria-label="Customize" onSubmit={(event) => event.preventDefault()}>
-          {oneMaterial && (
-            <div className="min-w-0">
-              <p className="mb-1.5 block p-0 font-semibold" id={`${id}-material`}>
-                Material
-              </p>
-              <ToggleGroup
-                type="single"
-                spacing={2}
-                className="flex-wrap"
-                aria-labelledby={`${id}-material`}
-                value={shownMaterial ?? ''}
-                onValueChange={(each) => {
-                  if (each !== '') onMaterial?.(each)
-                }}
-              >
-                {materials.map((each) => (
-                  <ToggleGroupItem
-                    key={each}
-                    value={each}
-                    variant="outline"
-                    className="min-h-11 rounded-full px-4 data-[state=on]:border-primary data-[state=on]:ring-1 data-[state=on]:ring-primary"
-                  >
-                    {each}
-                  </ToggleGroupItem>
-                ))}
-              </ToggleGroup>
-              {materialNote && (
-                <p className="mt-1.5 text-sm text-muted-foreground" role="status">
-                  {materialNote}
-                </p>
-              )}
-            </div>
-          )}
           {params.map(([name, param]) => (
             <ParamField
               key={name}
               param={param}
               value={values[name]}
+              shown={settled?.[name] ?? plan.shown[name]}
               filaments={listing.colours}
-              material={listing.one_material ? shownMaterial : null}
-              pick={picks?.[name]}
-              onPick={onPick && ((next) => onPick(name, next))}
+              materials={listing.materials}
               onChange={(next) => onChange(name, next)}
             />
           ))}

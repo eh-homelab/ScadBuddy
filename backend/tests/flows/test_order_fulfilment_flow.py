@@ -988,6 +988,45 @@ def test_a_lan_only_printer_the_model_remembers_is_named() -> None:
     assert host.requests[0]["printer"] == "p-lan" and "printer_id" not in host.requests[0]
 
 
+@pytest.mark.parametrize("remembered", [False, True])
+@pytest.mark.parametrize("kind", ["model", "library_file"])
+def test_the_remembered_colour_match_is_sent(remembered: bool, kind: str) -> None:
+    """#6304: a model or library file that remembers "Wait for the right colour" sends it,
+    so an order print of a model kept at "any colour" does not wait for the colour. A
+    library file's choices are read by its file (#6498)."""
+    choices = {
+        "default_nozzles": [],
+        "bed_type": "pei",
+        "model_choices": {"force_colour_match": remembered},
+    }
+    item = _item("a")
+    source: dict[str, Any] = {"output_id": "o"}
+    if kind == "library_file":
+        item = {**item, "kind": "library_file", "output_id": None, "library_file": {"id": 7}}
+        source = {"library_file_id": 7}
+    host = _Host([item], [_OK], [], choices=choices)
+    host.run()
+    assert host.sources == [source]
+    assert host.requests[0]["filament_plan"] == {"slots": [], "force_colour_match": remembered}
+
+
+@pytest.mark.parametrize("kind", ["model", "library_file"])
+def test_nothing_remembered_leaves_the_colour_match_to_the_default(kind: str) -> None:
+    """#6304: with nothing remembered the flow sends no `force_colour_match`, so the
+    plan's default (on, #6218) applies, as in the print dialog. A library file too (#6505),
+    its choices read by its file (#6511)."""
+    item = _item("a")
+    source: dict[str, Any] = {"output_id": "o"}
+    if kind == "library_file":
+        item = {**item, "kind": "library_file", "output_id": None, "library_file": {"id": 7}}
+        source = {"library_file_id": 7}
+    host = _Host([item], [_OK], [])
+    host.run()
+    assert host.sources == [source]
+    assert host.printed == ["a"]
+    assert host.requests[0]["filament_plan"] == {"slots": []}
+
+
 def test_only_a_timeout_counts_as_nobody_answering() -> None:
     host = _Host([_item("a")], [_refused("x")], [ValueError("bad timeout")])
     with pytest.raises(ValueError, match="bad timeout"):

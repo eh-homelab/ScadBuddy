@@ -90,6 +90,22 @@ QUEUE_FULL = "queue-full"
 #: `api/crud_render.py` `REUSE_LOST` and `DEADLOCK`.
 REUSE_LOST = "reuse-lost"
 DEADLOCK = "deadlock"
+#: `api/crud_render.py` `OTHER_BACKEND`: a put or swap of a ref on another backend than
+#: the API's store (this worker still renders to the old one after a `/store/migrate`).
+OTHER_BACKEND = "other-backend"
+#: A put's or swap's wait for its answer (#6534): the API reads and hashes a new object
+#: before it answers (`api/crud_render.py` `_verified`), so the wait grows with the
+#: ref's size. The floor is the client's default per-request timeout (10 s). Past it, the
+#: wait grows by `VERIFY_SECONDS_PER_MIB` for each whole MiB: a read at 1 MiB/s, a
+#: quarter of the 4.5 MB/s that `intake_worker/sandbox.py` `REQUEST_DEADLINE` calls well
+#: below the pod network's speed. A read through the Bambuddy store is slower than S3.
+VERIFY_TIMEOUT_FLOOR = 10.0
+VERIFY_SECONDS_PER_MIB = 1.0
+#: The most a put or swap waits, whatever the ref's size (#6538). A render activity
+#: budgets one `TRANSFER` (180 s, `workflows/pipelines.py`) for each piece it moves, and
+#: a publish is the upload plus this index write. The upload and the API's read move the
+#: same bytes, so each gets half of that budget. A ref of 80 MiB or more waits this long.
+VERIFY_TIMEOUT_CEILING = 90.0
 #: `api/crud_render.py` `BAMBUDDY_UNAVAILABLE`.
 BAMBUDDY_UNAVAILABLE = "bambuddy-unavailable"
 #: `api/crud_render.py` `FORGETTABLE_PREFIXES` and `LIBRARY_PIECE_KEY`: the keys only the
@@ -367,6 +383,27 @@ class WriteKeys:
         return activity_key(ordinal, self.namespace)
 
 
+class OtherBackendError(Exception):
+    """The API refused a put or swap of a ref on another backend than its store (a 409
+    ``other-backend``): this worker still renders to the store's old backend after a
+    `/store/migrate`. It renders to the new one once it reads the new settings."""
+
+    def __str__(self) -> str:
+        detail = super().__str__()
+        return (
+            "This render worker stores on another backend than the API's store; it has"
+            f" not read the store's new settings yet. {detail}"
+        ).strip()
+
+
+def verify_timeout(ref: BlobRef) -> float:
+    """A put's or swap's wait for ``ref``: `VERIFY_TIMEOUT_FLOOR`, plus
+    `VERIFY_SECONDS_PER_MIB` for each whole MiB the API may read and hash, never past
+    `VERIFY_TIMEOUT_CEILING`."""
+    scaled = VERIFY_TIMEOUT_FLOOR + (ref.size >> 20) * VERIFY_SECONDS_PER_MIB
+    return min(scaled, VERIFY_TIMEOUT_CEILING)
+
+
 class RemoteBlobIndex:
     """`BlobIndex` over the routes. Each call has the client's own budget, as each SQL
     call waited the pool's default for a connection."""
@@ -378,12 +415,20 @@ class RemoteBlobIndex:
     def _read(self, path: str, **query: Any) -> Any:
         return self._client.request("GET", _with(f"{BASE}/blob-index{path}", query)).json()
 
-    def _write(self, method: str, path: str, *, json: Any = None, **query: Any) -> Any:
+    def _write(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: Any = None,
+        timeout: float | None = None,
+        **query: Any,
+    ) -> Any:
         url = _with(f"{BASE}/blob-index{path}", query)
         try:
             try:
                 response = self._client.request(
-                    method, url, json=json, idempotency_key=self._keys.next()
+                    method, url, json=json, idempotency_key=self._keys.next(), timeout=timeout
                 )
             except CrudRefusedError as error:
                 if error.status != 422 or error.problem.get("type") != KEY_PROBLEM:
@@ -391,7 +436,7 @@ class RemoteBlobIndex:
                 # An earlier attempt of this activity sent another write under this
                 # ordinal (`WriteKeys`): this one is a write of its own.
                 response = self._client.request(
-                    method, url, json=json, idempotency_key=uuid.uuid4().hex
+                    method, url, json=json, idempotency_key=uuid.uuid4().hex, timeout=timeout
                 )
         except CrudRefusedError as error:
             reason = error.problem.get("reason") if error.status == 409 else None
@@ -399,6 +444,8 @@ class RemoteBlobIndex:
                 raise ReuseLostError(str(error.problem.get("detail", ""))) from error
             if reason == DEADLOCK:
                 raise DeadlockDetected(str(error.problem.get("detail", ""))) from error
+            if reason == OTHER_BACKEND:
+                raise OtherBackendError(str(error.problem.get("detail", ""))) from error
             raise
         return response.json()
 
@@ -423,6 +470,7 @@ class RemoteBlobIndex:
             "PUT",
             f"/{_part(key)}",
             json={"ref": ref.model_dump(mode="json"), "slug": slug, "meta": meta, "reuse": reuse},
+            timeout=verify_timeout(ref),
         )
         previous = body["previous"]
         return None if previous is None else BlobRef.model_validate(previous)
@@ -447,6 +495,7 @@ class RemoteBlobIndex:
                 "meta": meta,
                 "reuse": reuse,
             },
+            timeout=verify_timeout(ref),
         )
         return bool(body["swapped"])
 

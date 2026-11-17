@@ -1,13 +1,13 @@
 import { http, HttpResponse } from 'msw'
 import type { CustomizerSchema, ListingBound, StorefrontListing, StorefrontListingInput, StorefrontListingPage } from '../../api/types'
-import { mockModels, problem } from '../handlers'
+import { mockModels, mockSettings, problem } from '../handlers'
 import * as orders from './orders/state'
 
 /**
  * #5282 (spec 2026-11-02 §5.3; backend `api/storefront.py`): the back office's storefront
  * listings. An edit names the `updated_at` it read and unpublishes the listing; a delete
  * is refused while it is published. Publish here checks nothing against the template: the
- * backend's tests do that.
+ * backend's tests do that. It checks only each filament's material (`materialRefusal`, #6258).
  *
  * The listings are kept in `sessionStorage` too, so a reload shows the order a test set,
  * as the backend's rows would. Each Playwright test has its own context; `reset` clears it.
@@ -30,6 +30,38 @@ export function refuseNextRepublish(slug: string): void {
   republishRefusal = slug
 }
 let ticks = 0
+
+/** #6237 — the mock's `storefront_prepare_cap`; see `setPrepareCap`. */
+let prepareCap = 256
+/** #6237 — each prepared listing's combinations made ready so far, by id. */
+let prepared = new Map<string, number>()
+/** #6299 review — renders the next prepare run cannot start; see `failNextPrepareStarts`. */
+let prepareFailures = 0
+/** #6299 review — each listing's run's renders that could not be started, by id. */
+let notStarted = new Map<string, number>()
+
+export function setPrepareCap(cap: number): void {
+  prepareCap = cap
+}
+
+/** #6299 review — the next prepare run cannot start `n` of its renders. */
+export function failNextPrepareStarts(n: number): void {
+  prepareFailures = n
+}
+
+const HEX = /^#[0-9a-f]{6}$/i
+
+/**
+ * #6237 — the listing's colour combinations: the product of each choice bound whose
+ * choices are colours, each colour once whatever its case. The mock's snapshot has no
+ * schema, so a colour parameter is told by its choices (the backend reads its type).
+ */
+function combinationCount(listing: StorefrontListing): number {
+  const sizes = Object.values(listing.params)
+    .filter((bound) => bound.kind === 'choice' && bound.choices.length > 0 && bound.choices.every((c) => typeof c === 'string' && HEX.test(c)))
+    .map((bound) => new Set((bound.kind === 'choice' ? bound.choices : []).map((c) => String(c).toLowerCase())).size)
+  return sizes.length === 0 ? 0 : sizes.reduce((a, b) => a * b, 1)
+}
 
 function save(): void {
   try {
@@ -65,6 +97,27 @@ function emptyChoice(body: StorefrontListingInput) {
   return refused(422, 'listing_choice_empty', `'${name}' is offered with nothing to choose; for a colour parameter, choose at least one filament, or lock it`)
 }
 
+/** A support material, as the backend's `wire.py` `SUPPORT_MATERIAL` reads it. */
+const SUPPORT_MATERIAL = /support|pva|bvoh|hips/i
+
+/**
+ * #6258 — the backend's 422 `listing_material_not_allowed` (`orders/storefront/listings.py`
+ * `check_materials`), or null: a listing filament of a material neither the listing's
+ * `materials` nor, when it names none, the shop's `storefront_materials` allows. The mock
+ * does not check the locked colours (`check_locked_colours`): it has no schema. A row a
+ * test seeded without `materials` (or one kept in `sessionStorage` from before #6258) has none.
+ */
+function materialRefusal(listing: StorefrontListing) {
+  const own = (listing as Partial<StorefrontListing>).materials ?? []
+  const allowed = new Set((own.length > 0 ? own : (mockSettings().storefront_materials ?? [])).map((m) => m.trim().toLowerCase()))
+  for (const id of listing.colours) {
+    const material = orders.state.filaments.find((f) => f.id === id)?.material
+    if (material === undefined || SUPPORT_MATERIAL.test(material) || allowed.has(material.trim().toLowerCase())) continue
+    return refused(422, 'listing_material_not_allowed', `'${id}' is ${material}, which this listing does not allow; allow ${material} or take the filament out`, { name: id })
+  }
+  return null
+}
+
 /** #6213 — what a publish copies: one entry per picture, keyed by its media id. */
 function publishedMedia(listing: StorefrontListing): StorefrontListing['media'] {
   return listing.media_ids.map((id) => ({ blob_key: `listing-media-${id}`, kind: 'image', media_type: 'image/png', caption: '', media_id: id }))
@@ -97,7 +150,7 @@ function fields(body: StorefrontListingInput) {
     fixed: body.fixed ?? {},
     colours: body.colours ?? [],
     media_ids: body.media_ids ?? [],
-    one_material: body.one_material ?? false,
+    materials: body.materials ?? [],
   }
 }
 
@@ -113,14 +166,22 @@ const EMPTY_SCHEMA: CustomizerSchema = { title: null, source_sha256: '', groups:
 /** The backend's bounds on a page (`wire.py` `ListingQuery`: `LISTING_PAGE_MAX`, `LISTING_OFFSET_MAX`). */
 const PAGE_BOUNDS = { limit: [1, 200], offset: [0, 1_000_000] } as const
 
+/**
+ * `raw` as Pydantic reads an int from a query (measured with `TypeAdapter(int)`, pydantic
+ * 2.14.2): decimal digits with an optional sign and surrounding spaces, single `_` between
+ * digits, and a fraction of zeros only (`1_000.00` is 1000); `5.`, `.0`, `5.5`, `1e2` and
+ * `0x10` are refused (NaN).
+ */
+function queryInt(raw: string): number {
+  return /^\s*[+-]?\d+(_\d+)*(\.0+)?\s*$/.test(raw) ? Number(raw.replace(/_/g, '')) : NaN
+}
+
 /** FastAPI's 422 for a `limit` or `offset` out of its bounds, as the real route answers; null when both fit. */
 function outOfBounds(url: URL): Response | null {
   const detail = Object.entries(PAGE_BOUNDS).flatMap(([name, [min, max]]) => {
     const raw = url.searchParams.get(name)
     if (raw === null) return []
-    // As Pydantic reads an int from a query (measured with its `TypeAdapter(int)`): decimal
-    // digits with an optional sign and surrounding spaces; `1e2` and `0x10` are refused.
-    const value = /^\s*[+-]?\d+\s*$/.test(raw) ? Number(raw) : NaN
+    const value = queryInt(raw)
     if (!Number.isInteger(value)) return [{ type: 'int_parsing', loc: ['query', name], msg: 'Input should be a valid integer' }]
     if (value < min) return [{ type: 'greater_than_equal', loc: ['query', name], msg: `Input should be greater than or equal to ${min}` }]
     if (value > max) return [{ type: 'less_than_equal', loc: ['query', name], msg: `Input should be less than or equal to ${max}` }]
@@ -136,8 +197,8 @@ function page(url: URL): StorefrontListingPage {
   const slugs = url.searchParams.getAll('slug')
   const materials = url.searchParams.getAll('material').map((m) => m.toUpperCase())
   const status = get('status')
-  const limit = Number(get('limit') || 50)
-  const offset = Number(get('offset') || 0)
+  const limit = queryInt(get('limit') || '50')
+  const offset = queryInt(get('offset') || '0')
   const ordered = sorted()
   const place = new Map(ordered.map((listing, index) => [listing.id, index + 1]))
   const materialOf = new Map(orders.state.filaments.map((f) => [f.id, f.material.toUpperCase()]))
@@ -274,6 +335,8 @@ export const handlers = [
     const id = String(params['id'])
     const found = listings.find((l) => l.id === id)
     if (!found) return refused(404, 'listing_not_found', `no listing '${id}'`)
+    const notAllowed = materialRefusal(found)
+    if (notAllowed) return notAllowed
     const at = stamp()
     const published: StorefrontListing = {
       ...found,
@@ -294,6 +357,45 @@ export const handlers = [
     listings = listings.map((l) => (l.id === id ? published : l))
     save()
     return HttpResponse.json(published)
+  }),
+
+  // #6237 — each read moves a started run on by two combinations (a few at a time, #6299
+  // review), until each is ready or could not be started.
+  http.get(`${base}/:id/prepare`, ({ params }) => {
+    const id = String(params['id'])
+    const found = listings.find((l) => l.id === id)
+    if (!found) return refused(404, 'listing_not_found', `no listing '${id}'`)
+    if (!found.published) return refused(409, 'listing_not_published', 'Publish this listing before you prepare its colours.')
+    const count = combinationCount(found)
+    const before = prepared.get(id)
+    const failedToStart = notStarted.get(id) ?? 0
+    if (count > prepareCap || before === undefined) {
+      return HttpResponse.json({ count, cap: prepareCap, ready: 0, rendering: 0, failed: 0, running: false, failed_to_start: failedToStart })
+    }
+    const ready = Math.min(count - failedToStart, before + 2)
+    prepared.set(id, ready)
+    const rendering = Math.min(2, count - failedToStart - ready)
+    return HttpResponse.json({ count, cap: prepareCap, ready, rendering, failed: 0, running: ready + failedToStart < count, failed_to_start: failedToStart })
+  }),
+
+  http.post(`${base}/:id/prepare`, ({ params }) => {
+    const id = String(params['id'])
+    const found = listings.find((l) => l.id === id)
+    if (!found) return refused(404, 'listing_not_found', `no listing '${id}'`)
+    if (!found.published) return refused(409, 'listing_not_published', 'Publish this listing before you prepare its colours.')
+    const count = combinationCount(found)
+    if (count === 0) return refused(422, 'listing_no_colours', 'This listing offers no colour to choose.')
+    if (count > prepareCap) {
+      return refused(422, 'listing_combinations_over_cap', `This listing has ${count} colour combinations. The shop prepares at most ${prepareCap} at a time.`, { count, cap: prepareCap })
+    }
+    const before = prepared.get(id)
+    const open = before !== undefined && before + (notStarted.get(id) ?? 0) < count
+    if (!open) {
+      prepared.set(id, before ?? 0)
+      notStarted.set(id, Math.min(prepareFailures, count - (before ?? 0)))
+      prepareFailures = 0
+    }
+    return HttpResponse.json({ count, started: !open })
   }),
 
   http.post(`${base}/:id/unpublish`, ({ params }) => {
@@ -320,6 +422,10 @@ export const handlers = [
 export function reset(): void {
   listings = []
   republishRefusal = null
+  prepareCap = 256
+  prepared = new Map()
+  prepareFailures = 0
+  notStarted = new Map()
   try {
     sessionStorage.removeItem(STORAGE_KEY)
   } catch {

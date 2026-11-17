@@ -99,6 +99,7 @@ from scadbuddy.flows.operations import (
 )
 from scadbuddy.flows.print_binding import NativeCheck, PrinterLookup, bind_call
 from scadbuddy.flows.store import GrantStateError, author_principal
+from scadbuddy.flows.tool_names import unknown_tools
 from scadbuddy.flows.typecheck import (
     MAX_SCRIPT_BYTES,
     CheckerUnavailableError,
@@ -310,7 +311,7 @@ class GrantView(BaseModel):
     released: list[str] = []
 
 
-def _grant_view(grant: Grant, uses: list[GrantUse], in_force: bool) -> GrantView:
+def run_grant_view(grant: Grant, uses: list[GrantUse], in_force: bool) -> GrantView:
     return GrantView(
         **grant.model_dump(exclude={"run_id"}),
         # The whole chain's (`FlowStore.grant_in_force`), as each call is checked.
@@ -461,6 +462,8 @@ async def register_flow(body: DefinitionCreate, flows: FlowsDep) -> Definition:
         raise ApiError(status.HTTP_413_CONTENT_TOO_LARGE, "The script is over 64 KiB.")
     if problems := await _checked(body.script, body.inputs_schema):
         raise _script_problems(problems, "The script does not type-check.")
+    if problems := unknown_tools(body.script, await agent_tool_names(flows)):
+        raise _script_problems(problems, "The script names a tool the assistant does not have.")
     with _versioned():
         return await flows.definitions.register(
             body.name,
@@ -974,7 +977,7 @@ async def _run_view(
             raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.")
         view.display_name = (await flows.definitions.display_names({view.name})).get(view.name)
         if (grant := await flows.store.get_grant(run_id)) is not None:
-            view.grant = _grant_view(grant, [], await flows.store.grant_in_force(grant))
+            view.grant = run_grant_view(grant, [], await flows.store.grant_in_force(grant))
         return view
     display_name = (await flows.definitions.display_names({run.name})).get(run.name)
     run = run.model_copy(update={"display_name": display_name})
@@ -989,7 +992,7 @@ async def _run_view(
         images=await run_images(flows.connect, run.id) if flows.connect is not None else [],
     )
     if (grant := await flows.store.get_grant(run.id)) is not None:
-        view.grant = _grant_view(
+        view.grant = run_grant_view(
             grant, await flows.store.grant_uses(run.id), await flows.store.grant_in_force(grant)
         )
     if run.status in TERMINAL:
@@ -1370,6 +1373,21 @@ async def agent_tool_tiers(flows: Flows) -> dict[str, str]:
         ) from None
 
 
+async def agent_tool_names(flows: Flows) -> set[str]:
+    """Every tool the agent has for flows, disabled ones too (#6365): what a script's
+    literal tool names are checked against. Refused as `agent_tool_tiers` is when the
+    agent does not answer."""
+    try:
+        return await flows.agent_tools.tool_names()
+    except AgentToolsUnavailableError as err:
+        logger.warning("the agent did not list its tools: %s", err)
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "ScadBuddy's assistant service did not say what its tools are. Try again shortly.",
+            headers={"Retry-After": "5"},
+        ) from None
+
+
 def _check_grant(spec: GrantSpec, tool_tiers: dict[str, str]) -> None:
     if problems := validate_spec(spec, tool_tiers=tool_tiers, now=datetime.now(UTC)):
         raise ApiError(
@@ -1397,7 +1415,7 @@ def _grant_state(err: GrantStateError) -> ApiError:
 async def _grant_answer(flows: Flows, grant: Grant | None) -> GrantView:
     if grant is None:
         raise _no_grant()
-    return _grant_view(
+    return run_grant_view(
         grant,
         await flows.store.grant_uses(grant.run_id),
         await flows.store.grant_in_force(grant),

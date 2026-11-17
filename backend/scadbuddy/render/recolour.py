@@ -3,7 +3,9 @@
 A 3MF is written at render time in the model's own colours, before anyone has picked
 a spool. Bambuddy's slicer takes the filament colours of the presets it is handed, but
 it keeps the cover images the file carries — so without this, the queue shows a plate
-thumbnail in the model's colours while the printer lays down the spools'.
+thumbnail in the model's colours while the printer lays down the spools'. ScadBuddy's
+own slicer, the Bambu Studio CLI, keeps them too: run headless, its GLFW (built for
+Wayland only) finds no display, so it draws no cover and copies the input's (#6170).
 """
 
 from __future__ import annotations
@@ -11,7 +13,8 @@ from __future__ import annotations
 import io
 import json
 import zipfile
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from typing import BinaryIO
 
 from scadbuddy.render.bambu3mf import (
     PROJECT_SETTINGS_NAME,
@@ -20,18 +23,35 @@ from scadbuddy.render.bambu3mf import (
     rezipped,
 )
 from scadbuddy.render.geometry import parts_from_3mf
-from scadbuddy.render.split import normalise_colour
+from scadbuddy.render.split import ColourPart, normalise_colour
 from scadbuddy.render.thumbnail import render_plate_thumbnails
 
+#: Reads the parts of the plates named from a 3MF, by plate index.
+PlatesReader = Callable[[BinaryIO, Sequence[int]], dict[int, list[ColourPart]]]
 
-def recolour_3mf(payload: bytes, colours: Sequence[str]) -> bytes:
+
+def own_plates(archive: BinaryIO, plates: Sequence[int]) -> dict[int, list[ColourPart]]:
+    """The plates of a ScadBuddy 3MF (:func:`~scadbuddy.render.geometry.parts_from_3mf`)."""
+    return {index: parts_from_3mf(archive, index) for index in plates}
+
+
+def recolour_3mf(
+    payload: bytes, colours: Sequence[str], *, read_plates: PlatesReader = own_plates
+) -> bytes:
     """Return ``payload`` with ``filament_colour`` set to ``colours`` and every plate's
     cover images redrawn in them.
 
     ``colours`` is one per filament of the file, in filament order; a different count
     raises :class:`ValueError`, since the extruder numbers of every part index into it.
     A file written without covers gets none. Written in the writer's policy, every entry
-    it does not change copied as its compressed bytes (:func:`rezipped`, #3679).
+    it does not change copied as its compressed bytes (:func:`rezipped`, #3679). An
+    author's ``plate_no_light_<n>.png`` is replaced by the lit cover.
+
+    ``read_plates`` reads the covered plates' parts from the recoloured file. The default
+    reads ScadBuddy's own files. An author's file needs
+    :func:`~scadbuddy.render.objects3mf.read_plates_parts`, which reads build items,
+    multi-part objects and object-level extruders, within a read budget (#6170). A plate
+    with no parts keeps its covers.
     """
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         names = set(archive.namelist())
@@ -49,8 +69,10 @@ def recolour_3mf(payload: bytes, colours: Sequence[str]) -> bytes:
         # Read from the recoloured archive, in memory: that is what gives each part its
         # new colour through its extruder number.
         recoloured = io.BytesIO(rezipped(payload, changed))
-        for index in covered:
-            drawn = render_plate_thumbnails(parts_from_3mf(recoloured, index))
+        for index, parts in read_plates(recoloured, covered).items():
+            if not parts:
+                continue
+            drawn = render_plate_thumbnails(parts)
             changed.update(
                 zip(
                     cover_names(index),
@@ -58,4 +80,8 @@ def recolour_3mf(payload: bytes, colours: Sequence[str]) -> bytes:
                     strict=True,
                 )
             )
+            # Bambu Studio saves an unlit copy of the cover too, which its CLI keeps as
+            # it keeps the others (#6170); this side draws no unlit view.
+            if (unlit := f"Metadata/plate_no_light_{index}.png") in names:
+                changed[unlit] = drawn.plate
     return rezipped(payload, changed)

@@ -24,6 +24,7 @@ from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_run_choices import run_print, run_request, run_routes
 from tests.api.test_send import BASE, configure, make_output, upload_route
 
+pytestmark = pytest.mark.usefixtures("recorded_sb_spools")
 API = f"{BASE}/api/v1"
 
 

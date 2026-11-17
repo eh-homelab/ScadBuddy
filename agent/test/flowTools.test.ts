@@ -11,6 +11,7 @@ import { FLOW_TOOLS_PATH } from '../src/routes/flowTools.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { FLOW_TOOL_TIER_ACTIVITY, flowToolTiers } from '../src/temporal/flowTools.js'
 import { toolActivities } from '../src/temporal/toolActivities.js'
+import { ALL_TOOLS } from '../src/tools/index.js'
 import { defineTool, json, type Tool } from '../src/tools/registry.js'
 import { services } from './helpers/mcp.js'
 import { memoryAccess, rowsFromOverrides } from './support/memoryAccess.js'
@@ -79,7 +80,7 @@ describe("a flow's tool tiers (#2704)", () => {
     const sets = [{ name: 'scadbuddy', tool_prefix: 'mcp__scadbuddy__', switchable: false, tools: camera.map((t) => ({ name: t.name, harness_name: `mcp__scadbuddy__${t.name}`, risk: t.risk })) }]
     const svc = services({ toolOverrides: new BuiltInTools(access, sets).registryOverrides() })
     const tier = toolActivities(camera, { services: svc, sessions: { ownerOf: async () => undefined } })[FLOW_TOOL_TIER_ACTIVITY]!
-    expect(await env(`flow-${RUN}`).run(tier, { tool: 'get_printer_camera' })).toEqual({ tier: 'read', disabled: true, declared: 'read' })
+    expect(await env(`flow-${RUN}`).run(tier, { tool: 'get_printer_camera' })).toEqual({ tier: 'read', disabled: true, declared: 'read', keyed: false })
   })
 
   it('/internal/flows/tools lists the camera off as disabled', async () => {
@@ -100,17 +101,30 @@ describe("a flow's tool tiers (#2704)", () => {
     const { svc, set } = rig()
     const tier = toolActivities(TOOLS, { services: svc, sessions: { ownerOf: async () => undefined } })[FLOW_TOOL_TIER_ACTIVITY]!
     const flow = env(`flow-${RUN}`)
-    expect(await flow.run(tier, { tool: 'look' })).toEqual({ tier: 'read', disabled: false, declared: 'read' })
+    expect(await flow.run(tier, { tool: 'look' })).toEqual({ tier: 'read', disabled: false, declared: 'read', keyed: false })
     await set({ look: 'outward' }, ['send'])
-    expect(await flow.run(tier, { tool: 'look' })).toEqual({ tier: 'outward', disabled: false, declared: 'read' })
-    expect(await flow.run(tier, { tool: 'send' })).toEqual({ tier: 'outward', disabled: true, declared: 'outward' })
+    expect(await flow.run(tier, { tool: 'look' })).toEqual({ tier: 'outward', disabled: false, declared: 'read', keyed: false })
+    expect(await flow.run(tier, { tool: 'send' })).toEqual({ tier: 'outward', disabled: true, declared: 'outward', keyed: false })
   })
 
   it('answers the code tier as declared beside a lowered tier, so the flow retries by the stricter (review I2)', async () => {
     const { svc, set } = rig()
     const tier = toolActivities(TOOLS, { services: svc, sessions: { ownerOf: async () => undefined } })[FLOW_TOOL_TIER_ACTIVITY]!
     await set({ send: 'read' }, [])
-    expect(await env(`flow-${RUN}`).run(tier, { tool: 'send' })).toEqual({ tier: 'read', disabled: false, declared: 'outward' })
+    expect(await env(`flow-${RUN}`).run(tier, { tool: 'send' })).toEqual({ tier: 'read', disabled: false, declared: 'outward', keyed: false })
+  })
+
+  it('answers whether every write the tool makes is keyed to the call (#6345)', async () => {
+    const { svc } = rig()
+    const keyedSend = defineTool({ name: 'send', label: 'send', description: 'send', input: z.object({}), risk: 'outward', keyed: true, routes: [], handler: async () => json({}) })
+    const tier = toolActivities([keyedSend], { services: svc, sessions: { ownerOf: async () => undefined } })[FLOW_TOOL_TIER_ACTIVITY]!
+    expect(await env(`flow-${RUN}`).run(tier, { tool: 'send' })).toEqual({ tier: 'outward', disabled: false, declared: 'outward', keyed: true })
+  })
+
+  it('flags exactly the tools whose only write is one keyed command (#6345)', () => {
+    // Each handler is a single command() to a run_operation route; a handler that writes any other
+    // way must not be flagged, or a flow's retry of it could do it twice.
+    expect(ALL_TOOLS.filter((t) => t.keyed).map((t) => t.name).sort()).toEqual(['create_print_project', 'import_makerworld_model'])
   })
 
   it('refuses a tool the agent does not have, one a flow cannot call, and any other caller', async () => {

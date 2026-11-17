@@ -22,7 +22,7 @@ import {
 } from '../../agent/chat/images'
 import { statusLabel } from '../../agent/chat/labels'
 import { pageContext, suggestedPrompts } from '../../agent/chat/pageContext'
-import { isDone } from '../../agent/chat/protocol'
+import { isDone, QUEUE_MAX } from '../../agent/chat/protocol'
 import { askedBy, isBusy, isOwnedByBrowser, type SessionPatch, type SessionState } from '../../agent/chat/state'
 import { feedBlocks, toolStatus } from '../../agent/chat/toolGroups'
 import type { ChatTransportFactory } from '../../agent/chat/transport'
@@ -42,6 +42,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Toggle } from '@/components/ui/toggle'
 import { OriginBadge } from './badges'
 import { FeedItemView } from './FeedItemView'
+import { QueuedMessages } from './QueuedMessages'
 import { ToolGroup } from './ToolGroup'
 import { BudgetMeter, BudgetSpent, usd } from './SessionBudget'
 import { ArchivedSessions } from './ArchivedSessions'
@@ -242,6 +243,11 @@ export function AssistantChat({
   // #1885 — an archived chat is read-only: the composer is locked until it is unarchived.
   const archived = active?.archived === true
   const canSend = owned && !archived
+  // #6386 — a message sent while the chat's turn runs waits in its queue; a new chat's first
+  // turn is still on its way, so nothing is sent until it has started.
+  const queued = active?.queued ?? []
+  const queueFull = queued.length >= QUEUE_MAX
+  const holdSend = state.awaitingStart || (busy && (!active || queueFull))
   const streaming = active?.items.some((i) => i.kind === 'assistant' && !i.done) ?? false
   const pendingApproval = active?.items.some((i) => i.kind === 'approval' && i.state === 'pending') ?? false
   const pendingQuestion = active?.items.some((i) => i.kind === 'question' && i.state === 'pending' && !i.attention) ?? false
@@ -441,7 +447,7 @@ export function AssistantChat({
   }, [itemCount, lastText])
 
   const submit = (text: string) => {
-    if (!text.trim() || busy || !canSend || preparingNow.current > 0) return
+    if (!text.trim() || holdSend || !canSend || preparingNow.current > 0) return
     dictation.cancel()
     speech.arm()
     const { tools, dialogs, page } = bridge.snapshot()
@@ -922,6 +928,16 @@ export function AssistantChat({
               />
             ),
           )}
+        {active && (
+          <QueuedMessages
+            entries={queued}
+            sessionId={active.id}
+            canChange={canSend}
+            refusals={active.queueRefusals ?? {}}
+            onRemove={(id) => chat.removeQueued(active.id, id)}
+            onEdit={(id, text) => chat.editQueued(active.id, id, text)}
+          />
+        )}
         {itemCount === 0 && !busy && advanced && (
           // #1488 — an empty chat has no feed for Advanced to change, so say what it will do.
           <p className="text-xs text-muted-foreground">
@@ -1089,7 +1105,15 @@ export function AssistantChat({
               </Button>
             )}
           </div>
-          {busy && <span className="text-[11.5px] text-muted-foreground">Wait for this turn to finish, or stop it.</span>}
+          {busy && canSend && (
+            <span className="text-[11.5px] text-muted-foreground">
+              {state.awaitingStart || !active
+                ? 'Wait for this chat to start.'
+                : queueFull
+                  ? `${QUEUE_MAX} messages are waiting. Remove one, or wait for one to run.`
+                  : 'Sent now, it waits and runs after this turn.'}
+            </span>
+          )}
           <input
             ref={filePicker}
             type="file"
@@ -1119,8 +1143,8 @@ export function AssistantChat({
             </Button>
           </Tip>
           <MicButton dictation={dictation} disabled={!canSend} embedded={embedded} describedBy={voiceNoteId} />
-          <Button type="submit" size="sm" disabled={!draft.trim() || busy || !canSend || preparing > 0}>
-            Send
+          <Button type="submit" size="sm" disabled={!draft.trim() || holdSend || !canSend || preparing > 0}>
+            {busy && !holdSend ? 'Queue' : 'Send'}
           </Button>
         </div>
         <VoiceDisclosure id={voiceNoteId} />

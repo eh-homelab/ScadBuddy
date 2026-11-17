@@ -18,7 +18,7 @@ const DRAFT: Draft = {
     { id: 'pickup', label: 'Pick up at the workshop', amount_minor: 0, ships: false },
   ],
   items: [
-    { id: 'i1', kind: 'request', title: 'Design request', quantity: 1, inputs: null, notes: HOSTILE, attachments: [], sources: [], own_model: false },
+    { id: 'i1', kind: 'request', title: 'Design request', quantity: 1, inputs: null, notes: HOSTILE, attachments: [], sources: [], own_model: false, price: 'by_hand' },
     {
       id: 'i2',
       kind: 'model',
@@ -30,9 +30,20 @@ const DRAFT: Draft = {
       attachments: [],
       sources: [],
       own_model: false,
+      price: 'firm',
+      unit_price_minor: 650,
+      total_minor: 1300,
     },
-    { id: 'i3', kind: 'model', title: 'Luggage tag', quantity: 1, inputs: {}, labels: {}, notes: null, attachments: [], sources: [], own_model: false },
+    { id: 'i3', kind: 'model', title: 'Luggage tag', quantity: 1, inputs: {}, labels: {}, notes: null, attachments: [], sources: [], own_model: false, price: 'by_hand' },
   ],
+  pay_now: false,
+}
+
+/** Every line firm (#6153): the order goes to payment once it is sent. */
+const FIRM: Draft = {
+  ...DRAFT,
+  items: [DRAFT.items[1]!, { ...DRAFT.items[2]!, price: 'firm', unit_price_minor: 400, total_minor: 400 }],
+  pay_now: true,
 }
 
 describe('DraftPage', () => {
@@ -82,6 +93,25 @@ describe('DraftPage', () => {
     const ring = within(item).getByText('Keyring hole').closest('div')!
     expect(within(ring).getByText('No')).toBeInTheDocument()
     expect(within(item).queryByText('false')).toBeNull()
+  })
+
+  it('shows each firm price, and no number for a line the shop prices by hand (#6153)', async () => {
+    server.use(http.get('/api/store/v1/draft', () => HttpResponse.json(DRAFT)))
+    renderPage(<DraftPage />)
+    const keychain = (await screen.findByText('Name keychain')).closest('li')!
+    expect(within(keychain).getByText('$13.00')).toBeInTheDocument()
+    expect(within(keychain).getByText(/\$6\.50 each/)).toBeInTheDocument()
+    const tag = screen.getByText('Luggage tag').closest('li')!
+    expect(within(tag).getByText('The shop prices this by hand')).toBeInTheDocument()
+    expect(within(tag).queryByText(/\$/)).toBeNull()
+    expect(screen.getByRole('note')).toHaveTextContent('The prices shown come to $13.00. The shop prices the other designs by hand')
+  })
+
+  it('shows the total to pay when every line is firm (#6153)', async () => {
+    server.use(http.get('/api/store/v1/draft', () => HttpResponse.json(FIRM)))
+    renderPage(<DraftPage />)
+    expect(await screen.findByText('Total $17.00')).toBeInTheDocument()
+    expect(screen.getByRole('note')).toHaveTextContent('you pay from the link we mail you')
   })
 
   it('removes one item at a time, so a late answer never puts one back', async () => {
@@ -174,6 +204,80 @@ describe('Submitting the order', () => {
       address: { recipient: 'Ada Lovelace', lines: ['1 Analytical Way'], locality: 'London' },
     })
     expect(screen.queryByText('Name keychain')).toBeNull()
+  })
+
+  it('says the order is priced when it went straight to payment (#6153)', async () => {
+    server.use(
+      http.get('/api/store/v1/draft', () => HttpResponse.json({ ...FIRM, shipping_options: [] })),
+      http.post('/api/store/v1/draft/submit', () =>
+        HttpResponse.json({ id: 'd1', number: 'ORD-2026-8', email: 'ada@example.com', pay_now: true }),
+      ),
+    )
+    const { user } = renderPage(<DraftPage />)
+    await user.type(await screen.findByLabelText('Your name'), 'Ada')
+    await user.type(screen.getByLabelText('Email'), 'ada@example.com')
+    await user.click(screen.getByRole('button', { name: 'Send my order' }))
+    expect(await screen.findByText(/Follow the link in the mail to pay for your order/)).toBeInTheDocument()
+  })
+
+  it('loads the cart again when a price changed before the send (#6153)', async () => {
+    let reads = 0
+    const changed: Draft = { ...FIRM, shipping_options: [], items: [{ ...FIRM.items[0]!, unit_price_minor: 700, total_minor: 1400 }, FIRM.items[1]!] }
+    server.use(
+      http.get('/api/store/v1/draft', () => HttpResponse.json(reads++ === 0 ? { ...FIRM, shipping_options: [] } : changed)),
+      http.post('/api/store/v1/draft/submit', () =>
+        HttpResponse.json(
+          {
+            type: 'https://scadbuddy.dev/problems/storefront/prices_changed',
+            title: 'Conflict',
+            status: 409,
+            detail: 'Some prices changed. Check your order, then send it again.',
+            items: ['i2'],
+          },
+          { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const { user } = renderPage(<DraftPage />)
+    await user.type(await screen.findByLabelText('Your name'), 'Ada')
+    await user.type(screen.getByLabelText('Email'), 'ada@example.com')
+    await user.click(screen.getByRole('button', { name: 'Send my order' }))
+    expect(await screen.findByText('Some prices changed. Check your order, then send it again.')).toBeInTheDocument()
+    expect(await screen.findByText('$14.00')).toBeInTheDocument()
+    expect(screen.queryByText(/We have your order/)).toBeNull()
+  })
+
+  it('shows that the shop prices a line whose price went before the send (#6153)', async () => {
+    let reads = 0
+    const gone: Draft = {
+      ...FIRM,
+      shipping_options: [],
+      items: [{ ...FIRM.items[0]!, price: 'by_hand', unit_price_minor: null, total_minor: null }, FIRM.items[1]!],
+      pay_now: false,
+    }
+    server.use(
+      http.get('/api/store/v1/draft', () => HttpResponse.json(reads++ === 0 ? { ...FIRM, shipping_options: [] } : gone)),
+      http.post('/api/store/v1/draft/submit', () =>
+        HttpResponse.json(
+          {
+            type: 'https://scadbuddy.dev/problems/storefront/prices_changed',
+            title: 'Conflict',
+            status: 409,
+            detail: 'Some prices changed. Check your order, then send it again.',
+            items: [{ id: 'i2', price: 'by_hand' }],
+          },
+          { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const { user } = renderPage(<DraftPage />)
+    await user.type(await screen.findByLabelText('Your name'), 'Ada')
+    await user.type(screen.getByLabelText('Email'), 'ada@example.com')
+    await user.click(screen.getByRole('button', { name: 'Send my order' }))
+    expect(await screen.findByText('Some prices changed. Check your order, then send it again.')).toBeInTheDocument()
+    const keychain = (await screen.findByText('Name keychain')).closest('li')!
+    expect(await within(keychain).findByText('The shop prices this by hand')).toBeInTheDocument()
+    expect(screen.getByRole('note')).toHaveTextContent('The shop prices the other designs by hand')
   })
 
   it('sends a country typed in lower case as the two capital letters the server takes', async () => {
@@ -350,6 +454,7 @@ describe('Submitting the order', () => {
           notes: '',
           attachments: [],
           own_model: true,
+          price: 'by_hand',
           sources: [
             file('checking', {}),
             file('ready', { check_status: 'ready', preview_url: '/api/store/v1/draft/sources/ready/preview' }),

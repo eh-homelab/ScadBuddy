@@ -114,9 +114,12 @@ def test_the_last_customer_acceptance_accepts_a_storefront_order(
     shop.events.clear()
     shop.lifecycle.answer_revision(order.id, b.id, revision(shop, b).id, ACCEPTED, customer)
     assert shop.get(order).status == "accepted"
-    last = shop.rows.events(order.id)[-1]
-    assert (last.kind, last.detail["to"]) == ("order.status", "accepted")
-    assert last.by.kind == "customer" and last.by.principal == f"customer:{shop.customer.id}"
+    moved = [e for e in shop.rows.events(order.id) if e.kind == "order.status"][-1]
+    assert moved.detail["to"] == "accepted"
+    assert moved.by.kind == "customer" and moved.by.principal == f"customer:{shop.customer.id}"
+    # The customer pays once the order is accepted (#6153): its balance request opens,
+    # with no deposit asked before.
+    assert [(r.kind, r.status) for r in requests_for(shop, order)] == [("balance", "open")]
     told = [e for e in shop.events if isinstance(e, OrderChanged)]
     assert told and told[-1].status == "accepted"
 

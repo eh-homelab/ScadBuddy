@@ -1,5 +1,5 @@
 import type { Settings } from '../../api/types'
-import { RUNTIME_FIELDS, envVar, serverValue, type FieldName, type FieldSpec, type SectionId } from './fields'
+import { RUNTIME_FIELDS, serverValue, type FieldName, type FieldSpec, type SectionId } from './fields'
 
 /** #296 — `used` of `limit`, where a limit of 0 means none. */
 export function ofLimit(used: string, limit: number, format: (n: number) => string): string {
@@ -101,7 +101,6 @@ export function extraSpecs(settings: Settings | undefined): FieldSpec[] {
       return {
         name: name as FieldName,
         section: 'diagnostics' as const,
-        label: envVar(name),
         kind:
           typeof current === 'boolean'
             ? ('bool' as const)
@@ -202,6 +201,8 @@ export function toPatchValue(name: FieldName, raw: string, settings: Settings): 
   )
     return raw
   if (name === 'store_s3_path_style' || name === 'print_auto_import') return raw === 'true'
+  // #6262 Task 13 — one data type so far: spools (#6265 adds the others).
+  if (name === 'filament_sync') return { spools: raw }
   // #4699 — an empty list allows no source (each print goes to Unsorted imports) or skips no printer.
   if (name === 'print_auto_import_sources') return raw === '' ? [] : raw.split(',')
   if (name === 'print_auto_import_skip_printers') return raw === '' ? [] : raw.split(',').map(Number)

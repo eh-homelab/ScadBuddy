@@ -62,20 +62,20 @@ from scadbuddy.crud.client import CrudClient, wait_for_areas
 from scadbuddy.crud.operations import RemoteOperationStore
 from scadbuddy.crud.print import (
     RemoteEvents,
+    RemoteFilamentTrays,
     RemoteHeldPresets,
     RemoteLanImports,
     RemoteNativeSlices,
-    RemoteNativeSpools,
     RemoteOutcomes,
     RemoteOutputPrints,
     RemotePrinterStore,
     RemotePrintLinks,
     RemotePrintRunStore,
+    RemotePrintUses,
     RemoteRackUsage,
     RemoteReports,
     RemoteReprints,
     RemoteSettingsStore,
-    RemoteSpoolStore,
     RemoteUploadStore,
 )
 from scadbuddy.crud.projects import RemoteFlowStore, RemotePayloadKeys
@@ -90,6 +90,7 @@ from scadbuddy.crud.render import (
     RemoteRenderSettingsSource,
     RemoteStoreFolders,
 )
+from scadbuddy.filament.print_uses import print_use_hook
 from scadbuddy.flows.keys import approval_key
 from scadbuddy.flows.operations import flow_kinds
 from scadbuddy.library.assets import RemoteAssetStore
@@ -121,9 +122,6 @@ from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.slicing.catalogue import slices_native, warm_catalogue
 from scadbuddy.slicing.profiles import Profiles
 from scadbuddy.slicing.start import native_slice_starter
-from scadbuddy.spools.component import Spools
-from scadbuddy.spools.providers import SettingsOnly, discover_providers
-from scadbuddy.spools.spool_providers import native_use_hook
 from scadbuddy.store.bambuddy import StoreSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.factory import StoreBundle, build_store, store_health
@@ -158,7 +156,7 @@ from scadbuddy.workflows.operation_activities import operation_activities
 from scadbuddy.workflows.pipeline_activities import PipelineActivities
 from scadbuddy.workflows.pipelines import TRANSFER
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
-from scadbuddy.workflows.projects_worker import projects_worker
+from scadbuddy.workflows.projects_worker import projects_worker, warm_sandbox
 from scadbuddy.workflows.sdk_metrics import SDK_READ_TIMEOUT, sdk_exposition, sdk_runtime
 
 if TYPE_CHECKING:
@@ -852,7 +850,9 @@ async def _refresh_store_metrics(metrics: Metrics, store: StoreBundle, data: _Da
     health = await store_health(store)
     metrics.store_render_key_fallback.set(1 if health.render_key_fallback else 0)
     if isinstance(store.blobs, CachedBlobStore):
-        metrics.worker_cache_bytes.set(await asyncio.to_thread(store.blobs.cached_bytes))
+        cached = await asyncio.to_thread(store.blobs.cached_bytes)
+        if cached is not None:
+            metrics.worker_cache_bytes.set(cached)
 
 
 def _health_app(
@@ -1253,10 +1253,11 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
     (#5298). The Bambuddy settings, key included, are read through the API's CRUD route on
     every use, and the runs, outcomes, operations, events, uploads, slices, background
     slices, project records, print links, sends, outputs' last prints, printer rows, LAN
-    reports, access codes, the rack hotends' usage, the spools, ScadBuddy's own spools,
-    the kept presets, a native slice's start and a LAN print's read URL of its sliced file
-    go through its CRUD routes. So do whether the API can open access codes and a virtual
-    printer's sealed code, which the API opens (#5298 Task 33): the worker holds no KEK
+    reports, access codes, the rack hotends' usage, the SB spools in a native run's
+    trays and what its LAN starts use of them, the kept presets, a native slice's start
+    and a LAN print's read URL of its sliced file go through its CRUD routes. So do
+    whether the API can open access codes and a virtual printer's sealed code, which the
+    API opens (#5298 Task 33): the worker holds no KEK
     and reads no key file. ``crud``, the client of those routes, defaults to one with
     the worker's credential, exchanged for its proof (`SCADBUDDY_SERVICE_TOKEN_FILE` or
     `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`) alone (`exchange_source`, no view fallback).
@@ -1345,16 +1346,10 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
 
         return await lan_first(lan, subject.run_subject, bambuddy)
 
-    # A native run's plan lays the providers' records over its trays (#4551): the same
-    # providers the API discovers, over this worker's settings. Its follow takes what a
-    # native print used off ScadBuddy's own spools (#4643).
-    # The spools, ScadBuddy's own among them, through the API (#5298 Task 31): no pool.
-    spools = Spools(
-        store=RemoteSpoolStore(crud),
-        providers=discover_providers(
-            SettingsOnly(settings_store, RemoteNativeSpools(blocking)), None
-        ),
-    )
+    # A native run's SB spools and what its LAN starts use of them, through the API
+    # (#6262 Task 6, #5295): no pool, and no cache of the spools to keep.
+    sb_spools = RemoteFilamentTrays(crud)
+    print_uses = RemotePrintUses(crud)
     outcomes = RemoteOutcomes(crud)
     follower = Follower(
         outputs=outputs,
@@ -1367,7 +1362,7 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
         on_read=[
             lan_last_print(prints),
             lan_settle_hook(rack),
-            native_use_hook(spools),
+            print_use_hook(print_uses),
         ],
         newest_failed=newest_failed_from(print_runs, settings_store.load),
         record_outcome=outcomes.record,
@@ -1398,6 +1393,7 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
         # run is (plan 2026-10-18 D2).
         printers=printers,
         reports=reports,
+        sb_spools=sb_spools,
     )
     printing = PrintActivities(
         PrintDeps(
@@ -1413,7 +1409,7 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
             native=native,
             printers=printers,
             reports=reports,
-            spools=spools,
+            sb_spools=sb_spools,
         )
     )
     # A LAN print's sliced blob, through the API's internal route (plan 2026-10-16 Task 9)
@@ -1428,8 +1424,7 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
             rack=rack,
             # A run's next plate copy waits on the printer's report (#4541).
             reports=reports,
-            native_spools=RemoteNativeSpools(blocking),
-            spools=spools,
+            uses=print_uses,
         )
     )
     return PrintWorkerDeps(
@@ -1494,6 +1489,7 @@ PRINT_CRUD_AREAS = frozenset(
         "spools",
         "transfer-urls",
         "access-codes",
+        "filament",
     }
 )
 
@@ -1668,6 +1664,7 @@ async def run_projects_worker(
             # During a roll the API pod may be older than this worker: poll Temporal only
             # once it serves every area the worker calls.
             if await wait_for_areas(crud, "projects", PROJECTS_CRUD_AREAS, stop):
+                await asyncio.to_thread(warm_sandbox)
                 async with LoopWatch(metrics):
                     await _serve_versioned(
                         client,

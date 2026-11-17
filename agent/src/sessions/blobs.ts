@@ -26,9 +26,21 @@ import type { ImageRef, SentImage, ServerEvent } from './protocol.js'
 //
 // Rows go with their session (ON DELETE CASCADE) and are not pruned before that:
 // a session keeps every image its transcript names, so the panel can show any of
-// them. A fork copies none (#4212): it reads its ancestors' images that the events it
+// them. The one exception is a queued message's images (#6413): a write made by
+// `putMade` answers the names it made and when, and once the message leaves the queue
+// unrun, or the queue refuses it, `delete` takes those names back, unless a write
+// stored them again since. Every write sets `created_at` (an image already there
+// keeps its bytes), and a write of a name waits for the transaction that holds its
+// row, so a later write's time is always past `at`: an image another message or turn
+// stores, before its event or queue entry names it, is never deleted. A fork copies none (#4212): it reads its ancestors' images that the events it
 // reads through its chain name (`get`), never those past its cut (#2150), and
 // forgetting a parent copies those into it first (`copyForkBlobs`).
+//
+// Once the API lists area `session-blobs` (#5299 step 7), `CrudSessionBlobs` (crudBlobs.ts)
+// runs each method on the API's CRUD routes instead (backend api/crud_agent_blobs.py), the
+// same statements in one transaction. A forget through the API copies a fork's images there
+// (backend events.py `copy_fork_blobs`, #5299 step 9, part c); `copyForkBlobs` is the agent's own
+// forget transaction's, while the API has no area `forget` or no KEK.
 
 /** The most images one tool result keeps; any past it stay `[image]` in the summary. */
 export const RESULT_IMAGES_MAX = 8
@@ -94,7 +106,37 @@ export function sentImageBlobs(images: readonly UserImage[]): { blobs: SessionIm
 
 export type StoredBlob = { mediaType: ImageMediaType; bytes: Buffer }
 
-export class SessionBlobs {
+/**
+ * An AgentSession placement's hold on its turn (turnHost.ts): the session's row still names
+ * this attempt and this turn, checked `FOR SHARE` in the write's own transaction.
+ */
+export type TurnFence = { attempt: string; turnId: string }
+
+/**
+ * What one write of images made (#6413): the names not there before, and a time no later write
+ * of one of them comes before (each write sets `created_at`), which `delete` takes as `before`.
+ */
+export type MadeImages = { names: string[]; at: string }
+
+/** A session's images: `SessionBlobs` over SQL, `CrudSessionBlobs` over the API's routes. */
+export interface SessionImages {
+  put(sessionId: string, images: readonly SessionImage[], toolUseId?: string): Promise<void>
+  /**
+   * `put`, answering what it made, one entry per write (transaction) that made a name: a queued
+   * message's images, which `delete` takes back once it leaves the queue unrun.
+   */
+  putMade(sessionId: string, images: readonly SessionImage[]): Promise<MadeImages[]>
+  /**
+   * Deletes the images one write made, unless a write stored one again since or a tool call names
+   * it; the names deleted. With `fence`, nothing unless the fence holds.
+   */
+  delete(sessionId: string, made: MadeImages, fence?: TurnFence): Promise<string[]>
+  /** False when the fence refuses; over the API's routes a batch stored before the refusal stays (crudBlobs.ts). */
+  putIf(sessionId: string, images: readonly SessionImage[], fence: TurnFence): Promise<boolean>
+  get(sessionId: string, name: string): Promise<StoredBlob | undefined>
+}
+
+export class SessionBlobs implements SessionImages {
   private readonly sql: Sql
 
   constructor(sql: Sql) {
@@ -102,13 +144,17 @@ export class SessionBlobs {
   }
 
   /**
-   * Stores a session's images; one already there (the same bytes) is left as it is.
+   * Stores a session's images; one already there (the same bytes) keeps its bytes, and its
+   * `created_at` is set to this write's time (#6413).
    * With `toolUseId`, a durable tool call's images (#2478): they are recorded as what
    * that call produced, in order, replacing what an earlier attempt of it recorded, so
    * follow_session can name them on its `tool.result`.
    */
   async put(sessionId: string, images: readonly SessionImage[], toolUseId?: string): Promise<void> {
-    if (toolUseId === undefined) return this.insert(this.sql, sessionId, images)
+    if (toolUseId === undefined) {
+      await this.putMade(sessionId, images)
+      return
+    }
     await this.sql.begin(async (tx) => {
       await this.insert(tx, sessionId, images)
       await tx`DELETE FROM ai_session_tool_images WHERE session_id = ${sessionId} AND tool_use_id = ${toolUseId}`
@@ -124,21 +170,53 @@ export class SessionBlobs {
    * `put` under a fence checked in the same transaction (an AgentSession placement's hold on its
    * turn, turnHost.ts): false, and nothing stored, when the fence refuses.
    */
-  async putIf(sessionId: string, images: readonly SessionImage[], fence: (tx: TransactionSql) => Promise<boolean>): Promise<boolean> {
+  async putIf(sessionId: string, images: readonly SessionImage[], fence: TurnFence): Promise<boolean> {
     return this.sql.begin(async (tx) => {
-      if (!(await fence(tx))) return false
+      if (!(await held(tx, sessionId, fence))) return false
       await this.insert(tx, sessionId, images)
       return true
     })
   }
 
-  private async insert(sql: Sql | TransactionSql, sessionId: string, images: readonly SessionImage[]): Promise<void> {
+  /** One transaction, so a later write of a name waits for it and sets a time past `at`. */
+  async putMade(sessionId: string, images: readonly SessionImage[]): Promise<MadeImages[]> {
+    const made = await this.sql.begin((tx) => this.insert(tx, sessionId, images))
+    return made.names.length && made.at !== undefined ? [{ names: made.names, at: made.at }] : []
+  }
+
+  async delete(sessionId: string, made: MadeImages, fence?: TurnFence): Promise<string[]> {
+    const names = made.names.filter((name) => BLOB_NAME.test(name))
+    if (names.length === 0) return []
+    return this.sql.begin(async (tx) => {
+      if (fence && !(await held(tx, sessionId, fence))) return []
+      // Sent as text: postgres.js sends a timestamptz parameter through a Date, which drops the microseconds.
+      const rows = await tx<{ name: string }[]>`
+        DELETE FROM ai_session_blobs b
+         WHERE b.session_id = ${sessionId} AND b.name = ANY(${names}) AND b.created_at <= ${made.at}::text::timestamptz
+           AND NOT EXISTS (SELECT 1 FROM ai_session_tool_images t WHERE t.session_id = b.session_id AND t.name = b.name)
+        RETURNING b.name`
+      return rows.map((r) => r.name).sort()
+    })
+  }
+
+  /**
+   * Stores each image, or sets the time of one already there (its bytes stay): the names made,
+   * and the latest time set (backend api/crud_agent_blobs.py `_insert_blobs`).
+   */
+  private async insert(tx: TransactionSql, sessionId: string, images: readonly SessionImage[]): Promise<{ names: string[]; at?: string }> {
+    const names: string[] = []
+    let at: string | undefined
     for (const image of images) {
-      await sql`
-        INSERT INTO ai_session_blobs (session_id, name, media_type, data)
-        VALUES (${sessionId}, ${image.name}, ${image.mediaType}, ${image.bytes})
-        ON CONFLICT (session_id, name) DO NOTHING`
+      const [row] = await tx<{ at: string; made: boolean }[]>`
+        INSERT INTO ai_session_blobs (session_id, name, media_type, data, created_at)
+        VALUES (${sessionId}, ${image.name}, ${image.mediaType}, ${image.bytes}, clock_timestamp())
+        ON CONFLICT (session_id, name) DO UPDATE SET created_at = clock_timestamp()
+        RETURNING to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at, (xmax = 0) AS made`
+      if (row!.made && !names.includes(image.name)) names.push(image.name)
+      // ISO 8601 in UTC to the microsecond, so the strings compare as the times do.
+      if (at === undefined || row!.at > at) at = row!.at
     }
+    return at === undefined ? { names } : { names, at }
   }
 
   /**
@@ -150,6 +228,14 @@ export class SessionBlobs {
     if (!BLOB_NAME.test(name)) return undefined
     return getThroughChain(this.sql, sessionId, name)
   }
+}
+
+/** Whether the session's row still names the fence's turn attempt, locked `FOR SHARE` in `tx`. */
+async function held(tx: TransactionSql, sessionId: string, fence: TurnFence): Promise<boolean> {
+  const rows = await tx`
+    SELECT 1 FROM ai_sessions WHERE id = ${sessionId} AND turn_attempt = ${fence.attempt}
+       AND durable_turn_id = ${fence.turnId} FOR SHARE`
+  return rows.length > 0
 }
 
 /** The events a fork takes that can name an image (forkPoint.ts `blobNames`), all among eventLog.ts `FORK_EVENT_TYPES`. */
@@ -170,7 +256,9 @@ async function getThroughChain(sql: Sql | TransactionSql, sessionId: string, nam
 /**
  * Before the parent of `sessionId` goes (store.ts `copyForkRanges`, in forgetSubject's
  * transaction, before the link is cleared): the images `names` lists (forkPoint.ts `blobNames`
- * of the events `copyForkEvents` copied), found through its chain, become rows of its own.
+ * of the events `copyForkEvents` copied), found through its chain, become rows of its own. One
+ * it holds already (a queued message's write made it) gets this copy's time, as every write
+ * does (#6413): the copied events name it now, so that message's `delete` must not take it.
  */
 export async function copyForkBlobs(tx: TransactionSql, sessionId: string, names: readonly string[]): Promise<void> {
   if (names.length === 0) return
@@ -181,5 +269,5 @@ export async function copyForkBlobs(tx: TransactionSql, sessionId: string, names
       FROM chain c JOIN ai_session_blobs b ON b.session_id = c.id
      WHERE c.depth > 0 AND b.name = ANY(${names as string[]})
      ORDER BY b.name, c.depth
-    ON CONFLICT (session_id, name) DO NOTHING`
+    ON CONFLICT (session_id, name) DO UPDATE SET created_at = clock_timestamp()`
 }

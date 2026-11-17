@@ -1,4 +1,4 @@
-import { act, screen, waitFor } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Activity } from '../../api/types'
 import { api } from '../../api/client'
@@ -8,6 +8,10 @@ import { seedActivity, setActivityListCursor } from '../../mocks/features/activi
 import { mockSettings, resetMockState, setMockSettings } from '../../mocks/handlers'
 import { clearToasts } from '../../lib/toast'
 import { renderPage } from '../../test/utils'
+import { NeedsYouHarness } from '../../test/needsYou'
+import { respondRequests, setPendingApprovals } from '../../mocks/features/pendingInput'
+import { setFlowRunGrant } from '../../mocks/features/flows'
+import { changeFlowTrigger } from '../../mocks/features/flowTriggers'
 import { Toasts } from '../ui/Toasts'
 import { ActivityBell } from './ActivityBell'
 
@@ -309,7 +313,7 @@ describe('ActivityBell', () => {
   it('closes the popover on Escape and outside clicks, and names it with aria-controls', async () => {
     fakeRealtime()
     const { user } = mount()
-    const bell = screen.getByRole('button', { name: /Activity, 0 finished/ })
+    const bell = screen.getByRole('button', { name: 'Activity' })
     await user.click(bell)
     expect(bell).toHaveAttribute('aria-controls', screen.getByText('All activity').closest('[data-slot="popover-content"]')!.id)
     await user.keyboard('{Escape}')
@@ -318,5 +322,90 @@ describe('ActivityBell', () => {
     await user.click(bell)
     await user.click(document.body)
     expect(screen.queryByText('All activity')).toBeNull()
+  })
+})
+
+describe('ActivityBell, what waits on you (#6399)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    clearToasts()
+    resetMockState()
+    window.localStorage.clear()
+    seedActivity([])
+  })
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.useRealTimers()
+  })
+
+  const mountWaiting = () =>
+    renderPage(
+      <NeedsYouHarness>
+        <ActivityBell />
+      </NeedsYouHarness>,
+    )
+  const rows = () => screen.queryAllByTestId('needs-you-item')
+
+  it('counts the waiting requests, says so in its name, and stands out', async () => {
+    setPendingApprovals(1)
+    fakeRealtime()
+    mountWaiting()
+    const bell = await screen.findByRole('button', { name: 'Activity, 3 need you' })
+    expect(bell).toHaveAttribute('data-needs-you')
+    expect(bell).toHaveClass('bg-needs', 'text-needs-ink')
+    expect(within(bell).getByTestId('activity-bell-needs')).toHaveTextContent('3')
+    expect(within(bell).getByText('Needs you')).toBeInTheDocument()
+    expect(screen.getByTestId('activity-bell-live')).toHaveTextContent('3 need you')
+  })
+
+  it('lists them first, each with its answer, and opening it never clears them', async () => {
+    setPendingApprovals(1)
+    const live = fakeRealtime()
+    const { user } = mountWaiting()
+    await waitFor(() => expect(live.following()).toContain('activity'))
+    seedActivity([finished('browser')])
+    await live.signal('activity', 'activity.changed', { activity_id: 'render:x', principal: 'browser' })
+    const bell = await screen.findByRole('button', { name: 'Activity, 3 need you, 1 finished' })
+    await user.click(bell)
+    const section = screen.getByRole('region', { name: /Needs you/ })
+    expect(within(section).getByRole('link', { name: 'See all' })).toHaveAttribute('href', '/activity#needs-you')
+    expect(rows()).toHaveLength(3)
+    const prepared = rows().find((r) => within(r).queryByRole('heading', { name: 'Prepared action' }))!
+    expect(within(prepared).getByRole('button', { name: 'Approve' })).toBeInTheDocument()
+    expect(within(prepared).getByRole('button', { name: 'Deny' })).toBeInTheDocument()
+    const grant = rows().find((r) => within(r).queryByRole('heading', { name: 'Grant request' }))!
+    expect(within(grant).getByRole('link', { name: 'Review' })).toHaveAttribute('href', '/workflows/runs/run-ask')
+    // A standing grant's Review opens its own review on Activity.
+    const standing = rows().find((r) => within(r).queryByRole('heading', { name: 'Standing grant request' }))!
+    expect(within(standing).getByRole('link', { name: 'Review' })).toHaveAttribute('href', expect.stringMatching(/^\/activity\?review=trigger-grant%3A.+%3A\d+#needs-you$/))
+    // The waiting requests come before the finished ones.
+    const finishedHeading = screen.getByText('Finished since you last looked')
+    expect(section.compareDocumentPosition(finishedHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    // Seen clears the finished count only.
+    expect(screen.getByRole('button', { name: 'Activity, 3 need you' })).toBeInTheDocument()
+  })
+
+  it('takes an answered request off the list', async () => {
+    setPendingApprovals(1)
+    fakeRealtime()
+    const { user } = mountWaiting()
+    await user.click(await screen.findByRole('button', { name: 'Activity, 3 need you' }))
+    const prepared = rows().find((r) => within(r).queryByRole('heading', { name: 'Prepared action' }))!
+    await user.click(within(prepared).getByRole('button', { name: 'Deny' }))
+    expect(await screen.findByRole('button', { name: 'Activity, 2 need you' })).toBeInTheDocument()
+    expect(respondRequests().map((r) => r.body)).toEqual([{ kind: 'approval', decision: 'deny', input_hash: '0'.repeat(64) }])
+  })
+
+  it('has no "Needs you" heading while nothing waits', async () => {
+    setFlowRunGrant('run-ask', null)
+    changeFlowTrigger('trig-render', { grant: null })
+    fakeRealtime()
+    const { user } = mountWaiting()
+    await act(async () => vi.advanceTimersByTimeAsync(100))
+    const bell = screen.getByRole('button', { name: 'Activity' })
+    expect(bell).not.toHaveAttribute('data-needs-you')
+    await user.click(bell)
+    expect(screen.getByText('Finished since you last looked')).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: /Needs you/ })).toBeNull()
   })
 })

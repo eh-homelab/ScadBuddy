@@ -107,6 +107,8 @@ export const OPTIONS_MIN = 2
 export const OPTIONS_MAX = 4
 export const QUESTION_TEXT_MAX = 2_000
 export const PREVIEW_MAX = 20_000
+/** The agent's bound on a queued message's edited words (`src/sessions/clientProtocol.ts` `MESSAGE_MAX`, #6386). */
+export const MESSAGE_MAX = 32_000
 
 /**
  * #940 — one question the agent asks the user (Claude Code's AskUserQuestion). The user
@@ -185,6 +187,8 @@ export const PendingInputSchema = z.object({
       requested_by: z.object({ label: z.string() }).nullable().optional().catch(undefined),
       expires_at: z.string().nullable().optional().catch(undefined),
       input_hash: z.string().nullable().optional().catch(undefined),
+      /** #6399 — when it began to wait (a flow run's call: when its run last moved, when it has no time of its own). */
+      created_at: z.string().optional().catch(undefined),
       /** A durable entry past its timer whose worker has not resolved it yet: not waiting on anyone. */
       expiring: z.boolean().optional(),
       /** #2482 — a flow run's entry: at hop `parent` it waits for the starting session, not yet for the user. */
@@ -290,6 +294,22 @@ export type SentImage = z.infer<typeof SentImageSchema>
 export function blobUrl(sessionId: string, name: string): string {
   return `/api/v1/ai/sessions/${encodeURIComponent(sessionId)}/blobs/${encodeURIComponent(name)}`
 }
+
+/**
+ * #6386 — a message waiting in a session's queue: its id is the turn id it runs as, `text`
+ * the user's words (never the page context).
+ */
+export const QueuedEntrySchema = z.object({
+  id: z.string().min(1),
+  text: z.string(),
+  author: OwnerSchema,
+  images: z.array(SentImageSchema).optional(),
+  queuedAt: z.string(),
+})
+export type QueuedEntry = z.infer<typeof QueuedEntrySchema>
+
+/** #6386 — how many messages a session's queue holds (agent `temporal/session/models.ts` QUEUE_MAX). */
+export const QUEUE_MAX = 20
 
 const v = z.literal(PROTOCOL_VERSION)
 const sessionId = z.string().min(1)
@@ -430,6 +450,12 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     reconnected: z.literal(true).optional(),
   }),
   z.object({ v, type: z.literal('session.status'), sessionId, status: SessionStatusSchema }),
+  /**
+   * #6386 — the messages that wait to run after the session's turn, oldest first, after
+   * each change (queued, removed, edited, started or dropped). The log's last one is the
+   * queue; `version` grows with each change. Images by name only, as `user.turn` names them.
+   */
+  z.object({ v, type: z.literal('session.queue'), sessionId, version: z.number().int().min(0), queue: z.array(QueuedEntrySchema) }),
   z.object({
     v,
     type: z.literal('session.result'),
@@ -487,6 +513,8 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     message: z.string().min(1),
     /** #940 — the error refused the panel's answer to this question: its card is answerable again. */
     questionId: z.string().min(1).optional(),
+    /** #6386 — the error refused the panel's remove or edit of this queued message, which stays queued. */
+    queuedId: z.string().min(1).optional(),
     /** #3710 — `message` with the credential named by its name: shown in its place. */
     shown: z.string().min(1).optional(),
   }),
@@ -556,6 +584,9 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     answers: z.array(z.string().min(1).max(ANSWER_MAX)).min(1).max(QUESTIONS_MAX),
   }),
   z.object({ v, type: z.literal('session.interrupt'), sessionId }),
+  /** #6386 — remove a queued message, or give it new words, before it starts. */
+  z.object({ v, type: z.literal('queue.remove'), sessionId, id: z.string().min(1).max(200) }),
+  z.object({ v, type: z.literal('queue.edit'), sessionId, id: z.string().min(1).max(200), text: z.string().min(1).max(MESSAGE_MAX) }),
   z.object({ v, type: z.literal('session.handoff'), sessionId }),
   /** Watch a session: the server replays its transcript as events, then streams live. */
   z.object({ v, type: z.literal('session.attach'), sessionId }),

@@ -10,6 +10,7 @@ import { PgEventListener } from '../src/events/pgListener.js'
 import { ResourceHub } from '../src/resources/hub.js'
 import { BROWSER_USER } from '../src/routes/approvals.js'
 import { followSessionEvents, SessionEventPublisher } from '../src/sessions/busEvents.js'
+import { PgPublisher } from '../src/sessions/publish.js'
 import type { SessionManager, TurnPrincipal } from '../src/sessions/manager.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { runTool } from '../src/tools/registry.js'
@@ -86,7 +87,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
       options: { audit?: AuditLog } = {},
     ) {
       const tokens = new InMemoryTokenStore()
-      const publisher = new SessionEventPublisher(db.sql, { throttleMs: 10 })
+      const publisher = new SessionEventPublisher(new PgPublisher(db.sql), { throttleMs: 10 })
       const { runner, runs, prompts } = scriptedRunner(turns)
       const principals: TurnPrincipal[] = []
       const sessions = manager({
@@ -315,7 +316,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
       expect(errorText(await r.call('sessions_start', { title: 'x' }))).toMatch(/needs the "write" tier/)
     })
 
-    it('refuses a send while a turn runs; any watcher may interrupt it', async () => {
+    it('queues a send while a turn runs (#6386), which only its owner removes or edits; any watcher may interrupt the turn', async () => {
       let n = 0
       const { agent, prompts } = await setup(() => (n++ === 0 ? { hang: true } : { reply: 'second' }))
       const a = await agent('write')
@@ -323,19 +324,52 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
         await a.call('sessions_start', { prompt: 'take your time' }),
       )
       expect(session.status).toBe('running')
-      expect(errorText(await a.call('sessions_send', { session_id: session.id, text: 'hurry' }))).toMatch(
-        /a turn is already running/,
+      const hurry = ok<{ turn_id: string; queued: boolean; position: number; turn: { finished: boolean } }>(
+        await a.call('sessions_send', { session_id: session.id, text: 'hurry' }),
       )
+      expect(hurry).toMatchObject({ queued: true, position: 1, turn: { finished: false } })
+      const later = ok<{ turn_id: string; position: number }>(await a.call('sessions_send', { session_id: session.id, text: 'later' }))
+      expect(later.position).toBe(2)
+      const queueOf = async () => ok<{ queue: { id: string; text: string; author: { kind: string } }[] }>(await a.call('sessions_get', { session_id: session.id })).queue
+      await until(async () => (await queueOf()).length === 2, 'the queue to be written')
+      expect((await queueOf()).map((q) => q.text)).toEqual(['hurry', 'later'])
+      expect(ok(await a.call('sessions_queue_edit', { session_id: session.id, message_id: hurry.turn_id, text: 'hurry up' }))).toMatchObject({
+        queue: [{ id: hurry.turn_id, text: 'hurry up' }, { id: later.turn_id, text: 'later' }],
+      })
+      expect(ok(await a.call('sessions_queue_remove', { session_id: session.id, message_id: later.turn_id }))).toMatchObject({ queue: [{ id: hurry.turn_id }] })
+      expect(errorText(await a.call('sessions_queue_remove', { session_id: session.id, message_id: later.turn_id }))).toMatch(/not waiting in the queue/)
       // Stopped once it runs in its process: a Stop before the turn is placed ends it unrun.
       await until(async () => prompts.length === 1, 'the turn to reach its process')
       expect(ok(await a.call('sessions_interrupt', { session_id: session.id }))).toEqual({ interrupted: true })
+      // The Stop ended that turn only: the queued message runs next.
+      await until(async () => prompts.length === 2, 'the queued message to run')
       await until(async () => ok<{ session: { status: string; running: boolean } }>(
         await a.call('sessions_get', { session_id: session.id }),
-      ).session.running === false, 'the interrupted turn to end')
+      ).session.running === false, 'the queued turn to end')
+      expect(await queueOf()).toEqual([])
       const sent = ok<{ turn: { finished: boolean } }>(
         await a.call('sessions_send', { session_id: session.id, text: 'again', wait_seconds: 10 }),
       )
       expect(sent.turn).toMatchObject({ finished: true, result: 'success' })
+    })
+
+    it("refuses a flow run's send while a turn runs: only a caller's own send is queued (#6386)", async () => {
+      const { agent, sessions } = await setup(() => ({ hang: true }))
+      const a = await agent('write')
+      const { session } = ok<{ session: { id: string } }>(await a.call('sessions_start', { prompt: 'take your time' }))
+      const byName = new Map(ALL_TOOLS.map((t) => [t.name, t]))
+      const ctx = {
+        ...services({ sessions }),
+        principal: a.principal,
+        flowTurn: { run_id: 'run-1', call_id: 'call-1' },
+        progress: async () => {},
+        signal: new AbortController().signal,
+        gate: 'workflow' as const,
+      }
+      const result = (await runTool(byName.get('sessions_send')!, { session_id: session.id, text: 'from a flow' }, ctx)) as Result
+      expect(errorText(result)).toMatch(/already running/)
+      expect(ok<{ queue: unknown[] }>(await a.call('sessions_get', { session_id: session.id })).queue).toEqual([])
+      expect(ok(await a.call('sessions_interrupt', { session_id: session.id }))).toEqual({ interrupted: true })
     })
 
     it('forks a session into one the caller owns, with the conversation so far', async () => {
@@ -464,11 +498,11 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
     it('wakes a watcher on another replica through the bus, not the poll', async () => {
       const paths = await tempPaths()
       const slow = 60_000
-      const pubA = new SessionEventPublisher(db.sql, { throttleMs: 10 })
+      const pubA = new SessionEventPublisher(new PgPublisher(db.sql), { throttleMs: 10 })
       const { runner } = scriptedRunner(() => ({ reply: 'from replica A' }))
       const replicaA = manager({ sql: db.sql, paths, run: runner, pollMs: slow, onAppend: pubA.onAppend })
       const other = connectDatabase(url, { searchPath: schema })
-      const pubB = new SessionEventPublisher(other.sql, { throttleMs: 10 })
+      const pubB = new SessionEventPublisher(new PgPublisher(other.sql), { throttleMs: 10 })
       const replicaB: SessionManager = manager({ sql: other.sql, paths, pollMs: slow, onAppend: pubB.onAppend })
       const bus = await listener()
       const stopWake = followSessionEvents(bus, replicaB.events, pubB.replica)
@@ -551,6 +585,9 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
       expect(errorText(await b.call('sessions_send', { session_id: id, text: 'mine?' }))).toMatch(
         /controlled by another MCP token/,
       )
+      // Nor change its queue (#6386): that is the owner's, as sending is.
+      expect(errorText(await b.call('sessions_queue_remove', { session_id: id, message_id: 'q1' }))).toMatch(/only its owner can change its queue/)
+      expect(errorText(await b.call('sessions_queue_edit', { session_id: id, message_id: 'q1', text: 'x' }))).toMatch(/only its owner can change its queue/)
       expect(ok<{ offered_to_you: boolean }[]>(await a.call('sessions_list'))[0]!.offered_to_you).toBe(false)
 
       // A cannot accept on B's behalf, and a third agent cannot see it at all.

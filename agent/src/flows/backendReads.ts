@@ -1,16 +1,16 @@
-import type { Sql } from 'postgres'
-import { crudRead } from '../api/crudAreas.js'
+import { crudRead } from '../api/crudRead.js'
 
 // The agent's questions about the backend's flow tables (#5299 D7): `workflow_runs`,
 // `workflow_run_decisions` and `flow_grants`. The backend answers each over a CRUD route of
-// area `flows` (backend api/crud_agent.py, flows/agent_reads.py), with the same query.
-// `SqlFlowRunReads` keeps today's SQL for an API pod older than the routes (#5299 D9): the
-// agent uses it until `GET …/crud/agent/areas` lists `flows` (api/crudAreas.ts), and it goes,
-// with the agent's grants on these tables, once every API pod serves the routes.
+// area `flows` (backend api/crud_agent.py, flows/agent_reads.py), and the agent runs no SQL on
+// `workflow_runs` or `workflow_run_decisions`. The API takes back its role's grants on them at
+// every start (backend auth/revoke.py `RETIRED_GRANTS`), but the agent still connects as the
+// database owner, so that binds nothing until #5299 step 12; until then the guard is
+// test/retiredTables.test.ts.
 //
 // The gate's own read of `flow_grants` and `flow_grant_uses` (gate/store.ts `grantInput`) is not
-// here: it holds the grant row's share lock across the agent's own writes, and moves with the
-// gate (#5299 step 10).
+// here: it holds the grant row's share lock across the gate's writes, so it runs on the API in
+// the grant's own route (gate/crudStore.ts, backend api/crud_agent_gate.py, #5299 step 10).
 
 export type QueueHop = { hop: string; action: string; actor: string; at: string; reason?: string | null }
 
@@ -86,174 +86,6 @@ export interface FlowRunReads {
 
 /** The most request ids one `stillAtParentHop` read asks about (the route's bound). */
 export const STILL_WAITING_BATCH = 500
-
-/** A deployment without flows has no `workflow_runs`. */
-function noFlows(err: unknown): boolean {
-  return (err as { code?: string }).code === '42P01'
-}
-
-type RunRow = QueueRun & { started_by: StartedBy }
-
-function queueRun(row: Omit<RunRow, 'starter_session'> & { started_by: StartedBy }): QueueRun {
-  const session = row.started_by.session
-  return {
-    id: row.id,
-    name: row.name,
-    status: row.status,
-    workflow_run_id: row.workflow_run_id,
-    starter_session: typeof session === 'string' ? session : null,
-    waiting_on: row.waiting_on,
-    steps: Array.isArray(row.steps) ? row.steps : [],
-  }
-}
-
-/** Today's SQL, on the agent's own connection (see above). */
-export class SqlFlowRunReads implements FlowRunReads {
-  readonly #sql: Sql
-
-  constructor(sql: Sql) {
-    this.#sql = sql
-  }
-
-  async starter(runId: string, execution: string): Promise<RunStarter | undefined> {
-    // FOR SHARE needs UPDATE on workflow_runs, not only SELECT (flowRuns.ts).
-    const [row] = await this.#sql<RunStarter[]>`
-      SELECT started_by,
-             status IN ('running', 'waiting') AND NOT (${execution} = ANY(superseded_run_ids)) AS open,
-             workflow_run_id IS DISTINCT FROM ${execution} AND NOT (${execution} = ANY(superseded_run_ids)) AS unrecorded
-        FROM workflow_runs WHERE id = ${runId}
-         FOR SHARE`
-    return row
-  }
-
-  async decisions(requestId: string, inputHash: string): Promise<DecisionChecks> {
-    const approved = this.#sql`
-      FROM workflow_run_decisions d
-      WHERE d.request_id = ${requestId} AND d.kind = 'approval' AND d.outcome = 'approved'
-        AND d.input_hash = ${inputHash}`
-    // A run grant's approval holds only while the grant is in force (#2481).
-    const inForce = this.#sql`EXISTS (
-      SELECT 1 FROM flow_grants g
-      WHERE 'grant:' || g.id = d.responder AND g.status = 'approved'
-        AND g.revoked_at IS NULL AND now() < g.expires_at)`
-    const [row] = await this.#sql<{ approved: boolean; approved_unresolved: boolean; by_person: boolean; lapsed: boolean }[]>`
-      SELECT
-        EXISTS (SELECT 1 ${approved} AND (d.responder NOT LIKE 'grant:%' OR ${inForce})) AS approved,
-        EXISTS (SELECT 1 ${approved}
-                AND (d.responder LIKE 'grant:%' OR d.response ? 'narrowed_by')
-                AND (d.responder NOT LIKE 'grant:%' OR ${inForce})) AS approved_unresolved,
-        EXISTS (SELECT 1 ${approved} AND d.responder = 'browser') AS by_person,
-        EXISTS (
-          SELECT 1 FROM workflow_run_decisions d
-          JOIN flow_grants g ON 'grant:' || g.id = d.responder
-          WHERE d.request_id = ${requestId} AND d.kind = 'approval' AND d.outcome = 'approved'
-            AND d.input_hash = ${inputHash}
-            AND (g.status <> 'approved' OR g.revoked_at IS NOT NULL OR g.expires_at IS NULL OR now() >= g.expires_at)) AS lapsed`
-    return {
-      approved: row?.approved === true,
-      approvedUnresolved: row?.approved_unresolved === true,
-      byPerson: row?.by_person === true,
-      lapsed: row?.lapsed === true,
-    }
-  }
-
-  async grantInForce(grantId: string): Promise<boolean> {
-    const rows = await this.#sql`
-      SELECT 1 FROM flow_grants
-      WHERE id = ${grantId} AND status = 'approved' AND revoked_at IS NULL AND now() < expires_at`
-    return rows.length > 0
-  }
-
-  async queue(runId: string): Promise<(QueueRun & { requested_grant: { id: string; created_at: Date } | null }) | undefined> {
-    let run: RunRow | undefined
-    try {
-      ;[run] = await this.#sql<RunRow[]>`
-        SELECT id, name, status, workflow_run_id, started_by, waiting_on, steps FROM workflow_runs WHERE id = ${runId}`
-    } catch (err) {
-      if (noFlows(err)) return undefined
-      throw err
-    }
-    if (!run) return undefined
-    const [grant] = await this.#sql<{ id: string; created_at: Date }[]>`
-      SELECT id, created_at FROM flow_grants WHERE run_id = ${run.id} AND status = 'requested'`
-    return { ...queueRun(run), requested_grant: grant ?? null }
-  }
-
-  async waitingRuns(): Promise<(QueueRun & { updated_at: Date })[]> {
-    let runs: (RunRow & { updated_at: Date })[]
-    try {
-      runs = await this.#sql<(RunRow & { updated_at: Date })[]>`
-        SELECT id, name, status, workflow_run_id, started_by, waiting_on, steps, updated_at FROM workflow_runs
-         WHERE status IN ('running', 'waiting') AND jsonb_array_length(waiting_on) > 0
-         ORDER BY updated_at DESC LIMIT 200`
-    } catch (err) {
-      if (noFlows(err)) return []
-      throw err
-    }
-    return runs.map((run) => ({ ...queueRun(run), updated_at: run.updated_at }))
-  }
-
-  async steps(runId: string): Promise<StepRow[]> {
-    try {
-      const [r] = await this.#sql<{ steps: StepRow[] }[]>`SELECT steps FROM workflow_runs WHERE id = ${runId}`
-      return r && Array.isArray(r.steps) ? r.steps : []
-    } catch (err) {
-      if (noFlows(err)) return []
-      throw err
-    }
-  }
-
-  async parentHopApprovals(after: ParentHopCursor | null, limit: number): Promise<{ runs: ParentHopRun[]; next: ParentHopCursor | null }> {
-    // One predicate (#3494 review): a parent-hop approval whose hop has not timed out by
-    // Postgres's clock (#3411); a malformed hop_until is that call skipped, never a failed scan.
-    const live = this.#sql`w->>'hop' = 'parent' AND w->>'kind' = 'approval'
-      AND CASE WHEN pg_input_is_valid(w->>'hop_until', 'timestamptz')
-               THEN (w->>'hop_until')::timestamptz > now() ELSE false END`
-    let rows: (Omit<ParentHopRun, 'session' | 'principal'> & { started_by: StartedBy; cursor: string })[]
-    try {
-      rows = await this.#sql`
-        SELECT id, workflow_run_id, started_by, steps,
-               to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor,
-               (SELECT coalesce(jsonb_agg(w), '[]'::jsonb) FROM jsonb_array_elements(r.waiting_on) w WHERE ${live}) AS calls
-        FROM workflow_runs r
-        WHERE status = 'waiting' AND waiting_on @> '[{"hop": "parent"}]'::jsonb
-          AND EXISTS (SELECT 1 FROM jsonb_array_elements(r.waiting_on) w WHERE ${live})
-          -- The cursor is sent as text: a timestamptz parameter goes through a JS Date, which
-          -- drops its microseconds, and the page would start at the same run again.
-          AND (${after?.after_updated_at ?? null}::text IS NULL
-               OR (updated_at, id) > (${after?.after_updated_at ?? null}::text::timestamptz, ${after?.after_id ?? null}::text))
-        ORDER BY updated_at, id LIMIT ${limit}`
-    } catch (err) {
-      if (noFlows(err)) return { runs: [], next: null }
-      throw err
-    }
-    const runs = rows.map((r) => ({
-      id: r.id,
-      workflow_run_id: r.workflow_run_id,
-      session: r.started_by.session,
-      principal: r.started_by.principal,
-      calls: r.calls,
-      steps: Array.isArray(r.steps) ? r.steps : [],
-    }))
-    const last = rows.length === limit ? rows.at(-1) : undefined
-    return { runs, next: last ? { after_updated_at: last.cursor, after_id: last.id } : null }
-  }
-
-  async stillAtParentHop(requestIds: readonly string[]): Promise<Set<string> | undefined> {
-    if (requestIds.length === 0) return new Set()
-    try {
-      const rows = await this.#sql<{ id: string }[]>`
-        SELECT x.id FROM unnest(${requestIds as string[]}::text[]) x(id) WHERE EXISTS (
-          SELECT 1 FROM workflow_runs r CROSS JOIN LATERAL jsonb_array_elements(r.waiting_on) w
-           WHERE r.id = split_part(x.id, ':', 2) AND r.status = 'waiting' AND w ->> 'hop' = 'parent'
-             AND x.id = 'flow:' || r.id || ':' || r.workflow_run_id || ':' || (w ->> 'call_id'))`
-      return new Set(rows.map((r) => r.id))
-    } catch (err) {
-      if (noFlows(err)) return undefined
-      throw err
-    }
-  }
-}
 
 type WireRun = {
   id: string
@@ -336,20 +168,5 @@ export class CrudFlowRunReads implements FlowRunReads {
       for (const w of answer.waiting) waiting.add(w)
     }
     return waiting
-  }
-}
-
-/** `crud` once `useCrud()` holds (the API lists area `flows`), `sql` until then; chosen per read. */
-export function gatedFlowRunReads(sql: FlowRunReads, crud: FlowRunReads, useCrud: () => boolean): FlowRunReads {
-  const pick = () => (useCrud() ? crud : sql)
-  return {
-    starter: (runId, execution) => pick().starter(runId, execution),
-    decisions: (requestId, inputHash) => pick().decisions(requestId, inputHash),
-    grantInForce: (grantId) => pick().grantInForce(grantId),
-    queue: (runId) => pick().queue(runId),
-    waitingRuns: () => pick().waitingRuns(),
-    steps: (runId) => pick().steps(runId),
-    parentHopApprovals: (after, limit) => pick().parentHopApprovals(after, limit),
-    stillAtParentHop: (requestIds) => pick().stillAtParentHop(requestIds),
   }
 }

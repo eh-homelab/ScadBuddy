@@ -8,10 +8,12 @@ the book that is not archived once the body's are merged over the item's, and a 
 prices something. The run then writes, in this order, each after the operation's record
 exists: the body's filaments onto the item (:func:`set_filaments`, Ruling 6), the output
 the item renders to when it has none that matches (:func:`ensure_output`, Ruling 7), then
-every plate's slice (:func:`slice_item`, the print dialog's own background slice, Ruling
-2), the sliced files kept as blobs the quote holds before its row exists
-(:func:`keep_sliced`, Ruling 3), each plate read (:func:`read_plate`), priced
-(:func:`price_quote`) and recorded through the lifecycle.
+:func:`slice_and_price`: every plate's slice (the print dialog's own background slice,
+Ruling 2), the sliced files kept as blobs the quote holds before its row exists
+(:func:`keep_sliced`, Ruling 3), each plate read (:func:`read_plate`) and priced
+(:func:`price_plates`); then the quote is recorded through the lifecycle.
+:func:`slice_and_price` is the one slice and price: a storefront variant's price runs it
+too (#6153, ``orders/storefront/slice_price.py``).
 
 Slots: the sliced file numbers its filament slots from 1, as the 3MF does
 (``bambuddy/filaments.py``), and an item numbers its colour slots from 0
@@ -34,24 +36,24 @@ import logging
 import os
 import uuid
 import zipfile
-from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from fastapi import status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from scadbuddy.bambuddy.filaments import FilamentPlan
 from scadbuddy.bambuddy.part_settings import PartSettingsMap, dumped
 from scadbuddy.bambuddy.preview import PreviewStarted
 from scadbuddy.bambuddy.prime_tower import PrimeTowerChoice
+from scadbuddy.bambuddy.process_overrides import ProcessOverrides, normalised_overrides
 from scadbuddy.bambuddy.resolver import PrintChoices
 from scadbuddy.bambuddy.supports import SupportsChoice
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import PrintSequence
-from scadbuddy.library.outputs import OutputMeta, OutputNotFoundError
 from scadbuddy.operations.kinds import to_thread_to_end
 from scadbuddy.orders.lifecycle import (
     QUOTE_HOLDER,
@@ -76,23 +78,25 @@ from scadbuddy.orders.models import (
 )
 from scadbuddy.orders.pricing import Plate, PlateFilament, Priced, PricingError, price
 from scadbuddy.orders.problems import PROBLEMS, refused
-from scadbuddy.orders.reference import colours_of, is_commit_id
+from scadbuddy.orders.rendering import (
+    FOLLOW_EVERY,
+    AttachTo,
+    OutputsRead,
+    Renders,
+    output_for_reference,
+    reference_matches,
+)
 from scadbuddy.orders.store import OrderStore
-from scadbuddy.render.inputs import inputs_key
-from scadbuddy.render.job_models import Job
-from scadbuddy.render.runner import with_defaults
 from scadbuddy.render.schema import CustomizerSchema
 from scadbuddy.slicing.slice_info import read_sliced
 from scadbuddy.store import BlobStore
 from scadbuddy.store.content_models import BlobScope
 from scadbuddy.store.refs import BlobRefs
 
-__all__ = ["QUOTE_TIMEOUT"]
+__all__ = ["FOLLOW_EVERY", "QUOTE_TIMEOUT", "OutputsRead", "Renders"]
 
 logger = logging.getLogger(__name__)
 
-#: How often a run reads a render or a slice it waits on (Ruling 7, Task 4).
-FOLLOW_EVERY = 2.0
 #: The file a quote's blob keeps.
 SLICED_NAME = "sliced.3mf"
 #: A sliced file past this is not kept (as the dialog's reads bound it).
@@ -137,6 +141,16 @@ class SliceQuoteRequest(BaseModel):
     prime_tower: PrimeTowerChoice | None = None
     supports: SupportsChoice | None = None
     print_sequence: PrintSequence | None = None
+    #: Any Bambu Studio process settings (#2998, `PrintRunRequest.process_overrides`):
+    #: every key is accepted, the quote slices with them and records them, and the
+    #: item's print that sends none prints with them.
+    process_overrides: ProcessOverrides | None = None
+
+    @field_validator("process_overrides")
+    @classmethod
+    def _overrides_stored(cls, value: ProcessOverrides | None) -> ProcessOverrides | None:
+        # As the print run keeps them, so the recorded setup compares equal.
+        return normalised_overrides(value)  # type: ignore[return-value]
 
 
 class ItemSliceQuoteRequest(SliceQuoteRequest):
@@ -153,9 +167,19 @@ class ItemSliceQuoteRequest(SliceQuoteRequest):
 
 #: The fields of a slice quote's request that are its print setup (#4673): what the print
 #: sends to slice what was priced. `filaments` prices and `filament_plan` has a column
-#: of its own; `part_settings` has its own since #5571.
+#: of its own; `part_settings` has its own since #5571. `process_overrides` (#2998) is
+#: in the `choices` column with the rest, so no migration.
 SETUP_FIELDS = frozenset(
-    {"printer_id", "printer", "path", "choices", "prime_tower", "supports", "print_sequence"}
+    {
+        "printer_id",
+        "printer",
+        "path",
+        "choices",
+        "prime_tower",
+        "supports",
+        "print_sequence",
+        "process_overrides",
+    }
 )
 
 
@@ -165,19 +189,26 @@ def print_setup(request: SliceQuoteRequest) -> dict[str, Any]:
     return request.model_dump(mode="json", include=set(SETUP_FIELDS))
 
 
+#: The most units an `archive` quote's print run can have made (#6336).
+ARCHIVE_UNITS_MAX = 1000
+
+
 class ArchiveQuoteRequest(BaseModel):
     """`POST /orders/{id}/items/{item}/quotes/archive` (#4777, order operations spec
     §3.2): the past print to price the item from (``archive_id``: one the item was taken
     from, or one its output or library file printed; omitted, the first archive it was
     taken from) and the price-book filament of each colour slot, as a slice quote's
     ``filaments``. ``filament_id`` prices every slot the print used that ``filaments``
-    does not name, for an item with no slots yet (a library file item)."""
+    does not name, for an item with no slots yet (a library file item). ``units`` is the
+    number of units of the item the print run made (#6336): the run's grams and seconds
+    are divided by it, so a plate that held two units prices one unit at half the run."""
 
     model_config = ConfigDict(extra="forbid")
 
     archive_id: int | None = Field(default=None, ge=1)
     filaments: dict[int, str] = Field(default_factory=dict)
     filament_id: str | None = None
+    units: int = Field(default=1, ge=1, le=ARCHIVE_UNITS_MAX)
 
 
 class QuoteError(ValueError):
@@ -448,38 +479,10 @@ def set_filaments(
     return lifecycle.update_item(order_id, item_id, by, filaments=mine)
 
 
-class OutputsRead(Protocol):
-    """What :func:`ensure_output` reads of an output (``OutputStore``'s)."""
-
-    def get(self, output_id: str) -> OutputMeta: ...
-    def inputs(self, output_id: str) -> dict[str, Any]: ...
-    def arranged_from(self, output_id: str) -> list[str]: ...
-
-
 class PolicySource(Protocol):
     """The book's policy as each quote reads it (``PriceBookReader.policy``)."""
 
     def policy(self) -> tuple[str, PricingPolicy, str]: ...
-
-
-class Renders(Protocol):
-    """What :func:`ensure_output` renders with: ``RenderService``'s submit and read."""
-
-    async def submit(
-        self,
-        slug: str,
-        params: Mapping[str, Any],
-        *,
-        model_version: str | None = ...,
-        inputs: Mapping[str, Any] | None = ...,
-        whole_inputs: bool = ...,
-    ) -> Job: ...
-
-    def read(self, job_id: str) -> Job: ...
-
-
-#: A settled render's states other than `done` (`render/job_models.py` `JobState`).
-_SETTLED_JOB = frozenset({"failed", "cancelled"})
 
 
 def output_matches(
@@ -488,49 +491,13 @@ def output_matches(
     item: OrderItem,
     schema: CustomizerSchema | None = None,
 ) -> bool:
-    """The output is there and its ``meta.json`` and inputs are the reference's (Ruling
-    7): its ``slug``, ``model_version`` and normalised inputs. An arranged output records
-    a content hash where a render records its commit, and the item pins the template's
-    commit instead (#4565): no render of the reference remakes the arrangement, so its
-    hash stands for the pinned commit.
-
-    With ``schema`` (the commit's), both inputs are compared at its defaults where they
-    omit one (#4774): an output saved before renders filled them records only the params
-    it was sent, and is still the render of a reference that names its defaults."""
-    return output_id is not None and _matching(outputs, output_id, item, schema) is not None
-
-
-def _matching(
-    outputs: OutputsRead, output_id: str, item: OrderItem, schema: CustomizerSchema | None
-) -> OutputMeta | None:
-    """The output's ``meta.json`` when it matches (:func:`output_matches`), from one
-    read of it."""
-    try:
-        meta = outputs.get(output_id)
-        inputs = outputs.inputs(output_id)
-        arranged = not is_commit_id(meta.model_version) and bool(outputs.arranged_from(output_id))
-    except (OutputNotFoundError, OSError, ValueError):
-        return None
-    reference = item.reference
-    if reference is None:
-        return None
-    if (
-        meta.slug == reference.slug
-        and (meta.model_version == reference.commit or arranged)
-        and _at_defaults(inputs, schema) == _at_defaults(reference.inputs, schema)
-    ):
-        return meta
-    return None
-
-
-def _at_defaults(inputs: Mapping[str, Any], schema: CustomizerSchema | None) -> dict[str, Any]:
-    if schema is None:
-        return dict(inputs)
-    params = inputs.get("params", {})
-    if not isinstance(params, dict):
-        # A malformed row is compared exactly, never read as an all-defaults render.
-        return dict(inputs)
-    return {**inputs, "params": with_defaults(schema, params)}
+    """The output is there and is the render of the item's reference
+    (``orders/rendering.py`` :func:`reference_matches`)."""
+    return (
+        output_id is not None
+        and item.reference is not None
+        and reference_matches(outputs, output_id, item.reference, schema) is not None
+    )
 
 
 async def ensure_output(
@@ -549,116 +516,33 @@ async def ensure_output(
     saved_as: str | None = None,
     carried: Mapping[int, str] | None = None,
 ) -> str:
-    """The output the item slices (Ruling 7): its own while it matches the reference,
-    else the reference rendered at its commit, waited on through the projection, saved
-    as ``POST /outputs`` saves one (``create_output``, ``output_create``'s run) and set
-    as the item's ``output_id``. An item with no colour slots takes the render's, with
-    ``filaments`` on them. ``schema`` is the reference commit's, for `output_matches`.
-    With ``revision_id`` (the quote's run) the render is of that revision: once the
-    item has another, nothing is written and the run is refused `revision_not_newest`.
-    ``saved_as`` is the id a new output is saved under (:func:`operation_output_id`,
-    #5390): an output of that id that matches is one an earlier attempt of the same
-    operation saved before it stopped, and is set on the item without a second render
-    or save. The save claims the id first (``OutputStore.claim``): a directory already
-    there (another attempt's save still writing, or an output that does not match) is
-    left alone, and the new output gets an id of its own. ``carried`` (#4673, a slice's
-    new design) are the filaments the item had pinned before that revision: the fill
-    puts each on the rendered slot of its number, under ``filaments``, and drops the
-    rest."""
-    if await asyncio.to_thread(output_matches, outputs, item.output_id, item, schema):
-        assert item.output_id is not None
-        return item.output_id
-    if saved_as is not None:
-        earlier = await asyncio.to_thread(_matching, outputs, saved_as, item, schema)
-        if earlier is not None:
-            return await _set_output(
-                lifecycle,
-                order,
-                item,
-                saved_as,
-                list(earlier.colors),
-                filaments,
-                by,
-                revision_id,
-                carried,
-            )
-    reference = reference_of(item)
-    params = reference.inputs.get("params", {})
-    pipeline = reference.render_key == inputs_key(
-        reference.slug, reference.inputs, reference.commit
+    """The output the item slices (Ruling 7): ``orders/rendering.py``
+    :func:`output_for_reference` of the item's reference, set on the item. ``schema`` is
+    the reference commit's. With ``revision_id`` (the quote's run) the render is of that
+    revision: once the item has another, nothing is written and the run is refused
+    `revision_not_newest`. ``saved_as`` is the id a new output is saved under
+    (:func:`operation_output_id`, #5390). ``carried`` (#4673, a slice's new design) are
+    the filaments the item had pinned before that revision."""
+    rendered = await output_for_reference(
+        reference_of(item),
+        outputs=outputs,
+        renders=renders,
+        create_output=create_output,
+        name=f"{order.label} {item.title}",
+        saved_as=saved_as,
+        schema=schema,
+        follow_every=follow_every,
+        item=AttachTo(
+            lifecycle=lifecycle,
+            order=order,
+            item=item,
+            by=by,
+            filaments=filaments,
+            revision_id=revision_id,
+            carried=carried,
+        ),
     )
-    job = await renders.submit(
-        reference.slug,
-        params if isinstance(params, dict) else {},
-        model_version=reference.commit,
-        inputs=reference.inputs,
-        whole_inputs=pipeline,
-    )
-    while job.state not in ("done", *_SETTLED_JOB):
-        await asyncio.sleep(follow_every)
-        job = await asyncio.to_thread(renders.read, job.id)
-    if job.state != "done":
-        raise ApiError(
-            status.HTTP_409_CONFLICT,
-            f"the item's render, job {job.id}, is {job.state}"
-            + (f": {job.error}" if job.error else ""),
-            job_id=job.id,
-        )
-    saved = await create_output(
-        {
-            "slug": reference.slug,
-            "job_id": job.id,
-            "index": 0,
-            "inputs": reference.inputs,
-            "name": f"{order.label} {item.title}",
-            **({"output_id": saved_as} if saved_as is not None else {}),
-        }
-    )
-    return await _set_output(
-        lifecycle,
-        order,
-        item,
-        str(saved["id"]),
-        saved.get("colors") or [],
-        filaments,
-        by,
-        revision_id,
-        carried,
-    )
-
-
-async def _set_output(
-    lifecycle: Lifecycle,
-    order: Order,
-    item: OrderItem,
-    output_id: str,
-    colours: Sequence[str],
-    filaments: Mapping[int, str],
-    by: Actor,
-    revision_id: str | None,
-    carried: Mapping[int, str] | None = None,
-) -> str:
-    """The item's ``output_id`` set to the saved output, with its colour slots when the
-    item has none: ``filaments`` on them, over the ``carried`` ones the render has."""
-    slots = colours_of(colours)
-    rendered = {slot.slot for slot in slots}
-    fill = {slot: f for slot, f in (carried or {}).items() if slot in rendered}
-    fill.update(filaments)
-    try:
-        await asyncio.to_thread(
-            lambda: lifecycle.update_item(
-                order.id,
-                item.id,
-                by,
-                output_id=output_id,
-                colours=slots if not item.colours else None,
-                filaments=None if item.colours else fill or None,
-                expected_revision_id=revision_id,
-            )
-        )
-    except LifecycleError as error:
-        raise refused(error) from None
-    return output_id
+    return rendered.output_id
 
 
 @dataclass(frozen=True)
@@ -705,24 +589,11 @@ class LibraryFiles(Protocol):
         ...
 
 
-async def slice_item(
-    slicer: Slicer,
-    output_id: str,
-    request: SliceQuoteRequest,
-    subject: str,
-    *,
-    follow_every: float = FOLLOW_EVERY,
-) -> list[SlicedPlate]:
-    """Every plate of the output sliced (``start_preview_plates``) and followed to its
-    end, in plate order; a plate that fails fails the quote with the slicer's text."""
-    started = await slicer.start(output_id, request, subject)
-    return await _follow(slicer, started, subject, follow_every)
-
-
 async def _follow(
     slicer: Slicer, started: list[PreviewStarted], subject: str, follow_every: float
 ) -> list[SlicedPlate]:
-    """Each started plate followed to its end, in plate order."""
+    """Each started plate (``start_preview_plates``) followed to its end, in plate order;
+    a plate that fails fails the quote with the slicer's text."""
     sliced: list[SlicedPlate] = []
     for one in started:
         while (done := await slicer.poll(one, subject)) is None:
@@ -799,17 +670,22 @@ def file_colour(colour: str | None) -> str | None:
 
 
 def unsliced_slots(plates: Sequence[Plate], item: OrderItem) -> None:
-    """Every colour slot of the item is used on some plate: one no plate reads grams for
-    was not sliced (a 0 g slot is left out of ``slice_info.config``'s read,
+    """Every colour slot of the item is used on some plate (:func:`sliced_slots`)."""
+    sliced_slots(plates, [slot.slot for slot in item.colours])
+
+
+def sliced_slots(plates: Sequence[Plate], slots: Iterable[int]) -> None:
+    """Every slot of ``slots`` (from 0) is used on some plate: one no plate reads grams
+    for was not sliced (a 0 g slot is left out of ``slice_info.config``'s read,
     ``bambuddy/filaments3mf.py``), and is never priced at nothing."""
     used = {filament.slot for plate in plates for filament in plate.filaments}
-    for slot in item.colours:
-        if slot.slot not in used:
+    for slot in slots:
+        if slot not in used:
             raise QuoteError(
-                f"colour slot {slot.slot} (slot {slot.slot + 1}) reads 0 g on every plate,"
+                f"colour slot {slot} (slot {slot + 1}) reads 0 g on every plate,"
                 " so it was not sliced",
                 plate=None,
-                slot=slot.slot,
+                slot=slot,
             )
 
 
@@ -878,9 +754,22 @@ def price_quote(
     support: Mapping[int, str] | None = None,
 ) -> Priced:
     """Task 2's arithmetic over the item's filaments as they are now, the book's policy
-    copied into the lines. ``support`` prices each slot that is no colour slot of the
-    item with its own line (§6.3). A slot with no filament, or a support slot no plate
-    uses, is a 422 naming it."""
+    copied into the lines (:func:`quote_filaments`, then :func:`price_plates`)."""
+    filaments, supports = quote_filaments(plates, item, store, support)
+    return price_plates(
+        plates, filaments, policy, currency=currency, quantity=item.quantity, support=supports
+    )
+
+
+def quote_filaments(
+    plates: Sequence[Plate],
+    item: OrderItem,
+    store: OrderStore,
+    support: Mapping[int, str] | None = None,
+) -> tuple[dict[int, Filament], set[int]]:
+    """The filament of each slot an item's quote prices: its colour slots' as they are
+    now, and each slot of ``support`` that is no colour slot of the item, priced as its
+    own line (§6.3). A support slot no plate uses is a 422 naming it. Blocking."""
     filaments: dict[int, Filament] = {}
     for slot in item.colours:
         if slot.filament_id is not None:
@@ -902,17 +791,115 @@ def price_quote(
         if number not in filaments and record is not None and record.archived_at is None:
             filaments[number] = record
             supports.add(number)
+    return filaments, supports
+
+
+def price_plates(
+    plates: Sequence[Plate],
+    filaments: Mapping[int, Filament],
+    policy: PricingPolicy,
+    *,
+    currency: str,
+    quantity: int,
+    support: Collection[int] = (),
+) -> Priced:
+    """The one price of sliced plates (#6153): ``orders/pricing.py`` ``price`` over the
+    filament of each slot, for a back-office quote and a storefront price alike. A slot
+    with no filament is a 422 naming it."""
     try:
         return price(
-            plates,
-            filaments,
-            policy,
-            currency=currency,
-            quantity=item.quantity,
-            support=supports,
+            plates, filaments, policy, currency=currency, quantity=quantity, support=support
         )
     except PricingError as error:
         raise _unprocessable("filaments", str(error)) from None
+
+
+#: The machine rate of the printer a slice is for (``MachineRates.for_quote``, #4625).
+MachineRate = Callable[[str | None, int | None], Awaitable[MachineRateBreakdown | None]]
+
+
+async def rated_policy(
+    book: PolicySource,
+    machine_rate: MachineRate | None,
+    printer: str | None,
+    printer_id: int | None,
+) -> tuple[PricingPolicy, MachineRateBreakdown | None]:
+    """The book's policy, with machine time at the rate of the printer a slice is for
+    (#4625): ``printer``, else ``printer_id``'s, else the default printer. With no such
+    printer, or no ``machine_rate``, the book's own rate prices it."""
+    _, policy, _ = await asyncio.to_thread(book.policy)
+    rate = None
+    if machine_rate is not None:
+        rate = await machine_rate(printer, printer_id)
+    if rate is not None:
+        policy = policy.model_copy(update={"machine_rate_per_hour": rate.rate_per_hour})
+    return policy, rate
+
+
+@dataclass(frozen=True)
+class PriceSlots:
+    """What sliced plates are priced against (:func:`slice_and_price`): the filament of
+    each slot (from 0), the slots priced as support (§6.3), and the quantity."""
+
+    filaments: Mapping[int, Filament]
+    quantity: int
+    support: Collection[int] = ()
+
+
+@dataclass(frozen=True)
+class SlicedPrice:
+    """The plates a slice gave, as read, their price, and the machine rate it used."""
+
+    plates: list[Plate]
+    priced: Priced
+    rate: MachineRateBreakdown | None
+
+
+async def slice_and_price(
+    slicer: Slicer,
+    start: Callable[[], Awaitable[list[PreviewStarted]]],
+    subject: str,
+    request: SliceQuoteRequest,
+    *,
+    book: PolicySource,
+    machine_rate: MachineRate | None,
+    currency: str,
+    priced_for: Callable[[list[Plate]], Awaitable[PriceSlots]],
+    keep: Callable[[bytes], Awaitable[tuple[str, str]]] | None = None,
+    follow_every: float = FOLLOW_EVERY,
+) -> SlicedPrice:
+    """The one slice and price (#6153). A back-office quote (:func:`quote_run`) and a
+    storefront price (``orders/storefront/slice_price.py``) both run it. Every plate is
+    sliced (``start``) and followed to its end. Each sliced file is fetched and read
+    (:func:`read_plate`: a :class:`QuoteError` comes before anything is kept), then kept
+    with ``keep`` when it is given (its blob key and sha256 go on the plate).
+    ``priced_for`` checks the plates and gives the filament of each slot. The plates are
+    then priced with :func:`price_plates` at the policy of :func:`rated_policy` for the
+    printer ``request`` slices for."""
+    started = await start()
+    sliced = await _follow(slicer, started, subject, follow_every)
+    plates: list[Plate] = []
+    for plate in sliced:
+        payload = await slicer.fetch(plate)
+        # Read before it is kept: a file that cannot be priced is never held.
+        read_plate(payload, plate.plate_id)
+        key = sha256 = None
+        if keep is not None:
+            key, sha256 = await keep(payload)
+        plates.append(read_plate(payload, plate.plate_id, blob_key=key, sha256=sha256))
+    slots = await priced_for(plates)
+    policy, rate = await rated_policy(book, machine_rate, request.printer, request.printer_id)
+    priced = await asyncio.to_thread(
+        lambda: price_plates(
+            plates,
+            slots.filaments,
+            policy,
+            currency=currency,
+            quantity=slots.quantity,
+            support=slots.support,
+        )
+    )
+    return SlicedPrice(plates=plates, priced=priced, rate=rate)
 
 
 @dataclass
@@ -936,9 +923,7 @@ class QuoteRun:
     library: LibraryFiles | None = None
     #: The machine rate of the printer the request slices for (``printer``,
     #: ``printer_id``; ``MachineRates.for_quote``, #4625); None prices at the book's rate.
-    machine_rate: (
-        Callable[[str | None, int | None], Awaitable[MachineRateBreakdown | None]] | None
-    ) = None
+    machine_rate: MachineRate | None = None
 
 
 def operation_quote_id(operation: str | None) -> str:
@@ -1035,16 +1020,14 @@ async def quote_run(
             lambda: support_check(store, item_id, request, hint=RENDERED_SUPPORT_HINT)
         )
     subject = subject_of(item_id)
-    sliced = await slice_item(
-        run.slicer, output_id, request, subject, follow_every=run.follow_every
-    )
     scope = BlobScope(slug=reference.slug, title=reference.template_name)
     try:
         return await _priced(
             run,
             order,
             item_id,
-            sliced,
+            lambda: run.slicer.start(output_id, request, subject),
+            subject,
             scope,
             by,
             quote_id,
@@ -1076,8 +1059,6 @@ async def _library_quote(
     if not await library.exists(file.id):
         raise library_file_gone(item.id, file)
     subject = subject_of(item.id)
-    started = await run.slicer.start_library(file.id, request, subject)
-    sliced = await _follow(run.slicer, started, subject, run.follow_every)
     scope = BlobScope(slug=None, title=file.filename)
 
     async def recolour(plates: Sequence[Plate]) -> None:
@@ -1096,7 +1077,8 @@ async def _library_quote(
         run,
         order,
         item.id,
-        sliced,
+        lambda: run.slicer.start_library(file.id, request, subject),
+        subject,
         scope,
         by,
         quote_id,
@@ -1111,7 +1093,8 @@ async def _priced(
     run: QuoteRun,
     order: Order,
     item_id: str,
-    sliced: Sequence[SlicedPlate],
+    start: Callable[[], Awaitable[list[PreviewStarted]]],
+    subject: str,
     scope: BlobScope,
     by: Actor,
     quote_id: str,
@@ -1121,47 +1104,49 @@ async def _priced(
     part_settings: dict[str, dict[str, Any]] | None = None,
     request: SliceQuoteRequest,
 ) -> Quote:
-    """Each sliced plate fetched, read, kept and priced, then the quote recorded (or
-    the run's holds dropped as it fails). ``recolour`` gives an item with no slots the
-    ones its plates use, before they are checked (a library file item, #5544).
-    ``part_settings`` are the settings per slot it sliced with (#5571), and
-    ``request``'s print setup and spools (#4673) are recorded with it too. Machine time
-    is priced at the rate of the printer ``request`` sliced for, recorded with each part
-    of it (#4625), and its support slots with their own filaments."""
+    """Every plate sliced (``start``), then fetched, read, kept and priced by
+    :func:`slice_and_price`, then the quote recorded (or the run's holds dropped as it
+    fails). ``recolour`` gives an item with no slots the ones its plates use, before they
+    are checked (a library file item, #5544). ``part_settings`` are the settings per
+    slot it sliced with (#5571), and ``request``'s print setup and spools (#4673) are
+    recorded with it too. Machine time is priced at the rate of the printer ``request``
+    sliced for, recorded with each part of it (#4625), and its support slots with their
+    own filaments."""
     lifecycle = run.lifecycle
     store = lifecycle.store
     order_id = order.id
     held = False
-    try:
-        plates: list[Plate] = []
-        for plate in sliced:
-            payload = await run.slicer.fetch(plate)
-            # Read before it is kept: a file that cannot be priced is never held.
-            read_plate(payload, plate.plate_id)
-            held = True
-            key, sha256 = await keep_sliced(run.blobs, run.refs, payload, quote_id, scope)
-            plates.append(read_plate(payload, plate.plate_id, blob_key=key, sha256=sha256))
+
+    async def keep(payload: bytes) -> tuple[str, str]:
+        nonlocal held
+        held = True
+        return await keep_sliced(run.blobs, run.refs, payload, quote_id, scope)
+
+    async def priced_for(plates: list[Plate]) -> PriceSlots:
         if recolour is not None:
             await recolour(plates)
         item = await asyncio.to_thread(store.item, item_id)
         assert item is not None
         unsliced_slots(plates, item)
-        _, policy, _ = await asyncio.to_thread(run.book.policy)
-        rate = None
-        if run.machine_rate is not None:
-            rate = await run.machine_rate(request.printer, request.printer_id)
-        if rate is not None:
-            policy = policy.model_copy(update={"machine_rate_per_hour": rate.rate_per_hour})
-        priced = await asyncio.to_thread(
-            lambda: price_quote(
-                plates,
-                item,
-                store,
-                policy,
-                currency=order.currency,
-                support=request.support_filaments,
-            )
+        filaments, supports = await asyncio.to_thread(
+            quote_filaments, plates, item, store, request.support_filaments
         )
+        return PriceSlots(filaments=filaments, quantity=item.quantity, support=supports)
+
+    try:
+        done = await slice_and_price(
+            run.slicer,
+            start,
+            subject,
+            request,
+            book=run.book,
+            machine_rate=run.machine_rate,
+            currency=order.currency,
+            priced_for=priced_for,
+            keep=keep,
+            follow_every=run.follow_every,
+        )
+        plates, priced, rate = done.plates, done.priced, done.rate
         first = plates[0]
         assert first.sha256 is not None and first.blob_key is not None
         try:
@@ -1189,20 +1174,26 @@ async def _priced(
             raise refused(error) from None
     except QuoteError as error:
         await _drop(lifecycle, order_id, quote_id, held)
-        extensions: dict[str, Any] = {}
-        if error.plate is not None:
-            extensions["plate"] = error.plate
-        if error.slot is not None:
-            extensions["slot"] = error.slot
-        raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            str(error),
-            type_=PROBLEMS + "sliced_plate",
-            **extensions,
-        ) from None
+        raise sliced_plate_problem(error) from None
     except BaseException:
         await _drop(lifecycle, order_id, quote_id, held)
         raise
+
+
+def sliced_plate_problem(error: QuoteError) -> ApiError:
+    """422 ``sliced_plate``: a sliced plate that cannot be priced, naming the plate and
+    the slot."""
+    extensions: dict[str, Any] = {}
+    if error.plate is not None:
+        extensions["plate"] = error.plate
+    if error.slot is not None:
+        extensions["slot"] = error.slot
+    return ApiError(
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        str(error),
+        type_=PROBLEMS + "sliced_plate",
+        **extensions,
+    )
 
 
 async def _drop(lifecycle: Lifecycle, order_id: str, quote_id: str, held: bool) -> None:

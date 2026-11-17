@@ -1,4 +1,5 @@
 import type { Sql } from 'postgres'
+import { chunks, type CrudTarget, crudOf, qs, TABS_PER_CALL } from '../api/crudStores.js'
 
 // Which replica holds each tab's bridge socket (#4780,
 // backend/scadbuddy/migrations_agent/20261027T0103Z_tab_owners.sql), named by that replica's own queue
@@ -74,5 +75,43 @@ export class PostgresTabOwnerStore implements TabOwnerStore {
     } finally {
       signal?.removeEventListener('abort', onAbort)
     }
+  }
+}
+
+/** The owners through the API's CRUD routes, area `bridge-tabs` (#5299 step 5, backend api/crud_agent_stores.py). */
+export class CrudTabOwnerStore implements TabOwnerStore {
+  readonly #call: ReturnType<typeof crudOf>
+
+  constructor(target: CrudTarget) {
+    this.#call = crudOf(target)
+  }
+
+  async claim(tabId: string, queue: string): Promise<void> {
+    await this.#call('a tab claimed', '/tab-owners/claim', { body: { tab_id: tabId, queue } })
+  }
+
+  async refresh(tabIds: string[], queue: string): Promise<void> {
+    // In runs the route takes: a replica may hold more tabs than one call names.
+    for (const run of chunks(tabIds, TABS_PER_CALL)) {
+      await this.#call("a replica's tabs refreshed", '/tab-owners/refresh', { body: { tab_ids: run, queue } })
+    }
+  }
+
+  async release(tabId: string, queue: string, claimedBefore?: string): Promise<void> {
+    const body = { tab_id: tabId, queue, ...(claimedBefore ? { claimed_before: claimedBefore } : {}) }
+    await this.#call('a tab released', '/tab-owners/release', { body })
+  }
+
+  async releaseAll(queue: string): Promise<void> {
+    await this.#call("a replica's tabs released", '/tab-owners/release-all', { body: { queue } })
+  }
+
+  async ownerOf(tabId: string, signal?: AbortSignal): Promise<TabOwner | undefined> {
+    const { owner } = await this.#call<{ owner: { queue: string; claimed_at: string } | null }>(
+      "a tab's owner",
+      `/tab-owners${qs({ tab_id: tabId })}`,
+      { signal },
+    )
+    return owner ? { queue: owner.queue, claimedAt: owner.claimed_at } : undefined
   }
 }

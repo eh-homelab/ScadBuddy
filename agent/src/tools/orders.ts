@@ -12,6 +12,8 @@ import {
   printOptionFields,
   printPath,
   printSequence,
+  processOverrides,
+  sbPlanIds,
   setupPhrase,
   slotChoice,
   supportsChoice,
@@ -673,7 +675,7 @@ const sliceQuote = z
           'and a printer a run reaches over the LAN is sliced for with no Bambuddy call',
       ),
     filament_plan: z
-      .object({ slots: z.array(slotChoice), force_colour_match: z.boolean().default(true) })
+      .object({ slots: z.array(slotChoice), force_colour_match: z.boolean().default(true), ids: sbPlanIds })
       .describe('One spool per slot (slot_id from 1), as the print dialog sends it'),
     choices: printChoices,
     filaments: z
@@ -691,6 +693,14 @@ const sliceQuote = z
     prime_tower: primeTowerChoice,
     supports: supportsChoice,
     print_sequence: printSequence,
+    // #2998: any process setting, sliced with and recorded as part of the quote's print setup.
+    process_overrides: processOverrides.describe(
+      'Any Bambu Studio process settings to slice the quote with (#2998), as {key: value}, e.g. ' +
+        '{"skirt_loops": 0, "wipe_tower_no_sparse_layers": true}: every key but the host-side ones (post_process, print_host*: dropped) is accepted, and the ' +
+        "slicer judges it (a slice it refuses over one is a 422 naming the key). They win over the template's " +
+        "defaults and over prime_tower, supports and print_sequence. Recorded in the quote's print setup " +
+        "(`choices.process_overrides`), so order_item_print slices what was priced",
+    ),
     // #4673 PR 3: a new design first, through the revise path; the quote is of it.
     inputs: z
       .object({})
@@ -1993,7 +2003,10 @@ export const orderTools: Tool[] = [
       'storefront cart is refused `order_not_submitted` first. `archive` (#4777): priced from what a past print used, ' +
       'with no re-slice: every plate archive of its print run, grams per slot as the slicer estimated them and the ' +
       "actual seconds, at the price book in force, each slot at `filaments`' filament (written onto the item first). " +
-      '`archive_id` defaults to the first archive the item was taken from (order_item_add `archive_id`). Refused ' +
+      '`archive_id` defaults to the first archive the item was taken from (order_item_add `archive_id`). `units` ' +
+      '(default 1) is the number of units of the item the print run made: the run\'s grams and seconds are divided ' +
+      'by it, so a plate that held 2 units prices one unit at half the run. Set it whenever the run made more than ' +
+      'one unit, or the unit price is too high by that factor. Refused ' +
       '409 `archive_plates_missing` (a plate of the run has no archive), `archive_not_succeeded` (a failed or ' +
       'cancelled print: quote by slice or by hand) and `archive_gone`. When the unit price leaves a margin below the thin ' +
       "threshold against the model's real cost per unit in its last fulfilled jobs, the answer adds " +
@@ -2025,6 +2038,13 @@ export const orderTools: Tool[] = [
           filament_id: ID.optional().describe(
             'For an item with no colour slots yet (a library file item): the filament of every slot the print used',
           ),
+          units: z
+            .number()
+            .int()
+            .min(1)
+            .max(1000)
+            .optional()
+            .describe('The units of the item the print run made (default 1): its grams and seconds are divided by it'),
         })
         .strict()
         .optional(),
@@ -2168,9 +2188,9 @@ export const orderTools: Tool[] = [
     description:
       "Print an approved line item of an accepted order from its accepted quote (#4719): a print run of the item's " +
       "output with the quote's print setup (#4673: printer, path, a spool per slot, nozzles and quality, tower, " +
-      'supports and sequence, as order_item_quote `slice` recorded them; order_get lists each quote\'s `choices` and ' +
+      'supports, sequence and process overrides, as order_item_quote `slice` recorded them; order_get lists each quote\'s `choices` and ' +
       '`filament_plan`), every plate, for the quantity still to print. Send none of them to print what was quoted; ' +
-      "each one sent must be the quote's (a printer, choices, tower, supports or sequence that differs is refused " +
+      "each one sent must be the quote's (a printer, choices, tower, supports, sequence or process overrides that differ is refused " +
       '`requote_needed`: quote it again with them), except `path` (another route slices again) and the spools ' +
       "(`filament_plan`, filled from the item's filaments). A manual or archive quote records no setup: send " +
       '`choices` and `filament_plan` (else 422 `print_setup_missing`). Answers with the attempt it recorded (outcome unknown, ' +
@@ -2213,6 +2233,12 @@ export const orderTools: Tool[] = [
       ),
       print_sequence: printSequence.describe(
         "Omit to print with the accepted quote's (order_item_quote's `slice.print_sequence`); another is refused `requote_needed`",
+      ),
+      // #2998: any process setting; omitted is the quote's (`choices.process_overrides`).
+      process_overrides: processOverrides.describe(
+        'Any Bambu Studio process settings (#2998), as {key: value}: every key but the host-side ones (post_process, print_host*: dropped) is accepted, and ' +
+          'the slicer judges it (a refusal is a 422 naming the key). Omit to print with the accepted quote\'s ' +
+          "(order_item_quote's `slice.process_overrides`); others are refused `requote_needed`: quote with them first",
       ),
       test_revision_id: ID.optional().describe(
         "Print this design revision of the item as a test instead (order_item_revision_add makes one): an attempt of " +
@@ -2830,18 +2856,19 @@ export const orderTools: Tool[] = [
   }),
   defineTool({
     name: 'price_book_import_spools',
-    label: "Import filaments from Bambuddy's spools",
+    label: "Import filaments from ScadBuddy's spools",
     description:
-      "Make or update the price book's filament records from Bambuddy's spool inventory: one record per filament " +
-      '(material, subtype, brand and colour), made when the book has none, else given the most recent priced ' +
-      "spool's cost per kilogram; `min_cost_per_kg`/`max_cost_per_kg` show the spread when the spools' prices " +
+      "Make or update the price book's filament records from ScadBuddy's own spools: one record per filament " +
+      '(effective material, subtype, brand and `#RRGGBBAA`, so an opaque and a translucent spool of one hue are ' +
+      'two records), made when the book has none, else given the most recent priced spool\'s cost per kilogram ' +
+      "(the highest spool number); `spool_ids` are spool numbers; `min_cost_per_kg`/`max_cost_per_kg` show the spread when the spools' prices " +
       'differ. A record keeps its link to its spools, so a colour set by hand makes no second record; the import sets ' +
       "a record's colour, alpha, stops and effect only while its `colour_source` is `import`. " +
-      'A filament known only by its colour name, with no priced spool, or whose colour another record of its ' +
-      'material, subtype and brand already has (`colour_taken`), is `skipped` with its `reason`. A matched record ' +
-      "whose spools' colour another record of its names holds keeps its own colour, alpha, stops and effect, and " +
-      'comes back `updated` or `unchanged` with `reason` `colour_taken`. ' +
-      "Only when Bambuddy is linked (price_book_get's `spool_import`); else `not_linked`. Quotes never read spools.",
+      'A filament known only by its colour name, with no priced spool, or whose colour and alpha another record ' +
+      'of its material, subtype and brand already has (`colour_taken`), is `skipped` with its `reason`. A matched ' +
+      "record whose spools' colour another record of its names holds keeps its own colour, alpha, stops and " +
+      'effect, and comes back `updated` or `unchanged` with `reason` `colour_taken`. Needs no Bambuddy. Quotes ' +
+      'never read spools.',
     input: z.object({}),
     risk: 'write',
     routes: ['POST /api/v1/orders/price-book/import-spools'],
@@ -2853,11 +2880,12 @@ export const orderTools: Tool[] = [
     name: 'price_book_fill_densities',
     label: 'Fill empty filament densities',
     description:
-      'Give every price-book filament with no density the one its Bambuddy spools link to: the preset id ' +
-      "(the spool's slicer preset, then its K-profile's, then its AMS tray's) gives Bambuddy's local preset or " +
-      "the Bambu Studio vendor preset's `filament_density`, then Bambuddy's filament catalogue. Never " +
-      "overwrites a density that is set. Each row is filled with its `density_profile` (the source) or has no " +
-      "`density_g_cm3` (no source: enter it with price_book_set). Only when Bambuddy is linked; else `not_linked`.",
+      "Give every price-book filament with no density the one ScadBuddy's spools of its material, subtype, " +
+      "brand and `#RRGGBBAA` give: the newest spool's own effective density, else the `filament_density` of " +
+      "its slicer preset id (Bambuddy's local preset while Bambuddy is linked, else the Bambu Studio vendor " +
+      "preset), else that of the preset id (`tray_info_idx`) the tray holding it reports. Never overwrites a " +
+      'density that is set. Each row is filled with its `density_profile` ' +
+      '(the source) or has no `density_g_cm3` (no source: enter it with price_book_set). Needs no Bambuddy.',
     input: z.object({}),
     risk: 'write',
     routes: ['POST /api/v1/orders/price-book/fill-densities'],

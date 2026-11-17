@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto'
-import type { Sql } from 'postgres'
-import { type BusEvent, type EventSource, PG_CHANNEL } from '../events/bus.js'
+import type { BusEvent, EventSource } from '../events/bus.js'
 import type { EventLog } from './eventLog.js'
 import type { ServerEvent, SessionStatus } from './protocol.js'
+import type { Publisher } from './publish.js'
 
 // `session.*` on the event bus (#300; spec §7: "from the agent side
 // `session.*`"). Every batch a session appends to its event log
@@ -92,7 +92,7 @@ export type AppendHook = (sessionId: string, events: readonly ServerEvent[], las
 export class SessionEventPublisher {
   /** This process, in every payload it sends. */
   readonly replica: string
-  readonly #sql: Sql
+  readonly #publish: Pick<Publisher, 'sessionEvent'>
   readonly #throttleMs: number
   readonly #onError: (err: unknown) => void
   /** Per session: when the last `session.message` went, and a trailing one waiting. */
@@ -104,8 +104,9 @@ export class SessionEventPublisher {
   /** Payloads sent (tests, metrics). */
   sent = 0
 
-  constructor(sql: Sql, options: { replica?: string; throttleMs?: number; onError?: (err: unknown) => void } = {}) {
-    this.#sql = sql
+  /** `publish`: over SQL or the API's route, `gated` in main.ts (sessions/publish.ts). */
+  constructor(publish: Pick<Publisher, 'sessionEvent'>, options: { replica?: string; throttleMs?: number; onError?: (err: unknown) => void } = {}) {
+    this.#publish = publish
     this.replica = options.replica ?? randomUUID()
     this.#throttleMs = options.throttleMs ?? DEFAULT_THROTTLE_MS
     this.#onError = options.onError ?? ((err) => console.error('session events: NOTIFY failed:', (err as Error).message))
@@ -165,7 +166,7 @@ export class SessionEventPublisher {
       replica: this.replica,
     }
     this.sent += 1
-    this.#sql`SELECT pg_notify(${PG_CHANNEL}, ${JSON.stringify(event)})`.then(
+    this.#publish.sessionEvent(event).then(
       () => {},
       (err: unknown) => this.#onError(err),
     )

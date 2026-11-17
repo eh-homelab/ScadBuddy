@@ -14,6 +14,7 @@ import {
   proxyActivities,
   proxyLocalActivities,
   setHandler,
+  sleep,
   TimeoutFailure,
   workflowInfo,
 } from '@temporalio/workflow'
@@ -25,12 +26,26 @@ import { TASK_QUEUE } from '../names.js'
 import { type GateHost, type GateTurn, type Resolution, SessionGate } from './gate.js'
 import {
   type AcquireInput,
+  type BeginOutcome,
+  type BeginTurnInput,
   BUDGET_EXHAUSTED,
   type Continuation,
+  type EditQueuedArgs,
   type FinishTurnInput,
+  type FinishTurnResult,
   INTERRUPTED,
   MESSAGE_MAX,
   type Message,
+  NOT_QUEUED,
+  QUEUE_BYTES_MAX,
+  QUEUE_FULL,
+  QUEUE_MAX,
+  type QueueAnswer,
+  type MadeBlobs,
+  type QueueChangedInput,
+  type QueuedMessage,
+  type QueuedView,
+  type QueueState,
   type OpenInputAnswer,
   type OpenInputArgs,
   type SendAnswer,
@@ -45,12 +60,19 @@ import {
 } from './models.js'
 import {
   ACQUIRE_WORKER_ACTIVITY,
+  EDIT_QUEUED_UPDATE,
   NO_CAPACITY,
   OPEN_INPUT_UPDATE,
   OWNER_CHANGED_SIGNAL,
+  PLACEMENT_MOVED,
+  QUEUE_MESSAGE_UPDATE,
+  QUEUE_QUERY,
   RELEASE_WORKER_ACTIVITY,
+  REMOVE_QUEUED_UPDATE,
   SEND_MESSAGE_UPDATE,
+  SESSION_BEGIN_TURN_ACTIVITY,
   SESSION_FINISH_ACTIVITY,
+  SESSION_QUEUE_CHANGED_ACTIVITY,
   SESSION_SETTINGS_ACTIVITY,
   SESSION_TURN_ACTIVITY,
   SHUTTING_DOWN_FAILURE,
@@ -90,14 +112,31 @@ import {
 //
 // Affinity (§5.2), Go's Worker Sessions on worker-specific queues: `home` is the session host
 // queue (`agent-sessions.<identity>`) of the replica `acquire_worker` reserved a place on; each
-// turn runs there, and a turn whose home has gone (a timeout, ShuttingDown, NoCapacity) is placed
+// turn runs there, and a turn whose home has gone (a timeout, ShuttingDown, NoCapacity), or whose
+// placement another placement took the row from (PlacementMoved, PLACEMENT_MOVED_PATCH), is placed
 // again: acquire on the shared `agent-tools` (not one of the homes it was lost on while another
-// replica can take it, and the last placement unrestricted), then the turn on the new home,
-// resumed from its transcript (`restarted`), at most PLACEMENTS times. A home kept from an
+// replica can take it, and the last placement unrestricted; a PlacementMoved home answered and is
+// alive, so it is never one of them), then the turn on the new home,
+// resumed from its transcript (`restarted`), at most PLACEMENTS times, waiting PLACEMENT_BACKOFF
+// after each one that timed out (#6353). A home kept from an
 // earlier turn re-reserves as the turn arrives, and refuses NoCapacity when every slot there
 // runs a turn: that move is free, once per turn (FULL_HOME_PATCH). Each placement carries
 // its attempt id (run id and cycle), so a cut-off one still running stops. An interrupt never
 // moves it. On `end` the workflow releases its place on `home`.
+//
+// The queue (#6386): a send while a turn runs is `queue_message`, appended here (FIFO, at most
+// QUEUE_MAX entries and QUEUE_BYTES_MAX of JSON as UTF-8) and answered with its place; `remove_queued` and
+// `edit_queued` change an entry until it starts, and `queue` reads it. The turn's end starts the
+// head in its own transaction (`session.finish_turn`'s `next`), so the row never goes idle for a
+// later send to take first, and the run continues as new with that turn's message; a head queued
+// while no turn runs is started by `session.begin_turn`. A Stop ends the running turn only: the
+// next entry starts after it. Each change is written as a `session.queue` event by
+// `session.queue_changed`, one at a time and in order. The queue is carried over a continue-as-new
+// and dropped by `end`; a handoff drops the entries the new owner did not send. Every command it
+// adds runs only for a non-empty queue, which no earlier history has (QUEUE_PATCH). The images an
+// entry's send made go with it when it leaves unrun (removed, dropped by a handoff or `end`, or
+// dropped at its claim): the next `session.queue_changed` deletes them (#6413), an input field
+// only, so no history replays otherwise.
 //
 // Parks (§5.4): the turn's activity sends `open_input` for each call it parks, and holds
 // while the entry is answered here (`respond`), times out or is cancelled; the answer
@@ -112,6 +151,10 @@ const SHORT = '30s'
 const PLACEMENTS = 3
 
 const sendUpdate = defineUpdate<SendAnswer, [Message]>(SEND_MESSAGE_UPDATE)
+const queueUpdate = defineUpdate<QueueAnswer, [QueuedMessage]>(QUEUE_MESSAGE_UPDATE)
+const removeQueuedUpdate = defineUpdate<QueueState, [{ id: string }]>(REMOVE_QUEUED_UPDATE)
+const editQueuedUpdate = defineUpdate<QueueState, [EditQueuedArgs]>(EDIT_QUEUED_UPDATE)
+const queueQuery = defineQuery<QueueState>(QUEUE_QUERY)
 const interruptSignal = defineSignal<[{ reason?: string }?]>(INTERRUPT_SIGNAL)
 const endSignal = defineSignal<[unknown?]>(END_SIGNAL)
 const ownerChangedSignal = defineSignal<[{ owner: Owner }]>(OWNER_CHANGED_SIGNAL)
@@ -126,6 +169,22 @@ const GATE_SETTINGS_PATCH = 'agent-session-gate-settings'
 const END_WHILE_FINISHING_PATCH = 'agent-session-end-while-finishing'
 /** A kept home that is full when the turn arrives moves the turn at no cost to its placements, once (#3443). */
 const FULL_HOME_PATCH = 'agent-session-full-home'
+/**
+ * A placement that timed out (schedule-to-start, heartbeat) waits before the turn is placed
+ * again (#6353): PLACEMENT_BACKOFF[0] after the first such timeout, [1] after the next. On 2026-11-15 a stalled Temporal matching
+ * service (task delivery lost, eh-homelab/clusters#3618) spent all three placements in about a
+ * minute, on replicas that were alive (03:21:55 to 03:22:59), and the turn failed. A refusal
+ * (NoCapacity, ShuttingDown) does not wait: a live replica answered it.
+ */
+const PLACEMENT_BACKOFF_PATCH = 'agent-session-placement-backoff'
+const PLACEMENT_BACKOFF = ['10s', '30s'] as const
+/**
+ * A placement cut off because another placement took the turn's row (PlacementMoved) is placed
+ * again, as a lost worker's is (#6387). On 2026-11-15, in a rollout, such a cut (then SessionGone)
+ * failed a turn whose workflow had placed nothing else, and the user read "Activity task failed".
+ * Asked only when such a failure arrives, which no older worker sent.
+ */
+const PLACEMENT_MOVED_PATCH = 'agent-session-placement-moved'
 /**
  * An attention request may name `on_timeout` `wait` or `stop` (#5003): the turn acts on its
  * timeout, so the entry records what it will do. Asked only of such a request, which no earlier
@@ -144,6 +203,21 @@ const GATE_RECORD_PATCH = 'gate-record-r5'
  * the entry's next recheck there.
  */
 const WAKE_REREAD_PATCH = 'gate-record-wake-reread'
+/** The queue's commands (#6386): asked only for a non-empty queue, which no earlier history held. */
+const QUEUE_PATCH = 'agent-session-queue'
+/**
+ * A queue change made after the write loop's last check but before it cleared `publishing`
+ * (in the same activation) starts a write of its own; without it, that version was never
+ * written until the next change (#6386, PR #6411's CI).
+ */
+const QUEUE_PUBLISH_PATCH = 'agent-session-queue-publish'
+/**
+ * How long a head the row is not free for waits before `session.begin_turn` is asked again (a lost
+ * turn the sweep ends): BEGIN_RETRY_MS, doubling to BEGIN_RETRY_MAX_MS, so a row that stays taken
+ * adds a few events an hour to the history, not one every few seconds.
+ */
+const BEGIN_RETRY_MS = 5_000
+const BEGIN_RETRY_MAX_MS = 300_000
 const THE_TURN_ENDED = 'the turn ended'
 
 type Activities = Record<string, (input?: unknown) => Promise<unknown>>
@@ -176,7 +250,19 @@ export function movesWorker(err: unknown): boolean {
   // `turn_max_seconds` (StartToClose) is over, not lost: placing it again could triple its spend.
   if (cause instanceof TimeoutFailure) return cause.timeoutType === 'SCHEDULE_TO_START' || cause.timeoutType === 'HEARTBEAT'
   const type = failureType(err)
-  return type === SHUTTING_DOWN_FAILURE || type === NO_CAPACITY
+  // Another placement took the turn's row: the workflow, which owns placement, places it again (#6387).
+  return type === SHUTTING_DOWN_FAILURE || type === NO_CAPACITY || type === PLACEMENT_MOVED
+}
+
+/** Why a placement was lost, in the user's words: what the turn's failure says once the placements run out. */
+function lostWhy(err: unknown): string {
+  const cause = err instanceof ActivityFailure ? err.cause : err
+  if (cause instanceof TimeoutFailure) return cause.timeoutType === 'SCHEDULE_TO_START' ? 'no worker took the turn up in time' : 'its worker stopped answering'
+  const type = failureType(err)
+  if (type === PLACEMENT_MOVED) return 'another placement took the turn over'
+  if (type === SHUTTING_DOWN_FAILURE) return 'its worker was shutting down'
+  if (type === NO_CAPACITY) return 'every worker was busy with other turns'
+  return failureText(err)
 }
 
 /**
@@ -193,19 +279,78 @@ export function mergeRestarted(continuation: Continuation | undefined): Continua
 type TurnEnd = { outcome: TurnOutcome; message?: string; code?: string; tail?: ServerEvent[] }
 
 const busy = (): ApplicationFailure => ApplicationFailure.nonRetryable('the session is running a turn', 'busy')
+const endedFailure = (): ApplicationFailure => ApplicationFailure.nonRetryable('the session was marked done', 'ended')
+const notQueued = (id: string): ApplicationFailure =>
+  ApplicationFailure.nonRetryable(`message ${String(id).slice(0, 64)} is not waiting in the queue: it started, or was removed`, NOT_QUEUED)
 
+/** The turn's message of a queued entry: the claim columns and the view's fields left out. */
+export function queuedTurnMessage(q: QueuedMessage): Message {
+  return {
+    turn_id: q.turn_id,
+    text: q.text,
+    author: q.author,
+    images: q.images,
+    system_append: q.system_append,
+    ...(q.flow ? { flow: q.flow } : {}),
+    words: q.words,
+    ...(q.traceparent ? { traceparent: q.traceparent } : {}),
+  }
+}
+
+/** The text the turn gets: the words, then the page context the sender gave (manager.ts `send`). */
+export const queuedText = (words: string, context: string | undefined): string => (context ? `${words}\n\n${context}` : words)
+
+/** What the queue's readers see of an entry. */
+export function queuedView(q: QueuedMessage): QueuedView {
+  return { id: q.turn_id, text: q.words, author: q.author, ...(q.sent?.length ? { images: q.sent } : {}), queuedAt: q.queued_at }
+}
+
+/** Whether `author` may still send to a session `owner` owns: DurableTurns.send's claim condition. */
+const mayStillSend = (author: Owner, owner: Owner): boolean => author.kind === owner.kind && (author.id === owner.id || owner.kind === 'browser')
+
+/**
+ * A failure in the user's words: its cause, without the activity's own "Activity task failed",
+ * which says only where it happened (#6387). Only the activity's input, so an older history replays.
+ */
 function failureText(err: unknown): string {
-  const cause = err instanceof ActivityFailure ? err.cause : err
-  const text = cause instanceof Error ? `${err instanceof Error ? err.message : ''}: ${cause.message}` : String(err)
+  const cause = err instanceof ActivityFailure && err.cause ? err.cause : err
+  const text = cause instanceof Error ? cause.message : String(err)
   return text.slice(0, MESSAGE_MAX)
 }
 
 export async function AgentSession(started: SessionStart): Promise<void> {
   let start = started
-  let message: Message | undefined
+  // A queued message the last run's turn end started (its row is claimed): this run's first turn.
+  let message: Message | undefined = start.message ?? undefined
   let turn: TurnStart | undefined = start.turn ?? undefined
   // From a message's acceptance until its turn's end is written.
-  let inTurn = turn !== undefined
+  let inTurn = turn !== undefined || message !== undefined
+  /** The messages waiting for their turns (#6386), oldest first. */
+  const queue: QueuedMessage[] = [...(start.queue ?? [])]
+  let queueVersion = start.queue_version ?? 0
+  /**
+   * The ids that left the queue lately, carried over a continue-as-new: an Update sent again
+   * (its id is deduped only within a run) must not queue a message that already ran.
+   */
+  const left: string[] = [...(start.queue_left ?? [])]
+  const leave = (...ids: string[]): void => {
+    left.push(...ids)
+    left.splice(0, Math.max(0, left.length - 2 * QUEUE_MAX))
+  }
+  /** The images of the entries that left unrun since the last write (#6413). */
+  const unrun: MadeBlobs[] = [...(start.queue_unrun ?? [])]
+  const leftUnrun = (entries: readonly QueuedMessage[]): void => {
+    for (const q of entries) if (q.made) unrun.push(...q.made)
+  }
+  /** The last version `session.queue_changed` wrote, and the write in flight. */
+  let published = queueVersion
+  let publishing: Promise<void> | undefined
+  /** Whether the write loop still checks for a newer version: false once it ended, before `publishing` is cleared. */
+  let looping = false
+  /** The head being started (its claim in flight): no longer removable or editable. */
+  let starting: string | undefined
+  /** How many times in a row `session.begin_turn` found the row taken. */
+  let beginWaits = 0
   // From the turn's `session.finish_turn` until it is closed: its end is written, so a message
   // may be taken (it runs next) and an interrupt is the next message's. No call parks then
   // (`runs`: the turn's activity has ended).
@@ -258,14 +403,124 @@ export async function AgentSession(started: SessionStart): Promise<void> {
       },
     },
   )
+  /** A queue change: written as a `session.queue` event, one write at a time, the last version always written. */
+  function changed(): void {
+    patched(QUEUE_PATCH)
+    queueVersion++
+    if (publishing && (looping || !patched(QUEUE_PUBLISH_PATCH))) return
+    looping = true
+    const run: Promise<void> = (async () => {
+      try {
+        while (published < queueVersion) {
+          const version = queueVersion
+          // Taken now: if the activity fails for good (or the history is reset), these images stay
+          // until the session is deleted. Best effort, as the delete is: an image left costs a row.
+          // Those not taken yet are carried over a continue-as-new (`queue_unrun`).
+          const drop = unrun.splice(0)
+          await finish[SESSION_QUEUE_CHANGED_ACTIVITY]!({
+            sessionId: start.session_id,
+            version,
+            queue: queue.map(queuedView),
+            ...(drop.length ? { drop } : {}),
+          } satisfies QueueChangedInput)
+          published = version
+        }
+      } finally {
+        looping = false
+      }
+    })()
+      // A write that never lands leaves the version unwritten; the next change writes it.
+      .catch(() => undefined)
+      .finally(() => {
+        if (publishing === run) publishing = undefined
+      })
+    publishing = run
+  }
+  // Drops carried from the last run (#6413) are written, and their images deleted, at once.
+  if (unrun.length > 0) changed()
+  const queueState = (): QueueState => ({ version: queueVersion, queue: queue.map(queuedView) })
+  /** The index of a queued entry that may still change (not the head being started). */
+  const waiting = (id: string): number => (id === starting ? -1 : queue.findIndex((q) => q.turn_id === id))
+  const tooLarge = (entries: readonly QueuedMessage[]): boolean => new TextEncoder().encode(JSON.stringify(entries)).length > QUEUE_BYTES_MAX
+  const full = () =>
+    ApplicationFailure.nonRetryable(
+      `the session's queue is full (${QUEUE_MAX} messages, or ${QUEUE_BYTES_MAX / 1024} KiB); wait for one to start, or remove one`,
+      QUEUE_FULL,
+    )
+
+  setHandler(
+    queueUpdate,
+    (m: QueuedMessage): QueueAnswer => {
+      if (left.includes(m.turn_id)) return { id: m.turn_id, position: 0, version: queueVersion }
+      let at = queue.findIndex((q) => q.turn_id === m.turn_id)
+      // A re-sent Update after a continue-as-new (its id deduped only within a run) finds its entry.
+      if (at < 0) {
+        queue.push(m)
+        at = queue.length - 1
+        changed()
+      }
+      return { id: m.turn_id, position: at + 1, version: queueVersion }
+    },
+    {
+      validator: (m: QueuedMessage) => {
+        if (ended) throw endedFailure()
+        if (left.includes(m.turn_id) || queue.some((q) => q.turn_id === m.turn_id)) return
+        if (queue.length >= QUEUE_MAX || tooLarge([...queue, m])) throw full()
+      },
+    },
+  )
+  setHandler(
+    removeQueuedUpdate,
+    ({ id }: { id: string }): QueueState => {
+      leftUnrun(queue.splice(waiting(id), 1))
+      leave(id)
+      changed()
+      return queueState()
+    },
+    {
+      validator: ({ id }: { id: string }) => {
+        if (waiting(id) < 0) throw notQueued(id)
+      },
+    },
+  )
+  setHandler(
+    editQueuedUpdate,
+    ({ id, words }: EditQueuedArgs): QueueState => {
+      const at = waiting(id)
+      const entry = queue[at]!
+      queue[at] = { ...entry, words, text: queuedText(words, entry.context) }
+      changed()
+      return queueState()
+    },
+    {
+      validator: ({ id, words }: EditQueuedArgs) => {
+        const at = waiting(id)
+        if (at < 0) throw notQueued(id)
+        if (typeof words !== 'string' || !words.trim()) throw ApplicationFailure.nonRetryable('the message is empty', 'invalid')
+        const entry = queue[at]!
+        if (tooLarge(queue.map((q, i) => (i === at ? { ...entry, words, text: queuedText(words, entry.context) } : q)))) throw full()
+      },
+    },
+  )
+  setHandler(queueQuery, queueState)
+
   setHandler(endSignal, () => {
     ended = true
   })
   // A handoff (§5.6): the gate checks each later response against the new owner, and the next
-  // run starts with it. The handoff cancelled the parked entries itself (cancel_input).
+  // run starts with it. The handoff cancelled the parked entries itself (cancel_input). The
+  // queued messages the new owner did not send go: only the owner sends (#6386).
   setHandler(ownerChangedSignal, ({ owner }) => {
     start = { ...start, owner }
     gate.setOwner(owner)
+    const kept = queue.filter((q) => q.turn_id === starting || mayStillSend(q.author, owner))
+    if (kept.length !== queue.length) {
+      const gone = queue.filter((q) => !kept.includes(q))
+      leave(...gone.map((q) => q.turn_id))
+      leftUnrun(gone)
+      queue.splice(0, queue.length, ...kept)
+      changed()
+    }
   })
   setHandler(interruptSignal, (arg) => {
     if (!inTurn) return
@@ -321,7 +576,15 @@ export async function AgentSession(started: SessionStart): Promise<void> {
     /** The homes this turn was lost on: acquire_worker places it elsewhere while it can. */
     const lost: string[] = []
     let placements = PLACEMENTS
+    /** How many placements timed out so far: each waits before the next (#6353). */
+    let lostPlacements = 0
+    let waitFirst = false
     for (let cycle = 0; cycle < placements; cycle++) {
+      // Inside the turn's scope: an interrupt cancels the wait as it cancels the turn.
+      if (waitFirst && patched(PLACEMENT_BACKOFF_PATCH)) {
+        await sleep(PLACEMENT_BACKOFF[Math.min(lostPlacements, PLACEMENT_BACKOFF.length) - 1]!)
+      }
+      waitFirst = false
       const { continuation: _previous, ...rest } = input
       // A home kept from an earlier turn: its reservation may have lapsed (`warm_idle_seconds`).
       const kept = home !== undefined
@@ -365,19 +628,27 @@ export async function AgentSession(started: SessionStart): Promise<void> {
       } catch (err) {
         // An interrupt cancels the turn; it never moves the session (BudgetExhausted, CredentialRefused, SessionGone: the turn's end).
         if (isCancellation(err) || interrupted !== undefined || !movesWorker(err)) throw err
+        if (failureType(err) === PLACEMENT_MOVED && !patched(PLACEMENT_MOVED_PATCH)) throw err
         last = err
         // A kept home whose slots all run turns refused this one as it arrived (session_turn
         // re-reserves there, TurnHost.run): nothing ran, and its place was never this turn's, so
         // the move costs no placement. Only the first cycle's home is kept, so this happens once.
         if (kept && failureType(err) === NO_CAPACITY && patched(FULL_HOME_PATCH)) placements++
-        if (home && !lost.includes(home)) lost.push(home)
+        else if ((err instanceof ActivityFailure ? err.cause : err) instanceof TimeoutFailure) {
+          // A timeout (schedule-to-start, heartbeat) is what delivery loss looks like; a refusal
+          // (NoCapacity, ShuttingDown) is a live replica's answer, and the next is tried at once.
+          lostPlacements++
+          waitFirst = true
+        }
+        // A home cut off by another placement (PlacementMoved) answered and is alive: never steered away from.
+        if (home && !lost.includes(home) && failureType(err) !== PLACEMENT_MOVED) lost.push(home)
         home = undefined
         // `restarted` after a refusal too (a full home, NoCapacity): it only asks the next worker to
         // read the transcript, and the turn's message, not landed there, is sent as itself (§5.5).
         continuation = mergeRestarted(continuation)
       }
     }
-    return { status: 'failed', hostQueue: '', error: `the turn could not be placed on a worker: ${failureText(last)}` }
+    return { status: 'failed', hostQueue: '', error: `the turn could not be placed on a worker: ${lostWhy(last)} (${placements} tries); send the message again` }
   }
 
   /** acquire_worker on one replica's own session host queue, with no exclusion: its place there, or its refusal. */
@@ -471,22 +742,86 @@ export async function AgentSession(started: SessionStart): Promise<void> {
     return { kind: 'parked', calls: known.map((rid) => ({ requestId: rid, ...parkedCalls.get(rid)!, resolution: resolutions.get(rid)! })) }
   }
 
-  async function closeTurn(current: TurnStart, result: TurnEnd): Promise<void> {
+  /**
+   * Writes the turn's end. With a queue, its head is started in the same transaction (#6386):
+   * its message is returned when it did, and the head leaves the queue when it started or was
+   * dropped. A head the row is not free for stays (the loop starts it once it is).
+   */
+  async function closeTurn(current: TurnStart, result: TurnEnd): Promise<Message | undefined> {
     const reason = interrupted ?? THE_TURN_ENDED
     parkedCalls.clear()
     await gate.cancelAll(reason)
     await gate.settle(reason)
     // Once this is written the row is idle, and a send may come before it returns.
     closing = true
-    await finish[SESSION_FINISH_ACTIVITY]!({
-      sessionId: start.session_id,
-      turnId: current.turn_id,
-      outcome: result.outcome,
-      ...(result.message !== undefined ? { message: result.message } : {}),
-      ...(result.code !== undefined ? { code: result.code } : {}),
-      ...(result.tail ? { tail: result.tail } : {}),
-    } satisfies FinishTurnInput)
+    const next = !ended && queue.length > 0 && patched(QUEUE_PATCH) ? queue[0] : undefined
+    starting = next?.turn_id
+    let answer: unknown
+    try {
+      answer = await finish[SESSION_FINISH_ACTIVITY]!({
+        sessionId: start.session_id,
+        turnId: current.turn_id,
+        outcome: result.outcome,
+        ...(result.message !== undefined ? { message: result.message } : {}),
+        ...(result.code !== undefined ? { code: result.code } : {}),
+        ...(result.tail ? { tail: result.tail } : {}),
+        ...(next ? { next } : {}),
+      } satisfies FinishTurnInput)
+    } finally {
+      starting = undefined
+    }
+    if (!next) return undefined
+    // A worker of an older build answers a bare boolean: it started nothing, and the loop starts the head.
+    const outcome = typeof answer === 'object' && answer !== null ? (answer as FinishTurnResult).next : undefined
+    return leaveQueue(next, outcome)
   }
+
+  /** The head after its claim: out of the queue once it started or was dropped; its message when it started. */
+  function leaveQueue(next: QueuedMessage, outcome: BeginOutcome | undefined): Message | undefined {
+    if (outcome !== 'started' && outcome !== 'dropped') return undefined
+    const at = queue.findIndex((q) => q.turn_id === next.turn_id)
+    if (at >= 0) queue.splice(at, 1)
+    if (outcome === 'dropped') leftUnrun([next])
+    leave(next.turn_id)
+    changed()
+    return outcome === 'started' ? queuedTurnMessage(next) : undefined
+  }
+
+  /**
+   * Starts the queue's head while no turn runs (#6386): its message once the row is its turn's.
+   * Undefined when it was dropped, or the row runs another turn (a send that claimed it meanwhile,
+   * whose message runs first, or a lost turn the sweep ends): the head waits, and is asked again.
+   */
+  async function beginQueued(): Promise<Message | undefined> {
+    const next = queue[0]!
+    starting = next.turn_id
+    let outcome: BeginOutcome
+    try {
+      outcome = (await finish[SESSION_BEGIN_TURN_ACTIVITY]!({ sessionId: start.session_id, next } satisfies BeginTurnInput)) as BeginOutcome
+    } finally {
+      starting = undefined
+    }
+    if (outcome === 'busy') {
+      const wait = Math.min(BEGIN_RETRY_MS * 2 ** beginWaits, BEGIN_RETRY_MAX_MS)
+      beginWaits++
+      await condition(() => message !== undefined || ended || queue[0] !== next, wait)
+      return undefined
+    }
+    beginWaits = 0
+    return leaveQueue(next, outcome)
+  }
+
+  /** `end`: the messages still waiting go with the session. */
+  function dropQueue(): void {
+    if (queue.length === 0) return
+    leave(...queue.map((q) => q.turn_id))
+    leftUnrun(queue)
+    queue.length = 0
+    changed()
+  }
+
+  /** Every handler finished and every queue change written: what a run waits for before it ends. */
+  const settled = (): boolean => allHandlersFinished() && publishing === undefined
 
   let continuation: Continuation | undefined = start.continuation ?? undefined
   for (;;) {
@@ -494,9 +829,20 @@ export async function AgentSession(started: SessionStart): Promise<void> {
       // A turn handed over by continue-as-new: its message was sent already.
       continuation ??= { kind: 'restarted' }
     } else {
-      await condition(() => message !== undefined || ended)
+      await condition(() => message !== undefined || ended || queue.length > 0)
+      if (message === undefined && !ended && queue.length > 0 && patched(QUEUE_PATCH)) {
+        const begun = await beginQueued()
+        if (begun) {
+          message = begun
+          inTurn = true
+        }
+        if (message === undefined) continue
+      }
       if (message === undefined) {
         await releaseHome()
+        // Marked done: the messages still waiting go with it.
+        dropQueue()
+        await condition(() => publishing === undefined)
         return
       }
       turn = {
@@ -510,32 +856,50 @@ export async function AgentSession(started: SessionStart): Promise<void> {
       }
     }
     const current = turn
-    await closeTurn(current, await runTurn(current, continuation))
+    // The queue's head, when the turn's end started it: its row is claimed, so no send took it meanwhile.
+    const fromQueue = await closeTurn(current, await runTurn(current, continuation))
     turn = undefined
     continuation = undefined
     interrupted = interruptNext ? INTERRUPTED : undefined
     interruptNext = false
     closing = false
+    if (fromQueue) message = fromQueue
     // A message taken while the turn closed is the next turn's (it runs below, before an `end`).
     inTurn = message !== undefined
     if (ended && message === undefined) {
       await releaseHome()
-      await condition(allHandlersFinished)
+      dropQueue()
+      await condition(settled)
       return
     }
-    if (message === undefined) {
-      await condition(allHandlersFinished)
+    if (message === undefined || fromQueue) {
+      await condition(settled)
       // An `end` while the handlers finished: the session ends here, never in a new run.
       if (message === undefined && ended && patched(END_WHILE_FINISHING_PATCH)) {
         await releaseHome()
-        await condition(allHandlersFinished)
+        dropQueue()
+        await condition(settled)
         return
       }
-      if (message === undefined) {
+      // A queued turn runs in a run of its own, as a sent one does, unless an `end` came (it runs here, then the session ends).
+      if (message === undefined || (fromQueue && !ended)) {
         const next: SessionStart = { ...start, ...(home ? { host_queue: home } : {}) }
         delete next.turn
         delete next.interrupted
         delete next.continuation
+        delete next.queue
+        delete next.queue_version
+        delete next.queue_left
+        delete next.queue_unrun
+        delete next.message
+        if (queueVersion > 0) Object.assign(next, { queue: [...queue], queue_version: queueVersion })
+        if (left.length > 0) next.queue_left = [...left]
+        if (unrun.length > 0) next.queue_unrun = [...unrun]
+        if (message !== undefined) {
+          next.message = message
+          // A Stop since the turn's end is for that message's turn.
+          if (interrupted !== undefined) next.interrupted = interrupted
+        }
         await continueAsNew<typeof AgentSession>(next)
       }
     }

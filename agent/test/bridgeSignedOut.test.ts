@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import type { UpgradeWebSocket, WSContext, WSEvents } from 'hono/ws'
 import type { Sql } from 'postgres'
 import { describe, expect, it } from 'vitest'
-import { BrowserSessions, CACHE_MS, personSessions, SESSION_COOKIE, sessionIdHash } from '../src/auth/browserSession.js'
+import { BrowserSessions, CACHE_MS, PgSessionLookup, personSessions, SESSION_COOKIE, sessionIdHash } from '../src/auth/browserSession.js'
 import { TabHub } from '../src/bridge/hub.js'
 import { LINK_PROTOCOL_VERSION } from '../src/bridge/protocol.js'
 import type { AuthMode } from '../src/config.js'
@@ -27,7 +27,7 @@ async function openTab(mode: AuthMode) {
   let failing = false
   let now = 0
   const sql = (() => (failing ? Promise.reject(new Error('down')) : Promise.resolve(rows))) as unknown as Sql
-  const browserSessions = new BrowserSessions(sql, () => now)
+  const browserSessions = new BrowserSessions(new PgSessionLookup(sql), () => now)
   const bus = new MemoryEventSource()
   browserSessions.follow(bus)
   const tabs = new TabHub()

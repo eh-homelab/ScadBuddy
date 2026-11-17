@@ -8,6 +8,8 @@ import { contextFrom, withSpan } from '../telemetry/trace.js'
 import { type Tier, TIERS } from '../auth/principal.js'
 import { imageOfBlock, RESULT_IMAGES_MAX, type SessionImage } from '../sessions/blobs.js'
 import type { Owner } from '../sessions/protocol.js'
+import { PgSessionRows, type SessionRows } from '../sessions/rows.js'
+import { isUuid } from '../harness/stateDirs.js'
 import { withApprovalLine } from '../approvals/service.js'
 import {
   effectiveTool,
@@ -23,16 +25,17 @@ import {
   type ToolRun,
   type ToolServices,
 } from '../tools/registry.js'
+import type { ApprovalRoutes } from '../gate/crudPending.js'
 import { durableRequestId, flowRequestId, parseRequestId } from '../gate/ids.js'
 import { type ToolCallArgs, type ToolCallBlock, type ToolCallResult, toolCallActivity } from './toolCall.js'
 import { turnPrincipal } from '../tools/harness.js'
 import { FLOW_IMAGES_MAX, type FlowBlobStore, type FlowImage, flowImageOf } from './flowBlobs.js'
-import { type FlowRunReads, SqlFlowRunReads } from '../flows/backendReads.js'
+import type { FlowRunReads } from '../flows/backendReads.js'
 import { flowOf, type FlowRuns } from './flowRuns.js'
 import { FLOW_TOOL_TIER_ACTIVITY, flowToolTierActivity } from './flowTools.js'
 import { BUILTIN_TIER_ACTIVITY, builtinTier, TOOL_TIER_ACTIVITY, toolTierActivity } from './toolTier.js'
 import type { AccessResolver } from '../access/resolver.js'
-import { type SessionFiles, withWorkspaceSize } from '../workspace/store.js'
+import { type WorkspaceFiles, withWorkspaceSize } from '../workspace/store.js'
 
 // Every tool as an activity on `agent-tools` (spec 2026-10-01 §6.3, #1055), registered
 // under the tool's name, which is how the durable worker's `activity_as_tool` stubs
@@ -62,31 +65,32 @@ export interface SessionOwners {
   ownerOf(sessionId: string): Promise<(Owner & { turnTiers?: readonly Tier[] | null; turnId?: string | null }) | undefined>
 }
 
-export class PgSessionOwners implements SessionOwners {
-  private readonly sql: Sql
+/** A session's owner from its row (sessions/rows.ts `SessionRows.get`, `gated` in main.ts). */
+export class RowSessionOwners implements SessionOwners {
+  readonly #rows: Pick<SessionRows, 'get'>
 
-  constructor(sql: Sql) {
-    this.sql = sql
+  constructor(rows: Pick<SessionRows, 'get'>) {
+    this.#rows = rows
   }
 
   async ownerOf(sessionId: string): Promise<(Owner & { turnTiers: readonly Tier[] | null; turnId: string | null }) | undefined> {
-    const [row] = await this.sql<
-      {
-        owner_kind: Owner['kind']
-        owner_id: string
-        owner_label: string
-        turn_tiers: { by?: { kind?: string; id?: string }; tiers?: unknown } | null
-        durable_turn_id: string | null
-      }[]
-    >`
-      SELECT owner_kind, owner_id, owner_label, turn_tiers, durable_turn_id FROM ai_sessions WHERE id = ${sessionId}`
+    // An id that is no UUID throws, as the SQL's uuid cast did.
+    if (!isUuid(sessionId)) throw new Error(`session ${JSON.stringify(sessionId)} is not a session id`)
+    const row = await this.#rows.get(sessionId)
     if (!row) return undefined
     // Only the sender's own tiers, while it still owns the session (a handoff since
     // leaves the new owner its default), and only tiers there are.
-    const sent = row.turn_tiers
+    const sent = row.turn_tiers as { by?: { kind?: string; id?: string }; tiers?: unknown } | null
     const mine = sent?.by?.kind === row.owner_kind && sent.by.id === row.owner_id && Array.isArray(sent.tiers)
     const turnTiers = mine ? TIERS.filter((t) => (sent.tiers as unknown[]).includes(t)) : null
     return { kind: row.owner_kind, id: row.owner_id, label: row.owner_label, turnTiers, turnId: row.durable_turn_id }
+  }
+}
+
+/** `RowSessionOwners` on the session rows' SQL (tests, and a process with no API). */
+export class PgSessionOwners extends RowSessionOwners {
+  constructor(sql: Sql) {
+    super(new PgSessionRows(sql))
   }
 }
 
@@ -118,11 +122,17 @@ type Responder = { kind?: unknown; id?: unknown }
 export class PgApprovalRecords implements ApprovalRecords {
   readonly #sql: Sql
   readonly #grants: Pick<FlowRunReads, 'grantInForce'>
+  readonly #routes: { crud: ApprovalRoutes; use: () => boolean } | undefined
 
-  /** `grants`: the backend's `flow_grants` (flows/backendReads.ts, #5299 D7); its SQL on `sql` by default. */
-  constructor(sql: Sql, grants?: Pick<FlowRunReads, 'grantInForce'>) {
+  /**
+   * `grants`: the backend's `flow_grants`, through its CRUD routes (flows/backendReads.ts, #5299 D7).
+   * `routes`: the API's `pending-input` routes (gate/crudPending.ts, #5299 step 10), which the
+   * approval's read takes while `use()` holds; SQL otherwise.
+   */
+  constructor(sql: Sql, grants: Pick<FlowRunReads, 'grantInForce'>, routes?: { crud: ApprovalRoutes; use: () => boolean }) {
     this.#sql = sql
-    this.#grants = grants ?? new SqlFlowRunReads(sql)
+    this.#grants = grants
+    this.#routes = routes
   }
 
   async approved(requestId: string, call?: ApprovalBinding): Promise<boolean> {
@@ -137,6 +147,7 @@ export class PgApprovalRecords implements ApprovalRecords {
 
   async byPerson(requestId: string, call?: ApprovalBinding): Promise<boolean> {
     if (call === undefined) return false
+    if (this.#routes?.use()) return (await this.#routes.crud.approval(requestId, call.inputHash))?.kind === 'browser'
     const rows = await this.#sql`
       SELECT 1 FROM ai_input_responses r
       JOIN ai_audit a ON a.request_id = r.request_id AND a.kind = 'approval' AND a.action = 'approved'
@@ -149,7 +160,9 @@ export class PgApprovalRecords implements ApprovalRecords {
   async #approval(requestId: string, call?: ApprovalBinding): Promise<string | null | undefined> {
     // Without the call's hash nothing can be matched, so nothing is approved.
     if (call === undefined) return undefined
-    const [row] = await this.#sql<{ responder: Responder }[]>`
+    const [row] = this.#routes?.use()
+      ? await this.#routes.crud.approval(requestId, call.inputHash).then((responder) => (responder ? [{ responder }] : []))
+      : await this.#sql<{ responder: Responder }[]>`
       SELECT r.responder FROM ai_input_responses r
       JOIN ai_audit a ON a.request_id = r.request_id AND a.kind = 'approval' AND a.action = 'approved'
       WHERE r.request_id = ${requestId} AND r.kind = 'approval' AND r.outcome = 'approved'
@@ -506,6 +519,10 @@ async function runCall(
     flow,
     signal: context.cancellationSignal,
     heartbeat: (details) => context.heartbeat(details),
+    // The gate's request id is the same on every attempt of this activity, so each attempt keys
+    // its commands alike and a retry is answered from the first's operation (#6345); a fresh key
+    // per attempt made a second attempt a second operation.
+    callKey: caller.requestId,
     span,
   })
   if (context.cancellationSignal.aborted || run.outcome !== 'ok') span?.setAttribute('scadbuddy.outcome', run.outcome)
@@ -598,8 +615,10 @@ async function runGated(
   // `printer_id`, or null for a row only the LAN reaches), which the backend binds a person's
   // approval to (flows/print_binding.py, #4445): a printer re-linked since hashes otherwise.
   //
-  // Its activity runs once (a gated call is never retried), so a backend away or rate-limiting
-  // is tried again here, within the one approval: safe, since nothing is checked or sent before
+  // Its activity runs once (Temporal never retries a gated call; only a flow's keyed call whose
+  // one attempt lost its heartbeat is asked once more, by the flow's workflow, with its commands
+  // keyed on the request id: backend workflows/flow_tools.py FLOW_KEYED_RETRY_PATCH, #6345), so a
+  // backend away or rate-limiting is tried again here, within the one approval: safe, since nothing is checked or sent before
   // the read succeeds, and the approval is then checked against what that read resolved. Still
   // away after the last try, the call fails closed and is audited, and the model is told the
   // approval was spent, so it asks again and a person approves again.
@@ -936,7 +955,7 @@ export const DESCRIBE_CALL_ACTIVITY = 'gate.describe_call'
  */
 export function gateActivities(
   deps: Pick<ToolActivityDeps, 'audit' | 'sessions' | 'currentTiers'> & {
-    workspace?: SessionFiles | undefined
+    workspace?: WorkspaceFiles | undefined
     /**
      * The tools whose own `prepareApproval` decides what a call parks (#4442), and the
      * services it reads with, as the session's owner. Without them, every call parks as sent.

@@ -59,6 +59,12 @@ export const libraryFileId = z
 /** The two sources a print tool takes, exactly one of them per call. */
 export const sourceShape = { output_id: outputId.optional(), library_file_id: libraryFileId.optional() }
 
+/**
+ * #6395 — the backend's `print_library/associations.py` `RELATIONS`, which is the one list;
+ * `test/libraryAssociations.test.ts` fails when this copy differs from the API's spec.
+ */
+export const ASSOCIATION_RELATIONS = ['output_of', 'variant_of', 'source_of', 'related_to'] as const
+
 export const ONE_SOURCE = 'name one source: output_id or library_file_id'
 
 /** A print tool's input: `shape` plus its source, refused at parse time unless it names exactly one. */
@@ -110,16 +116,21 @@ function towerPhrase(tower: { enabled: boolean; no_sparse_layers?: boolean } | u
   )
 }
 
-/** #4673 — the supports, prime tower and print sequence a quote or an item's print names, in its line. */
+/**
+ * #4673 — the supports, prime tower and print sequence a quote or an item's print names, in its
+ * line; #2998: and its process overrides.
+ */
 export function setupPhrase(args: {
   supports?: { enabled: boolean; type?: string; threshold_angle?: number; on_build_plate_only?: boolean } | undefined
   prime_tower?: { enabled: boolean; no_sparse_layers?: boolean } | undefined
   print_sequence?: string | undefined
+  process_overrides?: Record<string, unknown> | undefined
 }): string {
   return (
     supportsPhrase(args.supports) +
     towerPhrase(args.prime_tower) +
-    (args.print_sequence === undefined ? '' : `, printed ${args.print_sequence}`)
+    (args.print_sequence === undefined ? '' : `, printed ${args.print_sequence}`) +
+    processOverridesPhrase(args.process_overrides)
   )
 }
 
@@ -309,49 +320,72 @@ export const printPath = z
   )
 
 /**
- * `PrintRunRequest.part_settings` (#5571): Bambu Studio process settings for the parts of one
- * filament slot, written into the laid-out 3MF as per-part overrides. The bounds are the
- * backend's (`bambuddy/part_settings.py`, from Bambu Studio's PrintConfig.cpp).
+ * #2998 — one Bambu Studio setting's value: a string, a number or a boolean (sent as Bambu's
+ * "1"/"0"), or a list of them for a per-extruder option. No key or value is refused before
+ * the slice: the slicer judges it (`backend/scadbuddy/bambuddy/process_overrides.py`).
  */
-const shellLayers = z.number().int().min(0).max(1000)
+const settingScalar = z.union([z.string(), z.number(), z.boolean()])
+export const settingValue = z.union([settingScalar, z.array(settingScalar)])
+
+/**
+ * `PrintRunRequest.part_settings` (#5571): Bambu Studio process settings for the parts of one
+ * filament slot, written into the laid-out 3MF as per-part overrides. Any key (#2998): the
+ * backend's `PartSettings` keeps every key sent, with no allowlist or range check.
+ */
 const SLOT_KEY = /^[1-9][0-9]*$/
 export const partSettings = z
   .object({})
-  .catchall(
-    z
-      .object({
-        top_shell_layers: shellLayers.optional(),
-        bottom_shell_layers: shellLayers.optional(),
-        wall_loops: shellLayers.optional(),
-        sparse_infill_density: z.number().int().min(0).max(100).optional().describe('Percent'),
-        sparse_infill_pattern: z
-          .enum([
-            'concentric', 'zig-zag', 'grid', 'line', 'cubic', 'triangles', 'tri-hexagon', 'gyroid', 'honeycomb',
-            'adaptivecubic', 'alignedrectilinear', '3dhoneycomb', 'hilbertcurve', 'archimedeanchords',
-            'octagramspiral', 'supportcubic', 'lightning', 'crosshatch', 'zigzag', 'crosszag', 'lockedzag', '2dlattice',
-          ])
-          .optional()
-          .describe("Bambu Studio's names: 'zig-zag' is Rectilinear"),
-        ironing_type: z.enum(['no ironing', 'top', 'topmost', 'solid']).optional(),
-      })
-      .strict(),
-  )
-  // A slot id from 1, as the backend's `SlotId` (1-64); `catchall`, not `z.record`, as
-  // `params` in common.ts says, so the key is checked here.
+  // `catchall`, not `z.record`, as `params` in common.ts says, so the key is checked here.
+  .catchall(z.object({}).catchall(settingValue))
+  // A slot id from 1, as the backend's `SlotId` (1-64).
   .refine((slots) => Object.keys(slots).every((slot) => SLOT_KEY.test(slot) && Number(slot) <= 64), {
     message: 'part_settings is keyed by slot id, a whole number from 1 to 64 (as filament_plan numbers slots)',
   })
   .optional()
   .describe(
     'Slicer settings for the parts of one filament slot (#5571), keyed by slot id (from 1, as `filament_plan`), ' +
-      'e.g. {"2": {"top_shell_layers": 8}} for 8 top layers on slot 2\'s parts only. Each omitted setting is the ' +
-      "process's. An output and a library file take them; a library file's slot is the filament its author gave the " +
-      "part, and a setting replaces the part's own value for that key. A slot no printed part of the file is made in " +
-      '(one only painted on faces among them), an unknown key or a value out of range is refused (422). A painted ' +
-      'part takes the settings of the slot it is made in, not of its painted faces. A sliced file, a file that ' +
-      "prints as it is (another slicer's, past the size caps, or with no 3MF to lay out), or one whose parts' " +
-      'settings file (Metadata/model_settings.config) cannot be read or written takes none (422).',
+      'e.g. {"2": {"top_shell_layers": 8}} for 8 top layers on slot 2\'s parts only. Any Bambu Studio process key ' +
+      'is accepted, with no allowlist, except the host-side ones (post_process, print_host*), which are dropped (#2998): e.g. top_shell_layers, wall_loops, sparse_infill_density (a number ' +
+      "is a percent), sparse_infill_pattern, ironing_type; the slicer judges each key and value. Each omitted " +
+      "setting is the process's. An output and a library file take them; a library file's slot is the filament its " +
+      "author gave the part, and a setting replaces the part's own value for that key. A slot no printed part of the " +
+      'file is made in (one only painted on faces among them) is refused (422). A painted part takes the settings of ' +
+      'the slot it is made in, not of its painted faces. A sliced file, a file that prints as it is (another ' +
+      "slicer's, past the size caps, or with no 3MF to lay out), or one whose parts' settings file " +
+      '(Metadata/model_settings.config) cannot be read or written takes none (422).',
   )
+
+/**
+ * #2998 — `PrintRunRequest.process_overrides`: any Bambu Studio process setting for the whole
+ * print, `{key: value}`. Also a slice quote's, an item print's and a remembered choice's.
+ */
+export const processOverrides = z
+  .object({})
+  // `catchall`, not `z.record`: see `params` in common.ts.
+  .catchall(settingValue)
+  .refine((settings) => Object.keys(settings).every((key) => key.length > 0), {
+    message: 'process_overrides keys are Bambu Studio process keys, never empty',
+  })
+  .optional()
+  .describe(
+    'Any Bambu Studio process settings for this print (#2998), as {key: value}, e.g. ' +
+      '{"skirt_loops": 0, "enable_prime_tower": false, "wall_loops": 3}. Every key is accepted, with no ' +
+      'allowlist; a boolean is sent as Bambu\'s "1"/"0", a list sets each extruder variant. The slicer judges ' +
+      'each key and value: a key the process preset has no value for is a warning (process-override-unchecked), ' +
+      "and a slice the slicer refuses over one comes back as a 422 naming the key. These win over the template's " +
+      'defaults and over prime_tower, supports and print_sequence. Only the settings that act on the machine ' +
+      'that slices are dropped, with a host-setting-dropped warning: post_process, filename_format, ' +
+      "bed_custom_texture, bed_custom_model and the print host's (print_host*, printhost_*, host_type); " +
+      "custom G-code (*_gcode) goes. get_process_values lists the resolved process's keys and the value each " +
+      'prints with.',
+  )
+
+/** `process_overrides`' phrase in an approval line. */
+export function processOverridesPhrase(settings: Record<string, unknown> | undefined): string {
+  const entries = Object.entries(settings ?? {})
+  if (entries.length === 0) return ''
+  return `, with slicer settings ${entries.map(([key, value]) => `${key}=${JSON.stringify(value)}`).join(', ')}`
+}
 
 /** `part_settings`' phrase in an approval line. */
 export function partSettingsPhrase(settings: Record<string, Record<string, unknown>> | undefined): string {
@@ -371,6 +405,11 @@ export function partSettingsPhrase(settings: Record<string, Record<string, unkno
 }
 
 export const slotChoice = z.object({ slot_id: z.number().int(), spool_id: z.number().int() })
+/** A plan's `ids` (#6262 Task 7): its positive spool ids are ScadBuddy spool numbers, as get_print_filaments lists them. */
+export const sbPlanIds = z
+  .literal('sb')
+  .default('sb')
+  .describe('What the spool ids name: ScadBuddy spool numbers (get_print_filaments), always "sb"')
 export const presetRef = z.object({
   source: z.enum(['orca_cloud', 'cloud', 'local', 'standard']),
   id: z.string().min(1),
@@ -505,6 +544,7 @@ const PRINT_OUTPUT_INPUT = withSource({
   supports: supportsChoice,
   prime_tower: primeTowerChoice,
   part_settings: partSettings,
+  process_overrides: processOverrides,
   accepted_fixes: z
     .array(z.string().regex(/^[0-9a-f]{32}$/))
     .max(32)
@@ -597,6 +637,7 @@ function printSummary(args: PrintOutputArgs, printerName?: string, lan = false):
     `${supportsPhrase(args.supports)}` +
     `${towerPhrase(args.prime_tower)}` +
     `${partSettingsPhrase(args.part_settings)}` +
+    `${processOverridesPhrase(args.process_overrides)}` +
     `${args.accepted_fixes?.length ? `, applying ${args.accepted_fixes.length} accepted analyzer fix${args.accepted_fixes.length === 1 ? '' : 'es'} (${args.accepted_fixes.join(', ')})` : ''}` +
     `${defaulted ? ' (other choices as the print dialog opens)' : ''}`
   )
@@ -662,10 +703,47 @@ export const printTools: Tool[] = [
   }),
 
   defineTool({
+    name: 'get_process_values',
+    label: "Read a print's slicer settings",
+    description:
+      'Every value of the Bambu Studio process preset these print choices resolve to (#2998): each key and the ' +
+      'value it prints with when nothing overrides it, flattened over the preset\'s inherits chain. These are ' +
+      "the keys print_output's `process_overrides` (and part_settings, order_item_quote, remember_model_print_choices) " +
+      'most often set, but any other Bambu Studio key is accepted too: the slicer judges it. `resolved: false` ' +
+      'with a `reason` when the values could not be read. Labels and sections are not given: Bambu Studio keeps ' +
+      'its option definitions in its binary.',
+    input: z.object({
+      nozzles: nozzles.optional().describe('As print_output takes them; omit for 0.4 mm standard'),
+      tier: tier.optional().describe("Omit for 'standard'"),
+      process_name: z.string().max(200).optional().describe('A Bambu process by name, in place of `tier`'),
+    }),
+    risk: 'read',
+    source: "Bambu Studio's process presets, from Bambuddy or the image's profiles",
+    bambuddyScope: ['Manage Library'],
+    routes: ['POST /api/v1/print/process-values'],
+    handler: async ({ nozzles: chosen, tier: chosenTier, process_name }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/print/process-values', {
+            body: {
+              choices: {
+                nozzles: chosen ?? DEFAULT_NOZZLES,
+                tier: process_name === undefined ? (chosenTier ?? 'standard') : null,
+                process_name: process_name ?? null,
+              },
+            } as never,
+          }),
+          'read the process preset values',
+        ),
+      ),
+  }),
+
+  defineTool({
     name: 'get_print_filaments',
     label: "Read the print dialog's filaments",
     description:
-      "Bambuddy's spool inventory joined to where each spool is loaded and, with `printer_id`, the " +
+      "ScadBuddy's spools, each by its number (`spool_id`, what `filament_plan` names), joined to the tray it " +
+      "is loaded in (a printer's report, else Bambuddy's assignment of its linked spool) and, with `printer_id`, the " +
       'remaining grams per slot and the mounted nozzles — plus what this output\'s (or library file\'s) plate ' +
       '(or, with `all_plates`, every plate) needs and a suggested spool per slot.',
     input: withSource({
@@ -674,7 +752,7 @@ export const printTools: Tool[] = [
         .optional()
         .describe(
           "A registry printer's `id` (list_printers): on a printer a run reaches over the LAN the spools are " +
-            "its loaded trays, each a negative `spool_id`, with the spool providers' records over them.",
+            "its loaded trays, each a negative `spool_id`, with the ScadBuddy spool it holds (`sb_spool_id`, `sb_number`).",
         ),
       plate_id: z.number().int().min(1).optional(),
       all_plates: z.boolean().optional(),
@@ -1241,6 +1319,111 @@ export const printTools: Tool[] = [
       ),
   }),
 
+  // #6395 — a native library file's associations with a model or another file. ScadBuddy's
+  // own records, re-settable: `write`, as remember_model_print_choices is.
+  defineTool({
+    name: 'associate_library_file',
+    label: 'Associate a library file',
+    description:
+      "Record how a file in ScadBuddy's own library relates to a model or to another library file, said from the " +
+      "file's side: the file is an `output_of` the target (a fixed or scaled copy of a model's print), a `variant_of` " +
+      'it (a PETG-supports copy of another file), the `source_of` it, or `related_to` it (instructions for a model). ' +
+      '`target` is `model:<slug>` (the model must exist) or `library:<file id>` (a live file of the native library). ' +
+      'The same file, target and relation again keeps the association and replaces its note. To associate any other ' +
+      '3MF, upload it with upload_library_file first. Only on library_backend=native.',
+    input: z.object({
+      file_id: libraryFileId.describe("A native library file's `id` (list_library)"),
+      target: z
+        .string()
+        .regex(/^(model:(builtin:)?[a-z0-9][a-z0-9-]*|library:[1-9][0-9]*)$/, 'must be model:<slug> or library:<file id>')
+        .max(200)
+        .describe('`model:<slug>` or `library:<file id>`'),
+      relation: z.enum(ASSOCIATION_RELATIONS),
+      note: z.string().max(500).optional(),
+    }),
+    risk: 'write',
+    routes: ['POST /api/v1/print/library/{file_id}/associations'],
+    summarize: ({ file_id, target, relation }) => `Associate library file ${file_id}: ${relation} ${target}`,
+    handler: async ({ file_id, target, relation, note }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/print/library/{file_id}/associations', {
+            params: { path: { file_id } },
+            body: { target, relation, note: note ?? '' },
+          }),
+          `associate library file ${file_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'list_associations',
+    label: 'List associations',
+    description:
+      "What a native library file (`file_id`) or a model (`slug`) is associated with. A file's list has its own " +
+      'associations and those of other files naming it as their target; a model\'s has the files naming it. Each ' +
+      "`relation` is said from `library_file_id`'s side (that file is an `output_of` the `target`). An implied one " +
+      "(`id` null, `implied_by` set) is read live and cannot be removed: a model made from the file (its mesh source) " +
+      "lists the file as `source_of` it, and a copy of a model's output as `output_of` it. Empty on Bambuddy's library." +
+      PAGED,
+    input: z
+      .object({
+        file_id: libraryFileId.optional().describe("A native library file's `id` (list_library)"),
+        slug: slug.optional(),
+        ...pageInput,
+      })
+      .refine((o) => (o.file_id === undefined) !== (o.slug === undefined), { message: 'name one: file_id or slug' }),
+    risk: 'read',
+    source: 'library file names, model names and notes that anyone with access to ScadBuddy can write',
+    routes: ['GET /api/v1/print/library/{file_id}/associations', 'GET /api/v1/models/{slug}/associations'],
+    handler: async (args, { backend }) => {
+      const { file_id, slug: model } = args
+      let found
+      if (file_id !== undefined) {
+        found = await ok(
+          backend.GET('/api/v1/print/library/{file_id}/associations', { params: { path: { file_id } } }),
+          `list library file ${file_id}'s associations`,
+        )
+      } else if (model !== undefined) {
+        found = await ok(
+          backend.GET('/api/v1/models/{slug}/associations', { params: { path: { slug: model } } }),
+          `list model ${model}'s associations`,
+        )
+      } else {
+        throw new ToolError('name one: file_id or slug')
+      }
+      // An implied one has no id: what it is read from, its file and its target name it.
+      const { items, ...rest } = page(
+        found.associations,
+        args,
+        (a) => a.id ?? `${a.implied_by}:${a.library_file_id}:${a.target}:${a.relation}`,
+        'list_associations',
+      )
+      return json({ associations: items, ...rest })
+    },
+  }),
+
+  defineTool({
+    name: 'remove_association',
+    label: 'Remove an association',
+    description:
+      "Remove a stored association of a native library file, by the `id` list_associations gives it. An implied one " +
+      '(`id` null) cannot be removed. associate_library_file adds it again.',
+    input: z.object({ association_id: z.string().uuid().describe('An association `id` from list_associations') }),
+    risk: 'write',
+    routes: ['DELETE /api/v1/print/library/associations/{association_id}'],
+    summarize: ({ association_id }) => `Remove association ${association_id}`,
+    handler: async ({ association_id }, { backend }) => {
+      await ok(
+        backend.DELETE('/api/v1/print/library/associations/{association_id}', {
+          params: { path: { association_id } },
+        }),
+        `remove association ${association_id}`,
+      )
+      return json({ removed: association_id })
+    },
+  }),
+
   // ── write: preferences the print dialog remembers (ScadBuddy-local, re-settable) ──
   defineTool({
     name: 'remember_model_print_choices',
@@ -1248,8 +1431,9 @@ export const printTools: Tool[] = [
     description:
       "Remember what a model's (or a Bambuddy library file's, `library_file_id`) print dialog opens on next " +
       'time: the printer, per-slot spools, nozzles, the quality tier or named process, the print sequence, and ' +
-      'the slicer settings per filament slot (`part_settings`, #5627), and whether Bambuddy\'s queue waits for ' +
-      'each slot\'s colour (`force_colour_match`, #6218; nothing remembered is on). Replaces the entry whole: an omitted ' +
+      'the slicer settings per filament slot (`part_settings`, #5627), whether Bambuddy\'s queue waits for ' +
+      'each slot\'s colour (`force_colour_match`, #6218; nothing remembered is on), and any Bambu Studio ' +
+      'process settings (`process_overrides`, #2998: every key accepted, the slicer judges it). Replaces the entry whole: an omitted ' +
       'part is forgotten, and passing nothing forgets them all (get_print_choices shows the current ' +
       '`model_choices`). Settings per slot are kept per model or library file only, never by set_print_options: ' +
       "a slot number names one file's colour.",
@@ -1279,6 +1463,11 @@ export const printTools: Tool[] = [
           .nullable()
           .optional()
           .describe("Whether Bambuddy's queue waits for a tray of each slot's colour (#6218); omit or null for the default, on"),
+        process_overrides: processOverrides.describe(
+          'Any Bambu Studio process settings the dialog opens on (#2998), as {key: value}: every key but the host-side ones is accepted, ' +
+            "with no allowlist, and the slicer judges it when the print slices; they win over the template's defaults " +
+            'and over the prime tower, supports and print sequence. Omit to forget them.',
+        ),
       })
       .refine((o) => (o.slug === undefined) !== (o.library_file_id === undefined), {
         message: 'name one: slug or library_file_id',
@@ -1298,6 +1487,7 @@ export const printTools: Tool[] = [
         print_sequence,
         part_settings,
         force_colour_match,
+        process_overrides,
       },
       { backend },
     ) => {
@@ -1311,6 +1501,7 @@ export const printTools: Tool[] = [
         print_sequence: print_sequence ?? null,
         part_settings: part_settings ?? null,
         force_colour_match: force_colour_match ?? null,
+        process_overrides: process_overrides ?? null,
       }
       if (library_file_id !== undefined) {
         return json(
@@ -1577,7 +1768,7 @@ export const printTools: Tool[] = [
         copies: args.copies ?? null,
         plate_id: args.plate_id,
         all_plates: args.all_plates,
-        filament_plan: { slots, force_colour_match: forceColourMatch ?? true },
+        filament_plan: { slots, force_colour_match: forceColourMatch ?? true, ids: 'sb' as const },
         choices: {
           nozzles: chosenNozzles,
           tier: chosenTier ?? null,
@@ -1616,6 +1807,8 @@ export const printTools: Tool[] = [
         // As given: the backend drops No sparse layers with the tower off (#3648 review).
         ...(args.prime_tower === undefined ? {} : { prime_tower: args.prime_tower }),
         ...(args.part_settings === undefined ? {} : { part_settings: args.part_settings }),
+        // #2998: any process setting, as given; the backend keeps it in Bambu's shape.
+        ...(args.process_overrides === undefined ? {} : { process_overrides: args.process_overrides }),
         ...(args.accepted_fixes?.length ? { accepted_fixes: args.accepted_fixes } : {}),
         request_id: requestId,
       }
@@ -1671,6 +1864,7 @@ export const printTools: Tool[] = [
     risk: 'outward',
     bambuddyScope: ['Manage Projects', 'Manage Library'],
     routes: ['POST /api/v1/print/projects'],
+    keyed: true,
     summarize: ({ name, project_id }) =>
       project_id !== undefined ? `Link Bambuddy project ${project_id}` : `Create the Bambuddy project "${name ?? ''}"`,
     handler: async (args, ctx) =>

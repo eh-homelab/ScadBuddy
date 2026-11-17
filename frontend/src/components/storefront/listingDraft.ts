@@ -19,8 +19,11 @@ export interface ListingDraft {
   fixed: Record<string, ParamValue>
   colours: string[]
   media_ids: string[]
-  /** Every colour of an order is of one material (#6152). */
-  one_material: boolean
+  /**
+   * The materials a print may be made of, first preferred; empty is the shop's default
+   * (`storefront_materials`, #6258). The editor's "Materials allowed" sets them.
+   */
+  materials: string[]
 }
 
 /** The schema's own hidden group: never shown to a customer, so never offered. */
@@ -30,7 +33,7 @@ export const MAX_TEXT_LENGTH = 200
 const NUMBERS: ReadonlySet<string> = new Set(['number', 'integer', 'slider'])
 
 export function emptyDraft(slug = '', commit = ''): ListingDraft {
-  return { slug, commit, title: '', description: '', params: {}, fixed: {}, colours: [], media_ids: [], one_material: false }
+  return { slug, commit, title: '', description: '', params: {}, fixed: {}, colours: [], media_ids: [], materials: [] }
 }
 
 export function draftOf(listing: StorefrontListing): ListingDraft {
@@ -43,8 +46,88 @@ export function draftOf(listing: StorefrontListing): ListingDraft {
     fixed: listing.fixed,
     colours: listing.colours,
     media_ids: listing.media_ids,
-    one_material: listing.one_material,
+    // A listing stored before #6258 has none: the shop's default.
+    materials: (listing.materials as string[] | undefined) ?? [],
   }
+}
+
+/** The most materials a list holds (backend `core/settings.py` `MAX_MATERIALS`). */
+export const MAX_MATERIALS = 16
+
+/**
+ * A material as publish compares it: trimmed, case aside (backend `inputs.py`
+ * `material_key`, which casefolds; a price book's materials are plain ASCII names).
+ */
+export function materialKey(material: string): string {
+  return material.trim().toLowerCase()
+}
+
+/**
+ * #6258 — the materials a print of `draft` may be made of, first preferred: its own, else
+ * the shop's default (backend `inputs.py` `effective_materials`). Null while the shop's
+ * default is not read yet.
+ */
+export function effectiveMaterials(draft: ListingDraft, shop: readonly string[] | undefined): string[] | null {
+  // A draft stored before #6258 has no `materials`: the shop's default.
+  const own = (draft.materials as string[] | undefined) ?? []
+  if (own.length > 0) return own
+  return shop ? [...shop] : null
+}
+
+/**
+ * #6258 — the materials of the price book a customer may be given: each once (case aside,
+ * the first spelling kept), never a support material (`customerFilaments`), by name.
+ */
+export function priceBookMaterials(filaments: readonly Filament[]): string[] {
+  const found = new Map<string, string>()
+  for (const filament of customerFilaments(filaments)) {
+    const material = filament.material.trim()
+    if (material && !found.has(materialKey(material))) found.set(materialKey(material), material)
+  }
+  return [...found.values()].sort((a, b) => a.localeCompare(b))
+}
+
+/** What publish refused about a listing's materials, shown beside the control it concerns (#6258). */
+export type ListingRefusal =
+  /** 422 `listing_material_not_allowed`: the filament `filament` is of a material the listing does not allow. */
+  | { kind: 'material_not_allowed'; filament: string; detail: string }
+  /** 422 `listing_locked_colours_unprintable`: no allowed material has every locked colour (`names`) and a choice of each offered one. */
+  | { kind: 'locked_colours_unprintable'; names: string[]; detail: string }
+  /**
+   * #6144, #6152 — a refusal about one parameter, `name`: 422 `listing_default_invalid` (it
+   * starts at a value its bounds do not allow), `listing_colour_unknown` (its colour, or the
+   * one it starts at, is no listing filament's) or `listing_support_offered` (it sets support,
+   * so it cannot be offered).
+   */
+  | { kind: 'param'; code: 'default_invalid' | 'colour_unknown' | 'support_offered'; name: string; detail: string }
+  /** 422 `listing_colour_unknown` naming no parameter: a filament on the listing is no longer in the price book. */
+  | { kind: 'filament_unknown'; detail: string }
+
+const PARAM_REFUSALS = ['default_invalid', 'colour_unknown', 'support_offered'] as const
+
+const STOREFRONT_PROBLEMS = 'https://scadbuddy.dev/problems/storefront/'
+
+/** The refusal `problem` is, when it is one of the `ListingRefusal`s; else null. */
+export function listingRefusal(problem: { type?: string; detail?: string; title: string; [extension: string]: unknown }): ListingRefusal | null {
+  const detail = problem.detail ?? problem.title
+  if (problem.type === `${STOREFRONT_PROBLEMS}listing_material_not_allowed` && typeof problem['name'] === 'string') {
+    return { kind: 'material_not_allowed', filament: problem['name'], detail }
+  }
+  if (problem.type === `${STOREFRONT_PROBLEMS}listing_locked_colours_unprintable`) {
+    const names = Array.isArray(problem['names']) ? problem['names'].filter((name): name is string => typeof name === 'string') : []
+    return { kind: 'locked_colours_unprintable', names, detail }
+  }
+  const code = PARAM_REFUSALS.find((slug) => problem.type === `${STOREFRONT_PROBLEMS}listing_${slug}`)
+  if (code !== undefined && typeof problem['name'] === 'string') return { kind: 'param', code, name: problem['name'], detail }
+  if (code === 'colour_unknown') return { kind: 'filament_unknown', detail }
+  return null
+}
+
+/** What publish refused about parameter `label` (`refusal`), said beside it. */
+export function refusalText(refusal: Extract<ListingRefusal, { kind: 'param' }>, label: string): string {
+  if (refusal.code === 'default_invalid') return `Not published: “${label}” starts at a value these choices do not allow. Set “Starts at” to one they allow.`
+  if (refusal.code === 'colour_unknown') return `Not published: “${label}” uses a colour that no colour on offer has. Pick a colour on offer, or tick a filament of that colour under “Colours on offer”.`
+  return `Not published: “${label}” sets support, which stays yours and a customer never sees. Turn off “Customer can change”.`
 }
 
 /** The parameters a listing can name: every one outside the hidden group. */
@@ -81,7 +164,7 @@ export function schemaBound(param: Param): ListingBound {
 }
 
 /** Whether `a` and `b` are one colour, as publish compares them: case aside. */
-function sameColour(a: ParamValue | null | undefined, b: ParamValue | null | undefined): boolean {
+export function sameColour(a: ParamValue | null | undefined, b: ParamValue | null | undefined): boolean {
   return typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase()
 }
 
@@ -144,7 +227,15 @@ export function defaultsFor(
     .filter((param) => param.type === 'color' && isSupport(param))
     .flatMap((param) => filamentOf(valueOf(param), priced) ?? [])
     .filter((filament) => !offered.includes(filament))
-  return { params, fixed, colours: [...offered, ...new Set(support)].map((filament) => filament.id) }
+  const colours = [...offered, ...new Set(support)].map((filament) => filament.id)
+  // #6144: an offered colour whose template default no colour on offer has starts at the
+  // value the person was looking at, else the first colour on offer, so publish takes it.
+  const pickable = pickableColours({ ...emptyDraft(), params, fixed, colours }, schema, filaments)
+  for (const param of shown) {
+    const bound = params[param.name]
+    if (bound && param.type === 'color') params[param.name] = fittedDefault(param, bound, pickable, valueOf(param))
+  }
+  return { params, fixed, colours }
 }
 
 /** A colour of the listing that none of its filaments has: publish would refuse it. */
@@ -245,6 +336,68 @@ export function lockedValue(draft: ListingDraft, param: Param): ParamValue | und
   return draft.fixed[param.name] ?? param.initial ?? undefined
 }
 
+/** How far a number may sit from a step, to a float's rounding (backend `inputs.py` `_STEP_TOLERANCE`). */
+const STEP_TOLERANCE = 1e-9
+
+/**
+ * #6144 — whether an offered `param` may start at `value` under `bound`, as publish checks
+ * a default (backend `inputs.py` `value_reason`): a colour one of `colours` (case aside), a
+ * number in the range and on the step from `min`, a choice one of the choices, text no
+ * longer than the bound.
+ */
+export function defaultFits(param: Param, bound: ListingBound, value: ParamValue | null | undefined, colours: readonly string[]): boolean {
+  if (value === null || value === undefined) return false
+  if (param.type === 'color') return colours.some((colour) => sameColour(colour, value))
+  if (bound.kind === 'number') {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < bound.min || value > bound.max) return false
+    if (param.type === 'integer' && !Number.isInteger(value)) return false
+    const step = bound.step ?? param.step
+    if (step != null && step > 0) {
+      const times = (value - bound.min) / step
+      if (Math.abs(times - Math.round(times)) > STEP_TOLERANCE) return false
+    }
+    return true
+  }
+  if (bound.kind === 'text') return typeof value === 'string' && [...value].length <= bound.max_length
+  return bound.choices.some((choice) => choice === value)
+}
+
+/** The value `bound` allows nearest `value`: a number put in the range and on the step, text cut to the length, else the first choice or colour. */
+function nearestAllowed(param: Param, bound: ListingBound, value: ParamValue | null | undefined, colours: readonly string[]): ParamValue | undefined {
+  if (param.type === 'color') return colours[0]
+  if (bound.kind === 'number') {
+    const start = typeof value === 'number' && Number.isFinite(value) ? value : bound.min
+    const step = bound.step ?? param.step
+    const inRange = Math.min(Math.max(start, bound.min), bound.max)
+    if (step == null || step <= 0) return inRange
+    const onStep = bound.min + Math.floor((inRange - bound.min) / step + STEP_TOLERANCE) * step
+    return Number(onStep.toPrecision(12))
+  }
+  if (bound.kind === 'text') return typeof value === 'string' ? [...value].slice(0, bound.max_length).join('') : ''
+  return bound.choices[0]
+}
+
+/**
+ * #6144 — `bound` with the default an unpicked render takes set only where it must be: a
+ * listing default that fits stays; else none, when the template's fits; else `current` (the
+ * value the person was looking at, or the locked one) when it fits; else the value the
+ * bound allows nearest it. A bound that allows nothing keeps no default. `colours` are the
+ * colours a customer can pick, for a colour parameter.
+ */
+export function fittedDefault(param: Param, bound: ListingBound, colours: readonly string[], current?: ParamValue | null): ListingBound {
+  const { default: own, ...rest } = bound
+  if (defaultFits(param, bound, own, colours)) return bound
+  if (defaultFits(param, bound, param.initial, colours)) return rest as ListingBound
+  const start = defaultFits(param, bound, current, colours) ? current : nearestAllowed(param, bound, current ?? own ?? param.initial, colours)
+  return start === undefined || !defaultFits(param, bound, start, colours) ? (rest as ListingBound) : ({ ...rest, default: start } as ListingBound)
+}
+
+/** The colours a customer can pick on `draft`: `listingInput`'s colour choices (the listing's filaments but support-only ones and support materials). */
+export function pickableColours(draft: ListingDraft, schema: CustomizerSchema | undefined, filaments: readonly Filament[]): string[] {
+  const { supportOnly } = withoutSupport(draft, schema, filaments)
+  return filamentColours(draft, customerFilaments(filaments)).filter((colour) => !supportOnly.some((support) => sameColour(support, colour)))
+}
+
 function filamentColours(draft: ListingDraft, filaments: readonly Filament[]): string[] {
   return draft.colours.flatMap((id) => filaments.find((filament) => filament.id === id)?.colour ?? [])
 }
@@ -306,10 +459,10 @@ export function isSupportOnly(filament: Filament, draft: ListingDraft, schema: C
  * is locked.
  */
 export function listingInput(draft: ListingDraft, schema: CustomizerSchema | undefined, filaments: readonly Filament[]): StorefrontListingInput {
-  const { byName, params, fixed, supportOnly } = withoutSupport(draft, schema, filaments)
+  const { byName, params, fixed } = withoutSupport(draft, schema, filaments)
   // #6152: never the colour of a support material (`customerFilaments`), which publish
   // refuses on offer, even one the shop ticked by hand.
-  const colours = filamentColours(draft, customerFilaments(filaments)).filter((colour) => !supportOnly.some((support) => sameColour(support, colour)))
+  const colours = pickableColours(draft, schema, filaments)
   for (const [name, bound] of Object.entries(params)) {
     // A colour's choices are the filaments'; its own label (#6137) and default (#6144) stay.
     if (byName.get(name)?.type === 'color')
@@ -373,6 +526,8 @@ export function previewListing(
   filaments: readonly Filament[],
   media: readonly MediaView[],
   mediaUrl: (item: MediaView) => string,
+  /** The shop's default materials (`storefront_materials`), once read. */
+  shop?: readonly string[],
 ): PublicListing {
   const input = listingInput(draft, schema, filaments)
   const params: Record<string, PublicParam> = {}
@@ -422,11 +577,16 @@ export function previewListing(
           ]
         : []
     }),
-    one_material: draft.one_material,
+    // #6258: the listing's own, else the shop's default (`shop`, once read); empty until
+    // then. A draft stored before #6258 has none: the shop's default too.
+    materials: effectiveMaterials(draft, shop) ?? [],
     media: draft.media_ids.flatMap((id) => {
       const item = media.find((m) => m.id === id)
       return item ? [{ url: mediaUrl(item), kind: item.kind, caption: item.caption }] : []
     }),
     updated_at: '',
+    // The preview does not judge which materials are printable (#6302 review): publish
+    // refuses a listing none can print, and an empty colour still shows as gone.
+    available: true,
   }
 }

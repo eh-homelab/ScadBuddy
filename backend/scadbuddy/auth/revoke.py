@@ -10,9 +10,9 @@ on the schema and its credential view (`auth/service_credentials.py`
 #5298 Task 22) also granted sequences and, for a held table, a restrictive row policy
 named ``only_<role>_<hash>`` (af75581's was the unsuffixed ``only_<role>``).
 Nothing granted functions, default privileges or memberships. The agent takes back its
-own `ai_*` grants (`agent/src/db/grants.ts` `revokeRole`): a grant is revoked only by
-the role that made it (or the owner's), so this revokes what a role this connection
-belongs to granted, and leaves the rest.
+own `ai_*` grants no longer (#6501): a grant is revoked only by the role that made it (or
+the owner's), so this revokes what a role this connection belongs to granted, and leaves the
+rest. Production connects the API and the agent as one role, so this covers the agent's.
 """
 
 from __future__ import annotations
@@ -44,8 +44,21 @@ def revoke_retired(conn: Connection[Any]) -> list[str]:
 #: The tables a caller's role no longer touches, taken back at every start: `grant_role`
 #: never revokes, so a table dropped from a caller's list (`auth/caller_grants.py`) is
 #: listed here. The agent's `blob_refs`: its workspace files are held through the CRUD
-#: routes (`api/crud_agent.py`, #5299), no longer by its trigger.
-RETIRED_GRANTS: Mapping[str, tuple[str, ...]] = {"scadbuddy_agent": ("blob_refs",)}
+#: routes (`api/crud_agent.py`, #5299), no longer by its trigger. Its `events`,
+#: `workflow_runs` and `workflow_run_decisions`: it reads the event log, flow runs and their
+#: decisions through the CRUD routes of areas ``events`` and ``flows`` (#5299 D7). Its
+#: ``flow_grants`` and ``flow_grant_uses``: its gate's grant check runs on the API, area
+#: ``gate`` (`api/crud_agent_gate.py`, #5299 step 10).
+RETIRED_GRANTS: Mapping[str, tuple[str, ...]] = {
+    "scadbuddy_agent": (
+        "blob_refs",
+        "events",
+        "workflow_runs",
+        "workflow_run_decisions",
+        "flow_grants",
+        "flow_grant_uses",
+    )
+}
 
 
 def revoke_tables(conn: Connection[Any], role: str, tables: tuple[str, ...]) -> list[str]:
@@ -78,7 +91,7 @@ def revoke_tables(conn: Connection[Any], role: str, tables: tuple[str, ...]) -> 
 
 #: Whether the role named is ``current_user`` or one it is a member of, through
 #: ``pg_auth_members`` (``pg_has_role`` would count every role for a superuser); no row
-#: for a missing role. The agent's `revokeRole` (`agent/src/db/grants.ts`) asks the same.
+#: for a missing role.
 MINE = (
     "WITH RECURSIVE mine(oid) AS (SELECT oid FROM pg_roles WHERE rolname = current_user"
     " UNION SELECT m.roleid FROM pg_auth_members m JOIN mine ON m.member = mine.oid)"
@@ -98,8 +111,7 @@ def revoke_role(conn: Connection[Any], role: str) -> list[str]:
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (GRANT_LOCK,))
         cur = conn.cursor(row_factory=tuple_row)
         found = cur.execute(MINE, (role,)).fetchone()
-        # A role this connection is a member of is its own: never revoked here, as the
-        # agent's `revokeRole` skips it too.
+        # A role this connection is a member of is its own: never revoked here.
         if found is None or found[0]:
             return revoked
         relations = cur.execute(

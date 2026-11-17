@@ -45,7 +45,8 @@ import zipfile
 from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
 from dataclasses import dataclass
-from typing import IO, TYPE_CHECKING, Any
+from datetime import datetime
+from typing import IO, Any
 
 import aiomqtt
 from fastapi import status
@@ -60,6 +61,7 @@ from scadbuddy.bambuddy.output_reader import BlobMissingAnswerError, SlicedBlobs
 from scadbuddy.bambuddy.runs import PrintRunError
 from scadbuddy.core.heartbeat import heartbeating
 from scadbuddy.core.problems import ApiError
+from scadbuddy.filament.print_uses import PrintUses, slot_uses
 from scadbuddy.library.settings_store import SettingsReader
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.reads import LibraryReads, reads_for
@@ -90,8 +92,6 @@ from scadbuddy.rack.usage import (
 )
 from scadbuddy.render.bambu3mf import PROJECT_SETTINGS_NAME
 from scadbuddy.slicing.slice_info import plate_grams
-from scadbuddy.spools.native import NativeSpoolStore, spool_uses
-from scadbuddy.spools.spool_providers import recache
 from scadbuddy.workflows.print_activities import raised_as
 from scadbuddy.workflows.print_models import (
     FAILED,
@@ -108,9 +108,6 @@ from scadbuddy.workflows.print_models import (
     LanWaitInput,
     SlicedSource,
 )
-
-if TYPE_CHECKING:
-    from scadbuddy.spools.component import Spools
 
 logger = logging.getLogger(__name__)
 
@@ -202,12 +199,10 @@ class LanDeps:
     reports: PrinterReportStore | None = None
     #: Seconds between ``lan_wait``'s reads of the report.
     wait_poll: float = LAN_WAIT_POLL
-    #: Where a start saves what it uses of ScadBuddy's own spools (#4643); ``None``
-    #: saves nothing.
-    native_spools: NativeSpoolStore | None = None
-    #: The spools whose native records a start re-caches once it saved its uses, so the
-    #: overlay shows the estimate taken off at start (#6261); ``None`` re-caches nothing.
-    spools: Spools | None = None
+    #: Where a start books what it uses of the SB spools in its trays (#4643, #6262):
+    #: the API's Postgres in-process, the CRUD routes on the print worker (#5295);
+    #: ``None`` books nothing.
+    uses: PrintUses | None = None
 
 
 class LanActivities:
@@ -335,7 +330,7 @@ class LanActivities:
             if state in TAKEN_STATES:
                 # Its pick was saved by the attempt that sent it; its spool use is saved
                 # again, which keeps what that attempt saved.
-                await self._save_uses(input)
+                await self._save_uses(input, first.received_at)
                 return self._named(
                     LanStarted(subtask_name=input.subtask_name, started_at=first.received_at),
                     input,
@@ -362,30 +357,26 @@ class LanActivities:
                 await self._save_picks(row, input, picks)
             raise
         await self._save_picks(row, input, picks)
-        await self._save_uses(input)
+        await self._save_uses(input, started.started_at)
         return self._named(started.model_copy(update={"warnings": warnings}), input)
 
-    async def _save_uses(self, input: LanPrintInput) -> None:
-        """What the start uses of ScadBuddy's own spools (#4643), under its run and its
-        ``subtask_name``: an estimate the ledger takes off at once, then the native
-        records re-cached for the overlay (`spools.spool_providers.recache`, as the settle
-        does), settled once the run's print settles
-        (`spools.spool_providers.native_use_hook`). Advisory, never raising."""
+    async def _save_uses(self, input: LanPrintInput, started_at: datetime) -> None:
+        """What the start uses of the SB spools in its trays (#4643, #6262), under its run
+        and its ``subtask_name``: an estimate at the plate's start, which the ledger
+        takes off at once, settled once the run's print settles
+        (`filament.print_uses.print_use_hook`). Advisory, never raising."""
         run_id = input.uploaded.run_id
-        uses = spool_uses(input.spools, input.uploaded.grams_by_slot)
-        store = self.d.native_spools
+        uses = slot_uses(input.spools, input.uploaded.grams_by_slot, started_at)
+        store = self.d.uses
         if run_id is None or not uses or store is None:
             return
         try:
-            await asyncio.to_thread(store.record_uses, run_id, input.subtask_name, uses)
+            await store.record_uses(run_id, input.subtask_name, uses)
         except Exception as error:
             logger.warning(
-                "could not save what a LAN print uses of the native spools",
+                "could not save what a LAN print uses of its SB spools",
                 extra={"run_id": run_id, "error": type(error).__name__},
             )
-            return
-        if self.d.spools is not None:
-            await recache(self.d.spools)
 
     @staticmethod
     def _named(started: LanStarted, input: LanPrintInput) -> LanStarted:

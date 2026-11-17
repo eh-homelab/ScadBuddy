@@ -7,12 +7,14 @@ import (
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91 "github.com/microsoft/kiota-abstractions-go/serialization"
 )
 
-// FilamentPlan what the dialog submits: one spool per slot, and how hard to insist on it. “force_colour_match“ becomes “force_color_match“ on every override, which is the flag Bambuddy's scheduler reads to require an exact type+colour match rather than merely preferring one. It is on by default (#6218): with it off, the scheduler can print a part in the wrong colour when the right one is not loaded; with it on, Bambuddy holds the queue item until a tray of the right colour is loaded. A caller may still send “False“.
+// FilamentPlan what the dialog submits: one spool per slot, and how hard to insist on it. “force_colour_match“ becomes “force_color_match“ on every override, which is the flag Bambuddy's scheduler reads to require an exact type+colour match rather than merely preferring one. It is on by default (#6218): with it off, the scheduler can print a part in the wrong colour when the right one is not loaded; with it on, Bambuddy holds the queue item until a tray of the right colour is loaded. A caller may still send “False“. “ids“ says what a positive “spool_id“ names (#6262 F14): “"sb"“ an SB spool's number, what every picker offers since Task 7 and every client sends; “"bb"“ (the default, so a plan from before it reads as it was meant: an in-flight run's input, an older client) a Bambuddy spool id, mapped to its linked SB spool's number where it is read (:func:`sb_plan`). A negative id is a tray chosen for itself either way.
 type FilamentPlan struct {
 	// Stores additional data not described in the OpenAPI description found when deserializing. Can be used for serialization as well.
 	additionalData map[string]any
 	// The force_colour_match property
 	force_colour_match *bool
+	// What a positive `spool_id` names: `sb` an SB spool's number (what `GET /print/filaments` and the choices offer), `bb` a Bambuddy spool id (the default, for a plan from before this field). Send `sb` with the numbers you read; an omitted `ids` is read as Bambuddy ids.
+	ids *FilamentPlan_ids
 	// The slots property
 	slots []SlotChoiceable
 }
@@ -23,6 +25,8 @@ func NewFilamentPlan() *FilamentPlan {
 	m.SetAdditionalData(make(map[string]any))
 	force_colour_matchValue := true
 	m.SetForceColourMatch(&force_colour_matchValue)
+	idsValue := BB_FILAMENTPLAN_IDS
+	m.SetIds(&idsValue)
 	return m
 }
 
@@ -52,6 +56,16 @@ func (m *FilamentPlan) GetFieldDeserializers() map[string]func(i878a80d2330e89d2
 		}
 		return nil
 	}
+	res["ids"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetEnumValue(ParseFilamentPlan_ids)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetIds(val.(*FilamentPlan_ids))
+		}
+		return nil
+	}
 	res["slots"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetCollectionOfObjectValues(CreateSlotChoiceFromDiscriminatorValue)
 		if err != nil {
@@ -77,6 +91,12 @@ func (m *FilamentPlan) GetForceColourMatch() *bool {
 	return m.force_colour_match
 }
 
+// GetIds gets the ids property value. What a positive `spool_id` names: `sb` an SB spool's number (what `GET /print/filaments` and the choices offer), `bb` a Bambuddy spool id (the default, for a plan from before this field). Send `sb` with the numbers you read; an omitted `ids` is read as Bambuddy ids.
+// returns a *FilamentPlan_ids when successful
+func (m *FilamentPlan) GetIds() *FilamentPlan_ids {
+	return m.ids
+}
+
 // GetSlots gets the slots property value. The slots property
 // returns a []SlotChoiceable when successful
 func (m *FilamentPlan) GetSlots() []SlotChoiceable {
@@ -87,6 +107,13 @@ func (m *FilamentPlan) GetSlots() []SlotChoiceable {
 func (m *FilamentPlan) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
 	{
 		err := writer.WriteBoolValue("force_colour_match", m.GetForceColourMatch())
+		if err != nil {
+			return err
+		}
+	}
+	if m.GetIds() != nil {
+		cast := (*m.GetIds()).String()
+		err := writer.WriteStringValue("ids", &cast)
 		if err != nil {
 			return err
 		}
@@ -122,6 +149,11 @@ func (m *FilamentPlan) SetForceColourMatch(value *bool) {
 	m.force_colour_match = value
 }
 
+// SetIds sets the ids property value. What a positive `spool_id` names: `sb` an SB spool's number (what `GET /print/filaments` and the choices offer), `bb` a Bambuddy spool id (the default, for a plan from before this field). Send `sb` with the numbers you read; an omitted `ids` is read as Bambuddy ids.
+func (m *FilamentPlan) SetIds(value *FilamentPlan_ids) {
+	m.ids = value
+}
+
 // SetSlots sets the slots property value. The slots property
 func (m *FilamentPlan) SetSlots(value []SlotChoiceable) {
 	m.slots = value
@@ -131,7 +163,9 @@ type FilamentPlanable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.AdditionalDataHolder
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetForceColourMatch() *bool
+	GetIds() *FilamentPlan_ids
 	GetSlots() []SlotChoiceable
 	SetForceColourMatch(value *bool)
+	SetIds(value *FilamentPlan_ids)
 	SetSlots(value []SlotChoiceable)
 }

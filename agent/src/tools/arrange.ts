@@ -138,7 +138,7 @@ export const arrangeTools: Tool[] = [
             goal,
             printer_id: printer_id ?? null,
             printer: printer ?? null,
-            filament_plan: filament_plan ?? null,
+            filament_plan: filament_plan ? { ...filament_plan, ids: 'sb' as const } : null,
             colours: colours ?? null,
             name: name ?? null,
             slug: slug ?? null,

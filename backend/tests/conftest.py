@@ -394,7 +394,35 @@ def pg_conninfo(_pg_database_url: str | None) -> Iterator[str]:
         yield make_conninfo(url, options=f"-c search_path={schema}")
     finally:
         with psycopg.connect(url, autocommit=True) as conn:
-            conn.execute(f'DROP SCHEMA "{schema}" CASCADE'.encode())
+            drop_schema(conn, schema)
+
+
+#: Tables dropped per transaction by `drop_schema`.
+DROP_BATCH = 20
+
+
+def drop_schema(conn: Connection[Any], schema: str) -> None:
+    """Drop ``schema`` on an autocommit connection, its tables first in batches.
+
+    One ``DROP SCHEMA … CASCADE`` locks every relation in one transaction: 4,643 locks for a
+    schema with the backend's and the agent's tables (209 tables, 505 indexes, measured
+    2026-11-15 on Postgres 18). The shared lock table holds ``max_locks_per_transaction``
+    (64) times ``max_connections`` (100 on CI's ``postgres:18``), 6,400, so two xdist
+    workers' teardowns at once ran it out ("out of shared memory"). A batch of
+    `DROP_BATCH` tables held at most 532, and the last ``DROP SCHEMA`` 8 (same schema).
+    """
+    tables = [
+        name
+        for (name,) in conn.execute(
+            "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+            " WHERE n.nspname = %s AND c.relkind IN ('r', 'p') AND NOT c.relispartition",
+            (schema,),
+        )
+    ]
+    for start in range(0, len(tables), DROP_BATCH):
+        names = ", ".join(f'"{schema}"."{name}"' for name in tables[start : start + DROP_BATCH])
+        conn.execute(f"DROP TABLE IF EXISTS {names} CASCADE".encode())
+    conn.execute(f'DROP SCHEMA "{schema}" CASCADE'.encode())
 
 
 PgPool = ConnectionPool[Connection[DictRow]]
@@ -510,7 +538,7 @@ if "%%LISTING%%" in text and out is not None and out.endswith(".param"):
                      {"name": "Square", "value": "square"}]},
     ]
     if "%%TWO_COLOURS%%" in text:
-        # A second colour a customer picks (#6152: one material across colours).
+        # A second colour a customer picks (#6152, #6258: one material per print).
         parameters.append(
             {"name": "trim", "type": "string", "initial": "#FF0000", "group": "Main"}
         )
@@ -527,6 +555,15 @@ if out is not None and out.endswith(".3mf"):
     # exports the 3MF named FAKE_3MF, if any.
     if any(arg.startswith("width=999") for arg in args):
         print("WARNING: The file 'pic.svg' couldn't be opened", file=sys.stderr)
+        print("ERROR: something broke", file=sys.stderr)
+        raise SystemExit(1)
+    fail_while = settings.get("FAKE_FAIL_WHILE")
+    if (
+        fail_while
+        and pathlib.Path(fail_while["file"]).exists()
+        and any(fail_while["arg"] in arg for arg in args)
+    ):
+        # A render of the arg that fails while the file is there (#6299 review).
         print("ERROR: something broke", file=sys.stderr)
         raise SystemExit(1)
     for line in settings.get("FAKE_STDERR", []):

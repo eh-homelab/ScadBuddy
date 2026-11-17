@@ -5,9 +5,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from '../src/db.js'
 import { Hono } from 'hono'
 import { childReasoning, FlowQueue, REASONING_MAX } from '../src/flows/queue.js'
+import { PgSessionReads } from '../src/sessions/sessionReads.js'
 import { originPolicy } from '../src/http/origins.js'
 import { durableRequestId, flowRequestId } from '../src/gate/ids.js'
 import { pendingInput, registerPendingInputRoutes } from '../src/routes/pendingInput.js'
+import { SqlFlowRunReads } from './support/sqlFlowRunReads.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { manager, tempPaths } from './support/sessions.js'
 
@@ -31,7 +33,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow run queue${TEST_DATABASE_URL ? '' : ` 
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     for (const file of readdirSync(MIGRATIONS).sort()) await db.sql.unsafe(readFileSync(`${MIGRATIONS}${file}`, 'utf8'))
-    queue = new FlowQueue(db.sql)
+    queue = new FlowQueue(db.sql, new SqlFlowRunReads(db.sql))
     parent = await session('bearer', TOKEN)
     child = await session('flow', `flow:${RUN}`)
   })
@@ -157,7 +159,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow run queue${TEST_DATABASE_URL ? '' : ` 
       { type: 'tool.call', id: toolu, name: 'print_output', input: {}, risk: 'outward' },
       text('m3', 'After the call.'),
     )
-    const reasoning = await childReasoning(db.sql, id)
+    const reasoning = await childReasoning(new PgSessionReads(db.sql), id)
     expect(reasoning).toHaveLength(REASONING_MAX)
     expect(reasoning).toBe('x'.repeat(REASONING_MAX))
     expect(reasoning).not.toContain('earlier')
@@ -170,9 +172,9 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow run queue${TEST_DATABASE_URL ? '' : ` 
       input: {},
       risk: 'outward',
     })
-    expect(await childReasoning(db.sql, durableRequestId(child, 'run-1', short))).toBe('One.\n\nTwo.')
+    expect(await childReasoning(new PgSessionReads(db.sql), durableRequestId(child, 'run-1', short))).toBe('One.\n\nTwo.')
     // Not logged yet: undefined, so a delivery waits for it rather than send none.
-    expect(await childReasoning(db.sql, durableRequestId(child, 'run-1', 'toolu_unlogged'))).toBeUndefined()
+    expect(await childReasoning(new PgSessionReads(db.sql), durableRequestId(child, 'run-1', 'toolu_unlogged'))).toBeUndefined()
   })
 
   it("puts the run's own calls in the person's aggregate read, marked by run, and in no one else's", async () => {
@@ -230,11 +232,11 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow run queue${TEST_DATABASE_URL ? '' : ` 
       risk: 'outward',
     })
     // A turn that starts before the window shows the text from the window's start.
-    expect(await childReasoning(db.sql, id, 2)).toBe('new')
-    expect(await childReasoning(db.sql, id)).toBe('old\n\nnew')
+    expect(await childReasoning(new PgSessionReads(db.sql), id, 2)).toBe('new')
+    expect(await childReasoning(new PgSessionReads(db.sql), id)).toBe('old\n\nnew')
     // A call before the window is not looked for.
     await log(child, text('m3', 'later'), text('m4', 'later still'))
-    expect(await childReasoning(db.sql, id, 2)).toBeUndefined()
+    expect(await childReasoning(new PgSessionReads(db.sql), id, 2)).toBeUndefined()
   })
 
   it("marks a child's call past its timer, which no one can decide any more", async () => {

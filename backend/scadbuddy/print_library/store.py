@@ -15,6 +15,7 @@ from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
 
 from scadbuddy.bambuddy.models import LibraryPlate
+from scadbuddy.bambuddy.print_links import forget_library_imports
 
 
 class UnsetType(Enum):
@@ -421,13 +422,18 @@ class NativeLibraryStore:
     def purge_trashed(self, id: int, cutoff: datetime) -> NativeFile | None:
         """Delete the row only if it is still trashed and past ``cutoff``; ``None`` when a
         restore got there first, so a restore between a sweep's list and its purge loses
-        nothing."""
-        found = self._files(
-            f"DELETE FROM library_files WHERE id = %s AND deleted_at IS NOT NULL"
-            f" AND deleted_at < %s RETURNING {_FILE_COLUMNS}",
-            (id, cutoff),
-        )
-        return found[0] if found else None
+        nothing. A purged file forgets the prints imported onto it (#6394), in the same
+        transaction; a file only trashed keeps them, so a restore loses nothing either."""
+        with self._pool.connection() as conn, conn.transaction():
+            row = conn.execute(
+                f"DELETE FROM library_files WHERE id = %s AND deleted_at IS NOT NULL"
+                f" AND deleted_at < %s RETURNING {_FILE_COLUMNS}".encode(),
+                (id, cutoff),
+            ).fetchone()
+            if row is None:
+                return None
+            forget_library_imports(conn, [int(row["id"])])
+        return NativeFile.model_validate(row)
 
     def filed_for_output(self, output_id: str) -> list[NativeFile]:
         with self._pool.connection() as conn:
@@ -441,6 +447,14 @@ class NativeLibraryStore:
     def filed_rows_for_output(self, output_id: str) -> list[NativeFile]:
         with self._pool.connection() as conn:
             return _rows_of_output(conn, output_id, which="filed")
+
+    def live_for_outputs(self, output_ids: list[str]) -> list[NativeFile]:
+        """Every live row naming one of ``output_ids``, filed or moved (#6395)."""
+        return self._files(
+            f"SELECT {_FILE_COLUMNS} FROM library_files WHERE output_id = ANY(%s)"
+            f" AND deleted_at IS NULL ORDER BY id",
+            (list(output_ids),),
+        )
 
     def live_copy_in_folder(self, output_id: str, folder_id: int) -> NativeFile | None:
         """The output's live copy in ``folder_id``, if any; no lock, so a hint only."""

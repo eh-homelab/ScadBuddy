@@ -34,6 +34,7 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.tracing import span
 from scadbuddy.library.deeplink import edit_url, merge_edit_note
+from scadbuddy.library.meshes import MAX_MESH_TRIANGLES
 from scadbuddy.library.outputs import OutputFiles, OutputMeta, download_filename
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.render.bambu3mf import (
@@ -50,7 +51,11 @@ from scadbuddy.render.bambu3mf import (
     state_nozzles,
     with_part_settings,
 )
-from scadbuddy.render.objects3mf import UnreadableObjectsError, plate_boxes
+from scadbuddy.render.objects3mf import (
+    UnreadableObjectsError,
+    plate_boxes,
+    read_plates_parts,
+)
 from scadbuddy.render.plate import DEFAULT_PLATE as FALLBACK_PLATE
 from scadbuddy.render.plate import (
     PRIME_TOWER_SIDE,
@@ -62,8 +67,9 @@ from scadbuddy.render.plate import (
     tower_reaches,
 )
 from scadbuddy.render.provenance import content_key
+from scadbuddy.render.read_budget import ReadBudget
 from scadbuddy.render.recolour import recolour_3mf
-from scadbuddy.render.split import normalise_colour
+from scadbuddy.render.split import ColourPart, normalise_colour
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +182,11 @@ _BED_STATED = "#bed"
 #: its tower at ``wipe_tower_y`` 5 (3 mm reserved for its brim), which a tall plate's
 #: brim passes, and reusing it kept every quote failing after the fix (#5566).
 _TOWER_BRIM = "#brim"
+#: Follows :data:`_TOWER_BRIM` in every :attr:`Target.key` of a copy laid out since an
+#: author's covers are redrawn in the spools' colours (:func:`_recoloured_covers`,
+#: #6170). A copy recorded before keeps the author's covers, which the slicer copies into
+#: the sliced file, so reusing it would keep Bambuddy's job cover in the wrong colours.
+_COVERS_REDRAWN = "#covers"
 #: Why a print's settings per part (#5571) are refused for a 3MF nothing can be
 #: written into (``layout_of`` ``as_is``), or a library file with no 3MF to lay out: it
 #: prints as it is, so it cannot carry them.
@@ -245,11 +256,12 @@ class Target:
     def key(self) -> str:
         """Recorded as a copy's ``target_key``: a reused upload has to match both halves.
 
-        It starts with the plate's own key, :data:`_BED_STATED` and :data:`_TOWER_BRIM`,
-        so a copy recorded before #4638, whose file states no bed, or before #5545, whose
-        tower leaves no room for a tall plate's brim, is never reused.
+        It starts with the plate's own key, :data:`_BED_STATED`, :data:`_TOWER_BRIM` and
+        :data:`_COVERS_REDRAWN`, so a copy recorded before #4638, whose file states no bed,
+        before #5545, whose tower leaves no room for a tall plate's brim, or before #6170,
+        whose covers are the author's, is never reused.
         """
-        key = f"{self.plate.key}{_BED_STATED}{_TOWER_BRIM}"
+        key = f"{self.plate.key}{_BED_STATED}{_TOWER_BRIM}{_COVERS_REDRAWN}"
         if self.nozzle_diameter is not None:
             key = f"{key}@{self.nozzle_diameter}"
         if self.nozzle_stats is not None:
@@ -396,7 +408,8 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     fallback. Moving it now is what puts the object — and the prime tower a
     multi-colour print needs — where every extruder can reach them. An author's file
     keeps its placement and every plate it lays out; only the nozzles and colours are
-    stated (:func:`state_nozzles`). Either way each painted filament is named on a part
+    stated (:func:`state_nozzles`), and its covers redrawn in those colours
+    (:func:`_recoloured_covers`, #6170). Either way each painted filament is named on a part
     that prints nothing (:func:`hint_painted_slots`, #4013). Anything else comes back
     unchanged, and so takes no settings per part: a ``target`` with some is refused
     (422, :data:`PART_SETTINGS_AS_IS`), as the run refuses it first
@@ -414,12 +427,15 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
         try:
             laid = hint_painted_slots(
                 towers_within_reach(
-                    state_nozzles(
-                        payload,
-                        nozzle_stats=target.nozzle_stats,
-                        nozzle_volume_type=target.nozzle_volume_type,
-                        filament_colour=colours,
-                        filament_map=target.filament_map,
+                    _recoloured_covers(
+                        state_nozzles(
+                            payload,
+                            nozzle_stats=target.nozzle_stats,
+                            nozzle_volume_type=target.nozzle_volume_type,
+                            filament_colour=colours,
+                            filament_map=target.filament_map,
+                        ),
+                        colours,
                     ),
                     target.plate,
                 )
@@ -448,6 +464,43 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     # Outside the ArchiveTooLargeError guard on purpose: that error is a ValueError,
     # which hint_painted_slots answers with the payload unchanged.
     return _with_parts(hint_painted_slots(payload), target.part_settings)
+
+
+#: The most triangles an author's file may hold, every covered plate's together, for its
+#: covers to be redrawn (:func:`_recoloured_covers`). The file is untrusted and the read
+#: budget's default sets no triangle limit (``read_max_triangles`` 0), so this bounds the
+#: parse and the rasteriser on its own, at the library's mesh cap
+#: (:data:`~scadbuddy.library.meshes.MAX_MESH_TRIANGLES`). A file past it keeps its
+#: covers and still prints. The prod file of #6170 holds 24,540.
+COVER_MAX_TRIANGLES = MAX_MESH_TRIANGLES
+
+
+def _recoloured_covers(payload: bytes, colours: Sequence[str] | None) -> bytes:
+    """An author's file with its covers redrawn in ``colours`` (:func:`recolour_3mf`):
+    the slicer keeps the covers it is handed, so the author's colours would become the
+    sliced file's plate image, Bambuddy's job cover (#6170). The plates are read as a
+    library file's preview reads them (:func:`read_plates_parts`: build items, multi-part
+    objects, object-level extruders), all of them within one read budget of
+    :data:`COVER_MAX_TRIANGLES`. The covers are cosmetic, so any failure keeps the
+    author's and the print goes on: a file that does not read back (still the author's,
+    :func:`layout_of`), one past the budget
+    (:class:`~scadbuddy.render.objects3mf.OverBudgetError`), or geometry the rasteriser
+    cannot draw."""
+    if colours is None:
+        return payload
+    budget = ReadBudget(max_triangles=COVER_MAX_TRIANGLES)
+
+    def read_plates(archive: BinaryIO, plates: Sequence[int]) -> dict[int, list[ColourPart]]:
+        return read_plates_parts(archive, plates, budget)
+
+    try:
+        return recolour_3mf(payload, colours, read_plates=read_plates)
+    except Exception as error:  # the covers are cosmetic; the print goes on
+        logger.warning(
+            "the 3MF's covers could not be redrawn in the spools' colours",
+            extra={"error": type(error).__name__, "detail": str(error)},
+        )
+        return payload
 
 
 def _source_bed(settings: dict[str, object]) -> tuple[float, float] | None:

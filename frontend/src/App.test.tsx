@@ -55,6 +55,9 @@ describe('App routes (#2356)', () => {
   it.each([
     ['/prints', 'Prints'],
     ['/m/chunky-name-sign/prints', 'Prints'],
+    // #6262 — `/filament` opens on the Spools tab.
+    ['/filament', 'Filament'],
+    ['/filament/ledger', 'Filament'],
   ])('renders %s through its lazy chunk', async (route, heading) => {
     const { App } = await import('./App')
     const done = settled()

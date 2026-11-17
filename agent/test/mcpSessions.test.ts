@@ -7,6 +7,8 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { RELAY_IDLE_SECONDS_MAX } from '../src/mcp/relayRows.js'
+import type { McpSessionRelay } from '../src/mcp/sessionRelay.js'
 import { unwrapUntrusted } from '../src/safety/untrusted.js'
 import { shutdown } from '../src/shutdown.js'
 import { appFetch, BACKEND, connect, MCP_URL, testApp } from './helpers/mcp.js'
@@ -43,6 +45,14 @@ describe('/mcp session limits', () => {
     clients.push(await connect(t.app, { address: '127.0.0.1' }))
     await expect(connect(t.app, { address: '127.0.0.1' })).rejects.toMatchObject({ code: 429 })
     clients.push(await connect(t.app, { address: '127.0.0.2' }))
+  })
+
+  it("refuses an idle window past the MCP relay's routes rather than cut it short", () => {
+    const relay = {} as McpSessionRelay
+    const idleSessionMs = RELAY_IDLE_SECONDS_MAX * 1000
+    expect(() => testApp({ settings: { mode: 'disabled' }, mcp: { relay, idleSessionMs } })).toThrow(RangeError)
+    // Without a relay there is no such bound.
+    void testApp({ settings: { mode: 'disabled' }, mcp: { idleSessionMs } }).app.close()
   })
 
   it('keeps an active session when the wall clock steps forward (#1485)', async () => {

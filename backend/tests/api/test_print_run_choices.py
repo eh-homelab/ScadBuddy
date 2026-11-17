@@ -56,11 +56,12 @@ from tests.api.test_send import (
 )
 from tests.bambuddy.conftest import recording
 from tests.support.operations import press
+from tests.support.sb_rows import drop_app_sb_presets
 from tests.test_bambu3mf import add_plate
 
 # A run and the dialog both read or record the output's upload copies (#316), which
 # live in Postgres.
-pytestmark = pytest.mark.requires_postgres
+pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("recorded_sb_spools")]
 
 API = f"{BASE}/api/v1"
 
@@ -200,7 +201,7 @@ def test_choices_slice_with_derived_presets_and_queue_without_a_pipeline(
     assert all("/slicer-pipelines" not in str(call.request.url) for call in respx.calls)
 
 
-def declare_print_settings(paths: DataPaths, model: str, settings: dict[str, str]) -> None:
+def declare_print_settings(paths: DataPaths, model: str, settings: dict[str, Any]) -> None:
     """Give ``model``'s model.json the ``print_settings`` (#770)."""
     meta = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))
     meta["print_settings"] = settings
@@ -252,6 +253,47 @@ def test_the_dialogs_print_sequence_goes_over_the_templates(
     assert slice_body["process_overrides"] == {
         "enable_prime_tower": "1",
         "print_sequence": "by object",
+    }
+
+
+@respx.mock
+def test_process_overrides_go_over_the_template_and_the_shorthands(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#2998: any key, as JSON gives it, sent in Bambu's string shape, over the
+    template's defaults and over the print's own ``print_sequence``."""
+    output_id = prepared(client, model)
+    declare_print_settings(paths, model, {"enable_prime_tower": "1", "print_sequence": "by layer"})
+    upload_route()
+    run_routes()
+    sliced = slice_routes()
+    queue_route()
+    # The overrides are checked against the process preset's values, for warnings only.
+    respx.get(f"{API}/slicer/preset-values").mock(
+        return_value=httpx.Response(200, json={"resolved": True, "values": {}})
+    )
+
+    response = run_print(
+        client,
+        output_id,
+        json={
+            **body(),
+            "print_sequence": "by object",
+            "process_overrides": {
+                "print_sequence": "by layer",
+                "enable_prime_tower": False,
+                "skirt_loops": 0,
+                "a_key_scadbuddy_never_heard_of": 0.25,
+            },
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert json.loads(sliced.calls.last.request.content)["process_overrides"] == {
+        "a_key_scadbuddy_never_heard_of": "0.25",
+        "enable_prime_tower": "0",
+        "print_sequence": "by layer",
+        "skirt_loops": "0",
     }
 
 
@@ -319,11 +361,13 @@ def test_a_template_without_print_settings_sends_no_overrides(
 
 
 @respx.mock
-def test_an_unknown_print_setting_is_refused_before_anything_is_sliced(
+def test_a_print_setting_no_slicer_takes_is_refused_before_anything_is_sliced(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
+    """#2998: any key and any string, number or list is taken; an object is no
+    setting's value, so the model.json is refused."""
     output_id = prepared(client, model)
-    declare_print_settings(paths, model, {"infill": "15%"})
+    declare_print_settings(paths, model, {"infill": {"density": "15%"}})
     upload_route()
     run_routes()
     sliced = slice_routes()
@@ -331,7 +375,7 @@ def test_an_unknown_print_setting_is_refused_before_anything_is_sliced(
     response = run_print(client, output_id, json=body())
 
     assert response.status_code == 409
-    assert "'infill' is not a print setting" in response.json()["detail"]
+    assert "print_settings.infill" in response.json()["detail"]
     assert not sliced.called
 
 
@@ -362,6 +406,7 @@ def test_the_check_reads_every_spools_presets_together(client: TestClient, model
     output_id = prepared(client, model)
     upload_route()
     run_routes()
+    drop_app_sb_presets(client, [5, 9])  # the plan reads their Bambuddy spools' presets
     asked = asyncio.Event()
 
     async def presets(request: httpx.Request) -> httpx.Response:
@@ -390,6 +435,7 @@ def test_the_spools_read_together_are_capped(
     output_id = prepared(client, model)
     upload_route()
     run_routes()
+    drop_app_sb_presets(client, [5, 9])  # the plan reads their Bambuddy spools' presets
     open_reads = 0
     most = 0
 
@@ -475,6 +521,7 @@ def test_the_spools_read_together_fail_as_the_serial_reads_did(
     output_id = prepared(client, model)
     upload_route()
     run_routes()
+    drop_app_sb_presets(client, [5, 9])  # the plan reads their Bambuddy spools' presets
     failing = {5: first, 9: second}
 
     def presets(request: httpx.Request) -> httpx.Response:
@@ -743,6 +790,39 @@ def test_a_plan_is_sliced_and_queued_with_the_mapping_on_the_wire(
         {"source": "cloud", "id": "GFSG00_24"},
         {"source": "cloud", "id": "GFSA05_21"},
     ]
+
+
+@respx.mock
+@pytest.mark.sb_offset(100)
+@pytest.mark.usefixtures("slots_from_bambuddy")
+def test_a_plan_of_sb_numbers_no_bambuddy_id_shares_prints_those_spools(
+    client: TestClient, model: str
+) -> None:
+    """#6262 Task 7 review I5: SB spools #109 and #105 (Bambuddy's 9 and 5) print with
+    their own colours and presets, read by number, never as Bambuddy ids; and a "bb"
+    plan of Bambuddy's ids is mapped to them."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    sliced = slice_routes()
+    queue_route()
+    plan = {
+        "ids": "sb",
+        "slots": [{"slot_id": 1, "spool_id": 109}, {"slot_id": 2, "spool_id": 105}],
+    }
+
+    response = run_print(client, output_id, json=run_request(filament_plan=plan))
+
+    assert response.status_code == 200, response.text
+    slice_body: dict[str, Any] = json.loads(sliced.calls.last.request.content)
+    assert slice_body["filament_colours"] == ["#688197", "#0047BB"]
+    assert slice_body["filament_presets"] == [
+        {"source": "cloud", "id": "GFSG00_24"},
+        {"source": "cloud", "id": "GFSA05_21"},
+    ]
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+    assert check.status_code == 200, check.text
+    assert check.json()["errors"] == []
 
 
 @respx.mock
@@ -1150,19 +1230,21 @@ def test_the_all_plates_filament_read_reads_the_spools_once(
     client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Two plates, one spool inventory: the spools are the same for every plate, so an
-    all-plates read asks for them once (#480)."""
+    all-plates read asks for them once (#480): Bambuddy's assignments, which place the SB
+    spools (#6262 Task 7)."""
     slots_from_bambuddy(monkeypatch)
     output_id = two_plate_output(client, model, paths)
     upload_route()
     split_plates_routes()
     hardware_routes()
-    before = sum(1 for call in respx.calls if call.request.url.path.endswith("/inventory/spools"))
+    placed = "/inventory/assignments"
+    before = sum(1 for call in respx.calls if call.request.url.path.endswith(placed))
     response = client.get(
         f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1&all_plates=true"
     )
     assert response.status_code == 200, response.text
     assert [slot["slot_id"] for slot in response.json()["slots"]] == [1, 2]
-    reads = sum(1 for call in respx.calls if call.request.url.path.endswith("/inventory/spools"))
+    reads = sum(1 for call in respx.calls if call.request.url.path.endswith(placed))
     assert reads - before == 1
 
 
@@ -1867,9 +1949,9 @@ def test_a_check_of_a_plan_with_no_slots_makes_no_read_of_its_own_for_spool_warn
     reads: list[object] = []
     real = filaments.read_inventory
 
-    async def counted(bambuddy: object) -> object:
+    async def counted(bambuddy: object, sb: object) -> object:
         reads.append(bambuddy)
-        return await real(bambuddy)  # type: ignore[arg-type]
+        return await real(bambuddy, sb)  # type: ignore[arg-type]
 
     monkeypatch.setattr(print_run, "read_inventory", counted)
 

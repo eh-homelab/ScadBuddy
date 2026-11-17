@@ -2,6 +2,7 @@ import type {
   Attention,
   Origin,
   Owner,
+  QueuedEntry,
   Question,
   Risk,
   SentImage,
@@ -148,6 +149,14 @@ export interface SessionState {
   offer?: HandoffOffer | null
   /** #2329 — how many `workspace.file` events arrived: the Files list reads again when it moves. */
   workspaceChanges?: number
+  /**
+   * #6386 — the messages waiting to run after the session's turn, oldest first: the last
+   * `session.queue` event's list (the log's order is the workflow's write order), less
+   * any that a `user.turn` has started since.
+   */
+  queued?: QueuedEntry[]
+  /** #6386 — per queued message, how many of the panel's removes or edits of it the agent refused. */
+  queueRefusals?: Record<string, number>
 }
 
 export type HandoffOffer = { to: Pick<Owner, 'kind' | 'label'> & { id?: string }; until: string }
@@ -300,6 +309,11 @@ function freshId(session: SessionState, prefix: string): string {
 
 const errorId = (session: SessionState) => freshId(session, 'error')
 
+/** #6386 — a queued message that started: it moves into the transcript. */
+function withoutQueued(session: SessionState, id: string): SessionState {
+  return session.queued?.some((q) => q.id === id) ? { ...session, queued: session.queued.filter((q) => q.id !== id) } : session
+}
+
 /** Without the respond errors about `id`, which a resolution has made stale (#1359). */
 function dropErrorsAbout(session: SessionState, id: string): SessionState {
   return session.items.some((i) => i.kind === 'error' && i.about === id)
@@ -375,11 +389,20 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
     case 'session.owner':
       return patchSession(state, event.sessionId, (s) => ({ ...s, owner: event.owner }))
 
+    case 'session.queue':
+      return patchSession(state, event.sessionId, (s) => {
+        // One the transcript already shows has started; its own queue event follows.
+        const queued = event.queue.filter((q) => !s.items.some((i) => i.kind === 'user' && i.id === q.id))
+        // The refusals of entries that left the queue go with them.
+        const refusals = s.queueRefusals && Object.entries(s.queueRefusals).filter(([id]) => queued.some((q) => q.id === id))
+        return { ...s, queued, ...(refusals ? { queueRefusals: Object.fromEntries(refusals) } : {}) }
+      })
+
     case 'user.turn':
       return patchSession(state, event.sessionId, (s) =>
         s.items.some((i) => i.kind === 'user' && i.id === event.turnId)
           ? s
-          : push(s, {
+          : push(withoutQueued(s, event.turnId), {
               kind: 'user',
               id: event.turnId,
               text: event.text,
@@ -571,9 +594,14 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
       // other error touches a sent answer, which may already have been accepted.
       const reopen = (s: SessionState, id: string): SessionState =>
         mapItems(s, (i) => (i.kind === 'question' && i.id === id && i.state === 'sent' ? { ...i, state: 'pending' } : i))
+      // #6386: a refused remove or edit of a queued message: that entry's buttons work again. One
+      // refused after its entry left the queue (it started, or another tab removed it) counts for
+      // nothing: no entry shows it, and only the error is shown.
+      const refused = (s: SessionState, id: string): SessionState =>
+        s.queued?.some((q) => q.id === id) ? { ...s, queueRefusals: { ...s.queueRefusals, [id]: (s.queueRefusals?.[id] ?? 0) + 1 } } : s
       if (event.sessionId && state.sessions[event.sessionId]) {
         return patchSession(state, event.sessionId, (s) =>
-          push(event.questionId ? reopen(s, event.questionId) : s, {
+          push(event.questionId ? reopen(s, event.questionId) : event.queuedId ? refused(s, event.queuedId) : s, {
             kind: 'error',
             id: errorId(s),
             message,
@@ -667,7 +695,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         ? patchSession(next, action.sessionId, (s) => ({
             ...s,
             items: [],
-            // Replayed from the log; the numbers stay for a log that has none.
+            // Replayed from the log, its queue too (#6386); the numbers stay for a log that has none.
+            queued: [],
             budgetSpent: false,
             sending: s.items.flatMap((i) => ((i.kind === 'approval' || i.kind === 'question') && i.state === 'sent' ? [i.id] : [])),
           }))

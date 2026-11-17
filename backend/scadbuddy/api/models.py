@@ -1550,6 +1550,13 @@ async def delete_template(
         await state.print_links.delete_models([slug])
     except psycopg.Error:
         logger.exception("could not forget a deleted model's imported prints", extra={"slug": slug})
+    # And the library files associated with it (#6395).
+    try:
+        await asyncio.to_thread(state.components.get(PRINT_LIBRARY).associations.forget_model, slug)
+    except psycopg.Error:
+        logger.exception(
+            "could not forget a deleted model's library associations", extra={"slug": slug}
+        )
     # And the projects it was filed into (#1660), or Settings keeps listing its id.
     try:
         await asyncio.to_thread(state.settings_store.forget_model_projects, slug)

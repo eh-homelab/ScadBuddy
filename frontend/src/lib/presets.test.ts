@@ -55,6 +55,8 @@ describe('presetParams', () => {
 describe('parsePresetTags', () => {
   it('splits on commas and cleans each tag as the server does', () => {
     expect(parsePresetTags(' gift,Gift , ,  big   tag,x')).toEqual(['gift', 'big tag', 'x'])
+    // The server's whitespace rule (`_clean_tags`), not JS's \s (#6462).
+    expect(parsePresetTags('a\u001cb, c\u0085d,e\ufefff')).toEqual(['a b', 'c d', 'e\ufefff'])
     expect(parsePresetTags('')).toEqual([])
   })
 

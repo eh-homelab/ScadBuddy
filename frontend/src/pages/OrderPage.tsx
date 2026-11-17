@@ -130,7 +130,7 @@ export function OrderPage() {
     // Replaced, so the hash form becomes the search form and Back leaves the order.
     setSearch(next, { replace: true })
   }
-  const slices = useSliceQuotes(id, view.data?.items, reload)
+  const slices = useSliceQuotes(id, view.data?.items, readOrder)
   const loaded = view.data !== undefined
   // A link to an item the order does not have names nothing: it leaves the address bar.
   const dead = openItem !== null && view.data !== undefined && !view.data.items.some((i) => i.id === openItem)
@@ -172,7 +172,12 @@ export function OrderPage() {
   const [pickerBusy, setPickerBusy] = useState(false)
 
   function reload() {
-    view.refresh()
+    readOrder()
+  }
+
+  /** `failed` hears a failed read of the order (a landed render then stops holding Slice…). */
+  function readOrder(failed?: () => void) {
+    view.refresh(undefined, failed)
     events.refresh()
     costs.refresh()
     orderParts.refresh()
@@ -648,7 +653,7 @@ function ItemDrawer({
   item: OrderItemDetail
   /** #5543 — the item's parts per unit; undefined until read. */
   parts: ItemPartRow[] | undefined
-  slices: Pick<ReturnType<typeof useSliceQuotes>, 'runs' | 'start' | 'dismiss'>
+  slices: Pick<ReturnType<typeof useSliceQuotes>, 'runs' | 'start' | 'render' | 'dismiss'>
   /** #4953 — `orders_allow_unfulfil`. */
   unfulfilAllowed: boolean
   /** #4955 — the section a row's ⋯ action opened the drawer at: scrolled into view. */
@@ -891,7 +896,7 @@ function ItemDrawer({
         // left `quoted` (added after acceptance, or by the agent) is accepted here, unless the order is on hold (#5541).
         <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={false} acceptPending={editable && !settled && !order.on_hold} onChanged={onChanged} storefront={order.source === 'storefront'} />
       ) : (
-        <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={quotable && !settled} onChanged={onChanged} item={item} parts={(parts ?? []).map((p) => `${p.part_id}:${p.per_unit}`).join(',')} slice={{ run: slices.runs.get(item.id), start: (body) => slices.start(item.id, body, item.quotes.map((q) => q.id)), dismiss: () => slices.dismiss(item.id) }} startSlicing={sliceAsked} onSliceOpened={onSliceOpened} storefront={order.source === 'storefront'} />
+        <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={quotable && !settled} onChanged={onChanged} item={item} parts={(parts ?? []).map((p) => `${p.part_id}:${p.per_unit}`).join(',')} slice={{ run: slices.runs.get(item.id), start: (body) => slices.start(item.id, body, item.quotes.map((q) => q.id)), render: () => slices.render(item.id, item.quotes.map((q) => q.id)), dismiss: () => slices.dismiss(item.id) }} startSlicing={sliceAsked} onSliceOpened={onSliceOpened} storefront={order.source === 'storefront'} />
       )}
       </div>
       )}

@@ -41,14 +41,19 @@ export function Component() {
             <tbody className="divide-y">
               {(settings.bootstrap ?? []).map((entry) => (
                 <tr key={entry.name} className="align-top transition-colors hover:bg-muted/50">
-                  <th scope="row" className="sb-num w-2/5 px-3 py-2 font-medium [overflow-wrap:anywhere]">
-                    {entry.env_var}
+                  {/* #887 — the friendly name first, the variable under it, small and muted. */}
+                  <th scope="row" className="w-2/5 px-3 py-2 font-medium">
+                    {entry.title}
+                    <span className="mt-0.5 block font-mono text-[11px] font-normal text-muted-foreground [overflow-wrap:anywhere]">
+                      {entry.env_var}
+                    </span>
                   </th>
                   <td className="px-3 py-2">
                     <span className="sb-num [overflow-wrap:anywhere]">{entry.value ?? 'unset'}</span>{' '}
                     <Badge variant="outline" className="ml-1 text-muted-foreground">
                       {entry.source === 'env' ? 'set' : 'default'}
                     </Badge>
+                    <p className="mt-1">{entry.description}</p>
                     <p className="mt-1 text-muted-foreground">{entry.reason}</p>
                   </td>
                 </tr>

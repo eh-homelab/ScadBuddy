@@ -19,7 +19,7 @@ from tests.api.test_print_filaments import prepared, queue_route, slice_routes
 from tests.api.test_print_run_choices import body, declare_print_settings, run_print, run_routes
 from tests.api.test_send import BASE, upload_route
 
-pytestmark = pytest.mark.requires_postgres
+pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("recorded_sb_spools")]
 
 #: The support settings as ``0.20mm Standard @BBL H2C`` resolves them, with the angle
 #: as an extruder-variant list, so the shape is what decides the override's.
@@ -101,6 +101,25 @@ def test_a_templates_supports_apply_and_the_prints_choice_wins(
     off = {**body(), "supports": {"enabled": False}}
     assert run_print(client, output_id, json=off).status_code == 200
     assert overrides(sliced) == {"enable_support": "0"}
+
+
+@respx.mock
+def test_a_templates_list_support_value_goes_as_written(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    # #6291 review: a list is not shaped as a support choice, and is never dropped.
+    output_id = prepared(client, model)
+    declare_print_settings(
+        paths, model, {"enable_support": "1", "support_threshold_angle": ["20", "35"]}
+    )
+    sliced = routes()
+    preset_values(PRESET)
+
+    assert run_print(client, output_id, json=body()).status_code == 200
+    assert overrides(sliced) == {
+        "enable_support": "1",
+        "support_threshold_angle": ["20", "35"],
+    }
 
 
 @respx.mock

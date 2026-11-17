@@ -1,8 +1,9 @@
 import { ApplicationFailure, Context } from '@temporalio/activity'
 import type { Sql } from 'postgres'
-import { userTurnRows } from '../sessions/eventLog.js'
+import { type EventRows, PgEventRows } from '../sessions/eventLog.js'
 import type { ServerEvent } from '../sessions/protocol.js'
-import { sameOwner, type Owner } from '../sessions/protocol.js'
+import { sameOwner } from '../sessions/protocol.js'
+import { PgSessionRows, type SessionRows } from '../sessions/rows.js'
 import { flowOf, type FlowRuns } from './flowRuns.js'
 import { NOT_FOR_FLOWS, UNKNOWN_FLOW } from './toolActivities.js'
 
@@ -30,9 +31,15 @@ const POLL_MS = 1_000
 
 export type TurnAnswer = { session_id: string; turn_id: string; text: string; outward_calls: number }
 
-export type FlowSessionDeps = { sql: Sql; flows: FlowRuns | undefined; pollMs?: number }
-
-type Row = { owner_kind: Owner['kind']; owner_id: string }
+export type FlowSessionDeps = {
+  sql: Sql
+  flows: FlowRuns | undefined
+  pollMs?: number
+  /** Where the sessions' logs are read (`PgEventRows` on `sql` when omitted; gated in main.ts, #5299 step 9). */
+  events?: Pick<EventRows, 'turnEvents'>
+  /** The sessions' rows, for a session's owner (`PgSessionRows` on `sql` when omitted; gated in main.ts). */
+  sessions?: Pick<SessionRows, 'get'>
+}
 
 function refused(message: string): ApplicationFailure {
   return ApplicationFailure.nonRetryable(message, SESSION_REFUSED)
@@ -55,7 +62,7 @@ async function allowed(deps: FlowSessionDeps, what: string, sessionId: unknown):
   // A lookup that throws (the database is away) is left to the activity's retries.
   const starter = deps.flows ? await deps.flows.startedBy(flow, runId) : undefined
   if (starter === undefined) throw ApplicationFailure.nonRetryable(`${what}: no open flow run ${flow} is recorded for this execution`, UNKNOWN_FLOW)
-  const [row] = await deps.sql<Row[]>`SELECT owner_kind, owner_id FROM ai_sessions WHERE id = ${sessionId}::uuid`
+  const row = await (deps.sessions ?? new PgSessionRows(deps.sql)).get(sessionId)
   if (!row || !sameOwner(starter, { kind: row.owner_kind, id: row.owner_id })) {
     throw refused(`no session ${sessionId} of the person who started this run`)
   }
@@ -67,37 +74,20 @@ async function allowed(deps: FlowSessionDeps, what: string, sessionId: unknown):
  * poll that finds the `user.turn` remembers its seq, and every poll after reads only the
  * rows past the last one read, so a long session costs no more to poll than a short one.
  */
-function turnReader(sql: Sql, sessionId: string, turnId: string): () => Promise<ServerEvent[] | undefined> {
+function turnReader(events: Pick<EventRows, 'turnEvents'>, sessionId: string, turnId: string): () => Promise<ServerEvent[] | undefined> {
   let after: string | undefined
-  const events: ServerEvent[] = []
+  const read: ServerEvent[] = []
   // #2277: a session deleted mid-wait never logs the result; without this the step would
   // wait out the whole turn timeout (backend workflows/flow_tools.py). Asked in the same
-  // query as each read, so a poll is one round trip.
+  // read as each poll, so a poll is one round trip.
   const gone = () => refused(`session ${sessionId} is gone; its turn ${turnId} will not finish`)
   return async () => {
-    if (after === undefined) {
-      const [start] = await sql<{ here: boolean; seq: string | null }[]>`
-        SELECT EXISTS (SELECT 1 FROM ai_sessions WHERE id = ${sessionId}::uuid) AS here, e.seq
-          FROM (SELECT 1) AS one
-          LEFT JOIN ai_session_events e ON ${userTurnRows(sql, sessionId, turnId)}
-          ORDER BY e.seq DESC NULLS LAST LIMIT 1`
-      if (!start?.here) throw gone()
-      if (start.seq === null) return undefined
-      after = start.seq
-    }
-    const rows = await sql<{ here: boolean; seq: string | null; event: string | null }[]>`
-      SELECT EXISTS (SELECT 1 FROM ai_sessions WHERE id = ${sessionId}::uuid) AS here, e.seq, e.event
-        FROM (SELECT 1) AS one
-        LEFT JOIN LATERAL (
-          SELECT seq, event FROM ai_session_events WHERE session_id = ${sessionId} AND seq > ${after} ORDER BY seq
-        ) e ON true`
-    if (!rows[0]?.here) throw gone()
-    for (const r of rows) {
-      if (r.seq === null || r.event === null) continue
-      events.push(JSON.parse(r.event) as ServerEvent)
-      after = r.seq
-    }
-    return events
+    const answer = await events.turnEvents(sessionId, turnId, after)
+    if (!answer.here) throw gone()
+    if (answer.after === undefined) return undefined
+    after = answer.after
+    read.push(...answer.events)
+    return read
   }
 }
 
@@ -162,7 +152,7 @@ export function flowSessionActivities(deps: FlowSessionDeps): Record<string, (ar
       const sessionId = await allowed(deps, FLOW_SESSION_TURN, session_id)
       if (typeof turn_id !== 'string' || turn_id === '') throw refused(`${FLOW_SESSION_TURN} takes a turn_id`)
       const context = Context.current()
-      const read = turnReader(deps.sql, sessionId, turn_id)
+      const read = turnReader(deps.events ?? new PgEventRows(deps.sql), sessionId, turn_id)
       const scan: Scan = { from: 0 }
       for (;;) {
         context.heartbeat()

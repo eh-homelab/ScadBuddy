@@ -1,0 +1,150 @@
+[
+  {
+    "case": "a colour name match wins over a nearer hex, casefolded",
+    "target": { "hex": "#FF0000", "name": "Signal Red" },
+    "candidates": [
+      { "hex": "#FE0101", "name": "Crimson" },
+      { "hex": "#00FF00", "name": "signal red" }
+    ],
+    "want": 1
+  },
+  {
+    "case": "a hex match, case aside",
+    "target": { "hex": "#1B6CA8", "name": null },
+    "candidates": [
+      { "hex": "#1B6CA9", "name": "Near blue" },
+      { "hex": "#1b6ca8", "name": "Ocean blue" }
+    ],
+    "want": 1
+  },
+  {
+    "case": "a hex with alpha FF is the same opaque colour",
+    "target": { "hex": "#1B6CA8", "name": null },
+    "candidates": [
+      { "hex": "#1B6CA7", "name": null },
+      { "hex": "#1B6CA8FF", "name": null }
+    ],
+    "want": 1
+  },
+  {
+    "case": "black goes to the darkest grey",
+    "target": { "hex": "#000000", "name": "Black" },
+    "candidates": [
+      { "hex": "#FFFFFF", "name": "White" },
+      { "hex": "#202020", "name": "Charcoal" },
+      { "hex": "#808080", "name": "Grey" }
+    ],
+    "want": 1
+  },
+  {
+    "case": "white goes to the lightest grey",
+    "target": { "hex": "#FFFFFF", "name": "White" },
+    "candidates": [
+      { "hex": "#000000", "name": "Black" },
+      { "hex": "#F0F0F0", "name": "Off white" },
+      { "hex": "#C0C0C0", "name": "Silver" }
+    ],
+    "want": 1
+  },
+  {
+    "case": "a mid grey goes to the nearest grey",
+    "target": { "hex": "#808080", "name": "Grey" },
+    "candidates": [
+      { "hex": "#707070", "name": "Dark grey" },
+      { "hex": "#858585", "name": "Mid grey" },
+      { "hex": "#A0A0A0", "name": "Light grey" }
+    ],
+    "want": 1
+  },
+  {
+    "case": "a translucent target goes to a translucent candidate, not to opaque white",
+    "target": { "hex": "#FFFFFF40", "name": "Clear" },
+    "candidates": [
+      { "hex": "#FFFFFF", "name": "White" },
+      { "hex": "#F0F0F050", "name": "Frost" }
+    ],
+    "want": 1
+  },
+  {
+    "case": "an opaque target goes to a near opaque grey, not to clear of the same RGB",
+    "target": { "hex": "#FFFFFF", "name": "Snow" },
+    "candidates": [
+      { "hex": "#FFFFFF00", "name": "Clear" },
+      { "hex": "#E6E6E6", "name": "Light grey" }
+    ],
+    "want": 1
+  },
+  {
+    "case": "a tie goes to the first candidate",
+    "target": { "hex": "#123457", "name": null },
+    "candidates": [
+      { "hex": "#123456", "name": "Navy A" },
+      { "hex": "#123456", "name": "Navy B" }
+    ],
+    "want": 0
+  },
+  {
+    "case": "a tie goes to the first candidate, whatever its name",
+    "target": { "hex": "#123457", "name": null },
+    "candidates": [
+      { "hex": "#123456", "name": "Navy B" },
+      { "hex": "#123456", "name": "Navy A" }
+    ],
+    "want": 0
+  },
+  {
+    "case": "an orange goes to rust, not blue or yellow",
+    "target": { "hex": "#E8532F", "name": "Signal orange" },
+    "candidates": [
+      { "hex": "#1B6CA8", "name": "Ocean blue" },
+      { "hex": "#C0502A", "name": "Rust" },
+      { "hex": "#FFFF00", "name": "Yellow" }
+    ],
+    "want": 1
+  },
+  {
+    "case": "a null name never matches another null name",
+    "target": { "hex": "#00AA00", "name": null },
+    "candidates": [
+      { "hex": "#000000", "name": null },
+      { "hex": "#00A000", "name": "Green" }
+    ],
+    "want": 1
+  },
+  {
+    "case": "a candidate hex that is not a colour is never closest",
+    "target": { "hex": "#FF0000", "name": "Red" },
+    "candidates": [
+      { "hex": "not-a-colour", "name": "Mystery" },
+      { "hex": "#EE1111", "name": "Red-ish" }
+    ],
+    "want": 1
+  },
+  {
+    "case": "the first match by name or hex wins, in candidate order",
+    "target": { "hex": "#1B6CA8", "name": "Ocean blue" },
+    "candidates": [
+      { "hex": "#1B6CA8", "name": "Deep sea" },
+      { "hex": "#2266AA", "name": "Ocean Blue" }
+    ],
+    "want": 0
+  },
+  {
+    "case": "a filament's alpha field makes clear differ from opaque white of the same RGB",
+    "target": { "hex": "#FFFFFF", "name": "Snow" },
+    "candidates": [
+      { "hex": "#FFFFFF", "name": "Clear", "alpha": 0 },
+      { "hex": "#E6E6E6", "name": "Light grey", "alpha": 255 }
+    ],
+    "want": 1
+  },
+  {
+    "case": "the alpha field wins over the hex's alpha byte, on the target and a candidate",
+    "target": { "hex": "#FFFFFF", "name": null, "alpha": 64 },
+    "candidates": [
+      { "hex": "#FFFFFF", "name": "White" },
+      { "hex": "#F0F0F0FF", "name": "Frost", "alpha": 80 }
+    ],
+    "want": 1
+  }
+]

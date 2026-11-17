@@ -11,7 +11,8 @@ These notes cover `backend/`; paths are repo-relative; the root CLAUDE.md has th
 
 The rule is in the root CLAUDE.md, "Database access (#5295)". Today the API connects as the
 database owner and runs SQL on the agent's `ai_*` tables. The agent's grant list is
-`auth/caller_grants.py` `AGENT_GRANTS`. The print worker holds no Postgres pool (#5298
+`auth/caller_grants.py` `AGENT_GRANTS`, empty since its gate's grant check runs here (#5299
+step 10); the API revokes what it held at every start (`auth/revoke.py` `RETIRED_GRANTS`). The print worker holds no Postgres pool (#5298
 Task 31): every store it uses goes through CRUD routes, it has no grant list, and the API
 revokes what its old role `scadbuddy_print` held at every start (`auth/revoke.py`, #5298
 Task 35). It holds no KEK either (#5298 Task 33): it exchanges its proof only (`exchange_source`, no
@@ -19,12 +20,16 @@ view fallback), refuses to start without one, and ignores `SCADBUDDY_DATABASE_UR
 warning; the API opens every sealed value it needs (area `access-codes`: whether the API
 opens access codes, and a virtual printer's sealed code). The projects and render workers have no database client
 (#5298): they reach their data through CRUD routes. Neither has a grant list. The API
-and the agent revoke what the projects worker's old role `scadbuddy_projects` held at
-every start (`auth/revoke.py`, `agent/src/db/grants.ts` `revokeRole`), and the API what
+revokes what the projects worker's old role `scadbuddy_projects` held at every start
+(`auth/revoke.py`; the agent no longer revokes or grants anything, #6501), and what
 the render worker's old role `scadbuddy_render` held (#5298 Task 22). The render
 worker also holds no KEK and runs only on a remote store (plan D11). Its blob-index
 routes take an allowlist (`api/crud_render.py` `RENDER_KEY`, `HELD_KEY`): it writes only
-a render job's own `piece` keys, and its settings route never releases the full Bambuddy
+a render job's own `piece` keys, never a meta key of the slicer's output mark
+(`SLICED_OUTPUT_META`, #6179), an output only while its job runs (`_open_jobs_only`),
+and a ref only at the object its bytes name, read and hashed by the API unless a row it
+verified (`store_blobs.verified_at`) names it (`_verified`, #6233).
+Its settings route never releases the full Bambuddy
 key (`withheld`; with no render key saved the worker gets none). Template `pipeline/`
 Python runs in the render worker's pod, and openscad and `openscad-lsp` run in the API's
 pod.
@@ -45,7 +50,8 @@ at `POST /api/v1/auth/service-token` (`ExchangeReader`; route `api/service_token
 credential, falling back to its view on a 404 while it has a database URL; otherwise it
 reads its sealed one from its view (`TokenReader`), as before (#5494). A caller with no database
 (the projects, render and print workers, #5298) takes `exchange_source` instead: the exchange
-only, with no view, and no proof refuses its start.
+only, with no view, and no proof refuses its start. The agent's `ExchangeCredential` reads no
+view on a 404 either (#6501); without a proof it still reads its view until #5299 step 12.
 `ExchangeReader`, `exchange_source` and `ServiceAuth`
 live in `auth/service_auth.py`, which imports no Postgres code (`service_credentials.py`
 re-exports them), so the storefront edge (`python -m scadbuddy.storefront`, #5282; it holds
@@ -74,11 +80,20 @@ queue, template media's `template_media`) skip unless `SCADBUDDY_TEST_DATABASE_U
 points at a Postgres they can create schemas in, e.g.
 `docker run -d -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=scadbuddy_test -p 5432:5432
 postgres:18` and `SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test`.
-Without Docker, a native Postgres 18 works (`initdb`, then `pg_ctl -o "-p 55432"`). It needs
-`timezone='UTC'` in `postgresql.conf`, or a timezone test fails. A data directory on a long
-path also needs `unix_socket_directories=''`, with TCP only (measured 2026-11-14 on WSL2,
-Homebrew `postgresql@18`, #6322).
-Without it most of `tests/api` skips. CI runs them against a `postgres:18` service
+Without Docker, a native Postgres 18 works:
+
+```bash
+initdb -D "$PGDATA" -U postgres --auth=trust
+pg_ctl -D "$PGDATA" -o "-p 55432 -c timezone=UTC -c unix_socket_directories=''" start
+createdb -h 127.0.0.1 -p 55432 -U postgres scadbuddy_test
+# SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:55432/scadbuddy_test
+```
+
+`timezone='UTC'` is required, or a timezone test fails. TCP only
+(`unix_socket_directories=''`) is needed when the data directory is on a long path.
+Measured on 2026-11-14 on WSL2 with Homebrew `postgresql@18` (#6322): the `timezone` and
+long-path findings. The commands above are that recipe written out in full, not re-run as one script.
+Without `SCADBUDDY_TEST_DATABASE_URL` most of `tests/api` skips. CI runs them against a `postgres:18` service
 container. A `Settings` for an app that never starts uses `tests.conftest.UNUSED_DATABASE_URL`.
 Tests marked `requires_fixtures` (#2146) use the real MakerWorld 3MFs in
 `test-fixtures/makerworld/` (Git LFS, ~290 MB; `git lfs pull --include "test-fixtures/**"`;
@@ -181,7 +196,12 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   backend's migrations), `agent_migrations.py` (the agent's, which the API applies at
   start after the backend's, `main._migrate_agent_at_start`; root CLAUDE.md "Migrations
   (#491)"; a test's app skips them unless the test is marked `agent_migrations`,
-  `tests/conftest.py`); the render worker holds no database (#5298,
+  `tests/conftest.py`; a table or other object an agent migration creates belongs to the
+  role the API connects as, not the agent's. Prod's API and agent connect as one role, so
+  nothing changes there; with a role per caller, the agent could not use what a later file
+  makes (nothing grants it, and since #6501 the agent grants the API's role nothing
+  either), so such a deployment keeps the API and the agent on one role
+  until the agent's data moves behind CRUD routes (#5299)); the render worker holds no database (#5298,
   `tests/test_render_worker_nodb.py`; the API revokes its old role `scadbuddy_render` at
   every start, `auth/revoke.py`, and every caller's grant list goes through
   `auth/caller_grants.py` `grant_role`): it reads the store settings and
@@ -201,6 +221,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
 - `backend/scadbuddy/workflows/arrange.py` — Arrange's packer (spec 2026-09-27 §7): goals,
   quarter turns, filament signatures, every plate checked with `plate.fit_problem`;
   `Arrange` in `workflows/pipelines.py` runs a `kind='arrange'` row (`POST /outputs/arrange`).
+  It packs with `packing.py` `GAP_MM` (5 mm) and ignores Bambu's by-object clearance, so a
+  by-object plate fails "too close to others" (#6246). A template plate is one object with
+  colour parts (#6245), so by-object slicing does nothing useful on it: render each piece
+  alone and arrange the pieces, which makes each one its own object (#956).
 - `backend/scadbuddy/workflows/` — renders on Temporal (#424): `pipelines.py`
   (`TemplatePipeline`, its `RenderPiece` children, `RenderPreview`), `activities.py`
   (the render stages as activities, `WorkerDeps`), `client.py` (`connect`,
@@ -260,8 +284,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
 - `backend/scadbuddy/flows/` — flow versions and runs (`store.py`: `workflow_definitions`,
   `workflow_runs`, the latter written only by the run's workflow), `agent_reads.py` (the
   agent's questions about the flow tables, read only, for `api/crud_agent.py` area `flows`,
-  #5299 D7: the queries the agent ran over SQL, which `agent/src/flows/backendReads.ts`
-  `SqlFlowRunReads` keeps a copy of until every API pod serves the routes), `typecheck.py` (a
+  #5299 D7: the queries the agent ran over SQL, of which the agent's tests keep a copy,
+  `agent/test/support/sqlFlowRunReads.ts`; the API revokes the agent's grants on
+  `workflow_runs` and `workflow_run_decisions`, `auth/revoke.py`), `typecheck.py` (a
   script's check at registration and at each start), `history.py` (a Reset's preview: the
   outward sends past a point, by activity id), `component.py` (`FLOWS`; runs the
   `projects` worker in-process with `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` or
@@ -270,6 +295,181 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   sweep for runs whose execution closed). Routes `api/flows.py`. An outward call's
   approval timeout resolves from the run, its flow, then `flow_approval_timeout_seconds`
   (0 is never).
+- `backend/scadbuddy/agent_data/` — the agent's settings, Claude credentials and payload data
+  keys behind the CRUD service (#5299 step 4, D5; #5342), for `api/crud_agent_secrets.py`
+  (class `crud.agent`, areas `settings`, `credentials`, `payload-keys`): `credentials.py` is
+  `agent/src/credentials.ts` `CredentialStore` statement for statement (the AAD, the table
+  lock, the `FOR UPDATE` health write, the warm-evict NOTIFY), sealed and opened here with the
+  KEK; `settings.py` a write with the NOTIFYs in its transaction and, with `expect`, a
+  compare-and-set under the table's lock; `payload_keys.py` a subject's data key released
+  (made first under the subject's advisory lock, never for a subject in
+  `ai_forgotten_subjects`), never the KEK; `audit.py` the `ai_audit` row each reveal
+  (kind `credential`; a redaction's once per `REDACT_AUDIT_WINDOW`) and release (kind `payload_key`, once per subject and
+  `RELEASE_AUDIT_WINDOW`) writes in its transaction; `rotation.py` the re-wrap of the credentials and payload
+  keys at the API's start (`main._rotate_agent_secrets`). For `api/crud_agent_forget.py` (area
+  `forget`, #5299 step 6): `forget.py` a subject's tombstone, its flow images and its key in one
+  transaction under its lock, a session's forks first taking their ranges of its transcript,
+  events and images (`transcripts.py` `copy_fork_ranges`, #5299 step 9, part c; refused,
+  `ForksTakeRangesError`, only with no KEK when a fork takes transcript entries, and the agent
+  copies them itself), a browser call's key dropped and the
+  hourly sweep of the keys no forget deletes; `flow_blobs.py` a flow run's images kept (sealed by
+  the agent, sent as multipart bytes; the tombstone check and `FLOW_IMAGES_MAX` under the lock)
+  and read. For `api/crud_agent_workspace.py` (area `workspace`, #5299 step 7): `workspace.py`
+  is the agent's `workspace/store.ts` `SessionFiles` on the API, with the sealing
+  (`seal_file`, `open_file`: the agent's `workspace/sealing.ts` format) and the file keys
+  wrapped and opened here under the session's payload key (`payload_keys.py` `key_in`, no
+  audit row: the key never leaves the API) or the KEK; each write's row, its blob's
+  `blob_refs` hold and its `workspace.file` events in one transaction, the reconcile one
+  transaction under `RECONCILE_LOCK`, and `rewrap` at a rotation. `api/crud_agent_blobs.py`
+  (areas `session-blobs`, `attachments`, `http-bodies`, #5299 step 7) is the agent's
+  `sessions/blobs.ts`, `attachments/store.ts` and `sessions/httpBodies.ts` statement for
+  statement: an image's name and signature checked from its bytes, a tool call's images
+  replaced whole, a fenced write checked `FOR SHARE`, a queued message's images deleted by
+  `…/session-blobs/deletes` only when its own write made them and no write stored them since
+  (every write sets `created_at`, #6413), a fork's read through its chain, an
+  attachment's caps under its owner's lock, a saved body read by range (tests
+  `tests/crud/test_crud_agent_blobs.py`). `flows/forget.py` and `flows/images.py` run the same statements on the API's own
+  tables, with no fallback for a database the agent never migrated (the API applies its files
+  first, #5299 D6). Its tests make the agent's tables
+  with the agent's own migration files (`render/agent_migrations.py` `migrate_agent`) and open
+  the credential vectors `tests/fixtures/secret-vectors.json`, a copy that
+  `lint-codec-copies.sh` keeps equal to the agent's. `notify.py` re-wraps the agent's Web Push
+  keys and notification channels' tokens (#5299 step 5) in the same rotation. `background.py` and `operations.py` are
+  the agent's background tasks (with a Monitor's events, a Workflow's journal and child chats)
+  and its command record `ai_operations`, for `api/crud_agent_tasks.py` (areas
+  `background-tasks`, `operations`, #5299 step 8): the agent's `BackgroundTaskStore` and
+  `OperationStore` statement for statement, a task's create under the session's
+  `bgtask:<session>` advisory lock; an operation's insert or end writes its `activity` row in
+  the same transaction (`ActivityIndex.ingest_agent_operation_in`), and the bus's
+  `ai_operation.changed` stays only for an agent pod still on SQL. `sessions.py` is a
+  session's row as the agent's session manager reads and writes it and what its calls touched,
+  for `api/crud_agent_sessions.py` (areas `sessions`, `session-resources`, #5299 step 9): the
+  agent's `PgSessionRows` and `PgResourceRows` statement for statement, an insert counted under
+  the owner's `ai_sessions.start:<kind>:<id>` lock and a fork's checked under its parent's
+  payload-key lock, shared, so an agent pod still on SQL excludes it (tests
+  `tests/crud/test_crud_agent_sessions.py`). `transcripts.py` is a session's transcript, for
+  `api/crud_agent_transcripts.py` (area `transcripts`, #5299 step 9, part b): the agent's
+  `PgTranscriptRows` statement for statement, each entry sealed and opened here under the
+  session's payload key (`payload_keys.py` `key_in`, no audit row) with the agent's AAD
+  (`ai_session_entries:<session>:<subpath>:<uuid or #id>`, so the ids are reserved with `nextval`
+  first); an append's tombstone check (under the subject's payload-key lock, shared), its fence
+  (`turn_attempt`, `durable_turn_id`, `FOR SHARE`) and its insert are one transaction, and a
+  fork's transcript is read through its chain (`LEAST(bound, cut)`) in one snapshot, read again
+  when an ancestor was forgotten meanwhile (tests `tests/crud/test_crud_agent_transcripts.py`).
+  `events.py` is a session's event log, for `api/crud_agent_events.py` (area `session-events`,
+  #5299 step 9, part b): the agent's `PgEventRows` statement for statement, a seq taken from
+  `ai_sessions.event_seq` in the insert's statement, a turn's append fenced `FOR UPDATE` on its
+  placement, a fork's read through its chain (`LEAST(bound, cut)`) in one statement, and a new
+  fork's log under its parent's payload-key lock, shared (tests
+  `tests/crud/test_crud_agent_events.py`). `order_costs.py` is the order items a session revised
+  and its spend's report, for `api/crud_agent_order_costs.py` (area `session-order-costs`, #5299
+  step 9, part c): the agent's `PgOrderCostRows`, a report's writes each checking in its
+  transaction that the caller's token holds the session's lease (`leases.py`
+  `order-cost:<session id>`, whose acquire also tries the SQL pod's advisory lock) (tests
+  `tests/crud/test_crud_agent_order_costs.py`). `turns.py` is a durable turn's writes of its
+  session's row, for `api/crud_agent_turns.py` (area `session-turns`, #6449): the agent's
+  `PgTurnRows` statement for statement, each with its events (`events.py` `append_in`) in one
+  transaction: a send's claim and its give-back (only while the row runs that turn), a
+  placement's claim (the only writer of `turn_attempt`, only while the row runs the turn), its
+  spend (once per key, `ai_turn_spend_keys`, so a write sent again after its answer was lost is
+  added once), the turn's end only while the row
+  runs that turn (its closing events worded with the lineage's spend and budget read `FOR UPDATE`,
+  `word_tail`, as the agent's `wordTail`) with the queue's head claimed in the same transaction,
+  and the running sweep's end of a lost turn only at the `event_seq` it read; a write waits at most
+  `LOCK_TIMEOUT_MS` (10 s) for the row's lock, else 503 `row_busy`, and a call at most
+  `POOL_WAIT_S` (10 s) for a connection, else 503 `pool_busy` (tests
+  `tests/crud/test_crud_agent_turns.py`; the agent's `test/turnRowsParity.pg.test.ts` runs one
+  scenario both ways). `edits.py` is an edit of a session, for `api/crud_agent_edits.py` (area
+  `session-edits`, #6449): the agent's `PgEditRows` transaction, under the row's lock and only
+  while the principal owns it, with its warm eviction, an archive's `done` summaries dismissed and
+  their events; a newly done session needs `told`, checked last (`untold`), so that answer means
+  the edit would pass: the agent then tells its workflow and sends it again (tests
+  `tests/crud/test_crud_agent_edits.py`; the agent's `test/editRowsParity.pg.test.ts`).
+- The agent's small stores (#5299 step 5): `api/crud_agent_stores.py` (areas
+  `activity-kinds`, `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`) and
+  `api/crud_agent_notify.py` (area `notify`, sealed with the KEK under the agent's AAD), each
+  route one method of the agent's store and its SQL, a transaction as one transaction: the
+  pairing request's advisory lock, the accept's `FOR UPDATE` with the code hash compared in
+  constant time, a push subscription under its endpoint row's lock. A tab image's bytes are
+  the request's and the answer's body, checked against its sha256 name. Tests
+  `tests/api/test_crud_agent_stores.py`, `test_crud_agent_notify.py`. The plugin stores
+  (#5299 step 5): `api/crud_agent_access.py` (areas `access` and `plugin-sessions`: the tool
+  access, each write with its warm-evict NOTIFY in one transaction; the tool listings, a
+  connection test's stored only while its lease holds, under the plugin's or the package's
+  row lock; the leases `…/agent/leases/{key}`, `agent_data/leases.py` over the API's own
+  table `agent_leases`, as `bambuddy/copy_leases.py`, whose acquire also tries the old
+  session advisory lock so an SQL-path agent pod's test makes it `busy`; the upstream MCP
+  sessions), `api/crud_agent_plugins.py` (area `plugins`: the remote plugins and their
+  OAuth sign-ins, sealed and opened with the KEK under the agent's AAD,
+  `agent_data/plugins.py`, which also re-wraps them in the rotation; a token refresh is
+  stored only while the lease `plugin-oauth:<plugin>` holds) and `api/crud_agent_packages.py`
+  (area `plugin-packages`: each write with `agent_data/packages.py` `prune_stale_rows`, the
+  agent's `pruneStaleRows`). `agent_data/access.py` holds the access writes they share.
+  Tests `tests/api/test_crud_agent_access.py`, `test_crud_agent_plugins.py`,
+  `test_crud_agent_packages.py`.
+- The agent's tool-call gate (#5299 step 10): `api/crud_agent_gate.py` (area `gate`) over
+  `agent_data/gate.py`, the agent's `gate/store.ts` writers statement for statement, each one
+  transaction: an entry opened (the Reset's cancels first, in their own), resolved, or decided
+  against its row's record by the gate's validator under the row's lock (`gate_validate.py` and
+  `gate_canonical.py`, byte copies of agent-durable's, kept so by `lint-codec-copies.sh`, with the
+  shared vectors in `tests/fixtures/`), a flow's refusal, and a run grant's approval checked
+  against `flow_grants` and `flow_grant_uses` under the grant row's share lock. The API builds the
+  session events as the agent did, appends them in the write's transaction, and answers them
+  (`logged`), which the agent hands to its event log. A decide that must know the row's run is
+  live answers `live_check` and writes nothing, and the agent asks again naming the run it found
+  running. Tests `tests/crud/test_crud_agent_gate.py`, `test_gate_vectors.py`; the agent's
+  `test/gateBackend.pg.test.ts` checks the port writes what the agent's SQL writes.
+  `api/crud_agent_pending.py` (area `pending-input`) over `agent_data/pending_input.py` is the
+  rest of the gate's SQL statement for statement: the agent's `gate/projection.ts` reads, the
+  orphan sweep (`gate/sweep.ts`; each cancel one transaction with its events, the session's
+  `idle` and an approval's audit row), a durable turn's response read and its parked call's span
+  mark (only while the turn's `turn_attempt` and `durable_turn_id` hold the session, checked `FOR
+  SHARE` in the mark's transaction), and a call's recorded approval (`PgApprovalRecords`). Tests
+  `tests/crud/test_crud_agent_pending.py`.
+  `api/crud_agent_audit.py` (area `audit`) over `agent_data/audit_log.py` is the agent's
+  `audit/log.ts` `AuditLog`: a row written (a tool call's approver copied from `ai_approvals` or
+  its request's `approved` response in the same statement), a page listed, and the prune, the one
+  DELETE the table's trigger lets through. Tests `tests/crud/test_crud_agent_audit.py`.
+  `api/crud_agent_approvals.py` (area `approvals`) over `agent_data/approvals.py` is the agent's
+  `approvals/service.ts` `ApprovalService` SQL: its reads, a pending approval made (with its
+  session events), a decision written once (the guarded UPDATE, the span's context the agent
+  sends, the session events and the `approval` audit row in one transaction), a prepared action
+  used once by its asker for its input hash, and an MCP prepare's bounds under its advisory lock.
+  Who may see or decide stays the agent's check. Tests `tests/crud/test_crud_agent_approvals.py`.
+  `api/crud_agent_questions.py` (area `questions`) over `agent_data/questions.py` is the agent's
+  `gate/questions.ts` `QuestionService` SQL: its reads, a `done` summary's dismissal (the guarded
+  UPDATE, its events and its `question` audit row in one transaction), the attention rate limit's
+  count (only while the caller holds the lease `attention-rate`, `agent_data/leases.py`, whose
+  acquire also tries the SQL path's `scadbuddy:attention-rate` transaction lock; 409 `lease-lost`
+  otherwise, never a count), a turn's `done` facts (`gate/doneSummary.ts` `loadDoneSummary`'s two
+  reads; the text is the agent's, which redacts the turn's secrets) and its post (only while the
+  turn's `turn_attempt` and `durable_turn_id` hold the session, read `FOR UPDATE`, and the session
+  is the browser user's; at most `DONE_POSTS_PER_TURN`, a refusal audited `rate_limited`; the
+  summaries it replaces, the events and their audit rows in the same transaction). Tests
+  `tests/crud/test_crud_agent_questions.py`.
+  `api/crud_agent_escalations.py` (area `escalations`) over `agent_data/escalations.py` is the
+  agent's `flows/escalations.ts` `Escalations` SQL and `flows/queue.ts`'s read of a run's child
+  entries: a parent's pass up and a deny's claim and release (each only while the entry is at hop
+  `parent` for the session named), the hop's timeout sweep, and a delivery's claim, hand back and
+  skip, with the record of a run's own calls sent. Who may answer stays the agent's check. Tests
+  `tests/crud/test_crud_agent_escalations.py`.
+  `api/crud_agent_mcp.py` (area `mcp-relay`, #5299 step 11) is the agent's `mcp/relayRows.ts`
+  `PgRelayRows` statement for statement: the /mcp session directory (`ai_mcp_sessions`), a relay
+  message's body row and its `scadbuddy_mcp` NOTIFY in one transaction (the header checked against
+  the relay's shapes and the NOTIFY payload cap), a row taken or withdrawn once, and the sweep.
+  Tests `tests/crud/test_crud_agent_mcp.py`.
+  `api/crud_agent_publish.py` (areas `publish` and `session-reads`, #6501): the NOTIFYs the
+  agent sent outside a store's write, a `session.*` bus event on `scadbuddy_events` (each field
+  checked, so the payload stays small) and a warm eviction on `scadbuddy_warm_evict`; and two
+  reads of a session's own events in `agent_data/events.py`, its open calls (`open_calls`) and a
+  child's text before a call (`reasoning_deltas`), the agent's statements. Tests
+  `tests/crud/test_crud_agent_publish.py`.
+  `api/crud_agent_sweeps.py` (areas `session-sweeps` and `forget-rows`, #6501): which of up to
+  `LIVE_IDS_MAX` session ids still have an `ai_sessions` row, for the agent's directory sweeps;
+  and a forget's last step, only for a session with an `ai_forgotten_subjects` row (409
+  `not-forgotten` otherwise): its `ai_session_entries` rows and its row in one transaction, then
+  the `ai_session_file_bytes` no file names (a failure left to the agent's sweep) and the
+  warm-evict NOTIFY. Tests `tests/crud/test_crud_agent_sweeps.py`.
 - `backend/scadbuddy/flow_triggers/` — runs started on a schedule or an event (#2484,
   spec 2026-10-11 §12): `store.py` (`flow_triggers`, their standing grants and fires),
   `fire.py` (the `flow_trigger_fire` activity on the `library` queue), `events.py` (the
@@ -367,8 +567,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   the print worker's LAN read URL is minted by the API too, `POST …/print/transfer-urls`,
   always the internal route's, `READ_TTL`, only for a key the content index holds live as
   a slicer's output (`SLICE_KIND` with `SLICED_OUTPUT_META`, which `Transfers.finish_put`
-  merges and `store/index.py` `put_in` keeps; its row swept or not; never the slicer's
-  inputs), else 403 `transfer-refused`; ScadBuddy strips print-host credential keys
+  merges and `store/index.py` `put_in` keeps, under the content-addressed key of its
+  bytes, `store/content_models.py` `content_index_key`, #6179; its row swept or not; never the
+  slicer's inputs), else 403 `transfer-refused`; ScadBuddy strips print-host credential keys
   whenever it parses a preset, and never stores, forwards or writes them into a slicer
   file (`core/credentials.py` `strip_credentials`, applied at parse in `bambuddy/models.py`
   `LocalPresetDetail`, nested keys too); the API strips the kept presets an older build
@@ -383,6 +584,15 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   and presets, which the dialog and the run share; the dialog's Reslice gives a
   completed slice a new row of its own, `reslice_of`, #4433; the lost-row repair), `preview.py` (the
   dialog's reads under `?slicer=native`) and `component.py` (`SLICING`).
+  What a native slice keeps of a file: `--load-settings` (ScadBuddy's process preset)
+  replaces the file's own process keys, `enable_support`, `support_filament` and
+  `support_interface_filament` among them; the supports option passes only enable, type and
+  build-plate-only (`supports.py` `SCALAR_KEYS`). An author layout (`render/bambu3mf.py`
+  `layout_of`: a `print_settings_id` other than ScadBuddy's placeholder) keeps its placement
+  and scale, and its tower unless the target's extruders cannot reach it
+  (`towers_within_reach`, in `bambuddy/send.py` `_laid_out_for`). A sliced file, another
+  slicer's, or one past the caps (`layout_of` `as_is`) prints as it is. The headless CLI
+  draws no plate covers (its GLFW is Wayland-only) and copies the input's (#6170).
   `workflows/slicing.py` is `SliceWorkflow` on the `library` queue (activities in
   `workflows/slicing_activities.py`, the run's `slice_run` and `print_sliced_upload`
   among them); the print worker only starts it. `api/internal_blobs.py` is the hidden
@@ -413,20 +623,39 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   with `path` `bambuddy` of a quote sliced over the LAN slices again (orders spec §5.4). A
   native run passes `client=None` (`bambuddy/client.py` `maybe_client`), reads printer
   state from the LAN report (`printers/reports.py`), and its filaments are the loaded
-  trays plus the physical-spool overlay of cached provider records (`spools/`, refreshed
-  off the path): Bambuddy's inventory and ScadBuddy's own (`spools/native.py` over the
-  `filament_*` tables since #6261, provider `native` in `spools/spool_providers.py`,
-  routes `api/native_spools.py`, #4643; each write re-caches it at once; a LAN start
-  books its slots' grams as `print_started` estimates in `filament_spool_events`, and the
-  run's settle books each start's `print_ended` actual (`done`) or 0, `native_use_hook`;
-  the editor is Settings' `components/settings/NativeSpools.tsx`).
+  trays, each with the SB spool it holds (#6262: `FilamentInventory.trays`, found by its
+  tag or a person's tray link; its presets by `sb_number`, `filament/presets.py`). The
+  run's plan and the dialog's background slice read them alike where they run
+  (`filament/inventory.py` `read_sb_spools`: the API's Postgres, or the print worker's
+  CRUD routes `…/print/filament/trays` and `…/filament/presets`, area `filament`,
+  `RemoteFilamentTrays`),
+  the run from the printer's stored report; a failed read plans on the trays alone. On
+  Bambuddy's path the picker offers SB spools too (#6262 Task 7: `build_options` over
+  `FilamentInventory.rows`, each placed by a printer's report, else by Bambuddy's
+  assignment of its linked spool), so a plan names SB numbers (`FilamentPlan.ids`
+  `"sb"`); a `"bb"` plan (an old client, an in-flight workflow's input) is mapped at read
+  by `filaments.sb_plan` (`bb_to_sb`), in activities and routes only, never in workflow
+  code, an unlinked slot dropped. The worker reads both through `…/filament/rows` and
+  `…/filament/bb-to-sb`. The tray question's answer
+  (`POST /print/printers/{id}/trays/{ams}/{tray}/spool`) takes the SB number, places it
+  at the tray, then writes Bambuddy's assignment for a linked spool. A
+  LAN start books its slots' grams as `print_started` estimates at the plate's start in
+  `filament_spool_events`, and the run's settle books each start's `print_ended` actual
+  (`done`) or 0 (`filament/print_uses.py`, `print_use_hook`; on the worker through
+  `…/filament/print-uses`, `RemotePrintUses`). ScadBuddy's own spools are the `filament_*`
+  tables (#6261). The `native` provider, its `/native-spools` routes, the `native_spool_*`
+  agent tools and Settings' editor are gone (#6262; the old anchor `#native-spools` lands
+  on Settings' Filament section), and so is the spool providers' overlay: the print dialog reads the
+  SB spools. The old tables (`native_spools`, `physical_spools`
+  and the rest) are unread now; a follow-up PR drops them. A migration
+  carried each person's tray link to the SB spool's tray place.
   `printers/ams_mapping.py` computes `ams_mapping`/`ams_mapping2` from the
   plan's trays and `printers/nozzle_mapping.py` an H2C rack print's `nozzle_mapping`
   (measured values in the spec's §2); `printers/lan.py` is the FTPS upload and MQTT
   command. `slicing/catalogue.py` and `slicing/values.py` give a native run the image's
   presets and a process preset's values in Bambuddy's shapes, with Bambuddy's `local`
   presets from the kept copy `slicing/held_presets.py` (#4645: `held_local_presets`,
-  refreshed on the spool providers' Schedule, read through `Profiles.held`; cloud user
+  refreshed on the spool refresh's Schedule, read through `Profiles.held`; cloud user
   presets are not offered, D5). `print_library/copies.py` files the laid-out per-print copy in the
   native library, marked with its run's subject (`library_files.print_subject`, as is
   its slice); `print_library/sweep.py` `sweep_print_copies` (housekeeping
@@ -449,6 +678,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   over the watch's `printer_reports`) waits out each print before the next starts, and
   `print_lan_update` rewrites the result (`PrintRunResult.lan_waiting`, `lan_stopped`).
   A change to what a native run reads must keep `e2e-stack/`'s recorder pass at zero.
+  A native file's associations (#6395): `print_library/associations.py` (`RELATIONS`, the
+  one list; `library_file_associations`), routes `api/library_associations.py`, which adds
+  the implied ones read live (a model's `mesh_source`, an output's copy). A trashed file's
+  rows are hidden, not deleted (a restore shows them again); a purge deletes them by FK, and
+  a model's delete (`api/models.py` `delete_template`) deletes the model's.
   Copies between the two libraries (#5355): `print_library/copy.py` (the plan's walk,
   the batch, the ``library`` queue activities), `copy_models.py`, `copy_store.py`
   (`library_copies`, `library_copy_files`), `workflows/library_copy.py` (`LibraryCopy`,
@@ -483,12 +717,26 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`effective()`: spool → type → subtype → material, the one resolver; a type links its
   price-book row by identity, alpha included, and never rewrites a found row), `spools.py`
   (instances and tag bindings; every writer locks the tag before the spool; archive closes
-  the open binding), `ledger.py` (`filament_spool_events`, the one source of grams left:
-  the newest absolute reading, then the deltas after it; events carry their physical time,
+  the open binding; `detail()` is the spool page's read: tags, last tag and its holder, the
+  grams `basis`, `in_use`; `ledger()` pages every spool's events by an opaque `(at, seq)`
+  cursor; `low_stock` is computed per spool against its effective `low_stock_pct`, else the setting `filament_low_stock_pct` (20 by default, read once per call, before the store takes a pool connection, by its `defaults` reader (`FilamentDefaults`); the summary's `value_left` uses `filament_default_cost_per_kg` for a spool with no cost; Settings → Printing → Filament), `presets.py` (a spool's own presets and K values over its type's, by key; `preset_for` is exact, never a near nozzle; no key is `*`: the 0706Z migration made each `*` row one `migrated` row per model and nozzle, `drop_migrated` deletes them when a spool gets its first type), `ledger.py` (`filament_spool_events`, the one source of grams left:
+  the newest absolute reading, then the deltas after it (`basis()` returns that anchor and those
+  deltas, and `grams_left()` is built on it); events carry their physical time,
   ordered by `(at, seq)`; a time-less event gets a clock-step guard because the WSL clock
   steps back), `locations.py` (a spool moves only through `move()`; AMS trays are keyed by
   printer, AMS and tray, never by name), `bambuddy_pull.py` (import and the scheduled pull,
-  read-only toward Bambuddy). Colour is `#RRGGBBAA` (`colour.py`). Routes: `api/filament.py`.
+  read-only toward Bambuddy; `scheduled_pull` skips when the setting `filament_sync.spools` is
+  `off`, read per run, #6262 Task 13), `csv_import.py` (the spools CSV import, #6262 Task 15:
+  rows the caller parsed, as text cells; a dry run reads only, so it adds no catalog row and
+  takes no spool number; a write is one transaction, refused whole when a line is an error,
+  and its `Idempotency-Key` reply is kept in `crud_requests` under caller `filament`; a
+  `location` cell is a `move_on`), `inventory.py` (`read_sb_spools`: which SB spool is in
+  each AMS tray, by tag or by the spool placed there with the tray's fingerprint, and the shelf), `print_uses.py` (a LAN print's grams as
+  ledger events). Colour is `#RRGGBBAA` (`colour.py`). Routes: `api/filament.py`; the ledger
+  route `GET /filament/events` takes `since` (included) and `until` (excluded), so two ranges
+  tile, with `spool_id`, `kind`, `source` and a cursor. The price book (the `filaments` rows
+  that `orders/pricebook.py` prices) is edited on Filament → Types (`components/orders/FilamentsEditor.tsx`),
+  not in Settings.
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
   Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),
   `BlobRefs` (`refs.py`, the `blob_refs` table that keeps a blob alive) and `sweep_blobs`
@@ -546,12 +794,13 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   one is 503 `LAN_NEEDS_KEK`), and its rack hotends' usage (`RemoteRackUsage`, a
   `RackUsageStore` with no pool, area `rack`, #5298 Task 30: a LAN start's picks are one
   route and one transaction on the API; every write but `seen` takes an
-  `Idempotency-Key`; `spool_history` is the API's), and its spools, ScadBuddy's own spools
-  and their uses, the kept presets and a native slice's start (`RemoteSpoolStore`,
-  `RemoteNativeSpools`, `RemoteHeldPresets`, `RemoteNativeSlices`, area `spools`, #5298
-  Task 31: each write runs whole on the API under its lock; a provider's records and a
-  run's settle take an `Idempotency-Key`; the refresh, tray links and the shelf's edits
-  are the API's), and a LAN print's read URL of a native slice's file (`RemoteBlobs`
+  `Idempotency-Key`; `spool_history` is the API's), and the kept presets and a native
+  slice's start (`RemoteHeldPresets`, `RemoteNativeSlices`, area `spools`, #5298 Task 31:
+  each write runs whole on the API under its lock), and the
+  SB spools in a native run's trays and what its LAN starts use of them
+  (`RemoteFilamentTrays`, `RemotePrintUses`, area `filament`, #6262 Task 6: an area of its
+  own, so the worker waits for an API that serves it; a start's uses and a run's settle
+  take an `Idempotency-Key`), and a LAN print's read URL of a native slice's file (`RemoteBlobs`
   asks the API, area `transfer-urls`, #5298 Task 32; it signs nothing), and it
   does not LISTEN, so it keeps no `RecentRuns`; every
   workflow on it AUTO_UPGRADE (`print_deployment`'s default, #2066; `FollowPrint` names
@@ -570,9 +819,21 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`BambuddyClient.makerworld_*`; Bambuddy's 400 for a link it refuses is a 422). The
   assistant imports only through these routes (agent `get_makerworld_status`,
   `resolve_makerworld_url`, `import_makerworld_model`): the agent worker has no route to
-  Bambuddy and never holds its key. The `makerworld-import` flow (stored in the
-  database, not in this repo) still posts to Bambuddy's `/api/v1/makerworld/import`
-  directly until its `import_one` is changed to call `import_makerworld_model`. The import is the `makerworld_import` operation on the
+  Bambuddy and never holds its key. The `makerworld-import` flow is not in this repo:
+  its versions are prod's `data/flows/makerworld-import/flow.py`, written only through
+  the API's `/workflows` routes (`POST /workflows` registers a version; restore and
+  delete commit too), never from this repo. Since version 2 its `import_one` calls `resolve_makerworld_url`,
+  `create_print_project` and `import_makerworld_model` (#6340). A command tool
+  (`agent/src/tools/command.ts`: `create_print_project`, `import_makerworld_model`)
+  answers `{status: "running", operation_id, next}` once its follow window ends, which a
+  script follows with `get_operation`; version 2 read `folder_id` straight off
+  `create_print_project` and failed `'folder_id'`. A flow run's call keys its commands on
+  its gate request id (`agent/src/temporal/toolActivities.ts` `runCall`, #6350), the same
+  on every attempt of that call; each `tool(...)` call the script makes is a new call with
+  a new key. A keyed tool (both of these) whose only attempt lost its heartbeat is asked
+  once more under that key (`workflows/flow_tools.py` `FLOW_KEYED_RETRY_PATCH`, #6345).
+  After `may have run` or `StartToClose` reaches the script, it checks state
+  (`list_print_projects`) before it sends the write again. The import is the `makerworld_import` operation on the
   `library` queue (`makerworld/operations.py`): Bambuddy downloads the 3MF (up to
   `MAKERWORLD_IMPORT_TIMEOUT`), then on `library_backend` native `makerworld/imports.py`
   copies it into the native library as a `bb_to_sb` copy does
@@ -586,9 +847,19 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   printer's storage only when asked) and reads the one chosen; `api/print_imports.py`
   links the archive to a model as a `print_links` row with the subject `model:<slug>` and
   `matched_by` `import`, beside its `print_imports` row (`PrintLinkStore.record_import`).
+  #6394: or to a native library file that stands and is no run's per-print copy (a 422:
+  the sweep would trash it), checked again in the import's transaction
+  (`require_import_target`) (`library_file_id`, subject `library:<id>`;
+  `print_imports.subject` is the target, while `library_file_id` and `source` stay where
+  the 3MF was read from, and `slug` is NULL). The print watcher and `slugs_by_hash` read
+  model imports only. A link of ScadBuddy's own print of that file takes the import's row
+  over and forgets its `print_imports` row (`_TAKE_OVER_IMPORT`, `_take_over`). A native
+  file purged from the trash forgets its imports (`print_library/store.py`
+  `purge_trashed`, `forget_library_imports`); a file only trashed keeps them, so a
+  restore loses nothing.
   Both routes first run the link passes for the one archive (`linking.link_archive`), so a
   print ScadBuddy made is linked to its run and refused (409), never imported; a run's
-  link found later still owns the print (`_OWNER_ORDER` puts `model:` last). One import
+  link found later still owns the print (`_OWNER_ORDER` puts every `import` link last). One import
   of an archive runs at a time (`PrintLinkStore.import_lock`); one that waits past
   `IMPORT_LOCK_WAIT_S` (30 s) is a 409 to send again. Every owner lookup (`archive_origin`,
   `archive_run_plates`) orders as `_OWNER_ORDER` does.
@@ -837,6 +1108,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   short statements on the API's role go on the shared `scadbuddy-rows` pool
   (`rows/component.py` `ROWS`). `tests/test_pg_pools.py` sums an API process's pools
   and fails on any new or bigger one; change it, and README "Running it", on purpose.
+  The agent's lease acquire (`api/crud_agent_access.py`) runs on the settings store's pool.
+  During a roll, a `plugin-oauth:` acquire whose grant row an SQL-path agent pod holds keeps
+  one of its connections for up to the request's `wait_s` (at most `MAX_WAIT`, 25 s). At
+  most `MAX_ROW_WAITS` (2) acquires of a process wait so; the rest poll without waiting.
 - A dict read from a `jsonb` column (e.g. `storefront_listings.params`) has no key order:
   Postgres stores the keys shortest first. Never show or answer its keys in that order;
   order them by the template schema's parameters (#6302).
@@ -877,7 +1152,12 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `mocks/features/activity.ts`.
 - `backend/scadbuddy/orders/` — orders phase 1 (#4249, epic #4248, spec
   `2026-10-18-orders-design.md`, plan `2026-10-19-orders-phase-1-customers-and-orders.md`):
-  customers, orders and line items as ScadBuddy's own records. `component.py` `ORDERS`
+  customers, orders and line items as ScadBuddy's own records. A library-file item has no
+  design revisions (409 "it has no design revisions"): to change one after acceptance, add
+  a new item (`POST …/{order_id}/items/after-acceptance`, the agent's
+  `order_item_add_after_acceptance`) and cancel the old one. An item made with
+  `archive_id` is a library-file item from a copy of the archive's file
+  (`origin_archive_ids`); its archive quote needs the archive `completed`. `component.py` `ORDERS`
   (`OrdersComponent`: `store` over the shared `scadbuddy-rows` pool (`rows/component.py`),
   opened on first use, `lifecycle` over the core's bus; `OrdersDep`), `models.py` (the wire and row shapes; money is integer minor
   units, `*_minor`), `store.py` (`OrderStore`, plain CRUD per table; `transaction()` and
@@ -957,13 +1237,16 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `QUOTE_TIMEOUT`), its steps `quote.py`: the check writes nothing; the run writes the
   body's filaments onto the item (`update_item`'s `filaments`, a repin only when a slot
   changes), renders and saves an output through `output_create`'s run when the item has
-  none matching, slices every plate through `bambuddy/preview.py` `start_preview_plates`
+  none matching (`ensure_output` over `rendering.py` `output_for_reference`, #6324: a
+  `Reference` to its output, no item needed; given one, `AttachTo` sets it on the item with
+  no new revision and no quote dropped), slices every plate through `bambuddy/preview.py` `start_preview_plates`
   (the dialog's background slice, either slicer), keeps each plate's sliced file as the
   directory blob `quote-<sha256>` held by `blob_refs (order_item_quote, <quote id>)`
-  before the quote's row exists, reads each plate with `read_sliced`, prices and records
-  it (`Lifecycle.record_slice_quote`). The quote records its print setup (#4673, order operations spec §5): `choices`
-  (`quote.py` `print_setup`: printer, path, `PrintChoices`, and the `prime_tower`, `supports` and
-  `print_sequence` the body takes in `PrintRunRequest`'s shapes, which `operations.py`
+  before the quote's row exists, reads each plate with `read_sliced` and prices it (these
+  steps are `quote.py` `slice_and_price`, the one slice and price, which a storefront price
+  runs too, #6153), then records it (`Lifecycle.record_slice_quote`). The quote records its print setup (#4673, order operations spec §5): `choices`
+  (`quote.py` `print_setup`: printer, path, `PrintChoices`, the `prime_tower`, `supports`,
+  `print_sequence` and `process_overrides` (#2998) the body takes in `PrintRunRequest`'s shapes, which `operations.py`
   `preview_request` slices with) and `filament_plan`, null on a manual or archive quote.
   An item's print (`ItemPrintRequest`, `{}` included) takes every part of that setup and
   the spools it omits from the quote's (`printing.py` `QUOTED_SETUP`, `quoted_setup`;
@@ -996,6 +1279,13 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`components/orders/FilamentsEditor.tsx`), `PrintPicker`'s `quote` mode with
   `QuoteFilaments` ("Slice…" in `QuoteEditor`), and the estimate in
   `AddToOrderDialog`; mocks `src/mocks/features/orders/priceBook.ts`.
+  An item's render (#6324, order operations spec §5 "#6324, as built"): the
+  `order_item_render` kind of `operations.py` on the `library` queue (`POST
+  /orders/{id}/items/{item}/render`, subject `order_item:<id>`, check `render_check`, the
+  quote's refusals; the output saved under `render_output_id`, one per operation), which
+  renders the item's reference and sets the output on it. "Slice…" on an item with a design
+  and no output starts it, then opens the print dialog on the new output (`useSliceQuotes`
+  `render`, the run's `stage` `rendering`); the agent's `order_item_quote` needs none.
   Attachments (#4251, spec §6.2 "As built"): any file on an order, a line item or a print attempt,
   `order_attachments` (subject `order:<id>` / `order_item:<id>` / `order_item_fulfilment:<id>`, an attempt's file listed
   under its item through `attempt_item_id`; `POST …/fulfilments/{f}/attachments`; typed by its bytes in
@@ -1368,7 +1658,17 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   a model's delete, the orphan sweep and a reused slug); the API's start runs
   `OutputIndex.sync` in the background (adds a row for any output with none, drops rows
   whose output is gone, `main._index_outputs_logged`), and a listed row whose files are
-  gone is dropped as it is read. `POST /orders/{id}/items/batch` and
+  gone is dropped as it is read. Each output has a `source` (#6371; `OutputMeta.source`
+  in `meta.json`, `output_index.source`): `back_office`, or `storefront` for the outputs
+  the storefront slice run saves (`output_for_reference`'s `source`, which only
+  `slice_price.py` sets; an order's render and a quote keep the default). `GET /outputs`
+  and `GET /models/{slug}/outputs` leave the storefront's out unless `include_storefront`
+  is true, and so do the agent's `list_recent_outputs` and `list_outputs`; a read by id
+  (`GET /outputs/{id}`, an item's `output_id`, the print dialog, slicing, printing, job
+  cost) finds either. An output saved before the mark is marked by the start's sync, once:
+  the migration `20261115T2118Z_output_index_source.sql` drops the rows named
+  "Storefront: …", and the sync marks one only when its id is `storefront_output_id` of
+  its own render key (`output_index.py` `saved_by_storefront_run`). `POST /orders/{id}/items/batch` and
   `…/items/after-acceptance/batch` (`ItemBatch`, at most `MAX_BATCH_ITEMS` 50) add
   `ItemCreate`s through `Lifecycle.add_items`, the one transaction every single add now
   uses (`NewModelItem`, `NewLibraryItem`, `NewCustomItem`, `NewRequestItem`); a body
@@ -1389,17 +1689,19 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   its print run's other linked plates, `OrderStore.archive_run_plates`). Quote source
   `archive`: `POST …/items/{item}/quotes/archive` (`ArchiveQuoteRequest`: `archive_id`,
   default the item's first origin, one of its origins or printed by its output or library
-  file, else 422; `filaments`; `filament_id` for every slot the print used), `quote_from_archive`: the slice quote's
+  file, else 422; `filaments`; `filament_id` for every slot the print used; `units`, the
+  units of the item the run made, 1 to `ARCHIVE_UNITS_MAX`, default 1, #6336), `quote_from_archive`: the slice quote's
   check, then every plate archive of the run (`print_sends` by `run_id`, `print_links` by
   queue item; 409 `archive_plates_missing` for a plate with none, `archive_not_succeeded` for
   a status other than `completed`, `archive_gone`), grams per slot from
   `extra_data.filament_slots` (slot id less one), the actual seconds else the estimate, each
-  plate an `ArchivePlate` naming its archive, recorded by `Lifecycle.record_archive_quote`
-  (the whole run is one unit: a run that printed several units, on one plate or as copies,
-  overstates the unit cost: `ArchiveFacts` carries no count of the units a plate held)
+  plate an `ArchivePlate` naming its archive, its grams and seconds divided by `units`
+  (`_per_unit`: grams to the hundredth, seconds to the second, half up; the setup line
+  stays per plate and the labour line per item), recorded by `Lifecycle.record_archive_quote`
   (no sliced file; printing it re-slices, as a manual quote). A library file item with no
   slots gets the slots the print used (`archive_colours`). Job cost reads an `archive`
-  quote's plates as a slice quote's (`models.py` `MEASURED_SOURCES`). Agent
+  quote's plates as a slice quote's, and a `storefront` quote's too (`models.py`
+  `MEASURED_SOURCES`). Agent
   `order_item_add`'s `archive_id`, `order_item_quote`'s `archive`; frontend
   `components/orders/PastPrintsPicker.tsx` ("Past prints" in `AddItemDialog`, over
   `GET /farm/archives`; status and name filter the listed page), `ArchiveQuote.tsx` ("Quote
@@ -1437,15 +1739,33 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   that imports `bambuddy.client` (`tests/test_orders_bambuddy_seam.py`), reached through
   `orders/integrations.py` `OrderIntegrations` (`OrdersComponent.integrations`, chosen for
   the running `bambuddy_url`; `NotLinked` without one); the quote's Bambuddy slice calls
-  live there too. `POST /orders/price-book/import-spools` (`orders/spool_import.py`) makes
-  or updates filament records from the spools, on click only (`PriceBook.spool_import`).
-  A record with no density gets one there, from a manual add sent with no density, and
-  from `POST …/price-book/fill-densities` (#6136, `orders/density.py`): the spools' preset id (`slicer_filament`, a K-profile's
-  `setting_id`, the AMS tray's `tray_info_idx`), that preset's density (Bambuddy's local
-  preset, else the image's Bambu Studio preset), else Bambuddy's filament catalogue
-  (only entries whose name holds each word of the spool's subtype); no preset is found
-  by a subtype's name. A density read Bambuddy refuses leaves the density
-  empty and fails nothing. `filaments.density_profile` keeps where it came from; a
+  live there too. The orders read ScadBuddy's own spools, never Bambuddy's (#6262 Task 9):
+  `OrdersComponent.inventory` is the filament component's `FilamentInventory`, and of
+  spools `OrderIntegrations` keeps only `local_densities` (Bambuddy's local presets, `{}`
+  when Bambuddy refuses) and `spool_assignments` (Bambuddy's tray assignments,
+  `filament/bambuddy_pull.py` `read_assignments`, `[]`, logged, when Bambuddy refuses,
+  answers no JSON or does not answer within `ASSIGNMENTS_TIMEOUT` (2.5 s, inside an item
+  print check's 6 s `CHECK_BUDGET_SECONDS`; the read is a `waiting_on_bambuddy` wait, so a
+  check cut short in it names Bambuddy)). `POST /orders/price-book/import-spools`
+  (`orders/spool_import.py` `inventory_groups`) makes or updates filament records from the
+  SB spools, on click only, with or without Bambuddy (`PriceBook.spool_import` is always
+  true); a group is the spools' effective names and `#RRGGBBAA` (#6316: an opaque and a
+  translucent spool of one hue are two records), its `spool_ids` are spool numbers, and the
+  newest priced spool (highest number) prices it. `GET /filament/inventory` and
+  `GET /filament/spools/{spool_id}/summary` (`api/filament.py`, `filament/inventory.py`
+  `view`, `summary`) replace the removed `/farm/inventory` and `/farm/spools/{id}/summary`;
+  they, and an item print's fill on the Bambuddy path, place a spool by the tray a
+  registry printer's report holds it in, else, while Bambuddy is linked, by Bambuddy's
+  assignment of its linked BB spool (plan Decision 3, until #6263; a failed read places by
+  the reports alone; a settings or spool read that fails is a 503). A record with no density gets one there, from a manual add sent with
+  no density, and from `POST …/price-book/fill-densities` (#6136, `orders/density.py`,
+  Task 9 review ruling), from the spools of its names and `#RRGGBBAA`: the newest spool's
+  own effective density (`ScadBuddy spool #N`), else its slicer preset's density
+  (Bambuddy's local preset's while linked, else the image's Bambu Studio preset's), else
+  that of the preset id (`tray_info_idx`) the tray holding it reports
+  (`FilamentInventory.tray_presets`). The K-profile and Bambuddy-catalogue steps are gone.
+  No preset is found by a subtype's name. A density read Bambuddy refuses leaves the
+  density empty and fails nothing; a spool read that fails is a 503. `filaments.density_profile` keeps where it came from; a
   person's density clears it. An estimate reads only the record's own density.
   A record's whole colour (#6209, migration `20261114T1607Z_filaments_alpha_effect.sql`):
   `colour` stays `#RRGGBB` (the render splits parts by it; a clear filament is its RGB with
@@ -1458,30 +1778,154 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `colour_source: "import"` in a PATCH hands it back; the editor's "Use spool colour"
   sends it only for a record an import linked to spools (`Filament.spool_linked`:
   `spool_colour` or `spool_ids` set). The import matches only a record of
-  the group's material, subtype and brand: by its link to the group's spools (`spool_ids`),
-  else by the spools' RGB (`spool_colour`, then `colour`), never by a colour a person set, so
-  it makes no duplicate, and a spool whose material was corrected is another filament's
-  (`spool_import.py` `_matches`, in three passes over every group, so the groups' order
-  never decides: a record linked to a group whose RGB its spools had, then a record linked
-  to any group's spools, then a record by colour (`_by_colour`); a spool link always wins
-  over a colour. `_movers` picks the matched `import` records whose colour changes and
-  whose new RGB no staying record of their names holds (a record held back stays too,
+  the group's material, subtype and brand: by its link to the group's spools (`spool_ids`,
+  whatever the spools' alpha: a link by id is not a match by colour), else by the spools'
+  own `#RRGGBBAA` at the last import (`spool_colour`, written as `#RRGGBBAA` since
+  `20261116T0300Z_filament_spool_colour_rgba.sql`, which converted the old `#RRGGBB` with
+  the record's alpha and the two stand-ins to `#00000000`; an old `#RRGGBB` an API on the
+  old code still writes during a rollout reads with the record's alpha, as the migration
+  converts it, `orders/spools.py` `link_rgba`), else, for a record with no link, by its own `colour` plus `alpha` (never
+  a spool of another alpha, `filament/colour.py` `same_opacity`), so a colour a person set on a linked record is
+  never matched, it makes no duplicate, and a spool whose material was corrected is
+  another filament's (`spool_import.py` `_matches`, in three passes over every group, so
+  the groups' order never decides: a record linked to a group whose `#RRGGBBAA` its spools
+  had, then a record linked to any group's spools, then a record by colour
+  (`_by_colour`); a spool link always wins over a colour. `_movers` picks the matched
+  `import` records whose `#RRGGBBAA` changes and whose new `#RRGGBBAA` no staying record
+  of their names holds (a record held back stays too,
   until none changes); the import parks them out of the identity index
   (`OrderStore.park_filaments`, `archived_at` set inside its transaction) and puts each
   back with its new colour (`set_import_look` `unpark`), so a chain or a swap of colours
   settles in one import. A matched record held back keeps its whole look with
   `colour_taken`. The matched groups are written before the new ones, and a new group
-  whose RGB is another record's colour is skipped `colour_taken`). The migration sets no
-  link (`spool_colour` NULL, `spool_ids` empty) on every existing record but two: the two
-  prod stand-ins for clear spools (ids and colours pinned in it) get `colour_source`
-  `manual` and `spool_colour` `#000000`, so the import finds them by their spools'
-  `#000000`. The next import links every other record by its own `colour`. Until that
+  whose colour and alpha are another record's is skipped `colour_taken`). The migration
+  sets no link (`spool_colour` NULL, `spool_ids` empty) on every existing record but two:
+  the two prod stand-ins for clear spools (ids and colours pinned in it) get
+  `colour_source` `manual` and `spool_colour` `#000000`, which found them by their
+  spools' RGB at the first import after it; that import set their `spool_ids` (SB numbers
+  since `20261116T0034Z_filament_plan_spool_numbers.sql`), and the import and an item
+  print now find them by those, whatever the alpha: they are opaque records (alpha 255)
+  of clear spools (`#00000000`); with those spools archived, a new clear spool is theirs
+  by their `spool_colour` `#00000000`. The next import links every other record by its own
+  `colour`. Until that
   first import after the deploy, a record with no link is found only by its own colour:
   change its colour by hand before then, and the import makes a second record of its
   spools' colour. So run "Import from spools" once after the deploy, before any colour
-  edit (#6211 review). An item
+  edit (#6211 review). Until that import also after #6262 Task 9's deploy, an opaque
+  record whose link an import before #6316 wrote over both alphas' spools (it grouped by
+  RGB) may take the translucent spool for an item print, by its `spool_ids`; the import
+  relinks it to its own alpha's spools. An old pod's import during the rollout writes
+  7-char links again (the RGB of a group of either alpha), which read with the record's
+  alpha until the next import on the new code writes `#RRGGBBAA`. An item
   print's spools are matched the same way (`orders/spools.py` `_of`, the store's
-  `spool_links`), so a hand-set colour still finds its spools.
+  `spool_links`), so a hand-set colour still finds its spools; `item_plan` fills SB spool
+  numbers (`ids: "sb"`) from the SB rows of the registry printer, and maps an older
+  `ids: "bb"` plan through `bb_to_sb`.
+- A storefront render's price (#6153, spec 2026-11-13 §5.4, §5.6): `orders/storefront/slice_price.py`,
+  migration `20261115T0825Z_storefront_slice_prices.sql`. The price is firm, and it comes
+  from a slice through the back office's quote path: `quote.py` `slice_and_price` (the same
+  slice, `read_plate` and `price_plates` a quote uses, at the book's policy and the profile
+  printer's machine rate, `MachineRates.for_quote`), never a second formula
+  (`test_slice_price.py` checks a storefront price equals a quote to the cent). The variant
+  is rendered to an output by `rendering.py` `output_for_reference` (saved as
+  `library/outputs.py` `storefront_output_id(render_key)`, `source` `storefront`, #6371) and sliced by `operations.py` `PreviewSlicer`, so the
+  template gives the support and process settings. The shop slice profile gives only the
+  printer and a spool per material, and the model's remembered dialog choices the rest
+  (`storefront_choices`; none remembered is Standard 0.4 mm). One row per variant in
+  `storefront_slice_prices`, keyed by `price_key`: a sha256 of the render's 3MF content, the
+  price-book filament per slot (id, material, cost), the profile, the choices, and the
+  book's policy and the live machine rate that prices it (`for_quote` through `live_rate`,
+  read again at most once a minute per process, `RATE_TTL`, and carried to the run,
+  `SliceVariant.machine_rate`). Any change is a new
+  key, so an old price is never read again; the row holds no job id and no bytes, so it
+  outlives the render prune. `GET …/renders/{job}/estimate` (`renders.py`
+  `render_estimate`, `slice_estimate`) answers `StoreEstimate`: `source` `slice` with the
+  price of one, `pending` (with `retry_after`) while the slice runs or waits, or `none`
+  (no profile, no spool for a slot's material, a colour with no listing filament, files
+  lost, a failed slice, or a render whose slug or commit is no longer the listing's). A
+  price is only ever for the visitor's own geometry (#6370 review): the run checks that the
+  3MF it rendered is the one the key names (`SliceRun.rendered_sha256`, the render job's
+  3MF, not the stamped output's), else `GEOMETRY_DIFFERS` and no price. The read starts the slice, only for the render on screen, as the
+  operation `storefront_slice_price` on the `library` queue (`orders/operations.py`,
+  3 attempts, `QUOTE_TIMEOUT`); a re-read joins it. `SlicePrices.claim` admits at most
+  `storefront_slices_concurrent` `running` rows, under one advisory lock; a running row
+  whose operation ended without writing it is failed at the next claim (`_settle_ended`),
+  one past `LOST_AFTER` frees its place, and a failed one is tried again after
+  `RETRY_FAILED_AFTER` (1 h); with no room, a read that cannot claim answers `pending`.
+  Each claim makes its own `claim_key`, which is the operation's `Idempotency-Key`, so a
+  later claim never meets an earlier claim's operation; a start that fails puts the row
+  back as it was before the claim (no row if the claim made it), and one whose answer says
+  the operation may still run (`api/operations.py` `may_still_run`) keeps it `running`
+  (#6370 review). Only deterministic refusals record `failed` (`QuoteError`, a 4xx such as
+  the 0 g `sliced_plate`, the stale profile, a gone filament); a 5xx, 408 or 429 is raised
+  as `SliceUnavailableError`, so the operation tries again. Before it slices, the run checks each profile spool is still
+  offered on the printer (`api/storefront_slice.py` `offered_spools`: a loaded tray's
+  negative id moves), and refuses with no price. The CRUD answer keeps `price_key`, `grams`
+  and `print_seconds` for the shop and the checkout (`estimate.py` `SHOP_ONLY_FIELDS`); the
+  edge sends only `routes.py` `ESTIMATE_FIELDS`. The volume analysis (`storefront_job_parts`)
+  is no longer read; `rough_estimate` stays for the back office.
+  Checkout charges that price (#6153 PR B, `orders/storefront/line_prices.py`, migration
+  `20261115T1823Z_storefront_item_prices.sql`). The server never takes a price from the
+  browser: `add_listing_item` makes the line's key as the estimate does
+  (`slice_price.py` `firm_price`, read only: it starts no slice) from the visitor's own
+  done render (`variant_at_add`, `renders.py` `variant_of`) and keeps the listing, the 3MF
+  sha256, the slot filaments and the price it found in `storefront_item_prices`. The
+  draft view answers each item's `price` (`firm` with `unit_price_minor` and
+  `total_minor`, else `by_hand` and no number) and `pay_now` (every item firm). The
+  submit prices each line again (`reprice`: a fresh key from the kept variant, no price
+  when the listing is gone, unpublished or at another slug or commit, or a slot
+  filament is gone or archived). A price that changed, came or went is written and
+  refused 409 `prices_changed`, with `items` of `{id, price}` (`firm` or `by_hand`), so
+  the customer sees a price that went before the shop prices the line; the next submit
+  sends it to the shop's check. `Lifecycle.submit_order(firm=...)` records a `storefront`
+  quote (`QuoteSource`, no sliced file, so a print slices again) of each firm line, with
+  the slice's plates (`storefront_slice_prices.plates`, else one plate of the row's
+  `print_seconds` and `grams`, else none, so job cost reads unknown, never zero). When
+  every open item has one it skips the deposit policy, accepts the items and the order
+  as the customer (`_accepted_by_the_last`), and the answer's `pay_now` is true; else
+  the deposit policy runs as before. The submit runs under `Payments.run_closing_linked`, so the balance
+  request's page is linked and the deposit request it replaced is closed. A storefront
+  customer's last accept now always opens the balance request (`_accept_order(balance=True)`,
+  decision 11), deposit or not. The order page shows a `storefront` quote with no design
+  sent, and lets the customer accept it on a `together` item.
+- Prepared colour combinations (#6237): `orders/storefront/prepare.py`, routes `GET`/`POST
+  /storefront/listings/{id}/prepare` (`api/storefront.py`). The combinations are enumerated
+  per printable material (of the listing's effective materials, in order, #6258, those
+  `inputs.py` `printable_materials` keeps: each locked colour and a choice of each offered
+  colour, #6302 review): for one
+  material, a combination is one colour per offered colour parameter (that material's
+  customer filaments' colours, support excluded, in each spelling the page can send: each
+  filament's own `colour`, as `ParamField.tsx` sends it, and the effective default when no
+  filament spells it so, #6299 review). Each is built by the visitor's render path
+  (`listing_values`, `resolve_choice`, `listing_reference`), a colour at its effective
+  default (same spelling) left out as the page leaves it out, so a visitor's render of the
+  same picks has its render key and reuses the prepared job. A clash
+  (`ColoursClashError`) is left out; a listing no material can print
+  (`LockedColoursClashError`) has no combination. The list is one combination per render key (the
+  first in material order); `count` is the number of keys. The list is built once per
+  listing, price book and materials (a small in-process cache), so an index names one
+  combination; above `ENUMERATION_LIMIT` (16384) picks it is not built and `count` is the
+  picks. The POST starts the workflow
+  `PrepareListing` (`workflows/prepare_listing.py`, `library` queue, id
+  `prepare-listing:<listing id>`, `USE_EXISTING`: a second POST joins it; AUTO_UPGRADE as
+  `VersionedPrepareListing`) and answers at once (`{count, started}`). The run submits by
+  index (activity `prepare_listing_submit`, `RenderService.submit_answer(...,
+  reuse_finished=True)` at the default priority, #6299 review: a visitor's render of the same
+  key joins the prepared execution, so a lower priority would hold the visitor up) and keeps
+  at most `PREPARE_IN_FLIGHT` (2) open, reading them with a backoff
+  (`prepare_listing_settled`). A done job is skipped, a full queue waited out, a failed
+  submit's index kept in the memo `failed_to_start` (a list; a run from before the patch
+  `prepare-failed-indices` keeps a count); it continues as new every 50 submits, carrying
+  the memo. Each render's claim (`request_id`) is `prepare:<listing>:<run id>:<key>`: a
+  retry of one submit joins it, a new run makes a new one, so "Prepare again" renders a
+  failed combination again (#6299 review). The POST's `started` comes from the start's own
+  answer (its run id against the open run's, or its chain's first run id). No
+  table: the GET reads the newest `render_jobs` row of each render key, and the run's state
+  (`running`, and `failed_to_start`: how many of the memo's indices have no done job) only
+  when `0 < count <= cap`; a failed Temporal read gives
+  `running: false`, not an error. Capped by `storefront_prepare_cap` (default 256; 422
+  `listing_combinations_over_cap` with `count` and `cap`, `listing_no_colours`, 409
+  `listing_not_published`). Prepared renders follow `job_ttl`; there is no keep mark.
 - A customer's own models (#6133, spec 2026-11-13; migration
   `20261113T1547Z_storefront_customer_models.sql`): `orders/storefront/model_requests.py`,
   CRUD area `models`, the edge's `POST /api/store/v1/uploads` and `…/draft/models`. The files

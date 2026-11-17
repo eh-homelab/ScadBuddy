@@ -17,14 +17,15 @@ event that names its time (``at``) keeps it: a BB weighing or drying at BB's tim
 state (``synced_from_bb``) at the BB row's ``updated_at``, a BB usage row at its
 ``created_at``, a print's ``print_started`` when the printer takes the plate and its
 ``print_ended`` at the report that shows the plate's timed end (from Task 5 of #6263;
-until then `spools/native.py` `settle_uses_in` books it at the plate's start). An event
+until then `filament/print_uses.py` books it at the plate's start). An event
 with no ``at`` is booked now: the clock's time, but never earlier than a microsecond
 after the spool's newest event, so a clock that steps back (WSL's does) cannot put an
 event before the one it follows. That guard only moves an event booked now, never a
 named time, so it never pushes a physical time past a newer anchor. Three rules (#6263, spec §5.5):
 
 1. At one instant every delta comes before every reading, and events of one kind keep
-   the order they are given in (`events` gives them in insert order, ``seq``). A reading
+   the order they were booked in (``seq``; a pull's ``created`` and ``synced_from_bb`` at
+   one BB time stay in order). A reading
    taken as a plate ends holds that plate. BB writes a usage row and its spool's
    ``updated_at`` at one instant, so a BB reading holds its own usage row.
 2. An ``ams_remain`` reading with ``data.printing`` true is recorded but is never an
@@ -53,7 +54,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime
-from typing import Any
+from typing import Any, Final
 from uuid import UUID
 
 from psycopg import Connection
@@ -65,20 +66,26 @@ from scadbuddy.filament import models as m
 
 Conn = Connection[DictRow]
 
+#: A print run's events (`filament/print_uses.py`): ``ref_kind`` `PRINT_RUN`, ``ref_id``
+#: ``run/subtask/slot``. A start books a `PRINT_STARTED` event of source
+#: `PRINT_ESTIMATE`; its settle a `PRINT_ENDED` one of source `PRINT_ACTUAL`.
+PRINT_RUN: Final = "print_run"
+PRINT_STARTED: Final = "print_started"
+PRINT_ENDED: Final = "print_ended"
+PRINT_ESTIMATE: Final = "print_estimate"
+PRINT_ACTUAL: Final = "print_actual"
+#: The ``ref_kind`` of a BB usage row booked on the spool.
+BB_USAGE: Final = "bb_usage"
+#: The ``ref_kind`` of a BB pull's ``created`` and ``synced_from_bb`` events.
+BB_SPOOL: Final = "bb_spool"
+#: The ``ref_kind``s of the events that carry BB's clock.
+BB_REFS: Final = frozenset({BB_SPOOL, "bb_scale", "bb_dried", BB_USAGE})
+
 _COLUMNS = ", ".join(m.SpoolEvent.model_fields)
 _ABSOLUTE = frozenset({"scale", "person", "bb", "ams_remain"})
 _MANUAL = frozenset({"scale", "person"})
-_DELTA = frozenset({"print_actual", "print_estimate"})
-_USED = frozenset({"print_started", "print_ended"})
-
-#: The ``ref_kind`` of SB's plate events (``ref_id`` ``run/subtask/slot``).
-PRINT_RUN = "print_run"
-#: The ``ref_kind`` of a BB usage row booked on the spool.
-BB_USAGE = "bb_usage"
-#: The ``ref_kind`` of a BB pull's ``created`` and ``synced_from_bb`` events.
-BB_SPOOL = "bb_spool"
-#: The ``ref_kind``s of the events that carry BB's clock.
-BB_REFS = frozenset({BB_SPOOL, "bb_scale", "bb_dried", BB_USAGE})
+_DELTA = frozenset({PRINT_ACTUAL, PRINT_ESTIMATE})
+_USED = frozenset({PRINT_STARTED, PRINT_ENDED})
 
 
 def job_of(event: m.SpoolEvent) -> str | None:
@@ -167,14 +174,13 @@ def _reading(event: m.SpoolEvent, label_weight_g: int | None) -> float | None:
     return None
 
 
-def grams_left(
+def basis(
     events: Sequence[m.SpoolEvent], *, weight_locked: bool, label_weight_g: int | None
-) -> float | None:
-    """The grams left on a spool by the rule above; ``None`` with no reading to anchor
-    on. Never below zero. At one time, deltas come first and events of one kind keep the
-    order they are given in (rule 1)."""
-    # sorted() is stable, so the given order breaks the remaining ties.
-    ordered = sorted(events, key=lambda e: (e.at, 0 if e.source in _DELTA else 1))
+) -> m.GramsBasis:
+    """The reading the grams left anchor on, and the deltas taken off it, by the rule
+    above; no anchor when there is no reading. At one time, deltas come first and events
+    of one kind keep the order they were booked in (rule 1)."""
+    ordered = sorted(events, key=lambda e: (e.at, 0 if e.source in _DELTA else 1, e.seq))
     readings = [_reading(e, label_weight_g) for e in ordered]
     manual = max(
         (i for i, e in enumerate(ordered) if e.source in _MANUAL and readings[i] is not None),
@@ -190,37 +196,52 @@ def grams_left(
             continue
         anchor = i
     if anchor < 0:
-        return None
+        return m.GramsBasis(anchor=None, deltas=[])
     # Rule 3: a job with a BB usage row and an SB plate event on this spool is a pair.
     # `plate` is SB's position of the plate per job: its newest end, else its newest start.
-    used = {job_of(e) for e in ordered if e.ref_kind == BB_USAGE and e.kind == "print_ended"}
+    used = {job_of(e) for e in ordered if e.ref_kind == BB_USAGE and e.kind == PRINT_ENDED}
     ends: dict[str, int] = {}
     starts: dict[str, int] = {}
     for i, event in enumerate(ordered):
         job = job_of(event)
         if event.ref_kind == PRINT_RUN and job in used and job is not None:
-            if event.kind == "print_ended":
+            if event.kind == PRINT_ENDED:
                 ends[job] = i
-            elif event.kind == "print_started":
+            elif event.kind == PRINT_STARTED:
                 starts[job] = i
     plate = starts | ends
     bb_anchor = ordered[anchor].ref_kind in BB_REFS
     ended = {(e.ref_kind, e.ref_id) for e in ordered if e.kind == "print_ended" and e.ref_id}
-    value = readings[anchor]
-    assert value is not None
+    deltas: list[m.SpoolEvent] = []
     for i, event in enumerate(ordered):
         job = job_of(event)
         if job in plate and event.ref_kind == PRINT_RUN:
             continue
         if job in plate and event.ref_kind == BB_USAGE:
             after = i > anchor if bb_anchor else plate[job] > anchor
-            if after and event.kind == "print_ended" and event.delta_g is not None:
-                value += event.delta_g
+            if after and event.kind == PRINT_ENDED and event.delta_g is not None:
+                deltas.append(event)
             continue
         if i <= anchor or event.source not in _DELTA or event.delta_g is None:
             continue
-        if event.source == "print_estimate" and (event.ref_kind, event.ref_id) in ended:
+        if event.source == PRINT_ESTIMATE and (event.ref_kind, event.ref_id) in ended:
             continue
+        deltas.append(event)
+    return m.GramsBasis(anchor=ordered[anchor], deltas=deltas)
+
+
+def grams_left(
+    events: Sequence[m.SpoolEvent], *, weight_locked: bool, label_weight_g: int | None
+) -> float | None:
+    """The grams left on a spool by the rule above; ``None`` with no reading to anchor
+    on. Never below zero. It is `basis`'s anchor less its deltas, so the two agree."""
+    found = basis(events, weight_locked=weight_locked, label_weight_g=label_weight_g)
+    if found.anchor is None:
+        return None
+    value = _reading(found.anchor, label_weight_g)
+    assert value is not None
+    for event in found.deltas:
+        assert event.delta_g is not None
         value += event.delta_g
     return max(value, 0.0)
 
@@ -232,6 +253,73 @@ def events(conn: Conn, spool_id: UUID) -> list[m.SpoolEvent]:
         (spool_id,),
     ).fetchall()
     return [m.SpoolEvent.model_validate(row) for row in rows]
+
+
+class BadCursorError(ValueError):
+    """A ``cursor`` that no page of this ledger gave."""
+
+    def __init__(self) -> None:
+        super().__init__("the cursor is not one this ledger gave")
+
+
+def _encode(at: datetime, seq: int) -> str:
+    return f"{at.isoformat()}|{seq}".encode().hex()
+
+
+def _decode(cursor: str) -> tuple[datetime, int]:
+    try:
+        text = bytes.fromhex(cursor).decode()
+        at, seq = text.rsplit("|", 1)
+        return datetime.fromisoformat(at), int(seq)
+    except ValueError:
+        raise BadCursorError() from None
+
+
+def page(
+    conn: Conn,
+    *,
+    spool_id: UUID | None = None,
+    kind: m.EventKind | None = None,
+    source: m.EventSource | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    cursor: str | None = None,
+    limit: int = 100,
+) -> m.EventPage:
+    """One page of every spool's events, newest first by ``(at, seq)``. The cursor names
+    the last row of the page before, as that pair, so two events of one time never lose
+    or repeat a row at the page's edge (F4). ``since`` is included and ``until`` excluded,
+    both on the event's ``at``."""
+    where: list[str] = []
+    args: list[Any] = []
+    for column, value in (("e.spool_id", spool_id), ("e.kind", kind), ("e.source", source)):
+        if value is not None:
+            where.append(f"{column} = %s")
+            args.append(value)
+    if since is not None:
+        where.append("e.at >= %s")
+        args.append(since)
+    if until is not None:
+        where.append("e.at < %s")
+        args.append(until)
+    if cursor is not None:
+        at, seq = _decode(cursor)
+        where.append("(e.at, e.seq) < (%s, %s)")
+        args.extend((at, seq))
+    clause = f" WHERE {' AND '.join(where)}" if where else ""
+    columns = ", ".join(f"e.{c}" for c in m.SpoolEvent.model_fields)
+    rows = conn.execute(
+        f"SELECT {columns}, e.seq, s.number AS spool_number FROM filament_spool_events e"
+        f" JOIN filament_spools s ON s.id = e.spool_id{clause}"
+        " ORDER BY e.at DESC, e.seq DESC LIMIT %s",
+        [*args, limit + 1],
+    ).fetchall()
+    more = len(rows) > limit
+    rows = rows[:limit]
+    return m.EventPage(
+        events=[m.LedgerRow.model_validate(row) for row in rows],
+        next_cursor=_encode(rows[-1]["at"], rows[-1]["seq"]) if more else None,
+    )
 
 
 def refresh_derived(conn: Conn, spool_id: UUID, event: m.SpoolEvent | None = None) -> None:

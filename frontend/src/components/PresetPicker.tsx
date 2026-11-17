@@ -16,6 +16,7 @@ import {
 import {
   applyPreset,
   parsePresetTags,
+  presetParams,
   presetDescriptionProblem,
   presetInputs,
   presetTagsProblem,
@@ -23,6 +24,7 @@ import {
 import { copyText } from '../lib/clipboard'
 import { appUrl } from '../lib/appLinks'
 import { presetPath } from '../lib/deeplink'
+import { normalisePresetText } from '../lib/presetName'
 import { useSubscription } from '../lib/realtime'
 import { useAsync } from '../lib/useAsync'
 import { useLatest } from '../lib/useLatest'
@@ -148,6 +150,13 @@ function skippedOf(schema: CustomizerSchema, preset: ParamPreset): Skipped[] {
   return applyPreset(schema, preset).skipped.map((name) => ({ name, value: stored[name] as ParamValue }))
 }
 
+/** #360 — a short word after an action, kept until the values or UI state change. */
+interface Notice {
+  text: string
+  values: ParamValues
+  extra: InputsExtra
+}
+
 function message(caught: unknown): string {
   return caught instanceof ApiError ? caught.detail : String(caught)
 }
@@ -233,6 +242,15 @@ export function PresetPicker({
   const [confirmingUpdate, setConfirmingUpdate] = useState(false)
   /** #1022 — the link Copy link copied, or offered to copy by hand where it could not. */
   const [copied, setCopied] = useState<{ id: string; url: string; ok: boolean } | null>(null)
+  /** #360 — the Update in flight, for its spinner: `busy` covers the dialogs' writes too. */
+  const [updating, setUpdating] = useState(false)
+  /** #360 — "Saved as X.", "Updated X." or what "No preset" leaves, until the next change. */
+  const [notice, setNotice] = useState<Notice | null>(null)
+  if (notice && (!sameValues(values, notice.values) || !sameJson(extra, notice.extra))) setNotice(null)
+
+  function say(text: string, shown: ParamValues = values, shownExtra: InputsExtra = extra) {
+    setNotice({ text, values: shown, extra: shownExtra })
+  }
 
   /**
    * #357 — the presets changed elsewhere (another tab, the assistant): read them again.
@@ -260,6 +278,7 @@ export function PresetPicker({
     setSelection(null)
     setSkipped([])
     setNaming(null)
+    setNotice(null)
     setError(DELETED_ELSEWHERE)
   }
 
@@ -269,6 +288,7 @@ export function PresetPicker({
     setSeenReset(resetKey)
     setSelection(null)
     setSkipped([])
+    setNotice(null)
     setError(null)
   }
 
@@ -327,6 +347,13 @@ export function PresetPicker({
   // with none selected, values that are not the defaults. The UI state has no default
   // to compare with there: a template UI may seed its own (#1484).
   const unsaved = selection ? modified : !sameValues(values, defaultValues(schema))
+  /**
+   * #360 — a preset saved now would hold nothing: every value is the default, no UI state.
+   * Any UI state counts, a template UI's own seeded state too (#1484, #6456): the picker
+   * cannot tell that state from an edit, as the page does not pass what the UI seeded.
+   */
+  const nothingDiffers =
+    Object.keys(presetParams(schema, values)).length === 0 && Object.keys(extra).length === 0
 
   /**
    * #359 — a pick replaces every value on screen, so with unsaved edits it asks first.
@@ -372,14 +399,31 @@ export function PresetPicker({
     [],
   )
 
+  /**
+   * #6456 — set while the picker itself puts the focus back on the select (the list or the
+   * question closing), so that focus opens no tooltip. Focus by the user still opens it.
+   */
+  const refocusing = useRef(false)
+  function refocusTrigger() {
+    refocusing.current = true
+    try {
+      trigger.current?.focus({ preventScroll: true })
+    } finally {
+      refocusing.current = false
+    }
+  }
+
   /** The latest pick: a migration answering after another pick is dropped. */
   const picking = useRef(0)
 
   /** Applies `preset`, or with none clears the selection and leaves the values alone. */
   async function pick(preset: ParamPreset | undefined) {
     setError(null)
+    setNotice(null)
     const turn = ++picking.current
     if (!preset) {
+      // #360 — the values are left as they are, which nothing on screen said.
+      if (selection) say('No preset selected. The values on screen stay as they are.')
       setSelection(null)
       setSkipped([])
       return
@@ -398,6 +442,14 @@ export function PresetPicker({
     setSkipped(applied.skipped.map((name) => ({ name, value: storedParams[name] as ParamValue })))
     setSettling(true)
     onApply(applied.values, applied.extra)
+  }
+
+  /** #360 — puts the selected preset's values and UI state back, undoing the edits since. */
+  function revert() {
+    if (!selection) return
+    setNotice(null)
+    setSettling(true)
+    onApply(selection.applied, selection.extra)
   }
 
   /**
@@ -482,7 +534,7 @@ export function PresetPicker({
   async function saveAs(event?: FormEvent) {
     event?.preventDefault()
     const chosen = name.trim()
-    if (!chosen || busy || pinned) return
+    if (!chosen || busy || pinned || nothingDiffers) return
     setNameError(null)
     const described = details()
     if (!described) return
@@ -497,6 +549,7 @@ export function PresetPicker({
       setSelection({ preset: created, applied: values, extra })
       setSkipped([])
       setNaming(null)
+      say(`Saved as ${created.name}.`)
     } catch (caught) {
       refused(caught)
     } finally {
@@ -572,7 +625,9 @@ export function PresetPicker({
     }
     setConfirmingUpdate(false)
     setBusy(true)
+    setUpdating(true)
     setError(null)
+    setNotice(null)
     try {
       const updated = await api.updatePreset(slug, selected.id, {
         inputs: presetInputs(schema, values, extra),
@@ -580,11 +635,13 @@ export function PresetPicker({
       presetsState.setData(presets.map((preset) => (preset.id === updated.id ? updated : preset)))
       setSelection({ preset: updated, applied: values, extra })
       setSkipped([])
+      say(`Updated ${updated.name}.`)
     } catch (caught) {
       if (gone(caught)) lost(selected.id)
       else setError(message(caught))
     } finally {
       setBusy(false)
+      setUpdating(false)
     }
   }
 
@@ -632,11 +689,23 @@ export function PresetPicker({
       ? `The copy is a saved preset of yours to change, with ${selected?.name ?? 'the original'}'s values, description and tags. The original stays as it is.`
       : naming === 'details'
         ? 'Its values stay as they are: Update saves the ones on screen.'
-        : "Saves the values that differ from the template's defaults, under a name to pick them by next time."
+        : "Saves the values that differ from the template's defaults, under a name to pick them by next time. " +
+          'Values equal to a default are not stored, so the preset follows later changes to the defaults.'
+  /**
+   * #360 — the name as it will be stored, said when that is not what was typed. A save
+   * sends `name.trim()` (JS's trim), which the server then cleans.
+   */
+  const normalisedName = normalisePresetText(name.trim())
+  const statusText = modified ? `Changed from ${selected?.name ?? ''}` : (notice?.text ?? '')
 
   return (
     <div data-testid="preset-picker" className="flex flex-col gap-2 border-b px-3 py-2.5">
-      <div className="flex items-center gap-2">
+      {/* #1023 — the actions sit after the select, so with no preset chosen "Save as
+          preset…" no longer takes a row of its own. They wrap below, together, when the
+          panel is too narrow for the select's minimum width beside them: in the
+          customizer's panel that is once a preset is chosen and its menu joins them
+          (e2e/presets.spec.ts checks the select stays put and they keep one row). */}
+      <div data-testid="preset-bar" className="flex flex-wrap items-center gap-2">
         <Label htmlFor="preset-select" className="shrink-0 font-normal text-muted-foreground">
           Preset
         </Label>
@@ -645,10 +714,29 @@ export function PresetPicker({
           onValueChange={(id) => choose(id === NONE ? '' : id)}
           disabled={presetsState.loading && !presetsState.data}
         >
-          <SelectTrigger ref={trigger} id="preset-select" className="min-w-0 flex-1">
-            <SelectValue placeholder={presets.length === 0 ? 'No presets yet' : 'Choose a preset…'} />
-          </SelectTrigger>
-          <SelectContent position="popper">
+          {/* #360 — a long name is cut off in a narrow panel: the whole of it on hover or focus,
+              but not on the focus the picker gives back after a pick (#6456). */}
+          <Hint content={selected?.name}>
+            <SelectTrigger
+              ref={trigger}
+              id="preset-select"
+              className="min-w-40 flex-1"
+              // Runs before the tooltip's own handler, which skips a prevented event.
+              onFocus={(event) => {
+                if (refocusing.current) event.preventDefault()
+              }}
+            >
+              <SelectValue placeholder={presets.length === 0 ? 'No presets yet' : 'Choose a preset…'} />
+            </SelectTrigger>
+          </Hint>
+          <SelectContent
+            position="popper"
+            // Radix's own close focuses the trigger the same way; this marks it as ours.
+            onCloseAutoFocus={(event) => {
+              event.preventDefault()
+              refocusTrigger()
+            }}
+          >
             {selected && (
               <>
                 <SelectItem value={NONE}>No preset</SelectItem>
@@ -677,72 +765,92 @@ export function PresetPicker({
             )}
           </SelectContent>
         </Select>
+        <div className="ml-auto flex items-center gap-1.5">
+          {editable && modified && !pinned && (
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => void update()}
+              disabled={busy}
+              aria-busy={updating || undefined}
+              aria-label={`Update preset ${selected?.name ?? ''}`}
+            >
+              {updating && <Spinner />}
+              Update
+            </Button>
+          )}
+          <Button type="button" variant="outline" size="sm" onClick={openSaveAs} disabled={busy || pinned}>
+            Save as preset…
+          </Button>
+          {selected && (
+            // #3672 — the preset's own actions, in one menu beside Save as. Each dialog opens
+            // once the menu has closed and put the focus back on its button.
+            // The menu opened again: a status from an earlier Copy link may no longer hold.
+            <DropdownMenu modal={false} onOpenChange={(open) => open && setCopied(null)}>
+              <DropdownMenuTrigger asChild>
+                <Button type="button" variant="outline" size="icon-sm" disabled={busy} aria-label={`More for preset ${selected.name}`}>
+                  <MoreHorizontalIcon />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-auto min-w-44">
+                <DropdownMenuItem onSelect={() => void copyLink()} aria-label={`Copy link to preset ${selected.name}`}>
+                  Copy link
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => setTimeout(openDuplicate, 0)} aria-label={`Duplicate preset ${selected.name}`}>
+                  Duplicate
+                </DropdownMenuItem>
+                {editable && (
+                  <DropdownMenuItem onSelect={() => setTimeout(openDetails, 0)} aria-label={`Edit details of preset ${selected.name}`}>
+                    Edit details
+                  </DropdownMenuItem>
+                )}
+                {editable && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      variant="destructive"
+                      onSelect={() => setTimeout(() => setConfirmingDelete(true), 0)}
+                      aria-label={`Delete preset ${selected.name}`}
+                    >
+                      Delete
+                    </DropdownMenuItem>
+                  </>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
+        </div>
       </div>
 
-      {/* #352 — its own line above the buttons: beside them it wrapped word by word
-          into a narrow column, and a long name pushed it out of the panel.
+      {/* #352 — its own line, below the select's row and its buttons (#1023): beside the
+          buttons it wrapped word by word into a narrow column, and a long name pushed it
+          out of the panel.
           #351 — always in the page, so "Changed from …" is announced as it appears;
-          out of the flow while empty, so it adds no gap. */}
-      <Hint content={modified ? `Changed from ${selected?.name ?? ''}` : undefined}>
-        <p
-          role="status"
-          data-testid={modified ? 'preset-modified' : undefined}
-          className={modified ? 'min-w-0 truncate text-xs text-muted-foreground' : 'sr-only'}
-        >
-          {modified && <>Changed from {selected?.name}</>}
-        </p>
-      </Hint>
-      <div className="flex flex-wrap items-center justify-end gap-1.5">
-        {editable && modified && !pinned && (
+          out of the flow while empty, so it adds no gap.
+          #360 — it also says what Save, Update and "No preset" did, until the next change,
+          and Revert sits beside "Changed from …". */}
+      <div className={statusText ? 'flex min-w-0 items-center gap-2' : 'contents'}>
+        <Hint content={modified ? statusText : undefined}>
+          <p
+            role="status"
+            data-testid={modified ? 'preset-modified' : notice ? 'preset-notice' : undefined}
+            className={statusText ? 'min-w-0 truncate text-xs text-muted-foreground' : 'sr-only'}
+          >
+            {statusText}
+          </p>
+        </Hint>
+        {modified && (
           <Button
             type="button"
-            size="sm"
-            onClick={() => void update()}
+            variant="outline"
+            size="xs"
+            className="shrink-0"
+            onClick={revert}
             disabled={busy}
-            aria-label={`Update preset ${selected?.name ?? ''}`}
+            aria-label={`Revert to preset ${selected?.name ?? ''}`}
           >
-            Update
+            Revert
           </Button>
-        )}
-        <Button type="button" variant="outline" size="sm" onClick={openSaveAs} disabled={busy || pinned}>
-          Save as preset…
-        </Button>
-        {selected && (
-          // #3672 — the preset's own actions, in one menu beside Save as. Each dialog opens
-          // once the menu has closed and put the focus back on its button.
-          // The menu opened again: a status from an earlier Copy link may no longer hold.
-          <DropdownMenu modal={false} onOpenChange={(open) => open && setCopied(null)}>
-            <DropdownMenuTrigger asChild>
-              <Button type="button" variant="outline" size="icon-sm" disabled={busy} aria-label={`More for preset ${selected.name}`}>
-                <MoreHorizontalIcon />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-auto min-w-44">
-              <DropdownMenuItem onSelect={() => void copyLink()} aria-label={`Copy link to preset ${selected.name}`}>
-                Copy link
-              </DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => setTimeout(openDuplicate, 0)} aria-label={`Duplicate preset ${selected.name}`}>
-                Duplicate
-              </DropdownMenuItem>
-              {editable && (
-                <DropdownMenuItem onSelect={() => setTimeout(openDetails, 0)} aria-label={`Edit details of preset ${selected.name}`}>
-                  Edit details
-                </DropdownMenuItem>
-              )}
-              {editable && (
-                <>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem
-                    variant="destructive"
-                    onSelect={() => setTimeout(() => setConfirmingDelete(true), 0)}
-                    aria-label={`Delete preset ${selected.name}`}
-                  >
-                    Delete
-                  </DropdownMenuItem>
-                </>
-              )}
-            </DropdownMenuContent>
-          </DropdownMenu>
         )}
       </div>
 
@@ -827,6 +935,11 @@ export function PresetPicker({
                 aria-invalid={invalidField === 'name' || undefined}
                 aria-describedby={invalidField === 'name' && nameError ? dialogErrorId : undefined}
               />
+              {normalisedName && normalisedName !== name.trim() && (
+                <p data-testid="preset-name-normalised" className="text-xs text-muted-foreground">
+                  Saved as “{normalisedName}”: each run of spaces, tabs or line breaks becomes one space.
+                </p>
+              )}
             </div>
             {naming !== 'duplicate' && (
               <>
@@ -862,6 +975,11 @@ export function PresetPicker({
                 </div>
               </>
             )}
+            {naming === 'save' && nothingDiffers && (
+              <p data-testid="preset-nothing-differs" className="text-sm text-muted-foreground">
+                Nothing differs from the defaults. Change a value to save it as a preset.
+              </p>
+            )}
             {nameError && (
               <p id={dialogErrorId} role="alert" className="text-sm text-destructive">
                 {nameError}
@@ -872,7 +990,11 @@ export function PresetPicker({
             <Button type="button" variant="outline" onClick={closeNaming} disabled={busy}>
               Cancel
             </Button>
-            <Button type="submit" form={`${fieldIds}-form`} disabled={busy || !name.trim()}>
+            <Button
+              type="submit"
+              form={`${fieldIds}-form`}
+              disabled={busy || !name.trim() || (naming === 'save' && nothingDiffers)}
+            >
               {busy && <Spinner />}
               {naming === 'duplicate' ? 'Duplicate' : 'Save'}
             </Button>
@@ -893,7 +1015,7 @@ export function PresetPicker({
           // Opened from the select's list, which is gone by now: back to the select (#1457).
           onCloseAutoFocus={(event) => {
             event.preventDefault()
-            trigger.current?.focus()
+            refocusTrigger()
           }}
         >
           <AlertDialogHeader>

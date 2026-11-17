@@ -69,10 +69,12 @@ ContactKind = Literal[
 #: sends either kind has it ignored (``Lifecycle._typed``).
 ChargeKind = Literal["shipping", "discount", "fee", "tax", "purchase", "handling"]
 #: A ``slice`` quote is priced from the item's slice; ``manual`` is typed; ``archive``
-#: (#4777) is priced from what a past print used, with no re-slice.
-QuoteSource = Literal["slice", "manual", "archive"]
+#: (#4777) is priced from what a past print used, with no re-slice; ``storefront``
+#: (#6153) is a storefront line's firm price at checkout, from the storefront's slice
+#: price, with no sliced file kept.
+QuoteSource = Literal["slice", "manual", "archive", "storefront"]
 #: The sources whose plates hold measured grams and seconds, which job cost prices by.
-MEASURED_SOURCES: frozenset[str] = frozenset({"slice", "archive"})
+MEASURED_SOURCES: frozenset[str] = frozenset({"slice", "archive", "storefront"})
 #: What an item is (#4954): a ``model`` names a template render (its ``reference``); a
 #: ``custom`` item is a title, a quantity and a typed price with nothing behind it; a
 #: ``library_file`` item (#5544) names a file of the library (its ``library_file``).
@@ -440,6 +442,12 @@ class OrderFilter(BaseModel):
     purchase_pending: bool = False
     #: Only orders with a source whose import is stuck (`IMPORT_STUCK`).
     import_stuck: bool = False
+    #: A closed or cancelled order is left out when it ended (``closed_at``, else
+    #: ``cancelled_at``, else ``updated_at``) before this; an open order is always kept (#6334).
+    ended_since: datetime | None = None
+    #: Only orders the customer owes money on: an `open`, `pending` or `failed` payment
+    #: request (#6334, the list's "Awaiting payment").
+    owing: bool = False
 
 
 # -- line items (§3.3) ------------------------------------------------------------------
@@ -640,8 +648,9 @@ class Quote(BaseModel):
     printer: str | None = None
     machine_rate_breakdown: MachineRateBreakdown | None = None
     #: A slice quote's print setup (#4673, order operations spec §5.1), as it sliced:
-    #: `printer_id`, `printer`, `path`, `choices`, `prime_tower`, `supports` and
-    #: `print_sequence`, each in `PrintRunRequest`'s shape (`orders/quote.py`
+    #: `printer_id`, `printer`, `path`, `choices`, `prime_tower`, `supports`,
+    #: `print_sequence` and `process_overrides` (#2998; absent from one recorded before
+    #: it), each in `PrintRunRequest`'s shape (`orders/quote.py`
     #: `print_setup`). Null for a manual or archive quote, and one recorded before.
     choices: dict[str, Any] | None = None
     #: The spool per slot a slice quote sliced with (`PrintRunRequest.filament_plan`).
@@ -1133,8 +1142,9 @@ class PriceBook(BaseModel):
     rough_estimate_factor: str
     #: The records not archived, by material, brand and colour.
     filaments: list[Filament]
-    #: Whether a Bambuddy is linked, so ``POST …/import-spools`` can run (§8.3, #4253).
-    spool_import: bool = False
+    #: Whether ``POST …/import-spools`` can run (§8.3, #4253): always, since it reads
+    #: ScadBuddy's own spools (#6262 Task 9), with or without a Bambuddy.
+    spool_import: bool = True
 
 
 SpoolImportAction = Literal["created", "updated", "unchanged", "skipped"]
@@ -1147,9 +1157,9 @@ class SpoolImportRow(BaseModel):
     #: Why a group was skipped: ``no_colour`` (its spools carry only a colour's name,
     #: and a record's colour is ``#RRGGBB``), ``no_price`` (no spool has a price),
     #: ``too_long`` (a name past a record's 100 characters) or ``colour_taken`` (another
-    #: record of its material, subtype and brand already has its RGB as its colour,
-    #: #6209). On a matched record, ``colour_taken`` says its colour, alpha, stops and
-    #: effect were kept: another record of its names has the spools' RGB.
+    #: record of its material, subtype and brand already has its colour and alpha,
+    #: #6209, #6316). On a matched record, ``colour_taken`` says its colour, alpha, stops
+    #: and effect were kept: another record of its names has the spools' colour and alpha.
     reason: Literal["no_colour", "no_price", "too_long", "colour_taken"] | None = None
     #: The newest spool's names. A matched record keeps its own: only its price changes.
     material: str
@@ -1159,7 +1169,7 @@ class SpoolImportRow(BaseModel):
     #: The record's colour after the import (#6209). A new record's, or a matched
     #: ``import`` record's, is the spools' RGB. A matched record keeps its own colour when
     #: a person set it (``colour_source`` ``manual``) or when ``_movers`` held it back
-    #: because another record of its names holds the spools' RGB (``reason``
+    #: because another record of its names holds the spools' colour and alpha (``reason``
     #: ``colour_taken``). A skipped group's is the spools' RGB (``None`` with no ``rgba``).
     colour: str | None = None
     alpha: int | None = None

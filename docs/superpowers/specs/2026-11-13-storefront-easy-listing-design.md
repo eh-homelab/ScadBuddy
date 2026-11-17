@@ -131,11 +131,23 @@ filaments into the parameters and filaments, and `sellMedia` picks the pictures:
   an offered one's default (`colourProblems`), is named at the top of the editor ("Plate is
   #1B6CA8"), with a picker of the price book's filaments, nearest colour first, and a link to
   add one to the price book (Settings → Printing → Orders). Choosing a filament adds it and
-  locks the colour at it (`fixColour`): the backend field for an offered colour's
-  default exists (#6144), and only the editor control to set it is still to come; until it
-  comes, locking is the fix. The note stays, live, until
+  locks the colour at it (`fixColour`). The note stays, live, until
   every colour has a filament. Publish stays possible, and the server's refusal names the
-  parameter if the person goes on anyway.
+  parameter if the person goes on anyway; the editor says it beside that parameter
+  (`listingDraft.ts` `listingRefusal`, kind `param`: `listing_default_invalid`,
+  `listing_colour_unknown`, `listing_support_offered`).
+- As built (#6144 follow-up): each offered parameter has a "Starts at" control, the value a
+  customer who picks nothing gets (`ListingEditor.tsx` `DefaultField`). It shows the
+  template's default while the bounds allow it, and the listing's own `default` otherwise.
+  The listing's own default is set only when it must be (`fittedDefault`): a smart default
+  for a colour whose template default no colour on offer has starts at the value the person
+  was looking at, else the first colour on offer; bounds narrowed past the starting value
+  move it to the nearest value they allow (a number in the range and on the step, the first
+  choice left). Each bound change fits again from the person's own choice, or the template's
+  when they made none, never from a value an earlier change forced, so typing "12" through
+  "1" leaves no starting value behind (`ListingEditor.tsx` `ParamRow` `refit`). A value the
+  bounds leave out is named under the control. "Use the
+  template's" drops the listing's own default when the template's fits again.
 - Render time: when the job (or the output's job) took more than 100 s, a note: "This design
   took N s to render. The store's preview and price give up after about 100 s" (#6120).
 
@@ -183,7 +195,6 @@ So "put the navy owl on the store" is: find the output, draft, then publish afte
 ## 7. Out of scope
 
 - Pipeline templates (publish refuses them, `listing_pipeline_unsupported`): #5701.
-- The editor control to set an offered parameter's default (the backend field is #6144).
 - Adding the output's render as a model picture from the editor (Generate → Rendered image…
   already adds one to the model's media).
 - Prices: the storefront prices each order from its quote, not the listing.

@@ -38,6 +38,7 @@ import time
 import types
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import (
     Annotated,
@@ -78,6 +79,7 @@ from scadbuddy.bambuddy.models import (
 from scadbuddy.bambuddy.options import OptionScope, PrintOptions, library_options_scope
 from scadbuddy.bambuddy.part_settings import PartSettingsMap, normalised, parts_set_only
 from scadbuddy.bambuddy.print_links import ImportSource
+from scadbuddy.bambuddy.process_overrides import ProcessOverrides, normalised_overrides
 from scadbuddy.core.config import LibraryBackend, Slicer, StoreBackend
 from scadbuddy.core.events import EventBus, SettingsChanged, SettingsSection, emit
 from scadbuddy.core.pg_pool import row_pool
@@ -89,7 +91,14 @@ from scadbuddy.core.secrets import (
     open_secret,
     seal_secret,
 )
-from scadbuddy.core.settings import ENV_SEEDED, SECRET_FIELDS, Settings, check_value, env_var
+from scadbuddy.core.settings import (
+    ENV_SEEDED,
+    SECRET_FIELDS,
+    FilamentSync,
+    Settings,
+    check_value,
+    env_var,
+)
 from scadbuddy.library.asset_fetch import DEFAULT_ASSET_FETCH_DOMAINS, normalise_domain
 from scadbuddy.library.catalogue import PrintSequence
 from scadbuddy.orders.message_models import MessagingBinding
@@ -294,6 +303,8 @@ def _parts_only_when_set(dumped: dict[str, Any]) -> dict[str, Any]:
     the settings set in each slot (#5627, ``parts_set_only``)."""
     if dumped.get("part_settings") is None:
         dumped.pop("part_settings", None)
+    if dumped.get("process_overrides") is None:
+        dumped.pop("process_overrides", None)
     return parts_set_only(dumped, maps=("part_settings",))
 
 
@@ -312,9 +323,12 @@ class ModelPrintChoices(BaseModel):
     (#5628). Kept per model or file only, never at the print options' global or printer
     scope, since a slot number means one file's colour. ``force_colour_match`` is the
     spool step's "Wait for the right colour" (#6218), kept beside the spools it applies
-    to; ``None`` is nothing remembered, which the dialog and the agent read as on. All
-    default to "nothing remembered", so a settings file written before them still loads;
-    an empty ``nozzles`` means the dialog's default.
+    to; ``None`` is nothing remembered, which the dialog and the agent read as on.
+    ``process_overrides`` are its "Slicer settings" (#2998,
+    ``bambuddy/process_overrides.py``): any Bambu Studio process key, kept in the stored
+    jsonb with the rest, so no migration. All default to "nothing remembered", so a
+    settings file written before them still loads; an empty ``nozzles`` means the
+    dialog's default.
     """
 
     printer_id: int | None = None
@@ -327,6 +341,7 @@ class ModelPrintChoices(BaseModel):
     print_sequence: PrintSequence | None = None
     part_settings: PartSettingsMap | None = None
     force_colour_match: bool | None = None
+    process_overrides: ProcessOverrides | None = None
 
     @field_validator("part_settings")
     @classmethod
@@ -334,9 +349,16 @@ class ModelPrintChoices(BaseModel):
         """Only slots that set something (#5627): none set is nothing remembered."""
         return normalised(value)
 
-    # `part_settings` only when some are remembered (#5627): an entry with none reads as
-    # it did before the field existed. A lambda with no return annotation, so the schema
-    # stays the model's (`part_settings.parts_set_only` says why).
+    @field_validator("process_overrides")
+    @classmethod
+    def _overrides_set(cls, value: ProcessOverrides | None) -> ProcessOverrides | None:
+        """As a print request keeps them (#2998); none set is nothing remembered."""
+        return normalised_overrides(value)  # type: ignore[return-value]
+
+    # `part_settings` and `process_overrides` only when some are remembered (#5627,
+    # #2998): an entry with none reads as it did before the fields existed. A lambda with
+    # no return annotation, so the schema stays the model's (`part_settings.parts_set_only`
+    # says why).
     _parts_when_set = model_serializer(mode="wrap")(
         lambda self, handler: _parts_only_when_set(handler(self))
     )
@@ -843,6 +865,10 @@ class SettingsPatch(BaseModel):
     event_log_retention_rows: int | None = None
     flow_approval_timeout_seconds: int | None = None
     spool_overlay_refresh_seconds: int | None = None
+    #: The Filament section (#6262 Task 13): see `core.settings.FilamentSync`.
+    filament_sync: FilamentSync | None = None
+    filament_low_stock_pct: int | None = Field(default=None, ge=0, le=100)
+    filament_default_cost_per_kg: Decimal | None = Field(default=None, ge=0)
     log_level: str | None = None
     temporal_ui_url: str | None = None
 
@@ -869,6 +895,10 @@ class SettingsPatch(BaseModel):
     storefront_slices_concurrent: int | None = None
     storefront_draft_ttl_days: int | None = None
     storefront_requests_enabled: bool | None = None
+    #: The materials a storefront print may be made of, in order (#6258).
+    storefront_materials: list[str] | None = None
+    #: The most colour combinations one prepare of a listing queues (#6237).
+    storefront_prepare_cap: int | None = None
     #: The storefront's mail (#5283); the password is sealed apart, never a setting.
     storefront_mail_host: str | None = None
     storefront_mail_port: int | None = None
@@ -1626,9 +1656,8 @@ class SettingsReader(Protocol):
     def plate_clear_required(self) -> bool: ...
 
 
-#: The sealed settings the print worker gets opened (#5298, plan D8): the Bambuddy key,
-#: which is also the Bambuddy spool provider's key (`bambuddy/spool_providers.py`). No
-#: other spool provider has a key. `print_projection` leaves every other sealed field null.
+#: The sealed settings the print worker gets opened (#5298, plan D8): the Bambuddy key.
+#: `print_projection` leaves every other sealed field null.
 PRINT_SECRETS = frozenset({"bambuddy_api_key"})
 #: The S3 store's connection, which the print worker never reads (it reaches blobs
 #: through the API's routes): `print_projection` answers each as null, or as its default

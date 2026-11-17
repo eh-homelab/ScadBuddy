@@ -28,6 +28,8 @@ from scadbuddy.activity.index import (
     ACTIVITY_REPAIR_WINDOW_DEFAULT,
     ACTIVITY_TTL_DEFAULT,
 )
+from scadbuddy.agent_data.rotation import kek_at
+from scadbuddy.agent_data.rotation import rotate as rotate_agent_secrets
 from scadbuddy.api import (
     health,
     internal_blobs,
@@ -91,6 +93,8 @@ from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.crud import idempotency
 from scadbuddy.crud import listener as crud_listener
 from scadbuddy.filament.component import FILAMENT
+from scadbuddy.filament.inventory import PoolSbSpoolReads
+from scadbuddy.filament.print_uses import PoolPrintUses
 from scadbuddy.flow_triggers.component import FLOW_TRIGGERS
 from scadbuddy.flow_triggers.events import listen_for_triggers
 from scadbuddy.flow_triggers.fire import TriggerFires, reconcile_trigger_schedules
@@ -116,6 +120,7 @@ from scadbuddy.operations.kinds import OperationKind, Queue
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import reap_quote_holds as reap_orphan_quote_holds
+from scadbuddy.orders.storefront.prepare import prepare_activities
 from scadbuddy.orders.storefront.staged_files import staged_file_activities, sweep_staged
 from scadbuddy.orders.storefront.visitors import VisitorStore
 from scadbuddy.payments.component import PAYMENTS
@@ -146,8 +151,6 @@ from scadbuddy.slicing.component import SLICING
 from scadbuddy.slicing.held_presets import HeldPresetStore, held_presets_activity
 from scadbuddy.slicing.start import stop_lost_native_slices, sweep_native_slices
 from scadbuddy.spools.activities import filament_pull_activity, spool_activities
-from scadbuddy.spools.component import SPOOLS
-from scadbuddy.spools.native import NativeSpoolStore
 from scadbuddy.store import sweep_blobs
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.backends import UnrecordedSweeper
@@ -217,6 +220,7 @@ from scadbuddy.workflows.housekeeping import (
 from scadbuddy.workflows.library_copy import VersionedLibraryCopy
 from scadbuddy.workflows.operation import VersionedOperationWorkflow
 from scadbuddy.workflows.operation_activities import operation_activities
+from scadbuddy.workflows.prepare_listing import VersionedPrepareListing
 from scadbuddy.workflows.previews import (
     DUE_ACTIVITY,
     REFRESH_ACTIVITY,
@@ -1198,6 +1202,27 @@ def _grant_and_rotate_at_start(state: AppState) -> None:
         logger.exception("could not issue the service credentials")
 
 
+def _rotate_agent_secrets(state: AppState) -> None:
+    """#5299 D5: with the previous KEK mounted, the agent's Claude credentials, payload
+    keys, Web Push keys, notification channel tokens, plugin header secrets and sign-ins,
+    and the workspace's principal file keys sealed under it are sealed again under the
+    current one (`agent_data/rotation.py`), as the agent did at its own start. Logged,
+    never fatal."""
+    current = kek_at(state.settings.secret_key_file)
+    previous = kek_at(state.settings.secret_key_previous_file)
+    if state.settings.secret_key_previous_file is not None and previous is None:
+        logger.warning(
+            "the previous secret key cannot be read; the agent's secrets are not re-wrapped"
+        )
+    if current is None or previous is None:
+        return
+    try:
+        with state.settings_store.pool.connection() as conn:
+            rotate_agent_secrets(conn, previous, current)
+    except Exception:
+        logger.exception("could not re-wrap the agent's secrets under the current key")
+
+
 def _prune_crud_requests(state: AppState) -> None:
     with state.settings_store.pool.connection() as conn:
         idempotency.prune(conn)
@@ -1617,7 +1642,7 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         native=state.components.get(SLICING).starter,
         printers=state.components.get(PRINTERS).store,
         reports=state.components.get(PRINTERS).reports,
-        spools=state.components.get(SPOOLS),
+        sb_spools=PoolSbSpoolReads.over(state.settings_store.pool),
     )
     ops = state.components.get(OPERATIONS)
     registry = state.components.get(PRINTERS)
@@ -1646,8 +1671,7 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         rack=state.components.get(RACK_USAGE),
         # A run's next plate copy waits on the printer's report (#4541).
         reports=registry.reports,
-        native_spools=NativeSpoolStore(state.settings_store.pool),
-        spools=state.components.get(SPOOLS),
+        uses=PoolPrintUses(state.settings_store.pool),
     )
     auto_imports = state.components.get(AUTO_IMPORTS)
     activities = [
@@ -1713,6 +1737,7 @@ LIBRARY_WORKFLOWS: tuple[type, ...] = (
     VersionedSliceWorkflow,
     VersionedSpoolRefresh,
     VersionedStagedFile,
+    VersionedPrepareListing,
 )
 
 
@@ -1817,9 +1842,15 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
     activities = [
         *_housekeeping_activities(state),
         *_preview_activities(state),
-        *spool_activities(state.components.get(SPOOLS)),
+        # The retired spool-provider activities, for runs opened before
+        # spool-providers-gone (#6262 Task 12).
+        *spool_activities(),
         # Bambuddy's spools pulled into ScadBuddy's own (#6261), on the spools' Schedule.
-        filament_pull_activity(state.components.get(FILAMENT), lambda: state.settings_store.load()),
+        filament_pull_activity(
+            state.components.get(FILAMENT),
+            lambda: state.settings_store.load(),
+            lambda: state.settings_store.read({"filament_sync"})["filament_sync"],
+        ),
         # Bambuddy's local presets kept for native runs (#4645), on the spools' Schedule.
         held_presets_activity(
             lambda: HeldPresetStore(state.projection.pool), lambda: state.settings_store.load()
@@ -1840,6 +1871,8 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
             lambda: state.uploads,
         ),  # Each staged customer file's watcher (#6133).
         *staged_file_activities(state),
+        # A listing's prepared colour combinations (#6237, #6299 review).
+        *prepare_activities(state, lambda: state.components.get(ORDERS)),
     ]
     try:
         while not stop.is_set():
@@ -1894,13 +1927,13 @@ async def _set_up_housekeeping(
     *,
     spool_refresh: float,
 ) -> bool:
-    """The housekeeping Schedules, the spool providers' refresh (every
-    ``spool_refresh`` seconds; 0: none, #3818) and the preview backfill's (``previews``:
-    the scheduler's render bound; None, previews off: none), retried until Temporal
-    takes them: a frontend can answer the connect before it can create one. Each set-up
-    triggers its Schedule, so the preview one comes last: a retry after the
-    housekeeping ones failed does not run the backfill twice (a refresh run twice is
-    only a refresh). True when the sweeps' one is paused."""
+    """The housekeeping Schedules, the spool refresh (Bambuddy's kept presets and its
+    spools pulled, every ``spool_refresh`` seconds; 0: none, #3818, #6262) and the
+    preview backfill's (``previews``: the scheduler's render bound; None, previews off:
+    none), retried until Temporal takes them: a frontend can answer the connect before
+    it can create one. Each set-up triggers its Schedule, so the preview one comes last:
+    a retry after the housekeeping ones failed does not run the backfill twice (a refresh
+    run twice is only a refresh). True when the sweeps' one is paused."""
     while not stop.is_set():
         try:
             paused = await ensure_schedules(client, queue, interval)
@@ -2013,6 +2046,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise
     # #4975 phase 4: the service credentials, before any caller reads its own.
     await asyncio.to_thread(_grant_and_rotate_at_start, state)
+    # #5299 D5: a KEK rotation re-wraps the agent's credentials and payload keys here.
+    await asyncio.to_thread(_rotate_agent_secrets, state)
     # #4975 phase 8 (spec 2026-11-01 §9.1): `enforce` without a usable login stops here.
     if state.settings.auth_mode == "enforce":
         auth = state.components.get(AUTH)

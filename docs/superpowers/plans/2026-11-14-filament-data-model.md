@@ -389,3 +389,7 @@ Bambuddy pull
 
 Unrelated flakes seen: #6313 (a lease test under xdist), a payments balance test under load.
 
+Review follow-ups (#6342)
+- The pull runs on every spool refresh while `bambuddy_url` is set, until #6262's `filament_bb_pull` setting gates it (#6265 adds the per-type settings). Every BB spool thus becomes a native provider record (priority 10) carrying BB's own values (#6342).
+- Migrated settled uses (`20261114T1302Z`) keep `settled_at` as their time, unlike new `print_ended` events, which sit at the plate start. This cannot change grams left: every pulled reading is booked at BB's `updated_at`, which is after every migrated event (#6342).
+- Deleting a Bambuddy-linked spool is refused (409, `SpoolBambuddyLinkedError`): the pull would make it again. Archive it. A spool with no link deletes as before; the rule is in `FilamentSpoolStore.delete`, so the native delete has it too (#6342). A link to a BB spool that is gone from Bambuddy is never removed yet, so such a spool cannot be deleted until #6265's sync engine owns the link's lifecycle; a partial BB listing must never unlink spools.
