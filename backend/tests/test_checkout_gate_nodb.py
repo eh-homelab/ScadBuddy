@@ -416,7 +416,11 @@ async def test_a_pin_lost_while_the_inner_slot_is_released_ends_with_an_error(
         error reach the outer one, before the renewal's coroutine sent the cancel."""
 
         def emit(self, record: logging.LogRecord) -> None:
-            if record.__dict__.get("row") == "pin hold":
+            if (
+                record.__dict__.get("row") == "pin hold"
+                and record.getMessage()
+                == "a renewal found its row gone; the block that held it ends"
+            ):
                 pin_lost.set()
 
     class _LateSlots(_Slots):
