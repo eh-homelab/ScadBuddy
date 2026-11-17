@@ -231,7 +231,7 @@ interface RecordsOf {
   list(query?: { cursor?: string; limit?: number; where?: Record<string, Scalar> }): Promise<RecordPage>
   get(id: string): Promise<RecordView>
   put(body: Json, opts?: { id?: string; version?: number; key?: string }): Promise<RecordView>
-  delete(id: string, opts?: { version?: number }): Promise<void>
+  delete(id: string, opts: { version: number }): Promise<void>
   subscribe(fn: (change: { id: string; deleted?: true }) => void): () => void
 }
 ```
@@ -247,7 +247,12 @@ interface RecordsOf {
   for the reader, not a proof: the module could send any header with `fetch` (P5). The
   types come from the generated schema (`frontend/src/api/schema.d.ts`); the authoring
   guide (§9) ships them as a `.d.ts` for page authors.
-- **`records.<type>`**. A thin client over §5's routes. `subscribe` follows the topic
+- **`records.<type>`**. A thin client over §5's routes. `put` with no `id` is a create
+  (`POST`). `put` with an `id` is a replace and needs `version`: without it the host
+  throws a `TypeError` before any request, so a page never sends a replace with no
+  `If-Match` (which the route would refuse 428, §5.3). `delete` needs `version` the
+  same way. The host never reads the current version for the page, because that would
+  overwrite a change the page has not seen. `subscribe` follows the topic
   `records:<type>` and calls back with ids only; the page re-reads (P10).
 - **`flows.start`** calls `POST /workflows/{id}/runs` for the newest version of the flow
   named, with `key` as its `Idempotency-Key` (a fresh one when none is given). The run
