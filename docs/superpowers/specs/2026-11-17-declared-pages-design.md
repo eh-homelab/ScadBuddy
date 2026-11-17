@@ -61,7 +61,7 @@ host. A later spec must decide otherwise, and §8 says what that spec would need
 | P2 | The served-file checks: a suffix allowlist with no HTML, no dotfile or empty segment, no path escape after `resolve()` (a symlink out too), the same 404 for every failure, `nosniff`, `default-src 'none'; sandbox`, `Cross-Origin-Resource-Policy: same-origin`, an ETag, and `immutable` only for an exported commit. | `backend/scadbuddy/api/template_ui.py:33-95` (`UI_MEDIA_TYPES`, `UI_FILE_HEADERS`, `_ui_file`, `_serve`) |
 | P3 | Host API v1 is one template's inputs: `inputs.get/set/subscribe`, `schema`, `files.url`, `generate`, `openPrint`, `presets`, `describe`. The host mounts majors `[current, current - 1]`; `UI_API_CURRENT` is 1. | `frontend/src/template-ui/types.ts:4-9`, `:36-60`; `host.ts:85` (`createHost`); pipelines spec §4.3 |
 | P4 | The host elements are `sb-param`, `sb-preview` and `sb-generate`. Each is a custom element whose content React renders through a portal. | `frontend/src/template-ui/elements.ts:1`, `:49`; `TemplateUi.tsx:164-176` |
-| P5 | A template UI module is not sandboxed. It runs in the page, under the page CSP, so it can call any `/api/v1` route as the viewer. | pipelines spec §9; `backend/scadbuddy/api/static.py:58-68` (`PAGE_CSP`: `script-src 'self'`, `connect-src 'self'` and Plaid's two hosts) |
+| P5 | A template UI module is not sandboxed. It runs in the page, under the page CSP, so it can call any `/api/v1` route as the viewer. | pipelines spec §9; `backend/scadbuddy/api/static.py:58-68` (`PAGE_CSP`: `script-src 'self'`, one inline-script hash and Plaid's `link-initialize.js`; `connect-src 'self'` and Plaid's two API hosts) |
 | P6 | `FlowHistory` is a `GitRepo` under `data/flows`: `<name>/flow.py` and `<name>/inputs.json`, one commit per version; `<name>/flow.json` holds the display name and description, each change its own commit. Writers hold a Postgres lock that carries HEAD, because every replica shares the repo over NFS. | `backend/scadbuddy/flows/repository.py:1-20`, `:221`; `core/gitrepo.py:232`, `:276`; `library/repo_lock.py:180` (`flows_coordinator`); `core/paths.py:80` |
 | P7 | The flow inputs subset: a flat object of `string`, `integer`, `number`, `boolean`, or an array of one of them, with `enum` and bounds, and `additionalProperties: false`. The API checks a schema (`schema_problems`) and checks and fills values (`resolve_inputs`). A `pattern` needs a `maxLength`, and patterns have a per-value and per-call time budget, because they run in the API process. | `backend/scadbuddy/flows/inputs.py:1-17`, `:40-48`, `:77`, `:281` |
 | P8 | The frontend draws that subset as a form. | `frontend/src/lib/flowInputs.ts:35` (`inputFields`); `components/flows/inputsForm.tsx:10` (`useInputs`) |
@@ -574,19 +574,30 @@ The orders spec §12 left one question to §9: whether a "customer approved the 
 step (`quoted` → `accepted`, made by the customer through a declared page) belongs in
 the lifecycle.
 
-The storefront settled it, without a declared page (P14):
+The storefront settled it, without a declared page (P14). The customer accepts on two
+paths, and both run as the customer actor:
 
-- The customer accepts a quote on the order page of the storefront (#5283). The edge
-  forwards the accept to the CRUD service, which runs `Lifecycle.accept_quote` as the
-  customer actor (`orders/storefront/order_page.py:896-915`).
+- At checkout. When every cart line has a firm price, `Lifecycle.submit_order` records a
+  `storefront` quote for each line (`_firm_quotes`), then accepts each quote and the
+  order as the customer, in the submit's transaction (`orders/lifecycle.py:918-1028`,
+  the accept at `:1016-1021`; called from `orders/storefront/submit.py` `submit_draft`,
+  `:138`, `:194`; #6153). The customer never opens the order page for these quotes.
+- On the order page of the storefront (#5283), for any quote that checkout did not
+  accept. The edge forwards the accept to the CRUD service, which runs
+  `Lifecycle.accept_quote` as the customer actor (`orders/storefront/order_page.py:896-915`).
 - The accept that leaves every open item `approved` accepts the order as the customer, in
   the same transaction (`orders/lifecycle.py` `_accepted_by_the_last`, `:4662`;
   storefront spec §6.2).
 - On a storefront order the shop cannot accept for the customer except with "Accept for
   the customer", which records a reason; any other shop accept is refused
   `customer_accepts` (`orders/lifecycle.py:4605-4621`; storefront spec §6.1).
-- The price the customer accepts is firm: it comes from a slice through the back
-  office's quote path, never from volume (#6153; `orders/storefront/slice_price.py`).
+- A firm line's price comes from a slice through the back office's quote path
+  (`quote.py` `slice_and_price`), never from volume (#6153;
+  `orders/storefront/slice_price.py`). #6581 (open, for #6574) makes the storefront's
+  slice use the same request builder as a back-office quote (`bambuddy/choices.py`
+  `opening_choices`); once it lands, the slice request matches too, not only the pricing.
+  A by-hand line has no firm price: the shop quotes it in the back office, and the
+  customer accepts that quote on the order page.
 
 So the step is in the lifecycle, and declared pages do not add a second path to it. A
 declared page that calls an accept route acts as the viewer, the shop, and the lifecycle
