@@ -8,6 +8,11 @@ write that shows that print ended returns the end (`advance_print`), so the watc
 settles the print's rack picks as the printer ends it (#5138, #5142), whether or not a
 follow still reads its run.
 
+The end is also booked on the plate's SB spools, at that report's time
+(`filament/prints.py` `plate_ended`, #6263): in a savepoint, so a failure never fails the
+write. An end no report timed (the printer moved on, or went ``IDLE``) is left to the
+run's settle.
+
 The end is timed to the report that shows it. A watch that was down, or a printer off
 the network, past the print's end charges the print up to that report: the end lies
 somewhere after the row's last ``seen_at``, and an upper bound counts the wear a lower
@@ -23,6 +28,7 @@ dialog and the SB tray resolution (`filament/inventory.py`) read it."""
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -33,10 +39,13 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.bambuddy.models import PrinterStatus
+from scadbuddy.filament import prints
 from scadbuddy.printers.lan_models import LanReport
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.status import status_from_report
 from scadbuddy.printers.store import printer_uuid
+
+logger = logging.getLogger(__name__)
 
 #: The states that show the printer running a plate (OpenBambuAPI ``mqtt.md``).
 RUNNING = frozenset({"PREPARE", "SLICING", "RUNNING", "PAUSE"})
@@ -107,6 +116,26 @@ def started_print(before: str | None, after: str | None) -> str | None:
     """The print a write started: the one running ``after`` it, when that is not the one
     running ``before`` it."""
     return after if after is not None and after != before else None
+
+
+def _book_plate_end(
+    conn: Connection[DictRow],
+    printer_id: str,
+    ended: PrintEnd,
+    report: dict[str, Any],
+    seen_at: datetime,
+) -> None:
+    """Book the plate's end at the report that shows it (`filament/prints.py`), in a
+    savepoint of its own: a failure is logged by its type and dropped, so capture never
+    fails the report's write. An end no report timed is left to the run's settle."""
+    try:
+        with conn.transaction():
+            prints.plate_ended(conn, ended.subtask_name, report["gcode_state"], seen_at)
+    except Exception as error:
+        logger.warning(
+            prints.FILAMENT_CAPTURE_FAILED,
+            extra={"printer_id": printer_id, "what": "plate_end", "error": type(error).__name__},
+        )
 
 
 @dataclass(frozen=True)
@@ -202,6 +231,8 @@ class PrinterReportStore:
         ).rowcount
         if not written:
             return Advance()
+        if ended is not None and ended.timed:
+            _book_plate_end(conn, printer_id, ended, report, seen_at)
         return Advance(ended=ended, started=started_print(before, running))
 
     def touch(self, printer_id: str, seen_at: datetime) -> None:

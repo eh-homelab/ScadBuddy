@@ -19,7 +19,7 @@ from psycopg.types.json import Jsonb
 from scadbuddy.bambuddy.models import Spool as BbSpool
 from scadbuddy.bambuddy.models import SpoolCatalogEntry
 from scadbuddy.core.settings import FilamentSync
-from scadbuddy.filament import ledger
+from scadbuddy.filament import ledger, prints
 from scadbuddy.filament.bambuddy_pull import (
     pull,
     read_and_pull,
@@ -948,6 +948,12 @@ def _now_in_bb() -> str:
     return datetime.now(UTC).replace(tzinfo=None).isoformat()
 
 
+def _report_end(pool: PgPool, subtask: str) -> None:
+    """The printer's report that shows plate ``subtask`` finished, now (Task 5)."""
+    with pool.connection() as conn, conn.transaction():
+        prints.plate_ended(conn, subtask, "FINISH", datetime.now(UTC))
+
+
 def test_a_pull_between_two_plates_counts_each_plate_once(pg_pool: PgPool) -> None:
     """BB deducts plate ``a`` as it ends; a pull then anchors on a value that holds it,
     and the run's settle at its end takes off plate ``b`` only."""
@@ -955,7 +961,9 @@ def test_a_pull_between_two_plates_counts_each_plate_once(pg_pool: PgPool) -> No
     (made,) = pull(f, [bb(updated_at=_bb_time(-3))], now=NOW).created_ids
     _lan_run(pg_pool, "a", "b")
     record_uses(pg_pool, RUN, "a", _use(made, 50))
-    # Plate a ends, BB takes its 50 g off, and the pull reads that before plate b.
+    # Plate a ends (the printer's report books it), BB takes its 50 g off, and the pull
+    # reads that before plate b.
+    _report_end(pg_pool, "a")
     pull(f, [bb(weight_used=150.0, updated_at=_now_in_bb())], now=NOW)
     record_uses(pg_pool, RUN, "b", _use(made, 30))
     settle_uses(pg_pool, RUN, ["done", "done"])
@@ -969,6 +977,7 @@ def test_a_bb_update_before_the_settle_counts_the_plate_once(pg_pool: PgPool) ->
     (made,) = pull(f, [bb(updated_at=_bb_time(-3))], now=NOW).created_ids
     _lan_run(pg_pool, "a")
     record_uses(pg_pool, RUN, "a", _use(made, 50))
+    _report_end(pg_pool, "a")
     pull(f, [bb(weight_used=150.0, updated_at=_now_in_bb())], now=NOW)
     settle_uses(pg_pool, RUN, ["done"])
     spool = f.spools.get(made)

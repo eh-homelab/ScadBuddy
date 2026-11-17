@@ -4,9 +4,10 @@
 Each LAN start books, per slot, the grams its sliced plate gives the slot against the SB
 spool the slot's tray holds (`slot_uses`, the tray's ``sb_spool_id``): a
 ``print_started`` event of source ``print_estimate`` (`record_uses`), at the plate's
-start, which the ledger takes off at once (`filament/ledger.py`). Once the run's print
-settles, `settle_uses` books each start's ``print_ended``: its sliced grams as the
-actual when it ended ``done``, else 0, which drops the estimate. Both are found by
+start, which the ledger takes off at once (`filament/ledger.py`). The printer report that
+shows the plate end books its ``print_ended`` (`prints.plate_ended`); once the run's
+print settles, `settle_uses` books the ones no report timed: the sliced grams as the
+actual when the start ended ``done``, else 0, which drops the estimate. Both are found by
 ``ref_kind`` ``print_run`` and ``ref_id`` ``run/subtask/slot``, so a slot is booked
 once and settled once, whichever reader comes first.
 
@@ -29,7 +30,7 @@ from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
 
-from scadbuddy.filament import ledger
+from scadbuddy.filament import ledger, prints
 
 if TYPE_CHECKING:
     from scadbuddy.bambuddy.filaments import SpoolOption
@@ -123,6 +124,7 @@ def record_uses_in(conn: Conn, run_id: str, subtask: str, uses: Sequence[SlotUse
             actor=ACTOR,
             # When the printer took the plate: a reading after it holds the plate.
             at=use.plate_started_at,
+            data={"job": subtask},
         )
         booked += event is not None
     return booked
@@ -140,26 +142,12 @@ def settle_uses_in(conn: Conn, run_id: str, stages: Sequence[str]) -> bool:
     as the follow's progress reads them). A start that ended ``done`` books its sliced
     grams as the actual (``print_ended``, ``print_actual``, ``data.basis`` ``sliced``);
     every other start books 0 (``basis`` ``not_applied``), which drops its estimate. A
-    ``print_ended`` is booked at its ``print_started``'s time, so a reading after the
-    plate started (a BB pull between two plates, or before the settle) is not taken off
-    again. Each use is settled once: the ledger keeps one ``print_ended`` per
+    use whose plate end a printer report booked already (`prints.plate_ended`) is not
+    booked again; one no report timed is booked here at the clock (``data.ended``
+    ``settle``). Each use is settled once: the ledger keeps one ``print_ended`` per
     ``ref_id``. Whether this settle booked any."""
     prefix = f"{run_id}/"
-    # By `filament_spool_events_print_ref`: a prefix match, the run id escaped.
-    pending = conn.execute(
-        "SELECT e.spool_id, e.ref_id, e.delta_g, e.at FROM filament_spool_events e"
-        " WHERE e.kind = %(started)s AND e.ref_kind = %(kind)s"
-        " AND e.ref_id LIKE %(prefix)s AND NOT EXISTS (SELECT 1 FROM filament_spool_events d"
-        " WHERE d.spool_id = e.spool_id AND d.kind = %(ended)s"
-        " AND d.ref_kind = %(kind)s AND d.ref_id = e.ref_id)"
-        " ORDER BY e.spool_id, e.ref_id",
-        {
-            "started": ledger.PRINT_STARTED,
-            "ended": ledger.PRINT_ENDED,
-            "kind": ledger.PRINT_RUN,
-            "prefix": _like_prefix(prefix),
-        },
-    ).fetchall()
+    pending = prints.open_for_run(conn, run_id)
     if not pending:
         return False
     row = conn.execute(
@@ -173,23 +161,9 @@ def settle_uses_in(conn: Conn, run_id: str, stages: Sequence[str]) -> bool:
     }
     settled = False
     for use in pending:
-        subtask = use["ref_id"][len(prefix) :].rsplit("/", 1)[0]
-        applied = subtask in done
-        grams = -(use["delta_g"] or 0.0)
-        ended = ledger.record(
-            conn,
-            use["spool_id"],
-            ledger.PRINT_ENDED,
-            source=ledger.PRINT_ACTUAL,
-            delta_g=-grams if applied else 0.0,
-            ref_kind=ledger.PRINT_RUN,
-            ref_id=use["ref_id"],
-            actor=ACTOR,
-            # At the plate's start: no end time is kept per plate (`LanStarted` has
-            # none), and a reading taken after the start is read as holding the
-            # plate, as BB's is once BB deducts it (`ledger.py`).
-            at=use["at"],
-            data={"basis": "sliced" if applied else "not_applied"},
+        subtask = use.ref_id[len(prefix) :].rsplit("/", 1)[0]
+        ended = prints.book_end(
+            conn, use, applied=subtask in done, at=None, actor=ACTOR, ended="settle"
         )
         settled |= ended is not None
     return settled
