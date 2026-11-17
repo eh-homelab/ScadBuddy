@@ -25,6 +25,7 @@ This module never imports `printers.reports`; that module imports it.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -33,6 +34,7 @@ from uuid import UUID
 
 from psycopg import Connection
 from psycopg.rows import DictRow
+from psycopg_pool import ConnectionPool
 
 from scadbuddy.bambuddy.models import PrinterStatus
 from scadbuddy.bambuddy.trays import EXTERNAL, place_label, seen_trays
@@ -41,11 +43,12 @@ from scadbuddy.filament.inventory import FilamentInventory
 from scadbuddy.filament.locations import LocationStore
 from scadbuddy.printers.lan_models import LanReport
 from scadbuddy.printers.models import PrinterRow
-from scadbuddy.printers.status import RUNNING, status_from_report
+from scadbuddy.printers.status import RUNNING, is_fresh, status_from_report
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.spools.models import clean_tag_uid, clean_tray_uuid
 
 Conn = Connection[DictRow]
+logger = logging.getLogger(__name__)
 
 #: Who a watch-booked event names, and a backstop's.
 WATCH_ACTOR: Final = "system:printer-watch"
@@ -306,3 +309,32 @@ def reconcile(
             )
             result += CaptureResult(readings=1)
     return result
+
+
+def reconcile_all(
+    pool: ConnectionPool[Conn], printer_ids: Sequence[str], *, now: datetime
+) -> CaptureResult:
+    """The backstop for what the printer watch missed: each printer's latest fresh report,
+    reconciled in a transaction of its own. The report row is locked first, as the watch's
+    write locks it, then the spools it can touch; the reconcile reads the row it locked. A
+    stale report is the watch's to answer for. A printer that raises is logged by its
+    error's type and skipped."""
+    total = CaptureResult()
+    for printer_id in printer_ids:
+        try:
+            with pool.connection() as conn, conn.transaction():
+                row = conn.execute(
+                    "SELECT report, seen_at FROM printer_reports WHERE printer_id = %s FOR UPDATE",
+                    (printer_id,),
+                ).fetchone()
+                if row is None or not is_fresh(row["seen_at"], now):
+                    continue
+                report = dict(row["report"])
+                lock(conn, touched(conn, printer_id, report, None, row["seen_at"]))
+                total += reconcile(conn, printer_id, report, row["seen_at"], actor=BACKSTOP_ACTOR)
+        except Exception as error:
+            logger.warning(
+                prints.FILAMENT_CAPTURE_FAILED,
+                extra={"printer_id": printer_id, "what": "backstop", "error": type(error).__name__},
+            )
+    return total

@@ -9,7 +9,9 @@ whose activity raised and a trays step that raised (``SCADBUDDY_RECORD_HISTORIES
 the recording below), both before the kept local presets' step (#4645); ``held`` with
 that step, behind its patch; ``bb_pull`` with Bambuddy's spools pulled after it, behind
 ``filament-bb-pull`` (#6261); ``providers_gone`` on the code behind
-``spool-providers-gone`` (#6262 Task 12), which runs only the kept presets and the pull.
+``spool-providers-gone`` (#6262 Task 12), which runs only the kept presets and the pull;
+``capture`` with the capture backstop after them, behind ``filament-capture-backstop``
+(#6263 Task 8).
 Never re-record them: a later change adds a history recorded on the changed code beside
 them.
 """
@@ -27,6 +29,7 @@ from temporalio.client import Client, WorkflowHistory
 from temporalio.worker import Replayer, Worker
 
 from scadbuddy.workflows.spool_refresh import (
+    CAPTURE_ACTIVITY,
     FILAMENT_PULL_ACTIVITY,
     HELD_ACTIVITY,
     LIST_ACTIVITY,
@@ -39,12 +42,26 @@ from tests.support.temporal import temporal_server
 HISTORIES = Path(__file__).parent / "fixtures" / "spool_refresh_histories"
 
 
-@pytest.mark.parametrize("name", ["refreshed", "failed", "held", "bb_pull", "providers_gone"])
+@pytest.mark.parametrize(
+    "name", ["refreshed", "failed", "held", "bb_pull", "providers_gone", "capture"]
+)
 async def test_spool_refresh_replays_its_recorded_history(name: str) -> None:
     history = WorkflowHistory.from_json(
         f"spool-refresh-{name}", (HISTORIES / f"{name}.json").read_text()
     )
     await Replayer(workflows=[SpoolRefresh]).replay_workflow(history)
+
+
+def test_the_capture_history_ends_with_the_backstop() -> None:
+    history = WorkflowHistory.from_json(
+        "spool-refresh-capture", (HISTORIES / "capture.json").read_text()
+    )
+    scheduled = [
+        event.activity_task_scheduled_event_attributes.activity_type.name
+        for event in history.events
+        if event.HasField("activity_task_scheduled_event_attributes")
+    ]
+    assert scheduled == [HELD_ACTIVITY, FILAMENT_PULL_ACTIVITY, CAPTURE_ACTIVITY]
 
 
 def test_the_patched_history_runs_only_the_presets_and_the_pull() -> None:
@@ -69,7 +86,7 @@ def recording_temporal() -> Iterator[str]:
 
 @pytest.mark.requires_temporal
 @pytest.mark.skipif(os.environ.get("SCADBUDDY_RECORD_HISTORIES") != "1", reason="records a history")
-@pytest.mark.parametrize("name", ["providers_gone"])
+@pytest.mark.parametrize("name", ["providers_gone", "capture"])
 async def test_record(recording_temporal: str, name: str) -> None:
     @activity.defn(name=LIST_ACTIVITY)
     async def names() -> list[str]:
@@ -94,18 +111,22 @@ async def test_record(recording_temporal: str, name: str) -> None:
     async def bb_pull() -> str:
         return "pulled"
 
+    @activity.defn(name=CAPTURE_ACTIVITY)
+    async def capture() -> str:
+        return "captured"
+
     client = await Client.connect(recording_temporal)
     queue = f"spools-{uuid.uuid4().hex[:8]}"
     async with Worker(
         client,
         task_queue=queue,
         workflows=[SpoolRefresh],
-        activities=[names, refresh, seen, held, bb_pull],
+        activities=[names, refresh, seen, held, bb_pull, capture],
     ):
         handle = await client.start_workflow(
             SpoolRefresh.run, id=f"spool-providers-{queue}", task_queue=queue
         )
-        if name == "providers_gone":
+        if name in {"providers_gone", "capture"}:
             expected: dict[str, str] = {}
         else:
             expected = {"a": "failed" if name == "failed" else "refreshed", "b": "refreshed"}

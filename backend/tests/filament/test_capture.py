@@ -11,6 +11,7 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+from psycopg.types.json import Jsonb
 
 from scadbuddy.filament import capture, prints
 from scadbuddy.filament.catalog import CatalogStore
@@ -20,6 +21,7 @@ from scadbuddy.filament.models import LocationCreate, LocationKind, Material, Sp
 from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.printers.models import LanLink, PrinterCreate
 from scadbuddy.printers.reports import PrinterReportStore
+from scadbuddy.printers.status import STALE_AFTER
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.spools.models import SeenTray
 from tests.conftest import PgPool
@@ -386,3 +388,58 @@ def test_a_plate_end_failure_still_writes_the_report_and_the_trays(
     (record,) = [r for r in caplog.records if r.message == prints.FILAMENT_CAPTURE_FAILED]
     assert record.__dict__["what"] == "plate_end"
     assert len(_events(pg_pool, spool, "loaded")) == 1
+
+
+def _write_report(pool: PgPool, pid: str, report: dict[str, Any], seen_at: datetime) -> None:
+    """A report row with no capture, as a watch that missed the change leaves it."""
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO printer_reports (printer_id, report, seen_at) VALUES (%s, %s, %s)"
+            " ON CONFLICT (printer_id) DO UPDATE SET report = EXCLUDED.report,"
+            " seen_at = EXCLUDED.seen_at",
+            (pid, Jsonb(report), seen_at),
+        )
+
+
+def test_the_backstop_books_a_change_the_watch_missed(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, tray_uuid=U1)
+    pid, _ = _printer(pg_pool)
+    _write_report(pg_pool, pid, _report(_tray(1, U1, remain=80)), T0)
+    first = capture.reconcile_all(pg_pool, [pid], now=T0 + timedelta(seconds=5))
+    assert first.loaded == 1
+    assert [e.kind for e in _events(pg_pool, spool, "loaded")] == ["loaded"]
+    assert capture.reconcile_all(pg_pool, [pid], now=T0 + timedelta(seconds=10)) == (
+        capture.CaptureResult()
+    )
+
+
+def test_a_stale_report_is_left_to_the_watch(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, tray_uuid=U1)
+    pid, _ = _printer(pg_pool)
+    _write_report(pg_pool, pid, _report(_tray(1, U1, remain=80)), T0)
+    late = T0 + STALE_AFTER + timedelta(seconds=1)
+    assert capture.reconcile_all(pg_pool, [pid], now=late) == capture.CaptureResult()
+    assert _events(pg_pool, spool, "loaded") == []
+
+
+def test_a_printer_that_raises_is_skipped_and_the_next_still_runs(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    spool = _spool(pg_pool, tray_uuid=U1)
+    pid, _ = _printer(pg_pool)
+    _write_report(pg_pool, pid, _report(_tray(1, U1)), T0)
+    real = capture.reconcile
+    calls: list[str] = []
+
+    def flaky(conn: Any, printer_id: str, *args: Any, **kwargs: Any) -> Any:
+        calls.append(printer_id)
+        if len(calls) == 1:
+            raise RuntimeError("secret detail")
+        return real(conn, printer_id, *args, **kwargs)
+
+    monkeypatch.setattr(capture, "reconcile", flaky)
+    with caplog.at_level(logging.WARNING):
+        result = capture.reconcile_all(pg_pool, [pid, pid], now=T0 + timedelta(seconds=5))
+    assert result.loaded == 1
+    assert "secret detail" not in caplog.text
+    assert [e.kind for e in _events(pg_pool, spool, "loaded")] == ["loaded"]

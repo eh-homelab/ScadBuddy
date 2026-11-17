@@ -150,7 +150,11 @@ from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.slicing.component import SLICING
 from scadbuddy.slicing.held_presets import HeldPresetStore, held_presets_activity
 from scadbuddy.slicing.start import stop_lost_native_slices, sweep_native_slices
-from scadbuddy.spools.activities import filament_pull_activity, spool_activities
+from scadbuddy.spools.activities import (
+    capture_backstop_activity,
+    filament_pull_activity,
+    spool_activities,
+)
 from scadbuddy.store import sweep_blobs
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.backends import UnrecordedSweeper
@@ -1851,6 +1855,8 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
             lambda: state.settings_store.load(),
             lambda: state.settings_store.read({"filament_sync"})["filament_sync"],
         ),
+        # The printers' trays reconciled with the ledger, the watch's backstop (#6263).
+        capture_backstop_activity(state.components.get(FILAMENT), state.components.get(PRINTERS)),
         # Bambuddy's local presets kept for native runs (#4645), on the spools' Schedule.
         held_presets_activity(
             lambda: HeldPresetStore(state.projection.pool), lambda: state.settings_store.load()
