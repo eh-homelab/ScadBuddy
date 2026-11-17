@@ -65,23 +65,27 @@ export class PgSessionLookup implements SessionLookup {
 export class CrudSessionLookup implements SessionLookup {
   readonly #call: ReturnType<typeof crudOf>
   readonly #max: number
+  readonly #waitMs: number
   #running = 0
   readonly #waiting: (() => void)[] = []
 
   /**
    * `max`: the lookups in flight at once; the rest wait their turn, so a burst of unknown cookies
-   * (each a cache miss) costs the API at most that many requests at a time and is never refused.
+   * (each a cache miss) costs the API at most that many requests at a time. `waitMs`: how long a
+   * lookup waits for its turn; past it the lookup throws, as a failed call does, so a long queue
+   * never holds a request open.
    */
-  constructor(target: CrudTarget, max = LOOKUPS_IN_FLIGHT) {
+  constructor(target: CrudTarget, max = LOOKUPS_IN_FLIGHT, waitMs = LOOKUP_WAIT_MS) {
     this.#call = crudOf(target)
     this.#max = max
+    this.#waitMs = waitMs
   }
 
   async byHash(id: string): Promise<PersonSession | undefined> {
     // A hash the API would refuse is no session's (`sessionIdHash` always makes a good one).
     if (!/^[0-9a-f]{64}$/.test(id)) return undefined
     // A slot is taken here, or handed over by the lookup that ends (`finally`), never both.
-    if (this.#running >= this.#max) await new Promise<void>((resolve) => this.#waiting.push(resolve))
+    if (this.#running >= this.#max) await this.#turn()
     else this.#running++
     try {
       const { session } = await this.#call<{ session: PersonSession | null }>('a signed-in session', '/auth-sessions/lookup', {
@@ -95,7 +99,25 @@ export class CrudSessionLookup implements SessionLookup {
       else this.#running--
     }
   }
+
+  #turn(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const go = (): void => {
+        clearTimeout(timer)
+        resolve()
+      }
+      const timer = setTimeout(() => {
+        const at = this.#waiting.indexOf(go)
+        if (at >= 0) this.#waiting.splice(at, 1)
+        reject(new Error(`a signed-in session: no lookup slot within ${this.#waitMs} ms`))
+      }, this.#waitMs)
+      this.#waiting.push(go)
+    })
+  }
 }
+
+/** How long a session lookup waits for a slot before it fails. */
+export const LOOKUP_WAIT_MS = 5000
 
 /** The session lookups `CrudSessionLookup` sends at once. */
 export const LOOKUPS_IN_FLIGHT = 8

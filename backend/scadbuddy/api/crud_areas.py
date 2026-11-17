@@ -140,6 +140,10 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: agent expects, which it waits for at its start; its ``auth-sessions`` area is
 #: ``…/agent/auth-sessions/lookup``, a signed-in person's live session by its cookie's hash
 #: (#6501, `api/crud_agent_start.py`).
+#: Its ``session-sweeps`` area is ``…/agent/sessions/live``, which session ids still have a
+#: row, for its directory sweeps; its ``forget-rows`` area is
+#: ``…/agent/sessions/{id}/forget-rows``, a forgotten session's last rows deleted with its
+#: unnamed workspace bytes and its warm-evict NOTIFY (#6501, `api/crud_agent_sweeps.py`).
 CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "projects": ["flows", "operations", "payload-keys"],
     "render": ["settings", "jobs", "refs", "blob-index", "store-folders", "assets", "libraries"],
@@ -215,6 +219,8 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "changes",
         "migrations",
         "auth-sessions",
+        "session-sweeps",
+        "forget-rows",
     ],
     "intake": ["sources"],
 }

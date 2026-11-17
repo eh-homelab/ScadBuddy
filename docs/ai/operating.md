@@ -708,6 +708,7 @@ In an `api` process, `temporal` reports its own `agent-tools.<hostname>` worker.
   |---|---|
   | `disabled (no database)` | `SCADBUDDY_DATABASE_URL` unset |
   | `unavailable (database unreachable)` | Ping failed, or the credential read threw |
+  | `unavailable (the API does not answer the agent's CRUD areas)` | Once the API lists every area the agent wants: the Postgres ping held, but `GET …/crud/agent/areas` did not answer (`agent/src/api/dataHealth.ts`, #6501) |
   | `unavailable (database migrations failed)` | `ready()` returned false |
   | `unavailable (waiting for the API to apply the database migrations)` | `ai_migrations` lacks a file this build expects: the API has not migrated yet (#5299) |
   | `unavailable (database timed out)` | `ready()` or the credential read took longer than 2 s (`DEFAULT_HEALTH_TIMEOUT_MS`) |

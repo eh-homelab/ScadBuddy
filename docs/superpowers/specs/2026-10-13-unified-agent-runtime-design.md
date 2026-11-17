@@ -725,7 +725,8 @@ never did (`questions/service.ts:34-38`).
   from it (`forget.ts:88`).
 - **Forgetting becomes crypto-shredding.** After the key row is deleted, entries in
   Postgres backups are unreadable too. A migration seals the existing rows (plan Task 3.2),
-  clearing `entry` in the same UPDATE (`agent/src/sessions/sealBackfill.ts`). A backup taken
+  clearing `entry` in the same UPDATE (`agent/src/sessions/sealBackfill.ts`, removed in #6501 once prod
+  had no plaintext row left). A backup taken
   before that backfill ran still holds those rows in plaintext, until it ages out of
   retention.
 - **Out of scope: a dropped or truncated row.** Each row's AAD names its own `uuid` or `id`,

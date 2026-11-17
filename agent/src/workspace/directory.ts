@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { constants } from 'node:fs'
 import { chmod, lstat, mkdir, open, readdir, realpath, rm, stat, utimes } from 'node:fs/promises'
 import path from 'node:path'
-import type { Sql } from 'postgres'
+import type { SessionPresence } from '../sessions/presence.js'
 import { isUuid } from '../harness/uuid.js'
 import { sha256, type WorkspaceFiles, WORKSPACE_PATH_MAX, WorkspaceError, type WorkspaceErrorCode, WORKSPACE_MAX_FILES, type WorkspaceRef } from './store.js'
 
@@ -465,7 +465,8 @@ export class SessionDirectory {
     files: Pick<WorkspaceFiles, 'list' | 'read' | 'write' | 'delete' | 'limits' | 'fileCount' | 'maxFiles'>,
     root: string,
     options: {
-      sql?: Sql | undefined
+      /** Which sessions still have a row (sessions/presence.ts). */
+      presence?: SessionPresence | undefined
       maxEntries?: number | undefined
       /** Whether the session has a warm process here now (warm.ts `has`): its cwd is never removed. */
       warm?: ((sessionId: string) => boolean) | undefined
@@ -477,8 +478,8 @@ export class SessionDirectory {
     // Four entries a file (MAX_SEGMENTS: the file and at most three parent directories), so a
     // placement of a full workspace never makes a directory the entry check stops.
     this.#maxEntries = options.maxEntries ?? MAX_SEGMENTS * files.maxFiles
-    const sql = options.sql
-    this.#exists = sql ? async (id) => (await sql`SELECT 1 FROM ai_sessions WHERE id = ${id}`).length > 0 : () => Promise.resolve(true)
+    const presence = options.presence
+    this.#exists = presence ? async (id) => (await presence.live([id])).has(id.toLowerCase()) : () => Promise.resolve(true)
   }
 
   /** The session's directory: the `cwd` its turns run in (harness/stateDirs.ts `sessionWorkDir`, from the same root). */
@@ -777,11 +778,11 @@ export class SessionDirectory {
    * `idleMs` (a backstop for a missed eviction); the ids it removed. Never a busy one, and
    * nothing not named by a session id.
    */
-  async sweep(sql: Sql, idleMs = IDLE_MS, now = Date.now()): Promise<string[]> {
+  async sweep(presence: SessionPresence, idleMs = IDLE_MS, now = Date.now()): Promise<string[]> {
     const names = await readdir(this.#root).catch((err: unknown) => (missing(err) ? ([] as string[]) : Promise.reject(err)))
     const ids = names.filter((n) => isUuid(n) && n === n.toLowerCase())
     if (ids.length === 0) return []
-    const live = new Set((await sql<{ id: string }[]>`SELECT id::text FROM ai_sessions WHERE id = ANY(${ids}::uuid[])`).map((r) => r.id))
+    const live = await presence.live(ids)
     const removed: string[] = []
     for (const id of ids) {
       const gone = await this.#serial(id, async () => {

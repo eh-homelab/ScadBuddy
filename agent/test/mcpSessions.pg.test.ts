@@ -65,8 +65,18 @@ class StallingRelay extends SharedMcpSessionRelay {
 
 type Replica = { app: AgentApp; relay: SharedMcpSessionRelay; listener: PgEventListener; bus: MemoryEventSource }
 
+type Liveness = { beatMs: number; ackTimeoutMs: number }
+/**
+ * The relay's liveness in most tests. Both replicas and the client share one process and one
+ * Postgres: on a loaded CI runner an event-loop stall, or a NOTIFY's round trip, can outlast the
+ * quick window below (a peer is gone after 3 silent beats, about 400 ms), and the relaying replica
+ * then ends a live owner's answer (#6521, reproduced with six runs pinned to two cores). Production
+ * beats every 10 s and waits 3 s for an ack (mcp/sessionRelay.ts).
+ */
+const LIVE: Liveness = { beatMs: 1_000, ackTimeoutMs: 3_000 }
+/** Only for the tests that make a peer silent or stall on purpose (`quickLiveness`). */
 const BEAT_MS = 100
-const ACK_TIMEOUT_MS = 1_000
+const QUICK: Liveness = { beatMs: BEAT_MS, ackTimeoutMs: 1_000 }
 
 /**
  * The backend's `mcp-relay` CRUD routes (api/crud_agent_mcp.py, whose SQL its pytest checks), as a
@@ -123,6 +133,7 @@ describe.skipIf(!TEST_DATABASE_URL).each(['sql', 'crud'] as const)(`/mcp session
   let a: Replica
   let b: Replica
   const clients: Client[] = []
+  let liveness: Liveness = LIVE
 
   /** A replica; `hears` drops the relay notifications it returns false for. */
   function replica(
@@ -136,8 +147,8 @@ describe.skipIf(!TEST_DATABASE_URL).each(['sql', 'crud'] as const)(`/mcp session
     const rows = over === 'sql' ? sql : new CrudRelayRows({ baseUrl: BACKEND, fetch: crudRoutes(sql) })
     const relay = new Relay(rows, {
       listen: (c, f) => listener.listenAlso(c, (payload) => (hears(payload) ? f(payload) : undefined)),
-      ackTimeoutMs: ACK_TIMEOUT_MS,
-      beatMs: BEAT_MS,
+      ackTimeoutMs: liveness.ackTimeoutMs,
+      beatMs: liveness.beatMs,
       log,
     })
     listener.start()
@@ -199,6 +210,7 @@ describe.skipIf(!TEST_DATABASE_URL).each(['sql', 'crud'] as const)(`/mcp session
     await Promise.all([a.listener.ready(), b.listener.ready()])
   })
   afterEach(async () => {
+    liveness = LIVE
     await Promise.all(clients.splice(0).map((c) => c.close().catch(() => {})))
     for (const r of [a, b]) {
       await r.app.close()
@@ -249,7 +261,7 @@ describe.skipIf(!TEST_DATABASE_URL).each(['sql', 'crud'] as const)(`/mcp session
     const started = performance.now()
     const res = await post(b, token, 'no-such-session', { jsonrpc: '2.0', id: 1, method: 'tools/list' })
     expect(res.status).toBe(404)
-    expect(performance.now() - started).toBeLessThan(ACK_TIMEOUT_MS)
+    expect(performance.now() - started).toBeLessThan(liveness.ackTimeoutMs)
   })
 
   it("delivers the owner's resource notifications on a GET stream that reached another replica", async () => {
@@ -261,10 +273,14 @@ describe.skipIf(!TEST_DATABASE_URL).each(['sql', 'crud'] as const)(`/mcp session
       updated.push(n.params.uri)
     })
     await client.subscribeResource({ uri: 'scadbuddy://jobs/j1' })
-    // The GET stream opens after `initialized`; it is relayed, so wait for the owner's beat on it.
-    await sleep(BEAT_MS * 3)
-    a.bus.emit({ id: 'e1', kind: 'job.running', job_id: 'j1', slug: 'keychain' })
-    await until(() => updated.includes('scadbuddy://jobs/j1'), 'the update through B')
+    // The GET stream opens after `initialized` and is relayed, so it may not be up yet: an update
+    // sent before it is lost, as it would be to a client with no stream. Sent again until one
+    // arrives, not after a fixed sleep a loaded runner can outlast (#6521).
+    let n = 0
+    await until(() => {
+      a.bus.emit({ id: `e${++n}`, kind: 'job.running', job_id: 'j1', slug: 'keychain' })
+      return updated.includes('scadbuddy://jobs/j1')
+    }, 'the update through B')
   })
 
   it('counts the per-caller limit across replicas', async () => {
@@ -290,6 +306,13 @@ describe.skipIf(!TEST_DATABASE_URL).each(['sql', 'crud'] as const)(`/mcp session
     expect(res.status).toBe(404)
     expect(await db.sql`SELECT 1 FROM ai_mcp_sessions WHERE id_hash = ${sessionHash(id)}`).toHaveLength(0)
   })
+
+  /** Both replicas again, with the quick liveness: for a test that silences or stalls a peer. */
+  async function quickLiveness(): Promise<void> {
+    liveness = QUICK
+    await swap('a', () => replica())
+    await swap('b', () => replica())
+  }
 
   /** Replaces replica `which` with one built by `make`. */
   async function swap(which: 'a' | 'b', make: () => Replica): Promise<void> {
@@ -436,7 +459,7 @@ describe.skipIf(!TEST_DATABASE_URL).each(['sql', 'crud'] as const)(`/mcp session
     const c = replica()
     await c.listener.ready()
     try {
-      await until(async () => (await openStream(c, token, id)) === 200, 'a new stream through C', BEAT_MS * 60)
+      await until(async () => (await openStream(c, token, id)) === 200, 'a new stream through C', liveness.beatMs * 10)
     } finally {
       await c.app.close()
       await c.listener.close()
@@ -578,6 +601,7 @@ describe.skipIf(!TEST_DATABASE_URL).each(['sql', 'crud'] as const)(`/mcp session
   // the other, still talking, for gone: the owner stopped the call, and the relaying
   // replica dropped the owner's directory row, so the client's next call met a 404.
   it('keeps a live owner through a stall while the call waits for its head (#4552)', async () => {
+    await quickLiveness()
     const { token } = await tokens.mint({ name: 't', tier: 'read' })
     const client = await connect(token, () => a)
     backend.use(
@@ -593,6 +617,7 @@ describe.skipIf(!TEST_DATABASE_URL).each(['sql', 'crud'] as const)(`/mcp session
   })
 
   it('keeps a live owner, and its session, through a stall between the answer and its end (#4552)', async () => {
+    await quickLiveness()
     await swap('a', () => replica({}, undefined, undefined, StallingRelay))
     const owner = a.relay as StallingRelay
     const { token } = await tokens.mint({ name: 't', tier: 'read' })
@@ -606,6 +631,7 @@ describe.skipIf(!TEST_DATABASE_URL).each(['sql', 'crud'] as const)(`/mcp session
   })
 
   it('ends an answer with an error, not as whole, when its owner stops it for the relaying replica going silent', async () => {
+    await quickLiveness()
     // #4384: A never hears B's beats, so it takes B for gone once the call's head has left.
     await swap('a', () => replica({}, (payload) => JSON.parse(payload).t !== 'beat'))
     backend.use(
@@ -627,6 +653,7 @@ describe.skipIf(!TEST_DATABASE_URL).each(['sql', 'crud'] as const)(`/mcp session
   })
 
   it('ends a relayed answer with an error when the owner dies mid-call', async () => {
+    await quickLiveness()
     let reached!: () => void
     const backendReached = new Promise<void>((r) => (reached = r))
     backend.use(

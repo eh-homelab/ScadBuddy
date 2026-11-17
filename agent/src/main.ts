@@ -70,17 +70,17 @@ import {
   withServiceCredential,
 } from './api/serviceCredential.js'
 import { untilBackendAnswers } from './api/backendUp.js'
-import { BLOB_AREAS, CrudAreas, FORGET_AREAS, GATE_AREAS, RELAY_AREAS, SECRET_AREAS, SESSION_AREAS, START_AREAS, TASK_AREAS, TURN_AREAS, WORKSPACE_AREAS, REST_AREAS } from './api/crudAreas.js'
+import { BLOB_AREAS, CrudAreas, FORGET_AREAS, GATE_AREAS, RELAY_AREAS, SECRET_AREAS, SESSION_AREAS, START_AREAS, TASK_AREAS, TURN_AREAS, WORKSPACE_AREAS, REST_AREAS, SWEEP_AREAS } from './api/crudAreas.js'
 import { CrudApprovals } from './approvals/crudApprovals.js'
 import { CrudAudit } from './audit/crudAudit.js'
 import { CrudPending } from './gate/crudPending.js'
 import { CrudQuestions } from './gate/crudQuestions.js'
 import { CrudEscalations } from './flows/crudEscalations.js'
 import { CrudGate } from './gate/crudStore.js'
+import { dataHealthOf, ledgerOf } from './api/dataHealth.js'
 import { gated, STORE_AREAS, type StoreArea } from './api/crudStores.js'
 import { CrudFlowRunReads } from './flows/backendReads.js'
 import { BrowserSessions, CrudSessionLookup, PgSessionLookup, type SessionLookup } from './auth/browserSession.js'
-import { sealBackfill } from './sessions/sealBackfill.js'
 import { ApprovalActions } from './approvals/mcp.js'
 import { approvalHashKey, sweepErrorText } from './approvals/service.js'
 import { fetchGrantKey, fetchGrantMinter } from './tools/fetchGrant.js'
@@ -99,6 +99,7 @@ import { storedModel } from './routes/model.js'
 import { followSessionEvents, SessionEventPublisher } from './sessions/busEvents.js'
 import { CrudPublisher, PgPublisher, type Publisher } from './sessions/publish.js'
 import { CrudSessionReads, PgSessionReads, type SessionReads } from './sessions/sessionReads.js'
+import { CrudSessionPresence, PgSessionPresence, type SessionPresence } from './sessions/presence.js'
 import { resolveTabWaits, SessionManager, type SessionManagerDeps, SETTING_MODEL } from './sessions/manager.js'
 import { readStartSettings, wireRuntimeSync } from './sessions/runtimeSync.js'
 import { drainRetains, type MemoryOptions } from './memory/hindsight.js'
@@ -239,7 +240,8 @@ const database: Database | undefined = config.databaseUrl
         if (err instanceof MigrationChecksumError) process.exit(1)
       },
       // The ledger through the API once it lists area `migrations` (#6501), over SQL until then.
-      ledger: (sql: Sql): LedgerReader => (expected) => (crudAreas.has('migrations') ? crudLedger(crudTarget) : sqlLedger(sql))(expected),
+      // Read when ready() asks, after crudAreas and crudTarget below exist.
+      ledger: (sql: Sql): LedgerReader => ledgerOf(crudAreas, crudLedger(crudTarget), sqlLedger)(sql),
     })
   : undefined
 // #4975 phase 4: the agent's service credential, on the client and the workspace blob routes.
@@ -267,7 +269,7 @@ const serviceCredential: CredentialSource | undefined =
 // gate's writes (#5299 step 10, `GATE_AREAS`), but for a run grant's check, which only the API runs,
 // and the sessions' rows and what their calls touched (#5299 step 9, `SESSION_AREAS`).
 const crudFetch = serviceCredential ? withServiceCredential(globalThis.fetch, serviceCredential, config.backendUrl) : globalThis.fetch
-const crudAreas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: [...SECRET_AREAS, ...FORGET_AREAS, ...STORE_AREAS, ...WORKSPACE_AREAS, ...BLOB_AREAS, ...TASK_AREAS, ...GATE_AREAS, ...SESSION_AREAS, ...REST_AREAS, ...TURN_AREAS, ...RELAY_AREAS, ...START_AREAS] })
+const crudAreas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: [...SECRET_AREAS, ...FORGET_AREAS, ...STORE_AREAS, ...WORKSPACE_AREAS, ...BLOB_AREAS, ...TASK_AREAS, ...GATE_AREAS, ...SESSION_AREAS, ...REST_AREAS, ...TURN_AREAS, ...RELAY_AREAS, ...START_AREAS, ...SWEEP_AREAS] })
 crudAreas.start()
 // The small stores (#5299 step 5, api/crudStores.ts): each through its CRUD routes once the API
 // lists its area, over SQL until then.
@@ -275,26 +277,9 @@ const crudTarget = { baseUrl: config.backendUrl, fetch: crudFetch }
 // Wait for the schema in the background: an API that has not migrated yet, or a database that is
 // down at start-up, is retried by the next /healthz or API call instead of stopping the pod.
 void database?.ready()
-// Health's probe of the agent's data (#6501): the Postgres ping, since the agent still runs SQL
-// (the LISTEN bus, a turn's claim and end, the MCP relay) until #5299 step 12, and, once the API
-// lists every area, its answer to them too. A change in the API's answer is logged, as /healthz
-// reports both under `database`.
-let apiAnswered = true
-const dataHealth = database
-  ? {
-      ...database,
-      ping: async (timeoutMs?: number) => {
-        if (!(await database.ping(timeoutMs))) return false
-        if (!crudAreas.complete) return true
-        const answered = await crudAreas.answers(timeoutMs)
-        if (answered !== apiAnswered) {
-          apiAnswered = answered
-          console.warn(answered ? "health: the API answers the agent's CRUD areas again" : "health: the API does not answer the agent's CRUD areas; /healthz reports database unreachable")
-        }
-        return answered
-      },
-    }
-  : undefined
+// Health's probe of the agent's data (#6501, api/dataHealth.ts): the Postgres ping and, once the
+// API lists every area, its answer to them too.
+const dataHealth = database ? dataHealthOf(database, crudAreas) : undefined
 const storeArea = (area: StoreArea) => () => crudAreas.has(area)
 // The tool-call gate's routes (#5299 step 10, backend api/crud_agent_gate.py).
 const gateRoutes = { crud: new CrudGate(crudTarget), use: () => crudAreas.has('gate') }
@@ -334,6 +319,10 @@ const sessionReads = (sql: Sql): SessionReads => gated<SessionReads>(new PgSessi
 // queue's head and the sweep's end of a lost turn, over SQL until the API lists area `session-turns`.
 const crudTurns = new CrudTurnRows(config.backendUrl, { fetch: crudFetch })
 const turnRows = (sql: Sql): TurnRows => gated<TurnRows>(new PgTurnRows(sql), crudTurns, () => crudAreas.has('session-turns'))
+// Which sessions still have a row, for the directory sweeps (#6501): over SQL until the API lists area `session-sweeps`.
+const crudPresence = new CrudSessionPresence(crudTarget)
+const sessionPresence = (sql: Sql): SessionPresence =>
+  gated<SessionPresence>(new PgSessionPresence(sql), crudPresence, () => crudAreas.has('session-sweeps'))
 // The headless browser's approved origins (#982), over `sql` or through area `browser-origins`.
 const browserOriginsOn = (sql: Sql) =>
   new BrowserOrigins(sql, settings, { crud: new CrudSessionOrigins(crudTarget), use: storeArea('browser-origins') })
@@ -689,18 +678,6 @@ if (backgroundClient && backgroundTasks) {
 // by a restart.
 const runtime = await readStartSettings({ database, settings }, console.log)
 if (database && !dataKeys) console.warn('sessions: no secret key, so no session transcript can be written until the API lists area `transcripts`')
-// Seals the transcripts written before sealing, in the background once migrations have applied; a failure is retried at the next start.
-if (role.http && database && dataKeys) {
-  void database
-    .untilReady()
-    .then(async () => {
-      const { sealed, deleted } = await sealBackfill(database.sql, dataKeys)
-      if (sealed || deleted) console.log(`session transcripts: sealed ${sealed} row(s); deleted ${deleted} of forgotten sessions`)
-    })
-    .catch((err: unknown) => console.error('session transcripts: sealing the existing rows failed; retried at the next start:', (err as Error).message))
-} else if (role.http && database) {
-  console.warn('session transcripts: no secret key, so the existing rows are not sealed')
-}
 // Automatic Hindsight memory's hook knobs for every turn (SessionManager, #2420).
 // Undefined: the defaults.
 const memory: MemoryOptions | undefined = undefined
@@ -908,7 +885,7 @@ const workerDataConverter = dataConverter
 if (database) {
   const sweepRoot = path.join(paths.stateDir, DURABLE_TURNS_DIR)
   const sweep = () =>
-    void sweepTurnDirs(sweepRoot, database.sql).catch((err: unknown) =>
+    void sweepTurnDirs(sweepRoot, sessionPresence(database.sql)).catch((err: unknown) =>
       console.error('durable http body sweep failed:', (err as Error).message),
     )
   sweep()
@@ -960,7 +937,7 @@ const durableToolDeps: ToolActivityDeps | undefined = temporal
 // placement. The directories of sessions gone since are swept every hour, by every process that runs turns.
 const sessionDirectory =
   role.sessionHost && workspace
-    ? new SessionDirectory(workspace, sessionsRoot(paths), { sql: database?.sql, ...(sessions ? { warm: (id: string) => sessions.warm.has(id) } : {}) })
+    ? new SessionDirectory(workspace, sessionsRoot(paths), { presence: database ? sessionPresence(database.sql) : undefined, ...(sessions ? { warm: (id: string) => sessions.warm.has(id) } : {}) })
     : undefined
 // A session's copy goes once its warm process here has: this disk holds the warm sessions' copies only.
 if (sessionDirectory && sessions) {
@@ -972,7 +949,7 @@ if (sessionDirectory && database) {
   const sweep = () =>
     void database
       .ready()
-      .then((ok) => (ok ? sessionDirectory.sweep(database.sql) : []))
+      .then((ok) => (ok ? sessionDirectory.sweep(sessionPresence(database.sql)) : []))
       .catch((err: unknown) => console.error('session directory sweep failed:', (err as Error).message))
   sweep()
   setInterval(sweep, 3600_000).unref()

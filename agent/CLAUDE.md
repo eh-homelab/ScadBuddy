@@ -37,10 +37,10 @@ is tried again at the next call and logged once as "waiting for the backend". Wi
 `service_credentials_agent` over SQL, as before (#5494), until #5299 step 12 makes a proof
 required. A signed-in person's session (`src/auth/browserSession.ts`) is looked up through the
 API's `…/agent/auth-sessions/lookup` once it lists area `auth-sessions` (`CrudSessionLookup`,
-only the cookie's hash travels, at most `LOOKUPS_IN_FLIGHT` requests at once, the rest waiting their turn), the view `auth_sessions_agent` over SQL until then. The ledger
+only the cookie's hash travels, at most `LOOKUPS_IN_FLIGHT` requests at once, the rest waiting their turn up to `LOOKUP_WAIT_MS`, then failing as no session), the view `auth_sessions_agent` over SQL until then. The ledger
 `ready()` waits for is read through `…/agent/migrations/ledger` once the API lists area
 `migrations` (`src/db/schema.ts` `crudLedger`), and `/healthz`'s `database` is the Postgres
-ping and, once the API lists every area, whether it answers them (`CrudAreas.answers`); the ping
+ping and, once the API lists every area, whether it answers them (`src/api/dataHealth.ts` `dataHealthOf`, `CrudAreas.answers`; the `ai` status then names the API); the ping
 stays while the agent still runs SQL, until #5299 step 12 (backend `api/crud_agent_start.py`, #6501; test `test/crudStart.test.ts`).
 
 The agent's own CRUD routes (`/api/v1/internal/crud/agent/`, class `crud.agent`, #5330): the
@@ -71,7 +71,8 @@ key, a session's forks first taking their ranges of its transcript, events and i
 transaction, opened and sealed by the API (backend `transcripts.py` `copy_fork_ranges`, #5299 step
 9, part c); only an API with no KEK, whose forks take transcript entries, refuses it
 `forks-take-ranges`, and the agent forgets it in its own transaction, whose `copyForkRanges` opens
-and seals its transcript), a browser call's key dropped and the hourly key sweep (`gatedKeyDeletes`), and a
+and seals its transcript, unless the API also lists `forget-rows`: then the forget throws
+`ForksNeedKeys` and deletes nothing more), a browser call's key dropped and the hourly key sweep (`gatedKeyDeletes`), and a
 flow run's images (`src/temporal/flowBlobs.ts` `CrudFlowBlobs`, `gatedFlowBlobs`: sealed here,
 sent as multipart bytes, the tombstone check and the cap in the API's transaction).
 Area `workspace` (#5299 step 7, `WORKSPACE_AREAS`; backend `api/crud_agent_workspace.py`):
@@ -222,12 +223,22 @@ Test `test/crudEscalations.test.ts`. The NOTIFYs sent outside a store's write (#
 `api/crud_agent_publish.py`, `src/sessions/publish.ts` `Publisher`: `PgPublisher`,
 `CrudPublisher`) go through area `publish`: a `session.*` bus event (`SessionEventPublisher`)
 and a warm eviction (a handoff's), which the API NOTIFYs on the same channels. A session's open
-calls (a restarted turn's finished calls; a forget's terminations stay SQL until it moves) and a child's reasoning
+calls (a restarted turn's finished calls, a forget's terminations) and a child's reasoning
 before a call go through area `session-reads` (`src/sessions/sessionReads.ts`
 `PgSessionReads`, `CrudSessionReads`), and a session's owner as a tool call
 (`toolActivities.ts` `RowSessionOwners`), a flow run's call (`flowRuns.ts`, `flowSessions.ts`)
 and an escalation read it, from the `sessions` area's row (`SessionRows.get`). Test
-`test/crudPublish.test.ts`. Area `mcp-relay` (#5299 step 11, `RELAY_AREAS`, backend
+`test/crudPublish.test.ts`. Which sessions still have a row, for each pod's directory sweeps
+(`temporal/turnServers.ts` `sweepTurnDirs`, `workspace/directory.ts` `SessionDirectory`), goes
+through area `session-sweeps` (#6501, backend `api/crud_agent_sweeps.py`, `src/sessions/presence.ts`
+`SessionPresence`: `PgSessionPresence`, `CrudSessionPresence`, in pages of `LIVE_IDS_MAX`); a read
+that fails throws, so a sweep removes nothing it could not check. A forget's last step (its
+transcript rows and session row, then its unnamed workspace bytes and the warm eviction) goes
+through area `forget-rows` (`forget.ts` `CrudForgetRows`, refused 409 `not-forgotten` for a session
+with no tombstone), and its background tasks through `BackgroundTaskStore`. The transcript sealing
+backfill (`sealBackfill`) and the `recover-durable-sessions` CLI are gone (#6501): prod had no
+plaintext transcript row and one `durable` session row, archived (measured 2026-11-16 with `psql`
+on `scadbuddy-db-1`, deploy/CLAUDE.md "Prod checks"). Test `test/crudSweeps.test.ts`. Area `mcp-relay` (#5299 step 11, `RELAY_AREAS`, backend
 `api/crud_agent_mcp.py`, `src/mcp/relayRows.ts` `CrudRelayRows` behind `RelayRows`, which
 `SharedMcpSessionRelay` takes) takes the /mcp session relay's directory (`ai_mcp_sessions`) and
 messages (`ai_mcp_relay_messages`): a session hash, a replica, a request and a row id travel in the

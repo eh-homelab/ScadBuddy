@@ -46,7 +46,7 @@ import subprocess
 import threading
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -727,14 +727,21 @@ async def _in_thread(
 
 @contextlib.asynccontextmanager
 async def _renewed(
-    ttl: float, renew: Callable[[], object], drop: Callable[[], object], what: str, holder: str
+    ttl: float,
+    renew: Callable[[], object],
+    drop: Callable[[], object],
+    what: str,
+    holder: str,
+    *,
+    sleep: Callable[[float], Awaitable[object]] = asyncio.sleep,
 ) -> AsyncIterator[None]:
     """A row already taken, renewed every third of its TTL until the block exits, and
-    then dropped."""
+    then dropped. ``sleep`` is the wait before each renewal: a test sets it to renew
+    when it says so (#6527)."""
 
     async def renewing() -> None:
         while True:
-            await asyncio.sleep(ttl / 3)
+            await sleep(ttl / 3)
             try:
                 await asyncio.to_thread(renew)
             except Exception:
@@ -754,7 +761,10 @@ async def _renewed(
 
 @contextlib.asynccontextmanager
 async def _shared_lease(
-    leases: SharedLeases, holder: str, checkouts: Sequence[Path]
+    leases: SharedLeases,
+    holder: str,
+    checkouts: Sequence[Path],
+    sleep: Callable[[float], Awaitable[object]],
 ) -> AsyncIterator[None]:
     """A lease row held, and renewed every third of its TTL, until the block exits."""
     token = await _taken(lambda: leases.take(holder, checkouts), leases.drop)
@@ -764,12 +774,15 @@ async def _shared_lease(
         lambda: leases.drop(token),
         "checkout lease",
         holder,
+        sleep=sleep,
     ):
         yield
 
 
 @contextlib.asynccontextmanager
-async def _shared_pin(leases: SharedLeases) -> AsyncIterator[None]:
+async def _shared_pin(
+    leases: SharedLeases, sleep: Callable[[float], Awaitable[object]]
+) -> AsyncIterator[None]:
     """A pin's hold, renewed every third of its TTL, until the block exits."""
     token = await _taken(leases.take_pin, leases.drop_pin)
     async with _renewed(
@@ -778,6 +791,7 @@ async def _shared_pin(leases: SharedLeases) -> AsyncIterator[None]:
         lambda: leases.drop_pin(token),
         "pin hold",
         str(token),
+        sleep=sleep,
     ):
         yield
 
@@ -933,10 +947,18 @@ class CheckoutGate:
     #872) is seen by a removal here and the other way round, and so is a pin (#1131).
     The render worker's ``leases`` go through the API's CRUD routes (#5298); it renders
     and pins, but removes nothing and asks no one's leases, which only SQL's answer.
+
+    ``sleep`` is the wait before each renewal of a shared row (:func:`_renewed`).
     """
 
-    def __init__(self, leases: SharedLeases | None = None) -> None:
+    def __init__(
+        self,
+        leases: SharedLeases | None = None,
+        *,
+        sleep: Callable[[float], Awaitable[object]] = asyncio.sleep,
+    ) -> None:
         self.shared = leases
+        self._sleep = sleep
         self._condition = asyncio.Condition()
         self._pins = 0
         self._removing = False
@@ -955,7 +977,7 @@ class CheckoutGate:
             if self.shared is None:
                 yield
             else:
-                async with _shared_pin(self.shared):
+                async with _shared_pin(self.shared, self._sleep):
                     yield
         finally:
             async with self._condition:
@@ -1005,7 +1027,7 @@ class CheckoutGate:
             if self.shared is None:
                 yield
             else:
-                async with _shared_lease(self.shared, holder, checkouts):
+                async with _shared_lease(self.shared, holder, checkouts, self._sleep):
                     yield
         finally:
             # Whatever ends the attempt -- done, failed, cancelled by shutdown.

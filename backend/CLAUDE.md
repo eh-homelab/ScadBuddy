@@ -470,6 +470,12 @@ so a write sent again after its answer was lost is added once), the turn's end o
   reads of a session's own events in `agent_data/events.py`, its open calls (`open_calls`) and a
   child's text before a call (`reasoning_deltas`), the agent's statements. Tests
   `tests/crud/test_crud_agent_publish.py`.
+  `api/crud_agent_sweeps.py` (areas `session-sweeps` and `forget-rows`, #6501): which of up to
+  `LIVE_IDS_MAX` session ids still have an `ai_sessions` row, for the agent's directory sweeps;
+  and a forget's last step, only for a session with an `ai_forgotten_subjects` row (409
+  `not-forgotten` otherwise): its `ai_session_entries` rows and its row in one transaction, then
+  the `ai_session_file_bytes` no file names (a failure left to the agent's sweep) and the
+  warm-evict NOTIFY. Tests `tests/crud/test_crud_agent_sweeps.py`.
 - `backend/scadbuddy/flow_triggers/` — runs started on a schedule or an event (#2484,
   spec 2026-10-11 §12): `store.py` (`flow_triggers`, their standing grants and fires),
   `fire.py` (the `flow_trigger_fire` activity on the `library` queue), `events.py` (the

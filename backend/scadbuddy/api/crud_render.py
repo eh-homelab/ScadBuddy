@@ -607,7 +607,9 @@ async def _replayed_or_open(
     then gets `_open_jobs_only` for an output's ``key``: a write to a settled job's
     output costs no GET and hash before its 403. The write's transaction reads the
     ledger and checks the job again, as a write can commit and the job can settle
-    between the two checks."""
+    between the two checks. Cost: the worker sends a key with every write (`WriteKeys`),
+    so each piece publish makes this one indexed ledger read, on a pooled connection,
+    before `_verified` (#6541)."""
     output = OUTPUT_KEY.fullmatch(key) is not None
     if idempotency_key is None and not output:
         return None
