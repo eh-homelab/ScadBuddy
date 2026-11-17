@@ -56,6 +56,7 @@ from scadbuddy.crud.client import CrudUnavailableError
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.operations.kinds import without_bb_ids
 from scadbuddy.printers.lan_models import LanStopped
+from scadbuddy.store.refs import BlobRefs
 
 logger = logging.getLogger(__name__)
 
@@ -812,11 +813,11 @@ def _release_run_files(conn: Connection[DictRow], run_id: str) -> None:
     )
 
 
-def reap_run_holds(pool: ConnectionPool[Connection[DictRow]]) -> int:
+def reap_run_holds(refs: BlobRefs) -> int:
     """Drop every print-run hold whose run is no longer in use, or gone (#6122): one an
     ending left (a slice attempt that outlived its run's end), and the holds of the runs
-    the retention prune deleted. How many went. ``pool`` is autocommit."""
-    with pool.connection() as conn:
+    the retention prune deleted. How many went."""
+    with refs.pool.connection() as conn:
         cursor = conn.execute(
             "DELETE FROM blob_refs r WHERE r.holder_kind = %s AND NOT EXISTS"
             f" (SELECT 1 FROM print_runs p WHERE p.id = r.holder_id AND {_in_use('p')})".encode(),

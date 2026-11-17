@@ -1425,7 +1425,7 @@ async def _reap_quote_holds_logged(state: AppState) -> None:
 async def _reap_run_holds_logged(state: AppState) -> None:
     """#6122: the LAN runs' holds on their sliced files that a run's end left."""
     try:
-        dropped = await asyncio.to_thread(reap_run_holds, state.refs.pool)
+        dropped = await asyncio.to_thread(reap_run_holds, state.refs)
     except Exception:
         logger.exception("could not reap the print runs' sliced-file holds")
         raise

@@ -216,7 +216,7 @@ async def test_the_reaper_drops_the_holds_of_ended_and_gone_runs_only(
     refs.add(FILE, RUN_HOLDER, ended.id)
     refs.add(FILE, RUN_HOLDER, "pruned")
     refs.add(FILE, QUOTE_HOLDER, "pruned")
-    assert reap_run_holds(jobs.pool) == 2
+    assert reap_run_holds(refs) == 2
     assert _holds(jobs) == {(FILE, kept.id)}
     with jobs.pool.connection() as conn:
         quote = conn.execute(
