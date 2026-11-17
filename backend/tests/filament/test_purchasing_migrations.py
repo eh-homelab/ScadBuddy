@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+from datetime import date
+from decimal import Decimal
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from psycopg import Connection, errors
 from psycopg.rows import DictRow
 from pydantic import ValidationError
 
-from scadbuddy.filament.purchasing_models import SupplierCreate
+from scadbuddy.filament.purchasing_models import (
+    InvoiceCreate,
+    PricePointCreate,
+    ShoppingItemCreate,
+    SupplierCreate,
+)
 from tests.conftest import PgPool
 
 pytestmark = pytest.mark.requires_postgres
@@ -145,3 +153,32 @@ def test_the_models_refuse_a_script_url() -> None:
     assert SupplierCreate(name="A", website="https://acme.example/x").website == (
         "https://acme.example/x"
     )
+
+
+@pytest.mark.parametrize("url", ["http://a b", "http://a\nb", "http://a\tb", "ftp://a.example"])
+def test_the_models_refuse_a_url_with_whitespace_or_another_scheme(url: str) -> None:
+    with pytest.raises(ValidationError):
+        SupplierCreate(name="A", website=url)
+
+
+def test_a_shopping_item_needs_a_material_or_a_type() -> None:
+    with pytest.raises(ValidationError):
+        ShoppingItemCreate()
+    assert ShoppingItemCreate(material="PLA").material == "PLA"
+    assert ShoppingItemCreate(type_id=uuid4()).material is None
+
+
+def test_money_refuses_a_fifth_decimal_and_too_many_digits() -> None:
+    with pytest.raises(ValidationError):
+        PricePointCreate(price=Decimal("1.00001"))
+    with pytest.raises(ValidationError):
+        PricePointCreate(price=Decimal("100000000.0000"))
+    assert PricePointCreate(price=Decimal("1.2345")).price == Decimal("1.2345")
+    with pytest.raises(ValidationError):
+        InvoiceCreate(
+            supplier_id=uuid4(),
+            invoice_date=date(2026, 11, 1),
+            currency="USD",
+            subtotal=Decimal("1"),
+            total=Decimal("1.00001"),
+        )

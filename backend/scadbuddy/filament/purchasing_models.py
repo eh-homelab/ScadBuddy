@@ -15,14 +15,16 @@ from typing import Annotated, Literal
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from pydantic import AfterValidator, BaseModel, Field, StringConstraints
+from pydantic import AfterValidator, BaseModel, Field, StringConstraints, model_validator
 
-from scadbuddy.filament.models import Cost, Name, Note, SpoolTypeCreate, Text, _In, _Patch, _Row
+from scadbuddy.filament.models import Name, Note, SpoolTypeCreate, Text, _In, _Patch, _Row
 
 
 def _http_url(value: str) -> str:
     if len(value) > 500:
         raise ValueError("a URL has at most 500 characters")
+    if any(c.isspace() or not c.isprintable() for c in value):
+        raise ValueError("a URL has no spaces or control characters")
     parts = urlsplit(value)
     if parts.scheme.lower() not in ("http", "https") or not parts.netloc:
         raise ValueError("a URL must start with http:// or https://")
@@ -30,6 +32,8 @@ def _http_url(value: str) -> str:
 
 
 Url = Annotated[str, AfterValidator(_http_url)]
+#: A money amount: the column is `numeric(12,4)`, so a fifth decimal is refused, not rounded.
+Money = Annotated[Decimal, Field(ge=0, max_digits=12, decimal_places=4)]
 Currency = Annotated[str, StringConstraints(pattern=r"^[A-Z]{3}$")]
 PackSize = Annotated[int, Field(gt=0, le=1000)]
 Quantity = Annotated[int, Field(gt=0, le=100_000)]
@@ -73,7 +77,7 @@ class PricePointCreate(_In):
     """A manual price: per pack, with tax. ``currency`` defaults to the shop's and
     ``on_date`` to today."""
 
-    price: Cost
+    price: Money
     currency: Currency | None = None
     on_date: date | None = None
 
@@ -159,9 +163,9 @@ class InvoiceLineIn(_In):
     ]
     sku: Sku | None = None
     quantity: Quantity
-    unit_price: Cost
-    line_subtotal: Cost | None = None
-    line_tax: Cost | None = None
+    unit_price: Money
+    line_subtotal: Money | None = None
+    line_tax: Money | None = None
     colour_code: Text | None = None
     type_id: UUID | None = None
     supplier_product_id: UUID | None = None
@@ -195,10 +199,10 @@ class InvoiceCreate(_In):
     number: Sku | None = None
     invoice_date: date
     currency: Currency
-    subtotal: Cost
-    shipping: Cost = Decimal(0)
-    tax: Cost = Decimal(0)
-    total: Cost
+    subtotal: Money
+    shipping: Money = Decimal(0)
+    tax: Money = Decimal(0)
+    total: Money
     note: Note | None = None
     import_run_id: Text | None = None
     lines: list[InvoiceLineIn] = Field(default_factory=list)
@@ -209,10 +213,10 @@ class InvoicePatch(_Patch):
     number: Sku | None = None
     invoice_date: date | None = None
     currency: Currency | None = None
-    subtotal: Cost | None = None
-    shipping: Cost | None = None
-    tax: Cost | None = None
-    total: Cost | None = None
+    subtotal: Money | None = None
+    shipping: Money | None = None
+    tax: Money | None = None
+    total: Money | None = None
     note: Note | None = None
 
 
@@ -251,6 +255,12 @@ class ShoppingItemCreate(_In):
     colour_name: Text | None = None
     quantity_spools: Annotated[int, Field(gt=0, le=1000)] = 1
     note: Note | None = None
+
+    @model_validator(mode="after")
+    def _material_or_type(self) -> ShoppingItemCreate:
+        if self.type_id is None and not self.material:
+            raise ValueError("material is required when no type_id is given")
+        return self
 
 
 class ShoppingItemPatch(_Patch):
