@@ -105,6 +105,28 @@ test('a supplier, a price, an invoice and its spools', async ({ page }) => {
   await expect(link.locator('xpath=..')).toContainText('line 1, $23.60 each')
 })
 
+// #6267 — "Import with the assistant": the start route (mocked) links a session to the draft and
+// the assistant panel opens on it; a second visit to the draft shows it running, with Open.
+test('an invoice is imported with the assistant, and a second visit shows the import running', async ({ page }) => {
+  await addSupplierAndProduct(page)
+  await startDraft(page)
+
+  await page.getByRole('button', { name: 'Import with the assistant' }).click()
+  const panel = page.getByRole('complementary', { name: 'Assistant' })
+  await expect(panel.getByTestId('active-session-title')).toHaveText('Import invoice acme-receipt.pdf')
+  await expect(page.getByText('Import running')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Import with the assistant' })).toHaveCount(0)
+
+  // In-app: a reload would reset the msw worker's data. Away to the Invoices tab and back to the Acme draft.
+  await page.getByRole('link', { name: 'Invoices', exact: true }).click()
+  await page.locator('tr[data-invoice]', { hasText: 'Acme' }).getByRole('link').click()
+  await expect(page).toHaveURL(/\/filament\/invoices\/[0-9a-f-]+$/)
+  await expect(page.getByText('Import running')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Import with the assistant' })).toHaveCount(0)
+  await page.getByRole('button', { name: 'Open', exact: true }).click()
+  await expect(panel.getByTestId('active-session-title')).toHaveText('Import invoice acme-receipt.pdf')
+})
+
 test('a total that does not add up cannot be confirmed', async ({ page }) => {
   await addSupplierAndProduct(page)
   await startDraft(page)

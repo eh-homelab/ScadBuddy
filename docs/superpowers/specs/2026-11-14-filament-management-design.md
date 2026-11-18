@@ -740,6 +740,19 @@ types, instances, tags and the ledger. It takes over the rules of
 "Bambuddy owns printers, spools, presets ..."; that changes to say SB owns
 spools.
 
+**As built in #6267** (plan `docs/superpowers/plans/2026-11-18-filament-invoice-import.md`,
+Decisions 1-7). The profile-fetch worker (step 7) is
+#6625, not part of #6267: until it lands, the session proposes a non-Bambu type
+with its 3DFP id and hex and says the presets are still to fetch. The import is
+an assistant session, not a flow (step 2): every session already runs as a
+Temporal workflow, so a stopped import resumes. The invoice file reaches the
+model in the session's first message, as an image or a PDF document block (step
+2), and `POST /api/v1/ai/filament/invoice-import` starts it and sets the draft's
+`import_run_id` to the session id. The colour table is read from the slicer
+profiles by `GET /api/v1/filament/bambu-colour-codes`, and the diff rule has a
+read, `GET /api/v1/filament/invoices/{id}/candidates`. The skill is
+`plugins/scadbuddy/skills/filament/SKILL.md`.
+
 ## 10. UI
 
 New top-level nav item **Filament** (`/filament`), between Library and Orders

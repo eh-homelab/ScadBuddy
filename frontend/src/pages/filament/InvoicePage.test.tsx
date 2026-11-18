@@ -2,6 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { Route, Routes } from 'react-router'
 import { beforeEach, describe, expect, it } from 'vitest'
+import { AssistantOpenerContext } from '../../agent/chat/opener'
 import { createInvoice, getInvoice } from '../../api/filamentPurchasing'
 import { cmpDecimals, formatCost } from '../../lib/decimal'
 import { spoolId, T } from '../../mocks/features/filament/seed'
@@ -406,6 +407,43 @@ describe('the invoice page', () => {
     release()
     await waitFor(() => expect(screen.queryByText('Saving the lines…')).not.toBeInTheDocument())
     expect(cost(2)).toHaveTextContent('30.00')
+  })
+
+  describe('import with the assistant (#6267)', () => {
+    function withAssistant(id: string) {
+      const opened: string[] = []
+      const view = renderPage(
+        <AssistantOpenerContext.Provider value={{ openSession: (session) => opened.push(session) }}>
+          <Routes>
+            <Route path="/filament/invoices/:id" element={<InvoicePage />} />
+          </Routes>
+        </AssistantOpenerContext.Provider>,
+        { route: `/filament/invoices/${id}` },
+      )
+      return { ...view, opened }
+    }
+
+    it('starts the import, opens its session, and says "Import running" after a reload of the page', async () => {
+      const first = withAssistant(INVOICE.DRAFT_A)
+      await heading()
+      await first.user.click(await screen.findByRole('button', { name: 'Import with the assistant' }))
+      await waitFor(() => expect(first.opened).toHaveLength(1))
+      first.unmount()
+
+      // A second visit: the invoice names the session, which still runs.
+      const second = withAssistant(INVOICE.DRAFT_A)
+      await heading()
+      expect(await screen.findByText('Import running')).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'Import with the assistant' })).not.toBeInTheDocument()
+      await second.user.click(screen.getByRole('button', { name: 'Open' }))
+      expect(second.opened).toEqual([first.opened[0]])
+    })
+
+    it('offers no import on a confirmed invoice', async () => {
+      withAssistant(INVOICE.CONFIRMED_A)
+      await heading()
+      expect(screen.queryByRole('button', { name: 'Import with the assistant' })).not.toBeInTheDocument()
+    })
   })
 
   describe('final review rulings', () => {

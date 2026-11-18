@@ -29,7 +29,8 @@
 import { HttpResponse, http } from 'msw'
 import { SYSTEM_PROMPT_APPEND_MAX, SYSTEM_PROMPT_BASES, TOOL_SEARCH_MODES } from '../../api/sessionTurn'
 import type { AiSessionView, ResourceRef, SessionLimits, SessionResource, SessionRuntime } from '../../api/types'
-import { EXTERNAL_SESSION_ID, mockAgentSessions } from '../agent'
+import { adoptMockSession, EXTERNAL_SESSION_ID, forgetAdoptedSessions, mockAgentSessions } from '../agent'
+import { newId } from '../newId'
 import { versionIds } from '../fixtures'
 
 const base = '/api/v1/ai'
@@ -118,6 +119,7 @@ export function sessionWrites(): readonly SessionWrite[] {
 }
 
 export function reset(): void {
+  forgetAdoptedSessions()
   state.limits = { ...DEFAULTS }
   state.writes = []
   state.runtime = { ...RUNTIME_DEFAULTS }
@@ -130,6 +132,20 @@ export function reset(): void {
   ])
 }
 reset()
+
+/** #6267 — an invoice import's session, as the agent's start route makes it: running, and known to the open mock agent. */
+export function startImportSession(title: string): string {
+  const id = newId()
+  state.views.set(id, view({ id, title, status: 'running', running: true }))
+  adoptMockSession(id, title)
+  return id
+}
+
+/** #6267 — whether session `id` still takes messages (agent `routes/invoiceImport.ts` `live`). */
+export function isSessionLive(id: string): boolean {
+  const known = state.views.get(id)
+  return !!known && !known.archived && known.status !== 'done' && known.status !== 'failed'
+}
 
 /** #1125 — how many of the user's sessions have a turn under way. */
 export function setRunningSessions(n: number): void {

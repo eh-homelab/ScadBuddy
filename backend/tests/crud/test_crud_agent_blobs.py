@@ -40,6 +40,7 @@ pytestmark = pytest.mark.requires_postgres
 BASE = "/api/v1/internal/crud/agent"
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
 JPEG = b"\xff\xd8\xff\xe0" + b"\x01" * 24
+PDF = b"%PDF-1.7\n" + b"\x03" * 24
 WEBP = b"RIFF\x00\x00\x00\x00WEBPVP8 " + b"\x02" * 16
 
 
@@ -132,7 +133,12 @@ class Agent:
         names: list[str] | None = None,
         **meta: Any,
     ) -> Any:
-        ext = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
+        ext = {
+            "image/png": "png",
+            "image/jpeg": "jpg",
+            "image/webp": "webp",
+            "application/pdf": "pdf",
+        }
         body = {
             "session_id": session,
             "images": [
@@ -268,6 +274,33 @@ def test_an_image_is_checked_against_its_name_type_and_caps(agent: Agent, tables
     big = PNG + b"\x00" * crud_agent_blobs.IMAGE_BYTES_MAX
     assert agent.blobs(sid, [("image/png", big)]).status_code == 413
     assert _sql(tables, "SELECT 1 FROM ai_session_blobs") == []
+
+
+def test_a_pdf_is_stored_by_name_checked_and_read_back(agent: Agent, tables: PgPool) -> None:
+    # An invoice's PDF is a session blob like an image (#6267), with its own, larger cap.
+    sid = _session(tables)
+    stored = agent.blobs(sid, [("application/pdf", PDF)]).json()
+    assert stored["created"] == [_name(PDF, "pdf")]
+    read = agent.get("/session-blobs", session_id=sid, name=_name(PDF, "pdf"))
+    assert read.content == PDF
+    assert read.headers["content-type"] == "application/pdf"
+    not_pdf = agent.blobs(sid, [("application/pdf", PNG)], names=[_name(PNG, "pdf")])
+    assert not_pdf.status_code == 422
+    big = PDF + b"\x00" * crud_agent_blobs.PDF_BYTES_MAX
+    assert agent.blobs(sid, [("application/pdf", big)]).status_code == 413
+    assert agent.blobs(sid, [("image/png", PDF)], names=[_name(PDF, "png")]).status_code == 422
+
+
+def test_a_write_is_refused_past_the_multipart_total_before_it_is_stored(
+    agent: Agent, tables: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sid = _session(tables)
+    one, two = PNG + b"1" * 100, PNG + b"2" * 100
+    monkeypatch.setattr(crud_agent_blobs, "WRITE_BYTES_MAX", len(one) + len(two) - 1)
+    assert agent.blobs(sid, [("image/png", one), ("image/png", two)]).status_code == 413
+    assert _sql(tables, "SELECT 1 FROM ai_session_blobs") == []
+    monkeypatch.setattr(crud_agent_blobs, "WRITE_BYTES_MAX", len(one) + len(two))
+    assert agent.blobs(sid, [("image/png", one), ("image/png", two)]).status_code == 200
 
 
 def test_a_tool_calls_images_replace_its_earlier_attempts(agent: Agent, tables: PgPool) -> None:

@@ -22,7 +22,7 @@ import { cancelOrphanedEntries } from '../gate/sweep.js'
 import type { SweepRoutes } from '../gate/crudPending.js'
 import type { AuditSink } from '../audit/log.js'
 import type { EventLog } from './eventLog.js'
-import type { UserImage } from './images.js'
+import type { UserAttachment } from './images.js'
 import { SessionError, type SessionRecord, type Turn, type TurnOutcome } from './manager.js'
 import { event, type Owner, type QueuedEntry, type SentImage, type ServerEvent, type SessionStatus } from './protocol.js'
 import { PgTurnRows, type SendClaim, type SendClaimed, type TurnRows } from './turnRows.js'
@@ -128,7 +128,7 @@ export type DurableTurn = {
   /** What the model gets: the words and the page context. */
   text: string
   author: Owner
-  images: readonly UserImage[]
+  images: readonly UserAttachment[]
   /** What the engine appends to Claude Code's own system prompt (Ruling 15). */
   systemAppend: string
   /** The sender's tiers, for a turn sent through the sessions_* tools (`turn_tiers`, #2320). */

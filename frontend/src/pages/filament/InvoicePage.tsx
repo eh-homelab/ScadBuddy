@@ -18,6 +18,7 @@ import {
   type SupplierProduct,
 } from '../../api/filamentPurchasing'
 import { InvoiceFile } from '../../components/filament/purchasing/InvoiceFile'
+import { InvoiceImport } from '../../components/filament/purchasing/InvoiceImport'
 import { InvoiceHeaderForm } from '../../components/filament/purchasing/InvoiceHeaderForm'
 import { InvoiceLinesTable } from '../../components/filament/purchasing/InvoiceLinesTable'
 import { bodyOfLines, confirmCounts, draftOfLine, hasType, lineErrors, taxBasisOf, type LineDraft, type LineErrors } from '../../components/filament/purchasing/invoiceLines'
@@ -410,6 +411,7 @@ export function InvoicePage() {
         </div>
         {draft && (
           <>
+            <InvoiceImport invoice={invoice} onChanged={reload} />
             <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => setAsking('delete')}>
               Delete draft
             </Button>

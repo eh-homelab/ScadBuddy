@@ -1,0 +1,32 @@
+{
+  "data": [
+    {
+      "fila_color_code": "10101",
+      "fila_color": ["#000000FF"],
+      "fila_color_name": {"en": "Black"},
+      "fila_type": "PLA Basic",
+      "fila_id": "GFA00"
+    },
+    {
+      "fila_color_code": "10102",
+      "fila_color": ["#FFFFFFFF"],
+      "fila_color_name": {"en": "Jade White"},
+      "fila_type": "PLA Basic",
+      "fila_id": "GFA00"
+    },
+    {
+      "fila_color_code": "13100",
+      "fila_color": ["#F4EE2A80"],
+      "fila_color_name": {"en": "Translucent Yellow"},
+      "fila_type": "PLA Translucent",
+      "fila_id": "GFA17"
+    },
+    {
+      "fila_color_code": "14500",
+      "fila_color": ["#FF0000FF", "#0000FFFF"],
+      "fila_color_name": {"en": "Dual Red Blue"},
+      "fila_type": "PLA Silk",
+      "fila_id": "GFA05"
+    }
+  ]
+}

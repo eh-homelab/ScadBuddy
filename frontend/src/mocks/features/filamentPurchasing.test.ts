@@ -23,6 +23,8 @@ import {
   patchSupplier,
   patchShopping,
   putInvoiceLines,
+  runningImportId,
+  startInvoiceImport,
   invoiceFileUrl,
   uploadInvoiceFile,
 } from '../../api/filamentPurchasing'
@@ -40,6 +42,17 @@ const refusal = async (promise: Promise<unknown>) => {
 }
 
 describe('the purchasing mocks', () => {
+  it('starts an invoice import as the agent route does: a session, then 409 import_running, 409 confirmed, 422', async () => {
+    resetMockState()
+    const first = await startInvoiceImport(INVOICE.DRAFT_A)
+    expect((await getInvoice(INVOICE.DRAFT_A)).import_run_id).toBe(first.session_id)
+    const again = await refusal(startInvoiceImport(INVOICE.DRAFT_A))
+    expect(again.status).toBe(409)
+    expect(runningImportId(again)).toBe(first.session_id)
+    expect((await refusal(startInvoiceImport(INVOICE.CONFIRMED_A))).problem).toMatchObject({ type: 'confirmed' })
+    expect((await refusal(startInvoiceImport(INVOICE.DRAFT_B))).status).toBe(422)
+  })
+
   it('seeds 3 suppliers, 2 drafts, 2 confirmed invoices and a shopping list of 4 with one purchased', async () => {
     resetMockState()
     expect((await listSuppliers()).map((row) => [row.name, row.product_count])).toEqual([
