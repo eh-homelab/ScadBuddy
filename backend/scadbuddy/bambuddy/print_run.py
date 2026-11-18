@@ -1552,7 +1552,7 @@ async def check_print(
         )
     finally:
         # Read by the slot refusals, else not wanted: dropped, never left running.
-        await _drop(*(hardware or ()))
+        await _drop(naming, *(hardware or ()))
     if slot_errors:
         errors.append(" ".join(slot_errors))
     # The one mounted-nozzle advisory kept (#723, #797): a warning, never a refusal. Not
@@ -1655,8 +1655,9 @@ async def _read_named[T](
     """``read`` of the Bambuddy printer ``naming`` names (`_named_printer`)."""
     _, printer_id = await naming
     if printer_id is None:
-        # `prepare_run` refuses such a row first, and drops this read.
-        raise RunRefusalError("The printer named is not on Bambuddy.")
+        # Never reached: `prepare_run` refuses such a row first (`_not_on_bambuddy`) and
+        # drops this read. An internal error, so no second wording of that refusal exists.
+        raise RuntimeError("a read of a printer that Bambuddy does not reach")
     return await read(printer_id)
 
 
