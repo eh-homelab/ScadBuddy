@@ -1,4 +1,5 @@
 import { HttpResponse, http } from 'msw'
+import { newId } from '../newId'
 import type { InvoiceLine } from '../../api/filamentPurchasing'
 import type { components } from '../../api/schema'
 import { addDecimals, cmpDecimals, divDecimal, fromScaled, mulDecimal, subDecimals, toScaled } from '../../lib/decimal'
@@ -186,7 +187,7 @@ const pricePerKg = (price: string, packSize: number, labelG: number) => money(di
 function invoicePrice(invoice: Stored, line: Line, products: Product[]): Price {
   const pack = products.find((product) => product.id === line.supplier_product_id)?.pack_size ?? 1
   return {
-    id: crypto.randomUUID(),
+    id: newId(),
     product_id: line.supplier_product_id!,
     price: pricePerPack(line, pack),
     currency: invoice.currency,
@@ -351,7 +352,7 @@ function newLine(invoiceId: string, body: Record<string, unknown>, position: num
   const quantity = body.quantity as number
   const given = body.line_tax != null
   return {
-    id: crypto.randomUUID(),
+    id: newId(),
     invoice_id: invoiceId,
     position,
     description: text(body.description),
@@ -474,7 +475,7 @@ async function confirm(invoice: Stored): Promise<Response | null> {
     const sku = line.sku || line.description
     product ??= state.products.find((one) => one.supplier_id === invoice.supplier_id && !one.archived_at && sameName(one.sku, sku))
     if (!product) {
-      product = { id: crypto.randomUUID(), supplier_id: invoice.supplier_id, type_id: line.type_id, sku, product_url: null, pack_size: 1, note: null, archived_at: null, created_at: now(), updated_at: now() }
+      product = { id: newId(), supplier_id: invoice.supplier_id, type_id: line.type_id, sku, product_url: null, pack_size: 1, note: null, archived_at: null, created_at: now(), updated_at: now() }
       state.products.push(product)
     }
     line.supplier_product_id = product.id
@@ -524,7 +525,7 @@ export const handlers = [
     if (bad) return problem(422, bad)
     if (state.suppliers.some((row) => !row.archived_at && sameName(row.name, text(body.name)))) return problem(409, REFUSED.supplierExists)
     const made: Supplier = {
-      id: crypto.randomUUID(),
+      id: newId(),
       name: text(body.name),
       website: (body.website as string | null | undefined) ?? null,
       customer_number: text(body.customer_number) || null,
@@ -612,7 +613,7 @@ export const handlers = [
     if (!typeInfo(body.type_id)) return problem(422, REFUSED.noType)
     if (state.products.some((row) => row.supplier_id === params.id && !row.archived_at && sameName(row.sku, text(body.sku)))) return problem(409, REFUSED.productExists)
     const made: Product = {
-      id: crypto.randomUUID(),
+      id: newId(),
       supplier_id: String(params.id),
       type_id: body.type_id,
       sku: text(body.sku),
@@ -658,7 +659,7 @@ export const handlers = [
     if (body.on_date != null && !/^\d{4}-\d{2}-\d{2}$/.test(String(body.on_date))) return problem(422, 'on_date: Input should be a valid date')
     if (!productOf(String(params.id))) return problem(404, `no supplier product ${String(params.id)}`)
     const made: Price = {
-      id: crypto.randomUUID(),
+      id: newId(),
       product_id: String(params.id),
       price: money(String(body.price)),
       currency: (body.currency as string | null | undefined) ?? SHOP_CURRENCY,
@@ -726,7 +727,7 @@ export const handlers = [
     if (supplier.archived_at) return problem(422, REFUSED.supplierArchived)
     const taken = numberTaken(String(body.supplier_id), text(body.number))
     if (taken) return taken
-    const id = crypto.randomUUID()
+    const id = newId()
     const made: Stored = {
       id,
       supplier_id: String(body.supplier_id),
@@ -856,7 +857,7 @@ export const handlers = [
     const type = body.type_id == null ? null : typeInfo(String(body.type_id))
     if (body.type_id != null && !type) return problem(422, REFUSED.noType)
     const made: Item = {
-      id: crypto.randomUUID(),
+      id: newId(),
       type_id: (body.type_id as string | null | undefined) ?? null,
       material: text(body.material) || type?.material || '',
       subtype: text(body.subtype) || type?.subtype || null,

@@ -1,4 +1,5 @@
 import { HttpResponse, http } from 'msw'
+import { newId } from '../../newId'
 import type { components } from '../../../api/schema'
 import type { FilamentInventorySpool, FilamentInventoryView, FilamentSpool } from '../../../api/types'
 import { parseRgba } from '../../../lib/rgba'
@@ -199,7 +200,7 @@ function detail(row: SpoolRow): S['SpoolDetail'] {
 
 function addEvent(spoolId: string, kind: S['SpoolEvent']['kind'], values: Partial<S['SpoolEvent']> = {}): S['SpoolEvent'] {
   const event: S['SpoolEvent'] = {
-    id: crypto.randomUUID(),
+    id: newId(),
     spool_id: spoolId,
     at: now(),
     kind,
@@ -516,7 +517,7 @@ function under(parent: string, id: string): boolean {
 /** A spool's new own columns with defaults, from a create body. */
 function newSpool(body: Record<string, unknown>): SpoolRow {
   const blank: SpoolRow = {
-    id: crypto.randomUUID(),
+    id: newId(),
     number: Math.max(0, ...state.spools.map((row) => row.number)) + 1,
     type_id: null,
     brand_id: null,
@@ -578,7 +579,7 @@ export function createType(raw: unknown): S['SpoolType'] | Response {
     cost_per_kg: null,
     note: null,
     ...body,
-    id: crypto.randomUUID(),
+    id: newId(),
     filament_id: null,
     archived_at: null,
     created_at: now(),
@@ -816,7 +817,7 @@ function importRow(row: Record<string, string | null>, line: number, write: bool
   for (const [column, name] of fresh) {
     const kind = CSV_CATALOGS[column]
     const blank = Object.fromEntries([...CATALOG_FIELDS[kind]].map((field) => [field, null]))
-    const made = { ...blank, name, sort_order: 1000, id: crypto.randomUUID(), archived_at: null, created_at: now(), updated_at: now() }
+    const made = { ...blank, name, sort_order: 1000, id: newId(), archived_at: null, created_at: now(), updated_at: now() }
     if (kind === 'subtypes') Object.assign(made, { material_id: (values.material_id as string | undefined) ?? material })
     ;(state.catalogs[kind] as unknown[]).push(made)
     values[`${column}_id`] = made.id
@@ -894,7 +895,7 @@ export const handlers = [
     const refused = catalogRefusal(kind, body, body)
     if (refused) return refused
     const blank = Object.fromEntries([...CATALOG_FIELDS[kind]].map((field) => [field, null]))
-    const made = { ...blank, sort_order: 0, ...body, id: crypto.randomUUID(), archived_at: null, created_at: now(), updated_at: now() }
+    const made = { ...blank, sort_order: 0, ...body, id: newId(), archived_at: null, created_at: now(), updated_at: now() }
     ;(state.catalogs[kind] as unknown[]).push(made)
     return HttpResponse.json(made, { status: 201 })
   }),
@@ -1085,7 +1086,7 @@ export const handlers = [
       tag.tag_uid ??= uid
       tag.tray_uuid ??= tray
     } else {
-      tag = { id: crypto.randomUUID(), kind: body.kind ?? 'other', tag_uid: uid, tray_uuid: tray, raw_blob: null, note: null, created_at: now() }
+      tag = { id: newId(), kind: body.kind ?? 'other', tag_uid: uid, tray_uuid: tray, raw_blob: null, note: null, created_at: now() }
       state.tags.push(tag)
     }
     const held = openBinding(tag.id)
@@ -1093,7 +1094,7 @@ export const handlers = [
     if (held) closeBinding(held, 'rebound')
     const other = state.bindings.find((one) => one.spool_id === row.id && !one.unbound_at)
     if (other) closeBinding(other, 'rebound')
-    const binding: S['TagBinding'] = { id: crypto.randomUUID(), tag_id: tag.id, spool_id: row.id, override: body.override ?? false, bound_at: now(), unbound_at: null, reason: null }
+    const binding: S['TagBinding'] = { id: newId(), tag_id: tag.id, spool_id: row.id, override: body.override ?? false, bound_at: now(), unbound_at: null, reason: null }
     state.bindings.push(binding)
     addEvent(row.id, 'tag_bound', { data: { tag_id: tag.id } })
     return HttpResponse.json(binding, { status: 201 })
@@ -1261,7 +1262,7 @@ export const handlers = [
       tray_id: null,
       note: null,
       ...body,
-      id: crypto.randomUUID(),
+      id: newId(),
       archived_at: null,
       created_at: now(),
       updated_at: now(),

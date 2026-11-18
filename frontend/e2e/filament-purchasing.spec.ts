@@ -71,7 +71,7 @@ async function addSupplierAndProduct(page: Page) {
   await products.getByRole('button', { name: 'Add price for ACME-JADE' }).click()
   await page.getByLabel('Price with tax for ACME-JADE').fill('20.00')
   await page.getByRole('form', { name: 'Add price for ACME-JADE' }).getByRole('button', { name: 'Add price' }).click()
-  await expect(products.getByRole('row', { name: /ACME-JADE/ })).toContainText('20.00')
+  await expect(products.locator('tr[data-product]', { hasText: 'ACME-JADE' })).toContainText('20.00')
 }
 
 test('a supplier, a price, an invoice and its spools', async ({ page }) => {
