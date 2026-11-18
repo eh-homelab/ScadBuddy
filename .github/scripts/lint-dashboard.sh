@@ -56,6 +56,9 @@
 #     so a name that only a fixture or log line quotes does not count. That
 #     search runs once the service's tracing module (agent/src/telemetry/setup.ts,
 #     frontend/src/lib/tracing.ts) exists, and is noted as unchecked until then
+#   - deploy/grafana holds only kustomization.yaml and `[a-z0-9-]+.json`
+#     regular files, the names deploy.reusable.yml vendors into clusters
+#     (eh-homelab/clusters#3734)
 #   - `kustomize build deploy/grafana` succeeds and yields one ConfigMap per
 #     dashboard and nothing else: `<name>-dashboard` in `cattle-dashboards`,
 #     labelled `grafana_dashboard: "1"`, whose one file `<name>.json` is the
@@ -83,6 +86,17 @@ problem() {
   printf '%s: %s\n' "$1" "$2"
   problems=$((problems + 1))
 }
+
+# clusters vendors this directory and the deploy copies only these names
+# (eh-homelab/clusters#3734); it rejects anything else, so it fails here first.
+while IFS= read -r -d '' entry; do
+  name=${entry##*/}
+  if [ -L "$entry" ] || [ ! -f "$entry" ]; then
+    problem "deploy/grafana/$name" "is not a regular file; the deploy vendors only kustomization.yaml and [a-z0-9-]+.json files"
+  elif ! [[ "$name" =~ ^(kustomization\.yaml|[a-z0-9-]+\.json)$ ]]; then
+    problem "deploy/grafana/$name" "is not kustomization.yaml or a [a-z0-9-]+.json dashboard, so the deploy cannot vendor it"
+  fi
+done < <(find "$root/deploy/grafana" -mindepth 1 -maxdepth 1 -print0)
 
 # Every dashboard, by its path from the repo root.
 mapfile -t dashboards < <(find "$root/deploy/grafana" -maxdepth 1 -name '*.json' -printf 'deploy/grafana/%f\n' | sort)

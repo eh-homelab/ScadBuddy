@@ -660,19 +660,6 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "print time and open picks in the print check's rack options, for the hotends that job could use. " +
       "It also answers each hotend's serial (#2170), which is for the Settings page and stays out of a model's context.",
   },
-  ...(
-    [
-      'GET /api/v1/printers/{printer_id}/machine-rate/events',
-      'POST /api/v1/printers/{printer_id}/machine-rate/events',
-      'PATCH /api/v1/printers/{printer_id}/machine-rate/events/{event_id}',
-    ] as const
-  ).map((operation) => ({
-    operation,
-    reason:
-      "A printer's maintenance events (#5774 PR 2). Their tools, machine_rate_events_list, machine_rate_event_add " +
-      'and machine_rate_event_update, come in #5774 PR 4 (spec 2026-11-17-machine-rate-actuals §5), which removes ' +
-      'these entries.',
-  })),
   {
     operation: 'DELETE /api/v1/printers/{printer_id}/machine-rate/events/{event_id}',
     reason:

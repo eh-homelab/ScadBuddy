@@ -240,6 +240,7 @@ async def reprice(state: AppState, items: Sequence[OrderItem]) -> Repriced:
             currency=now.currency,
             printer=now.printer,
             plates=_plates(now),
+            machine_rate_breakdown=now.machine_rate_breakdown,
         )
     return found
 

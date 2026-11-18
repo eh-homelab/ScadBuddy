@@ -188,7 +188,7 @@ describe('the filament mocks', () => {
     expect(await refusal(moveSpool(spoolId(9), NOBODY))).toEqual({
       status: 422,
       title: 'Unprocessable Content',
-      detail: 'the place to move to does not exist or is archived',
+      detail: "the place to move to does not exist, is archived or is an AMS unit's place",
     })
   })
 
@@ -279,7 +279,7 @@ describe('the filament mocks', () => {
   it('refuses a place whose name is taken, whose kind is missing, or that would sit under itself', async () => {
     expect(await refusal(upsertLocation({ name: 'Shelf A', kind_id: LK.SHELF, parent_id: L.WORKSHOP, sort_order: 0 }))).toMatchObject({
       status: 409,
-      detail: 'a place with that name or that tray already exists',
+      detail: 'a place with that name, that tray or that AMS unit already exists',
     })
     expect(await refusal(upsertLocation({ name: 'Shelf B', kind_id: L.WORKSHOP, sort_order: 0 }))).toMatchObject({
       status: 422,

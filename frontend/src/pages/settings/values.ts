@@ -84,14 +84,14 @@ export const HAND_LAID: Partial<Record<SectionId, readonly FieldName[]>> = {
   administration: ['activity_follow', 'activity_ttl_seconds', 'activity_repair_window_seconds'],
   // #959 — where the agent's `fetch_asset` (and `POST /models/{slug}/assets/fetch`) may fetch from.
   uploads: ['asset_fetch_domains'],
-  // #6262, #6264 — what moves between ScadBuddy and Bambuddy: spools in, tags out.
+  // #6262, #6264 — what moves between ScadBuddy and Bambuddy: spools and weights in, tags out.
   filament: ['filament_sync'],
 }
 
-/** The form's value of `filament_sync`, `spools|tags`, as its two choices. */
-export function syncParts(raw: string): [spools: 'off' | 'bb_to_sb', tags: 'off' | 'sb_to_bb'] {
-  const [spools, tags] = raw.split('|')
-  return [spools === 'off' ? 'off' : 'bb_to_sb', tags === 'sb_to_bb' ? 'sb_to_bb' : 'off']
+/** The form's value of `filament_sync`, `spools|tags|weights`, as its three choices. */
+export function syncParts(raw: string): [spools: 'off' | 'bb_to_sb', tags: 'off' | 'sb_to_bb', weights: 'off' | 'bb_to_sb'] {
+  const [spools, tags, weights] = raw.split('|')
+  return [spools === 'off' ? 'off' : 'bb_to_sb', tags === 'sb_to_bb' ? 'sb_to_bb' : 'off', weights === 'off' ? 'off' : 'bb_to_sb']
 }
 
 export const SPECS: Record<string, FieldSpec> = Object.fromEntries(RUNTIME_FIELDS.map((spec) => [spec.name, spec]))
@@ -209,10 +209,10 @@ export function toPatchValue(name: FieldName, raw: string, settings: Settings): 
   )
     return raw
   if (name === 'store_s3_path_style' || name === 'print_auto_import') return raw === 'true'
-  // #6262 Task 13, #6264 — one data type per key: the form's `spools|tags` string, split.
+  // #6262 Task 13, #6264 — one data type per key: the form's `spools|tags|weights` string, split.
   if (name === 'filament_sync') {
-    const [spools, tags] = syncParts(raw)
-    return { spools, tags }
+    const [spools, tags, weights] = syncParts(raw)
+    return { spools, tags, weights }
   }
   // #4699 — an empty list allows no source (each print goes to Unsorted imports) or skips no printer.
   if (name === 'print_auto_import_sources') return raw === '' ? [] : raw.split(',')

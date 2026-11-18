@@ -402,10 +402,22 @@ BB has a flat list (`/inventory/locations`) plus location sensors
 - Sensors: humidity and temperature per location, read from Home Assistant as
   BB does (`LocationHASensor`: entity id, alert above or below, notify) and from
   the AMS reports for AMS locations. Readings are kept as history.
+  As built in #6268: a sensor is a row of `filament_location_sensors` (`filament/sensors.py`),
+  its readings are in `filament_sensor_readings`. SB reads Home Assistant through
+  Bambuddy's `/location-ha-sensors/entities`, so SB holds no HA token. The AMS sensors
+  are made from the first report that shows a number, with an AMS-unit location as the
+  parent of the unit's tray locations. The humidity is the report's `humidity_raw`, the
+  percent; the report's `humidity` is Bambu's 1-5 level and is never stored as a percent. An alert is shown in the API and the UI, and is not
+  sent: follow-up issue #6646 adds the notification, and `notify` is kept for it. The
+  plan's Decisions 4 to 7 have the details.
 - A move writes a `moved` event (from, to) in the spool's ledger. A scan of a
   location QR, then of a spool tag or label, moves the spool.
 - Time spent outside dry storage counts toward "needs drying" for hygroscopic
   materials (§5.1 flag). That rule's hours are a material setting.
+  As built in #6268: the setting is `max_hours_outside_dry` on the material (empty means no
+  limit). `filament/dry_hours.py` counts the hours at read from the `moved` events since the
+  last `dried` event, and spool reads carry `hours_outside_dry` and `needs_drying`. The
+  plan's Decision 8 has the rule.
 
 ### 5.7 History and metrics
 
@@ -504,11 +516,23 @@ holds each decision and what it costs if wrong.
 - **Scale.** BB's SpoolBuddy posts scale readings to BB
   (`/spoolbuddy/scale/reading`). With BB→SB sync of weights on, SB reads
   `last_scale_weight` and `last_weighed_at` changes and writes `weighed`.
+  As built in #6268: the setting is `filament_sync.weights` (`off` or `bb_to_sb`,
+  on by default). With `off`, the pull books no `bb_scale` weighing and no `bb` weight
+  reading for a spool SB already tracks. A spool SB has never seen keeps its first `bb`
+  reading, because it needs a start weight. A `bb_dried` event is not a weight and is
+  still booked. The plan's Decision 3 has the reason.
 - **Backstop.** The existing `SpoolRefresh` schedule stays as a poll that
   catches what the events missed.
 - **AMS weight sync.** A button and an agent tool, "Sync weights from AMS".
   It writes `ams_reading` events for every loaded, unlocked spool. This is the
   SB equivalent of BB's `POST /inventory/sync-ams-weights`.
+  As built in #6268: `POST /filament/spools/sync-ams-weights` (`capture.sync_ams_weights`),
+  the Spools tab button "Sync weights from AMS" and the agent tool
+  `filament_sync_ams_weights`. It reads the stored LAN reports, not BB. It books one
+  `ams_reading` (`data.forced`) for the spool that holds each tray now, and skips a spool
+  with a weight lock and a printer that prints. It answers the counts `booked`, `locked`,
+  `printing`, `no_remain` and `stale`. Unlike BB, it does not release a weight lock.
+  The plan's Decisions 1 and 2 have the reasons.
 
 ## 7. RFID
 

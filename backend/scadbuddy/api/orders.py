@@ -666,12 +666,17 @@ def _cost_rates(settings: SettingsStore, orders: OrdersComponent) -> CostRates:
     """Today's rates; machine time at each printer's machine rate where it has one
     (#4625). Blocking."""
     runtime = settings.snapshot().runtime
-    machine_rate, printer_rates, serial_rates = orders.machine_rates.money_rates()
+    money = orders.machine_rates.money_rates()
     return CostRates(
         shop_currency=runtime.orders_currency,
-        machine_rate_per_hour=machine_rate,
-        printer_rates=printer_rates,
-        serial_rates=serial_rates,
+        machine_rate_per_hour=money.machine_rate_per_hour,
+        printer_rates=money.printer_rates,
+        serial_rates=money.serial_rates,
+        printer_actuals=money.printer_actuals,
+        serial_actuals=money.serial_actuals,
+        printer_confidence=money.printer_confidence,
+        serial_confidence=money.serial_confidence,
+        default_printer=money.default_printer,
         labour_per_item=runtime.pricing_labour_per_item,
         thin_margin_percent=runtime.orders_thin_margin_percent,
     )

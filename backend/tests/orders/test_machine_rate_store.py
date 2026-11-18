@@ -292,9 +292,21 @@ def test_the_money_views_fallback_is_the_default_printers_rate(
     store.replace(lan.id, INPUTS)
     machine = rates(store, printers, settings_store, FakeBambuddy(None))
     by_serial = {lan.serial: "0.7"}
-    assert machine.money_rates() == ("0.9", {lan.id: "0.7"}, by_serial)
+    money = machine.money_rates()
+    assert (money.machine_rate_per_hour, money.printer_rates, money.serial_rates) == (
+        "0.9",
+        {lan.id: "0.7"},
+        by_serial,
+    )
+    assert money.default_printer is None
     settings_store.save(SettingsPatch(default_printer=lan.id))
-    assert machine.money_rates() == ("0.7", {lan.id: "0.7"}, by_serial)
+    money = machine.money_rates()
+    assert (money.machine_rate_per_hour, money.printer_rates, money.serial_rates) == (
+        "0.7",
+        {lan.id: "0.7"},
+        by_serial,
+    )
+    assert money.default_printer == lan.id
 
 
 def test_a_printer_with_no_profile_is_the_books_rate_in_the_money_view(
@@ -307,10 +319,53 @@ def test_a_printer_with_no_profile_is_the_books_rate_in_the_money_view(
     bare = linked_printer(printers)
     store.replace(lan.id, INPUTS)
     settings_store.save(SettingsPatch(default_printer=lan.id))
-    fallback, by_id, by_serial = rates(store, printers, settings_store).money_rates()
-    assert fallback == "0.7"
-    assert by_id == {lan.id: "0.7", bare.id: "0.9"}
-    assert by_serial == {lan.serial: "0.7", bare.serial: "0.9"}
+    money = rates(store, printers, settings_store).money_rates()
+    assert money.machine_rate_per_hour == "0.7"
+    assert money.printer_rates == {lan.id: "0.7", bare.id: "0.9"}
+    assert money.serial_rates == {lan.serial: "0.7", bare.serial: "0.9"}
+    # #5774: only a profiled printer has a basis; the bare one is the book's.
+    assert money.printer_actuals == {lan.id: False}
+    assert money.serial_actuals == {lan.serial: False}
+    assert money.printer_confidence == {lan.id: None}
+    assert money.serial_confidence == {lan.serial: None}
+
+
+def test_the_money_view_says_which_rates_priced_from_actuals(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    """#5774 (spec §6): ``CostRates``' actuals and confidence maps, from each printer's
+    stored rate: a part set to ``actual`` with too few events prices at its estimate and
+    gives its confidence; with enough, it prices at its actual."""
+    printer = lan_printer(printers)
+    actual = INPUTS.model_copy(
+        update={
+            "profile": INPUTS.profile.model_copy(update={"actuals_window": 2}),
+            "wear_parts": [
+                WearPart(name="Nozzle", cost="14", life_hours="200", priced_by="actual")
+            ],
+        }
+    )
+    store.replace(printer.id, actual)
+    machine = rates(store, printers, settings_store)
+    log_part(store, printer.id, "0", "20")
+    log_part(store, printer.id, "400", "20")
+    money = machine.money_rates()
+    # One of two replacements: 50 % confidence, the estimate prices.
+    assert (money.printer_actuals, money.printer_confidence) == (
+        {printer.id: False},
+        {printer.id: 50},
+    )
+    assert (money.serial_actuals, money.serial_confidence) == (
+        {printer.serial: False},
+        {printer.serial: 50},
+    )
+    log_part(store, printer.id, "800", "20")
+    money = machine.money_rates()
+    assert (money.printer_actuals, money.printer_confidence) == (
+        {printer.id: True},
+        {printer.id: 100},
+    )
+    assert money.printer_rates[printer.id] == "0.68"
 
 
 async def test_a_reply_that_does_not_validate_falls_back_to_the_stored_intervals(

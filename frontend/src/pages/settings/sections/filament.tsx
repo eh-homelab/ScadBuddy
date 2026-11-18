@@ -30,6 +30,11 @@ const TAG_CHOICES = [
   { value: 'sb_to_bb', label: "Send ScadBuddy's bindings" },
 ] as const
 
+const WEIGHT_CHOICES = [
+  { value: 'off', label: 'Off' },
+  { value: 'bb_to_sb', label: 'Bambuddy → ScadBuddy' },
+] as const
+
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`
 
 /** What the override mode's status says, in a sentence. */
@@ -58,17 +63,17 @@ function reportLine(report: RfidReconcileReport): string {
   const noPreset = report.slots?.no_preset ?? 0
   if (noPreset > 0) parts.push(`${plural(noPreset, 'spool has', 'spools have')} no preset for the nozzle, so ${noPreset === 1 ? 'its slot is' : 'their slots are'} not set`)
   const noNozzle = report.slots?.no_nozzle ?? 0
-  if (noNozzle > 0) parts.push(`${plural(noNozzle, 'spool has', 'spools have')} no nozzle to set, so ${noNozzle === 1 ? 'its slot is' : 'their slots are'} not set`)
+  if (noNozzle > 0) parts.push(`${plural(noNozzle, 'slot', 'slots')}: the printer does not report the nozzle for ${noNozzle === 1 ? 'its tray, so it is' : 'their trays, so they are'} not set`)
   return `${parts.join('. ')}.`
 }
 
 /**
- * What moves between ScadBuddy and Bambuddy: the spools it pulls and the tag bindings it
- * sends. Both choices are one setting, `filament_sync`, held in the form as `spools|tags`
+ * What moves between ScadBuddy and Bambuddy: the spools and weighings it pulls and the tag
+ * bindings it sends. The choices are one setting, `filament_sync`, held in the form as `spools|tags|weights`
  * and saved with "Save Filament".
  */
 function SyncRows({ form }: { form: BackendSettings }) {
-  const [spools, tags] = syncParts(form.value('filament_sync'))
+  const [spools, tags, weights] = syncParts(form.value('filament_sync'))
   return (
     <>
       <FieldRow
@@ -77,14 +82,21 @@ function SyncRows({ form }: { form: BackendSettings }) {
         badge={<FieldBadge form={form} name="filament_sync" />}
         error={form.errors.filament_sync}
       >
-        <ChoiceSelect id="setting-filament_sync" value={spools} onValueChange={(next) => form.setField('filament_sync', `${next}|${tags}`)} choices={SPOOL_CHOICES} />
+        <ChoiceSelect id="setting-filament_sync" value={spools} onValueChange={(next) => form.setField('filament_sync', `${next}|${tags}|${weights}`)} choices={SPOOL_CHOICES} />
       </FieldRow>
       <FieldRow
         id="setting-filament-tags"
         label="Tags to Bambuddy"
         help="Send each tag binding to Bambuddy, so its spools carry the same tags."
       >
-        <ChoiceSelect id="setting-filament-tags" value={tags} onValueChange={(next) => form.setField('filament_sync', `${spools}|${next}`)} choices={TAG_CHOICES} />
+        <ChoiceSelect id="setting-filament-tags" value={tags} onValueChange={(next) => form.setField('filament_sync', `${spools}|${next}|${weights}`)} choices={TAG_CHOICES} />
+      </FieldRow>
+      <FieldRow
+        id="setting-filament-weights"
+        label="Weights from Bambuddy"
+        help="Book Bambuddy's scale weighings and weight readings. Off, no scale weighing is booked for any spool and no weight reading for a spool ScadBuddy already tracks; only a new spool still gets its first Bambuddy weight reading."
+      >
+        <ChoiceSelect id="setting-filament-weights" value={weights} onValueChange={(next) => form.setField('filament_sync', `${spools}|${tags}|${next}`)} choices={WEIGHT_CHOICES} />
       </FieldRow>
     </>
   )

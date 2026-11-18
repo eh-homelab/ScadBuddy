@@ -224,6 +224,7 @@ def unknown_trays(
                 label=tray_label(ams_id, tray.id),
                 material=material,
                 colour=colour,
+                rgba=tray_rgba(tray.tray_color),
                 colour_word=colour_word(colour),
                 fingerprint=f"{material}|{colour or ''}|{'' if tray.state is None else tray.state}",
                 spool_id=tray_spool_id(ams_id, tray.id),
@@ -265,6 +266,7 @@ def tray_option(tray: UnknownTray, printer_id: int, printer_name: str | None) ->
         spool_id=tray.spool_id,
         material=tray.material,
         colour=tray.colour,
+        rgba=tray.rgba,
         color_name=f"what's in {tray.label}",
         loaded=LoadedAt(
             printer_id=printer_id,
@@ -472,6 +474,7 @@ def tray_questions(
                 label=_native_label(seen.ams_id, seen.tray_id, status),
                 material=material,
                 colour=seen.colour,
+                rgba=seen.rgba,
                 colour_word=colour_word(seen.colour),
                 fingerprint=seen.fingerprint,
                 spool_id=tray_spool_id(seen.ams_id, seen.tray_id),
