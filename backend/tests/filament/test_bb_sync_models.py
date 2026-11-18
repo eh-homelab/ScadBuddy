@@ -23,6 +23,7 @@ from scadbuddy.filament.bb_sync_models import (
     seen_row,
     seen_value,
 )
+from scadbuddy.filament.bb_sync_plan import field_hash
 from tests.bambuddy.conftest import recording
 
 _AT = datetime(2026, 11, 18, 12, 0, tzinfo=UTC)
@@ -37,14 +38,6 @@ _DECISION_14_FIELDS = {
     "material_number", "archived_at", "weight_used", "weight_locked", "last_dried_at",
     "slicer_filament", "slicer_filament_name", "suppliers", "location_id",
 }  # fmt: skip
-
-
-def _hash(value: object) -> str:
-    """The plan's ``field_hash`` (Task 4): SHA-256 of sorted compact JSON, 16 hex."""
-    import hashlib
-
-    text = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
 def _seen(**fields: object) -> dict[str, object]:
@@ -182,7 +175,7 @@ def test_a_decimal_price_is_the_seen_price() -> None:
     seen = _seen(cost_per_kg=19.99)["cost_per_kg"]
     sb = seen_value("cost_per_kg", Decimal("19.9900"))
     assert sb == seen == 19.99
-    assert _hash(sb) == _hash(seen)
+    assert field_hash(sb) == field_hash(seen)
 
 
 def test_a_drying_time_is_the_seen_text() -> None:
@@ -191,14 +184,14 @@ def test_a_drying_time_is_the_seen_text() -> None:
         "last_dried_at", datetime(2026, 11, 1, 12, 0, tzinfo=timezone(timedelta(hours=2)))
     )
     assert sb == seen == "2026-11-01T10:00:00Z"
-    assert _hash(sb) == _hash(seen)
+    assert field_hash(sb) == field_hash(seen)
 
 
 def test_an_int_weight_used_is_the_seen_float() -> None:
     seen = _seen(weight_used=0.0)["weight_used"]
     sb = seen_value("weight_used", 0)
     assert sb == seen == 0.0 and isinstance(sb, float)
-    assert _hash(sb) == _hash(seen)
+    assert field_hash(sb) == field_hash(seen)
     assert seen_value("note", None) is None
 
 
@@ -263,7 +256,7 @@ def test_seen_value_is_seen_row_for_every_field() -> None:
     assert set(sb) == _DECISION_14_FIELDS == set(seen)
     for field in sorted(_DECISION_14_FIELDS):
         assert seen_value(field, sb[field]) == seen[field], field
-        assert _hash(seen_value(field, sb[field])) == _hash(seen[field]), field
+        assert field_hash(seen_value(field, sb[field])) == field_hash(seen[field]), field
 
 
 def test_json_form_turns_ids_dates_and_enums_into_json_values() -> None:

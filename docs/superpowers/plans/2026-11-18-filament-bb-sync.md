@@ -790,6 +790,95 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     of the Task 3 re-review 2. Cost: none; the table test now uses SB's real forms
     (`extra_colors` as upper-case `#RRGGBBAA` strings, an int price).
 
+35. Task 4: `desired_spool` gives a `Pending(kind, sb_id)` for a row Bambuddy has no id for
+    (`BbRefs` holds the ids). The spool waits (`deferred`) only while that row's create is
+    planned in this round, or it has an open intent and no `filament_bb_push_errors` row;
+    otherwise the field is left out (the supplier list as a whole). Why: a reference that
+    will not come (Bambuddy refused the row, or its listing was not read) must not defer
+    the spool on every pass and keep `more` set. Cost: a spool may reach Bambuddy once
+    without that field, and takes it on a later pass.
+36. Task 4: a field SB has no value for that Bambuddy cannot take empty is left out:
+    `label_weight` with no label weight, `core_weight` and `core_weight_catalog_id` with no
+    insert type, `low_stock_threshold_pct` outside 1-99 (SB allows 0-100; `SpoolUpdate`
+    1-99), `weight_used` with no label weight or no grams left. Why: the recorded schema.
+    Cost: Bambuddy keeps its own value then; SB's 0 % and 100 % never reach it.
+37. Task 4: a create carries the fields of every data type that pushes, not only
+    `spools`', except `last_dried_at` (`SpoolCreate` has none) and the three lists (they
+    need the BB id). Why: a new BB spool starts with SB's weight and place, not full and
+    nowhere. Cost: the drying time and the lists arrive one round later.
+38. Task 4: a `PATCH` that sends `weight_used` always sends `weight_locked` too, with its
+    hash. Why: Bambuddy locks the weight otherwise (`write_semantics.spool_update_partial`).
+    Cost: none known.
+39. Task 4: the K-profiles compare in `k_form` (`printer_id`, `extruder`,
+    `nozzle_diameter`, `k_value` to 4 decimals, sorted) with the snapshot row's
+    `k_profiles`, or `bb_k_profiles` when `bb_seen_at` is after `read_at`; the last seen
+    value under `two_way` is `bb_k_profiles`. The preset list (`PUT …/filament-presets`)
+    compares by its hash only, in both kinds of pass: no BB spool row carries it. Why: F11
+    and the recorded `SpoolResponse`. Cost: a preset list edited in Bambuddy is not
+    repaired, and the first pass under `pushes(presets)` puts `[]` once for every linked
+    spool with no preset.
+40. Task 4: an archived SB spool gets its archive write only (phase "archive/restore"), no
+    field or list write. `decide` with no BB `updated_at` (catalog and filament entries, or
+    a row `results` stored this pass) lets SB's change win. Why: an archived spool is off
+    the lists; there is no BB time to compare. Cost: a field edited on an archived spool
+    reaches Bambuddy only after a restore.
+41. Task 4: suppliers, locations, insert types and filament catalog entries compare field
+    by field with BB's listing (suppliers `name`, `website`, `customer_number`, `note`;
+    locations `name`, `identifier`; catalog `name`, `weight`; filament `name`, `type`,
+    `brand`, `color_hex` upper case, `density`; the rest of a `FilamentCreate` by hash).
+    An unlinked SB row adopts BB's unlinked row of the same upper case name, intent or
+    not, and records an intent when it has none; the write is an `update` with that
+    `bb_id`. Spools adopt only through an old intent (Decision 10). Why: Bambuddy answers
+    409 for a second supplier or location of one name, so a create would fail on every
+    pass. Cost: a BB row of the same name that a person made becomes SB's. Task 5 must take
+    an `update` on an unlinked item with an open intent as an adoption, for spools too.
+42. Task 4: a linked supplier, location, catalog or filament entry missing from BB's
+    listing gets no write; only spools are probed (Decision 13). Why: the brief's probe is
+    `spool_row`. Cost: such a row stays linked to a row Bambuddy deleted until a later
+    task handles it.
+43. Task 4: what is pushed of each kind: every unarchived insert type (`name`,
+    `weight` = `empty_weight_g`); every unarchived place that is no printer place, named by
+    its path; one filament catalog entry per unarchived type, named by its `code` (unique
+    in SB), `type` its material, `color_hex` the first 7 of `rgba`, temperatures the type's
+    own, `cost_per_kg` only when set. Why: Decision 14 names the rows, not their bodies.
+    Cost: a filament entry's name is a product code, not a display name.
+44. Task 4: a spool's adoption matches `bambuddy_pull.snapshot` (tags left out, SB sends
+    none) of BB's row with that of a `BbSpool` built from the create body, and BB's raw
+    `created_at` (which `BbSpool` drops) must be no earlier than the intent less 5 s when
+    the row has one. An old intent while the listing is partial waits (`deferred`). The
+    adoption's hashes are all desired fields'; its body only what differs (often `{}`).
+    Why: Decision 10; the clocks agree within 0.25 s; the row to adopt may be the
+    unparsed one. Cost: none known.
+45. Task 4: `sb_changed_at`: a value is inherited when the spool's own column is null and
+    it has a type, or when only the type gives it (`material_number`, presets, K values,
+    suppliers); then the type's `updated_at` and the newest `edited` event naming
+    `type_id` count too. `weight_used` takes the newest event with a reading or a delta;
+    `suppliers` also the type's products' and price points' `updated_at`. A catalog row's
+    rename and an insert type's weight edit do not count. Why: Decision 8 names edits,
+    ledger events and the type. Cost: a brand renamed in SB under `two_way` loses to a BB
+    edit of that field made after the spool's own last change.
+46. Task 4: `slicer_filament` is the effective preset for the model of the printer whose
+    place holds the spool (`upper(btrim(model))`), its first nozzle by text, else the first
+    preset by model and nozzle. The supplier list has one link per supplier (its first
+    priced product by SKU, else its first by SKU) with the newest `price_per_kg`
+    (no currency conversion); the supplier of the spool's invoice is the purchase source,
+    linked alone with no SKU and price when it sells no product of the type. Why: Bambuddy
+    refuses a supplier twice in one `PUT`. Cost: a second product of one supplier is not
+    shown in Bambuddy.
+47. Task 4: the limit cuts in the plan's order; an item any of whose writes is cut counts
+    `deferred` once, and only a kept create (or adoption) writes its intent. A create made
+    again over an old intent moves its `started_at` to now. The count of K values left out
+    for an unmapped printer (Decision 14's `unmapped_k`) is not in `SyncPlan` (Task 3's
+    model has no field). Why: the brief's limit test; the model is Task 3's. Cost: Task 7 or
+    10 adds the count if the status should show it.
+48. Task 4: an event-driven pass skips a field whose hash matches `pushed_fields` and
+    compares the rest with BB's row through `decide`; a field BB's row does not carry
+    compares by hash in both kinds of pass. `plan` is empty when none of `spools`,
+    `weights`, `presets`, `suppliers`, `locations` pushes (`tags` is the drain's). Why:
+    Decision 7, Decision 6. Cost: none known.
+49. Task 4 (R-T3-11): `test_bb_sync_models.py` uses `bb_sync_plan.field_hash` in place of its
+    test-local `_hash`. Why: one hash, tested where it is made. Cost: none.
+
 ## Self-review
 
 - Spec coverage: §8 "one setting per data type" → Task 1; §8.1 rows: types on spools with
