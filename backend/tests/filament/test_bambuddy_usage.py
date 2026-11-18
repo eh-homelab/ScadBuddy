@@ -610,3 +610,30 @@ def test_a_batch_row_on_the_estimates_spool_stops_a_cover_in_either_order(
     assert len(_usage_events(f, z)) == 1
     ended = [e for e in f.spools.events(y) if e.kind == "print_ended"]
     assert [e.ref_kind for e in ended] == [ledger.BB_USAGE]
+
+
+def test_two_rows_of_one_job_on_one_spool_cover_nothing_in_a_batch_or_across_pulls(
+    pg_pool: PgPool, caplog: pytest.LogCaptureFixture
+) -> None:
+    f = _filament(pg_pool)
+    _printer_1(pg_pool)
+    z = _linked(f)
+    y = _second_spool(f)
+    first, second = usage(id=457), usage(id=458, created_at=_naive(T1 + timedelta(seconds=1)))
+    # One batch.
+    _estimate(f, y)
+    with caplog.at_level("WARNING"):
+        assert _book(f, [first, second]).booked == 2
+    assert not [e for e in f.spools.events(y) if e.kind == "print_ended"]
+    assert "filament.usage.unpaired" in caplog.text
+    # Across two pulls: the first row is booked before Y's estimate exists.
+    f = _filament(pg_pool)
+    caplog.clear()
+    with pg_pool.connection() as conn:
+        conn.execute("DELETE FROM filament_spool_events WHERE spool_id = ANY(%s)", ([z, y],))
+    assert _book(f, [first]).booked == 1
+    _estimate(f, y, run="run-2")
+    with caplog.at_level("WARNING"):
+        assert _book(f, [second]).booked == 1
+    assert not [e for e in f.spools.events(y) if e.kind == "print_ended"]
+    assert "filament.usage.unpaired" in caplog.text

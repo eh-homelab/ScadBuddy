@@ -217,16 +217,16 @@ def _cover(
     ``filament.usage.unpaired`` when an estimate was a candidate. A retried booking books
     nothing twice: the covering event's key is the estimate's.
 
-    A candidate is an open estimate of the job (`prints.open_for_job`) whose own event
-    names no other printer, and whose spool has no usage row of the job, booked already or
-    still pending in this batch: a
-    pair by `ledger.basis` rule 3 writes no ``print_ended``, so that estimate would stay
-    open though it is paired. Candidates match on the job name within the printer, not on
-    the run: a stale estimate of the same job that never ended can be the candidate. A
-    candidate on an archived spool is not written to (the pull never writes to one) and is
-    logged with reason ``archived``. ``others`` counts the booked usage rows of the job
-    that no estimate pairs (an unlinked BB spool's row is not booked, so not counted) and
-    the rows of this batch not yet booked (``pending``)."""
+    A candidate is an open estimate of the job (`prints.open_for_job`) whose own event names
+    no other printer, and whose spool has no usage row of the job, booked already or still
+    pending in this batch: a pair by `ledger.basis` rule 3 writes no ``print_ended``, so
+    that estimate would stay open though it is paired. Candidates match on the job name
+    within the printer, not on the run: a stale estimate of the same job that never ended
+    can be the candidate. A candidate on an archived spool is not written to (the pull never
+    writes to one) and is logged with reason ``archived``. ``others`` counts the booked
+    usage rows of the job that no estimate pairs (an unlinked BB spool's row is not booked,
+    so not counted) and the rows of this batch not yet booked (``pending``), the row's own
+    spool included: a second row of the job on one spool makes the job ambiguous."""
     job = event.data.get("job")
     if not isinstance(job, str) or event.printer_id is None:
         return
@@ -271,7 +271,7 @@ def _cover(
         for other, other_spool in pending
         if other.print_name == job
         and other.printer_id == row.printer_id
-        and other_spool != spool_id
+        and other.id != row.id
         and not _has_estimate(conn, other_spool, job)
     }
     archived = len(candidates) == 1 and conn.execute(
