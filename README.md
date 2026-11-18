@@ -2472,7 +2472,9 @@ holds the manifests (the clusters PR, plan Task 11, applies the pod settings bel
   checks each file, removes its G-code keys, posts the files as one zip to Bambuddy's
   `POST /local-presets/import`, sets the type's presets for the fetched
   `(printer model, nozzle)` keys, reads K values from `GET /printers/{id}/kprofiles/`
-  where one matches exactly, and refreshes the kept copy of the local presets (unless the
+  where one matches exactly, removes an old K value of a fetched key that the new preset
+  does not match (the run's notes name each one; a printer whose K table did not answer
+  keeps its values), and refreshes the kept copy of the local presets (unless the
   setting `spool_overlay_refresh_seconds` is 0; build Decision 18). The worker
   never calls Bambuddy and never has a Bambuddy key. The nozzles are the remembered setting
   `profile_fetch_nozzles` (Settings → Printing → Filament; default 0.2, 0.4, 0.6, 0.8). The
@@ -2497,9 +2499,11 @@ holds the manifests (the clusters PR, plan Task 11, applies the pod settings bel
   `SCADBUDDY_TEMPORAL_NAMESPACE`, `SCADBUDDY_TDFP_EMAIL`, `SCADBUDDY_TDFP_PASSWORD`,
   `SCADBUDDY_PROFILE_FETCH_WORK_DIR` (a writable volume for the browser's profile, since
   the root file system is read-only; default `/tmp`) and `SCADBUDDY_LOG_LEVEL`
-  (`profile_fetch/settings.py`). The worker reads the two login values at start and removes
-  them from its environment, and it starts Chromium with an allowlisted environment, so no
-  browser process holds them. It exports one run at a time (one replica, strategy
+  (`profile_fetch/settings.py`). The worker reads the 3DFP login from its secret at start
+  and removes it from its environment. It types the login into the site's login form in
+  the browser, so the browser page holds it for the login. No other process, log or
+  stored file holds it: Chromium starts with an allowlisted environment, and no error
+  text, trace or HAR carries the login. It exports one run at a time (one replica, strategy
   `Recreate`), so two browsers never share one login.
 - **The secret.** The 1Password item "3D Filament Profiles" in the vault `homelab - prod` has
   a `password` field. It needs a text field `email` that the owner adds (the account email;
@@ -2557,7 +2561,14 @@ holds the manifests (the clusters PR, plan Task 11, applies the pod settings bel
   the fetch up") on a read or a start, once the run is 10 min old and no worker polls the
   queue (it asks Temporal's DescribeTaskQueue, kept 30 s), and cancels its workflow. A run
   older than the workflow's 24 h execution timeout plus 1 h ends `failed` too (plan
-  Decisions 62, 66, 67, 69).
+  Decisions 62, 66, 67, 69). An export that no worker started within 6 h ends
+  `failed` with "no profile-fetch worker started the fetch within 6 h: none is running,
+  or it is busy with other fetches" (build Decision 115).
+- **What is retried.** A login that the site refuses (it sends the browser back to
+  `/login`), an unknown 3DFP id, a missing export option and a file over 512 KiB are not
+  retried. A network error, a failed navigation, a timeout, a browser crash and Vercel's
+  check are retried. At start the worker logs them and starts anyway, so a network blip
+  does not stop the worker (build Decisions 110, 116).
 - **Deploy:** `deploy.reusable.yml` pins `applications/scadbuddy/scadbuddy-profile-fetch.yaml`
   (`MANIFEST_PROFILE_FETCH`) like the slicer: only once that file is in clusters and names
   the image, with one image line. A build whose `profile-fetch` job published nothing keeps
