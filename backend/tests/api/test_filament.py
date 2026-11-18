@@ -975,6 +975,33 @@ def test_the_reconcile_route_runs_the_mode_and_the_tags(client: TestClient) -> N
 
 
 @respx.mock
+def test_a_failing_reconcile_step_leaves_the_others_to_run(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configure(client, filament_sync={"tags": "sb_to_bb"})
+
+    async def broken(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("the mode step broke")
+
+    monkeypatch.setattr("scadbuddy.api.filament.reconcile_mode_now", broken)
+
+    done = client.post(f"{RFID}/reconcile")
+
+    assert done.status_code == 200, done.text
+    body = done.json()
+    assert (body["mode"]["state"], body["mode"]["detail"]) == ("pending", "internal")
+    assert body["tags"] == {"pushed": 0, "moved": 0, "cleared": 0, "unchanged": 0, "failed": 0}
+    assert body["slots"] == {
+        "configured": 0,
+        "unchanged": 0,
+        "no_preset": 0,
+        "no_temps": 0,
+        "no_nozzle": 0,
+        "failed": 0,
+    }
+
+
+@respx.mock
 def test_the_mode_route_answers_busy_while_another_reconcile_holds_the_lock(
     client: TestClient, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

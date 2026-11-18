@@ -21,8 +21,10 @@ import respx
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.models import SlotConfigure
+from scadbuddy.bambuddy.models import Spool as BbSpool
 from scadbuddy.bambuddy.trays import seen_trays
 from scadbuddy.core.problems import ApiError
+from scadbuddy.filament.bambuddy_pull import pull
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.inventory import FilamentInventory
@@ -328,6 +330,53 @@ async def test_an_override_turned_off_deletes_the_row_and_sends_nothing(
     w.bind(override=True)  # a later override configures the slot again
     await w.run(client)
     assert route.call_count == 2
+
+
+@respx.mock
+async def test_a_pull_keeps_the_override_slot_and_the_next_reconcile_configures_it(
+    pg_pool: PgPool, client: BambuddyClient
+) -> None:
+    w = World(pg_pool)
+    route = _configure()
+    await w.run(client)
+    assert route.call_count == 1
+    (before,) = w.rows()
+    # The AMS reloaded the tag, so the slot needs configuring again.
+    w.report(_report(tray_info_idx="GFA00", tray_type="PLA Basic"))
+    now = datetime.now(UTC)
+    # A changed Bambuddy spool linked to the holder is pulled: its tag keys differ.
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO filament_bb_links (spool_id, bb_spool_id, bb_updated_at, linked_at)"
+            " VALUES (%s, 11, %s, %s)",
+            (w.spool, now, now),
+        )
+    pull(
+        w.filament,
+        [
+            BbSpool.model_validate(
+                {
+                    "id": 11,
+                    "material": "PLA",
+                    "tray_uuid": TRAY,
+                    "tag_uid": None,
+                    "updated_at": "2099-01-01T00:00:00",
+                    "weight_used": 300.0,
+                }
+            )
+        ],
+        now=now,
+    )
+
+    binding = w.filament.spools.open_binding(w.spool)
+    assert binding is not None and binding.override
+    (kept,) = w.rows()
+    assert kept["spool_id"] == before["spool_id"]
+
+    report = await w.run(client)
+
+    assert route.call_count == 2
+    assert report.configured == 1
 
 
 @respx.mock
