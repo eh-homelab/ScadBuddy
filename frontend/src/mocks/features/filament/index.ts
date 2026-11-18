@@ -1373,6 +1373,7 @@ export const handlers = [
       alert_above: null,
       alert_below: null,
       ...body,
+      notify: body.notify ?? false,
       id: newId(),
       last_value: null,
       last_at: null,
