@@ -1558,3 +1558,71 @@ async def test_a_payload_of_another_shape_logs_no_value_from_it(
     assert caplog.text.count("another shape") == 2
     assert "ValidationError" in caplog.text
     assert secret not in caplog.text
+
+
+def _bound_kind(pool: PgPool, spool: UUID) -> str:
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT t.kind FROM filament_tag_bindings b JOIN filament_tags t ON t.id = b.tag_id"
+            " WHERE b.spool_id = %s AND b.unbound_at IS NULL",
+            (spool,),
+        ).fetchone()
+    assert row is not None
+    return str(row["kind"])
+
+
+def test_an_opentag_spool_binds_as_ntag_opentag(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    (made,) = pull(
+        f,
+        [bb(tray_uuid=None, tag_uid="04AABB", data_origin="opentag3d")],
+        now=NOW,
+    ).created_ids
+    assert _bound_kind(pg_pool, made) == "ntag_opentag"
+
+
+def test_a_plain_uid_stays_other(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb(tray_uuid=None, tag_uid="04AABB")], now=NOW).created_ids
+    assert _bound_kind(pg_pool, made) == "other"
+
+
+def test_a_tray_uuid_stays_bambu_mifare(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb(tag_uid="04AABB", data_origin="opentag3d")], now=NOW).created_ids
+    assert _bound_kind(pg_pool, made) == "bambu_mifare"
+
+
+def _linked_override_holder(f: Filament) -> UUID:
+    """SB spool A, linked to BB 11, holding TRAY as an override tag."""
+    (a,) = pull(f, [bb(id=11, tray_uuid=None, tag_uid=None)], now=NOW).created_ids
+    f.spools.bind_tag(a, tray_uuid=TRAY, kind="bambu_mifare", override=True, actor="ann")
+    return a
+
+
+def test_an_auto_added_bb_spool_for_an_override_tag_makes_no_second_sb_spool(
+    pg_pool: PgPool, caplog: pytest.LogCaptureFixture
+) -> None:
+    f = _filament(pg_pool)
+    a = _linked_override_holder(f)
+    before = f.spools.open_binding(a)
+    assert before is not None
+    report = pull(
+        f,
+        [bb(id=40, tag_uid=None, tray_uuid=TRAY, data_origin="rfid_auto")],
+        now=NOW,
+    )
+    assert report.created == 0
+    assert (report.rfid_duplicates, report.rfid_duplicate_bb_ids) == (1, [40])
+    assert [s.id for s in f.spools.list()] == [a]
+    after = f.spools.open_binding(a)
+    assert after is not None and after.id == before.id
+    assert "a Bambuddy spool made for an override tag is left alone" in caplog.text
+
+
+def test_an_unlinked_sb_spool_with_the_tag_is_still_linked(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    held = f.spools.create(SpoolCreate(material_id=_pla(pg_pool)), actor="ann")
+    f.spools.bind_tag(held.id, tray_uuid=TRAY, kind="bambu_mifare", override=True, actor="ann")
+    report = pull(f, [bb(id=40, tag_uid=None, tray_uuid=TRAY, data_origin="rfid_auto")], now=NOW)
+    assert (report.linked_ids, report.rfid_duplicates, report.created) == ([held.id], 0, 0)

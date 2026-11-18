@@ -1214,6 +1214,8 @@ export const handlers = [
       invalid_bb_ids: [],
       usage_booked: 0,
       usage_unlinked: 0,
+      rfid_duplicates: 0,
+      rfid_duplicate_bb_ids: [],
     } satisfies S['PullReport']),
   ),
 ]
