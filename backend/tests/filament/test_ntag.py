@@ -358,6 +358,27 @@ async def test_cancel_keeps_a_spools_row_queued_on_another_device(
 
 
 @respx.mock
+async def test_cancel_drops_the_spools_row_that_names_no_device(
+    pg_pool: PgPool, client: BambuddyClient
+) -> None:
+    f = _filament(pg_pool)
+    spool = _spool(f, pg_pool, 11)
+    with f.spools.transaction() as conn:
+        conn.execute(
+            "INSERT INTO filament_ntag_writes (spool_id, device_id, baseline_uid)"
+            " VALUES (%s, NULL, NULL)",
+            (spool,),
+        )
+    respx.post(f"{API}/spoolbuddy/devices/sb-2/cancel-write").mock(
+        return_value=httpx.Response(200, json={"status": "cancelled"})
+    )
+
+    await ntag.cancel(f, client, spool, "sb-2")
+
+    assert ntag._baseline(f, spool)[0] is False
+
+
+@respx.mock
 async def test_a_failed_device_cancel_keeps_the_spools_row(
     pg_pool: PgPool, client: BambuddyClient
 ) -> None:

@@ -207,7 +207,8 @@ async def confirm(
 
 
 async def cancel(store: Filament, client: BambuddyClient, spool_id: UUID, device_id: str) -> None:
-    """Drop the write the device has queued, and the record of every write queued on that
-    device (and the spool's), so a later `confirm` binds nothing."""
+    """Drop the write the device has queued, the record of every write queued on that
+    device, and the spool's own record if it names no device, so a later `confirm` binds
+    nothing for them. The spool's write queued on another device is kept."""
     await client.cancel_tag_write(device_id)
     await asyncio.to_thread(_clear_device, store, spool_id, device_id)
