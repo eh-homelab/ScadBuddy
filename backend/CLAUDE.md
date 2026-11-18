@@ -754,7 +754,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `import_run_id` returns the invoice (200), a number that collides is a 409 whose body has
   `existing_invoice_id`, and confirm refuses (409) a foreign currency, a difference over the
   tolerance, an archived named product, a line with no SKU and a description over 128
-  characters, and (422) an invoice with no lines. Confirm turns only a client conflict into a
+  characters, and an invoice with no lines. Confirm turns only a client conflict into a
   409 naming the line; any other error is a 500. The agent's tools are
   `agent/src/tools/filamentPurchasing.ts` (an invoice edit is a PATCH then a PUT, not atomic).
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`

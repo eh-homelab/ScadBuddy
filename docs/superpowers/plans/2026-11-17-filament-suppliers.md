@@ -56,7 +56,7 @@ Each line: what was decided, why, and what it costs if wrong. Measured against t
 - **Shopping items list newest first, pending above purchased** (`shopping.py`: `ORDER BY (status = 'pending') DESC, created_at DESC`) — the store's order is the one the UI shows; `created_at` is BB's `added_at`, with no second column — one sort flip.
 - **Every store sets `updated_at` itself** (no trigger) — the tables have none, and each write names it — a stale timestamp if a new write forgets it.
 - **Tax on a receipt whose lines cost nothing is a 422** (`InvoiceMathError`, mapped in `api/filament_purchasing.py`) — a free receipt with tax is a typing error — one mapping.
-- **A draft may hold header tax and no lines; confirm refuses an invoice with no lines** (`InvoiceNoLinesError`) — the upload flow makes empty drafts — one more 422.
+- **A draft may hold header tax and no lines; confirm refuses an invoice with no lines** (`InvoiceNoLinesError`) — the upload flow makes empty drafts — one more refusal (409, as every confirm refusal; `_conflict`).
 - **The agent's invoice edit is PATCH then PUT and is not atomic** (the tool description says so) — the brief's shape, and no combined route exists — a half-applied edit if the second call fails; a combined route later.
 - **PUT lines and DELETE answer a plain Problem 409 for a confirmed invoice** — they carry no `existing_invoice_id`, which only a number collision has — one `responses` entry.
 - **Confirm maps only `IntegrityError`, `DataError`, `SpoolTypelessError`, `SpoolInUseError` and pydantic `ValidationError` to a 409 naming the line** (`InvoiceLineError`); any other exception is a 500 — a client conflict must not hide a bug — a 500 for an unforeseen client error.
@@ -73,6 +73,8 @@ Each line: what was decided, why, and what it costs if wrong. Measured against t
 - **The invoice page saves in order: only the newest answer is applied; after a failed newest save it refetches the invoice under the same guard; the status line offers Retry** — an older answer would bring back a header the newer save changed, and a failed one would drop an earlier success — a stale field until a reload.
 - **"Use as default cost" is per product** (one button per supplier product in `PricePanel`) and only fills the cost field as an unsaved edit — a type has several suppliers, and a silent overwrite is an anti-goal (Decision 1) — one click.
 - **A price sheet that fails to load shows "Not loaded" in that type's "Newest price" cell; the other prices stay** (`allSettled`) — one failed supplier must not blank the column — an N+1 read stays, as no one-call endpoint exists.
+- **`change_pct` on a price sheet is rounded to one decimal place, ROUND_HALF_UP** (`suppliers.py` `_change_pct`) — it is a percent shown to people — a format change.
+- **The invoice-line spool picker has no "no invoice" filter; the server refuses a spool that has an invoice line at confirm (409 naming the spool)** — the picker lists the type's unarchived spools, and the server is the one rule — a person sees the refusal after confirm instead of a shorter list.
 
 ## Pre-flight rulings (2026-11-17)
 
