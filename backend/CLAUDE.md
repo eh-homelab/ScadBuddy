@@ -770,7 +770,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `InvoicePatch.import_run_id` with the conditional `if_import_run_id` (one UPDATE under the invoice's
   row lock, so two starts cannot both claim it). An empty PATCH `{}` returns the invoice unchanged.
   The agent's session blobs accept `application/pdf` (6 MiB, migration
-  `20261118T0811Z_session_blobs_pdf.sql`) and serve it as an attachment (`crud_agent_blobs.py`).
+  `20261118T0811Z_session_blobs_pdf.sql`) and store it (`crud_agent_blobs.py` stores and checks the bytes only; the attachment header is set by the agent's sessions route).
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
   Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),
   `BlobRefs` (`refs.py`, the `blob_refs` table that keeps a blob alive) and `sweep_blobs`

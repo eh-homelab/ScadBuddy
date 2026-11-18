@@ -137,7 +137,7 @@ describe('starting an invoice import (#6267)', () => {
     expect(first.prompt).toContain('`filament` skill')
     expect(first.prompt).toContain('filament_invoice_candidates')
     expect(first.prompt).toContain('filament_bambu_colour')
-    expect(first.prompt).toContain('(line subtotal + line tax) ÷ quantity')
+    expect(first.prompt).toContain('(line subtotal + line tax + the line\'s share of shipping) ÷ quantity')
     expect(first.prompt).toMatch(/never confirm/i)
     expect(first.images).toHaveLength(1)
     expect(first.images![0]!.mediaType).toBe('application/pdf')

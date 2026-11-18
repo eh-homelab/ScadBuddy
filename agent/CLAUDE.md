@@ -82,7 +82,7 @@ each file and re-wraps principals' keys, a write's row, blob hold and `workspace
 are one transaction there (`WriteOptions.log`, `DeleteOptions.log`), and the reconcile is one
 transaction under `RECONCILE_LOCK`; this process sends and gets plaintext only.
 Areas `session-blobs`, `attachments` and `http-bodies` (#5299 step 7, `BLOB_AREAS`; backend
-`api/crud_agent_blobs.py`): a session's images and PDFs (`src/sessions/crudBlobs.ts` `CrudSessionBlobs`
+`api/crud_agent_blobs.py`): a session's images and PDFs (the sessions route `src/routes/sessions.ts` serves a PDF with `Content-Disposition: attachment`; `src/sessions/crudBlobs.ts` `CrudSessionBlobs`
 behind the `SessionImages` interface; a durable tool call's images replaced whole, and a turn
 placement's write fenced by `TurnFence`, checked `FOR SHARE` in the API's transaction; a queued
 message's images deleted once it leaves the queue unrun or is refused, `…/session-blobs/deletes`,

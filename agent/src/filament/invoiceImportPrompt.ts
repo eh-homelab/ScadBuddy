@@ -11,7 +11,7 @@ export function invoiceImportPrompt(invoiceId: string): string {
     'First load the `filament` skill and follow it. These rules always apply:',
     '- Read the invoice from the attached file: its number, date, currency, subtotal, shipping, tax and total, and each line with its quantity and prices.',
     '- Diff before you create. For each line, call filament_invoice_candidates and update an open spool that already matches before you make a new one.',
-    '- The cost of one spool is (line subtotal + line tax) ÷ quantity.',
+    '- The cost of one spool is (line subtotal + line tax + the line\'s share of shipping) ÷ quantity. Shipping is shared over the lines by value. The confirm computes this number; show the person the same one.',
     '- For a Bambu Lab line, find the colour with filament_bambu_colour, from the code in the SKU.',
     '- If a line is ambiguous (more than one possible spool, an unknown colour or material, a total that does not add up), ask the person. Do not guess.',
     '- Never confirm the invoice without the person. Show what you will confirm, and wait for a yes.',

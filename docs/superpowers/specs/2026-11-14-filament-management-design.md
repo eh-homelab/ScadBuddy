@@ -662,7 +662,7 @@ types, instances, tags and the ledger. It takes over the rules of
 spools.
 
 **As built in #6267** (plan `docs/superpowers/plans/2026-11-18-filament-invoice-import.md`,
-Decisions 1-7). The profile-fetch worker (steps 7 and the 3DFP paragraph) is
+Decisions 1-7). The profile-fetch worker (step 7) is
 #6625, not part of #6267: until it lands, the session proposes a non-Bambu type
 with its 3DFP id and hex and says the presets are still to fetch. The import is
 an assistant session, not a flow (step 2): every session already runs as a
