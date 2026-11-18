@@ -245,3 +245,20 @@ def test_a_spool_placed_between_the_holder_read_and_the_lock_is_left_alone(
     assert (result.booked, result.spools) == (1, [spool])
     assert result.stale_printers == []
     assert _events(pg_pool, newcomer[0], "ams_reading") == []
+
+
+def test_a_printer_with_no_report_and_no_spool_is_not_named_stale(pg_pool: PgPool) -> None:
+    _printer(pg_pool)
+    result = _sync(pg_pool, T0 + STALE_AFTER + timedelta(seconds=1))
+    assert (result.booked, result.stale) == (0, 0)
+    assert result.stale_printers == []
+
+
+def test_a_printer_with_a_stale_report_and_no_spool_is_not_named_stale(pg_pool: PgPool) -> None:
+    """The sync visits this printer (it has a report row), finds the report stale and
+    holds no spool, so `_stale`'s `if not holders` branch keeps it out of `stale_printers`."""
+    pid, _ = _printer(pg_pool)
+    _write_report(pg_pool, pid, _report(_tray(1, U1)), T0)
+    result = _sync(pg_pool, T0 + STALE_AFTER + timedelta(seconds=1))
+    assert (result.booked, result.stale) == (0, 0)
+    assert result.stale_printers == []
