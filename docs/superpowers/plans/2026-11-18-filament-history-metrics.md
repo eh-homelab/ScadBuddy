@@ -786,6 +786,8 @@ Load `frontend-design` and `dataviz` first.
 45. Task 5 (history shape): `filament_spool_history` returns the route's answer without `series`, the first 50 events (the route sends newest first) and `truncated`. The description sends the reader to `filament_spool_events` for older events.
 46. Task 5 (date input): `since` and `until` are `YYYY-MM-DD` strings checked by a regex. The 1096-day bound stays on the route, which answers 422; the schema does not repeat it, and the description names it.
 47. Task 5 (optional query values): `dimension` and `bucket` have no schema default. The route owns the defaults (material, month), so an omitted value sends no query parameter.
+48. Task 5 (R-T5-1, real dates): The `DATE` schema for `since` and `until` keeps the `YYYY-MM-DD` regex and adds a refine. The refine parses the value as a UTC date and requires `toISOString().slice(0, 10)` to equal the input. So 2026-13-45 and 2026-02-30 fail in the schema, and 2028-02-29 passes. This replaces Decision 46's regex-only check. The 1096-day bound still stays on the route.
+49. Task 5 (R-T5-2, history description): The `filament_spool_history` description says that `filament_spool_events` lists every event oldest first, so the older events are at the start of its list.
 
 ## Pre-flight rulings (2026-11-18)
 

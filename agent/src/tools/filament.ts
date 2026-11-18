@@ -81,7 +81,14 @@ const EVENT_KINDS = [
 ] as const
 
 /** A calendar day, as the metrics routes' `date` query takes it. */
-const DATE = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe('A date, YYYY-MM-DD')
+const DATE = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/)
+  .refine((v) => {
+    const d = new Date(`${v}T00:00:00Z`)
+    return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v
+  }, 'Not a real calendar date')
+  .describe('A date, YYYY-MM-DD')
 
 /** The events `filament_spool_history` returns: the route sends them newest first. */
 const HISTORY_EVENTS = 50
@@ -670,7 +677,8 @@ export const filamentTools: Tool[] = [
       "A spool's timeline and metrics: the newest 50 ledger `events` (newest first, with `actor`, `order_id` " +
       'and `archive_id`), its `metrics` (use, waste, cost used, value left, burn rate, empty day, days since ' +
       'opened and last use, hours outside dry storage, AMS error), `type_ams_error`, `currency` and ' +
-      '`window_days`. `truncated` is true when older events exist; read them with filament_spool_events. ' +
+      '`window_days`. `truncated` is true when older events exist. filament_spool_events lists every event, oldest first, so the ' +
+      'older events are at the start of its list. ' +
       'The grams-left `series` is left out. 404 for no such spool.',
     input: z.object({ spool_id: z.string().uuid().describe("A spool's `id` from filament_spool_list") }),
     risk: 'read',

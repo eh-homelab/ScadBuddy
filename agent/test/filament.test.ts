@@ -740,4 +740,13 @@ describe('filament history and metrics tools', () => {
   it('refuses a dimension the route does not know', () => {
     expect(() => tool('filament_metrics').parse({ dimension: 'colour' })).toThrow()
   })
+
+  it.each([['2026-13-45'], ['2026-02-30']])('refuses the impossible date %s', (day) => {
+    expect(() => tool('filament_metrics').parse({ since: day })).toThrow()
+    expect(() => tool('filament_purchasing_metrics').parse({ until: day })).toThrow()
+  })
+
+  it('accepts a leap day', () => {
+    expect(() => tool('filament_metrics').parse({ since: '2028-02-29' })).not.toThrow()
+  })
 })
