@@ -57,10 +57,16 @@ The intake skill: `.claude/skills/filament-intake/SKILL.md`, `scripts/intake.py`
    as a Temporal workflow already (`agent/src/tools/sessions.ts`), so it resumes when stopped,
    which is what spec §9 step 2 asks of "a flow". Flow inputs take no blob; a session can read
    the invoice through the new reference. `import_run_id` is the session id.
-3. **The invoice reaches the model through an `invoice_file` reference**
-   (`agent/src/.../imageRefs.ts`), PDF as a document block, PNG/JPEG/GIF/WebP as an image
-   block, any other type refused with a clear message. The tool `filament_invoice_file_read`
-   returns it. The `GET /invoices/{id}/file` route leaves `NOT_A_TOOL`.
+3. **The invoice reaches the model in the import session's first user message**, as an
+   image block (PNG/JPEG/GIF/WebP) or, for a PDF, a `document` block, built only at the SDK
+   boundary that already builds image blocks (`agent/src/sessions/images.ts` `userPrompt`, on
+   `lint-base64-images.sh`'s allowlist). The session's stored attachments accept
+   `application/pdf` beside the image types (the same blob store, the same size cap rules);
+   any other type is refused with a clear message. A durable session keeps that message in its
+   history, so a resumed import still has the invoice. (Revised before Task 2, 2026-11-18: no
+   PDF library exists in the backend or the agent, and a tool result cannot show a PDF to the
+   model; the Messages API takes a PDF as a document block, which also covers a scan with no
+   text layer.) The `GET /invoices/{id}/file` route stays `NOT_A_TOOL`, its reason updated.
 4. **The start route lives in the agent**, `POST /api/v1/ai/filament/invoice-import`
    `{invoice_id}` → `{session_id}`. It refuses a confirmed invoice (409), an invoice without a
    file (422), and an invoice whose `import_run_id` names a live session (409 with that id, so
@@ -110,19 +116,23 @@ JSON under `backend/tests/fixtures/`), `backend/tests/api/test_filament_purchasi
   (Review Focus 4). Run → FAIL; implement; run → PASS.
 - [ ] Commit `feat(filament): Bambu colour codes and invoice line candidates (#6267)`.
 
-### Task 2: The agent reads an invoice file
+### Task 2: A session's first message can carry a PDF; the read tools
 
-**Files:** `agent/src/` image reference module (`imageRefs.ts` and the boundary that resolves
-refs), `agent/src/tools/filamentPurchasing.ts` (`filament_invoice_file_read`,
-`filament_bambu_colour`, `filament_invoice_candidates`), `agent/src/tools/coverage.ts`,
-`agent/src/sessions/touched.ts` if needed, `.github/scripts/lint-base64-images.sh` allowlist only
-if a new boundary is unavoidable. Tests beside each.
+**Files:** `agent/src/sessions/images.ts` (and the attachment store and schemas it uses: the
+media types and the size cap), `agent/src/tools/filamentPurchasing.ts`
+(`filament_bambu_colour`, `filament_invoice_candidates`), `agent/src/tools/coverage.ts`,
+`agent/src/sessions/touched.ts` if needed. Tests beside each.
 
-- [ ] Tests first: a PDF ref becomes a document block at the boundary and nowhere earlier; an
-  image ref an image block; a text file is refused (Review Focus 5); each tool's route and input
-  schema. Run → FAIL; implement; run → PASS (`pnpm test`, `pnpm typecheck`, `pnpm lint`,
+**Interfaces:** `userPrompt(text, attachments)` builds an image block for an image and a
+`document` block (`source: { type: 'base64', media_type: 'application/pdf', data }`) for a
+PDF; the attachment schema accepts `application/pdf`. Task 3 uses this to start the import.
+
+- [ ] Tests first: a PDF attachment becomes a document block in the SDK user message and
+  nowhere earlier; an image stays an image block; a text or HEIC file is refused (Review
+  Focus 5); a PDF over the cap is refused; each tool's route and input schema. Run → FAIL;
+  implement; run → PASS (`pnpm test`, `pnpm typecheck`, `pnpm lint`,
   `bash .github/scripts/lint-base64-images.sh`).
-- [ ] Commit `feat(agent): sessions read an invoice file (#6267)`.
+- [ ] Commit `feat(agent): a session's first message can carry an invoice PDF (#6267)`.
 
 ### Task 3: Start the import
 
