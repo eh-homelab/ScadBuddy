@@ -615,11 +615,14 @@ class FilamentSpoolStore:
         actor: str,
         ref_kind: str | None = None,
         ref_id: UUID | None = None,
+        invoice_line_id: UUID | None = None,
     ) -> bool:
         """`update` on ``conn``, in the caller's transaction (`filament/csv_import.py`);
         false for no such spool. A row it names that does not exist is the driver's
         `ForeignKeyViolation`. ``ref_kind`` and ``ref_id`` go on the ``edited`` event
-        (an invoice line's, #6266); a retry of one pair books nothing twice."""
+        (an invoice line's, #6266); a retry of one pair books nothing twice. An
+        ``invoice_line_id`` (an invoice confirm's, #6269 Decision 12) that differs from
+        the spool's is set in the same UPDATE and is one more change of that event."""
         sent = [n for n in _WRITABLE if n in patch.model_fields_set]
         if patch.archived:
             # The tag before the spool, as every writer of bindings takes them.
@@ -630,7 +633,8 @@ class FilamentSpoolStore:
                 (spool_id,),
             )
         current = conn.execute(
-            f"SELECT {_SPOOL_COLUMNS} FROM filament_spools WHERE id = %s FOR UPDATE",
+            f"SELECT {_SPOOL_COLUMNS}, invoice_line_id FROM filament_spools WHERE id = %s"
+            " FOR UPDATE",
             (spool_id,),
         ).fetchone()
         if current is None:
@@ -644,6 +648,9 @@ class FilamentSpoolStore:
             for n in m.SpoolPatch.model_fields
             if n in after and current[n] != after[n]
         }
+        if invoice_line_id is not None and current["invoice_line_id"] != invoice_line_id:
+            after["invoice_line_id"] = invoice_line_id
+            changes["invoice_line_id"] = [current["invoice_line_id"], invoice_line_id]
         if changes:
             columns = list(changes)
             conn.execute(

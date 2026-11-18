@@ -190,7 +190,7 @@ def seed_type(
         )
         for size, preset in (presets or {}).items()
     ]
-    assert filament.types.set_presets(created.id, rows) is not None
+    assert filament.types.set_presets(created.id, rows, actor="ann") is not None
     return created.id
 
 

@@ -610,6 +610,7 @@ class InvoiceStore:
                     actor=who,
                     ref_kind=_REF_KIND,
                     ref_id=line["id"],
+                    invoice_line_id=line["id"],
                 )
                 touched.append(spool_id)
             cost = spool_cost_per_kg(line["allocated_cost"], line["quantity"], label_g)

@@ -157,6 +157,7 @@ class World:
                     slicer_filament_name=None,
                 )
             ],
+            actor="ann",
         )
 
     def bind(self, *, override: bool) -> None:
@@ -260,6 +261,7 @@ async def test_the_k_value_of_the_extruder_the_ams_feeds_is_sent(
             )
             for ext in (0, 1)
         ],
+        actor="ann",
     )
     route = _configure()
 

@@ -66,6 +66,7 @@ from psycopg.types.json import Jsonb
 from pydantic_core import to_jsonable_python
 
 from scadbuddy.filament import models as m
+from scadbuddy.filament.provenance import current_by
 
 Conn = Connection[DictRow]
 
@@ -128,7 +129,12 @@ def record(
     booked, also for an event that names an earlier time. ``None`` when an event with
     the spool, ``ref_kind``, ``ref_id`` and ``kind`` is already recorded (a retry books
     nothing). ``at`` is when it physically happened; with none the event is booked
-    now, by the module's rule."""
+    now, by the module's rule. An agent's or a flow's call adds ``data.author``
+    (`provenance.current_by`), unless ``data`` names one; never ``data.by``, which
+    `capture.py` writes as a string."""
+    author = current_by()
+    if author is not None and "author" not in (data or {}):
+        data = (data or {}) | {"author": author}
     # Before the insert, whose foreign key would take a KEY SHARE lock that
     # `refresh_derived`'s FOR UPDATE then has to upgrade: two writers deadlock there.
     conn.execute("SELECT 1 FROM filament_spools WHERE id = %s FOR UPDATE", (spool_id,))

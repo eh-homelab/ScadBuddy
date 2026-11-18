@@ -741,6 +741,12 @@ Load `frontend-design` and `dataviz` first.
 
 1. Task 1: The two SKU fields use a `Days` type (`ge=0, le=365`) in `filament/models.py`, so the model bound matches the settings' bound of 365 and a day count above a year is refused with a 422 and not stored.
 2. Task 1: The three new settings also go into `api/settings.py` `SettingsResponse` and `library/settings_store.py` `SettingsPatch`, because `GET` and `PUT /api/v1/settings` only carry the fields those two models name.
+3. Task 1: The filament mock (`frontend/src/mocks/features/filament/index.ts`) gained `lead_time_days` and `safety_margin_days` in `createType` and in the `typeCreate` field list, because the generated `SpoolType` now requires both and the frontend typecheck failed without them.
+4. Task 2: `provenance.current_by` stores `Actor.run_id` under the key `flow_run`, the header's name (`X-ScadBuddy-Flow-Run`), as the brief says; the other keys keep `Actor`'s names.
+5. Task 2: The type fan-out compares each changed field with the type row the UPDATE returns, not with the patch, so a value the database normalises (an `rgba`) is not a change, and a patch that sends a field's current value writes no event.
+6. Task 2: A spool overrides `presets` or `k_values` when it has any own row of that list, and a type's presets or K values write no event when the list is the same before and after, so a whole-list save that changes nothing books nothing.
+7. Task 2: `SpoolTypeStore.archive` also takes `actor`, because it calls `update`, which now needs one; archiving writes no spool event, as `archived` is not in `OVERRIDABLE`.
+8. Task 2: The two API provenance tests build their own app with `tests/api/test_authorship_session.py`'s setup (a `secret_key_file`, `public_url` and `auth_mode` `observe`), because the module's `client` has no key to seal a service credential with, and `observe` is where that file tests that only the agent's credential may name an author.
 
 ## Pre-flight rulings (2026-11-18)
 

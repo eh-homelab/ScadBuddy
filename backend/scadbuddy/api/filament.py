@@ -288,9 +288,11 @@ async def get_type(filament: FilamentDep, type_id: UUID) -> m.SpoolTypeDetail:
         "unarchived type has the code, 422 for a bad field."
     ),
 )
-async def patch_type(filament: FilamentDep, type_id: UUID, body: m.SpoolTypePatch) -> m.SpoolType:
+async def patch_type(
+    filament: FilamentDep, caller: CallerDep, type_id: UUID, body: m.SpoolTypePatch
+) -> m.SpoolType:
     try:
-        changed = await asyncio.to_thread(filament.types.update, type_id, body)
+        changed = await asyncio.to_thread(filament.types.update, type_id, body, actor=actor(caller))
     except _TYPE_REFUSED as exc:
         raise _refused(exc) from None
     if changed is None:
@@ -308,11 +310,13 @@ async def patch_type(filament: FilamentDep, type_id: UUID, body: m.SpoolTypePatc
     ),
 )
 async def put_type_presets(
-    filament: FilamentDep, type_id: UUID, body: list[m.TypePresetCreate]
+    filament: FilamentDep, caller: CallerDep, type_id: UUID, body: list[m.TypePresetCreate]
 ) -> list[m.TypePreset]:
     rows = [m.TypePreset(type_id=type_id, **one.model_dump()) for one in body]
     try:
-        saved = await asyncio.to_thread(filament.types.set_presets, type_id, rows)
+        saved = await asyncio.to_thread(
+            filament.types.set_presets, type_id, rows, actor=actor(caller)
+        )
     except _TYPE_REFUSED as exc:
         raise _refused(exc) from None
     if saved is None:
@@ -330,11 +334,13 @@ async def put_type_presets(
     ),
 )
 async def put_type_k_values(
-    filament: FilamentDep, type_id: UUID, body: list[m.TypeKValueCreate]
+    filament: FilamentDep, caller: CallerDep, type_id: UUID, body: list[m.TypeKValueCreate]
 ) -> list[m.TypeKValue]:
     rows = [m.TypeKValue(type_id=type_id, **one.model_dump()) for one in body]
     try:
-        saved = await asyncio.to_thread(filament.types.set_k_values, type_id, rows)
+        saved = await asyncio.to_thread(
+            filament.types.set_k_values, type_id, rows, actor=actor(caller)
+        )
     except _TYPE_REFUSED as exc:
         raise _refused(exc) from None
     if saved is None:

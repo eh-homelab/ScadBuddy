@@ -328,7 +328,7 @@ def test_a_types_label_weight_edit_moves_its_spools_stored_grams(pg_pool: PgPool
     before = store.get(spool.id)
     assert before is not None
     assert before.grams_left == 500
-    types.update(kind.id, SpoolTypePatch(label_weight_g=2000))
+    types.update(kind.id, SpoolTypePatch(label_weight_g=2000), actor="ann")
     after = store.get(spool.id)
     assert after is not None
     assert after.grams_left == 1000

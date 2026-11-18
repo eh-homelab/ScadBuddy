@@ -60,7 +60,9 @@ def _own(nozzle: str, filament: str) -> SpoolPresetCreate:
 def test_a_spool_preset_overrides_its_types_for_that_key(pg_pool: PgPool) -> None:
     types, spools, type_id, spool_id = _type_with_spool(pg_pool)
     types.set_presets(
-        type_id, [_type_preset(type_id, "0.4", "GFA00"), _type_preset(type_id, "0.6", "GFA01")]
+        type_id,
+        [_type_preset(type_id, "0.4", "GFA00"), _type_preset(type_id, "0.6", "GFA01")],
+        actor="ann",
     )
     before = spools.presets(spool_id)
     assert before is not None
@@ -79,7 +81,7 @@ def test_a_spool_preset_overrides_its_types_for_that_key(pg_pool: PgPool) -> Non
 
 def test_a_spool_preset_for_a_key_the_type_lacks_is_kept(pg_pool: PgPool) -> None:
     types, spools, type_id, spool_id = _type_with_spool(pg_pool)
-    types.set_presets(type_id, [_type_preset(type_id, "0.4", "GFA00")])
+    types.set_presets(type_id, [_type_preset(type_id, "0.4", "GFA00")], actor="ann")
     saved = spools.set_presets(spool_id, [_own("0.2", "P2")], actor="ann")
     assert saved is not None
     assert [(p.nozzle_diameter, p.overridden) for p in saved] == [("0.2", True), ("0.4", False)]
@@ -87,12 +89,13 @@ def test_a_spool_preset_for_a_key_the_type_lacks_is_kept(pg_pool: PgPool) -> Non
 
 def test_setting_an_empty_list_resets_to_the_type(pg_pool: PgPool) -> None:
     types, spools, type_id, spool_id = _type_with_spool(pg_pool)
-    types.set_presets(type_id, [_type_preset(type_id, "0.4", "GFA00")])
+    types.set_presets(type_id, [_type_preset(type_id, "0.4", "GFA00")], actor="ann")
     spools.set_presets(spool_id, [_own("0.4", "P1")], actor="ann")
     reset = spools.set_presets(spool_id, [], actor="ann")
     assert reset is not None
     assert [(p.slicer_filament, p.overridden) for p in reset] == [("GFA00", False)]
-    events = [e for e in spools.events(spool_id) if e.kind == "edited"]
+    # The spool's own edits; the type's preset save wrote one with `data.type_id` (#6269).
+    events = [e for e in spools.events(spool_id) if e.kind == "edited" and "type_id" not in e.data]
     assert len(events) == 2
     changes = events[1].data["changes"]["presets"]
     assert [row["slicer_filament"] for row in changes[0]] == ["P1"]
@@ -112,7 +115,7 @@ def test_a_repeated_key_is_refused_and_no_spool_is_none(pg_pool: PgPool) -> None
 
 def test_preset_for_is_exact(pg_pool: PgPool) -> None:
     types, _, type_id, spool_id = _type_with_spool(pg_pool)
-    types.set_presets(type_id, [_type_preset(type_id, "0.4", "GFA00")])
+    types.set_presets(type_id, [_type_preset(type_id, "0.4", "GFA00")], actor="ann")
     with pg_pool.connection() as conn:
         rows = effective_presets(conn, spool_id)
     assert preset_for(rows, "H2C", "0.2") is None
@@ -141,6 +144,7 @@ def test_a_spool_k_value_overrides_its_types_and_resets(pg_pool: PgPool, pg_conn
             )
             for ext in (0, 1)
         ],
+        actor="ann",
     )
     own = SpoolKValueCreate(
         printer_id=printer, extruder=1, nozzle_diameter="0.4", k_value=Decimal("0.05"), name="mine"
@@ -155,7 +159,10 @@ def test_a_spool_k_value_overrides_its_types_and_resets(pg_pool: PgPool, pg_conn
     reset = spools.set_k_values(spool_id, [], actor="ann")
     assert reset is not None
     assert [k.overridden for k in reset] == [False, False]
-    assert [e.kind for e in spools.events(spool_id)].count("edited") == 2
+    own_edits = [
+        e for e in spools.events(spool_id) if e.kind == "edited" and "type_id" not in e.data
+    ]
+    assert len(own_edits) == 2  # and one from the type's K values (#6269)
     with pytest.raises(CatalogRefError):
         spools.set_k_values(
             spool_id,
@@ -207,7 +214,7 @@ def _rows(pool: PgPool, spool_id: UUID) -> list[tuple[str, str, str, bool]]:
 
 def test_a_first_type_drops_the_migrated_presets(pg_pool: PgPool) -> None:
     types, spools, type_id, _ = _type_with_spool(pg_pool)
-    types.set_presets(type_id, [_type_preset(type_id, "0.6", "T6")])
+    types.set_presets(type_id, [_type_preset(type_id, "0.6", "T6")], actor="ann")
     kind = types.get(type_id)
     assert kind is not None
     needs = spools.create(SpoolCreate(material_id=kind.material_id), actor="ann")
@@ -235,7 +242,7 @@ def test_a_first_type_drops_the_migrated_presets(pg_pool: PgPool) -> None:
 
 def test_the_effective_presets_say_which_own_rows_are_migrated(pg_pool: PgPool) -> None:
     types, spools, type_id, _ = _type_with_spool(pg_pool)
-    types.set_presets(type_id, [_type_preset(type_id, "0.6", "T6")])
+    types.set_presets(type_id, [_type_preset(type_id, "0.6", "T6")], actor="ann")
     kind = types.get(type_id)
     assert kind is not None
     needs = spools.create(SpoolCreate(material_id=kind.material_id), actor="ann")
@@ -253,7 +260,7 @@ def test_the_effective_presets_say_which_own_rows_are_migrated(pg_pool: PgPool) 
 
 def test_a_whole_list_save_keeps_the_migrated_rows(pg_pool: PgPool) -> None:
     types, spools, type_id, _ = _type_with_spool(pg_pool)
-    types.set_presets(type_id, [_type_preset(type_id, "0.6", "T6")])
+    types.set_presets(type_id, [_type_preset(type_id, "0.6", "T6")], actor="ann")
     kind = types.get(type_id)
     assert kind is not None
     needs = spools.create(SpoolCreate(material_id=kind.material_id), actor="ann")

@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from scadbuddy.core.authorship import AgentAuthor, authored_as
 from scadbuddy.filament import ledger
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.ledger import grams_left, job_of, record
@@ -526,3 +527,26 @@ def test_a_negative_reading_on_top_leaves_zero(pg_pool: PgPool) -> None:
         record(conn, spool, "weighed", source="person", absolute_g=-5, at=at)
         assert _derived(conn, spool)["grams_left"] == 0
         _assert_full_path_agrees(conn, spool)
+
+
+@pg
+def test_record_adds_the_agent_author(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool)
+    author = AgentAuthor(principal="user:a", session="s1", tool="filament_spool_upsert")
+    with authored_as(author), pg_pool.connection() as conn:
+        event = record(conn, spool, "weighed", source="person", absolute_g=700)
+    assert event is not None
+    assert event.data["author"] == {
+        "principal": "user:a",
+        "session": "s1",
+        "tool": "filament_spool_upsert",
+    }
+
+
+@pg
+def test_record_without_an_author_adds_nothing(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool)
+    with pg_pool.connection() as conn:
+        event = record(conn, spool, "weighed", source="person", absolute_g=700)
+    assert event is not None
+    assert "author" not in event.data

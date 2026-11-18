@@ -158,6 +158,22 @@ def test_a_created_or_updated_spools_event_carries_the_invoice_line_ref(shop: Sh
     assert old in done.lines[0].spool_ids
 
 
+def test_confirm_writes_edited_on_existing_spools(shop: Shop) -> None:
+    type_id = shop.type_id()
+    old = shop.spools.create(SpoolCreate(material_id=shop.material()), actor="ann").id
+    before = len(shop.spools.events(old))
+    invoice = shop.one(type_id, update_spool_ids=[old])
+    done, _ = _confirm(shop, invoice)
+    line_id = done.lines[0].id
+    [event] = [e for e in shop.spools.events(old)[before:] if e.kind == "edited"]
+    changes = event.data["changes"]
+    assert changes["invoice_line_id"] == [None, str(line_id)]
+    assert changes["type_id"] == [None, str(type_id)]
+    assert changes["cost_per_kg"][0] is None
+    assert D(changes["cost_per_kg"][1]) == D("21.4000")
+    assert event.ref_kind == "invoice_line"
+
+
 def test_a_duplicate_proposed_type_is_a_409_line_error(shop: Shop) -> None:
     shop.type_id("PLA-WHT")
     invoice = shop.one(None, proposed_type=shop.type_body("PLA-WHT"))

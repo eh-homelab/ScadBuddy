@@ -112,7 +112,7 @@ def test_price_per_kg_is_derived_from_the_types_label_weight(pg_pool: PgPool) ->
     assert (point.currency, point.source) == ("USD", "manual")
     product = store.product(product_id)
     assert product is not None
-    _types(pg_pool).update(product.type_id, SpoolTypePatch(label_weight_g=500))
+    _types(pg_pool).update(product.type_id, SpoolTypePatch(label_weight_g=500), actor="ann")
     assert store.prices(product_id)[0].price_per_kg == Decimal("40.0000")
     newest = store.product(product_id)
     assert newest is not None
