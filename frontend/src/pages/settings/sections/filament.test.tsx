@@ -42,12 +42,10 @@ describe('Filament (#6262)', () => {
     await seeded()
     const filament = region('Filament')
     await choose(user, within(filament).getByRole('combobox', { name: 'Tags to Bambuddy' }), "Send ScadBuddy's bindings")
-    expect(mockSettings().filament_sync).toEqual({ spools: 'bb_to_sb', tags: 'off' })
-    await user.click(within(filament).getByRole('button', { name: 'Save Filament' }))
-    await waitFor(() => expect(mockSettings().filament_sync).toEqual({ spools: 'bb_to_sb', tags: 'sb_to_bb' }))
-    // The form resets from the saved settings once the save settles; a choice made before that is overwritten.
-    await waitFor(() => expect(within(filament).getByRole('button', { name: 'Save Filament' })).toBeDisabled())
     await choose(user, within(filament).getByRole('combobox', { name: 'Spools' }), 'Off')
+    // Each choice keeps the other: both parts are one setting until it is saved.
+    expect(within(filament).getByRole('combobox', { name: 'Tags to Bambuddy' })).toHaveTextContent("Send ScadBuddy's bindings")
+    expect(mockSettings().filament_sync).toEqual({ spools: 'bb_to_sb', tags: 'off' })
     await user.click(within(filament).getByRole('button', { name: 'Save Filament' }))
     await waitFor(() => expect(mockSettings().filament_sync).toEqual({ spools: 'off', tags: 'sb_to_bb' }))
   })
