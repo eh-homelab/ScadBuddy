@@ -740,6 +740,23 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   tile, with `spool_id`, `kind`, `source` and a cursor. The price book (the `filaments` rows
   that `orders/pricebook.py` prices) is edited on Filament → Types (`components/orders/FilamentsEditor.tsx`),
   not in Settings.
+  Purchasing (#6266, spec §5.8; plan `docs/superpowers/plans/2026-11-17-filament-suppliers.md`,
+  which holds the decisions): `suppliers.py` (`SuppliersStore`: suppliers, products by
+  `upper(sku)`, price points; a price point is the price of one pack, tax in, shipping out, and
+  `price_per_kg` is derived on read; stats and `type_prices` keep archived suppliers, marked),
+  `invoices.py` (`InvoiceStore`: drafts, their lines, the file blob, and `confirm`, one
+  transaction under `FOR UPDATE`, idempotent by state: it makes or fills the spools, the types
+  and products a line names, and the price points; a confirmed invoice is frozen but for its
+  note and file), `invoice_money.py` (tax, shipping and cost per kg, largest-remainder at four
+  places; `RECONCILE_TOLERANCE` 0.05; tax on a zero subtotal is `InvoiceMathError`, a 422) and
+  `shopping.py` (`ShoppingStore`; `type_id` is optional and the text identity stays). Every
+  store sets `updated_at` itself. Routes: `api/filament_purchasing.py`; a repeated
+  `import_run_id` returns the invoice (200), a number that collides is a 409 whose body has
+  `existing_invoice_id`, and confirm refuses (409) a foreign currency, a difference over the
+  tolerance, an archived named product, a line with no SKU and a description over 128
+  characters, and (422) an invoice with no lines. Confirm turns only a client conflict into a
+  409 naming the line; any other error is a 500. The agent's tools are
+  `agent/src/tools/filamentPurchasing.ts` (an invoice edit is a PATCH then a PUT, not atomic).
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
   Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),
   `BlobRefs` (`refs.py`, the `blob_refs` table that keeps a blob alive) and `sweep_blobs`

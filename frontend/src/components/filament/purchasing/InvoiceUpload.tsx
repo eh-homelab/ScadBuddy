@@ -51,7 +51,7 @@ export function InvoiceUpload({ onCreated }: { onCreated: (invoiceId: string) =>
     }
   }, [])
 
-  const ready = supplierId !== '' && money.currency !== null && !busy
+  // Not disabled while no supplier is chosen: the supplier picker sits inside the zone, and a disabled zone would lock it.
 
   async function add(file: File | undefined) {
     if (!file || working.current) return
@@ -110,7 +110,7 @@ export function InvoiceUpload({ onCreated }: { onCreated: (invoiceId: string) =>
       <div
         role="group"
         aria-label="Add an invoice file"
-        aria-disabled={!ready}
+        aria-disabled={busy || money.currency === null}
         tabIndex={0}
         onPaste={paste}
         onDragOver={(event) => {

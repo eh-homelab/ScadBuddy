@@ -49,6 +49,31 @@ Each with what it costs if wrong.
 16. **Per-spool suppliers (§11 "Per spool: suppliers") are the spool's invoice line's supplier plus its type's supplier products**, shown on the spool page. BB's per-spool links with a quoted price are not copied: a quoted price is a price point. Supplier stats (BB `/inventory/stats/suppliers`) are `GET /filament/suppliers/stats`: per supplier, spools bought, grams left, grams consumed, spend. SKU settings (lead time, safety margin, §5.2 `sku_settings`) go with the forecast in #6269. Cost: two parity items wait one phase.
 17. **BB's supplier list is not pulled.** The pull (§8.1) has no supplier data to sync in this phase; #6265's engine decides. Cost: none.
 
+## Decisions made while building
+
+Each line: what was decided, why, and what it costs if wrong. Measured against the code on 2026-11-17.
+
+- **Shopping items list newest first, pending above purchased** (`shopping.py`: `ORDER BY (status = 'pending') DESC, created_at DESC`) — the store's order is the one the UI shows; `created_at` is BB's `added_at`, with no second column — one sort flip.
+- **Every store sets `updated_at` itself** (no trigger) — the tables have none, and each write names it — a stale timestamp if a new write forgets it.
+- **Tax on a receipt whose lines cost nothing is a 422** (`InvoiceMathError`, mapped in `api/filament_purchasing.py`) — a free receipt with tax is a typing error — one mapping.
+- **A draft may hold header tax and no lines; confirm refuses an invoice with no lines** (`InvoiceNoLinesError`) — the upload flow makes empty drafts — one more 422.
+- **The agent's invoice edit is PATCH then PUT and is not atomic** (the tool description says so) — the brief's shape, and no combined route exists — a half-applied edit if the second call fails; a combined route later.
+- **PUT lines and DELETE answer a plain Problem 409 for a confirmed invoice** — they carry no `existing_invoice_id`, which only a number collision has — one `responses` entry.
+- **Confirm maps only `IntegrityError`, `DataError`, `SpoolTypelessError`, `SpoolInUseError` and pydantic `ValidationError` to a 409 naming the line** (`InvoiceLineError`); any other exception is a 500 — a client conflict must not hide a bug — a 500 for an unforeseen client error.
+- **A line with no SKU and a description over 128 characters is refused at confirm** ("set a SKU") — the SKU is never truncated, because a cut could collide — one more typed field.
+- **Lines that propose the same new type code in one confirm share the type the first line made** — a second create would hit the unique code — nothing.
+- **A named `supplier_product_id` that is archived is refused (409), like the by-SKU lookup** — an archived product is not for new buying; a concurrent insert of the same new SKU re-reads the product (`ON CONFLICT DO NOTHING`) instead of a 500 — nothing.
+- **Supplier stats include archived suppliers and mark each row `archived`** — spend history stays true — a filter flip.
+- **`type_suppliers` on the spool page lists unarchived suppliers and products only** — it shows where to buy now; `type_prices` keeps archived rows, marked `supplier_archived` and `product_archived` — a filter flip.
+- **`spool_count` counts every spool bought, archived included; `remaining_g` counts unarchived spools only** (route and tool descriptions say so) — bought is history, remaining is stock — a filter flip.
+- **A repeat "purchased" keeps the first `purchased_at`** (`COALESCE`) — the first purchase time is the true one — nothing.
+- **A name collision is a 409 whose body carries `existing_invoice_id`** (not parsed from the text) — a client needs it without parsing `detail` — a UUID parse in the client.
+- **A draft's supplier is editable (`supplier_id` on a draft PATCH; a confirmed invoice answers 409), and a supplier move sets the draft lines' `supplier_product_id` to NULL** — a product belongs to one supplier, so a kept link would be false — a person re-picks the products.
+- **The invoice list carries `spool_count`** (by `invoice_line_id`, the set confirm stamps) so the tab can show "Spools" — one more query per list — a count that drifts from the stamp.
+- **The invoice page saves in order: only the newest answer is applied; after a failed newest save it refetches the invoice under the same guard; the status line offers Retry** — an older answer would bring back a header the newer save changed, and a failed one would drop an earlier success — a stale field until a reload.
+- **"Use as default cost" is per product** (one button per supplier product in `PricePanel`) and only fills the cost field as an unsaved edit — a type has several suppliers, and a silent overwrite is an anti-goal (Decision 1) — one click.
+- **A price sheet that fails to load shows "Not loaded" in that type's "Newest price" cell; the other prices stay** (`allSettled`) — one failed supplier must not blank the column — an N+1 read stays, as no one-call endpoint exists.
+
 ## Pre-flight rulings (2026-11-17)
 
 Twenty findings of the pre-flight scan, all accepted as proposed; the plan above already carries them.
