@@ -2560,8 +2560,9 @@ holds the manifests (the clusters PR, plan Task 11, applies the pod settings bel
   one run at a time. The API ends a `running` run `failed` ("no profile-fetch worker picked
   the fetch up") on a read or a start, once the run is 10 min old and no worker polls the
   queue (it asks Temporal's DescribeTaskQueue, kept 30 s), and cancels its workflow. A run
-  older than the workflow's 24 h execution timeout plus 1 h ends `failed` too (plan
-  Decisions 62, 66, 67, 69). An export that no worker started within 6 h ends
+  older than the workflow's 24 h execution timeout plus 1 h ends `failed` too, with "the
+  fetch did not end within 25 h; start it again", even while a worker polls (plan
+  Decisions 62, 66, 67, 69; build Decision 119). An export that no worker started within 6 h ends
   `failed` with "no profile-fetch worker started the fetch within 6 h: none is running,
   or it is busy with other fetches" (build Decision 115).
 - **What is retried.** A login that the site refuses (it sends the browser back to

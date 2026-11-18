@@ -164,6 +164,8 @@ still win.
    Printers), 503 (the fetch could not be started: say so, and try again later).
    A run that no worker serves ends `failed` with "no profile-fetch worker picked
    the fetch up". Tell the person; the worker is a Deployment they run. A run
+   still open after 25 h ends `failed` with "the fetch did not end within 25 h;
+   start it again": offer to start it again. A run
    whose export waited 6 h in the queue ends `failed` with "no profile-fetch
    worker started the fetch within 6 h: none is running, or it is busy with other
    fetches". Tell the person to check both: whether the worker's Deployment runs,

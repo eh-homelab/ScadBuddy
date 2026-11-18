@@ -489,7 +489,8 @@ def test_a_run_past_the_longest_run_ends_failed_with_pollers(
     probe.pollers = True
     read = _read(client, type_id)
     assert read["status"] == "failed"
-    assert read["error"] == "no profile-fetch worker picked the fetch up"
+    # A worker polls, so the text must not say none did (#6625 R-F10).
+    assert read["error"] == "the fetch did not end within 25 h; start it again"
     assert probe.cancelled == [run["id"]]
 
 

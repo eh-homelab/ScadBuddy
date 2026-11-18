@@ -67,7 +67,7 @@ from scadbuddy.profile_fetch.wire import (
     MissingKey,
     fetch_workflow_id,
 )
-from scadbuddy.profile_fetch.workflow import EXECUTION_TIMEOUT, LONGEST_RUN, NO_WORKER
+from scadbuddy.profile_fetch.workflow import EXECUTION_TIMEOUT, LONGEST_RUN, NO_WORKER, TOO_LONG
 from scadbuddy.slicing.held_presets import HeldPresetStore, refresh_held_presets
 
 if TYPE_CHECKING:
@@ -265,14 +265,14 @@ class ProfileFetches:
             ).fetchone()
         return None if row is None else row["age"]
 
-    def fail_unserved(self, run_id: UUID) -> bool:
-        """The run ends ``failed`` with `NO_WORKER` when it still runs (`end_unserved`);
+    def fail_unserved(self, run_id: UUID, reason: str) -> bool:
+        """The run ends ``failed`` with ``reason`` when it still runs (`end_unserved`);
         whether this call ended it."""
         with self._pool.connection() as conn:
             ended = conn.execute(
                 "UPDATE filament_profile_fetches SET status = 'failed', error = %s,"
                 " finished_at = now() WHERE id = %s AND status = 'running'",
-                (NO_WORKER, run_id),
+                (reason, run_id),
             )
             return ended.rowcount == 1
 
@@ -416,10 +416,10 @@ def probe(state: AppState) -> QueueProbe:
 
 
 async def end_unserved(state: AppState, run: ProfileFetch) -> ProfileFetch:
-    """The run, ended ``failed`` with `NO_WORKER` when no worker will serve it: it has
+    """The run, ended ``failed`` when no worker will serve it: with `NO_WORKER` when it has
     run longer than `NO_POLLER_GRACE` and no worker polls the profile-fetch queue, or,
-    as a last resort, it has run longer than `workflow.LONGEST_RUN` (the workflow's
-    execution timeout plus an hour). The workflow runs on that queue too, so with no
+    with `TOO_LONG` as a last resort, when it has run longer than `workflow.LONGEST_RUN`
+    (the workflow's execution timeout plus an hour). The workflow runs on that queue too, so with no
     worker deployed nothing else would ever end it. A worker that polls (a busy one)
     never fails a queued run before then, and a Temporal that does not answer leaves the
     run as it is. A run it ends has its workflow cancelled, best effort."""
@@ -440,8 +440,9 @@ async def end_unserved(state: AppState, run: ProfileFetch) -> ProfileFetch:
             return run
         if served:
             return run
-    if await asyncio.to_thread(runs.fail_unserved, run.id):
-        logger.warning("profile fetch %s ended failed: %s", run.id, NO_WORKER)
+    reason = NO_WORKER if age <= LONGEST_RUN else TOO_LONG
+    if await asyncio.to_thread(runs.fail_unserved, run.id, reason):
+        logger.warning("profile fetch %s ended failed: %s", run.id, reason)
         await _cancel_workflow(state, run.id)
     return await asyncio.to_thread(runs.get, run.id) or run
 

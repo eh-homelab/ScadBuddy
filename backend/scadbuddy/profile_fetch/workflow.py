@@ -77,9 +77,12 @@ FAILED_RETRY: Final = RetryPolicy(
     initial_interval=timedelta(seconds=5), maximum_interval=timedelta(minutes=10)
 )
 
-#: The run's ``error`` when the API ends a run no worker serves (`filament.profile_fetch.
-#: end_unserved`: no poller on the queue, or the last resort `LONGEST_RUN`).
+#: The run's ``error`` when the API ends a run because no worker polls the queue
+#: (`filament.profile_fetch.end_unserved`).
 NO_WORKER: Final = "no profile-fetch worker picked the fetch up"
+#: The run's ``error`` when the API ends a run at the last resort `LONGEST_RUN`: a worker may
+#: still poll, so the text does not say none did (#6625 R-F10).
+TOO_LONG: Final = "the fetch did not end within 25 h; start it again"
 #: The ``failed`` reason when the export waited out `EXPORT_SCHEDULE_TO_START`: the worker
 #: may be down, or alive and busy with an invoice's other fetches (R-F6).
 NOT_STARTED_IN_TIME: Final = (
