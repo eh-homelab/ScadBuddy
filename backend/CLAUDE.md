@@ -792,9 +792,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `option_missing`, `bot_check`, `timeout`, `browser`); `activities.py` has the export, import and
   `failed` activities and the `SiteHolder` that keeps one signed-in browser; `workflow.py` is
   the `ProfileFetch` workflow; `wire.py` is the bodies shared with the CRUD routes; `worker.py`
-  sets `RLIMIT_CORE` to 0 and launches Chromium with an allowlisted environment (no login, no
-  token path). The API side is `filament/profile_fetch.py` (`ProfileFetches`: open, store a
-  file, import, gaps, `end_unserved`; the run is the table `filament_profile_fetches`, its files
+  sets `RLIMIT_CORE` to 0 and builds `ThreeDfpSite`; `site.py`'s `browser_env` is the allowlisted environment that
+  Chromium launches with (no login, no token path). The API side is `filament/profile_fetch.py`
+  (`ProfileFetches`: `open`, `get`, `latest`, `gaps`, `fail_unstarted`, `running_age`,
+  `fail_unserved`; the module functions `start_fetch`, `store_file`, `import_run`, `mark_failed`
+  and `end_unserved`; the run is the table `filament_profile_fetches`, its files
   are `blob_refs` held by kind `profile_fetch`) and `api/crud_profile_fetch.py` (`crud_router(
   "profile-fetch")`, area `runs`: `PUT …/runs/{run_id}/files/{sha256}`, `POST …/runs/{run_id}/import`
   and `…/failed`). The public routes are `POST` and `GET /filament/types/{id}/profile-fetch`

@@ -2458,7 +2458,7 @@ holds the manifest (spec §12).
 ### Profile-fetch worker (#6625)
 
 A new spool type with a 3dfilamentprofiles.com (3DFP) id gets a slicer preset for each
-printer model and nozzle. A third Deployment, `scadbuddy-profile-fetch`, does the browser
+printer model and nozzle. A Deployment, `scadbuddy-profile-fetch`, does the browser
 part: `python -m scadbuddy.profile_fetch` polls the Temporal queue `profile-fetch`
 (`SCADBUDDY_TEMPORAL_TASK_QUEUE_PROFILE_FETCH`) and answers `/healthz` and `/metrics` on port
 9090. The plan is `docs/superpowers/plans/2026-11-18-profile-fetch-worker.md`; the spec is
@@ -2472,7 +2472,8 @@ holds the manifests (the clusters PR, plan Task 11, applies the pod settings bel
   checks each file, removes its G-code keys, posts the files as one zip to Bambuddy's
   `POST /local-presets/import`, sets the type's presets for the fetched
   `(printer model, nozzle)` keys, reads K values from `GET /printers/{id}/kprofiles/`
-  where one matches exactly, and refreshes the kept copy of the local presets. The worker
+  where one matches exactly, and refreshes the kept copy of the local presets (unless the
+  setting `spool_overlay_refresh_seconds` is 0; build Decision 18). The worker
   never calls Bambuddy and never has a Bambuddy key. The nozzles are the remembered setting
   `profile_fetch_nozzles` (Settings → Printing → Filament; default 0.2, 0.4, 0.6, 0.8). The
   printer models are the models of ScadBuddy's printers.
@@ -2481,7 +2482,9 @@ holds the manifests (the clusters PR, plan Task 11, applies the pod settings bel
   `filament_type_fetch_profiles` start one by hand
   (`POST /api/v1/filament/types/{id}/profile-fetch`). The agent tool
   `filament_type_profile_fetch` and `GET` on the same path read the run and the gaps. A
-  start while a run is `running` joins that run.
+  start while a run is `running` joins that run, unless no worker
+  serves the queue: then the API ends that run `failed` and opens a new one
+  (`start_fetch` in `filament/profile_fetch.py`; see "When no worker runs" below).
 - **No database and no key.** The worker refuses to start when `SCADBUDDY_DATABASE_URL`,
   `PGPASSWORD`, `PGPASSFILE` or `SCADBUDDY_SECRET_KEY_FILE` is set (#5295), and when `DEBUG`
   turns on a Playwright channel, because that log would write the 3DFP password to stderr.
@@ -2500,21 +2503,28 @@ holds the manifests (the clusters PR, plan Task 11, applies the pod settings bel
   `Recreate`), so two browsers never share one login.
 - **The secret.** The 1Password item "3D Filament Profiles" in the vault `homelab - prod` has
   a `password` field. It needs a text field `email` that the owner adds (the account email;
-  the item's username lacks it). The clusters PR makes a OnePasswordItem `scadbuddy-3dfp`
+  the item's username lacks it). This is the owner's statement of 2026-11-18 (plan Decision
+  15); #6625 did not read the item. The clusters PR makes a OnePasswordItem `scadbuddy-3dfp`
   that makes a Secret with the keys `email` and `password`, which become the two
   environment variables above. Never print either value. To check that the field is there,
-  read it into a variable and look at its length only:
+  read it into a variable and print a length or the word "missing", never the value:
 
   ```bash
-  KEY=$(op.exe read "op://homelab - prod/3D Filament Profiles/email" 2>&1); echo ${#KEY}
+  KEY=$(op.exe read "op://homelab - prod/3D Filament Profiles/email" 2>&1); case "$KEY" in *ERROR*|"") echo "missing";; *) echo "${#KEY}";; esac; unset KEY
   ```
 
-  (On WSL `op.exe` can write the value to stderr, so the command captures both streams.)
+  A missing field gives op's error text, which contains `ERROR`, so the command prints
+  "missing". The command prints only that word or a length. (On WSL `op.exe` can write the
+  value to stderr, so the command captures both streams.) The path follows op's documented
+  `op://<vault>/<item>/<field>` form and the plan's vault and item names. A live check on
+  2026-11-18 timed out on 1Password authorization, so the path is not yet confirmed; plan
+  Task 12 confirms it after the owner adds the field.
 - **The browser.** It is a headed Chromium under Xvfb with a normal Chrome user agent. Plan
-  Decision 5 records why: Vercel's bot check passes a headed browser, and a headless one with
-  the `HeadlessChrome` user agent gets 403 since 2026-11-01, as
-  `.claude/skills/filament-intake/SKILL.md` states (that skill gives no method for it, and
-  #6625 did not measure it against the real site; tests never reach 3DFP). Chromium's own
+  Decision 5 records why. The source is `.claude/skills/filament-intake/SKILL.md`: line 82 says
+  a real Chromium passes Vercel's bot check, and line 84 says the firewall answers 403 to the
+  `HeadlessChrome` user agent "since 2026-11-01". The skill gives a date for the 403 only and
+  no method for either claim. #6625 measured neither against the real site; its tests drive a
+  local replica and never reach 3DFP. Chromium's own
   sandbox stays on. The code never passes `--no-sandbox`: a renderer exploit must not reach
   the process that holds the password and the CRUD credential. If the sandbox cannot start,
   the browser does not launch and the worker exits 1.
@@ -2528,11 +2538,15 @@ holds the manifests (the clusters PR, plan Task 11, applies the pod settings bel
   uid 10001, with `allowPrivilegeEscalation: false`, every capability dropped and a read-only
   root file system. The Chromium container, and it alone, runs with the seccomp profile
   `Unconfined`, because a runtime's default profile refuses the user namespaces that Chromium's
-  sandbox needs ([Kubernetes: seccomp](https://kubernetes.io/docs/tutorials/security/seccomp/);
-  CI measured the refusal, "No usable sandbox!", on ubuntu-latest on 2026-11-18, plan Decision
-  73). On Ubuntu 24.04 nodes the pod also needs the `Localhost` AppArmor profile
-  `scadbuddy-intake-sandbox` that the intake sandbox uses (see "Intake worker (#6133)";
-  plan Decision 6). The worker sets `RLIMIT_CORE` to 0 itself, so a node that pipes core dumps
+  sandbox needs. The source is the measurement: CI got the refusal, "No usable sandbox!", on
+  ubuntu-latest on 2026-11-18 (plan Decision 73). The seccomp tutorial
+  ([Kubernetes: seccomp](https://kubernetes.io/docs/tutorials/security/seccomp/)) explains only
+  how a pod sets a profile, not this refusal. On Ubuntu 24.04 nodes
+  (`kernel.apparmor_restrict_unprivileged_userns=1`) the pod also needs the `Localhost`
+  AppArmor profile `scadbuddy-intake-sandbox` that the intake sandbox uses
+  ([AppArmor: unprivileged user namespace restrictions](https://gitlab.com/apparmor/apparmor/-/wikis/unprivileged_userns_restriction);
+  see "Intake worker (#6133)"; plan Decision 6). Nothing measured that Chromium's sandbox starts
+  under that profile on a prod node. The worker sets `RLIMIT_CORE` to 0 itself, so a node that pipes core dumps
   to a collector never keeps a renderer's memory. Never add `--no-sandbox`.
 - **Network.** The NetworkPolicy allows DNS, the API's 8082, Temporal's frontend and TCP 443
   to `0.0.0.0/0` except `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`

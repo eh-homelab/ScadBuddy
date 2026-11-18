@@ -94,8 +94,8 @@ and README "Intake worker (#6133)".
    into `/ms-playwright`, and `xvfb`, `xauth` and `tini`. `playwright` is pinned exactly in a
    new `[dependency-groups] profile-fetch`, so the app image does not carry it. The entrypoint
    is `tini -- xvfb-run -a python -m scadbuddy.profile_fetch`. It runs as uid 10001, amd64 only.
-5. **Headed Chromium under Xvfb, with a normal Chrome user agent.** This is the only mode
-   measured to pass Vercel's check on a fresh profile. The skill says headed passes it, and
+5. **Headed Chromium under Xvfb, with a normal Chrome user agent.** The filament-intake
+   skill says headed passes Vercel's check (nothing in #6625 measured it against the real site), and
    headless with the `HeadlessChrome` UA gets 403 since 2026-11-01. The UA string is
    `3dfp.mjs`'s. The profile directory is on the pod's emptyDir. The worker logs in at start
    (a bad secret fails the start, not the first fetch), and again when a page redirects to
@@ -153,8 +153,8 @@ and README "Intake worker (#6133)".
     attempts from 1 min. A run no worker serves is ended by the API with "no profile-fetch
     worker picked the fetch up": on a read or a start, once the run is 10 min old and no
     worker polls the `profile-fetch` queue, or, as a last resort, once it is older than the
-    export's `schedule_to_start` plus the export's and the import's schedule-to-close (build
-    Decision 62). A login refusal (`login_failed`), an unknown 3DFP id (`tdfp_not_found`) and a
+    export's `schedule_to_start` plus the export's and the import's schedule-to-close
+    (replaced by build Decisions 62 and 67: the workflow's 24 h execution timeout plus 1 h). A login refusal (`login_failed`), an unknown 3DFP id (`tdfp_not_found`) and a
     missing dialog option (`option_missing`) are non-retryable. A Vercel check that does not
     clear within 15 s (`bot_check`), a step that timed out (`timeout`) and a failure of the
     browser itself (`browser`: a crash, a closed page, any error the driver did not map) are
@@ -515,3 +515,6 @@ Branch from clusters' `main`. Copy the shape of `applications/scadbuddy/scadbudd
 104. Task 10: the spec §9 note says step 7 is a Temporal workflow and a worker, not a "flow" as the spec's step 7 first said, and that step 8's check is the `gaps` read. The earlier text of step 7 stays, with the note below it, as the #6264 and #6267 notes do.
 105. Task 10: the plugin's `filament` skill rule 5 sets `tdfp_id` on the proposed type (`SpoolTypeCreate` has it) and its end check adds a read of `filament_type_profile_fetch`. The skill tells the session never to write a preset to BB by hand to fill a gap, and never to start a fetch to test a change. Both plugin versions go from 0.1.41 to 0.1.42; the edit hook did not run for these edits, so the bump was by hand.
 106. Task 10: `backend/CLAUDE.md` had the `requires_chromium` note already (Task 5). Task 10 adds the layout bullet for `profile_fetch/`, `filament/profile_fetch.py` and `api/crud_profile_fetch.py`, placed before the `store/` bullet.
+107. R-T10-1: the README's `op://homelab - prod/3D Filament Profiles/email` path stays. It follows op's documented `op://<vault>/<item>/<field>` form and the plan's vault and item names. A live check timed out on 1Password authorization. Task 12 confirms the path after the owner adds the `email` field.
+108. R-T10-2: the README's field check reads `KEY=$(op.exe read "op://…" 2>&1)`, then prints "missing" on `*ERROR*` or empty, else `${#KEY}`, then unsets `KEY`. It prints only a length or the word "missing". This replaces Decision 102's `echo ${#KEY}` (Task 10 review I1: op's error text had a non-zero length).
+109. R-T10-3: all 14 findings of the Task 10 review (I1-I5, M1-M9) are fixed. Each doc says what was measured and what was not; each unsourced fact gets a link or is removed; `backend/CLAUDE.md` matches the code (`ProfileFetches` methods, `browser_env` in `site.py`); `trust-boundaries.md` names this pod as a second exception (untrusted web content, one CRUD credential, no database secret) in its target text, diagram, zone table and row; Decision 13's time bound is marked as replaced by Decisions 62 and 67.

@@ -149,9 +149,10 @@ still win.
    approval first. A start while a fetch runs joins it (`joined: true`).
 3. **Read the result.** Call `filament_type_profile_fetch` with the type's `id`. It
    answers the last `run` (`status`: `running`, `imported`, `partial` or `failed`;
-   `missing`, each key with its reason; `notes`; `error`) and `gaps`. A run takes
-   minutes: the worker exports one run at a time. Read again, and do not start a
-   second fetch.
+   `missing`, each key with its reason; `notes`; `error`) and `gaps`. How long a run
+   takes was not measured on the real site. The README gives the bounds: 20 min per
+   export attempt, and a queued export may wait up to 6 h because the worker exports
+   one run at a time. Read again, and do not start a second fetch.
 4. **Report the gaps.** `gaps` is every printer model and nozzle that the type has
    no preset for now. It can list keys even after an `imported` run, for example
    when a printer model was added after it. Name each gap and its reason to the
@@ -162,7 +163,9 @@ still win.
    Printers), 503 (the fetch could not be started: say so, and try again later).
    A run that no worker serves ends `failed` with "no profile-fetch worker picked
    the fetch up". Tell the person; the worker is a Deployment they run.
-6. **Preset names.** BB keeps a preset it already has. A fetched preset binds only
+6. **Preset names.** BB keeps a preset it already has (plan Decision 22, #6625; it
+   rests on the plan's reading of Bambuddy's `POST /local-presets/import`, which
+   answers `skipped`, and no test of #6625 ran against a live Bambuddy). A fetched preset binds only
    to a BB preset that this fetch made or that an earlier fetch of the type made. A
    hand-made BB preset of the same name leaves the key missing, and the run is
    `partial`. Tell the person; do not delete their preset.
@@ -175,8 +178,8 @@ For the BB-era scripts (`intake.py`, `3dfp.mjs`), use
 ## Where a fact comes from
 
 - The 3DFP bot check, its 429 and 403 answers, and the `GFA17` gap are stated
-  in `.claude/skills/filament-intake/SKILL.md`, which gives no date or method for
-  them. Neither #6267 nor #6625 measured them against the real site: the worker's
+  in `.claude/skills/filament-intake/SKILL.md`, which gives a date only for the 403
+  (since 2026-11-01) and no method for any of them. Neither #6267 nor #6625 measured them against the real site: the worker's
   tests drive a local replica, never 3DFP. Check one before you rely on it.
 - The worker's behaviour (what it exports, the run statuses, the gaps, the
   binding rule for preset names) is in `docs/superpowers/plans/2026-11-18-profile-fetch-worker.md`

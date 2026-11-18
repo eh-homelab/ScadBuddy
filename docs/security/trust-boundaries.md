@@ -85,6 +85,7 @@ controls.
 | Flow scripts (Monty) | the projects worker (`backend/scadbuddy/workflows/project.py`) | the interpreter; host functions only; outward calls need an approval | No. |
 | Workflow scripts (QuickJS) | the agent (`agent/src/background/workflowRunner.ts`) | the interpreter; each `agent()` call is a child chat | No. |
 | Template UI modules | the browser | a shadow root; `default-src 'none'; sandbox` on the served files (`backend/scadbuddy/api/template_ui.py:45-49`) | No. |
+| 3dfilamentprofiles.com pages (JavaScript in Chromium) | the profile-fetch worker pod (#6625), a headed Chromium that is a child of the worker | Chromium's own sandbox (the code never passes `--no-sandbox`), an environment allowlist for the browser (`backend/scadbuddy/profile_fetch/site.py` `browser_env`), the pod's egress policy (public 443 only, plan Decision 14). The pod holds the 3DFP login and one `profile-fetch` CRUD credential; the seccomp profile is `Unconfined` for the Chromium container (plan Decision 6, applied by the clusters PR, not measured on prod). | No: the pod holds no database secret. Its credential reaches the area `runs` only. |
 | Remote MCP servers, `http_request` targets | outside the cluster, reached through the agent | the loopback forwarder; results wrapped as untrusted data | No. |
 
 ## Zones
@@ -168,9 +169,14 @@ settings trust the whole pod CIDR: `SCADBUDDY_TRUSTED_PROXIES` and
 
 The CRUD service is the only process with a database secret, and nothing untrusted runs in
 its pod. Every other process calls it over HTTP with a short-lived service credential.
-Untrusted code runs in a pod that holds no secret and has no route to Postgres. The one
-exception is a token that authorizes calls to that sandbox and nothing else (the intake
-sandbox's RPC token, #6133), so a leak reaches nothing beyond the sandbox.
+Untrusted code runs in a pod that holds no secret and has no route to Postgres. There are
+two exceptions. The first is a token that authorizes calls to that sandbox and nothing else
+(the intake sandbox's RPC token, #6133), so a leak reaches nothing beyond the sandbox. The
+second is the profile-fetch worker (#6625): it runs untrusted web content (the pages of
+3dfilamentprofiles.com, in a Chromium that its own sandbox confines) and holds the 3DFP login
+and one `profile-fetch` CRUD credential, but no database secret. That credential reaches only
+the area `runs`, so a renderer exploit reaches the 3DFP account and the runs the API opened,
+not Postgres.
 
 Today (each line into Postgres is a connection; the dotted ones cross into the other
 service's tables; the render, print and projects workers call the API over HTTP, #5298):
@@ -204,7 +210,10 @@ flowchart LR
   A[agent services] -- HTTP + credential --> CRUD
   S[storefront<br/>public host] -- HTTP + credential --> CRUD
   I[intake worker<br/>customer files] -- HTTP + credential --> CRUD
-  F[profile-fetch worker<br/>3DFP web content] -- HTTP + credential --> CRUD
+  subgraph web[Second exception: web content, one CRUD credential, no database secret]
+    F[profile-fetch worker<br/>3DFP web content]
+  end
+  F -- HTTP + credential --> CRUD
   CRUD[CRUD service<br/>the one database role] --> DB[(Postgres<br/>ingress: CRUD only)]
 ```
 
