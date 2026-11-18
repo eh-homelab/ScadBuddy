@@ -24,9 +24,10 @@ MAX_FAILURE_REASON: Final = 300
 MAX_FAILED_REASON: Final = 500
 
 
-def fetch_workflow_id(type_id: str) -> str:
-    """One fetch per type at a time; a fetch run again later is a new run."""
-    return f"profile-fetch:{type_id}"
+def fetch_workflow_id(run_id: str) -> str:
+    """One workflow per run: the database allows one running run per type, and a new
+    run never attaches to an ended run's workflow that still runs."""
+    return f"profile-fetch:{run_id}"
 
 
 class _Wire(BaseModel):

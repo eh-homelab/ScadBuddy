@@ -87,6 +87,8 @@ NO_PRESET: Final = "no preset for this printer and nozzle yet"
 MAX_DEPTH: Final = 32
 #: The ``error`` of a run whose workflow Temporal did not start.
 NOT_STARTED: Final = "the fetch could not be started"
+#: The longest an invoice confirm waits for Temporal to take one fetch's start.
+START_TIMEOUT_SECONDS: Final = 10.0
 #: The keys only a printer or a process preset has.
 SETTINGS_IDS: Final = frozenset({"printer_settings_id", "print_settings_id"})
 
@@ -260,8 +262,8 @@ class Starter(Protocol):
 
 
 class FetchStarter:
-    """`FETCH_WORKFLOW` on the profile-fetch worker's queue, one per type: a workflow
-    already running for the type is joined, and one that ended is started again."""
+    """`FETCH_WORKFLOW` on the profile-fetch worker's queue, one per run: a retry of a
+    run's start joins its own workflow, and a new run never joins an ended run's."""
 
     def __init__(self, client: Client, task_queue: str) -> None:
         self.client = client
@@ -271,7 +273,7 @@ class FetchStarter:
         await self.client.start_workflow(
             FETCH_WORKFLOW,
             ask,
-            id=fetch_workflow_id(ask.type_id),
+            id=fetch_workflow_id(ask.run_id),
             task_queue=self.task_queue,
             id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
             id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
@@ -301,11 +303,13 @@ class FetchNotStartedError(Exception):
     """Temporal did not take the start; the run ended ``failed`` (`NOT_STARTED`)."""
 
 
-async def start_fetch(state: AppState, type_id: UUID, *, actor: str) -> ProfileFetchStarted:
+async def start_fetch(
+    state: AppState, type_id: UUID, *, actor: str, timeout: float | None = None
+) -> ProfileFetchStarted:
     """Open the type's run (`ProfileFetches.open`) and start its workflow. A run already
     running is joined, and its workflow is not started again. `FetchRefusedError` when
     the type cannot be fetched; `FetchNotStartedError` when Temporal did not take the
-    start, after the run is ended ``failed``."""
+    start (or not within ``timeout`` seconds), after the run is ended ``failed``."""
     runs = fetches(state)
     run, joined = await asyncio.to_thread(runs.open, type_id, actor=actor)
     if not joined:
@@ -313,7 +317,8 @@ async def start_fetch(state: AppState, type_id: UUID, *, actor: str) -> ProfileF
             run_id=str(run.id), type_id=str(type_id), tdfp_id=run.tdfp_id, targets=run.targets
         )
         try:
-            await starter(state).start(ask)
+            async with asyncio.timeout(timeout):
+                await starter(state).start(ask)
         except Exception as exc:
             await asyncio.to_thread(runs.fail_unstarted, run.id)
             raise FetchNotStartedError(NOT_STARTED) from exc
@@ -322,20 +327,31 @@ async def start_fetch(state: AppState, type_id: UUID, *, actor: str) -> ProfileF
 
 async def start_profile_fetches(state: AppState, type_ids: Sequence[UUID], *, actor: str) -> None:
     """Start a fetch for each type that has a 3DFP id (an invoice confirm's new types,
-    plan Decision 12). A type without one is skipped; any other refusal or failure is
-    logged, never raised, so it never fails the caller."""
-    for type_id in type_ids:
-        try:
-            await start_fetch(state, type_id, actor=actor)
-        except FetchRefusedError as refused:
-            if refused.code != "no_tdfp_id":
-                logger.warning(
-                    "did not start the profile fetch of spool type %s: %s", type_id, refused
-                )
-        except Exception:
-            logger.warning(
-                "could not start the profile fetch of spool type %s", type_id, exc_info=True
-            )
+    plan Decision 12), all at once, each start bounded by `START_TIMEOUT_SECONDS`. A type
+    without one is skipped; no printer model is logged once; any other refusal or failure
+    is logged, never raised, so it never fails the caller."""
+    refusals = await asyncio.gather(*(_start_logged(state, t, actor=actor) for t in type_ids))
+    if "no_printer_models" in refusals:
+        logger.warning(
+            "did not start the profile fetch of %d spool type(s): "
+            "no printer has a model to fetch presets for",
+            refusals.count("no_printer_models"),
+        )
+
+
+async def _start_logged(state: AppState, type_id: UUID, *, actor: str) -> str | None:
+    """`start_fetch` for `start_profile_fetches`: the refusal's code that the caller logs
+    (``no_printer_models``), else ``None`` once any other outcome is logged."""
+    try:
+        await start_fetch(state, type_id, actor=actor, timeout=START_TIMEOUT_SECONDS)
+    except FetchRefusedError as refused:
+        if refused.code == "no_printer_models":
+            return refused.code
+        if refused.code != "no_tdfp_id":
+            logger.warning("did not start the profile fetch of spool type %s: %s", type_id, refused)
+    except Exception:
+        logger.warning("could not start the profile fetch of spool type %s", type_id, exc_info=True)
+    return None
 
 
 # -- the worker's routes ------------------------------------------------------------------

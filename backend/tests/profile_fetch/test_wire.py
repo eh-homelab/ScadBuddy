@@ -19,7 +19,7 @@ def test_wire_imports_no_database_code() -> None:
     assert done.returncode == 0
 
 
-def test_the_workflow_id_names_the_type() -> None:
+def test_the_workflow_id_names_the_run() -> None:
     assert wire.fetch_workflow_id("abc") == "profile-fetch:abc"
 
 

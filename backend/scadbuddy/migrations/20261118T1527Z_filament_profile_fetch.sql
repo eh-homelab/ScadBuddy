@@ -14,7 +14,7 @@ ALTER TABLE service_caller_suspensions ADD CONSTRAINT service_caller_suspensions
 ALTER TABLE filament_spool_types ADD COLUMN tdfp_id integer CHECK (tdfp_id > 0);
 
 -- One fetch of a type's slicer profiles. `id` is the run id (the workflow id is
--- `profile-fetch:<type_id>`). `files` maps each fetched key to its blob key and preset
+-- `profile-fetch:<run_id>`). `files` maps each fetched key to its blob key and preset
 -- name, and, once imported, the Bambuddy preset id it bound; the blobs are held in
 -- `blob_refs` (holder `profile_fetch`, holder id the run id). `bambuddy_before` is the
 -- filament preset ids Bambuddy listed before the run's first import, so a retry after a

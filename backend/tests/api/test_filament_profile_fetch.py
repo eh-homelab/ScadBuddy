@@ -5,7 +5,11 @@ tests patch `intake.checker`."""
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import time
 from typing import Any
+from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
@@ -24,19 +28,39 @@ NOZZLES = ["0.2", "0.4", "0.6", "0.8"]
 
 class FakeTemporal:
     """The workflows the API starts, as `Client.start_workflow` gets them: ``(workflow,
-    id, task queue, ask)``, after checking the conflict and reuse policies. ``fail`` makes
-    every start raise."""
+    id, task queue, ask)``, after checking the conflict and reuse policies. As Temporal
+    does under USE_EXISTING, a start whose id names a workflow that still runs starts
+    nothing and returns that workflow (``attached`` lists those asks); the fake's
+    workflows never end. ``fail`` makes every start raise; ``hang`` makes every start
+    wait ten seconds before it is taken (``in_flight`` counts the waiting starts, and
+    ``most_in_flight`` the most at once)."""
 
     def __init__(self) -> None:
         self.started: list[tuple[str, str, str, FetchAsk]] = []
+        self.attached: list[FetchAsk] = []
         self.fail = False
+        self.hang = False
+        self.in_flight = 0
+        self.most_in_flight = 0
 
     async def start_workflow(self, workflow: str, ask: FetchAsk, **kwargs: Any) -> None:
         if self.fail:
             raise RuntimeError("Temporal is down")
+        if self.hang:
+            self.in_flight += 1
+            self.most_in_flight = max(self.most_in_flight, self.in_flight)
+            try:
+                await asyncio.sleep(10)
+            finally:
+                self.in_flight -= 1
         assert kwargs.pop("id_conflict_policy") == WorkflowIDConflictPolicy.USE_EXISTING
         assert kwargs.pop("id_reuse_policy") == WorkflowIDReusePolicy.ALLOW_DUPLICATE
-        self.started.append((workflow, kwargs.pop("id"), kwargs.pop("task_queue"), ask))
+        workflow_id = kwargs.pop("id")
+        if any(started[1] == workflow_id for started in self.started):
+            self.attached.append(ask)
+            kwargs.pop("task_queue")
+        else:
+            self.started.append((workflow, workflow_id, kwargs.pop("task_queue"), ask))
         assert kwargs == {}
 
 
@@ -104,7 +128,7 @@ def test_start_opens_a_run_and_starts_the_workflow(
     [(workflow, workflow_id, queue, ask)] = starter.started
     assert (workflow, workflow_id, queue) == (
         FETCH_WORKFLOW,
-        f"profile-fetch:{type_id}",
+        f"profile-fetch:{run['id']}",
         "profile-fetch",
     )
     assert ask.run_id == run["id"]
@@ -122,6 +146,24 @@ def test_a_second_start_joins_the_running_fetch(client: TestClient, starter: Fak
     assert again.json()["joined"] is True
     assert again.json()["run"]["id"] == first["run"]["id"]
     assert len(starter.started) == 1
+
+
+def test_an_ended_runs_workflow_does_not_capture_a_new_start(
+    client: TestClient, starter: FakeTemporal
+) -> None:
+    _printer(client)
+    type_id = _type(client)
+    first = _start(client, type_id).json()["run"]
+    # The run ends while its workflow still runs (Decision 25's lost answer, or the short
+    # time after the workflow ended the run and before the workflow itself ends).
+    profile_fetch.fetches(_state(client)).fail_unstarted(UUID(first["id"]))
+    again = _start(client, type_id)
+    assert again.status_code == 202, again.text
+    assert again.json()["joined"] is False
+    second = again.json()["run"]
+    assert second["id"] != first["id"]
+    assert starter.attached == []
+    assert [ask.run_id for (_, _, _, ask) in starter.started] == [first["id"], second["id"]]
 
 
 def test_targets_follow_the_nozzles_setting(client: TestClient, starter: FakeTemporal) -> None:
@@ -252,10 +294,10 @@ def test_confirm_starts_a_fetch_for_each_new_type_with_a_tdfp_id(
     assert done.status_code == 200, done.text
     types = {t["code"]: t["id"] for t in client.get(f"{URL}/types").json()}
     [(_, workflow_id, _, ask)] = starter.started
-    assert workflow_id == f"profile-fetch:{types['NEW-1']}"
     assert ask.tdfp_id == 30173
     run = client.get(f"{URL}/types/{types['NEW-1']}/profile-fetch").json()["run"]
     assert run["id"] == ask.run_id
+    assert workflow_id == f"profile-fetch:{run['id']}"
     for code in ("NEW-2", "OLD"):
         assert client.get(f"{URL}/types/{types[code]}/profile-fetch").json()["run"] is None
     again = client.post(f"{URL}/invoices/{invoice_id}/confirm")
@@ -273,3 +315,57 @@ def test_a_start_failure_never_fails_the_confirm(
     assert done.status_code == 200, done.text
     assert done.json()["status"] == "confirmed"
     assert "could not start the profile fetch" in caplog.text
+
+
+def test_a_hung_start_never_holds_the_confirm(
+    client: TestClient, starter: FakeTemporal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(profile_fetch, "START_TIMEOUT_SECONDS", 0.5)
+    _printer(client)
+    starter.hang = True
+    invoice_id = _invoice(
+        client,
+        [
+            _line(description="a", proposed_type=_type_body(client, "NEW-1", 30173)),
+            _line(description="b", proposed_type=_type_body(client, "NEW-2", 30174)),
+        ],
+    )
+    began = time.monotonic()
+    done = client.post(f"{URL}/invoices/{invoice_id}/confirm")
+    assert done.status_code == 200, done.text
+    assert time.monotonic() - began < 5
+    assert starter.most_in_flight == 2
+    types = {t["code"]: t["id"] for t in client.get(f"{URL}/types").json()}
+    for code in ("NEW-1", "NEW-2"):
+        run = client.get(f"{URL}/types/{types[code]}/profile-fetch").json()["run"]
+        assert run["status"] == "failed"
+        assert run["error"] == "the fetch could not be started"
+
+
+def test_no_printer_model_is_not_logged_without_a_fetchable_type(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING, logger=profile_fetch.__name__)
+    _printer(client, model=None)
+    invoice_id = _invoice(client, [_line(proposed_type=_type_body(client, "NEW-1", None))])
+    done = client.post(f"{URL}/invoices/{invoice_id}/confirm")
+    assert done.status_code == 200, done.text
+    assert caplog.records == []
+
+
+def test_no_printer_model_is_logged_once_per_confirm(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING, logger=profile_fetch.__name__)
+    _printer(client, model=None)
+    invoice_id = _invoice(
+        client,
+        [
+            _line(description="a", proposed_type=_type_body(client, "NEW-1", 30173)),
+            _line(description="b", proposed_type=_type_body(client, "NEW-2", 30174)),
+        ],
+    )
+    done = client.post(f"{URL}/invoices/{invoice_id}/confirm")
+    assert done.status_code == 200, done.text
+    [warning] = caplog.records
+    assert "no printer has a model" in warning.getMessage()
