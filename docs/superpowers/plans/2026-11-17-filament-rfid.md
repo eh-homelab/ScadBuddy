@@ -313,7 +313,7 @@ Strictly read-only: `GET` requests and a listening WebSocket that sends nothing.
   - mode off and nothing saved: no call.
   - A `blocked` or connect failure never clears `saved_auto_add` and never raises out of the activity.
 - Routes (`prefix="/filament"`): `GET /rfid/status` (read-only: it reads Bambuddy and lists devices best effort, a Bambuddy error leaves the fields `None`/empty with `state` from the row); `PUT /rfid/override-mode` body `{enabled: bool}` writes the row first, then runs `reconcile_mode`, answers `RfidStatus` (200 even when `blocked`); `POST /rfid/reconcile` runs the steps of the activity that exist so far once and answers `RfidReconcileReport(mode: RfidStatus, tags: TagPushReport, slots: SlotReport | None)`; here `slots` is always `None` (Task 6 runs the third step and fills it).
-- Tools: `filament_rfid_status` (read), `filament_rfid_override_mode` (write; "Only what the user says; this turns Bambuddy's auto-add of unknown RFID spools off while on"), `filament_rfid_reconcile` (write), each with `routes:`.
+- Tools: `filament_rfid_status` (read), `filament_rfid_override_mode` (outward, gated, Decision 33; "Only what the user says; this turns Bambuddy's auto-add of unknown RFID spools off while on"), `filament_rfid_reconcile` (outward, gated, Decision 33), each with `routes:`.
 
 - [ ] **Step 1: Write the failing tests** (respx, `pg_pool`):
   - `test_turning_the_mode_on_saves_the_found_value_then_turns_auto_add_off`: Bambuddy reads `true` → `saved_auto_add is True` before the PATCH (assert by the call order), the PATCH body is `{"auto_add_unknown_rfid": false}`, `state == "applied"`.
@@ -393,7 +393,7 @@ Strictly read-only: `GET` requests and a listening WebSocket that sends nothing.
   - `async confirm(store, client, spool_id: UUID, *, actor: str) -> NtagConfirm(bound: bool, tag_uid: str | None)`: reads the BB spool; `bound` when its `tag_uid` is set, `data_origin == "opentag3d"` and differs from the SB spool's open tag UID: then `bind_tag(kind="ntag_opentag", tag_uid=..., actor=actor)` (an idempotent no-op when already bound). Otherwise `bound` is false and nothing changes.
   - `async cancel(client, device_id: str) -> None`.
 - Routes: `POST /filament/rfid/scan` body `{timeout_s: int (1..50, default 30), device_id?: str}`; `POST /filament/spools/{id}/ntag/write` body `{device_id: str, replace: bool = False}`; `POST /filament/spools/{id}/ntag/confirm`; `POST /filament/spools/{id}/ntag/cancel` body `{device_id: str}`. 404 for an unknown spool. Each runs on the API process, with `actor(caller)`.
-- Tools: `filament_rfid_scan` (waits up to the given seconds; "the user holds a tag to a SpoolBuddy reader"), `filament_spool_ntag_write`, `filament_spool_ntag_confirm`, `filament_spool_ntag_cancel`.
+- Tools: `filament_rfid_scan` (waits up to the given seconds; "the user holds a tag to a SpoolBuddy reader"), `filament_spool_ntag_write` (outward, gated), `filament_spool_ntag_confirm` (write), `filament_spool_ntag_cancel` (outward, gated; Decision 33).
 - Frontend `api/filament.ts`: `scanTag`, `writeNtag`, `confirmNtag`, `cancelNtag` typed from the generated schema.
 
 - [ ] **Step 1: Write the failing tests:**

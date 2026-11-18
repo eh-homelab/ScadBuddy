@@ -128,7 +128,8 @@ def _written[T](printer_id: str, write: Callable[[], T]) -> T:
         "spool (one on no spool, or on an archived one, is taken), and a spool that held "
         "another tag is rebound to the tray's. 404 for an unknown printer or spool; 409 "
         "when the printer has not reported the tray filled, the tray's tag is on another "
-        "spool, or its two keys name two different tags. Writes ScadBuddy only."
+        "spool, or its two keys name two different tags. Writes ScadBuddy; with tag sync on "
+        "(`filament_sync.tags`), the tag change is then pushed to Bambuddy."
     ),
 )
 async def put_tray_spool(

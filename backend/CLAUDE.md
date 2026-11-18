@@ -728,7 +728,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   ordered by `(at, delta before reading, seq)` (a paired plate's `print_run` is skipped for its `bb_usage` row); a time-less event gets a clock-step guard because the WSL clock
   steps back), `locations.py` (a spool moves only through `move()`; AMS trays are keyed by
   printer, AMS and tray, never by name), `bambuddy_pull.py` (import and the scheduled pull,
-  read-only toward Bambuddy: it writes nothing there, tags go through `rfid_push.py`; it skips a BB spool whose tag an open binding of an SB spool linked elsewhere holds, warned once, and remembers it in `filament_bb_ignored` (the push clears its tag later, and the next pull would otherwise make a second SB spool); it never changes a held binding's `override` (`bind_on` with `override=None`); `scheduled_pull` skips when the setting `filament_sync.spools` is
+  read-only toward Bambuddy: it writes nothing there, tags go through `rfid_push.py`; it skips a BB spool whose tag an open binding of an SB spool linked elsewhere holds, warned once, and remembers it in `filament_bb_ignored` (the push clears its tag later, and the next pull would otherwise make a second SB spool; nothing un-ignores a row, so a person deletes it by hand, plan Decision 29); it never changes a held binding's `override` (`bind_on` with `override=None`); `scheduled_pull` skips when the setting `filament_sync.spools` is
   `off`, read per run, #6262 Task 13), `csv_import.py` (the spools CSV import, #6262 Task 15:
   rows the caller parsed, as text cells; a dry run reads only, so it adds no catalog row and
   takes no spool number; a write is one transaction, refused whole when a line is an error,

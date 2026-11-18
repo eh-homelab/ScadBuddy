@@ -454,7 +454,8 @@ export const filamentTools: Tool[] = [
     label: 'Archive or restore a spool',
     description:
       '`archived: true` takes a spool off the lists (an empty or retired reel); `false` puts it back. A spool ' +
-      'that has printed cannot be deleted, only archived. Only what the user says. Writes ScadBuddy only.',
+      'that has printed cannot be deleted, only archived. Only what the user says. Writes ScadBuddy; with tag sync on (filament_sync.tags), ' +
+      'the archived spool\'s tag is then cleared in Bambuddy.',
     input: z.object({ spool_id: z.string().uuid(), archived: z.boolean().default(true) }),
     risk: 'write',
     source: SOURCE,
