@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 import traceback
@@ -12,6 +13,8 @@ from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
 import pytest
+from playwright.async_api import Error as PlaywrightError
+from playwright.async_api import Page
 from pydantic import SecretStr
 
 from scadbuddy.profile_fetch import site
@@ -281,3 +284,88 @@ async def test_a_slash_in_the_export_name_becomes_a_dash(
     await browser.ensure_in_my_spools(30173)
     exported = await browser.export(30173, "H2C", "0.4")
     assert exported.name == "Inland PLA+ @BBL H2C-H2D 0.4 nozzle.json"
+
+
+def _chain(error: BaseException) -> list[BaseException]:
+    """``error`` and every exception its ``__cause__`` and ``__context__`` reach."""
+    seen: list[BaseException] = []
+    todo: list[BaseException] = [error]
+    while todo:
+        current = todo.pop()
+        if any(current is known for known in seen):
+            continue
+        seen.append(current)
+        todo.extend(e for e in (current.__cause__, current.__context__) if e is not None)
+    return seen
+
+
+def _chain_holds_no_secret(error: BaseException) -> None:
+    for linked in _chain(error):
+        _no_secret(str(linked))
+        _no_secret(repr(linked))
+
+
+async def _crash(page: Page) -> None:
+    """Crash the page's renderer with Chromium's ``chrome://crash`` (plan build Decision
+    49). With the pinned 1.64.1 it crashes only a page that is not on an http(s) origin,
+    so the page leaves for ``about:blank`` first, and only one that has not posted the
+    login form (after that post the renderer hung instead). The navigation itself fails;
+    Playwright delivers the ``crash`` event with the next call on the page, so the helper
+    makes one and waits for the event."""
+    await page.goto("about:blank")
+    async with page.expect_event("crash", timeout=5_000):
+        with contextlib.suppress(PlaywrightError):
+            await page.goto("chrome://crash")
+        await page.title()
+
+
+async def test_a_failed_login_chain_holds_no_secret(replica: ReplicaServer, tmp_path: Path) -> None:
+    async with _site(replica, tmp_path, password="wrong-" + PASSWORD) as driver:
+        with pytest.raises(SiteError) as caught:
+            await driver.login()
+    assert caught.value.kind == "login_failed"
+    _chain_holds_no_secret(caught.value)
+
+
+async def test_a_crash_during_login_is_browser(browser: ThreeDfpSite) -> None:
+    """A renderer that crashed is a browser failure, retried; not a refused login, which
+    is not."""
+    await _crash(browser.page)
+    with pytest.raises(SiteError) as caught:
+        await browser.login()
+    assert caught.value.kind == "browser"
+    _chain_holds_no_secret(caught.value)
+
+
+async def test_a_browser_failure_chain_holds_no_secret(browser: ThreeDfpSite) -> None:
+    await _crash(browser.page)
+    with pytest.raises(SiteError) as caught:
+        await browser.ensure_in_my_spools(30173)
+    assert caught.value.kind == "browser"
+    _chain_holds_no_secret(caught.value)
+
+
+async def test_the_crash_event_is_wired(browser: ThreeDfpSite) -> None:
+    """The page's ``crash`` event is wired: a wait for Vercel's check on a crashed page
+    ends as ``browser`` at once. Without the event's flag the wait's Playwright error
+    would escape as it is (measured with 1.64.1: on a crashed page ``title`` answers
+    ``""`` and ``wait_for_timeout`` raises "Page crashed", while ``is_closed`` stays
+    false)."""
+    await _crash(browser.page)
+    assert not browser.page.is_closed()
+    with pytest.raises(SiteError) as caught:
+        await browser._clear_checkpoint()
+    assert caught.value.kind == "browser"
+
+
+async def test_a_list_that_fills_within_the_option_wait_is_used(
+    browser: ThreeDfpSite, replica: ReplicaServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A combobox whose options appear a moment after it opens, within `OPTION_WAIT_MS`,
+    exports; only a list that stays empty is ``option_missing``."""
+    monkeypatch.setattr(site, "OPTION_WAIT_MS", 3_000)
+    replica.site.option_delay_ms = 800
+    await browser.login()
+    await browser.ensure_in_my_spools(30173)
+    exported = await browser.export(30173, "H2C", "0.4")
+    assert exported.name == EXPORT_NAME

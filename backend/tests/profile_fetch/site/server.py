@@ -38,6 +38,8 @@ class Replica:
     #: The three option lists of the export dialog: slicer, printer, nozzle.
     options: list[list[str]] = field(default_factory=lambda: [SLICERS, PRINTERS, NOZZLES])
     export_name: str = EXPORT_NAME
+    #: How long an opened combobox waits before it shows its options.
+    option_delay_ms: int = 0
     #: ``unhooked`` starts the download with a synthetic click event, which the driver's
     #: blob hook (it patches ``HTMLAnchorElement.prototype.click``) does not see.
     download: Literal["hooked", "unhooked"] = "hooked"
@@ -141,6 +143,7 @@ def _handler(site: Replica) -> type[BaseHTTPRequestHandler]:
                             IN_SPOOLS="true" if tdfp_id in site.in_spools else "false",
                             OPTIONS=json.dumps(site.options),
                             UNHOOKED="true" if site.download == "unhooked" else "false",
+                            OPTION_DELAY_MS=str(site.option_delay_ms),
                         ),
                     )
                     return

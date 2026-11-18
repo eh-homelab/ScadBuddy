@@ -14,6 +14,7 @@
     <script>
       const OPTIONS = __OPTIONS__;
       const UNHOOKED = __UNHOOKED__;
+      const OPTION_DELAY_MS = __OPTION_DELAY_MS__;
       let dialog = null;
       let list = null;
       const closeList = () => {
@@ -33,18 +34,25 @@
             closeList();
             list = document.createElement("div");
             list.setAttribute("role", "listbox");
-            for (const value of OPTIONS[i]) {
-              const option = document.createElement("div");
-              option.setAttribute("role", "option");
-              option.textContent = value;
-              option.onclick = () => {
-                chosen[i] = value;
-                box.textContent = value;
-                closeList();
-              };
-              list.appendChild(option);
-            }
             document.body.appendChild(list);
+            const shown = list;
+            const fill = () => {
+              if (list !== shown) return;
+              for (const value of OPTIONS[i]) {
+                const option = document.createElement("div");
+                option.setAttribute("role", "option");
+                option.textContent = value;
+                option.onclick = () => {
+                  chosen[i] = value;
+                  box.textContent = value;
+                  closeList();
+                };
+                list.appendChild(option);
+              }
+            };
+            // A client-rendered list can fill a moment after it opens.
+            if (OPTION_DELAY_MS > 0) setTimeout(fill, OPTION_DELAY_MS);
+            else fill();
           };
           dialog.appendChild(box);
         });

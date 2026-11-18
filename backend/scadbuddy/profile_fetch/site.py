@@ -182,7 +182,12 @@ class ThreeDfpSite:
         except PlaywrightTimeoutError:
             failed = SiteError("timeout", "the 3dfilamentprofiles.com login timed out")
         except PlaywrightError:
-            failed = SiteError("login_failed", "the 3dfilamentprofiles.com login failed")
+            if self._page_gone():
+                # A crashed renderer or a closed page is the browser's failure, retried;
+                # not a refused login, which is not.
+                failed = SiteError("browser", "the browser failed during the login")
+            else:
+                failed = SiteError("login_failed", "the 3dfilamentprofiles.com login failed")
         if failed is not None:
             # Raised outside the handler, so neither its cause nor its context is
             # Playwright's error: a fill's call log quotes the value it filled (measured
@@ -309,9 +314,13 @@ class ThreeDfpSite:
     def _on_crash(self, page: Page) -> None:
         self._crashed = True
 
+    def _page_gone(self) -> bool:
+        """The page is closed or its renderer crashed."""
+        return self.page.is_closed() or self._crashed
+
     def _check_page(self) -> None:
         """`SiteError` ``browser`` when the page is closed or its renderer crashed."""
-        if self.page.is_closed() or self._crashed:
+        if self._page_gone():
             raise SiteError("browser", "the browser page closed or crashed")
 
     async def _at_checkpoint(self) -> bool:
