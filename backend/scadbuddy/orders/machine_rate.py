@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import uuid
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
@@ -218,6 +219,10 @@ EventName = Annotated[str, Field(min_length=1, max_length=100)]
 IMPORT_SOURCE = "bambuddy:"
 #: An imported event's ``created_by``.
 IMPORTED_BY = "bambuddy"
+#: The bounds of an imported row's ``bambuddy_history_id integer``.
+INT32_MIN, INT32_MAX = -(2**31), 2**31 - 1
+#: The least ``hours_at_maintenance`` that rounds to 1e9, past ``numeric(10, 1)``.
+HOURS_AT_LIMIT = 999_999_999.95
 
 
 class MachineRateEvent(BaseModel):
@@ -1246,7 +1251,8 @@ class MachineRateStore:
         """Bambuddy's log rows (task name, row) kept as imported task events, each once by
         its ``bambuddy:<history id>`` source (§3.7, §4), and the read stamped
         (``events_read_at``), in one transaction under the printer's event lock. A row
-        read again, or whose source a ScadBuddy event holds, writes nothing. How many it
+        read again, or whose source a ScadBuddy event holds, writes nothing, and one past
+        the columns' bounds (its history id or its counter) is skipped. How many it
         wrote; None, writing nothing, once the printer no longer links
         ``bambuddy_printer_id`` (unlinked, or linked to another since the read began)."""
         key = printer_uuid(printer)
@@ -1266,11 +1272,19 @@ class MachineRateStore:
             if linked is None or linked["bambuddy_printer_id"] != bambuddy_printer_id:
                 return None
             for task, row in done:
-                hours: Decimal | None = reading(row.hours_at)
-                if hours is not None and hours < 0:
+                if (
+                    not INT32_MIN <= row.history_id <= INT32_MAX
+                    or not math.isfinite(row.hours_at)
+                    or row.hours_at >= HOURS_AT_LIMIT
+                ):
+                    # Past the columns' bounds (`bambuddy_history_id integer`, `hours_at
+                    # numeric(10, 1)`), or no number: skipped, as a long task name is.
+                    continue
+                hours: Decimal | None = None
+                if row.hours_at >= 0:
                     # A counter below 0 (a negative offset typed in Bambuddy) is no
                     # reading: the event opens and closes no gap.
-                    hours = None
+                    hours = reading(row.hours_at)
                 source = f"{IMPORT_SOURCE}{row.history_id}"
                 written += conn.execute(
                     "INSERT INTO printer_maintenance_events (id, printer, task, performed_at,"
@@ -1665,14 +1679,20 @@ def actuals_view(breakdown: MachineRateBreakdown, stored: Stored) -> ActualsView
 UNANSWERED = (ApiError, NotLinkedError, ValidationError, json.JSONDecodeError, UnicodeDecodeError)
 
 
+#: How a read of a printer's Bambuddy log ended: ``read`` and kept; ``unanswered`` (the
+#: task list or the log could not be read); ``unlinked`` (the printer no longer links the
+#: Bambuddy printer read, so nothing was kept).
+LogRead = Literal["read", "unanswered", "unlinked"]
+
+
 @dataclass
 class PricedRate:
     """A printer's rate now, the tasks read from Bambuddy for it (None: none read), and
-    whether its Bambuddy log was read (None: not asked, not linked or no profile)."""
+    how its Bambuddy log read ended (None: not asked, not linked or no profile)."""
 
     breakdown: MachineRateBreakdown
     tasks: list[MaintenanceTask] | None = None
-    log: bool | None = None
+    log: LogRead | None = None
 
 
 class MachineRates:
@@ -1715,7 +1735,7 @@ class MachineRates:
             return PricedRate(book)
         tasks: list[MaintenanceTask] | None = None
         intervals: IntervalSource = "typed"
-        log: bool | None = None
+        log: LogRead | None = None
         if row.bambuddy_printer_id is not None:
             intervals = "stored"
             if live:
@@ -1726,7 +1746,7 @@ class MachineRates:
                     self.store.remember_intervals, row.id, row.bambuddy_printer_id, tasks
                 )
             if read_log:
-                log = tasks is not None and await self._read_log(row, tasks, stored)
+                log = "unanswered" if tasks is None else await self._read_log(row, tasks, stored)
         rate = compute(
             stored.profile,
             stored.wear,
@@ -1759,10 +1779,11 @@ class MachineRates:
 
     async def _read_log(
         self, row: PrinterRow, tasks: Sequence[MaintenanceTask], stored: Stored
-    ) -> bool:
+    ) -> LogRead:
         """The log of each task Bambuddy names for the printer (at most `MAX_ROWS`), read
-        whole, then kept (§3.7); whether it was. A read that fails keeps nothing and
-        leaves ``events_read_at`` as it was. ``stored`` takes the events it added."""
+        whole, then kept (§3.7), and how that ended. A read that fails, or one the printer
+        was unlinked during, keeps nothing and leaves ``events_read_at`` as it was.
+        ``stored`` takes the events it added."""
         assert row.bambuddy_printer_id is not None
         items: dict[int, str] = {}
         for task in tasks:
@@ -1776,7 +1797,7 @@ class MachineRates:
                 " machine rate",
                 extra={"printer": row.id},
             )
-            return False
+            return "unanswered"
         done = [
             (items[item], entry)
             for item, entries in logs.items()
@@ -1787,33 +1808,43 @@ class MachineRates:
             self.store.import_events, row.id, row.bambuddy_printer_id, done
         )
         if written is None:
-            return False
+            return "unlinked"
         if written:
             fresh = await asyncio.to_thread(self.store.stored, row.id)
             if fresh.profile is not None:
                 stored.logged, stored.counts = fresh.logged, fresh.counts
-        return True
+        return "read"
 
-    async def read_log(self, row: PrinterRow) -> bool:
-        """`POST …/machine-rate/import`'s and the sweep's read of one printer's Bambuddy
-        log (§3.7): whether it was read. False, reading nothing, for a printer not linked
-        or with no profile (the rate then lists no task)."""
-        return bool((await self._priced(row, live=True, read_log=True)).log)
+    async def read_log(self, row: PrinterRow) -> LogRead | None:
+        """The sweep's read of one printer's Bambuddy log (:meth:`read_logs`, §3.7), and
+        how it ended. None, reading nothing, for a printer not linked or with no profile
+        (the rate then lists no task). The view and its button read the log in
+        :meth:`view`, through the same :meth:`_priced`."""
+        return (await self._priced(row, live=True, read_log=True)).log
 
     async def read_logs(self) -> tuple[int, int]:
         """The housekeeping sweep (§3.7): the log of every printer linked to Bambuddy
-        with a profile, one after another, each failing alone. How many were read and how
-        many failed."""
+        with a profile, one after another through :meth:`read_log`. Each fails alone: any
+        error is logged and counted, and the next printer is read. How many were read and
+        how many failed; a printer unlinked during its read is neither."""
         if not self.integrations.linked:
             return 0, 0
         read = failed = 0
         for row in await asyncio.to_thread(self.printers.list):
             if row.bambuddy_printer_id is None:
                 continue
-            log = (await self._priced(row, live=True, read_log=True)).log
-            if log is True:
+            try:
+                log = await self.read_log(row)
+            except Exception:
+                logger.exception(
+                    "a printer's maintenance log could not be imported",
+                    extra={"printer": row.id},
+                )
+                failed += 1
+                continue
+            if log == "read":
                 read += 1
-            elif log is False:
+            elif log == "unanswered":
                 failed += 1
         return read, failed
 
@@ -1916,8 +1947,8 @@ class MachineRates:
         """None for a printer the registry does not hold. A linked printer with a profile
         reads its Bambuddy log after the live task read (§3.7); one that cannot be read
         keeps the stored events, unless ``require_log`` (the "Read from Bambuddy" button):
-        then a refusal says why (409 ``not_linked``, 409 ``no_machine_rate``, 503
-        ``log_unavailable``)."""
+        then a refusal says why (409 ``not_linked``, also for a printer unlinked during the
+        read, 409 ``no_machine_rate``, 503 ``log_unavailable``)."""
         row = await asyncio.to_thread(self.printers.get, printer)
         if row is None:
             return None
@@ -1935,7 +1966,11 @@ class MachineRates:
                 "no_machine_rate",
                 "The printer has no machine rate inputs yet: set them, then read its log.",
             )
-        if require_log and not priced.log:
+        if require_log and priced.log == "unlinked":
+            raise refusal(
+                409, "not_linked", "The printer is not linked to Bambuddy: it has no log to read."
+            )
+        if require_log and priced.log == "unanswered":
             raise refusal(
                 503,
                 "log_unavailable",
