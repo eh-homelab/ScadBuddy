@@ -321,7 +321,9 @@ export const filamentTools: Tool[] = [
       'insert type and place as text), `low_stock`, and: the `tag` bound now, the `last_tag` it had before with ' +
       '`held_by` (the number of the spool that holds that tag now), its effective `presets` and `k_values`, the ' +
       '`basis` of `grams_left` (the anchor reading and the deltas taken off it), and `in_use` (it has printed, so ' +
-      'it can be archived but not deleted).',
+      'it can be archived but not deleted), the `invoice` it was bought on (number, date, supplier, line and ' +
+      '`unit_cost`; `null` if none), and `type_suppliers` (the unarchived products of its type from unarchived suppliers, each with its ' +
+      'newest price and price per kg).',
     input: z.object({ spool_id: z.string().uuid().describe("A spool's `id` from filament_spool_list") }),
     risk: 'read',
     source: SOURCE,

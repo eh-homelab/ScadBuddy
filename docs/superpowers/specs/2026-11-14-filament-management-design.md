@@ -400,6 +400,30 @@ Low-cardinality labels only: material, brand, location, not the spool id.
   allocated cost (line plus its tax, plus its share of shipping; §9).
 - Shopping list: BB parity with `/inventory/shopping-list`.
 
+**As built (#6266).** The plan `docs/superpowers/plans/2026-11-17-filament-suppliers.md`
+holds each decision and what it costs if wrong.
+
+- **Price point basis.** A price point is the price of one pack, tax included, shipping
+  excluded, in the invoice's currency. `price_per_kg` is derived on read from the pack size
+  and the type's label weight, so a label-weight edit leaves no stale number. A price point
+  never rewrites a type's `cost_per_kg`; "Use as default cost" is a person's click.
+- **Quantity counts spools.** A line's `quantity` is the number of spools; `pack_size` only
+  sizes the price point. A line may fill spools that exist (`update_spool_ids`).
+- **Tax and shipping.** All lines carry `line_tax`, or none do and the invoice's `tax` is
+  spread by line subtotal (basis `receipt-wide <rate>%`); a mix is a 422, and tax on lines
+  that cost nothing is a 422. Shipping is spread by line total. Sums round by largest
+  remainder at four places, so the lines add up to the invoice. Confirm needs the invoice's
+  currency to be the shop's and the difference within 0.05.
+- **Frozen confirmed invoices.** A confirmed invoice keeps only its note and file; its lines
+  and header refuse edits and it cannot be deleted. A second confirm returns it and makes
+  nothing.
+- **Shopping list statuses.** An item is `pending` or `purchased`; a repeat keeps the first
+  `purchased_at`. The list shows newest first, pending above purchased.
+- **Draft bounds and archived suppliers.** A line's quantity is at most 1,000; a line may
+  not fill more spools than its quantity, and its total must fit `numeric(12,4)`; each is a
+  422. A draft for an archived supplier is a 422, and confirming an invoice whose supplier
+  became archived is a 409.
+
 ## 6. Capture from events
 
 - **Tray changes.** SB receives the LAN MQTT reports, and the CRUD service

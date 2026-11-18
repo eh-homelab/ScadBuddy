@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from scadbuddy.api.limits import (
+    INVOICE_FILE_UPLOAD_PATH,
     MAX_MULTIPART_BODY_BYTES,
     MAX_TEXT_BODY_BYTES,
     ORDER_ATTACHMENT_UPLOAD_PATH,
@@ -158,3 +159,8 @@ def test_every_order_upload_route_takes_the_media_limit(path: str) -> None:
 )
 def test_no_other_order_route_takes_the_media_limit(path: str) -> None:
     assert not ORDER_ATTACHMENT_UPLOAD_PATH.match(path)
+
+
+def test_an_invoice_file_upload_takes_the_media_limit() -> None:
+    assert INVOICE_FILE_UPLOAD_PATH.match("/api/v1/filament/invoices/abc/file")
+    assert not INVOICE_FILE_UPLOAD_PATH.match("/api/v1/filament/invoices/abc/lines")

@@ -4,6 +4,7 @@ import { Route, Routes } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { getSpool, getType, listSpoolEvents, listSpools, patchSpool, setSpoolKValues, setSpoolPresets } from '../../api/filament'
 import { H2C, L, spoolId, T, TAG } from '../../mocks/features/filament/seed'
+import { INVOICE } from '../../mocks/features/filamentPurchasingSeed'
 import { server } from '../../mocks/server'
 import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
@@ -421,5 +422,22 @@ describe('the spool page', () => {
     await user.click(screen.getByRole('button', { name: 'Save spool' }))
     expect(await screen.findByRole('alert')).toBeInTheDocument()
     expect(temp).toHaveValue('300')
+  })
+
+  it("links the invoice the spool was bought on, and lists the type's suppliers", async () => {
+    open(1)
+    await heading(1)
+    const link = await screen.findByRole('link', { name: /Invoice US-441907 · Bambu Lab/ })
+    expect(link).toHaveAttribute('href', `/filament/invoices/${INVOICE.CONFIRMED_A}`)
+    expect(link.parentElement).toHaveTextContent(/line 1/)
+    const purchasing = screen.getByText('Purchasing').parentElement!
+    expect(purchasing).toHaveTextContent('Bambu Lab')
+    expect(purchasing).toHaveTextContent('A00-W1')
+  })
+
+  it('shows no Invoice row for a spool with no invoice', async () => {
+    open(2)
+    await heading(2)
+    expect(screen.queryByRole('link', { name: /^Invoice / })).not.toBeInTheDocument()
   })
 })

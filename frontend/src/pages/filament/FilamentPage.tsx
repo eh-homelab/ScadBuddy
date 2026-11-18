@@ -3,8 +3,11 @@ import { tabsListVariants } from '@/components/ui/tabs'
 import { cn } from '@/lib/utils'
 import { CatalogTab } from './CatalogTab'
 import { LedgerTab } from './LedgerTab'
+import { InvoicesTab } from './InvoicesTab'
 import { LocationsTab } from './LocationsTab'
+import { ShoppingListTab } from './ShoppingListTab'
 import { SpoolsTab } from './SpoolsTab'
+import { SuppliersTab } from './SuppliersTab'
 import { TagsTab } from './TagsTab'
 import { TypesTab } from './TypesTab'
 import { FILAMENT_TABS, type TabId } from './tabs'
@@ -57,6 +60,9 @@ export function FilamentPage({ tab }: { tab: TabId }) {
         {tab === 'locations' && <LocationsTab />}
         {tab === 'catalog' && <CatalogTab />}
         {tab === 'ledger' && <LedgerTab />}
+        {tab === 'suppliers' && <SuppliersTab />}
+        {tab === 'invoices' && <InvoicesTab />}
+        {tab === 'shopping-list' && <ShoppingListTab />}
       </div>
     </div>
   )

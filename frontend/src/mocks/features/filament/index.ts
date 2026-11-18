@@ -1,9 +1,12 @@
 import { HttpResponse, http } from 'msw'
+import { newId } from '../../newId'
 import type { components } from '../../../api/schema'
 import type { FilamentInventorySpool, FilamentInventoryView, FilamentSpool } from '../../../api/types'
 import { parseRgba } from '../../../lib/rgba'
 // A module cycle (`orders/priceBook.ts` imports `inventoryRows` from here): use it only inside functions.
 import { linkTypeFilament } from '../orders/priceBook'
+// Also a cycle (`filamentPurchasing.ts` calls `addInvoicedSpools`): only inside functions.
+import { invoiceRefOf, typeSuppliersOf } from '../filamentPurchasing'
 import { H2C, seed, type Catalogs, type Seed, type SpoolRow } from './seed'
 
 type S = components['schemas']
@@ -26,7 +29,11 @@ let state: Seed = seed()
 export function reset() {
   state = seed()
   imports.clear()
+  invoicedLine.clear()
 }
+
+/** The invoice line each spool `addInvoicedSpools` made was bought on (#6266). */
+const invoicedLine = new Map<string, string>()
 
 /** The default low-stock percentage (`filament/settings.py`, F3). */
 const LOW_STOCK_PCT = 20
@@ -186,12 +193,14 @@ function detail(row: SpoolRow): S['SpoolDetail'] {
     k_values: effectiveKValues(row.id),
     basis: { anchor, deltas },
     in_use: ledger.some((event) => event.kind === 'print_started' || event.kind === 'print_ended'),
+    invoice: invoiceRefOf(row.id, invoicedLine.get(row.id)),
+    type_suppliers: row.type_id ? typeSuppliersOf(row.type_id) : [],
   }
 }
 
 function addEvent(spoolId: string, kind: S['SpoolEvent']['kind'], values: Partial<S['SpoolEvent']> = {}): S['SpoolEvent'] {
   const event: S['SpoolEvent'] = {
-    id: crypto.randomUUID(),
+    id: newId(),
     spool_id: spoolId,
     at: now(),
     kind,
@@ -508,7 +517,7 @@ function under(parent: string, id: string): boolean {
 /** A spool's new own columns with defaults, from a create body. */
 function newSpool(body: Record<string, unknown>): SpoolRow {
   const blank: SpoolRow = {
-    id: crypto.randomUUID(),
+    id: newId(),
     number: Math.max(0, ...state.spools.map((row) => row.number)) + 1,
     type_id: null,
     brand_id: null,
@@ -544,6 +553,119 @@ function newSpool(body: Record<string, unknown>): SpoolRow {
     updated_at: now(),
   }
   return { ...blank, ...(body as Partial<SpoolRow>) }
+}
+
+/** `POST /filament/types`: the new type, or the refusal; an invoice's confirm makes its proposed types here too (#6266). */
+export function createType(raw: unknown): S['SpoolType'] | Response {
+  const extra = extraKeys(raw, FIELDS.typeCreate)
+  if (extra) return extra
+  const body = normalised(raw as S['SpoolTypeCreate-Input'])
+  const refused = typeRefusal(body)
+  if (refused) return refused
+  const made = linkPriceBook({
+    brand_id: null,
+    subtype_id: null,
+    category_id: null,
+    effect_id: null,
+    colour_name: null,
+    extra_colours: null,
+    density_g_cm3: null,
+    nozzle_temp_min: null,
+    nozzle_temp_max: null,
+    bed_temp_min: null,
+    bed_temp_max: null,
+    insert_type_id: null,
+    low_stock_pct: null,
+    cost_per_kg: null,
+    note: null,
+    ...body,
+    id: newId(),
+    filament_id: null,
+    archived_at: null,
+    created_at: now(),
+    updated_at: now(),
+  })
+  state.types.push(made)
+  return made
+}
+
+/** A type as the purchasing mocks read it (#6266): its code and label, its label weight, or `null` for none. */
+export function typeInfo(id: string): { code: string; label: string; label_weight_g: number; material: string; subtype: string | null; brand: string | null; colour_name: string | null } | null {
+  const type = state.types.find((one) => one.id === id)
+  if (!type) return null
+  return {
+    code: type.code,
+    label: type.colour_name ?? type.code,
+    label_weight_g: type.label_weight_g,
+    material: nameOf('materials', type.material_id) ?? '',
+    subtype: nameOf('subtypes', type.subtype_id),
+    brand: nameOf('brands', type.brand_id),
+    colour_name: type.colour_name,
+  }
+}
+
+/** Whether an unarchived type has the code (`filament_spool_types_code`, case-blind). */
+export const typeCodeTaken = (code: string) => state.types.some((type) => !type.archived_at && sameName(type.code, code))
+
+/** The spools of `ids` that exist, their grams left (unarchived only) and the grams their prints used (#6266 stats). */
+export function spoolUsage(ids: readonly string[]): { count: number; remaining_g: number; consumed_g: number } {
+  const rows = state.spools.filter((row) => ids.includes(row.id))
+  const used = state.events.filter((event) => ids.includes(event.spool_id) && event.kind.startsWith('print') && event.delta_g != null)
+  return {
+    count: rows.length,
+    remaining_g: rows.filter((row) => !row.archived_at).reduce((sum, row) => sum + (row.grams_left ?? 0), 0),
+    consumed_g: used.reduce((sum, event) => sum - (event.delta_g ?? 0), 0),
+  }
+}
+
+/** What `createType` would refuse for a proposed type, or `null`: checked before an invoice's confirm writes anything (#6266). */
+export function checkTypeProposal(raw: unknown): Response | null {
+  return extraKeys(raw, FIELDS.typeCreate) ?? typeRefusal(normalised(raw as S['SpoolTypeCreate-Input']))
+}
+
+/**
+ * Why a spool cannot be filled in by an invoice line of `typeId` (`null` for a type the
+ * line has yet to make), or `null` when it can: `filament/invoices.py` `_claimed`.
+ */
+export function spoolClaimRefusal(id: string, typeId: string | null): string | null {
+  const row = state.spools.find((one) => one.id === id)
+  if (!row) return 'does not exist'
+  if (row.archived_at) return 'is archived'
+  if (invoicedLine.has(id) || invoiceRefOf(id)) return 'already belongs to an invoice line'
+  if (row.cost_per_kg != null) return 'already has its own cost'
+  if (row.type_id != null && row.type_id !== typeId) return 'has another spool type'
+  return null
+}
+
+/** The spool's own label weight in grams, if it has one (`_claimed`: the cost uses it before the type's). */
+export const spoolLabelWeight = (id: string) => state.spools.find((one) => one.id === id)?.label_weight_g ?? null
+
+/** Fills an existing spool in from an invoice line: its type and cost, and the line it was bought on (`_confirm_line`). */
+export function updateInvoicedSpool(id: string, typeId: string, costPerKg: string, lineId: string): void {
+  const at = state.spools.findIndex((one) => one.id === id)
+  const row = state.spools[at]!
+  state.spools[at] = { ...row, type_id: typeId, cost_per_kg: costPerKg, updated_at: now() }
+  addEvent(id, 'edited', { ref_kind: 'invoice_line', ref_id: lineId, actor: `invoice:${lineId}`, data: { changes: { type_id: typeId, cost_per_kg: costPerKg } } })
+  invoicedLine.set(id, lineId)
+}
+
+/**
+ * #6266 — what an invoice's confirm makes: `count` new spools of the type at `costPerKg`
+ * (a decimal string), full to the type's label weight, each bought on invoice line
+ * `lineId` (`filament/invoices.py` `_confirm_line`). Answers their ids.
+ */
+export function addInvoicedSpools(typeId: string, count: number, costPerKg: string, lineId: string): string[] {
+  const type = state.types.find((one) => one.id === typeId)
+  const label = type?.label_weight_g ?? 1000
+  const ids: string[] = []
+  for (let i = 0; i < count; i++) {
+    const made = newSpool({ type_id: typeId, cost_per_kg: costPerKg, grams_left: label })
+    state.spools.push(made)
+    addEvent(made.id, 'created', { source: null, grams_after: label, ref_kind: 'invoice_line', ref_id: lineId, actor: `invoice:${lineId}` })
+    invoicedLine.set(made.id, lineId)
+    ids.push(made.id)
+  }
+  return ids
 }
 
 // -- the CSV import (`filament/csv_import.py`, #6262 Task 15) ------------------------
@@ -695,7 +817,7 @@ function importRow(row: Record<string, string | null>, line: number, write: bool
   for (const [column, name] of fresh) {
     const kind = CSV_CATALOGS[column]
     const blank = Object.fromEntries([...CATALOG_FIELDS[kind]].map((field) => [field, null]))
-    const made = { ...blank, name, sort_order: 1000, id: crypto.randomUUID(), archived_at: null, created_at: now(), updated_at: now() }
+    const made = { ...blank, name, sort_order: 1000, id: newId(), archived_at: null, created_at: now(), updated_at: now() }
     if (kind === 'subtypes') Object.assign(made, { material_id: (values.material_id as string | undefined) ?? material })
     ;(state.catalogs[kind] as unknown[]).push(made)
     values[`${column}_id`] = made.id
@@ -773,7 +895,7 @@ export const handlers = [
     const refused = catalogRefusal(kind, body, body)
     if (refused) return refused
     const blank = Object.fromEntries([...CATALOG_FIELDS[kind]].map((field) => [field, null]))
-    const made = { ...blank, sort_order: 0, ...body, id: crypto.randomUUID(), archived_at: null, created_at: now(), updated_at: now() }
+    const made = { ...blank, sort_order: 0, ...body, id: newId(), archived_at: null, created_at: now(), updated_at: now() }
     ;(state.catalogs[kind] as unknown[]).push(made)
     return HttpResponse.json(made, { status: 201 })
   }),
@@ -799,37 +921,8 @@ export const handlers = [
     return HttpResponse.json(state.types.filter((type) => archived || !type.archived_at).sort((a, b) => a.code.localeCompare(b.code)))
   }),
   http.post(`${BASE}/types`, async ({ request }) => {
-    const raw = await request.json()
-    const extra = extraKeys(raw, FIELDS.typeCreate)
-    if (extra) return extra
-    const body = normalised(raw as S['SpoolTypeCreate'])
-    const refused = typeRefusal(body)
-    if (refused) return refused
-    const made = linkPriceBook({
-      brand_id: null,
-      subtype_id: null,
-      category_id: null,
-      effect_id: null,
-      colour_name: null,
-      extra_colours: null,
-      density_g_cm3: null,
-      nozzle_temp_min: null,
-      nozzle_temp_max: null,
-      bed_temp_min: null,
-      bed_temp_max: null,
-      insert_type_id: null,
-      low_stock_pct: null,
-      cost_per_kg: null,
-      note: null,
-      ...body,
-      id: crypto.randomUUID(),
-      filament_id: null,
-      archived_at: null,
-      created_at: now(),
-      updated_at: now(),
-    })
-    state.types.push(made)
-    return HttpResponse.json(made, { status: 201 })
+    const made = createType(await request.json())
+    return made instanceof Response ? made : HttpResponse.json(made, { status: 201 })
   }),
   http.get(`${BASE}/types/:id`, ({ params }) => {
     const type = state.types.find((one) => one.id === params.id)
@@ -993,7 +1086,7 @@ export const handlers = [
       tag.tag_uid ??= uid
       tag.tray_uuid ??= tray
     } else {
-      tag = { id: crypto.randomUUID(), kind: body.kind ?? 'other', tag_uid: uid, tray_uuid: tray, raw_blob: null, note: null, created_at: now() }
+      tag = { id: newId(), kind: body.kind ?? 'other', tag_uid: uid, tray_uuid: tray, raw_blob: null, note: null, created_at: now() }
       state.tags.push(tag)
     }
     const held = openBinding(tag.id)
@@ -1001,7 +1094,7 @@ export const handlers = [
     if (held) closeBinding(held, 'rebound')
     const other = state.bindings.find((one) => one.spool_id === row.id && !one.unbound_at)
     if (other) closeBinding(other, 'rebound')
-    const binding: S['TagBinding'] = { id: crypto.randomUUID(), tag_id: tag.id, spool_id: row.id, override: body.override ?? false, bound_at: now(), unbound_at: null, reason: null }
+    const binding: S['TagBinding'] = { id: newId(), tag_id: tag.id, spool_id: row.id, override: body.override ?? false, bound_at: now(), unbound_at: null, reason: null }
     state.bindings.push(binding)
     addEvent(row.id, 'tag_bound', { data: { tag_id: tag.id } })
     return HttpResponse.json(binding, { status: 201 })
@@ -1169,7 +1262,7 @@ export const handlers = [
       tray_id: null,
       note: null,
       ...body,
-      id: crypto.randomUUID(),
+      id: newId(),
       archived_at: null,
       created_at: now(),
       updated_at: now(),
