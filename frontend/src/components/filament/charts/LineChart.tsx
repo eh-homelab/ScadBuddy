@@ -1,4 +1,5 @@
 import { useState, type PointerEvent } from 'react'
+import { yScale } from './scale'
 
 /** One point of the line: a time (epoch ms) and its value. */
 export interface LinePoint {
@@ -15,7 +16,7 @@ interface Props {
   formatTime?: (at: number) => string
   /** Points drawn as filled circles, each with the attribute `data-<name>`. */
   marks?: { name: string; points: readonly LinePoint[] }
-  /** Times drawn as short ticks on the x axis, each with the attribute `data-<name>`. */
+  /** Times drawn as short ticks on the x axis in ink, each with the attribute `data-<name>`. */
   ticks?: { name: string; at: readonly number[] }
   /** A value holds until the next point (a step), rather than sliding to it. */
   step?: boolean
@@ -29,23 +30,16 @@ const TOP = 8
 const BOTTOM = 18
 const TICK = 5
 
-/** The smallest round number at or above `max` (1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8 × 10ⁿ). */
-export function niceMax(max: number): number {
-  if (!(max > 0)) return 1
-  const power = 10 ** Math.floor(Math.log10(max))
-  for (const step of [1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]) if (step * power >= max) return step * power
-  return 10 * power
-}
-
 const dateText = (at: number) => new Date(at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 const attr = (name: string) => ({ [`data-${name}`]: '' })
 
 /**
  * #6269 — the one SVG line chart of the Filament section (the app has no chart library):
- * a zero-based y scale with three recessive grid lines, the first and last dates on the
+ * a y scale by `yScale` with three recessive grid lines, the first and last dates on the
  * x axis, a 2 px line in the accent ink, optional filled marks and axis ticks, and a
  * crosshair with the nearest point's value under the pointer. The marks and the line
- * share one colour: a single series needs no legend, and its label names it.
+ * share one colour: a single series needs no legend, and its label names it. The hover
+ * value is hidden from screen readers; the label and the page's table view carry it.
  */
 export function LineChart({ points, label, formatValue, formatTime = dateText, marks, ticks, step = false, width = 320, height = 120 }: Props) {
   const [hover, setHover] = useState<number | null>(null)
@@ -54,11 +48,11 @@ export function LineChart({ points, label, formatValue, formatTime = dateText, m
   const t0 = Math.min(...times, ...(ticks?.at ?? []))
   const t1 = Math.max(...times, ...(ticks?.at ?? []))
   const tSpan = t1 - t0 || 1
-  const top = niceMax(Math.max(...points.map((one) => one.value), 0))
+  const { lo, hi, grid } = yScale(points.map((one) => one.value))
   const plotW = width - LEFT - RIGHT
   const plotH = height - TOP - BOTTOM
   const x = (at: number) => LEFT + (t1 === t0 ? 0 : ((at - t0) / tSpan) * plotW)
-  const y = (value: number) => TOP + plotH - (Math.max(value, 0) / top) * plotH
+  const y = (value: number) => TOP + plotH - ((Math.max(value, lo) - lo) / (hi - lo)) * plotH
   const fixed = (n: number) => n.toFixed(1)
   const d = points
     .map((one, i) => {
@@ -66,7 +60,6 @@ export function LineChart({ points, label, formatValue, formatTime = dateText, m
       return step ? `H${fixed(x(one.at))} V${fixed(y(one.value))}` : `L${fixed(x(one.at))} ${fixed(y(one.value))}`
     })
     .join(' ')
-  const grid = [0, top / 2, top]
   const near = hover == null ? null : points[hover]
 
   const onMove = (event: PointerEvent<SVGSVGElement>) => {
@@ -83,7 +76,7 @@ export function LineChart({ points, label, formatValue, formatTime = dateText, m
       <svg role="img" aria-label={label} viewBox={`0 0 ${width} ${height}`} className="w-full overflow-visible text-primary" onPointerMove={onMove} onPointerLeave={() => setHover(null)}>
         <g className="text-border" aria-hidden="true">
           {grid.map((value) => (
-            <line key={value} x1={LEFT} x2={width - RIGHT} y1={y(value)} y2={y(value)} stroke="currentColor" strokeWidth={value === 0 ? 1 : 0.5} />
+            <line key={value} x1={LEFT} x2={width - RIGHT} y1={y(value)} y2={y(value)} stroke="currentColor" strokeWidth={value === lo ? 1 : 0.5} />
           ))}
         </g>
         <g className="fill-muted-foreground" fontSize={9} aria-hidden="true">
@@ -106,7 +99,7 @@ export function LineChart({ points, label, formatValue, formatTime = dateText, m
           )}
         </g>
         {ticks && (
-          <g className="text-muted-foreground" aria-hidden="true">
+          <g className="text-foreground" aria-hidden="true">
             {ticks.at.map((at, i) => (
               <line key={`${at}-${i}`} {...attr(ticks.name)} x1={x(at)} x2={x(at)} y1={TOP + plotH} y2={TOP + plotH - TICK} stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" />
             ))}
@@ -126,7 +119,7 @@ export function LineChart({ points, label, formatValue, formatTime = dateText, m
       </svg>
       {near && (
         <div
-          role="presentation"
+          aria-hidden="true"
           className={`pointer-events-none absolute top-0 z-10 rounded-md ${x(near.at) < width / 4 ? '' : x(near.at) > (width * 3) / 4 ? '-translate-x-full' : '-translate-x-1/2'} border bg-popover px-2 py-1 text-[12px] whitespace-nowrap text-popover-foreground shadow-sm`}
           style={{ left: `${(x(near.at) / width) * 100}%` }}
         >

@@ -1,11 +1,12 @@
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
-import { LineChart, niceMax } from './LineChart'
+import { LineChart } from './LineChart'
+import { niceMax } from './scale'
 
 const points = [
   { at: Date.parse('2026-11-01T00:00:00Z'), value: 1000 },
   { at: Date.parse('2026-11-05T00:00:00Z'), value: 700 },
-  { at: Date.parse('2026-11-09T00:00:00Z'), value: 400 },
+  { at: Date.parse('2026-11-09T00:00:00Z'), value: 350 },
 ]
 
 /** The path's x and y coordinates, in order. */
@@ -28,9 +29,9 @@ describe('the line chart', () => {
     expect(xs).toHaveLength(3)
     expect(xs[0]).toBe(36)
     expect(xs.at(-1)).toBe(320 - 8)
-    // A zero-based scale to 1000: the top value at the plot's top, 400 at 40 % of its height.
+    // A zero-based scale to 1000 (the lowest value is below 40 % of the top): the top value at the plot's top, 350 at 35 % of its height.
     expect(Math.min(...ys)).toBe(8)
-    expect(Math.max(...ys)).toBeCloseTo(8 + 94 - 0.4 * 94, 1)
+    expect(Math.max(...ys)).toBeCloseTo(8 + 94 - 0.35 * 94, 1)
   })
 
   it('draws a step line as horizontal then vertical moves', () => {
@@ -42,6 +43,29 @@ describe('the line chart', () => {
     const { container } = render(<LineChart points={points} label="Grams" formatValue={String} marks={{ name: 'anchor', points: points.slice(0, 1) }} ticks={{ name: 'plate', at: [points[1]!.at] }} />)
     expect(container.querySelectorAll('circle[data-anchor]')).toHaveLength(1)
     expect(container.querySelectorAll('line[data-plate]')).toHaveLength(1)
+  })
+
+  it('starts the scale below the lowest value, not at zero, when every value is in the top 60 %', () => {
+    const high = [
+      { at: Date.parse('2026-11-01T00:00:00Z'), value: 1000 },
+      { at: Date.parse('2026-11-05T00:00:00Z'), value: 905 },
+      { at: Date.parse('2026-11-09T00:00:00Z'), value: 820 },
+    ]
+    const { container } = render(<LineChart points={high} label="Grams" formatValue={String} width={320} height={120} />)
+    expect([...container.querySelectorAll('text')].slice(0, 3).map((text) => text.textContent)).toEqual(['800', '900', '1000'])
+    const { ys } = coordinates(container.querySelector('path[data-line]')!.getAttribute('d')!)
+    // 1000 at the plot's top, 820 a tenth of the way up from 800 at its bottom.
+    expect(Math.min(...ys)).toBe(8)
+    expect(Math.max(...ys)).toBeCloseTo(8 + 94 - 0.1 * 94, 1)
+  })
+
+  it('keeps the hover value out of the accessibility tree: the label names the chart', async () => {
+    const { container } = render(<LineChart points={points} label="Grams" formatValue={(value) => `${value} g`} />)
+    const svg = container.querySelector('svg')!
+    svg.getBoundingClientRect = () => ({ left: 0, top: 0, width: 320, height: 120, right: 320, bottom: 120, x: 0, y: 0, toJSON: () => ({}) })
+    fireEvent.pointerMove(svg, { clientX: 312, clientY: 60 })
+    const tip = await screen.findByText('350 g', { ignore: 'svg *' })
+    expect(tip.closest('[aria-hidden="true"]')).not.toBeNull()
   })
 
   it('rounds the top of the scale up to a round number', () => {

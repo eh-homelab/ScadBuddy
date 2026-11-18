@@ -3,19 +3,17 @@ import { LineChart, type LinePoint } from './charts/LineChart'
 
 const grams = (value: number) => `${Number(value.toFixed(1))} g`
 
-/** A plate's tick on the x axis: the end of a print, where its grams came off. */
-const PLATE_KINDS = new Set<GramsPoint['kind']>(['print_ended'])
-
 /**
  * #6269 — a spool's grams left over time, as SB believed them then (plan Decision 13):
- * a step line, the readings the grams anchored on as filled circles, and each plate as a
- * short tick on the x axis. Oldest first, as the history route sends the series.
+ * a step line, the readings the grams anchored on as filled circles in the accent, and
+ * each plate (`eventText` `plateTimes`) as a short tick on the x axis in ink, the colours the timeline
+ * gives readings and prints. Oldest first, as the history route sends the series.
  */
-export function GramsChart({ points, label }: { points: readonly GramsPoint[]; label: string }) {
+export function GramsChart({ points, plates: plateAt, label }: { points: readonly GramsPoint[]; plates: readonly string[]; label: string }) {
   if (points.length === 0) return <p className="text-[13px] text-muted-foreground">No weight history yet.</p>
   const line: LinePoint[] = points.map((one) => ({ at: Date.parse(one.at), value: one.grams }))
   const anchors = line.filter((_, i) => points[i]!.anchor)
-  const plates = line.filter((_, i) => PLATE_KINDS.has(points[i]!.kind)).map((one) => one.at)
+  const plates = plateAt.map((at) => Date.parse(at))
   const first = points[0]!.grams
   const last = points[points.length - 1]!.grams
   const name = `${label}: ${grams(first)} to ${grams(last)}, ${anchors.length} anchor ${anchors.length === 1 ? 'reading' : 'readings'}`
@@ -31,7 +29,7 @@ export function GramsChart({ points, label }: { points: readonly GramsPoint[]; l
         </span>
         {plates.length > 0 && (
           <span className="inline-flex items-center gap-1.5">
-            <svg aria-hidden="true" viewBox="0 0 8 8" className="size-2 text-muted-foreground">
+            <svg aria-hidden="true" viewBox="0 0 8 8" className="size-2 text-foreground">
               <line x1={4} x2={4} y1={1} y2={7} stroke="currentColor" strokeWidth={2} strokeLinecap="round" />
             </svg>
             A print

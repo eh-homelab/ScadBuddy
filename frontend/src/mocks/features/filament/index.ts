@@ -329,7 +329,7 @@ function summary(): S['InventorySummary'] {
     loaded: rows.filter((spool) => state.locations.find((place) => place.id === spool.location_id)?.printer_id).length,
     low_stock: rows.filter((spool) => spool.low_stock).length,
     needs_type: rows.filter((spool) => !spool.type_id).length,
-    // Every spool's plates, archived ones too (plan Decision 18); the mock books no BB pair.
+    // Every spool's plates, archived ones too (plan Decision 18), by the one plate rule (`metrics.plates`).
     consumed_g: plateGrams(state.events),
   }
 }
@@ -663,60 +663,76 @@ export function typeInfo(id: string): { code: string; label: string; label_weigh
 /** Whether an unarchived type has the code (`filament_spool_types_code`, case-blind). */
 export const typeCodeTaken = (code: string) => state.types.some((type) => !type.archived_at && sameName(type.code, code))
 
-/**
- * The grams the plates in `events` used, as `metrics.plates` counts them: only an ended
- * print counts (an open `print_started` estimate is 0 g), and a job that both SB (a print
- * run) and BB (a usage row) booked counts once, as BB's.
- */
-function plateGrams(events: readonly S['SpoolEvent'][]): number {
-  const jobOf = (event: S['SpoolEvent']) => {
-    const job = event.data?.job
-    if (typeof job === 'string') return job
-    const parts = event.ref_kind === 'print_run' ? event.ref_id?.split('/') : undefined
-    return parts && parts.length >= 3 ? parts.slice(1, -1).join('/') : null
-  }
-  const ended = events.filter((event) => event.kind === 'print_ended' && event.delta_g != null)
-  const bbJobs = new Set(ended.filter((event) => event.ref_kind === 'bb_usage').map(jobOf))
-  return ended
-    .filter((event) => !(event.ref_kind === 'print_run' && bbJobs.has(jobOf(event))))
-    .reduce((sum, event) => sum - (event.delta_g ?? 0), 0)
-}
-
 const DAY_MS = 86_400_000
 const BB_OUTCOMES = new Set(['completed', 'failed', 'cancelled'])
 const byTime = (a: S['SpoolEvent'], b: S['SpoolEvent']) => a.at.localeCompare(b.at) || a.seq - b.seq
+const PLATE_KINDS = new Set<S['SpoolEvent']['kind']>(['print_started', 'print_ended'])
 
-/** A spool's plates as `metrics.plates` counts them: BB's usage rows, and SB's runs BB did not book too. */
+/** `ledger.job_of`: `data.job`, else a print run's subtask in its `ref_id` (`run/subtask/slot`). */
+function jobOf(event: S['SpoolEvent']): string | null {
+  const job = event.data?.job
+  if (typeof job === 'string') return job
+  const parts = event.ref_kind === 'print_run' ? event.ref_id?.split('/') : undefined
+  return parts && parts.length >= 3 ? parts.slice(1, -1).join('/') : null
+}
+
+/**
+ * One spool's plates, oldest first, as `metrics.plates` counts them: an ended BB usage row,
+ * and an ended SB print run that BB did not book too (a `covered` one is none, a
+ * `not_applied` one a failed 0 g plate). An open `print_started` estimate and a `print`
+ * ref are no plate. The one plate rule of the mock: the history and `consumed_g` use it.
+ */
 function platesOf(events: readonly S['SpoolEvent'][]): { at: string; grams: number; outcome: string }[] {
-  const job = (event: S['SpoolEvent']) => (typeof event.data?.job === 'string' ? event.data.job : null)
-  const ended = events.filter((event) => event.kind === 'print_ended')
-  const bbJobs = new Set(ended.filter((event) => event.ref_kind === 'bb_usage').map(job))
-  return ended.flatMap((event) => {
+  const bbJobs = new Set(events.filter((event) => event.ref_kind === 'bb_usage' && event.kind === 'print_ended').map(jobOf))
+  return [...events].sort(byTime).flatMap((event) => {
+    if (event.kind !== 'print_ended') return []
     const grams = event.delta_g ? -event.delta_g : 0
     if (event.ref_kind === 'bb_usage') {
       const status = event.data?.bb_status
       return [{ at: event.at, grams, outcome: typeof status === 'string' && BB_OUTCOMES.has(status) ? status : 'unknown' }]
     }
-    if (event.ref_kind !== 'print_run' || bbJobs.has(job(event)) || event.data?.basis === 'covered') return []
+    if (event.ref_kind !== 'print_run' || bbJobs.has(jobOf(event)) || event.data?.basis === 'covered') return []
     const failed = event.data?.basis === 'not_applied'
     return [{ at: event.at, grams: failed ? 0 : grams, outcome: failed ? 'failed' : 'completed' }]
   })
 }
 
-/** Each scale reading less the newest AMS reading before it, within 24 h, with no plate that used grams between them (plan Decision 14). */
-function amsErrors(events: readonly S['SpoolEvent'][]): number[] {
-  const ordered = [...events].sort(byTime)
+/** The grams the plates in `events` used, each spool's plates counted by `platesOf` (`summary`'s `consumed_g`). */
+function plateGrams(events: readonly S['SpoolEvent'][]): number {
+  const spools = new Set(events.map((event) => event.spool_id))
+  return [...spools].reduce((sum, id) => sum + platesOf(events.filter((event) => event.spool_id === id)).reduce((total, plate) => total + plate.grams, 0), 0)
+}
+
+/** `ledger.reading`: the grams an absolute reading gives (with an AMS reading's `remain_pct` × the label weight when it has none), or `null`. */
+function readingOf(event: S['SpoolEvent'], labelWeight: number | null | undefined): number | null {
+  if (!event.source || !['scale', 'person', 'bb', 'ams_remain'].includes(event.source)) return null
+  if (event.grams_after != null) return event.grams_after
+  const pct = event.source === 'ams_remain' ? event.data?.remain_pct : undefined
+  return typeof pct === 'number' && labelWeight != null ? (pct * labelWeight) / 100 : null
+}
+
+/** `ledger.is_anchor`: a reading, and not an AMS one while the weight is locked or the AMS is printing. */
+const isAnchor = (event: S['SpoolEvent'], weightLocked: boolean, labelWeight: number | null | undefined) =>
+  readingOf(event, labelWeight) != null && !(event.source === 'ams_remain' && (weightLocked || event.data?.printing === true))
+
+/**
+ * `metrics.ams_pairs`: AMS grams less scale grams, one per scale reading with an AMS
+ * reading to pair: the newest `ams_remain` reading before it that is not printing, at most
+ * 24 h older, with no plate event that used grams between them (plan Decision 14).
+ */
+function amsErrors(events: readonly S['SpoolEvent'][], labelWeight: number | null | undefined): number[] {
   const errors: number[] = []
-  ordered.forEach((scale, i) => {
-    if (scale.source !== 'scale' || scale.grams_after == null) return
-    for (let j = i - 1; j >= 0; j--) {
-      const before = ordered[j]!
-      if ((before.kind === 'print_started' || before.kind === 'print_ended') && before.delta_g) return
-      if (before.source !== 'ams_remain' || before.grams_after == null || before.data?.printing === true) continue
-      if (Date.parse(scale.at) - Date.parse(before.at) <= DAY_MS) errors.push(before.grams_after - scale.grams_after)
-      return
+  let ams: { at: number; grams: number } | null = null
+  for (const event of [...events].sort(byTime)) {
+    if (PLATE_KINDS.has(event.kind)) {
+      if (event.delta_g) ams = null
+    } else if (event.source === 'ams_remain' && event.data?.printing !== true) {
+      const grams = readingOf(event, labelWeight)
+      if (grams != null) ams = { at: Date.parse(event.at), grams }
+    } else if (event.source === 'scale' && event.grams_after != null && ams && Date.parse(event.at) - ams.at <= DAY_MS) {
+      errors.push(ams.grams - event.grams_after)
     }
-  })
+  }
   return errors
 }
 
@@ -731,11 +747,11 @@ const costOf = (perKg: string, grams: number) => divDecimal(mulDecimal(perKg, Ma
 
 /**
  * `GET /filament/spools/{id}/history` (#6269, `metrics_store.history`): the timeline newest
- * first by `(at, seq)` with each plate's order and print, the grams series (the value after
- * an event is the next one's `grams_before`, the spool's grams left after the last; a
- * reading is an anchor), the spool's metrics over the burn window the settings hold, and
- * its type's AMS error. The spool's age starts at its first event when that is older than
- * `created_at`, as the seed's are.
+ * first by `(at, seq)` with each plate's order and print; the grams series as
+ * `metrics.series` builds it (the value after an event is the next one's `grams_before` by
+ * `seq`, the spool's grams left after the last, sorted by `(at, seq)`, an anchor by
+ * `ledger.is_anchor`); the spool's metrics over the burn window the settings hold, its age
+ * counted from `created_at`; and its type's AMS error.
  */
 function spoolHistory(row: SpoolRow): S['SpoolHistory'] {
   const events = state.events.filter((event) => event.spool_id === row.id).sort(byTime)
@@ -744,21 +760,24 @@ function spoolHistory(row: SpoolRow): S['SpoolHistory'] {
   const plates = platesOf(events)
   const used = plates.reduce((sum, plate) => sum + plate.grams, 0)
   const wasted = plates.filter((plate) => plate.outcome === 'failed' || plate.outcome === 'cancelled').reduce((sum, plate) => sum + plate.grams, 0)
-  const born = Math.min(Date.parse(row.created_at), ...events.map((event) => Date.parse(event.at)))
+  const born = Date.parse(row.created_at)
   const inside = plates.filter((plate) => nowMs - Date.parse(plate.at) < windowDays * DAY_MS && Date.parse(plate.at) <= nowMs)
   const burn = inside.length === 0 ? null : inside.reduce((sum, plate) => sum + plate.grams, 0) / Math.max(1, Math.min(windowDays, (nowMs - born) / DAY_MS))
   const left = row.grams_left
   const emptyDays = burn && burn > 0 && left != null ? left / burn : null
   const opened = events.find((event) => event.kind === 'loaded')?.at ?? plates[0]?.at ?? null
-  const perKg = view(row).effective?.cost_per_kg ?? mockSettings().filament_default_cost_per_kg ?? null
-  const series: S['GramsPoint'][] = events.flatMap((event, i) => {
-    const grams = i + 1 < events.length ? events[i + 1]!.grams_before : left
-    if (grams == null) return []
-    const reading = (event.kind === 'weighed' || event.kind === 'created' || event.kind === 'ams_reading') && event.grams_after != null
-    const anchor = reading && !(event.source === 'ams_remain' && (row.weight_locked || event.data?.printing === true))
-    return [{ at: event.at, grams, anchor, kind: event.kind }]
-  })
-  const sameType = row.type_id ? state.spools.filter((one) => one.type_id === row.type_id).map((one) => one.id) : []
+  const effective = view(row).effective
+  const perKg = effective?.cost_per_kg ?? mockSettings().filament_default_cost_per_kg ?? null
+  const labelWeight = effective?.label_weight_g
+  const bySeq = [...events].sort((a, b) => a.seq - b.seq)
+  const series: S['GramsPoint'][] = bySeq
+    .flatMap((event, i) => {
+      const grams = i + 1 < bySeq.length ? bySeq[i + 1]!.grams_before : left
+      return grams == null ? [] : [{ event, point: { at: event.at, grams, anchor: isAnchor(event, row.weight_locked, labelWeight), kind: event.kind } }]
+    })
+    .sort((a, b) => byTime(a.event, b.event))
+    .map(({ point }) => point)
+  const sameType = row.type_id ? state.spools.filter((one) => one.type_id === row.type_id) : []
   return {
     events: [...events].reverse().map((event) => {
       const archive = event.data?.bb_archive_id
@@ -779,9 +798,11 @@ function spoolHistory(row: SpoolRow): S['SpoolHistory'] {
       days_since_opened: opened ? (nowMs - Date.parse(opened)) / DAY_MS : null,
       days_since_last_use: row.last_used_at ? (nowMs - Date.parse(row.last_used_at)) / DAY_MS : null,
       hours_outside_dry: row.hours_outside_dry,
-      ams_error: amsError(amsErrors(events)),
+      ams_error: amsError(amsErrors(events, labelWeight)),
     },
-    type_ams_error: row.type_id ? amsError(sameType.flatMap((id) => amsErrors(state.events.filter((event) => event.spool_id === id)))) : null,
+    type_ams_error: row.type_id
+      ? amsError(sameType.flatMap((one) => amsErrors(state.events.filter((event) => event.spool_id === one.id), view(one).effective?.label_weight_g)))
+      : null,
     currency: mockSettings().orders_currency ?? 'USD',
     window_days: windowDays,
   }

@@ -31,7 +31,7 @@ function detail(event: SpoolEvent, names: EventNames): string {
   switch (event.kind) {
     case 'weighed':
     case 'ams_reading':
-      parts.push(event.grams_after != null ? grams(event.grams_after) : null, source, event.delta_g ? `${delta(event.delta_g)} on what it held` : null)
+      parts.push(event.grams_after != null ? grams(event.grams_after) : null, source, event.delta_g ? `${grams(Math.abs(event.delta_g))} ${event.delta_g < 0 ? 'less' : 'more'} than the last value` : null)
       break
     case 'print_started':
     case 'print_ended':
@@ -60,9 +60,9 @@ function detail(event: SpoolEvent, names: EventNames): string {
   return parts.filter(Boolean).join(', ')
 }
 
-/** The dot on the rail: prints in the accent, readings in ink, the rest recessive. */
+/** The dot on the rail: readings in the accent and prints in ink, as the grams chart draws its anchors and plate ticks; the rest recessive. */
 const dot = (kind: SpoolEvent['kind']) =>
-  kind === 'print_started' || kind === 'print_ended' ? 'bg-primary' : kind === 'weighed' || kind === 'ams_reading' ? 'bg-foreground' : 'bg-muted-foreground/50'
+  kind === 'weighed' || kind === 'ams_reading' ? 'bg-primary' : kind === 'print_started' || kind === 'print_ended' ? 'bg-foreground' : 'bg-muted-foreground/50'
 
 interface Props {
   /** Newest first, as the history route sends them; `null` while they load. */

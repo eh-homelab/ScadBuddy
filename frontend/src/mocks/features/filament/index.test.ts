@@ -7,6 +7,7 @@ import {
   deleteSpool,
   getInventory,
   getSpool,
+  getSpoolHistory,
   getSummary,
   getTag,
   getType,
@@ -81,6 +82,13 @@ describe('the filament mocks', () => {
       ['Shelf A', 2],
       ['Dry box 1', 2],
     ])
+  })
+
+  it("counts the summary's consumed grams by the one plate rule the history uses (metrics.plates)", async () => {
+    // #2's three plates (120 g) and #3's job SB and BB both booked, once (20 g). #4's `print` ref and #10's open estimate are no plate.
+    expect((await getSummary()).consumed_g).toBe(140)
+    const used = await Promise.all([2, 3, 4, 10].map(async (number) => (await getSpoolHistory(spoolId(number))).metrics.used_g))
+    expect(used).toEqual([120, 20, 0, 0])
   })
 
   it('pages the ledger with no row lost or repeated, and refuses a cursor no page gave', async () => {

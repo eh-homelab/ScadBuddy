@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import type { SpoolHistory } from '../../api/filament'
 import { when } from './formClasses'
 import { useMoney } from './purchasing/useMoney'
@@ -10,6 +11,7 @@ const days = (value: number) => {
 }
 /** A calendar day (`YYYY-MM-DD`) as a person reads it, on that day wherever they are. */
 const day = (iso: string) => new Date(`${iso}T00:00:00Z`).toLocaleDateString(undefined, { dateStyle: 'medium', timeZone: 'UTC' })
+const DAY_MS = 86_400_000
 const pairs = (count: number) => `${count} ${count === 1 ? 'pair' : 'pairs'}`
 
 interface Tile {
@@ -18,6 +20,8 @@ interface Tile {
   value: string | null
   why?: string
   note?: string
+  /** Shown whether the value is set or not. */
+  also?: string | null
 }
 
 /**
@@ -25,18 +29,23 @@ interface Tile {
  * age and the AMS reading error. A metric with no value shows "—" and a line that says
  * why; the burn window is the server's (`window_days`), never a fixed number.
  */
-export function SpoolMetricsPanel({ history, gramsLeft }: { history: SpoolHistory; gramsLeft: number | null }) {
+export function SpoolMetricsPanel({ history, gramsLeft, createdAt }: { history: SpoolHistory; gramsLeft: number | null; createdAt: string }) {
   const money = useMoney()
   const { metrics, window_days: window, type_ams_error: typeError } = history
   const noPrints = `No prints in the last ${window} days`
   const burn = metrics.burn_g_per_day
+  // `metrics.burn` divides by the spool's age from `created_at` when that is shorter than the window (at least a day).
+  const [now] = useState(() => Date.now())
+  const age = (now - Date.parse(createdAt)) / DAY_MS
+  const aged = Math.max(1, Math.floor(age))
+  const burnOver = age < window ? `Since it was opened ${aged} ${aged === 1 ? 'day' : 'days'} ago` : `Over the last ${window} days`
   const tiles: Tile[] = [
     {
       label: 'Used',
       value: grams(metrics.used_g),
       note: metrics.prints === 0 ? 'No prints yet' : `${metrics.prints} ${metrics.prints === 1 ? 'print' : 'prints'}${metrics.grams_per_print != null ? `, ${grams(metrics.grams_per_print)} each` : ''}`,
     },
-    { label: 'Burn rate', value: burn == null ? null : `${grams(burn)} a day`, why: noPrints, note: `Over the last ${window} days` },
+    { label: 'Burn rate', value: burn == null ? null : `${grams(burn)} a day`, why: noPrints, note: burnOver },
     {
       label: 'Empty around',
       value: metrics.empty_on ? day(metrics.empty_on) : null,
@@ -63,12 +72,8 @@ export function SpoolMetricsPanel({ history, gramsLeft }: { history: SpoolHistor
       label: 'AMS error',
       value: metrics.ams_error ? `±${grams(metrics.ams_error.mean_abs_g)}` : null,
       why: 'No AMS reading is paired with a scale reading yet',
-      note: [
-        metrics.ams_error ? `${signed(metrics.ams_error.bias_g)} bias over ${pairs(metrics.ams_error.pairs)}` : null,
-        typeError ? `Its type: ±${grams(typeError.mean_abs_g)} over ${pairs(typeError.pairs)}` : null,
-      ]
-        .filter(Boolean)
-        .join('. '),
+      note: metrics.ams_error ? `${signed(metrics.ams_error.bias_g)} bias over ${pairs(metrics.ams_error.pairs)}` : undefined,
+      also: typeError ? `Its type: ±${grams(typeError.mean_abs_g)} over ${pairs(typeError.pairs)}` : null,
     },
   ]
   return (
@@ -82,6 +87,7 @@ export function SpoolMetricsPanel({ history, gramsLeft }: { history: SpoolHistor
           ) : (
             tile.note && <dd className="text-[12px] text-muted-foreground">{tile.note}</dd>
           )}
+          {tile.also && <dd className="text-[12px] text-muted-foreground">{tile.also}</dd>}
         </div>
       ))}
     </dl>

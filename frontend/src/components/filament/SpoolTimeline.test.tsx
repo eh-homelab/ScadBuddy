@@ -78,4 +78,17 @@ describe('the spool timeline', () => {
       expect(items().map((item) => item.querySelector('.font-medium')?.textContent)).toEqual(shown)
     }
   })
+
+  it("says how a reading differs from the last value, in words", () => {
+    renderPage(<SpoolTimeline rows={[row({ kind: 'weighed', source: 'scale', grams_after: 820, delta_g: -20 })]} catalogs={catalogs} types={types} />)
+    expect(items()[0]).toHaveTextContent('Weighed, 820 g, scale, 20 g less than the last value')
+  })
+
+  it('dots a reading in the accent the chart draws readings in, and a print in ink, as the chart ticks plates', () => {
+    renderPage(<SpoolTimeline rows={rows} catalogs={catalogs} types={types} />)
+    const dot = (item: HTMLElement) => item.querySelector('span[aria-hidden="true"]')!
+    expect(dot(items()[3]!)).toHaveClass('bg-primary')
+    expect(dot(items()[1]!)).toHaveClass('bg-foreground')
+    expect(dot(items()[1]!)).not.toHaveClass('bg-primary')
+  })
 })

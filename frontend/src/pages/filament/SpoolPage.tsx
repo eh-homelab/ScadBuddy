@@ -41,6 +41,7 @@ import { RgbaColourField } from '../../components/filament/RgbaColourField'
 import { NeedsDrying } from '../../components/filament/NeedsDrying'
 import { outsideDryText } from '../../components/filament/outsideDry'
 import { RgbaSwatch } from '../../components/filament/RgbaSwatch'
+import { plateTimes } from '../../components/filament/eventText'
 import { GramsChart } from '../../components/filament/GramsChart'
 import { Section, SectionIndex } from '../../components/filament/SpoolSections'
 import { SpoolMetricsPanel } from '../../components/filament/SpoolMetricsPanel'
@@ -878,9 +879,9 @@ export function SpoolPage() {
                   <>
                     <div className="flex flex-col gap-2">
                       <h3 className="text-[13px] font-medium">Grams left</h3>
-                      <GramsChart points={history.series} label="Grams left" />
+                      <GramsChart points={history.series} plates={plateTimes(history.events.map((row) => row.event))} label="Grams left" />
                     </div>
-                    <SpoolMetricsPanel history={history} gramsLeft={leftNow} />
+                    {saved && <SpoolMetricsPanel history={history} gramsLeft={leftNow} createdAt={saved.created_at} />}
                     <SpoolTimeline rows={history.events} catalogs={catalogs} types={lists.types} />
                   </>
                 ) : (

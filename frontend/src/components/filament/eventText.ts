@@ -138,3 +138,25 @@ export function fromTypeText(event: SpoolEvent, names: EventNames): string | nul
   const code = names.get(typeId)
   return code ? `from its type ${code}` : 'from its type'
 }
+
+/** `ledger.job_of`: `data.job`, else a print run's subtask in its `ref_id` (`run/subtask/slot`). */
+function jobOf(event: SpoolEvent): string | null {
+  const job = (event.data as { job?: unknown }).job
+  if (typeof job === 'string') return job
+  const parts = event.ref_kind === 'print_run' ? event.ref_id?.split('/') : undefined
+  return parts && parts.length >= 3 ? parts.slice(1, -1).join('/') : null
+}
+
+/**
+ * When each plate ended, one time per plate (plan Decision 65), as `metrics.plates` counts
+ * them: an ended BB usage row, and an ended SB print run BB did not book too. A `covered`
+ * end is no plate and a `not_applied` one used no grams, so neither gets a tick.
+ */
+export function plateTimes(events: readonly SpoolEvent[]): string[] {
+  const ended = events.filter((event) => event.kind === 'print_ended')
+  const bbJobs = new Set(ended.filter((event) => event.ref_kind === 'bb_usage').map(jobOf))
+  const basis = (event: SpoolEvent) => (event.data as { basis?: unknown }).basis
+  return ended
+    .filter((event) => event.ref_kind === 'bb_usage' || (event.ref_kind === 'print_run' && !bbJobs.has(jobOf(event)) && basis(event) !== 'covered' && basis(event) !== 'not_applied'))
+    .map((event) => event.at)
+}

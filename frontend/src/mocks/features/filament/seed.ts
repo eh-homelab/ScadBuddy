@@ -379,7 +379,7 @@ function spool(number: number, values: Partial<SpoolRow>): SpoolRow {
 function spools(): SpoolRow[] {
   return [
     spool(1, { type_id: T.JADE, grams_left: 640, location_id: L.SHELF_A, last_weighed_g: 640, last_weighed_at: '2026-11-14T18:00:00Z' }),
-    spool(2, { type_id: T.ORANGE, grams_left: 820, location_id: L.DRY_BOX, last_weighed_g: 820, last_weighed_at: '2026-11-13T09:00:00Z', last_used_at: '2026-11-09T11:00:00Z', hours_outside_dry: 61.5, last_dried_at: '2026-11-12T09:00:00Z', last_dried_temp_c: 65, last_dried_hours: '8' }),
+    spool(2, { type_id: T.ORANGE, created_at: '2026-11-01T09:00:00Z', grams_left: 820, location_id: L.DRY_BOX, last_weighed_g: 820, last_weighed_at: '2026-11-13T09:00:00Z', last_used_at: '2026-11-09T11:00:00Z', hours_outside_dry: 61.5, last_dried_at: '2026-11-12T09:00:00Z', last_dried_temp_c: 65, last_dried_hours: '8' }),
     spool(3, { type_id: T.PINK, grams_left: 930, location_id: L.SHELF_A }),
     spool(4, { type_id: T.BLACK, grams_left: 120, location_id: L.AMS_A1, last_used_at: '2026-11-14T21:30:00Z' }),
     spool(5, { type_id: T.POLY_CLEAR, grams_left: 700, location_id: L.DRY_BOX }),
@@ -465,7 +465,6 @@ function events(): S['SpoolEvent'][] {
     event(19, '2026-11-10T12:00:00Z', 'tag_unbound', { data: { tag_id: TAG.MOVED, reason: 'spool empty' } }),
     event(19, '2026-11-10T12:01:00Z', 'archived'),
     event(3, '2026-11-10T12:05:00Z', 'tag_bound', { data: { tag_id: TAG.MOVED, override: true } }),
-    event(2, '2026-11-12T17:00:00Z', 'dried', { source: 'person', data: { temp_c: 65, hours: '8' } }),
     event(4, '2026-11-14T19:00:00Z', 'print_started', { ...printer, ref_kind: 'print', ref_id: '35', actor: null }),
     event(4, '2026-11-14T21:30:00Z', 'print_ended', { ...printer, source: 'print_actual', grams_before: 268, grams_after: 120, delta_g: -148, ref_kind: 'print', ref_id: '35', actor: null }),
     // Dated before every other event, so the newest-first ledger keeps its order. A plate both SB (a print run) and BB (a usage row) booked, and a print still running: the suppliers stats count 20 g and 0 g (`metrics.plates`).
@@ -475,18 +474,21 @@ function events(): S['SpoolEvent'][] {
     event(1, '2026-11-14T18:00:00Z', 'weighed', { source: 'scale', grams_before: 655, grams_after: 640, delta_g: -15 }),
     // #6269 — #2's life, for its timeline and grams chart: readings the grams anchor on, a
     // Bambuddy plate with its print (archive 41), a plate of an order's run, a failed plate,
-    // a move, an assistant's edit and a person's reset, a type's edit, and an AMS reading
-    // paired with a scale reading (+20 g). All before #4's print, so the ledger's newest
-    // rows stay as they were.
+    // a move, an assistant's edit and a person's reset, a type's edit, a drying, and an AMS
+    // reading paired with a scale reading (+20 g). The plates have the shape the API books
+    // (`print_actual`, `delta_g` only, `bambuddy_usage._book`), and the seqs follow time, as
+    // the grams series reads the value after an event by seq. All before #1's weighing, so
+    // the ledger's newest rows stay as they were.
     event(2, '2026-11-02T08:00:00Z', 'weighed', { source: 'scale', grams_before: 1000, grams_after: 995, delta_g: -5 }),
-    event(2, '2026-11-03T20:00:00Z', 'print_ended', { ...printer, source: 'bb', grams_before: 995, grams_after: 940, delta_g: -55, ref_kind: 'bb_usage', ref_id: 'usage-c', actor: 'bambuddy', data: { job: 'job-c', bb_archive_id: 41, bb_status: 'completed' } }),
+    event(2, '2026-11-03T20:00:00Z', 'print_ended', { ...printer, source: 'print_actual', grams_before: 995, delta_g: -55, ref_kind: 'bb_usage', ref_id: 'usage-c', actor: 'bambuddy', data: { job: 'job-c', basis: 'bb_usage', bb_archive_id: 41, bb_status: 'completed' } }),
     event(2, '2026-11-05T09:30:00Z', 'moved', { grams_before: 940, data: { from: L.SHELF_A, to: L.DRY_BOX } }),
-    event(2, '2026-11-06T16:00:00Z', 'print_ended', { ...printer, source: 'print_actual', grams_before: 940, grams_after: 905, delta_g: -35, ref_kind: 'print_run', ref_id: 'run3/job-d/0', actor: 'system:printer-watch', data: { job: 'job-d' } }),
-    event(2, '2026-11-09T11:00:00Z', 'print_ended', { ...printer, source: 'bb', grams_before: 905, grams_after: 875, delta_g: -30, ref_kind: 'bb_usage', ref_id: 'usage-e', actor: 'bambuddy', data: { job: 'job-e', bb_archive_id: 42, bb_status: 'failed' } }),
+    event(2, '2026-11-06T16:00:00Z', 'print_ended', { ...printer, source: 'print_actual', grams_before: 940, delta_g: -35, ref_kind: 'print_run', ref_id: 'run3/job-d/0', actor: 'system:printer-watch', data: { job: 'job-d' } }),
+    event(2, '2026-11-09T11:00:00Z', 'print_ended', { ...printer, source: 'print_actual', grams_before: 905, delta_g: -30, ref_kind: 'bb_usage', ref_id: 'usage-e', actor: 'bambuddy', data: { job: 'job-e', basis: 'bb_usage', bb_archive_id: 42, bb_status: 'failed' } }),
     event(2, '2026-11-10T14:00:00Z', 'edited', { grams_before: 875, actor: 'service:agent', data: { changes: { cost_per_kg: [null, '25.0000'] }, author: { principal: 'person@example.com', session: 'mock-session', tool: 'filament_update_spool' } } }),
     event(2, '2026-11-11T09:00:00Z', 'edited', { grams_before: 875, data: { changes: { cost_per_kg: ['25.0000', null] } } }),
     event(2, '2026-11-11T12:00:00Z', 'edited', { grams_before: 875, data: { changes: { nozzle_temp_max: [250, 260] }, type_id: T.ORANGE } }),
-    event(2, '2026-11-13T07:00:00Z', 'ams_reading', { ...printer, source: 'ams_remain', grams_before: 875, grams_after: 840, delta_g: -35, actor: 'bambuddy', data: { remain_pct: 84 } }),
+    event(2, '2026-11-12T17:00:00Z', 'dried', { source: 'person', grams_before: 875, data: { temp_c: 65, hours: '8' } }),
+    event(2, '2026-11-12T21:00:00Z', 'ams_reading', { ...printer, source: 'ams_remain', grams_before: 875, grams_after: 840, delta_g: -35, actor: 'bambuddy', data: { remain_pct: 84 } }),
     event(2, '2026-11-13T09:00:00Z', 'weighed', { source: 'scale', grams_before: 840, grams_after: 820, delta_g: -20 }),
   ]
 }
