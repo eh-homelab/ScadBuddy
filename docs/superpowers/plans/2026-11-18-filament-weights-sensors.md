@@ -101,7 +101,7 @@ Settings "weight-sync policy"), §12 row #6268. Earlier plans whose rulings bind
    A new partial unique index keeps one unit location per `(printer_id, ams_id)`.
 7. **Alerts are shown, not sent.** A reading outside `alert_above` / `alert_below` marks
    the sensor alerting in the API and the UI. Sending a notification has no backend channel
-   today; it is filed as a follow-up issue linked to #6270, and the `notify` flag is kept
+   today; it is filed as #6646, linked from #6270, and the `notify` flag is kept
    for it.
 8. **Time outside dry storage** is derived at read from the spool's `moved` events since
    its last `dried` event (or since it was created): the hours its location's kind was not
