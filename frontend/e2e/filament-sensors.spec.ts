@@ -19,6 +19,8 @@ test('Sync weights from AMS says what it did and what it skipped', async ({ page
 })
 
 test("a place's sensor shows its value, the limit it crossed, and a day of history", async ({ page }) => {
+  // The mock's readings end at the sensor's `last_at`; the component keeps the last 24 h from now.
+  await page.clock.setFixedTime(new Date('2026-11-18T09:45:00Z'))
   await page.goto('/filament/locations')
   const sensor = page.getByRole('listitem', { name: 'Shelf A humidity' })
   await expect(sensor).toContainText('62 %')
