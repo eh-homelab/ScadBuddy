@@ -418,7 +418,7 @@ export function analysisReport(
       printer_preset_name: null,
       process_preset_name: request.choices?.process_name ?? null,
       bed_type: request.choices?.bed_type ?? null,
-      plate_id: request.plate_id,
+      plate_id: request.plate_id ?? 1,
       plate_model: 'H2C',
       slots: (request.filament_plan?.slots ?? []).map((slot) => ({
         slot_id: slot.slot_id,
