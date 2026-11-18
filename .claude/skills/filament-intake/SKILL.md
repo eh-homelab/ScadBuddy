@@ -50,7 +50,11 @@ Write endpoints need no API key on this instance. Printer model string is `H2C`.
    Use the 3DFP hex as `rgba` and put the id in `fp`.
    If a receipt truncates the color, look the SKU up with WebSearch; Micro Center blocks both curl and headless Chromium.
 5. `intake.py apply lines.json --dry-run`, check it, then run it for real.
-6. **Profiles:**
+6. **Profiles:** for a type in ScadBuddy (SB), the profile-fetch worker fetches them
+   (#6625; plugin `filament` skill, "Profiles"; README "Profile-fetch worker"). Set the
+   type's `tdfp_id`; an invoice confirm, the type page's "Fetch from 3DFP" button or the
+   agent tool `filament_type_fetch_profiles` starts the fetch. The steps below are for
+   spools that live only in BB:
    - `node 3dfp.mjs login` (headed, once per profile dir; needs `FP_EMAIL`)
    - `add <fp ids>`
    - `export <fp ids>` (PRINTER=H2C, all four nozzles by default)

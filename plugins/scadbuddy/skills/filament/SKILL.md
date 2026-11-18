@@ -19,6 +19,8 @@ Sources, relative to the root of
   the invoice import.
 - `docs/superpowers/plans/2026-11-18-filament-invoice-import.md` (#6267): the
   decisions of the import, and "Decisions made while building".
+- `docs/superpowers/plans/2026-11-18-profile-fetch-worker.md` (#6625): the 3DFP
+  profile-fetch worker, for "Profiles".
 - `.claude/skills/filament-intake/SKILL.md`: the owner's rules for receipts. It
   is the source of the diff, cost and colour-code rules below. It still drives
   the BB-era scripts, so use it for 3dfilamentprofiles work (see "Profiles").
@@ -108,8 +110,9 @@ no invoice line:
    - A multi-colour silk's subtype follows the SKU: `A05-M*` is Dual Color and
      `A05-T*` is Tri Color.
 5. **Other brands:** propose a new type with its 3dfilamentprofiles.com (3DFP)
-   id and its hex as the RGBA. Say that the nozzle presets are still to fetch
-   (see "Profiles").
+   id set as `tdfp_id` and its hex as the RGBA. Confirm starts the preset fetch
+   for each new type that has a `tdfp_id` (see "Profiles"). Without a `tdfp_id`
+   no fetch starts.
 6. **Never confirm for the person.** Show the totals, the spools to create, and
    the spools to update. Wait for a yes.
 7. If the person corrects a line in the chat or on the page, edit the same draft.
@@ -122,13 +125,50 @@ no invoice line:
   refuses a larger difference (409).
 - No spool from the invoice is missing a cost.
 - Every new type has a colour.
+- Every new type has a preset for each nozzle of each printer model (filament
+  spec §9, step 8). Read `filament_type_profile_fetch` for each new type after
+  the confirm (see "Profiles"), and report each gap to the person.
 
 ## Profiles
 
-The fetch of slicer profiles from 3DFP needs a real browser, behind a Vercel bot
-check. SB has no worker for it yet: it is #6625. Until it lands, this session
-does not fetch profiles. For a non-Bambu line, the session proposes the type with
-its 3DFP id and hex, and tells the person that the presets are still to fetch.
+A worker fetches a type's slicer presets from 3DFP. 3DFP sits behind a Vercel bot
+check, so the worker drives a real Chromium. It exports one Bambu Studio preset per
+printer model that SB's printers have and per nozzle in the setting
+`profile_fetch_nozzles` (default 0.2, 0.4, 0.6, 0.8). SB imports them into BB's
+local presets, sets them as the type's presets for those keys, and sets K values
+from the printers' K tables where one matches exactly. The fetched keys replace the
+type's presets for those keys. The type's other presets stay. A spool's own presets
+still win.
+
+1. **Set the id.** The fetch needs the type's `tdfp_id`: a positive integer below
+   2^31. Set it with `filament_type_upsert`, or in the invoice line's proposed
+   type. A type without it gets 422 `no_tdfp_id`.
+2. **Confirm starts the fetch.** The invoice confirm starts one for each new type
+   that has a `tdfp_id`. To fetch by hand (an older type, or after a failure), use
+   `filament_type_fetch_profiles`. It writes BB's local presets, so it asks for
+   approval first. A start while a fetch runs joins it (`joined: true`).
+3. **Read the result.** Call `filament_type_profile_fetch` with the type's `id`. It
+   answers the last `run` (`status`: `running`, `imported`, `partial` or `failed`;
+   `missing`, each key with its reason; `notes`; `error`) and `gaps`. A run takes
+   minutes: the worker exports one run at a time. Read again, and do not start a
+   second fetch.
+4. **Report the gaps.** `gaps` is every printer model and nozzle that the type has
+   no preset for now. It can list keys even after an `imported` run, for example
+   when a printer model was added after it. Name each gap and its reason to the
+   person. Do not hide a `partial` run, and do not set a preset by hand to
+   hide a gap.
+5. **Know the refusals.** 422 `no_tdfp_id` (set the id), 422 `no_printer_models`
+   (no printer has a model: tell the person to set one in Settings → Printing →
+   Printers), 503 (the fetch could not be started: say so, and try again later).
+   A run that no worker serves ends `failed` with "no profile-fetch worker picked
+   the fetch up". Tell the person; the worker is a Deployment they run.
+6. **Preset names.** BB keeps a preset it already has. A fetched preset binds only
+   to a BB preset that this fetch made or that an earlier fetch of the type made. A
+   hand-made BB preset of the same name leaves the key missing, and the run is
+   `partial`. Tell the person; do not delete their preset.
+
+The fetch only reads 3DFP and writes SB and BB's local presets. Never start a
+fetch to test a change, and never write a preset to BB by hand to fill a gap.
 For the BB-era scripts (`intake.py`, `3dfp.mjs`), use
 `.claude/skills/filament-intake/SKILL.md`.
 
@@ -136,7 +176,14 @@ For the BB-era scripts (`intake.py`, `3dfp.mjs`), use
 
 - The 3DFP bot check, its 429 and 403 answers, and the `GFA17` gap are stated
   in `.claude/skills/filament-intake/SKILL.md`, which gives no date or method for
-  them. #6267 did not measure them again. Check one before you rely on it.
+  them. Neither #6267 nor #6625 measured them against the real site: the worker's
+  tests drive a local replica, never 3DFP. Check one before you rely on it.
+- The worker's behaviour (what it exports, the run statuses, the gaps, the
+  binding rule for preset names) is in `docs/superpowers/plans/2026-11-18-profile-fetch-worker.md`
+  ("Decisions this plan makes" and "Decisions made while building", #6625) and
+  the code it describes: `backend/scadbuddy/filament/profile_fetch.py`,
+  `backend/scadbuddy/profile_fetch/`. The routes are
+  `POST` and `GET /api/v1/filament/types/{type_id}/profile-fetch`.
 - The candidate rule ("uncosted") and the 404 and 503 answers of the colour
   route are SB's code and its tests: `backend/tests/filament/test_invoice_candidates.py`
   and `backend/tests/filament/test_colour_codes.py`.
