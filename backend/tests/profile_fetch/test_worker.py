@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import multiprocessing
 import os
 import resource
 import subprocess
@@ -286,41 +287,54 @@ def test_a_passing_failure_at_start_is_logged_and_the_worker_starts(
     assert EMAIL not in caplog.text and PASSWORD not in caplog.text
 
 
-def test_core_dumps_are_off_before_the_browser_launches(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_core_dumps_are_off_before_the_browser_launches(tmp_path: Path) -> None:
     """The worker sets RLIMIT_CORE to 0, soft and hard, before it launches Chromium: a
     node's ``core_pattern`` must not keep a crashed renderer's memory, where the page
-    and the login lived (build Decision 75). The hard limit stays 0 for this process."""
-    _, hard = resource.getrlimit(resource.RLIMIT_CORE)
-    if hard != 0:
+    and the login lived (build Decision 75). The start path runs in a forked child, so
+    the pytest process's own hard limit is never lowered."""
+    ctx = multiprocessing.get_context("fork")
+    reader, writer = ctx.Pipe(duplex=False)
+
+    def child() -> None:
+        _, hard = resource.getrlimit(resource.RLIMIT_CORE)
         # A soft limit above 0 first, so the check fails when the worker leaves it.
         resource.setrlimit(resource.RLIMIT_CORE, (hard, hard))
-    seen: list[tuple[int, int]] = []
-    events: list[str] = []
+        seen: list[tuple[int, int]] = []
+        events: list[str] = []
 
-    class Recording(StartSite):
-        async def __aenter__(self) -> Self:
-            seen.append(resource.getrlimit(resource.RLIMIT_CORE))
-            return await super().__aenter__()
+        class Recording(StartSite):
+            async def __aenter__(self) -> Self:
+                seen.append(resource.getrlimit(resource.RLIMIT_CORE))
+                return await super().__aenter__()
 
-    async def connect(*args: object, **kwargs: object) -> None:
-        raise ReachedTemporalError
+        async def connect(*args: object, **kwargs: object) -> None:
+            raise ReachedTemporalError
 
-    monkeypatch.setattr(Client, "connect", connect)
+        Client.connect = connect  # type: ignore[method-assign,assignment]
 
-    async def go() -> None:
-        await run(
-            _settings(tmp_path),
-            health_port=None,
-            crud=_crud(events, [["runs"]]),
-            open_site=lambda: Recording(events, None),
-            areas_poll=0.05,
-        )
+        async def go() -> None:
+            await run(
+                _settings(tmp_path),
+                health_port=None,
+                crud=_crud(events, [["runs"]]),
+                open_site=lambda: Recording(events, None),
+                areas_poll=0.05,
+            )
 
-    with pytest.raises(ReachedTemporalError):
-        asyncio.run(go())
-    assert seen == [(0, 0)]
+        try:
+            asyncio.run(go())
+        except ReachedTemporalError:
+            writer.send(seen)
+        else:
+            writer.send("the start did not reach Temporal")
+
+    process = ctx.Process(target=child)
+    process.start()
+    writer.close()
+    assert reader.poll(60)
+    assert reader.recv() == [(0, 0)]
+    process.join(30)
+    assert process.exitcode == 0
 
 
 def test_a_browser_that_does_not_launch_stops_the_worker(

@@ -195,13 +195,26 @@ export const filamentTools: Tool[] = [
       'nullable one. A new type needs `code`, `material_id`, `rgba` (`#RRGGBB` or `#RRGGBBAA`) and ' +
       '`label_weight_g`; ids come from filament_catalog_list. With a `cost_per_kg` it also keeps the price ' +
       'book row of its material, subtype, brand, colour and alpha in step; a new row takes its stops and effect. ' +
-      '`archived: true` takes a type off the lists and frees its code. `tdfp_id` (a positive integer, `null` ' +
+      '`archived: true` takes a type off the lists and frees its code. `tdfp_id` (a positive integer below 2^31, `null` ' +
       "clears it) is the type's filament id on 3dfilamentprofiles.com, which filament_type_fetch_profiles " +
       'fetches its slicer presets by. 409 when an unarchived type has the ' +
       'code; 422 when a minimum temperature is above its maximum. Only what the user says. Writes ScadBuddy only.',
     input: z.object({
       type_id: z.string().uuid().optional().describe("A type's `id`; omit to add"),
-      fields: z.record(z.string(), z.unknown()).default({}).describe('The type fields to set'),
+      fields: z
+        .object({
+          tdfp_id: z
+            .number()
+            .int()
+            .min(1)
+            .max(2147483647)
+            .nullable()
+            .optional()
+            .describe("The type's filament id on 3dfilamentprofiles.com: a positive integer below 2^31, null clears it"),
+        })
+        .catchall(z.unknown())
+        .default({})
+        .describe('The type fields to set'),
       archived: z.boolean().optional(),
     }),
     risk: 'write',
@@ -271,9 +284,9 @@ export const filamentTools: Tool[] = [
       '`joined`: true when a fetch of the type was already running, which it joins instead of starting another. ' +
       'Follow it with filament_type_profile_fetch. 422 `no_tdfp_id` when the type has no `tdfp_id` ' +
       '(set it with filament_type_upsert), 422 `no_printer_models` when no printer has a model, 503 when the ' +
-      'fetch could not be started. Only what the user says. Writes ScadBuddy and Bambuddy\'s local presets.',
+      'fetch could not be started. Writes ScadBuddy and Bambuddy\'s local presets. Approved first.',
     input: z.object({ type_id: z.string().uuid().describe("A type's `id` from filament_type_list") }),
-    risk: 'write',
+    risk: 'outward',
     source: SOURCE,
     routes: ['POST /api/v1/filament/types/{type_id}/profile-fetch'],
     summarize: ({ type_id }) => `Fetch the 3DFP presets of spool type ${type_id}`,

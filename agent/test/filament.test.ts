@@ -182,11 +182,11 @@ describe('filament type 3DFP preset fetch tools (#6625)', () => {
   }
 
   it.each([
-    ['filament_type_fetch_profiles', 'write', ['POST /api/v1/filament/types/{type_id}/profile-fetch']],
-    ['filament_type_profile_fetch', 'read', ['GET /api/v1/filament/types/{type_id}/profile-fetch']],
-  ])('%s is %s tier, never gated, on its route', (name, risk, routes) => {
+    ['filament_type_fetch_profiles', 'outward', true, ['POST /api/v1/filament/types/{type_id}/profile-fetch']],
+    ['filament_type_profile_fetch', 'read', false, ['GET /api/v1/filament/types/{type_id}/profile-fetch']],
+  ])('%s is %s tier, gated %s, on its route', (name, risk, gated, routes) => {
     expect(tool(name).risk).toBe(risk)
-    expect(tool(name).gated).toBe(false)
+    expect(tool(name).gated).toBe(gated)
     expect(tool(name).routes).toEqual(routes)
   })
 
@@ -202,6 +202,15 @@ describe('filament type 3DFP preset fetch tools (#6625)', () => {
     expect(start).toContain('Bambuddy')
     expect(start).toContain('3dfilamentprofiles.com')
     expect(tool('filament_type_upsert').description).toContain('tdfp_id')
+    expect(start).toMatch(/Approved first\.$/)
+  })
+
+  it('bounds tdfp_id in the upsert fields to a positive integer below 2^31, or null', () => {
+    const upsert = (tdfp_id: unknown) => tool('filament_type_upsert').parse({ fields: { tdfp_id } })
+    for (const bad of [0, -1, 1.5, 2147483648, '12']) expect(() => upsert(bad)).toThrow()
+    for (const good of [1, 2147483647, null]) expect(() => upsert(good)).not.toThrow()
+    expect(() => tool('filament_type_upsert').parse({ fields: { code: 'X' } })).not.toThrow()
+    expect(tool('filament_type_upsert').description).toContain('a positive integer below 2^31')
   })
 
   it('starts a fetch with POST and answers the run, its status and whether it joined', async () => {
@@ -212,7 +221,10 @@ describe('filament type 3DFP preset fetch tools (#6625)', () => {
         return HttpResponse.json({ run: RUN, joined: true }, { status: 202 })
       }),
     )
-    const started = await runTool(tool('filament_type_fetch_profiles'), { type_id: ROW }, ctx())
+    const started = await tool('filament_type_fetch_profiles').execute(
+      tool('filament_type_fetch_profiles').parse({ type_id: ROW }),
+      ctx('outward'),
+    )
     expect(started.isError).toBeFalsy()
     expect(calls).toEqual(['POST'])
     const answer = firstText(started) as { run: { id: string; status: string }; joined: boolean }
@@ -230,9 +242,8 @@ describe('filament type 3DFP preset fetch tools (#6625)', () => {
         ),
       ),
     )
-    const refused = await runTool(tool('filament_type_fetch_profiles'), { type_id: ROW }, ctx())
-    expect(refused.isError).toBe(true)
-    expect(JSON.stringify(refused.content)).toContain('no tdfp_id')
+    const start = tool('filament_type_fetch_profiles')
+    await expect(start.execute(start.parse({ type_id: ROW }), ctx('outward'))).rejects.toThrow(/no tdfp_id/)
   })
 
   it('reads the last fetch and the gaps', async () => {
