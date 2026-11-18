@@ -1196,5 +1196,5 @@ async def cancel_ntag(
     await _spool_or_404(filament, spool_id)
     settings = await asyncio.to_thread(store.load)
     async with client_for(settings) as client:
-        await ntag.cancel(client, body.device_id)
+        await ntag.cancel(filament, client, spool_id, body.device_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

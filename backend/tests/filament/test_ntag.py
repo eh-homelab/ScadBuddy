@@ -15,6 +15,7 @@ import respx
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.models import Spool, TagScan
+from scadbuddy.core.problems import ApiError
 from scadbuddy.filament import ntag
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.component import Filament
@@ -329,14 +330,75 @@ async def test_confirm_with_another_origin_binds_nothing(
 
 
 @respx.mock
-async def test_cancel_posts_to_the_device(client: BambuddyClient) -> None:
+async def test_cancel_posts_to_the_device(pg_pool: PgPool, client: BambuddyClient) -> None:
     route = respx.post(f"{API}/spoolbuddy/devices/sb-1/cancel-write").mock(
         return_value=httpx.Response(200, json={"status": "cancelled"})
     )
 
-    await ntag.cancel(client, "sb-1")
+    await ntag.cancel(_filament(pg_pool), client, _spool(_filament(pg_pool), pg_pool, 11), "sb-1")
 
     assert route.call_count == 1
+
+
+@respx.mock
+async def test_a_failed_device_cancel_keeps_the_spools_row(
+    pg_pool: PgPool, client: BambuddyClient
+) -> None:
+    f = _filament(pg_pool)
+    spool = _spool(f, pg_pool, 11)
+    await _queue(f, client, spool, None)
+    respx.post(f"{API}/spoolbuddy/devices/sb-1/cancel-write").mock(
+        return_value=httpx.Response(500, json={"detail": "down"})
+    )
+
+    with pytest.raises(ApiError):
+        await ntag.cancel(f, client, spool, "sb-1")
+
+    assert ntag._baseline(f, spool)[0] is True
+
+
+@respx.mock
+async def test_a_device_cancel_clears_every_write_queued_on_that_device(
+    pg_pool: PgPool, client: BambuddyClient
+) -> None:
+    f = _filament(pg_pool)
+    first = _spool(f, pg_pool, 11)
+    second = _spool(f, pg_pool, 12)
+    other = _spool(f, pg_pool, 13)
+    respx.post(f"{API}/spoolbuddy/nfc/write-tag").mock(
+        return_value=httpx.Response(200, json={"status": "queued", "warnings": []})
+    )
+    for bb_id, spool, device in ((11, first, "sb-1"), (12, second, "sb-1"), (13, other, "sb-2")):
+        _record(bb_id, None)
+        await ntag.write(f, client, spool, device, replace=True)
+    respx.post(f"{API}/spoolbuddy/devices/sb-1/cancel-write").mock(
+        return_value=httpx.Response(200, json={"status": "cancelled"})
+    )
+
+    await ntag.cancel(f, client, first, "sb-1")
+
+    assert ntag._baseline(f, first)[0] is False
+    assert ntag._baseline(f, second)[0] is False
+    assert ntag._baseline(f, other)[0] is True
+
+
+@respx.mock
+async def test_a_cancelled_write_cannot_be_confirmed(
+    pg_pool: PgPool, client: BambuddyClient
+) -> None:
+    f = _filament(pg_pool)
+    spool = _spool(f, pg_pool, 11)
+    await _queue(f, client, spool, None)
+    respx.post(f"{API}/spoolbuddy/devices/sb-1/cancel-write").mock(
+        return_value=httpx.Response(200, json={"status": "cancelled"})
+    )
+
+    await ntag.cancel(f, client, spool, "sb-1")
+    _record(11, UID)
+    result = await ntag.confirm(f, client, spool, actor="ann")
+
+    assert result.bound is False
+    assert f.spools.open_binding(spool) is None
 
 
 @respx.mock
