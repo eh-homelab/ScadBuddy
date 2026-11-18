@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
+import os
 import socket
 import sys
 import time
@@ -531,3 +533,84 @@ def test_the_browser_env_keeps_only_the_allowlist() -> None:
         "DISPLAY": ":99",
         "XAUTHORITY": "/tmp/xvfb-run.x/Xauthority",
     }
+
+
+FAKE_EMAIL = "fake-email-6625@example.test"
+FAKE_PASSWORD = "fake-pass-6625-XYZ"
+
+
+def _encodings(secret: str) -> list[bytes]:
+    """The forms a file in the profile could hold ``secret`` in: UTF-8 (JSON, SQLite text,
+    LevelDB), UTF-16-LE (SQLite's UTF-16 text, Windows-style strings) and the form body's
+    URL encoding."""
+    encoded = secret.replace("@", "%40")
+    return [secret.encode(), secret.encode("utf-16-le"), encoded.encode()]
+
+
+@pytest.mark.skipif(
+    not os.environ.get("DISPLAY") and os.environ.get("SCADBUDDY_TEST_CHROMIUM_REQUIRED") != "1",
+    reason="headed Chromium needs a DISPLAY (run under xvfb-run)",
+)
+async def test_the_profile_keeps_no_login_after_a_login(tmp_path: Path) -> None:
+    """R-F12: the persistent profile keeps the site's cookies, never the login itself. A
+    login to the replica with a known email and password in headed Chromium (the
+    worker's mode, Decision 5), then the browser closed: no file under the profile dir
+    holds either one, in any of `_encodings`.
+
+    Headed, because headless saved nothing to find: without the fix, headless Chromium
+    (Playwright 1.64.1's) left neither string in the profile, while headed Chromium left
+    the email in ``Default/Web Data``, ``Default/Login Data`` and the ``Default/Sessions``
+    files. The preferences (`site.write_preferences`) removed the first two; the
+    ``autocomplete=off`` the login sets on its fields removed the form state in
+    ``Sessions``."""
+    server = ReplicaServer(Replica(email=FAKE_EMAIL, password=FAKE_PASSWORD))
+    profile = tmp_path / "profile"
+    try:
+        async with ThreeDfpSite(
+            server.url, SecretStr(FAKE_EMAIL), SecretStr(FAKE_PASSWORD), profile, headless=False
+        ) as driver:
+            await driver.login()
+        assert server.site.logins == 1
+    finally:
+        server.close()
+    files = [path for path in profile.rglob("*") if path.is_file() and not path.is_symlink()]
+    assert files, "Chromium wrote no profile"
+    held = [
+        (str(path.relative_to(profile)), secret)
+        for path in files
+        for secret in (FAKE_EMAIL, FAKE_PASSWORD)
+        if any(form in path.read_bytes() for form in _encodings(secret))
+    ]
+    assert held == []
+
+
+def test_the_preferences_merge_into_the_profile(tmp_path: Path) -> None:
+    """`site.write_preferences` keeps every key Chromium wrote, sets the R-F12 ones, and
+    leaves the file 0600 in 0700 dirs."""
+    profile = tmp_path / "profile"
+    (profile / "Default").mkdir(parents=True, mode=0o755)
+    profile.chmod(0o755)
+    (profile / "Default" / "Preferences").write_text(
+        '{"autofill": {"profile_enabled": true, "last_version_deduped": 131},'
+        ' "profile": {"name": "Person 1", "password_manager_enabled": true},'
+        ' "browser": {"window_placement": {"top": 1}}}'
+    )
+    site.write_preferences(profile)
+    path = profile / "Default" / "Preferences"
+    written = json.loads(path.read_text())
+    assert written == {
+        "autofill": {
+            "enabled": False,
+            "profile_enabled": False,
+            "credit_card_enabled": False,
+            "last_version_deduped": 131,
+        },
+        "credentials_enable_service": False,
+        "credentials_enable_autosignin": False,
+        "profile": {"name": "Person 1", "password_manager_enabled": False},
+        "browser": {"window_placement": {"top": 1}},
+    }
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert profile.stat().st_mode & 0o777 == 0o700
+    assert (profile / "Default").stat().st_mode & 0o777 == 0o700
+    assert sorted(p.name for p in (profile / "Default").iterdir()) == ["Preferences"]

@@ -35,6 +35,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from functools import partial
 from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
 from uuid import UUID
 
@@ -758,7 +759,14 @@ async def _import_lock(pool: ConnectionPool[Conn], run_id: UUID) -> AsyncIterato
     own before it posts the zip (`_keep_before`), so a crash after the post still knows
     what it made (#6625 S1), and a row lock held through the import would block that
     write."""
-    conn = await asyncio.to_thread(pool.getconn)
+    getting = asyncio.ensure_future(asyncio.to_thread(pool.getconn))
+    try:
+        conn = await asyncio.shield(getting)
+    except asyncio.CancelledError:
+        # The thread still takes a connection after the cancel: back to the pool with it
+        # once it has one (R-F13). It holds no lock yet.
+        getting.add_done_callback(partial(_put_back, pool))
+        raise
     try:
         await asyncio.to_thread(conn.execute, _LOCK_SQL, (IMPORT_LOCK, str(run_id)))
         yield
@@ -767,6 +775,11 @@ async def _import_lock(pool: ConnectionPool[Conn], run_id: UUID) -> AsyncIterato
         # thread (one connection runs one statement at a time), so the lock is never left
         # held on a connection back in the pool.
         await asyncio.to_thread(_release, pool, conn, run_id)
+
+
+def _put_back(pool: ConnectionPool[Conn], getting: asyncio.Future[Conn]) -> None:
+    if not getting.cancelled() and getting.exception() is None:
+        pool.putconn(getting.result())
 
 
 def _release(pool: ConnectionPool[Conn], conn: Conn, run_id: UUID) -> None:

@@ -119,7 +119,11 @@ Tests marked `requires_chromium` (the 3DFP driver, `tests/profile_fetch/test_sit
 #6625) drive Playwright's Chromium against the local replica in
 `tests/profile_fetch/site/`, never the real site. They skip without that Chromium
 (`uv run --frozen playwright install chromium`) and fail instead when
-`SCADBUDDY_TEST_CHROMIUM_REQUIRED=1`. Playwright is pinned exactly in the
+`SCADBUDDY_TEST_CHROMIUM_REQUIRED=1`. One of them,
+`test_the_profile_keeps_no_login_after_a_login` (R-F12), drives headed Chromium, since
+headless saves no form data to find: it needs a `DISPLAY` (`xvfb-run -a`, as CI's
+`profile-fetch-image` job runs it) and skips without one unless that variable is set.
+Playwright is pinned exactly in the
 `profile-fetch` dependency group, which `dev` includes.
 Under pytest-xdist each worker makes its schemas in a database of its own
 (`<test db>_gw<N>`, created and dropped by `tests/conftest.py::_pg_database_url`),

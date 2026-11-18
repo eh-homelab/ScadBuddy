@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.auth.service_credentials import ServiceCredentialStore
+from scadbuddy.filament import profile_fetch
 from scadbuddy.filament.component import FILAMENT
 from scadbuddy.filament.models import TypeKValue, TypePreset
 from scadbuddy.filament.profile_fetch import HOLDER, ProfileFetches
@@ -727,6 +728,45 @@ def test_two_concurrent_imports_of_a_run_call_bambuddy_once(fetch: Fetch) -> Non
     assert replies["first"].json()["status"] == "imported"
     assert sent.call_count == 1
     assert listing.call_count == 2
+
+
+class _SlowPool:
+    """A pool whose `getconn` waits until ``give`` is set, then hands out ``conn``."""
+
+    def __init__(self) -> None:
+        self.conn = object()
+        self.asked, self.give = threading.Event(), threading.Event()
+        self.returned: list[object] = []
+
+    def getconn(self) -> object:
+        self.asked.set()
+        assert self.give.wait(30)
+        return self.conn
+
+    def putconn(self, conn: object) -> None:
+        self.returned.append(conn)
+
+
+async def test_a_cancel_while_the_lock_waits_for_a_connection_returns_it() -> None:
+    """R-F13: a request cancelled while `_import_lock` waits for a pooled connection. The
+    thread still gets the connection after the cancel; it goes back to the pool."""
+    pool = _SlowPool()
+
+    async def section() -> None:
+        async with profile_fetch._import_lock(pool, UUID(int=1)):  # type: ignore[arg-type]
+            raise AssertionError("never entered")
+
+    task = asyncio.create_task(section())
+    assert await asyncio.to_thread(pool.asked.wait, 30)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    pool.give.set()
+    for _ in range(300):
+        if pool.returned:
+            break
+        await asyncio.sleep(0.01)
+    assert pool.returned == [pool.conn]
 
 
 def test_import_needs_its_key(fetch: Fetch) -> None:

@@ -11,10 +11,14 @@ is recorded: a page's requests carry the login form. Downloads are refused
 the browser writes nothing outside the profile dir. The email and the password are only
 ever passed to `Page.fill`; no log line, exception text or `evaluate` carries them, and
 a failure inside the login is raised as a `SiteError` of a fixed text, its cause dropped.
+The profile keeps the site's cookies, not the login: autofill, form saving and the
+password manager are off (`write_preferences`), and the login's fields have autocomplete
+off, so no form state is kept either (R-F12, `test_the_profile_keeps_no_login_after_a_login`).
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -113,6 +117,48 @@ def browser_env(environ: Mapping[str, str]) -> dict[str, str]:
     }
 
 
+#: The Chromium preferences `write_preferences` sets before every launch (R-F12): no
+#: autofill, no address or card saving, no password manager and no credentials service,
+#: so the profile, which keeps the site's cookies on purpose, never keeps the login.
+PREFERENCES: Final[Mapping[str, Mapping[str, bool] | bool]] = {
+    "autofill": {"enabled": False, "profile_enabled": False, "credit_card_enabled": False},
+    "credentials_enable_service": False,
+    "credentials_enable_autosignin": False,
+    "profile": {"password_manager_enabled": False},
+}
+
+
+def write_preferences(profile_dir: Path) -> None:
+    """Merge `PREFERENCES` into the profile's ``Default/Preferences``, keeping every other
+    key Chromium wrote there. The dirs are 0700 and the file 0600."""
+    default = profile_dir / "Default"
+    default.mkdir(parents=True, exist_ok=True, mode=0o700)
+    profile_dir.chmod(0o700)
+    default.chmod(0o700)
+    path = default / "Preferences"
+    try:
+        current = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        current = {}
+    except ValueError:
+        # Chromium itself starts over from defaults on a file it cannot parse.
+        current = {}
+    if not isinstance(current, dict):
+        current = {}
+    for key, value in PREFERENCES.items():
+        if isinstance(value, Mapping):
+            section = current.get(key)
+            current[key] = {**(section if isinstance(section, dict) else {}), **value}
+        else:
+            current[key] = value
+    staged = default / "Preferences.scadbuddy"
+    fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as out:
+        json.dump(current, out)
+    staged.chmod(0o600)
+    os.replace(staged, path)
+
+
 class SiteError(Exception):
     """A step on the site that failed. ``kind`` says how; the message never holds the
     email or the password."""
@@ -155,6 +201,7 @@ class ThreeDfpSite:
 
     async def __aenter__(self) -> Self:
         self._profile_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        write_preferences(self._profile_dir)
         self._playwright = await async_playwright().start()
         env: dict[str, str | float | bool] = dict(browser_env(os.environ))
         try:
@@ -210,6 +257,12 @@ class ThreeDfpSite:
         failed: SiteError | None = None
         try:
             await self._goto("/login", settle_ms=5000)
+            # Chromium keeps a page's form state in the profile's ``Sessions`` files (for
+            # back and forward), but never for a field with autocomplete off (R-F12).
+            for field in ("email", "password"):
+                await page.locator(f"input[name={field}]").evaluate(
+                    "e => e.setAttribute('autocomplete', 'off')"
+                )
             await page.fill("input[name=email]", self._email.get_secret_value())
             await page.fill("input[name=password]", self._password.get_secret_value())
             await page.get_by_role("button", name="Sign In", exact=True).click()

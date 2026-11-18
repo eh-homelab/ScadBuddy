@@ -2501,9 +2501,19 @@ holds the manifests (the clusters PR, plan Task 11, applies the pod settings bel
   the root file system is read-only; default `/tmp`) and `SCADBUDDY_LOG_LEVEL`
   (`profile_fetch/settings.py`). The worker reads the 3DFP login from its secret at start
   and removes it from its environment. It types the login into the site's login form in
-  the browser, so the browser page holds it for the login. No other process, log or
-  stored file holds it: Chromium starts with an allowlisted environment, and no error
-  text, trace or HAR carries the login. It exports one run at a time (one replica, strategy
+  the browser, so the browser page holds it for the login. Chromium starts with an
+  allowlisted environment, so no browser process gets the login in its environment, and
+  no error text, trace or HAR carries it. The browser's profile under
+  `SCADBUDDY_PROFILE_FETCH_WORK_DIR` keeps the site's cookies, not the login: before each
+  launch the worker turns off Chromium's autofill, form saving, password manager and
+  credentials service in the profile's `Default/Preferences`, and it sets autocomplete
+  off on the login's fields. `test_the_profile_keeps_no_login_after_a_login`
+  (`backend/tests/profile_fetch/test_site.py`) measures this: it logs in to the local
+  replica site in headed Chromium, closes the browser, and finds neither the email nor
+  the password, as UTF-8, UTF-16-LE or URL-encoded bytes, in any file under the profile
+  directory. Without the two changes, the same test found the email in
+  `Default/Web Data`, `Default/Login Data` and `Default/Sessions` (Playwright 1.64.1's
+  Chromium). It does not check the profile while the browser runs. It exports one run at a time (one replica, strategy
   `Recreate`), so two browsers never share one login.
 - **The secret.** The 1Password item "3D Filament Profiles" in the vault `homelab - prod` has
   a `password` field. It needs a text field `email` that the owner adds (the account email;
