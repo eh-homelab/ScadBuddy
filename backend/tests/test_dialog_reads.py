@@ -8,6 +8,7 @@ import asyncio
 import httpx
 import pytest
 import respx
+from pydantic import ValidationError
 
 from scadbuddy.bambuddy.client import BambuddyConfig
 from scadbuddy.bambuddy.models import LibraryFile
@@ -193,6 +194,77 @@ async def test_waiters_on_a_failed_read_get_its_error_and_read_no_more() -> None
         with pytest.raises(RuntimeError):
             await caller
     assert calls == 1
+
+
+async def test_each_waiter_raises_its_own_copy_of_the_shared_error() -> None:
+    """No two callers share one exception object, so no traceback holds another caller's
+    frames; each copy keeps the error's class and fields, and names the shared read's
+    error as its cause (#6627)."""
+    gate = asyncio.Event()
+
+    async def read() -> LibraryFile:
+        await gate.wait()
+        raise ApiError(503, "Bambuddy did not answer", headers={"Retry-After": "5"})
+
+    reads = DialogReads(clock=Clock())
+    callers = [asyncio.create_task(reads.get(CONFIG, "library_file", 89, read)) for _ in range(3)]
+    await asyncio.sleep(0)
+    gate.set()
+    errors = []
+    for caller in callers:
+        with pytest.raises(ApiError) as raised:
+            await caller
+        errors.append(raised.value)
+    leader, *waiters = errors
+    assert len({id(error) for error in errors}) == 3
+    for waiter in waiters:
+        assert (waiter.status, waiter.detail, waiter.headers) == (
+            503,
+            leader.detail,
+            leader.headers,
+        )
+        assert waiter.__cause__ is leader
+    tracebacks = [error.__traceback__ for error in errors]
+    assert len({id(tb) for tb in tracebacks}) == 3
+
+
+async def test_an_error_that_cannot_be_copied_reaches_each_waiter_as_itself() -> None:
+    """A pydantic ``ValidationError`` (Bambuddy sent a row that does not fit the model)
+    cannot be rebuilt from its args, so each waiter raises the shared error itself, never
+    a ``TypeError`` from the copy."""
+    gate = asyncio.Event()
+
+    async def read() -> LibraryFile:
+        await gate.wait()
+        return LibraryFile.model_validate({})
+
+    reads = DialogReads(clock=Clock())
+    callers = [asyncio.create_task(reads.get(CONFIG, "library_file", 89, read)) for _ in range(3)]
+    await asyncio.sleep(0)
+    gate.set()
+    for caller in callers:
+        with pytest.raises(ValidationError):
+            await caller
+
+
+async def test_a_waiters_change_to_its_errors_fields_reaches_no_other_waiter() -> None:
+    gate = asyncio.Event()
+
+    async def read() -> LibraryFile:
+        await gate.wait()
+        raise ApiError(503, "Bambuddy did not answer", headers={"Retry-After": "5"})
+
+    reads = DialogReads(clock=Clock())
+    callers = [asyncio.create_task(reads.get(CONFIG, "library_file", 89, read)) for _ in range(3)]
+    await asyncio.sleep(0)
+    gate.set()
+    errors = []
+    for caller in callers:
+        with pytest.raises(ApiError) as raised:
+            await caller
+        errors.append(raised.value)
+    errors[1].headers["Retry-After"] = "60"
+    assert [error.headers["Retry-After"] for error in errors] == ["5", "60", "5"]
 
 
 async def test_waiters_on_a_cancelled_read_share_one_new_read() -> None:
