@@ -356,8 +356,7 @@ export const filamentPurchasingTools: Tool[] = [
     label: 'Add or edit a filament invoice draft',
     description:
       'Without `invoice_id`, add a draft: `fields` needs `supplier_id`, `invoice_date`, `currency`, `subtotal`, ' +
-      '`total`, and may have `number`, `shipping`, `tax`, `note` and `import_run_id` (a repeated one returns the ' +
-      'first invoice); `lines` are `{description, quantity, unit_price, line_subtotal?, line_tax?, sku?, ' +
+      '`total`, and may have `number`, `shipping`, `tax` and `note`; `lines` are `{description, quantity, unit_price, line_subtotal?, line_tax?, sku?, ' +
       'type_id?, ...}`. With `invoice_id`, edit a draft: the `fields` given change (`supplier_id` moves it to ' +
       'another unarchived supplier, and its lines drop their supplier product) and, when `lines` is sent, it ' +
       'replaces every line. Tax and shipping are spread over the lines on each write: give `line_tax` on every ' +
@@ -379,6 +378,10 @@ export const filamentPurchasingTools: Tool[] = [
     summarize: ({ invoice_id, fields }) =>
       invoice_id ? `Edit invoice ${invoice_id}` : `Add invoice ${String(fields['number'] ?? '')}`.trim(),
     handler: async ({ invoice_id, fields, lines }, { backend }) => {
+      // The link to an import session is the import route's alone (#6267): a model edit must not move it.
+      if ('import_run_id' in fields || 'if_import_run_id' in fields) {
+        throw new ToolError('`import_run_id` and `if_import_run_id` are not yours to set; leave them out')
+      }
       if (invoice_id === undefined) {
         return json(
           await ok(

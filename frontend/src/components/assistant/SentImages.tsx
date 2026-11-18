@@ -56,8 +56,8 @@ export function SentImages({ images, sessionId = '' }: { images: SentImage[]; se
                 className="inline-flex min-h-6 max-w-[12rem] items-center gap-1.5 rounded-md border border-border bg-muted/40 px-2 py-1 text-xs text-foreground hover:bg-muted"
               >
                 <FileTextIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
-                <span className="truncate" title={sent.name}>
-                  {sent.name}
+                <span className="truncate" title={'fileName' in sent && sent.fileName ? sent.fileName : sent.name}>
+                  {'fileName' in sent && sent.fileName ? sent.fileName : 'Invoice PDF'}
                 </span>
                 <span className="shrink-0 rounded bg-muted px-1 font-medium text-muted-foreground">PDF</span>
               </a>

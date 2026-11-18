@@ -284,6 +284,8 @@ export type ToolImage = z.infer<typeof ToolImageSchema>
 const SentBlobSchema = z.strictObject({
   name: z.string().regex(/^[0-9a-f]{64}\.(png|jpg|gif|webp|pdf)$/),
   mediaType: z.enum([...IMAGE_MEDIA_TYPES, 'application/pdf']),
+  // An invoice PDF's own file name, for its chip (the blob's name is a hash).
+  fileName: z.string().optional(),
 })
 export const SentImageSchema = z.union([
   z.strictObject({

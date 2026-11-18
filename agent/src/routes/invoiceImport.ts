@@ -5,7 +5,7 @@ import type { BackendClient } from '../api/backend.js'
 import { browserUser } from '../auth/browserSession.js'
 import { invoiceImportPrompt } from '../filament/invoiceImportPrompt.js'
 import type { OriginPolicy } from '../http/origins.js'
-import { checkedAttachments, DOCUMENT_MEDIA_TYPES, IMAGE_MEDIA_TYPES, unsupported } from '../sessions/images.js'
+import { checkedAttachments, DOCUMENT_MEDIA_TYPES, IMAGE_BYTES_MAX, IMAGE_MEDIA_TYPES, PDF_BYTES_MAX, unsupported } from '../sessions/images.js'
 import { SessionError, type SessionManager } from '../sessions/manager.js'
 import { authored, authorHeaders } from '../tools/authorship.js'
 import { jsonBodyLimit, type RemoteAddress, uiRequestProblem } from './guard.js'
@@ -57,6 +57,16 @@ const NOT_READY = 'the AI database is unreachable or its migrations have not app
 const ENDED = new Set(['done', 'failed'])
 /** The backend's own refusals the route forwards as they are; any other is the agent's problem. */
 const FORWARDED = new Set([404, 422])
+
+const megabytes = (bytes: number) => `${(Math.floor(bytes / 100_000) / 10).toFixed(1)} MB`
+const TOO_LARGE =
+  `This file is too large for the assistant to read. It can read at most ${megabytes(IMAGE_BYTES_MAX)} for a photo ` +
+  `and ${megabytes(PDF_BYTES_MAX)} for a PDF. Upload a smaller photo or a PDF.`
+/** What a refused session start tells the person (Minor 4): the reason, and when to try again. */
+const REFUSED: Partial<Record<string, string>> = {
+  rate_limited: 'You have started many sessions in a short time. Wait a minute, then import again.',
+  unavailable: 'The assistant is not ready yet. Wait a moment, then import again.',
+}
 
 export type InvoiceImportDeps = {
   backend: BackendClient | undefined
@@ -123,6 +133,9 @@ export function registerInvoiceImportRoutes(app: Hono, deps: InvoiceImportDeps):
     const mediaType = invoice.file.media_type.toLowerCase()
     if (!READABLE.includes(mediaType)) return answer(422, { detail: unsupported(mediaType) })
 
+    const cap = mediaType === 'application/pdf' ? PDF_BYTES_MAX : IMAGE_BYTES_MAX
+    if (invoice.file.size > cap) return answer(422, { detail: TOO_LARGE })
+
     const running = invoice.import_run_id
     if (running !== null && (await live(sessions, running, owner))) {
       return answer(409, { detail: 'This invoice is already being imported. Open its session.', type: 'import_running', session_id: running })
@@ -133,7 +146,7 @@ export function registerInvoiceImportRoutes(app: Hono, deps: InvoiceImportDeps):
       parseAs: 'arrayBuffer',
     })
     if (file.error !== undefined || !file.data) return upstream(file.response.status, 'read the invoice file')
-    const attachments = checkedAttachments([{ mediaType, bytes: Buffer.from(file.data as ArrayBuffer) }])
+    const attachments = checkedAttachments([{ mediaType, bytes: Buffer.from(file.data as ArrayBuffer), fileName: invoice.file.name }])
     if (!attachments.ok) return answer(422, { detail: attachments.error })
 
     // No prompt: no turn runs until the link is claimed, so a lost claim never runs an agent.
@@ -197,6 +210,8 @@ export function registerInvoiceImportRoutes(app: Hono, deps: InvoiceImportDeps):
     const { invoice_id: id } = body.data
     const done = await serially(id, () => start(deps.sessions as SessionManager, backend, id, owner)).catch((err: unknown) => {
       console.error(`invoice import: invoice ${id} failed: ${String(err)}`)
+      const why = err instanceof SessionError ? REFUSED[err.code] : undefined
+      if (why !== undefined) return answer((err as SessionError).status, { detail: why, type: 'session_refused' })
       return answer(502, { detail: 'The import could not start. Try again.', type: 'upstream_error' })
     })
     return c.json(done.body, done.status)

@@ -20,7 +20,11 @@ function explain(cause: unknown): Problem {
       return { text: 'This invoice no longer exists.', retry: false }
     case 403:
       return { text: 'You cannot import invoices from here.', retry: false }
+    case 429:
     case 503:
+      // The agent's own reason (a rate limit, a start that is not ready): it is written for people.
+      if (type === 'session_refused') return { text: cause.detail, retry: true }
+      if (cause.status === 429) return { text: START_FAILED, retry: true }
       return { text: 'The assistant is unavailable right now. Try again later.', retry: true }
     case 422:
       return type === undefined
@@ -60,7 +64,8 @@ export function InvoiceImport({ invoice, onChanged }: { invoice: Pick<InvoiceDet
   const watched = target !== null && target !== ended ? target : null
 
   useEffect(() => {
-    if (watched === null) return
+    // No assistant (AI off): there is no session to read, so nothing polls.
+    if (opener === null || watched === null) return
     const id = watched
     let live = true
     let sent = 0
@@ -95,7 +100,7 @@ export function InvoiceImport({ invoice, onChanged }: { invoice: Pick<InvoiceDet
       window.clearInterval(timer)
       window.removeEventListener('focus', read)
     }
-  }, [watched])
+  }, [watched, opener])
 
   if (!opener || closed || invoice.status !== 'draft' || !invoice.file) return null
   if (linked !== null && session === null && ended !== linked && checked !== linked) return null

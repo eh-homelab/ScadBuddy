@@ -100,10 +100,12 @@ export type ServerImage = { mediaType: ImageMediaType; bytes: Buffer; preview?: 
 const ServerImageSchema = stored(IMAGE_MEDIA_TYPES, IMAGE_BYTES_MAX).and(z.object({ preview: ImagePreviewSchema.optional() }))
 
 /** A PDF the user sends, as bytes. It has no preview: the panel draws none. */
-export type UserDocument = { mediaType: DocumentMediaType; bytes: Buffer }
+export type UserDocument = { mediaType: DocumentMediaType; bytes: Buffer; fileName?: string }
 export const UserDocumentSchema = z
   .object({
     mediaType: z.enum(DOCUMENT_MEDIA_TYPES),
+    // The file's own name, for the panel's chip (#6267): a name the person gave it, never the bytes.
+    fileName: z.string().min(1).max(200).optional(),
     bytes: z
       .instanceof(Buffer, { message: 'not bytes' })
       .refine((bytes) => bytes.length > 0, { message: 'empty' })
@@ -130,10 +132,25 @@ export function checkedImages(images: unknown): { ok: true; images: UserImage[] 
   return { ok: false, error: parsed.error.issues.map((i) => `${i.path.join('.') || 'images'}: ${i.message}`).join('; ') }
 }
 
+/** Plain names for the kinds of file people upload that ScadBuddy cannot read. */
+const KINDS: Record<string, string> = {
+  'image/heic': 'a HEIC photo',
+  'image/heif': 'a HEIF photo',
+  'image/tiff': 'a TIFF photo',
+  'image/bmp': 'a BMP photo',
+  'image/svg+xml': 'an SVG drawing',
+  'text/plain': 'a text file',
+  'text/html': 'a web page',
+  'text/csv': 'a spreadsheet file',
+  'application/zip': 'a ZIP file',
+}
+
 /** A refusal for a file type ScadBuddy cannot read, worded for the person. */
 export function unsupported(mediaType: unknown): string {
-  const kind = typeof mediaType === 'string' && /^[\w.+/-]{1,60}$/.test(mediaType) ? mediaType : 'type that ScadBuddy does not know'
-  return `This file is a ${kind}. ScadBuddy reads invoices as PDF, PNG, JPEG, GIF or WebP.`
+  const type = typeof mediaType === 'string' ? mediaType.toLowerCase() : ''
+  const kind = KINDS[type] ?? (type.startsWith('text/') ? 'a text file' : undefined)
+  const reads = 'ScadBuddy reads invoices as PDF, PNG, JPEG, GIF or WebP.'
+  return kind ? `This file is ${kind}. ${reads}` : `ScadBuddy cannot read this kind of file. It ${reads.slice('ScadBuddy '.length)}`
 }
 
 /**

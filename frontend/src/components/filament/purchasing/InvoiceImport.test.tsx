@@ -149,11 +149,42 @@ describe('InvoiceImport', () => {
   })
 
   it('says the sentence a 422 carries', async () => {
-    answers(422, { detail: 'This file is a image/heic. ScadBuddy reads invoices as PDF, PNG, JPEG, GIF or WebP.' })
+    answers(422, { detail: 'This file is a HEIC photo. ScadBuddy reads invoices as PDF, PNG, JPEG, GIF or WebP.' })
     const { user, opener } = render(draft)
     await user.click(await button())
-    expect(await screen.findByRole('alert')).toHaveTextContent('This file is a image/heic. ScadBuddy reads invoices as PDF, PNG, JPEG, GIF or WebP.')
+    expect(await screen.findByRole('alert')).toHaveTextContent('This file is a HEIC photo. ScadBuddy reads invoices as PDF, PNG, JPEG, GIF or WebP.')
     expect(opener!.openSession).not.toHaveBeenCalled()
+  })
+
+  it('says a too-large file is too large, with what to do', async () => {
+    const detail = 'This file is too large for the assistant to read. It can read at most 3.9 MB for a photo and 6.2 MB for a PDF. Upload a smaller photo or a PDF.'
+    answers(422, { detail })
+    const { user } = render(draft)
+    await user.click(await button())
+    expect(await screen.findByRole('alert')).toHaveTextContent(detail)
+  })
+
+  it('says the agent\'s own reason when the session start is rate limited, with Retry', async () => {
+    const detail = 'You have started many sessions in a short time. Wait a minute, then import again.'
+    answers(429, { detail, type: 'session_refused' })
+    const { user } = render(draft)
+    await user.click(await button())
+    expect(await screen.findByRole('alert')).toHaveTextContent(detail)
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+  })
+
+  it('does not read the session while the assistant is off', async () => {
+    let reads = 0
+    server.use(
+      http.get('/api/v1/ai/sessions/sess-off', () => {
+        reads += 1
+        return HttpResponse.json({ id: 'sess-off', title: 't', status: 'running', running: true, archived: false })
+      }),
+    )
+    const { container } = render({ ...draft, import_run_id: 'sess-off' }, null)
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(container).toBeEmptyDOMElement()
+    expect(reads).toBe(0)
   })
 
   it('shows a plain error with Retry on a 502, and Retry tries again', async () => {

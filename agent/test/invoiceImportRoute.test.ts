@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { describe, expect, it } from 'vitest'
 import { createBackendClient } from '../src/api/backend.js'
 import { registerInvoiceImportRoutes } from '../src/routes/invoiceImport.js'
+import { IMAGE_BYTES_MAX, PDF_BYTES_MAX } from '../src/sessions/images.js'
 import { SessionError } from '../src/sessions/manager.js'
 import { BACKEND, LOOPBACK, ORIGINS } from './helpers/mcp.js'
 
@@ -179,9 +180,57 @@ describe('starting an invoice import (#6267)', () => {
       const res = await post(hono)
       expect(res.status).toBe(422)
       expect(((await res.json()) as { detail: string }).detail).toBe(
-        `This file is a ${type}. ScadBuddy reads invoices as PDF, PNG, JPEG, GIF or WebP.`,
+        `This file is ${type === 'image/heic' ? 'a HEIC photo' : 'a text file'}. ScadBuddy reads invoices as PDF, PNG, JPEG, GIF or WebP.`,
       )
       expect(started).toEqual([])
+    }
+  })
+
+  it('refuses a photo or a PDF over its cap with a sentence that says what to do, before it reads the file', async () => {
+    const cases = [
+      { media_type: 'image/png', size: IMAGE_BYTES_MAX + 1, text: /photo/ },
+      { media_type: 'application/pdf', size: PDF_BYTES_MAX + 1, text: /PDF/ },
+    ]
+    for (const { media_type, size, text } of cases) {
+      const b = fakeBackend({ file: { name: 'big', media_type, size } })
+      const { hono, started } = app(b.backend)
+      const res = await post(hono)
+      expect(res.status).toBe(422)
+      const detail = ((await res.json()) as { detail: string }).detail
+      expect(detail).toMatch(/too large for the assistant to read/)
+      expect(detail).toMatch(/at most 3\.9 MB for a photo and 6\.2 MB for a PDF/)
+      expect(detail).toMatch(/Upload a smaller photo or a PDF/)
+      expect(detail).toMatch(text)
+      expect(detail).not.toMatch(/bytes/)
+      expect(started).toEqual([])
+    }
+  })
+
+  it('names the invoice file in the PDF attachment, so the chip can show it', async () => {
+    const b = fakeBackend({ file: { name: 'Bambu order 4411.pdf', media_type: 'application/pdf', size: PDF.length } })
+    const { hono, sent } = app(b.backend)
+    expect((await post(hono)).status).toBe(200)
+    expect(sent[0]!.images).toMatchObject([{ mediaType: 'application/pdf', fileName: 'Bambu order 4411.pdf' }])
+  })
+
+  it('tells the person to wait when the session start is rate limited, and to try later when it is not ready', async () => {
+    const cases: [SessionError, number, RegExp][] = [
+      [new SessionError('rate_limited', 'too many'), 429, /Wait a minute/],
+      [new SessionError('unavailable', 'no workflow'), 503, /not ready/],
+    ]
+    for (const [error, status, text] of cases) {
+      const b = fakeBackend()
+      const fake = fakeSessions()
+      fake.sessions.start = async () => {
+        throw error
+      }
+      const { hono, sent } = app(b.backend, fake)
+      const res = await post(hono)
+      expect(res.status).toBe(status)
+      const body = (await res.json()) as { detail: string; type: string }
+      expect(body.detail).toMatch(text)
+      expect(body.type).toBe('session_refused')
+      expect(sent).toEqual([])
     }
   })
 

@@ -178,6 +178,29 @@ describe('filament purchasing tools', () => {
     expect(nothing.isError).toBe(true)
   })
 
+  it('never lets the model set the import link (#6267)', async () => {
+    const INVOICE = '8d6f3c1e-0000-4000-8000-000000006605'
+    const seen: unknown[] = []
+    server.use(
+      http.post(`${FILAMENT}/invoices`, async ({ request }) => {
+        seen.push(await request.json())
+        return HttpResponse.json({ id: INVOICE })
+      }),
+      http.patch(`${FILAMENT}/invoices/${INVOICE}`, async ({ request }) => {
+        seen.push(await request.json())
+        return HttpResponse.json({ id: INVOICE })
+      }),
+    )
+    for (const fields of [{ import_run_id: 's-9' }, { if_import_run_id: null, note: 'x' }]) {
+      const edit = await runTool(tool('filament_invoice_upsert'), { invoice_id: INVOICE, fields }, ctx())
+      expect(edit.isError).toBe(true)
+      const add = await runTool(tool('filament_invoice_upsert'), { fields: { supplier_id: SUPPLIER, ...fields } }, ctx())
+      expect(add.isError).toBe(true)
+    }
+    expect(seen).toEqual([])
+    expect(tool('filament_invoice_upsert').description).not.toContain('`import_run_id`')
+  })
+
   it('deletes an invoice draft and answers its id', async () => {
     const INVOICE = '8d6f3c1e-0000-4000-8000-000000006605'
     server.use(http.delete(`${FILAMENT}/invoices/${INVOICE}`, () => new HttpResponse(null, { status: 204 })))

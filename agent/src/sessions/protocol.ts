@@ -68,7 +68,7 @@ export type ImageRef = { name: string; mediaType: 'image/png' | 'image/jpeg' | '
  */
 export type SentImage =
   | (Partial<ImageRef> & { preview: { name: string; mediaType: 'image/png' | 'image/jpeg' | 'image/webp' } })
-  | { name: string; mediaType: ImageRef['mediaType'] | 'application/pdf' }
+  | { name: string; mediaType: ImageRef['mediaType'] | 'application/pdf'; fileName?: string }
 
 /**
  * A message waiting for its turn (#6386): its id is the turn id it runs as, `text` the user's

@@ -181,3 +181,11 @@ to the new skill), spec §9 "as built in #6267" note for Decisions 1-7, `backend
 10. An idle import session is the assistant waiting for the person. The start route keeps opening it, and the UI says "waiting for you" with no pulse. The UI reads the status again every 15 s and on focus. If this were wrong, a second import could not start until the first one is archived.
 11. A hidden tab keeps polling the status. The 15 s read costs little. If this were wrong, background tabs would send idle requests.
 12. Open check for the final review: a connected panel must learn of a session that the REST start route created. Verify this on the real stack. This check is not done yet.
+13. Final review, Important 1: the start route compares the invoice file's size with the cap for its type before it reads the file. It answers 422 with a plain sentence: the file is too large for the assistant to read, the caps in MB for a photo and for a PDF, and to upload a smaller photo or a PDF. The panel shows that sentence.
+14. Final review, Minor 1: rule 2 of the filament skill is split into short sentences and bullets.
+15. Final review, Minor 2: a PDF's attachment pointer carries the file's own name (`{name, mediaType, fileName}`, never the bytes). The chip shows that name, and "Invoice PDF" for a turn that has none.
+16. Final review, Minor 3: `unsupported()` names the kind of file in plain words ("a HEIC photo", "a text file") with the right article. It says "this kind of file" for a kind it does not know.
+17. Final review, Minor 4: a rate-limited or not-ready session start answers its own status (429 or 503) with a plain reason and `type: session_refused`. The panel shows that reason.
+18. Final review, Minor 5: the invoice page does not read the session status when the assistant is off (no opener).
+19. Final review, Minor 6: the filament skill says that SB does not write back to BB "yet", and points to #6265 (filament spec §8).
+20. Final review, Minor 7: `filament_invoice_upsert` refuses `import_run_id` and `if_import_run_id` in `fields`, for an add and for an edit. Only the import route links a session. The backend PATCH stays as it is, because the start route and its tests send `import_run_id` with `if_import_run_id`, and the tool is the only model path to it.

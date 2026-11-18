@@ -5,8 +5,9 @@ description: Manage ScadBuddy's own filament inventory - spool types, spools, ta
 
 # Filament inventory and invoice import
 
-ScadBuddy (SB) owns the spool inventory. Bambuddy (BB) keeps a copy that SB pulls
-and does not write back to.
+ScadBuddy (SB) owns the spool inventory. Bambuddy (BB) keeps a copy that SB pulls.
+SB does not write back to BB yet. A push from SB to BB is planned in
+[#6265](https://github.com/eh-homelab/ScadBuddy/issues/6265) (filament spec §8).
 
 Sources, relative to the root of
 [eh-homelab/ScadBuddy](https://github.com/eh-homelab/ScadBuddy):
@@ -84,13 +85,15 @@ no invoice line:
    - "Uncosted" means the spool's own cost per kg is empty and it has no invoice
      line. A cost that only the type gives is a default, not a purchase.
 2. **Cost per spool** is (line subtotal + that line's tax + that line's share of
-   shipping) ÷ quantity. Shipping is shared over the lines by value
-   (`allocate` and `unit_cost` in `backend/scadbuddy/filament/invoice_money.py`).
-   The confirm computes the cost. Show the person the same number. Use the tax
-   the invoice prints per line. When only a total tax is printed, the rate is
-   total tax ÷ subtotal, applied per line, and the line records its tax basis
-   (for example "receipt-wide 7.0%"). A bundle that splits into N spools is
-   quantity N.
+   shipping) ÷ quantity.
+   - Shipping is shared over the lines by value (`allocate` and `unit_cost` in
+     `backend/scadbuddy/filament/invoice_money.py`).
+   - The confirm computes the cost. Show the person the same number.
+   - Use the tax that the invoice prints for each line.
+   - When the invoice prints only a total tax, the rate is total tax ÷ subtotal.
+     Apply it to each line. The line records its tax basis, for example
+     "receipt-wide 7.0%".
+   - A bundle that splits into N spools is quantity N.
 3. **No SKU on the invoice:** use the product name as the SKU. Never borrow a SKU
    from another invoice.
 4. **Bambu lines:** the colour code on the invoice (for example "Misty Blue

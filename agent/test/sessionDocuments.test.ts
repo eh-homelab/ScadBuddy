@@ -59,8 +59,18 @@ describe('a refusal for a type ScadBuddy cannot read', () => {
     const checked = checkedAttachments([{ mediaType: 'text/plain', bytes: Buffer.from('hello') }])
     expect(checked).toEqual({
       ok: false,
-      error: 'attachments.0.mediaType: This file is a text/plain. ScadBuddy reads invoices as PDF, PNG, JPEG, GIF or WebP.',
+      error: 'attachments.0.mediaType: This file is a text file. ScadBuddy reads invoices as PDF, PNG, JPEG, GIF or WebP.',
     })
+  })
+
+  it('names a kind of file in plain words, with the right article, and never an unknown type', () => {
+    const text = (mediaType: string) => {
+      const checked = checkedAttachments([{ mediaType, bytes: Buffer.from('x') }])
+      return checked.ok ? '' : checked.error
+    }
+    expect(text('image/heic')).toContain('This file is a HEIC photo.')
+    expect(text('image/tiff')).toContain('This file is a TIFF photo.')
+    expect(text('application/octet-stream')).toContain('ScadBuddy cannot read this kind of file.')
   })
 
   it('does not echo a type that is not a plain media type', () => {
@@ -86,6 +96,14 @@ describe('an image a server builds a turn from (no preview, #6267)', () => {
 })
 
 describe('a PDF in the session blobs', () => {
+  it('carries the invoice file name in its pointer, never the bytes', () => {
+    const named = { ...pdf, fileName: 'Bambu order.pdf' }
+    const checked = checkedAttachments([named])
+    expect(checked.ok && checked.attachments[0]).toMatchObject({ fileName: 'Bambu order.pdf' })
+    const { sent } = sentImageBlobs([named])
+    expect(sent).toEqual([{ name: sessionImage('application/pdf', PDF).name, mediaType: 'application/pdf', fileName: 'Bambu order.pdf' }])
+  })
+
   it('is named by its sha256 and .pdf, and a sent turn names it without a preview', () => {
     const blob = sessionImage('application/pdf', PDF)
     expect(blob.name).toMatch(BLOB_NAME)

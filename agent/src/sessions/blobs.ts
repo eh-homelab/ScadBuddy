@@ -101,7 +101,7 @@ export function sentImageBlobs(images: readonly UserAttachment[]): { blobs: Sess
       // A PDF has no preview (#6267): the turn names the document only.
       const doc = sessionImage(image.mediaType, image.bytes)
       blobs.push(doc)
-      return { name: doc.name, mediaType: image.mediaType }
+      return { name: doc.name, mediaType: image.mediaType, ...(image.fileName ? { fileName: image.fileName } : {}) }
     }
     const full = sessionImage(image.mediaType, image.bytes)
     if (!image.preview) {

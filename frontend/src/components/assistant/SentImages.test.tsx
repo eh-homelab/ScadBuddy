@@ -143,9 +143,18 @@ describe('sent images (#1891)', () => {
     render(<SentImages images={[{ name, mediaType: 'application/pdf' }]} sessionId={SESSION} />)
     const link = within(screen.getByRole('list', { name: 'Images sent' })).getByRole('link')
     expect(link).toHaveAttribute('href', blobUrl(SESSION, name))
-    expect(link).toHaveTextContent(name)
+    expect(link).toHaveTextContent('Invoice PDF')
+    expect(link).not.toHaveTextContent(name)
     expect(link).toHaveTextContent('PDF')
     expect(screen.queryByRole('img')).not.toBeInTheDocument()
+  })
+
+  it('names a PDF chip by the file the person uploaded when the turn carries it', () => {
+    const name = `${'c'.repeat(64)}.pdf`
+    render(<SentImages images={[{ name, mediaType: 'application/pdf', fileName: 'Bambu order 4411.pdf' }]} sessionId={SESSION} />)
+    const link = within(screen.getByRole('list', { name: 'Images sent' })).getByRole('link')
+    expect(link).toHaveTextContent('Bambu order 4411.pdf')
+    expect(link).toHaveAttribute('href', blobUrl(SESSION, name))
   })
 
   it('shows an image with no preview by its full image (#6267)', () => {
