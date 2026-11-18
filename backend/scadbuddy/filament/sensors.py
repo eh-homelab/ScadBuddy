@@ -5,6 +5,7 @@ stored reading is kept on the sensor row for reads."""
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -57,6 +58,7 @@ class SensorStore:
         names = list(data)
         try:
             with self._pool.connection() as conn:
+                self._live_place(conn, body.location_id)
                 row = conn.execute(
                     f"INSERT INTO filament_location_sensors ({', '.join(names)})"
                     f" VALUES ({', '.join('%s' for _ in names)}) RETURNING {_COLUMNS}",
@@ -77,6 +79,8 @@ class SensorStore:
         values: list[Any] = [getattr(patch, n) for n in sent]
         try:
             with self._pool.connection() as conn:
+                if patch.location_id is not None:
+                    self._live_place(conn, patch.location_id)
                 row = conn.execute(
                     f"UPDATE filament_location_sensors SET {sets}"
                     f" WHERE id = %s AND archived_at IS NULL RETURNING {_COLUMNS}",
@@ -111,11 +115,27 @@ class SensorStore:
         return [m.SensorReading.model_validate(row) for row in rows]
 
     @staticmethod
+    def _live_place(conn: Conn, location_id: UUID) -> None:
+        if (
+            conn.execute(
+                "SELECT 1 FROM filament_locations WHERE id = %s AND archived_at IS NULL",
+                (location_id,),
+            ).fetchone()
+            is None
+        ):
+            raise CatalogRefError()
+
+    @staticmethod
     def record_on(conn: Conn, sensor_id: UUID, value: float, at: datetime) -> bool:
-        """Store ``value`` read at ``at`` on ``conn``, in the caller's transaction, if it
-        differs from the last stored value or `SAME_VALUE_EVERY` has passed since it.
-        Marks the sensor reachable either way. ``False`` when nothing was stored (or the
-        sensor is gone)."""
+        """Store ``value`` read at ``at`` if it differs from the last stored value or
+        `SAME_VALUE_EVERY` has passed since it. Call it inside ``conn.transaction()``: the
+        sensor row's lock (``FOR UPDATE``) holds only to the end of a transaction, and the
+        reading and the row's last value must change together. Nothing is stored for a
+        value that is not finite, or an ``at`` not newer than the last stored reading (a
+        poll that arrived out of order). A stored or repeated value marks the sensor
+        reachable. ``False`` when nothing was stored (or the sensor is gone)."""
+        if not math.isfinite(value):
+            return False
         row = conn.execute(
             "SELECT last_value, last_at FROM filament_location_sensors WHERE id = %s FOR UPDATE",
             (sensor_id,),
@@ -123,23 +143,24 @@ class SensorStore:
         if row is None:
             return False
         last_at: datetime | None = row["last_at"]
+        if last_at is not None and at <= last_at:
+            return False
         if row["last_value"] == value and last_at is not None and at - last_at < SAME_VALUE_EVERY:
             conn.execute(
                 "UPDATE filament_location_sensors SET reachable = true WHERE id = %s",
                 (sensor_id,),
             )
             return False
-        stored = conn.execute(
-            "INSERT INTO filament_sensor_readings (sensor_id, at, value) VALUES (%s, %s, %s)"
-            " ON CONFLICT DO NOTHING RETURNING at",
+        conn.execute(
+            "INSERT INTO filament_sensor_readings (sensor_id, at, value) VALUES (%s, %s, %s)",
             (sensor_id, at, value),
-        ).fetchone()
+        )
         conn.execute(
             "UPDATE filament_location_sensors SET reachable = true, last_value = %s,"
             " last_at = %s WHERE id = %s",
             (value, at, sensor_id),
         )
-        return stored is not None
+        return True
 
 
 def repoint_printer_sensors(conn: Conn, merged: UUID, into: UUID) -> None:

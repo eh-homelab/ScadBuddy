@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
 
-from scadbuddy.filament.catalog import CatalogStore
-from scadbuddy.filament.locations import LocationStore
-from scadbuddy.filament.models import LocationCreate, LocationKind, SensorIn
+from scadbuddy.filament.catalog import CatalogRefError, CatalogStore
+from scadbuddy.filament.locations import LocationStore, repoint_printer_locations
+from scadbuddy.filament.models import (
+    LocationCreate,
+    LocationKind,
+    MaterialCreate,
+    SensorIn,
+    SensorPatch,
+)
 from scadbuddy.filament.sensors import SensorStore, repoint_printer_sensors
 from tests.conftest import PgPool
 
@@ -50,7 +57,7 @@ def _sensor(pool: PgPool, **extra: object) -> UUID:
 
 
 def _record(pool: PgPool, sensor: UUID, value: float, at: datetime) -> bool:
-    with pool.connection() as conn:
+    with pool.connection() as conn, conn.transaction():
         return SensorStore.record_on(conn, sensor, value, at)
 
 
@@ -161,8 +168,82 @@ def test_a_merge_keeps_the_kept_printers_unit_sensor(pg_pool: PgPool) -> None:
             for kind in kinds
         ]
     with pg_pool.connection() as conn:
-        repoint_printer_sensors(conn, gone, kept)
+        kept_unit = LocationStore.ensure_ams_unit_on(conn, kept, 0)
+        with conn.transaction():
+            repoint_printer_locations(conn, gone, kept)
+            repoint_printer_sensors(conn, gone, kept)
     live = {s.id: s for s in store.list(None)}
     assert made[gone][0] not in live
     assert live[made[gone][1]].printer_id == kept
+    assert live[made[gone][1]].location_id == kept_unit
+    assert {s.id for s in store.list(kept_unit)} == {made[kept][0], made[gone][1]}
     assert made[kept][0] in live and made[lone][0] in live
+
+
+def test_an_external_holder_has_no_unit_place(pg_pool: PgPool) -> None:
+    printer = _printer(pg_pool)
+    tray = LocationStore(pg_pool).ensure_ams(printer, 255, 0, label="Ext")
+    assert tray.parent_id is None
+    with pg_pool.connection() as conn:
+        row = conn.execute(
+            "SELECT count(*) AS n FROM filament_locations WHERE printer_id = %s"
+            " AND tray_id IS NULL",
+            (printer,),
+        ).fetchone()
+    assert row == {"n": 0}
+
+
+def test_a_non_finite_or_older_reading_stores_nothing(pg_pool: PgPool) -> None:
+    sensor = _sensor(pg_pool)
+    assert _record(pg_pool, sensor, 40.0, T0 + timedelta(minutes=5))
+    assert not _record(pg_pool, sensor, float("nan"), T0 + timedelta(minutes=6))
+    assert not _record(pg_pool, sensor, float("inf"), T0 + timedelta(minutes=7))
+    assert not _record(pg_pool, sensor, 55.0, T0)
+    assert not _record(pg_pool, sensor, 55.0, T0 + timedelta(minutes=5))
+    got = SensorStore(pg_pool).list(None)[0]
+    assert (got.last_value, got.last_at) == (40.0, T0 + timedelta(minutes=5))
+    assert len(SensorStore(pg_pool).readings(sensor, T0 - timedelta(hours=1), 100)) == 1
+
+
+def test_sensor_input_is_checked() -> None:
+    base: dict[str, object] = {
+        "location_id": uuid4(),
+        "kind": "humidity",
+        "name": "n",
+    }
+    ha = base | {"source": "home_assistant", "entity_id": "sensor.a"}
+    with pytest.raises(ValueError, match="printer_id"):
+        SensorIn.model_validate(ha | {"printer_id": uuid4()})
+    ams = base | {"source": "ams", "printer_id": uuid4(), "ams_id": 0}
+    with pytest.raises(ValueError, match="entity_id"):
+        SensorIn.model_validate(ams | {"entity_id": "sensor.a"})
+    with pytest.raises(ValueError, match="alert_below"):
+        SensorIn.model_validate(ha | {"alert_above": 10, "alert_below": 20})
+    with pytest.raises(ValueError):
+        SensorIn.model_validate(ha | {"alert_above": float("nan")})
+
+
+def test_a_sensor_needs_a_live_location(pg_pool: PgPool) -> None:
+    place = _place(pg_pool)
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_locations SET archived_at = now() WHERE id = %s", (place,))
+    body = SensorIn.model_validate(
+        {
+            "location_id": place,
+            "source": "home_assistant",
+            "kind": "humidity",
+            "entity_id": "sensor.a",
+            "name": "n",
+        }
+    )
+    with pytest.raises(CatalogRefError):
+        SensorStore(pg_pool).create(body, actor="x")
+    live = _sensor(pg_pool)
+    with pytest.raises(CatalogRefError):
+        SensorStore(pg_pool).update(live, SensorPatch(location_id=place), actor="x")
+
+
+def test_a_max_hours_value_fits_its_column() -> None:
+    assert MaterialCreate(name="x", max_hours_outside_dry=Decimal("99999.9"))
+    with pytest.raises(ValueError):
+        MaterialCreate(name="x", max_hours_outside_dry=Decimal("99999.95"))

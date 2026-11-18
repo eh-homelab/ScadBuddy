@@ -376,6 +376,11 @@ def repoint_printer_locations(conn: Conn, merged: UUID, into: UUID) -> None:
         )
     for old, kept in clash.items():
         conn.execute(
+            "UPDATE filament_location_sensors SET location_id = %s, updated_at = now()"
+            " WHERE location_id = %s",
+            (kept, old),
+        )
+        conn.execute(
             "UPDATE filament_locations SET parent_id = %s, updated_at = now() WHERE parent_id = %s",
             (kept, old),
         )

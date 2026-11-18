@@ -49,7 +49,8 @@ Temp = Annotated[int, Field(ge=0, le=1000)]
 Density = Annotated[Decimal, Field(gt=0, lt=1000)]
 Diameter = Annotated[Decimal, Field(gt=0, lt=100)]
 Hours = Annotated[Decimal, Field(ge=0, lt=1000)]
-MaxHours = Annotated[Decimal, Field(ge=0, lt=100_000)]
+#: numeric(6,1): 99999.9 is the largest the column holds.
+MaxHours = Annotated[Decimal, Field(ge=0, le=Decimal("99999.9"))]
 Grams = Annotated[float, Field(ge=0, le=1_000_000)]
 LabelWeight = Annotated[int, Field(gt=0, le=100_000)]
 Percent = Annotated[int, Field(ge=0, le=100)]
@@ -381,6 +382,9 @@ class LocationNode(Location):
     children: list[LocationNode] = Field(default_factory=list)
 
 
+Reading = Annotated[float, Field(allow_inf_nan=False)]
+
+
 class SensorIn(_In):
     location_id: UUID
     source: Literal["home_assistant", "ams"]
@@ -390,17 +394,29 @@ class SensorIn(_In):
     ams_id: Idx | None = None
     name: Name
     unit: Annotated[str, Field(max_length=16)] | None = None
-    alert_above: float | None = None
-    alert_below: float | None = None
+    alert_above: Reading | None = None
+    alert_below: Reading | None = None
     notify: bool = False
 
     @model_validator(mode="after")
     def _source_fields(self) -> SensorIn:
-        if self.source == "home_assistant" and not self.entity_id:
-            raise ValueError("entity_id is required for a home_assistant sensor")
-        if self.source == "ams" and (self.printer_id is None or self.ams_id is None):
-            raise ValueError("printer_id and ams_id are required for an ams sensor")
+        if self.source == "home_assistant":
+            if not self.entity_id:
+                raise ValueError("entity_id is required for a home_assistant sensor")
+            if self.printer_id is not None or self.ams_id is not None:
+                raise ValueError("printer_id and ams_id are for an ams sensor only")
+        else:
+            if self.printer_id is None or self.ams_id is None:
+                raise ValueError("printer_id and ams_id are required for an ams sensor")
+            if self.entity_id is not None:
+                raise ValueError("entity_id is for a home_assistant sensor only")
+        _band(self.alert_below, self.alert_above)
         return self
+
+
+def _band(below: float | None, above: float | None) -> None:
+    if below is not None and above is not None and below >= above:
+        raise ValueError("alert_below must be under alert_above")
 
 
 class SensorPatch(_Patch):
@@ -410,14 +426,15 @@ class SensorPatch(_Patch):
     location_id: UUID | None = None
     name: Name | None = None
     unit: Annotated[str, Field(max_length=16)] | None = None
-    alert_above: float | None = None
-    alert_below: float | None = None
+    alert_above: Reading | None = None
+    alert_below: Reading | None = None
     notify: bool | None = None
 
     @model_validator(mode="after")
     def _location_set(self) -> SensorPatch:
         if "location_id" in self.model_fields_set and self.location_id is None:
             raise ValueError("location_id cannot be cleared")
+        _band(self.alert_below, self.alert_above)
         return self
 
 
