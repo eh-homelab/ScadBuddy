@@ -18,6 +18,13 @@ the rate uses those and says so (``intervals`` ``stored``), counting only the ta
 last read counted, so it is the live rate as last read. A printer only the LAN reaches
 has its intervals typed.
 A printer with no profile is priced at the book's ``machine_rate_per_hour``.
+
+Actuals (#5774, spec 2026-11-17-machine-rate-actuals): two more tables of the CRUD
+service's own, ``printer_maintenance_events`` and ``printer_wear_replacements``, log what
+really happened, each event with the printer's print-hour counter then (`hours_source`).
+Each row computes an actual per hour over the last ``actuals_window`` usable gaps or
+replacements (`task_actual`, `part_actual`) and a confidence; a row set to ``actual``
+prices by it once it has that many, else by its estimate.
 """
 
 from __future__ import annotations
@@ -28,7 +35,7 @@ import logging
 import uuid
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Annotated, Literal, Self
 
@@ -41,13 +48,18 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.orders.integrations import MaintenanceTask, NotLinkedError, OrderIntegrations
 from scadbuddy.orders.models import (
+    ActualWhy,
+    HoursSource,
     IntervalSource,
     MachineRateBreakdown,
     MaintenancePart,
     NotCounted,
+    PricedBy,
+    SkippedGap,
     WearPartRate,
     _places,
 )
+from scadbuddy.printers import run_hours
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.store import PrinterStore, printer_uuid
 
@@ -70,6 +82,11 @@ Tenths = Annotated[str, _places(1, 10**7)]
 KwhPrice = Annotated[str, _places(4, 10**6)]
 #: ``numeric(12, 4)``: a labour rate.
 LabourRate = Annotated[str, _places(4, 10**8)]
+#: ``numeric(10, 1)`` at or above 0: a counter reading, or the LAN counter's offset.
+Reading = Annotated[str, _places(1, 10**9)]
+#: #5774 §3.3: the window's default and its bounds (``printer_cost_profiles.actuals_window``).
+DEFAULT_WINDOW = 3
+MAX_WINDOW = 20
 
 
 class CostProfile(BaseModel):
@@ -84,6 +101,21 @@ class CostProfile(BaseModel):
     watts: Tenths = "0"
     kwh_price: KwhPrice = "0"
     labour_rate_per_hour: LabourRate | None = None
+    #: #5774 (spec 2026-11-17-machine-rate-actuals §3.3): how many usable gaps or
+    #: replacements a row needs before its actual prices. Left out of a `PUT`: kept as
+    #: stored (3 for a new profile), so a client that does not know it never resets it.
+    actuals_window: int | None = Field(default=None, ge=1, le=MAX_WINDOW)
+    #: §3.6: the hours a LAN-linked printer ran before ScadBuddy's counter watched it.
+    #: Left out: kept as stored (0 for a new profile).
+    lan_hours_offset: Reading | None = None
+
+    @property
+    def window(self) -> int:
+        return self.actuals_window or DEFAULT_WINDOW
+
+
+#: A name the row had before this edit: its events move to the new name (§4).
+RenamedFrom = Annotated[str, Field(min_length=1, max_length=100)]
 
 
 class WearPart(BaseModel):
@@ -94,6 +126,10 @@ class WearPart(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     cost: Amount
     life_hours: Hours
+    #: #5774 §3.5: which figure prices it. Left out of a `PUT`: kept as stored (a new row
+    #: starts at ``estimate``).
+    priced_by: PricedBy | None = None
+    renamed_from: RenamedFrom | None = None
 
 
 class MaintenanceCost(BaseModel):
@@ -108,6 +144,9 @@ class MaintenanceCost(BaseModel):
     minutes: Tenths = "0"
     consumables: Amount = "0"
     interval_hours: Hours | None = None
+    #: As `WearPart.priced_by`.
+    priced_by: PricedBy | None = None
+    renamed_from: RenamedFrom | None = None
 
 
 def _unique(names: Sequence[str], what: str) -> None:
@@ -116,6 +155,19 @@ def _unique(names: Sequence[str], what: str) -> None:
         if name in seen:
             raise ValueError(f"two {what} are named {name!r}")
         seen.add(name)
+
+
+def _renames(rows: Sequence[tuple[str, str | None]], what: str) -> None:
+    """Each ``renamed_from`` names one old row, and never a name a row has now: that
+    row's events would move."""
+    names = {name for name, _ in rows}
+    seen: set[str] = set()
+    for name, old in rows:
+        if old is None or old == name:
+            continue
+        if old in names or old in seen:
+            raise ValueError(f"renamed_from {old!r} of {what} is another row's name")
+        seen.add(old)
 
 
 class MachineRateInputs(BaseModel):
@@ -131,7 +183,220 @@ class MachineRateInputs(BaseModel):
     def _names(self) -> Self:
         _unique([part.name for part in self.wear_parts], "wear parts")
         _unique([cost.task for cost in self.maintenance], "maintenance tasks")
+        _renames([(p.name, p.renamed_from) for p in self.wear_parts], "wear parts")
+        _renames([(c.task, c.renamed_from) for c in self.maintenance], "maintenance tasks")
         return self
+
+
+# -- logged events (#5774, spec 2026-11-17-machine-rate-actuals §4, §5) --------------------
+
+EventKind = Literal["task", "part"]
+EventOrigin = Literal["bambuddy", "scadbuddy"]
+#: ``notes``' bound (``text CHECK (length(notes) <= 1000)``).
+NOTES_MAX = 1000
+#: A writer's key, so a retry writes once.
+Source = Annotated[str, Field(min_length=1, max_length=200)]
+EventName = Annotated[str, Field(min_length=1, max_length=100)]
+
+
+class MachineRateEvent(BaseModel):
+    """A maintenance task done (``kind`` ``task``) or a wear part replaced (``part``).
+    ``hours_at`` is the printer's counter then, on ``hours_source``'s scale; a task's
+    null ``minutes`` or ``consumables`` is priced at the task's typed figure; a part's
+    ``hours_used`` is typed (a correction), else derived from the replacement before."""
+
+    id: str
+    kind: EventKind
+    name: str
+    at: datetime
+    hours_at: str | None = None
+    hours_source: HoursSource | None = None
+    minutes: str | None = None
+    consumables: str | None = None
+    cost: str | None = None
+    hours_used: str | None = None
+    notes: str | None = None
+    origin: EventOrigin
+    bambuddy_history_id: int | None = None
+    source: str
+    created_at: datetime
+    created_by: str
+
+
+class MachineRateEventCreate(BaseModel):
+    """`POST /printers/{id}/machine-rate/events`: a ScadBuddy event. ``hours_at`` left
+    out is filled from the printer's counter (§3.2); one sent is a correction on that
+    counter. A part takes ``cost`` (and may take ``hours_used``); a task takes
+    ``minutes`` and ``consumables`` (null: the typed ones)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: EventKind
+    name: EventName
+    #: When it was done; now when left out.
+    at: datetime | None = None
+    hours_at: Reading | None = None
+    hours_used: Hours | None = None
+    minutes: Tenths | None = None
+    consumables: Amount | None = None
+    cost: Amount | None = None
+    notes: str | None = Field(default=None, max_length=NOTES_MAX)
+    #: A retry with the same ``source`` returns the first event (200).
+    source: Source | None = None
+
+    @model_validator(mode="after")
+    def _fields(self) -> Self:
+        if self.kind == "part":
+            if self.cost is None:
+                raise ValueError("a replaced part needs its cost")
+            if self.minutes is not None or self.consumables is not None:
+                raise ValueError("a replaced part takes no minutes or consumables")
+        elif self.cost is not None or self.hours_used is not None:
+            raise ValueError("a task takes no cost or hours_used")
+        return self
+
+
+class MachineRateEventPatch(BaseModel):
+    """`PATCH /printers/{id}/machine-rate/events/{event_id}`: the fields sent are set; a
+    null clears one (a task's minutes or consumables then price at the typed ones). An
+    imported event's time, counter source and Bambuddy id stay as read."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    minutes: Tenths | None = None
+    consumables: Amount | None = None
+    cost: Amount | None = None
+    hours_at: Reading | None = None
+    hours_used: Hours | None = None
+    notes: str | None = Field(default=None, max_length=NOTES_MAX)
+
+
+class MachineRateEventPage(BaseModel):
+    """`GET /printers/{id}/machine-rate/events`: newest first, ``next`` the cursor of
+    the page after (null at the end)."""
+
+    events: list[MachineRateEvent]
+    next: str | None = None
+
+
+#: A page of `MachineRateStore.list_events`, and its most.
+EVENTS_PAGE = 50
+EVENTS_PAGE_MAX = 200
+
+
+class LanCount(BaseModel):
+    """ScadBuddy's own counter for a LAN-linked printer (§3.6): ``hours`` is the reading
+    events get, ``run_hours`` plus ``offset_hours``; ``unseen_hours`` were not counted (a
+    gap that ended in another state or print)."""
+
+    hours: str
+    run_hours: str
+    offset_hours: str
+    unseen_hours: str
+    counted_to: datetime
+    started_at: datetime
+
+
+class EventFieldError(ValueError):
+    """A patch sets a field its event's kind has not (a task's cost, a part's minutes), or
+    clears a part's cost."""
+
+    def __init__(self, kind: EventKind, fields: list[str]) -> None:
+        super().__init__(f"a {kind} event cannot set {', '.join(fields)}")
+        self.fields = fields
+
+
+class ImportedEventError(Exception):
+    """An event imported from Bambuddy cannot be deleted: the next import would bring it
+    back."""
+
+
+class EventSourceTakenError(Exception):
+    """A ``source`` already names an event of the other kind on the printer."""
+
+
+def _uuid(text: str) -> uuid.UUID | None:
+    try:
+        return uuid.UUID(text)
+    except ValueError:
+        return None
+
+
+def _cursor(cursor: str) -> tuple[datetime, uuid.UUID]:
+    at, _, ident = cursor.rpartition("|")
+    key = _uuid(ident)
+    if key is None:
+        raise ValueError("not a cursor this route gave")
+    return datetime.fromisoformat(at), key
+
+
+EVENTS_SQL = (
+    "SELECT * FROM ("
+    "SELECT id, printer, 'task' AS kind, task AS name, performed_at AS at, hours_at,"
+    " hours_source, minutes, consumables, NULL::numeric AS cost, NULL::numeric AS hours_used,"
+    " notes, origin, bambuddy_history_id, source, created_at, created_by"
+    " FROM printer_maintenance_events"
+    " UNION ALL "
+    "SELECT id, printer, 'part', part, replaced_at, hours_at, hours_source, NULL, NULL, cost,"
+    " hours_used, notes, 'scadbuddy', NULL, source, created_at, created_by"
+    " FROM printer_wear_replacements"
+    ") AS events"
+)
+
+
+def _event(row: DictRow) -> MachineRateEvent:
+    return MachineRateEvent(
+        id=str(row["id"]),
+        kind=row["kind"],
+        name=row["name"],
+        at=row["at"],
+        hours_at=_number(row["hours_at"]),
+        hours_source=row["hours_source"],
+        minutes=_number(row["minutes"]),
+        consumables=_number(row["consumables"]),
+        cost=_number(row["cost"]),
+        hours_used=_number(row["hours_used"]),
+        notes=row["notes"],
+        origin=row["origin"],
+        bambuddy_history_id=row["bambuddy_history_id"],
+        source=row["source"],
+        created_at=row["created_at"],
+        created_by=row["created_by"],
+    )
+
+
+def _decimal(text: str | None) -> Decimal | None:
+    return None if text is None else Decimal(text)
+
+
+def events_of(logged: Sequence[MachineRateEvent]) -> Events:
+    """`compute`'s ``events`` from the stored rows."""
+    events = Events()
+    for e in logged:
+        if e.kind == "task":
+            events.tasks.setdefault(e.name, []).append(
+                TaskEvent(
+                    id=e.id,
+                    at=e.at,
+                    hours_at=_decimal(e.hours_at),
+                    hours_source=e.hours_source,
+                    minutes=_decimal(e.minutes),
+                    consumables=_decimal(e.consumables),
+                )
+            )
+        else:
+            assert e.cost is not None
+            events.parts.setdefault(e.name, []).append(
+                Replacement(
+                    id=e.id,
+                    at=e.at,
+                    hours_at=_decimal(e.hours_at),
+                    hours_source=e.hours_source,
+                    cost=Decimal(e.cost),
+                    hours_used=_decimal(e.hours_used),
+                )
+            )
+    return events
 
 
 def _text(number: Decimal) -> str:
@@ -155,6 +420,157 @@ def _hours(value: float) -> str | None:
     return _text(hours) if hours > 0 else None
 
 
+def reading(value: float) -> Decimal:
+    """A counter reading Bambuddy gave as a float (``current_hours``,
+    ``hours_at_maintenance``), to the tenth its column keeps, rounded half up. Unlike
+    `_hours` it keeps 0: a first event at 0.0 h has a known counter (#5774 §3.2)."""
+    return Decimal(str(value)).quantize(INTERVAL_PLACES, rounding=ROUND_HALF_UP)
+
+
+# -- actuals (#5774, spec 2026-11-17-machine-rate-actuals §3.3, §3.4) ---------------------
+
+
+@dataclass(frozen=True)
+class TaskEvent:
+    """A maintenance task done (``printer_maintenance_events``), as `compute` reads it.
+    Null ``minutes`` or ``consumables``: the task's typed figure prices it."""
+
+    id: str
+    at: datetime
+    hours_at: Decimal | None
+    hours_source: HoursSource | None
+    minutes: Decimal | None = None
+    consumables: Decimal | None = None
+
+
+@dataclass(frozen=True)
+class Replacement:
+    """A wear part replaced (``printer_wear_replacements``): what the new part cost and,
+    when typed, the hours the removed one ran."""
+
+    id: str
+    at: datetime
+    hours_at: Decimal | None
+    hours_source: HoursSource | None
+    cost: Decimal
+    hours_used: Decimal | None = None
+
+
+@dataclass
+class Events:
+    """A printer's events, by task and by part name."""
+
+    tasks: dict[str, list[TaskEvent]] = field(default_factory=dict)
+    parts: dict[str, list[Replacement]] = field(default_factory=dict)
+
+
+@dataclass
+class Actual:
+    """One row's actual over its window: the usable gaps' (or replacements') sums, the
+    events walked (newest first, the skipped ones between them) and what was skipped."""
+
+    need: int
+    have: int = 0
+    cost: Decimal = Decimal(0)
+    hours: Decimal = Decimal(0)
+    partly_typed: bool = False
+    window: list[str] = field(default_factory=list)
+    skipped: list[SkippedGap] = field(default_factory=list)
+
+    @property
+    def per_hour(self) -> Decimal | None:
+        return _rounded(self.cost / self.hours) if self.have else None
+
+    @property
+    def confidence(self) -> int:
+        """``floor(100 x min(have, N) / N)`` (§3.4)."""
+        return 100 * min(self.have, self.need) // self.need
+
+    @property
+    def why(self) -> ActualWhy | None:
+        if self.have >= self.need:
+            return None
+        return "no_events" if self.have == 0 else "too_few"
+
+    @property
+    def ready(self) -> bool:
+        return self.have >= self.need
+
+
+def _gap_problem(
+    newer: HoursSource | None, older: HoursSource | None, hours: Decimal
+) -> Literal["not_positive", "counter_changed"] | None:
+    if newer != older:
+        return "counter_changed"
+    if hours <= 0:
+        return "not_positive"
+    return None
+
+
+def task_actual(
+    events: Sequence[TaskEvent], cost: MaintenanceCost | None, labour: Decimal, need: int
+) -> Actual:
+    """A task's actual (§3.3): over the last ``need`` usable gaps between two events with
+    a reading, ordered by reading then time, ``sum(cost_i) / sum(gap_i)``, where each
+    gap's cost is its newer event's own figures, else the typed ones."""
+    typed_minutes = Decimal(cost.minutes) if cost else Decimal(0)
+    typed_consumables = Decimal(cost.consumables) if cost else Decimal(0)
+    read = sorted(
+        (e for e in events if e.hours_at is not None),
+        key=lambda e: (e.hours_at, e.at, e.id),
+    )
+    actual = Actual(need=need)
+    for index in range(len(read) - 1, -1, -1):
+        newer = read[index]
+        actual.window.append(newer.id)
+        if actual.have >= need or index == 0:
+            break
+        older = read[index - 1]
+        assert newer.hours_at is not None and older.hours_at is not None
+        gap = newer.hours_at - older.hours_at
+        problem = _gap_problem(newer.hours_source, older.hours_source, gap)
+        if problem is not None:
+            actual.skipped.append(SkippedGap(event=newer.id, previous=older.id, reason=problem))
+            continue
+        minutes = typed_minutes if newer.minutes is None else newer.minutes
+        consumables = typed_consumables if newer.consumables is None else newer.consumables
+        if newer.minutes is None or newer.consumables is None:
+            actual.partly_typed = True
+        actual.cost += minutes * labour / MINUTES_PER_HOUR + consumables
+        actual.hours += gap
+        actual.have += 1
+    return actual
+
+
+def part_actual(replacements: Sequence[Replacement], need: int) -> Actual:
+    """A wear part's actual (§3.3): over the last ``need`` replacements with a usable
+    ``hours_used``, ``sum(cost_r) / sum(hours_used_r)``. Replacements are ordered by time
+    (one may have no reading). ``hours_used`` is the typed one, else the reading less the
+    replacement before's; a replacement with neither (the first, or one after a
+    replacement with no reading) only marks where the next part's life starts."""
+    ordered = sorted(replacements, key=lambda r: (r.at, r.hours_at or 0, r.id))
+    actual = Actual(need=need)
+    for index in range(len(ordered) - 1, -1, -1):
+        if actual.have >= need:
+            break
+        newer = ordered[index]
+        actual.window.append(newer.id)
+        used = newer.hours_used
+        if used is None:
+            older = ordered[index - 1] if index > 0 else None
+            if older is None or older.hours_at is None or newer.hours_at is None:
+                continue
+            used = newer.hours_at - older.hours_at
+            problem = _gap_problem(newer.hours_source, older.hours_source, used)
+            if problem is not None:
+                actual.skipped.append(SkippedGap(event=newer.id, previous=older.id, reason=problem))
+                continue
+        actual.cost += newer.cost
+        actual.hours += used
+        actual.have += 1
+    return actual
+
+
 def _task_part(
     task: str,
     interval: str | None,
@@ -162,25 +578,79 @@ def _task_part(
     cost: MaintenanceCost | None,
     labour: Decimal,
     why: NotCounted | None,
+    actual: Actual,
 ) -> MaintenancePart:
     minutes = Decimal(cost.minutes) if cost else Decimal(0)
     consumables = Decimal(cost.consumables) if cost else Decimal(0)
+    priced_by: PricedBy = (cost.priced_by if cost else None) or "estimate"
     if why is None and interval is None:
         why = "no_interval"
-    per_hour = Decimal(0)
+    estimate: Decimal | None = None
     if why is None:
         assert interval is not None
         occurrence = minutes * labour / MINUTES_PER_HOUR + consumables
-        per_hour = _rounded(occurrence / Decimal(interval))
+        estimate = _rounded(occurrence / Decimal(interval))
+    # A task not counted never prices, by either figure (§3.3: `why` keeps its meaning).
+    basis: PricedBy = (
+        "actual" if priced_by == "actual" and why is None and actual.ready else "estimate"
+    )
+    actual_per_hour = actual.per_hour
+    per_hour = actual_per_hour if basis == "actual" else estimate
     return MaintenancePart(
         task=task,
         interval_hours=interval,
         interval_type=interval_type,
         minutes=_text(minutes),
         consumables=_text(consumables),
-        per_hour=_text(per_hour),
+        per_hour=_text(per_hour or Decimal(0)),
         counted=why is None,
         why=why,
+        priced_by=priced_by,
+        basis=basis,
+        estimate_per_hour=_number(estimate),
+        actual_per_hour=_number(actual_per_hour),
+        have=actual.have,
+        need=actual.need,
+        confidence=actual.confidence,
+        partly_typed=actual.partly_typed,
+        actual_why=actual.why,
+        skipped_gaps=actual.skipped,
+        actual_interval_hours=(
+            _text((actual.hours / actual.have).quantize(INTERVAL_PLACES, ROUND_HALF_UP))
+            if actual.have
+            else None
+        ),
+        actual_cost_per_occurrence=(
+            _text(_rounded(actual.cost / actual.have)) if actual.have else None
+        ),
+    )
+
+
+def _wear_part(part: WearPart, actual: Actual) -> WearPartRate:
+    estimate = _rounded(Decimal(part.cost) / Decimal(part.life_hours))
+    priced_by: PricedBy = part.priced_by or "estimate"
+    basis: PricedBy = "actual" if priced_by == "actual" and actual.ready else "estimate"
+    actual_per_hour = actual.per_hour
+    per_hour = actual_per_hour if basis == "actual" and actual_per_hour is not None else estimate
+    return WearPartRate(
+        name=part.name,
+        cost=_text(Decimal(part.cost)),
+        life_hours=_text(Decimal(part.life_hours)),
+        per_hour=_text(per_hour),
+        priced_by=priced_by,
+        basis=basis,
+        estimate_per_hour=_text(estimate),
+        actual_per_hour=_number(actual_per_hour),
+        have=actual.have,
+        need=actual.need,
+        confidence=actual.confidence,
+        actual_why=actual.why,
+        skipped_gaps=actual.skipped,
+        actual_hours_used=(
+            _text((actual.hours / actual.have).quantize(INTERVAL_PLACES, ROUND_HALF_UP))
+            if actual.have
+            else None
+        ),
     )
 
 
@@ -197,13 +667,24 @@ def compute(
     printer_name: str | None = None,
     intervals_read_at: datetime | None = None,
     read_tasks: Collection[str] | None = None,
+    events: Events | None = None,
 ) -> MachineRateBreakdown:
     """The rate and its parts. ``tasks`` are Bambuddy's (a linked printer read now):
     the tasks are its, each with its interval, priced with the cost row of the same
     name. ``None`` prices every cost row with its own ``interval_hours``: typed, or, for
     a linked printer, the last read from Bambuddy, where ``read_tasks`` names the rows the
-    last read counted and any other row is ``not_read``."""
+    last read counted and any other row is ``not_read``.
+
+    ``events`` are the printer's logged ones (#5774): each row's actual over the
+    profile's ``actuals_window`` (§3.3) prices a row set to ``actual`` once it has that
+    many usable gaps or replacements; until then its estimate prices (§3.4)."""
     labour = Decimal(profile.labour_rate_per_hour or default_labour or "0")
+    logged = events or Events()
+    need = profile.window
+
+    def actual_of(name: str, cost: MaintenanceCost | None) -> Actual:
+        return task_actual(logged.tasks.get(name, ()), cost, labour, need)
+
     parts: list[MaintenancePart] = []
     if tasks is None:
         for cost in costs:
@@ -216,6 +697,7 @@ def compute(
                     cost,
                     labour,
                     "not_read" if unread else None,
+                    actual_of(cost.task, cost),
                 )
             )
     else:
@@ -229,32 +711,42 @@ def compute(
             interval = _hours(task.interval_hours)
             if why is None and interval is None:
                 why = "no_interval"
+            row = by_task.pop(task.task, None)
             parts.append(
                 _task_part(
                     task.task,
                     interval,
                     task.interval_type,
-                    by_task.pop(task.task, None),
+                    row,
                     labour,
                     why,
+                    actual_of(task.task, row),
                 )
             )
         for cost in by_task.values():
             parts.append(
-                _task_part(cost.task, cost.interval_hours, "hours", cost, labour, "not_in_bambuddy")
+                _task_part(
+                    cost.task,
+                    cost.interval_hours,
+                    "hours",
+                    cost,
+                    labour,
+                    "not_in_bambuddy",
+                    actual_of(cost.task, cost),
+                )
             )
     maintenance = sum((Decimal(part.per_hour) for part in parts), Decimal(0))
 
     wear_rates = [
-        WearPartRate(
-            name=part.name,
-            cost=_text(Decimal(part.cost)),
-            life_hours=_text(Decimal(part.life_hours)),
-            per_hour=_text(_rounded(Decimal(part.cost) / Decimal(part.life_hours))),
-        )
-        for part in wear
+        _wear_part(part, part_actual(logged.parts.get(part.name, ()), need)) for part in wear
     ]
     wear_total = sum((Decimal(part.per_hour) for part in wear_rates), Decimal(0))
+    # §3.4: the lowest confidence of the rows a person set to `actual` that can price (a
+    # task not counted cannot), or null when none is.
+    trusted = [p.confidence for p in parts if p.priced_by == "actual" and p.counted] + [
+        p.confidence for p in wear_rates if p.priced_by == "actual"
+    ]
+    confidences = [c for c in trusted if c is not None]
     power = _rounded(Decimal(profile.watts) / WATTS_PER_KW * Decimal(profile.kwh_price))
     depreciation = (
         _rounded(Decimal(profile.purchase_price) / Decimal(profile.life_hours))
@@ -280,6 +772,9 @@ def compute(
         depreciation_per_hour=_text(depreciation),
         intervals=intervals,
         intervals_read_at=intervals_read_at,
+        actuals=any(p.basis == "actual" for p in [*parts, *wear_rates]),
+        actuals_window=need,
+        confidence=min(confidences) if confidences else None,
     )
 
 
@@ -300,15 +795,23 @@ class Stored:
     read_tasks: set[str] = field(default_factory=set)
     linked: bool = False
     serial: str | None = None
+    #: #5774: its logged task events and part replacements, oldest first.
+    logged: list[MachineRateEvent] = field(default_factory=list)
 
     @property
     def stored_reads(self) -> set[str] | None:
         """`compute`'s ``read_tasks``: a linked printer's read tasks, else None."""
         return self.read_tasks if self.linked else None
 
+    @property
+    def events(self) -> Events:
+        """`compute`'s ``events``."""
+        return events_of(self.logged)
+
 
 class MachineRateStore:
-    """The three tables, plain CRUD (the CRUD service's own, #5295)."""
+    """The machine rate's tables, plain CRUD (the CRUD service's own, #5295): the inputs
+    and, since #5774, the logged events."""
 
     def __init__(self, pool: ConnectionPool[Connection[DictRow]]) -> None:
         self._pool = pool
@@ -331,27 +834,33 @@ class MachineRateStore:
         with self._pool.connection() as conn:
             profiles = conn.execute(
                 "SELECT c.printer, c.purchase_price, c.life_hours, c.watts, c.kwh_price,"
-                " c.labour_rate_per_hour, p.bambuddy_printer_id IS NOT NULL AS linked,"
+                " c.labour_rate_per_hour, c.actuals_window, c.lan_hours_offset,"
+                " p.bambuddy_printer_id IS NOT NULL AS linked,"
                 " p.serial"
                 " FROM printer_cost_profiles AS c JOIN printers AS p ON p.id = c.printer"
                 + ("" if keys is None else " WHERE c.printer = ANY(%s)"),
                 args,
             ).fetchall()
             parts = conn.execute(
-                f"SELECT printer, name, cost, life_hours FROM printer_wear_parts{where}"
+                "SELECT printer, name, cost, life_hours, priced_by"
+                f" FROM printer_wear_parts{where}"
                 " ORDER BY printer, position",
                 args,
             ).fetchall()
             tasks = conn.execute(
-                "SELECT printer, task, minutes, consumables, interval_hours, interval_read_at"
-                f" FROM printer_maintenance_costs{where} ORDER BY printer, task",
+                "SELECT printer, task, minutes, consumables, interval_hours, interval_read_at,"
+                f" priced_by FROM printer_maintenance_costs{where} ORDER BY printer, task",
                 args,
             ).fetchall()
+            logged = conn.execute(f"{EVENTS_SQL}{where} ORDER BY at, id", args).fetchall()
         found: dict[str, Stored] = {}
         for row in profiles:
-            fields = {
-                k: _number(v) for k, v in row.items() if k not in ("printer", "linked", "serial")
+            fields: dict[str, object] = {
+                k: _number(v)
+                for k, v in row.items()
+                if k not in ("printer", "linked", "serial", "actuals_window")
             }
+            fields["actuals_window"] = row["actuals_window"]
             found[str(row["printer"])] = Stored(
                 CostProfile.model_validate(fields),
                 [],
@@ -363,7 +872,12 @@ class MachineRateStore:
         for r in parts:
             held = found.setdefault(str(r["printer"]), Stored(None, [], [], None))
             held.wear.append(
-                WearPart(name=r["name"], cost=_text(r["cost"]), life_hours=_text(r["life_hours"]))
+                WearPart(
+                    name=r["name"],
+                    cost=_text(r["cost"]),
+                    life_hours=_text(r["life_hours"]),
+                    priced_by=r["priced_by"],
+                )
             )
         for r in tasks:
             held = found.setdefault(str(r["printer"]), Stored(None, [], [], None))
@@ -373,6 +887,7 @@ class MachineRateStore:
                     minutes=_text(r["minutes"]),
                     consumables=_text(r["consumables"]),
                     interval_hours=_number(r["interval_hours"]),
+                    priced_by=r["priced_by"],
                 )
             )
             read_at = r["interval_read_at"]
@@ -380,6 +895,9 @@ class MachineRateStore:
                 held.read_tasks.add(r["task"])
                 if held.read_at is None or read_at > held.read_at:
                     held.read_at = read_at
+        for r in logged:
+            held = found.setdefault(str(r["printer"]), Stored(None, [], [], None))
+            held.logged.append(_event(r))
         return found
 
     def replace(self, printer: str, body: MachineRateInputs) -> None:
@@ -395,11 +913,16 @@ class MachineRateStore:
             # intervals read below are not overtaken by a live read meanwhile.
             conn.execute(
                 "INSERT INTO printer_cost_profiles (printer, purchase_price, life_hours, watts,"
-                " kwh_price, labour_rate_per_hour) VALUES (%s, %s, %s, %s, %s, %s)"
+                " kwh_price, labour_rate_per_hour, actuals_window, lan_hours_offset)"
+                " VALUES (%s, %s, %s, %s, %s, %s,"
+                " coalesce(%s::integer, 3), coalesce(%s::numeric, 0))"
                 " ON CONFLICT (printer) DO UPDATE SET purchase_price = EXCLUDED.purchase_price,"
                 " life_hours = EXCLUDED.life_hours, watts = EXCLUDED.watts,"
                 " kwh_price = EXCLUDED.kwh_price,"
-                " labour_rate_per_hour = EXCLUDED.labour_rate_per_hour, updated_at = now()",
+                " labour_rate_per_hour = EXCLUDED.labour_rate_per_hour,"
+                " actuals_window = coalesce(%s::integer, printer_cost_profiles.actuals_window),"
+                " lan_hours_offset = coalesce(%s::numeric, printer_cost_profiles.lan_hours_offset),"
+                " updated_at = now()",
                 (
                     key,
                     profile.purchase_price,
@@ -407,8 +930,42 @@ class MachineRateStore:
                     profile.watts,
                     profile.kwh_price,
                     profile.labour_rate_per_hour,
+                    profile.actuals_window,
+                    profile.lan_hours_offset,
+                    profile.actuals_window,
+                    profile.lan_hours_offset,
                 ),
             )
+            # #5774 §3.5: a row sent with no `priced_by` keeps the stored choice (under
+            # its old name when renamed); a new row starts at `estimate`.
+            parts_chosen = {
+                r["name"]: r["priced_by"]
+                for r in conn.execute(
+                    "SELECT name, priced_by FROM printer_wear_parts WHERE printer = %s", (key,)
+                ).fetchall()
+            }
+            tasks_chosen = {
+                r["task"]: r["priced_by"]
+                for r in conn.execute(
+                    "SELECT task, priced_by FROM printer_maintenance_costs WHERE printer = %s",
+                    (key,),
+                ).fetchall()
+            }
+            # #5774 §4: a renamed row's events move to its new name, so no history is lost.
+            for part in body.wear_parts:
+                if part.renamed_from is not None and part.renamed_from != part.name:
+                    conn.execute(
+                        "UPDATE printer_wear_replacements SET part = %s"
+                        " WHERE printer = %s AND part = %s",
+                        (part.name, key, part.renamed_from),
+                    )
+            for cost in body.maintenance:
+                if cost.renamed_from is not None and cost.renamed_from != cost.task:
+                    conn.execute(
+                        "UPDATE printer_maintenance_events SET task = %s"
+                        " WHERE printer = %s AND task = %s",
+                        (cost.task, key, cost.renamed_from),
+                    )
             # Bambuddy's intervals are kept only while it tracks the printer: once
             # unlinked, the intervals sent are typed ones and count.
             read = {
@@ -424,18 +981,251 @@ class MachineRateStore:
             conn.execute("DELETE FROM printer_wear_parts WHERE printer = %s", (key,))
             for position, part in enumerate(body.wear_parts):
                 conn.execute(
-                    "INSERT INTO printer_wear_parts (printer, position, name, cost, life_hours)"
-                    " VALUES (%s, %s, %s, %s, %s)",
-                    (key, position, part.name, part.cost, part.life_hours),
+                    "INSERT INTO printer_wear_parts (printer, position, name, cost, life_hours,"
+                    " priced_by) VALUES (%s, %s, %s, %s, %s, %s)",
+                    (
+                        key,
+                        position,
+                        part.name,
+                        part.cost,
+                        part.life_hours,
+                        part.priced_by
+                        or parts_chosen.get(part.renamed_from or part.name, "estimate"),
+                    ),
                 )
             conn.execute("DELETE FROM printer_maintenance_costs WHERE printer = %s", (key,))
             for cost in body.maintenance:
                 interval, read_at = read.get(cost.task, (cost.interval_hours, None))
                 conn.execute(
                     "INSERT INTO printer_maintenance_costs (printer, task, minutes, consumables,"
-                    " interval_hours, interval_read_at) VALUES (%s, %s, %s, %s, %s, %s)",
-                    (key, cost.task, cost.minutes, cost.consumables, interval, read_at),
+                    " interval_hours, interval_read_at, priced_by)"
+                    " VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    (
+                        key,
+                        cost.task,
+                        cost.minutes,
+                        cost.consumables,
+                        interval,
+                        read_at,
+                        cost.priced_by
+                        or tasks_chosen.get(cost.renamed_from or cost.task, "estimate"),
+                    ),
                 )
+
+    # -- #5774: logged events and ScadBuddy's counter ----------------------------------
+
+    def add_event(
+        self,
+        printer: str,
+        body: MachineRateEventCreate,
+        *,
+        hours_at: str | None,
+        hours_source: HoursSource | None,
+        created_by: str,
+    ) -> tuple[MachineRateEvent, bool]:
+        """A ScadBuddy event, and whether this call wrote it: a second write of the same
+        printer and ``source`` returns the first as it was recorded and writes nothing."""
+        key = printer_uuid(printer)
+        assert key is not None
+        source = body.source or f"manual:{uuid.uuid4()}"
+        at = body.at or datetime.now(UTC)
+        with self._pool.connection() as conn, conn.transaction():
+            if body.kind == "task":
+                written = conn.execute(
+                    "INSERT INTO printer_maintenance_events (id, printer, task, performed_at,"
+                    " hours_at, hours_source, minutes, consumables, notes, origin, source,"
+                    " created_by) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'scadbuddy',"
+                    " %s, %s) ON CONFLICT (printer, source) DO NOTHING",
+                    (
+                        uuid.uuid4(),
+                        key,
+                        body.name,
+                        at,
+                        hours_at,
+                        hours_source,
+                        body.minutes,
+                        body.consumables,
+                        body.notes,
+                        source,
+                        created_by,
+                    ),
+                ).rowcount
+                table = "printer_maintenance_events"
+            else:
+                written = conn.execute(
+                    "INSERT INTO printer_wear_replacements (id, printer, part, replaced_at,"
+                    " hours_at, hours_source, hours_used, cost, notes, source, created_by)"
+                    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                    " ON CONFLICT (printer, source) DO NOTHING",
+                    (
+                        uuid.uuid4(),
+                        key,
+                        body.name,
+                        at,
+                        hours_at,
+                        hours_source,
+                        body.hours_used,
+                        body.cost,
+                        body.notes,
+                        source,
+                        created_by,
+                    ),
+                ).rowcount
+                table = "printer_wear_replacements"
+            found = conn.execute(
+                f"{EVENTS_SQL} WHERE printer = %s AND source = %s AND kind = %s",
+                (key, source, body.kind),
+            ).fetchone()
+        if found is None:
+            # The same source on the other table: never written, so a conflict to report.
+            raise EventSourceTakenError(table, source)
+        return _event(found), written > 0
+
+    def event_by_source(self, printer: str, source: str) -> MachineRateEvent | None:
+        key = printer_uuid(printer)
+        if key is None:
+            return None
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                f"{EVENTS_SQL} WHERE printer = %s AND source = %s", (key, source)
+            ).fetchone()
+        return None if row is None else _event(row)
+
+    def event(self, printer: str, event_id: str) -> MachineRateEvent | None:
+        key, ident = printer_uuid(printer), _uuid(event_id)
+        if key is None or ident is None:
+            return None
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                f"{EVENTS_SQL} WHERE printer = %s AND id = %s", (key, ident)
+            ).fetchone()
+        return None if row is None else _event(row)
+
+    def patch_event(
+        self,
+        printer: str,
+        event_id: str,
+        patch: MachineRateEventPatch,
+        *,
+        counter: HoursSource | None,
+    ) -> MachineRateEvent | None:
+        """The fields ``patch`` sets; None for no such event. A reading set on an event
+        with none takes ``counter`` (the printer's source now) as its source; one
+        cleared clears the source. :class:`EventFieldError` for a field the kind lacks."""
+        current = self.event(printer, event_id)
+        if current is None:
+            return None
+        sent = patch.model_dump(exclude_unset=True)
+        wrong = {"cost", "hours_used"} if current.kind == "task" else {"minutes", "consumables"}
+        if wrong & sent.keys():
+            raise EventFieldError(current.kind, sorted(wrong & sent.keys()))
+        if "cost" in sent and sent["cost"] is None:
+            raise EventFieldError(current.kind, ["cost"])
+        if "hours_at" in sent:
+            reading = sent["hours_at"]
+            sent["hours_source"] = (
+                None if reading is None else current.hours_source or counter or "typed"
+            )
+        if not sent:
+            return current
+        table = (
+            "printer_maintenance_events"
+            if current.kind == "task"
+            else ("printer_wear_replacements")
+        )
+        columns = ", ".join(f"{name} = %s" for name in sent)
+        with self._pool.connection() as conn:
+            conn.execute(
+                f"UPDATE {table} SET {columns} WHERE printer = %s AND id = %s",
+                (*sent.values(), printer_uuid(printer), _uuid(event_id)),
+            )
+        return self.event(printer, event_id)
+
+    def delete_event(self, printer: str, event_id: str) -> bool:
+        """A ScadBuddy event gone; False for none. :class:`ImportedEventError` for one
+        imported from Bambuddy: the next import would bring it back."""
+        current = self.event(printer, event_id)
+        if current is None:
+            return False
+        if current.origin == "bambuddy":
+            raise ImportedEventError(event_id)
+        table = (
+            "printer_maintenance_events"
+            if current.kind == "task"
+            else ("printer_wear_replacements")
+        )
+        with self._pool.connection() as conn:
+            gone = conn.execute(
+                f"DELETE FROM {table} WHERE printer = %s AND id = %s",
+                (printer_uuid(printer), _uuid(event_id)),
+            )
+        return gone.rowcount > 0
+
+    def list_events(
+        self,
+        printer: str,
+        *,
+        kind: EventKind | None = None,
+        name: str | None = None,
+        cursor: str | None = None,
+        limit: int = EVENTS_PAGE,
+    ) -> MachineRateEventPage:
+        """Every event of the printer, newest first (by time, then id), a page at a time.
+        :class:`ValueError` for a cursor this did not give."""
+        key = printer_uuid(printer)
+        if key is None:
+            return MachineRateEventPage(events=[])
+        where = ["printer = %s"]
+        args: list[object] = [key]
+        if kind is not None:
+            where.append("kind = %s")
+            args.append(kind)
+        if name is not None:
+            where.append("name = %s")
+            args.append(name)
+        if cursor is not None:
+            at, ident = _cursor(cursor)
+            where.append("(at, id) < (%s, %s)")
+            args += [at, ident]
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                f"{EVENTS_SQL} WHERE {' AND '.join(where)} ORDER BY at DESC, id DESC LIMIT %s",
+                (*args, limit + 1),
+            ).fetchall()
+        events = [_event(r) for r in rows[:limit]]
+        last = events[-1] if len(rows) > limit else None
+        return MachineRateEventPage(
+            events=events, next=None if last is None else f"{last.at.isoformat()}|{last.id}"
+        )
+
+    def counter(self, printer: str) -> LanCount | None:
+        """ScadBuddy's own counter for the printer (``printer_run_hours``, #5774 §3.6), a
+        plain read with the profile's offset (0 with no profile); None when the printer
+        was never LAN-linked."""
+        key = printer_uuid(printer)
+        if key is None:
+            return None
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT h.run_seconds, h.unseen_seconds, h.counted_to, h.started_at,"
+                " coalesce(c.lan_hours_offset, 0) AS offset_hours"
+                " FROM printer_run_hours AS h"
+                " LEFT JOIN printer_cost_profiles AS c ON c.printer = h.printer"
+                " WHERE h.printer = %s",
+                (key,),
+            ).fetchone()
+        if row is None:
+            return None
+        run = run_hours.hours(row["run_seconds"])
+        offset: Decimal = row["offset_hours"]
+        return LanCount(
+            hours=_text(run + offset),
+            run_hours=_text(run),
+            offset_hours=_text(offset),
+            unseen_hours=_text(run_hours.hours(row["unseen_seconds"])),
+            counted_to=row["counted_to"],
+            started_at=row["started_at"],
+        )
 
     def delete(self, printer: str) -> bool:
         """Every input of the printer gone; whether it had a profile."""
@@ -507,6 +1297,141 @@ class MachineRateView(BaseModel):
     #: printer with no profile yet, so its first tasks can be named as Bambuddy does.
     #: Empty when it is not linked or Bambuddy did not answer.
     bambuddy_tasks: list[str] = []
+    #: #5774 (§5): each row's logged events in its window and its actual, and the events
+    #: whose name no row has.
+    actuals: ActualsView
+    #: #5774 (§3.2, §5): the printer's print-hour counter.
+    counter: CounterView
+
+
+class RowActuals(BaseModel):
+    """One wear part's or task's actual (§3.3, §3.4): its events in the window, newest
+    first, the skipped ones between them, so the list and "k of N" agree with the rate."""
+
+    kind: EventKind
+    name: str
+    events: list[MachineRateEvent]
+    actual_per_hour: str | None = None
+    #: A task's mean gap and cost of one occurrence; a part's mean hours used.
+    actual_interval_hours: str | None = None
+    actual_cost_per_occurrence: str | None = None
+    actual_hours_used: str | None = None
+    have: int
+    need: int
+    confidence: int
+    partly_typed: bool = False
+    skipped_gaps: list[SkippedGap] = Field(default_factory=list)
+
+
+class Orphan(BaseModel):
+    """Events kept under a name no row has now (a row deleted): never lost."""
+
+    kind: EventKind
+    name: str
+    events: int
+
+
+class ActualsView(BaseModel):
+    window: int = DEFAULT_WINDOW
+    rows: list[RowActuals] = Field(default_factory=list)
+    orphaned: list[Orphan] = Field(default_factory=list)
+    #: When the events were last read from Bambuddy's log; null until it is read (the
+    #: import is #5774 PR 3).
+    events_read_at: datetime | None = None
+
+
+class CounterView(BaseModel):
+    """The printer's print-hour counter (§3.2). ``hours`` is the reading an event gets
+    now: null for ``typed`` (no counter) or when Bambuddy does not answer. ``lan_watch``
+    is ScadBuddy's own count when the printer has one; on a printer linked to Bambuddy
+    it is a check beside Bambuddy's and never prices."""
+
+    source: HoursSource
+    hours: str | None = None
+    lan_watch: LanCount | None = None
+
+
+def hours_source(row: PrinterRow) -> HoursSource:
+    """The printer's one counter (§3.2): Bambuddy's on a linked printer, ScadBuddy's own
+    on one only the LAN reaches, else none (``typed``)."""
+    if row.bambuddy_printer_id is not None:
+        return "bambuddy"
+    if row.lan_host is not None:
+        return "lan_watch"
+    return "typed"
+
+
+def bambuddy_hours(tasks: Sequence[MaintenanceTask] | None) -> Decimal | None:
+    """Bambuddy's counter from a live task read: every task carries the same one."""
+    for task in tasks or ():
+        if task.current_hours is not None:
+            return reading(task.current_hours)
+    return None
+
+
+#: A machine-rate refusal's problem type.
+PROBLEM = "https://scadbuddy.dev/problems/machine-rate/"
+
+
+def refusal(status: int, code: str, detail: str) -> ApiError:
+    return ApiError(status, detail, type_=PROBLEM + code, code=code)
+
+
+def actuals_view(breakdown: MachineRateBreakdown, stored: Stored) -> ActualsView:
+    """Each priced row's events in its window (§5), and the names no row has."""
+    logged = {e.id: e for e in stored.logged}
+    events = stored.events
+    window = stored.profile.window if stored.profile else DEFAULT_WINDOW
+    labour = Decimal(breakdown.labour_rate_per_hour or "0")
+    costs = {c.task: c for c in stored.costs}
+    rows: list[RowActuals] = []
+
+    def listed(actual: Actual) -> list[MachineRateEvent]:
+        return [logged[i] for i in actual.window if i in logged]
+
+    for task in breakdown.maintenance:
+        actual = task_actual(events.tasks.get(task.task, ()), costs.get(task.task), labour, window)
+        rows.append(
+            RowActuals(
+                kind="task",
+                name=task.task,
+                events=listed(actual),
+                actual_per_hour=task.actual_per_hour,
+                actual_interval_hours=task.actual_interval_hours,
+                actual_cost_per_occurrence=task.actual_cost_per_occurrence,
+                have=actual.have,
+                need=window,
+                confidence=actual.confidence,
+                partly_typed=actual.partly_typed,
+                skipped_gaps=actual.skipped,
+            )
+        )
+    for part in breakdown.wear:
+        actual = part_actual(events.parts.get(part.name, ()), window)
+        rows.append(
+            RowActuals(
+                kind="part",
+                name=part.name,
+                events=listed(actual),
+                actual_per_hour=part.actual_per_hour,
+                actual_hours_used=part.actual_hours_used,
+                have=actual.have,
+                need=window,
+                confidence=actual.confidence,
+                skipped_gaps=actual.skipped,
+            )
+        )
+    tasks = {m.task for m in breakdown.maintenance} | set(costs)
+    parts = {w.name for w in breakdown.wear} | {w.name for w in stored.wear}
+    orphaned: dict[tuple[EventKind, str], int] = {}
+    for e in stored.logged:
+        if e.name not in (tasks if e.kind == "task" else parts):
+            orphaned[e.kind, e.name] = orphaned.get((e.kind, e.name), 0) + 1
+    return ActualsView(
+        window=window,
+        rows=rows,
+        orphaned=[Orphan(kind=k, name=n, events=c) for (k, n), c in sorted(orphaned.items())],
+    )
 
 
 class MachineRates:
@@ -529,16 +1454,23 @@ class MachineRates:
         (and keeps their intervals); without it, or when Bambuddy does not answer, the
         stored intervals price it (``intervals`` ``stored``). A printer with no profile
         is the book's rate."""
+        return (await self._priced(row, live=live))[0]
+
+    async def _priced(
+        self, row: PrinterRow, *, live: bool
+    ) -> tuple[MachineRateBreakdown, list[MaintenanceTask] | None]:
+        """:meth:`breakdown`, and the tasks it read from Bambuddy (None: none read)."""
         runtime = (await asyncio.to_thread(self.settings.snapshot)).runtime
         stored = await asyncio.to_thread(self.store.stored, row.id)
         if stored.profile is None:
-            return MachineRateBreakdown(
+            book = MachineRateBreakdown(
                 printer=row.id,
                 printer_name=row.name,
                 source="price_book",
                 rate_per_hour=runtime.pricing_machine_rate_per_hour,
                 currency=runtime.orders_currency,
             )
+            return book, None
         tasks: list[MaintenanceTask] | None = None
         intervals: IntervalSource = "typed"
         if row.bambuddy_printer_id is not None:
@@ -550,7 +1482,7 @@ class MachineRates:
                 await asyncio.to_thread(
                     self.store.remember_intervals, row.id, row.bambuddy_printer_id, tasks
                 )
-        return compute(
+        rate = compute(
             stored.profile,
             stored.wear,
             stored.costs,
@@ -562,7 +1494,9 @@ class MachineRates:
             printer_name=row.name,
             intervals_read_at=stored.read_at if intervals == "stored" else None,
             read_tasks=stored.read_tasks if intervals == "stored" else None,
+            events=stored.events,
         )
+        return rate, tasks
 
     async def _read_tasks(self, row: PrinterRow) -> list[MaintenanceTask] | None:
         """A linked printer's tasks read from Bambuddy now; None when it does not answer."""
@@ -617,6 +1551,7 @@ class MachineRates:
             currency="",
             intervals="stored",
             read_tasks=stored.stored_reads,
+            events=stored.events,
         ).rate_per_hour
 
     def check_rate(self, printer: str | None, printer_id: int | None) -> str | None:
@@ -687,7 +1622,7 @@ class MachineRates:
             return None
         # The breakdown first: its live read keeps Bambuddy's intervals, which the
         # inputs then show.
-        breakdown = await self.breakdown(row)
+        breakdown, tasks = await self._priced(row, live=True)
         stored = await asyncio.to_thread(self.store.stored, row.id)
         inputs = None
         names: list[str] = []
@@ -699,8 +1634,16 @@ class MachineRates:
         # since), else one of its own for the book's rate.
         if breakdown.intervals == "bambuddy":
             names = [m.task for m in breakdown.maintenance if m.why != "not_in_bambuddy"]
-        elif breakdown.source == "price_book" and (tasks := await self._read_tasks(row)):
-            names = [task.task for task in tasks]
+        elif breakdown.source == "price_book" and row.bambuddy_printer_id is not None:
+            tasks = await self._read_tasks(row)
+            names = [task.task for task in tasks or ()]
+        source = hours_source(row)
+        lan = await asyncio.to_thread(self.store.counter, row.id)
+        hours: str | None = None
+        if source == "bambuddy":
+            hours = _number(bambuddy_hours(tasks))
+        elif source == "lan_watch" and lan is not None:
+            hours = lan.hours
         return MachineRateView(
             printer=row.id,
             printer_name=row.name,
@@ -708,4 +1651,79 @@ class MachineRates:
             inputs=inputs,
             breakdown=breakdown,
             bambuddy_tasks=names,
+            actuals=actuals_view(breakdown, stored),
+            counter=CounterView(source=source, hours=hours, lan_watch=lan),
         )
+
+    async def counter_reading(self, row: PrinterRow) -> tuple[HoursSource, Decimal | None]:
+        """The printer's counter source and its reading now (§3.2): Bambuddy's live
+        ``current_hours``, ScadBuddy's own count with its offset, or none (``typed``).
+        None for a counter that cannot be read now."""
+        source = hours_source(row)
+        if source == "bambuddy":
+            return source, bambuddy_hours(await self._read_tasks(row))
+        if source == "lan_watch":
+            lan = await asyncio.to_thread(self.store.counter, row.id)
+            return source, None if lan is None else Decimal(lan.hours)
+        return source, None
+
+    async def add_event(
+        self, row: PrinterRow, body: MachineRateEventCreate, *, created_by: str
+    ) -> tuple[MachineRateEvent, bool]:
+        """A ScadBuddy event (§5), its ``hours_at`` filled from the printer's counter when
+        left out, and whether this call wrote it. Refusals are :class:`ApiError`."""
+        source = hours_source(row)
+        if body.kind == "task" and source == "bambuddy":
+            raise refusal(
+                409,
+                "maintenance_from_bambuddy",
+                "Mark tasks done in Bambuddy; ScadBuddy reads them.",
+            )
+        stored = await asyncio.to_thread(self.store.stored, row.id)
+        names = (
+            {c.task for c in stored.costs} if body.kind == "task" else {p.name for p in stored.wear}
+        )
+        if body.name not in names:
+            what = "maintenance task" if body.kind == "task" else "wear part"
+            raise refusal(
+                422, f"unknown_{body.kind}", f"the printer has no {what} named {body.name!r}"
+            )
+        if body.source is not None:
+            # A retry returns the first event without reading the counter again.
+            first = await asyncio.to_thread(self.store.event_by_source, row.id, body.source)
+            if first is not None and first.kind == body.kind:
+                return first, False
+        hours_at = body.hours_at
+        recorded: HoursSource | None = source
+        if hours_at is None:
+            _, now = await self.counter_reading(row)
+            if now is not None:
+                hours_at = _text(now)
+            elif source != "typed":
+                raise refusal(
+                    503,
+                    "counter_unavailable",
+                    "The printer's counter cannot be read now. Try again, or enter the reading.",
+                )
+            elif body.kind == "task" or body.hours_used is None:
+                raise refusal(
+                    422,
+                    "counter_reading_required",
+                    "The printer has no counter: enter the reading (or, for a part, the"
+                    " hours it ran).",
+                )
+            else:
+                recorded = None
+        try:
+            return await asyncio.to_thread(
+                self.store.add_event,
+                row.id,
+                body,
+                hours_at=hours_at,
+                hours_source=recorded if hours_at is not None else None,
+                created_by=created_by,
+            )
+        except EventSourceTakenError as error:
+            raise refusal(
+                409, "source_taken", "another kind of event on the printer has this source"
+            ) from error

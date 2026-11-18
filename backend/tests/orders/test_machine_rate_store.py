@@ -19,6 +19,11 @@ from scadbuddy.library.settings_store import SettingsPatch, SettingsStore
 from scadbuddy.orders.integrations import MaintenanceTask, OrderIntegrations
 from scadbuddy.orders.machine_rate import (
     CostProfile,
+    EventFieldError,
+    ImportedEventError,
+    MachineRateEvent,
+    MachineRateEventCreate,
+    MachineRateEventPatch,
     MachineRateInputs,
     MachineRates,
     MachineRateStore,
@@ -39,10 +44,19 @@ INPUTS = MachineRateInputs(
         watts="120",
         kwh_price="0.25",
         labour_rate_per_hour="30",
+        # As a read gives them back (#5774: a `PUT` that leaves them out keeps them).
+        actuals_window=3,
+        lan_hours_offset="0",
     ),
-    wear_parts=[WearPart(name="Nozzle", cost="14", life_hours="200")],
+    wear_parts=[WearPart(name="Nozzle", cost="14", life_hours="200", priced_by="estimate")],
     maintenance=[
-        MaintenanceCost(task="Lubricate rods", minutes="20", consumables="2", interval_hours="100")
+        MaintenanceCost(
+            task="Lubricate rods",
+            minutes="20",
+            consumables="2",
+            interval_hours="100",
+            priced_by="estimate",
+        )
     ],
 )
 
@@ -142,7 +156,7 @@ def test_inputs_round_trip_and_are_replaced_whole(
     assert stored.costs == INPUTS.maintenance
     store.replace(printer.id, MachineRateInputs(profile=CostProfile(watts="300")))
     stored = store.stored(printer.id)
-    assert stored.profile == CostProfile(watts="300")
+    assert stored.profile == CostProfile(watts="300", actuals_window=3, lan_hours_offset="0")
     assert (stored.wear, stored.costs) == ([], [])
     assert store.delete(printer.id) is True
     assert store.stored(printer.id).profile is None
@@ -649,7 +663,9 @@ def test_a_merge_keeps_the_kept_printers_inputs_whole(
 ) -> None:
     """The kept printer has a profile and no parts or tasks: the gone printer's parts and
     tasks are dropped with its profile, never mixed in."""
-    own = MachineRateInputs(profile=CostProfile(watts="300"))
+    own = MachineRateInputs(
+        profile=CostProfile(watts="300", actuals_window=3, lan_hours_offset="0")
+    )
     kept = _merge(printers, store, own)
     stored = store.stored(kept)
     assert (stored.profile, stored.wear, stored.costs) == (own.profile, [], [])
@@ -665,3 +681,218 @@ def test_a_merge_moves_every_input_to_a_printer_with_none(
         INPUTS.wear_parts,
         INPUTS.maintenance,
     )
+
+
+# -- #5774: actuals (spec 2026-11-17-machine-rate-actuals §4, §5) --------------------------
+
+
+def part_event(cost: str = "35", **fields: object) -> MachineRateEventCreate:
+    body = {"kind": "part", "name": "Nozzle", "cost": cost, **fields}
+    return MachineRateEventCreate.model_validate(body)
+
+
+def log_part(
+    store: MachineRateStore, printer: str, hours: str, cost: str = "35", **fields: object
+) -> MachineRateEvent:
+    event, _ = store.add_event(
+        printer,
+        part_event(cost, **fields),
+        hours_at=hours,
+        hours_source="lan_watch",
+        created_by="browser",
+    )
+    return event
+
+
+def test_the_window_offset_and_priced_by_round_trip(
+    store: MachineRateStore, printers: PrinterStore
+) -> None:
+    printer = lan_printer(printers)
+    inputs = MachineRateInputs(
+        profile=CostProfile(actuals_window=5, lan_hours_offset="12.5"),
+        wear_parts=[WearPart(name="Nozzle", cost="35", life_hours="1000", priced_by="actual")],
+        maintenance=[MaintenanceCost(task="Lubricate rods", priced_by="actual")],
+    )
+    store.replace(printer.id, inputs)
+    stored = store.stored(printer.id)
+    assert stored.profile == inputs.profile
+    assert stored.wear == inputs.wear_parts
+    assert stored.costs == inputs.maintenance
+
+
+def test_rows_from_before_read_the_new_defaults(
+    store: MachineRateStore, printers: PrinterStore
+) -> None:
+    """#4625's rows read with the new columns' defaults: window 3, offset 0, estimate."""
+    printer = lan_printer(printers)
+    store.replace(printer.id, INPUTS)
+    stored = store.stored(printer.id)
+    assert stored.profile is not None
+    assert (stored.profile.actuals_window, stored.profile.lan_hours_offset) == (3, "0")
+    assert [p.priced_by for p in stored.wear] + [c.priced_by for c in stored.costs] == [
+        "estimate",
+        "estimate",
+    ]
+
+
+def test_a_retry_of_a_source_writes_once(store: MachineRateStore, printers: PrinterStore) -> None:
+    printer = lan_printer(printers)
+    store.replace(printer.id, INPUTS)
+    body = part_event(source="form:1")
+    first, wrote = store.add_event(
+        printer.id, body, hours_at="10", hours_source="lan_watch", created_by="browser"
+    )
+    again, wrote_again = store.add_event(
+        printer.id, body, hours_at="99", hours_source="lan_watch", created_by="browser"
+    )
+    assert (wrote, wrote_again) == (True, False)
+    assert again == first
+    assert first.hours_at == "10"
+    assert len(store.stored(printer.id).logged) == 1
+
+
+def test_logged_replacements_price_a_part_set_to_actual(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    printer = lan_printer(printers)
+    actual = INPUTS.model_copy(
+        update={
+            "profile": INPUTS.profile.model_copy(update={"actuals_window": 1}),
+            "wear_parts": [
+                WearPart(name="Nozzle", cost="14", life_hours="200", priced_by="actual")
+            ],
+        }
+    )
+    store.replace(printer.id, actual)
+    machine = rates(store, printers, settings_store)
+    assert machine.stored_rates()[printer.id] == "0.7"
+    log_part(store, printer.id, "0", "20")
+    log_part(store, printer.id, "400", "20")
+    # Nozzle 20 / 400 = 0.05 in place of 14 / 200 = 0.07.
+    assert machine.stored_rates()[printer.id] == "0.68"
+
+
+async def test_a_rename_moves_the_events_and_a_deleted_row_leaves_them_orphaned(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    printer = lan_printer(printers)
+    store.replace(printer.id, INPUTS)
+    log_part(store, printer.id, "0")
+    log_part(store, printer.id, "300")
+    renamed = INPUTS.model_copy(
+        update={
+            "wear_parts": [
+                WearPart(name="Hotend", cost="14", life_hours="200", renamed_from="Nozzle")
+            ]
+        }
+    )
+    store.replace(printer.id, renamed)
+    assert {e.name for e in store.stored(printer.id).logged} == {"Hotend"}
+    view = await rates(store, printers, settings_store).view(printer.id)
+    assert view is not None
+    hotend = next(r for r in view.actuals.rows if r.name == "Hotend")
+    assert (hotend.have, [e.hours_at for e in hotend.events]) == (1, ["300", "0"])
+    assert view.actuals.orphaned == []
+
+    store.replace(printer.id, INPUTS.model_copy(update={"wear_parts": []}))
+    view = await rates(store, printers, settings_store).view(printer.id)
+    assert view is not None
+    assert [(o.kind, o.name, o.events) for o in view.actuals.orphaned] == [("part", "Hotend", 2)]
+
+
+def test_a_merge_moves_events_and_skips_the_kept_printers_own(
+    store: MachineRateStore, printers: PrinterStore, pg_pool: PgPool
+) -> None:
+    gone = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    mine = printers.create(PrinterCreate(serial="01P00A000000001", name="Mine"))
+    for printer in (gone, mine):
+        store.replace(printer.id, INPUTS)
+    log_part(store, gone.id, "10", source="form:shared")
+    log_part(store, gone.id, "20", source="form:gone")
+    log_part(store, mine.id, "30", source="form:shared")
+    with pg_pool.connection() as conn:
+        for owner, history in ((gone.id, 7), (gone.id, 8), (mine.id, 7)):
+            conn.execute(
+                "INSERT INTO printer_maintenance_events (id, printer, task, performed_at,"
+                " hours_at, hours_source, origin, bambuddy_history_id, source, created_by)"
+                " VALUES (%s, %s, 'Lubricate rods', now(), 1, 'bambuddy', 'bambuddy', %s,"
+                " %s, 'import')",
+                (uuid.uuid4(), owner, history, f"bambuddy:{history}:{owner}"),
+            )
+    merged = printers.ensure_bambuddy(4, serial="01P00A000000001", name="H2C", model="H2C")
+    assert merged.id == mine.id
+    logged = store.stored(mine.id).logged
+    assert sorted(e.source for e in logged if e.kind == "part") == ["form:gone", "form:shared"]
+    assert next(e for e in logged if e.source == "form:shared").hours_at == "30"
+    assert sorted(e.bambuddy_history_id or 0 for e in logged if e.kind == "task") == [7, 8]
+
+
+def test_events_are_patched_deleted_and_paged(
+    store: MachineRateStore, printers: PrinterStore, pg_pool: PgPool
+) -> None:
+    printer = lan_printer(printers)
+    store.replace(printer.id, INPUTS)
+    events = [
+        log_part(store, printer.id, str(h * 100), at=f"2026-11-0{h + 1}T00:00:00Z")
+        for h in range(3)
+    ]
+    page = store.list_events(printer.id, limit=2)
+    assert [e.id for e in page.events] == [events[2].id, events[1].id]
+    assert page.next is not None
+    rest = store.list_events(printer.id, cursor=page.next, limit=2)
+    assert ([e.id for e in rest.events], rest.next) == ([events[0].id], None)
+
+    patched = store.patch_event(
+        printer.id,
+        events[0].id,
+        MachineRateEventPatch(cost="40", hours_used="640", notes="fitted before"),
+        counter="lan_watch",
+    )
+    assert patched is not None
+    assert (patched.cost, patched.hours_used, patched.notes) == ("40", "640", "fitted before")
+    with pytest.raises(EventFieldError):
+        store.patch_event(
+            printer.id, events[0].id, MachineRateEventPatch(minutes="5"), counter="lan_watch"
+        )
+    cleared = store.patch_event(
+        printer.id, events[0].id, MachineRateEventPatch(hours_at=None), counter="lan_watch"
+    )
+    assert cleared is not None and (cleared.hours_at, cleared.hours_source) == (None, None)
+    assert store.delete_event(printer.id, events[0].id) is True
+    assert store.delete_event(printer.id, events[0].id) is False
+
+    imported = uuid.uuid4()
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO printer_maintenance_events (id, printer, task, performed_at, origin,"
+            " bambuddy_history_id, source, created_by) VALUES (%s, %s, 'Lubricate rods',"
+            " now(), 'bambuddy', 3, 'bambuddy:3', 'import')",
+            (imported, printer.id),
+        )
+    with pytest.raises(ImportedEventError):
+        store.delete_event(printer.id, str(imported))
+
+
+def test_scadbuddys_counter_adds_the_offset_and_rounds_half_up(
+    store: MachineRateStore, printers: PrinterStore, pg_pool: PgPool
+) -> None:
+    printer = lan_printer(printers)
+    assert store.counter(printer.id) is None
+    with pg_pool.connection() as conn:
+        # 4.25 h run (rounds half up to 4.3), 0.04 h unseen (rounds to 0).
+        conn.execute(
+            "INSERT INTO printer_run_hours (printer, run_seconds, unseen_seconds, counted_to)"
+            " VALUES (%s, 15300, 144, now())",
+            (printer.id,),
+        )
+    count = store.counter(printer.id)
+    assert count is not None
+    assert (count.hours, count.run_hours, count.offset_hours, count.unseen_hours) == (
+        "4.3",
+        "4.3",
+        "0",
+        "0",
+    )
+    store.replace(printer.id, MachineRateInputs(profile=CostProfile(lan_hours_offset="100.5")))
+    count = store.counter(printer.id)
+    assert count is not None and (count.hours, count.offset_hours) == ("104.8", "100.5")

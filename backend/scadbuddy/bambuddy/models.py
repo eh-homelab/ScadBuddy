@@ -169,6 +169,11 @@ class MaintenanceStatus(BambuddyModel):
     enabled: bool = True
     interval_hours: float
     interval_type: Literal["hours", "days"] = "hours"
+    #: #5774 (spec 2026-11-17-machine-rate-actuals §3.7): the task's id on the printer,
+    #: which the history route takes, and the printer's print-hour counter now
+    #: (``runtime_seconds / 3600 + print_hours_offset``, §2.2).
+    id: int | None = None
+    current_hours: float | None = None
 
 
 class PrinterMaintenanceOverview(BambuddyModel):
