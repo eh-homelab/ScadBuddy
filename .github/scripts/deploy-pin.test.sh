@@ -655,6 +655,10 @@ dashboard_fails "remote line beside the copy" "$remote" "$(overlay_ns "$grafana_
 dashboard_fails "remote line with a timeout" "$remote" "$(overlay_ns "${old_line}&timeout=180s")"
 dashboard_fails "remote .git form, lower case" "$remote" \
   "$(overlay_ns "  - https://github.com/eh-homelab/scadbuddy.git//deploy/grafana?ref=main")"
+# A large overlay with the remote line near the top still fails: the check must
+# not read grep's early exit (SIGPIPE to its writer, 141 under pipefail) as no match.
+mapfile -t padding < <(for i in $(seq 6000); do printf '  - padding-resource-%05d.yaml\n' "$i"; done)
+dashboard_fails "remote line atop a large overlay" "$remote" "$(overlay_ns "$old_line" "$grafana_entry" "${padding[@]}")"
 # A comment that names the old source is not the remote line.
 if run_vendored "$(overlay_ns "  # A copy of https://github.com/eh-homelab/ScadBuddy//deploy/grafana" "$grafana_entry  # was eh-homelab/ScadBuddy//deploy/grafana?ref=x")"; then
   grep -qx 'dashboard=vendored' "$work/out" || fail "comment naming the remote: not vendored"
@@ -909,6 +913,12 @@ listing "file:$(printf 'a\tb.json')"
 got=$(presence ok)
 [ "$got" = 0:unknown:2 ] || fail "fetch: tab in a name: got $got, expected 0:unknown:2"
 grep -qF 'with a tab, newline or slash' "$work/log" || fail "fetch: tab in a name: no warning: $(cat "$work/log")"
+# An entry without a blob sha: `unknown`, with that reason, before any file is read.
+listing
+jq 'map(del(.sha))' "$work/src-listing.json" > "$work/listing-nosha.json" && mv "$work/listing-nosha.json" "$work/src-listing.json"
+got=$(presence ok)
+[ "$got" = 0:unknown:2 ] || fail "fetch: no sha: got $got, expected 0:unknown:2"
+grep -qF 'without a 40-hex blob sha' "$work/log" || fail "fetch: no sha: no warning: $(cat "$work/log")"
 # A listing at the contents API's 1,000-entry cap may be cut short: `unknown`.
 jq -n '[range(1000) | {type: "file", name: "d\(.).json", sha: "0000000000000000000000000000000000000000"}]' > "$work/src-listing.json"
 got=$(presence ok)
