@@ -696,6 +696,10 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     lock change from BB; with `weights` pulling they move whatever `spools` says. A new
     spool still takes BB's lock with its first reading. Why: Decision 14. Cost: #6268's
     `weights` `off` now also stops the `dried` events, which it left booked.
+14. Task 1 (review fix 1, I-1): a link records BB's values as seen only for the types that pull,
+    as an update does (`_seen`). Why: a spool linked while `weights` was off must take BB's
+    weight and lock when `weights` is switched on, even when BB's row has not moved. Cost: the
+    first pull after the switch reads that row in full once.
 
 ## Self-review
 

@@ -434,7 +434,7 @@ def _one(
         held_id, archived = held
         if archived:
             return "archived", held_id, False
-        typeless = _link(conn, store, bb, held_id, after, now, actor, pulls.weights)
+        typeless = _link(conn, store, bb, held_id, after, now, actor, pulls)
         _book(conn, held_id, bb, actor, pulls.weights)
         if pulls.presets:
             _bb_presets(conn, held_id, bb, actor)
@@ -635,7 +635,7 @@ def _link(
     after: dict[str, Any],
     now: datetime,
     actor: str,
-    weights: bool = True,
+    pulls: Pulls,
 ) -> bool:
     """Link the SB spool and keep what it has; a spool with no type takes the one BB's
     values match (dropping its ``migrated`` presets, `presets.drop_migrated`), and one
@@ -663,10 +663,10 @@ def _link(
     if insert is not None:
         changes["insert_type_id"] = insert
     reading = after["remaining_g"]
-    if not weights or current["grams_left"] is not None or current["weight_locked"]:
+    if not pulls.weights or current["grams_left"] is not None or current["weight_locked"]:
         reading = None
     _insert_link(conn, spool_id, bb, now)
-    _synced(conn, spool_id, bb, after, changes, reading, actor, linked=True)
+    _synced(conn, spool_id, bb, _seen(after, {}, pulls), changes, reading, actor, linked=True)
     FilamentSpoolStore.read(conn, spool_id, check=True)
     return type_id is None
 

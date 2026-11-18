@@ -2063,6 +2063,49 @@ def test_a_weight_bb_moved_while_weights_did_not_pull_is_booked_once_they_do(
     assert _bb_readings(f, made) == [900, 700]
 
 
+def _linked_while_weights_off(f: Filament, pool: PgPool, row: BbSpool) -> UUID:
+    held = f.spools.create(SpoolCreate(material_id=_pla(pool)), actor="ann")
+    f.spools.bind_tag(held.id, tray_uuid=TRAY, kind="bambu_mifare", actor="ann")
+    pull(f, [row], now=NOW, pulls=Pulls(weights=False))
+    spool = f.spools.get(held.id)
+    assert spool is not None
+    assert spool.grams_left is None
+    assert not spool.weight_locked
+    return held.id
+
+
+def test_a_link_made_while_weights_did_not_pull_takes_the_weight_later(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    row = bb(weight_used=300.0)
+    held = _linked_while_weights_off(f, pg_pool, row)
+    pull(f, [row], now=NOW)
+    spool = f.spools.get(held)
+    assert spool is not None
+    assert spool.grams_left == 700
+    assert _bb_readings(f, held) == [700]
+
+
+def test_a_link_made_while_weights_did_not_pull_takes_the_lock_later(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    row = bb(weight_used=300.0, weight_locked=True)
+    held = _linked_while_weights_off(f, pg_pool, row)
+    pull(f, [row], now=NOW)
+    spool = f.spools.get(held)
+    assert spool is not None
+    assert spool.weight_locked
+
+
+def test_a_link_made_while_presets_did_not_pull_takes_the_preset_later(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    held = f.spools.create(SpoolCreate(material_id=_pla(pg_pool)), actor="ann")
+    f.spools.bind_tag(held.id, tray_uuid=TRAY, kind="bambu_mifare", actor="ann")
+    row = bb(slicer_filament="GFA05", slicer_filament_name="Bambu PLA Silk")
+    pull(f, [row], now=NOW, pulls=Pulls(presets=False))
+    assert _own_presets(pg_pool, held.id) == []
+    pull(f, [row], now=NOW)
+    assert {p[1] for p in _own_presets(pg_pool, held.id)} == {"GFA05"}
+
+
 def test_a_preset_bb_moved_while_presets_did_not_pull_is_taken_once_they_do(
     pg_pool: PgPool,
 ) -> None:
