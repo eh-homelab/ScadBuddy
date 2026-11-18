@@ -21,8 +21,6 @@ function explain(cause: unknown): Problem {
     case 403:
       return { text: 'You cannot import invoices from here.', retry: false }
     case 409:
-      // A live import of another person: the agent names no session, so there is nothing to open.
-      if (type === 'import_running') return { text: 'Someone else is importing this invoice.', retry: false }
       return { text: START_FAILED, retry: true }
     case 429:
     case 503:
@@ -48,9 +46,8 @@ function explain(cause: unknown): Problem {
  * running" (pulsing); an idle one, or one that waits for an answer or an approval, reads "The
  * assistant is waiting for you". Both offer "Open". The session is read again on window focus and
  * every 15 s while one is linked, so a session that ends during a visit brings the button back.
- * A 409 `import_running` with a `session_id` opens the session that runs; one with none (another
- * person's import) says so and offers no Open; a 409 `confirmed` removes the button (the
- * invoice is reloaded). A refusal reads as a plain sentence. Without the assistant (AI off) there
+ * A 409 `import_running` names the running session and opens it; a 409 `confirmed` removes the
+ * button (the invoice is reloaded). A refusal reads as a plain sentence. Without the assistant (AI off) there
  * is nothing to open, so nothing shows.
  */
 export function InvoiceImport({ invoice, onChanged }: { invoice: Pick<InvoiceDetail, 'id' | 'status' | 'file' | 'import_run_id'>; onChanged: () => void }) {

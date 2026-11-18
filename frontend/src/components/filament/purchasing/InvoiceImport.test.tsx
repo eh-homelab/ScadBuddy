@@ -139,15 +139,6 @@ describe('InvoiceImport', () => {
     expect(await screen.findByText('Import running')).toBeInTheDocument()
   })
 
-  it('says someone else is importing, with no Open, when the 409 names no session', async () => {
-    answers(409, { detail: 'Someone else is importing this invoice.', type: 'import_running' })
-    const { user, opener } = render(draft)
-    await user.click(await button())
-    expect(await screen.findByRole('alert')).toHaveTextContent('Someone else is importing this invoice.')
-    expect(opener!.openSession).not.toHaveBeenCalled()
-    expect(screen.queryByRole('button', { name: 'Open' })).not.toBeInTheDocument()
-  })
-
   it('says the plain sentence for an unreadable file', async () => {
     const detail = 'This file is not a readable PDF or photo. Upload it again or use another file.'
     answers(422, { detail, type: 'unreadable_file' })

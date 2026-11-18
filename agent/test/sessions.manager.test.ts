@@ -1010,15 +1010,6 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
         ])
       })
 
-      it('looks a session up with whether the principal may see it, and undefined for a missing one', async () => {
-        const paths = await tempPaths()
-        const m = manager({ sql: db.sql, paths, run: scriptedRunner(() => ({ reply: 'x' })).runner })
-        const { session } = await m.start(agentA, { origin: 'mcp' })
-        expect(await m.lookup(session.id, agentA)).toMatchObject({ record: { id: session.id }, visible: true })
-        expect(await m.lookup(session.id, agentB)).toMatchObject({ record: { id: session.id }, visible: false })
-        expect(await m.lookup('no-such-session', agentA)).toBeUndefined()
-      })
-
       it('is refused to a principal that cannot see the session', async () => {
         const paths = await tempPaths()
         const m = manager({ sql: db.sql, paths, run: scriptedRunner(() => ({ reply: 'x' })).runner })

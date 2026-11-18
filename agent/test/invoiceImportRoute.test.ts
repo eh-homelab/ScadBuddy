@@ -61,8 +61,6 @@ function fakeBackend(over: Partial<Invoice> = {}, file: Buffer = PDF) {
   return { backend, invoice, patches, authors, patchRefusal, beforePatch }
 }
 
-const STRANGER = 'someone-else'
-
 type Started = { title?: string; origin: string; prompt?: string }
 type Sent = { id: string; prompt: string; images?: readonly { mediaType: string; bytes: Buffer }[] }
 
@@ -74,8 +72,6 @@ function fakeSessions() {
   const archived: string[] = []
   /** Set to make `get` fail with this error for every id. */
   const getFails: { error: Error | null } = { error: null }
-  /** Ids of sessions that exist but belong to somebody else (the principal `STRANGER`). */
-  const strangers = new Set<string>()
   let next = 0
   const sessions = {
     async get(id: string) {
@@ -83,12 +79,6 @@ function fakeSessions() {
       const row = rows.get(id)
       if (!row) throw new SessionError('not_found', `no session ${id}`)
       return { id, ...row }
-    },
-    async lookup(id: string, principal: { id: string }) {
-      if (getFails.error) throw getFails.error
-      const row = rows.get(id)
-      // A stranger's session is visible to its own owner only.
-      return row ? { record: { id, ...row }, visible: !strangers.has(id) || principal.id === STRANGER } : undefined
     },
     async start(_owner: unknown, options: Started) {
       started.push(options)
@@ -108,7 +98,7 @@ function fakeSessions() {
       },
     },
   }
-  return { sessions, rows, started, sent, archived, getFails, strangers }
+  return { sessions, rows, started, sent, archived, getFails }
 }
 
 function app(backend: ReturnType<typeof fakeBackend>['backend'], fake = fakeSessions(), ready = true) {
@@ -254,47 +244,6 @@ describe('starting an invoice import (#6267)', () => {
       type: 'unreadable_file',
     })
     expect(started).toEqual([])
-  })
-
-  it('does not reveal or replace a live session that belongs to someone else', async () => {
-    const b = fakeBackend({ import_run_id: 's-theirs' })
-    const fake = fakeSessions()
-    fake.rows.set('s-theirs', { status: 'running', archivedAt: null })
-    fake.strangers.add('s-theirs')
-    const { hono, started } = app(b.backend, fake)
-    const res = await post(hono)
-    expect(res.status).toBe(409)
-    const body = await res.json()
-    expect(body).toMatchObject({ type: 'import_running' })
-    expect(body).not.toHaveProperty('session_id')
-    expect(started).toEqual([])
-    expect(b.patches).toEqual([])
-  })
-
-  it('replaces another person’s session once it is done', async () => {
-    const b = fakeBackend({ import_run_id: 's-theirs' })
-    const fake = fakeSessions()
-    fake.rows.set('s-theirs', { status: 'done', archivedAt: null })
-    fake.strangers.add('s-theirs')
-    const { hono, started } = app(b.backend, fake)
-    expect((await post(hono)).status).toBe(200)
-    expect(started).toHaveLength(1)
-  })
-
-  it('does not name a rival session that belongs to someone else when it wins the race', async () => {
-    const b = fakeBackend()
-    const fake = fakeSessions()
-    fake.rows.set('s-rival', { status: 'running', archivedAt: null })
-    fake.strangers.add('s-rival')
-    b.beforePatch.run = () => {
-      b.invoice.import_run_id = 's-rival'
-    }
-    const { hono } = app(b.backend, fake)
-    const res = await post(hono)
-    expect(res.status).toBe(409)
-    const body = await res.json()
-    expect(body).toMatchObject({ type: 'import_running' })
-    expect(body).not.toHaveProperty('session_id')
   })
 
   it('does not name a rival session that is gone when it wins the race: answers 502 and no session_id', async () => {
