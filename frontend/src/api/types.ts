@@ -547,6 +547,16 @@ export type FilamentPatch = Partial<Schemas['FilamentPatch']>
 export type MachineRateView = Schemas['MachineRateView']
 export type MachineRateBreakdown = Schemas['MachineRateBreakdown']
 export type MaintenancePart = Schemas['MaintenancePart']
+export type WearPartRate = Schemas['WearPartRate']
+/** #5774 (spec 2026-11-17 §5): a printer's logged maintenance and replaced parts, each row's
+ * actual over its window, and its print-hour counter. */
+export type RowActuals = Schemas['RowActuals']
+export type SkippedGap = Schemas['SkippedGap']
+export type CounterView = Schemas['CounterView']
+export type LanCount = Schemas['LanCount']
+export type MachineRateEvent = Schemas['MachineRateEvent']
+export type MachineRateEventCreate = Schemas['MachineRateEventCreate']
+export type MachineRateEventPatch = Schemas['MachineRateEventPatch']
 /** The inputs as sent: a field with a default may be left out. Decimals are strings. */
 export type MachineRateInputs = {
   profile: Partial<Schemas['CostProfile']>

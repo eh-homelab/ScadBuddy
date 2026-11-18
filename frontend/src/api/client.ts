@@ -227,6 +227,9 @@ import type {
   OrderAttachment,
   OrderAttachmentPatch,
   OrderAttachmentRole,
+  MachineRateEvent,
+  MachineRateEventCreate,
+  MachineRateEventPatch,
   MachineRateInputs,
   MachineRateView,
   ManualQuoteInput,
@@ -2844,6 +2847,19 @@ export const api = {
     request<MachineRateView>(`/printers/${seg(printerId)}/machine-rate`, { method: 'PUT', body: JSON.stringify(body) }),
   /** The printer is priced at the price book's machine rate again. */
   deleteMachineRate: (printerId: string) => request<void>(`/printers/${seg(printerId)}/machine-rate`, { method: 'DELETE' }),
+  /**
+   * #5774 (spec 2026-11-17 §5) — a maintenance task done or a wear part replaced, logged here.
+   * With no `hours_at`, the backend fills it from the printer's counter; a retry with the same
+   * `source` writes once.
+   */
+  addMachineRateEvent: (printerId: string, body: MachineRateEventCreate) =>
+    request<MachineRateEvent>(`/printers/${seg(printerId)}/machine-rate/events`, { method: 'POST', body: JSON.stringify(body) }),
+  /** Corrects a logged event; on one read from Bambuddy, only its minutes, consumables and notes. */
+  patchMachineRateEvent: (printerId: string, eventId: string, body: MachineRateEventPatch) =>
+    request<MachineRateEvent>(`/printers/${seg(printerId)}/machine-rate/events/${seg(eventId)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  /** A ScadBuddy event only: one read from Bambuddy is 409 `imported_event`. */
+  deleteMachineRateEvent: (printerId: string, eventId: string) =>
+    request<void>(`/printers/${seg(printerId)}/machine-rate/events/${seg(eventId)}`, { method: 'DELETE' }),
   // -- the storefront's listings (#5282, spec 2026-11-02 §5.3) ---------------------------------
   /** #6157 — one page of the listings: searched, filtered and sorted on the server. */
   storefrontListings: (query: URLSearchParams = new URLSearchParams()) =>
