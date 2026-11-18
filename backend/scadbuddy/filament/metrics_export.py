@@ -17,6 +17,10 @@ from scadbuddy.filament.metrics_models import Snapshot
 #: Values of one label kept by name; the rest are summed as ``other``.
 TOP = 20
 
+#: The fold's own labels. A real value equal to one (any case) gets a ``*`` so it never
+#: shares the fold's or the null series (#6269 R-T6-4).
+_RESERVED = frozenset({"other", "none"})
+
 
 def fold(totals: Mapping[str | None, float], top: int = TOP) -> frozenset[str | None]:
     """The ``top`` values with the largest totals (ties by name). Null is never ranked:
@@ -29,7 +33,9 @@ def fold(totals: Mapping[str | None, float], top: int = TOP) -> frozenset[str | 
 def label(value: str | None, kept: frozenset[str | None]) -> str:
     if value is None:
         return "none"
-    return value if value in kept else "other"
+    if value not in kept:
+        return "other"
+    return value + "*" if value.lower() in _RESERVED else value
 
 
 def _totals(pairs: Iterable[tuple[str | None, float]]) -> dict[str | None, float]:

@@ -138,3 +138,15 @@ def test_days_of_stock_of_folded_materials_is_the_soonest() -> None:
 
 def test_worker_roles_do_not_export_filament() -> None:
     assert "scadbuddy_filament_" not in Metrics(role="print").exposition().decode()
+
+
+def test_a_real_value_named_like_a_fold_label_never_shares_its_series() -> None:
+    kept = frozenset({"other", "None", "a"})
+    assert metrics_export.label("other", kept) == "other*"
+    assert metrics_export.label("None", kept) == "None*"
+    assert metrics_export.label("a", kept) == "a"
+    assert metrics_export.label(None, kept) == "none"
+    metrics = Metrics()
+    stock = [("PLA", "other", "Shelf", 1, 500.0, None), ("PLA", None, "Shelf", 1, 100.0, None)]
+    metrics_export.export(metrics, _snapshot(stock=stock))
+    assert _brand_values(metrics, "scadbuddy_filament_stock_grams") == {"other*", "none"}

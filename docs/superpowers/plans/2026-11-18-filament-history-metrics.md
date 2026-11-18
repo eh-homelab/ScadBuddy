@@ -19,7 +19,7 @@ UI are plain SVG, as `SensorChart` (#6268) is: the app has no chart library.
 
 **Tech Stack:** Python 3.12, FastAPI, psycopg 3, pydantic v2, prometheus_client, Postgres 18,
 React + TanStack Query, plain SVG, the agent's `defineTool`, Grafana dashboard JSON,
-kustomize v5.6.0.
+kustomize v5.8.1.
 
 **Spec:** `docs/superpowers/specs/2026-11-14-filament-management-design.md` §5.7 (history and
 metrics), §5.5 (the ledger and its "As built" rules), §5.2 (`sku_settings`), §10 (Spools tab
@@ -51,7 +51,7 @@ rulings bind: `2026-11-14-filament-data-model.md`, `2026-11-15-filament-capture.
   never converted. The frontend shows money with `useMoney` and `lib/decimal.ts`.
 - Every setting is rememberable: the burn window and the lead-time defaults are stored
   settings; the Metrics tab's view sits behind "Remember my view".
-- Dashboards pass `.github/scripts/lint-dashboard.sh` (kustomize v5.6.0): uid equals the
+- Dashboards pass `.github/scripts/lint-dashboard.sh` (kustomize v5.8.1): uid equals the
   file name, datasources only as `${DS_PROMETHEUS}`, every series declared in
   `core/metrics.py` by its constructor, every `by (...)` label in that constructor's label
   list.
@@ -63,7 +63,7 @@ rulings bind: `2026-11-14-filament-data-model.md`, `2026-11-15-filament-capture.
   `SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:55432/scadbuddy_test_6269`;
   `uv run --frozen ruff check . && uv run --frozen ruff format --check . && uv run --frozen mypy`.
   Frontend and agent `pnpm typecheck && pnpm lint && pnpm test`; Playwright `--workers=2`.
-  Dashboards `KUSTOMIZE=<kustomize v5.6.0> .github/scripts/lint-dashboard.sh`.
+  Dashboards `KUSTOMIZE=<kustomize v5.8.1> .github/scripts/lint-dashboard.sh`.
 
 ## Decisions this plan makes
 
@@ -80,7 +80,7 @@ rulings bind: `2026-11-14-filament-data-model.md`, `2026-11-15-filament-capture.
 3. **The gauges come from a snapshot, refreshed at most every 60 s per process**
    (`FILAMENT_METRICS_MAX_AGE = 60.0`), in a thread, as the store-usage gauges are. Each
    gauge is cleared before it is set, so a material that leaves stock leaves the series.
-   Every API pod exports the same values, so the dashboard reads them with `max by (...)`.
+   Every API pod exports the same values, so the dashboard reads them with `max by (...)`. For a counter-like value (`used_grams`) the `max by` comes before `delta`, through a subquery (R-T6-1).
 4. **Labels.** `material` (the material's catalog `name`), `brand` (catalog name, a closed
    vocabulary), `location_kind` (the kind's catalog `name`, not the location's free-text
    name), `outcome`
@@ -562,8 +562,8 @@ rulings bind: `2026-11-14-filament-data-model.md`, `2026-11-15-filament-capture.
   1. Stat "Stock (kg)": `sum(max by (material, brand, location_kind) (scadbuddy_filament_stock_grams{…})) / 1000`.
   2. Stat "Stock value": `sum by (currency) (max by (material, currency) (scadbuddy_filament_stock_value{…}))`, legend `{{currency}}` (a bare `sum` drops `currency` and leaves the legend blank).
   3. Bar gauge "Stock by material (g)": `sum by (material) (max by (material, brand, location_kind) (scadbuddy_filament_stock_grams{…}))`.
-  4. Time series "Used per day by material (g)": `sum by (material) (max by (material, outcome) (delta(scadbuddy_filament_used_grams{…}[1d])))`.
-  5. Time series "Waste rate": failed plus cancelled `delta` over all `delta`, unit `percentunit`.
+  4. Time series "Used per day by material (g)": `sum by (material) (delta((max by (material, outcome) (scadbuddy_filament_used_grams{…}))[1d:5m]))`.
+  5. Time series "Waste rate": failed plus cancelled `delta` over all `delta`, unit `percentunit`. Each `delta` takes the deduped series: `sum(delta((max by (material, outcome) (scadbuddy_filament_used_grams{…, outcome=~"failed|cancelled"}))[1d:5m])) / sum(delta((max by (material, outcome) (scadbuddy_filament_used_grams{…}))[1d:5m]))`.
   6. Bar gauge "Days of stock by material": `max by (material) (scadbuddy_filament_days_of_stock{…})`, thresholds red < 14, amber < 30.
   7. Stat "Low-stock spools": `sum(max by (material) (scadbuddy_filament_low_stock_spools{…}))`.
   8. Stat "Types to reorder": `sum(max by (material) (scadbuddy_filament_reorder_types{…}))`.
@@ -690,6 +690,8 @@ Load `frontend-design` and `dataviz` first.
 
 ### Task 9: End-to-end, docs and the PR
 
+R-T6-5: Task 9's as-built notes must say a material crossing rank 20 makes a one-day step
+
 **Files:**
 - Create: `frontend/e2e/filament-metrics.spec.ts`
 - Modify: `docs/superpowers/specs/2026-11-14-filament-management-design.md` (§5.7 and §5.2
@@ -795,7 +797,11 @@ Load `frontend-design` and `dataviz` first.
 54. Task 6 (export order): `export` computes every folded value before it clears a gauge, so a failure in the fold leaves the last values in place.
 55. Task 6 (route clock in tests): The API tests inject the clock through `refresh_filament_metrics.__kwdefaults__["now"]` (`monkeypatch.setitem`), so the signature stays as the brief gives it and production code has no test-only seam.
 56. Task 6 (dashboard frame): The dashboard copies `scadbuddy-printing.json`'s `links`, `annotations`, `templating`, `editable`, `graphTooltip` and `schemaVersion`. Its default range is 30 days and it refreshes every 5 minutes, because the gauges change at most once a minute and the use panels read a 1-day `delta`. The waste rate's `delta` window is 1 day, the same as the use panel's. Units: `masskg`, `massg`, `d`, `percentunit`; the stock value has no unit, because the currency is its legend.
-57. Task 6 (kustomize version): The lint ran with kustomize v5.8.1, the version `ci.yml`'s lint job pins now (sha256 checked against the pin there), not v5.6.0: the root CLAUDE.md's "v5.6.0" is stale since the Argo CD v3.4.13 upgrade.
+57. Task 6 (kustomize version): The lint ran with kustomize v5.8.1, the version `ci.yml`'s lint job pins (sha256 checked against the pin there) and the root CLAUDE.md names since #6621. The plan's own lines that said v5.6.0 (the header, the constraints and Task 6) now say v5.8.1. The root CLAUDE.md needs no edit. (R-T6-2)
+58. R-T6-1 (dedupe before delta): The "Used per day" and "Waste rate" panels dedupe across API pods before `delta`, through a subquery: `delta((max by (material, outcome) (scadbuddy_filament_used_grams{…}))[1d:5m])`, summed by material afterwards. `max by` after `delta` shows only one pod's share of the day after each rollout.
+59. R-T6-3 (async refresh): `refresh_filament_metrics` stays `async def`, with its `try` inside (Decision 53). It never blocks the event loop.
+60. R-T6-4 (reserved label names): a real catalog value that equals `other` or `none` (any case) gets the label `other*` or `none*` (its own case, plus `*`). It then never merges with the fold label or the null label. A test covers it.
+61. R-T6-5 (rank-20 spike): a material that crosses rank 20 makes a one-day step in "Used per day" and in `other`. This is a known limit of folding, the same as a rename (Decision 4). Task 9's as-built notes say so. No cheap query avoids it, and the totals stay right.
 
 ## Pre-flight rulings (2026-11-18)
 

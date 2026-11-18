@@ -531,7 +531,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum by (material) (max by (material, outcome) (delta(scadbuddy_filament_used_grams{namespace=\"$namespace\"}[1d])))",
+          "expr": "sum by (material) (delta((max by (material, outcome) (scadbuddy_filament_used_grams{namespace=\"$namespace\"}))[1d:5m]))",
           "legendFormat": "{{material}}"
         }
       ]
@@ -565,7 +565,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(max by (material, outcome) (delta(scadbuddy_filament_used_grams{namespace=\"$namespace\", outcome=~\"failed|cancelled\"}[1d]))) / sum(max by (material, outcome) (delta(scadbuddy_filament_used_grams{namespace=\"$namespace\"}[1d])))",
+          "expr": "sum(delta((max by (material, outcome) (scadbuddy_filament_used_grams{namespace=\"$namespace\", outcome=~\"failed|cancelled\"}))[1d:5m])) / sum(delta((max by (material, outcome) (scadbuddy_filament_used_grams{namespace=\"$namespace\"}))[1d:5m]))",
           "legendFormat": "waste"
         }
       ]
