@@ -344,6 +344,25 @@ EVENTS_SQL = (
 )
 
 
+_EVENT_TABLES: dict[EventKind, str] = {
+    "task": "printer_maintenance_events",
+    "part": "printer_wear_replacements",
+}
+
+
+def _locked_event(
+    conn: Connection[DictRow], key: uuid.UUID, ident: uuid.UUID
+) -> MachineRateEvent | None:
+    """The event, its row locked until the transaction ends, so a check made on it
+    holds for the write that follows."""
+    for table in _EVENT_TABLES.values():
+        conn.execute(
+            f"SELECT 1 FROM {table} WHERE printer = %s AND id = %s FOR UPDATE", (key, ident)
+        )
+    row = conn.execute(f"{EVENTS_SQL} WHERE printer = %s AND id = %s", (key, ident)).fetchone()
+    return None if row is None else _event(row)
+
+
 def _event(row: DictRow) -> MachineRateEvent:
     return MachineRateEvent(
         id=str(row["id"]),
@@ -1212,56 +1231,57 @@ class MachineRateStore:
         cleared clears the source. :class:`EventFieldError` for a field the kind lacks;
         :class:`ImportedEventError` for a reading cleared on an event imported from
         Bambuddy, whose counter source stays as read."""
-        current = self.event(printer, event_id)
-        if current is None:
+        key, ident = printer_uuid(printer), _uuid(event_id)
+        if key is None or ident is None:
             return None
-        sent = patch.model_dump(exclude_unset=True)
-        if current.origin == "bambuddy" and "hours_at" in sent and sent["hours_at"] is None:
-            raise ImportedEventError(event_id)
-        wrong = {"cost", "hours_used"} if current.kind == "task" else {"minutes", "consumables"}
-        if wrong & sent.keys():
-            raise EventFieldError(current.kind, sorted(wrong & sent.keys()))
-        if "cost" in sent and sent["cost"] is None:
-            raise EventFieldError(current.kind, ["cost"])
-        if "hours_at" in sent:
-            reading = sent["hours_at"]
-            sent["hours_source"] = (
-                None if reading is None else current.hours_source or counter or "typed"
-            )
-        if not sent:
-            return current
-        table = (
-            "printer_maintenance_events"
-            if current.kind == "task"
-            else ("printer_wear_replacements")
-        )
-        columns = ", ".join(f"{name} = %s" for name in sent)
-        with self._pool.connection() as conn:
+        with self._pool.connection() as conn, conn.transaction():
+            current = _locked_event(conn, key, ident)
+            if current is None:
+                return None
+            sent = patch.model_dump(exclude_unset=True)
+            if current.origin == "bambuddy" and "hours_at" in sent and sent["hours_at"] is None:
+                raise ImportedEventError(event_id)
+            wrong = {"cost", "hours_used"} if current.kind == "task" else {"minutes", "consumables"}
+            if wrong & sent.keys():
+                raise EventFieldError(current.kind, sorted(wrong & sent.keys()))
+            if "cost" in sent and sent["cost"] is None:
+                raise EventFieldError(current.kind, ["cost"])
+            if "hours_at" in sent:
+                reading = sent["hours_at"]
+                sent["hours_source"] = (
+                    None if reading is None else current.hours_source or counter or "typed"
+                )
+            if not sent:
+                return current
+            columns = ", ".join(f"{name} = %s" for name in sent)
             conn.execute(
-                f"UPDATE {table} SET {columns} WHERE printer = %s AND id = %s",
-                (*sent.values(), printer_uuid(printer), _uuid(event_id)),
+                f"UPDATE {_EVENT_TABLES[current.kind]} SET {columns}"
+                " WHERE printer = %s AND id = %s",
+                (*sent.values(), key, ident),
             )
-        return self.event(printer, event_id)
+            row = conn.execute(
+                f"{EVENTS_SQL} WHERE printer = %s AND id = %s", (key, ident)
+            ).fetchone()
+        assert row is not None
+        return _event(row)
 
     def delete_event(self, printer: str, event_id: str) -> bool:
         """A ScadBuddy event gone; False for none. :class:`ImportedEventError` for one
         imported from Bambuddy: the next import would bring it back."""
-        current = self.event(printer, event_id)
-        if current is None:
+        key, ident = printer_uuid(printer), _uuid(event_id)
+        if key is None or ident is None:
             return False
-        if current.origin == "bambuddy":
-            raise ImportedEventError(event_id)
-        table = (
-            "printer_maintenance_events"
-            if current.kind == "task"
-            else ("printer_wear_replacements")
-        )
-        with self._pool.connection() as conn:
-            gone = conn.execute(
-                f"DELETE FROM {table} WHERE printer = %s AND id = %s",
-                (printer_uuid(printer), _uuid(event_id)),
+        with self._pool.connection() as conn, conn.transaction():
+            current = _locked_event(conn, key, ident)
+            if current is None:
+                return False
+            if current.origin == "bambuddy":
+                raise ImportedEventError(event_id)
+            conn.execute(
+                f"DELETE FROM {_EVENT_TABLES[current.kind]} WHERE printer = %s AND id = %s",
+                (key, ident),
             )
-        return gone.rowcount > 0
+        return True
 
     def list_events(
         self,
@@ -1775,6 +1795,12 @@ class MachineRates:
     ) -> tuple[MachineRateEvent, bool]:
         """A ScadBuddy event (§5), its ``hours_at`` filled from the printer's counter when
         left out, and whether this call wrote it. Refusals are :class:`ApiError`."""
+        if body.source is not None:
+            # A retry returns the first event without reading the counter again, and
+            # before the name check: its row may have been renamed or deleted since.
+            first = await asyncio.to_thread(self.store.event_by_source, row.id, body.source)
+            if first is not None and first.kind == body.kind:
+                return first, False
         source = hours_source(row)
         if body.kind == "task" and source == "bambuddy":
             raise refusal(
@@ -1791,11 +1817,6 @@ class MachineRates:
             raise refusal(
                 422, f"unknown_{body.kind}", f"the printer has no {what} named {body.name!r}"
             )
-        if body.source is not None:
-            # A retry returns the first event without reading the counter again.
-            first = await asyncio.to_thread(self.store.event_by_source, row.id, body.source)
-            if first is not None and first.kind == body.kind:
-                return first, False
         hours_at = body.hours_at
         recorded: HoursSource | None = source
         if hours_at is None:

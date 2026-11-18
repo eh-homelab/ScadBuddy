@@ -343,3 +343,23 @@ def test_a_source_names_one_event_across_both_kinds(client: TestClient) -> None:
     assert (task.status_code, task.json()["code"]) == (409, "source_taken")
     listed = client.get(events(row["id"])).json()["events"]
     assert [e["kind"] for e in listed] == ["part"]
+
+
+def test_a_retry_after_its_row_is_renamed_or_deleted_returns_the_first_event(
+    client: TestClient,
+) -> None:
+    """A retry is looked up by its ``source`` before its name: the row it named may have
+    been renamed or deleted since the first write."""
+    row = create(client)
+    client.put(path(row["id"]), json=INPUTS)
+    first = client.post(events(row["id"]), json=nozzle(hours_at="10", source="form:1"))
+    assert first.status_code == 201, first.text
+    renamed = {**INPUTS["wear_parts"][0], "name": "Hotend", "renamed_from": "Nozzle"}
+    client.put(path(row["id"]), json={**INPUTS, "wear_parts": [renamed]})
+    after_rename = client.post(events(row["id"]), json=nozzle(hours_at="10", source="form:1"))
+    assert after_rename.status_code == 200, after_rename.text
+    assert after_rename.json() == {**first.json(), "name": "Hotend"}
+    client.put(path(row["id"]), json={**INPUTS, "wear_parts": []})
+    after_delete = client.post(events(row["id"]), json=nozzle(hours_at="10", source="form:1"))
+    assert after_delete.status_code == 200, after_delete.text
+    assert after_delete.json() == {**first.json(), "name": "Hotend"}

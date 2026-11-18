@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import threading
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from decimal import Decimal
 from pathlib import Path
 from typing import cast
@@ -1009,6 +1009,67 @@ def test_an_imported_events_reading_is_not_cleared(
     )
     assert corrected is not None
     assert (corrected.hours_at, corrected.hours_source) == ("41", "bambuddy")
+
+
+def _imported_meanwhile(
+    store: MachineRateStore, printer: str, pg_pool: PgPool, act: Callable[[str], object]
+) -> tuple[str, object]:
+    """``act`` on a logged task's id, run while another transaction holds the event's row
+    and makes it an imported one: the id, and what ``act`` returned or raised once that
+    transaction committed."""
+    task = MachineRateEventCreate(kind="task", name="Lubricate rods", source="form:1")
+    event, _ = store.add_event(
+        printer, task, hours_at="40", hours_source="lan_watch", created_by="browser"
+    )
+    outcome: list[object] = []
+
+    def run() -> None:
+        try:
+            outcome.append(act(event.id))
+        except Exception as error:
+            outcome.append(error)
+
+    with pg_pool.connection() as conn, conn.transaction():
+        conn.execute(
+            "UPDATE printer_maintenance_events SET origin = 'bambuddy',"
+            " hours_source = 'bambuddy', bambuddy_history_id = 3 WHERE id = %s",
+            (event.id,),
+        )
+        thread = threading.Thread(target=run)
+        thread.start()
+        thread.join(1.0)
+    thread.join(10)
+    assert len(outcome) == 1
+    return event.id, outcome[0]
+
+
+def test_a_delete_reads_the_event_as_it_is_once_a_concurrent_write_commits(
+    store: MachineRateStore, printers: PrinterStore, pg_pool: PgPool
+) -> None:
+    printer = lan_printer(printers)
+    store.replace(printer.id, INPUTS)
+    ident, outcome = _imported_meanwhile(
+        store, printer.id, pg_pool, lambda ident: store.delete_event(printer.id, ident)
+    )
+    assert isinstance(outcome, ImportedEventError)
+    assert store.event(printer.id, ident) is not None
+
+
+def test_a_patch_reads_the_event_as_it_is_once_a_concurrent_write_commits(
+    store: MachineRateStore, printers: PrinterStore, pg_pool: PgPool
+) -> None:
+    printer = lan_printer(printers)
+    store.replace(printer.id, INPUTS)
+    clear = MachineRateEventPatch(hours_at=None)
+    ident, outcome = _imported_meanwhile(
+        store,
+        printer.id,
+        pg_pool,
+        lambda ident: store.patch_event(printer.id, ident, clear, counter="lan_watch"),
+    )
+    assert isinstance(outcome, ImportedEventError)
+    kept = store.event(printer.id, ident)
+    assert kept is not None and (kept.hours_at, kept.hours_source) == ("40", "bambuddy")
 
 
 def _all_events(store: MachineRateStore, printer: str) -> Events:
