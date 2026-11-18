@@ -3,6 +3,8 @@ import { http, HttpResponse } from 'msw'
 import { Link, Route, Routes, useLocation } from 'react-router'
 import { describe, expect, it } from 'vitest'
 import { getType, listTypes } from '../../api/filament'
+import { patchSupplier } from '../../api/filamentPurchasing'
+import { SUPPLIER } from '../../mocks/features/filamentPurchasingSeed'
 import { server } from '../../mocks/server'
 import { T } from '../../mocks/features/filament/seed'
 import { choose } from '../../test/select'
@@ -260,6 +262,14 @@ describe('the prices panel', () => {
     await user.click(screen.getByRole('button', { name: 'Save type' }))
     await waitFor(async () => expect((await getType(T.JADE)).cost_per_kg).toMatch(/^17\.305/))
     expect(writes).toEqual([`PATCH /api/v1/filament/types/${T.JADE}`])
+  })
+
+  it('offers no Add price for a product of an archived supplier', async () => {
+    await patchSupplier(SUPPLIER.BAMBU, { archived: true })
+    render(`/filament/types/${T.JADE}`)
+    await history()
+    expect(screen.getByRole('article', { name: 'Bambu Lab A00-W1' })).toHaveTextContent('Archived')
+    expect(screen.queryByRole('button', { name: 'Add price for Bambu Lab A00-W1' })).toBeNull()
   })
 
   it('says a type with no price has none yet', async () => {

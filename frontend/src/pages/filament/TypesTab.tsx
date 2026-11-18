@@ -22,23 +22,29 @@ const nameMap = (rows: { id: string; name: string }[]) => new Map(rows.map((row)
 
 const message = (cause: unknown) => (cause instanceof ApiError ? cause.detail : 'The types could not be loaded. Try again.')
 
-/** Each type's newest per-kg price from the suppliers' price sheets; a sheet that cannot be read leaves its prices out, as the column is extra to the tab. */
-async function newestPrices(): Promise<Map<string, PricePoint>> {
-  const out = new Map<string, PricePoint>()
+/**
+ * Each type's newest per-kg price from the suppliers' price sheets. A sheet that cannot be read
+ * leaves its prices out and sets `failed`, so a type with no price is not called unpriced.
+ */
+async function newestPrices(): Promise<{ prices: Map<string, PricePoint>; failed: boolean }> {
+  const prices = new Map<string, PricePoint>()
+  let suppliers
   try {
-    const suppliers = (await listSuppliers()).filter((supplier) => !supplier.archived_at)
-    for (const sheet of await Promise.all(suppliers.map((supplier) => getPriceSheet(supplier.id)))) {
-      for (const row of sheet) {
-        const point = row.newest
-        if (!point?.price_per_kg || row.product.archived_at) continue
-        const have = out.get(row.product.type_id)
-        if (!have || stamp(point) > stamp(have)) out.set(row.product.type_id, point)
-      }
-    }
+    suppliers = (await listSuppliers()).filter((supplier) => !supplier.archived_at)
   } catch {
-    out.clear()
+    return { prices, failed: true }
   }
-  return out
+  const sheets = await Promise.allSettled(suppliers.map((supplier) => getPriceSheet(supplier.id)))
+  for (const sheet of sheets) {
+    if (sheet.status === 'rejected') continue
+    for (const row of sheet.value) {
+      const point = row.newest
+      if (!point?.price_per_kg || row.product.archived_at) continue
+      const have = prices.get(row.product.type_id)
+      if (!have || stamp(point) > stamp(have)) prices.set(row.product.type_id, point)
+    }
+  }
+  return { prices, failed: sheets.some((sheet) => sheet.status === 'rejected') }
 }
 
 /** The type's name as a person says it: brand, material, subtype. */
@@ -57,6 +63,7 @@ export function TypesTab() {
   const money = useMoney()
   /** The newest per-kg price point per type, read beside the types so a slow supplier call never holds the table. */
   const [newest, setNewest] = useState<Map<string, PricePoint>>(new Map())
+  const [pricesFailed, setPricesFailed] = useState(false)
 
   /** Each load takes a number; only the newest one's answer is used. */
   const latest = useRef(0)
@@ -87,8 +94,10 @@ export function TypesTab() {
 
   useEffect(() => {
     let live = true
-    void newestPrices().then((prices) => {
-      if (live) setNewest(prices)
+    void newestPrices().then(({ prices, failed }) => {
+      if (!live) return
+      setNewest(prices)
+      setPricesFailed(failed)
     })
     return () => {
       live = false
@@ -164,7 +173,13 @@ export function TypesTab() {
                     <td className="px-2 py-1.5 text-right tabular-nums">
                       {(() => {
                         const point = newest.get(type.id)
-                        if (!point?.price_per_kg) return <span className="text-muted-foreground" aria-label="No supplier price">—</span>
+                        if (!point?.price_per_kg) {
+                          return pricesFailed ? (
+                            <span className="text-muted-foreground" title="A supplier's prices could not be loaded">Not loaded</span>
+                          ) : (
+                            <span className="text-muted-foreground" aria-label="No supplier price">—</span>
+                          )
+                        }
                         return <span title={`From ${point.on_date}`}>{money.format(point.price_per_kg, point.currency)}/kg</span>
                       })()}
                     </td>

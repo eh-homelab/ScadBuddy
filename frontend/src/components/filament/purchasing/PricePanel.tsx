@@ -113,7 +113,7 @@ export function PricePanel({ typeId, currency, exponent, onUseAsCost }: PricePan
               </div>
               <Sparkline values={perKg} label={`Price per kg of ${name} over time`} />
               <div className="flex gap-1">
-                {!product.archived_at && (
+                {!archived && (
                   <Button type="button" variant="ghost" size="sm" aria-label={`Add price for ${name}`} onClick={() => setAdding(adding === product.id ? null : product.id)}>
                     Add price
                   </Button>

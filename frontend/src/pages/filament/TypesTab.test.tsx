@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { api } from '../../api/client'
 import { listCatalog, listTypes, upsertCatalog, upsertType, type SpoolTypeCreate } from '../../api/filament'
 import { server } from '../../mocks/server'
+import { SUPPLIER } from '../../mocks/features/filamentPurchasingSeed'
 import { M, ST, T } from '../../mocks/features/filament/seed'
 import { FILAMENT_PETG } from '../../mocks/features/orders/state'
 import { renderPage } from '../../test/utils'
@@ -31,6 +32,17 @@ describe('the Types tab', () => {
     await waitFor(() => expect(within(jade).getByText('$17.305/kg')).toBeInTheDocument())
     const mistletoe = rows.find((row) => row.dataset.type === T.MISTLETOE)!
     expect(within(mistletoe).getByLabelText('No supplier price')).toBeInTheDocument()
+  })
+
+  it('keeps the prices of the sheets that loaded when one fails, and does not call the rest unpriced', async () => {
+    server.use(http.get(`/api/v1/filament/suppliers/${SUPPLIER.MICRO}/price-sheet`, () => HttpResponse.json({ detail: 'down' }, { status: 500 })))
+    renderPage(<TypesTab />)
+    const rows = typeRows(await types())
+    const jade = rows.find((row) => row.dataset.type === T.JADE)!
+    await waitFor(() => expect(within(jade).getByText('$17.305/kg')).toBeInTheDocument())
+    const inland = rows.find((row) => row.dataset.type === T.INLAND_BLACK)!
+    expect(within(inland).getByText('Not loaded')).toBeInTheDocument()
+    expect(within(inland).queryByLabelText('No supplier price')).toBeNull()
   })
 
   it('shows a type with no price as unpriced', async () => {
