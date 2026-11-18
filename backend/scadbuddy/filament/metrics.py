@@ -25,6 +25,8 @@ from scadbuddy.filament.models import SpoolEvent
 #: A scale reading pairs with an AMS reading at most this much older (Decision 14).
 AMS_PAIR_WINDOW = timedelta(hours=24)
 #: The outcomes BB's ``bb_status`` names as they are; any other status is ``unknown``.
+#: A forecast further out than this many days is no forecast (``empty_on`` is ``None``).
+MAX_FORECAST_DAYS = 3650
 _BB_OUTCOMES = frozenset(get_args(Outcome)) - {"unknown"}
 _PLATE_KINDS = frozenset({ledger.PRINT_STARTED, ledger.PRINT_ENDED})
 _CENT = Decimal("0.01")
@@ -88,10 +90,14 @@ def burn(
 
 def empty_on(grams_left: float | None, burn_g_per_day: float | None, now: datetime) -> date | None:
     """The day the spool runs out at ``burn_g_per_day``; ``None`` with no grams left
-    known or no burn."""
-    if grams_left is None or not burn_g_per_day or burn_g_per_day <= 0:
+    known, no burn (0 or less), or a day more than `MAX_FORECAST_DAYS` after ``now``. The
+    bound is checked before any date arithmetic, which overflows near year 9999."""
+    if grams_left is None or burn_g_per_day is None or burn_g_per_day <= 0:
         return None
-    return (now + timedelta(days=max(grams_left, 0.0) / burn_g_per_day)).date()
+    left_days = max(grams_left, 0.0) / burn_g_per_day
+    if left_days > MAX_FORECAST_DAYS:
+        return None
+    return (now + timedelta(days=left_days)).date()
 
 
 def reorder_on(empty: date | None, lead_time_days: int, safety_margin_days: int) -> date | None:
@@ -105,12 +111,14 @@ def reorder_on(empty: date | None, lead_time_days: int, safety_margin_days: int)
 def ams_pairs(events: Sequence[SpoolEvent], label_weight_g: int | None) -> list[float]:
     """AMS grams less scale grams, one per scale reading that has an AMS reading to pair:
     the newest ``ams_remain`` reading before it that is not ``printing``, at most
-    `AMS_PAIR_WINDOW` older, with no plate event between them."""
+    `AMS_PAIR_WINDOW` older, with no plate event that consumed grams (more than 0 g)
+    between them."""
     errors: list[float] = []
     ams: tuple[datetime, float] | None = None
     for event in _ordered(events):
         if event.kind in _PLATE_KINDS:
-            ams = None
+            if event.delta_g:
+                ams = None
         elif event.source == "ams_remain" and event.data.get("printing") is not True:
             value = ledger.reading(event, label_weight_g)
             if value is not None:

@@ -152,6 +152,26 @@ def test_empty_on() -> None:
     assert metrics.empty_on(None, 10, NOW) is None
 
 
+def test_empty_on_is_none_past_the_forecast_bound() -> None:
+    assert metrics.empty_on(1000, 1000 / metrics.MAX_FORECAST_DAYS, NOW) is not None
+    assert metrics.empty_on(1000, 1000 / (metrics.MAX_FORECAST_DAYS + 1), NOW) is None
+    tiny = metrics.burn([plate(days(1), 0.1)], window_days=365, born=days(400), now=NOW)
+    assert tiny is not None
+    assert metrics.empty_on(1000, tiny, NOW) is None
+    assert metrics.empty_on(1000, 5e-324, NOW) is None
+
+
+def test_a_window_of_zero_gram_plates_has_burn_zero_and_no_forecast() -> None:
+    zero = [plate(days(1), 0.0), plate(days(2), 0.0)]
+    rate = metrics.burn(zero, window_days=30, born=days(90), now=NOW)
+    assert rate == 0.0
+    assert metrics.empty_on(500, rate, NOW) is None
+    ended = sb_end(days(1), 0, "a", basis="not_applied")
+    found = metrics.plates([ended])
+    assert [p.grams for p in found] == [0.0]
+    assert metrics.burn(found, window_days=30, born=days(90), now=NOW) == 0.0
+
+
 def test_reorder_date_in_the_past_is_now() -> None:
     empty = NOW.date() + timedelta(days=5)
     assert metrics.reorder_on(empty, 7, 3) == NOW.date() - timedelta(days=5)
@@ -168,6 +188,35 @@ def test_ams_error_pairs_the_newest_reading_before_a_scale() -> None:
     assert metrics.ams_pairs([ams(t1, 510, printing=True), scale(t2, 500)], 1000) == []
     late = [ams(t2 - timedelta(hours=25), 510), scale(t2, 500)]
     assert metrics.ams_pairs(late, 1000) == []
+
+
+def test_only_a_plate_that_consumed_grams_breaks_an_ams_pair() -> None:
+    t0, t1, t2 = days(1), days(0.7), days(0.5)
+    zero = sb_end(t1, 0, "a", basis="not_applied")
+    assert metrics.ams_pairs([ams(t0, 520), zero, scale(t2, 500)], 1000) == [20.0]
+    covered = sb_end(t1, 0, "b", basis="covered")
+    assert metrics.ams_pairs([ams(t0, 520), covered, scale(t2, 500)], 1000) == [20.0]
+    heavy = sb_end(t1, 0.1, "c")
+    assert metrics.ams_pairs([ams(t0, 520), heavy, scale(t2, 500)], 1000) == []
+    started = sb_start(t1, 12, "d")
+    assert metrics.ams_pairs([ams(t0, 520), started, scale(t2, 500)], 1000) == []
+
+
+def test_equal_times_are_ordered_by_seq() -> None:
+    t = days(1)
+    first, second = ams(t, 520), scale(t, 500)
+    assert first.seq < second.seq
+    assert metrics.ams_pairs([second, first], 1000) == [20.0]
+    swapped = ams(t, 520).model_copy(update={"seq": second.seq + 1})
+    assert metrics.ams_pairs([swapped, second], 1000) == []
+    early = sb_end(t, 5, "a").model_copy(update={"seq": 10})
+    late = sb_end(t, 6, "b").model_copy(update={"seq": 11})
+    assert [p.job for p in metrics.plates([late, early])] == ["a", "b"]
+    created = event(t, "created").model_copy(update={"seq": 20})
+    after = scale(t, 400).model_copy(update={"seq": 21, "grams_before": 900})
+    points = _series([after, created], 400)
+    assert [p.kind for p in points] == ["created", "weighed"]
+    assert [p.grams for p in points] == [900, 400]
 
 
 def test_ams_error_reads_the_remain_percent() -> None:
