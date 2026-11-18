@@ -153,4 +153,16 @@ describe('sent images (#1891)', () => {
     render(<SentImages images={[{ name, mediaType: 'image/png' }]} sessionId={SESSION} />)
     expect(screen.getByRole('img', { name: 'Image 1 of 1' })).toHaveAttribute('src', blobUrl(SESSION, name))
   })
+
+  it('does not call an image with no preview a preview when its full image fails to load (#6267)', async () => {
+    const user = userEvent.setup()
+    const name = `${'d'.repeat(64)}.png`
+    render(<SentImages images={[{ name, mediaType: 'image/png' }]} sessionId={SESSION} />)
+    await user.click(screen.getByRole('button', { name: 'View image 1 of 1 larger' }))
+    const dialog = screen.getByRole('dialog', { name: 'Image 1 of 1' })
+    fireEvent.error(within(dialog).getByAltText('Image 1 of 1, as sent'))
+    expect(dialog).toHaveTextContent(/the image could not be loaded/i)
+    expect(dialog).not.toHaveTextContent(/preview/i)
+    expect(within(dialog).queryByRole('img', { name: /preview/ })).not.toBeInTheDocument()
+  })
 })

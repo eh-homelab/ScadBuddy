@@ -102,16 +102,18 @@ export function SentImages({ images, sessionId = '' }: { images: SentImage[]; se
               <DialogTitle>{name(shown)}</DialogTitle>
               {!full && (
                 <DialogDescription>
-                  {fullUrl
+                  {fullUrl && !('preview' in image)
+                    ? 'The image could not be loaded. The assistant was given it.'
+                    : fullUrl
                     ? 'The full image could not be loaded, so this is its preview. The assistant was given the full image.'
                     : 'Only a preview of this image is kept. The assistant was given the full image.'}
                 </DialogDescription>
               )}
             </DialogHeader>
-            {load !== 'loaded' && (
+            {load !== 'loaded' && ('preview' in image || load !== 'failed') && (
               <img
                 src={previewUrl(image)}
-                alt={`${name(shown)}, preview`}
+                alt={'preview' in image ? `${name(shown)}, preview` : name(shown)}
                 className="mx-auto max-h-[calc(100dvh-12rem)] w-full max-w-3xl object-contain"
               />
             )}

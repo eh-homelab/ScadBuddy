@@ -138,6 +138,22 @@ export async function getInvoiceFileBlob(id: string): Promise<Blob> {
 export const confirmInvoice = (id: string) => request<InvoiceDetail>(`${BASE}/invoices/${seg(id)}/confirm`, { method: 'POST' })
 
 /**
+ * #6267 — starts the assistant session that reads an invoice's file and fills its draft (the
+ * agent's `POST /api/v1/ai/filament/invoice-import`). The refusals are `ApiError`s: 409 with
+ * `type: 'import_running'` and the `session_id` that already does it, 409 `confirmed`, 422 (no
+ * file, or one it cannot read: `detail` is the sentence for the person) and 502 `upstream_error`.
+ */
+export const startInvoiceImport = (invoiceId: string) =>
+  request<{ session_id: string }>('/ai/filament/invoice-import', json('POST', { invoice_id: invoiceId }))
+
+/** The session an `import_running` 409 names, else `null`. */
+export function runningImportId(error: unknown): string | null {
+  if (!(error instanceof ApiError) || error.status !== 409) return null
+  const { type, session_id } = error.problem as { type?: string; session_id?: unknown }
+  return type === 'import_running' && typeof session_id === 'string' ? session_id : null
+}
+
+/**
  * The invoice that has the number a create or a change named: the 409's
  * `existing_invoice_id` (absent on a confirmed invoice's 409), else `null`.
  */
