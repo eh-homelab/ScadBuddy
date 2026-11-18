@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from datetime import date
 from types import TracebackType
 from typing import IO, Any, Literal, Self
+from urllib.parse import quote
 
 import httpx
 from fastapi import status
@@ -265,6 +266,11 @@ Operation = Literal[
 #: The close code Bambuddy's WebSocket gives a join with no valid token
 #: (``_WS_CLOSE_UNAUTHORIZED`` in ``routes/websocket.py``, v1.3.1).
 _WS_UNAUTHORISED = 4401
+#: Seconds websockets waits for the opening handshake.
+WS_OPEN_TIMEOUT = 10.0
+#: websockets logs its request line, ``?token=`` included, at DEBUG; this logger drops it.
+_WS_LOGGER = logging.getLogger("scadbuddy.bambuddy.ws")
+_WS_LOGGER.setLevel(logging.WARNING)
 _SCAN_FRAMES = frozenset({"spoolbuddy_tag_matched", "spoolbuddy_unknown_tag"})
 
 
@@ -599,17 +605,34 @@ class BambuddyClient:
         then takes no token: ``routes/websocket.py`` lines 101-135, v1.3.1).
         ``POST /api/v1/auth/ws-token`` (``WEBSOCKET_CONNECT``, which ``can_read_status``
         covers: Read Status; ``routes/auth.py`` line 670, v1.3.1) answers ``{"token": ...}``,
-        valid for 60 minutes. An unreadable auth status counts as on."""
-        if await self.auth_enabled() is False:
+        valid for 60 minutes. An unreadable auth status counts as on, and a refusal then
+        says so."""
+        enabled = await self.auth_enabled()
+        if enabled is False:
             return None
         what = "mint a WebSocket token"
-        response = await self._send(
-            "POST",
-            "/auth/ws-token",
-            scope=Scope.READ_STATUS,
-            operation="auth.ws_token",
-            what=what,
-        )
+        try:
+            response = await self._send(
+                "POST",
+                "/auth/ws-token",
+                scope=Scope.READ_STATUS,
+                operation="auth.ws_token",
+                what=what,
+            )
+        except ApiError as error:
+            if enabled is not None:
+                raise
+            unread = ApiError(
+                error.status,
+                f"{error.detail}. Bambuddy's auth status could not be read, so a token was"
+                " tried in case its auth is on",
+                title=error.title,
+                type_=error.type,
+                headers=error.headers,
+                **error.extensions,
+            )
+            unread.upstream = error.upstream
+            raise unread from error
         body = response.json()
         token = body.get("token") if isinstance(body, dict) else None
         if not isinstance(token, str) or not token:
@@ -622,27 +645,36 @@ class BambuddyClient:
     def _ws_url(self, token: str | None) -> str:
         scheme, _, rest = self.config.base_url.partition("://")
         url = f"{'wss' if scheme == 'https' else 'ws'}://{rest}{API_PREFIX}/ws"
-        return url if token is None else f"{url}?token={token}"
+        return url if token is None else f"{url}?token={quote(token, safe='')}"
 
     async def next_tag_scan(
         self, *, timeout: float, device_id: str | None = None
     ) -> TagScan | None:
-        """Wait up to ``timeout`` seconds for a SpoolBuddy reader to read a tag, on
-        ``WS /api/v1/ws`` (``?token=`` from :meth:`ws_token` with Bambuddy's auth on). The
-        socket is sent nothing; every frame is read and all but ``spoolbuddy_tag_matched``
-        and ``spoolbuddy_unknown_tag`` (of ``device_id``, when given) are ignored. ``None``
-        on timeout. A refused join is the scope 409 of ``map_response`` (Read Status)."""
+        """Wait up to ``timeout`` seconds, token mint and connect included, for a SpoolBuddy
+        reader to read a tag, on ``WS /api/v1/ws`` (``?token=`` from :meth:`ws_token` with
+        Bambuddy's auth on). The socket is sent nothing; every frame is read and all but
+        ``spoolbuddy_tag_matched`` and ``spoolbuddy_unknown_tag`` (of ``device_id``, when
+        given) are ignored. ``None`` only when that deadline passes. A refused join is the
+        scope 409 of ``map_response`` (Read Status); a connect that times out, or a close
+        before any tag, is the 502 or 504 of ``map_transport``."""
         what = "listen for a SpoolBuddy tag scan"
-        token = await self.ws_token()
+        deadline = asyncio.timeout(timeout)
         with _call_span("spoolbuddy.scan", "GET", Scope.READ_STATUS):
             try:
-                async with asyncio.timeout(timeout), ws_connect(self._ws_url(token)) as socket:
-                    async for raw in socket:
-                        scan = _tag_scan(raw, device_id)
-                        if scan is not None:
-                            return scan
-            except TimeoutError:
-                return None
+                async with deadline:
+                    token = await self.ws_token()
+                    async with ws_connect(
+                        self._ws_url(token), logger=_WS_LOGGER, open_timeout=WS_OPEN_TIMEOUT
+                    ) as socket:
+                        async for raw in socket:
+                            scan = _tag_scan(raw, device_id)
+                            if scan is not None:
+                                return scan
+                    raise map_transport(httpx.ReadError("the socket closed"), what=what)
+            except TimeoutError as error:
+                if deadline.expired():
+                    return None
+                raise map_transport(httpx.ConnectTimeout("connect timed out"), what=what) from error
             except InvalidStatus as error:
                 refused = httpx.Response(error.response.status_code)
                 raise map_response(refused, scope=Scope.READ_STATUS, what=what) from error
@@ -653,7 +685,6 @@ class BambuddyClient:
                 raise map_transport(httpx.ReadError(type(error).__name__), what=what) from error
             except (OSError, WebSocketException) as error:
                 raise map_transport(httpx.ConnectError(type(error).__name__), what=what) from error
-        return None
 
     async def printer_status(self, printer_id: int) -> PrinterStatus:
         """Live MQTT state: nozzles, AMS trays and the inlet each AMS is switched to."""
@@ -2101,7 +2132,7 @@ class BambuddyClient:
         ``routes/spoolbuddy.py`` line 1181, v1.3.1)."""
         await self._send(
             "POST",
-            f"/spoolbuddy/devices/{device_id}/cancel-write",
+            f"/spoolbuddy/devices/{quote(device_id, safe='')}/cancel-write",
             scope=Scope.MANAGE_INVENTORY,
             operation="spoolbuddy.cancel_write",
             what="cancel the pending tag write",

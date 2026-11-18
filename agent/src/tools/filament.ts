@@ -696,13 +696,13 @@ export const filamentTools: Tool[] = [
     name: 'filament_rfid_scan',
     label: 'Wait for a tag at a SpoolBuddy reader',
     description:
-      'Wait up to `timeout_s` seconds (1 to 60, default 30) while the user holds a tag to a SpoolBuddy reader, ' +
-      'then answer what it is: `status: tag` with `tag_uid`, `tray_uuid`, `tag_type`, its `kind`, the Bambuddy ' +
+      'Wait up to `timeout_s` seconds (1 to 50, default 30) while the user holds a tag to a SpoolBuddy reader, ' +
+      'then answer what it is: `status: tag` with `tag_uid`, `tray_uuid`, `tag_type`, its `kind` (from the bound tag, else the Bambuddy record, for a tag Bambuddy knows), the Bambuddy ' +
       'spool it matched (`bambuddy_spool_id`) and the ScadBuddy spool that holds it (`sb_spool`, or null), or ' +
       '`status: timeout`. Ask the user to hold the tag first, then call this. `device_id` (from ' +
       'filament_rfid_status) limits it to one reader. Writes nothing.',
     input: z.object({
-      timeout_s: z.number().int().min(1).max(60).default(30),
+      timeout_s: z.number().int().min(1).max(50).default(30),
       device_id: z.string().optional().describe("A SpoolBuddy device's `device_id`"),
     }),
     risk: 'read',

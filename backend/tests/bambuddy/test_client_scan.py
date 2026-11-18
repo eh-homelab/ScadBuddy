@@ -5,7 +5,10 @@ are respx. The live socket is never opened."""
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
+import time
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -16,8 +19,9 @@ import respx
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.http11 import Request, Response
 
+from scadbuddy.bambuddy import client as client_module
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
-from scadbuddy.bambuddy.errors import SCOPE_PROBLEM
+from scadbuddy.bambuddy.errors import SCOPE_PROBLEM, UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.models import TagScan
 from scadbuddy.core.problems import ApiError
 
@@ -49,7 +53,11 @@ def _auth(router: respx.MockRouter, enabled: bool) -> None:
 
 @asynccontextmanager
 async def _fake(
-    frames: list[Frame], *, token: str | None = None, seen: list[str] | None = None
+    frames: list[Frame],
+    *,
+    token: str | None = None,
+    seen: list[str] | None = None,
+    close: bool = False,
 ) -> AsyncIterator[BambuddyClient]:
     """A Bambuddy whose ``/api/v1/ws`` sends ``frames`` and then waits. With ``token``
     set it refuses, as Bambuddy does with auth on, a join without ``?token=<token>``."""
@@ -60,6 +68,8 @@ async def _fake(
             seen.append(connection.request.path)
         for frame in frames:
             await connection.send(json.dumps(frame))
+        if close:
+            await connection.close()
         await connection.wait_closed()
 
     def refuse(connection: ServerConnection, request: Request) -> Response | None:
@@ -194,3 +204,102 @@ async def test_ws_token_without_a_token_is_a_502(bambuddy: BambuddyClient) -> No
         await bambuddy.ws_token()
 
     assert caught.value.status == 502
+
+
+@pytest.fixture
+def no_scan_logs(caplog: pytest.LogCaptureFixture) -> pytest.LogCaptureFixture:
+    caplog.set_level(logging.DEBUG)
+    return caplog
+
+
+async def test_the_token_is_never_logged(
+    router: respx.MockRouter, no_scan_logs: pytest.LogCaptureFixture
+) -> None:
+    _auth(router, True)
+    router.post(url__regex=r"http://127\.0\.0\.1:\d+/api/v1/auth/ws-token").mock(
+        return_value=httpx.Response(200, json={"token": "abc123"})
+    )
+    async with _fake([UNKNOWN], token="abc123") as client:
+        assert await client.next_tag_scan(timeout=5) is not None
+
+    # The fake server logs its own side of the request; only our side is checked.
+    ours = [
+        r.getMessage() for r in no_scan_logs.records if not r.name.startswith("websockets.server")
+    ]
+    assert not [line for line in ours if "abc123" in line]
+
+
+async def test_a_remote_close_before_any_tag_is_not_a_timeout(router: respx.MockRouter) -> None:
+    _auth(router, False)
+    async with _fake([PRINTER_STATUS], close=True) as client:
+        with pytest.raises(ApiError) as caught:
+            await client.next_tag_scan(timeout=5)
+
+    assert (caught.value.status, caught.value.type) == (502, UNAVAILABLE_PROBLEM)
+
+
+async def test_a_connect_that_times_out_is_not_a_scan_timeout(
+    router: respx.MockRouter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _auth(router, False)
+    monkeypatch.setattr(client_module, "WS_OPEN_TIMEOUT", 0.2)
+
+    async def stall(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await asyncio.sleep(5)  # accepts the socket, never answers the handshake
+
+    server = await asyncio.start_server(stall, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    config = BambuddyConfig(base_url=f"http://127.0.0.1:{port}", api_key="s3cret")
+    try:
+        async with BambuddyClient(config) as client:
+            with pytest.raises(ApiError) as caught:
+                await client.next_tag_scan(timeout=5)
+    finally:
+        server.close()
+
+    assert (caught.value.status, caught.value.type) == (504, UNAVAILABLE_PROBLEM)
+
+
+async def test_the_token_mint_counts_against_the_deadline(router: respx.MockRouter) -> None:
+    _auth(router, True)
+
+    async def slow(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(2)
+        return httpx.Response(200, json={"token": "abc123"})
+
+    router.post(url__regex=r"http://127\.0\.0\.1:\d+/api/v1/auth/ws-token").mock(side_effect=slow)
+    began = time.monotonic()
+    async with _fake([UNKNOWN]) as client:
+        assert await client.next_tag_scan(timeout=0.3) is None
+
+    assert time.monotonic() - began < 1.5
+
+
+@respx.mock
+async def test_an_unreadable_auth_status_is_named_when_the_token_is_refused(
+    bambuddy: BambuddyClient,
+) -> None:
+    respx.get("https://bambuddy.test/api/v1/auth/status").mock(return_value=httpx.Response(500))
+    respx.post("https://bambuddy.test/api/v1/auth/ws-token").mock(
+        return_value=httpx.Response(403, json={"detail": "Forbidden"})
+    )
+
+    with pytest.raises(ApiError) as caught:
+        await bambuddy.ws_token()
+
+    assert (caught.value.status, caught.value.type) == (409, SCOPE_PROBLEM)
+    assert "auth status could not be read" in caught.value.detail
+    assert caught.value.extensions["required_scope"] == "Read Status"
+
+
+@respx.mock
+async def test_the_device_id_is_one_path_segment(bambuddy: BambuddyClient) -> None:
+    route = respx.post(url__regex=r"https://bambuddy\.test/api/v1/spoolbuddy/devices/.*").mock(
+        return_value=httpx.Response(200, json={})
+    )
+
+    await bambuddy.cancel_tag_write("a/../b")
+
+    assert route.calls.last.request.url.raw_path == (
+        b"/api/v1/spoolbuddy/devices/a%2F..%2Fb/cancel-write"
+    )

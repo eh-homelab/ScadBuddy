@@ -118,7 +118,7 @@ export type NtagQueued = Schemas['NtagQueued']
 export type NtagConfirm = Schemas['NtagConfirm']
 
 /**
- * Waits up to `timeoutS` seconds (1 to 60) for a tag at a SpoolBuddy reader; a timeout is a 200 with
+ * Waits up to `timeoutS` seconds (1 to 50) for a tag at a SpoolBuddy reader; a timeout is a 200 with
  * `status: 'timeout'`. The request stays open that long: pass a `signal` to stop waiting.
  */
 export const scanTag = (options: { timeoutS?: number; deviceId?: string } = {}, signal?: AbortSignal) =>

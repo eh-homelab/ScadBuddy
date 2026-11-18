@@ -1073,14 +1073,17 @@ async def reconcile_rfid(
     response_model=m.ScanResult,
     summary="Wait for a tag at a SpoolBuddy reader",
     description=(
-        "Listens on Bambuddy's WebSocket for up to `timeout_s` seconds (1 to 60, default 30) "
+        "Listens on Bambuddy's WebSocket for up to `timeout_s` seconds (1 to 50, default 30) "
         "while a person holds a tag to a SpoolBuddy reader; `device_id` limits it to one "
-        "reader. Answers 200 either way: `status` `tag` with the tag's `tag_uid`, `tray_uuid`, "
-        "`tag_type`, its `kind` (`bambu_mifare` with a tray UUID, `ntag_opentag` for an NTAG "
-        "chip, else `other`), the Bambuddy spool it matched (`bambuddy_spool_id`) and the "
-        "ScadBuddy spool that holds the tag (`sb_spool`, else the one linked to that Bambuddy "
-        "spool, else null); or `status` `timeout` with nothing else. Writes nothing. 409 when "
-        "no Bambuddy is configured or its key lacks the Read Status scope."
+        "reader. Answers 200 either way: `status` `tag` with the tag's `tag_uid`, "
+        "`tray_uuid`, `tag_type`, its `kind` (`bambu_mifare` with a tray UUID, `ntag_opentag` for "
+        "an NTAG chip, else `other`; for a tag Bambuddy already knows, which names no chip, the "
+        "kind of the ScadBuddy tag bound to it, else `ntag_opentag` when Bambuddy's record says "
+        "OpenTag3D wrote it, else `other`), the Bambuddy spool it matched (`bambuddy_spool_id`) "
+        "and the ScadBuddy spool that holds the tag (`sb_spool`, else the one linked to that "
+        "Bambuddy spool, else null); or `status` `timeout` with nothing else when the wait ran "
+        "out. Writes nothing. 409 when no Bambuddy is configured or its key lacks the Read "
+        "Status scope; 502 or 504 when Bambuddy cannot be reached or closes the socket first."
     ),
 )
 async def scan_rfid_tag(

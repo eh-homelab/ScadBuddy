@@ -1280,7 +1280,10 @@ class RfidReconcileReport(BaseModel):
     slots: SlotReport | None = None
 
 
-DeviceId = Annotated[str, Field(min_length=1, max_length=50)]
+#: A SpoolBuddy device id as Bambuddy mints them (``sb-`` and the MAC, in ``DeviceResponse``
+#: of ``rfid-routes.json``; its write and scan bodies cap it at 50 characters). It becomes
+#: a path segment of a Bambuddy call, so nothing outside this set may pass.
+DeviceId = Annotated[str, Field(pattern=r"^[A-Za-z0-9._:-]{1,50}$")]
 
 
 class SpoolRef(BaseModel):
@@ -1291,10 +1294,11 @@ class SpoolRef(BaseModel):
 
 
 class ScanRequest(_In):
-    """The body of ``POST /filament/rfid/scan``: how long to wait for a tag, and the
-    SpoolBuddy device to listen to (any device when unset)."""
+    """The body of ``POST /filament/rfid/scan``: how long to wait for a tag (at most 50
+    seconds, below the ingress's 60), and the SpoolBuddy device to listen to (any device
+    when unset)."""
 
-    timeout_s: Annotated[int, Field(ge=1, le=60)] = 30
+    timeout_s: Annotated[int, Field(ge=1, le=50)] = 30
     device_id: DeviceId | None = None
 
 

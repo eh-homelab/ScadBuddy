@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from typing import cast
 from uuid import UUID
 
 import httpx
@@ -13,7 +14,7 @@ import pytest
 import respx
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
-from scadbuddy.bambuddy.models import TagScan
+from scadbuddy.bambuddy.models import Spool, TagScan
 from scadbuddy.filament import ntag
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.component import Filament
@@ -82,9 +83,14 @@ def _scan(**over: object) -> TagScan:
 class _Scanner:
     """A client whose `next_tag_scan` answers ``scan``, as the socket would."""
 
-    def __init__(self, scan: TagScan | None) -> None:
+    def __init__(self, scan: TagScan | None, real: BambuddyClient | None = None) -> None:
         self._scan = scan
+        self._real = real
         self.asked: list[tuple[float, str | None]] = []
+
+    async def spool_row(self, spool_id: int) -> Spool:
+        assert self._real is not None
+        return await self._real.spool_row(spool_id)
 
     async def next_tag_scan(
         self, *, timeout: float, device_id: str | None = None
@@ -264,3 +270,55 @@ async def test_cancel_posts_to_the_device(client: BambuddyClient) -> None:
     await ntag.cancel(client, "sb-1")
 
     assert route.call_count == 1
+
+
+@respx.mock
+async def test_a_matched_frame_takes_its_kind_from_the_spool_that_holds_the_keys(
+    pg_pool: PgPool, client: BambuddyClient
+) -> None:
+    f = _filament(pg_pool)
+    holder = _spool(f, pg_pool, 11)
+    f.spools.bind_tag(holder, tag_uid=UID, kind="ntag_openspool", actor="ann")
+    route = respx.get(f"{API}/inventory/spools/11")
+    matched = _scan(tag_type=None, bb_spool_id=11)
+
+    result = await ntag.scan(f, _Scanner(matched, client), timeout=1, device_id=None)  # type: ignore[arg-type]
+
+    assert result.kind == "ntag_openspool"
+    assert route.call_count == 0
+
+
+@respx.mock
+async def test_a_matched_frame_with_no_binding_asks_bambuddy_for_the_origin(
+    pg_pool: PgPool, client: BambuddyClient
+) -> None:
+    f = _filament(pg_pool)
+    _spool(f, pg_pool, 11)
+    respx.get(f"{API}/inventory/spools/11").mock(
+        return_value=httpx.Response(
+            200, json={"id": 11, "material": "PLA", "tag_uid": UID, "data_origin": "opentag3d"}
+        )
+    )
+
+    scanner = cast(BambuddyClient, _Scanner(_scan(tag_type=None, bb_spool_id=11), client))
+    result = await ntag.scan(f, scanner, timeout=1, device_id=None)
+
+    assert result.kind == "ntag_opentag"
+
+
+@respx.mock
+async def test_a_matched_frame_of_another_origin_is_other(
+    pg_pool: PgPool, client: BambuddyClient
+) -> None:
+    f = _filament(pg_pool)
+    _spool(f, pg_pool, 11)
+    respx.get(f"{API}/inventory/spools/11").mock(
+        return_value=httpx.Response(
+            200, json={"id": 11, "material": "PLA", "tag_uid": UID, "data_origin": "nfc_link"}
+        )
+    )
+
+    scanner = cast(BambuddyClient, _Scanner(_scan(tag_type=None, bb_spool_id=11), client))
+    result = await ntag.scan(f, scanner, timeout=1, device_id=None)
+
+    assert result.kind == "other"

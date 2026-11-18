@@ -55,50 +55,62 @@ def scan_kind(scan: TagScan) -> m.TagKind:
 
 def _holder(
     store: Filament, uid: str | None, tray: str | None, bb_spool_id: int | None
-) -> m.SpoolRef | None:
-    """The SB spool whose open binding holds the keys, else the one linked to
-    ``bb_spool_id``."""
+) -> tuple[m.SpoolRef, m.TagKind | None] | None:
+    """The SB spool whose open binding holds the keys, with that tag's kind, else the one
+    linked to ``bb_spool_id`` (no kind)."""
     with store.spools.transaction() as conn:
         row = None
         if uid is not None or tray is not None:
             row = conn.execute(
-                "SELECT s.id, s.number FROM filament_tags t"
+                "SELECT s.id, s.number, t.kind FROM filament_tags t"
                 " JOIN filament_tag_bindings b ON b.tag_id = t.id AND b.unbound_at IS NULL"
                 " JOIN filament_spools s ON s.id = b.spool_id"
                 " WHERE t.tag_uid = %s OR t.tray_uuid = %s",
                 (uid, tray),
             ).fetchone()
-        if row is None and bb_spool_id is not None:
+        if row is not None:
+            return m.SpoolRef(id=row["id"], number=row["number"]), row["kind"]
+        if bb_spool_id is not None:
             row = conn.execute(
                 "SELECT s.id, s.number FROM filament_bb_links l"
                 " JOIN filament_spools s ON s.id = l.spool_id WHERE l.bb_spool_id = %s",
                 (bb_spool_id,),
             ).fetchone()
-    return None if row is None else m.SpoolRef(id=row["id"], number=row["number"])
+    return None if row is None else (m.SpoolRef(id=row["id"], number=row["number"]), None)
 
 
 async def scan(
     store: Filament, client: BambuddyClient, *, timeout: float, device_id: str | None
 ) -> m.ScanResult:
-    """Wait up to ``timeout`` seconds for a tag at a reader and say what it is."""
+    """Wait up to ``timeout`` seconds for a tag at a reader and say what it is. A matched
+    frame carries no chip type, so its kind is the bound tag's, else ``ntag_opentag`` when
+    Bambuddy's record says OpenTag3D wrote it, else ``other``."""
     found = await client.next_tag_scan(timeout=timeout, device_id=device_id)
     if found is None:
         return m.ScanResult(status="timeout")
-    holder = await asyncio.to_thread(
+    held = await asyncio.to_thread(
         _holder,
         store,
         clean_tag_uid(found.tag_uid),
         clean_tray_uuid(found.tray_uuid),
         found.bb_spool_id,
     )
+    kind = scan_kind(found)
+    if found.bb_spool_id is not None and not found.tray_uuid and found.tag_type is None:
+        # A matched frame names no chip type: the tag's own binding says what it is, else
+        # the origin of Bambuddy's record does.
+        if held is not None and held[1] is not None:
+            kind = held[1]
+        elif (await client.spool_row(found.bb_spool_id)).data_origin == OPENTAG_ORIGIN:
+            kind = "ntag_opentag"
     return m.ScanResult(
         status="tag",
         tag_uid=found.tag_uid,
         tray_uuid=found.tray_uuid,
         tag_type=found.tag_type,
-        kind=scan_kind(found),
+        kind=kind,
         bambuddy_spool_id=found.bb_spool_id,
-        sb_spool=holder,
+        sb_spool=None if held is None else held[0],
     )
 
 

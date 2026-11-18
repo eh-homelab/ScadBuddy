@@ -1006,7 +1006,7 @@ def _linked_spool(client: TestClient, pg_conninfo: str, bb_id: int | None = 11) 
 
 
 def test_a_scan_over_the_limit_is_a_422(client: TestClient) -> None:
-    too_long = client.post(f"{RFID}/scan", json={"timeout_s": 61})
+    too_long = client.post(f"{RFID}/scan", json={"timeout_s": 51})
     assert too_long.status_code == 422, too_long.text
     assert client.post(f"{RFID}/scan", json={"timeout_s": 0}).status_code == 422
 
@@ -1125,4 +1125,22 @@ def test_the_ntag_routes_404_for_an_unknown_spool(client: TestClient) -> None:
     assert client.post(f"{one}/write", json={"device_id": "sb-1"}).status_code == 404
     assert client.post(f"{one}/confirm").status_code == 404
     assert client.post(f"{one}/cancel", json={"device_id": "sb-1"}).status_code == 404
+    assert len(respx.calls) == 0
+
+
+@respx.mock
+def test_a_device_id_that_is_not_one_path_segment_is_a_422(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    configure(client)
+    made = _linked_spool(client, pg_conninfo)
+
+    for bad in ("../x", "a/b", "a b", "x" * 51, ""):
+        for path, body in (
+            (f"{SPOOLS}/{made}/ntag/cancel", {"device_id": bad}),
+            (f"{SPOOLS}/{made}/ntag/write", {"device_id": bad}),
+            (f"{RFID}/scan", {"device_id": bad}),
+        ):
+            refused = client.post(path, json=body)
+            assert refused.status_code == 422, (path, bad, refused.text)
     assert len(respx.calls) == 0
