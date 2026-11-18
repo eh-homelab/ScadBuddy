@@ -1355,7 +1355,8 @@ export const handlers = [
   // -- location sensors (#6268) --
   http.get(`${BASE}/sensors`, ({ request }) => {
     const place = new URL(request.url).searchParams.get('location_id')
-    return HttpResponse.json(state.sensors.filter((one) => !one.archived_at && (!place || one.location_id === place)))
+    const live = new Set(state.locations.filter((one) => !one.archived_at).map((one) => one.id))
+    return HttpResponse.json(state.sensors.filter((one) => !one.archived_at && live.has(one.location_id) && (!place || one.location_id === place)))
   }),
   http.get(`${BASE}/sensors/entities`, ({ request }) => {
     const search = (new URL(request.url).searchParams.get('search') ?? '').toLowerCase()
