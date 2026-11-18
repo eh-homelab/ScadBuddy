@@ -387,3 +387,22 @@ Load `frontend-design` first.
     `search` matches text, so it can return more entities than the one asked for. So
     `read_ha_sensors` keeps one GET with no `search`, and still makes none when no live
     Home Assistant sensor is set up. Revisit this when Bambuddy's route takes ids.
+27. **The AMS sync names its stale printers (#6679 item 4).** `AmsSyncResult` gains
+    `stale_printers`: each printer whose spools are in `stale`, once, as `StalePrinter`
+    (`id`, and `name` from the printer's row, `null` when the row is gone). A printer that
+    holds no spool is not named. The Spools tab's toast adds the names after the stale
+    count ("Skipped 4 whose printer has not reported lately (H2C, P1S)."), and a printer
+    with no name shows as "printer" and the first 8 characters of its id. The agent tool
+    `filament_sync_ams_weights` describes `stale_printers` and tells the agent to name
+    them. No plugin skill names the sync, so the plugin version does not change.
+28. **Bambuddy's AMS humidity is a percent (#6679 item 5, measured).** The final review of
+    #6650 could not verify Decision 11's "as Bambuddy's status gives a percent". Measured
+    on 2026-11-18 (history point `recorded_at` `2026-11-18T18:54:01`) with read-only GETs (`curl` and `jq`, no write, no
+    WebSocket) on the live Bambuddy 1.3.1 (`https://bambuddy.internal.nullreference.io`),
+    printer 1 (the H2C, printing): `GET /api/v1/printers/1/status` gave `ams[].humidity`
+    31, 17, 14, 15 and 19 for units 0, 1, 2, 3 and 128. Bambu's level is 1 to 5, so these
+    are percents. `GET /api/v1/ams-history/1/{ams_id}` stores `humidity` and
+    `humidity_raw` side by side; its latest point for each unit had both equal to the
+    status value (31.0 and 31.0, and so on). The raw MQTT report was not read: Bambuddy's
+    `GET /api/v1/printers/1/logging` held no messages (logging was off), and turning it on
+    is a write. The comment in `printers/status.py` `ams_units` now says this.

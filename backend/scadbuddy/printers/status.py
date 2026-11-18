@@ -146,7 +146,11 @@ def ams_units(report: dict[str, Any]) -> list[AmsUnit]:
             continue
         # The LAN report's `humidity` is Bambu's 1-5 level; the percent is `humidity_raw`
         # (recorded H2C report: "humidity": "3" beside "humidity_raw": "29"). `AmsUnit`
-        # holds the percent, as Bambuddy's status does, so a report without it has none.
+        # holds the percent, so a report without it has none. Bambuddy's status gives the
+        # percent too (measured 2026-11-18, read-only GETs on the live Bambuddy 1.3.1, H2C
+        # printer 1: `/api/v1/printers/1/status` `ams[].humidity` was 31, 17, 14, 15 and 19,
+        # and `/api/v1/ams-history/1/{ams_id}`'s latest points had `humidity` equal to
+        # `humidity_raw` for every unit; plan 2026-11-18-filament-weights-sensors Decision 28).
         unit = _valid(
             AmsUnit,
             {**entry, "humidity": entry.get("humidity_raw"), "tray": _trays(entry.get("tray"))},
