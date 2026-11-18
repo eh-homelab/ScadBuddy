@@ -1076,6 +1076,16 @@ export class SessionManager {
     return session
   }
 
+  /**
+   * The session whether or not the principal may see it, with that answer, or undefined when none
+   * exists. For a caller that must tell "not yours" from "not there" and never shows the record
+   * (the invoice import, #6267); anything that shows a session uses `get`.
+   */
+  async lookup(id: string, principal: Owner): Promise<{ record: SessionRecord; visible: boolean } | undefined> {
+    const record = await this.row(id)
+    return record ? { record, visible: canSee(principal, record) } : undefined
+  }
+
   /** What the session's tool calls touched, oldest first (#931, touched.ts); a session the principal may not see is not found. */
   async resources(id: string, principal: Owner): Promise<TouchedRecord[]> {
     await this.get(id, principal)

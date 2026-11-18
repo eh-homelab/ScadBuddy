@@ -20,6 +20,10 @@ function explain(cause: unknown): Problem {
       return { text: 'This invoice no longer exists.', retry: false }
     case 403:
       return { text: 'You cannot import invoices from here.', retry: false }
+    case 409:
+      // A live import of another person: the agent names no session, so there is nothing to open.
+      if (type === 'import_running') return { text: 'Someone else is importing this invoice.', retry: false }
+      return { text: START_FAILED, retry: true }
     case 429:
     case 503:
       // The agent's own reason (a rate limit, a start that is not ready): it is written for people.
@@ -27,7 +31,7 @@ function explain(cause: unknown): Problem {
       if (cause.status === 429) return { text: START_FAILED, retry: true }
       return { text: 'The assistant is unavailable right now. Try again later.', retry: true }
     case 422:
-      return type === undefined
+      return type === undefined || type === 'unreadable_file'
         ? { text: cause.detail, retry: false }
         : { text: 'The invoice could not be read, so it cannot be imported.', retry: false }
     // A 502 may name a session, but the agent archived it and ran no turn: there is nothing to open.

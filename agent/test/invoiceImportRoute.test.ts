@@ -72,6 +72,8 @@ function fakeSessions() {
   const archived: string[] = []
   /** Set to make `get` fail with this error for every id. */
   const getFails: { error: Error | null } = { error: null }
+  /** Ids of sessions that exist but belong to somebody else. */
+  const strangers = new Set<string>()
   let next = 0
   const sessions = {
     async get(id: string) {
@@ -79,6 +81,11 @@ function fakeSessions() {
       const row = rows.get(id)
       if (!row) throw new SessionError('not_found', `no session ${id}`)
       return { id, ...row }
+    },
+    async lookup(id: string) {
+      if (getFails.error) throw getFails.error
+      const row = rows.get(id)
+      return row ? { record: { id, ...row }, visible: !strangers.has(id) } : undefined
     },
     async start(_owner: unknown, options: Started) {
       started.push(options)
@@ -98,7 +105,7 @@ function fakeSessions() {
       },
     },
   }
-  return { sessions, rows, started, sent, archived, getFails }
+  return { sessions, rows, started, sent, archived, getFails, strangers }
 }
 
 function app(backend: ReturnType<typeof fakeBackend>['backend'], fake = fakeSessions(), ready = true) {
@@ -237,8 +244,54 @@ describe('starting an invoice import (#6267)', () => {
   it('refuses a file whose bytes are not the type it names', async () => {
     const b = fakeBackend({}, Buffer.from('not a pdf'))
     const { hono, started } = app(b.backend)
-    expect((await post(hono)).status).toBe(422)
+    const res = await post(hono)
+    expect(res.status).toBe(422)
+    expect(await res.json()).toEqual({
+      detail: 'This file is not a readable PDF or photo. Upload it again or use another file.',
+      type: 'unreadable_file',
+    })
     expect(started).toEqual([])
+  })
+
+  it('does not reveal or replace a live session that belongs to someone else', async () => {
+    const b = fakeBackend({ import_run_id: 's-theirs' })
+    const fake = fakeSessions()
+    fake.rows.set('s-theirs', { status: 'running', archivedAt: null })
+    fake.strangers.add('s-theirs')
+    const { hono, started } = app(b.backend, fake)
+    const res = await post(hono)
+    expect(res.status).toBe(409)
+    const body = await res.json()
+    expect(body).toMatchObject({ type: 'import_running' })
+    expect(body).not.toHaveProperty('session_id')
+    expect(started).toEqual([])
+    expect(b.patches).toEqual([])
+  })
+
+  it('replaces another person’s session once it is done', async () => {
+    const b = fakeBackend({ import_run_id: 's-theirs' })
+    const fake = fakeSessions()
+    fake.rows.set('s-theirs', { status: 'done', archivedAt: null })
+    fake.strangers.add('s-theirs')
+    const { hono, started } = app(b.backend, fake)
+    expect((await post(hono)).status).toBe(200)
+    expect(started).toHaveLength(1)
+  })
+
+  it('does not name a rival session that belongs to someone else when it wins the race', async () => {
+    const b = fakeBackend()
+    const fake = fakeSessions()
+    fake.rows.set('s-rival', { status: 'running', archivedAt: null })
+    fake.strangers.add('s-rival')
+    b.beforePatch.run = () => {
+      b.invoice.import_run_id = 's-rival'
+    }
+    const { hono } = app(b.backend, fake)
+    const res = await post(hono)
+    expect(res.status).toBe(409)
+    const body = await res.json()
+    expect(body).toMatchObject({ type: 'import_running' })
+    expect(body).not.toHaveProperty('session_id')
   })
 
   it('answers 409 with the live session’s id, so the page opens it (Review Focus 2)', async () => {
