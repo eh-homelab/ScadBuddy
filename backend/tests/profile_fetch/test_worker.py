@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import multiprocessing
 import os
 import resource
 import subprocess
@@ -24,6 +23,7 @@ from temporalio.client import Client
 from scadbuddy.auth.service_auth import ServiceAuth
 from scadbuddy.crud.client import CrudClient
 from scadbuddy.profile_fetch import __main__ as entry
+from scadbuddy.profile_fetch import worker
 from scadbuddy.profile_fetch.settings import ProfileFetchSettings
 from scadbuddy.profile_fetch.site import ExportedFile, Kind, SiteError
 from scadbuddy.profile_fetch.worker import StartRefusedError, _healthz, run
@@ -287,54 +287,59 @@ def test_a_passing_failure_at_start_is_logged_and_the_worker_starts(
     assert EMAIL not in caplog.text and PASSWORD not in caplog.text
 
 
-def test_core_dumps_are_off_before_the_browser_launches(tmp_path: Path) -> None:
-    """The worker sets RLIMIT_CORE to 0, soft and hard, before it launches Chromium: a
-    node's ``core_pattern`` must not keep a crashed renderer's memory, where the page
-    and the login lived (build Decision 75). The start path runs in a forked child, so
-    the pytest process's own hard limit is never lowered."""
-    ctx = multiprocessing.get_context("fork")
-    reader, writer = ctx.Pipe(duplex=False)
+def test_the_start_path_forbids_core_dumps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``run`` calls ``forbid_core_dumps()`` before it opens the site (build Decision 75):
+    a node's ``core_pattern`` must not keep a crashed renderer's memory, where the page
+    and the login lived. The spy stops the start right after the call."""
+    events: list[str] = []
 
-    def child() -> None:
-        _, hard = resource.getrlimit(resource.RLIMIT_CORE)
-        # A soft limit above 0 first, so the check fails when the worker leaves it.
-        resource.setrlimit(resource.RLIMIT_CORE, (hard, hard))
-        seen: list[tuple[int, int]] = []
-        events: list[str] = []
+    def spy() -> None:
+        events.append("forbid")
+        raise ReachedTemporalError
 
-        class Recording(StartSite):
-            async def __aenter__(self) -> Self:
-                seen.append(resource.getrlimit(resource.RLIMIT_CORE))
-                return await super().__aenter__()
+    monkeypatch.setattr(worker, "forbid_core_dumps", spy)
 
-        async def connect(*args: object, **kwargs: object) -> None:
-            raise ReachedTemporalError
-
-        Client.connect = connect  # type: ignore[method-assign,assignment]
-
-        async def go() -> None:
-            await run(
+    async def go() -> None:
+        # The timeout turns a missing call into a failure: without it the start runs on.
+        await asyncio.wait_for(
+            run(
                 _settings(tmp_path),
                 health_port=None,
                 crud=_crud(events, [["runs"]]),
-                open_site=lambda: Recording(events, None),
+                open_site=lambda: StartSite(events, None),
                 areas_poll=0.05,
-            )
+            ),
+            timeout=10,
+        )
 
-        try:
-            asyncio.run(go())
-        except ReachedTemporalError:
-            writer.send(seen)
-        else:
-            writer.send("the start did not reach Temporal")
+    with pytest.raises(ReachedTemporalError):
+        asyncio.run(go())
+    assert events == ["forbid"]
 
-    process = ctx.Process(target=child)
-    process.start()
-    writer.close()
-    assert reader.poll(60)
-    assert reader.recv() == [(0, 0)]
-    process.join(30)
-    assert process.exitcode == 0
+
+def test_forbid_core_dumps_sets_both_limits_to_zero() -> None:
+    """The call itself runs in a fresh interpreter, so the pytest process's own limits
+    are never changed."""
+    _, hard = resource.getrlimit(resource.RLIMIT_CORE)
+    if hard == 0:
+        pytest.skip("the hard RLIMIT_CORE is already 0, so the check cannot fail")
+    code = (
+        "import resource\n"
+        "from scadbuddy.profile_fetch.worker import forbid_core_dumps\n"
+        "hard = resource.getrlimit(resource.RLIMIT_CORE)[1]\n"
+        "resource.setrlimit(resource.RLIMIT_CORE, (hard, hard))\n"
+        "forbid_core_dumps()\n"
+        "print(resource.getrlimit(resource.RLIMIT_CORE))\n"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code],
+        timeout=60,
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=BACKEND,
+    )
+    assert out.stdout.strip() == "(0, 0)"
 
 
 def test_a_browser_that_does_not_launch_stops_the_worker(
