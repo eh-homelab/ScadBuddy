@@ -830,3 +830,21 @@ def test_the_route_binds_even_when_bambuddy_is_down(client: TestClient, pg_conni
         row = conn.execute("SELECT attempts FROM filament_bb_tag_pending").fetchone()
     assert row == (1,)
     assert client.get("/api/v1/filament/tags").json()[0]["tag_uid"] == "AABBCCDD"
+
+
+@respx.mock
+def test_the_route_calls_bambuddy_not_at_all_with_tags_off(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    configure(client, filament_sync={"tags": "off"})
+    spool = _spool(client)
+
+    bound = client.post(
+        f"{SPOOLS}/{spool['id']}/tags", json={"tag_uid": "AABBCCDD", "kind": "ntag_opentag"}
+    )
+
+    assert bound.status_code == 201, bound.text
+    assert len(respx.calls) == 0
+    with psycopg.connect(pg_conninfo) as conn:
+        row = conn.execute("SELECT attempts FROM filament_bb_tag_pending").fetchone()
+    assert row == (0,)

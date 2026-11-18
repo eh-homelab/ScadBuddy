@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+import psycopg
 from psycopg import Connection
 from psycopg.rows import DictRow
 
@@ -27,6 +28,10 @@ if TYPE_CHECKING:
 Conn = Connection[DictRow]
 
 logger = logging.getLogger(__name__)
+
+#: The session advisory lock (hashed with ``hashtextextended``) that one drain of the
+#: pending-tag queue holds, keyed by name as the backend's other advisory locks are.
+PUSH_LOCK = "scadbuddy:filament:rfid_push"
 
 
 def enqueue_tag(conn: Conn, tag_id: UUID) -> None:
@@ -183,5 +188,29 @@ async def push_pending(
     settings = await asyncio.to_thread(load)
     if not settings.bambuddy_url:
         return TagPushReport()
-    async with client_for(settings) as client:
-        return await drain_tags(store, client)
+    # One drain at a time across the route and the Schedule (and replicas): a session
+    # lock on a connection of its own, never the row pool's. A drain that finds it held
+    # returns at once and touches nothing; the holder pushes the queue.
+    lock = await asyncio.to_thread(_try_lock, store)
+    if lock is None:
+        return TagPushReport()
+    try:
+        async with client_for(settings) as client:
+            return await drain_tags(store, client)
+    finally:
+        await asyncio.to_thread(lock.close)  # closing the connection ends the lock
+
+
+def _try_lock(store: Filament) -> psycopg.Connection[Any] | None:
+    conn = psycopg.connect(store.spools.conninfo, autocommit=True, connect_timeout=10)
+    try:
+        got = conn.execute(
+            "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (PUSH_LOCK,)
+        ).fetchone()
+    except BaseException:
+        conn.close()
+        raise
+    if got is not None and got[0]:
+        return conn
+    conn.close()
+    return None

@@ -107,12 +107,12 @@ def filament_rfid_activity(
     @activity.defn(name=FILAMENT_RFID_ACTIVITY)
     async def filament_rfid_reconcile() -> str:
         try:
-            await push_pending(filament, load, sync)
+            report = await push_pending(filament, load, sync)
         except Exception as error:
             activity.logger.warning(
                 "could not push the tags to Bambuddy", extra={"error": type(error).__name__}
             )
             return "failed"
-        return "done"
+        return "failed" if report.failed else "done"
 
     return filament_rfid_reconcile

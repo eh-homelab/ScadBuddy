@@ -231,6 +231,13 @@ class FilamentSpoolStore:
         self._pool = pool
         self._defaults = defaults
 
+    @property
+    def conninfo(self) -> str:
+        """The database the pool serves, for a caller that needs a connection of its own
+        (`filament/rfid_push.py`'s drain lock)."""
+        conninfo = self._pool.conninfo
+        return conninfo() if callable(conninfo) else conninfo
+
     def list(self, *, include_archived: bool = False, needs_type: bool | None = None) -> _Spools:
         """By number. ``needs_type`` keeps only the spools with no type (``True``) or only
         those with one (``False``)."""

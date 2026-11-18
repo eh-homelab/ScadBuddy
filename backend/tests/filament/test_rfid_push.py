@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import httpx
+import psycopg
 import pytest
 import respx
 
@@ -22,12 +23,13 @@ from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.inventory import FilamentInventory
 from scadbuddy.filament.locations import LocationStore
-from scadbuddy.filament.models import Material, SpoolCreate, TagKind
+from scadbuddy.filament.models import Material, SpoolCreate, TagKind, TagPushReport
 from scadbuddy.filament.presets import PoolSpoolPresets
-from scadbuddy.filament.rfid_push import drain_tags, error_label, push_pending
+from scadbuddy.filament.rfid_push import PUSH_LOCK, drain_tags, error_label, push_pending
 from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.filament.types import SpoolTypeStore
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.spools.activities import filament_rfid_activity
 from tests.conftest import PgPool
 
 pytestmark = pytest.mark.requires_postgres
@@ -319,6 +321,50 @@ async def test_the_drain_is_off_unless_tags_is_sb_to_bb(pg_pool: PgPool) -> None
     on = await push_pending(f, _settings, lambda: FilamentSync(tags="sb_to_bb"))
     assert on.pushed == 1
     assert _pending(pg_pool) == []
+
+
+@respx.mock
+async def test_a_second_drain_touches_nothing_while_one_runs(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    _bind(f, _spool(f, pg_pool, 11), uid=UID)
+    with psycopg.connect(f.spools.conninfo, autocommit=True) as holder:
+        holder.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (PUSH_LOCK,))
+
+        held = await push_pending(f, _settings, lambda: FilamentSync(tags="sb_to_bb"))
+
+        assert held == TagPushReport()
+        assert len(respx.calls) == 0
+        assert len(_pending(pg_pool)) == 1
+    _by_tag(None)
+    respx.patch(f"{API}/inventory/spools/11/link-tag").mock(
+        return_value=httpx.Response(200, json=_bb(11, tag_uid=UID))
+    )
+
+    free = await push_pending(f, _settings, lambda: FilamentSync(tags="sb_to_bb"))
+
+    assert free.pushed == 1
+
+
+@respx.mock
+async def test_the_activity_answers_failed_and_never_raises(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    _bind(f, _spool(f, pg_pool, 11), uid=UID)
+    on = lambda: FilamentSync(tags="sb_to_bb")  # noqa: E731
+    run = filament_rfid_activity(None, f, _settings, on)  # type: ignore[arg-type]
+
+    respx.get(f"{API}/inventory/spools/by-tag").mock(side_effect=httpx.ConnectError("down"))
+    assert await run() == "failed"  # a tag failed: the report counts it
+
+    def broken() -> FilamentSync:
+        raise RuntimeError("settings are gone")
+
+    assert await filament_rfid_activity(None, f, _settings, broken)() == "failed"  # type: ignore[arg-type]
+
+    respx.get(f"{API}/inventory/spools/by-tag").mock(return_value=httpx.Response(404, json={}))
+    respx.patch(f"{API}/inventory/spools/11/link-tag").mock(
+        return_value=httpx.Response(200, json=_bb(11, tag_uid=UID))
+    )
+    assert await run() == "done"
 
 
 @respx.mock
