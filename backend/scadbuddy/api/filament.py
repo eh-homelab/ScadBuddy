@@ -49,6 +49,7 @@ from scadbuddy.filament.locations import (
     MoveTargetError,
 )
 from scadbuddy.filament.spools import (
+    OverrideKindError,
     SpoolBambuddyLinkedError,
     SpoolInUseError,
     SpoolTypelessError,
@@ -321,6 +322,7 @@ async def put_type_k_values(
 # -- spools, tags, the ledger ---------------------------------------------------------
 
 _SPOOL_REFUSED = (
+    OverrideKindError,
     CatalogRefError,
     TypeTempError,
     SpoolTypelessError,

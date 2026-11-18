@@ -797,3 +797,16 @@ def test_a_retried_import_writes_once(client: TestClient) -> None:
         IMPORT, json=body | {"rows": [{"material": "PETG"}]}, headers={"Idempotency-Key": "k-2"}
     )
     assert other.status_code == 422, other.text
+
+
+def test_the_route_answers_422_for_an_override_on_an_ntag(client: TestClient) -> None:
+    spool = _spool(client)
+    body = {"tag_uid": "AABBCCDD", "kind": "ntag_opentag", "override": True}
+    assert client.post(f"{SPOOLS}/{spool['id']}/tags", json=body).status_code == 422
+    ok = client.post(
+        f"{SPOOLS}/{spool['id']}/tags",
+        json={"tray_uuid": "0123456789abcdef0123456789abcdef", "kind": "bambu_mifare"}
+        | {"override": True},
+    )
+    assert ok.status_code == 201, ok.text
+    assert ok.json()["override"] is True

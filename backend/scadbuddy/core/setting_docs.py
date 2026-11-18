@@ -382,7 +382,7 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "Off, Bambuddy's spools are never pulled, its usage rows are never booked and"
             " ScadBuddy's own spools are the only ones."
             " Bambuddy \u2192 ScadBuddy copies Bambuddy's spools in on the schedule below;"
-            " ScadBuddy never writes to Bambuddy.",
+            " ScadBuddy writes only tags to Bambuddy, and only when tags is sb_to_bb.",
         ),
         "spool_overlay_refresh_seconds": SettingDoc(
             "Pull from Bambuddy every",

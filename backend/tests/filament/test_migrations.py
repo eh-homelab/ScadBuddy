@@ -124,3 +124,34 @@ def test_capture_migration_makes_bb_weighings_scale(pg_conninfo: str) -> None:
         ("print_started", "print_estimate", "r4/L/0", None),
     ]
     assert index is not None
+
+
+@pg
+def test_the_migration_queues_open_bindings(pg_conninfo: str) -> None:
+    # #6264: a tag with an open binding is pending after the migration; a closed one is not.
+    idx = next(i for i, m in enumerate(MIGRATIONS) if m.id.endswith("_filament_rfid"))
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        assert migrate(conn, MIGRATIONS[:idx]) == [m.id for m in MIGRATIONS[:idx]]
+        spools = [conn.execute(_SPOOL).fetchone() for _ in range(2)]
+        tags = [
+            conn.execute(
+                "INSERT INTO filament_tags (kind, tag_uid) VALUES ('other', %s) RETURNING id", (u,)
+            ).fetchone()
+            for u in ("AA", "BB")
+        ]
+        for spool, tag, closed in zip(spools, tags, (False, True), strict=True):
+            assert spool is not None and tag is not None
+            conn.execute(
+                "INSERT INTO filament_tag_bindings (tag_id, spool_id, unbound_at)"
+                " VALUES (%s, %s, CASE WHEN %s THEN now() END)",
+                (tag[0], spool[0], closed),
+            )
+        assert migrate(conn)[0] == MIGRATIONS[idx].id
+        pending = conn.execute("SELECT tag_id FROM filament_bb_tag_pending").fetchall()
+        state = conn.execute(
+            "SELECT override_mode, saved_auto_add FROM filament_rfid_state"
+        ).fetchall()
+    first = tags[0]
+    assert first is not None
+    assert pending == [(first[0],)]
+    assert state == [(False, None)]

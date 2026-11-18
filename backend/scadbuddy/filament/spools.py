@@ -26,6 +26,7 @@ from scadbuddy.filament import ledger
 from scadbuddy.filament import models as m
 from scadbuddy.filament import presets as p
 from scadbuddy.filament.catalog import CatalogRefError
+from scadbuddy.filament.rfid_push import enqueue_tag
 from scadbuddy.filament.types import TypeRowsDuplicateError, TypeTempError, effective, overridden
 from scadbuddy.spools.models import clean_tag_uid, clean_tray_uuid
 
@@ -89,6 +90,14 @@ class TagUnnamedError(ValueError):
 
 class _NoSpoolError(Exception):
     """The spool a tag is bound to does not exist; raised to roll back the bind."""
+
+
+class OverrideKindError(ValueError):
+    """An override binding on a tag that is not a Bambu MIFARE tag: only Bambuddy's reader
+    of those can be told to ignore them."""
+
+    def __init__(self) -> None:
+        super().__init__("only a bambu_mifare tag can be an override")
 
 
 class TagKeysClashError(ValueError):
@@ -644,7 +653,12 @@ class FilamentSpoolStore:
         takes a key it lacked; a tag not seen before is made with ``kind``. An open binding
         of the tag to another spool, and of the spool to another tag, is closed with
         ``reason='rebound'`` and a ``tag_unbound`` event on its spool; the new binding
-        writes ``tag_bound``. A tag already on the spool is left as it is.
+        writes ``tag_bound``. A tag already on the spool and already carrying the same
+        ``override`` is left as it is; one whose ``override`` differs is updated in place
+        (no ``tag_unbound``/``tag_bound`` pair). ``override`` is valid only for a
+        ``bambu_mifare`` tag (`OverrideKindError`) and locks the spool's weight, with one
+        ``edited`` event when it was unlocked. Every tag whose binding this changes is
+        queued for Bambuddy (`filament/rfid_push.py`), whatever the sync setting says.
 
         Locks, in this order: the tag, then the new and the old spool by id. Every writer of
         bindings takes the tag first, so two binds in opposite directions wait rather than
@@ -669,13 +683,20 @@ class FilamentSpoolStore:
         actor: str,
     ) -> m.TagBinding:
         """`bind_tag` on ``conn``'s transaction, its keys already cleaned; `_NoSpoolError`
-        when the spool does not exist, which the caller rolls back on."""
+        when the spool does not exist, and `OverrideKindError`, which the caller rolls back
+        on."""
         if (
             conn.execute("SELECT 1 FROM filament_spools WHERE id = %s", (spool_id,)).fetchone()
             is None
         ):
             raise _NoSpoolError()
         tag_id = FilamentSpoolStore._tag(conn, uid, tray, kind)
+        if override:
+            stored = conn.execute("SELECT kind FROM filament_tags WHERE id = %s", (tag_id,))
+            tag_row = stored.fetchone()
+            assert tag_row is not None
+            if tag_row["kind"] != "bambu_mifare":
+                raise OverrideKindError()
         holder = conn.execute(
             "SELECT spool_id FROM filament_tag_bindings WHERE tag_id = %s AND unbound_at IS NULL",
             (tag_id,),
@@ -694,6 +715,17 @@ class FilamentSpoolStore:
             (tag_id, spool_id),
         ).fetchone()
         if held is not None:
+            if held["override"] == override:
+                return m.TagBinding.model_validate(held)
+            held = conn.execute(
+                "UPDATE filament_tag_bindings SET override = %s WHERE id = %s"
+                f" RETURNING {_BINDING_COLUMNS}",
+                (override, held["id"]),
+            ).fetchone()
+            assert held is not None
+            if override:
+                FilamentSpoolStore._lock_weight(conn, spool_id, actor)
+            enqueue_tag(conn, tag_id)
             return m.TagBinding.model_validate(held)
         closed = conn.execute(
             "UPDATE filament_tag_bindings SET unbound_at = now(), reason = 'rebound'"
@@ -702,6 +734,7 @@ class FilamentSpoolStore:
             (tag_id, spool_id),
         ).fetchall()
         for old in closed:
+            enqueue_tag(conn, old["tag_id"])
             ledger.record(
                 conn,
                 old["spool_id"],
@@ -722,7 +755,27 @@ class FilamentSpoolStore:
             actor=actor,
             data={"tag_id": tag_id, "override": override},
         )
+        if override:
+            FilamentSpoolStore._lock_weight(conn, spool_id, actor)
+        enqueue_tag(conn, tag_id)
         return m.TagBinding.model_validate(row)
+
+    @staticmethod
+    def _lock_weight(conn: Conn, spool_id: UUID, actor: str) -> None:
+        """Lock the spool's weight, with one ``edited`` event, unless it is locked."""
+        changed = conn.execute(
+            "UPDATE filament_spools SET weight_locked = true, updated_at = now()"
+            " WHERE id = %s AND NOT weight_locked RETURNING id",
+            (spool_id,),
+        ).fetchone()
+        if changed is not None:
+            ledger.record(
+                conn,
+                spool_id,
+                "edited",
+                actor=actor,
+                data={"changes": {"weight_locked": [False, True]}},
+            )
 
     @staticmethod
     def tag_on(conn: Conn, uid: str | None, tray: str | None, kind: m.TagKind) -> UUID:
@@ -784,6 +837,7 @@ class FilamentSpoolStore:
                 actor=actor,
                 data={"tag_id": tag_id, "reason": "unbound"},
             )
+            enqueue_tag(conn, tag_id)
         return m.TagBinding.model_validate(row)
 
     def open_binding(self, spool_id: UUID) -> m.TagBinding | None:
@@ -892,6 +946,7 @@ class FilamentSpoolStore:
                     actor=actor,
                     data={"tag_id": closed["tag_id"], "reason": "archived"},
                 )
+                enqueue_tag(conn, closed["tag_id"])
         conn.execute(
             "UPDATE filament_spools SET archived_at = CASE WHEN %s THEN now() END,"
             " updated_at = now() WHERE id = %s",
