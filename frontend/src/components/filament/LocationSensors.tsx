@@ -98,7 +98,7 @@ function History({ sensor }: { sensor: Sensor }) {
     return () => {
       current = false
     }
-  }, [sensor.id])
+  }, [sensor.id, sensor.last_at])
   if (error)
     return (
       <p role="alert" className="text-[12px] text-warn">
@@ -235,6 +235,7 @@ function AddSensor({ locationId, locationName, onDone }: { locationId: string; l
           {listError}
         </p>
       )}
+      {!entities && !listError && <p className="text-muted-foreground">Loading the Home Assistant sensors…</p>}
       {entities && entities.length === 0 && <p className="text-muted-foreground">No sensor matches.</p>}
       {entities && entities.length > 0 && (
         <ul aria-label="Home Assistant sensors" className="flex max-h-40 flex-col overflow-y-auto rounded-md border bg-background">
@@ -304,14 +305,19 @@ export function LocationSensors({ locationId, locationName, sensors, canAdd, onC
   const [editing, setEditing] = useState<string | null>(null)
   const [adding, setAdding] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [archiving, setArchiving] = useState<string | null>(null)
 
   async function archive(sensor: Sensor) {
+    if (archiving) return
+    setArchiving(sensor.id)
     setError(null)
     try {
       await archiveSensor(sensor.id)
       onChanged()
     } catch (cause) {
       setError(message(cause, 'The sensor could not be archived. Try again.'))
+    } finally {
+      setArchiving(null)
     }
   }
 
@@ -361,7 +367,7 @@ export function LocationSensors({ locationId, locationName, sensors, canAdd, onC
                       <PencilIcon /> Edit
                     </Button>
                     {sensor.source === 'home_assistant' && (
-                      <Button type="button" size="xs" variant="ghost" aria-label={`Archive ${sensor.name}`} onClick={() => void archive(sensor)}>
+                      <Button type="button" size="xs" variant="ghost" aria-label={`Archive ${sensor.name}`} disabled={archiving !== null} onClick={() => void archive(sensor)}>
                         <ArchiveIcon /> Archive
                       </Button>
                     )}

@@ -13,6 +13,8 @@ describe('needs drying', () => {
 
   it('writes the hours outside dry storage in plain words', () => {
     expect(outsideDryText(61.5)).toBe('61.5 hours outside dry storage')
+    expect(outsideDryText(61.54)).toBe('61.5 hours outside dry storage')
+    expect(outsideDryText(0.04)).toBe('No time outside dry storage')
     expect(outsideDryText(1)).toBe('1 hour outside dry storage')
     expect(outsideDryText(0)).toBe('No time outside dry storage')
   })

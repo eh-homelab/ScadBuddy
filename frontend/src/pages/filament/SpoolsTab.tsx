@@ -129,6 +129,7 @@ export function SpoolsTab() {
   const [report, setReport] = useState<string | null>(null)
   const [importing, setImporting] = useState(false)
   const [syncing, setSyncing] = useState(false)
+  const [syncError, setSyncError] = useState<string | null>(null)
 
   /** Each load takes a number; only the newest one's answer is used. */
   const latest = useRef(0)
@@ -192,10 +193,13 @@ export function SpoolsTab() {
   const syncWeights = async () => {
     setSyncing(true)
     try {
-      toast({ title: syncText(await syncAmsWeights()) })
+      setSyncError(null)
+      toast(syncText(await syncAmsWeights()))
       await load()
     } catch (cause) {
-      toast({ title: 'The weights could not be synced.', detail: cause instanceof ApiError ? cause.detail : 'Try again.' })
+      const detail = cause instanceof ApiError ? cause.detail : 'Try again.'
+      setSyncError(detail)
+      toast({ title: 'The weights could not be synced.', detail })
     } finally {
       setSyncing(false)
     }
@@ -367,6 +371,11 @@ export function SpoolsTab() {
             void load()
           }}
         />
+      )}
+      {syncError && (
+        <p role="alert" className="text-[13px] text-destructive">
+          The weights could not be synced. {syncError}
+        </p>
       )}
       {report && (
         <p role="status" className="text-[13px]">

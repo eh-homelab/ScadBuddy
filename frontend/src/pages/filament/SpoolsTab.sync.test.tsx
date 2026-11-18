@@ -11,19 +11,19 @@ afterEach(() => clearToasts())
 
 describe('the weights sync result in words', () => {
   it('names what it did and each kind it skipped, with the count', () => {
-    expect(syncText({ booked: 3, locked: 1, printing: 2, no_remain: 0, stale: 0 })).toBe('Synced 3 spools. Skipped 1 locked, 2 on a printing printer.')
+    expect(syncText({ booked: 3, locked: 1, printing: 2, no_remain: 0, stale: 0 })).toEqual({ title: 'Synced 3 spools', detail: 'Skipped 1 locked, 2 on a printing printer.' })
   })
 
   it('uses the singular, and leaves out a count of zero', () => {
-    expect(syncText({ booked: 1, locked: 0, printing: 0, no_remain: 1, stale: 0 })).toBe('Synced 1 spool. Skipped 1 with no AMS weight.')
+    expect(syncText({ booked: 1, locked: 0, printing: 0, no_remain: 1, stale: 0 })).toEqual({ title: 'Synced 1 spool', detail: 'Skipped 1 with no AMS weight.' })
   })
 
   it('says when nothing was synced and nothing was skipped', () => {
-    expect(syncText({ booked: 0, locked: 0, printing: 0, no_remain: 0, stale: 0 })).toBe('Synced 0 spools. No spool is loaded in an AMS.')
+    expect(syncText({ booked: 0, locked: 0, printing: 0, no_remain: 0, stale: 0 })).toEqual({ title: 'Synced 0 spools', detail: 'No spool is loaded in an AMS.' })
   })
 
   it('names a stale report', () => {
-    expect(syncText({ booked: 2, locked: 0, printing: 0, no_remain: 0, stale: 4 })).toBe('Synced 2 spools. Skipped 4 whose printer has not reported lately.')
+    expect(syncText({ booked: 2, locked: 0, printing: 0, no_remain: 0, stale: 4 })).toEqual({ title: 'Synced 2 spools', detail: 'Skipped 4 whose printer has not reported lately.' })
   })
 })
 
@@ -32,7 +32,8 @@ describe('the Sync weights from AMS button', () => {
     const { user } = renderPage(<SpoolsTab />)
     await screen.findByRole('table', { name: 'Spools' })
     await user.click(screen.getByRole('button', { name: 'Sync weights from AMS' }))
-    await waitFor(() => expect(getToasts().map((one) => one.title)).toContain('Synced 3 spools. Skipped 1 locked, 2 on a printing printer.'))
+    await waitFor(() => expect(getToasts().map((one) => one.title)).toContain('Synced 3 spools'))
+    expect(getToasts()[0]!.detail).toBe('Skipped 1 locked, 2 on a printing printer.')
   })
 
   it('keeps the button from a second click while it runs', async () => {
@@ -58,6 +59,7 @@ describe('the Sync weights from AMS button', () => {
     await user.click(screen.getByRole('button', { name: 'Sync weights from AMS' }))
     await waitFor(() => expect(getToasts().map((one) => one.title)).toContain('The weights could not be synced.'))
     expect(getToasts()[0]!.detail).toBe('Bambuddy is down.')
+    expect(screen.getByRole('alert')).toHaveTextContent('Bambuddy is down.')
   })
 })
 

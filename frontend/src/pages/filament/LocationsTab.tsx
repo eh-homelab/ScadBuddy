@@ -24,7 +24,6 @@ interface Loaded {
   nodes: LocationNode[]
   kinds: { id: string; name: string }[]
   spools: Spool[]
-  sensors: Sensor[]
 }
 
 interface Draft {
@@ -77,29 +76,48 @@ export function LocationsTab() {
   const [formError, setFormError] = useState<string | null>(null)
   const [notice, setNotice] = useState('')
   const [saving, setSaving] = useState(false)
+  const [sensors, setSensors] = useState<Sensor[]>([])
+  const [sensorsError, setSensorsError] = useState(false)
 
   /** Each load takes a number; only the newest one's answer is used. */
   const latest = useRef(0)
   const load = useCallback(async () => {
     const mine = ++latest.current
     try {
-      const [nodes, kinds, spools, sensors] = await Promise.all([
+      const [nodes, kinds, spools] = await Promise.all([
         listLocations({ includeArchived: archived }),
         listCatalog('location-kinds'),
         listSpools({ includeArchived: false }),
-        listSensors(),
       ])
       if (mine !== latest.current) return
-      setData({ nodes, kinds, spools, sensors })
+      setData({ nodes, kinds, spools })
       setError(null)
     } catch (cause) {
       if (mine === latest.current) setError(message(cause, 'The places could not be loaded. Try again.'))
     }
   }, [archived])
 
+  /** The sensors load apart from the places, so a sensors failure leaves the tree usable. */
+  const latestSensors = useRef(0)
+  const loadSensors = useCallback(async () => {
+    const mine = ++latestSensors.current
+    try {
+      const rows = await listSensors()
+      if (mine !== latestSensors.current) return
+      setSensors(rows)
+      setSensorsError(false)
+    } catch {
+      if (mine === latestSensors.current) setSensorsError(true)
+    }
+  }, [])
+
   useEffect(() => {
     void load()
   }, [load])
+
+  useEffect(() => {
+    void loadSensors()
+  }, [loadSensors])
 
   const kinds = useMemo(() => new Map((data?.kinds ?? []).map((kind) => [kind.id, kind.name])), [data])
   const spoolsAt = useMemo(() => {
@@ -111,9 +129,9 @@ export function LocationsTab() {
   }, [data])
   const sensorsAt = useMemo(() => {
     const at = new Map<string, Sensor[]>()
-    for (const sensor of data?.sensors ?? []) at.set(sensor.location_id, [...(at.get(sensor.location_id) ?? []), sensor])
+    for (const sensor of sensors) at.set(sensor.location_id, [...(at.get(sensor.location_id) ?? []), sensor])
     return at
-  }, [data])
+  }, [sensors])
   const places = useMemo(() => flatten(data?.nodes ?? []), [data])
 
   function open(node?: LocationNode) {
@@ -285,7 +303,17 @@ export function LocationsTab() {
           </div>
         </form>
       )}
-      {data && <LocationTree nodes={data.nodes} kinds={kinds} spoolsAt={spoolsAt} sensorsAt={sensorsAt} onSensorsChanged={() => void load()} onEdit={open} onArchive={(node, value) => void archive(node, value)} />}
+      {sensorsError && (
+        <div className="flex items-center gap-3 text-[13px]">
+          <p role="alert" className="text-warn">
+            The sensors could not be loaded. The places below are still right.
+          </p>
+          <Button type="button" size="sm" variant="outline" onClick={() => void loadSensors()}>
+            Retry
+          </Button>
+        </div>
+      )}
+      {data && <LocationTree nodes={data.nodes} kinds={kinds} spoolsAt={spoolsAt} sensorsAt={sensorsAt} onSensorsChanged={() => void loadSensors()} onEdit={open} onArchive={(node, value) => void archive(node, value)} />}
     </div>
   )
 }

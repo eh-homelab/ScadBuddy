@@ -80,6 +80,36 @@ describe('the sensors of a place', () => {
     expect(await listSensors(L.SHELF_A)).toEqual([])
   })
 
+  it('sends one archive call for a double click', async () => {
+    let calls = 0
+    server.use(
+      http.post('/api/v1/filament/sensors/:id/archive', async () => {
+        calls += 1
+        await new Promise((resolve) => setTimeout(resolve, 50))
+        return HttpResponse.json({})
+      }),
+    )
+    const { user } = await show(L.SHELF_A)
+    const button = screen.getByRole('button', { name: 'Archive Shelf A humidity' })
+    await user.dblClick(button)
+    await waitFor(() => expect(button).toBeEnabled())
+    expect(calls).toBe(1)
+  })
+
+  it('says it is loading the Home Assistant sensors before the list arrives', async () => {
+    server.use(
+      http.get('/api/v1/filament/sensors/entities', async () => {
+        await new Promise((resolve) => setTimeout(resolve, 100))
+        return HttpResponse.json([])
+      }),
+    )
+    const { user } = await show(L.WORKSHOP)
+    await user.click(screen.getByRole('button', { name: 'Add a sensor to Place' }))
+    expect(screen.getByText('Loading the Home Assistant sensors…')).toBeInTheDocument()
+    expect(await screen.findByText('No sensor matches.')).toBeInTheDocument()
+    expect(screen.queryByText('Loading the Home Assistant sensors…')).toBeNull()
+  })
+
   it('adds a sensor by choosing a Home Assistant entity, which fills its name and unit', async () => {
     const { user, changed } = await show(L.WORKSHOP)
     await user.click(screen.getByRole('button', { name: 'Add a sensor to Place' }))
