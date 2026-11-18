@@ -946,7 +946,8 @@ async def list_locations(
         "A place has a `name`, a `kind_id` (the `location-kinds` catalog) and optionally a "
         "`parent_id`. An AMS tray also names its `printer_id`, `ams_id` and `tray_id`. 409 "
         "when an unarchived place of the name is under the parent, or one is already that "
-        "tray; 422 for a bad field or a row it points at that does not exist."
+        "tray or that AMS unit (a `printer_id` and an `ams_id` with no `tray_id`); 422 for "
+        "a bad field or a row it points at that does not exist."
     ),
 )
 async def create_location(filament: FilamentDep, body: m.LocationCreate) -> m.Location:
@@ -963,8 +964,8 @@ async def create_location(filament: FilamentDep, body: m.LocationCreate) -> m.Lo
     description=(
         "Only the fields sent change; `null` clears a nullable one. `archived: true` takes "
         "the place off the tree and frees its name, `false` puts it back. 404 for no such "
-        "place, 409 for a name or tray taken, or a `parent_id` that would make the place "
-        "its own ancestor; 422 for a bad field."
+        "place, 409 for a name, tray or AMS unit taken, or a `parent_id` that would make "
+        "the place its own ancestor; 422 for a bad field."
     ),
 )
 async def patch_location(

@@ -362,3 +362,8 @@ Load `frontend-design` first.
     with an event stamped one day ahead on a duplicate unit place. The migration's `moved`
     event must come after it (`greatest(clock_timestamp(), max(at) + 1 µs)`). The test
     failed with only `clock_timestamp()` and passes with the migration as it is.
+24. **The 409 for a second unit place names the AMS unit (#6679 item 1).** Decision 15's
+    index refuses a second unarchived hand-made place for one printer and AMS unit. The
+    refusal is `LocationExistsError`, so its text now says "a place with that name, that
+    tray or that AMS unit already exists". The descriptions of `POST /locations` and
+    `PATCH /locations/{id}` name the unit case too, and the frontend mock uses the same text.
