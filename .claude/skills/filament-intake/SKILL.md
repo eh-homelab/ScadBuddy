@@ -5,6 +5,8 @@ description: Use when adding purchased filament to the spool inventory from rece
 
 # Filament intake
 
+For work in ScadBuddy's own inventory (import an invoice, cost a spool, look up a Bambu colour code), use the `filament` skill (`plugins/scadbuddy/skills/filament/SKILL.md`). This skill keeps the Bambuddy-era steps and scripts.
+
 Receipts become spools with tax-inclusive cost. Non-Bambu filaments get
 3dfilamentprofiles (3DFP) profiles for every nozzle size. Then ScadBuddy's
 price book takes the new prices, so quotes and job cost use them. Two scripts do

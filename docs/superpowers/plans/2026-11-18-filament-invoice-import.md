@@ -168,3 +168,16 @@ to the new skill), spec §9 "as built in #6267" note for Decisions 1-7, `backend
 - [ ] Commit `docs(filament): the filament skill and the import as built (#6267)`.
 
 ## Decisions made while building (#6267)
+
+1. Decisions 1-7 stand as written above. The owner's rule is to decide and not re-ask. The cost of a wrong call is rework of the start path.
+2. "Uncosted" means the spool's own `cost_per_kg` is NULL and it has no invoice line. A type's cost is a default, not a purchase. The intake rule targets spools that an RFID tag auto-created. If this were wrong, a line would update a spool from an earlier purchase.
+3. The candidates read scans all spools on each call. The review asked for a change. We made none, because the inventory holds hundreds of spools. If this is wrong, the read is slow later.
+4. Decision 3 changed before Task 2. The invoice goes in the import session's first user message, as an image or a PDF document block. It is built at the `sessions/images.ts` SDK boundary. No PDF library exists, and a tool result cannot show a PDF to the model. If this were wrong, Task 2 would need a redo.
+5. A session PDF is served on the app origin with `Content-Disposition: attachment` and the CSP sandbox kept. This is the secure default. The sandbox blocks the browser's PDF viewer, so the chat cannot preview a PDF inline. The attachment header also keeps the file out of the Bambuddy frame.
+6. The preview of a sent file is optional for a turn that the server builds. The agent has no preview maker. If this were wrong, a large invoice image would show full-size as its thumbnail.
+7. The lightbox fallback text for an image with no preview says "its preview". We carried that minor into Task 4, because it is in the same chat files.
+8. An empty PATCH `{}` returns the invoice unchanged. It does not bump `updated_at` and does not recompute. Nothing changed, so nothing needs a recompute. If this were wrong, an empty PATCH would no longer refresh `updated_at`.
+9. A narrow gap stays open. If the send throws after a turn was queued, the archive of the session is refused and the refusal is logged. We accepted this, because it needs two failures in a row.
+10. An idle import session is the assistant waiting for the person. The start route keeps opening it, and the UI says "waiting for you" with no pulse. The UI reads the status again every 15 s and on focus. If this were wrong, a second import could not start until the first one is archived.
+11. A hidden tab keeps polling the status. The 15 s read costs little. If this were wrong, background tabs would send idle requests.
+12. Open check for the final review: a connected panel must learn of a session that the REST start route created. Verify this on the real stack. This check is not done yet.
