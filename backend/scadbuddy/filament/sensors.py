@@ -239,7 +239,8 @@ def capture_ams_on(conn: Conn, printer_id: str, report: dict[str, Any], seen_at:
     ``conn`` and in the caller's transaction. A unit's place and its sensors are made
     when a number first shows; a reading the report lacks (``""``) writes nothing. A
     sensor whose place a person archived moves to the unit's live place (made again if
-    need be) before its reading is stored, so no reading lands on a hidden place."""
+    need be) before its reading is stored; with no AMS kind to make one, the reading is
+    skipped. So no reading lands on a hidden place."""
     from scadbuddy.filament.locations import LocationStore, NoAmsKindError  # imports this
     from scadbuddy.printers.status import ams_units
 
@@ -271,12 +272,12 @@ def capture_ams_on(conn: Conn, printer_id: str, report: dict[str, Any], seen_at:
                     place = LocationStore.ensure_ams_unit_on(conn, printer, unit.id)
                 except NoAmsKindError:
                     _log_no_ams_kind()
-                else:
-                    conn.execute(
-                        "UPDATE filament_location_sensors SET location_id = %s,"
-                        " updated_at = now() WHERE id = %s",
-                        (place, row["id"]),
-                    )
+                    continue  # no live place: store nothing on the hidden one
+                conn.execute(
+                    "UPDATE filament_location_sensors SET location_id = %s,"
+                    " updated_at = now() WHERE id = %s",
+                    (place, row["id"]),
+                )
             if row is None:
                 try:
                     place = LocationStore.ensure_ams_unit_on(conn, printer, unit.id)

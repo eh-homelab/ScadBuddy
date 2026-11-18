@@ -1113,7 +1113,8 @@ def _no_sensor(sensor_id: UUID) -> ApiError:
     description=(
         "Put the spool in a place (`location_id: null`: in none) and write a `moved` ledger "
         "event, `{from, to}`. A spool already there is answered as it is, with no event. "
-        "404 for no such spool, 422 for a place that does not exist or is archived."
+        "404 for no such spool, 422 for a place that does not exist, is archived or is an "
+        "AMS unit's place."
     ),
 )
 async def move_spool(

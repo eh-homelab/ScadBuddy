@@ -54,10 +54,14 @@ class NoAmsKindError(ValueError):
 
 
 class MoveTargetError(ValueError):
-    """The place a spool would move to does not exist, is archived or is an AMS unit."""
+    """The place a spool would move to does not exist, is archived or is an AMS unit's
+    place (a printer, an ``ams_id`` and no tray). A printer's place with no ``ams_id``
+    takes spools."""
 
     def __init__(self) -> None:
-        super().__init__("the place to move to does not exist, is archived or is an AMS unit")
+        super().__init__(
+            "the place to move to does not exist, is archived or is an AMS unit's place"
+        )
 
 
 class LocationStore:
@@ -267,7 +271,9 @@ class LocationStore:
         """Put a spool in a place (``None``: in none) and write its ``moved`` event,
         ``data={"from": old, "to": new}``. ``None`` when it is there already: nothing is
         written. `LookupError` for no such spool, `MoveTargetError` for a place that does
-        not exist, is archived or is an AMS unit's place (a unit holds trays, not spools).
+        not exist, is archived or is an AMS unit's place (a printer, an ``ams_id`` and no
+        tray: a unit holds trays, not spools). A printer's place with no ``ams_id`` (a shelf
+        beside it) takes spools.
         Locks the spool, then the place."""
         with self._pool.connection() as conn, conn.transaction():
             return self.move_on(conn, spool_id, location_id, actor=actor)
@@ -297,11 +303,15 @@ class LocationStore:
             return None
         if location_id is not None:
             target = conn.execute(
-                "SELECT printer_id, tray_id FROM filament_locations"
+                "SELECT printer_id, ams_id, tray_id FROM filament_locations"
                 " WHERE id = %s AND archived_at IS NULL FOR SHARE",
                 (location_id,),
             ).fetchone()
-            if target is None or (target["printer_id"] is not None and target["tray_id"] is None):
+            if target is None or (
+                target["printer_id"] is not None
+                and target["ams_id"] is not None
+                and target["tray_id"] is None
+            ):
                 raise MoveTargetError()
         conn.execute(
             "UPDATE filament_spools SET location_id = %s, tray_fingerprint = NULL,"

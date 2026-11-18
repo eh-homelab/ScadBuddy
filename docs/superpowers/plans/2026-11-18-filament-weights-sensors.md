@@ -344,3 +344,21 @@ Load `frontend-design` first.
     row (`PrinterStore.read_on` gives `None`) counts its spools as `stale`. A spool placed
     in a tray after the first holder read was not locked, so the sync does not book or
     count it; the next sync takes it.
+20. **A printer's shelf place takes spools (review of 6904612c3).** `LocationStore.move_on`
+    refuses only a unit place: `printer_id` and `ams_id` set and no `tray_id`, the
+    predicate of the `filament_locations_ams_unit` index. Before, it refused every place
+    with a printer and no tray, so a move or a CSV import into a shelf beside the printer
+    failed. Decision 16 says such a place is not a unit place. `MoveTargetError` says
+    "the place to move to does not exist, is archived or is an AMS unit's place", and
+    the move route's description says the same.
+21. **The mock's move refusal uses the backend's text (review of 6904612c3).** The
+    frontend mock's `REFUSED.moveTarget` is the exact `MoveTargetError` message, so the
+    mock and the API give the same `detail`.
+22. **No reading lands on an archived unit place (review of 6904612c3).** When a sensor's
+    place is archived and `ensure_ams_unit_on` raises `NoAmsKindError` (no AMS kind to make
+    a new place), `capture_ams_on` skips that reading and stores nothing. Before, it
+    stored the reading on the archived place, which Decision 18 forbids.
+23. **The migration's `moved` event sorts last (review of 6904612c3).** A test puts a spool
+    with an event stamped one day ahead on a duplicate unit place. The migration's `moved`
+    event must come after it (`greatest(clock_timestamp(), max(at) + 1 µs)`). The test
+    failed with only `clock_timestamp()` and passes with the migration as it is.

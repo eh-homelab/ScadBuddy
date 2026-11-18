@@ -122,3 +122,61 @@ def test_places_with_no_ams_unit_are_kept_and_duplicates_hand_on_their_contents(
     assert len(moved) == 1
     assert moved[0][0]["from"] == str(dup)
     assert moved[0][0]["to"] == str(kept)
+
+
+def test_a_duplicates_moved_event_sorts_after_the_spools_earlier_events(
+    pg_conninfo: str,
+) -> None:
+    """A spool's ledger may hold events stamped later than the migration's clock (a
+    report's time); the ``moved`` event is booked after the last of them."""
+    index = next(i for i, m in enumerate(MIGRATIONS) if m.id.endswith(SLUG))
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[:index])
+        printer = _one(
+            conn,
+            "INSERT INTO printers (id, serial, name)"
+            " VALUES (gen_random_uuid(), 'SNLATE', 'P') RETURNING id",
+        )
+        kind = _one(conn, "SELECT id FROM filament_location_kinds LIMIT 1")
+
+        def place(name: str, created: str) -> Any:
+            return _one(
+                conn,
+                "INSERT INTO filament_locations (name, kind_id, printer_id, ams_id, created_at)"
+                " VALUES (%s, %s, %s, 0, %s) RETURNING id",
+                name,
+                kind,
+                printer,
+                created,
+            )
+
+        place("Unit", "2026-11-01T00:00:00Z")
+        dup = place("Unit again", "2026-11-02T00:00:00Z")
+        spool = _one(
+            conn,
+            "INSERT INTO filament_spools (material_id, location_id)"
+            " SELECT id, %s FROM filament_materials WHERE name = 'PLA' RETURNING id",
+            dup,
+        )
+        later = _one(
+            conn,
+            "INSERT INTO filament_spool_events (spool_id, at, kind, actor)"
+            " VALUES (%s, now() + interval '1 day', 'weighed', 'ann') RETURNING at",
+            spool,
+        )
+
+        migrate(conn, MIGRATIONS[: index + 1])
+
+        moved_at = _one(
+            conn,
+            "SELECT at FROM filament_spool_events WHERE spool_id = %s AND kind = 'moved'",
+            spool,
+        )
+        last = _one(
+            conn,
+            "SELECT kind FROM filament_spool_events WHERE spool_id = %s"
+            " ORDER BY at DESC, seq DESC LIMIT 1",
+            spool,
+        )
+    assert moved_at > later
+    assert last == "moved"

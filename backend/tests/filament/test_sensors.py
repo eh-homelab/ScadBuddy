@@ -443,6 +443,20 @@ def test_an_archived_unit_place_hands_its_sensors_to_a_new_one(pg_pool: PgPool) 
     assert _ams_readings(pg_pool, pid)[(0, "humidity")] == [29.0, 31.0]
 
 
+def test_an_archived_unit_place_with_no_ams_kind_stores_no_reading(pg_pool: PgPool) -> None:
+    """With no AMS kind there is no live place to move to, so the reading is skipped:
+    none lands on the hidden place (Decision 18)."""
+    pid, reports = _watched(pg_pool)
+    _advance(reports, pid, _unit(), T0)
+    with pg_pool.connection() as conn:
+        old = LocationStore.ensure_ams_unit_on(conn, UUID(pid), 0)
+    LocationStore(pg_pool).update(old, LocationPatch(archived=True))
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_location_kinds SET archived_at = now() WHERE ams")
+    _advance(reports, pid, _unit(humidity_raw="31", temp="30"), T0 + timedelta(minutes=1))
+    assert _ams_readings(pg_pool, pid) == {(0, "humidity"): [29.0], (0, "temperature"): [24.0]}
+
+
 def test_the_external_holder_makes_no_sensor(pg_pool: PgPool) -> None:
     pid, reports = _watched(pg_pool)
     _advance(reports, pid, _unit(id="255"), T0)

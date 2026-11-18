@@ -367,7 +367,7 @@ const REFUSED = {
   rowsDuplicate: 'two rows name the same printer and nozzle',
   locationExists: 'a place with that name or that tray already exists',
   locationCycle: 'a place cannot be its own parent or sit under one of its own',
-  moveTarget: 'the place to move to does not exist or is archived',
+  moveTarget: "the place to move to does not exist, is archived or is an AMS unit's place",
   badCursor: 'the cursor is not one this ledger gave',
   sensorAms: 'an AMS sensor is made by ScadBuddy and cannot be added by hand',
 } as const

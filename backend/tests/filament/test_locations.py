@@ -246,3 +246,15 @@ def test_a_spool_cannot_move_into_an_ams_unit_place(pg_pool: PgPool) -> None:
         store.move(spool, unit, actor="ann")
     tray = store.ensure_ams(printer, 0, 1, label="T1")
     assert store.move(spool, tray.id, actor="ann") is not None
+
+
+def test_a_spool_can_move_into_a_printer_place_with_no_ams(pg_pool: PgPool) -> None:
+    """A place beside a printer (``printer_id`` and no ``ams_id``) is not a unit's
+    place (Decision 16), so it takes spools."""
+    printer = _printer(pg_pool)
+    store = LocationStore(pg_pool)
+    spool = _spool(pg_pool)
+    beside = store.create(
+        LocationCreate(name="Beside the H2C", kind_id=_kind(pg_pool), printer_id=printer)
+    ).id
+    assert store.move(spool, beside, actor="ann") is not None
