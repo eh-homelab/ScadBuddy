@@ -51,7 +51,8 @@ export function InvoiceUpload({ onCreated }: { onCreated: (invoiceId: string) =>
     }
   }, [])
 
-  // Not disabled while no supplier is chosen: the supplier picker sits inside the zone, and a disabled zone would lock it.
+  // The zone is aria-disabled only while a draft is being made or the currency is unread, never for a missing supplier:
+  // the picker sits inside the zone, so a disabled zone would lock it. `add` asks for the supplier instead.
 
   async function add(file: File | undefined) {
     if (!file || working.current) return

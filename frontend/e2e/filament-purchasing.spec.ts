@@ -17,7 +17,16 @@ async function startDraft(page: Page) {
   await page.getByRole('link', { name: 'Suppliers', exact: true }).first().click()
   await page.getByRole('navigation', { name: 'Filament' }).getByRole('link', { name: 'Invoices' }).click()
   await choose(page, 'Supplier', 'Acme')
-  await page.getByRole('group', { name: 'Add an invoice file' }).locator('input[type="file"]').setInputFiles(pdf)
+  // A real paste: a ClipboardEvent whose DataTransfer carries the PDF, fired at the drop zone.
+  // (A string: this file is type-checked without the DOM lib.)
+  const file = JSON.stringify({ text: pdf.buffer.toString(), name: pdf.name, type: pdf.mimeType })
+  await page.evaluate(`(() => {
+    const zone = document.querySelector('[aria-label="Add an invoice file"]')
+    const file = ${file}
+    const transfer = new DataTransfer()
+    transfer.items.add(new File([file.text], file.name, { type: file.type }))
+    zone.dispatchEvent(new ClipboardEvent('paste', { clipboardData: transfer, bubbles: true, cancelable: true }))
+  })()`)
   await expect(page).toHaveURL(/\/filament\/invoices\/[0-9a-f-]+$/)
   await expect(page.getByText('Draft', { exact: true }).first()).toBeVisible()
 }
