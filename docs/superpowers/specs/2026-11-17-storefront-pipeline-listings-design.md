@@ -436,7 +436,8 @@ because a per-piece list would give a wrong price with no error.
 
 **No promise of a price.** A visitor's line may still be priced by hand on any visit, as
 for every listing: after #6581 a variant has no price while the profile printer's status
-cannot be read (`printer_opening` answers None, `STATUS_UNREAD`), a slot's type with no
+cannot be read (`printer_opening` gives no status, `STATUS_UNREAD`; no such printer gives
+None), a slot's type with no
 preset for the nozzle gives none (`NO_TYPE_PRESET`), and a slice that fails gives none
 either. A whole dollhouse slices for longer than a keychain, so a status blip during the
 wait is more likely to cost that visitor the firm price. The design adds no retry of its
