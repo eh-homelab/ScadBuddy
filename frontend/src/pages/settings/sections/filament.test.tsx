@@ -164,7 +164,7 @@ describe('Filament (#6262)', () => {
   it('saves the 3DFP fetch nozzles with Save Filament, and shows them again on the next visit (#6625)', async () => {
     const first = renderSettingsSection(<Filament />, { route: '/settings/printing' })
     await seeded()
-    const nozzles = () => within(region('Filament')).getByRole('group', { name: 'Profile fetch nozzles' })
+    const nozzles = () => within(region('Filament')).getByRole('group', { name: 'Nozzles to fetch from 3DFP' })
     for (const size of ['0.2', '0.4', '0.6', '0.8']) expect(within(nozzles()).getByRole('checkbox', { name: `${size} mm` })).toBeChecked()
     await first.user.click(within(nozzles()).getByRole('checkbox', { name: '0.2 mm' }))
     await first.user.click(within(nozzles()).getByRole('checkbox', { name: '0.8 mm' }))
@@ -185,7 +185,7 @@ describe('Filament (#6262)', () => {
   it('does not save the 3DFP fetch nozzles with none ticked', async () => {
     const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
     await seeded()
-    const nozzles = within(region('Filament')).getByRole('group', { name: 'Profile fetch nozzles' })
+    const nozzles = within(region('Filament')).getByRole('group', { name: 'Nozzles to fetch from 3DFP' })
     for (const size of ['0.2', '0.4', '0.6', '0.8']) await user.click(within(nozzles).getByRole('checkbox', { name: `${size} mm` }))
     await user.click(within(region('Filament')).getByRole('button', { name: 'Save Filament' }))
     expect(await within(region('Filament')).findByText('Choose at least one nozzle.')).toBeInTheDocument()

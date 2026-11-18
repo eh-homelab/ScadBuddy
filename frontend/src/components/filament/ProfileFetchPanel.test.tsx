@@ -6,6 +6,7 @@ import { T } from '../../mocks/features/filament/seed'
 import { resetMockState } from '../../mocks/handlers'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
+import { when } from './formClasses'
 import { ProfileFetchPanel } from './ProfileFetchPanel'
 
 const RUN: ProfileFetch = {
@@ -145,5 +146,114 @@ describe('ProfileFetchPanel (#6625)', () => {
     const { user } = show()
     await user.click(fetchButton())
     expect(await screen.findByRole('alert')).toHaveTextContent('This type has no saved 3DFP id. Enter it above and save the type.')
+  })
+
+  it('says that a fetch replaces the presets for the chosen nozzles, also after a run (R-T9-6)', async () => {
+    server.use(http.get(URL, () => HttpResponse.json({ run: { ...RUN, status: 'imported', finished_at: '2026-11-18T12:05:00Z' }, gaps: [] })))
+    show()
+    await screen.findByRole('status', { name: 'Last fetch' })
+    expect(fetchButton()).toHaveAccessibleDescription(
+      "Imports a preset for each printer model and nozzle into Bambuddy and sets it here. It replaces this type's presets for the nozzles chosen in Settings → Printing.",
+    )
+  })
+
+  it('writes when the run ended as the other filament pages do (R-T9-3)', async () => {
+    server.use(http.get(URL, () => HttpResponse.json({ run: { ...RUN, status: 'imported', finished_at: '2026-11-18T12:05:00Z' }, gaps: [] })))
+    show()
+    const last = await screen.findByRole('status', { name: 'Last fetch' })
+    expect(last).toHaveTextContent(`Ended ${when('2026-11-18T12:05:00Z')}. 4 presets were set for H2C.`)
+  })
+
+  it('lists the gaps no run is filling, leaving out the keys the last run listed as missing (R-T9-1)', async () => {
+    const gaps = [
+      { printer_model: 'H2C', nozzle_diameter: '0.2', reason: '3dfilamentprofiles has no 0.2 mm export for this filament' },
+      { printer_model: 'P1S', nozzle_diameter: '0.4', reason: 'no preset for this printer and nozzle yet' },
+      { printer_model: 'P1S', nozzle_diameter: '0.6', reason: 'no preset for this printer and nozzle yet' },
+    ]
+    const partial: ProfileFetch = { ...RUN, status: 'partial', finished_at: '2026-11-18T12:05:00Z', missing: [gaps[0]!] }
+    server.use(http.get(URL, () => HttpResponse.json({ run: partial, gaps })))
+    show()
+    const last = await screen.findByRole('status', { name: 'Last fetch' })
+    const missing = within(last).getByRole('list', { name: 'Presets not set' })
+    expect(within(missing).getAllByRole('listitem')).toHaveLength(1)
+    const open = screen.getByRole('list', { name: 'Presets missing' })
+    expect(within(open).getAllByRole('listitem').map((item) => item.textContent)).toEqual([
+      'P1S with a 0.4 mm nozzle: no preset for this printer and nozzle yet',
+      'P1S with a 0.6 mm nozzle: no preset for this printer and nozzle yet',
+    ])
+    expect(screen.getByText('These printers and nozzles have no preset yet. Fetch from 3DFP adds them:')).toBeInTheDocument()
+  })
+
+  it('lists the gaps when the type was never fetched, and not while a run is going (R-T9-1)', async () => {
+    const gaps = [{ printer_model: 'H2C', nozzle_diameter: '0.4', reason: 'no preset for this printer and nozzle yet' }]
+    let run: ProfileFetch | null = null
+    server.use(
+      http.get(URL, () => HttpResponse.json({ run, gaps })),
+      http.post(URL, () => {
+        run = RUN
+        return HttpResponse.json({ run: RUN, joined: false }, { status: 202 })
+      }),
+    )
+    const { user } = show({ pollMs: 60_000 })
+    const open = await screen.findByRole('list', { name: 'Presets missing' })
+    expect(within(open).getByRole('listitem')).toHaveTextContent('H2C with a 0.4 mm nozzle: no preset for this printer and nozzle yet')
+    await user.click(fetchButton())
+    await waitFor(() => expect(screen.getByRole('status', { name: 'Last fetch' })).toHaveTextContent('Running'))
+    expect(screen.queryByRole('list', { name: 'Presets missing' })).not.toBeInTheDocument()
+  })
+
+  it('lets no read that started before a start overwrite its run, and keeps reading (R-T9-4)', async () => {
+    let gets = 0
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    let done = false
+    const old: ProfileFetch = { ...RUN, id: '00000000-0000-4000-8000-00000000fe00', status: 'imported', finished_at: '2026-11-17T12:05:00Z' }
+    const fresh: ProfileFetch = { ...RUN, id: '00000000-0000-4000-8000-00000000fe02', status: 'imported', finished_at: '2026-11-18T12:05:00Z' }
+    server.use(
+      http.post(URL, () => HttpResponse.json({ run: RUN, joined: false }, { status: 202 })),
+      http.get(URL, async () => {
+        gets += 1
+        if (gets === 1) {
+          await held
+          return HttpResponse.json({ run: old, gaps: [] })
+        }
+        return HttpResponse.json({ run: done ? fresh : RUN, gaps: [] })
+      }),
+    )
+    const onEnded = vi.fn()
+    const { user } = show({ onEnded })
+    await waitFor(() => expect(gets).toBe(1))
+    await user.click(fetchButton())
+    const last = await screen.findByRole('status', { name: 'Last fetch' })
+    await waitFor(() => expect(last).toHaveTextContent('Running'))
+    release()
+    await waitFor(() => expect(gets).toBeGreaterThanOrEqual(3))
+    expect(last).toHaveTextContent('Running')
+    expect(onEnded).not.toHaveBeenCalled()
+    done = true
+    await waitFor(() => expect(onEnded).toHaveBeenCalledTimes(1))
+    expect(onEnded.mock.calls[0]![0]).toMatchObject({ id: fresh.id })
+    expect(last).toHaveTextContent('Imported')
+  })
+
+  it('says a 503 once, in a plain sentence (R-T9-5)', async () => {
+    const failed: ProfileFetch = { ...RUN, status: 'failed', finished_at: '2026-11-18T12:00:10Z', error: 'the fetch could not be started' }
+    let run: ProfileFetch | null = null
+    server.use(
+      http.get(URL, () => HttpResponse.json({ run, gaps: [] })),
+      http.post(URL, () => {
+        run = failed
+        return HttpResponse.json(
+          { type: 'about:blank', title: 'Service Unavailable', status: 503, detail: 'the fetch could not be started' },
+          { status: 503, headers: { 'Content-Type': 'application/problem+json' } },
+        )
+      }),
+    )
+    const { user } = show()
+    await user.click(fetchButton())
+    const last = await screen.findByRole('status', { name: 'Last fetch' })
+    await waitFor(() => expect(last).toHaveTextContent('Failed'))
+    expect(screen.getByRole('alert')).toHaveTextContent('ScadBuddy could not start the fetch. Try again in a minute.')
+    expect(screen.queryByText(/the fetch could not be started/)).not.toBeInTheDocument()
   })
 })

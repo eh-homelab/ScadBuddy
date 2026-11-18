@@ -745,9 +745,9 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             _TEMPORAL_QUEUE.format(what="the exports of a type's slicer profiles"),
         ),
         "profile_fetch_nozzles": SettingDoc(
-            "Profile fetch nozzles",
-            "The nozzle diameters a profile fetch exports for each printer model: any of"
-            " 0.2, 0.4, 0.6 and 0.8. At least one.",
+            "Nozzles to fetch from 3DFP",
+            "The nozzle diameters that Fetch from 3DFP exports for each printer model: any"
+            " of 0.2, 0.4, 0.6 and 0.8. At least one.",
         ),
         "temporal_sdk_metrics_port": SettingDoc(
             "Temporal SDK metrics port",
