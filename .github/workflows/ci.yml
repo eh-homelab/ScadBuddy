@@ -1314,7 +1314,19 @@ jobs:
   # The split reads backend/.test_durations (pytest-split's format). A test it does
   # not list -- a new one -- is placed by the average duration, so it always runs
   # in some shard; a stale file only balances the shards worse, it never fails a
-  # run. Its timings must be CI's own: a file stored on another machine had the
+  # run. The split is `least_duration` (each test, slowest first, goes to the
+  # shard with the least time so far), not pytest-split's default
+  # `duration_based_chunks`, which cuts the collection order into six runs of
+  # tests. With chunks, a file a week stale (3,325 of 17,091 tests missing, the
+  # tests/api tier twice its listed time) put the slow tests/api modules in one
+  # run of shards: on main's run 44270713273 the shards took 17 to 48 min of
+  # pytest, and PRs' shard 2 hit the 55 min timeout (#6596). least_duration with a
+  # fresh file was simulated at about 28.6 min a shard, but that sum of per-test
+  # timings leaves out the module- and session-scoped fixtures each shard now
+  # builds for every module it gets a part of. Measured pytest time a shard: 28 to
+  # 40 min on PR run 44300526218 (all six shards; the 40 min one on a slow runner),
+  # 27 to 28 min on main run 44308254023 (the three shards that finished before a
+  # newer push cancelled the run) (#6651). Its timings must be CI's own: a file stored on another machine had the
   # non-API tests at about twice their CI time, so the shard holding them finished
   # ten minutes before the rest. So each shard stores what it ran, timed here
   # (`--store-durations --clean-durations`), and `backend-pytest-split` merges the
@@ -1446,7 +1458,7 @@ jobs:
           line=$(docker run --rm -v "$PWD/results:/results" \
             -v "$PWD/test-fixtures:/app/test-fixtures:ro" \
             -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest \
-            --collect-only -q --splits 6 --group ${{ matrix.group }} \
+            --collect-only -q --splits 6 --group ${{ matrix.group }} --splitting-algorithm least_duration \
             --durations-path=/results/durations.json | grep -E '^[0-9]+/[0-9]+ tests collected')
           echo "$line"
           selected=${line%%/*}
@@ -1485,7 +1497,7 @@ jobs:
           -e SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
           -e SCADBUDDY_TEST_FIXTURES=/app/test-fixtures
           -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest -n auto
-          --splits 6 --group ${{ matrix.group }}
+          --splits 6 --group ${{ matrix.group }} --splitting-algorithm least_duration
           --store-durations --clean-durations --durations-path=/results/durations.json
           --junitxml=/results/junit.xml --durations=20
 

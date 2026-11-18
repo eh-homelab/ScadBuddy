@@ -792,3 +792,29 @@ def test_the_storefront_drafts_migration_keeps_every_order_a_back_office_one(
         assert conn.execute(
             "SELECT storefront_visitor_id FROM orders WHERE id = 'd'"
         ).fetchone() == (None,)
+
+
+@pytest.mark.requires_postgres
+def test_the_old_spool_tables_are_dropped(pg_conninfo: str) -> None:
+    """#6348: `native_spools`, `native_spool_uses` and the provider overlay's tables are
+    gone once every migration has run, and the filament table that carried their data stays."""
+    old = [
+        "native_spool_uses",
+        "native_spools",
+        "spool_record_links",
+        "spool_provider_records",
+        "spool_provider_refreshes",
+        "tray_spool_links",
+        "physical_spools",
+    ]
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn)
+        present = {
+            row[0]
+            for row in conn.execute(
+                "SELECT table_name FROM information_schema.tables"
+                " WHERE table_schema = current_schema() AND table_name = ANY(%s)",
+                ([*old, "filament_spools"],),
+            )
+        }
+    assert present == {"filament_spools"}

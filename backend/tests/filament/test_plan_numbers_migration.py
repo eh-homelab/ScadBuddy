@@ -12,7 +12,7 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
-from scadbuddy.render.pg_store import MIGRATIONS, migrate
+from scadbuddy.render.pg_store import MIGRATIONS, Migration, migrate
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -32,6 +32,13 @@ MAPPED = [
     {"slot_id": 3, "spool_id": -2},
     {"slot_id": 4, "spool_id": 5},
 ]
+
+
+def _before_drop() -> tuple[Migration, ...]:
+    """The migrations up to the one that drops the old tables (#6348): these tests read them."""
+    return MIGRATIONS[
+        : next(i for i, m in enumerate(MIGRATIONS) if m.id.endswith("_drop_native_spool_tables"))
+    ]
 
 
 def _index() -> int:
@@ -280,7 +287,7 @@ def test_with_nothing_stored_it_is_a_no_op(pg_conninfo: str) -> None:
         conn.execute(
             "INSERT INTO settings (name, value) VALUES ('storefront_slice_profile', 'null')"
         )
-        migrate(conn)
+        migrate(conn, _before_drop())
         assert (
             _one(conn, "SELECT value FROM settings WHERE name = 'storefront_slice_profile'") is None
         )

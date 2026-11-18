@@ -136,6 +136,24 @@ describe('Filament (#6262)', () => {
     expect(within(filament).getByText(/1 slot was not set/)).toBeInTheDocument()
   })
 
+  it('says which slots were skipped for no preset or no nozzle', async () => {
+    server.use(
+      http.post('*/api/v1/filament/rfid/reconcile', () =>
+        HttpResponse.json({
+          mode: { override_mode: true, state: 'applied', devices: [] },
+          tags: { pushed: 1, moved: 0, cleared: 0, unchanged: 0, failed: 0 },
+          slots: { configured: 0, unchanged: 0, no_preset: 2, no_temps: 0, no_nozzle: 1, failed: 0 },
+        }),
+      ),
+    )
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const filament = region('Filament')
+    await user.click(await within(filament).findByRole('button', { name: 'Apply now' }))
+    expect(await within(filament).findByText(/2 spools have no preset for the nozzle/)).toBeInTheDocument()
+    expect(within(filament).getByText(/1 spool has no nozzle to set/)).toBeInTheDocument()
+  })
+
   it('saves the thresholds and shows the server refusing 101 percent', async () => {
     const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
     await seeded()

@@ -121,8 +121,11 @@ because advisory locks and NOTIFY channels are per database: workers sharing one
 serialise every `migrate` and hear each other's events. So the test role needs
 `CREATEDB` (the `postgres` superuser above has it). Each worker also starts its own
 Temporal dev server.
-CI runs the suite in six `backend-pytest` jobs (#1167), each `--splits 6 --group N`
-(pytest-split) by the timings in `backend/.test_durations`; `backend-pytest-split`
+CI runs the suite in six `backend-pytest` jobs (#1167), each `--splits 6 --group N
+--splitting-algorithm least_duration` (pytest-split) by the timings in
+`backend/.test_durations`; `least_duration`, not the default `duration_based_chunks`,
+because chunks cut the collection order and a stale file then put the slow `tests/api`
+modules in one shard (#6596); `backend-pytest-split`
 checks that the six selections add up to the whole collection and that each
 shard ran what it selected. A test missing from
 the file is placed by the average, so a stale file only unbalances the shards. The
@@ -649,9 +652,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   tables (#6261). The `native` provider, its `/native-spools` routes, the `native_spool_*`
   agent tools and Settings' editor are gone (#6262; the old anchor `#native-spools` lands
   on Settings' Filament section), and so is the spool providers' overlay: the print dialog reads the
-  SB spools. The old tables (`native_spools`, `physical_spools`
-  and the rest) are unread now; a follow-up PR drops them. A migration
-  carried each person's tray link to the SB spool's tray place.
+  SB spools. A migration carried each person's tray link to the SB
+  spool's tray place, and the old tables (`native_spools`, `native_spool_uses`,
+  `physical_spools`, `spool_provider_records`, `spool_record_links`,
+  `spool_provider_refreshes`, `tray_spool_links`) were dropped in #6348
+  (`20261118T1235Z_drop_native_spool_tables.sql`).
   `printers/ams_mapping.py` computes `ams_mapping`/`ams_mapping2` from the
   plan's trays and `printers/nozzle_mapping.py` an H2C rack print's `nozzle_mapping`
   (measured values in the spec's §2); `printers/lan.py` is the FTPS upload and MQTT
