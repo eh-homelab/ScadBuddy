@@ -327,7 +327,7 @@ function summary(): S['InventorySummary'] {
     low_stock: rows.filter((spool) => spool.low_stock).length,
     needs_type: rows.filter((spool) => !spool.type_id).length,
     // Every spool's plates, archived ones too (plan Decision 18); the mock books no BB pair.
-    consumed_g: state.events.reduce((sum, event) => (event.kind === 'print_ended' && event.delta_g != null ? sum - event.delta_g : sum), 0),
+    consumed_g: plateGrams(state.events),
   }
 }
 
@@ -660,14 +660,32 @@ export function typeInfo(id: string): { code: string; label: string; label_weigh
 /** Whether an unarchived type has the code (`filament_spool_types_code`, case-blind). */
 export const typeCodeTaken = (code: string) => state.types.some((type) => !type.archived_at && sameName(type.code, code))
 
+/**
+ * The grams the plates in `events` used, as `metrics.plates` counts them: only an ended
+ * print counts (an open `print_started` estimate is 0 g), and a job that both SB (a print
+ * run) and BB (a usage row) booked counts once, as BB's.
+ */
+function plateGrams(events: readonly S['SpoolEvent'][]): number {
+  const jobOf = (event: S['SpoolEvent']) => {
+    const job = event.data?.job
+    if (typeof job === 'string') return job
+    const parts = event.ref_kind === 'print_run' ? event.ref_id?.split('/') : undefined
+    return parts && parts.length >= 3 ? parts.slice(1, -1).join('/') : null
+  }
+  const ended = events.filter((event) => event.kind === 'print_ended' && event.delta_g != null)
+  const bbJobs = new Set(ended.filter((event) => event.ref_kind === 'bb_usage').map(jobOf))
+  return ended
+    .filter((event) => !(event.ref_kind === 'print_run' && bbJobs.has(jobOf(event))))
+    .reduce((sum, event) => sum - (event.delta_g ?? 0), 0)
+}
+
 /** The spools of `ids` that exist, their grams left (unarchived only) and the grams their prints used (#6266 stats). */
 export function spoolUsage(ids: readonly string[]): { count: number; remaining_g: number; consumed_g: number } {
   const rows = state.spools.filter((row) => ids.includes(row.id))
-  const used = state.events.filter((event) => ids.includes(event.spool_id) && event.kind.startsWith('print') && event.delta_g != null)
   return {
     count: rows.length,
     remaining_g: rows.filter((row) => !row.archived_at).reduce((sum, row) => sum + (row.grams_left ?? 0), 0),
-    consumed_g: used.reduce((sum, event) => sum - (event.delta_g ?? 0), 0),
+    consumed_g: plateGrams(state.events.filter((event) => ids.includes(event.spool_id))),
   }
 }
 

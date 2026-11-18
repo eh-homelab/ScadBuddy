@@ -467,6 +467,10 @@ function events(): S['SpoolEvent'][] {
     event(2, '2026-11-12T17:00:00Z', 'dried', { source: 'person', data: { temp_c: 65, hours: '8' } }),
     event(4, '2026-11-14T19:00:00Z', 'print_started', { ...printer, ref_kind: 'print', ref_id: '35', actor: null }),
     event(4, '2026-11-14T21:30:00Z', 'print_ended', { ...printer, source: 'print_actual', grams_before: 268, grams_after: 120, delta_g: -148, ref_kind: 'print', ref_id: '35', actor: null }),
+    // A plate both SB (a print run) and BB (a usage row) booked, and a print still running: the suppliers stats count 20 g and 0 g (`metrics.plates`).
+    event(3, '2026-11-15T10:00:00Z', 'print_ended', { source: 'print_actual', delta_g: -20, ref_kind: 'print_run', ref_id: 'run1/job-a/0', actor: null, data: { job: 'job-a' } }),
+    event(3, '2026-11-15T10:01:00Z', 'print_ended', { source: 'print_actual', delta_g: -20, ref_kind: 'bb_usage', ref_id: 'usage-a', actor: null, data: { job: 'job-a' } }),
+    event(10, '2026-11-15T11:00:00Z', 'print_started', { source: 'print_estimate', delta_g: -30, ref_kind: 'print_run', ref_id: 'run2/job-b/0', actor: null, data: { job: 'job-b' } }),
     event(1, '2026-11-14T18:00:00Z', 'weighed', { source: 'scale', grams_before: 655, grams_after: 640, delta_g: -15 }),
   ]
 }

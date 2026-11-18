@@ -775,6 +775,12 @@ Load `frontend-design` and `dataviz` first.
 34. Task 4: `SuppliersStore.stats` sorts in Python after `metrics.plates` (most used first, then name, then id), and `test_stats_count_spend_and_stock` now expects 50 g, not 57 g, because the 7 g of an open estimate is a print still running, which counts 0 (the brief).
 35. Task 4: The history route reads the spool and its events on two connections, as `get` and `ledger.events` do; an event booked between them can show in the timeline with the grams of the read before it, which the next read corrects.
 36. Task 4: The frontend summary mock gives `consumed_g` (its `print_ended` grams), because the generated `InventorySummary` now requires it and the frontend typecheck failed without it.
+37. Task 4 (R-T4-1, agent tools first): The agent coverage test may fail between tasks. Task 5 adds a real agent tool for each of the four routes, not a `NOT_A_TOOL` entry, before the branch is pushed. Why: the routes are reads an agent needs. Cost if wrong: none, because the branch is not pushed until then.
+38. Task 4 (R-T4-2, settings input): `MetricsStore` takes a `MetricsSettings` callable (Decision 24). The burn and lead-time settings and `orders_currency` are runtime `Settings` fields, and one `settings_store.read` gives them all.
+39. Task 4 (R-T4-3, queries per read): A store read may use several queries on one connection (Decision 26). The next read corrects any skew between them.
+40. Task 4 (R-T4-4, open estimates): An open estimate counts 0 g (Decision 6), so `test_stats_count_spend_and_stock` expects 50 g.
+41. Task 4 (R-T4-5, no dated test input): The metrics route test builds `since` relative to today. A fixed 2026-01-01 would fail the 1096-day bound on 2029-01-02 and turn the test red.
+42. Task 4 (R-T4-6, suppliers mock): The frontend suppliers mock's `spoolUsage` uses the backend's rule now: an open estimate counts 0, and an SB+BB pair counts once. The mock must not show numbers the API never gives. The summary mock uses the same `plateGrams` helper, and the seed has one pair and one open estimate to show it.
 
 ## Pre-flight rulings (2026-11-18)
 

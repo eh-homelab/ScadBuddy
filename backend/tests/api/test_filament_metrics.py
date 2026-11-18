@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -71,7 +71,7 @@ def test_metrics_route_defaults(client: TestClient) -> None:
     assert len(forecast.json()["spools"]) == 1
     by_type = client.get(
         f"{URL}/metrics",
-        params={"dimension": "type", "bucket": "week", "since": str(date(2026, 1, 1))},
+        params={"dimension": "type", "bucket": "week", "since": str(today - timedelta(days=400))},
     )
     assert by_type.status_code == 200, by_type.text
     assert by_type.json()["stock"][0]["label"] == "No type"
