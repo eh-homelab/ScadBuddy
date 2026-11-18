@@ -234,7 +234,7 @@ same way, `vite.config.ts`).
   button (`scanTag`, 30 s), the "Override" mark of an open override binding, the weight-lock line (from `weight_locked`), and
   the override checkbox, on only for a Bambu tag (a tray UUID and kind `bambu_mifare`); `NtagPanel` writes an NTAG through a SpoolBuddy
   reader and polls `confirmNtag` every 2 s for 60 s, #6264) and `/filament/types/:id`
-  (`TypePage`). The Spools tab imports a CSV (`SpoolImport`: a dry run, Import is off while any
+  (`TypePage`). `/filament/labels` (`LabelsPage`, `Label`, `labelSheet.ts`, #6264) prints 50 x 25 mm labels from a copy in `#label-print-root`: a QR code of `scadbuddy:spool:<id>` (`labelPayload`) with a quiet zone of 4 modules; the layout (`roll` or `sheet`) is kept in `localStorage` under `scadbuddy.labels.layout`. The Spools tab imports a CSV (`SpoolImport`: a dry run, Import is off while any
   line is an error). The price book is edited on Filament → Types, not in Settings; the ledger
   tab asks `GET /filament/events` with `since` and `until`. Settings keeps a Filament section for
   configuration (`pages/settings/sections/filament.tsx`: also "Tags to Bambuddy", which saves

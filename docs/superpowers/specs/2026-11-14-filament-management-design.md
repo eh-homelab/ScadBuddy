@@ -518,6 +518,23 @@ Low-cardinality labels only: material, brand, location, not the spool id.
 - **Labels.** Print labels with the spool number and a QR code of the spool id.
   BB parity with `/inventory/labels`.
 
+  As built in #6264:
+  - Override rules. `override` is valid only for a Bambu tag (kind `bambu_mifare`, a tray UUID),
+    checked against the stored kind (422 otherwise). Binding with it locks the spool's weight, and
+    unbinding never unlocks it; a move ("Move it here") sends `override: false`. Every binding
+    change queues the tag in `filament_bb_tag_pending`; the push to Bambuddy (`link-tag`, a 409
+    `tag_already_linked` moves it) runs only with `filament_sync.tags` `sb_to_bb`, SB first and
+    Bambuddy second, comparing state before each write. Override mode is one row
+    (`filament_rfid_state`), set by `PUT /filament/rfid/override-mode`; `GET /filament/rfid/status`
+    reports it, with `blocked` when Bambuddy's auth refuses the setting write. The spool refresh
+    Schedule runs the step `filament_rfid_reconcile` (mode, tag push, slot configure; each fails
+    alone), and `POST /filament/rfid/reconcile` runs it once.
+  - The scan and write calls: `POST /filament/rfid/scan` (a bounded listen, `timeout_s` 1 to 50),
+    `POST /filament/spools/{id}/ntag/write`, `.../ntag/confirm` and `.../ntag/cancel`.
+  - Labels: 50 x 25 mm, a QR code of the text `scadbuddy:spool:<spool id>` (no host), with a quiet
+    zone of 4 modules, and the spool number, material, colour and brand. The page is
+    `/filament/labels`; the layout (roll or sheet) is kept in `localStorage`.
+
 ## 8. Sync with BB
 
 On only when BB integration is on. One system-level setting per data type:
@@ -766,6 +783,10 @@ Every item needs an SB equivalent:
 - Settings: default filament cost, currency, `auto_add_unknown_rfid`,
   low-stock threshold, drying presets.
 
+Gap recorded by #6264, for #6270: BB's label templates (custom label sizes) and its
+`/inventory/labels` PDF output are not matched. SB prints one fixed 50 x 25 mm label from the
+browser (§7).
+
 ## 12. Phases
 
 Epic: [#6260](https://github.com/eh-homelab/ScadBuddy/issues/6260). Each sub-issue ships as its own PRs. "After" lists the issues
@@ -783,6 +804,8 @@ that block it (GitHub's blocked-by links hold the same graph).
 | 6 | [#6268](https://github.com/eh-homelab/ScadBuddy/issues/6268) | AMS weight sync, scale input, location sensors (§6, §5.6) | [#6263](https://github.com/eh-homelab/ScadBuddy/issues/6263) |
 | 6 | [#6269](https://github.com/eh-homelab/ScadBuddy/issues/6269) | History timeline, metrics, Grafana panel (§5.7) | [#6263](https://github.com/eh-homelab/ScadBuddy/issues/6263) |
 | 6 | [#6270](https://github.com/eh-homelab/ScadBuddy/issues/6270) | Parity sweep against §11 | all of the above |
+
+As built in #6264: `filament_sync.tags` takes `off` (the default) and `sb_to_bb`. #6265 widens it to the four values of §8.
 
 [#6209](https://github.com/eh-homelab/ScadBuddy/issues/6209) (the price book keeps alpha, colour stops and effect) landed in
 [#6211](https://github.com/eh-homelab/ScadBuddy/pull/6211) before [#6261](https://github.com/eh-homelab/ScadBuddy/issues/6261); #6261's types write the book's alpha, stops and effect from it.

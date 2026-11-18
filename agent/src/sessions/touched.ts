@@ -729,6 +729,13 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'filament_spool_move',
   'filament_bambuddy_import',
   'filament_spool_import',
+  // #6264: the RFID override mode, its reconcile and the NTAG write calls touch the filament
+  // inventory (or a SpoolBuddy reader), and none is a recorded resource kind.
+  'filament_rfid_override_mode',
+  'filament_rfid_reconcile',
+  'filament_spool_ntag_write',
+  'filament_spool_ntag_confirm',
+  'filament_spool_ntag_cancel',
   // A re-pin's dry run (#1914): the pin and the history stay as they were. The candidate's
   // checkout is a cache on the volume, swept at boot when nothing pins it.
   'check_library_candidate',
