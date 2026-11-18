@@ -56,7 +56,7 @@ const problem = (status: keyof typeof TITLES, detail: string) =>
 const FIELDS = {
   preset: ['printer_model', 'nozzle_diameter', 'slicer_filament', 'slicer_filament_name'],
   kValue: ['printer_id', 'extruder', 'nozzle_diameter', 'nozzle_type', 'k_value', 'name', 'cali_idx', 'setting_id'],
-  typeCreate: ['code', 'material_id', 'subtype_id', 'brand_id', 'category_id', 'effect_id', 'insert_type_id', 'rgba', 'colour_name', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'cost_per_kg', 'label_weight_g', 'low_stock_pct', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'note'],
+  typeCreate: ['code', 'material_id', 'subtype_id', 'brand_id', 'category_id', 'effect_id', 'insert_type_id', 'rgba', 'colour_name', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'cost_per_kg', 'lead_time_days', 'safety_margin_days', 'label_weight_g', 'low_stock_pct', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'note'],
   spoolCreate: ['type_id', 'brand_id', 'material_id', 'subtype_id', 'category_id', 'effect_id', 'colour_name', 'rgba', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'label_weight_g', 'insert_type_id', 'low_stock_pct', 'cost_per_kg', 'weight_locked', 'note', 'grams_left'],
   move: ['location_id'],
   csvImport: ['rows', 'dry_run'],
@@ -625,6 +625,8 @@ export function createType(raw: unknown): S['SpoolType'] | Response {
     insert_type_id: null,
     low_stock_pct: null,
     cost_per_kg: null,
+    lead_time_days: null,
+    safety_margin_days: null,
     note: null,
     diameter_mm: '1.75',
     ...body,

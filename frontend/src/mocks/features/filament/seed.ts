@@ -280,6 +280,8 @@ function spoolType(look: TypeLook): S['SpoolType'] {
     insert_type_id: look.insert ?? IT.BAMBU_REUSABLE,
     low_stock_pct: null,
     cost_per_kg: look.cost_per_kg ?? null,
+    lead_time_days: null,
+    safety_margin_days: null,
     filament_id: null,
     note: null,
     archived_at: null,

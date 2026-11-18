@@ -195,6 +195,7 @@ export const filamentTools: Tool[] = [
       'nullable one. A new type needs `code`, `material_id`, `rgba` (`#RRGGBB` or `#RRGGBBAA`) and ' +
       '`label_weight_g`; ids come from filament_catalog_list. With a `cost_per_kg` it also keeps the price ' +
       'book row of its material, subtype, brand, colour and alpha in step; a new row takes its stops and effect. ' +
+      '`lead_time_days` and `safety_margin_days` (days, `null` clears) set the type\'s own reorder timing. ' +
       '`archived: true` takes a type off the lists and frees its code. 409 when an unarchived type has the ' +
       'code; 422 when a minimum temperature is above its maximum. Only what the user says. Writes ScadBuddy only.',
     input: z.object({

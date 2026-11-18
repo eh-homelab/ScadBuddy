@@ -186,6 +186,21 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     kind: 'text',
   },
   {
+    name: 'filament_burn_window_days',
+    section: 'filament',
+    kind: 'count',
+  },
+  {
+    name: 'filament_lead_time_days',
+    section: 'filament',
+    kind: 'count',
+  },
+  {
+    name: 'filament_safety_margin_days',
+    section: 'filament',
+    kind: 'count',
+  },
+  {
     name: 'media_upload_max_bytes',
     section: 'uploads',
     kind: 'bytes',

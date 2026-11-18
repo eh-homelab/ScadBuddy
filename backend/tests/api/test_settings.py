@@ -1080,3 +1080,11 @@ def test_a_saved_sync_reads_back_as_a_filament_sync(client: TestClient) -> None:
     read = _state(client).settings_store.read({"filament_sync"})["filament_sync"]
     assert isinstance(read, FilamentSync)
     assert read.spools == "off"
+
+
+def test_filament_metrics_settings_defaults(client: TestClient) -> None:
+    body = client.get("/api/v1/settings").json()
+    assert body["filament_burn_window_days"] == 30
+    assert body["filament_lead_time_days"] == 7
+    assert body["filament_safety_margin_days"] == 3
+    assert body["applies"]["filament_burn_window_days"] == "live"

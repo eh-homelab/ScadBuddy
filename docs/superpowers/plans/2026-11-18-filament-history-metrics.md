@@ -735,6 +735,13 @@ Load `frontend-design` and `dataviz` first.
   the same five values in Task 8.
 - **Review Focus.** Each line has its test in Tasks 3, 4 or 6.
 
+## Decisions made while building (#6269)
+
+(The builder adds one numbered line per decision, each with its reason.)
+
+1. Task 1: The two SKU fields use a `Days` type (`ge=0, le=365`) in `filament/models.py`, so the model bound matches the settings' bound of 365 and a day count above a year is refused with a 422 and not stored.
+2. Task 1: The three new settings also go into `api/settings.py` `SettingsResponse` and `library/settings_store.py` `SettingsPatch`, because `GET` and `PUT /api/v1/settings` only carry the fields those two models name.
+
 ## Pre-flight rulings (2026-11-18)
 
 The pre-flight scan found F1-F29. The controller took each proposed ruling. The task text

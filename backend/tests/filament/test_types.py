@@ -7,6 +7,7 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 
 from scadbuddy.filament.catalog import CatalogExistsError, CatalogStore
 from scadbuddy.filament.models import (
@@ -296,3 +297,21 @@ def test_a_failure_after_the_price_book_write_rolls_back_the_type(
         store.create(_body(pg_pool, cost_per_kg="10"))
     assert store.list(include_archived=True) == []
     assert OrderStore(pg_pool).filaments() == []
+
+
+@pg
+def test_type_keeps_lead_time_and_safety_margin(pg_pool: PgPool) -> None:
+    store = SpoolTypeStore(pg_pool)
+    made = store.create(_body(pg_pool, lead_time_days=10, safety_margin_days=2))
+    got = store.get(made.id)
+    assert got is not None
+    assert (got.lead_time_days, got.safety_margin_days) == (10, 2)
+    store.update(made.id, SpoolTypePatch(lead_time_days=None))
+    after = store.get(made.id)
+    assert after is not None
+    assert (after.lead_time_days, after.safety_margin_days) == (None, 2)
+
+
+def test_negative_lead_time_is_refused() -> None:
+    with pytest.raises(ValidationError):
+        SpoolTypePatch(lead_time_days=-1)
