@@ -189,3 +189,4 @@ to the new skill), spec §9 "as built in #6267" note for Decisions 1-7, `backend
 18. Final review, Minor 5: the invoice page does not read the session status when the assistant is off (no opener).
 19. Final review, Minor 6: the filament skill says that SB does not write back to BB "yet", and points to #6265 (filament spec §8).
 20. Final review, Minor 7: `filament_invoice_upsert` refuses `import_run_id` and `if_import_run_id` in `fields`, for an add and for an edit. Only the import route links a session. The backend PATCH stays as it is, because the start route and its tests send `import_run_id` with `if_import_run_id`, and the tool is the only model path to it.
+21. A live import session is always the caller's: ScadBuddy's browser sessions are one person (#4975 D8), so the start route opens it. A rival that closed during the link race is never handed to the page (502).
