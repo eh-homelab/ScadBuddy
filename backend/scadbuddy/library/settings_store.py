@@ -72,6 +72,7 @@ from pydantic import (
 from scadbuddy.bambuddy.models import (
     DEFAULT_ALGORITHM,
     NozzleChoice,
+    NozzleSize,
     RackAlgorithm,
     SlotChoice,
     Tier,
@@ -900,6 +901,8 @@ class SettingsPatch(BaseModel):
     storefront_materials: list[str] | None = None
     #: The most colour combinations one prepare of a listing queues (#6237).
     storefront_prepare_cap: int | None = None
+    #: The nozzle diameters one profile fetch exports per printer model (#6625).
+    profile_fetch_nozzles: list[NozzleSize] | None = None
     #: The storefront's mail (#5283); the password is sealed apart, never a setting.
     storefront_mail_host: str | None = None
     storefront_mail_port: int | None = None

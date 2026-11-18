@@ -592,6 +592,7 @@ export function createType(raw: unknown): S['SpoolType'] | Response {
     low_stock_pct: null,
     cost_per_kg: null,
     note: null,
+    tdfp_id: null,
     ...body,
     id: newId(),
     filament_id: null,

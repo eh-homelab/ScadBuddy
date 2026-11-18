@@ -231,6 +231,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "forget-rows",
     ],
     "intake": ["sources"],
+    "profile-fetch": [],
 }
 
 

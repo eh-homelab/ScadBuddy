@@ -54,6 +54,7 @@ Grams = Annotated[float, Field(ge=0, le=1_000_000)]
 LabelWeight = Annotated[int, Field(gt=0, le=100_000)]
 Percent = Annotated[int, Field(ge=0, le=100)]
 Cost = Annotated[Decimal, Field(ge=0, lt=100_000_000)]
+TdfpId = Annotated[int, Field(gt=0, lt=2**31)]
 Colours = Annotated[list[Rgba], Field(max_length=16)]
 #: How far past the server's clock a person's ``at`` may be (their clock may run ahead).
 FUTURE_SKEW = timedelta(minutes=5)
@@ -407,6 +408,7 @@ class SpoolTypeCreate(_In):
     insert_type_id: UUID | None = None
     low_stock_pct: Percent | None = None
     cost_per_kg: Cost | None = None
+    tdfp_id: TdfpId | None = None
     note: Note | None = None
 
 
@@ -431,6 +433,7 @@ class SpoolTypePatch(_Patch):
     insert_type_id: UUID | None = None
     low_stock_pct: Percent | None = None
     cost_per_kg: Cost | None = None
+    tdfp_id: TdfpId | None = None
     note: Note | None = None
     archived: bool | None = None
 
@@ -456,6 +459,7 @@ class SpoolType(_Row):
     low_stock_pct: int | None
     cost_per_kg: Decimal | None
     filament_id: str | None
+    tdfp_id: int | None
     note: str | None
     archived_at: datetime | None
 
