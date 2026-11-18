@@ -252,3 +252,13 @@ def test_a_printer_with_no_report_and_no_spool_is_not_named_stale(pg_pool: PgPoo
     result = _sync(pg_pool, T0 + STALE_AFTER + timedelta(seconds=1))
     assert (result.booked, result.stale) == (0, 0)
     assert result.stale_printers == []
+
+
+def test_a_printer_with_a_stale_report_and_no_spool_is_not_named_stale(pg_pool: PgPool) -> None:
+    """The sync visits this printer (it has a report row), finds the report stale and
+    holds no spool, so `_stale`'s `if not holders` branch keeps it out of `stale_printers`."""
+    pid, _ = _printer(pg_pool)
+    _write_report(pg_pool, pid, _report(_tray(1, U1)), T0)
+    result = _sync(pg_pool, T0 + STALE_AFTER + timedelta(seconds=1))
+    assert (result.booked, result.stale) == (0, 0)
+    assert result.stale_printers == []
