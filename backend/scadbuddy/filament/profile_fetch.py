@@ -24,13 +24,14 @@ import asyncio
 import hashlib
 import io
 import json
+import logging
 import math
 import zipfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from typing import TYPE_CHECKING, Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
 from uuid import UUID
 
 from fastapi import status
@@ -39,6 +40,8 @@ from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
+from temporalio.client import Client
+from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.models import KProfile
@@ -48,16 +51,21 @@ from scadbuddy.filament.models import TypeKValue, TypePreset
 from scadbuddy.filament.types import SpoolTypeStore
 from scadbuddy.orders.attachments import blob_path, keep_file
 from scadbuddy.profile_fetch.wire import (
+    FETCH_WORKFLOW,
     MAX_FILE_BYTES,
     ExportFailure,
     ExportTarget,
+    FetchAsk,
     ImportOutcome,
     MissingKey,
+    fetch_workflow_id,
 )
 from scadbuddy.slicing.held_presets import HeldPresetStore, refresh_held_presets
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
+
+logger = logging.getLogger(__name__)
 
 Conn = Connection[DictRow]
 Status = Literal["running", "imported", "partial", "failed"]
@@ -77,6 +85,8 @@ NO_FILE: Final = "the profile-fetch worker sent no file for it"
 NO_PRESET: Final = "no preset for this printer and nozzle yet"
 #: The deepest a preset file may nest (the document itself is level 1).
 MAX_DEPTH: Final = 32
+#: The ``error`` of a run whose workflow Temporal did not start.
+NOT_STARTED: Final = "the fetch could not be started"
 #: The keys only a printer or a process preset has.
 SETTINGS_IDS: Final = frozenset({"printer_settings_id", "print_settings_id"})
 
@@ -100,9 +110,25 @@ class ProfileFetch(BaseModel):
 _COLUMNS = ", ".join(ProfileFetch.model_fields)
 
 
+class ProfileFetchStarted(BaseModel):
+    """``POST /filament/types/{id}/profile-fetch``: the run, and whether it was one
+    already running (``joined``)."""
+
+    run: ProfileFetch
+    joined: bool
+
+
+class ProfileFetchStatus(BaseModel):
+    """``GET /filament/types/{id}/profile-fetch``: the type's last run, if any, and the
+    targets it has no preset for (`ProfileFetches.gaps`)."""
+
+    run: ProfileFetch | None
+    gaps: list[MissingKey]
+
+
 class FetchRefusedError(Exception):
     """A fetch that cannot start: ``code`` is ``type_not_found``, ``no_tdfp_id`` (the
-    type has no 3DFP id) or ``no_targets`` (no printer has a model)."""
+    type has no 3DFP id) or ``no_printer_models`` (no printer has a model)."""
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
@@ -120,6 +146,8 @@ class ProfileFetches:
     def open(self, type_id: UUID, *, actor: str) -> tuple[ProfileFetch, bool]:
         """A new running fetch of the type, or the one already running (``True``: it
         joined it). Under the type's row lock, so two opens make one run."""
+        # The setting takes a connection of its own: read it before taking ours.
+        nozzles = list(self._nozzles())
         with self._pool.connection() as conn, conn.transaction():
             kind = conn.execute(
                 "SELECT tdfp_id FROM filament_spool_types WHERE id = %s FOR UPDATE", (type_id,)
@@ -135,9 +163,11 @@ class ProfileFetches:
                 return ProfileFetch.model_validate(running), True
             if kind["tdfp_id"] is None:
                 raise FetchRefusedError("no_tdfp_id", "the type has no 3dfilamentprofiles id")
-            targets = self._targets(conn)
+            targets = self._targets(conn, nozzles)
             if not targets:
-                raise FetchRefusedError("no_targets", "no printer has a model to fetch for")
+                raise FetchRefusedError(
+                    "no_printer_models", "no printer has a model to fetch presets for"
+                )
             row = conn.execute(
                 "INSERT INTO filament_profile_fetches (type_id, tdfp_id, targets, started_by)"
                 f" VALUES (%s, %s, %s, %s) RETURNING {_COLUMNS}",
@@ -166,8 +196,9 @@ class ProfileFetches:
     def gaps(self, type_id: UUID) -> list[MissingKey]:
         """The targets as they stand now (the printers' models, the nozzle setting) that
         the type has no preset row for, each with the reason its last fetch gave, if any."""
+        nozzles = list(self._nozzles())
         with self._pool.connection() as conn:
-            targets = self._targets(conn)
+            targets = self._targets(conn, nozzles)
             have = {
                 (row["printer_model"], row["nozzle_diameter"])
                 for row in conn.execute(
@@ -192,8 +223,19 @@ class ProfileFetches:
             if (target.printer_model, nozzle) not in have
         ]
 
-    def _targets(self, conn: Conn) -> list[ExportTarget]:
-        nozzles = list(self._nozzles())
+    def fail_unstarted(self, run_id: UUID) -> None:
+        """The run ends ``failed`` with `NOT_STARTED` when it still runs: Temporal did
+        not take its start, so no workflow will end it, and a later start must open a
+        new run rather than join this one."""
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE filament_profile_fetches SET status = 'failed', error = %s,"
+                " finished_at = now() WHERE id = %s AND status = 'running'",
+                (NOT_STARTED, run_id),
+            )
+
+    @staticmethod
+    def _targets(conn: Conn, nozzles: list[str]) -> list[ExportTarget]:
         rows = conn.execute(
             "SELECT DISTINCT model FROM printers WHERE model IS NOT NULL ORDER BY model"
         ).fetchall()
@@ -206,6 +248,94 @@ class ProfileFetches:
             " ORDER BY started_at DESC, id DESC LIMIT 1",
             (type_id,),
         ).fetchone()
+
+
+# -- starting a fetch ---------------------------------------------------------------------
+
+
+class Starter(Protocol):
+    """Starts a run's workflow (`FetchStarter`; a test's fake)."""
+
+    async def start(self, ask: FetchAsk) -> None: ...
+
+
+class FetchStarter:
+    """`FETCH_WORKFLOW` on the profile-fetch worker's queue, one per type: a workflow
+    already running for the type is joined, and one that ended is started again."""
+
+    def __init__(self, client: Client, task_queue: str) -> None:
+        self.client = client
+        self.task_queue = task_queue
+
+    async def start(self, ask: FetchAsk) -> None:
+        await self.client.start_workflow(
+            FETCH_WORKFLOW,
+            ask,
+            id=fetch_workflow_id(ask.type_id),
+            task_queue=self.task_queue,
+            id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
+            id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
+        )
+
+
+def starter(state: AppState) -> Starter:
+    """The app's starter: the operations' client, on the profile-fetch worker's queue."""
+    from scadbuddy.operations.component import OPERATIONS
+
+    ops = state.components.get(OPERATIONS)
+    return FetchStarter(ops.client, state.settings.temporal_task_queue_profile_fetch)
+
+
+def fetches(state: AppState) -> ProfileFetches:
+    """The app's runs, with ``profile_fetch_nozzles`` read on each use (a live setting)."""
+    store = state.settings_store
+
+    def nozzles() -> list[str]:
+        value: list[str] = store.read({"profile_fetch_nozzles"})["profile_fetch_nozzles"]
+        return value
+
+    return ProfileFetches(store.pool, nozzles)
+
+
+class FetchNotStartedError(Exception):
+    """Temporal did not take the start; the run ended ``failed`` (`NOT_STARTED`)."""
+
+
+async def start_fetch(state: AppState, type_id: UUID, *, actor: str) -> ProfileFetchStarted:
+    """Open the type's run (`ProfileFetches.open`) and start its workflow. A run already
+    running is joined, and its workflow is not started again. `FetchRefusedError` when
+    the type cannot be fetched; `FetchNotStartedError` when Temporal did not take the
+    start, after the run is ended ``failed``."""
+    runs = fetches(state)
+    run, joined = await asyncio.to_thread(runs.open, type_id, actor=actor)
+    if not joined:
+        ask = FetchAsk(
+            run_id=str(run.id), type_id=str(type_id), tdfp_id=run.tdfp_id, targets=run.targets
+        )
+        try:
+            await starter(state).start(ask)
+        except Exception as exc:
+            await asyncio.to_thread(runs.fail_unstarted, run.id)
+            raise FetchNotStartedError(NOT_STARTED) from exc
+    return ProfileFetchStarted(run=run, joined=joined)
+
+
+async def start_profile_fetches(state: AppState, type_ids: Sequence[UUID], *, actor: str) -> None:
+    """Start a fetch for each type that has a 3DFP id (an invoice confirm's new types,
+    plan Decision 12). A type without one is skipped; any other refusal or failure is
+    logged, never raised, so it never fails the caller."""
+    for type_id in type_ids:
+        try:
+            await start_fetch(state, type_id, actor=actor)
+        except FetchRefusedError as refused:
+            if refused.code != "no_tdfp_id":
+                logger.warning(
+                    "did not start the profile fetch of spool type %s: %s", type_id, refused
+                )
+        except Exception:
+            logger.warning(
+                "could not start the profile fetch of spool type %s", type_id, exc_info=True
+            )
 
 
 # -- the worker's routes ------------------------------------------------------------------

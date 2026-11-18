@@ -534,10 +534,14 @@ class InvoiceStore:
 
     # -- confirm ------------------------------------------------------------------------
 
-    def confirm(self, invoice_id: UUID, *, actor: str) -> tuple[pm.InvoiceDetail, bool] | None:
+    def confirm(
+        self, invoice_id: UUID, *, actor: str
+    ) -> tuple[pm.InvoiceDetail, bool, tuple[UUID, ...]] | None:
         """Turn a draft into types, supplier products, spools with their cost, and price
-        points, in one transaction (Decisions 3, 4, 9, 11-13). ``(invoice, confirmed_now)``;
-        false when it was already confirmed (nothing more is made); ``None`` for no such
+        points, in one transaction (Decisions 3, 4, 9, 11-13). ``(invoice, confirmed_now,
+        new_type_ids)``: the ids of the types this confirm made from proposed types
+        (#6625: the caller starts their preset fetches); ``confirmed_now`` is false, and
+        the ids empty, when it was already confirmed (nothing more is made); ``None`` for no such
         invoice. A refusal is a typed `ValueError` and nothing is written. `actor` is unused:
         the events carry `invoice:<id>` as the actor."""
         shop = self._shop_currency()
@@ -550,7 +554,7 @@ class InvoiceStore:
             if head is None:
                 return None
             if head["status"] == "confirmed":
-                return self._detail_of(conn, invoice_id), False
+                return self._detail_of(conn, invoice_id), False, ()
             lines = conn.execute(
                 "SELECT id, position, description, sku, quantity, line_total, allocated_cost,"
                 " type_id, supplier_product_id, proposed_type, update_spool_ids"
@@ -586,7 +590,8 @@ class InvoiceStore:
                 " updated_at = now() WHERE id = %s",
                 (invoice_id,),
             )
-            return self._detail_of(conn, invoice_id), True
+            made_ids = tuple(made_id for made_id, _ in made.values())
+            return self._detail_of(conn, invoice_id), True, made_ids
 
     def _detail_of(self, conn: Conn, invoice_id: UUID) -> pm.InvoiceDetail:
         found = self._detail(conn, invoice_id)

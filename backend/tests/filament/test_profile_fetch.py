@@ -69,7 +69,7 @@ def test_a_second_open_joins_the_running_one(pg_pool: PgPool) -> None:
 
 @pytest.mark.parametrize(
     ("tdfp_id", "printer", "code"),
-    [(None, True, "no_tdfp_id"), (30173, False, "no_targets")],
+    [(None, True, "no_tdfp_id"), (30173, False, "no_printer_models")],
 )
 def test_a_run_needs_a_tdfp_id_and_a_target(
     pg_pool: PgPool, tdfp_id: int | None, printer: bool, code: str
