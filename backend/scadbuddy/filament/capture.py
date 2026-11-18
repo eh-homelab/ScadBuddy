@@ -365,18 +365,24 @@ def reconcile_all(
 
 
 def sync_ams_weights(pool: ConnectionPool[Conn], *, actor: str, now: datetime) -> m.AmsSyncResult:
-    """Book the AMS's ``remain`` of every spool loaded in a tray now as an ``ams_reading``
-    timed ``now`` (``data.forced``), so it anchors the grams left (#6268 Decision 2). Each
-    printer is one transaction: its report row is locked first, then its spools, as
-    `reconcile_all` does. The tray's holder is the spool placed there now, never an older
-    one. A spool is counted once: ``booked``, ``locked`` (its weight is locked),
-    ``printing`` (its printer is printing), ``no_remain`` (its tray shows no ``remain``,
-    or none at all) or ``stale`` (its printer's report is older than `is_fresh`)."""
+    """Book the AMS's ``remain`` of every spool in a printer's tray place now as an
+    ``ams_reading`` timed ``now`` (``data.forced``), so it anchors the grams left (#6268
+    Decision 2). Each printer is one transaction: its report row is locked first, then its
+    spools, as `reconcile_all` does, and the holders and weight locks are read after the
+    spool locks, so a lock set meanwhile is honoured. The tray's holder is the spool placed
+    there now, never an older one (an AMS-unit place holds no spool). Each such spool is
+    counted once: ``booked``, ``locked`` (its weight is locked), ``printing`` (its printer
+    is printing), ``no_remain`` (its tray shows no ``remain``, or none at all) or ``stale``
+    (its printer has no report, or one older than `is_fresh`). A spool in no tray place is
+    not counted."""
     with pool.connection() as conn:
         ids = [
             str(r["printer_id"])
             for r in conn.execute(
-                "SELECT printer_id FROM printer_reports ORDER BY printer_id"
+                "SELECT printer_id FROM printer_reports"
+                " UNION SELECT printer_id FROM filament_locations"
+                " WHERE printer_id IS NOT NULL AND tray_id IS NOT NULL AND archived_at IS NULL"
+                " ORDER BY printer_id"
             ).fetchall()
         ]
     result = m.AmsSyncResult()
@@ -386,18 +392,19 @@ def sync_ams_weights(pool: ConnectionPool[Conn], *, actor: str, now: datetime) -
                 "SELECT report, seen_at FROM printer_reports WHERE printer_id = %s FOR UPDATE",
                 (printer_id,),
             ).fetchone()
-            printer = PrinterStore.read_on(conn, printer_id)
-            if row is None or printer is None:
-                continue
+            places, current, _ = _holders(conn, printer_id)
+            lock(conn, sorted({s for spools in current.values() for s in spools}))
             places, current, locked = _holders(conn, printer_id)
             holders = sorted({s for spools in current.values() for s in spools})
-            lock(conn, holders)
+            if row is None or not is_fresh(row["seen_at"], now):
+                result.stale += len(holders)
+                continue
+            printer = PrinterStore.read_on(conn, printer_id)
+            if printer is None:
+                continue
             report = dict(row["report"])
             state = report.get("gcode_state")
             printing = isinstance(state, str) and state in RUNNING
-            if not is_fresh(row["seen_at"], now):
-                result.stale += len(holders)
-                continue
             if printing:
                 result.printing += len(holders)
                 continue

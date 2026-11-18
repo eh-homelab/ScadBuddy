@@ -3,6 +3,7 @@ remain of every loaded, unlocked spool as a reading that anchors."""
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from uuid import UUID
 
@@ -140,3 +141,31 @@ def test_a_reloaded_tray_syncs_only_its_holder(pg_pool: PgPool) -> None:
     result = _sync(pg_pool, T0 + timedelta(seconds=4))
     assert result.spools == [new]
     assert len(_events(pg_pool, old, "ams_reading")) == 1
+
+
+def test_a_lock_set_before_the_spool_locks_is_honoured(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pid, _ = _printer(pg_pool)
+    spool = _loaded(pg_pool, pid)
+    real = capture.lock
+
+    def lock_after_a_weight_lock(conn: capture.Conn, spool_ids: Sequence[UUID]) -> None:
+        with pg_pool.connection() as other:
+            other.execute("UPDATE filament_spools SET weight_locked = true WHERE id = %s", (spool,))
+        real(conn, spool_ids)
+
+    monkeypatch.setattr(capture, "lock", lock_after_a_weight_lock)
+    result = _sync(pg_pool)
+    assert (result.booked, result.locked) == (0, 1)
+    assert len(_events(pg_pool, spool, "ams_reading")) == 1
+
+
+def test_a_spool_on_a_printer_with_no_report_counts_as_stale(pg_pool: PgPool) -> None:
+    pid, _ = _printer(pg_pool)
+    spool = _loaded(pg_pool, pid)
+    with pg_pool.connection() as conn:
+        conn.execute("DELETE FROM printer_reports WHERE printer_id = %s", (pid,))
+    result = _sync(pg_pool)
+    assert (result.booked, result.stale) == (0, 1)
+    assert len(_events(pg_pool, spool, "ams_reading")) == 1

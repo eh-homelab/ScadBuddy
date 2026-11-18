@@ -450,8 +450,8 @@ async def import_spools(
         "of its grams left (remain times its label weight) that outranks older ones. Skips "
         "a spool whose weight is locked, every spool of a printer that is printing, one "
         "whose tray reports no `remain` (only RFID trays do), and every spool of a printer "
-        "whose report is stale. Each loaded spool is in one count; `spools` are the ones "
-        "booked."
+        "with no report or a stale one. Each spool in a printer's tray is in one count; "
+        "`spools` are the ones booked."
     ),
 )
 async def sync_ams_weights(filament: FilamentDep, caller: CallerDep) -> m.AmsSyncResult:

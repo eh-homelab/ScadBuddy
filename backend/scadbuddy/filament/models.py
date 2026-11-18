@@ -1285,7 +1285,8 @@ class LedgerRow(SpoolEvent):
 
 
 class AmsSyncResult(BaseModel):
-    """What one sync of the AMS's weights did (#6268); each loaded spool is in one count."""
+    """What one sync of the AMS's weights did (#6268). Each spool in a printer's tray place is
+    in one count; a spool elsewhere is in none."""
 
     booked: int = 0
     #: Spools whose weight is locked.
@@ -1294,7 +1295,7 @@ class AmsSyncResult(BaseModel):
     printing: int = 0
     #: Spools whose tray shows no ``remain`` (no RFID, or no tray in the report).
     no_remain: int = 0
-    #: Spools in a printer whose report is too old to read.
+    #: Spools in a printer with no report, or one too old to read.
     stale: int = 0
     #: The spools booked.
     spools: list[UUID] = Field(default_factory=list)
