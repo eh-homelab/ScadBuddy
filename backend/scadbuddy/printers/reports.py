@@ -28,6 +28,9 @@ A write that shows a print running that was not running before it returns the st
 The row's ``running_subtask`` changes once per job, under the row's lock, so one job
 gives one start, also across a reconnect's ``pushall`` and a new attempt of the watch.
 
+A written report and a touch also move the printer's hour counter (`run_hours.py`,
+#5774) in their transaction, the report row locked first, then the counter row.
+
 A stored report reads as the printer's status through `report_status`, as the print
 dialog and the SB tray resolution (`filament/inventory.py`) read it."""
 
@@ -46,6 +49,7 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.bambuddy.models import PrinterStatus
 from scadbuddy.filament import prints
+from scadbuddy.printers import run_hours
 from scadbuddy.printers.lan_models import LanReport
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.status import RUNNING as RUNNING  # re-exported (`progress`)
@@ -276,20 +280,24 @@ class PrinterReportStore:
         ).rowcount
         if not written:
             return Advance()
+        run_hours.advance_in(conn, printer_id, seen_at, report)
         _capture(conn, printer_id, ended, None if old is None else old["report"], report, seen_at)
         return Advance(ended=ended, started=started_print(before, running))
 
     def touch(self, printer_id: str, seen_at: datetime) -> None:
         """Heard from as late as ``seen_at``, with nothing new to say; never earlier than
-        what the row already says."""
+        what the row already says. The hour counter moves in the same transaction
+        (`run_hours.advance_in`), locked after the report row, as in `advance_in`."""
         key = printer_uuid(printer_id)
         if key is None:
             return
-        with self.pool.connection() as conn:
-            conn.execute(
+        with self.pool.connection() as conn, conn.transaction():
+            touched = conn.execute(
                 "UPDATE printer_reports SET seen_at = GREATEST(seen_at, %s) WHERE printer_id = %s",
                 (seen_at, printer_id),
-            )
+            ).rowcount
+            if touched:
+                run_hours.advance_in(conn, printer_id, seen_at, None)
 
     def get(self, printer_id: str) -> tuple[dict[str, Any], datetime] | None:
         key = printer_uuid(printer_id)
