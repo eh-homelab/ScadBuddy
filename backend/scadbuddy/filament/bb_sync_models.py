@@ -10,8 +10,9 @@ the agent read.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
+from enum import Enum
 from typing import Any, Literal, cast
 from uuid import UUID
 
@@ -75,19 +76,41 @@ _SUPPLIER_FIELDS = frozenset(
 )
 
 
-#: The `SEEN_FIELDS` for which Bambuddy gives a float, so ``0`` and ``0.0`` are one value.
-_FLOAT_FIELDS = frozenset({"cost_per_kg", "weight_used"})
+#: The money and weight fields, as `SEEN_FIELDS` names and as a supplier link's price key:
+#: a whole number in them is a float, so ``0`` and ``0.0`` are one value on both sides.
+_FLOAT_FIELDS = frozenset(
+    {
+        "cost_per_kg",
+        "label_weight",
+        "core_weight",
+        "weight_used",
+        "quoted_price_per_kg",
+    }
+)
+
+
+def _amount(key: str, value: object) -> object:
+    if key in _FLOAT_FIELDS and isinstance(value, int) and not isinstance(value, bool):
+        return float(value)
+    return value
 
 
 def json_form(value: object) -> object:
     """``value`` in the one JSON form of a ``bb_seen`` value, item by item through lists and
     dicts: a `Decimal` is a float, a datetime is UTC ISO text ending in ``Z`` (a naive one
-    counts as UTC), anything else stays. `seen_row` and `seen_value` both use it, so the
-    stored form and SB's form cannot differ."""
+    counts as UTC), a date is ISO text, a UUID is text, an Enum is its value, anything else
+    stays. `seen_row` and `seen_value` both use it, so the stored form and SB's form cannot
+    differ."""
     if isinstance(value, Decimal):
         return float(value)
     if isinstance(value, datetime):
         return as_utc(value).astimezone(UTC).isoformat().replace("+00:00", "Z")
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, Enum):
+        return json_form(value.value)
     if isinstance(value, list | tuple):
         return [json_form(v) for v in value]
     if isinstance(value, dict):
@@ -96,31 +119,31 @@ def json_form(value: object) -> object:
 
 
 def _suppliers_form(links: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The supplier links as the sync compares them: what ``PUT …/suppliers`` sends, sorted
-    by ``supplier_id``."""
-    rows = [{k: v for k, v in link.items() if k in _SUPPLIER_FIELDS} for link in links]
-    forms: list[dict[str, Any]] = [cast("dict[str, Any]", json_form(r)) for r in rows]
+    """The supplier links as the sync compares them: all four keys of what ``PUT
+    …/suppliers`` sends (a missing one is ``None``), sorted by ``supplier_id``."""
+    forms: list[dict[str, Any]] = [
+        {k: _amount(k, json_form(link.get(k))) for k in sorted(_SUPPLIER_FIELDS)} for link in links
+    ]
     return sorted(forms, key=lambda r: r["supplier_id"])
 
 
 def seen_value(field: str, value: object) -> object:
     """An SB ``value`` for the `SEEN_FIELDS` name ``field``, in exactly the form `seen_row`
-    stores for it (`json_form`; ``rgba`` and ``extra_colors`` canonical; a float field's int
-    a float; the supplier links as `_suppliers_form`). The plan compares and hashes SB's
+    stores for it (`json_form`; ``rgba`` and ``extra_colors`` canonical; a money or weight
+    field's int a float; the supplier links as `_suppliers_form`). The plan compares and hashes SB's
     side through this, never raw (M2 of the Task 3 review). The archive state is compared
     as ``archived_at is None``, not by time."""
+    if field == "suppliers":
+        links = [] if value is None else list(cast("list[Any]", value))
+        return _suppliers_form(cast("list[dict[str, Any]]", links))
     if value is None:
         return None
-    if field in _FLOAT_FIELDS and isinstance(value, Decimal | int):
-        return float(value)
     if field == "rgba" and isinstance(value, str):
         return canonical_rgba(value)
     if field == "extra_colors":
         text = ",".join(value) if isinstance(value, list | tuple) else value
         return canonical_colours(text if isinstance(text, str) else None)
-    if field == "suppliers":
-        return _suppliers_form(cast("list[dict[str, Any]]", list(cast("list[Any]", value))))
-    return json_form(value)
+    return _amount(field, json_form(value))
 
 
 def seen_row(row: BbSpool) -> dict[str, Any]:

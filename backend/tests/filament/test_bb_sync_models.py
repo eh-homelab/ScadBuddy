@@ -19,6 +19,7 @@ from scadbuddy.filament.bb_sync_models import (
     PlanRequest,
     SyncPassResult,
     SyncPlan,
+    json_form,
     seen_row,
     seen_value,
 )
@@ -238,7 +239,7 @@ def test_seen_value_is_seen_row_for_every_field() -> None:
     sb = {f: bb.get(f) for f in _DECISION_14_FIELDS}
     sb |= {
         "rgba": "#68819780",
-        "extra_colors": ["#ff0000", "#00ff0080"],
+        "extra_colors": ["#FF0000FF", "#00FF0080"],
         "cost_per_kg": Decimal("19.5000"),
         "weight_used": 12,
         "archived_at": datetime(2026, 11, 2, 13, 30, tzinfo=ist),
@@ -254,7 +255,7 @@ def test_seen_value_is_seen_row_for_every_field() -> None:
             {
                 "supplier_id": 9,
                 "supplier_article_number": None,
-                "quoted_price_per_kg": Decimal("21"),
+                "quoted_price_per_kg": 21,
                 "is_purchase_source": False,
             },
         ][::-1],
@@ -263,3 +264,46 @@ def test_seen_value_is_seen_row_for_every_field() -> None:
     for field in sorted(_DECISION_14_FIELDS):
         assert seen_value(field, sb[field]) == seen[field], field
         assert _hash(seen_value(field, sb[field])) == _hash(seen[field]), field
+
+
+def test_json_form_turns_ids_dates_and_enums_into_json_values() -> None:
+    from datetime import date
+    from enum import Enum
+    from uuid import UUID
+
+    class Colour(Enum):
+        RED = "red"
+
+    uid = UUID("12345678-1234-5678-1234-567812345678")
+    form = json_form({"a": [uid, date(2026, 11, 2)], "b": (Colour.RED,)})
+    assert form == {"a": [str(uid), "2026-11-02"], "b": ["red"]}
+    assert json.dumps(form)
+
+
+def test_whole_number_amounts_are_floats_on_both_sides() -> None:
+    for field in ("cost_per_kg", "label_weight", "core_weight", "weight_used"):
+        sb = seen_value(field, 250)
+        assert sb == 250.0 and isinstance(sb, float), field
+    assert seen_value("weight_locked", True) is True
+    link = {"supplier_id": 1, "quoted_price_per_kg": 21}
+    price = seen_value("suppliers", [link])[0]["quoted_price_per_kg"]  # type: ignore[index]
+    assert isinstance(price, float)
+    seen = _seen(label_weight=1000, core_weight=250)
+    assert isinstance(seen["label_weight"], float) and isinstance(seen["core_weight"], float)
+
+
+def test_no_supplier_links_is_an_empty_list() -> None:
+    assert seen_value("suppliers", None) == []
+    assert _seen(suppliers=[])["suppliers"] == []
+
+
+def test_a_link_missing_a_key_gets_it_as_none() -> None:
+    sb = seen_value("suppliers", [{"supplier_id": 7}])
+    assert sb == [
+        {
+            "supplier_id": 7,
+            "supplier_article_number": None,
+            "quoted_price_per_kg": None,
+            "is_purchase_source": None,
+        }
+    ]

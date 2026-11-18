@@ -781,6 +781,14 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     the Task 3 re-review). Cost: a table test builds one BB row and its SB-side values.
 33. Task 3 (R-T3-8): Decision 22's note says Decision 29 added `Manage Inventory`. Why: the old
     note said it was left out, which was false once item 29 landed.
+34. Task 3 (R-T3-9): `json_form` also turns a UUID into text, a date (not a datetime) into ISO
+    text and an Enum into its value, recursively. A whole number in a money or weight field
+    (`cost_per_kg`, `label_weight`, `core_weight`, `weight_used`, a supplier link's
+    `quoted_price_per_kg`; the constant `_FLOAT_FIELDS`) is a float on both sides.
+    `seen_value("suppliers", None)` is `[]`, and a link that lacks a PUT key gets it as `None`,
+    so it matches the full-key form `seen_row` stores (sorted by `supplier_id`). Why: M-1 to M-3
+    of the Task 3 re-review 2. Cost: none; the table test now uses SB's real forms
+    (`extra_colors` as upper-case `#RRGGBBAA` strings, an int price).
 
 ## Self-review
 
