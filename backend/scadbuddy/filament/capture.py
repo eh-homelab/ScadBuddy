@@ -41,6 +41,7 @@ from psycopg_pool import ConnectionPool
 from scadbuddy.bambuddy.models import PrinterStatus
 from scadbuddy.bambuddy.trays import EXTERNAL, loading_trays, place_label, seen_trays
 from scadbuddy.filament import ledger, prints
+from scadbuddy.filament import models as m
 from scadbuddy.filament.inventory import FilamentInventory
 from scadbuddy.filament.locations import LocationStore
 from scadbuddy.printers.lan_models import LanReport
@@ -221,6 +222,30 @@ def _reading_due(conn: Conn, spool_id: UUID, key: tuple[UUID, int, int], remain:
     )
 
 
+def _holders(
+    conn: Conn, printer_id: str
+) -> tuple[dict[tuple[int, int], UUID], dict[UUID, list[UUID]], set[UUID]]:
+    """The printer's tray places by ``(ams_id, tray_id)``, the unarchived spools now in each
+    place, and those of them whose weight is locked. An AMS-unit place is no tray."""
+    places: dict[tuple[int, int], UUID] = {}
+    current: dict[UUID, list[UUID]] = {}
+    locked: set[UUID] = set()
+    for found in conn.execute(
+        "SELECT l.id, l.ams_id, l.tray_id, s.id AS spool_id, s.weight_locked"
+        " FROM filament_locations l"
+        " LEFT JOIN filament_spools s ON s.location_id = l.id AND s.archived_at IS NULL"
+        " WHERE l.printer_id = %s AND l.tray_id IS NOT NULL AND l.archived_at IS NULL"
+        " ORDER BY s.id",
+        (printer_id,),
+    ).fetchall():
+        places[(found["ams_id"], found["tray_id"])] = found["id"]
+        if found["spool_id"] is not None:
+            current.setdefault(found["id"], []).append(found["spool_id"])
+            if found["weight_locked"]:
+                locked.add(found["spool_id"])
+    return places, current, locked
+
+
 def reconcile(
     conn: Conn, printer_id: str, report: Mapping[str, Any], seen_at: datetime, *, actor: str
 ) -> CaptureResult:
@@ -233,18 +258,7 @@ def reconcile(
     status = _status(row, report, seen_at)
     filled = {(t.ams_id, t.tray_id): t for t in seen_trays(status)}
     loading = loading_trays(status)
-    places: dict[tuple[int, int], UUID] = {}
-    current: dict[UUID, list[UUID]] = {}
-    for found in conn.execute(
-        "SELECT l.id, l.ams_id, l.tray_id, s.id AS spool_id FROM filament_locations l"
-        " LEFT JOIN filament_spools s ON s.location_id = l.id AND s.archived_at IS NULL"
-        " WHERE l.printer_id = %s AND l.tray_id IS NOT NULL AND l.archived_at IS NULL"
-        " ORDER BY s.id",
-        (printer_id,),
-    ).fetchall():
-        places[(found["ams_id"], found["tray_id"])] = found["id"]
-        if found["spool_id"] is not None:
-            current.setdefault(found["id"], []).append(found["spool_id"])
+    places, current, _ = _holders(conn, printer_id)
     state = report.get("gcode_state")
     printing = isinstance(state, str) and state in RUNNING
     job = report.get("subtask_name") if printing else None
@@ -348,3 +362,66 @@ def reconcile_all(
                 extra={"printer_id": printer_id, "what": "backstop", "error": type(error).__name__},
             )
     return total
+
+
+def sync_ams_weights(pool: ConnectionPool[Conn], *, actor: str, now: datetime) -> m.AmsSyncResult:
+    """Book the AMS's ``remain`` of every spool loaded in a tray now as an ``ams_reading``
+    timed ``now`` (``data.forced``), so it anchors the grams left (#6268 Decision 2). Each
+    printer is one transaction: its report row is locked first, then its spools, as
+    `reconcile_all` does. The tray's holder is the spool placed there now, never an older
+    one. A spool is counted once: ``booked``, ``locked`` (its weight is locked),
+    ``printing`` (its printer is printing), ``no_remain`` (its tray shows no ``remain``,
+    or none at all) or ``stale`` (its printer's report is older than `is_fresh`)."""
+    with pool.connection() as conn:
+        ids = [
+            str(r["printer_id"])
+            for r in conn.execute(
+                "SELECT printer_id FROM printer_reports ORDER BY printer_id"
+            ).fetchall()
+        ]
+    result = m.AmsSyncResult()
+    for printer_id in ids:
+        with pool.connection() as conn, conn.transaction():
+            row = conn.execute(
+                "SELECT report, seen_at FROM printer_reports WHERE printer_id = %s FOR UPDATE",
+                (printer_id,),
+            ).fetchone()
+            printer = PrinterStore.read_on(conn, printer_id)
+            if row is None or printer is None:
+                continue
+            places, current, locked = _holders(conn, printer_id)
+            holders = sorted({s for spools in current.values() for s in spools})
+            lock(conn, holders)
+            report = dict(row["report"])
+            state = report.get("gcode_state")
+            printing = isinstance(state, str) and state in RUNNING
+            if not is_fresh(row["seen_at"], now):
+                result.stale += len(holders)
+                continue
+            if printing:
+                result.printing += len(holders)
+                continue
+            filled = {(t.ams_id, t.tray_id): t for t in seen_trays(_status(printer, report, now))}
+            for (ams_id, tray_id), place in places.items():
+                seen = filled.get((ams_id, tray_id))
+                for spool in current.get(place, []):
+                    if spool in locked:
+                        result.locked += 1
+                    elif seen is None or seen.remain is None:
+                        result.no_remain += 1
+                    else:
+                        ledger.record(
+                            conn,
+                            spool,
+                            "ams_reading",
+                            source="ams_remain",
+                            printer=UUID(printer_id),
+                            ams_id=ams_id,
+                            tray_id=tray_id,
+                            actor=actor,
+                            at=now,
+                            data={"remain_pct": seen.remain, "printing": False, "forced": True},
+                        )
+                        result.booked += 1
+                        result.spools.append(spool)
+    return result

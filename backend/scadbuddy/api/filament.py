@@ -8,6 +8,7 @@ only reads."""
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from typing import Annotated, Any, cast
 from uuid import UUID
 
@@ -25,6 +26,7 @@ from scadbuddy.crud.idempotency import (
     idempotent_write,
     required_key,
 )
+from scadbuddy.filament import capture
 from scadbuddy.filament import models as m
 from scadbuddy.filament.assignments_cache import AssignmentsCache
 from scadbuddy.filament.bambuddy_pull import PullReport, read_and_pull, try_assignments
@@ -437,6 +439,25 @@ async def import_spools(
     except ImportRefusedError as exc:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from None
     return ImportPreview.model_validate(done.body)
+
+
+@router.post(
+    "/spools/sync-ams-weights",
+    response_model=m.AmsSyncResult,
+    summary="Sync weights from the AMS",
+    description=(
+        "Books the AMS's remaining percent of each spool loaded in a tray now, as a reading "
+        "of its grams left (remain times its label weight) that outranks older ones. Skips "
+        "a spool whose weight is locked, every spool of a printer that is printing, one "
+        "whose tray reports no `remain` (only RFID trays do), and every spool of a printer "
+        "whose report is stale. Each loaded spool is in one count; `spools` are the ones "
+        "booked."
+    ),
+)
+async def sync_ams_weights(filament: FilamentDep, caller: CallerDep) -> m.AmsSyncResult:
+    return await asyncio.to_thread(
+        capture.sync_ams_weights, filament.spools.pool, actor=actor(caller), now=datetime.now(UTC)
+    )
 
 
 @router.get(

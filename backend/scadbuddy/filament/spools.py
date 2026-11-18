@@ -732,6 +732,12 @@ class FilamentSpoolStore:
         key, are `TagKeysClashError`."""
         return FilamentSpoolStore._tag(conn, uid, tray, kind)
 
+    @property
+    def pool(self) -> ConnectionPool[Conn]:
+        """The pool the store runs on, for a writer that locks printer rows first
+        (`filament/capture.py` `sync_ams_weights`)."""
+        return self._pool
+
     @contextmanager
     def transaction(self) -> Iterator[Conn]:
         """A connection in a transaction, for a caller that writes a spool, its tags and
