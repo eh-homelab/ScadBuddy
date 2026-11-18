@@ -288,9 +288,7 @@ def test_ids_are_uuids_and_a_malformed_id_is_not_found(printers: PrinterStore) -
 def test_every_reference_to_a_printer_is_merged(pg_pool: PgPool) -> None:
     """I7: every foreign key to `printers.id` is in `PRINTER_REFERENCES`, so a merge
     repoints it. A table that names a printer without one (Task 8's activity
-    attribution) must add itself too. The retired overlay's ``tray_spool_links`` is left
-    out: nothing reads it since #6262 Task 12, and the PR that drops it drops this
-    exception."""
+    attribution) must add itself too."""
     with pg_pool.connection() as conn:
         rows = conn.execute(
             "SELECT cl.relname AS t, a.attname AS c FROM pg_constraint co"
@@ -303,7 +301,7 @@ def test_every_reference_to_a_printer_is_merged(pg_pool: PgPool) -> None:
     listed = {
         (ref.table, ref.column) for ref in PRINTER_REFERENCES if isinstance(ref, PrinterReference)
     }
-    assert fks - {("tray_spool_links", "printer_id")} <= listed
+    assert fks <= listed
 
 
 def test_a_synthetic_row_merges_into_the_row_holding_the_serial(
