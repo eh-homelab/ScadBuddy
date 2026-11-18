@@ -58,6 +58,23 @@ function translucent(colour: string | null | undefined): boolean {
   return rgba !== null && isTranslucent(rgba)
 }
 
+/**
+ * #6349 — the least opacity the 3D preview draws a part at. A clear filament (alpha
+ * `00`-`20`) at its own alpha would vanish; at this floor it still shows as glass.
+ */
+export const MIN_PREVIEW_OPACITY = 0.35
+
+/** The preview's opacity for an alpha byte, 0-255: 1 at `FF`, else `alpha / 255`, never below the floor. */
+export function opacityOfAlpha(alpha: number): number {
+  return alpha >= 0xff ? 1 : Math.max(MIN_PREVIEW_OPACITY, alpha / 0xff)
+}
+
+/** The preview's opacity for a colour: opaque when it has no alpha, is `FF`, or is not hex. */
+export function previewOpacity(colour: string | null | undefined): number {
+  const rgba = colour == null ? null : parseRgba(colour)
+  return rgba === null ? 1 : opacityOfAlpha(alphaOf(rgba))
+}
+
 /** `rgba(r, g, b, a)` for CSS, alpha to three places. */
 export function cssRgba(rgba: string): string {
   const full = rgbaOf(rgba)

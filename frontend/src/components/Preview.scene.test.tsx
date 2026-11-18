@@ -13,6 +13,8 @@ const scene = vi.hoisted(() => ({
   controls: null as unknown as { target: THREE.Vector3; update: () => void },
   pending: new Map<string, { promise: Promise<void>; resolve: () => void }>(),
   orbit: {} as { maxDistance?: number },
+  /** #6349 — the canvas the viewer marks with its see-through parts. */
+  canvas: document.createElement('canvas'),
   /** #2364 — a mesh loaded from a URL, where one is wanted; else a stand-in. */
   meshes: new Map<string, THREE.Object3D>(),
   /** URLs whose load fails, as a 404 or a bad mesh does. */
@@ -31,7 +33,12 @@ vi.mock('@react-three/fiber', () => ({
     { clear: () => {} },
   ),
   useThree: (select: (state: unknown) => unknown) =>
-    select({ camera: scene.camera, controls: scene.controls, invalidate: () => {} }),
+    select({
+      camera: scene.camera,
+      controls: scene.controls,
+      invalidate: () => {},
+      gl: { domElement: scene.canvas },
+    }),
 }))
 vi.mock('@react-three/drei', () => ({
   Grid: () => null,
@@ -155,6 +162,25 @@ describe('Preview scene (#364)', () => {
     expect(scene.camera.position.length()).toBeCloseTo(80 * 1.9 + 40)
     // And its measured size is shown, as a rendered model's is (#2866).
     expect(screen.getByTestId('bbox-readout')).toHaveTextContent(/80.*40.*10/)
+  })
+
+  it('marks the canvas with each see-through part’s opacity, floored for a clear one (#6349)', () => {
+    vi.stubEnv('VITE_MOCK_API', '1')
+    onTestFinished(() => {
+      vi.unstubAllEnvs()
+    })
+    const placed = new THREE.Group()
+    const glass = new THREE.Mesh(new THREE.BoxGeometry(10, 10, 10), new THREE.MeshStandardMaterial())
+    glass.userData.scadbuddy_alpha = 0
+    const tint = new THREE.Mesh(new THREE.BoxGeometry(10, 10, 10), new THREE.MeshStandardMaterial())
+    tint.userData.scadbuddy_alpha = 128
+    placed.add(glass, tint, new THREE.Mesh(new THREE.BoxGeometry(10, 10, 10), new THREE.MeshStandardMaterial()))
+    const url = '/api/v1/jobs/a/preview.glb'
+    scene.meshes.set(url, placed)
+
+    render(<Preview unit="mm" job={job('a', box([0, 0, 0], [10, 10, 10]), { preview_url: url })} rendering={false} />)
+
+    expect(scene.canvas.getAttribute('data-see-through')).toBe('0.35,0.50')
   })
 
   it("measures a plate shown alone in model space, whatever offset the drawn clone's parent still holds (#3026 review)", () => {

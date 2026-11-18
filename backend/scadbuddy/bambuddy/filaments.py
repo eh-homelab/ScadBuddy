@@ -193,7 +193,8 @@ class SpoolOption(BaseModel):
     sb_number: int | None = None
     #: The colour with its alpha, ``#RRGGBBAA``: the held SB spool's own, else the tray's
     #: reported ``tray_color``. ``colour`` stays ``#RRGGBB``, which the render splits by;
-    #: this is what tells a translucent spool from an opaque one (`same_opacity`).
+    #: this is what tells a translucent spool from an opaque one (`same_opacity`), and
+    #: where the print dialog's 3D preview reads each slot's alpha (#6349).
     rgba: str | None = None
     #: The SB spool has no type yet (#6261): its values are its own until it gets one.
     #: ``None`` where no SB spool is known; optional, as ``tray_only`` is.
@@ -209,6 +210,8 @@ class UnknownTray(BaseModel):
     label: str
     material: str
     colour: str | None = None
+    #: ``colour`` with the reported alpha, ``#RRGGBBAA`` (#6349): the choice's own ``rgba``.
+    rgba: str | None = None
     #: "black", for "black PLA".
     colour_word: str | None = None
     #: What the tray is now, so a "no" is remembered only until it changes.
