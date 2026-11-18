@@ -572,8 +572,53 @@ IntervalSource = Literal["bambuddy", "stored", "typed", "none"]
 #: ``not_read``: a linked printer's task whose interval Bambuddy has not given (yet).
 NotCounted = Literal["calendar", "disabled", "no_interval", "not_in_bambuddy", "not_read"]
 
+#: #5774 (spec 2026-11-17-machine-rate-actuals §3.5): which figure of a wear part or task
+#: prices, a remembered choice per row. A new row starts at ``estimate``.
+PricedBy = Literal["estimate", "actual"]
+#: Which print-hour counter an event's reading is on (§3.2): Bambuddy's, ScadBuddy's own
+#: LAN counter, or typed on a printer with no counter.
+HoursSource = Literal["bambuddy", "lan_watch", "typed"]
+#: Why a row's actual does not price (§3.3): no usable gap or replacement yet, or fewer
+#: than the printer's ``actuals_window``.
+ActualWhy = Literal["too_few", "no_events"]
+#: Why a gap (a task) or a derived ``hours_used`` (a part) is not usable (§3.3).
+SkipReason = Literal["not_positive", "counter_changed"]
 
-class MaintenancePart(BaseModel):
+
+class SkippedGap(BaseModel):
+    """A gap left out of an actual's window: ``event`` and the one before it
+    (``previous``), and why."""
+
+    event: str
+    previous: str
+    reason: SkipReason
+
+
+class _Actuals(BaseModel):
+    """What a row's actual is (§3.3, §3.4, §6), on a task and on a wear part. The
+    defaults are what a quote recorded before #5774 reads: priced by its estimate, with
+    no confidence."""
+
+    priced_by: PricedBy = "estimate"
+    #: The figure that priced it: ``per_hour`` is this one's.
+    basis: PricedBy = "estimate"
+    #: The typed figure per hour; null for a task not counted.
+    estimate_per_hour: str | None = None
+    #: The logged figure per hour; null with no usable gap or replacement.
+    actual_per_hour: str | None = None
+    #: Usable gaps (a task) or replacements with a usable ``hours_used`` (a part), and the
+    #: printer's ``actuals_window``.
+    have: int = 0
+    need: int | None = None
+    #: ``floor(100 x min(have, need) / need)``; null on a quote recorded before.
+    confidence: int | None = None
+    #: An event in the window with no minutes or consumables used the typed ones.
+    partly_typed: bool = False
+    actual_why: ActualWhy | None = None
+    skipped_gaps: list[SkippedGap] = Field(default_factory=list)
+
+
+class MaintenancePart(_Actuals):
     task: str
     interval_hours: str | None
     interval_type: Literal["hours", "days"] = "hours"
@@ -582,13 +627,18 @@ class MaintenancePart(BaseModel):
     per_hour: str
     counted: bool
     why: NotCounted | None = None
+    #: The actual's mean gap and cost of one occurrence, beside the typed ones.
+    actual_interval_hours: str | None = None
+    actual_cost_per_occurrence: str | None = None
 
 
-class WearPartRate(BaseModel):
+class WearPartRate(_Actuals):
     name: str
     cost: str
     life_hours: str
     per_hour: str
+    #: The actual's mean hours a part ran, beside the typed life.
+    actual_hours_used: str | None = None
 
 
 class MachineRateBreakdown(BaseModel):
@@ -617,6 +667,11 @@ class MachineRateBreakdown(BaseModel):
     intervals: IntervalSource = "none"
     #: When the stored intervals were read from Bambuddy (``intervals`` ``stored``).
     intervals_read_at: datetime | None = None
+    #: #5774 (§6): whether any part priced by its actual, the printer's window, and the
+    #: lowest confidence of the rows set to ``actual`` that can price (null: none is).
+    actuals: bool = False
+    actuals_window: int | None = None
+    confidence: int | None = None
 
 
 class Quote(BaseModel):
