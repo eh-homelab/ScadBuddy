@@ -431,6 +431,12 @@ async function confirmRefusal(invoice: Stored): Promise<Response | null> {
       }
       codes.add(code.toUpperCase())
     }
+    // `_line_product`: the product the line names (or its SKU finds) must be this supplier's, live, and for the line's type.
+    const named = line.supplier_product_id ? productOf(line.supplier_product_id) : undefined
+    if (line.supplier_product_id && (!named || named.supplier_id !== invoice.supplier_id || named.archived_at)) return fail("its supplier product is archived or not this supplier's")
+    const sku = line.sku ?? line.description
+    const product = named ?? (line.supplier_product_id ? undefined : state.products.find((one) => one.supplier_id === invoice.supplier_id && !one.archived_at && sameName(one.sku, sku)))
+    if (product && product.type_id !== line.type_id) return fail('its supplier product is for another spool type')
     // Decision 11: the spools the line fills in are all checked before anything is written.
     const ids = line.update_spool_ids
     if (ids.length > line.quantity) return fail(`it fills ${ids.length} spools but its quantity is ${line.quantity}`)
@@ -470,7 +476,7 @@ async function confirm(invoice: Stored): Promise<Response | null> {
     }
     line.supplier_product_id = product.id
     const filled = line.update_spool_ids
-    for (const id of filled) updateInvoicedSpool(id, line.type_id, costPerKg(line, spoolLabelWeight(id) ?? info.label_weight_g), line.id)
+    for (const id of filled) updateInvoicedSpool(id, line.type_id, costPerKg(line, spoolLabelWeight(id) || info.label_weight_g), line.id)
     line.spool_ids = [...filled, ...addInvoicedSpools(line.type_id, line.quantity - filled.length, costPerKg(line, info.label_weight_g), line.id)]
     state.prices.push(invoicePrice(invoice, line, state.products))
   }

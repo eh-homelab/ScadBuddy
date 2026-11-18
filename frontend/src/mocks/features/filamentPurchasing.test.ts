@@ -226,6 +226,19 @@ describe('the purchasing mocks', () => {
     })
   })
 
+  it('refuses a line whose supplier product is for another spool type, writing nothing', async () => {
+    resetMockState()
+    const before = (await listSpools({ includeArchived: true })).length
+    const base = { supplier_id: SUPPLIER.BAMBU, invoice_date: '2026-11-16', currency: 'USD', subtotal: '10', total: '10' }
+    const named = await createInvoice({ ...base, lines: [{ description: 'x', quantity: 1, unit_price: '10', type_id: T.PINK, supplier_product_id: PRODUCT.JADE }] })
+    expect((await refusal(confirmInvoice(named.id))).detail).toBe('line 1: its supplier product is for another spool type')
+    const bySku = await createInvoice({ ...base, lines: [{ description: 'x', sku: 'a00-w1', quantity: 1, unit_price: '10', type_id: T.PINK }] })
+    expect((await refusal(confirmInvoice(bySku.id))).detail).toBe('line 1: its supplier product is for another spool type')
+    const other = await createInvoice({ ...base, lines: [{ description: 'x', quantity: 1, unit_price: '10', type_id: T.INLAND_BLACK, supplier_product_id: PRODUCT.INLAND }] })
+    expect((await refusal(confirmInvoice(other.id))).detail).toBe("line 1: its supplier product is archived or not this supplier's")
+    expect((await listSpools({ includeArchived: true })).length).toBe(before)
+  })
+
   it('writes nothing when a later line is refused', async () => {
     resetMockState()
     const before = (await listSpools({ includeArchived: true })).length

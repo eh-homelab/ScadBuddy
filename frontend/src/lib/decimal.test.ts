@@ -19,6 +19,8 @@ describe('exact arithmetic', () => {
     expect(addDecimals('0.1', '0.2')).toBe('0.3')
     expect(subDecimals('117.04', '117')).toBe('0.04')
     expect(subDecimals('1', '1.5')).toBe('-0.5')
+    expect(subDecimals('-1.25', '2')).toBe('-3.25')
+    expect(subDecimals('0.1', '0.3')).toBe('-0.2')
   })
 
   it('multiplies by a whole number', () => {
