@@ -9,7 +9,7 @@
 // openapi-typescript skips an inline request body, but FastAPI puts every body behind a
 // `$ref`. So a defaulted property of a schema that only request bodies reach is made
 // optional. A schema that a response reaches too keeps the response's shape.
-// Test: agent/test/genApiRequestDefaults.test.ts.
+// Test: agent/test/genApiRequestDefaults.test.ts. Lint: agent's `pnpm lint` (#6671).
 
 const SCHEMAS = '#/components/schemas/'
 

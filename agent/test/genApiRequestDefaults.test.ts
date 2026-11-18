@@ -1,11 +1,24 @@
 // scripts/gen-api-request-defaults.mjs, the request-body defaults both gen-api scripts
 // use (#6602, #6660, #6661), run through openapi-typescript on a hand-written spec.
-import openapiTS, { astToString } from 'openapi-typescript'
+import openapiTS, { astToString, type OpenAPITSOptions } from 'openapi-typescript'
 import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
 
-// A computed specifier, so tsc does not look for a declaration of the plain .mjs.
-const shared = await import(new URL('../../scripts/gen-api-request-defaults.mjs', import.meta.url).href)
+/** The module's exports, as the two gen-api scripts call them (#6670). */
+type Shared = {
+  requestDefaultsHook: (
+    doc: object,
+    typescript: typeof ts,
+  ) => NonNullable<OpenAPITSOptions['transformProperty']>
+  reached: (schemas: Record<string, unknown>, node: unknown, seen?: Set<string>) => Set<string>
+  unescapePointer: (segment: string) => string
+}
+
+// A computed specifier, so tsc does not look for a declaration of the plain .mjs; the
+// cast gives the test the module's shape, so a call that does not fit it fails tsc.
+const shared = (await import(
+  new URL('../../scripts/gen-api-request-defaults.mjs', import.meta.url).href
+)) as Shared
 
 const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` })
 const body = (name: string) => ({ content: { 'application/json': { schema: ref(name) } } })
