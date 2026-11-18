@@ -115,6 +115,12 @@ That CLI is pinned by version and amd64 sha256 in the Dockerfile's `test` stage
 (`TEMPORAL_CLI_VERSION`, `TEMPORAL_CLI_SHA256_AMD64`, with the arm64 digest and its REST
 API asset id `TEMPORAL_CLI_ASSET_ARM64`, the arm64 fallback's URL, #5706), in `ci.yml`'s
 two "Install the Temporal CLI" steps; move all three together.
+Tests marked `requires_chromium` (the 3DFP driver, `tests/profile_fetch/test_site.py`,
+#6625) drive Playwright's Chromium against the local replica in
+`tests/profile_fetch/site/`, never the real site. They skip without that Chromium
+(`uv run --frozen playwright install chromium`) and fail instead when
+`SCADBUDDY_TEST_CHROMIUM_REQUIRED=1`. Playwright is pinned exactly in the
+`profile-fetch` dependency group, which `dev` includes.
 Under pytest-xdist each worker makes its schemas in a database of its own
 (`<test db>_gw<N>`, created and dropped by `tests/conftest.py::_pg_database_url`),
 because advisory locks and NOTIFY channels are per database: workers sharing one would
