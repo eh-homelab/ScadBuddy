@@ -9,9 +9,11 @@ These notes cover `deploy/`; paths are repo-relative; the root `CLAUDE.md` has t
   `<name>` and its own `configMapGenerator` ConfigMap `<name>-dashboard` in
   `cattle-dashboards` for the rancher-monitoring sidecar, datasources only as the
   `DS_PROMETHEUS`/`DS_TEMPO` variables. A new dashboard is a new file plus its
-  generator entry. clusters will pull them in as a remote
-  resource pinned to a full SHA, once clusters#1596 Phase 5 adds the line, and
-  `deploy.reusable.yml` moves that `ref` with the image.
+  generator entry. clusters vendors the directory in `clusters/prod/scadbuddy/grafana/`
+  with a `.revision` file (eh-homelab/clusters#3734), and `deploy.reusable.yml`
+  replaces that copy with the deployed commit's files in the image's deploy PR. Only
+  `kustomization.yaml` and `[a-z0-9-]+.json` files may live here (no subdirectory):
+  the deploy rejects anything else.
   A query may read only series `core/metrics.py` declares and span names the
   service emits (`lint-dashboard.sh` checks both, in every file); a span named at run
   time (a server span, `bambuddy.<op>`, Temporal's) is matched by attribute instead.
