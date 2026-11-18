@@ -87,7 +87,8 @@ NO_PRESET: Final = "no preset for this printer and nozzle yet"
 MAX_DEPTH: Final = 32
 #: The ``error`` of a run whose workflow Temporal did not start.
 NOT_STARTED: Final = "the fetch could not be started"
-#: The longest an invoice confirm waits for Temporal to take one fetch's start.
+#: The longest a start (the route's, or one of an invoice confirm's) waits for Temporal
+#: to take a fetch's workflow.
 START_TIMEOUT_SECONDS: Final = 10.0
 #: The keys only a printer or a process preset has.
 SETTINGS_IDS: Final = frozenset({"printer_settings_id", "print_settings_id"})

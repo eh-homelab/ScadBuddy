@@ -15,6 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 
+from scadbuddy.api import filament as filament_api
 from scadbuddy.filament import profile_fetch
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.profile_fetch.wire import FETCH_WORKFLOW, FetchAsk
@@ -217,6 +218,22 @@ def test_a_failed_start_fails_the_run_and_answers_503(
     assert again.status_code == 202, again.text
     assert again.json()["joined"] is False
     assert again.json()["run"]["id"] != run["id"]
+
+
+def test_a_hung_start_fails_the_run_and_answers_503(
+    client: TestClient, starter: FakeTemporal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(filament_api, "START_TIMEOUT_SECONDS", 0.5)
+    _printer(client)
+    type_id = _type(client)
+    starter.hang = True
+    began = time.monotonic()
+    r = _start(client, type_id)
+    assert r.status_code == 503, r.text
+    assert time.monotonic() - began < 5
+    run = client.get(f"{URL}/types/{type_id}/profile-fetch").json()["run"]
+    assert run["status"] == "failed"
+    assert run["error"] == "the fetch could not be started"
 
 
 def test_status_lists_the_gaps(client: TestClient) -> None:

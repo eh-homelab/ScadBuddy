@@ -59,6 +59,7 @@ from scadbuddy.filament.locations import (
 )
 from scadbuddy.filament.profile_fetch import (
     PROBLEMS,
+    START_TIMEOUT_SECONDS,
     FetchNotStartedError,
     FetchRefusedError,
     ProfileFetchStarted,
@@ -361,15 +362,15 @@ async def put_type_k_values(
         "read its progress with `GET` on this path. A start while a fetch of the type runs "
         "joins it (`joined: true`, the same run) and starts nothing new. 404 for no such "
         "type, 422 `no_tdfp_id` for a type without a 3DFP id, 422 `no_printer_models` when "
-        "no printer has a model, 503 when Temporal did not take the start (the run ends "
-        "`failed`)."
+        "no printer has a model, 503 when Temporal did not take the start within 10 s (the "
+        "run ends `failed`)."
     ),
 )
 async def start_type_profile_fetch(
     state: StateDep, caller: CallerDep, type_id: UUID
 ) -> ProfileFetchStarted:
     try:
-        return await start_fetch(state, type_id, actor=actor(caller))
+        return await start_fetch(state, type_id, actor=actor(caller), timeout=START_TIMEOUT_SECONDS)
     except FetchRefusedError as refused:
         if refused.code == "type_not_found":
             raise _no_type(type_id) from None
