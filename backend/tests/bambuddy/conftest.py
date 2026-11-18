@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import jsonschema
 import pytest
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
@@ -31,8 +32,12 @@ async def bambuddy(config: BambuddyConfig) -> Any:
         yield client
 
 
+#: The pruned OpenAPI recordings, searched in order for a schema.
+RECORDED_SPECS = ("scadbuddy-routes.json", "rfid-routes.json", "sync-routes.json")
+
+
 def recorded_schema(name: str) -> dict[str, Any]:
-    for recorded in ("scadbuddy-routes.json", "rfid-routes.json"):
+    for recorded in RECORDED_SPECS:
         spec = json.loads((RECORDINGS / "openapi" / recorded).read_text(encoding="utf-8"))
         schemas: dict[str, Any] = spec["components"]["schemas"]
         if name in schemas:
@@ -49,3 +54,12 @@ def shaped(schema: str, **values: Any) -> dict[str, Any]:
     unknown = set(values) - set(recorded_schema(schema)["properties"])
     assert not unknown, f"{schema} has no field {sorted(unknown)}"
     return values
+
+
+def assert_recorded_body(recorded: str, schema: str, body: Any, *, many: bool = False) -> None:
+    """``body`` (a list of them with ``many``) is valid against ``schema`` as the recording
+    ``recordings/openapi/<recorded>`` holds it: types, required fields and nested refs."""
+    spec = json.loads((RECORDINGS / "openapi" / recorded).read_text(encoding="utf-8"))
+    ref = {"$ref": f"#/components/schemas/{schema}"}
+    root = {"type": "array", "items": ref} if many else ref
+    jsonschema.validate(body, {**root, "components": spec["components"]})

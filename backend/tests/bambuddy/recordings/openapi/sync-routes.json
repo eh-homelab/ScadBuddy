@@ -1,0 +1,3811 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Bambuddy",
+    "description": "Archive and manage Bambu Lab 3MF files",
+    "version": "1.3.1"
+  },
+  "x-recorded-note": "Pruned to the spool, supplier, location and catalog write routes of #6265 (and the two lists the sync reads) plus every schema they reference. Measured read-only on 2026-11-18: GET https://bambuddy.internal.nullreference.io/openapi.json (200, 1,245,373 bytes, info.version 1.3.1), no key sent. 'routes' (permission, line, key flag) is read from the Bambuddy source at tag v1.3.1 (https://github.com/maziggy/bambuddy/tree/v1.3.1/backend/app), and 'apikey_scope_flag' from _APIKEY_SCOPE_BY_PERMISSION (https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/core/auth.py#L90).",
+  "paths": {
+    "/api/v1/inventory/spools": {
+      "post": {
+        "tags": [
+          "inventory"
+        ],
+        "summary": "Create Spool",
+        "description": "Create a new spool.",
+        "operationId": "create_spool_api_v1_inventory_spools_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SpoolCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpoolResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/inventory/spools/{spool_id}": {
+      "patch": {
+        "tags": [
+          "inventory"
+        ],
+        "summary": "Update Spool",
+        "description": "Update a spool.",
+        "operationId": "update_spool_api_v1_inventory_spools__spool_id__patch",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "spool_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Spool Id"
+            }
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SpoolUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpoolResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/inventory/spools/{spool_id}/archive": {
+      "post": {
+        "tags": [
+          "inventory"
+        ],
+        "summary": "Archive Spool",
+        "description": "Soft-delete a spool by setting archived_at.",
+        "operationId": "archive_spool_api_v1_inventory_spools__spool_id__archive_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "spool_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Spool Id"
+            }
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpoolResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/inventory/spools/{spool_id}/restore": {
+      "post": {
+        "tags": [
+          "inventory"
+        ],
+        "summary": "Restore Spool",
+        "description": "Restore an archived spool.",
+        "operationId": "restore_spool_api_v1_inventory_spools__spool_id__restore_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "spool_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Spool Id"
+            }
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpoolResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/inventory/spools/{spool_id}/k-profiles": {
+      "put": {
+        "tags": [
+          "inventory"
+        ],
+        "summary": "Replace K Profiles",
+        "description": "Replace all K-profiles for a spool (batch save).\n\nA caller limited to some printers (#1727) replaces only theirs: the\nprofiles of printers it cannot see -- which its form never showed, a new\nspool's from its product's profile default (#1326) among them -- stay.",
+        "operationId": "replace_k_profiles_api_v1_inventory_spools__spool_id__k_profiles_put",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "spool_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Spool Id"
+            }
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/SpoolKProfileBase"
+                },
+                "title": "Profiles"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SpoolKProfileResponse"
+                  },
+                  "title": "Response Replace K Profiles Api V1 Inventory Spools  Spool Id  K Profiles Put"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/inventory/spools/{spool_id}/filament-presets": {
+      "put": {
+        "tags": [
+          "inventory"
+        ],
+        "summary": "Replace Filament Presets",
+        "description": "Replace all per-printer-model preset overrides for a spool.\n\nReplace rather than merge, matching the K-profile endpoint next door: the\nspool form always holds the complete set, and an empty list is how the\nuser clears every override back to the spool's own preset.",
+        "operationId": "replace_filament_presets_api_v1_inventory_spools__spool_id__filament_presets_put",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "spool_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Spool Id"
+            }
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/SpoolFilamentPresetBase"
+                },
+                "title": "Presets"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SpoolFilamentPresetResponse"
+                  },
+                  "title": "Response Replace Filament Presets Api V1 Inventory Spools  Spool Id  Filament Presets Put"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/inventory/spools/{spool_id}/suppliers": {
+      "put": {
+        "tags": [
+          "inventory"
+        ],
+        "summary": "Replace Spool Suppliers",
+        "description": "Replace a spool's supplier assignments (#2988, batch save).\n\nSame replace-all shape as the k-profiles endpoint. At most one assignment\nmay be the purchase source — the record of where this concrete spool was\nactually bought; the rest read as alternative sources.",
+        "operationId": "replace_spool_suppliers_api_v1_inventory_spools__spool_id__suppliers_put",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "spool_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Spool Id"
+            }
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/SpoolSupplierLinkInput"
+                },
+                "title": "Links"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SpoolSupplierResponse"
+                  },
+                  "title": "Response Replace Spool Suppliers Api V1 Inventory Spools  Spool Id  Suppliers Put"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/inventory/suppliers": {
+      "get": {
+        "tags": [
+          "inventory"
+        ],
+        "summary": "List Suppliers",
+        "description": "List all suppliers with their spool-usage counts.",
+        "operationId": "list_suppliers_api_v1_inventory_suppliers_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SupplierResponse"
+                  },
+                  "title": "Response List Suppliers Api V1 Inventory Suppliers Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "inventory"
+        ],
+        "summary": "Create Supplier",
+        "description": "Create a supplier (mirrors create_location, duplicate name included).",
+        "operationId": "create_supplier_api_v1_inventory_suppliers_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SupplierCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupplierResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/inventory/suppliers/{supplier_id}": {
+      "patch": {
+        "tags": [
+          "inventory"
+        ],
+        "summary": "Update Supplier",
+        "description": "Update a supplier.",
+        "operationId": "update_supplier_api_v1_inventory_suppliers__supplier_id__patch",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "supplier_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Supplier Id"
+            }
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SupplierUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupplierResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/inventory/locations": {
+      "get": {
+        "tags": [
+          "inventory"
+        ],
+        "summary": "List Locations",
+        "description": "List all storage locations with spool counts.",
+        "operationId": "list_locations_api_v1_inventory_locations_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/LocationResponse"
+                  },
+                  "title": "Response List Locations Api V1 Inventory Locations Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "inventory"
+        ],
+        "summary": "Create Location",
+        "description": "Create a storage location.",
+        "operationId": "create_location_api_v1_inventory_locations_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LocationCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/inventory/locations/{location_id}": {
+      "patch": {
+        "tags": [
+          "inventory"
+        ],
+        "summary": "Update Location",
+        "description": "Update a storage location (rename propagates to assigned spools).",
+        "operationId": "update_location_api_v1_inventory_locations__location_id__patch",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "location_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Location Id"
+            }
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LocationUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/inventory/catalog": {
+      "post": {
+        "tags": [
+          "inventory"
+        ],
+        "summary": "Add Catalog Entry",
+        "description": "Add a new spool catalog entry.",
+        "operationId": "add_catalog_entry_api_v1_inventory_catalog_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CatalogEntryCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogEntryResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/inventory/catalog/{entry_id}": {
+      "put": {
+        "tags": [
+          "inventory"
+        ],
+        "summary": "Update Catalog Entry",
+        "description": "Update a spool catalog entry.",
+        "operationId": "update_catalog_entry_api_v1_inventory_catalog__entry_id__put",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "entry_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Entry Id"
+            }
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CatalogEntryUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogEntryResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/filament-catalog/": {
+      "post": {
+        "tags": [
+          "filament-catalog"
+        ],
+        "summary": "Create Filament",
+        "description": "Create a new filament entry.",
+        "operationId": "create_filament_api_v1_filament_catalog__post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FilamentCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FilamentResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/filament-catalog/{filament_id}": {
+      "patch": {
+        "tags": [
+          "filament-catalog"
+        ],
+        "summary": "Update Filament",
+        "description": "Update a filament.",
+        "operationId": "update_filament_api_v1_filament_catalog__filament_id__patch",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "filament_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Filament Id"
+            }
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FilamentUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FilamentResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "CatalogEntryCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "weight": {
+            "type": "integer",
+            "title": "Weight"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "weight"
+        ],
+        "title": "CatalogEntryCreate"
+      },
+      "CatalogEntryResponse": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "weight": {
+            "type": "integer",
+            "title": "Weight"
+          },
+          "is_default": {
+            "type": "boolean",
+            "title": "Is Default"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "weight",
+          "is_default"
+        ],
+        "title": "CatalogEntryResponse"
+      },
+      "CatalogEntryUpdate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "weight": {
+            "type": "integer",
+            "title": "Weight"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "weight"
+        ],
+        "title": "CatalogEntryUpdate"
+      },
+      "FilamentCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "type": {
+            "type": "string",
+            "maxLength": 50,
+            "minLength": 1,
+            "title": "Type"
+          },
+          "brand": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Brand"
+          },
+          "color": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Color"
+          },
+          "color_hex": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^#[0-9A-Fa-f]{6}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Color Hex"
+          },
+          "cost_per_kg": {
+            "type": "number",
+            "title": "Cost Per Kg",
+            "default": 25.0
+          },
+          "spool_weight_g": {
+            "type": "number",
+            "title": "Spool Weight G",
+            "default": 1000.0
+          },
+          "currency": {
+            "type": "string",
+            "title": "Currency",
+            "default": "USD"
+          },
+          "density": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Density"
+          },
+          "print_temp_min": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Print Temp Min"
+          },
+          "print_temp_max": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Print Temp Max"
+          },
+          "bed_temp_min": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bed Temp Min"
+          },
+          "bed_temp_max": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bed Temp Max"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "type"
+        ],
+        "title": "FilamentCreate"
+      },
+      "FilamentResponse": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "type": {
+            "type": "string",
+            "maxLength": 50,
+            "minLength": 1,
+            "title": "Type"
+          },
+          "brand": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Brand"
+          },
+          "color": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Color"
+          },
+          "color_hex": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^#[0-9A-Fa-f]{6}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Color Hex"
+          },
+          "cost_per_kg": {
+            "type": "number",
+            "title": "Cost Per Kg",
+            "default": 25.0
+          },
+          "spool_weight_g": {
+            "type": "number",
+            "title": "Spool Weight G",
+            "default": 1000.0
+          },
+          "currency": {
+            "type": "string",
+            "title": "Currency",
+            "default": "USD"
+          },
+          "density": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Density"
+          },
+          "print_temp_min": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Print Temp Min"
+          },
+          "print_temp_max": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Print Temp Max"
+          },
+          "bed_temp_min": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bed Temp Min"
+          },
+          "bed_temp_max": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bed Temp Max"
+          },
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "type",
+          "id",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "FilamentResponse"
+      },
+      "FilamentUpdate": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Type"
+          },
+          "brand": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Brand"
+          },
+          "color": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Color"
+          },
+          "color_hex": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Color Hex"
+          },
+          "cost_per_kg": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Per Kg"
+          },
+          "spool_weight_g": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spool Weight G"
+          },
+          "currency": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Currency"
+          },
+          "density": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Density"
+          },
+          "print_temp_min": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Print Temp Min"
+          },
+          "print_temp_max": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Print Temp Max"
+          },
+          "bed_temp_min": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bed Temp Min"
+          },
+          "bed_temp_max": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bed Temp Max"
+          }
+        },
+        "type": "object",
+        "title": "FilamentUpdate"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "LocationCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "identifier": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Identifier"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "LocationCreate"
+      },
+      "LocationResponse": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "identifier": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Identifier"
+          },
+          "spool_count": {
+            "type": "integer",
+            "title": "Spool Count",
+            "default": 0
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "LocationResponse"
+      },
+      "LocationUpdate": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "identifier": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Identifier"
+          }
+        },
+        "type": "object",
+        "title": "LocationUpdate"
+      },
+      "SpoolCreate": {
+        "properties": {
+          "material": {
+            "type": "string",
+            "maxLength": 50,
+            "minLength": 1,
+            "title": "Material"
+          },
+          "subtype": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subtype"
+          },
+          "color_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Color Name"
+          },
+          "rgba": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9A-Fa-f]{8}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rgba"
+          },
+          "extra_colors": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extra Colors"
+          },
+          "effect_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effect Type"
+          },
+          "brand": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Brand"
+          },
+          "label_weight": {
+            "type": "integer",
+            "title": "Label Weight",
+            "default": 1000
+          },
+          "core_weight": {
+            "type": "integer",
+            "title": "Core Weight",
+            "default": 250
+          },
+          "core_weight_catalog_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Core Weight Catalog Id"
+          },
+          "weight_used": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Weight Used",
+            "default": 0
+          },
+          "weight_used_baseline": {
+            "type": "number",
+            "title": "Weight Used Baseline",
+            "default": 0
+          },
+          "slicer_filament": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slicer Filament"
+          },
+          "slicer_filament_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slicer Filament Name"
+          },
+          "nozzle_temp_min": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nozzle Temp Min"
+          },
+          "nozzle_temp_max": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nozzle Temp Max"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "tag_uid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tag Uid"
+          },
+          "tray_uuid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tray Uuid"
+          },
+          "data_origin": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Data Origin"
+          },
+          "tag_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tag Type"
+          },
+          "cost_per_kg": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Per Kg"
+          },
+          "weight_locked": {
+            "type": "boolean",
+            "title": "Weight Locked",
+            "default": false
+          },
+          "last_scale_weight": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Scale Weight"
+          },
+          "last_weighed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Weighed At"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 50
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "low_stock_threshold_pct": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 99.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Low Stock Threshold Pct"
+          },
+          "material_number": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Material Number"
+          },
+          "storage_location": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Storage Location"
+          },
+          "location_id": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "material"
+        ],
+        "title": "SpoolCreate"
+      },
+      "SpoolFilamentPresetBase": {
+        "properties": {
+          "printer_model": {
+            "type": "string",
+            "maxLength": 50,
+            "minLength": 1,
+            "title": "Printer Model"
+          },
+          "nozzle_diameter": {
+            "type": "string",
+            "maxLength": 10,
+            "title": "Nozzle Diameter",
+            "default": ""
+          },
+          "slicer_filament": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slicer Filament"
+          },
+          "slicer_filament_name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slicer Filament Name"
+          }
+        },
+        "type": "object",
+        "required": [
+          "printer_model"
+        ],
+        "title": "SpoolFilamentPresetBase",
+        "description": "One per-printer-model slicer preset override for a spool.\n\n``nozzle_diameter`` defaults to \"\" meaning \"any nozzle of this model\". The\nspool form always sends a concrete size; the empty form is for API clients\nthat want one value to cover a model. Lengths match the columns, which are wider than\n``Spool.slicer_filament`` so a preset id that fits the Spoolman write\nschema cannot truncate on the way in."
+      },
+      "SpoolFilamentPresetResponse": {
+        "properties": {
+          "printer_model": {
+            "type": "string",
+            "maxLength": 50,
+            "minLength": 1,
+            "title": "Printer Model"
+          },
+          "nozzle_diameter": {
+            "type": "string",
+            "maxLength": 10,
+            "title": "Nozzle Diameter",
+            "default": ""
+          },
+          "slicer_filament": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slicer Filament"
+          },
+          "slicer_filament_name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slicer Filament Name"
+          },
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "spool_id": {
+            "type": "integer",
+            "title": "Spool Id"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "printer_model",
+          "id",
+          "spool_id",
+          "created_at"
+        ],
+        "title": "SpoolFilamentPresetResponse"
+      },
+      "SpoolKProfileBase": {
+        "properties": {
+          "printer_id": {
+            "type": "integer",
+            "title": "Printer Id"
+          },
+          "extruder": {
+            "type": "integer",
+            "title": "Extruder",
+            "default": 0
+          },
+          "nozzle_diameter": {
+            "type": "string",
+            "title": "Nozzle Diameter",
+            "default": "0.4"
+          },
+          "nozzle_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nozzle Type"
+          },
+          "k_value": {
+            "type": "number",
+            "title": "K Value"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "cali_idx": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cali Idx"
+          },
+          "setting_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Setting Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "printer_id",
+          "k_value"
+        ],
+        "title": "SpoolKProfileBase"
+      },
+      "SpoolKProfileResponse": {
+        "properties": {
+          "printer_id": {
+            "type": "integer",
+            "title": "Printer Id"
+          },
+          "extruder": {
+            "type": "integer",
+            "title": "Extruder",
+            "default": 0
+          },
+          "nozzle_diameter": {
+            "type": "string",
+            "title": "Nozzle Diameter",
+            "default": "0.4"
+          },
+          "nozzle_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nozzle Type"
+          },
+          "k_value": {
+            "type": "number",
+            "title": "K Value"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "cali_idx": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cali Idx"
+          },
+          "setting_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Setting Id"
+          },
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "spool_id": {
+            "type": "integer",
+            "title": "Spool Id"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "printer_id",
+          "k_value",
+          "id",
+          "spool_id",
+          "created_at"
+        ],
+        "title": "SpoolKProfileResponse"
+      },
+      "SpoolResponse": {
+        "properties": {
+          "material": {
+            "type": "string",
+            "maxLength": 50,
+            "minLength": 1,
+            "title": "Material"
+          },
+          "subtype": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subtype"
+          },
+          "color_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Color Name"
+          },
+          "rgba": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rgba"
+          },
+          "extra_colors": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extra Colors"
+          },
+          "effect_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effect Type"
+          },
+          "brand": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Brand"
+          },
+          "label_weight": {
+            "type": "integer",
+            "title": "Label Weight",
+            "default": 1000
+          },
+          "core_weight": {
+            "type": "integer",
+            "title": "Core Weight",
+            "default": 250
+          },
+          "core_weight_catalog_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Core Weight Catalog Id"
+          },
+          "weight_used": {
+            "type": "number",
+            "title": "Weight Used",
+            "default": 0
+          },
+          "weight_used_baseline": {
+            "type": "number",
+            "title": "Weight Used Baseline",
+            "default": 0
+          },
+          "slicer_filament": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slicer Filament"
+          },
+          "slicer_filament_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slicer Filament Name"
+          },
+          "nozzle_temp_min": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nozzle Temp Min"
+          },
+          "nozzle_temp_max": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nozzle Temp Max"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "tag_uid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tag Uid"
+          },
+          "tray_uuid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tray Uuid"
+          },
+          "data_origin": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Data Origin"
+          },
+          "tag_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tag Type"
+          },
+          "cost_per_kg": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Per Kg"
+          },
+          "weight_locked": {
+            "type": "boolean",
+            "title": "Weight Locked",
+            "default": false
+          },
+          "last_scale_weight": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Scale Weight"
+          },
+          "last_weighed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Weighed At"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 50
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "low_stock_threshold_pct": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 99.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Low Stock Threshold Pct"
+          },
+          "material_number": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Material Number"
+          },
+          "storage_location": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Storage Location"
+          },
+          "location_id": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location Id"
+          },
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "added_full": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Added Full"
+          },
+          "last_used": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Used"
+          },
+          "last_dried_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Dried At"
+          },
+          "last_dried_temp": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Dried Temp"
+          },
+          "last_dried_hours": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Dried Hours"
+          },
+          "encode_time": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Encode Time"
+          },
+          "archived_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Archived At"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "k_profiles": {
+            "items": {
+              "$ref": "#/components/schemas/SpoolKProfileResponse"
+            },
+            "type": "array",
+            "title": "K Profiles",
+            "default": []
+          },
+          "suppliers": {
+            "items": {
+              "$ref": "#/components/schemas/SpoolSupplierResponse"
+            },
+            "type": "array",
+            "title": "Suppliers",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "material",
+          "id",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "SpoolResponse"
+      },
+      "SpoolSupplierLinkInput": {
+        "properties": {
+          "supplier_id": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Supplier Id"
+          },
+          "supplier_article_number": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier Article Number"
+          },
+          "quoted_price_per_kg": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quoted Price Per Kg"
+          },
+          "is_purchase_source": {
+            "type": "boolean",
+            "title": "Is Purchase Source",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "supplier_id"
+        ],
+        "title": "SpoolSupplierLinkInput",
+        "description": "One spool-to-supplier assignment as written by the spool dialog."
+      },
+      "SpoolSupplierResponse": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "supplier_id": {
+            "type": "integer",
+            "title": "Supplier Id"
+          },
+          "supplier_name": {
+            "type": "string",
+            "title": "Supplier Name"
+          },
+          "supplier_article_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier Article Number"
+          },
+          "quoted_price_per_kg": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quoted Price Per Kg"
+          },
+          "is_purchase_source": {
+            "type": "boolean",
+            "title": "Is Purchase Source",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "supplier_id",
+          "supplier_name"
+        ],
+        "title": "SpoolSupplierResponse"
+      },
+      "SpoolUpdate": {
+        "properties": {
+          "material": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Material"
+          },
+          "subtype": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subtype"
+          },
+          "color_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Color Name"
+          },
+          "rgba": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9A-Fa-f]{8}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rgba"
+          },
+          "extra_colors": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extra Colors"
+          },
+          "effect_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effect Type"
+          },
+          "brand": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Brand"
+          },
+          "label_weight": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label Weight"
+          },
+          "core_weight": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Core Weight"
+          },
+          "core_weight_catalog_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Core Weight Catalog Id"
+          },
+          "weight_used": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weight Used"
+          },
+          "slicer_filament": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slicer Filament"
+          },
+          "slicer_filament_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slicer Filament Name"
+          },
+          "nozzle_temp_min": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nozzle Temp Min"
+          },
+          "nozzle_temp_max": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nozzle Temp Max"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "tag_uid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tag Uid"
+          },
+          "tray_uuid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tray Uuid"
+          },
+          "data_origin": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Data Origin"
+          },
+          "tag_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tag Type"
+          },
+          "cost_per_kg": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Per Kg"
+          },
+          "weight_locked": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weight Locked"
+          },
+          "last_dried_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Dried At"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 50
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "low_stock_threshold_pct": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 99.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Low Stock Threshold Pct"
+          },
+          "material_number": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Material Number"
+          },
+          "storage_location": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Storage Location"
+          },
+          "location_id": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location Id"
+          }
+        },
+        "type": "object",
+        "title": "SpoolUpdate"
+      },
+      "SupplierCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "website": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Website"
+          },
+          "customer_number": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Customer Number"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "SupplierCreate"
+      },
+      "SupplierResponse": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "website": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Website"
+          },
+          "customer_number": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Customer Number"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "spool_count": {
+            "type": "integer",
+            "title": "Spool Count",
+            "default": 0
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "id",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "SupplierResponse"
+      },
+      "SupplierUpdate": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "website": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Website"
+          },
+          "customer_number": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Customer Number"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "type": "object",
+        "title": "SupplierUpdate"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  },
+  "routes": [
+    {
+      "method": "POST",
+      "path": "/api/v1/inventory/spools",
+      "operationId": "create_spool_api_v1_inventory_spools_post",
+      "parameters": [],
+      "request_schema": "SpoolCreate",
+      "success_status": 200,
+      "bambuddy_permission": "INVENTORY_UPDATE",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/inventory.py#L1625",
+      "apikey_scope_flag": "can_manage_inventory",
+      "scadbuddy_scope": "Manage Inventory",
+      "scadbuddy_operation": "spools.create"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/v1/inventory/spools/{spool_id}",
+      "operationId": "update_spool_api_v1_inventory_spools__spool_id__patch",
+      "parameters": [
+        {
+          "name": "spool_id",
+          "in": "path",
+          "required": true
+        }
+      ],
+      "request_schema": "SpoolUpdate",
+      "success_status": 200,
+      "bambuddy_permission": "INVENTORY_UPDATE",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/inventory.py#L1693",
+      "apikey_scope_flag": "can_manage_inventory",
+      "scadbuddy_scope": "Manage Inventory",
+      "scadbuddy_operation": "spools.update"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/inventory/spools/{spool_id}/archive",
+      "operationId": "archive_spool_api_v1_inventory_spools__spool_id__archive_post",
+      "parameters": [
+        {
+          "name": "spool_id",
+          "in": "path",
+          "required": true
+        }
+      ],
+      "request_schema": null,
+      "success_status": 200,
+      "bambuddy_permission": "INVENTORY_UPDATE",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/inventory.py#L1774",
+      "apikey_scope_flag": "can_manage_inventory",
+      "scadbuddy_scope": "Manage Inventory",
+      "scadbuddy_operation": "spools.archive"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/inventory/spools/{spool_id}/restore",
+      "operationId": "restore_spool_api_v1_inventory_spools__spool_id__restore_post",
+      "parameters": [
+        {
+          "name": "spool_id",
+          "in": "path",
+          "required": true
+        }
+      ],
+      "request_schema": null,
+      "success_status": 200,
+      "bambuddy_permission": "INVENTORY_UPDATE",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/inventory.py#L1796",
+      "apikey_scope_flag": "can_manage_inventory",
+      "scadbuddy_scope": "Manage Inventory",
+      "scadbuddy_operation": "spools.restore"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/inventory/spools/{spool_id}/k-profiles",
+      "operationId": "replace_k_profiles_api_v1_inventory_spools__spool_id__k_profiles_put",
+      "parameters": [
+        {
+          "name": "spool_id",
+          "in": "path",
+          "required": true
+        }
+      ],
+      "request_schema": "list[SpoolKProfileBase]",
+      "success_status": 200,
+      "bambuddy_permission": "INVENTORY_UPDATE",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/inventory.py#L2020",
+      "apikey_scope_flag": "can_manage_inventory",
+      "scadbuddy_scope": "Manage Inventory",
+      "scadbuddy_operation": "spools.k_profiles"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/inventory/spools/{spool_id}/filament-presets",
+      "operationId": "replace_filament_presets_api_v1_inventory_spools__spool_id__filament_presets_put",
+      "parameters": [
+        {
+          "name": "spool_id",
+          "in": "path",
+          "required": true
+        }
+      ],
+      "request_schema": "list[SpoolFilamentPresetBase]",
+      "success_status": 200,
+      "bambuddy_permission": "INVENTORY_UPDATE",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/inventory.py#L2126",
+      "apikey_scope_flag": "can_manage_inventory",
+      "scadbuddy_scope": "Manage Inventory",
+      "scadbuddy_operation": "spools.presets_put"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/inventory/spools/{spool_id}/suppliers",
+      "operationId": "replace_spool_suppliers_api_v1_inventory_spools__spool_id__suppliers_put",
+      "parameters": [
+        {
+          "name": "spool_id",
+          "in": "path",
+          "required": true
+        }
+      ],
+      "request_schema": "list[SpoolSupplierLinkInput]",
+      "success_status": 200,
+      "bambuddy_permission": "INVENTORY_UPDATE",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/inventory.py#L2060",
+      "apikey_scope_flag": "can_manage_inventory",
+      "scadbuddy_scope": "Manage Inventory",
+      "scadbuddy_operation": "spools.suppliers_put"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/inventory/suppliers",
+      "operationId": "list_suppliers_api_v1_inventory_suppliers_get",
+      "parameters": [],
+      "request_schema": null,
+      "success_status": 200,
+      "bambuddy_permission": "INVENTORY_READ",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/inventory.py#L896",
+      "apikey_scope_flag": "can_read_status",
+      "scadbuddy_scope": "Read Status",
+      "scadbuddy_operation": "suppliers.list"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/inventory/suppliers",
+      "operationId": "create_supplier_api_v1_inventory_suppliers_post",
+      "parameters": [],
+      "request_schema": "SupplierCreate",
+      "success_status": 201,
+      "bambuddy_permission": "INVENTORY_UPDATE",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/inventory.py#L916",
+      "apikey_scope_flag": "can_manage_inventory",
+      "scadbuddy_scope": "Manage Inventory",
+      "scadbuddy_operation": "suppliers.create"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/v1/inventory/suppliers/{supplier_id}",
+      "operationId": "update_supplier_api_v1_inventory_suppliers__supplier_id__patch",
+      "parameters": [
+        {
+          "name": "supplier_id",
+          "in": "path",
+          "required": true
+        }
+      ],
+      "request_schema": "SupplierUpdate",
+      "success_status": 200,
+      "bambuddy_permission": "INVENTORY_UPDATE",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/inventory.py#L939",
+      "apikey_scope_flag": "can_manage_inventory",
+      "scadbuddy_scope": "Manage Inventory",
+      "scadbuddy_operation": "suppliers.update"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/inventory/locations",
+      "operationId": "list_locations_api_v1_inventory_locations_get",
+      "parameters": [],
+      "request_schema": null,
+      "success_status": 200,
+      "bambuddy_permission": "INVENTORY_READ",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/inventory.py#L700",
+      "apikey_scope_flag": "can_read_status",
+      "scadbuddy_scope": "Read Status",
+      "scadbuddy_operation": "locations.list"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/inventory/locations",
+      "operationId": "create_location_api_v1_inventory_locations_post",
+      "parameters": [],
+      "request_schema": "LocationCreate",
+      "success_status": 201,
+      "bambuddy_permission": "INVENTORY_UPDATE",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/inventory.py#L716",
+      "apikey_scope_flag": "can_manage_inventory",
+      "scadbuddy_scope": "Manage Inventory",
+      "scadbuddy_operation": "locations.create"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/v1/inventory/locations/{location_id}",
+      "operationId": "update_location_api_v1_inventory_locations__location_id__patch",
+      "parameters": [
+        {
+          "name": "location_id",
+          "in": "path",
+          "required": true
+        }
+      ],
+      "request_schema": "LocationUpdate",
+      "success_status": 200,
+      "bambuddy_permission": "INVENTORY_UPDATE",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/inventory.py#L740",
+      "apikey_scope_flag": "can_manage_inventory",
+      "scadbuddy_scope": "Manage Inventory",
+      "scadbuddy_operation": "locations.update"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/inventory/catalog",
+      "operationId": "add_catalog_entry_api_v1_inventory_catalog_post",
+      "parameters": [],
+      "request_schema": "CatalogEntryCreate",
+      "success_status": 200,
+      "bambuddy_permission": "INVENTORY_UPDATE",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/inventory.py#L530",
+      "apikey_scope_flag": "can_manage_inventory",
+      "scadbuddy_scope": "Manage Inventory",
+      "scadbuddy_operation": "catalog.create"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/inventory/catalog/{entry_id}",
+      "operationId": "update_catalog_entry_api_v1_inventory_catalog__entry_id__put",
+      "parameters": [
+        {
+          "name": "entry_id",
+          "in": "path",
+          "required": true
+        }
+      ],
+      "request_schema": "CatalogEntryUpdate",
+      "success_status": 200,
+      "bambuddy_permission": "INVENTORY_UPDATE",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/inventory.py#L545",
+      "apikey_scope_flag": "can_manage_inventory",
+      "scadbuddy_scope": "Manage Inventory",
+      "scadbuddy_operation": "catalog.update"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/filament-catalog/",
+      "operationId": "create_filament_api_v1_filament_catalog__post",
+      "parameters": [],
+      "request_schema": "FilamentCreate",
+      "success_status": 200,
+      "bambuddy_permission": "FILAMENTS_CREATE",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/filaments.py#L34",
+      "apikey_scope_flag": null,
+      "scadbuddy_scope": "Filament catalog (admin only)",
+      "scadbuddy_operation": "filament_catalog.create"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/v1/filament-catalog/{filament_id}",
+      "operationId": "update_filament_api_v1_filament_catalog__filament_id__patch",
+      "parameters": [
+        {
+          "name": "filament_id",
+          "in": "path",
+          "required": true
+        }
+      ],
+      "request_schema": "FilamentUpdate",
+      "success_status": 200,
+      "bambuddy_permission": "FILAMENTS_UPDATE",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/filaments.py#L63",
+      "apikey_scope_flag": null,
+      "scadbuddy_scope": "Filament catalog (admin only)",
+      "scadbuddy_operation": "filament_catalog.update"
+    }
+  ],
+  "filament_catalog_writes_meta": {
+    "note": "FILAMENTS_CREATE and FILAMENTS_UPDATE are absent from _APIKEY_SCOPE_BY_PERMISSION and listed in _APIKEY_DENIED_PERMISSIONS: no API key can write the filament catalog, so such a write works only while Bambuddy's auth is off (prod: auth_enabled false, measured 2026-11-17 in rfid-routes.json).",
+    "source": [
+      "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/core/auth.py#L90 (allowlist; FILAMENTS_READ only, line 107)",
+      "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/core/auth.py#L300-L301 (denied)"
+    ]
+  },
+  "write_semantics": {
+    "spool_update_partial": {
+      "note": "PATCH /inventory/spools/{id} applies model_dump(exclude_unset=True): only the fields sent change. A sent weight_used locks the weight unless weight_locked is sent too; a sent last_dried_at clears last_dried_temp and last_dried_hours.",
+      "source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/inventory.py#L1701-L1716"
+    },
+    "replace_all_lists": {
+      "note": "PUT k-profiles, filament-presets and suppliers each replace the spool's whole list; an empty list clears it. suppliers refuses a duplicate supplier or two purchase sources (400) and an unknown supplier (404).",
+      "source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/inventory.py#L2015-L2102 and #L2121"
+    },
+    "duplicate_name_409": {
+      "note": "POST and PATCH of a supplier or a location answer 409 for a name another row has.",
+      "source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/inventory.py#L719-L729 (locations) and #L919-L928, #L948-L956 (suppliers)"
+    },
+    "catalog_update_full": {
+      "note": "PUT /inventory/catalog/{id} takes name and weight (both required, weight an integer) and sets both.",
+      "source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/inventory.py#L540-L555"
+    },
+    "missing_404": {
+      "note": "Each write on an id answers 404 when the row is missing (spool, supplier, location, catalog entry, filament).",
+      "source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/inventory.py#L1698 (spool), #L944 (supplier), #L744 (location), #L551 (catalog); filaments.py#L68"
+    }
+  },
+  "measured_2026-11-18": {
+    "method": "GET only, no key, no body, https://bambuddy.internal.nullreference.io",
+    "commands": [
+      "curl -sS https://bambuddy.internal.nullreference.io/openapi.json",
+      "curl -sS https://bambuddy.internal.nullreference.io/api/v1/inventory/spools",
+      "curl -sS https://bambuddy.internal.nullreference.io/api/v1/inventory/suppliers",
+      "curl -sS https://bambuddy.internal.nullreference.io/api/v1/inventory/locations",
+      "curl -sS https://bambuddy.internal.nullreference.io/api/v1/inventory/catalog",
+      "curl -sS https://bambuddy.internal.nullreference.io/api/v1/filament-catalog/",
+      "curl -sS https://raw.githubusercontent.com/maziggy/bambuddy/v1.3.1/backend/app/api/routes/inventory.py (and filaments.py, core/auth.py, main.py)"
+    ],
+    "openapi": {
+      "url": "/openapi.json",
+      "status": 200,
+      "bytes": 1245373,
+      "info_version": "1.3.1"
+    },
+    "source_tag": {
+      "tag": "v1.3.1",
+      "commit": "d3be761f3bd0b6bac78045dc53599331d64c3672",
+      "read_with": "git ls-remote --tags https://github.com/maziggy/bambuddy 'v1.3.1*'"
+    },
+    "inventory_spools": {
+      "url": "/api/v1/inventory/spools",
+      "status": 200,
+      "rows": 106,
+      "with_k_profiles": 0,
+      "with_suppliers": 4,
+      "supplier_link_keys": [
+        "id",
+        "is_purchase_source",
+        "quoted_price_per_kg",
+        "supplier_article_number",
+        "supplier_id",
+        "supplier_name"
+      ]
+    },
+    "inventory_suppliers": {
+      "url": "/api/v1/inventory/suppliers",
+      "status": 200,
+      "rows": 3
+    },
+    "inventory_locations": {
+      "url": "/api/v1/inventory/locations",
+      "status": 200,
+      "rows": 0
+    },
+    "inventory_catalog": {
+      "url": "/api/v1/inventory/catalog",
+      "status": 200,
+      "rows": 91
+    },
+    "filament_catalog": {
+      "url": "/api/v1/filament-catalog/",
+      "status": 200,
+      "rows": 0
+    }
+  }
+}

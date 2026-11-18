@@ -700,6 +700,35 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     as an update does (`_seen`). Why: a spool linked while `weights` was off must take BB's
     weight and lock when `weights` is switched on, even when BB's row has not moved. Cost: the
     first pull after the switch reads that row in full once.
+15. Task 2: the live Bambuddy gave `info.version` `1.3.1` on 2026-11-18 (`GET /openapi.json`, no
+    key), so `sync-routes.json` and the new client docstrings cite the source at tag `v1.3.1`
+    (commit d3be761), not `v1.3.2b1-daily.20261113`. Why: F14. Cost: none known; the routes and
+    lines are the ones that version serves.
+16. Task 2: the filament catalog's writes (`create_filament`, `update_filament`) take a new
+    `Scope.ADMIN_FILAMENTS` ("Filament catalog (admin only)"), not Manage Inventory, and a 403
+    on one says that no API key can make it. Why: `FILAMENTS_CREATE`/`FILAMENTS_UPDATE` are
+    absent from `_APIKEY_SCOPE_BY_PERMISSION` and listed in `_APIKEY_DENIED_PERMISSIONS`
+    (`core/auth.py` lines 90 and 300-301, v1.3.1). Cost: the filament-catalog push works only
+    while Bambuddy's auth is off (prod runs with it off); Task 4 must treat that 409 as a
+    per-item error.
+17. Task 2: `suppliers()` and `locations()` take Read Status, as `spool_row` does. Why: their
+    routes need `INVENTORY_READ` (`inventory.py` lines 896, 700), which maps to
+    `can_read_status`. Cost: none known.
+18. Task 2: `create_catalog_entry` and `update_catalog_entry` keep `weight: float` and send
+    `round(weight)`. Why: `CatalogEntryCreate`/`CatalogEntryUpdate.weight` is an integer in the
+    recording. Cost: a fractional SB weight reaches BB rounded to whole grams.
+19. Task 2: `test_a_k_profile_row_parses_its_printer_and_k` puts a K-profile built from the
+    recorded `SpoolKProfileResponse` into a recorded spool row. Why: no live spool had a
+    K-profile (0 of 106, `GET /api/v1/inventory/spools` on 2026-11-18). Cost: the field names
+    are checked against the recording; the values are not measured.
+20. Task 2: sent bodies are validated with `jsonschema` against the recorded schema
+    (`conftest.assert_recorded_body`: types, required fields, nested refs), beyond `shaped`'s
+    name check; the recording test is a new `test_recordings_sync.py`. Why: the brief asks for
+    bodies validated against the recorded schema. Cost: none known.
+21. Task 2: `SpoolSupplier` (a spool's nested supplier link) requires only `supplier_id`, as
+    Bambuddy's `SpoolSupplierResponse` does with `id` and `supplier_name` beside it. Why: a link
+    with no supplier names nothing; the other fields default so a sparse row parses. Cost: a
+    link row with no `supplier_id` fails the whole spool's parse.
 
 ## Self-review
 
