@@ -149,15 +149,21 @@ def warm_crud_routes(base_url: str, auth: httpx.Auth, caller: str) -> None:
     ``caller``'s areas route, goes past the app's other routers first, so it builds
     them; with ``auth`` it also mints and resolves the credential. It is bounded by
     `WARM_TIMEOUT`, not a test's bound, and a refusal (another caller's credential)
-    still builds the routes."""
+    still builds the routes. A 5xx fails here, at the helper, not in the test's first
+    timed call (#6682)."""
     with httpx.Client(base_url=base_url, auth=auth, timeout=WARM_TIMEOUT) as warm:
-        warm.get(_areas(caller))
+        _warmed(warm.get(_areas(caller)))
 
 
 async def warm_crud_routes_async(base_url: str, auth: httpx.Auth, caller: str) -> None:
     """`warm_crud_routes` for a helper on the test's event loop."""
     async with httpx.AsyncClient(base_url=base_url, auth=auth, timeout=WARM_TIMEOUT) as warm:
-        await warm.get(_areas(caller))
+        _warmed(await warm.get(_areas(caller)))
+
+
+def _warmed(reply: httpx.Response) -> None:
+    """Any answer but a server error: a refusal still built the routes."""
+    assert reply.status_code < 500, f"the CRUD warm-up got {reply.status_code}: {reply.text}"
 
 
 def agent_key_tables(store: FlowStore) -> Connect:
