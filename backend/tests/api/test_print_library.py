@@ -55,6 +55,7 @@ from tests.api.test_settings_runtime import _state
 from tests.bambuddy.conftest import recording
 from tests.support.operations import press
 from tests.support.printers import linked_printer
+from tests.support.sb_rows import drop_app_sb_presets, seed_app_sb_spools
 from tests.test_clearance import two_objects_3mf
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("recorded_sb_spools")]
@@ -1573,6 +1574,77 @@ def test_a_library_files_check_reads_the_printer_beside_prepare_run_and_each_rea
         for route in (file_read, plates, download, printers, status, printer, remain)
     ]
     assert counts == [1] * 7
+
+
+@respx.mock
+def test_a_library_files_check_reads_the_printer_list_beside_the_file(
+    client: TestClient,
+) -> None:
+    """#4196: the check read the file and its plates, then Bambuddy's printer list. Here
+    the file answers only once the list has been asked for, so a check that still read
+    them one after the other hangs. Each is read once."""
+    configure(client)
+    library_file(89)
+    run_routes()
+    listed = asyncio.Event()
+
+    def list_printers(request: httpx.Request) -> httpx.Response:
+        listed.set()
+        return httpx.Response(200, json=recording("printers.json"))
+
+    printers = respx.get(f"{API}/printers/").mock(side_effect=list_printers)
+
+    async def file_after_list(request: httpx.Request) -> httpx.Response:
+        await listed.wait()
+        return httpx.Response(
+            200, json={"id": 89, "filename": "file-89.3mf", "file_type": "3mf", "file_hash": None}
+        )
+
+    file_read = respx.get(f"{API}/library/files/89").mock(side_effect=file_after_list)
+
+    check = client.post("/api/v1/print/library/89/check", json=body())
+
+    assert check.status_code == 200, check.text
+    assert (file_read.call_count, printers.call_count) == (1, 1)
+
+
+@respx.mock
+def test_a_library_files_check_reads_the_spools_presets_beside_the_printers_status(
+    client: TestClient,
+) -> None:
+    """#4196: the plan's spools' Bambuddy presets were read only after `prepare_run`.
+    Here the printer's status, which `prepare_run` reads, answers only once a spool's
+    presets have been asked for, so a check that still read them after it hangs. Each
+    spool's presets are read once."""
+    configure(client)
+    library_file(89)
+    run_routes()
+    seed_app_sb_spools(client)
+    drop_app_sb_presets(client, [5, 9])  # the plan reads their Bambuddy spools' presets
+    presets_asked = asyncio.Event()
+
+    def spool_presets(request: httpx.Request) -> httpx.Response:
+        presets_asked.set()
+        return httpx.Response(200, json=[])
+
+    presets = respx.route(
+        method="GET", path__regex=r"/api/v1/inventory/spools/\d+/filament-presets"
+    ).mock(side_effect=spool_presets)
+
+    async def status_after_presets(request: httpx.Request) -> httpx.Response:
+        await presets_asked.wait()
+        return httpx.Response(200, json=recording("printer-status-rack.json"))
+
+    status = respx.get(f"{API}/printers/1/status").mock(side_effect=status_after_presets)
+
+    check = client.post("/api/v1/print/library/89/check", json=body())
+
+    assert check.status_code == 200, check.text
+    assert status.call_count == 1
+    assert sorted(call.request.url.path for call in presets.calls) == [
+        "/api/v1/inventory/spools/5/filament-presets",
+        "/api/v1/inventory/spools/9/filament-presets",
+    ]
 
 
 @respx.mock
