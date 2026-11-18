@@ -35,7 +35,7 @@ from scadbuddy.workflows.commands import TemporalRefusedError
 from tests.api.conftest import read_stored
 from tests.api.test_settings_runtime import _state
 from tests.bambuddy.conftest import recording
-from tests.support.sb_rows import seed_app_sb_spools
+from tests.support.sb_rows import seed_app_type
 
 # The trailing slash is load-bearing: /api/v1/printers is a 404 on Bambuddy 1.2.5.5.
 PRINTERS_URL = "https://bambuddy.test/api/v1/printers/"
@@ -921,84 +921,56 @@ def _profile_printer(client: TestClient) -> str:
     return store.create(PrinterCreate(serial="01P00A0000000AA", name="Garage")).id
 
 
-@respx.mock
-def test_profile_with_unknown_spool_is_422(client: TestClient) -> None:
-    """#6153: each spool of the shop slice profile is one the print dialog offers on its
-    printer; here ScadBuddy's own spools by number, as the printer runs on Bambuddy's
-    path (#6262 Task 7)."""
+def test_a_profile_names_a_filament_type_per_material(client: TestClient) -> None:
+    """#6574: the shop slice profile names the filament type each material is sliced
+    with, casefolded; no spool is checked, as a type's preset needs no tray."""
     printer = _profile_printer(client)
-    client.put("/api/v1/settings", json={"bambuddy_url": "https://bambuddy.test"})
-    seed_app_sb_spools(client, [{"id": 7, "material": "PLA"}])
+    pla = str(seed_app_type(client, "PLA-W", "PLA", {"0.4": "Bambu PLA Basic @BBL H2C"}))
+    saved = client.put(
+        "/api/v1/settings",
+        json={"storefront_slice_profile": {"printer": printer, "materials": {"PLA": pla}}},
+    )
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["storefront_slice_profile"] == {
+        "printer": printer,
+        "materials": {"pla": pla},
+    }
+    # The old shape, a spool per material, is refused.
     refused = client.put(
         "/api/v1/settings",
-        json={"storefront_slice_profile": {"printer": printer, "spools": {"PETG": 8}}},
+        json={"storefront_slice_profile": {"printer": printer, "spools": {"PLA": 7}}},
+    )
+    assert refused.status_code == 422
+    cleared = client.put("/api/v1/settings", json={"storefront_slice_profile": None})
+    assert cleared.json()["storefront_slice_profile"] is None
+
+
+def test_profile_with_an_unknown_type_is_422(client: TestClient) -> None:
+    """#6574: each filament type of the profile is one not archived."""
+    printer = _profile_printer(client)
+    refused = client.put(
+        "/api/v1/settings",
+        json={
+            "storefront_slice_profile": {
+                "printer": printer,
+                "materials": {"PETG": str(uuid.uuid4())},
+            }
+        },
     )
     assert refused.status_code == 422, refused.text
     assert refused.json()["errors"][0]["loc"] == [
         "body",
         "storefront_slice_profile",
-        "spools",
+        "materials",
         "petg",
     ]
-    assert client.get("/api/v1/settings").json()["storefront_slice_profile"] is None
-
-    saved = client.put(
-        "/api/v1/settings",
-        json={"storefront_slice_profile": {"printer": printer, "spools": {"PLA": 7}}},
-    )
-    assert saved.status_code == 200, saved.text
-    assert saved.json()["storefront_slice_profile"] == {"printer": printer, "spools": {"pla": 7}}
-    cleared = client.put("/api/v1/settings", json={"storefront_slice_profile": None})
-    assert cleared.json()["storefront_slice_profile"] is None
-
-
-@respx.mock
-def test_profile_is_checked_against_the_connection_sent_beside_it(client: TestClient) -> None:
-    """#6255 review: one PUT that sets the Bambuddy URL and the profile checks the
-    profile with the new connection, not the stored one. Since #6262 Task 7 the spools
-    on Bambuddy's path are ScadBuddy's own, so neither URL's spools are read."""
-    printer = _profile_printer(client)
-    client.put("/api/v1/settings", json={"bambuddy_url": "https://old.test"})
-    seed_app_sb_spools(client, [{"id": 7, "material": "PLA"}])
-    old = respx.get("https://old.test/api/v1/inventory/spools")
-    new = respx.get("https://new.test/api/v1/inventory/spools")
-    saved = client.put(
-        "/api/v1/settings",
-        json={
-            "bambuddy_url": "https://new.test",
-            "storefront_slice_profile": {"printer": printer, "spools": {"PLA": 7}},
-        },
-    )
-    assert saved.status_code == 200, saved.text
-    assert saved.json()["storefront_slice_profile"] == {"printer": printer, "spools": {"pla": 7}}
-    assert not old.called and not new.called
-
-
-@respx.mock
-def test_profile_is_checked_against_a_connection_reset_beside_it(client: TestClient) -> None:
-    """#6255 review: a PUT that resets the Bambuddy URL and sets the profile checks the
-    spools at the deployment's URL, not the stored one."""
-    printer = _profile_printer(client)
-    client.put("/api/v1/settings", json={"bambuddy_url": "https://stored.test"})
-    respx.get("https://stored.test/api/v1/inventory/spools").mock(
-        return_value=httpx.Response(200, json=[{"id": 7, "material": "PLA"}])
-    )
-    refused = client.put(
-        "/api/v1/settings",
-        json={
-            "reset": ["bambuddy_url"],
-            "storefront_slice_profile": {"printer": printer, "spools": {"PLA": 7}},
-        },
-    )
-    # The tests' deployment has no Bambuddy URL, so spool 7 cannot be read.
-    assert refused.status_code != 200, refused.text
     assert client.get("/api/v1/settings").json()["storefront_slice_profile"] is None
 
 
 def test_profile_with_unknown_printer_is_422(client: TestClient) -> None:
     refused = client.put(
         "/api/v1/settings",
-        json={"storefront_slice_profile": {"printer": "nowhere", "spools": {}}},
+        json={"storefront_slice_profile": {"printer": "nowhere", "materials": {}}},
     )
     assert refused.status_code == 422
     assert refused.json()["errors"][0]["loc"] == ["body", "storefront_slice_profile", "printer"]
@@ -1007,7 +979,7 @@ def test_profile_with_unknown_printer_is_422(client: TestClient) -> None:
 def test_profile_takes_no_support_or_process_setting(client: TestClient) -> None:
     refused = client.put(
         "/api/v1/settings",
-        json={"storefront_slice_profile": {"printer": "p", "spools": {}, "supports": {}}},
+        json={"storefront_slice_profile": {"printer": "p", "materials": {}, "supports": {}}},
     )
     assert refused.status_code == 422
 

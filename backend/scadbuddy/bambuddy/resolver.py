@@ -198,6 +198,15 @@ def _own_preset(
     return preset_for(spool_presets.get(option.sb_number, ()), PRINTER_MODEL, size)
 
 
+def _type_preset(rows: Sequence[EffectivePreset], size: str) -> EffectivePreset | None:
+    """A filament type's preset for exactly the H2C and this nozzle size
+    (`filament.presets.preset_for`, #6574), or ``None``."""
+    # Here, not at the top: `filament.presets` reads this module's `PRINTER_MODEL`.
+    from scadbuddy.filament.presets import preset_for
+
+    return preset_for(rows, PRINTER_MODEL, size)
+
+
 #: What a ref the image's catalogue does not hold is, by its source (#3818 D5): a
 #: standard one is Bambu Studio's, from a version this image does not ship.
 _NOT_NATIVE: dict[str, str] = {
@@ -307,11 +316,19 @@ def resolve(
     choices: PrintChoices,
     catalogue: Catalogue,
     spool_presets: Mapping[int, Sequence[EffectivePreset]],
+    *,
+    slot_presets: Mapping[int, Sequence[EffectivePreset]] | None = None,
 ) -> Resolved:
     """Every slicer preset for ``plan`` on ``options``. ``spool_presets`` are each chosen
     spool's effective presets (#6262 F1, `filament.presets.effective_presets`), keyed by
     its SB number (``sb_number``); only the row of exactly the H2C and the chosen nozzle
-    is used."""
+    is used.
+
+    A slot needs a spool, except a slot in ``slot_presets`` (a storefront price's slice,
+    #6574): the presets of its filament type, by slot id. Such a slot takes its type's
+    preset for the H2C and the chosen nozzle as a spool takes its own, in the file's own
+    colour for the slot. That is how a price names a filament that is not loaded. A
+    print still needs a spool for every slot."""
     chosen = _resolve_choices(choices, catalogue)
     warnings = list(chosen.warnings)
     errors = list(chosen.errors)
@@ -331,8 +348,12 @@ def resolve(
         spool_id = plan.spool_for(slot.slot_id)
         # Not ``or -1``: a negative id is a tray chosen for itself (#2164).
         option = by_id.get(spool_id) if spool_id is not None else None
+        type_presets = (
+            slot_presets.get(slot.slot_id) if option is None and slot_presets is not None else None
+        )
         colours[idx] = (option.colour if option else slot.colour) or "#FFFFFF"
-        if option is None:
+        label = spool_label(option) if option is not None else f"Slot {slot.slot_id}'s filament"
+        if option is None and type_presets is None:
             # Not a preset problem, so Advanced cannot fix it: the slot needs a spool.
             errors.append(
                 FilamentWarning(
@@ -376,7 +397,11 @@ def resolve(
         if ref is None:
             # The spool's own preset for this nozzle first (#6262 F1): an SB spool's,
             # a tray's included (its SB spool's, by number), the person's choice.
-            own_preset = _own_preset(spool_presets, option, size)
+            own_preset = (
+                _own_preset(spool_presets, option, size)
+                if option is not None
+                else _type_preset(type_presets or (), size)
+            )
             own = [] if own_preset is None else [own_preset.slicer_filament]
             if catalogue.is_native:
                 # A spool's preset is a preset name, a Bambu Cloud setting_id, a BBL
@@ -404,7 +429,7 @@ def resolve(
                     # (#4645), and otherwise not said.
                     logger.debug(
                         "a spool's own preset is not in the native catalogue",
-                        extra={"spool_id": option.spool_id},
+                        extra={"spool_id": None if option is None else option.spool_id},
                     )
                 # Each is a ref the catalogue offers: a kept local one is not a name.
                 ref = next((native for native in mapped.values() if native is not None), None)
@@ -418,7 +443,12 @@ def resolve(
                     ),
                     None,
                 )
-            if ref is None and option.spool_id < 0 and option.slicer_filament:
+            if (
+                ref is None
+                and option is not None
+                and option.spool_id < 0
+                and option.slicer_filament
+            ):
                 # A tray chosen for itself: its tray_info_idx is the BBL preset's
                 # filament_id, after its SB spool's own preset (#6262).
                 ref = _by_filament_id(catalogue.filament, option.slicer_filament, printer)
@@ -427,11 +457,11 @@ def resolve(
             # the option's.
             for name in (
                 own_preset.slicer_filament_name if own_preset is not None else None,
-                option.slicer_filament_name,
+                None if option is None else option.slicer_filament_name,
             ):
                 if ref is None and name:
                     ref = _fits(catalogue.filament, f"{name} @BBL H2C", printer)
-            if ref is None:
+            if ref is None and option is not None:
                 ref = _fits(catalogue.filament, f"Generic {option.material} @BBL H2C", printer)
                 if ref is not None:
                     warnings.append(
@@ -450,7 +480,7 @@ def resolve(
                     kind="no-preset",
                     slot_id=slot.slot_id,
                     message=(
-                        f"{spool_label(option)} has no slicer preset for a {size} mm nozzle. "
+                        f"{label} has no slicer preset for a {size} mm nozzle. "
                         "Pick one under Advanced."
                     ),
                 )

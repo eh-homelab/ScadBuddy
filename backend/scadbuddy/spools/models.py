@@ -70,6 +70,9 @@ class SeenTray(BaseModel):
     #: the SB tray fingerprint (`filament/inventory.py`); ``colour`` stays ``#RRGGBB``
     #: for the slicer and the colour match.
     rgba: str | None = None
+    #: The AMS's remaining percent for a tray with RFID keys that sent it (`seen_trays`);
+    #: ``None`` for any other tray.
+    remain: int | None = None
 
     @property
     def fingerprint(self) -> str:

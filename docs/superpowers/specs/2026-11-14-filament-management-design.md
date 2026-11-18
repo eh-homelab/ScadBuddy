@@ -274,24 +274,55 @@ anchor, then subtract the **deltas** of every later event.
   `label_weight - weight_used`. A scale weighing always counts, a BB one
   included (BB's `last_scale_weight` is gross, so SB books it net of the
   insert's empty weight, else BB's `core_weight`).
-- Order is physical time (as built in #6261). Each event carries when it
-  happened: a print's `print_started` and `print_ended` at the plate's start, a
-  BB reading at the BB row's `updated_at`, a scale reading at its weighing time.
-  An event with no time of its own gets the clock time, kept after the spool's
-  newest event (the WSL clock can step back). Events of one time keep insert
-  order (`seq`).
+- Order is physical time (as built in #6261, changed in #6263). Each event
+  carries when it happened: a print's `print_started` when the printer takes the
+  plate, its `print_ended` at the report that shows the plate's timed end
+  (`FINISH` or `FAILED`; the settle's clock time when no report showed it), a BB
+  reading at the BB row's `updated_at`, a BB usage row at its `created_at`, a
+  scale reading at its weighing time. An event with no time of its own gets the
+  clock time, kept after the spool's newest event (the WSL clock can step
+  back). Events of one time keep insert order (`seq`). Three rules (#6263):
+  1. **At one instant, deltas come before readings.** A reading taken at the
+     moment a plate ends holds that plate. BB's usage row and its spool's
+     `updated_at` carry the same time, so a BB reading holds its own usage row.
+  2. **An `ams_remain` reading taken while the printer prints is recorded, but
+     is never an anchor.** The event carries `data.printing = true`. The AMS
+     remain % moves in steps during a plate, so it does not tell the grams left
+     after the plate.
+  3. **One plate is counted once.** SB's `print_started` and `print_ended`
+     events (`ref_kind = print_run`) and BB's usage row (`ref_kind = bb_usage`)
+     are paired when they name the same spool and the same job (SB's
+     `subtask_name`, which is BB's `print_name`). For a pair, SB's events are
+     skipped and BB's grams count, because BB keeps a failed plate's partial
+     grams and SB books 0 g for one. The pair is counted once, when it lies
+     after the anchor. The ledger compares each anchor in its own clock: an
+     anchor from BB (`bb_spool`, `bb_scale`, `bb_dried`) against BB's usage
+     time, any other anchor (AMS, person) against SB's time of the plate (the
+     end, else the start). So the skew between BB's clock and SB's cannot
+     count a plate twice.
 - The UI shows the anchor and the deltas that make the current value.
 
-Known limits of the time rule (#6261, to revisit in #6263, which records plate
-end times and AMS readings per tick):
-- A BB write during a plate that is not a deduction (a rename, say) becomes an
-  anchor before BB took the plate off, so that plate is under-counted until the
-  next absolute reading.
-- A BB clock behind SB's by more than a plate's length counts that plate twice
-  until the next reading.
-- A reading taken in the middle of a plate hides the rest of that plate.
-- The rule assumes BB deducts `weight_used` when a print ends (§8.2); this is
-  not yet measured on a live BB.
+Known limits of the time rule (#6261 and #6263):
+- Measured on the live BB on 2026-11-15 (§8.2): BB deducts `weight_used` in the
+  write that ends the print, at the usage row's `created_at`, which equals the
+  spool's `updated_at`. That is why a BB reading holds its own usage row
+  (rule 1).
+- A print BB did not deduct (BB was down at its end) and a later BB reading: SB's
+  plate sits inside the BB anchor's time but not inside its value, so it is
+  under-counted until the next scale or person reading.
+- A plate that BB credits to another spool (the spool BB assigned to the tray,
+  not the one SB printed from) counts on two spools: SB's record on SB's spool,
+  and BB's usage row on the other. #6264 and #6265 fix this when they sync the
+  tray assignment.
+- A BB usage row with no SB record (a print SB did not start) is compared with
+  an AMS or person anchor by raw time, so the measured skew (§8.2) decides a
+  plate that ends within that skew of the reading.
+- During a plate, the spool shows the anchor before the plate minus the
+  estimate, because AMS readings taken while printing are no anchor (rule 2).
+- The pull reads the newest 200 usage rows. More than 200 rows between two pulls
+  are not all booked. They are inside the next BB reading's value.
+- A plate end that no report showed (the next plate began, the printer went
+  `IDLE`) is booked at the settle's clock time, an upper bound.
 
 `native_spool_uses` (`20261101T1849Z_native_spool_uses.sql`) held a LAN print's
 sliced grams. Since #6261 the native store writes only the ledger, and the
@@ -391,12 +422,30 @@ holds each decision and what it costs if wrong.
 
 ## 6. Capture from events
 
-- **Tray changes.** SB already receives the LAN MQTT reports
-  (`spools/seen.py`, `ReportTrays`). A change of tray contents writes
-  `loaded` or `unloaded` at once, and an `ams_reading` with the remain %.
-- **Prints.** SB's own runs write `print_started` (estimate) and `print_ended`
-  (actual). For prints SB did not start, the print watcher's BB archive import
-  writes `print_ended` with the archive's actual grams.
+- **Tray changes.** SB receives the LAN MQTT reports, and the CRUD service
+  writes each one (`printers/reports.py` `advance_in`). A change of tray
+  contents writes `loaded` or `unloaded` in that write, and an `ams_reading`
+  with the remain % for an RFID tray (a tray without RFID keys gives no
+  reading). The `SpoolRefresh` schedule runs a capture backstop that reconciles
+  the stored reports against the ledger for what the write missed. Capture never
+  fails a report write: a failure is logged and the write goes on.
+- **Prints.** Only SB's native LAN runs write `print_started` (estimate, when
+  the printer takes the plate). Their `print_ended` (actual) is booked in the
+  write of the report that shows the plate's timed end (`FINISH` or `FAILED`,
+  at that report's time); an end with no time (the next plate began, the printer
+  went `IDLE`) is left to the follow's settle. A print sent through BB's queue
+  gets no `print_started` and no estimate (owner's ruling, 2026-11-15): its
+  grams come only from BB's usage rows. The scheduled BB pull books BB's usage
+  rows (`GET /inventory/usage`), per spool, as `print_ended` events with
+  `ref_kind = bb_usage` and the matched BB archive id (§8.2). It does not book the
+  print watcher's archive import. An archive holds one total for the print, not
+  grams per spool, and the watcher imports it while the print still runs, before
+  any actual exists. A usage row is what BB deducted from each spool. When SB and
+  BB both record one plate, BB's grams count (§5.5 rule 3). The booking runs
+  inside the pull, so it obeys #6262's `filament_sync.spools` setting. The per-type
+  sync settings are #6265's.
+  The reasons are in `docs/superpowers/plans/2026-11-15-filament-capture.md`,
+  "Decisions this plan makes", with the measurements of 2026-11-15 in §8.2.
 - **Scale.** BB's SpoolBuddy posts scale readings to BB
   (`/spoolbuddy/scale/reading`). With BB→SB sync of weights on, SB reads
   `last_scale_weight` and `last_weighed_at` changes and writes `weighed`.
@@ -467,11 +516,66 @@ else SB proposes a new type for a person to confirm.
   archive, or the same SB run) is not written again. Any other pulled change is
   a `bb` absolute reading. When SB pushes weights, it pushes `weight_used` as
   label weight minus SB's grams left, so BB converges on SB's value.
-  As built in #6261 (pull only), by time rather than by matching: the ledger
-  orders events by when they physically happened. A pulled reading sits at the
-  BB row's `updated_at`, and a native print's `print_ended` at its plate's start,
-  so a plate that started before BB's write is inside BB's value and is not
-  taken off again (`filament/ledger.py`, `filament/bambuddy_pull.py`).
+  As built in #6263: the ledger counts a plate once by pairing a job's SB and
+  BB records (§5.5 rule 3), not by matching an archive id. A pulled reading sits
+  at the BB row's `updated_at`, and BB's usage row of the same write at its
+  `created_at`, the same instant, with the delta first (§5.5 rule 1). SB's own
+  plate pairs with BB's usage row by job. Each anchor is compared in its own
+  clock: a BB anchor against BB's time, any other anchor against SB's time. So a
+  plate inside a BB reading's value is not taken off again, and the skew
+  between the clocks cannot count a plate twice (`filament/ledger.py`,
+  `filament/bambuddy_pull.py`, `filament/bambuddy_usage.py`). #6261 ordered a
+  native plate's `print_ended` at its plate's start; #6263 replaced that.
+
+  Measured on 2026-11-15 (#6263), read-only, from the WSL host, against
+  `https://bambuddy.internal.nullreference.io` (BB) and
+  `https://scadbuddy.internal.nullreference.io` (SB), with `GET` requests only:
+  - From the probe of about 05:50 UTC (`GET /api/v1/inventory/usage?limit=60`,
+    `GET /api/v1/archives/?limit=40`, `GET /api/v1/inventory/spools`), reused
+    and not measured again. A usage row's `created_at` equals its spool's
+    `updated_at` to the microsecond (usage 457 and spool 31; usage 465 and
+    spool 103), so BB deducts in the write that moves `updated_at`. BB keeps one
+    usage row per spool per print, SB's own LAN prints included, and their
+    `print_name` is SB's `subtask_name` (`scadbuddy-ac13ac3c-p1`). A failed
+    print has usage rows with partial grams (usage 460: 23.4 g, `failed`).
+  - The archive window, at about 06:22 UTC. `GET /api/v1/inventory/usage?limit=500`
+    gave 435 rows; `GET /api/v1/archives/?limit=200` gave 200 archives, the
+    oldest `completed_at` 2026-09-27. For each of the 406 usage rows not older
+    than that archive, the script took the archive of the same `printer_id`
+    whose `completed_at` was nearest, inside `[created_at − 60 s, created_at + 60 s]`.
+    379 rows matched (138 archives); no row had a second archive in the window.
+    `completed_at − created_at`: min 0.085 s, median 0.698 s, max 17.390 s,
+    n 379; none was negative. By the row's status: `completed` n 274, median
+    0.49 s, max 9.18 s; `cancelled` n 60, max 10.72 s; `failed` n 47, max
+    17.39 s. All rows of one print share one `created_at`. 27 rows (12 prints:
+    15 `failed`, 7 `cancelled`, 5 `completed`) matched no archive: for 19 the
+    200 archives hold no archive of that name; for 5 the archive of that name
+    was printed again, so its `completed_at` is a later run's; for 3 the
+    nearest archive was more than 60 s away. Both times are BB's clock, so the
+    skew below does not enter the window. The window to match an archive is
+    therefore `[created_at, created_at + 17.4 s]` at the least; no archive
+    ended before its usage rows.
+  - Ruling (controller, 2026-11-15, from the measurement above): SB matches an
+    archive to a usage row inside `[created_at, created_at + 30 s]`, the widest
+    offset seen (17.4 s) plus a margin, and none before `created_at`. A row with
+    no archive in the window keeps a null archive id; its grams are unaffected.
+  - The clock skew, at about 06:30 UTC. 120 alternating requests, 0.25 s
+    apart: `GET /api/v1/system/storage-usage` on BB and `GET /healthz` on SB,
+    both answered by `uvicorn` (the `Server` header). Each request recorded
+    the `Date` header and its send and receive times on the host's
+    `time.monotonic()`, not the wall clock. One SB answer that took 36 s was
+    dropped (n 119). Both servers drifted against the host's clock by the same
+    −0.073 s/s, so the WSL clock is the one that moves. A least-squares fit of
+    `Date − mid(send, receive)` with one common slope and one intercept per
+    server gives BB − SB = +0.011 s (residual sd 0.52 s). Each BB sample
+    against the mean of its two SB neighbours gives a mean of +0.019 s
+    (n 58, sd 0.62 s, standard error 0.08 s). `Date` has 1 s steps, and
+    uvicorn refreshes it about once a second (`Server.on_tick`, every 10
+    ticks of 0.1 s, in [uvicorn 0.53.0 `server.py`](https://github.com/Kludex/uvicorn/blob/0.53.0/uvicorn/server.py),
+    the version SB's `uv.lock` pins; BB's uvicorn version was not read), so one sample says little; the
+    expected bias is the same on both servers and cancels in the difference.
+    So the BB and SB clocks agree to within about 0.25 s. A second run of 120
+    stopped at a 60 s read timeout and is not used.
 - The sync runs in a worker and calls CRUD routes for SB data, with a service
   credential (§3).
 

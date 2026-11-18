@@ -257,6 +257,20 @@ function tree(includeArchived: boolean): S['LocationNode'][] {
   return shown.filter((place) => !place.parent_id || !ids.has(place.parent_id)).sort(order).map(node)
 }
 
+/**
+ * #6574 — the types not archived as the shop slice profile's options name them
+ * (`api/storefront_slice.py` `_types`), by code: for the settings mock.
+ */
+export function profileTypes(): S['ProfileType'][] {
+  return state.types
+    .filter((type) => !type.archived_at)
+    .sort((a, b) => a.code.localeCompare(b.code))
+    .map((type) => {
+      const material = nameOf('materials', type.material_id)
+      return { id: type.id, code: type.code, material: material ?? '', label: [type.code, material, type.colour_name].filter(Boolean).join(' ') }
+    })
+}
+
 /** `GET /filament/inventory`'s rows, from the same spools: for the orders and settings mocks too. */
 export function inventoryRows(includeArchived = false): FilamentInventorySpool[] {
   return listed(includeArchived).map((row) => ({
@@ -1290,6 +1304,8 @@ export const handlers = [
       archived_ids: [],
       failed_bb_ids: [],
       invalid_bb_ids: [],
+      usage_booked: 0,
+      usage_unlinked: 0,
     } satisfies S['PullReport']),
   ),
 ]

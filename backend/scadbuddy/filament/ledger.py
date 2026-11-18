@@ -12,20 +12,45 @@ of a ``print_actual`` event, or of a ``print_estimate`` event while no ``print_e
 event has its ``ref_id``: a print's actual replaces its estimate, and a print that ended
 with no actual known (``delta_g`` null) drops its estimate.
 
-The order is when things physically happened, so a print two sources both booked is
-counted once (§8.2, "Consumption is counted once"). An event that names its time (``at``)
-keeps it: a BB weighing or drying at BB's time, BB's state (``synced_from_bb``) at the BB
-row's ``updated_at``, a print's ``print_started`` and ``print_ended`` at its plate's start
-(`filament/print_uses.py`). A reading taken after a plate started is therefore read as holding that
-plate, and the plate's actual is not taken off it again. An event with no ``at`` is
-booked now: the clock's time, but never earlier than a microsecond after the spool's
-newest event, so a clock that steps back (WSL's does) cannot put an event before the one
-it follows. That guard only moves an event booked now, never a named time, so it never
-pushes a physical time past a newer anchor. Two events of one time keep the order they
-were booked in (``seq``), as a pull's ``created`` and ``synced_from_bb`` at one BB time.
+The order is when things physically happened (§8.2, "Consumption is counted once"). An
+event that names its time (``at``) keeps it: a BB weighing or drying at BB's time, BB's
+state (``synced_from_bb``) at the BB row's ``updated_at``, a BB usage row at its
+``created_at``, a print's ``print_started`` when the printer takes the plate and its
+``print_ended`` at the report that shows the plate's timed end (`filament/prints.py`). An event
+with no ``at`` is booked now: the clock's time, but never earlier than a microsecond
+after the spool's newest event, so a clock that steps back (WSL's does) cannot put an
+event before the one it follows. That guard only moves an event booked now, never a
+named time, so it never pushes a physical time past a newer anchor. Three rules (#6263, spec §5.5):
 
-`refresh_derived` reads a spool's whole history for each event. That is cheap at a few
-events a print; #6263's AMS readings, one per tick, will need an incremental path.
+1. At one instant every delta comes before every reading, and events of one kind keep
+   the order they were booked in (``seq``; a pull's ``created`` and ``synced_from_bb`` at
+   one BB time stay in order). A reading
+   taken as a plate ends holds that plate. BB writes a usage row and its spool's
+   ``updated_at`` at one instant, so a BB reading holds its own usage row.
+2. An ``ams_remain`` reading with ``data.printing`` true is recorded but is never an
+   anchor: the AMS remain % moves in steps during a plate.
+3. One plate is counted once. SB's events (``ref_kind`` `PRINT_RUN`) and BB's usage row
+   (`BB_USAGE`) of one job (`job_of`) on one spool are a pair. For a pair, SB's events
+   are skipped and BB's ``delta_g`` counts, because BB keeps a failed plate's partial
+   grams and SB books 0 g. The pair counts when it lies after the anchor, and each
+   anchor is compared in its own clock: an anchor from BB (`BB_REFS`) with BB's usage
+   time, any other anchor with SB's time of the plate (its newest end, else its start).
+   So the skew between BB's clock and SB's cannot count a plate twice or drop it. A pair
+   is per spool: when BB booked the plate on another spool than SB's estimate, the pull
+   books a 0 g ``print_ended`` on the estimate's spool with ``data.covered_by`` the BB
+   event (`bambuddy_usage._cover`, #6598). The estimate then drops as any estimate does
+   whose ref has a ``print_ended``: `basis` skips it.
+
+`refresh_derived` reads a spool's whole history, except for an event booked on top of
+it (`record` passes the event; #6263's AMS readings come one per tick). When no other
+event of the spool is later than it, it is not a delta (``source`` ``print_actual`` or
+``print_estimate``), not a ``print_started`` or ``print_ended``, and changes nothing
+(no ``data.changes``: an edit can lock the weight or move the label weight), the event
+sorts last and joins no pair, so the walk's answer is known without the walk. A reading
+that qualifies as an anchor (an ``ams_remain`` one when the weight is not locked and it
+is not ``printing``) gives ``grams_left``; any other event leaves it. A ``weighed`` or
+``scale`` event with ``grams_after`` sets ``last_weighed_*``, a ``dried`` one
+``last_dried_*``. Any other event takes the full walk.
 """
 
 from __future__ import annotations
@@ -52,12 +77,31 @@ PRINT_STARTED: Final = "print_started"
 PRINT_ENDED: Final = "print_ended"
 PRINT_ESTIMATE: Final = "print_estimate"
 PRINT_ACTUAL: Final = "print_actual"
+#: The ``ref_kind`` of a BB usage row booked on the spool.
+BB_USAGE: Final = "bb_usage"
+#: The ``ref_kind`` of a BB pull's ``created`` and ``synced_from_bb`` events.
+BB_SPOOL: Final = "bb_spool"
+#: The ``ref_kind``s of the events that carry BB's clock.
+BB_REFS: Final = frozenset({BB_SPOOL, "bb_scale", "bb_dried", BB_USAGE})
 
 _COLUMNS = ", ".join(m.SpoolEvent.model_fields)
 _ABSOLUTE = frozenset({"scale", "person", "bb", "ams_remain"})
 _MANUAL = frozenset({"scale", "person"})
 _DELTA = frozenset({PRINT_ACTUAL, PRINT_ESTIMATE})
 _USED = frozenset({PRINT_STARTED, PRINT_ENDED})
+
+
+def job_of(event: m.SpoolEvent) -> str | None:
+    """The job an event belongs to: ``data.job``, else for a `PRINT_RUN` event from
+    before #6263 the subtask in its ``ref_id`` (``run/subtask/slot``)."""
+    job = event.data.get("job")
+    if isinstance(job, str):
+        return job
+    if event.ref_kind == PRINT_RUN and event.ref_id:
+        parts = event.ref_id.split("/")
+        if len(parts) >= 3:
+            return "/".join(parts[1:-1])
+    return None
 
 
 def record(
@@ -117,8 +161,9 @@ def record(
     ).fetchone()
     if row is None:
         return None
-    refresh_derived(conn, spool_id)
-    return m.SpoolEvent.model_validate(row)
+    event = m.SpoolEvent.model_validate(row)
+    refresh_derived(conn, spool_id, event)
+    return event
 
 
 def _reading(event: m.SpoolEvent, label_weight_g: int | None) -> float | None:
@@ -136,9 +181,9 @@ def basis(
     events: Sequence[m.SpoolEvent], *, weight_locked: bool, label_weight_g: int | None
 ) -> m.GramsBasis:
     """The reading the grams left anchor on, and the deltas taken off it, by the rule
-    above; no anchor when there is no reading. Events of one time keep the order they were
-    booked in (``seq``)."""
-    ordered = sorted(events, key=lambda e: (e.at, e.seq))
+    above; no anchor when there is no reading. At one time, deltas come first and events
+    of one kind keep the order they were booked in (rule 1)."""
+    ordered = sorted(events, key=lambda e: (e.at, 0 if e.source in _DELTA else 1, e.seq))
     readings = [_reading(e, label_weight_g) for e in ordered]
     manual = max(
         (i for i, e in enumerate(ordered) if e.source in _MANUAL and readings[i] is not None),
@@ -148,19 +193,43 @@ def basis(
     for i, event in enumerate(ordered):
         if readings[i] is None:
             continue
-        if event.source == "ams_remain" and (weight_locked or i < manual):
+        if event.source == "ams_remain" and (
+            weight_locked or i < manual or event.data.get("printing") is True
+        ):
             continue
         anchor = i
     if anchor < 0:
         return m.GramsBasis(anchor=None, deltas=[])
+    # Rule 3: a job with a BB usage row and an SB plate event on this spool is a pair.
+    # `plate` is SB's position of the plate per job: its newest end, else its newest start.
+    used = {job_of(e) for e in ordered if e.ref_kind == BB_USAGE and e.kind == PRINT_ENDED}
+    ends: dict[str, int] = {}
+    starts: dict[str, int] = {}
+    for i, event in enumerate(ordered):
+        job = job_of(event)
+        if event.ref_kind == PRINT_RUN and job in used and job is not None:
+            if event.kind == PRINT_ENDED:
+                ends[job] = i
+            elif event.kind == PRINT_STARTED:
+                starts[job] = i
+    plate = starts | ends
+    bb_anchor = ordered[anchor].ref_kind in BB_REFS
     ended = {(e.ref_kind, e.ref_id) for e in ordered if e.kind == "print_ended" and e.ref_id}
-    deltas = [
-        event
-        for event in ordered[anchor + 1 :]
-        if event.source in _DELTA
-        and event.delta_g is not None
-        and not (event.source == "print_estimate" and (event.ref_kind, event.ref_id) in ended)
-    ]
+    deltas: list[m.SpoolEvent] = []
+    for i, event in enumerate(ordered):
+        job = job_of(event)
+        if job in plate and event.ref_kind == PRINT_RUN:
+            continue
+        if job in plate and event.ref_kind == BB_USAGE:
+            after = i > anchor if bb_anchor else plate[job] > anchor
+            if after and event.kind == PRINT_ENDED and event.delta_g is not None:
+                deltas.append(event)
+            continue
+        if i <= anchor or event.source not in _DELTA or event.delta_g is None:
+            continue
+        if event.source == PRINT_ESTIMATE and (event.ref_kind, event.ref_id) in ended:
+            continue
+        deltas.append(event)
     return m.GramsBasis(anchor=ordered[anchor], deltas=deltas)
 
 
@@ -256,11 +325,12 @@ def page(
     )
 
 
-def refresh_derived(conn: Conn, spool_id: UUID) -> None:
+def refresh_derived(conn: Conn, spool_id: UUID, event: m.SpoolEvent | None = None) -> None:
     """Recompute the spool's ``grams_left`` and ``last_*`` columns from its events. The
     label weight is the spool's own, else its type's. The spool's row is locked (`record`
     has locked it already), so two transactions that each record an event read each
-    other's in turn."""
+    other's in turn. With ``event`` (the one just booked), an event on top of the history
+    updates the columns without reading it, by the module's rule."""
     spool = conn.execute(
         "SELECT s.weight_locked, coalesce(s.label_weight_g, t.label_weight_g) AS label_weight_g"
         " FROM filament_spools s LEFT JOIN filament_spool_types t ON t.id = s.type_id"
@@ -269,12 +339,11 @@ def refresh_derived(conn: Conn, spool_id: UUID) -> None:
     ).fetchone()
     if spool is None:
         return
+    if event is not None and _on_top(conn, spool_id, event):
+        _book_on_top(conn, spool_id, event, spool["weight_locked"], spool["label_weight_g"])
+        return
     history = events(conn, spool_id)
-    weighed = [
-        e
-        for e in history
-        if (e.kind == "weighed" or e.source == "scale") and e.grams_after is not None
-    ]
+    weighed = [e for e in history if _weighs(e)]
     dried = [e for e in history if e.kind == "dried"]
     used = [e for e in history if e.kind in _USED]
     last_weighed = weighed[-1] if weighed else None
@@ -298,3 +367,50 @@ def refresh_derived(conn: Conn, spool_id: UUID) -> None:
             spool_id,
         ),
     )
+
+
+def _weighs(event: m.SpoolEvent) -> bool:
+    return (event.kind == "weighed" or event.source == "scale") and event.grams_after is not None
+
+
+def _on_top(conn: Conn, spool_id: UUID, event: m.SpoolEvent) -> bool:
+    """True when ``event`` sorts last in the walk and can join no pair or change the
+    rule's inputs: the module's fast-path rule."""
+    if event.source in _DELTA or event.kind in _USED or event.data.get("changes"):
+        return False
+    row = conn.execute(
+        "SELECT max(at) AS at FROM filament_spool_events WHERE spool_id = %s AND id <> %s",
+        (spool_id, event.id),
+    ).fetchone()
+    newest = row["at"] if row is not None else None
+    return newest is None or newest <= event.at
+
+
+def _book_on_top(
+    conn: Conn,
+    spool_id: UUID,
+    event: m.SpoolEvent,
+    weight_locked: bool,
+    label_weight_g: int | None,
+) -> None:
+    """The columns ``event`` changes when it is on top. A last reading is the walk's
+    anchor whenever it qualifies (no manual reading is later), and no delta follows it."""
+    sets: dict[str, Any] = {}
+    reading = _reading(event, label_weight_g)
+    if reading is not None and not (
+        event.source == "ams_remain" and (weight_locked or event.data.get("printing") is True)
+    ):
+        sets["grams_left"] = max(reading, 0.0)
+    if _weighs(event):
+        sets |= {"last_weighed_g": event.grams_after, "last_weighed_at": event.at}
+    if event.kind == "dried":
+        sets |= {
+            "last_dried_at": event.at,
+            "last_dried_temp_c": event.data.get("temp_c"),
+            "last_dried_hours": event.data.get("hours"),
+        }
+    if sets:
+        columns = ", ".join(f"{c} = %s" for c in sets)
+        conn.execute(
+            f"UPDATE filament_spools SET {columns} WHERE id = %s", [*sets.values(), spool_id]
+        )

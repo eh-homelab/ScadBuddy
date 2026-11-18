@@ -1079,6 +1079,40 @@ async def test_the_checks_early_reads_fail_in_the_order_they_were_read_in(
         await check_print(bambuddy, cast(PrintSource, source), StoredSettings(), request)
 
 
+@respx.mock
+async def test_the_printers_status_does_not_wait_on_the_catalogue(
+    bambuddy: BambuddyClient,
+) -> None:
+    """#4196: `prepare_run` read the preset catalogue, then the printer's status. Here the
+    catalogue answers only once the status has been asked for, so a check that still read
+    them one after the other hangs. The choices are refused by the catalogue, and the
+    refusal is the check's answer, as before."""
+    respx.get(f"{API}/printers/").mock(return_value=_ok("printers.json"))
+    status_asked = asyncio.Event()
+    respx.get(f"{API}/printers/1/status").mock(
+        side_effect=_marks(status_asked, "printer-status-rack.json")
+    )
+    presets = respx.get(f"{API}/slicer/presets").mock(
+        side_effect=_after(status_asked, "slicer-presets-h2c.json")
+    )
+    respx.get(f"{API}/local-presets/").mock(return_value=_ok("local-presets.json"))
+    respx.get(f"{API}/printers/1").mock(return_value=_ok("printer.json"))
+    respx.get(f"{API}/printers/1/inventory-remain").mock(return_value=_ok("inventory-remain.json"))
+    request = PrintRunRequest.model_validate(
+        {
+            "filament_plan": {"ids": "sb", "slots": []},
+            "choices": {"nozzles": [{"size": "0.4"}, {"size": "0.2"}], "tier": "standard"},
+            "printer_id": 1,
+        }
+    )
+
+    check = await check_print(bambuddy, cast(PrintSource, _CheckDone()), StoredSettings(), request)
+
+    [error] = check.errors
+    assert "different sizes" in error
+    assert presets.call_count == 1
+
+
 def _sidecar_unanswered() -> httpx.Response:
     """/slicer/presets as Bambuddy answered it while its slicer sidecar timed out
     (#4717): ``_fetch_bundled_presets`` leaves the standard tier empty with no error or

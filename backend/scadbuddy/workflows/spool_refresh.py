@@ -18,6 +18,10 @@ the spool overlay, then the kept presets behind `HELD_PATCH` and the pull behind
 `FILAMENT_PULL_PATCH`. The overlay is gone; a run opened before the patch replays that
 branch, and its three activities answer as having nothing to do (`spools/activities.py`).
 
+Behind ``filament-capture-backstop`` (#6263 Task 8), after the pull on every branch, a run
+reconciles each printer's latest report with the filament ledger (`filament_capture_backstop`),
+the backstop for what the printer watch missed.
+
 On the versioned ``library`` worker (#4090) it is AUTO_UPGRADE (`VersionedSpoolRefresh`),
 so a run left open across a deploy replays on the new code: a change to the commands
 ``SpoolRefresh.run`` issues goes behind ``workflow.patched``
@@ -50,6 +54,9 @@ FILAMENT_PULL_PATCH = "filament-bb-pull"
 #: spool overlay is gone (#6262 Task 12). ``deprecate_patch`` and the removal of the old
 #: branch come in a later PR, once no run opened before it is left (`RUN_TIMEOUT`).
 PROVIDERS_GONE_PATCH = "spool-providers-gone"
+CAPTURE_ACTIVITY = "filament_capture_backstop"
+#: The `workflow.patched` id that adds `CAPTURE_ACTIVITY` to a run (#6263 Task 8).
+CAPTURE_PATCH = "filament-capture-backstop"
 #: Listing the providers read nothing (before `PROVIDERS_GONE_PATCH`, as the next three).
 LIST_TIMEOUT = timedelta(seconds=30)
 #: One provider's refresh, which was bounded at a minute inside its activity.
@@ -60,6 +67,8 @@ SEEN_TIMEOUT = timedelta(minutes=2)
 HELD_TIMEOUT = timedelta(minutes=2)
 #: One list of Bambuddy's spools, then a transaction per spool.
 FILAMENT_PULL_TIMEOUT = timedelta(minutes=5)
+#: Every printer's latest report, reconciled with the ledger in a transaction each.
+CAPTURE_TIMEOUT = timedelta(minutes=2)
 #: A run opened before `PROVIDERS_GONE_PATCH` grows with the providers; a run that can
 #: never finish still ends, and the Schedule's overlap SKIP stops holding later ticks back.
 RUN_TIMEOUT = timedelta(minutes=15)
@@ -78,7 +87,14 @@ class SpoolRefresh:
         """Empty since `PROVIDERS_GONE_PATCH`. Before it, what came of each provider, in
         priority order: ``refreshed``, ``failed`` or ``skipped``. One step's failure
         never stops the next."""
-        if workflow.patched(PROVIDERS_GONE_PATCH):
+        gone = workflow.patched(PROVIDERS_GONE_PATCH)
+        outcome = await self._run_steps(gone)
+        if workflow.patched(CAPTURE_PATCH):
+            await self._capture()
+        return outcome
+
+    async def _run_steps(self, gone: bool) -> dict[str, str]:
+        if gone:
             await self._held()
             await self._pull()
             return {}
@@ -123,6 +139,17 @@ class SpoolRefresh:
             )
         except ActivityError:
             workflow.logger.warning("could not keep Bambuddy's local presets")
+
+    async def _capture(self) -> None:
+        try:
+            await workflow.execute_activity(
+                CAPTURE_ACTIVITY,
+                result_type=str,
+                start_to_close_timeout=CAPTURE_TIMEOUT,
+                retry_policy=_ONCE,
+            )
+        except ActivityError:
+            workflow.logger.warning("could not reconcile the printers' trays with the ledger")
 
     async def _pull(self) -> None:
         try:
