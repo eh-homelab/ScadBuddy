@@ -64,6 +64,8 @@ from scadbuddy.bambuddy.models import (
     FolderCreate,
     FolderUpdate,
     InventoryRemain,
+    KProfile,
+    KProfileTable,
     LibraryFile,
     LibraryListRow,
     LibraryPlates,
@@ -72,6 +74,7 @@ from scadbuddy.bambuddy.models import (
     LocalPresetDetail,
     MoveResult,
     PresetCatalogue,
+    PresetImport,
     PresetRef,
     PresetValues,
     Printer,
@@ -218,6 +221,7 @@ Operation = Literal[
     "printers.files",
     "printers.files.download",
     "printers.inventory_remain",
+    "printers.kprofiles",
     "printers.list",
     "printers.read",
     "printers.slot_configure",
@@ -236,6 +240,7 @@ Operation = Literal[
     "slice.start",
     "slicer.local_preset",
     "slicer.local_preset.create",
+    "slicer.local_presets.import",
     "slicer.local_presets",
     "slicer.preset_values",
     "slicer.presets",
@@ -899,6 +904,33 @@ class BambuddyClient:
             json={"name": name, "preset_type": preset_type, "setting": dict(setting)},
         )
         return LocalPreset.model_validate(response.json())
+
+    async def import_local_presets(self, zip_bytes: bytes) -> PresetImport:
+        """``POST /api/v1/local-presets/import``: one zip of presets, sent as the multipart
+        part ``file`` named ``profiles.zip``. Bambuddy gates it like the create call
+        (:meth:`create_local_preset`), so a refusal names the same scope (#6625)."""
+        response = await self._send(
+            "POST",
+            "/local-presets/import",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="slicer.local_presets.import",
+            what="import local presets",
+            files={"file": ("profiles.zip", zip_bytes, "application/zip")},
+        )
+        return PresetImport.model_validate(response.json())
+
+    async def k_profiles(self, printer_id: int, nozzle_diameter: str) -> list[KProfile]:
+        """``GET /api/v1/printers/{id}/kprofiles/?nozzle_diameter=``: the K table the
+        printer holds for one nozzle. The trailing slash is Bambuddy's route (#6625)."""
+        response = await self._send(
+            "GET",
+            f"/printers/{printer_id}/kprofiles/",
+            scope=Scope.READ_STATUS,
+            operation="printers.kprofiles",
+            what=f"read printer {printer_id}'s K profiles",
+            params={"nozzle_diameter": nozzle_diameter},
+        )
+        return KProfileTable.model_validate(response.json()).profiles
 
     # --- inventory -----------------------------------------------------------
 
