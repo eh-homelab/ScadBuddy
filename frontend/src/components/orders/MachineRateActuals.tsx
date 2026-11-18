@@ -1,5 +1,5 @@
 import { useState, type KeyboardEvent, type ReactNode } from 'react'
-import { ApiError, api } from '../../api/client'
+import { ApiError, api, newRequestId } from '../../api/client'
 import type { CounterView, MachineRateEvent, MachineRateEventPatch, RowActuals } from '../../api/types'
 import { toast } from '../../lib/toast'
 import { Button } from '@/components/ui/button'
@@ -383,7 +383,8 @@ export function LogEventForm({
   onCancel: () => void
 }) {
   const filled = counter.hours ?? ''
-  const [source] = useState(() => globalThis.crypto.randomUUID())
+  // getRandomValues, not randomUUID: plain http on the LAN and Bambuddy's iframe have no secure context.
+  const [source] = useState(() => newRequestId())
   const [date, setDate] = useState(() => localDay())
   const [reading, setReading] = useState(filled)
   const [usedOpen, setUsedOpen] = useState(false)
@@ -400,6 +401,7 @@ export function LogEventForm({
   async function submit() {
     const hoursAt = reading.trim()
     const hoursUsed = usedOpen ? used.trim() : ''
+    if (date && date > localDay()) return setError('Enter a date no later than today.')
     if (hoursAt && !decimal(hoursAt, TENTHS)) return setError(`Enter the counter reading as a number ${placesText(TENTHS)}.`)
     if (hoursUsed && (!decimal(hoursUsed, TENTHS) || Number(hoursUsed) <= 0)) return setError(`Enter the hours used as a number above 0 ${placesText(TENTHS)}.`)
     if (!hoursAt && counter.source === 'typed' && !hoursUsed)

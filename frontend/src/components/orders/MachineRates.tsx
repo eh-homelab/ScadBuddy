@@ -62,8 +62,8 @@ function bodyOf(draft: Draft, linked: boolean): MachineRateInputs | string {
     number(p.labour_rate_per_hour, 'the labour rate', AMOUNT) ??
     number(p.lan_hours_offset, 'the offset', TENTHS)
   if (problem) return problem
-  const window = p.actuals_window.trim()
-  if (!/^\d+$/.test(window) || Number(window) < 1 || Number(window) > 20) return 'Enter the actuals window as a whole number from 1 to 20.'
+  const actualsWindow = p.actuals_window.trim()
+  if (!/^\d+$/.test(actualsWindow) || Number(actualsWindow) < 1 || Number(actualsWindow) > 20) return 'Enter the actuals window as a whole number from 1 to 20.'
   const optional = (text: string) => (text.trim() ? text.trim() : undefined)
   for (const w of draft.wear) {
     if (!w.name.trim()) return 'Name each wear part, such as Nozzle.'
@@ -85,8 +85,9 @@ function bodyOf(draft: Draft, linked: boolean): MachineRateInputs | string {
       watts: optional(p.watts),
       kwh_price: optional(p.kwh_price),
       labour_rate_per_hour: optional(p.labour_rate_per_hour) ?? null,
-      actuals_window: Number(window),
-      lan_hours_offset: optional(p.lan_hours_offset),
+      actuals_window: Number(actualsWindow),
+      // Empty is no offset; left out, the backend would keep the stored one.
+      lan_hours_offset: p.lan_hours_offset.trim() || '0',
     },
     wear_parts: draft.wear.map((w) => ({
       name: w.name.trim(),
@@ -189,7 +190,7 @@ function Editor({ printer, onClose }: { printer: PrinterRow; onClose: () => void
   // Bambuddy's own task names, from a read of Bambuddy itself, also before the first save.
   const bambuddyTasks = view.data?.bambuddy_tasks ?? []
   const actuals = new Map((view.data?.actuals.rows ?? []).map((row) => [`${row.kind}:${row.name}`, row]))
-  const window = view.data?.actuals.window ?? DEFAULT_WINDOW
+  const actualsWindow = view.data?.actuals.window ?? DEFAULT_WINDOW
   const wearRates = new Map((view.data?.breakdown.wear ?? []).map((w) => [w.name, w]))
   const taskRates = new Map((view.data?.breakdown.maintenance ?? []).map((m) => [m.task, m]))
   const logged = () => {
@@ -239,7 +240,7 @@ function Editor({ printer, onClose }: { printer: PrinterRow; onClose: () => void
     const row: RowActuals | undefined = actuals.get(key)
     return (
       <div className="flex flex-col gap-2">
-        <FigurePair name={saved} kind={kind} estimate={figures.estimate} row={row} pricedBy={pricedBy} need={window} notCounted={figures.notCounted} onPricedBy={setPricedBy} />
+        <FigurePair name={saved} kind={kind} estimate={figures.estimate} row={row} pricedBy={pricedBy} need={actualsWindow} notCounted={figures.notCounted} onPricedBy={setPricedBy} />
         <EventList
           printerId={printer.id}
           kind={kind}

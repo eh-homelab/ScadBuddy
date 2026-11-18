@@ -367,6 +367,58 @@ describe('MachineRates actuals (#5774)', () => {
     expect(await within(panel).findByText(/712.4 h, counted by ScadBuddy/)).toBeInTheDocument()
   })
 
+  it('logs a replacement outside a secure context, where crypto.randomUUID is missing', async () => {
+    await nozzle()
+    const original = Object.getOwnPropertyDescriptor(crypto, 'randomUUID')
+    Object.defineProperty(crypto, 'randomUUID', { value: undefined, configurable: true })
+    try {
+      const { user } = renderPage(<MachineRates />)
+      const panel = await open(user, 'Garage')
+      const wear = within(panel).getByRole('group', { name: 'Wear part 1' })
+      await user.click(within(wear).getByRole('button', { name: 'Log replacement' }))
+      const form = within(wear).getByRole('form', { name: 'Log replacement of Nozzle' })
+      await user.type(within(form).getByLabelText('Counter reading (h)'), '120')
+      await user.click(within(form).getByRole('button', { name: 'Log replacement' }))
+      await waitFor(() => expect(machineRateEvents(GARAGE)).toHaveLength(1))
+      expect(machineRateEvents(GARAGE)[0]!.source).toMatch(/^[0-9a-f]{32}$/)
+    } finally {
+      if (original) Object.defineProperty(crypto, 'randomUUID', original)
+      else delete (crypto as { randomUUID?: unknown }).randomUUID
+    }
+  })
+
+  it('refuses a date after today typed by hand', async () => {
+    await nozzle()
+    const { user } = renderPage(<MachineRates />)
+    const panel = await open(user, 'Garage')
+    const wear = within(panel).getByRole('group', { name: 'Wear part 1' })
+    await user.click(within(wear).getByRole('button', { name: 'Log replacement' }))
+    const form = within(wear).getByRole('form', { name: 'Log replacement of Nozzle' })
+    await user.type(within(form).getByLabelText('Counter reading (h)'), '120')
+    const tomorrow = new Date(Date.now() + 86_400_000)
+    const day = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, '0')}-${String(tomorrow.getDate()).padStart(2, '0')}`
+    await user.clear(within(form).getByLabelText('Date'))
+    await user.type(within(form).getByLabelText('Date'), day)
+    await user.click(within(form).getByRole('button', { name: 'Log replacement' }))
+    expect(await within(form).findByRole('alert')).toHaveTextContent('Enter a date no later than today.')
+    expect(machineRateEvents(GARAGE)).toHaveLength(0)
+  })
+
+  it('saves an emptied offset as 0, not as the old offset', async () => {
+    await nozzle()
+    await api.linkPrinterLan(GARAGE, { host: '10.0.0.5', access_code: '12345678' })
+    setLanCount(GARAGE, { run_hours: '612.4' })
+    const { user } = renderPage(<MachineRates />)
+    const panel = await open(user, 'Garage')
+    await user.clear(within(panel).getByLabelText('Offset (h)'))
+    await user.type(within(panel).getByLabelText('Offset (h)'), '100')
+    await user.click(within(panel).getByRole('button', { name: 'Save machine rate' }))
+    await waitFor(async () => expect((await api.machineRate(GARAGE)).inputs?.profile).toMatchObject({ lan_hours_offset: '100' }))
+    await user.clear(within(panel).getByLabelText('Offset (h)'))
+    await user.click(within(panel).getByRole('button', { name: 'Save machine rate' }))
+    await waitFor(async () => expect(Number((await api.machineRate(GARAGE)).inputs?.profile?.lan_hours_offset)).toBe(0))
+  })
+
   it('refuses a window outside 1 to 20', async () => {
     await nozzle()
     const { user } = renderPage(<MachineRates />)
