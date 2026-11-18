@@ -1024,7 +1024,8 @@ export const filamentTools: Tool[] = [
       "Book the AMS's remaining percent of each spool in a tray now as its grams left. It skips locked spools, " +
       'every spool of a printer that is printing, and printers with no fresh report. Only RFID trays carry a remain ' +
       '%, so other trays are counted as `no_remain`. Returns the counts (`booked`, `locked`, `printing`, ' +
-      '`no_remain`, `stale`) and the `spools` booked. Writes ScadBuddy only.',
+      '`no_remain`, `stale`), the `spools` booked, and `stale_printers`: each printer whose spools are in `stale`, ' +
+      'with its `id` and `name` (`null` when the printer is gone). Name those printers to the user. Writes ScadBuddy only.',
     input: z.object({}),
     risk: 'write',
     source: SOURCE,

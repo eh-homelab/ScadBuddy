@@ -474,7 +474,8 @@ async def import_spools(
         "a spool whose weight is locked, every spool of a printer that is printing, one "
         "whose tray reports no `remain` (only RFID trays do), and every spool of a printer "
         "with no report or a stale one. Each spool in a printer's tray is in one count; "
-        "`spools` are the ones booked."
+        "`spools` are the ones booked, and `stale_printers` names (`id`, `name`) each "
+        "printer whose spools are in `stale`."
     ),
 )
 async def sync_ams_weights(filament: FilamentDep, caller: CallerDep) -> m.AmsSyncResult:

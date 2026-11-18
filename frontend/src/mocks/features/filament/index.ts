@@ -1349,7 +1349,7 @@ export const handlers = [
 
   // -- AMS weights (#6268): the mock books the same three spools, skipping one locked and two on a printing printer --
   http.post(`${BASE}/spools/sync-ams-weights`, () =>
-    HttpResponse.json({ booked: 3, locked: 1, printing: 2, no_remain: 0, stale: 0, spools: [spoolId(1), spoolId(4), spoolId(8)] } satisfies S['AmsSyncResult']),
+    HttpResponse.json({ booked: 3, locked: 1, printing: 2, no_remain: 0, stale: 0, stale_printers: [], spools: [spoolId(1), spoolId(4), spoolId(8)] } satisfies S['AmsSyncResult']),
   ),
 
   // -- location sensors (#6268) --

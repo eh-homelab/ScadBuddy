@@ -364,6 +364,27 @@ def reconcile_all(
     return total
 
 
+def _stale(
+    conn: Conn,
+    result: m.AmsSyncResult,
+    printer_id: str,
+    holders: list[UUID],
+    *,
+    name: str | None = None,
+    gone: bool = False,
+) -> None:
+    """Count ``holders`` as ``stale`` and name their printer in ``stale_printers`` (#6679).
+    A printer that holds no spool is not named. With no ``name`` and not ``gone``, the name
+    is read from the printer's row."""
+    if not holders:
+        return
+    result.stale += len(holders)
+    if name is None and not gone:
+        row = conn.execute("SELECT name FROM printers WHERE id = %s", (printer_id,)).fetchone()
+        name = None if row is None else row["name"]
+    result.stale_printers.append(m.StalePrinter(id=UUID(printer_id), name=name))
+
+
 def sync_ams_weights(pool: ConnectionPool[Conn], *, actor: str, now: datetime) -> m.AmsSyncResult:
     """Book the AMS's ``remain`` of every spool in a printer's tray place now as an
     ``ams_reading`` timed ``now`` (``data.forced``), so it anchors the grams left (#6268
@@ -374,7 +395,8 @@ def sync_ams_weights(pool: ConnectionPool[Conn], *, actor: str, now: datetime) -
     counted once: ``booked``, ``locked`` (its weight is locked), ``printing`` (its printer
     is printing), ``no_remain`` (its tray shows no ``remain``, or none at all) or ``stale``
     (its printer has no report or no row, or a report older than `is_fresh` or one that
-    cannot be read: that is logged, and the other printers go on). A spool in no tray
+    cannot be read: that is logged, and the other printers go on); each such printer is
+    named once in ``stale_printers``. A spool in no tray
     place is not counted, nor is one placed in a tray between the first holder read and
     the spool locks: it was not locked, so it is left to the next sync."""
     with pool.connection() as conn:
@@ -401,11 +423,11 @@ def sync_ams_weights(pool: ConnectionPool[Conn], *, actor: str, now: datetime) -
             current = {p: [s for s in spools if s in taken] for p, spools in current.items()}
             holders = sorted({s for spools in current.values() for s in spools})
             if row is None or not is_fresh(row["seen_at"], now):
-                result.stale += len(holders)
+                _stale(conn, result, printer_id, holders)
                 continue
             printer = PrinterStore.read_on(conn, printer_id)
             if printer is None:
-                result.stale += len(holders)
+                _stale(conn, result, printer_id, holders, gone=True)
                 continue
             report = dict(row["report"])
             state = report.get("gcode_state")
@@ -427,7 +449,7 @@ def sync_ams_weights(pool: ConnectionPool[Conn], *, actor: str, now: datetime) -
                         "error": type(error).__name__,
                     },
                 )
-                result.stale += len(holders)
+                _stale(conn, result, printer_id, holders, name=printer.name)
                 continue
             for (ams_id, tray_id), place in places.items():
                 seen = filled.get((ams_id, tray_id))
