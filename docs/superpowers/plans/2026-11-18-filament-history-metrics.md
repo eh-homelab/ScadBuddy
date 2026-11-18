@@ -747,6 +747,7 @@ Load `frontend-design` and `dataviz` first.
 6. Task 2: A spool overrides `presets` or `k_values` when it has any own row of that list, and a type's presets or K values write no event when the list is the same before and after, so a whole-list save that changes nothing books nothing.
 7. Task 2: `SpoolTypeStore.archive` also takes `actor`, because it calls `update`, which now needs one; archiving writes no spool event, as `archived` is not in `OVERRIDABLE`.
 8. Task 2: The two API provenance tests build their own app with `tests/api/test_authorship_session.py`'s setup (a `secret_key_file`, `public_url` and `auth_mode` `observe`), because the module's `client` has no key to seal a service credential with, and `observe` is where that file tests that only the agent's credential may name an author.
+9. Task 2: `test_presets.py`'s `test_setting_an_empty_list_resets_to_the_type` and `test_a_spool_k_value_overrides_its_types_and_resets` now count only the spool's own `edited` events (no `data.type_id`), because the type's preset or K-value save before them now writes a fan-out event on the spool, which had no rows of its own yet.
 
 ## Pre-flight rulings (2026-11-18)
 
