@@ -18,6 +18,7 @@ from uuid import UUID
 from pydantic import AfterValidator, BaseModel, Field, StringConstraints, model_validator
 
 from scadbuddy.core.problems import Problem
+from scadbuddy.filament.colour import Rgba
 from scadbuddy.filament.models import Name, Note, SpoolTypeCreate, Text, _In, _Patch, _Row
 
 
@@ -208,6 +209,28 @@ class InvoiceLine(_Row):
     update_spool_ids: list[UUID]
     unit_cost: Decimal | None = None
     spool_ids: list[UUID] = Field(default_factory=list)
+
+
+class SpoolBrief(BaseModel):
+    """An open spool as a line's candidate: what a person or the session needs to tell it
+    from another one (#6267). Values are the effective ones (own override over the type's)."""
+
+    id: UUID
+    number: int
+    type_id: UUID | None
+    colour_name: str | None
+    rgba: Rgba | None
+    cost_per_kg: Decimal | None
+    grams_left: float | None
+
+
+class LineCandidates(BaseModel):
+    """The open spools a line could update instead of making new ones (#6267): those with
+    the line's material and exact RGBA, split by whether they have a cost yet."""
+
+    position: int
+    uncosted: list[SpoolBrief]
+    costed: list[SpoolBrief]
 
 
 class InvoiceConflict(Problem):

@@ -40,6 +40,7 @@ Conn = Connection[DictRow]
 Row = Mapping[str, Any]
 _Ids = list[UUID]
 _Invoices = list[pm.Invoice]
+_Candidates = list[pm.LineCandidates]
 _Claimed = list[tuple[UUID, int | None]]
 _Made = dict[str, tuple[UUID, int]]
 _SKU_MAX = 128
@@ -235,6 +236,47 @@ class InvoiceStore:
             ),
         )
         return pm.Invoice.model_validate(fields)
+
+    def candidates(self, invoice_id: UUID) -> _Candidates:
+        """Per line, the open (unarchived) spools that match its type, or its proposed
+        type, by effective material and exact RGBA, split by whether they have a cost.
+        A line with neither type has none. Empty for no such invoice (#6267)."""
+        invoice = self.get(invoice_id)
+        if invoice is None:
+            return []
+        open_spools = self._spools.list()
+        found: _Candidates = []
+        for line in invoice.lines:
+            key = self._line_key(line)
+            matching = [
+                pm.SpoolBrief(
+                    id=s.id,
+                    number=s.number,
+                    type_id=s.type_id,
+                    colour_name=s.effective.colour_name,
+                    rgba=s.effective.rgba,
+                    cost_per_kg=s.effective.cost_per_kg,
+                    grams_left=s.grams_left,
+                )
+                for s in open_spools
+                if key is not None and (s.effective.material_id, s.effective.rgba) == key
+            ]
+            found.append(
+                pm.LineCandidates(
+                    position=line.position,
+                    uncosted=[s for s in matching if s.cost_per_kg is None],
+                    costed=[s for s in matching if s.cost_per_kg is not None],
+                )
+            )
+        return found
+
+    def _line_key(self, line: pm.InvoiceLine) -> tuple[UUID, str] | None:
+        if line.type_id is not None:
+            kind = self._types.get(line.type_id)
+            return None if kind is None else (kind.material_id, kind.rgba)
+        if line.proposed_type is not None:
+            return (line.proposed_type.material_id, line.proposed_type.rgba)
+        return None
 
     def _detail(self, conn: Conn, invoice_id: UUID) -> pm.InvoiceDetail | None:
         row = conn.execute(

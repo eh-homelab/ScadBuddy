@@ -19,6 +19,7 @@ from scadbuddy.api.order_attachments import INERT, NOSNIFF
 from scadbuddy.auth.component import CallerDep
 from scadbuddy.core.problems import ApiError
 from scadbuddy.filament import purchasing_models as pm
+from scadbuddy.filament.colour_codes import ColourCode, ColourTableMissingError, colour_codes
 from scadbuddy.filament.component import FilamentDep
 from scadbuddy.filament.invoice_money import InvoiceMathError, MixedLineTaxError
 from scadbuddy.filament.invoices import (
@@ -386,6 +387,45 @@ async def get_invoice(filament: FilamentDep, invoice_id: UUID) -> pm.InvoiceDeta
     found = await asyncio.to_thread(filament.invoices.get, invoice_id)
     if found is None:
         raise _no_invoice(invoice_id)
+    return found
+
+
+@router.get(
+    "/invoices/{invoice_id}/candidates",
+    response_model=list[pm.LineCandidates],
+    summary="List the spools each invoice line could update",
+    description=(
+        "Per line (by `position`), the open spools whose effective material and exact RGBA "
+        "match the line's type, or its proposed type when it has no type yet: `uncosted` "
+        "(no cost per kg yet) and `costed`. A line with neither type has none. 404 for no "
+        "such invoice."
+    ),
+)
+async def invoice_candidates(filament: FilamentDep, invoice_id: UUID) -> list[pm.LineCandidates]:
+    if await asyncio.to_thread(filament.invoices.get, invoice_id) is None:
+        raise _no_invoice(invoice_id)
+    return await asyncio.to_thread(filament.invoices.candidates, invoice_id)
+
+
+@router.get(
+    "/bambu-colour-codes",
+    response_model=ColourCode,
+    summary="Look up a Bambu colour code",
+    description=(
+        "Bambu Studio's colour table, by the `code` digits of a Bambu spool's SKU: its "
+        "`name`, its `rgba` list (`#RRGGBBAA`, one per colour; a translucent colour keeps "
+        "its alpha, e.g. `80`), `fila_type` and `fila_id`. 404 for a code the table does "
+        "not have, 503 when the image has no table (the body names the path)."
+    ),
+)
+async def bambu_colour_code(state: StateDep, code: str) -> ColourCode:
+    table = colour_codes(state.settings.slicer_profiles_dir)
+    try:
+        found = await asyncio.to_thread(table.lookup, code)
+    except ColourTableMissingError as exc:
+        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from None
+    if found is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no Bambu colour code {code}")
     return found
 
 
