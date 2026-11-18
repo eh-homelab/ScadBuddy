@@ -32,7 +32,9 @@ function answers(status: number, body: Record<string, unknown>) {
   return bodies
 }
 
-for (const id of ['sess-1', 'sess-2', 'sess-3', 'sess-other']) beforeEach(() => setSessionResources(id, [], { status: 'running', running: true }))
+beforeEach(() => {
+  for (const id of ['sess-1', 'sess-2', 'sess-3', 'sess-other']) setSessionResources(id, [], { status: 'running', running: true })
+})
 
 const button = () => screen.findByRole('button', { name: 'Import with the assistant' })
 
@@ -184,7 +186,7 @@ describe('InvoiceImport', () => {
     expect(alert).toHaveTextContent('cannot be imported')
   })
 
-  it('shows no uuid on a 502, and offers Open the session when one is named', async () => {
+  it('says the import could not start on a 502 that names a session, and offers Retry, not the archived session', async () => {
     answers(502, {
       detail: 'The import session 3f2b6c1e-0000-4000-8000-000000000000 started, but ScadBuddy could not link it to the invoice. Try again.',
       type: 'upstream_error',
@@ -194,8 +196,56 @@ describe('InvoiceImport', () => {
     await user.click(await button())
     const alert = await screen.findByRole('alert')
     expect(alert).not.toHaveTextContent(/[0-9a-f]{8}-/)
-    await user.click(screen.getByRole('button', { name: 'Open the session' }))
-    expect(opener!.openSession).toHaveBeenCalledWith('sess-named')
+    expect(alert).toHaveTextContent('The import could not start. Try again.')
+    expect(screen.queryByRole('button', { name: 'Open the session' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+    expect(opener!.openSession).not.toHaveBeenCalled()
+  })
+
+  it('keeps the import shown when a status read fails, and reads again on the next focus', async () => {
+    let reads = 0
+    server.use(
+      http.get('/api/v1/ai/sessions/sess-flaky', () => {
+        reads += 1
+        if (reads === 2) return HttpResponse.json({ detail: 'boom' }, { status: 500 })
+        if (reads === 3) return HttpResponse.error()
+        return HttpResponse.json({ id: 'sess-flaky', title: 't', status: reads > 3 ? 'idle' : 'running', running: reads === 1, archived: false })
+      }),
+    )
+    render({ ...draft, import_run_id: 'sess-flaky' })
+    expect(await screen.findByText('Import running')).toBeInTheDocument()
+    window.dispatchEvent(new Event('focus'))
+    await waitFor(() => expect(reads).toBe(2))
+    window.dispatchEvent(new Event('focus'))
+    await waitFor(() => expect(reads).toBe(3))
+    expect(screen.getByText('Import running')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Import with the assistant' })).not.toBeInTheDocument()
+    window.dispatchEvent(new Event('focus'))
+    expect(await screen.findByText('The assistant is waiting for you')).toBeInTheDocument()
+  })
+
+  it('drops an older answer that arrives after a newer one', async () => {
+    let reads = 0
+    let release = () => {}
+    server.use(
+      http.get('/api/v1/ai/sessions/sess-race', async () => {
+        reads += 1
+        const mine = reads
+        if (mine === 2) await new Promise<void>((resolve) => (release = resolve))
+        const idle = mine === 3
+        return HttpResponse.json({ id: 'sess-race', title: 't', status: idle ? 'idle' : 'running', running: !idle, archived: false })
+      }),
+    )
+    render({ ...draft, import_run_id: 'sess-race' })
+    expect(await screen.findByText('Import running')).toBeInTheDocument()
+    window.dispatchEvent(new Event('focus'))
+    await waitFor(() => expect(reads).toBe(2))
+    window.dispatchEvent(new Event('focus'))
+    expect(await screen.findByText('The assistant is waiting for you')).toBeInTheDocument()
+    release()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(screen.getByText('The assistant is waiting for you')).toBeInTheDocument()
+    expect(screen.queryByText('Import running')).not.toBeInTheDocument()
   })
 
   it.each([

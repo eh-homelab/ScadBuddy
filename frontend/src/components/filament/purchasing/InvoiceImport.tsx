@@ -9,12 +9,12 @@ const POLL_MS = 15_000
 const START_FAILED = 'The import could not start. Try again.'
 
 type Phase = 'working' | 'waiting'
-type Problem = { text: string; retry: boolean; session?: string }
+type Problem = { text: string; retry: boolean }
 
 /** What the person reads for a refused start. A forwarded backend answer (it has a `type`) is not written for people. */
 function explain(cause: unknown): Problem {
   if (!(cause instanceof ApiError)) return { text: START_FAILED, retry: true }
-  const { type, session_id } = cause.problem as { type?: string; session_id?: unknown }
+  const { type } = cause.problem as { type?: string }
   switch (cause.status) {
     case 404:
       return { text: 'This invoice no longer exists.', retry: false }
@@ -26,10 +26,7 @@ function explain(cause: unknown): Problem {
       return type === undefined
         ? { text: cause.detail, retry: false }
         : { text: 'The invoice could not be read, so it cannot be imported.', retry: false }
-    case 502:
-      return typeof session_id === 'string'
-        ? { text: 'The import started, but it could not be linked to this invoice.', retry: true, session: session_id }
-        : { text: START_FAILED, retry: true }
+    // A 502 may name a session, but the agent archived it and ran no turn: there is nothing to open.
     default:
       return { text: START_FAILED, retry: true }
   }
@@ -85,9 +82,9 @@ export function InvoiceImport({ invoice, onChanged }: { invoice: Pick<InvoiceDet
           apply(mine, over ? null : { id, phase: found.status === 'running' ? 'working' : 'waiting' })
         })
         .catch((cause) => {
-          // A session that is gone (404) is over. Another failure leaves the button, which the agent refuses with the session's id if one still runs.
-          if (!(cause instanceof ApiError)) console.warn('invoice import: could not read the session', cause)
-          apply(mine, null)
+          // Only a 404 means the session is gone. Any other failure keeps what shows, and the next tick or focus reads again.
+          if (cause instanceof ApiError && cause.status === 404) apply(mine, null)
+          else console.warn('invoice import: could not read the session', cause)
         })
     }
     read()
@@ -154,11 +151,6 @@ export function InvoiceImport({ invoice, onChanged }: { invoice: Pick<InvoiceDet
         <SparklesIcon aria-hidden />
         {busy ? 'Starting the import…' : error?.retry ? 'Retry' : 'Import with the assistant'}
       </Button>
-      {error?.session && (
-        <Button type="button" variant="outline" size="sm" onClick={() => open(error.session!)}>
-          Open the session
-        </Button>
-      )}
       {error && (
         <p role="alert" className="basis-full text-[13px] text-warn">
           {error.text}
