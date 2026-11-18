@@ -19,6 +19,8 @@ from scadbuddy.orders.machine_rate import (
     TaskEvent,
     WearPart,
     compute,
+    part_actual,
+    task_actual,
 )
 from scadbuddy.orders.models import HoursSource, MachineRateBreakdown, PricedBy
 
@@ -457,6 +459,19 @@ def test_a_derived_hours_used_of_zero_or_across_counters_is_skipped() -> None:
         ("r1", "not_positive"),
     ]
     assert (part.have, part.confidence, part.actual_why) == (1, 33, "too_few")
+
+
+def test_a_tasks_and_a_parts_window_list_the_same_events() -> None:
+    """Both windows list each counted gap's two events, so the list and "k of N" read the
+    same for a task and a part: the newest event and the one its gap starts from."""
+    readings = ["0", "100", "200"]
+    task = task_actual([task_event(h, n=i) for i, h in enumerate(readings)], None, Decimal(0), 1)
+    part = part_actual([replacement(h, "35", n=i) for i, h in enumerate(readings)], 1)
+    assert (task.have, task.window) == (1, ["t2", "t1"])
+    assert (part.have, part.window) == (1, ["r2", "r1"])
+    # A typed hours_used reads no event before it.
+    typed = part_actual([replacement("0", "35", n=0), replacement(None, "35", n=1, used="9")], 1)
+    assert (typed.have, typed.window) == (1, ["r1"])
 
 
 def test_the_rates_confidence_is_the_lowest_of_the_rows_set_to_actual() -> None:

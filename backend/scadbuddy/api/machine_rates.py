@@ -135,7 +135,8 @@ EVENT_REFUSALS = (
     "now is 503 `counter_unavailable`, and a printer with no counter needs `hours_at` (or, "
     "for a part, `hours_used`): 422 `counter_reading_required`. A `hours_at` sent is a "
     "correction on the printer's counter. The name must be one of the printer's tasks or "
-    "wear parts (422 `unknown_task`, `unknown_part`)."
+    "wear parts (422 `unknown_task`, `unknown_part`). A `source` names one event of the "
+    "printer: one that names an event of the other kind is 409 `source_taken`."
 )
 
 
@@ -204,7 +205,8 @@ async def add_machine_rate_event(
         "Sets the fields sent: a task's `minutes` and `consumables` (null: the typed "
         "ones price it), a part's `cost` and `hours_used`, `hours_at` (a correction on "
         "the event's counter) and `notes`. An imported event's time, counter source and "
-        "Bambuddy id stay as read. 422 for a field the event's kind has not."
+        "Bambuddy id stay as read: clearing its `hours_at` is 422 `imported_event`. 422 "
+        "for a field the event's kind has not."
     ),
 )
 async def patch_machine_rate_event(
@@ -226,6 +228,12 @@ async def patch_machine_rate_event(
     except EventFieldError as error:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_ENTITY, str(error), fields=error.fields
+        ) from error
+    except ImportedEventError as error:
+        raise refusal(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "imported_event",
+            "An event read from Bambuddy keeps its counter reading: correct it, do not clear it.",
         ) from error
     if event is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no event {event_id!r}")

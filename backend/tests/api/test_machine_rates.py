@@ -214,7 +214,8 @@ def test_a_lan_printers_events_read_scadbuddys_counter(
     wear = view["breakdown"]["wear"][0]
     assert (wear["basis"], wear["per_hour"], wear["confidence"]) == ("actual", "0.0667", 100)
     listed = next(r for r in view["actuals"]["rows"] if r["name"] == "Nozzle")
-    assert [e["hours_at"] for e in listed["events"]] == ["402"]
+    # The replacement and the one its hours_used is derived from.
+    assert [e["hours_at"] for e in listed["events"]] == ["402", "102"]
 
 
 def test_a_printer_with_no_counter_needs_a_reading(client: TestClient) -> None:
@@ -310,3 +311,35 @@ def test_events_are_listed_patched_and_deleted(client: TestClient, pg_conninfo: 
     minutes = client.patch(f"{events(row['id'])}/{imported}", json={"minutes": "12"})
     assert minutes.status_code == 200 and minutes.json()["minutes"] == "12"
     assert client.get(events("nope")).status_code == 404
+
+
+def test_an_imported_events_reading_is_not_cleared(client: TestClient, pg_conninfo: str) -> None:
+    row = create(client)
+    client.put(path(row["id"]), json=INPUTS)
+    imported = uuid.uuid4()
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO printer_maintenance_events (id, printer, task, performed_at, hours_at,"
+            " hours_source, origin, bambuddy_history_id, source, created_by) VALUES (%s, %s,"
+            " 'Lubricate rods', now(), 40, 'bambuddy', 'bambuddy', 3, 'bambuddy:3', 'import')",
+            (imported, row["id"]),
+        )
+    one = f"{events(row['id'])}/{imported}"
+    refused = client.patch(one, json={"hours_at": None})
+    assert (refused.status_code, refused.json()["code"]) == (422, "imported_event")
+    kept = client.get(events(row["id"])).json()["events"][0]
+    assert (kept["hours_at"], kept["hours_source"]) == ("40", "bambuddy")
+
+
+def test_a_source_names_one_event_across_both_kinds(client: TestClient) -> None:
+    row = create(client)
+    client.put(path(row["id"]), json=INPUTS)
+    part = client.post(events(row["id"]), json=nozzle(hours_at="10", source="form:1"))
+    assert part.status_code == 201, part.text
+    task = client.post(
+        events(row["id"]),
+        json={"kind": "task", "name": "Lubricate rods", "hours_at": "20", "source": "form:1"},
+    )
+    assert (task.status_code, task.json()["code"]) == (409, "source_taken")
+    listed = client.get(events(row["id"])).json()["events"]
+    assert [e["kind"] for e in listed] == ["part"]

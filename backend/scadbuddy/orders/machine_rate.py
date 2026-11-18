@@ -307,8 +307,8 @@ class EventFieldError(ValueError):
 
 
 class ImportedEventError(Exception):
-    """An event imported from Bambuddy cannot be deleted: the next import would bring it
-    back."""
+    """An event imported from Bambuddy cannot be deleted (the next import would bring it
+    back), nor its reading cleared (its counter source stays as read)."""
 
 
 class EventSourceTakenError(Exception):
@@ -547,27 +547,33 @@ def part_actual(replacements: Sequence[Replacement], need: int) -> Actual:
     ``hours_used``, ``sum(cost_r) / sum(hours_used_r)``. Replacements are ordered by time
     (one may have no reading). ``hours_used`` is the typed one, else the reading less the
     replacement before's; a replacement with neither (the first, or one after a
-    replacement with no reading) only marks where the next part's life starts."""
+    replacement with no reading) only marks where the next part's life starts.
+
+    The window lists, as a task's does, every event a counted or skipped gap reads: the
+    oldest counted replacement's base is listed too when its ``hours_used`` is derived."""
     ordered = sorted(replacements, key=lambda r: (r.at, r.hours_at or 0, r.id))
     actual = Actual(need=need)
     for index in range(len(ordered) - 1, -1, -1):
-        if actual.have >= need:
-            break
         newer = ordered[index]
         actual.window.append(newer.id)
         used = newer.hours_used
+        base: Replacement | None = None
         if used is None:
-            older = ordered[index - 1] if index > 0 else None
-            if older is None or older.hours_at is None or newer.hours_at is None:
+            base = ordered[index - 1] if index > 0 else None
+            if base is None or base.hours_at is None or newer.hours_at is None:
                 continue
-            used = newer.hours_at - older.hours_at
-            problem = _gap_problem(newer.hours_source, older.hours_source, used)
+            used = newer.hours_at - base.hours_at
+            problem = _gap_problem(newer.hours_source, base.hours_source, used)
             if problem is not None:
-                actual.skipped.append(SkippedGap(event=newer.id, previous=older.id, reason=problem))
+                actual.skipped.append(SkippedGap(event=newer.id, previous=base.id, reason=problem))
                 continue
         actual.cost += newer.cost
         actual.hours += used
         actual.have += 1
+        if actual.have >= need:
+            if base is not None:
+                actual.window.append(base.id)
+            break
     return actual
 
 
@@ -795,8 +801,15 @@ class Stored:
     read_tasks: set[str] = field(default_factory=set)
     linked: bool = False
     serial: str | None = None
-    #: #5774: its logged task events and part replacements, oldest first.
+    #: #5774: the logged task events and part replacements each row's window needs (a
+    #: task's with a reading only), oldest first: `events` prices as every event would.
     logged: list[MachineRateEvent] = field(default_factory=list)
+    #: How many events each kind and name has, all of them.
+    counts: dict[tuple[EventKind, str], int] = field(default_factory=dict)
+
+    @property
+    def window(self) -> int:
+        return self.profile.window if self.profile else DEFAULT_WINDOW
 
     @property
     def stored_reads(self) -> set[str] | None:
@@ -807,6 +820,45 @@ class Stored:
     def events(self) -> Events:
         """`compute`'s ``events``."""
         return events_of(self.logged)
+
+
+#: The events `task_actual` reads: a task's with a reading, every part's.
+COUNTED = "(kind = 'part' OR hours_at IS NOT NULL)"
+
+#: Each row's newest events (``COUNTED``), in the order `task_actual` (reading, time, id)
+#: or `part_actual` (time, reading, id) walks them: `_fetched` of them per row.
+WINDOWED_SQL = (
+    "SELECT * FROM (SELECT e.*, row_number() OVER (PARTITION BY e.printer, e.kind, e.name"
+    " ORDER BY CASE WHEN e.kind = 'task' THEN e.hours_at END DESC, e.at DESC,"
+    " CASE WHEN e.kind = 'part' THEN coalesce(e.hours_at, 0) END DESC, e.id DESC) AS rank,"
+    " 2 * coalesce(c.actuals_window, %s) + 1 AS fetched"
+    f" FROM ({EVENTS_SQL}) AS e LEFT JOIN printer_cost_profiles AS c ON c.printer = e.printer"
+    " WHERE (e.kind = 'part' OR e.hours_at IS NOT NULL){where}"
+    ") AS ranked WHERE rank <= fetched ORDER BY at, id"
+)
+
+
+def _fetched(window: int) -> int:
+    """How many of a row's newest events `WINDOWED_SQL` reads (its ``fetched``, the same
+    sum): N + 1 make N gaps, and the rest leave room for skipped ones before a row must
+    be read whole."""
+    return 2 * window + 1
+
+
+def _cut_short(held: Stored) -> list[tuple[EventKind, str]]:
+    """The rows whose read stopped at `_fetched` events before their window was full: a
+    walk past the oldest event read could have found a gap the read left out. A row that
+    filled its window within the events read prices as every event would."""
+    events, need = held.events, held.window
+    limit = _fetched(need)
+    short: list[tuple[EventKind, str]] = []
+    for name, tasks in events.tasks.items():
+        if len(tasks) >= limit and not task_actual(tasks, None, Decimal(0), need).ready:
+            short.append(("task", name))
+    for name, replacements in events.parts.items():
+        if len(replacements) >= limit and not part_actual(replacements, need).ready:
+            short.append(("part", name))
+    return short
 
 
 class MachineRateStore:
@@ -852,7 +904,38 @@ class MachineRateStore:
                 f" priced_by FROM printer_maintenance_costs{where} ORDER BY printer, task",
                 args,
             ).fetchall()
-            logged = conn.execute(f"{EVENTS_SQL}{where} ORDER BY at, id", args).fetchall()
+            logged = conn.execute(
+                WINDOWED_SQL.format(where="" if keys is None else " AND e.printer = ANY(%s)"),
+                (DEFAULT_WINDOW, *args),
+            ).fetchall()
+            counts = conn.execute(
+                f"SELECT printer, kind, name, count(*) AS events FROM ({EVENTS_SQL}) AS e"
+                f"{where} GROUP BY printer, kind, name",
+                args,
+            ).fetchall()
+            found = self._held(profiles, parts, tasks, logged, counts)
+            # A row whose skipped gaps walked past what was read is read whole.
+            for printer, held in found.items():
+                for kind, name in _cut_short(held):
+                    rows = conn.execute(
+                        f"{EVENTS_SQL} WHERE printer = %s AND kind = %s AND name = %s"
+                        f" AND {COUNTED} ORDER BY at, id",
+                        (uuid.UUID(printer), kind, name),
+                    ).fetchall()
+                    kept = [e for e in held.logged if (e.kind, e.name) != (kind, name)]
+                    held.logged = sorted(
+                        [*kept, *map(_event, rows)], key=lambda e: (e.at, uuid.UUID(e.id))
+                    )
+        return found
+
+    @staticmethod
+    def _held(
+        profiles: list[DictRow],
+        parts: list[DictRow],
+        tasks: list[DictRow],
+        logged: list[DictRow],
+        counts: list[DictRow],
+    ) -> dict[str, Stored]:
         found: dict[str, Stored] = {}
         for row in profiles:
             fields: dict[str, object] = {
@@ -898,6 +981,9 @@ class MachineRateStore:
         for r in logged:
             held = found.setdefault(str(r["printer"]), Stored(None, [], [], None))
             held.logged.append(_event(r))
+        for r in counts:
+            held = found.setdefault(str(r["printer"]), Stored(None, [], [], None))
+            held.counts[r["kind"], r["name"]] = r["events"]
         return found
 
     def replace(self, printer: str, body: MachineRateInputs) -> None:
@@ -1024,12 +1110,28 @@ class MachineRateStore:
         created_by: str,
     ) -> tuple[MachineRateEvent, bool]:
         """A ScadBuddy event, and whether this call wrote it: a second write of the same
-        printer and ``source`` returns the first as it was recorded and writes nothing."""
+        printer and ``source`` returns the first as it was recorded and writes nothing.
+        :class:`EventSourceTakenError` when the source names an event of the other kind:
+        each table's ``UNIQUE (printer, source)`` does not span both, so the write looks
+        the source up in both under the printer's lock, which two writes of one printer
+        take in turn."""
         key = printer_uuid(printer)
         assert key is not None
         source = body.source or f"manual:{uuid.uuid4()}"
         at = body.at or datetime.now(UTC)
         with self._pool.connection() as conn, conn.transaction():
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended('scadbuddy:machine-rate-events:'"
+                " || %s, 0))",
+                (str(key),),
+            )
+            first = conn.execute(
+                f"{EVENTS_SQL} WHERE printer = %s AND source = %s", (key, source)
+            ).fetchone()
+            if first is not None:
+                if first["kind"] != body.kind:
+                    raise EventSourceTakenError(body.kind, source)
+                return _event(first), False
             if body.kind == "task":
                 written = conn.execute(
                     "INSERT INTO printer_maintenance_events (id, printer, task, performed_at,"
@@ -1050,7 +1152,6 @@ class MachineRateStore:
                         created_by,
                     ),
                 ).rowcount
-                table = "printer_maintenance_events"
             else:
                 written = conn.execute(
                     "INSERT INTO printer_wear_replacements (id, printer, part, replaced_at,"
@@ -1071,14 +1172,11 @@ class MachineRateStore:
                         created_by,
                     ),
                 ).rowcount
-                table = "printer_wear_replacements"
             found = conn.execute(
                 f"{EVENTS_SQL} WHERE printer = %s AND source = %s AND kind = %s",
                 (key, source, body.kind),
             ).fetchone()
-        if found is None:
-            # The same source on the other table: never written, so a conflict to report.
-            raise EventSourceTakenError(table, source)
+        assert found is not None
         return _event(found), written > 0
 
     def event_by_source(self, printer: str, source: str) -> MachineRateEvent | None:
@@ -1111,11 +1209,15 @@ class MachineRateStore:
     ) -> MachineRateEvent | None:
         """The fields ``patch`` sets; None for no such event. A reading set on an event
         with none takes ``counter`` (the printer's source now) as its source; one
-        cleared clears the source. :class:`EventFieldError` for a field the kind lacks."""
+        cleared clears the source. :class:`EventFieldError` for a field the kind lacks;
+        :class:`ImportedEventError` for a reading cleared on an event imported from
+        Bambuddy, whose counter source stays as read."""
         current = self.event(printer, event_id)
         if current is None:
             return None
         sent = patch.model_dump(exclude_unset=True)
+        if current.origin == "bambuddy" and "hours_at" in sent and sent["hours_at"] is None:
+            raise ImportedEventError(event_id)
         wrong = {"cost", "hours_used"} if current.kind == "task" else {"minutes", "consumables"}
         if wrong & sent.keys():
             raise EventFieldError(current.kind, sorted(wrong & sent.keys()))
@@ -1381,7 +1483,7 @@ def actuals_view(breakdown: MachineRateBreakdown, stored: Stored) -> ActualsView
     """Each priced row's events in its window (§5), and the names no row has."""
     logged = {e.id: e for e in stored.logged}
     events = stored.events
-    window = stored.profile.window if stored.profile else DEFAULT_WINDOW
+    window = stored.window
     labour = Decimal(breakdown.labour_rate_per_hour or "0")
     costs = {c.task: c for c in stored.costs}
     rows: list[RowActuals] = []
@@ -1423,14 +1525,15 @@ def actuals_view(breakdown: MachineRateBreakdown, stored: Stored) -> ActualsView
         )
     tasks = {m.task for m in breakdown.maintenance} | set(costs)
     parts = {w.name for w in breakdown.wear} | {w.name for w in stored.wear}
-    orphaned: dict[tuple[EventKind, str], int] = {}
-    for e in stored.logged:
-        if e.name not in (tasks if e.kind == "task" else parts):
-            orphaned[e.kind, e.name] = orphaned.get((e.kind, e.name), 0) + 1
+    orphaned = sorted(
+        (kind, name, count)
+        for (kind, name), count in stored.counts.items()
+        if name not in (tasks if kind == "task" else parts)
+    )
     return ActualsView(
         window=window,
         rows=rows,
-        orphaned=[Orphan(kind=k, name=n, events=c) for (k, n), c in sorted(orphaned.items())],
+        orphaned=[Orphan(kind=k, name=n, events=c) for k, n, c in orphaned],
     )
 
 

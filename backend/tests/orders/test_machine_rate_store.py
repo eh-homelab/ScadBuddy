@@ -8,6 +8,7 @@ import json
 import threading
 import uuid
 from collections.abc import Iterator
+from decimal import Decimal
 from pathlib import Path
 from typing import cast
 
@@ -20,6 +21,8 @@ from scadbuddy.orders.integrations import MaintenanceTask, OrderIntegrations
 from scadbuddy.orders.machine_rate import (
     CostProfile,
     EventFieldError,
+    Events,
+    EventSourceTakenError,
     ImportedEventError,
     MachineRateEvent,
     MachineRateEventCreate,
@@ -30,6 +33,9 @@ from scadbuddy.orders.machine_rate import (
     MaintenanceCost,
     Stored,
     WearPart,
+    events_of,
+    part_actual,
+    task_actual,
 )
 from scadbuddy.printers.models import PrinterCreate, PrinterRow
 from scadbuddy.printers.store import PrinterStore
@@ -896,3 +902,168 @@ def test_scadbuddys_counter_adds_the_offset_and_rounds_half_up(
     store.replace(printer.id, MachineRateInputs(profile=CostProfile(lan_hours_offset="100.5")))
     count = store.counter(printer.id)
     assert count is not None and (count.hours, count.offset_hours) == ("104.8", "100.5")
+
+
+def test_a_source_names_one_event_across_both_kinds(
+    store: MachineRateStore, printers: PrinterStore
+) -> None:
+    printer = lan_printer(printers)
+    store.replace(printer.id, INPUTS)
+    log_part(store, printer.id, "10", source="form:1")
+    task = MachineRateEventCreate(kind="task", name="Lubricate rods", source="form:1")
+    with pytest.raises(EventSourceTakenError):
+        store.add_event(
+            printer.id, task, hours_at="20", hours_source="lan_watch", created_by="browser"
+        )
+    assert [e.kind for e in store.list_events(printer.id).events] == ["part"]
+
+
+def test_a_write_of_the_other_kind_at_the_same_time_is_refused(
+    store: MachineRateStore, printers: PrinterStore, pg_pool: PgPool
+) -> None:
+    """Two writes of one source and different kinds at once: the second waits for the
+    first's transaction, then sees its row and is refused."""
+    printer = lan_printer(printers)
+    store.replace(printer.id, INPUTS)
+    task = MachineRateEventCreate(kind="task", name="Lubricate rods", source="form:1")
+    outcome: list[Exception | None] = []
+
+    def add_task() -> None:
+        try:
+            store.add_event(
+                printer.id, task, hours_at="20", hours_source="lan_watch", created_by="browser"
+            )
+            outcome.append(None)
+        except Exception as error:
+            outcome.append(error)
+
+    with pg_pool.connection() as conn, conn.transaction():
+        # A part's write of the same source, as `add_event` makes it, not yet committed.
+        conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended('scadbuddy:machine-rate-events:'"
+            " || %s, 0))",
+            (printer.id,),
+        )
+        conn.execute(
+            "INSERT INTO printer_wear_replacements (id, printer, part, replaced_at, cost,"
+            " source, created_by) VALUES (%s, %s, 'Nozzle', now(), 35, 'form:1', 'browser')",
+            (uuid.uuid4(), printer.id),
+        )
+        thread = threading.Thread(target=add_task)
+        thread.start()
+        thread.join(1.0)
+        assert outcome == []
+    thread.join(10)
+    assert len(outcome) == 1 and isinstance(outcome[0], EventSourceTakenError)
+    assert [e.kind for e in store.list_events(printer.id).events] == ["part"]
+
+
+def test_an_imported_events_reading_is_not_cleared(
+    store: MachineRateStore, printers: PrinterStore, pg_pool: PgPool
+) -> None:
+    printer = lan_printer(printers)
+    store.replace(printer.id, INPUTS)
+    imported = uuid.uuid4()
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO printer_maintenance_events (id, printer, task, performed_at, hours_at,"
+            " hours_source, origin, bambuddy_history_id, source, created_by) VALUES (%s, %s,"
+            " 'Lubricate rods', now(), 40, 'bambuddy', 'bambuddy', 3, 'bambuddy:3', 'import')",
+            (imported, printer.id),
+        )
+    with pytest.raises(ImportedEventError):
+        store.patch_event(
+            printer.id, str(imported), MachineRateEventPatch(hours_at=None), counter="lan_watch"
+        )
+    kept = store.event(printer.id, str(imported))
+    assert kept is not None and (kept.hours_at, kept.hours_source) == ("40", "bambuddy")
+    corrected = store.patch_event(
+        printer.id, str(imported), MachineRateEventPatch(hours_at="41"), counter="lan_watch"
+    )
+    assert corrected is not None
+    assert (corrected.hours_at, corrected.hours_source) == ("41", "bambuddy")
+
+
+def _all_events(store: MachineRateStore, printer: str) -> Events:
+    page = store.list_events(printer, limit=200)
+    assert page.next is None
+    return events_of(list(reversed(page.events)))
+
+
+async def test_the_read_takes_each_rows_window_and_prices_as_every_event_would(
+    store: MachineRateStore,
+    printers: PrinterStore,
+    pg_pool: PgPool,
+    settings_store: SettingsStore,
+) -> None:
+    """The stored rows hold what each row's window needs, not every event, and price as
+    every event would: a row whose skipped gaps reach past what was read is read whole."""
+    printer = lan_printer(printers)
+    inputs = INPUTS.model_copy(
+        update={
+            "profile": INPUTS.profile.model_copy(update={"actuals_window": 2}),
+            "wear_parts": [
+                WearPart(name="Nozzle", cost="14", life_hours="200"),
+                WearPart(name="Plate", cost="35", life_hours="500"),
+                WearPart(name="Gone", cost="1", life_hours="10"),
+            ],
+        }
+    )
+    store.replace(printer.id, inputs)
+    # Nozzle: twelve replacements 100 h apart, every gap usable.
+    for n in range(12):
+        log_part(store, printer.id, str(n * 100), at=f"2026-01-{n + 1:02d}T00:00:00Z")
+    # Plate: every gap across two counters, so its window walks back to the first.
+    for n in range(12):
+        store.add_event(
+            printer.id,
+            part_event(name="Plate", at=f"2026-02-{n + 1:02d}T00:00:00Z"),
+            hours_at=str(n * 100),
+            hours_source="lan_watch" if n % 2 else "typed",
+            created_by="browser",
+        )
+    # Lubricate rods: the newest gap 0 h (skipped), and one task with no reading.
+    with pg_pool.connection() as conn:
+        for n, hours in enumerate([*range(0, 1100, 100), 1000, None]):
+            conn.execute(
+                "INSERT INTO printer_maintenance_events (id, printer, task, performed_at,"
+                " hours_at, hours_source, origin, source, created_by) VALUES (%s, %s,"
+                " 'Lubricate rods', %s, %s, %s, 'scadbuddy', %s, 'browser')",
+                (
+                    uuid.uuid4(),
+                    printer.id,
+                    f"2026-03-{n + 1:02d}T00:00:00Z",
+                    hours,
+                    None if hours is None else "lan_watch",
+                    f"t{n}",
+                ),
+            )
+    # Gone: its row deleted below, its events kept and counted as orphans.
+    for n in range(8):
+        store.add_event(
+            printer.id,
+            part_event(name="Gone", at=f"2026-04-{n + 1:02d}T00:00:00Z"),
+            hours_at=str(n + 1),
+            hours_source="typed",
+            created_by="browser",
+        )
+    store.replace(printer.id, inputs.model_copy(update={"wear_parts": inputs.wear_parts[:2]}))
+
+    every = _all_events(store, printer.id)
+    for stored in (store.stored(printer.id), store.stored_all()[printer.id]):
+        read = stored.events
+        assert len(stored.logged) < 45
+        for name in ("Nozzle", "Plate"):
+            assert part_actual(read.parts[name], 2) == part_actual(every.parts[name], 2)
+        rods = "Lubricate rods"
+        assert task_actual(read.tasks[rods], None, Decimal(1), 2) == task_actual(
+            every.tasks[rods], None, Decimal(1), 2
+        )
+        assert len(read.parts["Plate"]) == 12
+        assert len(read.parts["Nozzle"]) < 12
+
+    view = await rates(store, printers, settings_store).view(printer.id)
+    assert view is not None
+    assert [(o.kind, o.name, o.events) for o in view.actuals.orphaned] == [("part", "Gone", 8)]
+    nozzle = next(r for r in view.actuals.rows if r.name == "Nozzle")
+    assert [e.hours_at for e in nozzle.events] == ["1100", "1000", "900"]
