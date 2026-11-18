@@ -19,6 +19,7 @@ import {
   listSuppliers,
   listTypePrices,
   patchInvoice,
+  patchSupplier,
   patchShopping,
   putInvoiceLines,
   invoiceFileUrl,
@@ -261,6 +262,28 @@ describe('the purchasing mocks', () => {
     const after = await getInvoice(made.id)
     expect([after.status, after.lines[0]!.spool_ids, after.lines[0]!.supplier_product_id]).toEqual(['draft', [], null])
     expect((await listPrices(PRODUCT.INLAND)).every((price) => price.source === 'manual')).toBe(true)
+  })
+})
+
+describe('a draft changing supplier', () => {
+  it('moves, drops the products, and is refused as the backend refuses', async () => {
+    resetMockState()
+    const moved = await patchInvoice(INVOICE.DRAFT_A, { supplier_id: SUPPLIER.AMAZON })
+    expect(moved.supplier_id).toBe(SUPPLIER.AMAZON)
+    expect(moved.lines.map((line) => line.supplier_product_id)).toEqual([null, null])
+    expect((await refusal(patchInvoice(INVOICE.CONFIRMED_A, { supplier_id: SUPPLIER.AMAZON }))).status).toBe(409)
+    expect((await refusal(patchInvoice(INVOICE.DRAFT_B, { supplier_id: '00000000-0000-4000-8000-000000000999' }))).status).toBe(422)
+    await patchSupplier(SUPPLIER.MICRO, { archived: true })
+    expect((await refusal(patchInvoice(INVOICE.DRAFT_A, { supplier_id: SUPPLIER.MICRO }))).status).toBe(422)
+    const taken = await createInvoice({ supplier_id: SUPPLIER.BAMBU, number: 'US-452318', invoice_date: '2026-11-01', currency: 'USD', subtotal: '1', total: '1' })
+    const clash = await refusal(patchInvoice(INVOICE.DRAFT_A, { supplier_id: SUPPLIER.BAMBU }))
+    expect([clash.status, invoiceConflictId(clash)]).toEqual([409, taken.id])
+  })
+
+  it('counts the spools each invoice made', async () => {
+    resetMockState()
+    const counts = new Map((await listInvoices()).map((row) => [row.id, row.spool_count]))
+    expect([counts.get(INVOICE.DRAFT_A), counts.get(INVOICE.CONFIRMED_A)]).toEqual([0, 2])
   })
 })
 

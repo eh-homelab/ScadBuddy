@@ -35,6 +35,9 @@ describe('the invoices tab', () => {
     expect(within(draft).getByLabelText('Has a file')).toBeInTheDocument()
     const confirmed = rows().find((row) => row.dataset.invoice === INVOICE.CONFIRMED_B)!
     expect(within(confirmed).getByText('Confirmed')).toBeInTheDocument()
+    expect(within(confirmed).getByLabelText('Spools made or filled')).toHaveTextContent('1')
+    expect(within(draft).getByLabelText('Spools made or filled')).toHaveTextContent('0')
+    expect(screen.getByRole('columnheader', { name: 'Spools' })).toBeInTheDocument()
     expect(within(confirmed).queryByLabelText('Has a file')).not.toBeInTheDocument()
   })
 

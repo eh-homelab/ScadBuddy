@@ -5,11 +5,11 @@ import { ApiError } from '../../../api/client'
 import { createInvoice, listSuppliers, uploadInvoiceFile, type Supplier } from '../../../api/filamentPurchasing'
 import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { acceptableInvoiceFile } from './invoiceLines'
 import { lastSupplier, rememberSupplier } from './invoicesQuery'
 import { useMoney } from './useMoney'
 
 const ACCEPT = 'application/pdf,image/*'
-const acceptable = (file: File) => file.type === 'application/pdf' || file.type.startsWith('image/')
 
 /** Today as `YYYY-MM-DD` in the browser's own calendar. */
 function today(): string {
@@ -57,7 +57,7 @@ export function InvoiceUpload({ onCreated }: { onCreated: (invoiceId: string) =>
     if (!file || working.current) return
     setError(null)
     setKept(null)
-    if (!acceptable(file)) {
+    if (!acceptableInvoiceFile(file)) {
       setError('Choose a PDF or a photo.')
       return
     }

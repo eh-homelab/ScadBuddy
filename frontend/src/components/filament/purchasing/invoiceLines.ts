@@ -2,6 +2,9 @@ import type { Spool } from '../../../api/filament'
 import type { InvoiceLine, InvoiceLineIn } from '../../../api/filamentPurchasing'
 import { parseDecimal } from '../../../lib/decimal'
 
+/** A PDF or a photo, by the type the browser reports; the server's sniff is the truth. */
+export const acceptableInvoiceFile = (file: File) => file.type === 'application/pdf' || file.type.startsWith('image/')
+
 /** One line of a draft as the person is typing it: every field is the text of its input. */
 export interface LineDraft {
   /** Stable while the line is on screen; the server makes new line ids at every save. */

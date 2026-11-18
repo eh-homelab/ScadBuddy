@@ -581,3 +581,41 @@ def test_the_shopping_list_is_added_changed_filtered_and_cleared(client: TestCli
 
 def test_a_malformed_shopping_item_id_is_a_422(client: TestClient) -> None:
     assert client.patch(f"{URL}/shopping-list/nope", json={"note": "x"}).status_code == 422
+
+
+def test_a_draft_changes_supplier_and_a_confirmed_one_is_a_409(client: TestClient) -> None:
+    one, two = _supplier(client, "One"), _supplier(client, "Two")
+    draft = client.post(f"{URL}/invoices", json=_invoice_body(one, number="M-1")).json()
+    moved = client.patch(f"{URL}/invoices/{draft['id']}", json={"supplier_id": two})
+    assert moved.status_code == 200, moved.text
+    assert moved.json()["supplier_id"] == two
+    assert (
+        client.patch(f"{URL}/invoices/{draft['id']}", json={"supplier_id": None}).status_code == 422
+    )
+    missing = client.patch(f"{URL}/invoices/{draft['id']}", json={"supplier_id": str(uuid4())})
+    assert missing.status_code == 422, missing.text
+    client.patch(f"{URL}/suppliers/{one}", json={"archived": True})
+    archived = client.patch(f"{URL}/invoices/{draft['id']}", json={"supplier_id": one})
+    assert archived.status_code == 422, archived.text
+    frozen = _confirmable(client)
+    client.post(f"{URL}/invoices/{frozen}/confirm")
+    refused = client.patch(f"{URL}/invoices/{frozen}", json={"supplier_id": two})
+    assert refused.status_code == 409, refused.text
+
+
+def test_a_move_onto_a_taken_number_is_a_409_with_the_first_id(client: TestClient) -> None:
+    one, two = _supplier(client, "One"), _supplier(client, "Two")
+    first = client.post(f"{URL}/invoices", json=_invoice_body(two, number="X-1")).json()
+    draft = client.post(f"{URL}/invoices", json=_invoice_body(one, number="X-1")).json()
+    refused = client.patch(f"{URL}/invoices/{draft['id']}", json={"supplier_id": two})
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["existing_invoice_id"] == first["id"]
+
+
+def test_the_invoice_list_carries_the_spool_count(client: TestClient) -> None:
+    invoice_id = _confirmable(client)
+    waiting = _confirmable(client)
+    client.post(f"{URL}/invoices/{invoice_id}/confirm")
+    rows = {row["id"]: row["spool_count"] for row in client.get(f"{URL}/invoices").json()}
+    assert rows[invoice_id] == 2
+    assert rows[waiting] == 0

@@ -29,7 +29,7 @@ type Product = Omit<S['SupplierProduct'], 'newest_price'>
 type Price = Omit<S['PricePoint'], 'price_per_kg'>
 type Item = S['ShoppingItem']
 type Line = Omit<InvoiceLine, 'unit_cost'>
-type Head = Omit<S['Invoice'], 'difference' | 'reconciles' | 'line_count' | 'minor_exponent'>
+type Head = Omit<S['Invoice'], 'difference' | 'reconciles' | 'line_count' | 'spool_count' | 'minor_exponent'>
 type Stored = Head & { lines: Line[] }
 
 const now = () => new Date().toISOString()
@@ -236,7 +236,7 @@ const minorExponent = (currency: string) => (['JPY', 'KRW', 'VND'].includes(curr
 function invoiceView(invoice: Stored): S['Invoice'] {
   const { lines: _lines, ...head } = invoice
   const diff = difference(invoice)
-  return { ...head, minor_exponent: minorExponent(invoice.currency), difference: diff, reconciles: cmpDecimals(diff.replace('-', ''), TOLERANCE) <= 0, line_count: invoice.lines.length }
+  return { ...head, minor_exponent: minorExponent(invoice.currency), difference: diff, reconciles: cmpDecimals(diff.replace('-', ''), TOLERANCE) <= 0, line_count: invoice.lines.length, spool_count: invoice.lines.reduce((n, line) => n + line.spool_ids.length, 0) }
 }
 
 const detailView = (invoice: Stored): S['InvoiceDetail'] => ({ ...invoiceView(invoice), lines: invoice.lines.map(lineView) })
@@ -323,6 +323,7 @@ const REFUSED = {
   confirmed: 'a confirmed invoice cannot be changed; edit its spools instead',
   noLines: 'an invoice with no lines cannot be confirmed',
   duplicateNumber: 'the supplier has an invoice with that number',
+  supplierArchived: 'the supplier is archived: restore it or pick another',
 } as const
 
 // -- invoices: writes -------------------------------------------------------------------------
@@ -753,16 +754,25 @@ export const handlers = [
   http.patch(`${BASE}/invoices/:id`, async ({ params, request }) => {
     const row = invoiceOf(String(params.id))
     const body = (await request.json()) as Record<string, unknown>
-    const extra = extraKeys(body, FIELDS.invoice.filter((field) => field !== 'supplier_id' && field !== 'lines' && field !== 'import_run_id'))
+    const extra = extraKeys(body, FIELDS.invoice.filter((field) => field !== 'lines' && field !== 'import_run_id'))
     if (extra) return extra
-    for (const field of ['invoice_date', 'currency', 'subtotal', 'shipping', 'tax', 'total']) if (field in body && body[field] === null) return problem(422, `${field} cannot be cleared`)
+    for (const field of ['supplier_id', 'invoice_date', 'currency', 'subtotal', 'shipping', 'tax', 'total']) if (field in body && body[field] === null) return problem(422, `${field} cannot be cleared`)
+    if ('supplier_id' in body && !isUuid(body.supplier_id)) return problem(422, 'supplier_id: Input should be a valid UUID')
     const refused = headerRefusal(body, false)
     if (refused) return refused
     if (!row) return problem(404, `no invoice ${String(params.id)}`)
     if (row.status === 'confirmed' && Object.keys(body).some((field) => field !== 'note')) return problem(409, REFUSED.confirmed)
-    const taken = 'number' in body ? numberTaken(row.supplier_id, text(body.number), row.id) : null
+    const supplier = typeof body.supplier_id === 'string' ? supplierOf(body.supplier_id) : undefined
+    if (typeof body.supplier_id === 'string' && !supplier) return problem(422, REFUSED.invoiceRef)
+    if (supplier?.archived_at) return problem(422, REFUSED.supplierArchived)
+    const supplierId = supplier?.id ?? row.supplier_id
+    const number = 'number' in body ? text(body.number) : row.number
+    const taken = 'number' in body || supplierId !== row.supplier_id ? numberTaken(supplierId, number ?? '', row.id) : null
     if (taken) return taken
     const next: Stored = { ...row, lines: row.lines.map((line) => ({ ...line })), updated_at: now() }
+    // A move drops the lines' products of the old supplier (the backend's `_move`).
+    if (supplierId !== row.supplier_id) for (const line of next.lines) line.supplier_product_id = null
+    next.supplier_id = supplierId
     for (const field of ['invoice_date', 'currency'] as const) if (field in body) next[field] = String(body[field])
     for (const field of HEADER_MONEY) if (field in body) next[field] = money(String(body[field]))
     if ('number' in body) next.number = text(body.number) || null

@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import { ApiError } from '../../../api/client'
-import { invoiceConflictId, patchInvoice, type InvoiceDetail, type InvoicePatch } from '../../../api/filamentPurchasing'
+import { invoiceConflictId, type InvoiceDetail, type InvoicePatch, type Supplier } from '../../../api/filamentPurchasing'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { cmpDecimals, parseDecimal } from '../../../lib/decimal'
 
 type MoneyField = 'subtotal' | 'shipping' | 'tax' | 'total'
@@ -39,31 +40,43 @@ const draftOf = (invoice: InvoiceDetail): Draft => ({
 /**
  * #6266 — an invoice's header: number, date, currency, the four amounts from the receipt
  * (typed as decimal text, read through `parseDecimal`, a bad number an inline error) and a
- * note. Each field saves on blur. The supplier is the invoice's own and cannot change. A
- * confirmed invoice is frozen but for its note (`editable` false).
+ * note. Each field saves on blur; the supplier is a choice that saves at once (a draft can move
+ * to another supplier). A confirmed invoice is frozen but for its note (`editable` false). A
+ * field with unsent text is never overwritten by an answer.
  */
 export function InvoiceHeaderForm({
   invoice,
-  supplierName,
+  suppliers,
   editable,
-  onSaved,
+  onSave,
 }: {
   invoice: InvoiceDetail
-  supplierName: string
+  suppliers: Supplier[]
   editable: boolean
-  onSaved: (invoice: InvoiceDetail) => void
+  /** Sends one change; rejects with the server's refusal. The page orders the answers. */
+  onSave: (patch: InvoicePatch) => Promise<unknown>
 }) {
   const [draft, setDraft] = useState(() => draftOf(invoice))
   const [problems, setProblems] = useState<Partial<Record<keyof Draft, string>>>({})
   const [refused, setRefused] = useState<{ detail: string; existing: string | null } | null>(null)
 
-  // The server's answer (a money amount comes back with its own digits) replaces the text.
+  // Fields with text the server has not been sent, which an answer must not overwrite.
+  const edited = useRef(new Set<keyof Draft>())
+
+  // The server's answer (a money amount comes back with its own digits) replaces the fields
+  // the person is not editing.
   const { number, invoice_date, currency, subtotal, shipping, tax, total, note } = invoice
   useEffect(() => {
-    setDraft(draftOf({ number, invoice_date, currency, subtotal, shipping, tax, total, note } as InvoiceDetail))
+    const server = draftOf({ number, invoice_date, currency, subtotal, shipping, tax, total, note } as InvoiceDetail)
+    setDraft((now) => {
+      const next = { ...now }
+      for (const field of Object.keys(server) as (keyof Draft)[]) if (!edited.current.has(field)) next[field] = server[field]
+      return next
+    })
   }, [number, invoice_date, currency, subtotal, shipping, tax, total, note])
 
   const set = (field: keyof Draft, value: string) => {
+    edited.current.add(field)
     setDraft((now) => ({ ...now, [field]: value }))
     setProblems((now) => ({ ...now, [field]: undefined }))
   }
@@ -102,8 +115,20 @@ export function InvoiceHeaderForm({
       patch = { note: text || null }
     }
     setRefused(null)
+    // Sent: what is typed from here on is new text, and the answer may replace this.
+    edited.current.delete(field)
     try {
-      onSaved(await patchInvoice(invoice.id, patch))
+      await onSave(patch)
+    } catch (cause) {
+      setRefused({ detail: cause instanceof ApiError ? cause.detail : 'The change could not be saved. Try again.', existing: invoiceConflictId(cause) })
+    }
+  }
+
+  async function moveTo(supplierId: string) {
+    if (supplierId === invoice.supplier_id) return
+    setRefused(null)
+    try {
+      await onSave({ supplier_id: supplierId })
     } catch (cause) {
       setRefused({ detail: cause instanceof ApiError ? cause.detail : 'The change could not be saved. Try again.', existing: invoiceConflictId(cause) })
     }
@@ -135,12 +160,34 @@ export function InvoiceHeaderForm({
 
   return (
     <form className="flex flex-col gap-3" onSubmit={(event) => event.preventDefault()} noValidate>
-      <p className="text-[13px]">
-        <span className="text-muted-foreground">Supplier </span>
-        <Link to={`/filament/suppliers/${invoice.supplier_id}`} className="font-medium underline-offset-4 hover:underline">
-          {supplierName || 'Unknown supplier'}
-        </Link>
-      </p>
+      {editable ? (
+        <div className="flex min-w-0 flex-col gap-1">
+          <Label htmlFor="invoice-supplier" className="text-[13px]">
+            Supplier
+          </Label>
+          <Select value={invoice.supplier_id} onValueChange={(next) => void moveTo(next)}>
+            <SelectTrigger id="invoice-supplier" aria-label="Supplier" className="w-full sm:w-64">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {suppliers
+                .filter((one) => !one.archived_at || one.id === invoice.supplier_id)
+                .map((one) => (
+                  <SelectItem key={one.id} value={one.id}>
+                    {one.name}
+                  </SelectItem>
+                ))}
+            </SelectContent>
+          </Select>
+        </div>
+      ) : (
+        <p className="text-[13px]">
+          <span className="text-muted-foreground">Supplier </span>
+          <Link to={`/filament/suppliers/${invoice.supplier_id}`} className="font-medium underline-offset-4 hover:underline">
+            {suppliers.find((one) => one.id === invoice.supplier_id)?.name ?? 'Unknown supplier'}
+          </Link>
+        </p>
+      )}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
         {input('number', 'Number')}
         {input('invoice_date', 'Date', { type: 'date' })}

@@ -334,7 +334,8 @@ def _invoice_error(exc: ValueError) -> ApiError:
     description=(
         "Newest `invoice_date` first. Filter by `supplier_id` and `status` (`draft` or "
         "`confirmed`). Each invoice carries `difference` (its total less its lines and "
-        "shipping), `reconciles`, `line_count` and its `file` pointer."
+        "shipping), `reconciles`, `line_count`, `spool_count` (the spools its lines made or "
+        "filled) and its `file` pointer."
     ),
 )
 async def list_invoices(
@@ -392,9 +393,10 @@ async def get_invoice(filament: FilamentDep, invoice_id: UUID) -> pm.InvoiceDeta
     summary="Change an invoice",
     description=(
         "Only the fields sent change; the lines' tax and cost are worked out again. A "
-        "confirmed invoice accepts only `note` (409 otherwise). 404 for no such invoice, 409 "
-        "for a number the supplier has (with `existing_invoice_id`), 422 for a bad field or "
-        "a tax that cannot be spread."
+        "confirmed invoice accepts only `note` (409 otherwise). A draft's `supplier_id` moves "
+        "it to another unarchived supplier (its lines drop their supplier product). 404 for "
+        "no such invoice, 409 for a number the supplier has (with `existing_invoice_id`), 422 "
+        "for a bad field, a missing or archived supplier or a tax that cannot be spread."
     ),
 )
 async def patch_invoice(

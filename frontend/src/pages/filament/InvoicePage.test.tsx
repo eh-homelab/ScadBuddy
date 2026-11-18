@@ -1,4 +1,5 @@
 import { screen, waitFor, within } from '@testing-library/react'
+import { http, HttpResponse } from 'msw'
 import { Route, Routes } from 'react-router'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { createInvoice, getInvoice } from '../../api/filamentPurchasing'
@@ -54,7 +55,7 @@ describe('the invoice page', () => {
   it('names the invoice and shows its file beside the lines', async () => {
     render(INVOICE.DRAFT_A)
     expect(await heading()).toHaveTextContent('US-452318')
-    expect(await screen.findByText('Bambu Lab')).toBeInTheDocument()
+    expect(await screen.findByRole('combobox', { name: 'Supplier' })).toHaveTextContent('Bambu Lab')
     expect(screen.getByRole('table', { name: 'Invoice lines' })).toBeInTheDocument()
     const file = await screen.findByTitle('Invoice file')
     expect(file).toHaveAttribute('data', `/api/v1/filament/invoices/${INVOICE.DRAFT_A}/file`)
@@ -168,5 +169,116 @@ describe('the invoice page', () => {
     render(INVOICE.DRAFT_A)
     await heading()
     expect(await screen.findByRole('status')).toHaveTextContent(/reconciles/i)
+  })
+
+  it('drops a lines answer that arrives after a newer header answer', async () => {
+    const old = await getInvoice(INVOICE.DRAFT_A)
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let sentLines = false
+    server.use(
+      http.put('*/api/v1/filament/invoices/:id/lines', async () => {
+        sentLines = true
+        await gate
+        return HttpResponse.json(old)
+      }),
+    )
+    const { user } = render(INVOICE.DRAFT_A)
+    await heading()
+    const price = await screen.findByLabelText('Unit price, line 1')
+    await user.clear(price)
+    await user.type(price, '20')
+    await user.tab()
+    await waitFor(() => expect(sentLines).toBe(true))
+    const total = screen.getByLabelText('Total')
+    await user.clear(total)
+    await user.type(total, '90')
+    await user.tab()
+    const typed = () => screen.getByText('Total typed').nextElementSibling
+    await waitFor(() => expect(typed()).toHaveTextContent('90.00'))
+    release()
+    await waitFor(() => expect(screen.queryByText('Saving the lines…')).not.toBeInTheDocument())
+    expect(typed()).toHaveTextContent('90.00')
+    expect(cmpDecimals((total as HTMLInputElement).value, '90')).toBe(0)
+  })
+
+  it('keeps what is typed in one field while another field\'s save returns', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    // Holds the answer; a resolver that returns nothing falls through to the mock.
+    server.use(
+      http.patch('*/api/v1/filament/invoices/:id', async () => {
+        await gate
+      }),
+    )
+    const { user } = render(INVOICE.DRAFT_A)
+    await heading()
+    const total = await screen.findByLabelText('Total')
+    await user.clear(total)
+    await user.type(total, '117')
+    await user.tab()
+    const note = screen.getByLabelText('Note')
+    await user.type(note, 'Paid by card')
+    release()
+    await waitFor(() => expect(total).not.toHaveValue('117'))
+    expect(cmpDecimals((total as HTMLInputElement).value, '117')).toBe(0)
+    expect(note).toHaveValue('Paid by card')
+    await user.tab()
+    await waitFor(async () => expect((await getInvoice(INVOICE.DRAFT_A)).note).toBe('Paid by card'))
+  })
+
+  it('says the lines are not saved after a failed save, and saves them on Retry', async () => {
+    let calls = 0
+    server.use(
+      http.put('*/api/v1/filament/invoices/:id/lines', () => {
+        calls += 1
+        if (calls > 1) return undefined
+        return HttpResponse.json({ type: 'about:blank', title: 'Server error', status: 500, detail: 'The database is busy' }, { status: 500, headers: { 'Content-Type': 'application/problem+json' } })
+      }),
+    )
+    const { user } = render(INVOICE.DRAFT_A)
+    await heading()
+    const description = await screen.findByLabelText('Description, line 1')
+    await user.type(description, ' again')
+    await user.tab()
+    expect(await screen.findByRole('alert')).toHaveTextContent('The database is busy')
+    expect(screen.getByText('The lines are not saved')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Confirm' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Confirm' })).toBeEnabled())
+    expect(calls).toBe(2)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect((await getInvoice(INVOICE.DRAFT_A)).lines[0]!.description).toMatch(/ again$/)
+  })
+
+  it('moves a draft to another supplier and clears its lines\' products', async () => {
+    const { user } = render(INVOICE.DRAFT_A)
+    await heading()
+    await choose(user, await screen.findByRole('combobox', { name: 'Supplier' }), 'Micro Center')
+    await waitFor(async () => expect((await getInvoice(INVOICE.DRAFT_A)).supplier_id).toBe(SUPPLIER.MICRO))
+    expect((await getInvoice(INVOICE.DRAFT_A)).lines.map((line) => line.supplier_product_id)).toEqual([null, null])
+    expect(screen.getByRole('combobox', { name: 'Supplier' })).toHaveTextContent('Micro Center')
+    expect(screen.getByRole('combobox', { name: 'Supplier product, line 1' })).toHaveTextContent('Product by SKU')
+  })
+
+  it('refuses a move onto a supplier that has the number, with a link to that invoice', async () => {
+    const taken = await createInvoice({ supplier_id: SUPPLIER.MICRO, number: 'US-452318', invoice_date: '2026-11-01', currency: 'USD', subtotal: '1', total: '1' })
+    const { user } = render(INVOICE.DRAFT_A)
+    await heading()
+    await choose(user, await screen.findByRole('combobox', { name: 'Supplier' }), 'Micro Center')
+    const alert = await screen.findByRole('alert')
+    expect(within(alert).getByRole('link', { name: /Open that invoice/ })).toHaveAttribute('href', `/filament/invoices/${taken.id}`)
+    expect((await getInvoice(INVOICE.DRAFT_A)).supplier_id).toBe(SUPPLIER.BAMBU)
+  })
+
+  it('shows a confirmed invoice\'s supplier as a link, not a choice', async () => {
+    render(INVOICE.CONFIRMED_A)
+    await heading()
+    expect(await screen.findByRole('link', { name: 'Bambu Lab' })).toHaveAttribute('href', `/filament/suppliers/${SUPPLIER.BAMBU}`)
+    expect(screen.queryByRole('combobox', { name: 'Supplier' })).not.toBeInTheDocument()
   })
 })

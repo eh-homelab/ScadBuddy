@@ -21,12 +21,15 @@ from scadbuddy.filament.purchasing_models import (
     InvoiceDetail,
     InvoiceLineIn,
     InvoicePatch,
+    ProductCreate,
     SupplierCreate,
+    SupplierPatch,
 )
 from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.filament.suppliers import SuppliersStore
 from scadbuddy.filament.types import SpoolTypeStore
 from tests.conftest import PgPool
+from tests.support.purchasing import Shop
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -297,3 +300,84 @@ def test_file_key_is_none_until_a_file_is_set(pg_pool: PgPool) -> None:
     )
     assert made is not None
     assert store.file_key(invoice.id) == ("attachment-x", made)
+
+
+def test_a_draft_moves_to_another_supplier(pg_pool: PgPool) -> None:
+    store = _store(pg_pool)
+    one, two = _supplier(pg_pool, "One"), _supplier(pg_pool, "Two")
+    draft = _make(store, _body(one, number="A-1"))
+    moved = store.update(draft.id, InvoicePatch(supplier_id=two))
+    assert moved is not None
+    assert moved.supplier_id == two
+    assert moved.number == "A-1"
+    assert [i.id for i in store.list(supplier_id=two)] == [draft.id]
+    assert store.list(supplier_id=one) == []
+
+
+def test_a_move_names_a_missing_or_archived_supplier_as_a_ref_error(pg_pool: PgPool) -> None:
+    store = _store(pg_pool)
+    one, two = _supplier(pg_pool, "One"), _supplier(pg_pool, "Two")
+    draft = _make(store, _body(one))
+    with pytest.raises(InvoiceRefError):
+        store.update(draft.id, InvoicePatch(supplier_id=uuid4()))
+    SuppliersStore(pg_pool, lambda: "USD").update(two, SupplierPatch(archived=True))
+    with pytest.raises(InvoiceRefError):
+        store.update(draft.id, InvoicePatch(supplier_id=two))
+    kept = store.get(draft.id)
+    assert kept is not None
+    assert kept.supplier_id == one
+
+
+def test_a_confirmed_invoice_keeps_its_supplier(pg_pool: PgPool) -> None:
+    store = _store(pg_pool)
+    one, two = _supplier(pg_pool, "One"), _supplier(pg_pool, "Two")
+    kept = _make(store, _body(one, number="K"))
+    _confirm(pg_pool, kept.id)
+    with pytest.raises(InvoiceConfirmedError):
+        store.update(kept.id, InvoicePatch(supplier_id=two))
+
+
+def test_a_move_onto_a_supplier_that_has_the_number_is_refused(pg_pool: PgPool) -> None:
+    store = _store(pg_pool)
+    one, two = _supplier(pg_pool, "One"), _supplier(pg_pool, "Two")
+    first = _make(store, _body(two, number="SAME"))
+    draft = _make(store, _body(one, number="same"))
+    with pytest.raises(DuplicateInvoiceError) as err:
+        store.update(draft.id, InvoicePatch(supplier_id=two))
+    assert err.value.existing_id == first.id
+    unmoved = store.get(draft.id)
+    assert unmoved is not None
+    assert unmoved.supplier_id == one
+
+
+def test_a_move_drops_the_lines_product_of_the_old_supplier(pg_pool: PgPool) -> None:
+    shop = Shop(pg_pool)
+    type_id = shop.type_id()
+    product = shop.suppliers.add_product(shop.supplier_id, ProductCreate(type_id=type_id, sku="S1"))
+    assert product is not None
+    draft = shop.draft(
+        [
+            InvoiceLineIn(
+                description="PLA", quantity=1, unit_price=D("40"), supplier_product_id=product.id
+            )
+        ]
+    )
+    assert draft.lines[0].supplier_product_id == product.id
+    other = shop.suppliers.create(SupplierCreate(name="Other")).id
+    moved = shop.invoices.update(draft.id, InvoicePatch(supplier_id=other))
+    assert moved is not None
+    assert moved.lines[0].supplier_product_id is None
+
+
+def test_the_list_counts_each_invoices_spools(pg_pool: PgPool) -> None:
+    shop = Shop(pg_pool)
+    type_id = shop.type_id()
+    line = InvoiceLineIn(description="PLA", quantity=3, unit_price=D("10"), type_id=type_id)
+    confirmed = shop.draft([line], subtotal="30", tax="0", total="30", number="C")
+    waiting = shop.draft([line], subtotal="30", tax="0", total="30", number="D")
+    assert shop.invoices.confirm(confirmed.id, actor="t") is not None
+    counts = {i.id: i.spool_count for i in shop.invoices.list()}
+    assert counts == {confirmed.id: 3, waiting.id: 0}
+    detail = shop.invoices.get(confirmed.id)
+    assert detail is not None
+    assert detail.spool_count == 3

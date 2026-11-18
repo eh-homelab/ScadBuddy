@@ -220,7 +220,10 @@ class InvoiceCreate(_In):
 
 
 class InvoicePatch(_Patch):
-    not_null = frozenset({"invoice_date", "currency", "subtotal", "shipping", "tax", "total"})
+    not_null = frozenset(
+        {"supplier_id", "invoice_date", "currency", "subtotal", "shipping", "tax", "total"}
+    )
+    supplier_id: UUID | None = None
     number: Sku | None = None
     invoice_date: date | None = None
     currency: Currency | None = None
@@ -248,6 +251,7 @@ class Invoice(_Row):
     difference: Decimal | None = None
     reconciles: bool | None = None
     line_count: int = 0
+    spool_count: int = 0
     file: FileRef | None = None
 
 

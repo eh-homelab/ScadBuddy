@@ -272,8 +272,8 @@ export const filamentPurchasingTools: Tool[] = [
     label: 'List filament invoices',
     description:
       'Filament invoices, newest `invoice_date` first. Filter by `supplier_id` and `status` (`draft` or ' +
-      '`confirmed`). Each has `difference` (its total less its lines and shipping), `reconciles`, `line_count` ' +
-      'and a `file` pointer. Money is a decimal string.',
+      '`confirmed`). Each has `difference` (its total less its lines and shipping), `reconciles`, `line_count`, ' +
+      '`spool_count` (the spools its lines made or filled) and a `file` pointer. Money is a decimal string.',
     input: z.object({
       supplier_id: z.string().uuid().optional(),
       status: z.enum(['draft', 'confirmed']).optional(),
@@ -316,7 +316,8 @@ export const filamentPurchasingTools: Tool[] = [
       'Without `invoice_id`, add a draft: `fields` needs `supplier_id`, `invoice_date`, `currency`, `subtotal`, ' +
       '`total`, and may have `number`, `shipping`, `tax`, `note` and `import_run_id` (a repeated one returns the ' +
       'first invoice); `lines` are `{description, quantity, unit_price, line_subtotal?, line_tax?, sku?, ' +
-      'type_id?, ...}`. With `invoice_id`, edit a draft: the `fields` given change and, when `lines` is sent, it ' +
+      'type_id?, ...}`. With `invoice_id`, edit a draft: the `fields` given change (`supplier_id` moves it to ' +
+      'another unarchived supplier, and its lines drop their supplier product) and, when `lines` is sent, it ' +
       'replaces every line. Tax and shipping are spread over the lines on each write: give `line_tax` on every ' +
       'line or on none (422 for some). Money is a decimal string. 409 for a taken number (`existing_invoice_id`) ' +
       'or a confirmed invoice. An edit with both `fields` and `lines` is two requests: if the second fails, the ' +

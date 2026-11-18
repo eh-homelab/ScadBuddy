@@ -53,7 +53,7 @@ _WRITE_REFUSALS = (
 )
 
 _UNIT = Decimal("0.0001")
-_COMPUTED = {"minor_exponent", "difference", "reconciles", "line_count", "file"}
+_COMPUTED = {"minor_exponent", "difference", "reconciles", "line_count", "spool_count", "file"}
 _INVOICE_COLUMNS = (
     ", ".join(f"i.{n}" for n in pm.Invoice.model_fields if n not in _COMPUTED)
     + ", i.file_name, i.file_media_type, i.file_size"
@@ -67,8 +67,8 @@ _HOLDER = "filament_invoice"
 class InvoiceRefError(ValueError):
     """An invoice or a line names a supplier, type or product that does not exist."""
 
-    def __init__(self) -> None:
-        super().__init__("no such supplier, spool type or supplier product")
+    def __init__(self, reason: str = "no such supplier, spool type or supplier product") -> None:
+        super().__init__(reason)
 
 
 class DuplicateInvoiceError(ValueError):
@@ -187,22 +187,27 @@ class InvoiceStore:
                 args,
             ).fetchall()
             sums = self._sums(conn, [r["id"] for r in rows])
-        return [self._invoice(row, sums.get(row["id"], (Decimal(0), 0))) for row in rows]
+        return [self._invoice(row, sums.get(row["id"], (Decimal(0), 0, 0))) for row in rows]
 
     @staticmethod
-    def _sums(conn: Conn, ids: _Ids) -> dict[UUID, tuple[Decimal, int]]:
+    def _sums(conn: Conn, ids: _Ids) -> dict[UUID, tuple[Decimal, int, int]]:
+        """Per invoice: its lines' total, its line count and the spools its lines made or
+        filled (archived ones too, as the supplier stats count them)."""
         if not ids:
             return {}
         rows = conn.execute(
-            "SELECT invoice_id, sum(line_total) AS total, count(*)::int AS n"
-            " FROM filament_invoice_lines WHERE invoice_id = ANY(%s) GROUP BY invoice_id",
+            "SELECT l.invoice_id, sum(l.line_total) AS total, count(*)::int AS n,"
+            " (SELECT count(*)::int FROM filament_spools s WHERE s.invoice_line_id IN"
+            "  (SELECT id FROM filament_invoice_lines WHERE invoice_id = l.invoice_id))"
+            " AS spools"
+            " FROM filament_invoice_lines l WHERE l.invoice_id = ANY(%s) GROUP BY l.invoice_id",
             (ids,),
         ).fetchall()
-        return {r["invoice_id"]: (r["total"], r["n"]) for r in rows}
+        return {r["invoice_id"]: (r["total"], r["n"], r["spools"]) for r in rows}
 
     @staticmethod
-    def _invoice(row: Row, sums: tuple[Decimal, int]) -> pm.Invoice:
-        line_total, count = sums
+    def _invoice(row: Row, sums: tuple[Decimal, int, int]) -> pm.Invoice:
+        line_total, count, spools = sums
         diff = difference(row["total"], [line_total], row["shipping"])
         fields = {k: row[k] for k in pm.Invoice.model_fields if k in row}
         fields.update(
@@ -210,6 +215,7 @@ class InvoiceStore:
             difference=diff,
             reconciles=abs(diff) <= RECONCILE_TOLERANCE,
             line_count=count,
+            spool_count=spools,
             file=(
                 None
                 if row["file_name"] is None
@@ -252,7 +258,7 @@ class InvoiceStore:
             for line in line_rows
         ]
         total = sum((line.line_total for line in lines), Decimal(0))
-        head = self._invoice(row, (total, len(lines)))
+        head = self._invoice(row, (total, len(lines), sum(len(ids) for ids in spools.values())))
         return pm.InvoiceDetail.model_validate({**head.model_dump(), "lines": lines})
 
     # -- writes -------------------------------------------------------------------------
@@ -324,6 +330,9 @@ class InvoiceStore:
                 supplier_id = head["supplier_id"]
                 if head["status"] == "confirmed" and patch.model_fields_set - {"note"}:
                     raise InvoiceConfirmedError()
+                if patch.supplier_id is not None and patch.supplier_id != supplier_id:
+                    supplier_id = patch.supplier_id
+                    self._move(conn, invoice_id, supplier_id)
                 conn.execute(
                     f"UPDATE filament_invoices SET {', '.join([*sets, 'updated_at = now()'])}"
                     " WHERE id = %s",
@@ -334,12 +343,40 @@ class InvoiceStore:
                 return self._detail(conn, invoice_id)
         except errors.UniqueViolation:
             taken = (
-                None if supplier_id is None else self._taken(supplier_id, patch.number, invoice_id)
+                None
+                if supplier_id is None
+                else self._taken(supplier_id, self._number(patch, invoice_id), invoice_id)
             )
             if taken is None:
                 # Not the number index (the only unique index an update can break).
                 raise
             raise DuplicateInvoiceError(taken) from None
+
+    def _number(self, patch: pm.InvoicePatch, invoice_id: UUID) -> str | None:
+        """The number the invoice has after ``patch``: the patch's, else the one it kept."""
+        if "number" in patch.model_fields_set:
+            return patch.number
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT number FROM filament_invoices WHERE id = %s", (invoice_id,)
+            ).fetchone()
+        return None if row is None else row["number"]
+
+    @staticmethod
+    def _move(conn: Conn, invoice_id: UUID, supplier_id: UUID) -> None:
+        """A draft's lines name the old supplier's products: they name none after the move
+        (confirm matches by SKU). The supplier must be there and not archived."""
+        row = conn.execute(
+            "SELECT archived_at FROM filament_suppliers WHERE id = %s", (supplier_id,)
+        ).fetchone()
+        if row is None:
+            raise InvoiceRefError()
+        if row["archived_at"] is not None:
+            raise InvoiceRefError("the supplier is archived: restore it or pick another")
+        conn.execute(
+            "UPDATE filament_invoice_lines SET supplier_product_id = NULL WHERE invoice_id = %s",
+            (invoice_id,),
+        )
 
     def replace_lines(
         self, invoice_id: UUID, lines: Sequence[pm.InvoiceLineIn]

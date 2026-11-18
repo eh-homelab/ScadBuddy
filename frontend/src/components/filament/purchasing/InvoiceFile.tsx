@@ -4,6 +4,7 @@ import { ApiError } from '../../../api/client'
 import { getInvoiceFileBlob, invoiceFileUrl, uploadInvoiceFile, type FileRef } from '../../../api/filamentPurchasing'
 import { Button } from '@/components/ui/button'
 import { AppLink } from '../../AppLink'
+import { acceptableInvoiceFile } from './invoiceLines'
 import { downloadBlob, NEW_TAB } from '../../../lib/embed'
 
 /**
@@ -21,7 +22,7 @@ export function InvoiceFile({ invoiceId, file, onChanged }: { invoiceId: string;
 
   async function upload(chosen: File | undefined) {
     if (!chosen) return
-    if (chosen.type !== 'application/pdf' && !chosen.type.startsWith('image/')) {
+    if (!acceptableInvoiceFile(chosen)) {
       setError('Choose a PDF or a photo.')
       return
     }

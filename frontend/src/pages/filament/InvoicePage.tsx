@@ -1,5 +1,5 @@
 import { ChevronLeftIcon } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { ApiError } from '../../api/client'
 import { listSpools, listTypes, type Spool, type SpoolType } from '../../api/filament'
@@ -7,10 +7,12 @@ import {
   confirmInvoice,
   deleteInvoice,
   getInvoice,
+  patchInvoice,
   listProducts,
   listSuppliers,
   putInvoiceLines,
   type InvoiceDetail,
+  type InvoicePatch,
   type Supplier,
   type SupplierProduct,
 } from '../../api/filamentPurchasing'
@@ -24,6 +26,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { addDecimals, formatCost } from '../../lib/decimal'
+import { useLatest } from '../../lib/useLatest'
 import { useLeaveGuard } from '../../lib/useLeaveGuard'
 
 /** How long after a field is left the lines are saved, so a tab through three fields is one save. */
@@ -62,6 +65,8 @@ export function InvoicePage() {
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
+  // The last lines save failed: the lines stay unsaved until a retry or a later edit saves them.
+  const [failed, setFailed] = useState(false)
   const [types, setTypes] = useState<SpoolType[]>([])
   const [products, setProducts] = useState<SupplierProduct[]>([])
   const [spools, setSpools] = useState<Spool[]>([])
@@ -75,6 +80,10 @@ export function InvoicePage() {
   const version = useRef(0)
   const running = useRef(false)
   const again = useRef(false)
+  // The page the answers belong to, and the newest save (header or lines) sent for it: an
+  // answer that is not the newest would bring back a header the newer save has changed.
+  const here = useLatest(id)
+  const sent = useRef(0)
 
   const guard = useLeaveGuard(dirty)
 
@@ -82,6 +91,9 @@ export function InvoicePage() {
     let live = true
     setInvoice(null)
     setLoadError(null)
+    setFailed(false)
+    setSaveError(null)
+    sent.current += 1
     getInvoice(id).then(
       (found) => {
         if (!live) return
@@ -144,17 +156,39 @@ export function InvoicePage() {
     const at = version.current
     const sending = rowsRef.current
     if (Object.keys(lineErrors(sending)).length > 0) return
+    const page = id
+    const seq = ++sent.current
     setSaving(true)
     setSaveError(null)
+    setFailed(false)
     try {
-      const saved = await putInvoiceLines(id, bodyOfLines(sending))
-      setInvoice(saved)
+      const saved = await putInvoiceLines(page, bodyOfLines(sending))
+      if (here.current !== page) return
+      // An older answer is dropped: the newer save's answer is the truth.
+      if (seq === sent.current) setInvoice(saved)
       // An edit made while this was in flight is saved by the commit that follows it.
       if (version.current === at) setDirty(false)
     } catch (cause) {
+      if (here.current !== page) return
+      setFailed(true)
       setSaveError(message(cause, 'The lines could not be saved. Try again.'))
     } finally {
-      setSaving(false)
+      if (here.current === page) setSaving(false)
+    }
+  }
+
+  /** One header change (the form sends them): its answer replaces the invoice only if no later save was sent. */
+  async function saveHeader(patch: InvoicePatch) {
+    const page = id
+    const seq = ++sent.current
+    const saved = await patchInvoice(page, patch)
+    if (here.current !== page) return
+    if (seq === sent.current) setInvoice(saved)
+    // The server dropped the old supplier's products from the lines.
+    if (patch.supplier_id && rowsRef.current.some((row) => row.productId)) {
+      const next = rowsRef.current.map((row) => ({ ...row, productId: '' }))
+      rowsRef.current = next
+      setRows(next)
     }
   }
 
@@ -187,16 +221,18 @@ export function InvoicePage() {
   async function confirm() {
     setBusy(true)
     setRefusal(null)
+    const page = id
     try {
-      const made = await confirmInvoice(id)
+      const made = await confirmInvoice(page)
+      if (here.current !== page) return
       setInvoice(made)
       setDirty(false)
       setAsking(null)
       readSpools()
     } catch (cause) {
-      setRefusal(message(cause, 'The invoice could not be confirmed. Try again.'))
+      if (here.current === page) setRefusal(message(cause, 'The invoice could not be confirmed. Try again.'))
     } finally {
-      setBusy(false)
+      if (here.current === page) setBusy(false)
     }
   }
 
@@ -216,8 +252,6 @@ export function InvoicePage() {
   const reload = useCallback(() => {
     getInvoice(id).then(setInvoice, () => undefined)
   }, [id])
-
-  const supplierName = useMemo(() => suppliers.find((one) => one.id === invoice?.supplier_id)?.name ?? '', [suppliers, invoice?.supplier_id])
 
   if (loadError) {
     return (
@@ -251,15 +285,17 @@ export function InvoicePage() {
         ? `Fix line ${firstBad + 1} first`
         : untyped >= 0
           ? `Line ${untyped + 1} has no type`
-          : dirty
-            ? 'Saving the lines…'
-            : money.currency === null
-              ? "Reading the shop's currency…"
-              : invoice.currency !== money.currency
-                ? `The invoice is in ${invoice.currency} but the shop's currency is ${money.currency}. Change the currency above.`
-                : invoice.reconciles !== true
-                  ? `The total is ${format(invoice.difference ?? '0')} off the lines and shipping. Fix a price, the tax or the shipping.`
-                  : null
+          : failed
+            ? 'The lines are not saved'
+            : dirty
+              ? 'Saving the lines…'
+              : money.currency === null
+                ? "Reading the shop's currency…"
+                : invoice.currency !== money.currency
+                  ? `The invoice is in ${invoice.currency} but the shop's currency is ${money.currency}. Change the currency above.`
+                  : invoice.reconciles !== true
+                    ? `The total is ${format(invoice.difference ?? '0')} off the lines and shipping. Fix a price, the tax or the shipping.`
+                    : null
   const counts = confirmCounts(rows)
 
   return (
@@ -282,8 +318,13 @@ export function InvoicePage() {
       </header>
       <div className="mb-4 min-h-5 text-[13px]" aria-live="polite">
         {draft && reason && (
-          <p id="confirm-reason" className="text-muted-foreground">
+          <p id="confirm-reason" className="flex items-center gap-2 text-muted-foreground">
             {reason}
+            {failed && !saving && (
+              <Button type="button" variant="outline" size="xs" onClick={() => void flush()}>
+                Retry
+              </Button>
+            )}
           </p>
         )}
         {draft && !reason && saving && <span className="text-muted-foreground">Saving…</span>}
@@ -304,7 +345,7 @@ export function InvoicePage() {
           <InvoiceFile invoiceId={invoice.id} file={invoice.file} onChanged={reload} />
         </div>
         <div className="flex min-w-0 flex-col gap-6">
-          <InvoiceHeaderForm invoice={invoice} supplierName={supplierName} editable={draft} onSaved={setInvoice} />
+          <InvoiceHeaderForm invoice={invoice} suppliers={suppliers} editable={draft} onSave={saveHeader} />
           <section aria-labelledby="invoice-lines-heading" className="flex min-w-0 flex-col gap-2">
             <h2 id="invoice-lines-heading" className="text-sm font-semibold tracking-tight">
               Lines

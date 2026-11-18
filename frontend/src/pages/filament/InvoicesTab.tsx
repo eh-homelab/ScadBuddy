@@ -133,7 +133,7 @@ export function InvoicesTab() {
                 <th scope="col" className={TH}>Number</th>
                 <th scope="col" className={TH}>Status</th>
                 <th scope="col" className={`${TH} text-right`}>Total</th>
-                <th scope="col" className={`${TH} text-right`}>Lines</th>
+                <th scope="col" className={`${TH} text-right`}>Spools</th>
                 <th scope="col" className={TH}>
                   <span className="sr-only">File</span>
                 </th>
@@ -153,7 +153,9 @@ export function InvoicesTab() {
                     <Badge variant={invoice.status === 'draft' ? 'outline' : 'secondary'}>{invoice.status === 'draft' ? 'Draft' : 'Confirmed'}</Badge>
                   </td>
                   <td className={`${TD} text-right tabular-nums`}>{formatCost(invoice.total, invoice.currency, invoice.minor_exponent)}</td>
-                  <td className={`${TD} text-right tabular-nums`}>{invoice.line_count}</td>
+                  <td className={`${TD} text-right tabular-nums`} aria-label="Spools made or filled">
+                    {invoice.spool_count}
+                  </td>
                   <td className={`${TD} text-right`}>{invoice.file && <PaperclipIcon aria-label="Has a file" role="img" className="inline size-3.5 text-muted-foreground" />}</td>
                 </tr>
               ))}
