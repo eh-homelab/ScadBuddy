@@ -385,10 +385,12 @@ describe('the sensors list (#6684)', () => {
   it('leaves out the sensors of an archived place, as the backend does', async () => {
     resetMockState()
     expect((await listSensors()).map((one) => one.id)).toContain(SENSOR.BOX_HUMIDITY)
+    expect((await listSensors(L.DRY_BOX)).map((one) => one.id)).toContain(SENSOR.BOX_HUMIDITY)
     await upsertLocation({ archived: true }, L.DRY_BOX)
     const ids = (await listSensors()).map((one) => one.id)
     expect(ids).not.toContain(SENSOR.BOX_HUMIDITY)
     expect(ids).not.toContain(SENSOR.BOX_TEMP)
     expect(ids).toContain(SENSOR.SHELF_HUMIDITY)
+    expect(await listSensors(L.DRY_BOX)).toEqual([])
   })
 })
