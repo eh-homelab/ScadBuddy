@@ -2929,6 +2929,9 @@ export const orderTools: Tool[] = [
     routes: ['POST /api/v1/printers/{printer_id}/machine-rate/events'],
     title: ({ printer, kind, name }) => (kind === 'part' ? `Log a replaced ${name} on printer ${printer}` : `Log ${name} done on printer ${printer}`),
     handler: async ({ printer, source, ...fields }, ctx) => {
+      // These kind checks copy the backend's rule in `MachineRateEventCreate._fields`
+      // (backend/scadbuddy/orders/machine_rate.py), here only to give a clearer error before the
+      // call. A change to one must change the other.
       if (fields.kind === 'part') {
         if (fields.cost === undefined) throw new ToolError('a replaced part needs its cost')
         if (fields.minutes !== undefined || fields.consumables !== undefined) {

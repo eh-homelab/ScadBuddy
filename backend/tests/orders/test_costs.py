@@ -18,7 +18,13 @@ from scadbuddy.orders.costs import (
     order_margins,
 )
 from scadbuddy.orders.integrations import NOT_LINKED, NotLinkedError
-from scadbuddy.orders.lifecycle import QUOTE_HOLDER, FulfilmentInput, OrderEdit, ShipmentInput
+from scadbuddy.orders.lifecycle import (
+    QUOTE_HOLDER,
+    FirmLine,
+    FulfilmentInput,
+    OrderEdit,
+    ShipmentInput,
+)
 from scadbuddy.orders.models import (
     ChargeInput,
     ColourSlot,
@@ -735,6 +741,47 @@ async def test_a_quote_recorded_with_no_breakdown_reads_as_an_estimate(shop: Sho
     assert costs is not None
     (at,) = costs.items[0].attempts
     assert (at.machine_rate_basis, at.machine_rate_confidence) == ("quote_estimate", None)
+
+
+async def test_a_storefront_quote_takes_the_basis_of_the_rate_its_variant_was_priced_at(
+    shop: Shop,
+) -> None:
+    """A storefront line's firm price carries the rate its variant was sliced and priced
+    at (``FirmLine.machine_rate_breakdown``), so its quote reads the printer's basis and
+    confidence, not an estimate it cannot tell."""
+    order = shop.order()
+    item = shop.item(order)
+    filament = shop.rows.insert_filament(
+        FilamentInput(material="PLA", colour="#00aa00", cost_per_kg="20")
+    )
+    plates = [
+        Plate(index=1, print_seconds=600, filaments=[PlateFilament(slot=0, used_g=Decimal("10"))])
+    ]
+    priced = price(
+        plates, {0: filament}, PricingPolicy(machine_rate_per_hour="6"), currency="USD", quantity=1
+    )
+    line = FirmLine(
+        lines=tuple(priced.lines),
+        unit_cost_minor=priced.unit_cost_minor,
+        unit_price_minor=priced.unit_price_minor,
+        currency="USD",
+        printer="p-1",
+        plates=tuple(plate.model_dump(mode="json") for plate in plates),
+        machine_rate_breakdown=_breakdown(True, 66),
+    )
+    with shop.rows.transaction() as conn:
+        _, [(_, quote)] = shop.lifecycle._firm_quotes(conn, order, BY, {item.id: line})  # type: ignore[misc]
+    assert quote.source == "storefront"
+    assert quote.machine_rate_breakdown == _breakdown(True, 66)
+    shop.lifecycle.accept_quote(order.id, item.id, quote.id, BY)
+    order = shop.lifecycle.accept_order(order.id, BY)
+    attempt(shop, order, shop.get_item(item), "succeeded", 1, 12.0, 90)
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, USD)
+
+    assert costs is not None
+    (at,) = costs.items[0].attempts
+    assert (at.machine_rate_basis, at.machine_rate_confidence) == ("quote_actuals", 66)
 
 
 async def test_an_attempt_at_todays_rate_takes_its_printers_basis(shop: Shop, pool: PgPool) -> None:

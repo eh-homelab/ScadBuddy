@@ -1942,7 +1942,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   sends it to the shop's check. `Lifecycle.submit_order(firm=...)` records a `storefront`
   quote (`QuoteSource`, no sliced file, so a print slices again) of each firm line, with
   the slice's plates (`storefront_slice_prices.plates`, else one plate of the row's
-  `print_seconds` and `grams`, else none, so job cost reads unknown, never zero). When
+  `print_seconds` and `grams`, else none, so job cost reads unknown, never zero) and the
+  machine rate's breakdown the slice was priced at (`storefront_slice_prices.machine_rate_breakdown`,
+  #5774; never the live rate read again; none on a row stored before it). When
   every open item has one it skips the deposit policy, accepts the items and the order
   as the customer (`_accepted_by_the_last`), and the answer's `pay_now` is true; else
   the deposit policy runs as before. The submit runs under `Payments.run_closing_linked`, so the balance

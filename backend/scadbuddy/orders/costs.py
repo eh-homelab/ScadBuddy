@@ -449,7 +449,9 @@ class _Item:
             else:
                 if "seconds" in estimated:
                     estimated.append("machine")
-                # A quote recorded with no breakdown was priced at the book's rate.
+                # A quote with no breakdown was priced at the book's rate, or recorded
+                # before #4625, or is a storefront quote of a slice price stored before
+                # #5774: its rate's parts were not recorded, so it reads `quote_estimate`.
                 breakdown = None if quote is None else quote.machine_rate_breakdown
                 actuals = breakdown is not None and breakdown.actuals
                 basis = "quote_actuals" if actuals else "quote_estimate"
