@@ -5,11 +5,13 @@ from __future__ import annotations
 from uuid import UUID
 
 import pytest
+from psycopg import errors
 from pydantic import ValidationError
 
 from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.models import Material, SpoolCreate, SpoolPatch
+from scadbuddy.filament.rfid_push import enqueue_tag
 from scadbuddy.filament.spools import FilamentSpoolStore, OverrideKindError
 from tests.conftest import PgPool
 
@@ -66,6 +68,8 @@ def test_an_override_on_an_ntag_is_refused(pg_pool: PgPool) -> None:
     assert _locks(store, spool) == []
     assert not _locked(store, spool)
     assert _pending(pg_pool) == set()
+    with pg_pool.connection() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM filament_tags").fetchone() == {"n": 0}
 
 
 def test_a_second_override_bind_adds_no_second_lock_event(pg_pool: PgPool) -> None:
@@ -130,3 +134,73 @@ def test_filament_sync_tags_defaults_off_and_refuses_other_values() -> None:
     for bad in ("bb_to_sb", "two_way", ""):
         with pytest.raises(ValidationError):
             FilamentSync.model_validate({"tags": bad})
+
+
+def test_dropping_an_override_keeps_the_weight_locked_and_queues_the_tag(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    spool = _spool(store, pg_pool)
+    first = store.bind_tag(spool, tray_uuid=_TRAY, kind="bambu_mifare", override=True, actor="ann")
+    assert first is not None
+    with pg_pool.connection() as conn:
+        conn.execute("DELETE FROM filament_bb_tag_pending")
+    off = store.bind_tag(spool, tray_uuid=_TRAY, kind="bambu_mifare", actor="ann")
+    assert off is not None and off.id == first.id and off.override is False
+    assert _locked(store, spool)
+    assert len(_locks(store, spool)) == 1
+    assert _pending(pg_pool) == {first.tag_id}
+
+
+def test_an_existing_ntag_is_refused_an_override_whatever_kind_the_caller_names(
+    pg_pool: PgPool,
+) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    spool = _spool(store, pg_pool)
+    store.bind_tag(spool, tag_uid=_T1, kind="ntag_opentag", actor="ann")
+    with pytest.raises(OverrideKindError):
+        store.bind_tag(spool, tag_uid=_T1, kind="bambu_mifare", override=True, actor="ann")
+    assert not _locked(store, spool)
+
+
+def test_requeueing_a_tag_resets_its_attempts_and_error(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    spool = _spool(store, pg_pool)
+    bound = store.bind_tag(spool, tag_uid=_T1, kind="other", actor="ann")
+    assert bound is not None
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_bb_tag_pending SET attempts = 4, last_error = 'boom'"
+            " WHERE tag_id = %s",
+            (bound.tag_id,),
+        )
+        enqueue_tag(conn, bound.tag_id)
+        row = conn.execute("SELECT attempts, last_error FROM filament_bb_tag_pending").fetchone()
+    assert row == {"attempts": 0, "last_error": None}
+
+
+def test_a_second_rfid_state_row_is_refused(pg_pool: PgPool) -> None:
+    with pg_pool.connection() as conn:
+        with pytest.raises(errors.UniqueViolation), conn.transaction():
+            conn.execute("INSERT INTO filament_rfid_state (singleton) VALUES (true)")
+        with pytest.raises(errors.CheckViolation), conn.transaction():
+            conn.execute("INSERT INTO filament_rfid_state (singleton) VALUES (false)")
+
+
+def test_deleting_a_spool_removes_its_override_slot(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    spool = _spool(store, pg_pool)
+    with pg_pool.connection() as conn:
+        printer = conn.execute(
+            "INSERT INTO printers (id, serial, name) VALUES (gen_random_uuid(), 'S1', 'p')"
+            " RETURNING id"
+        ).fetchone()
+        assert printer is not None
+        conn.execute(
+            "INSERT INTO filament_override_slots (printer_id, ams_id, tray_id, spool_id)"
+            " VALUES (%s, 0, 0, %s)",
+            (printer["id"], spool),
+        )
+    assert store.delete(spool) is True
+    with pg_pool.connection() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM filament_override_slots").fetchone() == {
+            "n": 0
+        }

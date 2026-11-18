@@ -23,7 +23,7 @@ CREATE TABLE filament_override_slots (
     printer_id uuid NOT NULL REFERENCES printers (id) ON DELETE CASCADE,
     ams_id integer NOT NULL,
     tray_id integer NOT NULL,
-    spool_id uuid NOT NULL REFERENCES filament_spools (id),
+    spool_id uuid NOT NULL REFERENCES filament_spools (id) ON DELETE CASCADE,
     params_hash text,
     configured_at timestamptz,
     attempts integer NOT NULL DEFAULT 0,

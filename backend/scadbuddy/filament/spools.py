@@ -690,13 +690,9 @@ class FilamentSpoolStore:
             is None
         ):
             raise _NoSpoolError()
-        tag_id = FilamentSpoolStore._tag(conn, uid, tray, kind)
-        if override:
-            stored = conn.execute("SELECT kind FROM filament_tags WHERE id = %s", (tag_id,))
-            tag_row = stored.fetchone()
-            assert tag_row is not None
-            if tag_row["kind"] != "bambu_mifare":
-                raise OverrideKindError()
+        tag_id, tag_kind = FilamentSpoolStore._tag(conn, uid, tray, kind)
+        if override and tag_kind != "bambu_mifare":
+            raise OverrideKindError()
         holder = conn.execute(
             "SELECT spool_id FROM filament_tag_bindings WHERE tag_id = %s AND unbound_at IS NULL",
             (tag_id,),
@@ -783,7 +779,7 @@ class FilamentSpoolStore:
         key it lacked, else a new tag of ``kind``, on ``conn``'s transaction; for a caller
         that takes the tag before its spools (`filament/inventory.py`). Two tags, one per
         key, are `TagKeysClashError`."""
-        return FilamentSpoolStore._tag(conn, uid, tray, kind)
+        return FilamentSpoolStore._tag(conn, uid, tray, kind)[0]
 
     @contextmanager
     def transaction(self) -> Iterator[Conn]:
@@ -955,9 +951,10 @@ class FilamentSpoolStore:
         ledger.record(conn, current["id"], "archived" if archived else "restored", actor=actor)
 
     @staticmethod
-    def _tag(conn: Conn, uid: str | None, tray: str | None, kind: m.TagKind) -> UUID:
-        """The id of the tag either key names, locked and given the key it lacked; else a
-        new tag. A tag another transaction makes first is found on the second look."""
+    def _tag(conn: Conn, uid: str | None, tray: str | None, kind: m.TagKind) -> tuple[UUID, str]:
+        """The id and kind of the tag either key names, locked and given the key it lacked;
+        else a new tag of ``kind``. A tag another transaction makes first is found on the
+        second look."""
         while True:
             found = conn.execute(
                 f"SELECT {_TAG_COLUMNS} FROM filament_tags"
@@ -977,7 +974,7 @@ class FilamentSpoolStore:
                         (uid, tray, tag["id"]),
                     )
                 tag_id: UUID = tag["id"]
-                return tag_id
+                return tag_id, tag["kind"]
             made = conn.execute(
                 "INSERT INTO filament_tags (kind, tag_uid, tray_uuid) VALUES (%s, %s, %s)"
                 " ON CONFLICT DO NOTHING RETURNING id",
@@ -985,4 +982,4 @@ class FilamentSpoolStore:
             ).fetchone()
             if made is not None:
                 new_id: UUID = made["id"]
-                return new_id
+                return new_id, kind
