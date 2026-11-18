@@ -366,7 +366,7 @@ Strictly read-only: `GET` requests and a listening WebSocket that sends nothing.
 
 **Interfaces:**
 - `_bind`'s kind rule: `bambu_mifare` when the tray uuid is set; else `ntag_opentag` when `bb.data_origin == "opentag3d"`; else `other`. `_bind` gets the BB spool (or its `data_origin`) as a parameter.
-- `PullReport.rfid_duplicates: int = 0` and `rfid_duplicate_bb_ids: list[int]`. A BB spool with no link whose tag keys are held by an **open override binding** of an SB spool that **already has a BB link to another BB spool** creates no SB spool. It is counted and logged (`a Bambuddy spool made for an override tag is left alone`). Step 2 (link by tag) stays for an SB spool with no BB link.
+- `PullReport.rfid_duplicates: int = 0` and `rfid_duplicate_bb_ids: list[int]`. A BB spool with no link whose tag keys are held by an **open binding (override or not)** of an SB spool that **already has a BB link to another BB spool** creates no SB spool. It is counted and logged (`a Bambuddy spool made for a tag a linked spool holds is left alone`, a warning the first time for a BB id, then debug). Step 2 (link by tag) stays for an SB spool with no BB link.
 
 - [ ] **Step 1: Write the failing tests:**
   - `test_an_opentag_spool_binds_as_ntag_opentag` (BB spool with `tag_uid="04AABB", data_origin="opentag3d"`, no tray uuid → the SB binding's tag kind is `ntag_opentag`); `test_a_plain_uid_stays_other`; `test_a_tray_uuid_stays_bambu_mifare`.

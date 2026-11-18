@@ -21,6 +21,7 @@ from scadbuddy.bambuddy.models import SpoolCatalogEntry
 from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament import ledger, prints
 from scadbuddy.filament.bambuddy_pull import (
+    _WARNED_DUPLICATES,
     pull,
     read_and_pull,
     read_assignments,
@@ -867,15 +868,16 @@ def test_a_linked_spool_archived_in_sb_takes_nothing(pg_pool: PgPool) -> None:
     assert len(f.spools.events(made)) == count
 
 
-def test_two_bb_spools_with_one_tag_give_the_second_none(
+def test_two_bb_spools_with_one_tag_make_one_spool_and_count_the_second(
     pg_pool: PgPool, caplog: pytest.LogCaptureFixture
 ) -> None:
+    _WARNED_DUPLICATES.clear()
     f = _filament(pg_pool)
     report = pull(f, [bb(id=1), bb(id=2)], now=NOW)
-    first, second = report.created_ids
+    (first,) = report.created_ids
     assert f.spools.open_binding(first) is not None
-    assert f.spools.open_binding(second) is None
-    assert "tag is on another spool; not moved" in caplog.text
+    assert (report.rfid_duplicates, report.rfid_duplicate_bb_ids) == (1, [2])
+    assert "is left alone" in caplog.text
 
 
 def test_a_failing_spool_is_listed_and_the_rest_go_on(
@@ -1603,6 +1605,7 @@ def _linked_override_holder(f: Filament) -> UUID:
 def test_an_auto_added_bb_spool_for_an_override_tag_makes_no_second_sb_spool(
     pg_pool: PgPool, caplog: pytest.LogCaptureFixture
 ) -> None:
+    _WARNED_DUPLICATES.clear()
     f = _filament(pg_pool)
     a = _linked_override_holder(f)
     before = f.spools.open_binding(a)
@@ -1617,7 +1620,7 @@ def test_an_auto_added_bb_spool_for_an_override_tag_makes_no_second_sb_spool(
     assert [s.id for s in f.spools.list()] == [a]
     after = f.spools.open_binding(a)
     assert after is not None and after.id == before.id
-    assert "a Bambuddy spool made for an override tag is left alone" in caplog.text
+    assert "a Bambuddy spool made for a tag a linked spool holds is left alone" in caplog.text
 
 
 def test_an_unlinked_sb_spool_with_the_tag_is_still_linked(pg_pool: PgPool) -> None:
@@ -1626,3 +1629,39 @@ def test_an_unlinked_sb_spool_with_the_tag_is_still_linked(pg_pool: PgPool) -> N
     f.spools.bind_tag(held.id, tray_uuid=TRAY, kind="bambu_mifare", override=True, actor="ann")
     report = pull(f, [bb(id=40, tag_uid=None, tray_uuid=TRAY, data_origin="rfid_auto")], now=NOW)
     assert (report.linked_ids, report.rfid_duplicates, report.created) == ([held.id], 0, 0)
+
+
+def test_an_auto_added_bb_spool_for_a_plain_binding_makes_no_second_sb_spool(
+    pg_pool: PgPool,
+) -> None:
+    f = _filament(pg_pool)
+    (a,) = pull(f, [bb(id=11, tray_uuid=None, tag_uid=None)], now=NOW).created_ids
+    f.spools.bind_tag(a, tray_uuid=TRAY, kind="bambu_mifare", actor="ann")
+    report = pull(f, [bb(id=40, tag_uid=None, tray_uuid=TRAY, data_origin="rfid_auto")], now=NOW)
+    assert (report.created, report.rfid_duplicates, report.rfid_duplicate_bb_ids) == (0, 1, [40])
+    assert [s.id for s in f.spools.list()] == [a]
+
+
+def test_the_bb_spool_the_override_holder_is_linked_to_is_no_duplicate(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    a = _linked_override_holder(f)
+    report = pull(
+        f,
+        [bb(id=11, tag_uid=None, tray_uuid=TRAY, updated_at=_bb_time(1), weight_used=300.0)],
+        now=NOW,
+    )
+    assert (report.rfid_duplicates, report.created, report.updated_ids) == (0, 0, [a])
+
+
+def test_a_duplicate_is_warned_once_then_debug(
+    pg_pool: PgPool, caplog: pytest.LogCaptureFixture
+) -> None:
+    _WARNED_DUPLICATES.clear()
+    f = _filament(pg_pool)
+    _linked_override_holder(f)
+    rows = [bb(id=40, tag_uid=None, tray_uuid=TRAY, data_origin="rfid_auto")]
+    with caplog.at_level("DEBUG"):
+        pull(f, rows, now=NOW)
+        pull(f, rows, now=NOW)
+    levels = [r.levelname for r in caplog.records if "is left alone" in r.getMessage()]
+    assert levels == ["WARNING", "DEBUG"]

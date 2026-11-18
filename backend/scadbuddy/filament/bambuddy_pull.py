@@ -31,9 +31,9 @@ this order:
    type) and BB's values as its own. A spool with a type overrides only what BB says
    differently. It takes BB's tags unless another linked spool holds them, a
    ``created`` event with a ``bb`` reading of what is left, and its link. A BB spool whose
-   tag keys an SB spool holds as an open override binding, where that spool is already
-   linked to another BB spool, is one Bambuddy added itself for the tag (#6264): it makes
-   no SB spool, and is counted in ``PullReport.rfid_duplicates``. A tag with a tray UUID
+   tag keys an SB spool holds through an open binding (override or not), where that spool
+   is already linked to another BB spool, is one Bambuddy added itself for the tag (#6264):
+   it makes no SB spool, and is counted in ``PullReport.rfid_duplicates``. A tag with a tray UUID
    binds as ``bambu_mifare``; one BB read as OpenTag3D (``data_origin == "opentag3d"``) as
    ``ntag_opentag``; any other as ``other``.
 
@@ -135,6 +135,8 @@ _NOT_COLUMNS = frozenset(
 #: The catalog entries already warned about as skipped, so a clash is told once a process.
 _WARNED_SKIPS: set[tuple[int, str]] = set()
 _WARNED_SKIPS_MAX = 1000
+#: The BB spools already warned about as duplicates, so each is told once a process.
+_WARNED_DUPLICATES: set[int] = set()
 
 Outcome = Literal["pulled", "skipped", "failed"]
 
@@ -147,7 +149,7 @@ class PullReport(BaseModel):
     had one; whether BB's spool catalog failed (all or nothing: then no entry was mapped),
     and how many of its entries were skipped (no name or weight, or a name another type
     has), so a spool naming one gets no insert type; and the BB spools it left alone
-    because they are Bambuddy's copy of an override tag a linked SB spool holds
+    because they are Bambuddy's copy of a tag a linked SB spool holds
     (``rfid_duplicates``, with their ids)."""
 
     created: int = 0
@@ -170,7 +172,7 @@ class PullReport(BaseModel):
     #: spool is linked to (`bambuddy_usage.py`).
     usage_booked: int = 0
     usage_unlinked: int = 0
-    #: BB spools made for an override tag a linked SB spool holds: no SB spool is made.
+    #: BB spools made for a tag a linked SB spool holds: no SB spool is made.
     rfid_duplicates: int = 0
     rfid_duplicate_bb_ids: list[int] = Field(default_factory=list)
 
@@ -381,13 +383,17 @@ def _one(
         _book(conn, held_id, bb, actor)
         _bb_presets(conn, held_id, bb, actor)
         return "linked", held_id, typeless
-    override_holder = _override_holder(conn, after)
-    if override_holder is not None:
-        logger.warning(
-            "a Bambuddy spool made for an override tag is left alone",
-            extra={"bb_spool_id": bb.id, "holder": str(override_holder)},
+    linked_holder = _linked_holder(conn, after)
+    if linked_holder is not None:
+        if len(_WARNED_DUPLICATES) > _WARNED_SKIPS_MAX:
+            _WARNED_DUPLICATES.clear()
+        log = logger.debug if bb.id in _WARNED_DUPLICATES else logger.warning
+        _WARNED_DUPLICATES.add(bb.id)
+        log(
+            "a Bambuddy spool made for a tag a linked spool holds is left alone",
+            extra={"bb_spool_id": bb.id, "holder": str(linked_holder)},
         )
-        return "duplicate", override_holder, False
+        return "duplicate", linked_holder, False
     made, typeless = _create(conn, store, bb, after, now, actor)
     _book(conn, made, bb, actor)
     _bb_presets(conn, made, bb, actor)
@@ -533,16 +539,17 @@ def _holder(conn: Conn, after: dict[str, Any], bb_id: int) -> tuple[UUID, bool] 
     return None
 
 
-def _override_holder(conn: Conn, after: dict[str, Any]) -> UUID | None:
-    """The unarchived SB spool, linked to a BB spool, that holds the BB spool's tag keys as
-    an open override binding: Bambuddy added this BB spool itself for that tag (#6264)."""
+def _linked_holder(conn: Conn, after: dict[str, Any]) -> UUID | None:
+    """The unarchived SB spool, linked to another BB spool, that holds the BB spool's tag
+    keys through an open binding (override or not): Bambuddy added this BB spool itself
+    for that tag (#6264), and a second SB spool for one physical spool is never right."""
     uid, tray = after["tag_uid"], after["tray_uuid"]
     if uid is None and tray is None:
         return None
     row = conn.execute(
         "SELECT b.spool_id FROM filament_tag_bindings b JOIN filament_tags t ON t.id = b.tag_id"
         " JOIN filament_spools s ON s.id = b.spool_id"
-        " WHERE b.unbound_at IS NULL AND b.override AND s.archived_at IS NULL"
+        " WHERE b.unbound_at IS NULL AND s.archived_at IS NULL"
         " AND (t.tag_uid = %s OR t.tray_uuid = %s)"
         " AND EXISTS (SELECT 1 FROM filament_bb_links l WHERE l.spool_id = b.spool_id)"
         " ORDER BY b.bound_at, b.id LIMIT 1",
