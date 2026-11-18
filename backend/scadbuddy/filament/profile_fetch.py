@@ -707,6 +707,11 @@ class _Ending:
     missing: list[MissingKey]
     presets: list[TypePreset] = field(default_factory=list)
     k_values: list[TypeKValue] = field(default_factory=list)
+    #: The (printer, nozzle) keys whose K rows the fetch replaces, each with the printer's
+    #: label: a mapped file's key on a printer of its model, unless that printer's K
+    #: table did not answer (`_k_values`). Their old rows that ``k_values`` does not hold
+    #: are removed (R-F4).
+    k_scope: dict[tuple[UUID, str], str] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
     error: str | None = None
 
@@ -811,6 +816,7 @@ async def _import_once(
                 reply = Replay(200, _stored_outcome(now).model_dump(mode="json"))
             else:
                 SpoolTypeStore.merge_presets(conn, now["type_id"], ending.presets)
+                _drop_stale_k_values(conn, now["type_id"], ending)
                 SpoolTypeStore.merge_k_values(conn, now["type_id"], ending.k_values)
                 files = now["files"]
                 for preset in ending.presets:
@@ -943,7 +949,10 @@ async def _import(
                 again = [i for i in same if i in fetched]
                 if not ours and not again:
                     missing[(f.printer_model, f.nozzle)] = (
-                        f"Bambuddy already has a preset named {f.name} that no profile fetch made"
+                        # Per type on purpose (S1): a preset another type's fetch made
+                        # is not this type's to bind (R-F5).
+                        f"Bambuddy already has a preset named {f.name}"
+                        " that no fetch of this type made"
                         if same
                         else f"Bambuddy did not list the imported preset {f.name!r}"
                     )
@@ -1030,24 +1039,51 @@ async def _k_values(
     """The K value each printer holds for a mapped file's filament: only where its
     ``filament_id`` is the preset document's and not a Bambu system id (``GF…``, which
     many types share), and one value per extruder. A printer that does not answer is a
-    note."""
+    note, and its key stays out of ``k_scope``, so its old K rows are kept."""
     for printer in printers:
         for f in files:
             if f.printer_model != printer["model"]:
                 continue
+            printer_id = UUID(str(printer["id"]))
+            label = f"{printer['name']} ({printer['model']})"
             filament_id = json.loads(docs[f.sha256]).get("filament_id")
             if not isinstance(filament_id, str) or filament_id.startswith("GF"):
+                ending.k_scope[(printer_id, f.nozzle)] = label
                 continue
             try:
                 rows = await client.k_profiles(printer["bambuddy_printer_id"], f.nozzle)
             except ApiError as error:
                 ending.notes.append(
-                    f"{printer['name']} ({printer['model']}) did not give its {f.nozzle} mm"
-                    f" K table: {error.detail}"
+                    f"{label} did not give its {f.nozzle} mm K table: {error.detail}"
                 )
                 continue
-            ending.k_values.extend(
-                _matched(type_id, UUID(str(printer["id"])), f.nozzle, filament_id, rows)
+            ending.k_scope[(printer_id, f.nozzle)] = label
+            ending.k_values.extend(_matched(type_id, printer_id, f.nozzle, filament_id, rows))
+
+
+def _drop_stale_k_values(conn: Conn, type_id: UUID, ending: _Ending) -> None:
+    """Remove the type's K rows of ``ending.k_scope``'s keys that the fetch did not match
+    (`_Ending.k_scope`), each named in ``ending.notes``. On ``conn``, in the end's
+    transaction."""
+    keep = {(k.printer_id, k.extruder, k.nozzle_diameter) for k in ending.k_values}
+    for (printer_id, nozzle), label in sorted(ending.k_scope.items()):
+        rows = conn.execute(
+            "SELECT extruder, k_value FROM filament_spool_type_k_values"
+            " WHERE type_id = %s AND printer_id = %s AND nozzle_diameter = %s"
+            " ORDER BY extruder",
+            (type_id, printer_id, nozzle),
+        ).fetchall()
+        for row in rows:
+            if (printer_id, row["extruder"], nozzle) in keep:
+                continue
+            conn.execute(
+                "DELETE FROM filament_spool_type_k_values WHERE type_id = %s"
+                " AND printer_id = %s AND extruder = %s AND nozzle_diameter = %s",
+                (type_id, printer_id, row["extruder"], nozzle),
+            )
+            ending.notes.append(
+                f"removed the old K value {row['k_value']} of {label}, extruder"
+                f" {row['extruder']}, {nozzle} mm: the fetched preset does not match it"
             )
 
 

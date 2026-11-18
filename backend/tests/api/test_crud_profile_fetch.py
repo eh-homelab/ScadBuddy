@@ -25,7 +25,7 @@ from fastapi.testclient import TestClient
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.auth.service_credentials import ServiceCredentialStore
 from scadbuddy.filament.component import FILAMENT
-from scadbuddy.filament.models import TypePreset
+from scadbuddy.filament.models import TypeKValue, TypePreset
 from scadbuddy.filament.profile_fetch import HOLDER, ProfileFetches
 from scadbuddy.orders.attachments import blob_path
 from scadbuddy.printers.component import PRINTERS
@@ -403,7 +403,7 @@ def test_a_hand_made_preset_of_the_same_name_is_not_bound(fetch: Fetch) -> None:
     )
     assert r.status_code == 200, r.text
     assert r.json()["status"] == "partial"
-    reason = f"Bambuddy already has a preset named {name_of(clash)} that no profile fetch made"
+    reason = f"Bambuddy already has a preset named {name_of(clash)} that no fetch of this type made"
     assert {"printer_model": "H2C", "nozzle_diameter": "0.4", "reason": reason} in r.json()[
         "missing"
     ]
@@ -565,6 +565,79 @@ def test_k_values_need_an_exact_non_gf_match(fetch: Fetch) -> None:
     # 0.2's preset has a Bambu system id: no printer is asked for it.
     assert sum(1 for n in notes if "H2C 2" in n) == 3, notes
     assert other.id != fetch.printer_id
+
+
+def _k_row(fetch: Fetch, printer_id: str, nozzle: str, k: str, extruder: int = 0) -> TypeKValue:
+    return TypeKValue(
+        type_id=fetch.type_id,
+        printer_id=UUID(printer_id),
+        extruder=extruder,
+        nozzle_diameter=nozzle,
+        nozzle_type=None,
+        k_value=Decimal(k),
+        name="old",
+        cali_idx=None,
+        setting_id=None,
+    )
+
+
+@respx.mock
+def test_a_stale_k_value_of_a_fetched_key_is_removed_and_named(fetch: Fetch) -> None:
+    """R-F4: a fetch replaces the K rows of every key it fetched. An old K row of a fetched
+    (printer, extruder, nozzle) key the new preset does not match is removed, and the
+    run's notes name it; a key whose K table did not answer, and a key not fetched, keep
+    theirs."""
+    state = _state(fetch.client)
+    types = state.components.get(FILAMENT).types
+    x1c = state.components.get(PRINTERS).store.create_linked(
+        serial="31B598000002", name="X1C", model="X1C", bambuddy_printer_id=3
+    )
+    types.set_k_values(
+        fetch.type_id,
+        [
+            _k_row(fetch, fetch.printer_id, "0.2", "0.03"),  # GF preset now: removed
+            _k_row(fetch, fetch.printer_id, "0.4", "0.05", extruder=1),  # no match: removed
+            _k_row(fetch, fetch.printer_id, "0.4", "0.04"),  # matched: replaced
+            _k_row(fetch, fetch.printer_id, "0.8", "0.06"),  # its K table failed: kept
+            _k_row(fetch, x1c.id, "0.4", "0.07"),  # not fetched: kept
+        ],
+    )
+    bodies = [export("0.2", filament_id="GFL99"), export("0.4"), export("0.6"), export("0.8")]
+    for nozzle, body in zip(NOZZLES, bodies, strict=True):
+        assert fetch.put(body, nozzle=nozzle).status_code == 204
+    bb_import(4)
+    local_presets([name_of(b) for b in bodies])
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        nozzle = request.url.params["nozzle_diameter"]
+        if nozzle == "0.8":
+            return httpx.Response(502, json={"detail": "printer offline"})
+        if nozzle == "0.4":
+            return httpx.Response(200, json={"profiles": [_profile("P1a2b3c4", "0.025")]})
+        return httpx.Response(200, json={"profiles": []})
+
+    respx.get(url__regex=KPROFILES.pattern).mock(side_effect=answer)
+
+    r = fetch.import_()
+
+    assert r.status_code == 200, r.text
+    kept = {
+        (str(k.printer_id), k.extruder, k.nozzle_diameter): k.k_value
+        for k in types.k_values(fetch.type_id)
+    }
+    assert kept == {
+        (fetch.printer_id, 0, "0.4"): Decimal("0.0250"),
+        (fetch.printer_id, 0, "0.8"): Decimal("0.0600"),
+        (x1c.id, 0, "0.4"): Decimal("0.0700"),
+    }
+    removed = [n for n in r.json()["notes"] if n.startswith("removed")]
+    assert sorted(removed) == [
+        "removed the old K value 0.0300 of H2C (H2C), extruder 0, 0.2 mm:"
+        " the fetched preset does not match it",
+        "removed the old K value 0.0500 of H2C (H2C), extruder 1, 0.4 mm:"
+        " the fetched preset does not match it",
+    ]
+    assert fetch.run().notes == r.json()["notes"]
 
 
 @respx.mock
