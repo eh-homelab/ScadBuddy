@@ -116,6 +116,18 @@ export const bindTag = (spoolId: string, body: TagBind) =>
 export type ScanResult = Schemas['ScanResult']
 export type NtagQueued = Schemas['NtagQueued']
 export type NtagConfirm = Schemas['NtagConfirm']
+export type RfidStatus = Schemas['RfidStatus']
+export type RfidReconcileReport = Schemas['RfidReconcileReport']
+export type SpoolBuddyDevice = Schemas['SpoolBuddyDevice']
+
+/** `devices` is read only by the GET: the PUT answers an empty list. */
+export const getRfidStatus = () => request<RfidStatus>(`${BASE}/rfid/status`)
+
+/** Waits up to 5 s for the write to land: `pending` with the detail `busy` means it applies on the next refresh. */
+export const setOverrideMode = (enabled: boolean) => request<RfidStatus>(`${BASE}/rfid/override-mode`, json('PUT', { enabled }))
+
+/** Runs once what the spool refresh Schedule runs: the mode, the pending tags, the override slots. */
+export const reconcileRfid = () => request<RfidReconcileReport>(`${BASE}/rfid/reconcile`, { method: 'POST' })
 
 /**
  * Waits up to `timeoutS` seconds (1 to 50) for a tag at a SpoolBuddy reader; a timeout is a 200 with

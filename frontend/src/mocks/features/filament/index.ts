@@ -163,6 +163,9 @@ function effectiveKValues(spoolId: string): S['EffectiveKValue'][] {
 }
 
 const tagById = (id: string) => state.tags.find((tag) => tag.id === id)
+/** What the NTAG write route (`rfid.ts`) asks of a spool: its Bambuddy link, and whether its open tag was bound with `override`. */
+export const hasBambuddyLink = (spoolId: string) => state.bbLinks.has(spoolId)
+export const holdsOverrideTag = (spoolId: string) => state.bindings.some((one) => one.spool_id === spoolId && !one.unbound_at && one.override)
 const openBinding = (tagId: string) => state.bindings.find((one) => one.tag_id === tagId && !one.unbound_at)
 const numberOf = (spoolId: string) => findSpool(spoolId)?.number ?? null
 

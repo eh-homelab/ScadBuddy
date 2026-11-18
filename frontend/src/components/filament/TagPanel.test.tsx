@@ -1,7 +1,9 @@
 import { screen, waitFor } from '@testing-library/react'
+import { http, HttpResponse } from 'msw'
 import { describe, expect, it, vi } from 'vitest'
 import { getSpool, unbindTag } from '../../api/filament'
 import { spoolId, TAG } from '../../mocks/features/filament/seed'
+import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { TagPanel } from './TagPanel'
 
@@ -46,9 +48,101 @@ describe('TagPanel', () => {
     expect((await getSpool(spoolId(2))).tag?.tag_uid).toBe('04AABBCC')
   })
 
-  it('says the override box only records that the tag was taken', async () => {
-    await render(2)
-    expect(screen.getByRole('checkbox', { name: /Record that the tag was taken from another spool on purpose/ })).toBeInTheDocument()
+  it('test_move_it_here_is_not_an_override', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.post('*/api/v1/filament/spools/:id/tags', async ({ request }) => {
+        bodies.push(await request.clone().json())
+        return HttpResponse.json({}, { status: 201 })
+      }),
+    )
+    const { user, onChanged } = await render(19)
+    await user.click(screen.getByRole('button', { name: 'Tag is on spool #3 — Move it here' }))
+    await waitFor(() => expect(onChanged).toHaveBeenCalled())
+    expect(bodies[0]).toMatchObject({ override: false })
+  })
+
+  it('test_the_override_checkbox_needs_a_tray_uuid', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.post('*/api/v1/filament/spools/:id/tags', async ({ request }) => {
+        bodies.push(await request.clone().json())
+        return HttpResponse.json({}, { status: 201 })
+      }),
+    )
+    const { user, onChanged } = await render(2)
+    const box = screen.getByRole('checkbox', { name: 'This Bambu tag belongs to a different filament (override)' })
+    await user.type(screen.getByLabelText('Tag UID'), '04AABBCC')
+    expect(box).toBeDisabled()
+    await user.type(screen.getByLabelText('Tray UUID'), '0123456789ABCDEF0123456789ABCDEF')
+    expect(box).toBeEnabled()
+    await user.click(box)
+    await user.click(screen.getByRole('button', { name: 'Bind tag' }))
+    await waitFor(() => expect(onChanged).toHaveBeenCalled())
+    expect(bodies[0]).toMatchObject({ override: true, kind: 'bambu_mifare' })
+  })
+
+  it('test_scanning_fills_the_form', async () => {
+    server.use(
+      http.post('*/api/v1/filament/rfid/scan', () =>
+        HttpResponse.json({ status: 'tag', tag_uid: '04A1B2C3', tray_uuid: null, kind: 'ntag_opentag', sb_spool: { id: spoolId(5), number: 5 } }),
+      ),
+    )
+    const { user } = await render(2)
+    await user.click(screen.getByRole('button', { name: 'Scan a tag' }))
+    await waitFor(() => expect(screen.getByLabelText('Tag UID')).toHaveValue('04A1B2C3'))
+    expect(screen.getByLabelText('Tray UUID')).toHaveValue('')
+    expect(screen.getByRole('combobox', { name: 'Tag kind' })).toHaveTextContent('OpenTag (NTAG)')
+    expect(screen.getByText(/Spool #5 already holds this tag/)).toBeInTheDocument()
+  })
+
+  it('waits for the reader and sends the 30 second window', async () => {
+    let sent: unknown
+    server.use(
+      http.post('*/api/v1/filament/rfid/scan', async ({ request }) => {
+        sent = await request.json()
+        await new Promise((resolve) => setTimeout(resolve, 150))
+        return HttpResponse.json({ status: 'timeout' })
+      }),
+    )
+    const { user } = await render(2)
+    await user.click(screen.getByRole('button', { name: 'Scan a tag' }))
+    expect(await screen.findByText('Hold the tag to the reader')).toBeInTheDocument()
+    await screen.findByText('No tag seen')
+    expect(sent).toMatchObject({ timeout_s: 30 })
+  })
+
+  it('test_a_scan_timeout_says_so', async () => {
+    server.use(http.post('*/api/v1/filament/rfid/scan', () => HttpResponse.json({ status: 'timeout' })))
+    const { user } = await render(2)
+    await user.click(screen.getByRole('button', { name: 'Scan a tag' }))
+    expect(await screen.findByText('No tag seen')).toBeInTheDocument()
+    expect(screen.getByLabelText('Tag UID')).toHaveValue('')
+  })
+
+  it('says a reader that cannot be reached apart from no tag seen', async () => {
+    server.use(
+      http.post('*/api/v1/filament/rfid/scan', () =>
+        HttpResponse.json({ title: 'Bad Gateway', status: 502, detail: 'Bambuddy refused' }, { status: 502, headers: { 'Content-Type': 'application/problem+json' } }),
+      ),
+    )
+    const { user } = await render(2)
+    await user.click(screen.getByRole('button', { name: 'Scan a tag' }))
+    expect(await screen.findByText('Could not reach the reader through Bambuddy')).toBeInTheDocument()
+    expect(screen.queryByText('No tag seen')).toBeNull()
+  })
+
+  it('marks an open override binding and says the weight is locked', async () => {
+    await render(3)
+    expect(await screen.findByText('Override')).toBeInTheDocument()
+    expect(screen.getByText('Weight locked: the AMS percentage never changes grams left')).toBeInTheDocument()
+  })
+
+  it('shows no override mark on a plain binding', async () => {
+    await render(4)
+    await screen.findByText(/A1B2C3D4/)
+    expect(screen.queryByText('Override')).toBeNull()
+    expect(screen.queryByText(/Weight locked/)).toBeNull()
   })
 
   it('refuses a bind with no key', async () => {

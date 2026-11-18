@@ -1,6 +1,8 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ApiError } from '../../api/client'
-import { bindTag, unbindTag, type SpoolDetail, type TagBind } from '../../api/filament'
+import { bindTag, getTag, scanTag, unbindTag, type SpoolDetail, type TagBind } from '../../api/filament'
+import { useAsync } from '../../lib/useAsync'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
@@ -10,6 +12,9 @@ import { KINDS } from './tagKinds'
 
 const message = (cause: unknown) => (cause instanceof ApiError ? cause.detail : 'The server could not be reached. Try again.')
 
+/** How long the scan waits for a tag at a reader (the route takes 1 to 50 s). */
+const SCAN_SECONDS = 30
+
 interface Props {
   spool: SpoolDetail
   /** A bind or an unbind landed: the page reads the spool again. */
@@ -17,12 +22,16 @@ interface Props {
 }
 
 /**
- * #6262 — a spool's tag: the open one with "Take off", the last one it held with "Bind tag
- * again" (free) or "Tag is on spool #N — Move it here" (another spool holds it now;
- * Decision 7), and a form to bind any tag by its UID or tray UUID. A restore binds
- * nothing: the tag comes back only through these buttons, which post the last tag's own
- * keys. The server moves a tag that another spool holds whether or not `override` is set; the flag only records that a person did it on purpose. "Move it here" sends `override: true`, and the server writes `tag_unbound` and
- * `tag_bound` events on both spools.
+ * #6262, #6264 — a spool's tag: the open one with "Take off" (and an "Override" mark and
+ * the weight-lock line when the open binding was made with `override`), the last one it held
+ * with "Bind tag again" (free) or "Tag is on spool #N — Move it here" (another spool holds it
+ * now; Decision 7), and a form to bind any tag by its UID or tray UUID, which "Scan a tag"
+ * fills from a SpoolBuddy reader. A restore binds nothing: the tag comes back only through
+ * these buttons, which post the last tag's own keys. The server moves a tag that another
+ * spool holds whether or not `override` is set. "Move it here" sends `override: false`
+ * (Decision 3). The override box is for a Bambu tag that belongs to a different filament
+ * than this spool: it needs a tray UUID, and it sends `override: true`, which makes the
+ * binding keep this spool's own filament (the AMS percentage never changes its grams left).
  */
 export function TagPanel({ spool, onChanged }: Props) {
   const [uid, setUid] = useState('')
@@ -31,6 +40,15 @@ export function TagPanel({ spool, onChanged }: Props) {
   const [override, setOverride] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [scanning, setScanning] = useState(false)
+  const [scanNote, setScanNote] = useState<string | null>(null)
+  const scan = useRef<AbortController | null>(null)
+
+  useEffect(() => () => scan.current?.abort(), [])
+
+  const openTag = spool.tag
+  const binding = useAsync(() => (openTag ? getTag(openTag.id) : Promise.resolve(null)), [openTag?.id])
+  const overridden = binding.data?.binding?.override === true
 
   async function run(action: () => Promise<unknown>) {
     setBusy(true)
@@ -50,15 +68,52 @@ export function TagPanel({ spool, onChanged }: Props) {
     ...(last?.tag.tag_uid ? { tag_uid: last.tag.tag_uid } : {}),
     ...(last?.tag.tray_uuid ? { tray_uuid: last.tag.tray_uuid } : {}),
     kind: last?.tag.kind ?? 'other',
-    override: last?.held_by != null,
+    override: false,
   })
 
+  const hasTray = tray.trim() !== ''
+
   function bind() {
-    if (!uid.trim() && !tray.trim()) {
+    if (!uid.trim() && !hasTray) {
       setError('Enter a tag UID or a tray UUID.')
       return
     }
-    void run(() => bindTag(spool.id, { ...(uid.trim() ? { tag_uid: uid.trim() } : {}), ...(tray.trim() ? { tray_uuid: tray.trim() } : {}), kind, override }))
+    void run(() =>
+      bindTag(spool.id, {
+        ...(uid.trim() ? { tag_uid: uid.trim() } : {}),
+        ...(hasTray ? { tray_uuid: tray.trim() } : {}),
+        kind,
+        override: override && hasTray,
+      }),
+    )
+  }
+
+  async function scanForTag() {
+    scan.current?.abort()
+    const controller = new AbortController()
+    scan.current = controller
+    setScanning(true)
+    setScanNote(null)
+    setError(null)
+    try {
+      const found = await scanTag({ timeoutS: SCAN_SECONDS }, controller.signal)
+      if (controller.signal.aborted) return
+      if (found.status === 'timeout') {
+        setScanNote('No tag seen')
+        return
+      }
+      setUid(found.tag_uid ?? '')
+      setTray(found.tray_uuid ?? '')
+      if (found.kind) setKind(found.kind)
+      if (!found.tray_uuid) setOverride(false)
+      setScanNote(found.sb_spool ? `Spool #${found.sb_spool.number} already holds this tag` : null)
+    } catch (cause) {
+      if (controller.signal.aborted) return
+      if (cause instanceof ApiError && (cause.status === 502 || cause.status === 504)) setScanNote('Could not reach the reader through Bambuddy')
+      else setError(message(cause))
+    } finally {
+      if (scan.current === controller) setScanning(false)
+    }
   }
 
   return (
@@ -66,8 +121,12 @@ export function TagPanel({ spool, onChanged }: Props) {
       {spool.tag ? (
         <div className="flex flex-wrap items-center gap-2 rounded-md border px-3 py-2 text-[13px]">
           <div className="min-w-0 flex-1">
-            <p className="font-medium">{KINDS.find((one) => one.id === spool.tag!.kind)?.name ?? spool.tag.kind}</p>
+            <p className="flex flex-wrap items-center gap-2 font-medium">
+              {KINDS.find((one) => one.id === spool.tag!.kind)?.name ?? spool.tag.kind}
+              {overridden && <Badge variant="secondary">Override</Badge>}
+            </p>
             <p className="truncate font-mono text-[12px] text-muted-foreground">{[spool.tag.tag_uid, spool.tag.tray_uuid].filter(Boolean).join(' · ')}</p>
+            {overridden && <p className="mt-1 text-[12px] text-muted-foreground">Weight locked: the AMS percentage never changes grams left</p>}
           </div>
           <Button type="button" size="xs" variant="outline" disabled={busy} onClick={() => void run(() => unbindTag(spool.tag!.id))}>
             Take off
@@ -89,6 +148,27 @@ export function TagPanel({ spool, onChanged }: Props) {
         </div>
       )}
 
+      <div className="flex flex-wrap items-center gap-2">
+        <Button type="button" size="sm" variant="outline" disabled={scanning} onClick={() => void scanForTag()}>
+          Scan a tag
+        </Button>
+        {scanning && (
+          <>
+            <p role="status" className="text-[13px] text-muted-foreground">
+              Hold the tag to the reader
+            </p>
+            <Button type="button" size="xs" variant="ghost" onClick={() => scan.current?.abort()}>
+              Stop
+            </Button>
+          </>
+        )}
+        {scanNote && (
+          <p role="status" className="text-[13px] text-muted-foreground">
+            {scanNote}
+          </p>
+        )}
+      </div>
+
       <form
         className="grid grid-cols-1 gap-2 sm:grid-cols-2"
         aria-label="Bind a tag"
@@ -107,7 +187,15 @@ export function TagPanel({ spool, onChanged }: Props) {
           <Label htmlFor="tag-tray" className="text-[13px]">
             Tray UUID
           </Label>
-          <Input id="tag-tray" className="font-mono" value={tray} onChange={(e) => setTray(e.target.value)} />
+          <Input
+            id="tag-tray"
+            className="font-mono"
+            value={tray}
+            onChange={(e) => {
+              setTray(e.target.value)
+              if (e.target.value.trim() === '') setOverride(false)
+            }}
+          />
         </div>
         <div className="flex flex-col gap-1">
           <Label className="text-[13px]">Kind</Label>
@@ -126,8 +214,15 @@ export function TagPanel({ spool, onChanged }: Props) {
         </div>
         <div className="flex items-end gap-3">
           <Label className="flex items-center gap-2 pb-2 text-[13px] font-normal">
-            <Checkbox checked={override} onCheckedChange={(next) => setOverride(next === true)} />
-            Record that the tag was taken from another spool on purpose
+            <Checkbox
+              checked={override && hasTray}
+              disabled={!hasTray}
+              onCheckedChange={(next) => {
+                setOverride(next === true)
+                if (next === true) setKind('bambu_mifare')
+              }}
+            />
+            This Bambu tag belongs to a different filament (override)
           </Label>
         </div>
         <div className="sm:col-span-2">

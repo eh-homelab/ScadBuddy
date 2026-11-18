@@ -39,6 +39,7 @@ import { keyOf as presetKey, presetRowsError } from '../../components/filament/p
 import { RgbaColourField } from '../../components/filament/RgbaColourField'
 import { RgbaSwatch } from '../../components/filament/RgbaSwatch'
 import { HistoryList, Section, SectionIndex } from '../../components/filament/SpoolSections'
+import { NtagPanel } from '../../components/filament/NtagPanel'
 import { TagPanel } from '../../components/filament/TagPanel'
 import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
@@ -641,7 +642,15 @@ export function SpoolPage() {
             </div>
             <div className="flex flex-col gap-2">
               <h3 className="text-[13px] font-medium">Tag</h3>
-              {saved && !creating ? <TagPanel spool={saved} onChanged={() => void reload(true).catch((cause) => setError(message(cause)))} /> : <p className="text-[13px] text-muted-foreground">Save the spool first, then bind its tag.</p>}
+              {saved && !creating ? (
+                <>
+                  <TagPanel spool={saved} onChanged={() => void reload(true).catch((cause) => setError(message(cause)))} />
+                  <h3 className="mt-2 text-[13px] font-medium">Write a tag</h3>
+                  <NtagPanel spool={saved} onBound={() => void reload(true).catch((cause) => setError(message(cause)))} />
+                </>
+              ) : (
+                <p className="text-[13px] text-muted-foreground">Save the spool first, then bind its tag.</p>
+              )}
             </div>
             {!creating && saved && (
               <div className="flex flex-wrap items-center gap-2 border-t pt-3">
