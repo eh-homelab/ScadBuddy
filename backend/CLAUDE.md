@@ -121,8 +121,11 @@ because advisory locks and NOTIFY channels are per database: workers sharing one
 serialise every `migrate` and hear each other's events. So the test role needs
 `CREATEDB` (the `postgres` superuser above has it). Each worker also starts its own
 Temporal dev server.
-CI runs the suite in six `backend-pytest` jobs (#1167), each `--splits 6 --group N`
-(pytest-split) by the timings in `backend/.test_durations`; `backend-pytest-split`
+CI runs the suite in six `backend-pytest` jobs (#1167), each `--splits 6 --group N
+--splitting-algorithm least_duration` (pytest-split) by the timings in
+`backend/.test_durations`; `least_duration`, not the default `duration_based_chunks`,
+because chunks cut the collection order and a stale file then put the slow `tests/api`
+modules in one shard (#6596); `backend-pytest-split`
 checks that the six selections add up to the whole collection and that each
 shard ran what it selected. A test missing from
 the file is placed by the average, so a stale file only unbalances the shards. The
