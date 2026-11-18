@@ -306,6 +306,9 @@ def _forget_settings(conn: Connection[DictRow], printer_id: str) -> None:
 #: later table keyed by ``printers.id``.
 PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
     PrinterReference("printer_reports", "printer_id", unique=True),
+    # #5774: ScadBuddy's hour counter; the kept printer's row stays, the gone one's
+    # moves only when the kept printer has none.
+    PrinterReference("printer_run_hours", "printer", unique=True),
     # #3823 Task 8: the printer a run printed on, and its activity row's facet.
     PrinterReference("print_runs", "printer"),
     # #4747: the printer a Bambuddy virtual printer forwards to.
@@ -715,6 +718,8 @@ class PrinterStore:
             if row is None:
                 raise PrinterNotFoundError(printer_id)
             conn.execute("DELETE FROM printer_reports WHERE printer_id = %s", (row.id,))
+            # #5774: the hours stay (a fact about the printer); no gap spans the unlink.
+            conn.execute("UPDATE printer_run_hours SET state = NULL WHERE printer = %s", (row.id,))
             return self._update(
                 conn,
                 printer_id,

@@ -3,7 +3,7 @@ import type { Sql } from 'postgres'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AuditLog } from '../src/audit/log.js'
 import type { Database } from '../src/db.js'
-import { SessionBlobs } from '../src/sessions/blobs.js'
+import { SessionBlobs, sessionImage } from '../src/sessions/blobs.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { PostgresSessionStore } from '../src/sessions/store.js'
 import { TurnHost } from '../src/sessions/turnHost.js'
@@ -113,5 +113,30 @@ describe.skipIf(skip !== undefined)(`a placement's spend over a carried cost-sta
 
   it('guard, not a state the real SDK produces: a resume that loads nothing is priced at what it reports, R', async () => {
     pricedAtR(await place(R, { carried: 'before', loads: false }))
+  })
+
+  it('a PDF blob the turn names reaches the SDK user message as a document block (#6267)', async () => {
+    const pdf = Buffer.concat([Buffer.from('%PDF-1.7\n'), Buffer.from('invoice')])
+    const scripted = scriptedRunner(() => ({ reply: 'read it', costUsd: R }))
+    m = manager({ sql: db.sql, paths: await tempPaths(), run: scripted.runner, audit: new AuditLog({ sql: db.sql }) })
+    const { session } = await m.start(browser, { origin: 'chat' })
+    const id = session.id
+    const blobs = new SessionBlobs(db.sql)
+    const blob = sessionImage('application/pdf', pdf)
+    await blobs.put(id, [blob])
+    const turnId = randomUUID()
+    await db.sql`
+      UPDATE ai_sessions SET status = 'running', runtime = 'unified', durable_turn_id = ${turnId}, updated_at = now()
+      WHERE id = ${id}`
+    const host = new TurnHost({ core: m.turnCore, sql: db.sql, images: blobs, hostQueue: 'agent-sessions.pod-a' })
+    const result = await host.run(
+      { sessionId: id, turnId, attempt: 'run:1', message: { turn_id: turnId, author: browser, text: 'import this', images: [{ name: blob.name, mediaType: 'application/pdf' }], system_append: null } },
+      { heartbeat: () => {}, cancelled: new AbortController().signal, cancelReason: () => 'interrupt' },
+    )
+    await host.stop({ graceMs: 0, abortWaitMs: 0 })
+    expect(result).toMatchObject({ status: 'done' })
+    const content = scripted.prompts.at(-1)!.message.content as { type: string }[]
+    expect(content[0]).toEqual({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdf.toString('base64') } })
+    expect(content.at(-1)).toMatchObject({ type: 'text' })
   })
 })

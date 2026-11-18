@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 from uuid import uuid4
 
 import psycopg
@@ -211,6 +212,39 @@ def test_an_invoice_is_made_with_string_money(client: TestClient) -> None:
     assert body["file"] is None
     assert client.get(f"{URL}/invoices/{body['id']}").json() == body
     assert [i["id"] for i in client.get(f"{URL}/invoices").json()] == [body["id"]]
+
+
+def test_an_import_run_is_set_and_claimed_only_from_the_value_read(client: TestClient) -> None:
+    draft = client.post(f"{URL}/invoices", json=_invoice_body(_supplier(client))).json()
+    assert draft["import_run_id"] is None
+    url = f"{URL}/invoices/{draft['id']}"
+    first = client.patch(url, json={"import_run_id": "s-1", "if_import_run_id": None})
+    assert first.status_code == 200, first.text
+    assert first.json()["import_run_id"] == "s-1"
+    # A second writer that read `null` loses: the value is not what it read (#6267).
+    lost = client.patch(url, json={"import_run_id": "s-2", "if_import_run_id": None})
+    assert lost.status_code == 409, lost.text
+    assert client.get(url).json()["import_run_id"] == "s-1"
+    # Replacing a dead run: the writer names the value it read.
+    won = client.patch(url, json={"import_run_id": "s-3", "if_import_run_id": "s-1"})
+    assert won.status_code == 200, won.text
+    assert won.json()["import_run_id"] == "s-3"
+    # With no condition the field is a plain write, and the condition alone changes nothing.
+    assert client.patch(url, json={"import_run_id": None}).json()["import_run_id"] is None
+    assert client.patch(url, json={"if_import_run_id": "x"}).status_code == 409
+
+
+def test_an_import_run_already_on_another_invoice_is_a_409(client: TestClient) -> None:
+    supplier = _supplier(client)
+    one = client.post(f"{URL}/invoices", json=_invoice_body(supplier)).json()
+    two = client.post(f"{URL}/invoices", json=_invoice_body(supplier)).json()
+    assert (
+        client.patch(f"{URL}/invoices/{one['id']}", json={"import_run_id": "s-1"}).status_code
+        == 200
+    )
+    refused = client.patch(f"{URL}/invoices/{two['id']}", json={"import_run_id": "s-1"})
+    assert refused.status_code == 409, refused.text
+    assert client.get(f"{URL}/invoices/{two['id']}").json()["import_run_id"] is None
 
 
 def test_mixed_line_tax_is_a_422(client: TestClient) -> None:
@@ -711,3 +745,76 @@ def test_confirming_an_invoice_of_an_archived_supplier_is_a_409(client: TestClie
     assert refused.status_code == 409, refused.text
     assert "archived" in refused.text
     assert client.get(f"{URL}/invoices/{invoice_id}").json()["status"] == "draft"
+
+
+FIXTURES = Path(__file__).parents[1] / "fixtures"
+
+
+def _table(client: TestClient, monkeypatch: pytest.MonkeyPatch, where: Path) -> None:
+    state = _state(client)
+    monkeypatch.setattr(
+        state, "settings", state.settings.model_copy(update={"slicer_profiles_dir": where})
+    )
+
+
+def _profiles(tmp_path: Path) -> Path:
+    table = tmp_path / "BBL" / "filament"
+    table.mkdir(parents=True)
+    (table / "filaments_color_codes.json").write_bytes(
+        (FIXTURES / "bambu_filaments_color_codes.json").read_bytes()
+    )
+    return tmp_path
+
+
+def test_a_code_gives_its_rgba_and_name(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _table(client, monkeypatch, _profiles(tmp_path))
+    found = client.get(f"{URL}/bambu-colour-codes", params={"code": "13100"})
+    assert found.status_code == 200, found.text
+    assert found.json() == {
+        "code": "13100",
+        "name": "Translucent Yellow",
+        "rgba": ["#F4EE2A80"],
+        "fila_type": "PLA Translucent",
+        "fila_id": "GFA17",
+    }
+
+
+def test_an_unknown_code_is_404(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _table(client, monkeypatch, _profiles(tmp_path))
+    missing = client.get(f"{URL}/bambu-colour-codes", params={"code": "GFA17"})
+    assert missing.status_code == 404, missing.text
+    assert "GFA17" in missing.text
+
+
+def test_a_missing_table_is_503(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _table(client, monkeypatch, tmp_path / "nowhere")
+    refused = client.get(f"{URL}/bambu-colour-codes", params={"code": "10101"})
+    assert refused.status_code == 503, refused.text
+    assert "nowhere" in refused.text
+
+
+def test_candidates_over_http_and_a_missing_invoice_is_404(client: TestClient) -> None:
+    type_id = _type(client)
+    spool = client.post(f"{URL}/spools", json={"type_id": type_id})
+    assert spool.status_code == 201, spool.text
+    line = {"description": "PLA white", "quantity": 1, "unit_price": "40.00", "type_id": type_id}
+    made = client.post(
+        f"{URL}/invoices",
+        json=_invoice_body(
+            _supplier(client), subtotal="40", shipping="0", tax="0", total="40", lines=[line]
+        ),
+    )
+    assert made.status_code == 201, made.text
+    found = client.get(f"{URL}/invoices/{made.json()['id']}/candidates")
+    assert found.status_code == 200, found.text
+    (row,) = found.json()
+    assert row["position"] == 1
+    assert [s["id"] for s in row["uncosted"]] == [spool.json()["id"]]
+    assert row["costed"] == []
+    assert client.get(f"{URL}/invoices/{MISSING}/candidates").status_code == 404

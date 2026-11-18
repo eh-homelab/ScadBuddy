@@ -14,7 +14,7 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   ).map((operation) => ({
     operation,
     reason:
-      "A multipart upload and a binary download; the assistant reaches an invoice's file as a blob pointer in #6267.",
+      "A multipart upload and a binary download. The assistant gets an invoice's file in the import session's first message, as an image or a PDF document block (#6267), not through a tool.",
   })),
   {
     operation: 'GET /api/v1/filament/spools/{spool_id}/presets',
@@ -704,6 +704,12 @@ export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: str
     reason:
       "A flow run's queue is the person's (spec 2026-10-11 §4.2): no grant decides it. The starter session " +
       'is sent the calls waiting for it in an escalation turn and answers with escalation_respond.',
+  },
+  {
+    route: 'POST /api/v1/ai/filament/invoice-import',
+    reason:
+      "The invoice page's Import button (#6267): it starts the import session, with the invoice's file attached to its first " +
+      'message. An assistant that is already in a session reads and edits invoices with the filament_invoice_* tools.',
   },
   // Web Push (#815 §3, routes/push.ts).
   ...['GET /api/v1/ai/push/key', 'PUT /api/v1/ai/push/subscription', 'DELETE /api/v1/ai/push/subscription'].map((route) => ({

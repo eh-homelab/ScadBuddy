@@ -18,6 +18,7 @@ from uuid import UUID
 from pydantic import AfterValidator, BaseModel, Field, StringConstraints, model_validator
 
 from scadbuddy.core.problems import Problem
+from scadbuddy.filament.colour import Rgba
 from scadbuddy.filament.models import Name, Note, SpoolTypeCreate, Text, _In, _Patch, _Row
 
 
@@ -210,6 +211,28 @@ class InvoiceLine(_Row):
     spool_ids: list[UUID] = Field(default_factory=list)
 
 
+class SpoolBrief(BaseModel):
+    """An open spool as a line's candidate: what a person or the session needs to tell it
+    from another one (#6267). Values are the effective ones (own override over the type's)."""
+
+    id: UUID
+    number: int
+    type_id: UUID | None
+    colour_name: str | None
+    rgba: Rgba | None
+    cost_per_kg: Decimal | None
+    grams_left: float | None
+
+
+class LineCandidates(BaseModel):
+    """The open spools a line could update instead of making new ones (#6267): those with
+    the line's material and exact RGBA, split by whether they have a cost yet."""
+
+    position: int
+    uncosted: list[SpoolBrief]
+    costed: list[SpoolBrief]
+
+
 class InvoiceConflict(Problem):
     """The 409 of an invoice write: ``existing_invoice_id`` names the invoice that has the
     number; it is absent when the invoice is confirmed (frozen)."""
@@ -244,6 +267,10 @@ class InvoicePatch(_Patch):
     tax: Money | None = None
     total: Money | None = None
     note: Note | None = None
+    import_run_id: Text | None = None
+    # Not a column: the write applies only while the invoice's `import_run_id` is this value
+    # (`null` for none), else 409. How the import claims an invoice without a lock (#6267).
+    if_import_run_id: Text | None = None
 
 
 class Invoice(_Row):

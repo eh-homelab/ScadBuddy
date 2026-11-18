@@ -40,6 +40,7 @@ Conn = Connection[DictRow]
 Row = Mapping[str, Any]
 _Ids = list[UUID]
 _Invoices = list[pm.Invoice]
+_Candidates = list[pm.LineCandidates]
 _Claimed = list[tuple[UUID, int | None]]
 _Made = dict[str, tuple[UUID, int]]
 _SKU_MAX = 128
@@ -78,6 +79,13 @@ class DuplicateInvoiceError(ValueError):
     def __init__(self, existing_id: UUID) -> None:
         super().__init__("the supplier has an invoice with that number")
         self.existing_id = existing_id
+
+
+class ImportRunChangedError(ValueError):
+    """The write named the import run it read, and another run holds the invoice now."""
+
+    def __init__(self, message: str = "the invoice's import run changed since it was read") -> None:
+        super().__init__(message)
 
 
 class InvoiceConfirmedError(ValueError):
@@ -136,7 +144,11 @@ _REF_KIND = "invoice_line"
 
 
 def _sets(patch: pm.InvoicePatch) -> tuple[list[str], list[Any]]:
-    columns = [n for n in pm.InvoicePatch.model_fields if n in patch.model_fields_set]
+    columns = [
+        n
+        for n in pm.InvoicePatch.model_fields
+        if n in patch.model_fields_set and n != "if_import_run_id"
+    ]
     return [f"{n} = %s" for n in columns], [getattr(patch, n) for n in columns]
 
 
@@ -235,6 +247,59 @@ class InvoiceStore:
             ),
         )
         return pm.Invoice.model_validate(fields)
+
+    def candidates(self, invoice_id: UUID) -> _Candidates | None:
+        """Per line, the open (unarchived) spools that match its type, or its proposed
+        type, by effective material and exact RGBA, split by whether the spool's own purchase
+        is known: an own cost or an invoice line. A type's cost is a default, not a
+        purchase. A line with neither type has none. None for no such invoice (#6267)."""
+        invoice = self.get(invoice_id)
+        if invoice is None:
+            return None
+        open_spools = self._spools.list()
+        with self._pool.connection() as conn:
+            bought = {
+                r["id"]
+                for r in conn.execute(
+                    "SELECT id FROM filament_spools"
+                    " WHERE cost_per_kg IS NOT NULL OR invoice_line_id IS NOT NULL"
+                ).fetchall()
+            }
+        found: _Candidates = []
+        for line in invoice.lines:
+            key = self._line_key(line)
+            matching = [
+                (
+                    s.id in bought,
+                    pm.SpoolBrief(
+                        id=s.id,
+                        number=s.number,
+                        type_id=s.type_id,
+                        colour_name=s.effective.colour_name,
+                        rgba=s.effective.rgba,
+                        cost_per_kg=s.effective.cost_per_kg,
+                        grams_left=s.grams_left,
+                    ),
+                )
+                for s in open_spools
+                if key is not None and (s.effective.material_id, s.effective.rgba) == key
+            ]
+            found.append(
+                pm.LineCandidates(
+                    position=line.position,
+                    uncosted=[b for known, b in matching if not known],
+                    costed=[b for known, b in matching if known],
+                )
+            )
+        return found
+
+    def _line_key(self, line: pm.InvoiceLine) -> tuple[UUID, str] | None:
+        if line.type_id is not None:
+            kind = self._types.get(line.type_id)
+            return None if kind is None else (kind.material_id, kind.rgba)
+        if line.proposed_type is not None:
+            return (line.proposed_type.material_id, line.proposed_type.rgba)
+        return None
 
     def _detail(self, conn: Conn, invoice_id: UUID) -> pm.InvoiceDetail | None:
         row = conn.execute(
@@ -342,6 +407,13 @@ class InvoiceStore:
                 supplier_id = head["supplier_id"]
                 if head["status"] == "confirmed" and patch.model_fields_set - {"note"}:
                     raise InvoiceConfirmedError()
+                if (
+                    "if_import_run_id" in patch.model_fields_set
+                    and head["import_run_id"] != patch.if_import_run_id
+                ):
+                    raise ImportRunChangedError()
+                if not sets:
+                    return self._detail(conn, invoice_id)
                 if patch.supplier_id is not None and patch.supplier_id != supplier_id:
                     supplier_id = patch.supplier_id
                     self._move(conn, invoice_id, supplier_id)
@@ -359,10 +431,14 @@ class InvoiceStore:
                 if supplier_id is None
                 else self._taken(supplier_id, self._number(patch, invoice_id), invoice_id)
             )
-            if taken is None:
-                # Not the number index (the only unique index an update can break).
-                raise
-            raise DuplicateInvoiceError(taken) from None
+            if taken is not None:
+                raise DuplicateInvoiceError(taken) from None
+            if patch.import_run_id is not None:
+                # The import-run index: another invoice already holds that run.
+                raise ImportRunChangedError(
+                    "another invoice already holds that import run"
+                ) from None
+            raise
         except errors.ForeignKeyViolation:
             raise InvoiceRefError() from None
         except (errors.CheckViolation, errors.DataError) as exc:
@@ -702,7 +778,8 @@ class InvoiceStore:
     @staticmethod
     def _lock(conn: Conn, invoice_id: UUID) -> Row | None:
         return conn.execute(
-            "SELECT id, supplier_id, status FROM filament_invoices WHERE id = %s FOR UPDATE",
+            "SELECT id, supplier_id, status, import_run_id FROM filament_invoices"
+            " WHERE id = %s FOR UPDATE",
             (invoice_id,),
         ).fetchone()
 
