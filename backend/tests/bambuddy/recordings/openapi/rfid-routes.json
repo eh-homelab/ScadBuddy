@@ -5117,6 +5117,23 @@
       "scadbuddy_scope": "Manage Inventory"
     },
     {
+      "method": "GET",
+      "path": "/api/v1/inventory/spools/{spool_id}",
+      "operationId": "get_spool_api_v1_inventory_spools__spool_id__get",
+      "parameters": [
+        {
+          "name": "spool_id",
+          "in": "path",
+          "required": true
+        }
+      ],
+      "request_schema": null,
+      "bambuddy_permission": "INVENTORY_READ",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/inventory.py#L1602",
+      "apikey_scope_flag": "can_read_status",
+      "scadbuddy_scope": "Read Status"
+    },
+    {
       "method": "PATCH",
       "path": "/api/v1/inventory/spools/{spool_id}",
       "operationId": "update_spool_api_v1_inventory_spools__spool_id__patch",

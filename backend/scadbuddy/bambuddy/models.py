@@ -1497,10 +1497,10 @@ class SlotConfigure(BaseModel):
 
     tray_info_idx: str
     tray_type: str
-    tray_sub_brands: str | None = None
+    tray_sub_brands: str
     tray_color: str
-    nozzle_temp_min: int | None = None
-    nozzle_temp_max: int | None = None
+    nozzle_temp_min: int
+    nozzle_temp_max: int
     cali_idx: int | None = None
     nozzle_diameter: str
     setting_id: str | None = None

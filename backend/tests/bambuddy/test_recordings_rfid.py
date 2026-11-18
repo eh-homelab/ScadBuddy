@@ -20,6 +20,7 @@ _EXPECTED_ROUTES = {
     ("PATCH", "/api/v1/inventory/spools/{spool_id}/link-tag"): Scope.MANAGE_INVENTORY,
     ("GET", "/api/v1/inventory/spools/by-tag"): Scope.MANAGE_INVENTORY,
     ("PATCH", "/api/v1/inventory/spools/{spool_id}"): Scope.MANAGE_INVENTORY,
+    ("GET", "/api/v1/inventory/spools/{spool_id}"): Scope.READ_STATUS,
     ("GET", "/api/v1/settings/"): Scope.READ_STATUS,
     ("PATCH", "/api/v1/settings/"): Scope.ADMIN_SETTINGS,
     (

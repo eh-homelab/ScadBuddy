@@ -9,6 +9,7 @@ import typing
 import httpx
 import pytest
 import respx
+from pydantic import ValidationError
 
 from scadbuddy.bambuddy import client as client_module
 from scadbuddy.bambuddy.client import BambuddyClient, Operation
@@ -33,7 +34,10 @@ def _slot(**values: object) -> SlotConfigure:
     base: dict[str, object] = {
         "tray_info_idx": "GFA00",
         "tray_type": "PLA",
+        "tray_sub_brands": "Basic",
         "tray_color": "FF0000FF",
+        "nozzle_temp_min": 190,
+        "nozzle_temp_max": 230,
         "nozzle_diameter": "0.4",
     }
     return SlotConfigure.model_validate({**base, **values})
@@ -170,16 +174,33 @@ async def test_slot_configure_puts_the_values_in_the_query(bambuddy: BambuddyCli
         return_value=httpx.Response(200, json={})
     )
 
-    await bambuddy.configure_slot(1, 0, 2, _slot(nozzle_temp_min=190, k_value=0.02))
+    await bambuddy.configure_slot(1, 0, 2, _slot(k_value=0.02))
 
     assert dict(route.calls.last.request.url.params) == {
         "tray_info_idx": "GFA00",
         "tray_type": "PLA",
+        "tray_sub_brands": "Basic",
         "tray_color": "FF0000FF",
-        "nozzle_diameter": "0.4",
         "nozzle_temp_min": "190",
+        "nozzle_temp_max": "230",
+        "nozzle_diameter": "0.4",
         "k_value": "0.02",
     }
+
+
+def test_the_route_s_required_query_parameters_are_required_fields() -> None:
+    required = {
+        p["name"]
+        for r in RFID["routes"]
+        if r["path"].endswith("/configure")
+        for p in r["parameters"]
+        if p["in"] == "query" and p["required"]
+    }
+    base = _slot().model_dump()
+    for name in required & set(SlotConfigure.model_fields):
+        with pytest.raises(ValidationError):
+            SlotConfigure.model_validate({k: v for k, v in base.items() if k != name})
+    assert {"tray_sub_brands", "nozzle_temp_min", "nozzle_temp_max"} <= required
 
 
 def test_a_digest_changes_with_any_field() -> None:
@@ -188,10 +209,10 @@ def test_a_digest_changes_with_any_field() -> None:
     for field, value in {
         "tray_info_idx": "GFB00",
         "tray_type": "PETG",
-        "tray_sub_brands": "Basic",
+        "tray_sub_brands": "Plus",
         "tray_color": "00FF00FF",
         "nozzle_temp_min": 200,
-        "nozzle_temp_max": 230,
+        "nozzle_temp_max": 250,
         "cali_idx": 4,
         "nozzle_diameter": "0.6",
         "setting_id": "S1",

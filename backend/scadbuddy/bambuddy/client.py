@@ -1913,7 +1913,8 @@ class BambuddyClient:
 
     async def spool_row(self, spool_id: int) -> Spool:
         """``GET /api/v1/inventory/spools/{id}``: one spool, for a write that reads state
-        first (``INVENTORY_READ``: Read Status)."""
+        first (``INVENTORY_READ``: Read Status, ``can_read_status``;
+        ``routes/inventory.py`` line 1602, maziggy/bambuddy v1.3.1)."""
         response = await self._send(
             "GET",
             f"/inventory/spools/{spool_id}",
@@ -1986,7 +1987,7 @@ class BambuddyClient:
 
     async def queue_tag_write(self, device_id: str, spool_id: int) -> list[str]:
         """``POST /api/v1/spoolbuddy/nfc/write-tag`` (``INVENTORY_UPDATE``: Manage
-        Inventory; ``routes/spoolbuddy.py``, v1.3.1): queues one write, once per call.
+        Inventory; ``routes/spoolbuddy.py`` line 830, v1.3.1): queues one write, once per call.
         Returns the answer's ``warnings``."""
         response = await self._send(
             "POST",
