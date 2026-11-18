@@ -270,7 +270,7 @@ Derived from the ledger and stored for reads: grams left, last weighed weight
 and time, last dried (time, temperature, hours), last used, weight lock, current
 tray.
 
-`native_spools` and `physical_spools` exist today. `physical_spools` already
+`native_spools` and `physical_spools` existed before #6261 (both were dropped in #6348, after #6262 stopped reading them). `physical_spools` already
 gives an identity keyed by RFID
 (`20261018T1744Z_physical_spools.sql`). The migration (our call; as built in
 #6261, `20261114T1302Z_filament_from_native.sql`):
@@ -382,8 +382,8 @@ migration `20261114T1302Z` copied the old rows: an applied use as `print_ended`
 actual, so the sliced grams are the best actual known), a settled but unapplied
 use as `print_ended` with delta 0 (`basis = "not_applied"`), and an unsettled
 use as `print_started` / `print_estimate`, which the run's end then replaces.
-The old tables are unread after #6262 and stay in the database; a follow-up PR drops
-them (#6262 removed their readers and writers, not the tables).
+#6262 removed the old tables' readers and writers, and #6348 dropped the tables
+(`20261118T1235Z_drop_native_spool_tables.sql`).
 
 ### 5.6 Locations
 

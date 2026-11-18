@@ -652,9 +652,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   tables (#6261). The `native` provider, its `/native-spools` routes, the `native_spool_*`
   agent tools and Settings' editor are gone (#6262; the old anchor `#native-spools` lands
   on Settings' Filament section), and so is the spool providers' overlay: the print dialog reads the
-  SB spools. The old tables (`native_spools`, `physical_spools`
-  and the rest) are unread now; a follow-up PR drops them. A migration
-  carried each person's tray link to the SB spool's tray place.
+  SB spools. A migration carried each person's tray link to the SB
+  spool's tray place, and the old tables (`native_spools`, `native_spool_uses`,
+  `physical_spools`, `spool_provider_records`, `spool_record_links`,
+  `spool_provider_refreshes`, `tray_spool_links`) were dropped in #6348
+  (`20261118T1235Z_drop_native_spool_tables.sql`).
   `printers/ams_mapping.py` computes `ams_mapping`/`ams_mapping2` from the
   plan's trays and `printers/nozzle_mapping.py` an H2C rack print's `nozzle_mapping`
   (measured values in the spec's §2); `printers/lan.py` is the FTPS upload and MQTT
