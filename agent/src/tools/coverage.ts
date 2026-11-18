@@ -14,7 +14,7 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   ).map((operation) => ({
     operation,
     reason:
-      "A multipart upload and a binary download; the assistant reaches an invoice's file as a blob pointer in #6267.",
+      "A multipart upload and a binary download. The assistant gets an invoice's file in the import session's first message, as an image or a PDF document block (#6267), not through a tool.",
   })),
   {
     operation: 'GET /api/v1/filament/spools/{spool_id}/presets',

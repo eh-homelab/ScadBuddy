@@ -56,11 +56,20 @@ from scadbuddy.crud.guard import crud_router
 router = crud_router("agent")
 
 #: An image's name: lowercase sha256 hex and its type's extension (``BLOB_NAME``).
-BLOB_NAME = r"^[0-9a-f]{64}\.(png|jpg|gif|webp)$"
-EXTENSION = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"}
+BLOB_NAME = r"^[0-9a-f]{64}\.(png|jpg|gif|webp|pdf)$"
+EXTENSION = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/gif": "gif",
+    "image/webp": "webp",
+    "application/pdf": "pdf",
+}
 PREVIEW_TYPES = ("image/png", "image/jpeg", "image/webp")
 #: One image's largest bytes (``sessions/images.ts`` ``IMAGE_BYTES_MAX``).
 IMAGE_BYTES_MAX = 5 * 1024 * 1024 // 4 * 3
+#: One PDF's largest bytes, an invoice sent to the model as a document block (#6267;
+#: ``sessions/images.ts`` ``PDF_BYTES_MAX``, what 8 MiB of base64 holds).
+PDF_BYTES_MAX = 8 * 1024 * 1024 // 4 * 3
 #: A preview's largest bytes (``PREVIEW_BYTES_MAX``).
 PREVIEW_BYTES_MAX = 48 * 1024
 #: The most images one ``session-blobs`` write stores: a tool result's
@@ -124,6 +133,8 @@ def sniff(data: bytes) -> str | None:
         return "image/gif"
     if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "image/webp"
+    if data[:5] == b"%PDF-":
+        return "application/pdf"
     return None
 
 
@@ -132,6 +143,8 @@ def image_name(media_type: str, data: bytes) -> str:
 
 
 def _checked_image(what: str, media_type: str, data: bytes, cap: int) -> None:
+    if media_type == "application/pdf":
+        cap = PDF_BYTES_MAX
     if not data:
         raise _unprocessable(f"{what} is empty")
     if len(data) > cap:
@@ -215,7 +228,7 @@ class Fence(_Body):
 
 class BlobMeta(_Body):
     name: Name
-    media_type: Literal["image/png", "image/jpeg", "image/gif", "image/webp"]
+    media_type: Literal["image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf"]
 
 
 class BlobsMeta(_Body):
@@ -251,7 +264,9 @@ def _insert_blobs(
 
 @router.post("/session-blobs", name="crud_agent_session_blobs_put")
 async def session_blobs_put(request: Request, state: StateDep) -> BlobsStored:
-    raw, files = await _multipart(request, IMAGES_PER_WRITE, IMAGES_PER_WRITE * IMAGE_BYTES_MAX)
+    raw, files = await _multipart(
+        request, IMAGES_PER_WRITE, IMAGES_PER_WRITE * max(IMAGE_BYTES_MAX, PDF_BYTES_MAX)
+    )
     meta = _meta(BlobsMeta, raw)
     if meta.tool_use_id is not None and meta.fence is not None:
         raise _unprocessable("a write names a tool_use_id or a fence, not both")

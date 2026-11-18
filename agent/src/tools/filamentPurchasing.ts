@@ -310,6 +310,48 @@ export const filamentPurchasingTools: Tool[] = [
   }),
 
   defineTool({
+    name: 'filament_bambu_colour',
+    label: 'Look up a Bambu colour code',
+    description:
+      "Bambu Studio's colour table, by the `code` digits of a Bambu spool's SKU (the five digits after the " +
+      'material, e.g. `10100`). Returns its `name`, `rgba` (`#RRGGBBAA`, one per colour; a translucent colour ' +
+      'keeps its alpha, e.g. `80`), `fila_type` and `fila_id`. 404 means the table does not have the code: ' +
+      'say so, and ask the user for the colour. 503 means this install has no table. Reads only.',
+    input: z.object({ code: z.string().min(1).describe('The colour code: the digits of a Bambu SKU') }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/bambu-colour-codes'],
+    handler: async ({ code }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/bambu-colour-codes', { params: { query: { code } } }),
+          `look up Bambu colour code ${code}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_invoice_candidates',
+    label: "Read an invoice's spool candidates",
+    description:
+      "For each line of an invoice draft: the open spools with no cost whose effective material and RGBA match " +
+      "the line's type (or its proposed type) exactly, and those with a cost already. Use it before you create " +
+      'spools for a line, so a spool the user already has is costed, not added twice. When a line has more ' +
+      'candidates than you can place, ask the user. 404 for no such invoice. Reads only.',
+    input: z.object({ invoice_id: z.string().uuid().describe("An invoice draft's `id`") }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/invoices/{invoice_id}/candidates'],
+    handler: async ({ invoice_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/invoices/{invoice_id}/candidates', { params: { path: { invoice_id } } }),
+          `read the candidates of invoice ${invoice_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
     name: 'filament_invoice_upsert',
     label: 'Add or edit a filament invoice draft',
     description:
