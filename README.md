@@ -2510,15 +2510,15 @@ holds the manifests (the clusters PR, plan Task 11, applies the pod settings bel
   read it into a variable and print a length or the word "missing", never the value:
 
   ```bash
-  KEY=$(op.exe read "op://homelab - prod/3D Filament Profiles/email" 2>&1); case "$KEY" in *ERROR*|"") echo "missing";; *) echo "${#KEY}";; esac; unset KEY
+  KEY=$(op.exe read "op://homelab - prod/3D Filament Profiles/email" 2>&1); case "$KEY" in *ERROR*|*"not found"*|"") echo "missing";; *) echo "${#KEY}";; esac; unset KEY
   ```
 
   A missing field gives op's error text, which contains `ERROR`, so the command prints
   "missing". The command prints only that word or a length. (On WSL `op.exe` can write the
   value to stderr, so the command captures both streams.) The path follows op's documented
   `op://<vault>/<item>/<field>` form and the plan's vault and item names. A live check on
-  2026-11-18 timed out on 1Password authorization, so the path is not yet confirmed; plan
-  Task 12 confirms it after the owner adds the field.
+  2026-11-18 timed out on 1Password authorization, so the path is not yet confirmed. Run
+  the check above once the owner adds the field. A missing `op.exe` also prints "missing".
 - **The browser.** It is a headed Chromium under Xvfb with a normal Chrome user agent. Plan
   Decision 5 records why. The source is `.claude/skills/filament-intake/SKILL.md`: line 82 says
   a real Chromium passes Vercel's bot check, and line 84 says the firewall answers 403 to the
