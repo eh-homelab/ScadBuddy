@@ -65,7 +65,7 @@ import asyncio
 import logging
 import math
 from collections.abc import Callable, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
@@ -74,7 +74,8 @@ from psycopg import Connection
 from psycopg.rows import DictRow
 from pydantic import BaseModel, Field, ValidationError
 
-from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.client import BambuddyClient, client_for
+from scadbuddy.bambuddy.linking import ARCHIVE_OVERLAP, ARCHIVE_PAGE, MAX_ARCHIVE_PAGES
 from scadbuddy.bambuddy.models import Archive, SpoolAssignment, SpoolCatalogEntry, SpoolUsage
 from scadbuddy.bambuddy.models import Spool as BbSpool
 from scadbuddy.core.problems import ApiError
@@ -1067,7 +1068,8 @@ async def read_and_pull(
             _failed("could not find Bambuddy's unbooked usage rows", error)
         if pending:
             try:
-                archives = await client.archives(limit=50)
+                since = min(row.created_at for row in usage if row.id in pending).date()
+                archives = await _read_archives(client, since - ARCHIVE_LEAD)
             except Exception as error:
                 _failed("could not read Bambuddy's archives", error)
     spools, bad = parse_rows(rows)
@@ -1090,6 +1092,34 @@ async def read_and_pull(
         extra={"usage_booked": report.usage_booked, "usage_unlinked": report.usage_unlinked},
     )
     return report
+
+
+#: How long before its usage row an archive may have been made. The archive window is on
+#: its ``created_at`` (the dispatch), and the row comes when the print ends; a day covers
+#: a print that long, and the window is on dates.
+ARCHIVE_LEAD = timedelta(days=1)
+
+
+async def _read_archives(client: BambuddyClient, since: date) -> list[Archive]:
+    """The archives made from ``since`` on, paged as `linking` pages them (an overlap, at
+    most `MAX_ARCHIVE_PAGES` pages): the newest 50 would miss the archives of the older
+    usage rows a first pull books (#6598). A read that hits the cap logs it and keeps
+    what it has."""
+    found: dict[int, Archive] = {}
+    for page in range(MAX_ARCHIVE_PAGES):
+        rows = await client.archives(
+            date_from=since, limit=ARCHIVE_PAGE, offset=page * (ARCHIVE_PAGE - ARCHIVE_OVERLAP)
+        )
+        found.update((row.id, row) for row in rows)
+        if len(rows) < ARCHIVE_PAGE:
+            break
+    else:
+        logger.warning(
+            "stopped reading Bambuddy's archives for usage rows; the archives of the oldest"
+            " pending rows were not read (pages probably come newest first)",
+            extra={"since": since.isoformat(), "pages": MAX_ARCHIVE_PAGES},
+        )
+    return list(found.values())
 
 
 def _failed(message: str, error: Exception) -> None:

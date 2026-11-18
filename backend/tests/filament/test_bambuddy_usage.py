@@ -4,13 +4,15 @@ when one ended in the window, and counted once beside BB's reading and SB's own 
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
+import httpx
 import pytest
 import respx
 
+from scadbuddy.bambuddy.linking import ARCHIVE_PAGE, MAX_ARCHIVE_PAGES
 from scadbuddy.bambuddy.models import Archive, SpoolUsage
 from scadbuddy.bambuddy.models import Spool as BbSpool
 from scadbuddy.filament import bambuddy_usage, capture, ledger
@@ -237,6 +239,34 @@ async def test_a_pull_books_bambuddys_usage_rows(pg_pool: PgPool) -> None:
     assert event.data["bb_archive_id"] == 248
 
 
+async def test_the_archive_read_reaches_back_to_the_oldest_row_booked(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    spool = _linked(f)
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    rows = [usage().model_dump(mode="json")]
+    ended = _naive(T1 + timedelta(seconds=0.9))
+    filler = [{"id": 1000 + i, "printer_id": 1, "completed_at": _naive(NOW)} for i in range(100)]
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        # Without a date window Bambuddy answers its newest rows, which are all later.
+        params = request.url.params
+        if "date_from" not in params:
+            return httpx.Response(200, json=filler[:50])
+        assert date.fromisoformat(params["date_from"]) <= T1.date()
+        if int(params.get("offset", 0)) == 0:
+            return httpx.Response(200, json=filler)
+        return httpx.Response(200, json=[{"id": 248, "printer_id": 1, "completed_at": ended}])
+
+    with respx.mock() as router:
+        router.get(f"{BB}/api/v1/inventory/spools").respond(json=[bb().model_dump(mode="json")])
+        router.get(f"{BB}/api/v1/inventory/usage").respond(json=rows)
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
+        router.get(f"{BB}/api/v1/archives/").mock(side_effect=answer)
+        await read_and_pull(f, settings)
+    (event,) = _usage_events(f, spool)
+    assert event.data["bb_archive_id"] == 248
+
+
 async def test_rows_that_would_not_book_read_no_archives(pg_pool: PgPool) -> None:
     f = _filament(pg_pool)
     _linked(f)
@@ -355,3 +385,271 @@ def test_the_spools_are_locked_in_id_order_before_any_booking(
     monkeypatch.setattr(capture, "lock", spy)
     assert _book(f, rows).booked == 3
     assert locked == [sorted(by_bb.values())]
+
+
+def _printer_1(pool: PgPool) -> None:
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO printers (id, serial, name, bambuddy_printer_id)"
+            " VALUES (gen_random_uuid(), 'TEST00000000001', 'H2C', 1)"
+        )
+
+
+def _second_spool(f: Filament) -> UUID:
+    (made,) = pull(f, [bb(id=8)], now=NOW).created_ids
+    return made
+
+
+def _estimate(f: Filament, spool: UUID, slot: int = 0, run: str = "run-1") -> str:
+    ref = f"{run}/{JOB}/{slot}"
+    with f.spools.transaction() as conn:
+        ledger.record(
+            conn,
+            spool,
+            "print_started",
+            source="print_estimate",
+            delta_g=-70.0,
+            ref_kind=ledger.PRINT_RUN,
+            ref_id=ref,
+            at=T0 + timedelta(minutes=10),
+            data={"job": JOB},
+        )
+    return ref
+
+
+def test_a_usage_row_on_another_spool_than_the_estimate_covers_the_estimate(
+    pg_pool: PgPool,
+) -> None:
+    f = _filament(pg_pool)
+    _printer_1(pg_pool)
+    z = _linked(f)
+    y = _second_spool(f)
+    ref = _estimate(f, y)
+    assert _left(f, y) == pytest.approx(900 - 70.0)
+    assert _book(f, [usage()]).booked == 1
+    (zevent,) = _usage_events(f, z)
+    (cover,) = [e for e in f.spools.events(y) if e.kind == "print_ended"]
+    assert (cover.source, cover.delta_g) == ("print_actual", 0)
+    assert (cover.ref_kind, cover.ref_id) == (ledger.PRINT_RUN, ref)
+    assert cover.data["covered_by"] == str(zevent.id)
+    assert _left(f, z) == pytest.approx(900 - 75.1)
+    assert _left(f, y) == pytest.approx(900)
+
+
+def test_a_two_slot_job_with_two_open_estimates_is_left_alone_and_logged(
+    pg_pool: PgPool, caplog: pytest.LogCaptureFixture
+) -> None:
+    f = _filament(pg_pool)
+    _printer_1(pg_pool)
+    z = _linked(f)
+    y = _second_spool(f)
+    (other,) = pull(f, [bb(id=9)], now=NOW).created_ids
+    _estimate(f, y, slot=0)
+    _estimate(f, other, slot=1)
+    with caplog.at_level("WARNING"):
+        assert _book(f, [usage()]).booked == 1
+    assert not [e for e in f.spools.events(y) if e.kind == "print_ended"]
+    assert not [e for e in f.spools.events(other) if e.kind == "print_ended"]
+    assert _left(f, y) == pytest.approx(900 - 70.0)
+    assert _left(f, z) == pytest.approx(900 - 75.1)
+    assert "filament.usage.unpaired" in caplog.text
+
+
+def test_two_unpaired_usage_rows_of_one_job_cover_nothing(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    _printer_1(pg_pool)
+    _linked(f)
+    y = _second_spool(f)
+    (third,) = pull(f, [bb(id=9)], now=NOW).created_ids
+    _estimate(f, y)
+    _book(f, [usage(), usage(id=458, spool_id=9)])
+    assert not [e for e in f.spools.events(y) if e.kind == "print_ended"]
+    assert _left(f, third) == pytest.approx(900 - 75.1)
+
+
+def test_a_retried_booking_covers_once(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    _printer_1(pg_pool)
+    _linked(f)
+    y = _second_spool(f)
+    _estimate(f, y)
+    _book(f, [usage()])
+    assert _book(f, [usage()]).booked == 0
+    assert len([e for e in f.spools.events(y) if e.kind == "print_ended"]) == 1
+
+
+def test_a_second_usage_row_of_a_job_already_paired_on_the_estimates_spool_covers_nothing(
+    pg_pool: PgPool,
+) -> None:
+    f = _filament(pg_pool)
+    _printer_1(pg_pool)
+    z = _linked(f)
+    y = _second_spool(f)
+    _estimate(f, y)
+    # Y's own row pairs with its estimate by `ledger.basis`: no covering print_ended on Y.
+    assert _book(f, [usage(id=460, spool_id=8)]).booked == 1
+    assert _book(f, [usage()]).booked == 1
+    assert len(_usage_events(f, z)) == 1
+    ended = [e for e in f.spools.events(y) if e.kind == "print_ended"]
+    assert [e.ref_kind for e in ended] == [ledger.BB_USAGE]
+
+
+def test_an_estimate_event_of_another_printer_is_not_covered(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    _printer_1(pg_pool)
+    with pg_pool.connection() as conn:
+        row = conn.execute(
+            "INSERT INTO printers (id, serial, name, bambuddy_printer_id)"
+            " VALUES (gen_random_uuid(), 'TEST00000000002', 'P2', 2) RETURNING id"
+        ).fetchone()
+    assert row is not None
+    _linked(f)
+    y = _second_spool(f)
+    with f.spools.transaction() as conn:
+        ledger.record(
+            conn,
+            y,
+            "print_started",
+            source="print_estimate",
+            delta_g=-70.0,
+            ref_kind=ledger.PRINT_RUN,
+            ref_id=f"run-1/{JOB}/0",
+            at=T0 + timedelta(minutes=10),
+            printer=row["id"],
+            data={"job": JOB},
+        )
+    assert _book(f, [usage()]).booked == 1
+    assert not [e for e in f.spools.events(y) if e.kind == "print_ended"]
+
+
+def test_a_failed_cover_rolls_back_the_booking_and_the_next_pull_retries_both(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    f = _filament(pg_pool)
+    _printer_1(pg_pool)
+    z = _linked(f)
+    y = _second_spool(f)
+    _estimate(f, y)
+    real = bambuddy_usage._cover
+    calls = {"n": 0}
+
+    def flaky(*args: Any, **kwargs: Any) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("boom")
+        real(*args, **kwargs)
+
+    monkeypatch.setattr(bambuddy_usage, "_cover", flaky)
+    assert _book(f, [usage()]).booked == 0
+    assert not _usage_events(f, z)
+    assert _book(f, [usage()]).booked == 1
+    assert len(_usage_events(f, z)) == 1
+    assert len([e for e in f.spools.events(y) if e.kind == "print_ended"]) == 1
+
+
+def test_an_archived_estimate_spool_is_not_written_to_and_is_logged(
+    pg_pool: PgPool, caplog: pytest.LogCaptureFixture
+) -> None:
+    f = _filament(pg_pool)
+    _printer_1(pg_pool)
+    _linked(f)
+    y = _second_spool(f)
+    _estimate(f, y)
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_spools SET archived_at = now() WHERE id = %s", (y,))
+    with caplog.at_level("WARNING"):
+        assert _book(f, [usage()]).booked == 1
+    assert not [e for e in f.spools.events(y) if e.kind == "print_ended"]
+    (record,) = [r for r in caplog.records if r.message == "filament.usage.unpaired"]
+    assert getattr(record, "reason", None) == "archived"
+
+
+async def test_the_archive_read_stops_at_the_page_cap_and_says_what_it_missed(
+    pg_pool: PgPool, caplog: pytest.LogCaptureFixture
+) -> None:
+    f = _filament(pg_pool)
+    spool = _linked(f)
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    pages: list[int] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        pages.append(int(request.url.params.get("offset", 0)))
+        base = 1000 * len(pages)
+        return httpx.Response(
+            200,
+            json=[
+                {"id": base + i, "printer_id": 1, "completed_at": _naive(NOW)}
+                for i in range(ARCHIVE_PAGE)
+            ],
+        )
+
+    with respx.mock() as router, caplog.at_level("WARNING"):
+        router.get(f"{BB}/api/v1/inventory/spools").respond(json=[bb().model_dump(mode="json")])
+        router.get(f"{BB}/api/v1/inventory/usage").respond(json=[usage().model_dump(mode="json")])
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
+        router.get(f"{BB}/api/v1/archives/").mock(side_effect=answer)
+        report = await read_and_pull(f, settings)
+    assert len(pages) == MAX_ARCHIVE_PAGES
+    assert report.usage_booked == 1
+    assert len(_usage_events(f, spool)) == 1
+    (warning,) = [r for r in caplog.records if r.message.startswith("stopped reading")]
+    assert "oldest pending rows" in warning.message
+
+
+@pytest.mark.parametrize("y_first", [True, False])
+def test_a_batch_row_on_the_estimates_spool_stops_a_cover_in_either_order(
+    pg_pool: PgPool, y_first: bool
+) -> None:
+    f = _filament(pg_pool)
+    _printer_1(pg_pool)
+    z = _linked(f)
+    y = _second_spool(f)
+    _estimate(f, y)
+    rows = [usage(id=460, spool_id=8), usage()]
+    assert _book(f, rows if y_first else rows[::-1]).booked == 2
+    assert len(_usage_events(f, z)) == 1
+    ended = [e for e in f.spools.events(y) if e.kind == "print_ended"]
+    assert [e.ref_kind for e in ended] == [ledger.BB_USAGE]
+
+
+def test_two_rows_of_one_job_on_one_spool_cover_nothing_in_a_batch_or_across_pulls(
+    pg_pool: PgPool, caplog: pytest.LogCaptureFixture
+) -> None:
+    f = _filament(pg_pool)
+    _printer_1(pg_pool)
+    z = _linked(f)
+    y = _second_spool(f)
+    first, second = usage(id=457), usage(id=458, created_at=_naive(T1 + timedelta(seconds=1)))
+    # One batch.
+    _estimate(f, y)
+    with caplog.at_level("WARNING"):
+        assert _book(f, [first, second]).booked == 2
+    assert not [e for e in f.spools.events(y) if e.kind == "print_ended"]
+    assert "filament.usage.unpaired" in caplog.text
+    # Across two pulls: the first row is booked before Y's estimate exists.
+    f = _filament(pg_pool)
+    caplog.clear()
+    with pg_pool.connection() as conn:
+        conn.execute("DELETE FROM filament_spool_events WHERE spool_id = ANY(%s)", ([z, y],))
+    assert _book(f, [first]).booked == 1
+    _estimate(f, y, run="run-2")
+    with caplog.at_level("WARNING"):
+        assert _book(f, [second]).booked == 1
+    assert not [e for e in f.spools.events(y) if e.kind == "print_ended"]
+    assert "filament.usage.unpaired" in caplog.text
+
+
+def test_a_row_that_covered_an_estimate_does_not_make_a_later_row_of_the_job_ambiguous(
+    pg_pool: PgPool,
+) -> None:
+    f = _filament(pg_pool)
+    _printer_1(pg_pool)
+    _linked(f)
+    y = _second_spool(f)
+    _estimate(f, y)
+    assert _book(f, [usage()]).booked == 1
+    _estimate(f, y, run="run-2")
+    later = usage(id=458, created_at=_naive(T1 + timedelta(hours=1)))
+    assert _book(f, [later]).booked == 1
+    covers = [e for e in f.spools.events(y) if e.kind == "print_ended"]
+    assert sorted(str(e.ref_id) for e in covers) == [f"run-1/{JOB}/0", f"run-2/{JOB}/0"]
