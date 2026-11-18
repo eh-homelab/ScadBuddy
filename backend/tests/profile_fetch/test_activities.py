@@ -20,6 +20,7 @@ from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
 from scadbuddy.auth.service_auth import ServiceAuth
+from scadbuddy.bambuddy.client import DEFAULT_TIMEOUT as BAMBUDDY_TIMEOUT
 from scadbuddy.crud.client import CrudClient
 from scadbuddy.profile_fetch.activities import (
     BASE,
@@ -37,6 +38,7 @@ from scadbuddy.profile_fetch.wire import (
     ExportTarget,
     FetchAsk,
 )
+from scadbuddy.profile_fetch.workflow import IMPORT_TIMEOUT
 from tests.crud.test_client import Source
 
 HEADER = {"X-ScadBuddy-Crud": "1"}
@@ -116,6 +118,8 @@ class FakeCrud:
     def __init__(self) -> None:
         self.puts: list[tuple[str, dict[str, list[str]], bytes, str | None]] = []
         self.imports: list[tuple[dict[str, Any], str | None]] = []
+        #: The read timeout each import request was sent with.
+        self.import_reads: list[float | None] = []
         self.failed: list[dict[str, Any]] = []
         #: A problem every route answers instead: ``(status, code)``.
         self.refuse: tuple[int, str] | None = None
@@ -140,6 +144,7 @@ class FakeCrud:
             self.imports.append(
                 (json.loads(request.content), request.headers.get("Idempotency-Key"))
             )
+            self.import_reads.append(request.extensions["timeout"]["read"])
             outcome = {"status": "partial", "presets": 3, "k_values": 0, "missing": [], "notes": []}
             return httpx.Response(200, json=outcome, headers=HEADER)
         if path == f"{BASE}/{RUN}/failed":
@@ -423,6 +428,18 @@ def test_import_posts_the_failures_with_a_key() -> None:
     [(body, key)] = crud.imports
     assert body == {"failures": [{"printer_model": "H2C", "nozzle": "0.2", "reason": "r"}]}
     assert key
+
+
+def test_import_waits_out_the_routes_worst_case() -> None:
+    """The import route does every Bambuddy call of the import in one request (about 12,
+    each up to the Bambuddy client's own timeout): the request waits that long, not the
+    CRUD client's 10 s, so a slow Bambuddy is not retried into a second import (R-F2)."""
+    crud = FakeCrud()
+    run(FakeSite(), crud, lambda a: a.import_(RUN, ExportReport(exported=3, failures=[])))
+    [read] = crud.import_reads
+    assert read is not None
+    assert read >= 12 * BAMBUDDY_TIMEOUT
+    assert read < IMPORT_TIMEOUT.total_seconds()
 
 
 def test_import_of_an_ended_run_is_not_running() -> None:

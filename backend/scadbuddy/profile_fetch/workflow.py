@@ -51,6 +51,11 @@ EXPORT_RETRY: Final = RetryPolicy(
 #: The API imports into Bambuddy and reads K tables: idempotent by its key, so a lost
 #: answer or a Bambuddy 5xx is tried again.
 IMPORT_TIMEOUT: Final = timedelta(minutes=10)
+#: How long the import activity's one request waits for the API's answer (R-F2). The route
+#: does all of the import's Bambuddy calls in that request: about 12 (two listings, the
+#: zip, a K table per printer and nozzle, the held copy's refresh), each up to the
+#: Bambuddy client's 30 s. Under `IMPORT_TIMEOUT`, so the attempt ends by its own read.
+IMPORT_REQUEST_TIMEOUT: Final = timedelta(minutes=9)
 IMPORT_RETRY: Final = RetryPolicy(
     initial_interval=timedelta(seconds=10),
     maximum_interval=timedelta(minutes=2),

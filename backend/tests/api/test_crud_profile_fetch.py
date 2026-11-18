@@ -9,6 +9,7 @@ import hashlib
 import io
 import json
 import re
+import threading
 import zipfile
 from dataclasses import dataclass
 from decimal import Decimal
@@ -595,6 +596,64 @@ def test_import_twice_with_one_key_imports_once(fetch: Fetch) -> None:
     other = fetch.import_(key="k2")
     assert (other.status_code, other.json()) == (200, first.json())
     assert sent.call_count == 1
+
+
+@respx.mock
+def test_a_retried_import_of_an_imported_run_calls_bambuddy_no_more(fetch: Fetch) -> None:
+    """R-F2: a run already ``imported`` answers its stored outcome, under its first key or
+    another one, and Bambuddy is not asked anything again."""
+    bodies = put_all(fetch)
+    bb_import(4)
+    local_presets([name_of(b) for b in bodies])
+    no_k_profiles()
+    first = fetch.import_()
+    assert first.json()["status"] == "imported"
+    calls = respx.calls.call_count
+    for key in ("k1", "k2"):
+        again = fetch.import_(key=key)
+        assert (again.status_code, again.json()) == (200, first.json())
+    assert respx.calls.call_count == calls
+
+
+@respx.mock
+def test_two_concurrent_imports_of_a_run_call_bambuddy_once(fetch: Fetch) -> None:
+    """R-F2: the worker's client retries a slow import with the same key while the first
+    request still runs. The second waits on the run's lock and then answers the first
+    one's outcome: one zip import, one set of listings, never two imports in parallel."""
+    bodies = put_all(fetch)
+    reached, release = threading.Event(), threading.Event()
+
+    async def slow_import(request: httpx.Request) -> httpx.Response:
+        reached.set()
+        await asyncio.to_thread(release.wait, 30)
+        return httpx.Response(
+            200, json={"success": True, "imported": 4, "skipped": 0, "errors": []}
+        )
+
+    sent = respx.post(f"{API}/local-presets/import").mock(side_effect=slow_import)
+    listing = local_presets([name_of(b) for b in bodies])
+    no_k_profiles()
+    replies: dict[str, Any] = {}
+
+    def call(name: str) -> None:
+        replies[name] = fetch.import_()
+
+    first = threading.Thread(target=call, args=("first",))
+    first.start()
+    assert reached.wait(30)
+    second = threading.Thread(target=call, args=("second",))
+    second.start()
+    # Long enough for an unlocked second request to reach Bambuddy as well.
+    second.join(timeout=1.5)
+    release.set()
+    first.join(timeout=60)
+    second.join(timeout=60)
+    assert replies["first"].status_code == 200, replies["first"].text
+    assert replies["second"].status_code == 200, replies["second"].text
+    assert replies["second"].json() == replies["first"].json()
+    assert replies["first"].json()["status"] == "imported"
+    assert sent.call_count == 1
+    assert listing.call_count == 2
 
 
 def test_import_needs_its_key(fetch: Fetch) -> None:

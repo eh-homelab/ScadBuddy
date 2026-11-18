@@ -48,6 +48,7 @@ from scadbuddy.profile_fetch.wire import (
     FetchAsk,
     ImportOutcome,
 )
+from scadbuddy.profile_fetch.workflow import IMPORT_REQUEST_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
@@ -244,13 +245,15 @@ class ProfileFetchActivities:
     @activity.defn(name=IMPORT_ACTIVITY)
     async def import_(self, run_id: str, report: ExportReport) -> ImportOutcome:
         """``POST …/runs/{id}/import`` with the keys that failed, under a key that is the
-        same on each retry; the API's outcome."""
+        same on each retry, waiting up to `IMPORT_REQUEST_TIMEOUT` for the route; the API's
+        outcome."""
         try:
             response = await self._crud.request(
                 "POST",
                 f"{BASE}/{quote(run_id, safe='')}/import",
                 json={"failures": [f.model_dump(mode="json") for f in report.failures]},
                 idempotency_key=activity_key(1),
+                timeout=IMPORT_REQUEST_TIMEOUT.total_seconds(),
             )
         except CrudRefusedError as refusal:
             if _not_running(refusal):

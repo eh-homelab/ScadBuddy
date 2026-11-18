@@ -15,7 +15,9 @@ earlier fetch bound for the type; a preset of that name a person made is never b
 (#6625 S1). It merges those ids over the type's preset rows of the fetched keys, reads
 the K values the type's printers hold for an exact filament match, refreshes the kept
 copy of the local presets, and ends the run. Every write of the end is in one transaction with the
-idempotency ledger's row.
+idempotency ledger's row. One run's import runs once at a time (`_import_lock`): a second
+request for the run (the worker's client retrying a slow one) waits, then answers the
+first one's outcome without calling Bambuddy.
 """
 
 from __future__ import annotations
@@ -28,7 +30,8 @@ import logging
 import math
 import time
 import zipfile
-from collections.abc import Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -79,6 +82,9 @@ Status = Literal["running", "imported", "partial", "failed"]
 HOLDER: Final = "profile_fetch"
 #: The ledger route of an import.
 IMPORT_ROUTE: Final = "profile-fetch.import"
+#: The first key of the advisory lock one run's import holds (`_import_lock`), "PFIM".
+IMPORT_LOCK: Final = 0x5046494D
+_LOCK_SQL: Final = "SELECT pg_advisory_lock(%s, hashtext(%s))"
 PROBLEMS: Final = "https://scadbuddy.dev/problems/profile-fetch/"
 RUN_NOT_FOUND: Final = "run_not_found"
 NOT_RUNNING: Final = "not_running"
@@ -730,7 +736,47 @@ async def import_run(
     the type's presets, once per ``key``. A run already ended answers its stored outcome
     and imports nothing. Bambuddy refusing the import (a 4xx: without the settings
     permission it answers 403) ends the run ``failed`` with that reason and sets no
-    preset; Bambuddy down (5xx) raises, so the worker retries with the same key."""
+    preset; Bambuddy down (5xx) raises, so the worker retries with the same key. The whole
+    import holds the run's `_import_lock`, so a request that arrives while another for the
+    run still runs waits for it and then answers its outcome (R-F2)."""
+    pool = state.settings_store.pool
+    async with _import_lock(pool, run_id):
+        return await _import_once(state, run_id, key, failures)
+
+
+@asynccontextmanager
+async def _import_lock(pool: ConnectionPool[Conn], run_id: UUID) -> AsyncIterator[None]:
+    """The run's import lock: a session advisory lock (`IMPORT_LOCK`, the run's id) on a
+    pooled connection of its own (the pool is autocommit), held until the block ends. Not
+    the run row's ``FOR UPDATE``: the import commits the run's ``bambuddy_before`` on its
+    own before it posts the zip (`_keep_before`), so a crash after the post still knows
+    what it made (#6625 S1), and a row lock held through the import would block that
+    write."""
+    conn = await asyncio.to_thread(pool.getconn)
+    try:
+        await asyncio.to_thread(conn.execute, _LOCK_SQL, (IMPORT_LOCK, str(run_id)))
+        yield
+    finally:
+        # Also after a cancel: the unlock waits for a lock wait still running in its
+        # thread (one connection runs one statement at a time), so the lock is never left
+        # held on a connection back in the pool.
+        await asyncio.to_thread(_release, pool, conn, run_id)
+
+
+def _release(pool: ConnectionPool[Conn], conn: Conn, run_id: UUID) -> None:
+    try:
+        conn.execute("SELECT pg_advisory_unlock(%s, hashtext(%s))", (IMPORT_LOCK, str(run_id)))
+    except BaseException:
+        # A connection that may still hold the lock never goes back to the pool open.
+        conn.close()
+        raise
+    finally:
+        pool.putconn(conn)
+
+
+async def _import_once(
+    state: AppState, run_id: UUID, key: str, failures: list[ExportFailure]
+) -> ImportOutcome:
     asked = {"failures": [f.model_dump() for f in failures]}
     pool = state.settings_store.pool
 
