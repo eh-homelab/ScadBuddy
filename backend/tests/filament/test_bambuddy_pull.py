@@ -793,6 +793,47 @@ def test_weights_off_books_no_bb_weighing(pg_pool: PgPool) -> None:
     assert [e for e in f.spools.events(made) if e.ref_kind == "bb_scale"] == []
 
 
+def _bb_readings(f: Filament, spool: UUID) -> list[float | None]:
+    return [e.grams_after for e in f.spools.events(spool) if e.source == "bb"]
+
+
+def test_weights_off_books_no_bb_reading_on_an_update(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb()], now=NOW).created_ids
+    pull(f, [bb(weight_used=300.0, updated_at=_bb_time(1))], now=NOW, weights=False)
+    spool = f.spools.get(made)
+    assert spool is not None
+    assert spool.grams_left == 900
+    assert _bb_readings(f, made) == [900]
+
+
+def test_weights_off_books_no_bb_reading_on_a_link(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    held = f.spools.create(SpoolCreate(material_id=_pla(pg_pool)), actor="ann")
+    f.spools.bind_tag(held.id, tray_uuid=TRAY, kind="bambu_mifare", actor="ann")
+    pull(f, [bb()], now=NOW, weights=False)
+    spool = f.spools.get(held.id)
+    assert spool is not None
+    assert spool.grams_left is None
+    assert _bb_readings(f, held.id) == []
+
+
+def test_weights_off_still_books_a_new_spools_first_reading(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb()], now=NOW, weights=False).created_ids
+    spool = f.spools.get(made)
+    assert spool is not None
+    assert spool.grams_left == 900
+    assert _bb_readings(f, made) == [900]
+
+
+def test_weights_bb_to_sb_books_a_bb_reading_on_an_update(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb()], now=NOW).created_ids
+    pull(f, [bb(weight_used=300.0, updated_at=_bb_time(1))], now=NOW, weights=True)
+    assert _bb_readings(f, made) == [900, 700]
+
+
 def test_weights_bb_to_sb_books_the_bb_weighing(pg_pool: PgPool) -> None:
     f = _filament(pg_pool)
     weighed = bb(

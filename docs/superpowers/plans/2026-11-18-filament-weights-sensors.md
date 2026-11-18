@@ -83,8 +83,9 @@ Settings "weight-sync policy"), §12 row #6268. Earlier plans whose rulings bind
    Reports older than `reports.is_fresh` are counted as `stale`, not read.
 3. **`filament_sync.weights`** (`"off" | "bb_to_sb"`, default `"bb_to_sb"`) is the
    "weight-sync policy" of §10 and the "BB→SB sync of weights" of §6. With `off`, the pull
-   books no `bb_scale` weighing and no `bb` weight reading; everything else in the pull is
-   unchanged. #6265 widens the values; it keeps the field name.
+   books no `bb_scale` weighing and no `bb` weight reading on a spool SB already tracks
+   (an update or a link); a create keeps its first reading (see "Decisions made while
+   building"). Everything else in the pull is unchanged. #6265 widens the values; it keeps the field name.
 4. **Sensors are SB's own** (`filament_location_sensors`): location, `source`
    (`home_assistant` | `ams`), `kind` (`humidity` | `temperature`), `entity_id` (HA) or
    `printer_id` + `ams_id` (AMS), unit, `alert_above`, `alert_below`, `notify`, archived.
@@ -266,3 +267,9 @@ Load `frontend-design` first.
 - Commit `docs(filament): weights and sensors as built (#6268)`.
 
 ## Decisions made while building (#6268)
+
+- **`weights: off` and a new spool (Task 3 fix round 1).** With `off`, `_update` and `_link`
+  book no `bb` weight reading (reading = None) for a spool SB already tracks, and `_book`
+  books no `bb_scale` weighing. `_create` keeps its first `bb` reading: a spool SB has never
+  seen needs a starting weight, and there is no SB weight to protect. The ruling of the
+  controller. `bb_dried` is not a weight and stays booked.

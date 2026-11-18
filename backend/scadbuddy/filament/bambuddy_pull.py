@@ -371,7 +371,7 @@ def _one(
         spool_id: UUID = link["spool_id"]
         if link["archived"]:
             return "archived", spool_id, False
-        changed = _update(conn, store, bb, spool_id, link["bb_updated_at"], now, actor)
+        changed = _update(conn, store, bb, spool_id, link["bb_updated_at"], now, actor, weights)
         # BB may not move ``updated_at`` for a weighing: its events are booked anyway,
         # once each.
         booked = _book(conn, spool_id, bb, actor, weights)
@@ -383,7 +383,7 @@ def _one(
         held_id, archived = held
         if archived:
             return "archived", held_id, False
-        typeless = _link(conn, store, bb, held_id, after, now, actor)
+        typeless = _link(conn, store, bb, held_id, after, now, actor, weights)
         _book(conn, held_id, bb, actor, weights)
         _bb_presets(conn, held_id, bb, actor)
         return "linked", held_id, typeless
@@ -582,6 +582,7 @@ def _link(
     after: dict[str, Any],
     now: datetime,
     actor: str,
+    weights: bool = True,
 ) -> bool:
     """Link the SB spool and keep what it has; a spool with no type takes the one BB's
     values match (dropping its ``migrated`` presets, `presets.drop_migrated`), and one
@@ -609,7 +610,7 @@ def _link(
     if insert is not None:
         changes["insert_type_id"] = insert
     reading = after["remaining_g"]
-    if current["grams_left"] is not None or current["weight_locked"]:
+    if not weights or current["grams_left"] is not None or current["weight_locked"]:
         reading = None
     _insert_link(conn, spool_id, bb, now)
     _synced(conn, spool_id, bb, after, changes, reading, actor, linked=True)
@@ -753,6 +754,7 @@ def _update(
     pulled_at: datetime | None,
     now: datetime,
     actor: str,
+    weights: bool = True,
 ) -> bool:
     """True when the SB spool took anything from BB."""
     unmoved = bb.updated_at is not None and pulled_at is not None and bb.updated_at <= pulled_at
@@ -866,7 +868,7 @@ def _update(
     reading = after["remaining_g"]
     locked = bool(changes.get("weight_locked", [None, spool.weight_locked])[1])
     weight: str | None = None
-    if reading is None or reading == before.get("remaining_g"):
+    if not weights or reading is None or reading == before.get("remaining_g"):
         reading = None
     elif locked:
         reading, weight = None, "locked"
@@ -924,7 +926,9 @@ def _book(conn: Conn, spool_id: UUID, bb: BbSpool, actor: str, weights: bool = T
     reading. A weighing is a physical reading, so it counts under the weight lock, which
     guards against estimates (§5.5). The ledger's rule picks the anchor: the weighing wins
     when it is the newest reading. With ``weights`` False (``filament_sync.weights`` off)
-    the weighing is not booked. True when either is new."""
+    the weighing is not booked, and `_update` and `_link` book no ``bb`` reading either;
+    `_create` keeps its first one, as a new spool needs a starting weight. True when either
+    is new."""
     booked = False
     if weights and bb.last_weighed_at is not None and bb.last_scale_weight is not None:
         gross = float(bb.last_scale_weight)

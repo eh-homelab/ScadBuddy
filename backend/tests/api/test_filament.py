@@ -442,6 +442,27 @@ def test_the_bambuddy_import_needs_bambuddy(client: TestClient) -> None:
 
 
 @respx.mock
+def test_the_bambuddy_import_reads_the_weights_setting(client: TestClient) -> None:
+    configure(client, filament_sync={"weights": "off"})
+    bb = {
+        "id": 41,
+        "material": "PLA",
+        "rgba": "00FF00",
+        "label_weight": 1000,
+        "weight_used": 250.0,
+        "core_weight": 250,
+        "last_scale_weight": 700,
+        "last_weighed_at": "2026-11-14T10:00:00",
+        "updated_at": "2026-11-14T10:00:00",
+    }
+    respx.get(f"{API}/inventory/spools").mock(return_value=httpx.Response(200, json=[bb]))
+    respx.get(f"{API}/inventory/catalog").mock(return_value=httpx.Response(200, json=[]))
+    (spool_id,) = client.post(IMPORT_BB).json()["created_ids"]
+    events = client.get(f"/api/v1/filament/spools/{spool_id}/events").json()
+    assert [e for e in events if e["kind"] == "weighed"] == []
+
+
+@respx.mock
 def test_the_bambuddy_import_pulls_once_then_changes_nothing(client: TestClient) -> None:
     configure(client)
     bb = {
