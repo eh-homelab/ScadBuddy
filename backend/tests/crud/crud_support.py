@@ -667,27 +667,32 @@ def threaded_print_crud(
     )
     thread = threading.Thread(target=server.run, name="crud print routes", daemon=True)
     thread.start()
-    deadline = time.monotonic() + 30
-    while not server.started:
-        assert thread.is_alive() and time.monotonic() < deadline, "the server did not start"
-        time.sleep(0.01)
-    port = server.servers[0].sockets[0].getsockname()[1]
-    base_url = f"http://127.0.0.1:{port}"
-    auth = ServiceAuth(InProcessProvider(caller, lambda: credentials))
-    # One request before the test's first (#6666). FastAPI builds an included router's
-    # routes on the first request that matches one (about 95 routes here, 0.2 to 0.6 s
-    # of CPU on the server's loop, measured 2026-11-18), so a test's first call,
-    # bounded by the watch's 2 s timeout (`crud/print.py` `WATCH_CALL_TIMEOUT`), timed
-    # out on a loaded runner. This request takes that cost, mints the caller's
-    # credential and resolves it, under the start's own deadline, not a test's bound.
-    # A refusal (another caller's credential) still builds the routes.
-    with httpx.Client(base_url=base_url, auth=auth, timeout=30) as warm:
-        warm.get(f"{PRINT_BASE}/areas")
-    client = CrudSyncClient(base_url, "print", auth, unavailable_budget=0.5)
+    client: CrudSyncClient | None = None
+    # Everything after the start is under the `finally`, so a server that does not start
+    # or a warm-up that fails still stops the thread (#6673).
     try:
+        deadline = time.monotonic() + 30
+        while not server.started:
+            assert thread.is_alive() and time.monotonic() < deadline, "the server did not start"
+            time.sleep(0.01)
+        port = server.servers[0].sockets[0].getsockname()[1]
+        base_url = f"http://127.0.0.1:{port}"
+        auth = ServiceAuth(InProcessProvider(caller, lambda: credentials))
+        # One request before the test's first (#6666). FastAPI builds an included
+        # router's routes on the first request that matches one (about 95 routes here,
+        # 0.2 to 0.6 s of CPU on the server's loop, measured 2026-11-18), so a test's
+        # first call, bounded by the watch's 2 s timeout (`crud/print.py`
+        # `WATCH_CALL_TIMEOUT`), timed out on a loaded runner. This request takes that
+        # cost, mints the caller's credential and resolves it, under the start's own
+        # deadline, not a test's bound. A refusal (another caller's credential) still
+        # builds the routes.
+        with httpx.Client(base_url=base_url, auth=auth, timeout=30) as warm:
+            warm.get(f"{PRINT_BASE}/areas")
+        client = CrudSyncClient(base_url, "print", auth, unavailable_budget=0.5)
         yield client
     finally:
-        client.close()
+        if client is not None:
+            client.close()
         server.should_exit = True
         thread.join(30)
 
