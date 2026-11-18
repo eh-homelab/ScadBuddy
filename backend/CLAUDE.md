@@ -1035,6 +1035,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   open. This lives in the activity: `FollowPrint`'s commands are unchanged, and its
   histories replay from `tests/fixtures/follow_print_histories/`, so a change to them
   goes behind `workflow.patched`.
+- `backend/scadbuddy/dialog_reads/` — the print dialog's kept Bambuddy reads (#4196, the
+  `DIALOG_READS` component): the printer list, a printer, a library file and its plates
+  are kept for `DIALOG_TTL` (5 s) per Bambuddy and key, so a check uses what `choices`
+  read. So a printer renamed in Bambuddy can show in a check up to 5 s late. Status, AMS,
+  inventory, spool assignments and the download are always read. The run never uses it.
 - `backend/scadbuddy/core/gitrepo.py` — `GitRepo`, the hermetic git core (#2503) under
   model history (`library/history.py` `ModelHistory`) and flow scripts
   (`flows/repository.py` `FlowHistory`: `data/flows/<name>/flow.py`, one commit per

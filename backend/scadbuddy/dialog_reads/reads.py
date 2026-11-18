@@ -7,11 +7,13 @@ what ``choices`` read. Only reads that cannot go stale in a way that harms a pri
 kept: a printer's name, model and nozzle count, and a library file's metadata and
 plates. The printer's status, its AMS trays, its inventory and the spool assignments are
 always read again, and so is the file's download. A check only judges: the run reads
-everything again, with a client that keeps nothing. A failed read is not kept.
+everything again, with a client that keeps nothing. A failed read is not kept. Two
+callers that miss one key at once share one read.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -31,6 +33,7 @@ DIALOG_TTL = 5.0
 MAX_ENTRIES = 256
 
 type _Key = tuple[str, str, str, int]
+type _Value = BaseModel | list[Printer]
 
 
 class DialogReads:
@@ -46,23 +49,44 @@ class DialogReads:
         self._ttl = ttl
         self._clock = clock
         self._max_entries = max_entries
-        self._entries: dict[_Key, tuple[float, BaseModel | list[Printer]]] = {}
+        self._entries: dict[_Key, tuple[float, _Value]] = {}
+        #: The read under way for each key. Its result is ``None`` when it failed, so
+        #: each caller that waited on it reads for itself.
+        self._reading: dict[_Key, asyncio.Future[_Value | None]] = {}
 
     async def get[T: BaseModel | list[Printer]](
         self, config: BambuddyConfig, kind: str, item: int, read: Callable[[], Awaitable[T]]
     ) -> T:
         """What ``read`` answered for this key less than the TTL ago, else a new read,
-        kept if it succeeds. Each caller gets its own copy, so one caller's change to an
+        kept if it succeeds. A caller that misses while another reads the key waits for
+        that read (#6618). Each caller gets its own copy, so one caller's change to an
         answer never reaches another's."""
         key = (config.base_url, _scope(config.api_key), kind, item)
         hit = self._entries.get(key)
         if hit is not None and hit[0] > self._clock():
             return _copy(hit[1])  # type: ignore[return-value]
-        value = await read()
-        self._put(key, value)
+        under_way = self._reading.get(key)
+        if under_way is not None:
+            # The shield keeps a waiter's cancel from cancelling the shared read.
+            shared = await asyncio.shield(under_way)
+            if shared is not None:
+                return _copy(shared)  # type: ignore[return-value]
+        reading: asyncio.Future[_Value | None] = asyncio.get_running_loop().create_future()
+        self._reading[key] = reading
+        try:
+            value = await read()
+        except BaseException:
+            reading.set_result(None)
+            raise
+        else:
+            self._put(key, value)
+            reading.set_result(value)
+        finally:
+            if self._reading.get(key) is reading:
+                del self._reading[key]
         return _copy(value)
 
-    def _put(self, key: _Key, value: BaseModel | list[Printer]) -> None:
+    def _put(self, key: _Key, value: _Value) -> None:
         now = self._clock()
         self._entries.pop(key, None)
         if len(self._entries) >= self._max_entries:
