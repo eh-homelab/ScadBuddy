@@ -1269,8 +1269,8 @@ class RfidModeSet(BaseModel):
 
 
 class RfidReconcileReport(BaseModel):
-    """What one reconcile did: the mode, the tags and the override slots (``None`` until
-    the slots step exists)."""
+    """What one reconcile did: the mode, the tags and the override slots (``None`` when no
+    Bambuddy is configured: the step is skipped)."""
 
     mode: RfidStatus
     tags: TagPushReport

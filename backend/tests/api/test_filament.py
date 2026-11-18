@@ -958,7 +958,13 @@ def test_the_reconcile_route_runs_the_mode_and_the_tags(client: TestClient) -> N
     body = done.json()
     assert body["mode"]["state"] == "applied"
     assert body["tags"] == {"pushed": 0, "moved": 0, "cleared": 0, "unchanged": 0, "failed": 0}
-    assert body["slots"] is None
+    assert body["slots"] == {
+        "configured": 0,
+        "unchanged": 0,
+        "no_preset": 0,
+        "no_nozzle": 0,
+        "failed": 0,
+    }
 
 
 @respx.mock

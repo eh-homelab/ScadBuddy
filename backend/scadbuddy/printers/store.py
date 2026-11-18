@@ -161,6 +161,13 @@ def _repoint_filament_locations(conn: Connection[DictRow], merged: str, into: st
     repoint_printer_locations(conn, uuid.UUID(merged), uuid.UUID(into))
 
 
+def _drop_override_slots(conn: Connection[DictRow], merged: str, into: str) -> None:
+    """#6264: the merged printer's override-slot rows are dropped, not moved: a row is only
+    the attempt guard of a slot the AMS may have reset, and the kept printer's next
+    reconcile reads its report and configures what differs."""
+    conn.execute("DELETE FROM filament_override_slots WHERE printer_id = %s", (merged,))
+
+
 def _repoint_k_values(table: str) -> RepointHook:
     def repoint(conn: Connection[DictRow], merged: str, into: str) -> None:
         from scadbuddy.filament.types import repoint_k_values
@@ -325,6 +332,8 @@ PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
         "printer_id",
         repoint=_repoint_k_values("filament_spool_k_values"),
     ),
+    # #6264: the slots of override tags (dropped; the kept printer's reconcile redoes them).
+    PrinterReference("filament_override_slots", "printer_id", repoint=_drop_override_slots),
     _repoint_run_activity,
     # #4971: the default printer and the registry-keyed settings map entries; #4699: the
     # registry ids in the print watcher's skip list.

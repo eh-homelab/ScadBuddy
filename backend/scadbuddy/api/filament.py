@@ -54,6 +54,7 @@ from scadbuddy.filament.locations import (
 )
 from scadbuddy.filament.rfid_mode import read_status, reconcile_mode_now
 from scadbuddy.filament.rfid_push import push_pending
+from scadbuddy.filament.rfid_slots import reconcile_slots_now
 from scadbuddy.filament.spools import (
     OverrideKindError,
     SpoolBambuddyLinkedError,
@@ -66,6 +67,7 @@ from scadbuddy.filament.types import TypeRowsDuplicateError, TypeTempError
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.operations.kinds import waiting_on_bambuddy
 from scadbuddy.orders.store import FilamentExistsError
+from scadbuddy.printers.component import PrintersDep
 
 router = APIRouter(prefix="/filament", tags=["filament"])
 logger = logging.getLogger(__name__)
@@ -1046,13 +1048,19 @@ async def set_rfid_override_mode(
     description=(
         "Runs once what the spool refresh Schedule runs: Bambuddy's `auto_add_unknown_rfid` "
         "is brought to the override mode, then the queued tag changes are pushed (only with "
-        "`filament_sync.tags` `sb_to_bb`). Answers the mode's status and the tag push "
-        "counts; `slots` is null."
+        "`filament_sync.tags` `sb_to_bb`), then the AMS slot of each override tag is "
+        "configured with its type's preset. Answers the mode's status and the tag push "
+        "counts, and the override slots' counts (`slots` is null with no Bambuddy)."
     ),
 )
-async def reconcile_rfid(filament: FilamentDep, store: SettingsStoreDep) -> m.RfidReconcileReport:
+async def reconcile_rfid(
+    filament: FilamentDep, store: SettingsStoreDep, printers: PrintersDep
+) -> m.RfidReconcileReport:
     mode = await reconcile_mode_now(filament.rfid, store.load)
     tags = await push_pending(
         filament, store.load, lambda: store.read({"filament_sync"})["filament_sync"]
     )
-    return m.RfidReconcileReport(mode=mode, tags=tags)
+    slots = await reconcile_slots_now(
+        filament, store.load, printers=printers.store, reports=printers.reports
+    )
+    return m.RfidReconcileReport(mode=mode, tags=tags, slots=slots)

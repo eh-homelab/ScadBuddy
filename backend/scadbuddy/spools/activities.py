@@ -23,6 +23,7 @@ from scadbuddy.filament.bambuddy_pull import scheduled_pull
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.rfid_mode import BUSY, NO_BAMBUDDY, reconcile_mode_now
 from scadbuddy.filament.rfid_push import push_pending
+from scadbuddy.filament.rfid_slots import reconcile_slots_now
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.printers.component import Printers
 from scadbuddy.workflows.spool_refresh import (
@@ -103,7 +104,8 @@ def filament_rfid_activity(
 ) -> Callable[[], Any]:
     """``filament_rfid_reconcile``: Bambuddy's auto-add of unknown RFID spools brought to
     the override mode (`filament/rfid_mode.reconcile_mode`), then ScadBuddy's tag bindings
-    told to Bambuddy (`filament/rfid_push.drain_tags`, #6264). Each step fails alone; the
+    told to Bambuddy (`filament/rfid_push.drain_tags`), then the AMS slot of each override
+    tag configured (`filament/rfid_slots.reconcile_slots`, #6264). Each step fails alone; the
     activity returns ``done`` or ``failed`` and never raises, so the run never fails on it.
     A mode left ``pending`` is a failure; ``blocked`` is shown on the status, not one."""
 
@@ -126,6 +128,16 @@ def filament_rfid_activity(
         except Exception as error:
             activity.logger.warning(
                 "could not push the tags to Bambuddy", extra={"error": type(error).__name__}
+            )
+            failed = True
+        try:
+            slots = await reconcile_slots_now(
+                filament, load, printers=printers.store, reports=printers.reports
+            )
+            failed = failed or (slots is not None and slots.failed > 0)
+        except Exception as error:
+            activity.logger.warning(
+                "could not configure the override slots", extra={"error": type(error).__name__}
             )
             failed = True
         return "failed" if failed else "done"
