@@ -333,6 +333,82 @@ def test_a_failing_sensor_capture_keeps_the_report(
     assert "secret detail" not in caplog.text
 
 
+class _Counting:
+    """A connection that counts the statements run through ``execute``."""
+
+    def __init__(self, conn: Any) -> None:
+        self.conn = conn
+        self.statements = 0
+
+    def execute(self, *args: Any, **kwargs: Any) -> Any:
+        self.statements += 1
+        return self.conn.execute(*args, **kwargs)
+
+
+def _unit(**more: str) -> dict[str, Any]:
+    return {"ams": {"ams": [{"id": "0", "humidity": "4", "temp": "24"} | more]}}
+
+
+def test_an_unchanged_report_costs_one_query(pg_pool: PgPool) -> None:
+    pid, reports = _watched(pg_pool)
+    _advance(reports, pid, _unit(), T0)
+    with pg_pool.connection() as conn, conn.transaction():
+        counted = _Counting(conn)
+        sensors.capture_ams_on(counted, pid, _unit(), T0 + timedelta(minutes=1))  # type: ignore[arg-type]
+    assert counted.statements == 1
+    assert _ams_readings(pg_pool, pid) == {(0, "humidity"): [4.0], (0, "temperature"): [24.0]}
+
+
+def test_a_changed_value_inside_fifteen_minutes_is_stored(pg_pool: PgPool) -> None:
+    pid, reports = _watched(pg_pool)
+    _advance(reports, pid, _unit(), T0)
+    _advance(reports, pid, _unit(humidity="5"), T0 + timedelta(minutes=1))
+    assert _ams_readings(pg_pool, pid)[(0, "humidity")] == [4.0, 5.0]
+
+
+def test_the_same_value_is_stored_again_after_fifteen_minutes(pg_pool: PgPool) -> None:
+    pid, reports = _watched(pg_pool)
+    _advance(reports, pid, _unit(), T0)
+    _advance(reports, pid, _unit(), T0 + sensors.SAME_VALUE_EVERY)
+    assert _ams_readings(pg_pool, pid)[(0, "humidity")] == [4.0, 4.0]
+
+
+def test_a_report_marks_an_unreachable_sensor_reachable(pg_pool: PgPool) -> None:
+    pid, reports = _watched(pg_pool)
+    _advance(reports, pid, _unit(), T0)
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_location_sensors SET reachable = false")
+    _advance(reports, pid, _unit(), T0 + timedelta(minutes=1))
+    with pg_pool.connection() as conn:
+        rows = conn.execute("SELECT reachable FROM filament_location_sensors").fetchall()
+    assert [r["reachable"] for r in rows] == [True, True]
+    assert _ams_readings(pg_pool, pid)[(0, "humidity")] == [4.0]
+
+
+def test_the_external_holder_makes_no_sensor(pg_pool: PgPool) -> None:
+    pid, reports = _watched(pg_pool)
+    _advance(reports, pid, _unit(id="255"), T0)
+    with pg_pool.connection() as conn:
+        count = conn.execute("SELECT count(*) AS n FROM filament_location_sensors").fetchone()
+    assert count is not None
+    assert count["n"] == 0
+
+
+def test_a_missing_ams_kind_is_logged_once(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(sensors, "_no_ams_kind_logged", False)
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_location_kinds SET archived_at = now() WHERE ams")
+    pid, reports = _watched(pg_pool)
+    with caplog.at_level(logging.WARNING):
+        _advance(reports, pid, _unit(), T0)
+        _advance(reports, pid, _unit(), T0 + timedelta(minutes=1))
+    assert [r.getMessage() for r in caplog.records].count(prints.FILAMENT_CAPTURE_FAILED) == 0
+    assert sum("no location kind" in r.getMessage() for r in caplog.records) == 1
+    assert _ams_readings(pg_pool, pid) == {}
+
+
 def test_a_max_hours_value_fits_its_column() -> None:
     assert MaterialCreate(name="x", max_hours_outside_dry=Decimal("99999.9"))
     with pytest.raises(ValueError):

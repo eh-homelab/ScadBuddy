@@ -5,6 +5,7 @@ stored reading is kept on the sensor row for reads."""
 
 from __future__ import annotations
 
+import logging
 import math
 from datetime import datetime, timedelta
 from typing import Any
@@ -17,6 +18,8 @@ from psycopg_pool import ConnectionPool
 from scadbuddy.bambuddy.trays import EXTERNAL
 from scadbuddy.filament import models as m
 from scadbuddy.filament.catalog import CatalogRefError
+
+logger = logging.getLogger(__name__)
 
 Conn = Connection[DictRow]
 
@@ -168,37 +171,73 @@ def capture_ams_on(conn: Conn, printer_id: str, report: dict[str, Any], seen_at:
     """Record each AMS unit's humidity and temperature from ``report`` as readings, on
     ``conn`` and in the caller's transaction. A unit's place and its sensors are made
     when a number first shows; a reading the report lacks (``""``) writes nothing."""
-    from scadbuddy.filament.locations import LocationStore  # imports this module
-    from scadbuddy.printers.status import _ams
+    from scadbuddy.filament.locations import LocationStore, NoAmsKindError  # imports this
+    from scadbuddy.printers.status import ams_units
 
+    units = [u for u in ams_units(report) if u.id != EXTERNAL]
+    if not any(u.humidity is not None or u.temp is not None for u in units):
+        return
     printer = UUID(printer_id)
-    for unit in _ams(report):
-        if unit.id == EXTERNAL:
-            continue
-        place: UUID | None = None
+    # One read of the printer's sensors: a report that changes nothing costs only this.
+    known = {
+        (row["ams_id"], row["kind"]): row
+        for row in conn.execute(
+            "SELECT id, ams_id, kind, last_value, last_at, reachable"
+            " FROM filament_location_sensors"
+            " WHERE source = 'ams' AND printer_id = %s AND archived_at IS NULL",
+            (printer,),
+        ).fetchall()
+    }
+    for unit in units:
         for kind, value, symbol in (
             ("humidity", unit.humidity, "%"),
             ("temperature", unit.temp, "°C"),
         ):
             if value is None:
                 continue
-            if place is None:
-                place = LocationStore.ensure_ams_unit_on(conn, printer, unit.id)
-            conn.execute(
-                "INSERT INTO filament_location_sensors"
-                " (location_id, source, kind, printer_id, ams_id, name, unit)"
-                " VALUES (%s, 'ams', %s, %s, %s, %s, %s)"
-                " ON CONFLICT (printer_id, ams_id, kind)"
-                " WHERE source = 'ams' AND archived_at IS NULL DO NOTHING",
-                (place, kind, printer, unit.id, f"AMS {unit.id} {kind}", symbol),
-            )
-            sensor = conn.execute(
-                "SELECT id FROM filament_location_sensors WHERE source = 'ams' AND printer_id = %s"
-                " AND ams_id = %s AND kind = %s AND archived_at IS NULL",
-                (printer, unit.id, kind),
-            ).fetchone()
-            if sensor is not None:
-                SensorStore.record_on(conn, sensor["id"], float(value), seen_at)
+            row = known.get((unit.id, kind))
+            if row is None:
+                try:
+                    place = LocationStore.ensure_ams_unit_on(conn, printer, unit.id)
+                except NoAmsKindError:
+                    _log_no_ams_kind()
+                    break
+                made = conn.execute(
+                    "INSERT INTO filament_location_sensors"
+                    " (location_id, source, kind, printer_id, ams_id, name, unit)"
+                    " VALUES (%s, 'ams', %s, %s, %s, %s, %s)"
+                    " ON CONFLICT (printer_id, ams_id, kind)"
+                    " WHERE source = 'ams' AND archived_at IS NULL DO NOTHING RETURNING id",
+                    (place, kind, printer, unit.id, f"AMS {unit.id} {kind}", symbol),
+                ).fetchone()
+                if made is not None:
+                    SensorStore.record_on(conn, made["id"], float(value), seen_at)
+            elif _due(row, float(value), seen_at):
+                SensorStore.record_on(conn, row["id"], float(value), seen_at)
+
+
+_no_ams_kind_logged = False
+
+
+def _log_no_ams_kind() -> None:
+    """Say once per process that AMS sensors wait for an ``ams`` location kind."""
+    global _no_ams_kind_logged
+    if not _no_ams_kind_logged:
+        _no_ams_kind_logged = True
+        logger.warning("no location kind is marked as an AMS; AMS sensors are not recorded")
+
+
+def _due(row: dict[str, Any], value: float, at: datetime) -> bool:
+    """Whether `SensorStore.record_on` has something to do for ``value`` read at ``at``,
+    from the sensor row already read: a first reading, a changed value, `SAME_VALUE_EVERY`
+    since the last, or an unreachable sensor to mark reachable."""
+    last_at: datetime | None = row["last_at"]
+    return (
+        last_at is None
+        or not row["reachable"]
+        or row["last_value"] != value
+        or at - last_at >= SAME_VALUE_EVERY
+    )
 
 
 def repoint_printer_sensors(conn: Conn, merged: UUID, into: UUID) -> None:

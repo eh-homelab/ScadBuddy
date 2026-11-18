@@ -126,7 +126,7 @@ def _presence_bit(ams_id: int, tray_id: int) -> int | None:
     HT's against OrcaSlicer ``DevFilaSystem.cpp`` and a live H2D capture). Not yet
     measured on our H2C: the LAN fixture is synthetic (plan 2026-10-16 Task 7).
 
-    The HT bits 16-23 are also AMS units 4 and 5's bits, so :func:`_ams` vetoes by no
+    The HT bits 16-23 are also AMS units 4 and 5's bits, so :func:`ams_units` vetoes by no
     bit two reported trays share: nothing says whose it is (#4377)."""
     unit = _A2L_BITS if ams_id == _A2L_PHYSICAL else ams_id
     if 128 <= unit <= 135:
@@ -136,7 +136,7 @@ def _presence_bit(ams_id: int, tray_id: int) -> int | None:
     return None
 
 
-def _ams(report: dict[str, Any]) -> list[AmsUnit]:
+def ams_units(report: dict[str, Any]) -> list[AmsUnit]:
     block = report.get("ams")
     units = block.get("ams") if isinstance(block, dict) else None
     bits = _presence_bits(block) if isinstance(block, dict) else None
@@ -287,7 +287,7 @@ def status_from_report(row: PrinterRow, report: LanReport, *, now: datetime) -> 
     and the run name the printer by ``row.id``."""
     data = report.print
     nozzles, rack = _nozzles(data)
-    ams = _ams(data)
+    ams = ams_units(data)
     switch = _fila_switch(data)
     extruders, inlets = _routing(data, switch is not None)
     status = PrinterStatus.model_validate(
