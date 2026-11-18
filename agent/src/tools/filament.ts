@@ -833,4 +833,138 @@ export const filamentTools: Tool[] = [
     handler: async (_input, { backend }) =>
       json(await ok(backend.POST('/api/v1/filament/bambuddy/import'), "import Bambuddy's spools")),
   }),
+
+  defineTool({
+    name: 'filament_sync_ams_weights',
+    label: 'Sync spool weights from the AMS',
+    description:
+      "Book the AMS's remaining percent of each spool in a tray now as its grams left. It skips locked spools, " +
+      'every spool of a printer that is printing, and printers with no fresh report. Only RFID trays carry a remain ' +
+      '%, so other trays are counted as `no_remain`. Returns the counts (`booked`, `locked`, `printing`, ' +
+      '`no_remain`, `stale`) and the `spools` booked. Writes ScadBuddy only.',
+    input: z.object({}),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/spools/sync-ams-weights'],
+    summarize: () => 'Sync spool weights from the AMS',
+    handler: async (_input, { backend }) =>
+      json(await ok(backend.POST('/api/v1/filament/spools/sync-ams-weights'), 'sync the AMS weights')),
+  }),
+
+  defineTool({
+    name: 'filament_sensors_list',
+    label: 'List location sensors',
+    description:
+      'The humidity and temperature sensors of the places, by name, or of one place with `location_id`. Each has ' +
+      'its last value and time, `reachable` and `alerting` (the value is outside its alert band).',
+    input: z.object({ location_id: z.string().uuid().optional().describe("A place's `id` from filament_location_list") }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/sensors'],
+    handler: async ({ location_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/sensors', { params: { query: { location_id } } }),
+          'list the location sensors',
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_sensor_readings',
+    label: "Read a sensor's history",
+    description:
+      "A sensor's stored readings (`at`, `value`), oldest first, from `since` (default the last 24 hours). With " +
+      'more than `limit` readings (default 500, at most 5000), it gives the newest ones.',
+    input: z.object({
+      sensor_id: z.string().uuid(),
+      since: z.string().datetime({ offset: true }).optional().describe('An ISO time with a zone'),
+      limit: z.number().int().min(1).max(5000).optional(),
+    }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/sensors/{sensor_id}/readings'],
+    handler: async ({ sensor_id, since, limit }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/sensors/{sensor_id}/readings', {
+            params: { path: { sensor_id }, query: { since, limit } },
+          }),
+          `read the readings of sensor ${sensor_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_sensor_save',
+    label: 'Add or edit a location sensor',
+    description:
+      'Add a Home Assistant sensor to a place (no `sensor_id`): `fields` needs `location_id`, `source: ' +
+      "home_assistant`, `kind` (`humidity` or `temperature`), `entity_id` (from filament_ha_entities) and `name`. " +
+      'Or edit one: only the `fields` given change (`location_id`, `name`, `unit`, `alert_below`, `alert_above`, ' +
+      '`notify`), and `null` clears a nullable one. An AMS sensor cannot be made by hand: ScadBuddy makes it from ' +
+      'the printer report. Alerts are shown, not sent. Only what the user says. Writes ScadBuddy only.',
+    input: z.object({
+      sensor_id: z.string().uuid().optional().describe("A sensor's `id` from filament_sensors_list; omit to add"),
+      fields: z.record(z.string(), z.unknown()).default({}).describe('The sensor fields to set'),
+    }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/sensors', 'PATCH /api/v1/filament/sensors/{sensor_id}'],
+    summarize: ({ sensor_id, fields }) =>
+      sensor_id ? `Edit sensor ${sensor_id}` : `Add sensor ${String(fields['name'] ?? '')}`.trim(),
+    handler: async ({ sensor_id, fields }, { backend }) => {
+      if (sensor_id === undefined) {
+        return json(await ok(backend.POST('/api/v1/filament/sensors', { body: fields as never }), 'add a sensor'))
+      }
+      return json(
+        await ok(
+          backend.PATCH('/api/v1/filament/sensors/{sensor_id}', {
+            params: { path: { sensor_id } },
+            body: fields as never,
+          }),
+          `edit sensor ${sensor_id}`,
+        ),
+      )
+    },
+  }),
+
+  defineTool({
+    name: 'filament_sensor_archive',
+    label: 'Archive a location sensor',
+    description:
+      'Take a sensor off the lists. Its readings are kept. 404 when the sensor is missing or already archived. ' +
+      'Only what the user says. Writes ScadBuddy only.',
+    input: z.object({ sensor_id: z.string().uuid() }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/sensors/{sensor_id}/archive'],
+    summarize: ({ sensor_id }) => `Archive sensor ${sensor_id}`,
+    handler: async ({ sensor_id }, { backend }) => {
+      await ok(
+        backend.POST('/api/v1/filament/sensors/{sensor_id}/archive', { params: { path: { sensor_id } } }),
+        `archive sensor ${sensor_id}`,
+      )
+      return json({ archived: sensor_id })
+    },
+  }),
+
+  defineTool({
+    name: 'filament_ha_entities',
+    label: 'List Home Assistant entities',
+    description:
+      'The Home Assistant entities Bambuddy can read, with their states, for choosing a sensor `entity_id`; ' +
+      '`search` narrows them. 409 when no Bambuddy is configured. Reads Bambuddy, writes nothing.',
+    input: z.object({ search: z.string().optional() }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/sensors/entities'],
+    handler: async ({ search }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/sensors/entities', { params: { query: { search } } }),
+          'list the Home Assistant entities',
+        ),
+      ),
+  }),
 ]
