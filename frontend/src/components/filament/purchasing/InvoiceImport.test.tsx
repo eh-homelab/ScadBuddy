@@ -1,6 +1,6 @@
 import { screen, waitFor } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { AssistantOpenerContext } from '../../../agent/chat/opener'
 import { setSessionResources } from '../../../mocks/features/assistantSessions'
 import { server } from '../../../mocks/server'
@@ -31,6 +31,8 @@ function answers(status: number, body: Record<string, unknown>) {
   )
   return bodies
 }
+
+for (const id of ['sess-1', 'sess-2', 'sess-3', 'sess-other']) beforeEach(() => setSessionResources(id, [], { status: 'running', running: true }))
 
 const button = () => screen.findByRole('button', { name: 'Import with the assistant' })
 
@@ -70,6 +72,49 @@ describe('InvoiceImport', () => {
     expect(screen.queryByRole('button', { name: 'Import with the assistant' })).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Open' }))
     expect(opener!.openSession).toHaveBeenCalledWith('sess-live')
+  })
+
+  it('says the assistant waits for the person when the session is idle, with Open and no pulse', async () => {
+    setSessionResources('sess-idle', [], { status: 'idle' })
+    const { user, opener, container } = render({ ...draft, import_run_id: 'sess-idle' })
+    expect(await screen.findByText('The assistant is waiting for you')).toBeInTheDocument()
+    expect(screen.queryByText('Import running')).not.toBeInTheDocument()
+    expect(container.querySelector('.animate-pulse')).toBeNull()
+    await user.click(screen.getByRole('button', { name: 'Open' }))
+    expect(opener!.openSession).toHaveBeenCalledWith('sess-idle')
+  })
+
+  it('reads the session again on window focus, so a session that ends brings the button back', async () => {
+    setSessionResources('sess-end', [], { status: 'running', running: true })
+    render({ ...draft, import_run_id: 'sess-end' })
+    expect(await screen.findByText('Import running')).toBeInTheDocument()
+    setSessionResources('sess-end', [], { status: 'done' })
+    window.dispatchEvent(new Event('focus'))
+    expect(await button()).toBeInTheDocument()
+    expect(screen.queryByText('Import running')).not.toBeInTheDocument()
+  })
+
+  it('reads the session again on an interval, and stops when unmounted', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      let reads = 0
+      server.use(
+        http.get('/api/v1/ai/sessions/sess-poll', () => {
+          reads += 1
+          return HttpResponse.json({ id: 'sess-poll', title: 't', status: reads > 1 ? 'idle' : 'running', running: reads === 1, archived: false })
+        }),
+      )
+      const { unmount } = render({ ...draft, import_run_id: 'sess-poll' })
+      expect(await screen.findByText('Import running')).toBeInTheDocument()
+      await vi.advanceTimersByTimeAsync(15_000)
+      expect(await screen.findByText('The assistant is waiting for you')).toBeInTheDocument()
+      unmount()
+      const seen = reads
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(reads).toBe(seen)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('offers the import again when the linked session is done', async () => {
@@ -118,6 +163,51 @@ describe('InvoiceImport', () => {
     await user.click(screen.getByRole('button', { name: 'Retry' }))
     await waitFor(() => expect(opener!.openSession).toHaveBeenCalledWith('sess-3'))
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('says the invoice is gone on a 404, with no Retry', async () => {
+    answers(404, { detail: 'the backend refused to read the invoice', type: 'backend_refused' })
+    const { user } = render(draft)
+    await user.click(await button())
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('This invoice no longer exists.')
+    expect(alert).not.toHaveTextContent('backend')
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
+  })
+
+  it('does not show a forwarded backend 422 detail', async () => {
+    answers(422, { detail: 'the backend refused to read the invoice file', type: 'backend_refused' })
+    const { user } = render(draft)
+    await user.click(await button())
+    const alert = await screen.findByRole('alert')
+    expect(alert).not.toHaveTextContent('backend')
+    expect(alert).toHaveTextContent('cannot be imported')
+  })
+
+  it('shows no uuid on a 502, and offers Open the session when one is named', async () => {
+    answers(502, {
+      detail: 'The import session 3f2b6c1e-0000-4000-8000-000000000000 started, but ScadBuddy could not link it to the invoice. Try again.',
+      type: 'upstream_error',
+      session_id: 'sess-named',
+    })
+    const { user, opener } = render(draft)
+    await user.click(await button())
+    const alert = await screen.findByRole('alert')
+    expect(alert).not.toHaveTextContent(/[0-9a-f]{8}-/)
+    await user.click(screen.getByRole('button', { name: 'Open the session' }))
+    expect(opener!.openSession).toHaveBeenCalledWith('sess-named')
+  })
+
+  it.each([
+    [503, 'The assistant is unavailable'],
+    [403, 'You cannot import invoices'],
+  ])('says something specific on a %i', async (status, text) => {
+    answers(status, { detail: 'raw refusal' })
+    const { user } = render(draft)
+    await user.click(await button())
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(text)
+    expect(alert).not.toHaveTextContent('raw refusal')
   })
 
   it('shows nothing for a confirmed invoice, an invoice with no file, or without an assistant', () => {
