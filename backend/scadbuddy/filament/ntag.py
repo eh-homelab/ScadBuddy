@@ -196,6 +196,8 @@ async def confirm(
     return m.NtagConfirm(bound=bound is not None, tag_uid=uid if bound is not None else None)
 
 
-async def cancel(client: BambuddyClient, device_id: str) -> None:
-    """Drop the write the device has queued."""
+async def cancel(store: Filament, client: BambuddyClient, spool_id: UUID, device_id: str) -> None:
+    """Drop the write the device has queued, and the spool's record of it, so a later
+    `confirm` binds nothing."""
     await client.cancel_tag_write(device_id)
+    await asyncio.to_thread(_clear_baseline, store, spool_id)
