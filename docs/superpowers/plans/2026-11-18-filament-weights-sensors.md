@@ -375,3 +375,15 @@ Load `frontend-design` first.
     its sensors hide together. An AMS sensor shows again when the next report moves it to
     its unit's live place (Decision 18). `read_ha_sensors` reads the list, so it makes no
     Bambuddy call when every Home Assistant sensor is on an archived place.
+26. **The Home Assistant read stays one unfiltered GET (#6679 item 3).** The ruling was to
+    ask Bambuddy only for the entity ids the pull needs, if its route allows it. It does
+    not. Bambuddy 1.3.1's OpenAPI (`GET /openapi.json`, `info.version` `1.3.1`, read with
+    `jq` on 2026-11-18) gives `GET /api/v1/location-ha-sensors/entities` one query
+    parameter, `search` (a string or null), and no list of ids. The other Home Assistant
+    reads are no better: `GET /api/v1/ha-sensors/entities` also takes only `search`,
+    `GET /api/v1/smart-plugs/ha/sensors` takes none and lists power and energy sensors
+    only, and `GET /api/v1/bulk/ha-sensor-readings?ids=` takes printer ids, not entity
+    ids. One `search` call per sensor would make N calls per pull in place of one, and
+    `search` matches text, so it can return more entities than the one asked for. So
+    `read_ha_sensors` keeps one GET with no `search`, and still makes none when no live
+    Home Assistant sensor is set up. Revisit this when Bambuddy's route takes ids.
