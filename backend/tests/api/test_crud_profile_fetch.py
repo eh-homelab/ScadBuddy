@@ -55,6 +55,14 @@ def export(nozzle: str = "0.4", **over: Any) -> bytes:
     return json.dumps(doc).encode()
 
 
+def nested(levels: int) -> Any:
+    """A value of ``levels`` nested lists."""
+    value: Any = []
+    for _ in range(levels - 1):
+        value = [value]
+    return value
+
+
 def name_of(body: bytes) -> str:
     name: str = json.loads(body)["name"]
     return name
@@ -202,6 +210,11 @@ def test_a_file_is_stored_as_a_blob_held_by_its_run(fetch: Fetch) -> None:
     assert refs == [{"key": entry["key"], "holder_kind": HOLDER, "holder_id": str(fetch.run_id)}]
 
 
+def test_a_file_32_levels_deep_is_kept(fetch: Fetch) -> None:
+    r = fetch.put(export(note=nested(31)))
+    assert r.status_code == 204, r.text
+
+
 def test_a_file_sent_again_replaces_the_key_and_its_hold(fetch: Fetch) -> None:
     assert fetch.put(export()).status_code == 204
     again = export(filament_vendor=["Inland 2"])
@@ -223,6 +236,12 @@ def test_a_file_sent_again_replaces_the_key_and_its_hold(fetch: Fetch) -> None:
         ("print settings id", 422),
         ("no inherits", 422),
         ("empty inherits", 422),
+        ("too deep", 422),
+        ("deep enough to blow the stack", 422),
+        ("NaN", 422),
+        ("Infinity", 422),
+        ("-Infinity", 422),
+        ("1e400", 422),
         ("not a target", 422),
         ("not running", 409),
     ],
@@ -249,6 +268,14 @@ def test_a_file_is_refused_unless_valid(fetch: Fetch, case: str, status: int) ->
         r = fetch.put(json.dumps(doc).encode())
     elif case == "empty inherits":
         r = fetch.put(export(inherits=""))
+    elif case == "too deep":
+        # The object itself is level 1; 32 more lists make 33 levels.
+        r = fetch.put(export(note=nested(32)))
+    elif case == "deep enough to blow the stack":
+        deep = b"[" * 200_000 + b"]" * 200_000
+        r = fetch.put(export(note=0).replace(b'"note": 0', b'"note": ' + deep))
+    elif case in {"NaN", "Infinity", "-Infinity", "1e400"}:
+        r = fetch.put(export(note=0).replace(b'"note": 0', b'"note": ' + case.encode()))
     elif case == "not a target":
         r = fetch.put(body, model="X1C")
     else:

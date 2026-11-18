@@ -24,6 +24,7 @@ import asyncio
 import hashlib
 import io
 import json
+import math
 import zipfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -74,6 +75,8 @@ MAX_NAME: Final = 200
 NO_FILE: Final = "the profile-fetch worker sent no file for it"
 #: The reason of a gap no run has given a reason for.
 NO_PRESET: Final = "no preset for this printer and nozzle yet"
+#: The deepest a preset file may nest (the document itself is level 1).
+MAX_DEPTH: Final = 32
 #: The keys only a printer or a process preset has.
 SETTINGS_IDS: Final = frozenset({"printer_settings_id", "print_settings_id"})
 
@@ -245,18 +248,48 @@ def _unfit(detail: str) -> ApiError:
     return ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, detail)
 
 
+def _no_constant(name: str) -> Any:
+    raise ValueError(f"a preset file holds {name}, which is not JSON")
+
+
+def _finite(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError(f"a preset file holds {text}, which is not a finite number")
+    return value
+
+
+def _depth(doc: Any) -> int:
+    """How deep ``doc`` nests (a scalar is 0, ``{}`` is 1), without recursion."""
+    deepest = 0
+    stack = [(doc, 1)]
+    while stack:
+        value, level = stack.pop()
+        if isinstance(value, dict):
+            value = list(value.values())
+        if isinstance(value, list):
+            deepest = max(deepest, level)
+            stack.extend((item, level + 1) for item in value)
+    return deepest
+
+
 def clean_preset(body: bytes) -> tuple[str, bytes]:
     """A site's preset file as Bambuddy may take it: its ``name``, and the document
     without a top-level key whose name ends in ``gcode`` or ``post_process`` (the printer
     runs that G-code; the preset inherits its base's), as JSON again. 422 unless it is a
-    filament preset: a JSON object with a ``name`` of 1 to `MAX_NAME` characters, a
+    filament preset: a JSON object, at most `MAX_DEPTH` levels deep and with no NaN,
+    Infinity or number too large for a float, with a ``name`` of 1 to `MAX_NAME` characters, a
     ``type`` that is absent or ``filament``, a non-empty ``inherits``, and no
     ``printer_settings_id`` or ``print_settings_id`` (a printer or process preset's).
     Stable: the bytes it gives are cleaned to themselves."""
     try:
-        doc = json.loads(body)
-    except (UnicodeDecodeError, json.JSONDecodeError):
+        doc = json.loads(body, parse_constant=_no_constant, parse_float=_finite)
+    except RecursionError:
+        raise _unfit(f"a preset file nests at most {MAX_DEPTH} levels deep") from None
+    except ValueError:  # JSONDecodeError and UnicodeDecodeError are ValueErrors too
         doc = None
+    if _depth(doc) > MAX_DEPTH:
+        raise _unfit(f"a preset file nests at most {MAX_DEPTH} levels deep")
     name = doc.get("name") if isinstance(doc, dict) else None
     if not isinstance(doc, dict) or not isinstance(name, str) or not 1 <= len(name) <= MAX_NAME:
         raise _unfit(
