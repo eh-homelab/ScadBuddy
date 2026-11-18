@@ -54,6 +54,37 @@ describe('checkedAttachments', () => {
   })
 })
 
+describe('a refusal for a type ScadBuddy cannot read', () => {
+  it('speaks to the person and names the type and what is read', () => {
+    const checked = checkedAttachments([{ mediaType: 'text/plain', bytes: Buffer.from('hello') }])
+    expect(checked).toEqual({
+      ok: false,
+      error: 'attachments.0.mediaType: This file is a text/plain. ScadBuddy reads invoices as PDF, PNG, JPEG, GIF or WebP.',
+    })
+  })
+
+  it('does not echo a type that is not a plain media type', () => {
+    const checked = checkedAttachments([{ mediaType: '<script>x</script>', bytes: Buffer.from('hello') }])
+    expect(checked.ok).toBe(false)
+    if (!checked.ok) expect(checked.error).not.toContain('<script>')
+  })
+})
+
+describe('an image a server builds a turn from (no preview, #6267)', () => {
+  const bare = { mediaType: 'image/png' as const, bytes: PNG }
+
+  it('passes the check and the turn names the full image only, storing one blob', () => {
+    expect(checkedAttachments([bare]).ok).toBe(true)
+    const { blobs, sent } = sentImageBlobs([bare])
+    expect(blobs).toHaveLength(1)
+    expect(sent).toEqual([{ name: blobs[0]!.name, mediaType: 'image/png' }])
+  })
+
+  it('still refuses bytes that are not the image type', () => {
+    expect(checkedAttachments([{ mediaType: 'image/png', bytes: Buffer.from('nope') }]).ok).toBe(false)
+  })
+})
+
 describe('a PDF in the session blobs', () => {
   it('is named by its sha256 and .pdf, and a sent turn names it without a preview', () => {
     const blob = sessionImage('application/pdf', PDF)

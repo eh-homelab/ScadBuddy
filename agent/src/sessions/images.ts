@@ -87,9 +87,17 @@ function stored<T extends readonly [string, ...string[]]>(types: T, max: number)
 export type ImagePreview = { mediaType: PreviewMediaType; bytes: Buffer }
 export const ImagePreviewSchema = stored(PREVIEW_MEDIA_TYPES, PREVIEW_BYTES_MAX)
 
-/** An image the user sends, and its preview, as bytes. */
+/** An image the user sends, and its preview, as bytes: what the panel uploads. */
 export type UserImage = { mediaType: ImageMediaType; bytes: Buffer; preview: ImagePreview }
 export const UserImageSchema = stored(IMAGE_MEDIA_TYPES, IMAGE_BYTES_MAX).and(z.object({ preview: ImagePreviewSchema }))
+
+/**
+ * An image a server builds a turn from (#6267: an invoice image the API read from a file).
+ * The agent has no image library to draw a preview with (the panel draws the panel's own),
+ * so this one has none, and its turn names the full image only: the panel shows that.
+ */
+export type ServerImage = { mediaType: ImageMediaType; bytes: Buffer; preview?: ImagePreview }
+const ServerImageSchema = stored(IMAGE_MEDIA_TYPES, IMAGE_BYTES_MAX).and(z.object({ preview: ImagePreviewSchema.optional() }))
 
 /** A PDF the user sends, as bytes. It has no preview: the panel draws none. */
 export type UserDocument = { mediaType: DocumentMediaType; bytes: Buffer }
@@ -104,7 +112,7 @@ export const UserDocumentSchema = z
   .refine((doc) => sniffPdf(doc.bytes), { message: 'the bytes are not a PDF', path: ['bytes'] })
 
 /** What a message carries for the model: an image, or a PDF. */
-export type UserAttachment = UserImage | UserDocument
+export type UserAttachment = ServerImage | UserDocument
 
 export const UserImagesSchema = z
   .array(UserImageSchema)
@@ -120,6 +128,12 @@ export function checkedImages(images: unknown): { ok: true; images: UserImage[] 
   if (parsed.success) return { ok: true, images: parsed.data as UserImage[] }
   // Messages name fields and caps only: they never quote the bytes.
   return { ok: false, error: parsed.error.issues.map((i) => `${i.path.join('.') || 'images'}: ${i.message}`).join('; ') }
+}
+
+/** A refusal for a file type ScadBuddy cannot read, worded for the person. */
+function unsupported(mediaType: unknown): string {
+  const kind = typeof mediaType === 'string' && /^[\w.+/-]{1,60}$/.test(mediaType) ? mediaType : 'type that ScadBuddy does not know'
+  return `This file is a ${kind}. ScadBuddy reads invoices as PDF, PNG, JPEG, GIF or WebP.`
 }
 
 /**
@@ -138,10 +152,10 @@ export function checkedAttachments(
   for (const [index, attachment] of attachments.entries()) {
     const mediaType = (attachment as { mediaType?: unknown } | null)?.mediaType
     if (!types.includes(mediaType)) {
-      problems.push(`attachments.${index}.mediaType: must be one of ${types.join(', ')}`)
+      problems.push(`attachments.${index}.mediaType: ${unsupported(mediaType)}`)
       continue
     }
-    const parsed = (mediaType === 'application/pdf' ? UserDocumentSchema : UserImageSchema).safeParse(attachment)
+    const parsed = (mediaType === 'application/pdf' ? UserDocumentSchema : ServerImageSchema).safeParse(attachment)
     if (parsed.success) checked.push(parsed.data as UserAttachment)
     else problems.push(...parsed.error.issues.map((i) => `attachments.${index}.${i.path.join('.') || 'attachment'}: ${i.message}`))
   }

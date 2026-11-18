@@ -63,12 +63,12 @@ export type ImageRef = { name: string; mediaType: 'image/png' | 'image/jpeg' | '
 
 /**
  * An image the user sent with a turn, as `user.turn` names it (#2479): the full image
- * and its preview, each one of the session's blobs; or a PDF (#6267), which has no preview. A turn logged before #2479 whose
+ * and its preview, each one of the session's blobs; or an image a server built the turn from, or a PDF (#6267), which have no preview. A turn logged before #2479 whose
  * full image could not be stored names its preview only (that migration).
  */
 export type SentImage =
   | (Partial<ImageRef> & { preview: { name: string; mediaType: 'image/png' | 'image/jpeg' | 'image/webp' } })
-  | { name: string; mediaType: 'application/pdf' }
+  | { name: string; mediaType: ImageRef['mediaType'] | 'application/pdf' }
 
 /**
  * A message waiting for its turn (#6386): its id is the turn id it runs as, `text` the user's

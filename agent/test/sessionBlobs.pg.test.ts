@@ -318,6 +318,11 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session ima
       const res = await get(`/api/v1/ai/sessions/${session.id}/blobs/${NAME_PDF}`)
       expect(res.status).toBe(200)
       expect(res.headers.get('content-type')).toBe('application/pdf')
+      // Untrusted bytes on the app's origin: downloaded, never rendered in the page (#6267).
+      expect(res.headers.get('content-disposition')).toMatch(/^attachment;/)
+      expect(res.headers.get('content-security-policy')).toBe("default-src 'none'; sandbox")
+      // The panel's own schema accepts the PDF turn.
+      await expectPanelAccepts(events)
       expect(Buffer.from(await res.arrayBuffer()).equals(PDF)).toBe(true)
     })
 

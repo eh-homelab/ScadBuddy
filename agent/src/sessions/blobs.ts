@@ -104,6 +104,11 @@ export function sentImageBlobs(images: readonly UserAttachment[]): { blobs: Sess
       return { name: doc.name, mediaType: image.mediaType }
     }
     const full = sessionImage(image.mediaType, image.bytes)
+    if (!image.preview) {
+      // A server-built turn (#6267) has no preview: the turn names the full image only.
+      blobs.push(full)
+      return { name: full.name, mediaType: image.mediaType }
+    }
     const small = sessionImage(image.preview.mediaType, image.preview.bytes)
     blobs.push(full, small)
     return {
