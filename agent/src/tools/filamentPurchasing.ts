@@ -320,7 +320,7 @@ export const filamentPurchasingTools: Tool[] = [
       'another unarchived supplier, and its lines drop their supplier product) and, when `lines` is sent, it ' +
       'replaces every line. Tax and shipping are spread over the lines on each write: give `line_tax` on every ' +
       'line or on none (422 for some). Money is a decimal string. 409 for a taken number (`existing_invoice_id`) ' +
-      'or a confirmed invoice. An edit with both `fields` and `lines` is two requests: if the second fails, the ' +
+      'or any field but `note` on a confirmed invoice (it still takes a note-only edit). An edit with both `fields` and `lines` is two requests: if the second fails, the ' +
       'header change stays. Only what the user says. Writes ScadBuddy only.',
     input: z.object({
       invoice_id: z.string().uuid().optional().describe("An invoice's `id`; omit to add"),
@@ -492,27 +492,29 @@ export const filamentPurchasingTools: Tool[] = [
     name: 'filament_shopping_remove',
     label: 'Remove from the shopping list',
     description:
-      'Remove one item (`item_id`), or with no `item_id` clear the list: only the purchased items with ' +
-      '`purchased_only: true`, else every item. Returns `{removed: n}`, the number removed. Only when the user asks. Writes ScadBuddy only.',
+      'Remove one item: give `item_id`. To clear the list, give `clear` instead: `purchased` removes only the ' +
+      'purchased items, `all` removes every item. Give exactly one of them: a call with neither removes nothing. ' +
+      'Returns `{removed: n}`, the number removed. Only when the user asks. Writes ScadBuddy only.',
     input: z.object({
-      item_id: z.string().uuid().optional().describe('One item to remove; omit to clear'),
-      purchased_only: z.boolean().default(false).describe('With no item_id: clear only purchased items'),
+      item_id: z.string().uuid().optional().describe('One item to remove'),
+      clear: z.enum(['all', 'purchased']).optional().describe('Clear the list: every item, or only the purchased ones'),
     }),
     risk: 'write',
     source: SOURCE,
     routes: ['DELETE /api/v1/filament/shopping-list/{item_id}', 'DELETE /api/v1/filament/shopping-list'],
-    summarize: ({ item_id, purchased_only }) =>
-      item_id ? `Remove shopping list item ${item_id}` : purchased_only ? 'Clear purchased items' : 'Clear the shopping list',
-    handler: async ({ item_id, purchased_only }, { backend }) => {
+    summarize: ({ item_id, clear }) =>
+      item_id ? `Remove shopping list item ${item_id}` : clear === 'purchased' ? 'Clear purchased items' : 'Clear the shopping list',
+    handler: async ({ item_id, clear }, { backend }) => {
+      if (item_id !== undefined && clear !== undefined) throw new ToolError('give item_id or clear, not both')
       if (item_id === undefined) {
+        if (clear === undefined) throw new ToolError('give item_id to remove one item, or clear: "all" or "purchased" to clear the list')
         return json(
           await ok(
-            backend.DELETE('/api/v1/filament/shopping-list', { params: { query: { purchased_only } } }),
+            backend.DELETE('/api/v1/filament/shopping-list', { params: { query: { purchased_only: clear === 'purchased' } } }),
             'clear the shopping list',
           ),
         )
       }
-      if (purchased_only) throw new ToolError('purchased_only clears the list; give no item_id with it')
       await ok(
         backend.DELETE('/api/v1/filament/shopping-list/{item_id}', { params: { path: { item_id } } }),
         `remove shopping list item ${item_id}`,

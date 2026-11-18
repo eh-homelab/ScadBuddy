@@ -250,10 +250,90 @@ describe('filament purchasing tools', () => {
       removed: 1,
     })
     expect(
-      firstText(await runTool(tool('filament_shopping_remove'), { purchased_only: true }, ctx())),
+      firstText(await runTool(tool('filament_shopping_remove'), { clear: 'purchased' }, ctx())),
     ).toEqual({ removed: 2 })
     expect(purchasedOnly).toBe('true')
-    const both = await runTool(tool('filament_shopping_remove'), { item_id: ITEM, purchased_only: true }, ctx())
+    expect(firstText(await runTool(tool('filament_shopping_remove'), { clear: 'all' }, ctx()))).toEqual({
+      removed: 2,
+    })
+    expect(purchasedOnly).toBe('false')
+    const both = await runTool(tool('filament_shopping_remove'), { item_id: ITEM, clear: 'all' }, ctx())
     expect(both.isError).toBe(true)
+  })
+
+  it('never clears the shopping list when no item_id and no clear is given', async () => {
+    let requests = 0
+    server.use(
+      http.delete(`${FILAMENT}/shopping-list`, () => {
+        requests += 1
+        return HttpResponse.json({ removed: 9 })
+      }),
+    )
+    const none = await runTool(tool('filament_shopping_remove'), {}, ctx())
+    expect(none.isError).toBe(true)
+    const old = await runTool(tool('filament_shopping_remove'), { purchased_only: true }, ctx())
+    expect(old.isError).toBe(true)
+    expect(requests).toBe(0)
+  })
+
+  it('says a confirmed invoice still takes a note-only edit', () => {
+    expect(tool('filament_invoice_upsert').description).toContain('note-only edit')
+  })
+
+  it('reads the stats, a price sheet, the invoices and one invoice, and the products', async () => {
+    const INVOICE = '8d6f3c1e-0000-4000-8000-000000006609'
+    let invoiceQuery = ''
+    let archived: string | null = null
+    server.use(
+      http.get(`${FILAMENT}/suppliers/stats`, () => HttpResponse.json([{ supplier_id: SUPPLIER }])),
+      http.get(`${FILAMENT}/suppliers/${SUPPLIER}/price-sheet`, () => HttpResponse.json([{ change_pct: null }])),
+      http.get(`${FILAMENT}/suppliers/${SUPPLIER}/products`, ({ request }) => {
+        archived = new URL(request.url).searchParams.get('include_archived')
+        return HttpResponse.json([{ id: PRODUCT }])
+      }),
+      http.get(`${FILAMENT}/invoices/${INVOICE}`, () => HttpResponse.json({ id: INVOICE, lines: [] })),
+      http.get(`${FILAMENT}/invoices`, ({ request }) => {
+        invoiceQuery = new URL(request.url).search
+        return HttpResponse.json([{ id: INVOICE }])
+      }),
+    )
+    expect(firstText(await runTool(tool('filament_supplier_stats'), {}, ctx()))).toEqual([{ supplier_id: SUPPLIER }])
+    expect(firstText(await runTool(tool('filament_price_sheet'), { supplier_id: SUPPLIER }, ctx()))).toEqual([
+      { change_pct: null },
+    ])
+    expect(
+      firstText(await runTool(tool('filament_product_list'), { supplier_id: SUPPLIER, include_archived: true }, ctx())),
+    ).toEqual([{ id: PRODUCT }])
+    expect(archived).toBe('true')
+    expect(
+      firstText(await runTool(tool('filament_invoice_list'), { supplier_id: SUPPLIER, status: 'draft' }, ctx())),
+    ).toEqual([{ id: INVOICE }])
+    expect(invoiceQuery).toContain(`supplier_id=${SUPPLIER}`)
+    expect(invoiceQuery).toContain('status=draft')
+    expect(firstText(await runTool(tool('filament_invoice_get'), { invoice_id: INVOICE }, ctx()))).toEqual({
+      id: INVOICE,
+      lines: [],
+    })
+  })
+
+  it('adds a supplier with its fields and edits one with archived', async () => {
+    const seen: unknown[] = []
+    server.use(
+      http.post(`${FILAMENT}/suppliers`, async ({ request }) => {
+        seen.push(await request.json())
+        return HttpResponse.json({ id: SUPPLIER }, { status: 201 })
+      }),
+      http.patch(`${FILAMENT}/suppliers/${SUPPLIER}`, async ({ request }) => {
+        seen.push(await request.json())
+        return HttpResponse.json({ id: SUPPLIER })
+      }),
+    )
+    await runTool(
+      tool('filament_supplier_upsert'),
+      { fields: { name: 'Acme', website: 'https://acme.test', note: null } },
+      ctx(),
+    )
+    await runTool(tool('filament_supplier_upsert'), { supplier_id: SUPPLIER, fields: { note: 'x' }, archived: true }, ctx())
+    expect(seen).toEqual([{ name: 'Acme', website: 'https://acme.test', note: null }, { note: 'x', archived: true }])
   })
 })
