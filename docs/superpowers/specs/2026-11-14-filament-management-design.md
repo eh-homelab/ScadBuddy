@@ -406,7 +406,8 @@ BB has a flat list (`/inventory/locations`) plus location sensors
   its readings are in `filament_sensor_readings`. SB reads Home Assistant through
   Bambuddy's `/location-ha-sensors/entities`, so SB holds no HA token. The AMS sensors
   are made from the first report that shows a number, with an AMS-unit location as the
-  parent of the unit's tray locations. An alert is shown in the API and the UI, and is not
+  parent of the unit's tray locations. The humidity is the report's `humidity_raw`, the
+  percent; the report's `humidity` is Bambu's 1-5 level and is never stored as a percent. An alert is shown in the API and the UI, and is not
   sent: follow-up issue #6646 adds the notification, and `notify` is kept for it. The
   plan's Decisions 4 to 7 have the details.
 - A move writes a `moved` event (from, to) in the spool's ledger. A scan of a

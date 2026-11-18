@@ -22,7 +22,7 @@ test("a place's sensor shows its value, the limit it crossed, and a day of histo
   await page.goto('/filament/locations')
   const sensor = page.getByRole('listitem', { name: 'Shelf A humidity' })
   await expect(sensor).toContainText('62 %')
-  await expect(sensor).toContainText('Over the limit')
+  await expect(sensor).toContainText('Above the limit')
   await sensor.getByRole('button', { name: 'Show history of Shelf A humidity' }).click()
   await expect(sensor.getByRole('img', { name: /Shelf A humidity: .* %, 96 readings/ })).toBeVisible()
   await expect(sensor.locator('[data-limit="above"]')).toHaveCount(1)

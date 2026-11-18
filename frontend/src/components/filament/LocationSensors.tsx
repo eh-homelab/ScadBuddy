@@ -34,6 +34,9 @@ const message = (cause: unknown, fallback: string) => (cause instanceof ApiError
 
 const withUnit = (value: number, unit: string | null) => (unit ? `${value} ${unit}` : String(value))
 
+/** Whether the reading is over `alert_above`; an alerting sensor that is not is under `alert_below`. */
+const overLimit = (sensor: Sensor) => sensor.last_value != null && sensor.alert_above != null && sensor.last_value > sensor.alert_above
+
 function limitsText(sensor: Sensor): string | null {
   const parts = [
     sensor.alert_above != null && `above ${withUnit(sensor.alert_above, sensor.unit)}`,
@@ -343,7 +346,7 @@ export function LocationSensors({ locationId, locationName, sensors, canAdd, onC
                   </span>
                   <span className="text-[13px]">{sensor.name}</span>
                   <span className="text-muted-foreground">{KINDS[sensor.kind]}</span>
-                  {sensor.alerting && <span className="font-medium text-warn">Over the limit</span>}
+                  {sensor.alerting && <span className="font-medium text-warn">{overLimit(sensor) ? 'Above the limit' : 'Below the limit'}</span>}
                   {!sensor.reachable && <span className="text-warn">Not reachable</span>}
                   {limits && <span className="text-muted-foreground">{limits}</span>}
                   {sensor.source === 'ams' && <span className="text-muted-foreground">Made by ScadBuddy from the printer</span>}

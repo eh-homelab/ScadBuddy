@@ -117,6 +117,21 @@ def test_sync_skips_a_stale_report(pg_pool: PgPool) -> None:
     assert len(_events(pg_pool, spool, "ams_reading")) == 1
 
 
+def test_sync_counts_a_printer_whose_report_cannot_be_read_as_stale(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pid, _ = _printer(pg_pool)
+    spool = _loaded(pg_pool, pid)
+
+    def boom(*args: object) -> None:
+        raise ValueError("malformed report")
+
+    monkeypatch.setattr(capture, "_status", boom)
+    result = _sync(pg_pool)
+    assert (result.booked, result.stale) == (0, 1)
+    assert len(_events(pg_pool, spool, "ams_reading")) == 1
+
+
 def test_a_synced_reading_becomes_the_anchor(pg_pool: PgPool) -> None:
     pid, _ = _printer(pg_pool)
     spool = _loaded(pg_pool, pid, remain=50)

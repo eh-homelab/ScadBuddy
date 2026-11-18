@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -30,6 +32,7 @@ from tests.printers.conftest import KEK
 pytestmark = pytest.mark.requires_postgres
 
 T0 = datetime(2026, 11, 18, 12, 0, tzinfo=UTC)
+PRINTER_FIXTURES = Path(__file__).parents[1] / "printers" / "fixtures"
 
 
 def _place(pool: PgPool) -> UUID:
@@ -280,12 +283,15 @@ def _ams_readings(pool: PgPool, pid: str) -> dict[tuple[int, str], list[float]]:
 
 def test_a_report_records_ams_humidity_and_temperature(pg_pool: PgPool) -> None:
     pid, reports = _watched(pg_pool)
-    units = [{"id": "0", "humidity": "4", "temp": "24.5"}, {"id": "1", "humidity": "3"}]
+    units = [
+        {"id": "0", "humidity": "3", "humidity_raw": "29", "temp": "24.5"},
+        {"id": "1", "humidity": "5", "humidity_raw": "16"},
+    ]
     _advance(reports, pid, {"ams": {"ams": units}}, T0)
     assert _ams_readings(pg_pool, pid) == {
-        (0, "humidity"): [4.0],
+        (0, "humidity"): [29.0],
         (0, "temperature"): [24.5],
-        (1, "humidity"): [3.0],
+        (1, "humidity"): [16.0],
     }
     with pg_pool.connection() as conn:
         rows = conn.execute(
@@ -296,8 +302,35 @@ def test_a_report_records_ams_humidity_and_temperature(pg_pool: PgPool) -> None:
         ).fetchall()
     assert len(rows) == 3
     assert all(r["location_id"] == r["unit"] for r in rows)
+    with pg_pool.connection() as conn:
+        names = conn.execute(
+            "SELECT l.name AS place, s.name FROM filament_location_sensors s"
+            " JOIN filament_locations l ON l.id = s.location_id WHERE s.printer_id = %s"
+            " AND s.ams_id = 0 AND s.kind = 'humidity'",
+            (pid,),
+        ).fetchone()
+    assert names == {"place": "H2C AMS-A", "name": "H2C AMS-A humidity"}
     _advance(reports, pid, {"ams": {"ams": units}}, T0 + timedelta(minutes=1))
-    assert _ams_readings(pg_pool, pid)[(0, "humidity")] == [4.0]
+    assert _ams_readings(pg_pool, pid)[(0, "humidity")] == [29.0]
+
+
+def test_a_recorded_h2c_report_stores_the_percent_not_the_level(pg_pool: PgPool) -> None:
+    recorded = json.loads((PRINTER_FIXTURES / "lan-report-h2c-idle.json").read_text("utf-8"))
+    pid, reports = _watched(pg_pool)
+    _advance(reports, pid, recorded["print"], T0)
+    humidity = {
+        unit: values[0]
+        for (unit, kind), values in _ams_readings(pg_pool, pid).items()
+        if kind == "humidity"
+    }
+    assert humidity == {0: 29.0, 1: 16.0, 2: 12.0, 3: 14.0, 128: 15.0}
+
+
+def test_a_level_without_a_percent_records_no_humidity(pg_pool: PgPool) -> None:
+    pid, reports = _watched(pg_pool)
+    units = [{"id": "0", "humidity": "3", "temp": "25"}]
+    _advance(reports, pid, {"ams": {"ams": units}}, T0)
+    assert _ams_readings(pg_pool, pid) == {(0, "temperature"): [25.0]}
 
 
 def test_a_report_without_ams_writes_nothing(pg_pool: PgPool) -> None:
@@ -312,7 +345,7 @@ def test_a_report_without_ams_writes_nothing(pg_pool: PgPool) -> None:
 
 def test_an_empty_humidity_is_skipped(pg_pool: PgPool) -> None:
     pid, reports = _watched(pg_pool)
-    _advance(reports, pid, {"ams": {"ams": [{"id": "0", "humidity": "", "temp": "25"}]}}, T0)
+    _advance(reports, pid, {"ams": {"ams": [{"id": "0", "humidity_raw": "", "temp": "25"}]}}, T0)
     assert _ams_readings(pg_pool, pid) == {(0, "temperature"): [25.0]}
 
 
@@ -326,7 +359,7 @@ def test_a_failing_sensor_capture_keeps_the_report(
 
     monkeypatch.setattr(sensors, "capture_ams_on", boom)
     with caplog.at_level(logging.WARNING):
-        _advance(reports, pid, {"ams": {"ams": [{"id": "0", "humidity": "4"}]}}, T0)
+        _advance(reports, pid, {"ams": {"ams": [{"id": "0", "humidity_raw": "29"}]}}, T0)
     assert reports.get(pid) is not None
     record = next(r for r in caplog.records if r.getMessage() == prints.FILAMENT_CAPTURE_FAILED)
     assert record.__dict__["error"] == "RuntimeError"
@@ -346,7 +379,9 @@ class _Counting:
 
 
 def _unit(**more: str) -> dict[str, Any]:
-    return {"ams": {"ams": [{"id": "0", "humidity": "4", "temp": "24"} | more]}}
+    return {
+        "ams": {"ams": [{"id": "0", "humidity": "3", "humidity_raw": "29", "temp": "24"} | more]}
+    }
 
 
 def test_an_unchanged_report_costs_one_query(pg_pool: PgPool) -> None:
@@ -356,21 +391,21 @@ def test_an_unchanged_report_costs_one_query(pg_pool: PgPool) -> None:
         counted = _Counting(conn)
         sensors.capture_ams_on(counted, pid, _unit(), T0 + timedelta(minutes=1))  # type: ignore[arg-type]
     assert counted.statements == 1
-    assert _ams_readings(pg_pool, pid) == {(0, "humidity"): [4.0], (0, "temperature"): [24.0]}
+    assert _ams_readings(pg_pool, pid) == {(0, "humidity"): [29.0], (0, "temperature"): [24.0]}
 
 
 def test_a_changed_value_inside_fifteen_minutes_is_stored(pg_pool: PgPool) -> None:
     pid, reports = _watched(pg_pool)
     _advance(reports, pid, _unit(), T0)
-    _advance(reports, pid, _unit(humidity="5"), T0 + timedelta(minutes=1))
-    assert _ams_readings(pg_pool, pid)[(0, "humidity")] == [4.0, 5.0]
+    _advance(reports, pid, _unit(humidity_raw="31"), T0 + timedelta(minutes=1))
+    assert _ams_readings(pg_pool, pid)[(0, "humidity")] == [29.0, 31.0]
 
 
 def test_the_same_value_is_stored_again_after_fifteen_minutes(pg_pool: PgPool) -> None:
     pid, reports = _watched(pg_pool)
     _advance(reports, pid, _unit(), T0)
     _advance(reports, pid, _unit(), T0 + sensors.SAME_VALUE_EVERY)
-    assert _ams_readings(pg_pool, pid)[(0, "humidity")] == [4.0, 4.0]
+    assert _ams_readings(pg_pool, pid)[(0, "humidity")] == [29.0, 29.0]
 
 
 def test_a_report_marks_an_unreachable_sensor_reachable(pg_pool: PgPool) -> None:
@@ -382,7 +417,7 @@ def test_a_report_marks_an_unreachable_sensor_reachable(pg_pool: PgPool) -> None
     with pg_pool.connection() as conn:
         rows = conn.execute("SELECT reachable FROM filament_location_sensors").fetchall()
     assert [r["reachable"] for r in rows] == [True, True]
-    assert _ams_readings(pg_pool, pid)[(0, "humidity")] == [4.0]
+    assert _ams_readings(pg_pool, pid)[(0, "humidity")] == [29.0]
 
 
 def test_the_external_holder_makes_no_sensor(pg_pool: PgPool) -> None:

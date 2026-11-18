@@ -18,7 +18,7 @@ describe('the Locations tab and sensors', () => {
     renderPage(<LocationsTab />)
     const shelf = await place(L.SHELF_A)
     await waitFor(() => expect(within(shelf).getByText('Shelf A humidity')).toBeInTheDocument())
-    expect(within(shelf).getByText('Over the limit')).toBeInTheDocument()
+    expect(within(shelf).getByText('Above the limit')).toBeInTheDocument()
   })
 
   it('shows the AMS unit its own humidity sensor, with no add button on a printer place', async () => {

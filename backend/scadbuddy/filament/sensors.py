@@ -251,13 +251,17 @@ def capture_ams_on(conn: Conn, printer_id: str, report: dict[str, Any], seen_at:
                 except NoAmsKindError:
                     _log_no_ams_kind()
                     break
+                place_name = conn.execute(
+                    "SELECT name FROM filament_locations WHERE id = %s", (place,)
+                ).fetchone()
+                assert place_name is not None
                 made = conn.execute(
                     "INSERT INTO filament_location_sensors"
                     " (location_id, source, kind, printer_id, ams_id, name, unit)"
                     " VALUES (%s, 'ams', %s, %s, %s, %s, %s)"
                     " ON CONFLICT (printer_id, ams_id, kind)"
                     " WHERE source = 'ams' AND archived_at IS NULL DO NOTHING RETURNING id",
-                    (place, kind, printer, unit.id, f"AMS {unit.id} {kind}", symbol),
+                    (place, kind, printer, unit.id, f"{place_name['name']} {kind}", symbol),
                 ).fetchone()
                 if made is not None:
                     SensorStore.record_on(conn, made["id"], float(value), seen_at)

@@ -18,7 +18,7 @@ from psycopg import Connection, errors
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
-from scadbuddy.bambuddy.trays import EXTERNAL
+from scadbuddy.bambuddy.trays import EXTERNAL, unit_label
 from scadbuddy.filament import ledger
 from scadbuddy.filament import models as m
 from scadbuddy.filament.catalog import CatalogRefError
@@ -218,8 +218,9 @@ class LocationStore:
     @staticmethod
     def ensure_ams_unit_on(conn: Conn, printer_id: UUID, ams_id: int) -> UUID:
         """The id of the unarchived place of that printer's AMS unit (no tray), made as
-        ``AMS <ams_id>`` of the first ``ams`` kind if there is none (#6268). Idempotent and
-        safe when two calls race. `NoAmsKindError`, or `CatalogRefError` for an unknown
+        ``<printer> <unit>`` (``H2C AMS-A``, ``H2C HT-A``, as the tray places are named) of
+        the first ``ams`` kind if there is none (#6268). Idempotent and safe when two calls
+        race. `NoAmsKindError`, or `CatalogRefError` for an unknown
         printer."""
         select = (
             "SELECT id FROM filament_locations WHERE printer_id = %s AND ams_id = %s"
@@ -235,13 +236,18 @@ class LocationStore:
                 ).fetchone()
                 if kind is None:
                     raise NoAmsKindError()
+                printer = conn.execute(
+                    "SELECT name FROM printers WHERE id = %s", (printer_id,)
+                ).fetchone()
+                if printer is None:
+                    raise CatalogRefError()
                 found = conn.execute(
                     "INSERT INTO filament_locations (name, kind_id, printer_id, ams_id)"
                     " VALUES (%s, %s, %s, %s)"
                     " ON CONFLICT (printer_id, ams_id) WHERE tray_id IS NULL"
                     " AND printer_id IS NOT NULL AND archived_at IS NULL DO NOTHING"
                     " RETURNING id",
-                    (f"AMS {ams_id}", kind["id"], *key),
+                    (f"{printer['name']} {unit_label(ams_id)}", kind["id"], *key),
                 ).fetchone()
             if found is None:
                 found = conn.execute(select, key).fetchone()

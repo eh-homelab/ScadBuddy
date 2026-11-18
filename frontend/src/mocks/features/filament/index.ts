@@ -341,10 +341,6 @@ const HA_ENTITIES: S['HaEntity'][] = [
   { entity_id: 'sensor.attic_humidity', friendly_name: 'Attic humidity', state: 'unavailable', domain: 'sensor', device_class: 'humidity', unit_of_measurement: '%' },
 ]
 
-/** Sensor ids come from a counter: the mocks never call `crypto.randomUUID` for these. */
-let sensorCount = 100
-const nextSensorId = () => `62680001-0000-4000-8000-${String(++sensorCount).padStart(12, '0')}`
-
 const isAlerting = (sensor: S['Sensor']) =>
   sensor.last_value != null &&
   ((sensor.alert_above != null && sensor.last_value > sensor.alert_above) || (sensor.alert_below != null && sensor.last_value < sensor.alert_below))
@@ -1375,7 +1371,7 @@ export const handlers = [
       alert_above: null,
       alert_below: null,
       ...body,
-      id: nextSensorId(),
+      id: newId(),
       last_value: null,
       last_at: null,
       alerting: false,

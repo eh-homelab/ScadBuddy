@@ -291,9 +291,11 @@ Load `frontend-design` first.
 6. **The place keeps its "Add a sensor" button (Task 8).** A sensor belongs to one place. A
    button at tab level needs a place picker, which is one more step. The cost is a busier
    tree.
-7. **Empty sensor fields give 422 (Task 7).** The agent tool sends the fields as given and
-   the backend refuses an empty one. The 422 shows as an error through the shared `ok`
-   helper. The cost is a less clear error text.
+7. **An add with no fields gives 422; an empty edit is a 200 (Task 7).** The agent tool
+   sends the fields as given. `POST` with no fields is refused with a 422, which shows as an
+   error through the shared `ok` helper. An edit with `fields: {}` sends `PATCH {}`, which
+   `SensorPatch` accepts: it answers 200 and only `updated_at` moves. The cost is a less
+   clear error text on the add.
 8. **A whole-object PUT is not a defect (Task 3).** The UI sends the full settings object,
    and no agent tool writes it. A change made in another tab can be overwritten by an old
    form draft, as before this work. Nothing changed.
@@ -304,3 +306,11 @@ Load `frontend-design` first.
 10. **Follow-up.** Decision 7 stays as made: alerts are shown, not sent. Issue #6646,
     "send a notification when a location sensor alerts" (a sub-issue of #6260, linked from
     #6270), tracks the notification.
+11. **AMS humidity is the percent, `humidity_raw` (final review).** The LAN report's
+    `humidity` is Bambu's 1-5 level; the percent is `humidity_raw` (recorded H2C report:
+    `"humidity": "3"` beside `"humidity_raw": "29"`). `printers/status.py` `ams_units`
+    fills `AmsUnit.humidity` from `humidity_raw`, as Bambuddy's status gives a percent. A
+    report with no `humidity_raw` has no humidity and makes no humidity sensor.
+12. **A sensor under `alert_below` says "Below the limit" (final review).** `Sensor.alerting`
+    is true above `alert_above` and below `alert_below`, so `LocationSensors` says "Above
+    the limit" or "Below the limit" by which band the value left.

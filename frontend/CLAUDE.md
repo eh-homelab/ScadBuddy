@@ -263,7 +263,8 @@ same way, `vite.config.ts`).
   `filament_sync.tags` with "Save Filament", and the "RFID override mode" switch with "Apply now", #6264); the old anchors `#native-spools` and
   `#inventory` land on it. Colour is `#RRGGBBAA` (`lib/rgba.ts`). Mocks:
   `src/mocks/features/filament/` (`seed.ts` has 12 spools that cover the cases; `rfid.ts` owns
-  `/filament/rfid/*` and `…/ntag/*`). e2e: `e2e/filament.spec.ts`, `e2e/filament-rfid.spec.ts` and
+  `/filament/rfid/*` and `…/ntag/*`). e2e: `e2e/filament.spec.ts`, `e2e/filament-rfid.spec.ts`,
+  `e2e/filament-sensors.spec.ts` (a place's sensor, its limit and history, #6268) and
   `e2e/filament-purchasing.spec.ts` (a supplier, a price, an invoice confirmed into spools, and a
   total that cannot be confirmed), plus `hot-path.spec.ts` (SB spool numbers in the trays, no Bambuddy
   call), `settings.spec.ts` and `page-titles.spec.ts`. Sensors and weights (#6268):

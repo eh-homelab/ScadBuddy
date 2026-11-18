@@ -373,7 +373,8 @@ def sync_ams_weights(pool: ConnectionPool[Conn], *, actor: str, now: datetime) -
     there now, never an older one (an AMS-unit place holds no spool). Each such spool is
     counted once: ``booked``, ``locked`` (its weight is locked), ``printing`` (its printer
     is printing), ``no_remain`` (its tray shows no ``remain``, or none at all) or ``stale``
-    (its printer has no report, or one older than `is_fresh`). A spool in no tray place is
+    (its printer has no report, or one older than `is_fresh` or one that cannot be read:
+    that is logged, and the other printers go on). A spool in no tray place is
     not counted."""
     with pool.connection() as conn:
         ids = [
@@ -408,7 +409,22 @@ def sync_ams_weights(pool: ConnectionPool[Conn], *, actor: str, now: datetime) -
             if printing:
                 result.printing += len(holders)
                 continue
-            filled = {(t.ams_id, t.tray_id): t for t in seen_trays(_status(printer, report, now))}
+            try:
+                filled = {
+                    (t.ams_id, t.tray_id): t for t in seen_trays(_status(printer, report, now))
+                }
+            except Exception as error:
+                # A malformed stored report is one printer's problem, as in `reconcile_all`.
+                logger.warning(
+                    prints.FILAMENT_CAPTURE_FAILED,
+                    extra={
+                        "printer_id": printer_id,
+                        "what": "ams sync",
+                        "error": type(error).__name__,
+                    },
+                )
+                result.stale += len(holders)
+                continue
             for (ams_id, tray_id), place in places.items():
                 seen = filled.get((ams_id, tray_id))
                 for spool in current.get(place, []):

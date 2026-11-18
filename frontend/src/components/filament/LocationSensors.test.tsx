@@ -29,8 +29,17 @@ describe('the sensors of a place', () => {
   it('says a sensor is over its limit, with the limit', async () => {
     await show(L.SHELF_A)
     const row = screen.getByRole('listitem', { name: 'Shelf A humidity' })
-    expect(within(row).getByText('Over the limit')).toBeInTheDocument()
+    expect(within(row).getByText('Above the limit')).toBeInTheDocument()
     expect(within(row).getByText('Alert above 55 %')).toBeInTheDocument()
+  })
+
+  it('says a sensor is under its limit when the value is below the alert-below limit', async () => {
+    const [shelf] = await listSensors(L.SHELF_A)
+    const cold = { ...shelf!, name: 'Cold shelf', alert_above: null, alert_below: 10, last_value: 5, alerting: true }
+    renderPage(<LocationSensors locationId={L.SHELF_A} locationName="Place" sensors={[cold]} canAdd={false} onChanged={vi.fn()} />)
+    const row = screen.getByRole('listitem', { name: 'Cold shelf' })
+    expect(within(row).getByText('Below the limit')).toBeInTheDocument()
+    expect(within(row).queryByText('Above the limit')).toBeNull()
   })
 
   it('says a sensor cannot be reached', async () => {

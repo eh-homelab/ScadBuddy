@@ -144,7 +144,13 @@ def ams_units(report: dict[str, Any]) -> list[AmsUnit]:
     for entry in _list(units):
         if not isinstance(entry, dict):
             continue
-        unit = _valid(AmsUnit, {**entry, "tray": _trays(entry.get("tray"))})
+        # The LAN report's `humidity` is Bambu's 1-5 level; the percent is `humidity_raw`
+        # (recorded H2C report: "humidity": "3" beside "humidity_raw": "29"). `AmsUnit`
+        # holds the percent, as Bambuddy's status does, so a report without it has none.
+        unit = _valid(
+            AmsUnit,
+            {**entry, "humidity": entry.get("humidity_raw"), "tray": _trays(entry.get("tray"))},
+        )
         if unit is not None:
             found.append(unit)
     if bits is None:
