@@ -21,6 +21,8 @@ import { KValueTable } from '../../components/filament/KValueTable'
 import { kValueRowsError, type KPrinter } from '../../components/filament/kValueRows'
 import { PresetTable } from '../../components/filament/PresetTable'
 import { presetRowsError } from '../../components/filament/presetRows'
+import { PricePanel } from '../../components/filament/purchasing/PricePanel'
+import { useMoney } from '../../components/filament/purchasing/useMoney'
 import { RgbaColourField } from '../../components/filament/RgbaColourField'
 import { RgbaSwatch } from '../../components/filament/RgbaSwatch'
 import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
@@ -231,7 +233,8 @@ interface Lists {
 /**
  * #6262 — one type, `/filament/types/<id>` or `/filament/types/new`: what a spool of it is
  * (material, colour, weights, temperatures, price), the slicer presets it prints with per
- * printer model and nozzle, its pressure-advance K values, and the spools of it. Saving
+ * printer model and nozzle, its pressure-advance K values, the supplier prices it has
+ * (#6266; "Use as default cost" only fills the cost field, Save writes it), and the spools of it. Saving
  * sends one PATCH of what changed (a POST for a new type) and, when they changed, the
  * presets' and the K values' PUTs. Unsaved edits hold every way out (`useLeaveGuard`).
  */
@@ -248,6 +251,7 @@ export function TypePage() {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const money = useMoney()
 
   useEffect(() => {
     let live = true
@@ -461,6 +465,18 @@ export function TypePage() {
           </Field>
         </div>
       </div>
+
+      {!creating && (
+        <PricePanel
+          typeId={madeId ?? id}
+          currency={money.currency}
+          exponent={money.exponent}
+          onUseAsCost={(perKg, from) => {
+            set('cost_per_kg', perKg)
+            setNotice(`Cost per kg is now ${perKg}, from ${from}. Save the type to keep it.`)
+          }}
+        />
+      )}
 
       <section aria-label="Slicer presets" className="mt-6 flex flex-col gap-2">
         <h2 className="text-sm font-semibold tracking-tight">Slicer presets</h2>

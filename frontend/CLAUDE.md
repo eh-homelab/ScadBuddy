@@ -230,6 +230,9 @@ same way, `vite.config.ts`).
   Catalog, Shopping list and Ledger (`tabs.ts` lists Metrics as not available until #6269).
   Purchasing (#6266): `api/filamentPurchasing.ts`, the exact decimal strings of `lib/decimal.ts`
   (money never goes through `Number`), and the mocks `src/mocks/features/filamentPurchasing.ts`.
+  `TypePage` shows a saved type's supplier prices (`components/filament/purchasing/PricePanel.tsx`);
+  "Use as default cost" only fills the cost field as an unsaved edit, and the Types tab's
+  "Newest price" column reads the suppliers' price sheets.
   `/filament/spools/:id` (`SpoolPage`: sections, a "Go to section" select below
   1024 px, `OverrideField` with "Reset to type", `RgbaColourField` with Opaque, Translucent and
   Clear presets, `TagPanel` with "Tag is on spool #N — Move it here") and `/filament/types/:id`

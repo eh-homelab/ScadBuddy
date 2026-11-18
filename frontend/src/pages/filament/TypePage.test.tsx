@@ -225,3 +225,86 @@ describe('the type page', () => {
     expect(options).not.toContain('Silk')
   })
 })
+
+describe('the prices panel', () => {
+  const history = () => screen.findByRole('table', { name: 'Price history of Bambu Lab A00-W1' })
+  const dates = (table: HTMLElement) => within(table).getAllByRole('row').slice(1).map((row) => row.querySelector('time')?.getAttribute('datetime'))
+
+  it('lists the seeded history newest first, per pack and per kg', async () => {
+    render(`/filament/types/${T.JADE}`)
+    const table = await history()
+    expect(dates(table)).toEqual(['2026-10-08', '2026-09-14', '2026-08-02'])
+    const newest = within(table).getAllByRole('row')[1]!
+    expect(within(newest).getAllByText('$17.305')).toHaveLength(2)
+    expect(within(newest).getByText('Invoice')).toBeInTheDocument()
+    expect(within(table).getAllByText('Added by hand')).toHaveLength(2)
+    expect(screen.getByRole('img', { name: 'Price per kg of Bambu Lab A00-W1 over time' })).toBeInTheDocument()
+  })
+
+  it('fills the cost field with the newest per-kg price and sends nothing until Save', async () => {
+    const writes: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.method !== 'GET') writes.push(`${request.method} ${new URL(request.url).pathname}`)
+    })
+    const { user } = render(`/filament/types/${T.JADE}`)
+    await history()
+    const cost = screen.getByLabelText('Cost per kg')
+    expect(cost).toHaveValue('15.91')
+    expect(screen.getByRole('button', { name: 'Save type' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Use as default cost from Bambu Lab A00-W1' }))
+    expect((cost as HTMLInputElement).value).toMatch(/^17\.305/)
+    expect(screen.getByRole('status')).toHaveTextContent('Save the type to keep it')
+    expect(screen.getByRole('button', { name: 'Save type' })).toBeEnabled()
+    expect(writes).toEqual([])
+    expect((await getType(T.JADE)).cost_per_kg).toMatch(/^15\.91/)
+    await user.click(screen.getByRole('button', { name: 'Save type' }))
+    await waitFor(async () => expect((await getType(T.JADE)).cost_per_kg).toMatch(/^17\.305/))
+    expect(writes).toEqual([`PATCH /api/v1/filament/types/${T.JADE}`])
+  })
+
+  it('says a type with no price has none yet', async () => {
+    render(`/filament/types/${T.MISTLETOE}`)
+    expect(await screen.findByText(/No prices yet/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Use as default cost/ })).toBeNull()
+  })
+
+  it('is not on a new type', async () => {
+    render('/filament/types/new')
+    await code()
+    expect(screen.queryByRole('region', { name: 'Prices' })).toBeNull()
+  })
+
+  it('adds a price with the shared form and shows it first', async () => {
+    const { user } = render(`/filament/types/${T.JADE}`)
+    const table = await history()
+    await user.click(screen.getByRole('button', { name: 'Add price for Bambu Lab A00-W1' }))
+    await user.type(screen.getByLabelText('Price with tax for Bambu Lab A00-W1'), '17.25')
+    const date = screen.getByLabelText('Date for Bambu Lab A00-W1')
+    await user.clear(date)
+    await user.type(date, '2026-11-16')
+    await user.click(screen.getByRole('button', { name: 'Add price' }))
+    await waitFor(() => expect(dates(table)[0]).toBe('2026-11-16'))
+    expect(within(table).getAllByRole('row')[1]).toHaveTextContent('$17.25')
+  })
+
+  it('adds a supplier product for the type from the sheet', async () => {
+    const { user } = render(`/filament/types/${T.MISTLETOE}`)
+    await screen.findByText(/No prices yet/)
+    await user.click(screen.getByRole('button', { name: 'Add supplier product' }))
+    await choose(user, await screen.findByRole('combobox', { name: 'Supplier' }), 'Micro Center')
+    await user.type(screen.getByLabelText('SKU'), 'MC-MIST')
+    await user.click(screen.getByRole('button', { name: 'Add product' }))
+    expect(await screen.findByRole('article', { name: 'Micro Center MC-MIST' })).toBeInTheDocument()
+  })
+
+  it('refuses a product page that is not http or https', async () => {
+    const { user } = render(`/filament/types/${T.MISTLETOE}`)
+    await screen.findByText(/No prices yet/)
+    await user.click(screen.getByRole('button', { name: 'Add supplier product' }))
+    await choose(user, await screen.findByRole('combobox', { name: 'Supplier' }), 'Micro Center')
+    await user.type(screen.getByLabelText('SKU'), 'MC-MIST')
+    await user.type(screen.getByLabelText('Product page'), 'javascript:alert(1)')
+    await user.click(screen.getByRole('button', { name: 'Add product' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('must start with http')
+  })
+})

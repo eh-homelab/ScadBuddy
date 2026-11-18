@@ -5,6 +5,8 @@ import { formatCost } from '../../../lib/decimal'
 export interface ShopMoney {
   /** The shop's currency code, `null` until it is read. */
   currency: string | null
+  /** The shop currency's minor-unit digits (2 until it is read). */
+  exponent: number
   /** A decimal string in `currency` (the shop's when none is given), with the digits it holds. */
   format: (amount: string, currency?: string) => string
 }
@@ -26,6 +28,7 @@ export function useMoney(): ShopMoney {
   }, [])
   return {
     currency: shop?.currency ?? null,
+    exponent: shop?.exponent ?? 2,
     format: (amount, currency) => {
       const code = currency ?? shop?.currency ?? 'USD'
       return formatCost(amount, code, shop && shop.currency === code ? shop.exponent : 2)

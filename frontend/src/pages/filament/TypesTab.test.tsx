@@ -24,6 +24,15 @@ describe('the Types tab', () => {
     expect(orange.querySelector('[data-colour]')).toHaveAttribute('data-colour', '#FF6A1380')
   })
 
+  it('shows the newest per-kg price of a type from its suppliers', async () => {
+    renderPage(<TypesTab />)
+    const rows = typeRows(await types())
+    const jade = rows.find((row) => row.dataset.type === T.JADE)!
+    await waitFor(() => expect(within(jade).getByText('$17.305/kg')).toBeInTheDocument())
+    const mistletoe = rows.find((row) => row.dataset.type === T.MISTLETOE)!
+    expect(within(mistletoe).getByLabelText('No supplier price')).toBeInTheDocument()
+  })
+
   it('shows a type with no price as unpriced', async () => {
     renderPage(<TypesTab />)
     const mistletoe = typeRows(await types()).find((row) => row.dataset.type === T.MISTLETOE)!
