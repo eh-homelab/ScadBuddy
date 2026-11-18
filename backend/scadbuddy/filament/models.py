@@ -1318,6 +1318,14 @@ class LedgerRow(SpoolEvent):
     spool_number: int
 
 
+class StalePrinter(BaseModel):
+    """A printer whose spools an AMS sync counted as ``stale`` (#6679)."""
+
+    id: UUID
+    #: Its name; ``None`` when the printer has no row.
+    name: str | None = None
+
+
 class AmsSyncResult(BaseModel):
     """What one sync of the AMS's weights did (#6268). Each spool in a printer's tray place is
     in one count; a spool elsewhere is in none, and so is one placed in a tray while the
@@ -1332,6 +1340,8 @@ class AmsSyncResult(BaseModel):
     no_remain: int = 0
     #: Spools in a printer with no report or no row, or a report too old or unreadable.
     stale: int = 0
+    #: The printers whose spools are in ``stale``, by id, each once.
+    stale_printers: list[StalePrinter] = Field(default_factory=list)
     #: The spools booked.
     spools: list[UUID] = Field(default_factory=list)
 

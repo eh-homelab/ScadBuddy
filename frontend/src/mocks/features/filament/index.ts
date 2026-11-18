@@ -365,7 +365,7 @@ const REFUSED = {
   tagUnnamed: 'the tag has no tag_uid or tray_uuid once cleaned',
   tagKeysClash: 'the tag_uid and the tray_uuid name two different tags',
   rowsDuplicate: 'two rows name the same printer and nozzle',
-  locationExists: 'a place with that name or that tray already exists',
+  locationExists: 'a place with that name, that tray or that AMS unit already exists',
   locationCycle: 'a place cannot be its own parent or sit under one of its own',
   moveTarget: "the place to move to does not exist, is archived or is an AMS unit's place",
   badCursor: 'the cursor is not one this ledger gave',
@@ -1349,7 +1349,7 @@ export const handlers = [
 
   // -- AMS weights (#6268): the mock books the same three spools, skipping one locked and two on a printing printer --
   http.post(`${BASE}/spools/sync-ams-weights`, () =>
-    HttpResponse.json({ booked: 3, locked: 1, printing: 2, no_remain: 0, stale: 0, spools: [spoolId(1), spoolId(4), spoolId(8)] } satisfies S['AmsSyncResult']),
+    HttpResponse.json({ booked: 3, locked: 1, printing: 2, no_remain: 0, stale: 0, stale_printers: [], spools: [spoolId(1), spoolId(4), spoolId(8)] } satisfies S['AmsSyncResult']),
   ),
 
   // -- location sensors (#6268) --

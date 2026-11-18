@@ -472,12 +472,14 @@ describe('filament sensor and AMS weight tools (#6268)', () => {
     expect(tool('filament_sync_ams_weights').description).toMatch(/locked/)
     expect(tool('filament_sync_ams_weights').description).toMatch(/printing/)
     expect(tool('filament_sync_ams_weights').description).toMatch(/RFID/)
+    // #6679: the agent can name which printers had no fresh report.
+    expect(tool('filament_sync_ams_weights').description).toMatch(/`stale_printers`.*`name`/)
     expect(tool('filament_sensor_save').description).toMatch(/AMS sensor cannot be made by hand/)
     expect(tool('filament_sensor_save').description).toMatch(/shown, not sent/)
   })
 
   it('syncs the AMS weights with one POST and no body', async () => {
-    const result = { booked: 1, locked: 0, printing: 0, no_remain: 0, stale: 0, spools: [ROW] }
+    const result = { booked: 1, locked: 0, printing: 0, no_remain: 0, stale: 0, stale_printers: [], spools: [ROW] }
     let calls = 0
     server.use(
       http.post(`${BACKEND}/api/v1/filament/spools/sync-ams-weights`, () => {

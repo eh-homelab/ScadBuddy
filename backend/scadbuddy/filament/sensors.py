@@ -53,11 +53,14 @@ class SensorStore:
         self._pool = pool
 
     def list(self, location_id: UUID | None) -> list[m.Sensor]:
-        """The unarchived sensors, of one place or of all, by name."""
+        """The unarchived sensors on unarchived places, of one place or of all, by name. A
+        sensor whose place is archived is hidden with it (#6679)."""
         where, args = ("", []) if location_id is None else (" AND location_id = %s", [location_id])
         with self._pool.connection() as conn:
             rows = conn.execute(
                 f"SELECT {_COLUMNS} FROM filament_location_sensors WHERE archived_at IS NULL"
+                " AND location_id IN"
+                " (SELECT id FROM filament_locations WHERE archived_at IS NULL)"
                 f"{where} ORDER BY upper(name), id",
                 args,
             ).fetchall()
@@ -204,14 +207,18 @@ _PLAIN_NUMBER = re.compile(r"[+-]?(\d+\.?\d*|\.\d+)")
 
 def apply_ha_states_on(conn: Conn, states: dict[str, str | None], at: datetime) -> tuple[int, int]:
     """Read ``states`` (Home Assistant's entity ids and their states) into each
-    unarchived Home Assistant sensor, on ``conn`` and in the caller's transaction. A plain
+    unarchived Home Assistant sensor on an unarchived place, on ``conn`` and in the
+    caller's transaction. A sensor whose place is archived is skipped: it gets no reading
+    and is not marked unreachable, so no reading lands on a hidden place (#6679). A plain
     finite number is `SensorStore.record_on`'s at ``at``. A state that is not one
     (``unavailable``, ``unknown``, ``45.2 %``, empty, none, or digits too many for a
     float), or an entity ``states`` lacks, stores nothing
     and marks the sensor unreachable. Answers how many sensors read and how many did not."""
     rows = conn.execute(
-        "SELECT id, entity_id FROM filament_location_sensors"
-        " WHERE source = 'home_assistant' AND archived_at IS NULL"
+        "SELECT s.id, s.entity_id FROM filament_location_sensors s"
+        " JOIN filament_locations l ON l.id = s.location_id"
+        " WHERE s.source = 'home_assistant' AND s.archived_at IS NULL"
+        " AND l.archived_at IS NULL"
     ).fetchall()
     read = unreachable = 0
     for row in rows:
