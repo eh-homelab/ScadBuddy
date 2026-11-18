@@ -234,6 +234,19 @@ def test_an_import_run_is_set_and_claimed_only_from_the_value_read(client: TestC
     assert client.patch(url, json={"if_import_run_id": "x"}).status_code == 409
 
 
+def test_an_import_run_already_on_another_invoice_is_a_409(client: TestClient) -> None:
+    supplier = _supplier(client)
+    one = client.post(f"{URL}/invoices", json=_invoice_body(supplier)).json()
+    two = client.post(f"{URL}/invoices", json=_invoice_body(supplier)).json()
+    assert (
+        client.patch(f"{URL}/invoices/{one['id']}", json={"import_run_id": "s-1"}).status_code
+        == 200
+    )
+    refused = client.patch(f"{URL}/invoices/{two['id']}", json={"import_run_id": "s-1"})
+    assert refused.status_code == 409, refused.text
+    assert client.get(f"{URL}/invoices/{two['id']}").json()["import_run_id"] is None
+
+
 def test_mixed_line_tax_is_a_422(client: TestClient) -> None:
     lines = [
         {"description": "a", "quantity": 1, "unit_price": "40", "line_tax": "3"},

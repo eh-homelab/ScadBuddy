@@ -6,7 +6,7 @@ import { browserUser } from '../auth/browserSession.js'
 import { invoiceImportPrompt } from '../filament/invoiceImportPrompt.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { checkedAttachments, DOCUMENT_MEDIA_TYPES, IMAGE_MEDIA_TYPES, unsupported } from '../sessions/images.js'
-import type { SessionManager } from '../sessions/manager.js'
+import { SessionError, type SessionManager } from '../sessions/manager.js'
 import { authored, authorHeaders } from '../tools/authorship.js'
 import { jsonBodyLimit, type RemoteAddress, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
@@ -16,8 +16,8 @@ import { ready, type RouteModule } from './module.js'
 //
 //   POST /api/v1/ai/filament/invoice-import   {invoice_id} → {session_id}
 //
-// It starts one assistant session whose first message is the import prompt
-// (filament/invoiceImportPrompt.ts) with the invoice's file attached, and links the session to the
+// It starts one assistant session, links it to the invoice, and only then sends it the import prompt
+// (filament/invoiceImportPrompt.ts) with the invoice's file attached. It links the session to the
 // invoice as its `import_run_id`. It starts the session through the manager, as POST
 // /api/v1/ai/sessions does (routes/sessions.ts), as the browser user; it reaches the invoice
 // through the backend's /api/v1/filament routes with the agent's service credential (#5295).
@@ -29,14 +29,17 @@ import { ready, type RouteModule } from './module.js'
 //        and a new import replaces it
 //   422  the invoice has no file, or a file type ScadBuddy cannot read (the person's own sentence
 //        as `detail`, Review Focus 5)
-//   502  the session started but could not be linked (`session_id` names it): it is stopped, as
-//        a rival's would be. Ending it is refused while its turn runs, so stopping is what is
-//        possible; a retry then starts a clean one
+//   502  the session started but could not be linked (`session_id` names it): it is archived,
+//        and it ran no turn; a retry then starts a clean one
+//
+// The order is: start the session with no prompt (no turn runs), claim the link, then send the
+// import prompt and the file as its first message. A lost claim or a failed link therefore runs
+// no agent and its session is archived, so nothing is left in the person's list.
 //
 // Two calls at once: one in-process queue per invoice makes the second wait for the first and
 // then find its live session (409). A call on another replica is caught by the backend: the link
 // is written only while `import_run_id` is still the value this call read (`if_import_run_id`,
-// one UPDATE under the invoice's row lock), so the loser's write is refused and its session stops.
+// one UPDATE under the invoice's row lock), so the loser's write is refused and its (turnless) session is archived.
 
 declare module '../app.js' {
   interface AppDeps {
@@ -88,9 +91,18 @@ export function registerInvoiceImportRoutes(app: Hono, deps: InvoiceImportDeps):
     try {
       const session = await sessions.get(id, owner)
       return session.archivedAt === null && !ENDED.has(session.status)
-    } catch {
-      return false
+    } catch (err) {
+      // Only "no such session" means gone; any other error is not an answer, so it reaches the route (502).
+      if (err instanceof SessionError && err.code === 'not_found') return false
+      throw err
     }
+  }
+
+  /** Puts away a session this call made and will not use, so no "Import invoice" session is left in the list. */
+  async function putAway(sessions: SessionManager, id: string, owner: ReturnType<typeof browserUser>): Promise<void> {
+    await sessions.edits.update(id, owner, { archived: true }).catch((err: unknown) => {
+      console.error(`invoice import: could not archive the unused session ${id}: ${String(err)}`)
+    })
   }
 
   async function start(
@@ -124,20 +136,27 @@ export function registerInvoiceImportRoutes(app: Hono, deps: InvoiceImportDeps):
     const attachments = checkedAttachments([{ mediaType, bytes: Buffer.from(file.data as ArrayBuffer) }])
     if (!attachments.ok) return answer(422, { detail: attachments.error })
 
+    // No prompt: no turn runs until the link is claimed, so a lost claim never runs an agent.
     const { session } = await sessions.start(owner, {
       origin: 'chat',
       title: `Import invoice ${invoice.number ?? invoice.file.name}`,
-      prompt: invoiceImportPrompt(invoiceId),
-      images: attachments.attachments,
     })
 
     const linked = await backend.PATCH('/api/v1/filament/invoices/{invoice_id}', {
       params: { path: { invoice_id: invoiceId } },
       body: { import_run_id: session.id, if_import_run_id: running },
     })
-    if (linked.error === undefined) return answer(200, { session_id: session.id })
+    if (linked.error === undefined) {
+      try {
+        await sessions.send(session.id, owner, invoiceImportPrompt(invoiceId), { images: attachments.attachments })
+      } catch (err) {
+        await putAway(sessions, session.id, owner)
+        throw err
+      }
+      return answer(200, { session_id: session.id })
+    }
 
-    await sessions.interrupt(session.id, owner).catch(() => false)
+    await putAway(sessions, session.id, owner)
     if (linked.response.status === 409) {
       // A rival linked its session first (or the invoice was confirmed meanwhile): theirs stands.
       const now = await backend.GET('/api/v1/filament/invoices/{invoice_id}', { params: { path: { invoice_id: invoiceId } } })
@@ -147,7 +166,7 @@ export function registerInvoiceImportRoutes(app: Hono, deps: InvoiceImportDeps):
     }
     console.error(`invoice import: the backend answered HTTP ${linked.response.status} linking session ${session.id} to invoice ${invoiceId}`)
     return answer(502, {
-      detail: `The import session ${session.id} started, but ScadBuddy could not link it to the invoice, so it was stopped. Try again.`,
+      detail: `The import session ${session.id} started, but ScadBuddy could not link it to the invoice, so it was put away. Try again.`,
       type: 'upstream_error',
       session_id: session.id,
     })
@@ -176,7 +195,10 @@ export function registerInvoiceImportRoutes(app: Hono, deps: InvoiceImportDeps):
     const owner = browserUser(c)
     const backend = authored(deps.backend, authorHeaders({ id: owner.id, kind: 'browser', tiers: [] }, undefined, TOOL))
     const { invoice_id: id } = body.data
-    const done = await serially(id, () => start(deps.sessions as SessionManager, backend, id, owner))
+    const done = await serially(id, () => start(deps.sessions as SessionManager, backend, id, owner)).catch((err: unknown) => {
+      console.error(`invoice import: invoice ${id} failed: ${String(err)}`)
+      return answer(502, { detail: 'The import could not start. Try again.', type: 'upstream_error' })
+    })
     return c.json(done.body, done.status)
   })
 }

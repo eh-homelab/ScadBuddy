@@ -60,16 +60,21 @@ function fakeBackend(over: Partial<Invoice> = {}, file: Buffer = PDF) {
   return { backend, invoice, patches, authors, patchRefusal, beforePatch }
 }
 
-type Started = { prompt?: string; title?: string; images?: readonly { mediaType: string; bytes: Buffer }[]; origin: string }
+type Started = { title?: string; origin: string; prompt?: string }
+type Sent = { id: string; prompt: string; images?: readonly { mediaType: string; bytes: Buffer }[] }
 
 /** The session manager's three calls the route makes, over a map of sessions. */
 function fakeSessions() {
   const rows = new Map<string, { status: string; archivedAt: string | null }>()
   const started: Started[] = []
-  const interrupted: string[] = []
+  const sent: Sent[] = []
+  const archived: string[] = []
+  /** Set to make `get` fail with this error for every id. */
+  const getFails: { error: Error | null } = { error: null }
   let next = 0
   const sessions = {
     async get(id: string) {
+      if (getFails.error) throw getFails.error
       const row = rows.get(id)
       if (!row) throw new SessionError('not_found', `no session ${id}`)
       return { id, ...row }
@@ -77,16 +82,22 @@ function fakeSessions() {
     async start(_owner: unknown, options: Started) {
       started.push(options)
       const id = `s-${++next}`
-      rows.set(id, { status: 'running', archivedAt: null })
+      rows.set(id, { status: 'idle', archivedAt: null })
       await Promise.resolve()
-      return { session: { id }, turn: { turnId: `t-${next}` } }
+      return { session: { id } }
     },
-    async interrupt(id: string) {
-      interrupted.push(id)
-      return true
+    async send(id: string, _owner: unknown, prompt: string, options: { images?: Sent['images'] } = {}) {
+      sent.push({ id, prompt, ...(options.images ? { images: options.images } : {}) })
+      return { turnId: `t-${sent.length}` }
+    },
+    edits: {
+      async update(id: string, _owner: unknown, edit: { archived?: boolean }) {
+        if (edit.archived) archived.push(id)
+        return { id }
+      },
     },
   }
-  return { sessions, rows, started, interrupted }
+  return { sessions, rows, started, sent, archived, getFails }
 }
 
 function app(backend: ReturnType<typeof fakeBackend>['backend'], fake = fakeSessions(), ready = true) {
@@ -111,14 +122,17 @@ const post = (hono: Hono, body: unknown = { invoice_id: INVOICE }, headers: Reco
 describe('starting an invoice import (#6267)', () => {
   it('starts a session whose first message names the invoice and the skill, attaches the file, and links it', async () => {
     const b = fakeBackend()
-    const { hono, started } = app(b.backend)
+    const { hono, started, sent } = app(b.backend)
     const res = await post(hono)
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({ session_id: 's-1' })
     expect(started).toHaveLength(1)
-    const first = started[0]!
-    expect(first.title).toBe('Import invoice INV-77')
-    expect(first.origin).toBe('chat')
+    expect(started[0]!.prompt).toBeUndefined()
+    expect(started[0]!.title).toBe('Import invoice INV-77')
+    expect(started[0]!.origin).toBe('chat')
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.id).toBe('s-1')
+    const first = sent[0]!
     expect(first.prompt).toContain(INVOICE)
     expect(first.prompt).toContain('`filament` skill')
     expect(first.prompt).toContain('filament_invoice_candidates')
@@ -134,10 +148,10 @@ describe('starting an invoice import (#6267)', () => {
 
   it('titles the session by the file name when the invoice has no number, and attaches an image as an image', async () => {
     const b = fakeBackend({ number: null, file: { name: 'scan.png', media_type: 'image/png', size: PNG.length } }, PNG)
-    const { hono, started } = app(b.backend)
+    const { hono, started, sent } = app(b.backend)
     expect((await post(hono)).status).toBe(200)
     expect(started[0]!.title).toBe('Import invoice scan.png')
-    expect(started[0]!.images![0]!.mediaType).toBe('image/png')
+    expect(sent[0]!.images![0]!.mediaType).toBe('image/png')
   })
 
   it('answers 409 for a confirmed invoice and starts nothing', async () => {
@@ -221,7 +235,7 @@ describe('starting an invoice import (#6267)', () => {
     expect(b.invoice.import_run_id).toBe('s-1')
   })
 
-  it('loses a race with another replica cleanly: the conditional write is refused, its session stops, and the winner’s id is answered', async () => {
+  it('loses a race with another replica cleanly: the conditional write is refused, no turn runs, its session is archived, and the winner’s id is answered', async () => {
     const b = fakeBackend()
     const fake = fakeSessions()
     fake.rows.set('s-rival', { status: 'running', archivedAt: null })
@@ -229,25 +243,49 @@ describe('starting an invoice import (#6267)', () => {
     b.beforePatch.run = () => {
       b.invoice.import_run_id = 's-rival'
     }
-    const { hono, started, interrupted } = app(b.backend, fake)
+    const { hono, started, sent, archived } = app(b.backend, fake)
     const res = await post(hono)
     expect(res.status).toBe(409)
     expect(await res.json()).toMatchObject({ session_id: 's-rival' })
     expect(started).toHaveLength(1)
-    expect(interrupted).toEqual(['s-1'])
+    expect(sent).toEqual([])
+    expect(archived).toEqual(['s-1'])
     expect(b.invoice.import_run_id).toBe('s-rival')
   })
 
-  it('answers 502 naming the session when the link cannot be written, and stops it', async () => {
+  it('answers 502 naming the session when the link cannot be written, runs no turn and archives it', async () => {
     const b = fakeBackend()
     b.patchRefusal.status = 500
-    const { hono, interrupted } = app(b.backend)
+    const { hono, sent, archived } = app(b.backend)
     const res = await post(hono)
     expect(res.status).toBe(502)
+    expect(sent).toEqual([])
+    expect(archived).toEqual(['s-1'])
     const body = (await res.json()) as { detail: string; session_id: string }
     expect(body.session_id).toBe('s-1')
     expect(body.detail).toContain('s-1')
-    expect(interrupted).toEqual(['s-1'])
+  })
+
+  it('answers 502, and starts no duplicate, when reading the linked session fails for any reason but not-found', async () => {
+    const b = fakeBackend({ import_run_id: 's-live' })
+    const fake = fakeSessions()
+    fake.getFails.error = new Error('connection reset')
+    const { hono, started } = app(b.backend, fake)
+    const res = await post(hono)
+    expect(res.status).toBe(502)
+    expect(started).toEqual([])
+    expect(b.patches).toEqual([])
+  })
+
+  it('archives the session when the first message cannot be sent, so a retry starts a clean one', async () => {
+    const b = fakeBackend()
+    const fake = fakeSessions()
+    fake.sessions.send = async () => {
+      throw new Error('no worker')
+    }
+    const { hono, archived } = app(b.backend, fake)
+    expect((await post(hono)).status).toBe(502)
+    expect(archived).toEqual(['s-1'])
   })
 
   it('answers the backend’s 404 for no such invoice', async () => {

@@ -84,8 +84,8 @@ class DuplicateInvoiceError(ValueError):
 class ImportRunChangedError(ValueError):
     """The write named the import run it read, and another run holds the invoice now."""
 
-    def __init__(self) -> None:
-        super().__init__("the invoice's import run changed since it was read")
+    def __init__(self, message: str = "the invoice's import run changed since it was read") -> None:
+        super().__init__(message)
 
 
 class InvoiceConfirmedError(ValueError):
@@ -431,10 +431,14 @@ class InvoiceStore:
                 if supplier_id is None
                 else self._taken(supplier_id, self._number(patch, invoice_id), invoice_id)
             )
-            if taken is None:
-                # Not the number index (the only unique index an update can break).
-                raise
-            raise DuplicateInvoiceError(taken) from None
+            if taken is not None:
+                raise DuplicateInvoiceError(taken) from None
+            if patch.import_run_id is not None:
+                # The import-run index: another invoice already holds that run.
+                raise ImportRunChangedError(
+                    "another invoice already holds that import run"
+                ) from None
+            raise
         except errors.ForeignKeyViolation:
             raise InvoiceRefError() from None
         except (errors.CheckViolation, errors.DataError) as exc:
