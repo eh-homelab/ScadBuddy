@@ -20,6 +20,7 @@ const CustomizePage = lazyRetry(async () => ({ default: (await import('./pages/C
 const EditPage = lazyRetry(async () => ({ default: (await import('./pages/EditPage')).EditPage }))
 const SpoolPage = lazyRetry(async () => ({ default: (await import('./pages/filament/SpoolPage')).SpoolPage }))
 const TypePage = lazyRetry(async () => ({ default: (await import('./pages/filament/TypePage')).TypePage }))
+const SupplierPage = lazyRetry(async () => ({ default: (await import('./pages/filament/SupplierPage')).SupplierPage }))
 const FilamentPage = lazyRetry(async () => ({ default: (await import('./pages/filament/FilamentPage')).FilamentPage }))
 const FlowPage = lazyRetry(async () => ({ default: (await import('./pages/FlowPage')).FlowPage }))
 const HistoryPage = lazyRetry(async () => ({ default: (await import('./pages/HistoryPage')).HistoryPage }))
@@ -116,7 +117,7 @@ export function App() {
         <Route path="filament" element={<Navigate to={FILAMENT_HOME} replace />} />
         <Route path="filament/spools/:id" element={<SpoolPage />} />
         <Route path="filament/types/:id" element={<TypePage />} />
-        <Route path="filament/suppliers/:id" element={<FilamentPage tab="suppliers" />} />
+        <Route path="filament/suppliers/:id" element={<SupplierPage />} />
         <Route path="filament/invoices/:id" element={<FilamentPage tab="invoices" />} />
         {/* One literal path per available tab (`pages/filament/tabs.ts`): e2e/page-titles.spec.ts reads these. */}
         <Route path="filament/spools" element={<FilamentPage tab="spools" />} />
