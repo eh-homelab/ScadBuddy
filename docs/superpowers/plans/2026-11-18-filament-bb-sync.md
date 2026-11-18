@@ -734,6 +734,19 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     says it lists the backend's `Scope` labels, and a 403 on a filament-catalog write carries that
     label. Cost: none known. `'Manage Inventory'` is missing from the union on main too; this
     commit leaves it, as the review asked for the new label only.
+23. Task 3: `seen_row` keeps `archived_at` (the archive state), the `weights`, `presets` and
+    `locations` fields and the spool's `suppliers` (each link restricted to what `PUT …/suppliers`
+    sends, sorted by `supplier_id`), but not `k_profiles`. Why: Decision 14 lists them; the brief
+    gives the K-profiles their own column, `filament_bb_links.bb_k_profiles`. Cost: a consumer that
+    compares K values reads that column, not `bb_seen`.
+24. Task 3: in `bb_seen`, `extra_colors` is a list of `#RRGGBBAA` (as `snapshot`'s
+    `extra_colours`), and a value `normalise_rgba` refuses reads as `None` (as the pull reads it).
+    Times are ISO text (`model_dump(mode="json")`). Why: F17's one canonical form for compare and
+    hash, and `bb_seen` is jsonb. Cost: Task 4 sends `extra_colors` to Bambuddy comma-joined
+    without `#`, so it converts at the edge.
+25. Task 3: the new tables' `kind` and `sb_id` key columns carry no `NOT NULL`, as the brief's
+    SQL gives them; a primary key makes them not null anyway. `Kind` and `Op` are module-level
+    `Literal`s in `bb_sync_models.py`. Why: the brief's values verbatim. Cost: none known.
 
 ## Self-review
 
