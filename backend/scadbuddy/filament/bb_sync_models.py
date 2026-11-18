@@ -12,11 +12,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel, Field
-from pydantic_core import to_jsonable_python
 
 from scadbuddy.bambuddy.models import (
     BbLocation,
@@ -80,42 +79,60 @@ _SUPPLIER_FIELDS = frozenset(
 _FLOAT_FIELDS = frozenset({"cost_per_kg", "weight_used"})
 
 
+def json_form(value: object) -> object:
+    """``value`` in the one JSON form of a ``bb_seen`` value, item by item through lists and
+    dicts: a `Decimal` is a float, a datetime is UTC ISO text ending in ``Z`` (a naive one
+    counts as UTC), anything else stays. `seen_row` and `seen_value` both use it, so the
+    stored form and SB's form cannot differ."""
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, datetime):
+        return as_utc(value).astimezone(UTC).isoformat().replace("+00:00", "Z")
+    if isinstance(value, list | tuple):
+        return [json_form(v) for v in value]
+    if isinstance(value, dict):
+        return {k: json_form(v) for k, v in value.items()}
+    return value
+
+
+def _suppliers_form(links: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The supplier links as the sync compares them: what ``PUT …/suppliers`` sends, sorted
+    by ``supplier_id``."""
+    rows = [{k: v for k, v in link.items() if k in _SUPPLIER_FIELDS} for link in links]
+    forms: list[dict[str, Any]] = [cast("dict[str, Any]", json_form(r)) for r in rows]
+    return sorted(forms, key=lambda r: r["supplier_id"])
+
+
 def seen_value(field: str, value: object) -> object:
-    """An SB ``value`` for the `SEEN_FIELDS` name ``field``, in exactly the JSON form
-    `seen_row` stores for it: a `Decimal` or an int of a float field is a float, a
-    datetime is UTC ISO text ending in ``Z``, ``rgba`` is ``#RRGGBBAA``, ``None`` stays
-    ``None``. The plan compares and hashes SB's side through this, never raw (M2 of the
-    Task 3 review). The archive state is compared as ``archived_at is None``, not by time."""
+    """An SB ``value`` for the `SEEN_FIELDS` name ``field``, in exactly the form `seen_row`
+    stores for it (`json_form`; ``rgba`` and ``extra_colors`` canonical; a float field's int
+    a float; the supplier links as `_suppliers_form`). The plan compares and hashes SB's
+    side through this, never raw (M2 of the Task 3 review). The archive state is compared
+    as ``archived_at is None``, not by time."""
     if value is None:
         return None
     if field in _FLOAT_FIELDS and isinstance(value, Decimal | int):
         return float(value)
     if field == "rgba" and isinstance(value, str):
         return canonical_rgba(value)
-    if isinstance(value, datetime):
-        value = as_utc(value).astimezone(UTC)
-    return to_jsonable_python(value)
+    if field == "extra_colors":
+        text = ",".join(value) if isinstance(value, list | tuple) else value
+        return canonical_colours(text if isinstance(text, str) else None)
+    if field == "suppliers":
+        return _suppliers_form(cast("list[dict[str, Any]]", list(cast("list[Any]", value))))
+    return json_form(value)
 
 
 def seen_row(row: BbSpool) -> dict[str, Any]:
     """Bambuddy's spool ``row`` as a link's ``bb_seen`` (F5): the `SEEN_FIELDS` only,
-    keyed by BB's names, as JSON (times as ISO text). ``rgba`` and ``extra_colors`` are in
-    the canonical form the plan hashes and compares (Decision 14, F17): ``#RRGGBBAA``
-    through `normalise_rgba`, ``extra_colors`` a list of them; the supplier links keep
-    what ``PUT …/suppliers`` sends, by ``supplier_id``.
+    keyed by BB's names, in `json_form` (times as UTC ISO text). ``rgba`` and
+    ``extra_colors`` are in the canonical form the plan hashes and compares (Decision 14,
+    F17): ``#RRGGBBAA``, ``extra_colors`` a list of them; the supplier links keep what
+    ``PUT …/suppliers`` sends, by ``supplier_id``.
 
     `bambuddy_pull.snapshot` is another shape, for the ``synced_from_bb`` event only."""
-    seen = row.model_dump(mode="json", include=set(SEEN_FIELDS))
-    seen["rgba"] = canonical_rgba(row.rgba)
-    seen["extra_colors"] = canonical_colours(row.extra_colors)
-    seen["suppliers"] = sorted(
-        (
-            {k: v for k, v in s.model_dump(mode="json").items() if k in _SUPPLIER_FIELDS}
-            for s in row.suppliers
-        ),
-        key=lambda s: s["supplier_id"],
-    )
-    return seen
+    raw = row.model_dump(include=set(SEEN_FIELDS))
+    return {k: seen_value(k, v) for k, v in raw.items()}
 
 
 class BbSnapshot(BaseModel, extra="forbid"):

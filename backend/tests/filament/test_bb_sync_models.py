@@ -199,3 +199,67 @@ def test_an_int_weight_used_is_the_seen_float() -> None:
     assert sb == seen == 0.0 and isinstance(sb, float)
     assert _hash(sb) == _hash(seen)
     assert seen_value("note", None) is None
+
+
+def test_seen_value_is_seen_row_for_every_field() -> None:
+    """One BB row and its SB-side values (SB's types: Decimal, tz-aware times, ints for
+    floats, SB's colour forms): ``seen_value`` equals ``seen_row`` for all 25 fields, and
+    so do the hashes."""
+    ist = timezone(timedelta(hours=5, minutes=30))
+    bb = next(r for r in recording("inventory-spools.json") if r["id"] == 9) | {
+        "rgba": "68819780",
+        "extra_colors": "ff0000,00FF0080",
+        "cost_per_kg": 19.5,
+        "weight_used": 12.0,
+        "archived_at": "2026-11-02T08:00:00",
+        "last_dried_at": "2026-11-01T10:00:00",
+        "note": "shelf 2",
+        "low_stock_threshold_pct": 15,
+        "suppliers": [
+            {
+                "id": 4,
+                "supplier_id": 9,
+                "supplier_name": "Other",
+                "supplier_article_number": None,
+                "quoted_price_per_kg": 21.0,
+                "is_purchase_source": False,
+            },
+            {
+                "id": 3,
+                "supplier_id": 7,
+                "supplier_name": "Shop",
+                "supplier_article_number": "A-1",
+                "quoted_price_per_kg": 19.5,
+                "is_purchase_source": True,
+            },
+        ],
+    }
+    seen = seen_row(BbSpool.model_validate(bb))
+    sb = {f: bb.get(f) for f in _DECISION_14_FIELDS}
+    sb |= {
+        "rgba": "#68819780",
+        "extra_colors": ["#ff0000", "#00ff0080"],
+        "cost_per_kg": Decimal("19.5000"),
+        "weight_used": 12,
+        "archived_at": datetime(2026, 11, 2, 13, 30, tzinfo=ist),
+        "last_dried_at": datetime(2026, 11, 1, 15, 30, tzinfo=ist),
+        "suppliers": [
+            {
+                "supplier_id": 7,
+                "supplier_article_number": "A-1",
+                "quoted_price_per_kg": Decimal("19.50"),
+                "is_purchase_source": True,
+                "name": "ignored",
+            },
+            {
+                "supplier_id": 9,
+                "supplier_article_number": None,
+                "quoted_price_per_kg": Decimal("21"),
+                "is_purchase_source": False,
+            },
+        ][::-1],
+    }
+    assert set(sb) == _DECISION_14_FIELDS == set(seen)
+    for field in sorted(_DECISION_14_FIELDS):
+        assert seen_value(field, sb[field]) == seen[field], field
+        assert _hash(seen_value(field, sb[field])) == _hash(seen[field]), field

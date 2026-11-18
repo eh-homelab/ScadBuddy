@@ -732,8 +732,8 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
 22. Task 3 (Task 2 review minor): the agent's `BambuddyScope` union (`agent/src/tools/registry.ts`)
     names `'Filament catalog (admin only)'`, the label of `Scope.ADMIN_FILAMENTS`. Why: the type
     says it lists the backend's `Scope` labels, and a 403 on a filament-catalog write carries that
-    label. Cost: none known. `'Manage Inventory'` is missing from the union on main too; this
-    commit leaves it, as the review asked for the new label only.
+    label. Cost: none known. Decision 29 added `'Manage Inventory'`, which was missing from
+    the union on main too.
 23. Task 3: `seen_row` keeps `archived_at` (the archive state), the `weights`, `presets` and
     `locations` fields and the spool's `suppliers` (each link restricted to what `PUT …/suppliers`
     sends, sorted by `supplier_id`), but not `k_profiles`. Why: Decision 14 lists them; the brief
@@ -772,6 +772,15 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     `PUT .../suppliers` and `PUT .../k-profiles`, it checks in Task 2's recordings that each
     answer is a full `SpoolResponse`. Where an answer is not, Task 5 reads the spool with a
     GET (`GET` only) and stores that.
+32. Task 3 (R-T3-7): `json_form(value)` in `bb_sync_models.py` is the one recursive JSON form of a
+    `bb_seen` value: a Decimal is a float, a datetime is UTC ISO text ending in `Z` (a naive one
+    counts as UTC), lists and dicts go item by item. `seen_row` and `seen_value` both use it,
+    `rgba` and `extra_colors` also go through `canonical_rgba` and `canonical_colours`, and
+    `seen_value("suppliers", ...)` keeps what `seen_row` keeps (the `PUT .../suppliers` fields,
+    sorted by `supplier_id`). Why: the stored form and SB's form cannot differ (I-1, M-1, M-2 of
+    the Task 3 re-review). Cost: a table test builds one BB row and its SB-side values.
+33. Task 3 (R-T3-8): Decision 22's note says Decision 29 added `Manage Inventory`. Why: the old
+    note said it was left out, which was false once item 29 landed.
 
 ## Self-review
 
