@@ -728,6 +728,9 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'filament_location_upsert',
   'filament_spool_move',
   'filament_bambuddy_import',
+  'filament_sync_ams_weights',
+  'filament_sensor_save',
+  'filament_sensor_archive',
   'filament_spool_import',
   // #6264: the RFID override mode, its reconcile and the NTAG write calls touch the filament
   // inventory (or a SpoolBuddy reader), and none is a recorded resource kind.

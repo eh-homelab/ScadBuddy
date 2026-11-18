@@ -237,8 +237,29 @@ describe('starting an invoice import (#6267)', () => {
   it('refuses a file whose bytes are not the type it names', async () => {
     const b = fakeBackend({}, Buffer.from('not a pdf'))
     const { hono, started } = app(b.backend)
-    expect((await post(hono)).status).toBe(422)
+    const res = await post(hono)
+    expect(res.status).toBe(422)
+    expect(await res.json()).toEqual({
+      detail: 'This file is not a readable PDF or photo. Upload it again or use another file.',
+      type: 'unreadable_file',
+    })
     expect(started).toEqual([])
+  })
+
+  it('does not name a rival session that is gone when it wins the race: answers 502 and no session_id', async () => {
+    const b = fakeBackend()
+    const fake = fakeSessions()
+    fake.rows.set('s-rival', { status: 'done', archivedAt: null })
+    b.beforePatch.run = () => {
+      b.invoice.import_run_id = 's-rival'
+    }
+    const { hono, sent } = app(b.backend, fake)
+    const res = await post(hono)
+    expect(res.status).toBe(502)
+    const body = await res.json()
+    expect(body).toMatchObject({ type: 'upstream_error', detail: 'The import could not start. Try again.' })
+    expect(body).not.toHaveProperty('session_id')
+    expect(sent).toEqual([])
   })
 
   it('answers 409 with the live session’s id, so the page opens it (Review Focus 2)', async () => {

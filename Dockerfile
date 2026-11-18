@@ -169,6 +169,8 @@ ENV SCADBUDDY_OPENAPI_JSON=/src/openapi.json \
     SCADBUDDY_STOREFRONT_OPENAPI_JSON=/src/storefront-openapi.json
 
 COPY frontend/ ./
+# gen-api.mjs imports the request-body defaults it shares with the agent (#6660).
+COPY scripts/gen-api-request-defaults.mjs /src/scripts/
 # The browser's `service.version` (tracing spec 2026-10-01 §3): the same label the
 # runtime stage gets. Declared here, after the copy, so a new version reruns only this
 # build step. build-image.yml passes it; ci.yml's builds keep the default.
@@ -204,6 +206,8 @@ COPY --from=api-spec /src/openapi.json /src/openapi.json
 ENV SCADBUDDY_OPENAPI_JSON=/src/openapi.json
 
 COPY agent/ ./
+# gen-api.mjs imports the request-body defaults it shares with the frontend (#6660).
+COPY scripts/gen-api-request-defaults.mjs /src/scripts/
 # ScadBuddy's own plugin's skills and subagents (#896): agent/plugins/scadbuddy
 # links to them, and `pnpm build` copies the authoring skill into dist/docs for
 # `scadbuddy://docs/authoring` (#252, agent/src/tools/guide.ts).

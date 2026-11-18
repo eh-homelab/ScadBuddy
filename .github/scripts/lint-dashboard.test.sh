@@ -387,6 +387,19 @@ check 'a ConfigMap holding two dashboards fails' \
   "1:$k: $f must build into one ConfigMap scadbuddy-dashboard in cattle-dashboards labelled grafana_dashboard: \"1\" holding only scadbuddy.json (got: ConfigMap scadbuddy-dashboard cattle-dashboards 1 scadbuddy-api.json,scadbuddy.json)" \
   "$(run)"
 
+# Only the names the deploy vendors into clusters (eh-homelab/clusters#3734).
+good
+printf 'notes\n' > "$r/deploy/grafana/README.md"
+check 'a file the deploy cannot vendor fails' \
+  "1:deploy/grafana/README.md: is not kustomization.yaml or a [a-z0-9-]+.json dashboard, so the deploy cannot vendor it" \
+  "$(run)"
+
+good
+mkdir "$r/deploy/grafana/panels"
+check 'a subdirectory fails' \
+  "1:deploy/grafana/panels: is not a regular file; the deploy vendors only kustomization.yaml and [a-z0-9-]+.json files" \
+  "$(run)"
+
 good
 yq -i '.resources = ["missing.yaml"]' "$r/$k"
 check 'a kustomization that does not build fails' '1' "$(run | cut -d: -f1)"

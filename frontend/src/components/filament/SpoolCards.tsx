@@ -1,3 +1,4 @@
+import { NeedsDrying } from './NeedsDrying'
 import { SpoolLink } from './SpoolLink'
 import { Checkbox } from '@/components/ui/checkbox'
 import { cn } from '@/lib/utils'
@@ -52,6 +53,7 @@ export function SpoolCards({ groups, selected, onSelect }: Props) {
                       {spool.grams_left == null ? 'Weight not known' : `${grams(spool.grams_left)} g${label ? ` of ${grams(label)}` : ''}`}
                     </p>
                     <NeedsType spool={spool} />
+                    <NeedsDrying spool={spool} />
                   </div>
                 </li>
               )

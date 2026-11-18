@@ -208,7 +208,7 @@ spool for gets a `trays` question. Its `candidates` name rows of the answer's `s
   positional and valid within that one answer only. "Yes" links the row by its
   `physical_spool_id`, else one of its `records` (`{provider, record_id}`), through
   `PUT /api/v1/printers/{id}/trays/{ams_id}/{tray_id}/spool` (`api/tray_spools.py`).
-  That writes `tray_spool_links` and nothing in any provider.
+  That wrote `tray_spool_links` and nothing in any provider (the table was dropped in #6348; a tray link is a filament tray place now, #6262).
 
 ## 4. What ScadBuddy sends, and what Bambuddy decides
 

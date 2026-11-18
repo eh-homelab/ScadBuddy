@@ -22,7 +22,7 @@ from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.core.settings import Settings
-from scadbuddy.filament import ledger
+from scadbuddy.filament import dry_hours, ledger
 from scadbuddy.filament import models as m
 from scadbuddy.filament import presets as p
 from scadbuddy.filament.catalog import CatalogRefError
@@ -43,7 +43,10 @@ _KRows = list[m.SpoolKValueCreate]
 
 #: The columns of a spool row: every field of `Spool` but the four it is given here.
 _SPOOL_FIELDS = tuple(
-    f for f in m.Spool.model_fields if f not in {"effective", "overridden", "names", "low_stock"}
+    f
+    for f in m.Spool.model_fields
+    if f
+    not in {"effective", "overridden", "names", "low_stock", "hours_outside_dry", "needs_drying"}
 )
 _SPOOL_COLUMNS = ", ".join(_SPOOL_FIELDS)
 _TYPE_COLUMNS = ", ".join(m.SpoolType.model_fields)
@@ -148,10 +151,18 @@ def _hydrate(
     conn: Conn,
     rows: list[dict[str, Any]],
     defaults: FilamentDefaults = _SETTING_DEFAULTS,
+    now: datetime | None = None,
+    hours: bool = True,
 ) -> list[m.Spool]:
     """The spools of ``rows`` with their effective values. A spool's subtype and
     material are its own if it sets them, else its type's. A spool with no percentage of
-    its own is low under ``defaults.low_stock_pct``, the setting ``filament_low_stock_pct``."""
+    its own is low under ``defaults.low_stock_pct``, the setting ``filament_low_stock_pct``.
+    ``now`` is the time the hours outside dry storage run to (`filament/dry_hours.py`);
+    with none it is the database's. With ``hours`` false (a caller that does not return the
+    spool) the hours and ``needs_drying`` stay at their defaults and cost no query. The
+    hours are rounded to 0.1 h, the precision of the limit; ``needs_drying`` compares the
+    unrounded hours. A place's CURRENT kind judges the whole window: no kind history is
+    kept, so re-kinding a shelf to a dry box turns its past time there into dry time."""
     default_pct = defaults.low_stock_pct
     types = _by_id(conn, "filament_spool_types", _TYPE_COLUMNS, (r["type_id"] for r in rows))
 
@@ -184,6 +195,7 @@ def _hydrate(
         row = pick(found, key)
         return None if row is None else str(row["name"])
 
+    outside = _hours_outside_dry(conn, rows, now) if hours else {}
     spools = []
     for row, own in zip(rows, values, strict=True):
         names = m.SpoolNames(
@@ -195,10 +207,21 @@ def _hydrate(
             insert_type=name(inserts, own.insert_type_id),
             location=name(places, row["location_id"]),
         )
+        spent = outside.get(row["id"], 0.0)
+        material = pick(materials, own.material_id)
         spools.append(
             m.Spool.model_validate(
                 row
                 | {
+                    "hours_outside_dry": round(spent, 1),
+                    "needs_drying": material is not None
+                    and dry_hours.needs_drying(
+                        spent,
+                        hygroscopic=material["hygroscopic"],
+                        max_hours_outside_dry=None
+                        if material["max_hours_outside_dry"] is None
+                        else float(material["max_hours_outside_dry"]),
+                    ),
                     "effective": own,
                     "overridden": overridden(row),
                     "names": names,
@@ -207,6 +230,52 @@ def _hydrate(
             )
         )
     return spools
+
+
+def _hours_outside_dry(
+    conn: Conn, rows: list[dict[str, Any]], now: datetime | None
+) -> dict[UUID, float]:
+    """Each spool's hours outside dry storage (`dry_hours.outside_dry`), from one query
+    for the dry places and one for the ``moved`` events of all ``rows`` since each was
+    last dried, else made."""
+    if not rows:
+        return {}
+    if now is None:
+        found = conn.execute("SELECT clock_timestamp() AS now").fetchone()
+        assert found is not None
+        now = found["now"]
+    dry = {
+        r["id"]
+        for r in conn.execute(
+            "SELECT l.id FROM filament_locations l JOIN filament_location_kinds k"
+            " ON k.id = l.kind_id WHERE k.dry_storage"
+        ).fetchall()
+    }
+    moves: dict[UUID, list[dry_hours.Move]] = {}
+    for e in conn.execute(
+        "SELECT e.spool_id, e.at, e.data ->> 'from' AS origin, e.data ->> 'to' AS target"
+        " FROM filament_spool_events e JOIN filament_spools s ON s.id = e.spool_id"
+        " WHERE e.spool_id = ANY(%s) AND e.kind = 'moved'"
+        " AND e.at > coalesce(s.last_dried_at, s.created_at) ORDER BY e.at, e.seq",
+        ([r["id"] for r in rows],),
+    ).fetchall():
+        moves.setdefault(e["spool_id"], []).append(
+            dry_hours.Move(
+                e["at"],
+                None if e["origin"] is None else UUID(e["origin"]),
+                None if e["target"] is None else UUID(e["target"]),
+            )
+        )
+    return {
+        r["id"]: dry_hours.outside_dry(
+            r["last_dried_at"] or r["created_at"],
+            moves.get(r["id"], []),
+            dry,
+            r["location_id"],
+            now,
+        )
+        for r in rows
+    }
 
 
 def _low_stock(grams_left: float | None, values: m.EffectiveValues, default_pct: int) -> bool:
@@ -225,12 +294,15 @@ class FilamentSpoolStore:
         self,
         pool: ConnectionPool[Conn],
         defaults: Callable[[], FilamentDefaults] = _setting_defaults,
+        now: Callable[[], datetime] | None = None,
     ) -> None:
         """``defaults`` reads the Filament settings as they are now. It may take a
         connection of its own, so a method calls it before it takes one of the pool's,
-        never inside. A store built without one uses the settings' defaults."""
+        never inside. A store built without one uses the settings' defaults. ``now`` is the
+        clock the hours outside dry storage run to; with none, the database's."""
         self._pool = pool
         self._defaults = defaults
+        self._now = now
 
     @property
     def conninfo(self) -> str:
@@ -258,7 +330,10 @@ class FilamentSpoolStore:
             rows = conn.execute(
                 f"SELECT {_SPOOL_COLUMNS} FROM filament_spools{clause} ORDER BY number"
             ).fetchall()
-            return _hydrate(conn, rows, defaults)
+            return _hydrate(conn, rows, defaults, self._clock())
+
+    def _clock(self) -> datetime | None:
+        return None if self._now is None else self._now()
 
     def defaults(self) -> FilamentDefaults:
         """The Filament settings as they are now, for a caller that reads a spool with
@@ -268,7 +343,7 @@ class FilamentSpoolStore:
     def get(self, spool_id: UUID) -> m.Spool | None:
         defaults = self._defaults()
         with self._pool.connection() as conn:
-            return self._spool(conn, spool_id, defaults)
+            return self._spool(conn, spool_id, defaults, self._clock())
 
     def detail(self, spool_id: UUID) -> m.SpoolDetail | None:
         """The spool with its tags, effective presets and K values, the basis of its
@@ -277,7 +352,7 @@ class FilamentSpoolStore:
         with self._pool.connection() as conn, conn.transaction():
             # One snapshot, so the stored grams and the basis behind them agree.
             conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-            spool = self._spool(conn, spool_id, defaults)
+            spool = self._spool(conn, spool_id, defaults, self._clock())
             if spool is None:
                 return None
             history = ledger.events(conn, spool_id)
@@ -471,7 +546,7 @@ class FilamentSpoolStore:
         try:
             with self._pool.connection() as conn, conn.transaction():
                 spool_id = self.create_on(conn, body, actor=actor)
-                made = self._spool(conn, spool_id, defaults)
+                made = self._spool(conn, spool_id, defaults, self._clock())
         except errors.ForeignKeyViolation:
             raise CatalogRefError() from None
         assert made is not None
@@ -527,7 +602,7 @@ class FilamentSpoolStore:
             with self._pool.connection() as conn, conn.transaction():
                 if not self.update_on(conn, spool_id, patch, actor=actor):
                     return None
-                return self._spool(conn, spool_id, defaults)
+                return self._spool(conn, spool_id, defaults, self._clock())
         except errors.ForeignKeyViolation:
             raise CatalogRefError() from None
 
@@ -598,7 +673,7 @@ class FilamentSpoolStore:
         """The spool's slicer presets, its own over its type's; ``None`` for no such
         spool."""
         with self._pool.connection() as conn:
-            if self._spool(conn, spool_id) is None:
+            if self._spool(conn, spool_id, hours=False) is None:
                 return None
             return p.effective_presets(conn, spool_id)
 
@@ -647,7 +722,7 @@ class FilamentSpoolStore:
         """The spool's pressure-advance values, its own over its type's; ``None`` for no
         such spool."""
         with self._pool.connection() as conn:
-            if self._spool(conn, spool_id) is None:
+            if self._spool(conn, spool_id, hours=False) is None:
                 return None
             return p.effective_k_values(conn, spool_id)
 
@@ -863,6 +938,12 @@ class FilamentSpoolStore:
         key, are `TagKeysClashError`."""
         return FilamentSpoolStore._tag(conn, uid, tray, kind)[0]
 
+    @property
+    def pool(self) -> ConnectionPool[Conn]:
+        """The pool the store runs on, for a writer that locks printer rows first
+        (`filament/capture.py` `sync_ams_weights`)."""
+        return self._pool
+
     @contextmanager
     def transaction(self) -> Iterator[Conn]:
         """A connection in a transaction, for a caller that writes a spool, its tags and
@@ -966,12 +1047,16 @@ class FilamentSpoolStore:
 
     @staticmethod
     def _spool(
-        conn: Conn, spool_id: UUID, defaults: FilamentDefaults = _SETTING_DEFAULTS
+        conn: Conn,
+        spool_id: UUID,
+        defaults: FilamentDefaults = _SETTING_DEFAULTS,
+        now: datetime | None = None,
+        hours: bool = True,
     ) -> m.Spool | None:
         row = conn.execute(
             f"SELECT {_SPOOL_COLUMNS} FROM filament_spools WHERE id = %s", (spool_id,)
         ).fetchone()
-        return None if row is None else _hydrate(conn, [row], defaults)[0]
+        return None if row is None else _hydrate(conn, [row], defaults, now, hours)[0]
 
     @staticmethod
     def _tag_row(row: Row) -> m.TagRow:
@@ -1002,7 +1087,7 @@ class FilamentSpoolStore:
         )
 
     def _check(self, conn: Conn, spool_id: UUID) -> None:
-        spool = self._spool(conn, spool_id)
+        spool = self._spool(conn, spool_id, hours=False)
         assert spool is not None
         _check_temps(spool.effective)
 

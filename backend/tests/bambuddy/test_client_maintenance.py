@@ -76,10 +76,16 @@ async def test_a_printers_maintenance_is_read_with_read_status(bambuddy: Bambudd
         "Clean Nozzle",
         "Check Belt Tension",
     ]
+    # #5774 §3.7: each task's id on the printer and the counter now come along.
+    seen = MaintenanceTask(task="", interval_hours=0, item_id=1, current_hours=812.5)
     assert maintenance_tasks(overview) == [
-        MaintenanceTask(task="Lubricate Carbon Rods", interval_hours=100.0),
-        MaintenanceTask(task="Clean Nozzle", interval_hours=30, interval_type="days"),
-        MaintenanceTask(task="Check Belt Tension", interval_hours=200.0, enabled=False),
+        seen.model_copy(update={"task": "Lubricate Carbon Rods", "interval_hours": 100.0}),
+        seen.model_copy(
+            update={"task": "Clean Nozzle", "interval_hours": 30, "interval_type": "days"}
+        ),
+        seen.model_copy(
+            update={"task": "Check Belt Tension", "interval_hours": 200.0, "enabled": False}
+        ),
     ]
 
 

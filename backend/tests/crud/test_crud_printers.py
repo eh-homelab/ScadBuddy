@@ -293,7 +293,9 @@ def test_the_workers_merge_runs_on_the_api(store: SettingsStore, printers: Print
     (the worker's role holds none of those tables)."""
     rates = MachineRateStore(store.pool)
     gone = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
-    inputs = MachineRateInputs(profile=CostProfile(watts="300"))
+    inputs = MachineRateInputs(
+        profile=CostProfile(watts="300", actuals_window=3, lan_hours_offset="0")
+    )
     rates.replace(gone.id, inputs)
     with store.pool.connection() as conn:
         conn.execute(

@@ -149,6 +149,37 @@ def test_each_unknown_tray_is_also_offered_as_itself() -> None:
     assert len([spool for spool in options.spools if spool.tray_only]) == len(offered)
 
 
+def test_a_translucent_tray_is_offered_with_its_alpha() -> None:
+    """#6349: the print dialog draws the choice see-through; `colour` stays six digits."""
+    status = PrinterStatus(
+        id=1,
+        name="Garage",
+        connected=True,
+        ams=[
+            AmsUnit(
+                id=0,
+                tray=[
+                    AmsTray.model_validate(
+                        {"id": 0, "tray_type": "PETG", "tray_color": "E8532F80", "state": 11}
+                    ),
+                    AmsTray.model_validate(
+                        {"id": 1, "tray_type": "PLA", "tray_color": "27272C", "state": 11}
+                    ),
+                ],
+            )
+        ],
+    )
+    options = FilamentOptions(library_file_id=1, printer_id=1, spools=[])
+
+    with_trays(options, status, 1)
+
+    offered = {spool.spool_id: spool for spool in options.spools if spool.tray_only}
+    clear = offered[tray_spool_id(0, 0)]
+    assert clear.colour == "#E8532F"
+    assert clear.rgba == "#E8532F80"
+    assert offered[tray_spool_id(0, 1)].rgba == "#27272CFF"
+
+
 # --- a native run's trays over the SB spools (#6262 Task 5) ---------------------------
 
 

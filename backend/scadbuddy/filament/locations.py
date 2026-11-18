@@ -18,6 +18,7 @@ from psycopg import Connection, errors
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
+from scadbuddy.bambuddy.trays import EXTERNAL, unit_label
 from scadbuddy.filament import ledger
 from scadbuddy.filament import models as m
 from scadbuddy.filament.catalog import CatalogRefError
@@ -53,10 +54,14 @@ class NoAmsKindError(ValueError):
 
 
 class MoveTargetError(ValueError):
-    """The place a spool would move to does not exist or is archived."""
+    """The place a spool would move to does not exist, is archived or is an AMS unit's
+    place (a printer, an ``ams_id`` and no tray). A printer's place with no ``ams_id``
+    takes spools."""
 
     def __init__(self) -> None:
-        super().__init__("the place to move to does not exist or is archived")
+        super().__init__(
+            "the place to move to does not exist, is archived or is an AMS unit's place"
+        )
 
 
 class LocationStore:
@@ -166,7 +171,9 @@ class LocationStore:
     def ensure_ams_on(
         conn: Conn, printer_id: UUID, ams_id: int, tray_id: int, *, label: str
     ) -> m.Location:
-        """`ensure_ams` on ``conn``, in the caller's transaction (`filament/capture.py`)."""
+        """`ensure_ams` on ``conn``, in the caller's transaction (`filament/capture.py`).
+        The tray's place hangs under its unit's place (`ensure_ams_unit_on`), also when it
+        was made before the unit's place existed; an external holder has no unit."""
         select = (
             f"SELECT {_COLUMNS} FROM filament_locations WHERE printer_id = %s AND ams_id = %s"
             " AND tray_id = %s AND archived_at IS NULL"
@@ -174,6 +181,18 @@ class LocationStore:
         key = (printer_id, ams_id, tray_id)
         try:
             found = conn.execute(select, key).fetchone()
+            if found is not None and found["parent_id"] is not None:
+                return m.Location.model_validate(found)
+            try:
+                unit = (
+                    None
+                    if ams_id == EXTERNAL
+                    else LocationStore.ensure_ams_unit_on(conn, printer_id, ams_id)
+                )
+            except NoAmsKindError:
+                if found is None:
+                    raise
+                return m.Location.model_validate(found)  # the tray never needs its unit's place
             if found is None:
                 kind = conn.execute(
                     "SELECT id FROM filament_location_kinds WHERE ams AND archived_at IS NULL"
@@ -183,14 +202,21 @@ class LocationStore:
                     raise NoAmsKindError()
                 found = conn.execute(
                     "INSERT INTO filament_locations"
-                    " (name, kind_id, printer_id, ams_id, tray_id) VALUES (%s, %s, %s, %s, %s)"
+                    " (name, kind_id, parent_id, printer_id, ams_id, tray_id)"
+                    " VALUES (%s, %s, %s, %s, %s, %s)"
                     " ON CONFLICT (printer_id, ams_id, tray_id)"
                     " WHERE printer_id IS NOT NULL AND archived_at IS NULL DO NOTHING"
                     f" RETURNING {_COLUMNS}",
-                    (label, kind["id"], *key),
+                    (label, kind["id"], unit, *key),
                 ).fetchone()
             if found is None:
                 found = conn.execute(select, key).fetchone()
+            if unit is not None and found is not None and found["parent_id"] is None:
+                found = conn.execute(
+                    "UPDATE filament_locations SET parent_id = %s, updated_at = now()"
+                    f" WHERE id = %s RETURNING {_COLUMNS}",
+                    (unit, found["id"]),
+                ).fetchone()
         except errors.UniqueViolation:
             raise LocationExistsError() from None
         except errors.ForeignKeyViolation:
@@ -198,11 +224,57 @@ class LocationStore:
         assert found is not None
         return m.Location.model_validate(found)
 
+    @staticmethod
+    def ensure_ams_unit_on(conn: Conn, printer_id: UUID, ams_id: int) -> UUID:
+        """The id of the unarchived place of that printer's AMS unit (no tray), made as
+        ``<printer> <unit>`` (``H2C AMS-A``, ``H2C HT-A``, as the tray places are named) of
+        the first ``ams`` kind if there is none (#6268). Idempotent and safe when two calls
+        race. `NoAmsKindError`, or `CatalogRefError` for an unknown
+        printer."""
+        select = (
+            "SELECT id FROM filament_locations WHERE printer_id = %s AND ams_id = %s"
+            " AND tray_id IS NULL AND archived_at IS NULL"
+        )
+        key = (printer_id, ams_id)
+        try:
+            found = conn.execute(select, key).fetchone()
+            if found is None:
+                kind = conn.execute(
+                    "SELECT id FROM filament_location_kinds WHERE ams AND archived_at IS NULL"
+                    " ORDER BY sort_order, upper(name), id LIMIT 1"
+                ).fetchone()
+                if kind is None:
+                    raise NoAmsKindError()
+                printer = conn.execute(
+                    "SELECT name FROM printers WHERE id = %s", (printer_id,)
+                ).fetchone()
+                if printer is None:
+                    raise CatalogRefError()
+                found = conn.execute(
+                    "INSERT INTO filament_locations (name, kind_id, printer_id, ams_id)"
+                    " VALUES (%s, %s, %s, %s)"
+                    " ON CONFLICT (printer_id, ams_id) WHERE tray_id IS NULL"
+                    " AND printer_id IS NOT NULL AND ams_id IS NOT NULL"
+                    " AND archived_at IS NULL DO NOTHING"
+                    " RETURNING id",
+                    (f"{printer['name']} {unit_label(ams_id)}", kind["id"], *key),
+                ).fetchone()
+            if found is None:
+                found = conn.execute(select, key).fetchone()
+        except errors.ForeignKeyViolation:
+            raise CatalogRefError() from None
+        assert found is not None
+        unit: UUID = found["id"]
+        return unit
+
     def move(self, spool_id: UUID, location_id: UUID | None, *, actor: str) -> m.SpoolEvent | None:
         """Put a spool in a place (``None``: in none) and write its ``moved`` event,
         ``data={"from": old, "to": new}``. ``None`` when it is there already: nothing is
         written. `LookupError` for no such spool, `MoveTargetError` for a place that does
-        not exist or is archived. Locks the spool, then the place."""
+        not exist, is archived or is an AMS unit's place (a printer, an ``ams_id`` and no
+        tray: a unit holds trays, not spools). A printer's place with no ``ams_id`` (a shelf
+        beside it) takes spools.
+        Locks the spool, then the place."""
         with self._pool.connection() as conn, conn.transaction():
             return self.move_on(conn, spool_id, location_id, actor=actor)
 
@@ -231,10 +303,15 @@ class LocationStore:
             return None
         if location_id is not None:
             target = conn.execute(
-                "SELECT 1 FROM filament_locations WHERE id = %s AND archived_at IS NULL FOR SHARE",
+                "SELECT printer_id, ams_id, tray_id FROM filament_locations"
+                " WHERE id = %s AND archived_at IS NULL FOR SHARE",
                 (location_id,),
             ).fetchone()
-            if target is None:
+            if target is None or (
+                target["printer_id"] is not None
+                and target["ams_id"] is not None
+                and target["tray_id"] is None
+            ):
                 raise MoveTargetError()
         conn.execute(
             "UPDATE filament_spools SET location_id = %s, tray_fingerprint = NULL,"
@@ -295,7 +372,7 @@ def repoint_printer_locations(conn: Conn, merged: UUID, into: UUID) -> None:
     Locks the spools before the places, as `LocationStore.move` does."""
     gone = conn.execute(
         "SELECT m.id, k.id AS kept FROM filament_locations m LEFT JOIN filament_locations k"
-        " ON k.printer_id = %s AND k.ams_id = m.ams_id AND k.tray_id = m.tray_id"
+        " ON k.printer_id = %s AND k.ams_id = m.ams_id AND k.tray_id IS NOT DISTINCT FROM m.tray_id"
         " AND k.archived_at IS NULL"
         " WHERE m.printer_id = %s AND m.archived_at IS NULL AND k.id IS NOT NULL",
         (into, merged),
@@ -324,6 +401,11 @@ def repoint_printer_locations(conn: Conn, merged: UUID, into: UUID) -> None:
             data={"from": spool["location_id"], "to": to, "reason": "printer_merged"},
         )
     for old, kept in clash.items():
+        conn.execute(
+            "UPDATE filament_location_sensors SET location_id = %s, updated_at = now()"
+            " WHERE location_id = %s",
+            (kept, old),
+        )
         conn.execute(
             "UPDATE filament_locations SET parent_id = %s, updated_at = now() WHERE parent_id = %s",
             (kept, old),

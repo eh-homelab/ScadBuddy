@@ -15,14 +15,14 @@ import psycopg
 import pytest
 
 import scadbuddy
-from scadbuddy.render.pg_store import MIGRATIONS, migrate
+from scadbuddy.render.pg_store import MIGRATIONS, Migration, migrate
 
 pytestmark = pytest.mark.requires_postgres
 
 Conn = psycopg.Connection[tuple[Any, ...]]
 
 SLUG = "_filament_carry_tray_links"
-#: The retired overlay's and native spools' tables, kept unread until the drop PR.
+#: The retired overlay's and native spools' tables, dropped by #6348 (these tests stop before it).
 OLD_TABLES = (
     "native_spools",
     "native_spool_uses",
@@ -33,6 +33,13 @@ OLD_TABLES = (
     "tray_spool_links",
 )
 PRINTER = "00000000-0000-0000-0000-0000000000a1"
+
+
+def _before_drop() -> tuple[Migration, ...]:
+    """The migrations up to the one that drops the old tables (#6348): these tests read them."""
+    return MIGRATIONS[
+        : next(i for i, m in enumerate(MIGRATIONS) if m.id.endswith("_drop_native_spool_tables"))
+    ]
 
 
 def _before(conn: Conn) -> None:
@@ -89,7 +96,7 @@ def test_a_tray_link_becomes_a_tray_place(pg_conninfo: str) -> None:
         spool = _spool(conn, 1)
         _tray_link(conn, 1, spool, "PLA|FF0000")
 
-        migrate(conn)
+        migrate(conn, _before_drop())
 
         assert _place(conn, spool) == (PRINTER, 0, 1, "PLA|#FF0000FF")
         assert _moves(conn, spool) == [("system:migration", None, True)]
@@ -108,7 +115,7 @@ def test_an_empty_colour_link_carries(pg_conninfo: str) -> None:
         spool = _spool(conn, 1)
         _tray_link(conn, 2, spool, "PLA|")
 
-        migrate(conn)
+        migrate(conn, _before_drop())
 
         assert _place(conn, spool) == (PRINTER, 0, 2, "PLA|")
 
@@ -130,7 +137,7 @@ def test_a_bb_only_tray_link_finds_its_pulled_spool(pg_conninfo: str) -> None:
             "INSERT INTO filament_bb_links (spool_id, bb_spool_id) VALUES (%s, 42)", (pulled,)
         )
 
-        migrate(conn)
+        migrate(conn, _before_drop())
 
         assert _place(conn, pulled) == (PRINTER, 0, 0, "PETG|#00FF00FF")
         assert len(_moves(conn, pulled)) == 1
@@ -165,14 +172,14 @@ def test_the_carry_skips_a_taken_tray(pg_conninfo: str) -> None:
         _tray_link(conn, 2, "00000000-0000-0000-0000-0000000000ee", "PLA|0000FF")  # no SB spool
         _tray_link(conn, 0, odd, "PLA|12", ams=1)  # not RRGGBB
 
-        migrate(conn)
+        migrate(conn, _before_drop())
 
         assert _place(conn, holder) == (PRINTER, 0, 0, None)
         assert _place(conn, linked) is None
         assert _place(conn, placed) == (PRINTER, 0, 3, None)
         assert _place(conn, odd) is None
         assert _one(conn, "SELECT count(*) FROM filament_spool_events WHERE kind = 'moved'") == 0
-        # Nothing is dropped (Decision 6).
+        # The carry leaves the old table as it was.
         assert _one(conn, "SELECT count(*) FROM tray_spool_links") == 4
 
 
@@ -183,7 +190,7 @@ def test_two_links_of_one_spool_place_it_once(pg_conninfo: str) -> None:
         _tray_link(conn, 0, spool, "PLA|FF0000")
         _tray_link(conn, 1, spool, "PLA|FF0000")
 
-        migrate(conn)
+        migrate(conn, _before_drop())
 
         assert _place(conn, spool) is not None
         assert len(_moves(conn, spool)) == 1

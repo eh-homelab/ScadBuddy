@@ -15,7 +15,8 @@
       "ams": [
         {
           "id": "0",
-          "humidity": "4",
+          "humidity": "3",
+          "humidity_raw": "29",
           "temp": "22.7",
           "tray": [
             {"id": "0"},

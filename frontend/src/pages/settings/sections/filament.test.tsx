@@ -34,7 +34,7 @@ describe('Filament (#6262)', () => {
     await seeded()
     await choose(user, within(region('Filament')).getByRole('combobox', { name: 'Spools' }), 'Off')
     await user.click(within(region('Filament')).getByRole('button', { name: 'Save Filament' }))
-    await waitFor(() => expect(mockSettings().filament_sync).toEqual({ spools: 'off', tags: 'off' }))
+    await waitFor(() => expect(mockSettings().filament_sync).toEqual({ spools: 'off', tags: 'off', weights: 'bb_to_sb' }))
   })
 
   it('saves the tags choice with Save Filament, as filament_sync.tags beside the spools choice', async () => {
@@ -45,9 +45,20 @@ describe('Filament (#6262)', () => {
     await choose(user, within(filament).getByRole('combobox', { name: 'Spools' }), 'Off')
     // Each choice keeps the other: both parts are one setting until it is saved.
     expect(within(filament).getByRole('combobox', { name: 'Tags to Bambuddy' })).toHaveTextContent("Send ScadBuddy's bindings")
-    expect(mockSettings().filament_sync).toEqual({ spools: 'bb_to_sb', tags: 'off' })
+    expect(mockSettings().filament_sync).toEqual({ spools: 'bb_to_sb', tags: 'off', weights: 'bb_to_sb' })
     await user.click(within(filament).getByRole('button', { name: 'Save Filament' }))
-    await waitFor(() => expect(mockSettings().filament_sync).toEqual({ spools: 'off', tags: 'sb_to_bb' }))
+    await waitFor(() => expect(mockSettings().filament_sync).toEqual({ spools: 'off', tags: 'sb_to_bb', weights: 'bb_to_sb' }))
+  })
+
+  it('saves the weights choice as filament_sync.weights without touching spools or tags', async () => {
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const filament = region('Filament')
+    expect(within(filament).getByRole('combobox', { name: 'Weights from Bambuddy' })).toHaveTextContent('Bambuddy → ScadBuddy')
+    await choose(user, within(filament).getByRole('combobox', { name: 'Weights from Bambuddy' }), 'Off')
+    expect(mockSettings().filament_sync).toEqual({ spools: 'bb_to_sb', tags: 'off', weights: 'bb_to_sb' })
+    await user.click(within(filament).getByRole('button', { name: 'Save Filament' }))
+    await waitFor(() => expect(mockSettings().filament_sync).toEqual({ spools: 'bb_to_sb', tags: 'off', weights: 'off' }))
   })
 
   it('switches the RFID override mode on and says Bambuddy no longer adds unknown spools', async () => {
@@ -123,6 +134,24 @@ describe('Filament (#6262)', () => {
     await user.click(await within(filament).findByRole('button', { name: 'Apply now' }))
     expect(await within(filament).findByText(/2 tags were not sent/)).toBeInTheDocument()
     expect(within(filament).getByText(/1 slot was not set/)).toBeInTheDocument()
+  })
+
+  it('says which slots were skipped for no preset or no nozzle', async () => {
+    server.use(
+      http.post('*/api/v1/filament/rfid/reconcile', () =>
+        HttpResponse.json({
+          mode: { override_mode: true, state: 'applied', devices: [] },
+          tags: { pushed: 1, moved: 0, cleared: 0, unchanged: 0, failed: 0 },
+          slots: { configured: 0, unchanged: 0, no_preset: 2, no_temps: 0, no_nozzle: 1, failed: 0 },
+        }),
+      ),
+    )
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const filament = region('Filament')
+    await user.click(await within(filament).findByRole('button', { name: 'Apply now' }))
+    expect(await within(filament).findByText(/2 spools have no preset for the nozzle/)).toBeInTheDocument()
+    expect(within(filament).getByText(/1 slot: the printer does not report the nozzle for its tray, so it is not set/)).toBeInTheDocument()
   })
 
   it('saves the thresholds and shows the server refusing 101 percent', async () => {

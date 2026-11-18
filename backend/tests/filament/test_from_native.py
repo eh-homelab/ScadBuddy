@@ -7,9 +7,16 @@ import pytest
 from psycopg.rows import dict_row
 
 from scadbuddy.filament.ledger import refresh_derived
-from scadbuddy.render.pg_store import MIGRATIONS, migrate
+from scadbuddy.render.pg_store import MIGRATIONS, Migration, migrate
 
 pg = pytest.mark.requires_postgres
+
+
+def _before_drop() -> tuple[Migration, ...]:
+    """The migrations up to the one that drops the old tables (#6348): these tests read them."""
+    return MIGRATIONS[
+        : next(i for i, m in enumerate(MIGRATIONS) if m.id.endswith("_drop_native_spool_tables"))
+    ]
 
 
 def _index(slug: str) -> int:
@@ -184,7 +191,7 @@ def test_a_linked_native_record_keeps_its_cache_and_link_under_its_new_id(
                 " VALUES ('native', %s, jsonb_build_object('record_id', %s::text), now())",
                 (str(record), str(record)),
             )
-        migrate(conn)
+        migrate(conn, _before_drop())
 
         links = conn.execute(
             "SELECT record_id, physical_spool_id, linked_by FROM spool_record_links"

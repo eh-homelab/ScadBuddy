@@ -65,7 +65,9 @@ def filament_pull_activity(
     (`filament/bambuddy_pull.py`). It runs on the ``library`` worker, in the API process,
     which holds the store (`main._run_library_worker`), so it writes it directly. With
     ``filament_sync.spools`` off (``sync`` reads it), no Bambuddy, or Bambuddy down, it
-    logs and returns, so the run never fails on it."""
+    pulls no spool: it logs and returns, so the run never fails on it. Before that gate,
+    whenever Bambuddy is configured, it reads the Home Assistant sensors and writes their
+    readings, even with spools off."""
 
     @activity.defn(name=FILAMENT_PULL_ACTIVITY)
     async def filament_bambuddy_pull() -> str:
