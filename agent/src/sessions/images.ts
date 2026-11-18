@@ -104,8 +104,8 @@ export type UserDocument = { mediaType: DocumentMediaType; bytes: Buffer; fileNa
 export const UserDocumentSchema = z
   .object({
     mediaType: z.enum(DOCUMENT_MEDIA_TYPES),
-    // The file's own name, for the panel's chip (#6267): a name the person gave it, never the bytes.
-    fileName: z.string().min(1).max(200).optional(),
+    // The file's own name, for the panel's chip (#6267): a name the person gave it, never the bytes. The cap matches the backend's 255.
+    fileName: z.string().min(1).max(255).optional(),
     bytes: z
       .instanceof(Buffer, { message: 'not bytes' })
       .refine((bytes) => bytes.length > 0, { message: 'empty' })
