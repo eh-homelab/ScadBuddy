@@ -1166,6 +1166,7 @@ async def resolve_plates(
     catalogue: Catalogue,
     *,
     presets: SpoolPresetSource | None = None,
+    slot_presets: Mapping[int, Sequence[EffectivePreset]] | None = None,
 ) -> tuple[list[Resolved], list[str]]:
     """Each plate resolved for ``plan``, and every slot refusal among them in the run's
     own words: what :func:`plan_run` refuses with, and what :func:`check_print` reports
@@ -1177,7 +1178,8 @@ async def resolve_plates(
     no row for the H2C and the chosen nozzle that is linked to a Bambuddy spool takes
     Bambuddy's rows for that spool, read only with a ``client``: a native run has none
     and reads nothing of Bambuddy. A Bambuddy-path row is an SB spool too (Task 7), so it
-    reads its presets the same way."""
+    reads its presets the same way. ``slot_presets`` are a storefront price's filament
+    types' presets, by slot id (#6574, ``resolver.resolve``)."""
     # Here, not at the top: see the `TYPE_CHECKING` import.
     from scadbuddy.filament.presets import preset_for
 
@@ -1247,7 +1249,9 @@ async def resolve_plates(
     every: list[Resolved] = []
     errors: list[str] = []
     for plate_id, options in zip(plate_ids, per_plate, strict=True):
-        resolved = resolve(options, plan, choices, catalogue, spool_presets)
+        resolved = resolve(
+            options, plan, choices, catalogue, spool_presets, slot_presets=slot_presets
+        )
         for error in resolved.errors:
             message = (
                 f"Plate {plate_id}: {error.message}"
@@ -3323,8 +3327,13 @@ async def plan_run(
     held: HeldTrays | None = None,
     presets: SpoolPresetSource | None = None,
     reads: SbSpoolReads | None = None,
+    slot_presets: Mapping[int, Sequence[EffectivePreset]] | None = None,
 ) -> PlannedRun:
     """Upload, then resolve every plate, before anything is sliced (spec §4).
+
+    With ``slot_presets`` (a storefront price's slice, #6574) a slot with no spool is
+    sliced with its filament type's preset in the file's own colour
+    (``resolver.resolve``).
 
     With ``slicer_backend`` ``native`` the plates are sliced by the native slicer
     (``native``, the image's profiles; a 503 without them), and a reprint reuses a
@@ -3527,7 +3536,14 @@ async def plan_run(
     if not native_run:
         per_plate = [with_trays(options, printer_status, printer_id) for options in per_plate]
     every, errors = await resolve_plates(
-        client, plate_ids, per_plate, request.filament_plan, choices, catalogue, presets=presets
+        client,
+        plate_ids,
+        per_plate,
+        request.filament_plan,
+        choices,
+        catalogue,
+        presets=presets,
+        slot_presets=slot_presets,
     )
     for plate_id, options, resolved in zip(plate_ids, per_plate, every, strict=True):
         if resolved.errors:
@@ -3584,10 +3600,10 @@ async def plan_run(
         # Bambuddy's slicer drops the prime tower when slots share one preset name
         # (#3962): each repeat gets a preset of its own, before any key is taken, so
         # the preview, the slice and a reprint's lookup all name the same refs.
-        slot_presets = SlotPresets(client, catalogue)
+        own_presets = SlotPresets(client, catalogue)
         slotted: list[tuple[int, FilamentOptions, Resolved, SlicePlan]] = []
         for plate_id, options, resolved, unslotted in ready:
-            slotted_plan, shared_names[plate_id] = await slot_presets.planned(unslotted)
+            slotted_plan, shared_names[plate_id] = await own_presets.planned(unslotted)
             slotted.append((plate_id, options, resolved, slotted_plan))
         ready = slotted
 

@@ -570,7 +570,8 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
         ),
         "storefront_slice_profile": SettingDoc(
             "Shop slice profile",
-            "The printer, and a spool per material, a storefront variant is sliced with."
+            "The printer, and a filament type per material, a storefront variant is"
+            " sliced with (#6574)."
             " None set: nothing is sliced, so no visitor sees a price.",
         ),
         # -- Storefront mail -----------------------------------------------------------

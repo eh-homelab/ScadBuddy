@@ -1832,11 +1832,31 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`test_slice_price.py` checks a storefront price equals a quote to the cent). The variant
   is rendered to an output by `rendering.py` `output_for_reference` (saved as
   `library/outputs.py` `storefront_output_id(render_key)`, `source` `storefront`, #6371) and sliced by `operations.py` `PreviewSlicer`, so the
-  template gives the support and process settings. The shop slice profile gives only the
-  printer and a spool per material, and the model's remembered dialog choices the rest
-  (`storefront_choices`; none remembered is Standard 0.4 mm). One row per variant in
-  `storefront_slice_prices`, keyed by `price_key`: a sha256 of the render's 3MF content, the
-  price-book filament per slot (id, material, cost), the profile, the choices, and the
+  template gives the support and process settings. The variant is sliced with the
+  choices and presets a back-office quote of a spool of the same filament type on the same
+  printer gets (#6574, `test_slice_parity.py`). The shop slice profile gives only the
+  printer and a filament type per material (`slice_profile.py`, a
+  `filament_spool_types` id, #6262; migration
+  `20261117T1557Z_storefront_slice_profile_presets.sql` made each old SB spool entry its
+  spool's type and dropped the rest, keeping the printer). The profile holds no preset of
+  its own: each slot has no spool and takes its type's preset for the H2C and the chosen
+  nozzle (`filament_spool_type_presets`, `filament/presets.py` `preset_for`, the row a
+  spool of the type with no own row takes), in the render's own colour for the slot
+  (`bambuddy/resolver.py` `resolve` `slot_presets`, by slot id, read by `slice_price.py`
+  `read_type_presets` and carried in `SliceVariant.slot_presets` to `PreviewSlicer.start`
+  and `preview.py` `start_preview_plates`; only a storefront price passes it, and a print
+  still needs a spool per slot). A type with no preset for that nozzle gives no price
+  (`NO_TYPE_PRESET`). The rest are the choices the print dialog opens on (`bambuddy/choices.py`
+  `opening_choices(remembered, status, bed_type)`, which `choices_for` also uses for
+  `ChoicesView.opening_choices`): the model's remembered nozzles, tier and process, else
+  `default_nozzles` of the printer's live status, read as the dialog reads it
+  (`printer_opening`: the LAN report on a native route, else Bambuddy's status and last
+  plate; `slice_price.py` `live_opening` keeps a read status `RATE_TTL`; the plate
+  remembered on the printer is read each time, `PrinterOpening.bed_type`). A status that
+  cannot be read gives no price (`STATUS_UNREAD`), never a standard-flow guess. One row
+  per variant in `storefront_slice_prices`, keyed by `price_key` (`KEY_VERSION` 3): a
+  sha256 of the render's 3MF content, the price-book filament per slot (id, material,
+  cost, colour, and its type's preset it is sliced with), the profile, the choices, and the
   book's policy and the live machine rate that prices it (`for_quote` through `live_rate`,
   read again at most once a minute per process, `RATE_TTL`, and carried to the run,
   `SliceVariant.machine_rate`). Any change is a new
@@ -1844,7 +1864,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   outlives the render prune. `GET …/renders/{job}/estimate` (`renders.py`
   `render_estimate`, `slice_estimate`) answers `StoreEstimate`: `source` `slice` with the
   price of one, `pending` (with `retry_after`) while the slice runs or waits, or `none`
-  (no profile, no spool for a slot's material, a colour with no listing filament, files
+  (no profile, no type or type preset for a slot's material, a printer status not read, a colour with no listing filament, files
   lost, a failed slice, or a render whose slug or commit is no longer the listing's). A
   price is only ever for the visitor's own geometry (#6370 review): the run checks that the
   3MF it rendered is the one the key names (`SliceRun.rendered_sha256`, the render job's
@@ -1860,10 +1880,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   back as it was before the claim (no row if the claim made it), and one whose answer says
   the operation may still run (`api/operations.py` `may_still_run`) keeps it `running`
   (#6370 review). Only deterministic refusals record `failed` (`QuoteError`, a 4xx such as
-  the 0 g `sliced_plate`, the stale profile, a gone filament); a 5xx, 408 or 429 is raised
-  as `SliceUnavailableError`, so the operation tries again. Before it slices, the run checks each profile spool is still
-  offered on the printer (`api/storefront_slice.py` `offered_spools`: a loaded tray's
-  negative id moves), and refuses with no price. The CRUD answer keeps `price_key`, `grams`
+  the 0 g `sliced_plate`, a preset that does not fit the nozzle, a gone filament); a 5xx,
+  408 or 429 is raised as `SliceUnavailableError`, so the operation tries again. The CRUD answer keeps `price_key`, `grams`
   and `print_seconds` for the shop and the checkout (`estimate.py` `SHOP_ONLY_FIELDS`); the
   edge sends only `routes.py` `ESTIMATE_FIELDS`. The volume analysis (`storefront_job_parts`)
   is no longer read; `rough_estimate` stays for the back office.

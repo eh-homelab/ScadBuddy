@@ -594,3 +594,35 @@ async def test_native_options_read_no_bambuddy() -> None:
     assert resolved.filament_presets == [
         PresetRef(source="standard", id="Tray PETG @BBL H2C 0.4 nozzle")
     ]
+
+
+def test_a_storefront_slot_takes_its_filament_types_preset_and_own_colour() -> None:
+    """#6574: a storefront price names a filament that is not loaded as a slot with no
+    spool and its filament type's presets (``slot_presets``). The slot is sliced with the
+    type's preset for the H2C and the chosen nozzle, as a spool of the type would be, in
+    the file's own colour for the slot. Without them a slot with no spool is refused, as
+    a print refuses it."""
+    built = FilamentOptions(
+        library_file_id=41,
+        slots=[SlotNeed(slot_id=1, colour="#FF0000"), SlotNeed(slot_id=2, colour="#0000FF")],
+        spools=[],
+    )
+    choices = PrintChoices(nozzles=[NozzleChoice(size="0.4")])
+    pla = [_preset("0.4", "GFSA00_22"), _preset("0.6", "GFSA00_31")]
+    priced = resolve(built, FilamentPlan(), choices, recorded(), {}, slot_presets={1: pla, 2: pla})
+    assert priced.errors == []
+    assert priced.filament_presets == [PresetRef(source="cloud", id="GFSA00_22")] * 2
+    assert priced.filament_colours == ["#FF0000", "#0000FF"]
+    printed = resolve(built, FilamentPlan(), choices, recorded(), {})
+    assert [(e.kind, e.slot_id) for e in printed.errors] == [("no-choice", 1), ("no-choice", 2)]
+    # A type with no preset for the nozzle has nothing to slice with.
+    bare = resolve(
+        built,
+        FilamentPlan(),
+        PrintChoices(nozzles=[NozzleChoice(size="0.2")]),
+        recorded(),
+        {},
+        slot_presets={1: pla, 2: pla},
+    )
+    assert [(e.kind, e.slot_id) for e in bare.errors] == [("no-preset", 1), ("no-preset", 2)]
+    assert bare.errors[0].message.startswith("Slot 1's filament has no slicer preset")
