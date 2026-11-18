@@ -453,6 +453,115 @@ describe('filament location tools', () => {
   })
 })
 
+describe('filament sensor and AMS weight tools (#6268)', () => {
+  const SENSORS = `${BACKEND}/api/v1/filament/sensors`
+
+  it.each([
+    ['filament_sync_ams_weights', 'write'],
+    ['filament_sensors_list', 'read'],
+    ['filament_sensor_readings', 'read'],
+    ['filament_sensor_save', 'write'],
+    ['filament_sensor_archive', 'write'],
+    ['filament_ha_entities', 'read'],
+  ])('%s is %s tier, never gated', (name, risk) => {
+    expect(tool(name).risk).toBe(risk)
+    expect(tool(name).gated).toBe(false)
+  })
+
+  it('says in its descriptions what the sync skips, that an AMS sensor is not made by hand, and that alerts are not sent', () => {
+    expect(tool('filament_sync_ams_weights').description).toMatch(/locked/)
+    expect(tool('filament_sync_ams_weights').description).toMatch(/printing/)
+    expect(tool('filament_sync_ams_weights').description).toMatch(/RFID/)
+    expect(tool('filament_sensor_save').description).toMatch(/AMS sensor cannot be made by hand/)
+    expect(tool('filament_sensor_save').description).toMatch(/shown, not sent/)
+  })
+
+  it('syncs the AMS weights with one POST and no body', async () => {
+    const result = { booked: 1, locked: 0, printing: 0, no_remain: 0, stale: 0, spools: [ROW] }
+    let calls = 0
+    server.use(
+      http.post(`${BACKEND}/api/v1/filament/spools/sync-ams-weights`, () => {
+        calls += 1
+        return HttpResponse.json(result)
+      }),
+    )
+    expect(firstText(await runTool(tool('filament_sync_ams_weights'), {}, ctx()))).toEqual(result)
+    expect(calls).toBe(1)
+  })
+
+  it('lists sensors, of one place when asked', async () => {
+    const seen: (string | null)[] = []
+    server.use(
+      http.get(SENSORS, ({ request }) => {
+        seen.push(new URL(request.url).searchParams.get('location_id'))
+        return HttpResponse.json([{ id: ROW }])
+      }),
+    )
+    await runTool(tool('filament_sensors_list'), {}, ctx())
+    await runTool(tool('filament_sensors_list'), { location_id: ROW }, ctx())
+    expect(seen).toEqual([null, ROW])
+  })
+
+  it('reads a sensor history with since and limit', async () => {
+    const seen: string[] = []
+    server.use(
+      http.get(`${SENSORS}/${ROW}/readings`, ({ request }) => {
+        seen.push(new URL(request.url).search)
+        return HttpResponse.json([{ at: '2026-11-18T00:00:00Z', value: 41 }])
+      }),
+    )
+    const out = await runTool(tool('filament_sensor_readings'), { sensor_id: ROW, since: '2026-11-18T00:00:00Z', limit: 10 }, ctx())
+    expect(firstText(out)).toEqual([{ at: '2026-11-18T00:00:00Z', value: 41 }])
+    expect(seen).toEqual(['?since=2026-11-18T00%3A00%3A00Z&limit=10'])
+    expect((await runTool(tool('filament_sensor_readings'), { sensor_id: ROW, limit: 0 }, ctx())).isError).toBe(true)
+  })
+
+  it('adds a sensor, and patches one', async () => {
+    const calls: unknown[] = []
+    server.use(
+      http.post(SENSORS, async ({ request }) => {
+        calls.push(['add', await request.json()])
+        return HttpResponse.json({ id: ROW }, { status: 201 })
+      }),
+      http.patch(`${SENSORS}/${ROW}`, async ({ request }) => {
+        calls.push(['edit', await request.json()])
+        return HttpResponse.json({ id: ROW })
+      }),
+    )
+    const fields = { location_id: ROW, source: 'home_assistant', kind: 'humidity', entity_id: 'sensor.box', name: 'Box' }
+    expect((await runTool(tool('filament_sensor_save'), { fields }, ctx())).isError).toBeFalsy()
+    const edit = { sensor_id: ROW, fields: { alert_above: null, notify: true } }
+    expect((await runTool(tool('filament_sensor_save'), edit, ctx())).isError).toBeFalsy()
+    expect(calls).toEqual([['add', fields], ['edit', { alert_above: null, notify: true }]])
+    expect(tool('filament_sensor_save').summarize?.({ fields } as never)).toContain('Box')
+  })
+
+  it('archives a sensor on a 204', async () => {
+    let calls = 0
+    server.use(
+      http.post(`${SENSORS}/${ROW}/archive`, () => {
+        calls += 1
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    expect((await runTool(tool('filament_sensor_archive'), { sensor_id: ROW }, ctx())).isError).toBeFalsy()
+    expect(calls).toBe(1)
+  })
+
+  it('lists Home Assistant entities with a search', async () => {
+    let search: string | null = null
+    server.use(
+      http.get(`${SENSORS}/entities`, ({ request }) => {
+        search = new URL(request.url).searchParams.get('search')
+        return HttpResponse.json([{ entity_id: 'sensor.box', state: '41' }])
+      }),
+    )
+    const out = await runTool(tool('filament_ha_entities'), { search: 'box' }, ctx())
+    expect(firstText(out)).toEqual([{ entity_id: 'sensor.box', state: '41' }])
+    expect(search).toBe('box')
+  })
+})
+
 const RFID = `${BACKEND}/api/v1/filament/rfid`
 const STATUS = { override_mode: true, state: 'applied', devices: [] }
 

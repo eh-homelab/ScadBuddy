@@ -657,6 +657,15 @@ whose names are built at run time (FastAPI server spans, `bambuddy.<operation>`,
 (`span.http.route`, `span.scadbuddy.bambuddy.scope`, `span.scadbuddy.tool_use_id`,
 `span.temporalActivityID`), which the lint does not check.
 
+> **Superseded (eh-homelab/clusters#3734, 2026-11-18).** Argo CD's repo-server
+> failed to fetch the remote resource below in prod and wedged syncs. Clusters
+> now vendors the directory: `clusters/prod/scadbuddy/grafana/` holds a
+> byte-for-byte copy of `deploy/grafana/` plus a `.revision` file, the overlay
+> lists `grafana/`, and `deploy.reusable.yml` replaces the copy with the files
+> at `REVISION` instead of moving a `ref`. An overlay that still names
+> `deploy/grafana` as a remote resource fails the deploy. The rest of this
+> subsection records the original design.
+
 **Pinned at the deployed revision.** Clusters' `clusters/prod/scadbuddy`
 overlay references it as a remote kustomize resource:
 

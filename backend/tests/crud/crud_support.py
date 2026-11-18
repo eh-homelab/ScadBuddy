@@ -63,6 +63,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.crud import listener
 from scadbuddy.crud.client import CrudClient, CrudSyncClient
 from scadbuddy.crud.guard import CRUD_HEADERS
+from scadbuddy.crud.print import BASE as PRINT_BASE
 from scadbuddy.crud.projects import RemoteFlowStore, RemotePayloadKeys
 from scadbuddy.crud.render import (
     FORGETTABLE_PREFIXES,
@@ -671,12 +672,18 @@ def threaded_print_crud(
         assert thread.is_alive() and time.monotonic() < deadline, "the server did not start"
         time.sleep(0.01)
     port = server.servers[0].sockets[0].getsockname()[1]
-    client = CrudSyncClient(
-        f"http://127.0.0.1:{port}",
-        "print",
-        ServiceAuth(InProcessProvider(caller, lambda: credentials)),
-        unavailable_budget=0.5,
-    )
+    base_url = f"http://127.0.0.1:{port}"
+    auth = ServiceAuth(InProcessProvider(caller, lambda: credentials))
+    # One request before the test's first (#6666). FastAPI builds an included router's
+    # routes on the first request that matches one (about 95 routes here, 0.2 to 0.6 s
+    # of CPU on the server's loop, measured 2026-11-18), so a test's first call,
+    # bounded by the watch's 2 s timeout (`crud/print.py` `WATCH_CALL_TIMEOUT`), timed
+    # out on a loaded runner. This request takes that cost, mints the caller's
+    # credential and resolves it, under the start's own deadline, not a test's bound.
+    # A refusal (another caller's credential) still builds the routes.
+    with httpx.Client(base_url=base_url, auth=auth, timeout=30) as warm:
+        warm.get(f"{PRINT_BASE}/areas")
+    client = CrudSyncClient(base_url, "print", auth, unavailable_budget=0.5)
     try:
         yield client
     finally:

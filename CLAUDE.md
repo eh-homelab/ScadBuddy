@@ -71,7 +71,10 @@ Generated API files (#492): `backend/openapi.json`, `frontend/src/api/schema.d.t
 client. `typecheck`, `test` and (in the agent) `build` run it first, so both packages need
 uv and the backend tree. With `SCADBUDDY_OPENAPI_JSON` set, it reads that spec and skips
 the export. That's how the Dockerfile's `frontend` and `agent-build` stages use the spec
-from its `api-spec` stage. The frontend's `gen:api` also writes
+from its `api-spec` stage. Both scripts make a defaulted property optional when only
+request bodies reach its schema, with the shared `scripts/gen-api-request-defaults.mjs`
+(#6602, #6660; test `agent/test/genApiRequestDefaults.test.ts`), which both stages copy to
+`/src/scripts/`. The frontend's `gen:api` also writes
 `src/storefront/api/schema.d.ts` (gitignored) from the storefront edge's spec
 (`export_openapi --storefront`, `backend/storefront-openapi.json`, gitignored), or from
 `SCADBUDDY_STOREFRONT_OPENAPI_JSON` when it is set (#5282). It also writes `src/api/settingDocs.json`

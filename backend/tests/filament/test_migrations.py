@@ -127,6 +127,54 @@ def test_capture_migration_makes_bb_weighings_scale(pg_conninfo: str) -> None:
 
 
 @pg
+def test_the_sensor_tables_column_and_unit_index_exist(pg_pool: PgPool) -> None:
+    with pg_pool.connection() as conn:
+        tables = {
+            r["table_name"]
+            for r in conn.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_name IN (%s, %s)",
+                ("filament_location_sensors", "filament_sensor_readings"),
+            ).fetchall()
+        }
+        column = conn.execute(
+            "SELECT 1 FROM information_schema.columns WHERE table_name = %s AND column_name = %s",
+            ("filament_materials", "max_hours_outside_dry"),
+        ).fetchone()
+        index = conn.execute(
+            "SELECT 1 FROM pg_indexes WHERE indexname = %s", ("filament_locations_ams_unit",)
+        ).fetchone()
+    assert tables == {"filament_location_sensors", "filament_sensor_readings"}
+    assert column is not None and index is not None
+
+
+@pg
+def test_sensors_migration_hangs_trays_under_an_existing_unit(pg_conninfo: str) -> None:
+    idx = next(i for i, m in enumerate(MIGRATIONS) if m.id.endswith("_filament_sensors"))
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[:idx])
+        printer = conn.execute(
+            "INSERT INTO printers (id, serial, name) VALUES (gen_random_uuid(), 'SNMIG', 'P')"
+            " RETURNING id"
+        ).fetchone()
+        kind = conn.execute(
+            "SELECT id FROM filament_location_kinds WHERE ams ORDER BY sort_order LIMIT 1"
+        ).fetchone()
+        assert printer is not None and kind is not None
+        ins = (
+            "INSERT INTO filament_locations (name, kind_id, printer_id, ams_id, tray_id)"
+            " VALUES (%s, %s, %s, %s, %s) RETURNING id"
+        )
+        unit = conn.execute(ins, ("AMS 0", kind[0], printer[0], 0, None)).fetchone()
+        tray = conn.execute(ins, ("T1", kind[0], printer[0], 0, 1)).fetchone()
+        orphan = conn.execute(ins, ("T9", kind[0], printer[0], 1, 1)).fetchone()
+        assert unit is not None and tray is not None and orphan is not None
+        migrate(conn)
+        rows = conn.execute("SELECT id, parent_id FROM filament_locations").fetchall()
+        parents: dict[object, object] = {r[0]: r[1] for r in rows}
+    assert parents[tray[0]] == unit[0]
+    assert parents[orphan[0]] is None
+
+
 def test_the_migration_queues_open_bindings(pg_conninfo: str) -> None:
     # #6264: a tag with an open binding is pending after the migration; a closed one is not.
     idx = next(i for i, m in enumerate(MIGRATIONS) if m.id.endswith("_filament_rfid"))

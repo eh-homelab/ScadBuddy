@@ -130,13 +130,14 @@ def _linked(store: Filament, spool_id: UUID) -> tuple[int | None, bool]:
     )
 
 
-def _record_baseline(store: Filament, spool_id: UUID, baseline: str | None) -> None:
+def _record_baseline(store: Filament, spool_id: UUID, device_id: str, baseline: str | None) -> None:
     with store.spools.transaction() as conn:
         conn.execute(
-            "INSERT INTO filament_ntag_writes (spool_id, baseline_uid) VALUES (%s, %s)"
+            "INSERT INTO filament_ntag_writes (spool_id, device_id, baseline_uid)"
+            " VALUES (%s, %s, %s)"
             " ON CONFLICT (spool_id) DO UPDATE SET baseline_uid = EXCLUDED.baseline_uid,"
-            " queued_at = now()",
-            (spool_id, baseline),
+            " device_id = EXCLUDED.device_id, queued_at = now()",
+            (spool_id, device_id, baseline),
         )
 
 
@@ -154,6 +155,15 @@ def _clear_baseline(store: Filament, spool_id: UUID) -> None:
         conn.execute("DELETE FROM filament_ntag_writes WHERE spool_id = %s", (spool_id,))
 
 
+def _clear_device(store: Filament, spool_id: UUID, device_id: str) -> None:
+    with store.spools.transaction() as conn:
+        conn.execute(
+            "DELETE FROM filament_ntag_writes WHERE device_id = %s"
+            " OR (spool_id = %s AND (device_id = %s OR device_id IS NULL))",
+            (device_id, spool_id, device_id),
+        )
+
+
 async def write(
     store: Filament, client: BambuddyClient, spool_id: UUID, device_id: str, *, replace: bool
 ) -> m.NtagQueued:
@@ -168,7 +178,7 @@ async def write(
         raise NtagOverrideOpenError()
     baseline = clean_tag_uid((await client.spool_row(bb_spool_id)).tag_uid)
     warnings = await client.queue_tag_write(device_id, bb_spool_id)
-    await asyncio.to_thread(_record_baseline, store, spool_id, baseline)
+    await asyncio.to_thread(_record_baseline, store, spool_id, device_id, baseline)
     return m.NtagQueued(status="queued", warnings=warnings)
 
 
@@ -196,6 +206,9 @@ async def confirm(
     return m.NtagConfirm(bound=bound is not None, tag_uid=uid if bound is not None else None)
 
 
-async def cancel(client: BambuddyClient, device_id: str) -> None:
-    """Drop the write the device has queued."""
+async def cancel(store: Filament, client: BambuddyClient, spool_id: UUID, device_id: str) -> None:
+    """Drop the write the device has queued, the record of every write queued on that
+    device, and the spool's own record if it names no device, so a later `confirm` binds
+    nothing for them. The spool's write queued on another device is kept."""
     await client.cancel_tag_write(device_id)
+    await asyncio.to_thread(_clear_device, store, spool_id, device_id)

@@ -6,8 +6,10 @@ description: Manage ScadBuddy's own filament inventory - spool types, spools, ta
 # Filament inventory and invoice import
 
 ScadBuddy (SB) owns the spool inventory. Bambuddy (BB) keeps a copy that SB pulls.
-SB does not write back to BB yet. A push from SB to BB is planned in
-[#6265](https://github.com/eh-homelab/ScadBuddy/issues/6265) (filament spec §8).
+SB writes no spool records to BB yet; that push is planned in
+[#6265](https://github.com/eh-homelab/ScadBuddy/issues/6265) (filament spec §8). Tag pushes
+(`filament_sync.tags` set to `sb_to_bb`), override mode, AMS slot setup and NTAG writes do
+write BB.
 
 Sources, relative to the root of
 [eh-homelab/ScadBuddy](https://github.com/eh-homelab/ScadBuddy):

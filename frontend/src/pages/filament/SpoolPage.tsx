@@ -38,6 +38,8 @@ import { PresetTable } from '../../components/filament/PresetTable'
 import { keyOf as presetKey, presetRowsError } from '../../components/filament/presetRows'
 import { SpoolPurchasing } from '../../components/filament/purchasing/SpoolPurchasing'
 import { RgbaColourField } from '../../components/filament/RgbaColourField'
+import { NeedsDrying } from '../../components/filament/NeedsDrying'
+import { outsideDryText } from '../../components/filament/outsideDry'
 import { RgbaSwatch } from '../../components/filament/RgbaSwatch'
 import { HistoryList, Section, SectionIndex } from '../../components/filament/SpoolSections'
 import { NtagPanel } from '../../components/filament/NtagPanel'
@@ -546,6 +548,7 @@ export function SpoolPage() {
               ? 'Choose its type, or its material if it has none yet.'
               : [typeRow?.code ?? saved?.names.material, leftNow != null ? grams(leftNow) : null, saved?.low_stock ? 'Low stock' : null, saved?.archived_at ? 'Archived' : null].filter(Boolean).join(', ')}
           </p>
+          {!creating && saved && <NeedsDrying spool={saved} />}
         </div>
         {!creating && saved?.archived_at && (
           <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void act(async () => { await archiveSpool(spoolKey, false); await reload(true) })}>
@@ -796,6 +799,9 @@ export function SpoolPage() {
                   </SelectContent>
                 </Select>
                 <p className="text-[12px] text-muted-foreground">Saved through a move, which the history records.</p>
+                {!creating && saved && (
+                  <p className={saved.needs_drying ? 'text-[13px] font-medium text-warn' : 'text-[13px] text-muted-foreground'}>{outsideDryText(saved.hours_outside_dry)}</p>
+                )}
               </div>
               {!creating && (
                 <form

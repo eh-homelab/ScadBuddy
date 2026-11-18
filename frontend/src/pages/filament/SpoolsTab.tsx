@@ -1,8 +1,8 @@
-import { Columns3Icon, DownloadIcon, ListFilterIcon, LayoutGridIcon, PlusIcon, Rows3Icon, UploadIcon, XIcon } from 'lucide-react'
+import { Columns3Icon, DownloadIcon, ListFilterIcon, RefreshCwIcon, LayoutGridIcon, PlusIcon, Rows3Icon, UploadIcon, XIcon } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
 import { ApiError } from '../../api/client'
-import { getSummary, listLocations, listSpools, listTypes, type InventorySummary, type LocationNode, type Spool, type SpoolType } from '../../api/filament'
+import { getSummary, listLocations, listSpools, listTypes, syncAmsWeights, type InventorySummary, type LocationNode, type Spool, type SpoolType } from '../../api/filament'
 import { BulkBar, type Place } from '../../components/filament/BulkBar'
 import { SpoolCards } from '../../components/filament/SpoolCards'
 import { SpoolImport } from '../../components/filament/SpoolImport'
@@ -40,6 +40,8 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { downloadBlob } from '../../lib/embed'
+import { toast } from '../../lib/toast'
+import { syncText } from './syncText'
 import { cn } from '@/lib/utils'
 
 interface Loaded {
@@ -126,6 +128,8 @@ export function SpoolsTab() {
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set())
   const [report, setReport] = useState<string | null>(null)
   const [importing, setImporting] = useState(false)
+  const [syncing, setSyncing] = useState(false)
+  const [syncError, setSyncError] = useState<string | null>(null)
 
   /** Each load takes a number; only the newest one's answer is used. */
   const latest = useRef(0)
@@ -182,6 +186,22 @@ export function SpoolsTab() {
       await downloadBlob(async () => new Blob([text], { type: 'text/csv;charset=utf-8' }), `spools-${new Date().toISOString().slice(0, 10)}.csv`)
     } catch (cause) {
       setReport(cause instanceof Error ? cause.message : 'The download did not start.')
+    }
+  }
+
+  /** Books each loaded spool's AMS weight, says what it did and what it skipped, and loads the list again. */
+  const syncWeights = async () => {
+    setSyncing(true)
+    try {
+      setSyncError(null)
+      toast(syncText(await syncAmsWeights()))
+      await load()
+    } catch (cause) {
+      const detail = cause instanceof ApiError ? cause.detail : 'Try again.'
+      setSyncError(detail)
+      toast({ title: 'The weights could not be synced.', detail })
+    } finally {
+      setSyncing(false)
     }
   }
 
@@ -310,6 +330,9 @@ export function SpoolsTab() {
               <PlusIcon /> New spool
             </Link>
           </Button>
+          <Button size="sm" variant="outline" disabled={syncing} onClick={() => void syncWeights()}>
+            <RefreshCwIcon className={syncing ? 'animate-spin motion-reduce:animate-none' : undefined} /> {syncing ? 'Syncing weights…' : 'Sync weights from AMS'}
+          </Button>
           <Button size="sm" variant="outline" disabled={!shown.length} onClick={() => void exportCsv()}>
             <DownloadIcon /> Export CSV
           </Button>
@@ -348,6 +371,11 @@ export function SpoolsTab() {
             void load()
           }}
         />
+      )}
+      {syncError && (
+        <p role="alert" className="text-[13px] text-destructive">
+          The weights could not be synced. {syncError}
+        </p>
       )}
       {report && (
         <p role="status" className="text-[13px]">

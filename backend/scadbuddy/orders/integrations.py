@@ -155,6 +155,10 @@ class MaintenanceTask(BaseModel):
     interval_hours: float
     interval_type: Literal["hours", "days"] = "hours"
     enabled: bool = True
+    #: #5774 (spec 2026-11-17-machine-rate-actuals §3.7): Bambuddy's id of the task on
+    #: the printer (its history route takes it), and the printer's print-hour counter now.
+    item_id: int | None = None
+    current_hours: float | None = None
 
 
 #: What of an archive can be copied: an attempt's finish photo and timelapse (§8.2), or
