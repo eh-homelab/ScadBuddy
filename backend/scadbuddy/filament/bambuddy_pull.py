@@ -90,7 +90,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament import bambuddy_usage, ledger, sensors
 from scadbuddy.filament import models as m
-from scadbuddy.filament.colour import normalise_rgba
+from scadbuddy.filament.colour import canonical_colours, canonical_rgba
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.presets import drop_migrated, own_presets
 from scadbuddy.filament.spools import FilamentSpoolStore, TagKeysClashError
@@ -231,25 +231,6 @@ def _text(value: str | None) -> str | None:
     return cleaned or None
 
 
-def _rgba(value: str | None) -> str | None:
-    try:
-        return normalise_rgba(value) if value else None
-    except ValueError:
-        return None
-
-
-def _colours(value: str | None) -> list[str] | None:
-    """BB's ``extra_colors``: comma-separated hex, 6 or 8 digits each, lower case with no
-    ``#`` as BB stores it (``normalize_extra_colors``, ``backend/app/schemas/spool.py``
-    lines 42-66 at https://github.com/maziggy/bambuddy/tree/1aa7bce166682fde929fec0d535bdaaa22685aad).
-    Spaces and ``;`` are taken as commas too. One bad token drops the field."""
-    parts = [p for p in (value or "").replace(";", ",").replace(" ", ",").split(",") if p]
-    colours = [_rgba(p) for p in parts]
-    if not colours or any(c is None for c in colours):
-        return None
-    return [c for c in colours if c is not None]
-
-
 def snapshot(bb: BbSpool) -> dict[str, Any]:
     """BB's values in SB's terms, as JSON: what a pull compares with the last one's."""
     label = bb.label_weight if bb.label_weight > 0 else None
@@ -261,8 +242,8 @@ def snapshot(bb: BbSpool) -> dict[str, Any]:
         "category": _text(bb.category),
         "effect": _text(bb.effect_type),
         "colour_name": _text(bb.color_name),
-        "rgba": _rgba(bb.rgba),
-        "extra_colours": _colours(bb.extra_colors),
+        "rgba": canonical_rgba(bb.rgba),
+        "extra_colours": canonical_colours(bb.extra_colors),
         "label_weight_g": label,
         "cost_per_kg": cost,
         "nozzle_temp_min": bb.nozzle_temp_min,

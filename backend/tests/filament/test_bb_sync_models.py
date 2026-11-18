@@ -3,7 +3,9 @@ Task 3)."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import json
+from datetime import UTC, datetime, timedelta, timezone
+from decimal import Decimal
 from uuid import uuid4
 
 import pytest
@@ -12,17 +14,41 @@ from pydantic import ValidationError
 from scadbuddy.bambuddy.models import Spool as BbSpool
 from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament.bb_sync_models import (
-    SEEN_FIELDS,
     BbSnapshot,
     BbWrite,
     PlanRequest,
     SyncPassResult,
     SyncPlan,
     seen_row,
+    seen_value,
 )
 from tests.bambuddy.conftest import recording
 
 _AT = datetime(2026, 11, 18, 12, 0, tzinfo=UTC)
+
+
+#: Decision 14's fields of a spool row, by BB's names, written out (not `SEEN_FIELDS`, so a
+#: dropped field fails).
+_DECISION_14_FIELDS = {
+    "material", "subtype", "brand", "category", "effect_type", "color_name", "rgba",
+    "extra_colors", "label_weight", "core_weight", "core_weight_catalog_id",
+    "nozzle_temp_min", "nozzle_temp_max", "note", "cost_per_kg", "low_stock_threshold_pct",
+    "material_number", "archived_at", "weight_used", "weight_locked", "last_dried_at",
+    "slicer_filament", "slicer_filament_name", "suppliers", "location_id",
+}  # fmt: skip
+
+
+def _hash(value: object) -> str:
+    """The plan's ``field_hash`` (Task 4): SHA-256 of sorted compact JSON, 16 hex."""
+    import hashlib
+
+    text = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+def _seen(**fields: object) -> dict[str, object]:
+    row = next(r for r in recording("inventory-spools.json") if r["id"] == 9)
+    return seen_row(BbSpool.model_validate(row | fields))
 
 
 def _snapshot(**lists: object) -> BbSnapshot:
@@ -76,7 +102,7 @@ def test_seen_row_keeps_only_decision_14_fields() -> None:
         ],
     }
     seen = seen_row(BbSpool.model_validate(row))
-    assert set(seen) == set(SEEN_FIELDS)
+    assert set(seen) == _DECISION_14_FIELDS
     assert {"id", "tag_uid", "tray_uuid", "k_profiles", "updated_at", "created_at"}.isdisjoint(seen)
     assert seen["rgba"] == "#68819780"
     assert seen["extra_colors"] == ["#FF0000FF", "#00FF0080"]
@@ -149,3 +175,27 @@ def test_a_plan_round_trips() -> None:
     assert SyncPlan.model_validate_json(plan.model_dump_json()) == plan
     with pytest.raises(ValidationError):
         BbWrite.model_validate(write.model_dump() | {"kind": "tray"})
+
+
+def test_a_decimal_price_is_the_seen_price() -> None:
+    seen = _seen(cost_per_kg=19.99)["cost_per_kg"]
+    sb = seen_value("cost_per_kg", Decimal("19.9900"))
+    assert sb == seen == 19.99
+    assert _hash(sb) == _hash(seen)
+
+
+def test_a_drying_time_is_the_seen_text() -> None:
+    seen = _seen(last_dried_at="2026-11-01T10:00:00")["last_dried_at"]
+    sb = seen_value(
+        "last_dried_at", datetime(2026, 11, 1, 12, 0, tzinfo=timezone(timedelta(hours=2)))
+    )
+    assert sb == seen == "2026-11-01T10:00:00Z"
+    assert _hash(sb) == _hash(seen)
+
+
+def test_an_int_weight_used_is_the_seen_float() -> None:
+    seen = _seen(weight_used=0.0)["weight_used"]
+    sb = seen_value("weight_used", 0)
+    assert sb == seen == 0.0 and isinstance(sb, float)
+    assert _hash(sb) == _hash(seen)
+    assert seen_value("note", None) is None

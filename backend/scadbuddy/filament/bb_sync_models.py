@@ -10,16 +10,24 @@ the agent read.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
+from pydantic_core import to_jsonable_python
 
-from scadbuddy.bambuddy.models import BbLocation, BbSupplier, CatalogFilament, SpoolCatalogEntry
+from scadbuddy.bambuddy.models import (
+    BbLocation,
+    BbSupplier,
+    CatalogFilament,
+    SpoolCatalogEntry,
+    as_utc,
+)
 from scadbuddy.bambuddy.models import Spool as BbSpool
 from scadbuddy.core.settings import FilamentSync
-from scadbuddy.filament.colour import normalise_rgba
+from scadbuddy.filament.colour import canonical_colours, canonical_rgba
 
 #: The SB rows the sync writes to Bambuddy, as `filament_bb_creates.kind` and
 #: `filament_bb_push_errors.kind` name them.
@@ -68,21 +76,25 @@ _SUPPLIER_FIELDS = frozenset(
 )
 
 
-def _rgba(value: str | None) -> str | None:
-    try:
-        return normalise_rgba(value) if value else None
-    except ValueError:
-        return None
+#: The `SEEN_FIELDS` for which Bambuddy gives a float, so ``0`` and ``0.0`` are one value.
+_FLOAT_FIELDS = frozenset({"cost_per_kg", "weight_used"})
 
 
-def _colours(value: str | None) -> list[str] | None:
-    """BB's comma-separated ``extra_colors`` as a list of ``#RRGGBBAA``; ``None`` when
-    there are none or one is not a colour, as the pull reads it (`bambuddy_pull._colours`)."""
-    parts = [p for p in (value or "").replace(";", ",").replace(" ", ",").split(",") if p]
-    colours = [_rgba(p) for p in parts]
-    if not colours or any(c is None for c in colours):
+def seen_value(field: str, value: object) -> object:
+    """An SB ``value`` for the `SEEN_FIELDS` name ``field``, in exactly the JSON form
+    `seen_row` stores for it: a `Decimal` or an int of a float field is a float, a
+    datetime is UTC ISO text ending in ``Z``, ``rgba`` is ``#RRGGBBAA``, ``None`` stays
+    ``None``. The plan compares and hashes SB's side through this, never raw (M2 of the
+    Task 3 review). The archive state is compared as ``archived_at is None``, not by time."""
+    if value is None:
         return None
-    return [c for c in colours if c is not None]
+    if field in _FLOAT_FIELDS and isinstance(value, Decimal | int):
+        return float(value)
+    if field == "rgba" and isinstance(value, str):
+        return canonical_rgba(value)
+    if isinstance(value, datetime):
+        value = as_utc(value).astimezone(UTC)
+    return to_jsonable_python(value)
 
 
 def seen_row(row: BbSpool) -> dict[str, Any]:
@@ -94,8 +106,8 @@ def seen_row(row: BbSpool) -> dict[str, Any]:
 
     `bambuddy_pull.snapshot` is another shape, for the ``synced_from_bb`` event only."""
     seen = row.model_dump(mode="json", include=set(SEEN_FIELDS))
-    seen["rgba"] = _rgba(row.rgba)
-    seen["extra_colors"] = _colours(row.extra_colors)
+    seen["rgba"] = canonical_rgba(row.rgba)
+    seen["extra_colors"] = canonical_colours(row.extra_colors)
     seen["suppliers"] = sorted(
         (
             {k: v for k, v in s.model_dump(mode="json").items() if k in _SUPPLIER_FIELDS}

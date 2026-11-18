@@ -748,6 +748,31 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     SQL gives them; a primary key makes them not null anyway. `Kind` and `Op` are module-level
     `Literal`s in `bb_sync_models.py`. Why: the brief's values verbatim. Cost: none known.
 
+26. Task 3 (ruling R-T3-1): the colour helpers are shared. `_rgba` and `_colours` moved to
+    `filament/colour.py` as public `canonical_rgba` and `canonical_colours`; `bambuddy_pull`
+    and `bb_sync_models` import them. Why: F17 needs one canonical colour form, two copies can
+    drift, and `colour.py` avoids the import cycle Task 9 would make. Cost: one small move.
+27. Task 3 (R-T3-2): both sides compare in one JSON form. `bb_sync_models.seen_value(field,
+    value)` writes SB's Decimal, datetime and int values as `seen_row` stores them (`19.99`,
+    `"...Z"` text, `0.0`). Task 4 runs SB's desired values through it before every compare and
+    hash. The archive state is compared as `archived_at is None` on both sides, never as
+    timestamps. Why: otherwise every full pass rewrites the price and the drying time, and
+    `two_way` always sees a difference. Cost: an extra helper.
+28. Task 3 (R-T3-3): `test_seen_row_keeps_only_decision_14_fields` asserts a literal set of the
+    25 Decision 14 names, not `SEEN_FIELDS`. Why: a test that compares the code with its own
+    constant cannot catch a dropped field.
+29. Task 3 (R-T3-4): `'Manage Inventory'` is added to the agent's `BambuddyScope` union beside
+    the filament catalog label (this replaces the "left" note in item 22). Why: the gap is older
+    than this PR, but the fix is one line in a line this PR already edits.
+30. Task 3 (R-T3-5): Task 5 cleans the `filament_bb_push_errors` and `filament_bb_creates` rows
+    of every kind (spool, supplier, location, insert type) when the SB row they name is deleted
+    or archived, not only kind `spool`. Why: otherwise a deleted supplier's error shows in
+    `SyncStatus.errors` forever.
+31. Task 3 (R-T3-6): before Task 5 stores `seen_row(answer)` for `archive`, `restore`,
+    `PUT .../suppliers` and `PUT .../k-profiles`, it checks in Task 2's recordings that each
+    answer is a full `SpoolResponse`. Where an answer is not, Task 5 reads the spool with a
+    GET (`GET` only) and stores that.
+
 ## Self-review
 
 - Spec coverage: §8 "one setting per data type" → Task 1; §8.1 rows: types on spools with
