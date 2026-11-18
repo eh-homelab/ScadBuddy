@@ -552,6 +552,9 @@ jobs:
           listing="${RUNNER_TEMP}/grafana-listing.json"
           fetch "$listing" "${api}?ref=${REVISION}" || unknown "the listing: $err"
           jq -e 'type == "array"' "$listing" > /dev/null 2>&1 || unknown "the listing is not a directory's"
+          # The contents API lists at most 1,000 entries; a listing that long
+          # may be cut short, and a partial copy must not deploy.
+          jq -e 'length < 1000' "$listing" > /dev/null || unknown "the listing has 1,000 entries or more, the contents API's cap"
           # A tab or newline in a name would be escaped by @tsv below and
           # reach the checks under another name: refuse it here, by name.
           jq -e 'all(.[]; .name | test("^[^\t\n/]+$"))' "$listing" > /dev/null 2>&1 \
@@ -823,6 +826,8 @@ jobs:
                 || { echo "::error::deploy/grafana/${name} at ${REVISION} is not kustomization.yaml or a [a-z0-9-]+.json dashboard, so it cannot be vendored"; exit 1; }
             done < <(find "$src" -mindepth 1 -maxdepth 1 -print0)
             # Replace, not merge: a dashboard the revision dropped goes too.
+            # "$src"/* never stays a literal `*`: $src holds kustomization.yaml
+            # (checked above).
             find "$dir" -maxdepth 1 -type f \( -name '*.json' -o -name kustomization.yaml \) -delete
             cp -- "$src"/* "$dir/"
             for f in "$src"/*; do

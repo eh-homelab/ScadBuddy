@@ -909,6 +909,11 @@ listing "file:$(printf 'a\tb.json')"
 got=$(presence ok)
 [ "$got" = 0:unknown:2 ] || fail "fetch: tab in a name: got $got, expected 0:unknown:2"
 grep -qF 'with a tab, newline or slash' "$work/log" || fail "fetch: tab in a name: no warning: $(cat "$work/log")"
+# A listing at the contents API's 1,000-entry cap may be cut short: `unknown`.
+jq -n '[range(1000) | {type: "file", name: "d\(.).json", sha: "0000000000000000000000000000000000000000"}]' > "$work/src-listing.json"
+got=$(presence ok)
+[ "$got" = 0:unknown:2 ] || fail "fetch: 1,000 entries: got $got, expected 0:unknown:2"
+grep -qF "the contents API's cap" "$work/log" || fail "fetch: 1,000 entries: no warning: $(cat "$work/log")"
 # ...and a clean fetch feeds a refresh end to end.
 listing
 presence ok > /dev/null
