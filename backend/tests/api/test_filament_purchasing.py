@@ -659,6 +659,42 @@ def test_a_line_total_or_invoice_total_out_of_range_is_a_422(client: TestClient)
     assert put.status_code == 422, put.text
 
 
+def test_a_patched_tax_or_shipping_past_the_line_range_is_a_422(client: TestClient) -> None:
+    supplier = _supplier(client)
+    line = {"description": "x", "quantity": 1, "unit_price": "60000000"}
+    draft = client.post(f"{URL}/invoices", json=_invoice_body(supplier, lines=[line])).json()
+    for field in ("tax", "shipping"):
+        patched = client.patch(f"{URL}/invoices/{draft['id']}", json={field: "60000000"})
+        assert patched.status_code == 422, patched.text
+    assert client.get(f"{URL}/invoices/{draft['id']}").json()["tax"] != "60000000.0000"
+
+
+def test_a_price_point_past_its_range_is_a_409_naming_the_line(client: TestClient) -> None:
+    supplier = _supplier(client)
+    type_id = _type(client)
+    product = client.post(
+        f"{URL}/suppliers/{supplier}/products",
+        json={"type_id": type_id, "sku": "BIG", "pack_size": 1000},
+    )
+    assert product.status_code == 201, product.text
+    line = {
+        "description": "x",
+        "quantity": 1,
+        "unit_price": "200000",
+        "type_id": type_id,
+        "supplier_product_id": product.json()["id"],
+    }
+    body = _invoice_body(
+        supplier, subtotal="200000", shipping="0", tax="0", total="200000", lines=[line]
+    )
+    made = client.post(f"{URL}/invoices", json=body)
+    assert made.status_code == 201, made.text
+    refused = client.post(f"{URL}/invoices/{made.json()['id']}/confirm")
+    assert refused.status_code == 409, refused.text
+    assert "price point" in refused.text
+    assert client.get(f"{URL}/invoices/{made.json()['id']}").json()["status"] == "draft"
+
+
 def test_an_invoice_for_an_archived_supplier_is_a_422(client: TestClient) -> None:
     supplier = _supplier(client)
     assert client.patch(f"{URL}/suppliers/{supplier}", json={"archived": True}).status_code == 200

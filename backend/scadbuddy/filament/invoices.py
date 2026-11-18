@@ -363,6 +363,12 @@ class InvoiceStore:
                 # Not the number index (the only unique index an update can break).
                 raise
             raise DuplicateInvoiceError(taken) from None
+        except errors.ForeignKeyViolation:
+            raise InvoiceRefError() from None
+        except (errors.CheckViolation, errors.DataError) as exc:
+            # The recompute writes each line's total and allocated cost from the new tax
+            # and shipping; a sum past the columns' range is the same 422 as a line's.
+            raise InvoiceRefError(_LINE_BOUNDS) from exc
 
     def _number(self, patch: pm.InvoicePatch, invoice_id: UUID) -> str | None:
         """The number the invoice has after ``patch``: the patch's, else the one it kept."""
@@ -548,17 +554,21 @@ class InvoiceStore:
             " WHERE id = ANY(%s)",
             (line["id"], touched),
         )
-        conn.execute(
-            "INSERT INTO filament_price_points (product_id, price, currency, on_date, source,"
-            " invoice_line_id) VALUES (%s, %s, %s, %s, 'invoice', %s)",
-            (
-                product_id,
-                price_per_pack(line["line_total"], line["quantity"], pack_size),
-                head["currency"],
-                head["invoice_date"],
-                line["id"],
-            ),
-        )
+        try:
+            with conn.transaction():
+                conn.execute(
+                    "INSERT INTO filament_price_points (product_id, price, currency, on_date,"
+                    " source, invoice_line_id) VALUES (%s, %s, %s, %s, 'invoice', %s)",
+                    (
+                        product_id,
+                        price_per_pack(line["line_total"], line["quantity"], pack_size),
+                        head["currency"],
+                        head["invoice_date"],
+                        line["id"],
+                    ),
+                )
+        except _WRITE_REFUSALS as exc:
+            raise InvoiceLineError(position, f"its price point cannot be written ({exc})") from exc
         conn.execute(
             "UPDATE filament_invoice_lines SET type_id = %s, supplier_product_id = %s,"
             " updated_at = now() WHERE id = %s",
