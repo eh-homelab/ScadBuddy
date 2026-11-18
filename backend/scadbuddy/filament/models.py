@@ -1212,3 +1212,23 @@ class InventorySummary(BaseModel):
     loaded: int
     low_stock: int
     needs_type: int
+
+
+class TagPushReport(BaseModel):
+    """What one drain of the pending-tag queue did (`filament/rfid_push.py`, #6264)."""
+
+    pushed: int = 0
+    moved: int = 0
+    cleared: int = 0
+    unchanged: int = 0
+    failed: int = 0
+
+
+class SlotReport(BaseModel):
+    """What one reconcile of the override slots did (#6264)."""
+
+    configured: int = 0
+    unchanged: int = 0
+    no_preset: int = 0
+    no_nozzle: int = 0
+    failed: int = 0

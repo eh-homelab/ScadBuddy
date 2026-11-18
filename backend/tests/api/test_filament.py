@@ -810,3 +810,23 @@ def test_the_route_answers_422_for_an_override_on_an_ntag(client: TestClient) ->
     )
     assert ok.status_code == 201, ok.text
     assert ok.json()["override"] is True
+
+
+@respx.mock
+def test_the_route_binds_even_when_bambuddy_is_down(client: TestClient, pg_conninfo: str) -> None:
+    """#6264 Task 4: the tag is pushed once inline, and a Bambuddy that is down never fails
+    the request; the row stays queued for the refresh."""
+    configure(client, filament_sync={"tags": "sb_to_bb"})
+    route = respx.get(f"{API}/inventory/spools/by-tag").mock(side_effect=httpx.ConnectError("down"))
+    spool = _spool(client)
+
+    bound = client.post(
+        f"{SPOOLS}/{spool['id']}/tags", json={"tag_uid": "AABBCCDD", "kind": "ntag_opentag"}
+    )
+
+    assert bound.status_code == 201, bound.text
+    assert route.call_count == 1
+    with psycopg.connect(pg_conninfo) as conn:
+        row = conn.execute("SELECT attempts FROM filament_bb_tag_pending").fetchone()
+    assert row == (1,)
+    assert client.get("/api/v1/filament/tags").json()[0]["tag_uid"] == "AABBCCDD"

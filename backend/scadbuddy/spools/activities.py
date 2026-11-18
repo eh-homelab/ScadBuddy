@@ -21,11 +21,13 @@ from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament import capture
 from scadbuddy.filament.bambuddy_pull import scheduled_pull
 from scadbuddy.filament.component import Filament
+from scadbuddy.filament.rfid_push import push_pending
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.printers.component import Printers
 from scadbuddy.workflows.spool_refresh import (
     CAPTURE_ACTIVITY,
     FILAMENT_PULL_ACTIVITY,
+    FILAMENT_RFID_ACTIVITY,
     LIST_ACTIVITY,
     PROVIDER_ACTIVITY,
     SEEN_ACTIVITY,
@@ -90,3 +92,27 @@ def capture_backstop_activity(printers: Printers) -> Callable[[], Any]:
         return "captured"
 
     return filament_capture_backstop
+
+
+def filament_rfid_activity(
+    printers: Printers,
+    filament: Filament,
+    load: Callable[[], StoredSettings],
+    sync: Callable[[], FilamentSync],
+) -> Callable[[], Any]:
+    """``filament_rfid_reconcile``: ScadBuddy's tag bindings told to Bambuddy
+    (`filament/rfid_push.drain_tags`, #6264). Each step fails alone; the activity returns
+    ``done`` or ``failed`` and never raises, so the run never fails on it."""
+
+    @activity.defn(name=FILAMENT_RFID_ACTIVITY)
+    async def filament_rfid_reconcile() -> str:
+        try:
+            await push_pending(filament, load, sync)
+        except Exception as error:
+            activity.logger.warning(
+                "could not push the tags to Bambuddy", extra={"error": type(error).__name__}
+            )
+            return "failed"
+        return "done"
+
+    return filament_rfid_reconcile

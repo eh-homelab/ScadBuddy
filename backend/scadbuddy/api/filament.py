@@ -2,12 +2,15 @@
 module holds the catalogs a spool type or a spool picks from (plain reads and writes
 over `filament/catalog.py`), the spool types (`filament/types.py`), and the spools,
 their tags and their ledger (`filament/spools.py`, `filament/ledger.py`). Only the import
-(`POST /filament/bambuddy/import`, `filament/bambuddy_pull.py`) reaches Bambuddy, and it
-only reads."""
+(`POST /filament/bambuddy/import`, `filament/bambuddy_pull.py`) and a tag change
+(`POST /filament/spools/{id}/tags`, `filament/rfid_push.py`, #6264) reach Bambuddy; the
+import only reads, and the tag change writes to Bambuddy only with ``filament_sync.tags``
+``sb_to_bb``."""
 
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Annotated, Any, cast
 from uuid import UUID
 
@@ -34,7 +37,7 @@ from scadbuddy.filament.catalog import (
     CatalogRefError,
     CatalogSpec,
 )
-from scadbuddy.filament.component import FilamentDep
+from scadbuddy.filament.component import Filament, FilamentDep
 from scadbuddy.filament.csv_import import (
     ImportPreview,
     ImportRefusedError,
@@ -48,6 +51,7 @@ from scadbuddy.filament.locations import (
     LocationExistsError,
     MoveTargetError,
 )
+from scadbuddy.filament.rfid_push import push_pending
 from scadbuddy.filament.spools import (
     OverrideKindError,
     SpoolBambuddyLinkedError,
@@ -58,9 +62,15 @@ from scadbuddy.filament.spools import (
 )
 from scadbuddy.filament.types import TypeRowsDuplicateError, TypeTempError
 from scadbuddy.library.settings_store import SettingsStore
+from scadbuddy.operations.kinds import waiting_on_bambuddy
 from scadbuddy.orders.store import FilamentExistsError
 
 router = APIRouter(prefix="/filament", tags=["filament"])
+logger = logging.getLogger(__name__)
+
+#: How long a tag change waits to tell Bambuddy before the reply goes (#6264); the
+#: refresh Schedule finishes the rest.
+RFID_INLINE_SECONDS = 2.5
 
 CatalogRow = (
     m.Material
@@ -536,11 +546,18 @@ async def archive_spool(
         "them), or made with `kind`. A binding the tag had to another spool, or the spool "
         "had to another tag, is closed, with a `tag_unbound` ledger event on that spool and "
         "`tag_bound` on this one. 404 for no such spool, 409 when the two keys name two "
-        "tags, 422 when neither key is left once cleaned."
+        "tags, 422 when neither key is left once cleaned. With `filament_sync.tags` set to "
+        "`sb_to_bb` the change is also told to Bambuddy, for at most 2.5 seconds; what is not "
+        "done by then is finished by the spool refresh, and a Bambuddy that is down never "
+        "fails the request."
     ),
 )
 async def bind_spool_tag(
-    filament: FilamentDep, caller: CallerDep, spool_id: UUID, body: m.TagBind
+    filament: FilamentDep,
+    store: SettingsStoreDep,
+    caller: CallerDep,
+    spool_id: UUID,
+    body: m.TagBind,
 ) -> m.TagBinding:
     try:
         bound = await asyncio.to_thread(
@@ -557,7 +574,24 @@ async def bind_spool_tag(
         raise _refused(exc) from None
     if bound is None:
         raise _no_spool(spool_id)
+    await _push_now(filament, store)
     return bound
+
+
+async def _push_now(filament: Filament, store: SettingsStore) -> None:
+    """Tell Bambuddy of the queued tags once, for at most `RFID_INLINE_SECONDS`. Whatever
+    it does not finish stays queued for the refresh; nothing here fails the request."""
+    try:
+        async with asyncio.timeout(RFID_INLINE_SECONDS), waiting_on_bambuddy():
+            await push_pending(
+                filament,
+                store.load,
+                lambda: store.read({"filament_sync"})["filament_sync"],
+            )
+    except Exception as error:
+        logger.info(
+            "the tags were not pushed in the request", extra={"error": type(error).__name__}
+        )
 
 
 @router.delete(

@@ -1,13 +1,32 @@
-"""The queue of tags whose binding changed and that Bambuddy has not been told of (#6264)."""
+"""The queue of tags whose binding changed and that Bambuddy has not been told of, and the
+push that drains it (#6264)."""
 
 from __future__ import annotations
 
+import asyncio
+import logging
+from collections.abc import Callable
+from datetime import datetime
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from psycopg import Connection
 from psycopg.rows import DictRow
 
+from scadbuddy.bambuddy.client import BambuddyClient, client_for
+from scadbuddy.bambuddy.errors import TagAlreadyLinkedError
+from scadbuddy.core.problems import ApiError
+from scadbuddy.core.settings import FilamentSync
+from scadbuddy.filament.models import TagPushReport
+from scadbuddy.library.settings_store import StoredSettings
+
+if TYPE_CHECKING:
+    # `filament.spools` imports this module for `enqueue_tag`.
+    from scadbuddy.filament.component import Filament
+
 Conn = Connection[DictRow]
+
+logger = logging.getLogger(__name__)
 
 
 def enqueue_tag(conn: Conn, tag_id: UUID) -> None:
@@ -18,3 +37,147 @@ def enqueue_tag(conn: Conn, tag_id: UUID) -> None:
         " ON CONFLICT (tag_id) DO UPDATE SET queued_at = now(), attempts = 0, last_error = NULL",
         (tag_id,),
     )
+
+
+def error_label(exc: ApiError) -> str:
+    """What a failed push records: the problem ``type``, plus ``:<status>`` when Bambuddy
+    answered with one. Never the message, which may carry what Bambuddy sent."""
+    code = exc.extensions.get("bambuddy_status")
+    return exc.type if code is None else f"{exc.type}:{code}"
+
+
+def _label(exc: Exception) -> str:
+    return error_label(exc) if isinstance(exc, ApiError) else type(exc).__name__
+
+
+def _read(store: Filament, tag_id: UUID) -> tuple[dict[str, Any], int | None] | None:
+    """The queued tag's keys and ``queued_at``, and the Bambuddy id of the spool it is
+    bound to (``None`` when unbound or the spool has no Bambuddy link); ``None`` when it
+    is no longer queued."""
+    with store.spools.transaction() as conn:
+        tag = conn.execute(
+            "SELECT t.kind, t.tag_uid, t.tray_uuid, p.queued_at"
+            " FROM filament_bb_tag_pending p JOIN filament_tags t ON t.id = p.tag_id"
+            " WHERE p.tag_id = %s",
+            (tag_id,),
+        ).fetchone()
+        if tag is None:
+            return None
+        held = conn.execute(
+            "SELECT l.bb_spool_id FROM filament_tag_bindings b"
+            " JOIN filament_bb_links l ON l.spool_id = b.spool_id"
+            " WHERE b.tag_id = %s AND b.unbound_at IS NULL",
+            (tag_id,),
+        ).fetchone()
+    return tag, None if held is None else held["bb_spool_id"]
+
+
+def _sb_holder(store: Filament, bb_spool_id: int) -> bool | None:
+    """Whether the SB spool linked to Bambuddy's ``bb_spool_id`` holds an open binding
+    now; ``None`` when no SB spool is linked to it."""
+    with store.spools.transaction() as conn:
+        row = conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM filament_tag_bindings b"
+            " WHERE b.spool_id = l.spool_id AND b.unbound_at IS NULL) AS bound"
+            " FROM filament_bb_links l WHERE l.bb_spool_id = %s",
+            (bb_spool_id,),
+        ).fetchone()
+    return None if row is None else bool(row["bound"])
+
+
+def _done(store: Filament, tag_id: UUID, queued_at: datetime) -> None:
+    """Drop the row, unless the tag was queued again since it was read."""
+    with store.spools.transaction() as conn:
+        conn.execute(
+            "DELETE FROM filament_bb_tag_pending WHERE tag_id = %s AND queued_at = %s",
+            (tag_id, queued_at),
+        )
+
+
+def _failed(store: Filament, tag_id: UUID, label: str) -> None:
+    with store.spools.transaction() as conn:
+        conn.execute(
+            "UPDATE filament_bb_tag_pending SET attempts = attempts + 1,"
+            " last_attempt_at = now(), last_error = %s WHERE tag_id = %s",
+            (label, tag_id),
+        )
+
+
+async def _push_one(
+    store: Filament, client: BambuddyClient, tag_id: UUID, report: TagPushReport
+) -> None:
+    read = await asyncio.to_thread(_read, store, tag_id)
+    if read is None:
+        return
+    tag, desired = read
+    uid, tray = tag["tag_uid"], tag["tray_uuid"]
+    found = await client.spool_by_tag(tray_uuid=tray, tag_uid=uid)
+    observed = None if found is None else found.id
+    if desired == observed:
+        report.unchanged += 1
+    elif desired is not None:
+        kind = "bambu" if tag["kind"] == "bambu_mifare" else "ntag"
+        try:
+            await client.link_tag(
+                desired, tag_uid=uid, tray_uuid=tray, tag_type=kind, data_origin="nfc_link"
+            )
+            report.pushed += 1
+        except TagAlreadyLinkedError as clash:
+            await client.clear_spool_tag(clash.holder_id)
+            await client.link_tag(
+                desired, tag_uid=uid, tray_uuid=tray, tag_type=kind, data_origin="nfc_link"
+            )
+            report.moved += 1
+    else:
+        assert observed is not None
+        bound = await asyncio.to_thread(_sb_holder, store, observed)
+        if bound is None or bound:
+            # An unknown holder is left alone (Decision 7). A holder that now has a tag of
+            # its own was rebound across kinds: clearing both keys would wipe the new tag.
+            report.unchanged += 1
+        else:
+            await client.clear_spool_tag(observed)
+            report.cleared += 1
+    await asyncio.to_thread(_done, store, tag_id, tag["queued_at"])
+
+
+async def drain_tags(store: Filament, client: BambuddyClient, *, limit: int = 50) -> TagPushReport:
+    """Tell Bambuddy of every queued tag, oldest first (a closed and a new tag of one
+    ``bind_on`` share ``queued_at``, so ``tag_id`` breaks the tie). A tag whose Bambuddy
+    state already matches ScadBuddy's is only dequeued. A failure is recorded on the row
+    (``attempts``, ``last_error``) and the next tag goes on."""
+    report = TagPushReport()
+    with store.spools.transaction() as conn:
+        ids = [
+            row["tag_id"]
+            for row in conn.execute(
+                "SELECT tag_id FROM filament_bb_tag_pending ORDER BY queued_at, tag_id LIMIT %s",
+                (limit,),
+            )
+        ]
+    for tag_id in ids:
+        try:
+            await _push_one(store, client, tag_id, report)
+        except Exception as error:
+            label = _label(error)
+            logger.warning(
+                "could not push a tag to Bambuddy",
+                extra={"tag_id": str(tag_id), "error": label},
+            )
+            await asyncio.to_thread(_failed, store, tag_id, label)
+            report.failed += 1
+    return report
+
+
+async def push_pending(
+    store: Filament, load: Callable[[], StoredSettings], sync: Callable[[], FilamentSync]
+) -> TagPushReport:
+    """`drain_tags` when ``filament_sync.tags`` is ``sb_to_bb`` and a Bambuddy is
+    configured; otherwise nothing, and the rows stay queued."""
+    if (await asyncio.to_thread(sync)).tags != "sb_to_bb":
+        return TagPushReport()
+    settings = await asyncio.to_thread(load)
+    if not settings.bambuddy_url:
+        return TagPushReport()
+    async with client_for(settings) as client:
+        return await drain_tags(store, client)

@@ -153,6 +153,7 @@ from scadbuddy.slicing.start import stop_lost_native_slices, sweep_native_slices
 from scadbuddy.spools.activities import (
     capture_backstop_activity,
     filament_pull_activity,
+    filament_rfid_activity,
     spool_activities,
 )
 from scadbuddy.store import sweep_blobs
@@ -1874,6 +1875,13 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
         ),
         # The printers' trays reconciled with the ledger, the watch's backstop (#6263).
         capture_backstop_activity(state.components.get(PRINTERS)),
+        # The tag bindings ScadBuddy changed, told to Bambuddy (#6264).
+        filament_rfid_activity(
+            state.components.get(PRINTERS),
+            state.components.get(FILAMENT),
+            lambda: state.settings_store.load(),
+            lambda: state.settings_store.read({"filament_sync"})["filament_sync"],
+        ),
         # Bambuddy's local presets kept for native runs (#4645), on the spools' Schedule.
         held_presets_activity(
             lambda: HeldPresetStore(state.projection.pool), lambda: state.settings_store.load()
