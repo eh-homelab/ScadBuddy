@@ -173,26 +173,52 @@ async def test_two_misses_at_once_read_once() -> None:
     assert a is not b
 
 
-async def test_a_waiter_reads_for_itself_when_the_shared_read_fails() -> None:
+async def test_waiters_on_a_failed_read_get_its_error_and_read_no_more() -> None:
+    """Callers that wait on a read that fails get its error: the same Bambuddy, the same
+    key, so a read of their own would fail the same way (#6622)."""
     gate = asyncio.Event()
     calls = 0
 
     async def read() -> LibraryFile:
         nonlocal calls
         calls += 1
-        if calls == 1:
-            await gate.wait()
-            raise RuntimeError("Bambuddy did not answer")
+        await gate.wait()
+        raise RuntimeError("Bambuddy did not answer")
+
+    reads = DialogReads(clock=Clock())
+    callers = [asyncio.create_task(reads.get(CONFIG, "library_file", 89, read)) for _ in range(3)]
+    await asyncio.sleep(0)
+    gate.set()
+    for caller in callers:
+        with pytest.raises(RuntimeError):
+            await caller
+    assert calls == 1
+
+
+async def test_waiters_on_a_cancelled_read_share_one_new_read() -> None:
+    """A shared read whose own caller left ends with no answer; the callers that waited on
+    it share one new read (#6622)."""
+    gates = [asyncio.Event(), asyncio.Event()]
+    calls = 0
+
+    async def read() -> LibraryFile:
+        nonlocal calls
+        calls += 1
+        await gates[calls - 1].wait()
         return _file()
 
     reads = DialogReads(clock=Clock())
     first = asyncio.create_task(reads.get(CONFIG, "library_file", 89, read))
-    second = asyncio.create_task(reads.get(CONFIG, "library_file", 89, read))
     await asyncio.sleep(0)
-    gate.set()
-    with pytest.raises(RuntimeError):
+    waiters = [asyncio.create_task(reads.get(CONFIG, "library_file", 89, read)) for _ in range(3)]
+    await asyncio.sleep(0)
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
         await first
-    assert await second == _file()
+    for _ in range(3):
+        await asyncio.sleep(0)
+    gates[1].set()
+    assert await asyncio.gather(*waiters) == [_file()] * 3
     assert calls == 2
 
 
