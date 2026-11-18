@@ -37,7 +37,8 @@ Url = Annotated[str, AfterValidator(_http_url)]
 Money = Annotated[Decimal, Field(ge=0, max_digits=12, decimal_places=4)]
 Currency = Annotated[str, StringConstraints(pattern=r"^[A-Z]{3}$")]
 PackSize = Annotated[int, Field(gt=0, le=1000)]
-Quantity = Annotated[int, Field(gt=0, le=100_000)]
+Quantity = Annotated[int, Field(gt=0, le=1_000)]
+_MONEY_LIMIT = Decimal(10) ** 8
 Sku = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
 Source = Literal["invoice", "manual"]
 InvoiceStatus = Literal["draft", "confirmed"]
@@ -174,7 +175,18 @@ class InvoiceLineIn(_In):
     type_id: UUID | None = None
     supplier_product_id: UUID | None = None
     proposed_type: SpoolTypeCreate | None = None
-    update_spool_ids: Annotated[list[UUID], Field(max_length=100_000)] = Field(default_factory=list)
+    update_spool_ids: Annotated[list[UUID], Field(max_length=1_000)] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _within_bounds(self) -> InvoiceLineIn:
+        if len(self.update_spool_ids) > self.quantity:
+            raise ValueError("update_spool_ids names more spools than the line's quantity")
+        subtotal = self.line_subtotal
+        if subtotal is None:
+            subtotal = self.quantity * self.unit_price
+        if subtotal >= _MONEY_LIMIT:
+            raise ValueError("the line total is out of range (at most 99,999,999.9999)")
+        return self
 
 
 class InvoiceLine(_Row):

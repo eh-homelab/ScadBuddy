@@ -3,7 +3,7 @@
 A draft is edited freely; every write to one ends in `_recompute`, which spreads the
 receipt's tax and shipping over the lines (`invoice_money`) in the same transaction, so a
 reader never sees a line total that disagrees with the header. A confirmed invoice is
-frozen but for its note (and, in Task 5, its file). No trigger keeps ``updated_at``: each
+frozen but for its note and its file. No trigger keeps ``updated_at``: each
 write here sets it.
 """
 
@@ -43,6 +43,7 @@ _Invoices = list[pm.Invoice]
 _Claimed = list[tuple[UUID, int | None]]
 _Made = dict[str, tuple[UUID, int]]
 _SKU_MAX = 128
+_LINE_BOUNDS = "a line is out of range: its spool list, its total or the invoice total"
 #: What a line's spool or type writes can be refused with; each is a 409 naming the line.
 _WRITE_REFUSALS = (
     errors.IntegrityError,
@@ -101,6 +102,13 @@ class InvoiceCurrencyError(ValueError):
             f"the invoice is in {currency} but the shop's currency is {shop}: "
             "change the shop's currency or retype the invoice"
         )
+
+
+class InvoiceSupplierArchivedError(ValueError):
+    """An archived supplier gets no new products or price points from a confirm."""
+
+    def __init__(self) -> None:
+        super().__init__("the supplier is archived: restore it or move the invoice to another")
 
 
 class InvoiceNotReconciledError(ValueError):
@@ -265,7 +273,8 @@ class InvoiceStore:
 
     def create(self, body: pm.InvoiceCreate, *, actor: str) -> tuple[pm.InvoiceDetail, bool]:
         """``(invoice, made)``; ``made`` is false when ``import_run_id`` matched one.
-        ``actor`` is unused: a draft records no event (confirm's carry ``invoice:<id>``)."""
+        ``actor`` is unused: a draft records no event (confirm's carry ``invoice:<id>``).
+        A supplier that is missing or archived is an `InvoiceRefError`."""
         run = body.import_run_id
         if run is not None:
             found = self._by_run(run)
@@ -275,6 +284,7 @@ class InvoiceStore:
         names = list(data)
         try:
             with self._pool.connection() as conn, conn.transaction():
+                self._live_supplier(conn, body.supplier_id)
                 row = conn.execute(
                     f"INSERT INTO filament_invoices ({', '.join(names)})"
                     f" VALUES ({', '.join('%s' for _ in names)}) RETURNING id",
@@ -297,6 +307,8 @@ class InvoiceStore:
             raise DuplicateInvoiceError(taken) from None
         except errors.ForeignKeyViolation:
             raise InvoiceRefError() from None
+        except (errors.CheckViolation, errors.DataError) as exc:
+            raise InvoiceRefError(_LINE_BOUNDS) from exc
         assert made is not None
         return made, True
 
@@ -363,9 +375,8 @@ class InvoiceStore:
         return None if row is None else row["number"]
 
     @staticmethod
-    def _move(conn: Conn, invoice_id: UUID, supplier_id: UUID) -> None:
-        """A draft's lines name the old supplier's products: they name none after the move
-        (confirm matches by SKU). The supplier must be there and not archived."""
+    def _live_supplier(conn: Conn, supplier_id: UUID) -> None:
+        """The supplier must be there and not archived (`InvoiceRefError`)."""
         row = conn.execute(
             "SELECT archived_at FROM filament_suppliers WHERE id = %s", (supplier_id,)
         ).fetchone()
@@ -373,6 +384,12 @@ class InvoiceStore:
             raise InvoiceRefError()
         if row["archived_at"] is not None:
             raise InvoiceRefError("the supplier is archived: restore it or pick another")
+
+    @staticmethod
+    def _move(conn: Conn, invoice_id: UUID, supplier_id: UUID) -> None:
+        """A draft's lines name the old supplier's products: they name none after the move
+        (confirm matches by SKU). The supplier must be there and not archived."""
+        InvoiceStore._live_supplier(conn, supplier_id)
         conn.execute(
             "UPDATE filament_invoice_lines SET supplier_product_id = NULL WHERE invoice_id = %s",
             (invoice_id,),
@@ -392,6 +409,8 @@ class InvoiceStore:
                 return self._detail(conn, invoice_id)
         except errors.ForeignKeyViolation:
             raise InvoiceRefError() from None
+        except (errors.CheckViolation, errors.DataError) as exc:
+            raise InvoiceRefError(_LINE_BOUNDS) from exc
 
     def delete(self, invoice_id: UUID) -> bool:
         with self._pool.connection() as conn, conn.transaction():
@@ -437,7 +456,8 @@ class InvoiceStore:
         """Turn a draft into types, supplier products, spools with their cost, and price
         points, in one transaction (Decisions 3, 4, 9, 11-13). ``(invoice, confirmed_now)``;
         false when it was already confirmed (nothing more is made); ``None`` for no such
-        invoice. A refusal is a typed `ValueError` and nothing is written."""
+        invoice. A refusal is a typed `ValueError` and nothing is written. `actor` is unused:
+        the events carry `invoice:<id>` as the actor."""
         shop = self._shop_currency()
         with self._pool.connection() as conn, conn.transaction():
             head = conn.execute(
@@ -457,11 +477,24 @@ class InvoiceStore:
             ).fetchall()
             if not lines:
                 raise InvoiceNoLinesError()
+            archived = conn.execute(
+                "SELECT archived_at FROM filament_suppliers WHERE id = %s", (head["supplier_id"],)
+            ).fetchone()
+            if archived is not None and archived["archived_at"] is not None:
+                raise InvoiceSupplierArchivedError()
             if head["currency"] != shop:
                 raise InvoiceCurrencyError(head["currency"], shop)
             diff = difference(head["total"], [row["line_total"] for row in lines], head["shipping"])
             if abs(diff) > RECONCILE_TOLERANCE:
                 raise InvoiceNotReconciledError(diff)
+            # One sorted lock over every line's spools, so two confirms that claim the
+            # same spools in a different line order cannot deadlock.
+            claimed = sorted({i for line in lines for i in line["update_spool_ids"]})
+            if claimed:
+                conn.execute(
+                    "SELECT id FROM filament_spools WHERE id = ANY(%s) ORDER BY id FOR UPDATE",
+                    (claimed,),
+                )
             who = f"invoice:{invoice_id}"
             made: _Made = {}
             for line in lines:

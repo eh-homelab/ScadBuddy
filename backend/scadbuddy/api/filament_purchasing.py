@@ -29,6 +29,7 @@ from scadbuddy.filament.invoices import (
     InvoiceNoLinesError,
     InvoiceNotReconciledError,
     InvoiceRefError,
+    InvoiceSupplierArchivedError,
 )
 from scadbuddy.filament.shopping import ShoppingRefError
 from scadbuddy.filament.suppliers import (
@@ -263,7 +264,8 @@ async def list_prices(filament: FilamentDep, product_id: UUID) -> list[pm.PriceP
     description=(
         "A price per pack, with tax, as a decimal string. `currency` defaults to the shop's "
         "(`orders_currency`) and `on_date` to today (UTC). The point's source is `manual`. "
-        "404 for no such product, 422 for a bad field."
+        "An archived product still takes a price, and a currency other than the shop's is "
+        "kept as sent (Decision 6). 404 for no such product, 422 for a bad field."
     ),
 )
 async def add_price(
@@ -355,8 +357,9 @@ async def list_invoices(
         "the lines on every write: all lines give a `line_tax`, or none does and the invoice "
         "`tax` is spread by subtotal. A repeated `import_run_id` answers 200 with the first "
         "invoice and applies nothing. 409 when the supplier has an invoice with the number "
-        "(the body's `existing_invoice_id` is that invoice), 422 for a missing supplier, type "
-        "or product, a mixed line tax or a bad field."
+        "(the body's `existing_invoice_id` is that invoice), 422 for a missing or archived "
+        "supplier, a missing type or product, a mixed line tax, a line whose spool list is "
+        "longer than its quantity or whose total is out of range, or a bad field."
     ),
 )
 async def create_invoice(
@@ -462,9 +465,9 @@ async def delete_invoice(filament: FilamentDep, invoice_id: UUID) -> Response:
         "the line fills the spools in `update_spool_ids`) with a `cost_per_kg` from the line's "
         "allocated cost, and one price point per line. Confirming a confirmed invoice answers "
         "200 with it and makes nothing more. 404 for no such invoice. 409, with nothing "
-        "written, for an invoice with no lines, one not in the shop's currency, one whose "
-        "total is more than 0.05 from its lines plus shipping, or a line that cannot be "
-        "confirmed (the message names the line)."
+        "written, for an invoice with no lines, one of an archived supplier, one not in the "
+        "shop's currency, one whose total is more than 0.05 from its lines plus shipping, or a "
+        "line that cannot be confirmed (the message names the line)."
     ),
 )
 async def confirm_invoice(
@@ -475,6 +478,7 @@ async def confirm_invoice(
     except (
         InvoiceNoLinesError,
         InvoiceCurrencyError,
+        InvoiceSupplierArchivedError,
         InvoiceNotReconciledError,
         InvoiceLineError,
     ) as exc:

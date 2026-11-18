@@ -363,10 +363,22 @@ def test_a_photo_is_kept(client: TestClient) -> None:
     ids=["html", "svg", "empty"],
 )
 def test_a_file_that_is_no_pdf_or_photo_is_refused(
-    client: TestClient, pg_conninfo: str, data: bytes, name: str
+    client: TestClient,
+    pg_conninfo: str,
+    monkeypatch: pytest.MonkeyPatch,
+    data: bytes,
+    name: str,
 ) -> None:
+    kept: list[object] = []
+
+    async def spy(*args: object, **kwargs: object) -> str:
+        kept.append(args)
+        return "never"
+
+    monkeypatch.setattr("scadbuddy.orders.attachments.keep_file", spy)
     invoice_id = _draft(client)
     assert _send(client, invoice_id, data, name).status_code == 422
+    assert kept == []
     assert _holds(pg_conninfo, invoice_id) == []
     assert client.get(f"{URL}/invoices/{invoice_id}").json()["file"] is None
     assert client.get(f"{URL}/invoices/{invoice_id}/file").status_code == 404
@@ -619,3 +631,47 @@ def test_the_invoice_list_carries_the_spool_count(client: TestClient) -> None:
     rows = {row["id"]: row["spool_count"] for row in client.get(f"{URL}/invoices").json()}
     assert rows[invoice_id] == 2
     assert rows[waiting] == 0
+
+
+def test_a_line_with_more_spools_than_its_quantity_is_a_422(client: TestClient) -> None:
+    supplier = _supplier(client)
+    ids = [str(uuid4()), str(uuid4())]
+    line = {"description": "x", "quantity": 1, "unit_price": "5", "update_spool_ids": ids}
+    made = client.post(f"{URL}/invoices", json=_invoice_body(supplier, lines=[line]))
+    assert made.status_code == 422, made.text
+    draft = client.post(f"{URL}/invoices", json=_invoice_body(supplier)).json()
+    put = client.put(f"{URL}/invoices/{draft['id']}/lines", json=[line])
+    assert put.status_code == 422, put.text
+
+
+def test_a_line_total_or_invoice_total_out_of_range_is_a_422(client: TestClient) -> None:
+    supplier = _supplier(client)
+    huge = {"description": "x", "quantity": 1_000, "unit_price": "99999999.9999"}
+    made = client.post(f"{URL}/invoices", json=_invoice_body(supplier, lines=[huge]))
+    assert made.status_code == 422, made.text
+    # Each subtotal is in range, their sum with the tax is not: the database refuses it.
+    near = {"description": "y", "quantity": 1, "unit_price": "99999999.9999"}
+    draft = client.post(f"{URL}/invoices", json=_invoice_body(supplier)).json()
+    put = client.put(
+        f"{URL}/invoices/{draft['id']}/lines",
+        json=[{**near, "line_tax": "99999999.9999"}],
+    )
+    assert put.status_code == 422, put.text
+
+
+def test_an_invoice_for_an_archived_supplier_is_a_422(client: TestClient) -> None:
+    supplier = _supplier(client)
+    assert client.patch(f"{URL}/suppliers/{supplier}", json={"archived": True}).status_code == 200
+    made = client.post(f"{URL}/invoices", json=_invoice_body(supplier))
+    assert made.status_code == 422, made.text
+    assert "archived" in made.text
+
+
+def test_confirming_an_invoice_of_an_archived_supplier_is_a_409(client: TestClient) -> None:
+    invoice_id = _confirmable(client)
+    supplier = client.get(f"{URL}/invoices/{invoice_id}").json()["supplier_id"]
+    assert client.patch(f"{URL}/suppliers/{supplier}", json={"archived": True}).status_code == 200
+    refused = client.post(f"{URL}/invoices/{invoice_id}/confirm")
+    assert refused.status_code == 409, refused.text
+    assert "archived" in refused.text
+    assert client.get(f"{URL}/invoices/{invoice_id}").json()["status"] == "draft"

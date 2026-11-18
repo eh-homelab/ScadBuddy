@@ -381,3 +381,24 @@ def test_the_list_counts_each_invoices_spools(pg_pool: PgPool) -> None:
     detail = shop.invoices.get(confirmed.id)
     assert detail is not None
     assert detail.spool_count == 3
+
+
+def test_a_check_the_validator_missed_is_a_ref_error_not_a_500(pg_pool: PgPool) -> None:
+    store = _store(pg_pool)
+    one = _supplier(pg_pool, "One")
+    draft = _make(store, _body(one))
+    bad = InvoiceLineIn.model_construct(
+        description="x",
+        sku=None,
+        quantity=1,
+        unit_price=Decimal(1),
+        line_subtotal=None,
+        line_tax=None,
+        colour_code=None,
+        type_id=None,
+        supplier_product_id=None,
+        proposed_type=None,
+        update_spool_ids=[uuid4(), uuid4()],
+    )
+    with pytest.raises(InvoiceRefError):
+        store.replace_lines(draft.id, [bad])
