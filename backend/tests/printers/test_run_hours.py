@@ -14,8 +14,6 @@ from scadbuddy.printers.status import STALE_AFTER
 
 T0 = datetime(2026, 11, 18, 12, 0, tzinfo=UTC)
 JOB = "run-1 plate 1"
-#: The database's clock: near the writes, so no stored time is ahead of it.
-NOW = T0
 
 
 def _row(state: str | None = "RUNNING", subtask: str | None = JOB) -> RunHours:
@@ -48,26 +46,26 @@ def test_the_counter_counts_only_running_and_its_limit_is_the_stale_limit() -> N
 
 @pytest.mark.parametrize("gap", [1, 10, 90])
 def test_a_short_gap_in_running_counts(gap: int) -> None:
-    after = accrue(_row(), _at(gap), _report(), now=NOW)
+    after = accrue(_row(), _at(gap), _report())
     assert after.run_seconds == Decimal(100 + gap)
     assert after.unseen_seconds == 0
     assert after.counted_to == _at(gap)
 
 
 def test_a_short_gap_counts_on_a_touch_too() -> None:
-    after = accrue(_row(), _at(10), None, now=NOW)
+    after = accrue(_row(), _at(10), None)
     assert after.run_seconds == Decimal(110) and after.counted_to == _at(10)
     assert (after.state, after.subtask) == ("RUNNING", JOB)
 
 
 def test_a_fraction_of_a_second_counts() -> None:
-    after = accrue(_row(), _at(1.25), _report(), now=NOW)
+    after = accrue(_row(), _at(1.25), _report())
     assert after.run_seconds == Decimal("101.25")
 
 
 @pytest.mark.parametrize("state", ["PAUSE", "PREPARE", "SLICING", "IDLE", "FINISH", "FAILED", None])
 def test_any_other_state_counts_nothing(state: str | None) -> None:
-    after = accrue(_row(state=state), _at(10), _report(state="RUNNING"), now=NOW)
+    after = accrue(_row(state=state), _at(10), _report(state="RUNNING"))
     assert after.run_seconds == 100 and after.unseen_seconds == 0
     assert after.counted_to == _at(10)
     assert after.state == "RUNNING"
@@ -75,14 +73,14 @@ def test_any_other_state_counts_nothing(state: str | None) -> None:
 
 @pytest.mark.parametrize("state", ["PAUSE", "IDLE"])
 def test_a_long_gap_from_another_state_counts_nothing_and_is_not_unseen(state: str) -> None:
-    after = accrue(_row(state=state), _at(600), _report(state="FINISH"), now=NOW)
+    after = accrue(_row(state=state), _at(600), _report(state="FINISH"))
     assert after.run_seconds == 100 and after.unseen_seconds == 0
     assert after.counted_to == _at(600)
 
 
 def test_a_long_gap_with_the_same_print_still_running_counts() -> None:
     """A watch restart: the printer printed on while ScadBuddy's link was down."""
-    after = accrue(_row(), _at(600), _report(), now=NOW)
+    after = accrue(_row(), _at(600), _report())
     assert after.run_seconds == 700 and after.unseen_seconds == 0
     assert after.counted_to == _at(600)
 
@@ -100,74 +98,76 @@ def test_a_long_gap_with_the_same_print_still_running_counts() -> None:
     ids=["finished", "paused", "another-print", "no-state", "no-subtask", "delta"],
 )
 def test_a_long_gap_that_ends_otherwise_is_unseen(report: dict[str, object]) -> None:
-    after = accrue(_row(), _at(600), report, now=NOW)
+    after = accrue(_row(), _at(600), report)
     assert after.run_seconds == 100
     assert after.unseen_seconds == 600
     assert after.counted_to == _at(600)
 
 
 def test_a_long_gap_after_a_row_with_no_subtask_is_unseen() -> None:
-    after = accrue(_row(subtask=None), _at(600), _report(), now=NOW)
+    after = accrue(_row(subtask=None), _at(600), _report())
     assert after.run_seconds == 100 and after.unseen_seconds == 600
 
 
 def test_a_touch_after_a_long_gap_changes_nothing_and_the_next_report_decides() -> None:
     row = _row()
-    touched = accrue(row, _at(600), None, now=NOW)
+    touched = accrue(row, _at(600), None)
     assert touched == row
-    assert accrue(touched, _at(610), _report(), now=NOW).run_seconds == 710
-    assert accrue(touched, _at(610), _report(state="FINISH"), now=NOW).unseen_seconds == 610
+    assert accrue(touched, _at(610), _report()).run_seconds == 710
+    assert accrue(touched, _at(610), _report(state="FINISH")).unseen_seconds == 610
 
 
 def test_a_resend_at_the_same_seen_at_adds_nothing() -> None:
-    once = accrue(_row(), _at(10), _report(), now=NOW)
-    assert accrue(once, _at(10), _report(), now=NOW) == once
+    once = accrue(_row(), _at(10), _report())
+    assert accrue(once, _at(10), _report()) == once
 
 
 def test_a_touch_stamped_before_counted_to_adds_nothing() -> None:
     row = _row()
-    assert accrue(row, _at(-20), None, now=NOW) == row
+    assert accrue(row, _at(-20), None) == row
 
 
-def test_an_earlier_report_changes_nothing_while_no_clock_is_ahead() -> None:
-    """Only a merge brings one here (a `stale` report never reaches the counter): it
-    counts nothing and keeps ``counted_to`` and the newer state."""
+def test_an_earlier_report_changes_nothing() -> None:
+    """A late write, or a report after the watch clock stepped back: ``counted_to``
+    never moves back, so nothing is counted twice."""
     row = _row()
-    assert accrue(row, _at(-5), _report(state="PAUSE"), now=NOW) == row
+    assert accrue(row, _at(-5), _report()) == row
+    assert accrue(row, _at(-5), _report(subtask="another")) == row
 
 
-def test_a_late_write_while_the_clock_is_still_ahead_counts_nothing_twice() -> None:
-    """The watch host's clock is steadily 60 s ahead, so `reports.stale` lets a late
-    write through. It changes nothing, and the next report counts only its own gap."""
-    ahead_now = T0 - timedelta(seconds=60)
-    late = accrue(_row(), _at(-10), _report(state="PAUSE"), now=ahead_now)
-    assert late == _row()
-    after = accrue(late, _at(10), _report(), now=ahead_now)
+def test_a_late_write_on_a_clock_far_ahead_counts_nothing_twice() -> None:
+    """The watch host is 45 s ahead and a write lands 35 s late (review of c83f2b0d7):
+    it changes nothing, and the next report counts only its own gap."""
+    row = _row()
+    late = accrue(row, _at(-35), _report())
+    assert late == row
+    after = accrue(late, _at(10), _report())
     assert after.run_seconds == 110 and after.counted_to == _at(10)
 
 
-def test_a_corrected_clock_moves_counted_to_back_and_counts_nothing() -> None:
-    """``counted_to`` is past the database's clock and the report is not: the watch
-    host's clock was corrected. The report counts nothing and ``counted_to`` follows it
-    back, so the next report counts its own gap."""
-    row = replace(_row(), counted_to=_at(3600))
-    after = accrue(row, _at(-5), _report(state="PAUSE"), now=NOW)
-    assert after.run_seconds == 100 and after.unseen_seconds == 0
-    assert (after.counted_to, after.state) == (_at(-5), "PAUSE")
+def test_an_earlier_report_may_stop_the_counting() -> None:
+    """A print that ended while the clock was behind ``counted_to`` stops the counting,
+    so the next report counts nothing for its gap: low, never high."""
+    stopped = accrue(_row(), _at(-5), _report(state="FINISH"))
+    assert stopped == replace(_row(), state="FINISH")
+    after = accrue(stopped, _at(10), _report(state="FINISH"))
+    assert after.run_seconds == 100 and after.counted_to == _at(10)
 
 
-def test_a_report_still_ahead_never_moves_counted_to_back() -> None:
-    row = replace(_row(), counted_to=_at(3600))
-    assert accrue(row, _at(3000), _report(state="PAUSE"), now=NOW) == row
+def test_an_earlier_report_never_starts_the_counting() -> None:
+    row = _row(state="PAUSE")
+    assert accrue(row, _at(-5), _report()) == row
 
 
-def test_after_a_clock_step_back_the_next_report_counts_its_normal_gap() -> None:
-    ahead = accrue(_row(), _at(3600), _report(), now=NOW)  # the same print on, an hour "later"
+def test_after_a_clock_step_back_counting_waits_for_counted_to() -> None:
+    """A clock an hour ahead that steps back loses its lead once, never more: reports
+    before ``counted_to`` count nothing, and the first one past it counts its gap."""
+    ahead = accrue(_row(), _at(3600), _report())  # the same print on, an hour "later"
     assert ahead.run_seconds == 3700
-    stepped = accrue(ahead, _at(10), _report(), now=NOW)  # the clock steps back an hour
-    assert stepped.run_seconds == 3700 and stepped.counted_to == _at(10)
-    after = accrue(stepped, _at(20), _report(), now=NOW)
-    assert after.run_seconds == 3710 and after.counted_to == _at(20)
+    stepped = accrue(accrue(ahead, _at(10), _report()), _at(20), _report())
+    assert stepped == ahead
+    after = accrue(stepped, _at(3610), _report())
+    assert after.run_seconds == 3710 and after.counted_to == _at(3610)
 
 
 def test_a_touch_after_a_clock_step_back_adds_nothing_and_keeps_counted_to() -> None:
@@ -175,20 +175,20 @@ def test_a_touch_after_a_clock_step_back_adds_nothing_and_keeps_counted_to() -> 
     ``counted_to`` is the usual case after a report: moving back on it would count that
     stretch twice."""
     row = _row()
-    assert accrue(row, _at(-3600), None, now=NOW) == row
+    assert accrue(row, _at(-3600), None) == row
 
 
 def test_a_delta_report_without_state_keeps_the_state() -> None:
-    after = accrue(_row(), _at(10), _report(state=None, subtask=None), now=NOW)
+    after = accrue(_row(), _at(10), _report(state=None, subtask=None))
     assert after.run_seconds == 110
     assert (after.state, after.subtask) == ("RUNNING", JOB)
-    assert accrue(after, _at(20), {"mc_percent": 41}, now=NOW).run_seconds == 120
+    assert accrue(after, _at(20), {"mc_percent": 41}).run_seconds == 120
 
 
 def test_a_report_sets_state_and_subtask_each_only_when_present() -> None:
-    after = accrue(_row(), _at(10), _report(state="PAUSE", subtask=None), now=NOW)
+    after = accrue(_row(), _at(10), _report(state="PAUSE", subtask=None))
     assert (after.state, after.subtask) == ("PAUSE", JOB)
-    after = accrue(after, _at(20), _report(state=None, subtask="run-2 plate 1"), now=NOW)
+    after = accrue(after, _at(20), _report(state=None, subtask="run-2 plate 1"))
     assert (after.state, after.subtask) == ("PAUSE", "run-2 plate 1")
 
 
@@ -214,7 +214,7 @@ def test_a_print_counts_running_only() -> None:
         (105, None),
     ]
     for at, report in steps:
-        row = accrue(row, _at(at), report, now=NOW)
+        row = accrue(row, _at(at), report)
     assert row.run_seconds == (55 - 30) + (95 - 75)
     assert row.unseen_seconds == 0
     assert (row.state, row.counted_to) == ("FINISH", _at(105))

@@ -97,11 +97,11 @@ def test_a_stale_write_leaves_the_counter_alone(
     assert _counter(pg_pool, pid) == before
 
 
-def test_a_report_after_the_watch_clock_steps_back_moves_the_counter_back(
+def test_after_the_watch_clock_steps_back_the_counter_waits_for_counted_to(
     printers_with_kek: PrinterStore, pg_pool: PgPool
 ) -> None:
     """A row stamped by a clock an hour ahead guards nothing (`reports.stale`), so the
-    next report is written, and the counter counts on from its time."""
+    next reports are written, but the counter neither moves back nor counts them."""
     pid = _linked(printers_with_kek)
     reports = PrinterReportStore(pg_pool)
     ahead = datetime.now(UTC).replace(microsecond=0) + timedelta(hours=1)
@@ -113,21 +113,21 @@ def test_a_report_after_the_watch_clock_steps_back_moves_the_counter_back(
 
     counter = _counter(pg_pool, pid)
     assert counter is not None
-    assert (counter.run_seconds, counter.counted_to) == (Decimal(20), _at(10))
+    assert (counter.run_seconds, counter.counted_to) == (Decimal(10), ahead + timedelta(seconds=10))
 
 
 def test_a_late_write_while_the_watch_clock_is_ahead_counts_nothing_twice(
     printers_with_kek: PrinterStore, pg_pool: PgPool
 ) -> None:
     """A watch host 60 s ahead: the stored ``seen_at`` guards nothing (`reports.stale`), so
-    a late write is written, but the counter neither moves back nor counts it again."""
+    a write 35 s late is written, but the counter neither moves back nor counts it again."""
     pid = _linked(printers_with_kek)
     reports = PrinterReportStore(pg_pool)
     base = datetime.now(UTC).replace(microsecond=0) + timedelta(seconds=60)
     reports.advance(pid, _running(), base)
     reports.advance(pid, _running(), base + timedelta(seconds=10))
 
-    reports.advance(pid, _running("PAUSE"), base + timedelta(seconds=5))  # the late write
+    reports.advance(pid, _running(), base - timedelta(seconds=35))  # 35 s late
     reports.advance(pid, _running(), base + timedelta(seconds=20))
 
     counter = _counter(pg_pool, pid)
@@ -177,6 +177,24 @@ def test_a_touch_with_no_row_writes_none(printers_with_kek: PrinterStore, pg_poo
     pid = _linked(printers_with_kek)
     PrinterReportStore(pg_pool).touch(pid, _at(0))
     assert _counter(pg_pool, pid) is None
+
+
+def test_a_touch_before_the_first_report_after_the_deploy_makes_no_row(
+    printers_with_kek: PrinterStore, pg_pool: PgPool
+) -> None:
+    """A printer that reported before the counter existed has a report row and no counter
+    row: a touch makes none, and its next full report does."""
+    pid = _linked(printers_with_kek)
+    reports = PrinterReportStore(pg_pool)
+    reports.advance(pid, _running(), _at(0))
+    with pg_pool.connection() as conn:
+        conn.execute("DELETE FROM printer_run_hours WHERE printer = %s", (pid,))
+
+    reports.touch(pid, _at(10))
+    assert _counter(pg_pool, pid) is None
+    reports.advance(pid, _running(), _at(20))
+    counter = _counter(pg_pool, pid)
+    assert counter is not None and counter.counted_to == _at(20) and counter.run_seconds == 0
 
 
 def test_an_unlink_keeps_the_total_and_clears_the_state_and_a_relink_counts_on(

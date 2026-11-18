@@ -49,13 +49,6 @@ from scadbuddy.printers.models import PrinterRow
 #: A printer whose last report is older than this is offline (Review Focus 5).
 STALE_AFTER = timedelta(seconds=90)
 
-#: How far ahead of the database's clock a stored ``seen_at`` may be and still guard the
-#: row (`reports.stale`). Report times come from the clock of the host that runs the
-#: watch, which may move between hosts; a row stamped by a host whose clock ran ahead must
-#: not freeze every later report until real time catches up. The hour counter reads it too
-#: (`run_hours.accrue`).
-FUTURE_TOLERANCE = timedelta(seconds=30)
-
 #: The states that show the printer running a plate (OpenBambuAPI ``mqtt.md``).
 RUNNING = frozenset({"PREPARE", "SLICING", "RUNNING", "PAUSE"})
 

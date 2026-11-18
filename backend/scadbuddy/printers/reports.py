@@ -39,7 +39,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from psycopg import Connection
@@ -52,7 +52,6 @@ from scadbuddy.filament import prints
 from scadbuddy.printers import run_hours
 from scadbuddy.printers.lan_models import LanReport
 from scadbuddy.printers.models import PrinterRow
-from scadbuddy.printers.status import FUTURE_TOLERANCE as FUTURE_TOLERANCE  # re-exported
 from scadbuddy.printers.status import RUNNING as RUNNING  # re-exported (`progress`)
 from scadbuddy.printers.status import status_from_report
 from scadbuddy.printers.store import printer_uuid
@@ -78,6 +77,13 @@ class PrintEnd:
 
     subtask_name: str
     timed: bool
+
+
+#: How far ahead of the database's clock a stored ``seen_at`` may be and still guard the
+#: row (`stale`). Report times come from the clock of the host that runs the watch, which
+#: may move between hosts; a row stamped by a host whose clock ran ahead must not freeze
+#: every later report until real time catches up.
+FUTURE_TOLERANCE = timedelta(seconds=30)
 
 
 def stale(stored: datetime | None, seen_at: datetime, now: datetime) -> bool:

@@ -343,19 +343,17 @@ gets from the watch, in the same transaction:
   report's `UPDATE` and the counter's `UPDATE` in one transaction, and locks in the same
   order as `advance_in`: the report row first, then the counter row.
 
-Each step is a pure function, `run_hours.accrue(row, t, report, now=)`, where `t` is the
-write's or touch's `seen_at`, `report` is the merged report (none for a touch) and `now`
-is the database's clock (`now()` in the write's transaction):
+Each step is a pure function, `run_hours.accrue(row, t, report)`, where `t` is the
+write's or touch's `seen_at` and `report` is the merged report (none for a touch):
 
 ```
 d = t - row.counted_to
-ahead = now + FUTURE_TOLERANCE          # status.FUTURE_TOLERANCE (30 s)
+if d < 0:                               # a late write, a clock step back, an earlier touch
+    add nothing; keep counted_to; on a report whose gcode_state is not "RUNNING"
+    while row.state is "RUNNING": state = its gcode_state (stop counting); nothing else
+    (stop here)
 if d == 0:                              # a resend (same seen_at)
     add nothing; keep counted_to
-elif d < 0 and report and row.counted_to > ahead >= t:
-    add nothing; counted_to = t         # the watch clock was corrected
-elif d < 0:                             # a late write, an earlier touch
-    change nothing (state included)
 elif row.state != "RUNNING":
     add nothing
 elif d <= GAP_LIMIT:                    # GAP_LIMIT = status.STALE_AFTER (90 s)
@@ -392,17 +390,16 @@ on a report: state, subtask = its gcode_state and subtask_name, each only when p
     runs after it. Otherwise it goes to `unseen_seconds`.
   - A **backward step** (a watch host whose clock ran ahead, then stepped back) makes a
     report earlier than `counted_to`. It reaches the counter only when the report row's
-    `seen_at` is past `FUTURE_TOLERANCE` (`reports.py` `stale`). When `counted_to` is
-    past `now + FUTURE_TOLERANCE` and the report is not, the clock was corrected: that
-    report counts nothing and moves `counted_to` back to its `seen_at`, so the next
-    report counts its own gap. The step loses at most the time from the last write before
-    it to the first report after it, and nothing later. The counter never waits for real
-    time to catch up.
-  - A **late write** (a print worker's request still running on the API after the worker
-    gave its answer up) also gets past `stale` while the stored `seen_at` is ahead, with
-    no step at all. A report before `counted_to` that is not the corrected-clock case
-    changes nothing, its state included, so no stretch is counted twice. A merge that
-    moves a counter under a printer with older reports gives the same case.
+    `seen_at` is past `FUTURE_TOLERANCE` (`reports.py` `stale`). A **late write** (a print
+    worker's request still running on the API after the worker gave its answer up) gets
+    there the same way while the stored `seen_at` is ahead, with no step at all, and so
+    does a report after a merge moved a counter under a printer with older reports. Their
+    times cannot tell them apart: a write 35 s late on a host 45 s ahead looks like a
+    clock corrected by 35 s. Moving `counted_to` back on a late write would count the
+    stretch to it twice, so no write moves it back. **(call: low, never high)** Such a
+    report counts nothing and may only stop the counting: a state other than `RUNNING`
+    replaces a counted one. It never starts it. A clock that ran ahead so loses its lead
+    once: counting goes on when its reports pass `counted_to` again.
   - A **touch** stamped before `counted_to` never moves it back. A touch is stamped
     `watch.LINK_PROOF` (20 s) before it is sent, so after a report this is the usual case,
     and moving back would count that stretch twice.
@@ -463,9 +460,7 @@ CREATE TABLE printer_run_hours (
   run_seconds numeric(16, 6) NOT NULL DEFAULT 0 CHECK (run_seconds >= 0),
   -- Gaps over the limit that ended in another state or print: not counted.
   unseen_seconds numeric(16, 6) NOT NULL DEFAULT 0 CHECK (unseen_seconds >= 0),
-  -- Counted up to here. Moves back only to a report stamped before it when it is past
-  -- the database's clock and the report is not (a watch clock that was corrected),
-  -- counting nothing for that report.
+  -- Counted up to here. Never moves back: a write stamped before it counts nothing.
   counted_to timestamptz NOT NULL,
   -- The last report's gcode_state and subtask_name. Null state: nothing to count
   -- (also set by an unlink, so no gap spans it).
@@ -770,8 +765,8 @@ Print-hours   495.3 h from Bambuddy        ScadBuddy's count: 12.4 h (check)
   (a watch restart); one that ends in another state or print counts nothing and adds to
   `unseen_seconds`; a touch over 90 s changes nothing and the next report decides; a
   resend at the same `seen_at` adds nothing; a touch stamped before `counted_to` adds
-  nothing; a late report while the clock is still ahead changes nothing, and only a
-  corrected clock moves `counted_to` back; a delta report without `gcode_state` keeps the state; a replay of the
+  nothing; a report before `counted_to` (late, or after a clock step back) never moves it
+  back, counts nothing and may stop the counting but never start it; a delta report without `gcode_state` keeps the state; a replay of the
   recorded H2C reports (`tests/printers/fixtures/`) in order gives the expected seconds.
 - Counter, store (`requires_postgres`, a new `backend/tests/printers/test_run_hours_store.py`): `advance_in` creates the row on the first report and
   advances it under the lock; a `stale` write and a write for a printer not LAN-linked

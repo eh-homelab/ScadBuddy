@@ -12,11 +12,11 @@ A gap over `GAP_LIMIT` means the watch or its link was down. It counts only when
 report after it shows the same print still running (the printer printed on); otherwise
 ScadBuddy cannot know when the state changed, so the gap goes to ``unseen_seconds`` and
 the counter is low, never high. A touch after such a gap changes nothing, so the next
-report decides it. A watch clock that ran ahead and then stepped back loses at most the
-stretch it repeats: the first report back within `FUTURE_TOLERANCE` of the database's
-clock moves ``counted_to`` back and counts nothing, and counting goes on from there. Any
-other write before ``counted_to`` (a late write, on a clock that is ahead or not) changes
-nothing, so no stretch is counted twice (`accrue`).
+report decides it. ``counted_to`` never moves back, so no stretch is counted twice. A
+write stamped before it (a late write, or a watch clock that ran ahead and then stepped
+back) counts nothing; it may stop the counting but never start it (`accrue`). The two
+cannot be told apart by their times, so a clock that ran ahead loses its lead once: the
+counter counts on when the clock passes ``counted_to`` again.
 
 An unlink keeps the row but clears its ``state`` (`store.py` `PrinterStore.unlink_lan`),
 so no gap spans it, and a merge keeps the kept printer's row (`PRINTER_REFERENCES`)."""
@@ -31,7 +31,7 @@ from typing import Any
 from psycopg import Connection
 from psycopg.rows import DictRow
 
-from scadbuddy.printers.status import FUTURE_TOLERANCE, STALE_AFTER
+from scadbuddy.printers.status import STALE_AFTER
 
 #: The one ``gcode_state`` counted, as Bambuddy's own counter counts (spec §2.2), not
 #: `status.RUNNING`, which also holds ``PREPARE``, ``SLICING`` and ``PAUSE``.
@@ -62,26 +62,25 @@ def _same_print_running(row: RunHours, report: dict[str, Any]) -> bool:
     return report.get("gcode_state") == COUNTED_STATE and bool(named) and named == row.subtask
 
 
-def accrue(row: RunHours, t: datetime, report: dict[str, Any] | None, *, now: datetime) -> RunHours:
-    """``row`` after a write seen at ``t``: a report (``report``) or a touch (None);
-        ``now`` is the database's clock. A write at ``counted_to`` (a resend) or before it
-        counts nothing. Only a report from a clock that was corrected moves ``counted_to``
-        back, to ``t``, so the next report counts its own gap: ``counted_to`` is past ``now``
-        by more than `FUTURE_TOLERANCE` and ``t`` is not. Any other write before it changes
-    nothing, its state included (the row already holds a newer one).
-        A late write (a print worker's request still running on the API after the worker
-        gave its answer up) gets past `reports.stale` while the stored ``seen_at`` is ahead,
-        and moving back on it would count the stretch to ``counted_to`` twice. A touch is
-        stamped `watch.LINK_PROOF` (20 s) before it is sent, so after a report it is the usual
-        case."""
+def accrue(row: RunHours, t: datetime, report: dict[str, Any] | None) -> RunHours:
+    """``row`` after a write seen at ``t``: a report (``report``) or a touch (None). A
+    write at ``counted_to`` (a resend) or before it counts nothing and never moves
+    ``counted_to`` back. Before it, a write may be late (a print worker's request still
+    running on the API after the worker gave its answer up, which gets past
+    `reports.stale` while the stored ``seen_at`` is ahead) or come after a watch clock
+    stepped back, and its time cannot tell which. Moving back on a late write would count
+    the stretch to ``counted_to`` twice, so neither moves it. Such a report only stops the
+    counting: a state other than `COUNTED_STATE` replaces a counted one, and nothing else
+    changes. So the counter can be low, never high. A touch is stamped `watch.LINK_PROOF`
+    (20 s) before it is sent, so one before ``counted_to`` is the usual case."""
     after = row
     gap = t - row.counted_to
-    ahead = now + FUTURE_TOLERANCE
     if gap < timedelta(0):
-        if report is None or not row.counted_to > ahead >= t:
-            return row
-        after = replace(after, counted_to=t)
-    elif gap > timedelta(0):
+        state = None if report is None else report.get("gcode_state")
+        if row.state == COUNTED_STATE and state is not None and state != COUNTED_STATE:
+            return replace(row, state=state)
+        return row
+    if gap > timedelta(0):
         seconds = Decimal(gap // _MICROSECOND) / _MICROS
         if row.state == COUNTED_STATE:
             if gap <= GAP_LIMIT or (report is not None and _same_print_running(row, report)):
@@ -139,13 +138,13 @@ def advance_in(
             (printer_id, t),
         )
     data = conn.execute(
-        f"SELECT {_COLUMNS}, now() AS now FROM printer_run_hours WHERE printer = %s FOR UPDATE",
+        f"SELECT {_COLUMNS} FROM printer_run_hours WHERE printer = %s FOR UPDATE",
         (printer_id,),
     ).fetchone()
     if data is None:
         return
     row = _row(data)
-    after = accrue(row, t, report, now=data["now"])
+    after = accrue(row, t, report)
     if after == row:
         return
     conn.execute(
