@@ -35,7 +35,10 @@ named time, so it never pushes a physical time past a newer anchor. Three rules 
    grams and SB books 0 g. The pair counts when it lies after the anchor, and each
    anchor is compared in its own clock: an anchor from BB (`BB_REFS`) with BB's usage
    time, any other anchor with SB's time of the plate (its newest end, else its start).
-   So the skew between BB's clock and SB's cannot count a plate twice or drop it.
+   So the skew between BB's clock and SB's cannot count a plate twice or drop it. A pair
+   is per spool: when BB booked the plate on another spool than SB's estimate, the pull
+   books a 0 g ``print_ended`` on the estimate's spool with ``data.covered_by`` the BB
+   event (`bambuddy_usage._cover`, #6598), and the estimate drops by this rule.
 
 `refresh_derived` reads a spool's whole history, except for an event booked on top of
 it (`record` passes the event; #6263's AMS readings come one per tick). When no other

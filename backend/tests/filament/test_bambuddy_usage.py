@@ -12,6 +12,7 @@ import httpx
 import pytest
 import respx
 
+from scadbuddy.bambuddy.linking import ARCHIVE_PAGE, MAX_ARCHIVE_PAGES
 from scadbuddy.bambuddy.models import Archive, SpoolUsage
 from scadbuddy.bambuddy.models import Spool as BbSpool
 from scadbuddy.filament import bambuddy_usage, capture, ledger
@@ -475,3 +476,121 @@ def test_a_retried_booking_covers_once(pg_pool: PgPool) -> None:
     _book(f, [usage()])
     assert _book(f, [usage()]).booked == 0
     assert len([e for e in f.spools.events(y) if e.kind == "print_ended"]) == 1
+
+
+def test_a_second_usage_row_of_a_job_already_paired_on_the_estimates_spool_covers_nothing(
+    pg_pool: PgPool,
+) -> None:
+    f = _filament(pg_pool)
+    _printer_1(pg_pool)
+    z = _linked(f)
+    y = _second_spool(f)
+    _estimate(f, y)
+    # Y's own row pairs with its estimate by `ledger.basis`: no covering print_ended on Y.
+    assert _book(f, [usage(id=460, spool_id=8)]).booked == 1
+    assert _book(f, [usage()]).booked == 1
+    assert len(_usage_events(f, z)) == 1
+    ended = [e for e in f.spools.events(y) if e.kind == "print_ended"]
+    assert [e.ref_kind for e in ended] == [ledger.BB_USAGE]
+
+
+def test_an_estimate_event_of_another_printer_is_not_covered(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    _printer_1(pg_pool)
+    with pg_pool.connection() as conn:
+        row = conn.execute(
+            "INSERT INTO printers (id, serial, name, bambuddy_printer_id)"
+            " VALUES (gen_random_uuid(), 'TEST00000000002', 'P2', 2) RETURNING id"
+        ).fetchone()
+    assert row is not None
+    _linked(f)
+    y = _second_spool(f)
+    with f.spools.transaction() as conn:
+        ledger.record(
+            conn,
+            y,
+            "print_started",
+            source="print_estimate",
+            delta_g=-70.0,
+            ref_kind=ledger.PRINT_RUN,
+            ref_id=f"run-1/{JOB}/0",
+            at=T0 + timedelta(minutes=10),
+            printer=row["id"],
+            data={"job": JOB},
+        )
+    assert _book(f, [usage()]).booked == 1
+    assert not [e for e in f.spools.events(y) if e.kind == "print_ended"]
+
+
+def test_a_failed_cover_rolls_back_the_booking_and_the_next_pull_retries_both(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    f = _filament(pg_pool)
+    _printer_1(pg_pool)
+    z = _linked(f)
+    y = _second_spool(f)
+    _estimate(f, y)
+    real = bambuddy_usage._cover
+    calls = {"n": 0}
+
+    def flaky(*args: Any, **kwargs: Any) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("boom")
+        real(*args, **kwargs)
+
+    monkeypatch.setattr(bambuddy_usage, "_cover", flaky)
+    assert _book(f, [usage()]).booked == 0
+    assert not _usage_events(f, z)
+    assert _book(f, [usage()]).booked == 1
+    assert len(_usage_events(f, z)) == 1
+    assert len([e for e in f.spools.events(y) if e.kind == "print_ended"]) == 1
+
+
+def test_an_archived_estimate_spool_is_not_written_to_and_is_logged(
+    pg_pool: PgPool, caplog: pytest.LogCaptureFixture
+) -> None:
+    f = _filament(pg_pool)
+    _printer_1(pg_pool)
+    _linked(f)
+    y = _second_spool(f)
+    _estimate(f, y)
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_spools SET archived_at = now() WHERE id = %s", (y,))
+    with caplog.at_level("WARNING"):
+        assert _book(f, [usage()]).booked == 1
+    assert not [e for e in f.spools.events(y) if e.kind == "print_ended"]
+    (record,) = [r for r in caplog.records if r.message == "filament.usage.unpaired"]
+    assert getattr(record, "reason", None) == "archived"
+
+
+async def test_the_archive_read_stops_at_the_page_cap_and_says_what_it_missed(
+    pg_pool: PgPool, caplog: pytest.LogCaptureFixture
+) -> None:
+    f = _filament(pg_pool)
+    spool = _linked(f)
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    pages: list[int] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        pages.append(int(request.url.params.get("offset", 0)))
+        base = 1000 * len(pages)
+        return httpx.Response(
+            200,
+            json=[
+                {"id": base + i, "printer_id": 1, "completed_at": _naive(NOW)}
+                for i in range(ARCHIVE_PAGE)
+            ],
+        )
+
+    with respx.mock() as router, caplog.at_level("WARNING"):
+        router.get(f"{BB}/api/v1/inventory/spools").respond(json=[bb().model_dump(mode="json")])
+        router.get(f"{BB}/api/v1/inventory/usage").respond(json=[usage().model_dump(mode="json")])
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
+        router.get(f"{BB}/api/v1/archives/").mock(side_effect=answer)
+        report = await read_and_pull(f, settings)
+    assert len(pages) == MAX_ARCHIVE_PAGES
+    assert report.usage_booked == 1
+    assert len(_usage_events(f, spool)) == 1
+    (warning,) = [r for r in caplog.records if r.message.startswith("stopped reading")]
+    assert "oldest pending rows" in warning.message

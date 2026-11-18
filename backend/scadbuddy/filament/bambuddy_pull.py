@@ -1115,7 +1115,8 @@ async def _read_archives(client: BambuddyClient, since: date) -> list[Archive]:
             break
     else:
         logger.warning(
-            "stopped reading Bambuddy's archives for usage rows",
+            "stopped reading Bambuddy's archives for usage rows; the archives of the oldest"
+            " pending rows were not read (pages come newest first)",
             extra={"since": since.isoformat(), "pages": MAX_ARCHIVE_PAGES},
         )
     return list(found.values())
