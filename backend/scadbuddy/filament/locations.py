@@ -54,10 +54,10 @@ class NoAmsKindError(ValueError):
 
 
 class MoveTargetError(ValueError):
-    """The place a spool would move to does not exist or is archived."""
+    """The place a spool would move to does not exist, is archived or is an AMS unit."""
 
     def __init__(self) -> None:
-        super().__init__("the place to move to does not exist or is archived")
+        super().__init__("the place to move to does not exist, is archived or is an AMS unit")
 
 
 class LocationStore:
@@ -176,12 +176,14 @@ class LocationStore:
         )
         key = (printer_id, ams_id, tray_id)
         try:
+            found = conn.execute(select, key).fetchone()
+            if found is not None and found["parent_id"] is not None:
+                return m.Location.model_validate(found)
             unit = (
                 None
                 if ams_id == EXTERNAL
                 else LocationStore.ensure_ams_unit_on(conn, printer_id, ams_id)
             )
-            found = conn.execute(select, key).fetchone()
             if found is None:
                 kind = conn.execute(
                     "SELECT id FROM filament_location_kinds WHERE ams AND archived_at IS NULL"
@@ -253,7 +255,8 @@ class LocationStore:
         """Put a spool in a place (``None``: in none) and write its ``moved`` event,
         ``data={"from": old, "to": new}``. ``None`` when it is there already: nothing is
         written. `LookupError` for no such spool, `MoveTargetError` for a place that does
-        not exist or is archived. Locks the spool, then the place."""
+        not exist, is archived or is an AMS unit's place (a unit holds trays, not spools).
+        Locks the spool, then the place."""
         with self._pool.connection() as conn, conn.transaction():
             return self.move_on(conn, spool_id, location_id, actor=actor)
 
@@ -282,10 +285,11 @@ class LocationStore:
             return None
         if location_id is not None:
             target = conn.execute(
-                "SELECT 1 FROM filament_locations WHERE id = %s AND archived_at IS NULL FOR SHARE",
+                "SELECT printer_id, tray_id FROM filament_locations"
+                " WHERE id = %s AND archived_at IS NULL FOR SHARE",
                 (location_id,),
             ).fetchone()
-            if target is None:
+            if target is None or (target["printer_id"] is not None and target["tray_id"] is None):
                 raise MoveTargetError()
         conn.execute(
             "UPDATE filament_spools SET location_id = %s, tray_fingerprint = NULL,"

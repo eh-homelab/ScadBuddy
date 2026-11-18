@@ -234,3 +234,15 @@ def test_move_on_and_ensure_ams_on_match_the_pool_methods(pg_pool: PgPool) -> No
     assert again == tray == store.ensure_ams(printer, 0, 2, label="x")
     assert moved is not None and moved.at == at and moved.data["to"] == str(tray.id)
     assert cleared == {"tray_fingerprint": None}
+
+
+def test_a_spool_cannot_move_into_an_ams_unit_place(pg_pool: PgPool) -> None:
+    printer = _printer(pg_pool)
+    store = LocationStore(pg_pool)
+    spool = _spool(pg_pool)
+    with pg_pool.connection() as conn:
+        unit = LocationStore.ensure_ams_unit_on(conn, printer, 0)
+    with pytest.raises(MoveTargetError):
+        store.move(spool, unit, actor="ann")
+    tray = store.ensure_ams(printer, 0, 1, label="T1")
+    assert store.move(spool, tray.id, actor="ann") is not None
