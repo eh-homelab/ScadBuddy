@@ -4,13 +4,15 @@ routes are `tests/api/test_crud_profile_fetch.py`."""
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 from uuid import UUID
 
 import pytest
 
+from scadbuddy.core.problems import ApiError
 from scadbuddy.filament.models import TypeKValue, TypePreset
-from scadbuddy.filament.profile_fetch import FetchRefusedError, ProfileFetches
+from scadbuddy.filament.profile_fetch import FetchRefusedError, ProfileFetches, clean_preset
 from scadbuddy.filament.types import SpoolTypeStore
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.profile_fetch.wire import ExportTarget, MissingKey
@@ -168,3 +170,48 @@ def test_missing_reason_of_the_last_run_names_the_gap(pg_pool: PgPool) -> None:
         )
     gaps = fetches.gaps(type_id)
     assert MissingKey(printer_model="H2C", nozzle_diameter="0.2", reason="no 0.2") in gaps
+
+
+PRESET = {"name": "Inland PLA+ @BBL H2C", "inherits": "Generic PLA @BBL H2C", "from": "User"}
+
+
+def test_clean_preset_strips_gcode_and_post_process() -> None:
+    doc = {
+        **PRESET,
+        "type": "filament",
+        "filament_start_gcode": ["G28"],
+        "filament_end_gcode": ["M84"],
+        "Machine_Start_GCODE": "M84",
+        "post_process": ["/bin/sh"],
+        "gcode_flavor_note": "kept: the name does not end in gcode",
+    }
+    name, body = clean_preset(json.dumps(doc).encode())
+    assert name == PRESET["name"]
+    assert json.loads(body) == {
+        **PRESET,
+        "type": "filament",
+        "gcode_flavor_note": "kept: the name does not end in gcode",
+    }
+    # The same bytes again: cleaning is stable, so the import's second pass changes nothing.
+    assert clean_preset(body) == (name, body)
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"type": "machine"},
+        {"type": "process"},
+        {"printer_settings_id": "Bambu Lab H2C 0.4 nozzle"},
+        {"print_settings_id": "0.20mm Standard @BBL H2C"},
+        {"inherits": ""},
+        {"inherits": ["Generic PLA"]},
+        {"inherits": None},
+    ],
+)
+def test_clean_preset_refuses_what_is_not_a_filament_preset(over: dict[str, object]) -> None:
+    doc = {**PRESET, **over}
+    if over.get("inherits", "x") is None:
+        del doc["inherits"]
+    with pytest.raises(ApiError) as caught:
+        clean_preset(json.dumps(doc).encode())
+    assert caught.value.status == 422

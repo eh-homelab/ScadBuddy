@@ -15,13 +15,17 @@ ALTER TABLE filament_spool_types ADD COLUMN tdfp_id integer CHECK (tdfp_id > 0);
 
 -- One fetch of a type's slicer profiles. `id` is the run id (the workflow id is
 -- `profile-fetch:<type_id>`). `files` maps each fetched key to its blob key and preset
--- name; the blobs are held in `blob_refs` (holder `profile_fetch`, holder id the run id).
+-- name, and, once imported, the Bambuddy preset id it bound; the blobs are held in
+-- `blob_refs` (holder `profile_fetch`, holder id the run id). `bambuddy_before` is the
+-- filament preset ids Bambuddy listed before the run's first import, so a retry after a
+-- lost answer still knows which presets the run made.
 CREATE TABLE filament_profile_fetches (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     type_id uuid NOT NULL REFERENCES filament_spool_types (id) ON DELETE CASCADE,
     tdfp_id integer NOT NULL CHECK (tdfp_id > 0),
     targets jsonb NOT NULL DEFAULT '[]',
     files jsonb NOT NULL DEFAULT '{}',
+    bambuddy_before jsonb,
     status text NOT NULL DEFAULT 'running'
         CHECK (status IN ('running', 'imported', 'partial', 'failed')),
     missing jsonb NOT NULL DEFAULT '[]',

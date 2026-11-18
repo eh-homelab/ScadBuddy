@@ -15,8 +15,8 @@ secret and only a `profile-fetch` service credential. Its activity logs in to 3D
 headed Chromium under Xvfb and a normal Chrome user agent. It exports one profile per printer
 model and nozzle from `/my/spools/details/<id>`, and PUTs each file's bytes to a CRUD route
 that stores it as a blob held by the run. A second activity asks the API to import the run.
-The API reads the blobs, checks them, posts them as one zip to Bambuddy's `POST
-/local-presets/import`, maps the names to local preset ids, sets the type's presets for the
+The API reads the blobs, checks them, strips their G-code, posts them as one zip to Bambuddy's `POST
+/local-presets/import`, maps the names to local preset ids a fetch made, sets the type's presets for the
 fetched keys, sets the K values from `GET /printers/{id}/kprofiles/`, refreshes the kept copy
 of local presets, and records what is still missing. Invoice confirm starts a fetch for each
 new type with a 3DFP id; a route, two agent tools and a button start or read one by hand.
@@ -185,8 +185,11 @@ and README "Intake worker (#6133)".
 2. **A start while a fetch runs.** It joins the run and never starts a second browser on the
    same type. Pinned in Task 4 (`test_a_second_start_joins_the_running_fetch`).
 3. **A preset name BB already has.** On a re-fetch, BB answers `skipped`. The key maps to the
-   existing local preset's id and does not fail. Pinned in Task 3
-   (`test_a_name_bb_already_has_maps_to_its_id`).
+   existing local preset's id only when an earlier fetch of the type bound that id, with a run
+   note that BB kept its old content; a preset of that name that no fetch made leaves the key
+   missing (build Decisions 20 and 22). Pinned in Task 3
+   (`test_a_preset_an_earlier_fetch_set_is_bound_again`,
+   `test_a_hand_made_preset_of_the_same_name_is_not_bound`).
 4. **A model or nozzle that 3DFP does not offer.** That key is listed as missing with its
    reason, the others are imported, and the run is `partial`. Pinned in Task 3
    (`test_a_missing_key_makes_the_run_partial`) and Task 5
@@ -252,7 +255,7 @@ and README "Intake worker (#6133)".
   - `test_a_file_is_refused_unless_valid`, parametrised: a wrong sha256 → 422, more than 512 KiB → 413, not JSON → 422, no `name` → 422, a target the run lacks → 422, a run not `running` → 409 `not_running`.
   - `test_another_caller_gets_403` (the `intake` credential on these routes).
   - `test_import_posts_one_zip_and_sets_the_type_presets`: respx answers BB import `{success:true, imported:4, skipped:0}` and `GET /local-presets/` with four ids; the type's rows are `("H2C","0.2".."0.8")` with those ids and names; the status is `imported`.
-  - `test_a_name_bb_already_has_maps_to_its_id`: BB answers `skipped:1`; the key still gets the listed id (Review Focus 3).
+  - `test_a_preset_an_earlier_fetch_set_is_bound_again` and `test_a_hand_made_preset_of_the_same_name_is_not_bound`: BB answers `skipped:1`; the key gets the listed id only when an earlier fetch bound it, else it is missing (Review Focus 3, build Decision 20).
   - `test_a_missing_key_makes_the_run_partial`: there are 3 files and one `ExportFailure("H2C","0.2","3DFP offers no 0.2 mm nozzle for H2C")`; the status is `partial` and `missing` holds that key and reason (Review Focus 4).
   - `test_other_keys_are_kept`: a type row for `("X1C","0.4")` is still there after the import (Decision 10).
   - `test_k_values_need_an_exact_non_gf_match`: a profile with `filament_id` `"P1a2b3c4"` sets a K row (`extruder`, `cali_idx=slot_id`, `nozzle_type=nozzle_id`); one with `"GFL99"` sets none; two matches with different `k_value` set none; a printer whose kprofiles answers 502 adds a note.
@@ -408,10 +411,13 @@ Branch from clusters' `main`. Copy the shape of `applications/scadbuddy/scadbudd
 10. A file sent again for a key replaces that key's entry, and the run's hold of a blob that no key names any more is dropped in the same transaction, so a retry leaves no orphan hold.
 11. `ProfileFetches.open` locks the type's row, so two opens join one run before the partial unique index is ever reached; it refuses with `FetchRefusedError` codes `type_not_found`, `no_tdfp_id` and `no_targets` (no printer has a model), which Task 4 maps to HTTP.
 12. `ProfileFetches` takes the nozzle setting as a callable asked on each use (`profile_fetch_nozzles` is a live setting), and `gaps` gives each gap the reason of the type's last run, else "no preset for this printer and nozzle yet".
-13. A Bambuddy 4xx on the import (403 without the settings permission, 409 with no Bambuddy configured) ends the run `failed` with its detail; a 5xx or a transport error raises and records nothing, so the worker's retry with the same key imports again, and Bambuddy's `skipped` then maps the names to their ids.
+13. A Bambuddy 4xx on the import (403 without the settings permission, 409 with no Bambuddy configured) ends the run `failed` with its detail; a 5xx or a transport error raises and records nothing but the pre-import listing (Decision 20), so the worker's retry with the same key imports again, and Bambuddy's `skipped` presets then bind as ones the run made, because they are absent from the listing its first attempt kept.
 14. The run ends `failed` when no preset was set (no file at all, or no imported name listed), `partial` when any target key is missing, else `imported`. A target with neither a file nor an `ExportFailure` is missing with "the profile-fetch worker sent no file for it"; a failure for a key the run lacks, or for a key that has a file, is ignored.
 15. The import's Bambuddy calls run outside a transaction; its writes (preset and K merges, the run's end, the ledger row) run in one, under the run's row lock. An import that finds the run ended there answers the stored outcome and writes nothing, so two imports at once set the presets once.
 16. K values are read only for a mapped file whose `filament_id` is a string not starting with `GF`, so a printer is never asked for a nozzle that cannot match. A merge replaces only the `(printer, extruder, nozzle)` keys that matched; a key with no match keeps what it had, because no match is no information, not a zero.
 17. Any `ApiError` from `k_profiles` (a 403 too) is a note naming the printer and nozzle, never a failure (ruling for Task 3). A K value outside `numeric(6,4)`'s 0 to under 100 is no match.
 18. The kept copy is refreshed only when `spool_overlay_refresh_seconds` is not 0: with the refresh off the API forgets the copy at start (`slicing/component.py`), and a copy made once would then go stale. A failed refresh is a note.
 19. The file route answers 404 `run_not_found` and 409 `not_running` as problems with a `code` extension (type `https://scadbuddy.dev/problems/profile-fetch/<code>`); `failed` on an ended run is 409 too (Decision 7).
+20. A fetched file binds only to a Bambuddy filament preset of its name that (a) is absent from the listing read before the run's first import (this run made it) or (b) is an id the type's preset rows hold that an earlier fetch of the type bound (its `files` entry's `preset_id`, written when that run ended). Any other preset of that name leaves the key missing with "Bambuddy already has a preset named <name> that no profile fetch made", so the run is `partial`. Why: the name comes from an untrusted website, and binding by name alone could point the type at a preset a person made by hand (Task 3 review, S1). The before-listing is kept on the run (`bambuddy_before`, added to this branch's own unmerged migration) before the import is posted, so a retry after a lost answer still binds what its first attempt made (`test_a_retry_binds_what_its_lost_first_attempt_made`).
+21. `store_file` accepts only a filament preset: `type` absent or `filament`, `inherits` a non-empty string, and no `printer_settings_id` or `print_settings_id` (else 422). It drops every top-level key whose name ends in `gcode` (case-insensitive) and `post_process`, and keeps the rest as JSON again (`clean_preset`; the preset inherits its base's G-code). The path's sha256 is checked against the sent bytes; the kept blob, its `files` sha256 and its zip entry name are the cleaned document's. `import_run` cleans each blob again before the zip (defence in depth); a blob that fails the check there makes its key missing. Why: the files come from an untrusted website, and a filament preset's `filament_start_gcode`/`filament_end_gcode` run on the printer (Task 3 review, S2).
+22. When Bambuddy's import answers `skipped` > 0 and a key binds through Decision 20 (b), the run gets the note "Bambuddy kept its existing preset <name>; its content was not updated". Why: Bambuddy does not overwrite a preset of a name it has, so a re-fetch of changed 3DFP content would otherwise end `imported` while the type still slices with the old settings (Task 3 review, Minor 1).

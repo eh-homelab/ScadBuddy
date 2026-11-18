@@ -4,6 +4,7 @@ Bambuddy as one zip, and sets the type's presets and K values. Bambuddy is respx
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
@@ -25,6 +26,7 @@ from scadbuddy.auth.service_credentials import ServiceCredentialStore
 from scadbuddy.filament.component import FILAMENT
 from scadbuddy.filament.models import TypePreset
 from scadbuddy.filament.profile_fetch import HOLDER, ProfileFetches
+from scadbuddy.orders.attachments import blob_path
 from scadbuddy.printers.component import PRINTERS
 from tests.api.test_send import API, configure
 from tests.filament.test_types import _body
@@ -131,14 +133,32 @@ def fetch(client: TestClient) -> Fetch:
     return Fetch(client, type_id, run.id, printer.id, bearer_of(client, "profile-fetch"))
 
 
-def local_presets(names: list[str], first_id: int = 101) -> respx.Route:
-    rows = [
+def _rows(names: list[str], first_id: int) -> list[dict[str, Any]]:
+    return [
         {"id": first_id + i, "name": n, "preset_type": "filament", "source": "import"}
         for i, n in enumerate(names)
     ]
-    return respx.get(f"{API}/local-presets/").mock(
-        return_value=httpx.Response(200, json={"filament": rows, "printer": [], "process": []})
-    )
+
+
+def local_presets(
+    names: list[str], first_id: int = 101, before: list[dict[str, Any]] | None = None
+) -> respx.Route:
+    """Bambuddy's local presets: ``before`` (none by default) on the first listing, the
+    import's run reads before it imports; ``before`` and ``names`` (ids from
+    ``first_id``) on every later one."""
+    return _listing(respx.get(f"{API}/local-presets/"), before or [], _rows(names, first_id))
+
+
+def _listing(
+    route: respx.Route, before: list[dict[str, Any]], after: list[dict[str, Any]]
+) -> respx.Route:
+    calls = iter([before])
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        rows = next(calls, before + after)
+        return httpx.Response(200, json={"filament": rows, "printer": [], "process": []})
+
+    return route.mock(side_effect=answer)
 
 
 def bb_import(imported: int, skipped: int = 0, status: int = 200) -> respx.Route:
@@ -198,6 +218,11 @@ def test_a_file_sent_again_replaces_the_key_and_its_hold(fetch: Fetch) -> None:
         ("too large", 413),
         ("not json", 422),
         ("no name", 422),
+        ("machine preset", 422),
+        ("printer settings id", 422),
+        ("print settings id", 422),
+        ("no inherits", 422),
+        ("empty inherits", 422),
         ("not a target", 422),
         ("not running", 409),
     ],
@@ -212,6 +237,18 @@ def test_a_file_is_refused_unless_valid(fetch: Fetch, case: str, status: int) ->
         r = fetch.put(b"<html>no</html>")
     elif case == "no name":
         r = fetch.put(json.dumps({"filament_id": "P1"}).encode())
+    elif case == "machine preset":
+        r = fetch.put(export(type="machine"))
+    elif case == "printer settings id":
+        r = fetch.put(export(printer_settings_id="Bambu Lab H2C 0.4 nozzle"))
+    elif case == "print settings id":
+        r = fetch.put(export(print_settings_id="0.20mm Standard @BBL H2C"))
+    elif case == "no inherits":
+        doc = json.loads(export())
+        del doc["inherits"]
+        r = fetch.put(json.dumps(doc).encode())
+    elif case == "empty inherits":
+        r = fetch.put(export(inherits=""))
     elif case == "not a target":
         r = fetch.put(body, model="X1C")
     else:
@@ -221,6 +258,31 @@ def test_a_file_is_refused_unless_valid(fetch: Fetch, case: str, status: int) ->
     assert r.status_code == status, r.text
     if case != "not running":
         assert fetch.rows("SELECT key FROM blob_refs WHERE holder_kind = %s", HOLDER) == []
+
+
+GCODE: dict[str, Any] = {
+    "filament_start_gcode": ["G28\nM104 S300"],
+    "filament_end_gcode": ["M84"],
+    "machine_end_gcode": "M84",
+    "post_process": ["/bin/sh -c x"],
+}
+
+
+def _blob(fetch: Fetch, key: str) -> Path:
+    path = asyncio.run(blob_path(_state(fetch.client).store.blobs, key))
+    assert path is not None
+    return path
+
+
+def test_site_gcode_is_stripped_before_the_file_is_kept(fetch: Fetch) -> None:
+    body = export(**GCODE)
+    r = fetch.put(body)
+    assert r.status_code == 204, r.text
+    [row] = fetch.rows("SELECT files FROM filament_profile_fetches WHERE id = %s", fetch.run_id)
+    entry = row["files"]["H2C"]["0.4"]
+    kept = _blob(fetch, entry["key"]).read_bytes()
+    assert entry["sha256"] == hashlib.sha256(kept).hexdigest()
+    assert json.loads(kept) == json.loads(export())
 
 
 def test_an_unknown_run_is_404(fetch: Fetch) -> None:
@@ -259,8 +321,9 @@ def test_import_posts_one_zip_and_sets_the_type_presets(fetch: Fetch) -> None:
         "notes": [],
     }
     archive = zipfile.ZipFile(io.BytesIO(_zip_of(sent.calls.last.request)))
+    [row] = fetch.rows("SELECT files FROM filament_profile_fetches WHERE id = %s", fetch.run_id)
     assert sorted(archive.namelist()) == sorted(
-        f"{hashlib.sha256(b).hexdigest()}.json" for b in bodies
+        f"{e['sha256']}.json" for e in row["files"]["H2C"].values()
     )
     assert fetch.presets() == [
         ("H2C", n, str(101 + i), name_of(bodies[i])) for i, n in enumerate(NOZZLES)
@@ -279,16 +342,96 @@ def _zip_of(request: httpx.Request) -> bytes:
 
 
 @respx.mock
-def test_a_name_bb_already_has_maps_to_its_id(fetch: Fetch) -> None:
-    [body] = put_all(fetch, ["0.4"])
-    bb_import(0, skipped=1)
-    local_presets(["Other", name_of(body)], first_id=40)
+def test_the_zip_carries_no_site_gcode(fetch: Fetch) -> None:
+    body = export(**GCODE)
+    assert fetch.put(body).status_code == 204
+    # The kept blob changed under the run (defence in depth: the import strips again).
+    [row] = fetch.rows("SELECT files FROM filament_profile_fetches WHERE id = %s", fetch.run_id)
+    path = _blob(fetch, row["files"]["H2C"]["0.4"]["key"])
+    path.chmod(0o644)
+    path.write_bytes(body)
+    sent = bb_import(1)
+    local_presets([name_of(body)])
     no_k_profiles()
     r = fetch.import_(
         [{"printer_model": "H2C", "nozzle": n, "reason": "x"} for n in ("0.2", "0.6", "0.8")]
     )
     assert r.status_code == 200, r.text
-    assert ("H2C", "0.4", "41", name_of(body)) in fetch.presets()
+    archive = zipfile.ZipFile(io.BytesIO(_zip_of(sent.calls.last.request)))
+    [entry] = archive.namelist()
+    doc = json.loads(archive.read(entry))
+    assert [k for k in doc if k.endswith("gcode") or k == "post_process"] == []
+    assert doc["name"] == name_of(body)
+
+
+@respx.mock
+def test_a_hand_made_preset_of_the_same_name_is_not_bound(fetch: Fetch) -> None:
+    clash, fresh = put_all(fetch, ["0.4", "0.6"])
+    bb_import(1, skipped=1)
+    local_presets([name_of(fresh)], first_id=101, before=_rows(["Other", name_of(clash)], 40))
+    no_k_profiles()
+    r = fetch.import_(
+        [{"printer_model": "H2C", "nozzle": n, "reason": "x"} for n in ("0.2", "0.8")]
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "partial"
+    reason = f"Bambuddy already has a preset named {name_of(clash)} that no profile fetch made"
+    assert {"printer_model": "H2C", "nozzle_diameter": "0.4", "reason": reason} in r.json()[
+        "missing"
+    ]
+    assert fetch.presets() == [("H2C", "0.6", "101", name_of(fresh))]
+
+
+@respx.mock
+def test_a_preset_an_earlier_fetch_set_is_bound_again(fetch: Fetch) -> None:
+    failures = [{"printer_model": "H2C", "nozzle": n, "reason": "x"} for n in ("0.2", "0.6", "0.8")]
+    [body] = put_all(fetch, ["0.4"])
+    bb_import(1)
+    listing = local_presets([name_of(body)], first_id=41, before=_rows(["Other"], 40))
+    no_k_profiles()
+    first = fetch.import_(failures)
+    assert first.json()["notes"] == [], first.text
+    assert fetch.presets() == [("H2C", "0.4", "41", name_of(body))]
+
+    run, _ = ProfileFetches(_state(fetch.client).settings_store.pool, lambda: NOZZLES).open(
+        fetch.type_id, actor="person:test"
+    )
+    fetch.run_id = run.id
+    assert fetch.put(body, nozzle="0.4").status_code == 204
+    bb_import(0, skipped=1)
+    both = _rows(["Other", name_of(body)], 40)
+    _listing(listing, both, [])
+
+    r = fetch.import_(failures, key="k2")
+
+    assert r.status_code == 200, r.text
+    assert (r.json()["status"], r.json()["presets"]) == ("partial", 1), r.text
+    assert r.json()["notes"] == [
+        f"Bambuddy kept its existing preset {name_of(body)}; its content was not updated"
+    ]
+    assert fetch.presets() == [("H2C", "0.4", "41", name_of(body))]
+
+
+@respx.mock
+def test_a_retry_binds_what_its_lost_first_attempt_made(fetch: Fetch) -> None:
+    bodies = put_all(fetch)
+    sent = bb_import(0, status=502)
+    listing = local_presets([])
+    assert fetch.import_().status_code == 502
+    # Bambuddy made the presets, but its answer was lost; the retry finds them listed.
+    sent.mock(
+        return_value=httpx.Response(
+            200, json={"success": True, "imported": 0, "skipped": 4, "errors": []}
+        )
+    )
+    _listing(listing, _rows([name_of(b) for b in bodies], 101), [])
+    no_k_profiles()
+
+    r = fetch.import_()
+
+    assert r.status_code == 200, r.text
+    assert (r.json()["status"], r.json()["presets"]) == ("imported", 4)
+    assert [p[2] for p in fetch.presets()] == ["101", "102", "103", "104"]
 
 
 @respx.mock
@@ -400,6 +543,7 @@ def test_k_values_need_an_exact_non_gf_match(fetch: Fetch) -> None:
 def test_bb_refusing_the_import_fails_the_run(fetch: Fetch) -> None:
     put_all(fetch)
     bb_import(0, status=403)
+    local_presets([])
     r = fetch.import_()
     assert r.status_code == 200, r.text
     assert (r.json()["status"], r.json()["presets"]) == ("failed", 0)
