@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -108,6 +109,16 @@ class SensorStore:
         if done is None:
             raise LookupError(f"no sensor {sensor_id}")
 
+    def exists(self, sensor_id: UUID) -> bool:
+        """Whether there is a sensor of that id, archived or not."""
+        with self._pool.connection() as conn:
+            return (
+                conn.execute(
+                    "SELECT 1 FROM filament_location_sensors WHERE id = %s", (sensor_id,)
+                ).fetchone()
+                is not None
+            )
+
     def readings(self, sensor_id: UUID, since: datetime, limit: int) -> _Readings:
         """The stored readings from ``since`` on, oldest first, at most ``limit``."""
         with self._pool.connection() as conn:
@@ -165,6 +176,36 @@ class SensorStore:
             (value, at, sensor_id),
         )
         return True
+
+
+#: A state Home Assistant gives as a plain number: no unit, no text, no ``nan``.
+_PLAIN_NUMBER = re.compile(r"[+-]?(\d+\.?\d*|\.\d+)")
+
+
+def apply_ha_states_on(conn: Conn, states: dict[str, str | None], at: datetime) -> tuple[int, int]:
+    """Read ``states`` (Home Assistant's entity ids and their states) into each
+    unarchived Home Assistant sensor, on ``conn`` and in the caller's transaction. A plain
+    number is `SensorStore.record_on`'s at ``at``. A state that is not one (``unavailable``,
+    ``unknown``, ``45.2 %``, empty, none), or an entity ``states`` lacks, stores nothing
+    and marks the sensor unreachable. Answers how many sensors read and how many did not."""
+    rows = conn.execute(
+        "SELECT id, entity_id FROM filament_location_sensors"
+        " WHERE source = 'home_assistant' AND archived_at IS NULL"
+    ).fetchall()
+    read = unreachable = 0
+    for row in rows:
+        state = states.get(row["entity_id"])
+        if state is not None and _PLAIN_NUMBER.fullmatch(state):
+            SensorStore.record_on(conn, row["id"], float(state), at)
+            read += 1
+        else:
+            conn.execute(
+                "UPDATE filament_location_sensors SET reachable = false"
+                " WHERE id = %s AND reachable",
+                (row["id"],),
+            )
+            unreachable += 1
+    return read, unreachable
 
 
 def capture_ams_on(conn: Conn, printer_id: str, report: dict[str, Any], seen_at: datetime) -> None:

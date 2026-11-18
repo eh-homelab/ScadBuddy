@@ -8,7 +8,7 @@ only reads."""
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, cast
 from uuid import UUID
 
@@ -18,7 +18,8 @@ from pydantic import AwareDatetime, BaseModel, ValidationError
 from scadbuddy.api.deps import SettingsStoreDep
 from scadbuddy.auth.component import CallerDep
 from scadbuddy.auth.models import Caller, Person, PersonalToken, Service
-from scadbuddy.bambuddy.models import SpoolAssignment
+from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.models import HaEntity, SpoolAssignment
 from scadbuddy.core.problems import DATABASE_ERRORS, ApiError
 from scadbuddy.crud.idempotency import (
     MaybeIdempotencyKey,
@@ -927,6 +928,132 @@ async def patch_location(
     if changed is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no location {location_id}")
     return changed
+
+
+# -- location sensors (#6268) ---------------------------------------------------------
+
+
+@router.get(
+    "/sensors",
+    response_model=list[m.Sensor],
+    summary="List the location sensors",
+    description=(
+        "The unarchived humidity and temperature sensors of the places, by name; of one "
+        "place with `location_id`. Each carries its last stored value and time, `reachable` "
+        "(false when its last read had no number), and `alerting` (the last value is "
+        "outside `alert_below` / `alert_above`)."
+    ),
+)
+async def list_sensors(filament: FilamentDep, location_id: UUID | None = None) -> list[m.Sensor]:
+    return await asyncio.to_thread(filament.sensors.list, location_id)
+
+
+@router.get(
+    "/sensors/entities",
+    response_model=list[HaEntity],
+    summary="List Home Assistant entities",
+    description=(
+        "The Home Assistant entities Bambuddy can read, with their states, for choosing a "
+        "sensor's `entity_id`; `search` narrows them. Reads Bambuddy and writes nothing. "
+        "409 when no Bambuddy is configured; Bambuddy's own errors as they come."
+    ),
+)
+async def list_ha_entities(store: SettingsStoreDep, search: str | None = None) -> list[HaEntity]:
+    settings = await asyncio.to_thread(store.load)
+    async with client_for(settings) as client:
+        return await client.ha_entities(search)
+
+
+@router.post(
+    "/sensors",
+    response_model=m.Sensor,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add a location sensor",
+    description=(
+        "A `home_assistant` sensor reads the state of an `entity_id` through Bambuddy (the "
+        "pull reads it) and is put on a place; it has a `kind` (`humidity` or "
+        "`temperature`), a `name`, an optional `unit`, an alert band (`alert_below`, "
+        "`alert_above`) and `notify`. An `ams` sensor is made by ScadBuddy from the "
+        "printer's report, never by hand (422). 422 for a bad field or a place that does "
+        "not exist or is archived."
+    ),
+)
+async def create_sensor(filament: FilamentDep, caller: CallerDep, body: m.SensorIn) -> m.Sensor:
+    if body.source == "ams":
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "an ams sensor is made from the printer's report, not by hand",
+        )
+    try:
+        return await asyncio.to_thread(filament.sensors.create, body, actor(caller))
+    except CatalogRefError as exc:
+        raise _refused(exc) from None
+
+
+@router.patch(
+    "/sensors/{sensor_id}",
+    response_model=m.Sensor,
+    summary="Change a location sensor",
+    description=(
+        "Only the fields sent change: `location_id`, `name`, `unit`, the alert band and "
+        "`notify`; `null` clears a nullable one. Its source, kind and where it reads from "
+        "stay as made. 404 for no such sensor, 422 for a bad field or a place that does "
+        "not exist."
+    ),
+)
+async def patch_sensor(
+    filament: FilamentDep, caller: CallerDep, sensor_id: UUID, body: m.SensorPatch
+) -> m.Sensor:
+    try:
+        return await asyncio.to_thread(filament.sensors.update, sensor_id, body, actor(caller))
+    except LookupError:
+        raise _no_sensor(sensor_id) from None
+    except CatalogRefError as exc:
+        raise _refused(exc) from None
+
+
+@router.post(
+    "/sensors/{sensor_id}/archive",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Archive a location sensor",
+    description=(
+        "Takes the sensor off the lists; its readings are kept. 404 for no such sensor, or "
+        "one already archived."
+    ),
+)
+async def archive_sensor(filament: FilamentDep, caller: CallerDep, sensor_id: UUID) -> Response:
+    try:
+        await asyncio.to_thread(filament.sensors.archive, sensor_id, actor(caller))
+    except LookupError:
+        raise _no_sensor(sensor_id) from None
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get(
+    "/sensors/{sensor_id}/readings",
+    response_model=list[m.SensorReading],
+    summary="A sensor's readings",
+    description=(
+        "The stored readings (`at`, `value`) from `since` (default: the last 24 hours) on, "
+        "oldest first, at most `limit` (default 500, at most 5000). A reading is stored "
+        "when the value changed, or 15 minutes after the last stored one. 404 for no such "
+        "sensor (an archived one still answers)."
+    ),
+)
+async def sensor_readings(
+    filament: FilamentDep,
+    sensor_id: UUID,
+    since: AwareDatetime | None = None,
+    limit: Annotated[int, Query(ge=1, le=5000)] = 500,
+) -> list[m.SensorReading]:
+    if not await asyncio.to_thread(filament.sensors.exists, sensor_id):
+        raise _no_sensor(sensor_id)
+    start = since or datetime.now(UTC) - timedelta(hours=24)
+    return await asyncio.to_thread(filament.sensors.readings, sensor_id, start, limit)
+
+
+def _no_sensor(sensor_id: UUID) -> ApiError:
+    return ApiError(status.HTTP_404_NOT_FOUND, f"no sensor {sensor_id}")
 
 
 @router.post(

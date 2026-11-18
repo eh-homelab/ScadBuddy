@@ -80,7 +80,7 @@ from scadbuddy.bambuddy.models import Archive, SpoolAssignment, SpoolCatalogEntr
 from scadbuddy.bambuddy.models import Spool as BbSpool
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import FilamentSync
-from scadbuddy.filament import bambuddy_usage, ledger
+from scadbuddy.filament import bambuddy_usage, ledger, sensors
 from scadbuddy.filament import models as m
 from scadbuddy.filament.colour import normalise_rgba
 from scadbuddy.filament.component import Filament
@@ -1207,6 +1207,29 @@ async def try_assignments(settings: StoredSettings) -> list[SpoolAssignment] | N
     return None
 
 
+async def read_ha_sensors(store: Filament, settings: StoredSettings, now: datetime) -> None:
+    """Read Bambuddy's Home Assistant states into the location sensors (#6268): one GET,
+    and none when no Home Assistant sensor is set up. A state is a reading at ``now`` (see
+    `sensors.apply_ha_states_on`). It never fails the pull: a failure is logged with its
+    type only, and the sensors stay as they were."""
+    try:
+        if not any(
+            s.source == "home_assistant" for s in await asyncio.to_thread(store.sensors.list, None)
+        ):
+            return
+        async with client_for(settings) as client:
+            entities = await client.ha_entities(None)
+        states = {e.entity_id: e.state for e in entities}
+        await asyncio.to_thread(_apply_ha, store, states, now)
+    except Exception as error:
+        _failed("could not read Bambuddy's Home Assistant sensors", error)
+
+
+def _apply_ha(store: Filament, states: dict[str, str | None], now: datetime) -> None:
+    with store.spools.transaction() as conn:
+        sensors.apply_ha_states_on(conn, states, now)
+
+
 async def scheduled_pull(
     store: Filament, load: Callable[[], StoredSettings], sync: Callable[[], FilamentSync]
 ) -> Outcome:
@@ -1214,10 +1237,13 @@ async def scheduled_pull(
     ``off`` (no spool pulled, no usage row booked) or no BB URL,
     ``failed`` when BB or the store fails (logged, never raised),
     else ``pulled``. ``sync`` reads the setting as it is now (#6262 Task 13)."""
+    settings = await asyncio.to_thread(load)
+    if settings.bambuddy_url:
+        # Sensors are not spool data: read whatever ``filament_sync`` says.
+        await read_ha_sensors(store, settings, datetime.now(UTC))
     if (await asyncio.to_thread(sync)).spools == "off":
         logger.info("Bambuddy's spools are not pulled: the Filament sync is off")
         return "skipped"
-    settings = await asyncio.to_thread(load)
     if not settings.bambuddy_url:
         logger.info("no Bambuddy configured; its spools are not pulled")
         return "skipped"

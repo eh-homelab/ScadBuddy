@@ -395,3 +395,9 @@ Added for #6262 (Bambuddy 1.2.6b1):
 | File | Source |
 |---|---|
 | `inventory-catalog.json` | `GET /api/v1/inventory/catalog`. Not a live recording: built by hand from the 1.2.6b1 OpenAPI `CatalogEntry {id, name, weight}` quoted in spec `2026-11-14-filament-management-design.md` §3; the names and weights are examples. |
+
+Added for #6268 (Bambuddy 1.3.1):
+
+| File | Source |
+|---|---|
+| `ha-entities.json` | `GET /api/v1/location-ha-sensors/entities?search=`. Not a live recording: built by hand from the 1.3.1 OpenAPI `HADisplayEntity {entity_id, friendly_name, state, domain, device_class, unit_of_measurement}` (read-only, 2026-11-18, plan `docs/superpowers/plans/2026-11-18-filament-weights-sensors.md`); the entities and states are examples. |

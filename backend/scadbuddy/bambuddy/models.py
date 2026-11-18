@@ -1176,6 +1176,20 @@ class SpoolUsage(BambuddyModel):
         return as_utc(value)
 
 
+class HaEntity(BambuddyModel):
+    """A row of ``GET /api/v1/location-ha-sensors/entities`` (#6268): Bambuddy's
+    ``HADisplayEntity``, a Home Assistant entity and its state as text (``unavailable``,
+    ``unknown`` and the like included; ``null`` for none). Bambuddy 1.3.1, read from its
+    OpenAPI on 2026-11-18. It carries no time of change."""
+
+    entity_id: str
+    friendly_name: str | None = None
+    state: str | None = None
+    domain: str | None = None
+    device_class: str | None = None
+    unit_of_measurement: str | None = None
+
+
 class SpoolFilamentPreset(BambuddyModel):
     """A row of ``GET /api/v1/inventory/spools/{id}/filament-presets``.
 

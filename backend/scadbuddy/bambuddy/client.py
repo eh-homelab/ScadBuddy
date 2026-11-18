@@ -58,6 +58,7 @@ from scadbuddy.bambuddy.models import (
     Folder,
     FolderCreate,
     FolderUpdate,
+    HaEntity,
     InventoryRemain,
     LibraryFile,
     LibraryListRow,
@@ -234,6 +235,7 @@ Operation = Literal[
     "spools.filament_presets",
     "spools.list",
     "spools.usage",
+    "ha.entities",
     "version",
     "virtual_printers.create",
     "virtual_printers.delete",
@@ -784,6 +786,27 @@ class BambuddyClient:
             params={"include_archived": include_archived},
         )
         return self._rows(response, what=what)
+
+    async def ha_entities(self, search: str | None) -> list[HaEntity]:
+        """``GET /api/v1/location-ha-sensors/entities`` (#6268): Home Assistant's entities
+        and their states as Bambuddy reads them, matched by ``search`` (none: all). Each
+        row is validated on its own: one that is not an entity is logged and left out."""
+        what = "list the Home Assistant entities"
+        response = await self._send(
+            "GET",
+            "/location-ha-sensors/entities",
+            scope=Scope.READ_STATUS,
+            operation="ha.entities",
+            what=what,
+            params={"search": search} if search else None,
+        )
+        entities: list[HaEntity] = []
+        for row in self._rows(response, what=what):
+            try:
+                entities.append(HaEntity.model_validate(row))
+            except ValidationError:
+                logger.warning("a Bambuddy Home Assistant entity is not an entity; skipped")
+        return entities
 
     async def spool_usage(self, *, limit: int = 200) -> list[SpoolUsage]:
         """``GET /api/v1/inventory/usage`` (#6263): BB's usage rows, one per spool per
