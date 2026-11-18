@@ -16,6 +16,7 @@ from scadbuddy.profile_fetch.settings import (
     ProfileFetchRefusal,
     ProfileFetchSettings,
     check_environment,
+    forget_login,
 )
 from scadbuddy.profile_fetch.wire import DEFAULT_QUEUE
 
@@ -132,3 +133,30 @@ def test_main_refuses_a_playwright_debug_log(
 ) -> None:
     monkeypatch.setenv("DEBUG", "pw:api")
     assert main([]) == 2
+
+
+def test_forget_login_removes_every_spelling_of_the_login() -> None:
+    """pydantic-settings reads names without regard to case, so the login may come in any
+    spelling; `forget_login` removes each one, and nothing else."""
+    environ = {
+        "SCADBUDDY_TDFP_EMAIL": EMAIL,
+        "scadbuddy_tdfp_email": EMAIL,
+        "Scadbuddy_Tdfp_Password": PASSWORD,
+        "scadbuddy_tdfp_password": PASSWORD,
+        "SCADBUDDY_API_INTERNAL_URL": "http://scadbuddy:8082",
+        "SCADBUDDY_TDFP_EMAIL_X": "kept",
+    }
+    forget_login(environ)
+    assert environ == {
+        "SCADBUDDY_API_INTERNAL_URL": "http://scadbuddy:8082",
+        "SCADBUDDY_TDFP_EMAIL_X": "kept",
+    }
+
+
+def test_the_settings_read_a_lower_case_login(
+    worker_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The case `forget_login` covers: a lower-case name is read as the login."""
+    monkeypatch.delenv("SCADBUDDY_TDFP_EMAIL")
+    monkeypatch.setenv("scadbuddy_tdfp_email", EMAIL)
+    assert ProfileFetchSettings().tdfp_email.get_secret_value() == EMAIL  # type: ignore[call-arg]

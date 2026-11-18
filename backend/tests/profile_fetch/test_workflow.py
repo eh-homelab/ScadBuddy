@@ -17,7 +17,7 @@ from temporalio.client import Client
 from temporalio.exceptions import ApplicationError
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
-from scadbuddy.filament.profile_fetch import FetchStarter, TemporalQueueProbe
+from scadbuddy.filament.profile_fetch import FetchStarter, PollerCache, TemporalQueueProbe
 from scadbuddy.profile_fetch import workflow as fetch_workflow
 from scadbuddy.profile_fetch.wire import (
     EXPORT_ACTIVITY,
@@ -225,7 +225,8 @@ async def test_no_worker_fails_the_run(
 async def test_the_queue_probe_sees_a_polling_worker(client: Client, queue: str) -> None:
     """`TemporalQueueProbe` reads DescribeTaskQueue for the workflow and activity task
     queues: none polled a new queue, and a running worker does (build Decision 62)."""
-    probe = TemporalQueueProbe(client, queue)
+    # No cache: the second read must see the worker that started after the first.
+    probe = TemporalQueueProbe(client, queue, PollerCache(seconds=0))
     assert await probe.has_pollers() is False
     async with Worker(client, task_queue=queue, workflows=[ProfileFetch], activities=[]):
         deadline = asyncio.get_running_loop().time() + 10

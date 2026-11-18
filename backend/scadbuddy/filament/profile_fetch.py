@@ -26,6 +26,7 @@ import io
 import json
 import logging
 import math
+import time
 import zipfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -63,7 +64,7 @@ from scadbuddy.profile_fetch.wire import (
     MissingKey,
     fetch_workflow_id,
 )
-from scadbuddy.profile_fetch.workflow import LONGEST_RUN, NO_WORKER
+from scadbuddy.profile_fetch.workflow import EXECUTION_TIMEOUT, LONGEST_RUN, NO_WORKER
 from scadbuddy.slicing.held_presets import HeldPresetStore, refresh_held_presets
 
 if TYPE_CHECKING:
@@ -99,6 +100,8 @@ START_TIMEOUT_SECONDS: Final = 10.0
 NO_POLLER_GRACE: Final = timedelta(minutes=10)
 #: The longest that read may take; a slower Temporal leaves the run alone.
 PROBE_TIMEOUT_SECONDS: Final = 5.0
+#: How long the API keeps that read's answer for one queue (`PollerCache`).
+POLLERS_CACHE_SECONDS: Final = 30.0
 #: The keys only a printer or a process preset has.
 SETTINGS_IDS: Final = frozenset({"printer_settings_id", "print_settings_id"})
 
@@ -256,14 +259,16 @@ class ProfileFetches:
             ).fetchone()
         return None if row is None else row["age"]
 
-    def fail_unserved(self, run_id: UUID) -> None:
-        """The run ends ``failed`` with `NO_WORKER` when it still runs (`end_unserved`)."""
+    def fail_unserved(self, run_id: UUID) -> bool:
+        """The run ends ``failed`` with `NO_WORKER` when it still runs (`end_unserved`);
+        whether this call ended it."""
         with self._pool.connection() as conn:
-            conn.execute(
+            ended = conn.execute(
                 "UPDATE filament_profile_fetches SET status = 'failed', error = %s,"
                 " finished_at = now() WHERE id = %s AND status = 'running'",
                 (NO_WORKER, run_id),
             )
+            return ended.rowcount == 1
 
     @staticmethod
     def _targets(conn: Conn, nozzles: list[str]) -> list[ExportTarget]:
@@ -304,27 +309,72 @@ class FetchStarter:
             ask,
             id=fetch_workflow_id(ask.run_id),
             task_queue=self.task_queue,
+            execution_timeout=EXECUTION_TIMEOUT,
             id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
             id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
         )
 
 
 class QueueProbe(Protocol):
-    """Whether any worker polls the profile-fetch queue (`TemporalQueueProbe`; a test's
-    fake)."""
+    """What `end_unserved` asks Temporal: whether any worker polls the profile-fetch
+    queue, and the cancel of a run's workflow (`TemporalQueueProbe`; a test's fake)."""
 
     async def has_pollers(self) -> bool: ...
+
+    async def cancel(self, run_id: str) -> None: ...
+
+
+class PollerCache:
+    """DescribeTaskQueue's answer per queue, kept `POLLERS_CACHE_SECONDS`: each read of
+    a fetch's status (a page polls it) would otherwise ask Temporal twice."""
+
+    def __init__(
+        self,
+        seconds: float = POLLERS_CACHE_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._seconds = seconds
+        self._clock = clock
+        self._answers: dict[tuple[str, str], tuple[float, bool]] = {}
+
+    def get(self, key: tuple[str, str]) -> bool | None:
+        kept = self._answers.get(key)
+        if kept is None or self._clock() - kept[0] >= self._seconds:
+            return None
+        return kept[1]
+
+    def put(self, key: tuple[str, str], pollers: bool) -> None:
+        self._answers[key] = (self._clock(), pollers)
+
+
+#: The app's cache: `probe` makes a new probe for each read.
+POLLERS: Final = PollerCache()
 
 
 class TemporalQueueProbe:
     """Temporal's DescribeTaskQueue for the queue's workflow and its activity task
-    queues: a poller on either is a worker that will take the run."""
+    queues: a poller on either is a worker that will take the run. The answer is kept
+    in ``cache`` (the app's `POLLERS` by default); a failed read is not kept."""
 
-    def __init__(self, client: Client, task_queue: str) -> None:
+    def __init__(self, client: Client, task_queue: str, cache: PollerCache = POLLERS) -> None:
         self.client = client
         self.task_queue = task_queue
+        self.cache = cache
 
     async def has_pollers(self) -> bool:
+        key = (self.client.namespace, self.task_queue)
+        kept = self.cache.get(key)
+        if kept is not None:
+            return kept
+        pollers = await self._read()
+        self.cache.put(key, pollers)
+        return pollers
+
+    async def cancel(self, run_id: str) -> None:
+        """Ask Temporal to cancel the run's workflow (`fetch_workflow_id`)."""
+        await self.client.get_workflow_handle(fetch_workflow_id(run_id)).cancel()
+
+    async def _read(self) -> bool:
         for kind in (
             TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW,
             TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY,
@@ -362,10 +412,11 @@ def probe(state: AppState) -> QueueProbe:
 async def end_unserved(state: AppState, run: ProfileFetch) -> ProfileFetch:
     """The run, ended ``failed`` with `NO_WORKER` when no worker will serve it: it has
     run longer than `NO_POLLER_GRACE` and no worker polls the profile-fetch queue, or,
-    as a last resort, it has run longer than `workflow.LONGEST_RUN` (Decision 13's
-    bounds). The workflow runs on that queue too, so with no worker deployed nothing
-    else would ever end it. A worker that polls (a busy one) never fails a queued run,
-    and a Temporal that does not answer leaves the run as it is."""
+    as a last resort, it has run longer than `workflow.LONGEST_RUN` (the workflow's
+    execution timeout plus an hour). The workflow runs on that queue too, so with no
+    worker deployed nothing else would ever end it. A worker that polls (a busy one)
+    never fails a queued run before then, and a Temporal that does not answer leaves the
+    run as it is. A run it ends has its workflow cancelled, best effort."""
     if run.status != "running":
         return run
     runs = fetches(state)
@@ -383,9 +434,22 @@ async def end_unserved(state: AppState, run: ProfileFetch) -> ProfileFetch:
             return run
         if served:
             return run
-    await asyncio.to_thread(runs.fail_unserved, run.id)
-    logger.warning("profile fetch %s ended failed: %s", run.id, NO_WORKER)
+    if await asyncio.to_thread(runs.fail_unserved, run.id):
+        logger.warning("profile fetch %s ended failed: %s", run.id, NO_WORKER)
+        await _cancel_workflow(state, run.id)
     return await asyncio.to_thread(runs.get, run.id) or run
+
+
+async def _cancel_workflow(state: AppState, run_id: UUID) -> None:
+    """Best effort: ask Temporal to cancel the workflow of a run `end_unserved` ended, so
+    a worker that takes it later does not export for an ended run. An error or a
+    Temporal that does not answer within `PROBE_TIMEOUT_SECONDS` is logged and ignored:
+    the workflow then meets 409 ``not_running`` (build Decision 51)."""
+    try:
+        async with asyncio.timeout(PROBE_TIMEOUT_SECONDS):
+            await probe(state).cancel(str(run_id))
+    except Exception:
+        logger.warning("could not cancel the workflow of profile fetch %s", run_id, exc_info=True)
 
 
 def fetches(state: AppState) -> ProfileFetches:

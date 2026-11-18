@@ -20,7 +20,7 @@ from scadbuddy.api import filament as filament_api
 from scadbuddy.filament import profile_fetch
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.profile_fetch.wire import FETCH_WORKFLOW, FetchAsk
-from scadbuddy.profile_fetch.workflow import LONGEST_RUN
+from scadbuddy.profile_fetch.workflow import EXECUTION_TIMEOUT, LONGEST_RUN
 from tests.api.test_crud_profile_fetch import _state
 
 pytestmark = pytest.mark.requires_postgres
@@ -45,6 +45,8 @@ class FakeTemporal:
         self.hang = False
         self.in_flight = 0
         self.most_in_flight = 0
+        #: Each start's ``execution_timeout``.
+        self.execution_timeouts: list[timedelta | None] = []
 
     async def start_workflow(self, workflow: str, ask: FetchAsk, **kwargs: Any) -> None:
         if self.fail:
@@ -59,6 +61,7 @@ class FakeTemporal:
         assert kwargs.pop("id_conflict_policy") == WorkflowIDConflictPolicy.USE_EXISTING
         assert kwargs.pop("id_reuse_policy") == WorkflowIDReusePolicy.ALLOW_DUPLICATE
         workflow_id = kwargs.pop("id")
+        self.execution_timeouts.append(kwargs.pop("execution_timeout", None))
         if any(started[1] == workflow_id for started in self.started):
             self.attached.append(ask)
             kwargs.pop("task_queue")
@@ -68,19 +71,28 @@ class FakeTemporal:
 
 
 class FakeProbe:
-    """`profile_fetch.QueueProbe`: whether the profile-fetch queue has pollers. ``fail``
-    makes the read raise, as a Temporal that does not answer; ``reads`` counts them."""
+    """`profile_fetch.QueueProbe`: whether the profile-fetch queue has pollers, and the
+    cancel of a run's workflow. ``fail`` makes the read raise, as a Temporal that does not
+    answer; ``reads`` counts them. ``cancelled`` lists the runs whose workflow was
+    cancelled; ``cancel_fail`` makes the cancel raise."""
 
     def __init__(self) -> None:
         self.pollers = True
         self.fail = False
         self.reads = 0
+        self.cancelled: list[str] = []
+        self.cancel_fail = False
 
     async def has_pollers(self) -> bool:
         self.reads += 1
         if self.fail:
             raise RuntimeError("Temporal is down")
         return self.pollers
+
+    async def cancel(self, run_id: str) -> None:
+        if self.cancel_fail:
+            raise RuntimeError("Temporal is down")
+        self.cancelled.append(run_id)
 
 
 @pytest.fixture(autouse=True)
@@ -161,6 +173,9 @@ def test_start_opens_a_run_and_starts_the_workflow(
     assert ask.type_id == type_id
     assert ask.tdfp_id == 30173
     assert [t.model_dump() for t in ask.targets] == [{"printer_model": "H2C", "nozzles": NOZZLES}]
+    # Temporal ends a workflow that outlives it; the API's last resort waits past it.
+    assert starter.execution_timeouts == [EXECUTION_TIMEOUT] == [timedelta(hours=24)]
+    assert EXECUTION_TIMEOUT + timedelta(hours=1) == LONGEST_RUN
 
 
 def test_a_second_start_joins_the_running_fetch(client: TestClient, starter: FakeTemporal) -> None:
@@ -455,8 +470,11 @@ def test_a_run_no_worker_polls_for_ends_failed(
     if status == "failed":
         assert read["error"] == "no profile-fetch worker picked the fetch up"
         assert read["finished_at"] is not None
+        # The workflow, if a worker ever takes it, is cancelled too.
+        assert probe.cancelled == [run["id"]]
     else:
         assert read["error"] is None
+        assert probe.cancelled == []
 
 
 def test_a_run_past_the_longest_run_ends_failed_with_pollers(
@@ -472,6 +490,39 @@ def test_a_run_past_the_longest_run_ends_failed_with_pollers(
     read = _read(client, type_id)
     assert read["status"] == "failed"
     assert read["error"] == "no profile-fetch worker picked the fetch up"
+    assert probe.cancelled == [run["id"]]
+
+
+def test_a_queued_run_within_the_execution_timeout_is_left_running(
+    client: TestClient, probe: FakeProbe
+) -> None:
+    """While a worker polls, the API never fails a run before Temporal's own execution
+    timeout (plus an hour) could have ended its workflow: a run queued behind many others
+    for longer than the export's waits is still served."""
+    _printer(client)
+    type_id = _type(client)
+    run = _start(client, type_id).json()["run"]
+    _started_ago(client, run["id"], EXECUTION_TIMEOUT + timedelta(minutes=30))
+    probe.pollers = True
+    assert _read(client, type_id)["status"] == "running"
+    assert probe.cancelled == []
+
+
+def test_a_cancel_that_fails_still_ends_the_run(
+    client: TestClient, probe: FakeProbe, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The cancel is best effort: a Temporal that refuses it is logged, and the run still
+    ends ``failed``."""
+    _printer(client)
+    type_id = _type(client)
+    run = _start(client, type_id).json()["run"]
+    _started_ago(client, run["id"], timedelta(minutes=11))
+    probe.pollers = False
+    probe.cancel_fail = True
+    caplog.set_level(logging.WARNING)
+    read = _read(client, type_id)
+    assert read["status"] == "failed"
+    assert any("could not cancel" in r.getMessage() for r in caplog.records)
 
 
 def test_a_temporal_error_leaves_the_run_running(

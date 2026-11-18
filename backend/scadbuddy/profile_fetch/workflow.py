@@ -38,9 +38,10 @@ with workflow.unsafe.imports_passed_through():
 EXPORT_TIMEOUT: Final = timedelta(minutes=20)
 #: The activity heartbeats every `core.heartbeat.HEARTBEAT_EVERY` (10 s).
 EXPORT_HEARTBEAT: Final = timedelta(minutes=2)
-#: Caps how long an export may wait in the queue: one worker exports one run at a time, so
-#: an invoice confirm's many runs queue behind each other (Decision 16). A worker that is
-#: not there is found sooner by the API, from the queue's pollers (build Decision 62).
+#: Caps how long one export attempt may wait in the queue: one worker exports one run at a
+#: time, so an invoice confirm's many runs queue behind each other (Decision 16). A worker
+#: that is not there is found sooner by the API, from the queue's pollers (build Decision
+#: 62).
 EXPORT_SCHEDULE_TO_START = timedelta(hours=6)
 #: The activity marks `site.SiteError`'s kinds that are not worth another try as
 #: non-retryable (`activities.RETRYABLE_KINDS`).
@@ -55,13 +56,15 @@ IMPORT_RETRY: Final = RetryPolicy(
     maximum_interval=timedelta(minutes=2),
     maximum_attempts=5,
 )
-#: The longest each step's attempts take once a worker holds them (their schedule-to-close
-#: without the queue): every attempt's timeout plus the retry backoffs between them.
-EXPORT_SCHEDULE_TO_CLOSE: Final = 3 * EXPORT_TIMEOUT + timedelta(minutes=1 + 2)
-IMPORT_SCHEDULE_TO_CLOSE: Final = 5 * IMPORT_TIMEOUT + timedelta(seconds=10 + 20 + 40 + 80)
-#: A run still ``running`` this long after it started has no workflow that will end it:
+#: The workflow's execution timeout (`filament.profile_fetch.FetchStarter`): Temporal ends
+#: a workflow still open this long after its start. The steps' own timeouts give no bound
+#: of their own: `EXPORT_SCHEDULE_TO_START` applies to each attempt, and ``failed`` retries
+#: without a limit.
+EXECUTION_TIMEOUT: Final = timedelta(hours=24)
+#: A run still ``running`` this long after it started has no workflow that will end it
+#: (Temporal ended it at `EXECUTION_TIMEOUT`, and an hour has passed for its last post):
 #: the API ends it ``failed`` (`filament.profile_fetch.end_unserved`, the last resort).
-LONGEST_RUN: Final = EXPORT_SCHEDULE_TO_START + EXPORT_SCHEDULE_TO_CLOSE + IMPORT_SCHEDULE_TO_CLOSE
+LONGEST_RUN: Final = EXECUTION_TIMEOUT + timedelta(hours=1)
 
 #: Posting ``failed`` waits out a CRUD service that does not answer.
 FAILED_TIMEOUT: Final = timedelta(minutes=2)

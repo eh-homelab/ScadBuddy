@@ -73,9 +73,10 @@ def check_environment(environ: Mapping[str, str]) -> None:
 def forget_login(environ: MutableMapping[str, str]) -> None:
     """Remove the 3DFP login from ``environ`` (``os.environ``) once the settings read it,
     so no process the worker starts (Playwright's driver, the browser) inherits it
-    (Task 6 review, I1)."""
-    for name in LOGIN_ENV:
-        environ.pop(name, None)
+    (Task 6 review, I1). pydantic-settings reads names without regard to case, so every
+    spelling of them goes."""
+    for name in [name for name in environ if name.upper() in LOGIN_ENV]:
+        del environ[name]
 
 
 class ProfileFetchSettings(BaseSettings):

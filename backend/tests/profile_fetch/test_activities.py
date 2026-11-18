@@ -339,6 +339,52 @@ def test_a_browser_or_timeout_failure_opens_a_fresh_browser(kind: Kind, launches
     assert len(crud.puts) == 4
 
 
+def test_a_cancelled_export_opens_a_fresh_browser() -> None:
+    """An export Temporal cancels (a cancel request, or its start-to-close timeout, which
+    the worker delivers as a cancellation) closes the browser as a ``timeout`` does, then
+    ends cancelled: the page it left may be wedged mid-export."""
+    made: list[FakeSite] = []
+    first = FakeSite()
+    entered = asyncio.Event()
+
+    async def hang(tdfp_id: int, printer_model: str, nozzle: str) -> ExportedFile:
+        entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("never woken")
+
+    first.export = hang  # type: ignore[method-assign]
+
+    def make() -> FakeSite:
+        made.append(first if not made else FakeSite())
+        return made[-1]
+
+    crud = FakeCrud()
+    client = CrudClient(
+        "http://api", "profile-fetch", ServiceAuth(Source()), transport=httpx.MockTransport(crud)
+    )
+    sites = SiteHolder(make)
+    activities = ProfileFetchActivities(client, sites)
+
+    async def go() -> None:
+        env = ActivityEnvironment()
+        try:
+            task = asyncio.create_task(env.run(activities.export, ASK))
+            await asyncio.wait_for(entered.wait(), 5)
+            env.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert first.closed == 1
+            await ActivityEnvironment().run(activities.export, ASK)
+        finally:
+            await sites.aclose()
+            await client.aclose()
+
+    asyncio.run(go())
+    assert len(made) == 2
+    assert (made[1].opened, made[1].logins) == (1, 1)
+    assert len(crud.puts) == 4
+
+
 @pytest.mark.parametrize(("status", "code"), [(409, "not_running"), (404, "run_not_found")])
 def test_a_run_the_api_ended_is_not_running(status: int, code: str) -> None:
     """Decision 25: the API ended the run; the workflow ends without a retry."""

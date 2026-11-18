@@ -16,6 +16,7 @@ route that answers the run is not running (409) or gone (404) is `NOT_RUNNING`.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 from collections.abc import Awaitable, Callable
@@ -152,8 +153,14 @@ class ProfileFetchActivities:
     @activity.defn(name=EXPORT_ACTIVITY)
     async def export(self, ask: FetchAsk) -> ExportReport:
         """The export (the module docstring). It heartbeats while it runs
-        (`workflow.EXPORT_HEARTBEAT`)."""
-        return await heartbeating(self._export(ask))
+        (`workflow.EXPORT_HEARTBEAT`). Cancelled by Temporal (a cancel, or its
+        start-to-close timeout), it closes the browser as a ``timeout`` does, since the
+        page may be wedged mid-export, and ends cancelled."""
+        try:
+            return await heartbeating(self._export(ask))
+        except asyncio.CancelledError:
+            await self._sites.drop()
+            raise
 
     async def _export(self, ask: FetchAsk) -> ExportReport:
         exported = 0
