@@ -19,6 +19,7 @@ import {
   listSuppliers,
   listTypePrices,
   patchInvoice,
+  patchProduct,
   patchSupplier,
   patchShopping,
   putInvoiceLines,
@@ -26,7 +27,7 @@ import {
   uploadInvoiceFile,
 } from '../../api/filamentPurchasing'
 import { resetMockState } from '../handlers'
-import { spoolId, T } from './filament/seed'
+import { M, spoolId, T } from './filament/seed'
 import { INVOICE, ITEM, LINE, PRODUCT, SUPPLIER } from './filamentPurchasingSeed'
 
 const refusal = async (promise: Promise<unknown>) => {
@@ -206,7 +207,6 @@ describe('the purchasing mocks', () => {
         [[spoolId(1)], 'already belongs to an invoice line'],
         [[spoolId(9)], 'has another spool type'],
         [[spoolId(6), spoolId(6)], 'it names a spool twice'],
-        [[spoolId(6), spoolId(11), spoolId(7)], 'it fills 3 spools but its quantity is 2'],
       ]
       for (const [ids, text] of cases) {
         const made = await draft(ids)
@@ -219,6 +219,21 @@ describe('the purchasing mocks', () => {
       expect((await getSpool(spoolId(6))).type_id).toBeNull()
     })
 
+    it('refuses more spools than the quantity when the lines are written, as the backend does', async () => {
+      resetMockState()
+      const error = await refusal(draft([spoolId(6), spoolId(11), spoolId(7)]))
+      expect(error.status).toBe(422)
+      expect(error.detail).toContain('more spools than')
+    })
+
+    it("prices a filled spool from the type's label weight when its own is 0", async () => {
+      resetMockState()
+      const spool = await createSpool({ material_id: M.PLA, label_weight_g: 0, weight_locked: false })
+      const done = await confirmInvoice((await draft([spool.id], 1, T.JADE)).id)
+      expect(done.lines[0]!.spool_ids[0]).toBe(spool.id)
+      expect((await getSpool(spool.id)).cost_per_kg).toBe('30.0000')
+    })
+
     it('refuses one spool named by two lines of the same invoice', async () => {
       resetMockState()
       const line = { description: 'Jade', quantity: 1, unit_price: '15', type_id: T.JADE, update_spool_ids: [spoolId(6)] }
@@ -227,7 +242,7 @@ describe('the purchasing mocks', () => {
     })
   })
 
-  it('refuses a line whose supplier product is for another spool type, writing nothing', async () => {
+  it('refuses a line whose supplier product cannot be used, writing nothing', async () => {
     resetMockState()
     const before = (await listSpools({ includeArchived: true })).length
     const base = { supplier_id: SUPPLIER.BAMBU, invoice_date: '2026-11-16', currency: 'USD', subtotal: '10', total: '10' }
@@ -237,7 +252,30 @@ describe('the purchasing mocks', () => {
     expect((await refusal(confirmInvoice(bySku.id))).detail).toBe('line 1: its supplier product is for another spool type')
     const other = await createInvoice({ ...base, lines: [{ description: 'x', quantity: 1, unit_price: '10', type_id: T.INLAND_BLACK, supplier_product_id: PRODUCT.INLAND }] })
     expect((await refusal(confirmInvoice(other.id))).detail).toBe("line 1: its supplier product is archived or not this supplier's")
+    await patchProduct(PRODUCT.ORANGE, { archived: true })
+    const archived = await createInvoice({ ...base, lines: [{ description: 'x', quantity: 1, unit_price: '10', type_id: T.ORANGE, supplier_product_id: PRODUCT.ORANGE }] })
+    expect((await refusal(confirmInvoice(archived.id))).detail).toBe("line 1: its supplier product is archived or not this supplier's")
     expect((await listSpools({ includeArchived: true })).length).toBe(before)
+  })
+
+  it('refuses an invoice for an archived supplier, and confirming one that became archived', async () => {
+    resetMockState()
+    const base = { invoice_date: '2026-11-16', currency: 'USD', subtotal: '10', total: '10', lines: [{ description: 'x', quantity: 1, unit_price: '10', type_id: T.JADE }] }
+    const open = await createInvoice({ ...base, supplier_id: SUPPLIER.AMAZON })
+    await patchSupplier(SUPPLIER.AMAZON, { archived: true })
+    const made = await refusal(createInvoice({ ...base, supplier_id: SUPPLIER.AMAZON }))
+    expect(made.status).toBe(422)
+    expect(made.detail).toContain('archived')
+    const confirmed = await refusal(confirmInvoice(open.id))
+    expect(confirmed.status).toBe(409)
+    expect(confirmed.detail).toContain('archived')
+    expect((await getInvoice(open.id)).status).toBe('draft')
+  })
+
+  it('refuses a quantity over 1,000 with 422', async () => {
+    resetMockState()
+    const line = { description: 'x', quantity: 1001, unit_price: '1', type_id: T.JADE }
+    expect((await refusal(createInvoice({ supplier_id: SUPPLIER.BAMBU, invoice_date: '2026-11-16', currency: 'USD', subtotal: '1', total: '1', lines: [line] }))).status).toBe(422)
   })
 
   it('writes nothing when a later line is refused', async () => {

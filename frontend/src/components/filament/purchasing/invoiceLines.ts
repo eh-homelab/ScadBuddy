@@ -64,7 +64,7 @@ export const blankLine = (): LineDraft => ({
 /** A line has a type when it names one or proposes one (made at confirm). */
 export const hasType = (row: LineDraft) => row.typeId !== '' || row.proposedType != null
 
-const quantityOf = (row: LineDraft): number | null => (/^\d+$/.test(row.quantity.trim()) && Number(row.quantity) >= 1 && Number(row.quantity) <= 100_000 ? Number(row.quantity) : null)
+const quantityOf = (row: LineDraft): number | null => (/^\d+$/.test(row.quantity.trim()) && Number(row.quantity) >= 1 && Number(row.quantity) <= 1_000 ? Number(row.quantity) : null)
 
 /** What is wrong with each typed line, by line key; a line with nothing wrong has no entry. */
 export function lineErrors(rows: LineDraft[]): LineErrors {

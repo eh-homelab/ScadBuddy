@@ -137,4 +137,15 @@ describe('the supplier page', () => {
     await user.click(screen.getByRole('button', { name: 'Leave without saving' }))
     expect(await screen.findByText('Elsewhere')).toBeInTheDocument()
   })
+
+  it('treats whitespace typed in a field as no change: no leave prompt and nothing to save', async () => {
+    const patched = recorded('PATCH', /\/suppliers\/[^/]+$/)
+    const { user } = render()
+    await heading('Bambu Lab')
+    await user.type(screen.getByLabelText('Note'), '   ')
+    await user.click(screen.getByRole('link', { name: /Suppliers/ }))
+    expect(await screen.findByText('Elsewhere')).toBeInTheDocument()
+    expect(screen.queryByText('Leave without saving?')).toBeNull()
+    expect(patched).toEqual([])
+  })
 })

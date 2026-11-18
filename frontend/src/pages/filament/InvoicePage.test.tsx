@@ -407,4 +407,139 @@ describe('the invoice page', () => {
     await waitFor(() => expect(screen.queryByText('Saving the lines…')).not.toBeInTheDocument())
     expect(cost(2)).toHaveTextContent('30.00')
   })
+
+  describe('final review rulings', () => {
+    const problem = (status: number, detail: string) => HttpResponse.json({ type: 'about:blank', title: 'Refused', status, detail }, { status, headers: { 'Content-Type': 'application/problem+json' } })
+    const held = () => {
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      return { gate, release }
+    }
+    const pdf = () => new File(['%PDF-1.4 x'], 'again.pdf', { type: 'application/pdf' })
+    // jsdom's FormData does not go through Node's fetch, so the mock's multipart parser cannot read it: answer the upload here.
+    const uploadAnswered = () => server.use(http.post('*/api/v1/filament/invoices/:id/file', () => HttpResponse.json({ name: 'again.pdf', media_type: 'application/pdf', size: 10 })))
+
+    it('keeps a product picked while a supplier move is refused, and restores the other lines', async () => {
+      const { gate, release } = held()
+      let started = false
+      server.use(
+        http.patch('*/api/v1/filament/invoices/:id', async () => {
+          started = true
+          await gate
+          return problem(409, 'The supplier has that number')
+        }),
+      )
+      const { user } = render(INVOICE.DRAFT_A)
+      await heading()
+      await choose(user, await screen.findByRole('combobox', { name: 'Supplier' }), 'Micro Center')
+      await waitFor(() => expect(started).toBe(true))
+      await choose(user, screen.getByRole('combobox', { name: 'Supplier product, line 1' }), 'A00-R3')
+      release()
+      await screen.findByRole('alert')
+      await waitFor(() => expect(screen.getByRole('combobox', { name: 'Supplier product, line 2' })).toHaveTextContent('A00-W1'))
+      expect(screen.getByRole('combobox', { name: 'Supplier product, line 1' })).toHaveTextContent('A00-R3')
+    })
+
+    it('reads the invoice again only after a save in flight, when a file is uploaded meanwhile', async () => {
+      const { gate, release } = held()
+      let putStarted = false
+      server.use(
+        http.put('*/api/v1/filament/invoices/:id/lines', async () => {
+          putStarted = true
+          await gate
+        }),
+      )
+      uploadAnswered()
+      const seen = requests()
+      const { user } = render(INVOICE.DRAFT_A)
+      await heading()
+      await user.type(await screen.findByLabelText('Description, line 1'), ' again')
+      await user.tab()
+      await waitFor(() => expect(putStarted).toBe(true))
+      const getsBefore = seen.filter((one) => one === `GET /api/v1/filament/invoices/${INVOICE.DRAFT_A}`).length
+      await user.upload(screen.getByLabelText('Choose an invoice file'), pdf())
+      await waitFor(() => expect(seen.some((one) => one === `POST /api/v1/filament/invoices/${INVOICE.DRAFT_A}/file`)).toBe(true))
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(seen.filter((one) => one === `GET /api/v1/filament/invoices/${INVOICE.DRAFT_A}`)).toHaveLength(getsBefore)
+      release()
+      await waitFor(() => expect(seen.filter((one) => one === `GET /api/v1/filament/invoices/${INVOICE.DRAFT_A}`).length).toBe(getsBefore + 1))
+    })
+
+    it('keeps each row\'s server cost, by line, when the invoice is read again beside an unsent new row', async () => {
+      uploadAnswered()
+      const { user } = render(INVOICE.DRAFT_A)
+      await heading()
+      const lines = await screen.findByRole('table', { name: 'Invoice lines' })
+      const cost = (n: number) => within(lines.querySelector(`tr[data-line="${n}"]`) as HTMLElement).getByText(/\$\d/, { selector: 'td:nth-last-child(2)' })
+      await waitFor(() => expect(cost(1)).toBeInTheDocument())
+      await user.click(screen.getByRole('button', { name: 'Add line' }))
+      await user.upload(screen.getByLabelText('Choose an invoice file'), pdf())
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Replace file' })).toBeEnabled())
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(cost(1)).toBeInTheDocument()
+      expect(cost(2)).toBeInTheDocument()
+    })
+
+    it('keeps Confirm disabled while a header change is in flight', async () => {
+      const { gate, release } = held()
+      let started = false
+      server.use(
+        http.patch('*/api/v1/filament/invoices/:id', async () => {
+          started = true
+          await gate
+        }),
+      )
+      const { user } = render(INVOICE.DRAFT_A)
+      await heading()
+      const note = await screen.findByLabelText('Note')
+      await user.type(note, 'Paid')
+      await user.tab()
+      await waitFor(() => expect(started).toBe(true))
+      expect(screen.getByRole('button', { name: 'Confirm' })).toBeDisabled()
+      expect(screen.getByText('Saving the header…')).toBeInTheDocument()
+      release()
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Confirm' })).toBeEnabled())
+    })
+
+    it('puts focus on the heading after a confirm, where the Confirm button was', async () => {
+      const { user } = render(INVOICE.DRAFT_A)
+      await heading()
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Confirm' })).toBeEnabled())
+      await user.click(screen.getByRole('button', { name: 'Confirm' }))
+      await user.click(await screen.findByRole('button', { name: 'Make the spools' }))
+      await waitFor(() => expect(screen.getByText('Confirmed')).toBeInTheDocument())
+      await waitFor(() => expect(screen.getByRole('heading', { level: 1 })).toHaveFocus())
+    })
+
+    it('dims the server figures of a line while its edit is unsaved', async () => {
+      const { gate, release } = held()
+      server.use(
+        http.put('*/api/v1/filament/invoices/:id/lines', async () => {
+          await gate
+        }),
+      )
+      const { user } = render(INVOICE.DRAFT_A)
+      await heading()
+      const lines = await screen.findByRole('table', { name: 'Invoice lines' })
+      const costCell = () => lines.querySelector('tr[data-line="1"] td:nth-last-child(2)') as HTMLElement
+      await waitFor(() => expect(costCell()).toHaveTextContent('$'))
+      expect(costCell()).not.toHaveClass('opacity-50')
+      const price = screen.getByLabelText('Unit price, line 1')
+      await user.clear(price)
+      await user.type(price, '21')
+      await user.tab()
+      expect(costCell()).toHaveClass('opacity-50')
+      release()
+      await waitFor(() => expect(costCell()).not.toHaveClass('opacity-50'))
+    })
+
+    it('puts focus on the new line\'s description after Add line', async () => {
+      const { user } = render(INVOICE.DRAFT_A)
+      await heading()
+      await user.click(await screen.findByRole('button', { name: 'Add line' }))
+      await waitFor(() => expect(screen.getByLabelText('Description, line 3')).toHaveFocus())
+    })
+  })
 })

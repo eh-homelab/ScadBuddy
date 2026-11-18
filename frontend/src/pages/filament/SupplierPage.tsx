@@ -1,10 +1,9 @@
 import { ArchiveIcon, ArchiveRestoreIcon, ChevronLeftIcon } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link, useParams } from 'react-router'
 import { ApiError } from '../../api/client'
 import { listTypes, type SpoolType } from '../../api/filament'
 import {
-  createProduct,
   getPriceSheet,
   getSupplier,
   listProducts,
@@ -13,26 +12,22 @@ import {
   type Supplier,
   type SupplierProduct,
 } from '../../api/filamentPurchasing'
+import { AddProductSheet } from '../../components/filament/purchasing/AddProductSheet'
 import { PriceSheet } from '../../components/filament/purchasing/PriceSheet'
 import { ProductsTable } from '../../components/filament/purchasing/ProductsTable'
 import { BLANK_SUPPLIER, draftOfSupplier, supplierBody, supplierError } from '../../components/filament/purchasing/supplierDraft'
 import { SupplierFields } from '../../components/filament/purchasing/SupplierFields'
 import { useMoney } from '../../components/filament/purchasing/useMoney'
-import { webUrlError } from '../../components/filament/purchasing/webUrl'
-import { RecordDrawer } from '../../components/records/RecordDrawer'
 import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { useAdvanced } from '../../lib/advanced'
 import { useLeaveGuard } from '../../lib/useLeaveGuard'
+import { message } from '../../components/filament/purchasing/priceFormat'
 
 /** Remembered per browser: whether archived products are listed. */
 export const SHOW_ARCHIVED_PRODUCTS_KEY = 'scadbuddy.filament.supplier.showArchivedProducts'
 
-const message = (cause: unknown, fallback: string) => (cause instanceof ApiError ? cause.detail : fallback)
 
 interface Loaded {
   supplier: Supplier
@@ -45,6 +40,9 @@ interface Loaded {
  * navigation), its products with their newest prices and an inline "Add price", and its price
  * sheet. A product is added by picking one of the types.
  */
+/** A draft's text with its edge whitespace off, as a string to compare: a space typed is no change. */
+const trimmed = (draft: object) => JSON.stringify(Object.fromEntries(Object.entries(draft).map(([key, value]) => [key, typeof value === 'string' ? value.trim() : value])))
+
 export function SupplierPage() {
   const { id = '' } = useParams()
   const money = useMoney()
@@ -98,7 +96,7 @@ export function SupplierPage() {
 
   const typeMap = useMemo(() => new Map(types.map((type) => [type.id, type])), [types])
   const base = useMemo(() => (data ? draftOfSupplier(data.supplier) : BLANK_SUPPLIER), [data])
-  const dirty = JSON.stringify(draft) !== JSON.stringify(base)
+  const dirty = trimmed(draft) !== trimmed(base)
   const guard = useLeaveGuard(dirty)
 
   async function save() {
@@ -233,8 +231,9 @@ export function SupplierPage() {
 
       {adding && (
         <AddProductSheet
-          supplierId={id}
-          types={types.filter((type) => !type.archived_at)}
+          title="Add product"
+          fixed={{ supplierId: id }}
+          pick={{ label: 'Type', placeholder: 'Pick a type', refusal: 'Pick the type this product is.', options: types.filter((type) => !type.archived_at).map((type) => ({ id: type.id, label: type.code })) }}
           onClose={() => setAdding(false)}
           onAdded={() => {
             setAdding(false)
@@ -258,89 +257,6 @@ export function SupplierPage() {
         </AlertDialogContent>
       </AlertDialog>
     </Shell>
-  )
-}
-
-function AddProductSheet({ supplierId, types, onClose, onAdded }: { supplierId: string; types: SpoolType[]; onClose: () => void; onAdded: () => void }) {
-  const [typeId, setTypeId] = useState('')
-  const [sku, setSku] = useState('')
-  const [pack, setPack] = useState('1')
-  const [url, setUrl] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  async function submit(event: FormEvent) {
-    event.preventDefault()
-    const size = /^\d+$/.test(pack.trim()) ? Number(pack) : 0
-    const refused = !typeId
-      ? 'Pick the type this product is.'
-      : !sku.trim()
-        ? 'Enter the supplier’s SKU.'
-        : size < 1
-          ? 'The pack size is a whole number of spools, at least 1.'
-          : webUrlError(url, 'The product page')
-    if (refused) {
-      setError(refused)
-      return
-    }
-    setBusy(true)
-    setError(null)
-    try {
-      await createProduct(supplierId, { type_id: typeId, sku: sku.trim(), pack_size: size, ...(url.trim() ? { product_url: url.trim() } : {}) })
-      onAdded()
-    } catch (cause) {
-      setError(message(cause, 'The product could not be added. Try again.'))
-      setBusy(false)
-    }
-  }
-
-  return (
-    <RecordDrawer
-      title="Add product"
-      onClose={onClose}
-      footer={
-        <Button type="submit" form="add-product" disabled={busy}>
-          Add product
-        </Button>
-      }
-    >
-      <form id="add-product" className="flex flex-col gap-3" onSubmit={(event) => void submit(event)} noValidate>
-        <div className="flex flex-col gap-1">
-          <Label htmlFor="product-type" className="text-[13px]">Type</Label>
-          <Select value={typeId} onValueChange={setTypeId}>
-            <SelectTrigger id="product-type" aria-label="Type" className="w-full text-[13px]">
-              <SelectValue placeholder="Pick a type" />
-            </SelectTrigger>
-            <SelectContent>
-              {types.map((type) => (
-                <SelectItem key={type.id} value={type.id}>
-                  {type.code}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="grid grid-cols-2 gap-3">
-          <div className="flex flex-col gap-1">
-            <Label htmlFor="product-sku" className="text-[13px]">SKU</Label>
-            <Input id="product-sku" value={sku} onChange={(event) => setSku(event.target.value)} />
-          </div>
-          <div className="flex flex-col gap-1">
-            <Label htmlFor="product-pack" className="text-[13px]">Pack size</Label>
-            <Input id="product-pack" inputMode="numeric" value={pack} onChange={(event) => setPack(event.target.value)} />
-          </div>
-        </div>
-        <div className="flex flex-col gap-1">
-          <Label htmlFor="product-url" className="text-[13px]">Product page</Label>
-          <Input id="product-url" inputMode="url" placeholder="https://" value={url} onChange={(event) => setUrl(event.target.value)} />
-        </div>
-        {error && (
-          <p role="alert" className="text-[13px] text-warn">
-            {error}
-          </p>
-        )}
-      </form>
-    </RecordDrawer>
   )
 }
 

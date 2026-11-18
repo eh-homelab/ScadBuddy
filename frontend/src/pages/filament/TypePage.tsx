@@ -253,6 +253,7 @@ export function TypePage() {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [adding, setAdding] = useState(false)
   const money = useMoney()
 
   useEffect(() => {
@@ -351,6 +352,8 @@ export function TypePage() {
   }
 
   async function addToShopping() {
+    if (adding) return
+    setAdding(true)
     setError(null)
     setNotice(null)
     try {
@@ -358,6 +361,8 @@ export function TypePage() {
       setNotice('Added to the shopping list.')
     } catch (cause) {
       setError(message(cause))
+    } finally {
+      setAdding(false)
     }
   }
 
@@ -418,7 +423,7 @@ export function TypePage() {
           </Button>
         )}
         {!creating && (
-          <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void addToShopping()}>
+          <Button type="button" variant="outline" size="sm" disabled={busy || adding} onClick={() => void addToShopping()}>
             <ShoppingCartIcon />
             Add to shopping list
           </Button>

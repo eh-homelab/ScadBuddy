@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { ApiError } from '../../api/client'
 import { listTypes, type SpoolType } from '../../api/filament'
 import { addShopping, clearShopping, listShopping, patchShopping, removeShopping, type ShoppingItem, type ShoppingItemCreate } from '../../api/filamentPurchasing'
 import { TD, TH } from '../../components/filament/formClasses'
@@ -9,6 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { message } from '../../components/filament/purchasing/priceFormat'
 
 /** Remembered per browser: the last quantity of spools added. */
 export const QUANTITY_KEY = 'scadbuddy.filament.shopping.quantity'
@@ -16,7 +16,6 @@ export const QUANTITY_KEY = 'scadbuddy.filament.shopping.quantity'
 const NO_TYPE = '__none__'
 const QUANTITY = /^\d+$/
 
-const message = (cause: unknown, fallback: string) => (cause instanceof ApiError ? cause.detail : fallback)
 
 function rememberedQuantity(): string {
   try {
@@ -246,7 +245,7 @@ export function ShoppingListTab() {
           <table aria-label="Shopping list" className="w-full text-left text-[13px]">
             <thead className="bg-muted/50 text-muted-foreground">
               <tr>
-                <th className="w-7 px-1 py-1.5">
+                <th scope="col" className="w-7 px-1 py-1.5">
                   <span className="sr-only">Colour chip</span>
                 </th>
                 <th scope="col" className={TH}>Material</th>

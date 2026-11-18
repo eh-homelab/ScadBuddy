@@ -243,7 +243,13 @@ same way, `vite.config.ts`).
   `InvoiceUpload.test.tsx`). The Shopping list tab (`ShoppingListTab`) adds an item from a type or by
   text, marks it purchased (it sorts below the pending ones) or removes it, and confirms "Clear
   purchased" and "Clear all"; the last quantity is remembered (`QUANTITY_KEY`). The Types tab's row
-  and `TypePage` add a type to it as one pending spool.
+  and `TypePage` add a type to it as one pending spool (one click at a time: the button is off
+  while its request is out). `useMoney.format` shows the bare decimal, with no symbol, while the
+  shop's currency is unread or failed to read. `InvoicePage` refetches only when no save is in
+  flight (it waits and refetches after it), keys the server figures by line id, dims them while
+  an edit is unsaved, holds Confirm while a header change is in flight, and on a phone folds the
+  file viewer so the form leads. `AddProductSheet`, `message` and `today` are shared in
+  `components/filament/purchasing/` (`priceFormat.ts`).
   `/filament/spools/:id` (`SpoolPage`: sections, a "Go to section" select below
   1024 px, `OverrideField` with "Reset to type", `RgbaColourField` with Opaque, Translucent and
   Clear presets, `TagPanel` with "Tag is on spool #N — Move it here") and `/filament/types/:id`

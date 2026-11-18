@@ -1,4 +1,5 @@
 import { PlusIcon, Trash2Icon } from 'lucide-react'
+import { useEffect, useRef } from 'react'
 import { Link } from 'react-router'
 import type { Spool, SpoolType } from '../../../api/filament'
 import type { InvoiceLine, SupplierProduct } from '../../../api/filamentPurchasing'
@@ -28,6 +29,8 @@ interface EditableProps extends Shared {
   /** The server's line for each row, by the row's key: its cost, tax and basis are shown read-only. */
   computed: ReadonlyMap<string, InvoiceLine>
   errors: LineErrors
+  /** Lines are edited and not saved yet: the server's figures beside them are out of date. */
+  pending?: boolean
   products: SupplierProduct[]
   onChange: (rows: LineDraft[]) => void
   /** A field was left, or a choice made: save the lines soon. */
@@ -37,9 +40,19 @@ interface EditableProps extends Shared {
 const field = 'h-8 px-2 text-[13px]'
 
 /** What the lines of a draft are: typed in, saved as they are left, the server's figures beside them. */
-function Editable({ rows, computed, errors, products, types, spools, money, onChange, onCommit }: EditableProps) {
+function Editable({ rows, computed, errors, pending = false, products, types, spools, money, onChange, onCommit }: EditableProps) {
   const change = (at: number, patch: Partial<LineDraft>) => onChange(rows.map((row, i) => (i === at ? { ...row, ...patch } : row)))
   const typeOf = (id: string) => types.find((type) => type.id === id)
+  const table = useRef<HTMLTableElement>(null)
+  const addButton = useRef<HTMLButtonElement>(null)
+  // A line added by the button: its description takes focus once the row is there.
+  const focusLine = useRef<number | null>(null)
+  useEffect(() => {
+    if (focusLine.current === null) return
+    table.current?.querySelector<HTMLInputElement>(`input[aria-label="Description, line ${focusLine.current}"]`)?.focus()
+    focusLine.current = null
+  }, [rows.length])
+  const stale = pending ? 'opacity-50' : ''
   const taken = (at: number) => new Set(rows.flatMap((row, i) => (i === at ? [] : row.updateSpoolIds)))
 
   function pickType(at: number, value: string) {
@@ -65,7 +78,7 @@ function Editable({ rows, computed, errors, products, types, spools, money, onCh
   return (
     <div className="flex flex-col gap-2">
       <div className="relative overflow-x-auto rounded-md border">
-        <table aria-label="Invoice lines" className="w-full min-w-[46rem] text-left text-[13px]">
+        <table ref={table} aria-label="Invoice lines" className="w-full min-w-[46rem] text-left text-[13px]">
           <thead className="bg-muted/50 text-muted-foreground">
             <tr>
               <th scope="col" className={TH}>Item</th>
@@ -127,7 +140,7 @@ function Editable({ rows, computed, errors, products, types, spools, money, onCh
                     <Input className={`${field} w-20`} inputMode="decimal" aria-label={`Line tax, line ${n}`} placeholder="Receipt-wide" aria-invalid={problems.lineTax ? true : undefined} value={row.lineTax} onChange={(e) => change(at, { lineTax: e.target.value })} onBlur={onCommit} />
                     {problems.lineTax && <p className="mt-1 max-w-28 text-[12px] text-warn">{problems.lineTax}</p>}
                     {server && (
-                      <p className="mt-1 text-[12px] text-muted-foreground">
+                      <p className={`mt-1 text-[12px] text-muted-foreground ${stale}`} title={pending ? 'Worked out again when the lines are saved' : undefined}>
                         {money(server.line_tax)}
                         {server.tax_basis !== 'none' && server.tax_basis !== 'line' && <span className="block">{server.tax_basis}</span>}
                       </p>
@@ -187,7 +200,7 @@ function Editable({ rows, computed, errors, products, types, spools, money, onCh
                       />
                     </div>
                   </td>
-                  <td className={`${TD} text-right tabular-nums`}>
+                  <td className={`${TD} text-right tabular-nums ${stale}`} title={pending ? 'Worked out again when the lines are saved' : undefined}>
                     {server ? (
                       <>
                         {money(server.allocated_cost)}
@@ -206,6 +219,8 @@ function Editable({ rows, computed, errors, products, types, spools, money, onCh
                       onClick={() => {
                         onChange(rows.filter((_, i) => i !== at))
                         onCommit()
+                        // The row and its button are gone: focus the button that adds one.
+                        addButton.current?.focus()
                       }}
                     >
                       <Trash2Icon aria-hidden />
@@ -225,7 +240,16 @@ function Editable({ rows, computed, errors, products, types, spools, money, onCh
         </table>
       </div>
       <div className="flex flex-wrap items-center gap-3">
-        <Button type="button" variant="outline" size="sm" onClick={() => onChange([...rows, blankLine()])}>
+        <Button
+          ref={addButton}
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            focusLine.current = rows.length + 1
+            onChange([...rows, blankLine()])
+          }}
+        >
           <PlusIcon aria-hidden />
           Add line
         </Button>

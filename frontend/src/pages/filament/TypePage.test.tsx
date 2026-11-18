@@ -318,6 +318,15 @@ describe('the prices panel', () => {
     expect(after.filter((item) => item.type_id === T.MISTLETOE)).toEqual([expect.objectContaining({ quantity_spools: 1, status: 'pending' })])
   })
 
+  it('adds one item for a double click on Add to shopping list', async () => {
+    const { user } = render(`/filament/types/${T.MISTLETOE}`)
+    await code()
+    const before = (await listShopping()).filter((item) => item.type_id === T.MISTLETOE).length
+    await user.dblClick(screen.getByRole('button', { name: 'Add to shopping list' }))
+    await screen.findByText(/Added to the shopping list/)
+    expect((await listShopping()).filter((item) => item.type_id === T.MISTLETOE)).toHaveLength(before + 1)
+  })
+
   it('refuses a product page that is not http or https', async () => {
     const { user } = render(`/filament/types/${T.MISTLETOE}`)
     await screen.findByText(/No prices yet/)

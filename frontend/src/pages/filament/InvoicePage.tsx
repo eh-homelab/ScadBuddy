@@ -1,4 +1,4 @@
-import { ChevronLeftIcon } from 'lucide-react'
+import { ChevronDownIcon, ChevronLeftIcon } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { ApiError } from '../../api/client'
@@ -26,14 +26,15 @@ import { useMoney } from '../../components/filament/purchasing/useMoney'
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { addDecimals, formatCost } from '../../lib/decimal'
 import { useLatest } from '../../lib/useLatest'
 import { useLeaveGuard } from '../../lib/useLeaveGuard'
+import { message } from '../../components/filament/purchasing/priceFormat'
 
 /** How long after a field is left the lines are saved, so a tab through three fields is one save. */
 const SAVE_DELAY_MS = 400
 
-const message = (cause: unknown, fallback: string) => (cause instanceof ApiError ? cause.detail : fallback)
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`
 
 function Shell({ children }: { children: ReactNode }) {
@@ -77,6 +78,8 @@ export function InvoicePage() {
   const [asking, setAsking] = useState<'confirm' | 'delete' | null>(null)
   const [busy, setBusy] = useState(false)
   const [refusal, setRefusal] = useState<string | null>(null)
+  // On a phone the file starts folded, so the form leads; from `lg` it stands beside the form.
+  const [fileOpen, setFileOpen] = useState(() => typeof matchMedia !== 'function' || matchMedia('(min-width: 1024px)').matches)
 
   const rowsRef = useRef<LineDraft[]>([])
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -93,6 +96,12 @@ export function InvoicePage() {
   // Edits no save has taken yet: a field left with nothing changed sends nothing.
   const unsent = useRef(false)
   const stale = useRef(false)
+  // The row key each line id of the invoice answers.
+  const keyOfLine = useRef(new Map<string, string>())
+  // Header saves in flight (state, so Confirm waits for them).
+  const [headerSaves, setHeaderSaves] = useState(0)
+  const heading = useRef<HTMLHeadingElement>(null)
+  const focusHeading = useRef(false)
 
   const guard = useLeaveGuard(dirty)
 
@@ -110,6 +119,7 @@ export function InvoicePage() {
         rowsRef.current = next
         version.current = 0
         setSavedKeys(next.map((row) => row.key))
+        remember(found, next.map((row) => row.key))
         unsent.current = false
         setRows(next)
         setErrors({})
@@ -164,15 +174,34 @@ export function InvoicePage() {
     setDirty(true)
   }
 
-  /** The invoice as the server holds it, unless a save was sent since. */
+  /** Remember which row each line of `found` answers (by line id), for the rows' server figures. */
+  function remember(found: InvoiceDetail, keys: string[]) {
+    keyOfLine.current = new Map(found.lines.map((line, at) => [line.id, keys[at]!]))
+  }
+
+  /**
+   * The invoice as the server holds it, unless a save was sent since. With a save in flight
+   * the read could be answered before that save commits: it waits for the save (`settle`).
+   */
   function refetch(page: string) {
+    if (inflight.current > 0) {
+      stale.current = true
+      return
+    }
     const seq = ++sent.current
     getInvoice(page).then(
       (found) => {
         if (here.current !== page || seq !== sent.current) return
         setInvoice(found)
-        const keys = rowsRef.current.map((row) => row.key)
-        setSavedKeys(keys.length === found.lines.length ? keys : [])
+        // By line id, not position: rows swapped, added or removed in unsent edits keep their own figures.
+        const keys = found.lines.map((line) => keyOfLine.current.get(line.id))
+        if (keys.every((key): key is string => key !== undefined)) {
+          remember(found, keys)
+          setSavedKeys(keys)
+        } else {
+          keyOfLine.current = new Map()
+          setSavedKeys([])
+        }
       },
       () => undefined,
     )
@@ -205,6 +234,7 @@ export function InvoicePage() {
       if (seq === sent.current) {
         setInvoice(saved)
         setSavedKeys(sending.map((row) => row.key))
+        remember(saved, sending.map((row) => row.key))
       }
       // An edit made while this was in flight is saved by the commit that follows it.
       if (version.current === at) setDirty(false)
@@ -232,6 +262,7 @@ export function InvoicePage() {
     }
     const seq = ++sent.current
     inflight.current += 1
+    setHeaderSaves((n) => n + 1)
     try {
       const saved = await patchInvoice(page, patch)
       if (here.current !== page) return
@@ -239,9 +270,10 @@ export function InvoicePage() {
     } catch (cause) {
       if (here.current === page) {
         if (seq === sent.current) stale.current = true
-        // Refused: the lines keep the products they had.
+        // Refused: the lines keep the products they had. A row whose product was picked
+        // while the request was out keeps that pick.
         if (patch.supplier_id && before !== rowsRef.current) {
-          const next = rowsRef.current.map((row) => ({ ...row, productId: before.find((one) => one.key === row.key)?.productId ?? row.productId }))
+          const next = rowsRef.current.map((row) => (row.productId === '' ? { ...row, productId: before.find((one) => one.key === row.key)?.productId ?? '' } : row))
           rowsRef.current = next
           setRows(next)
         }
@@ -249,6 +281,7 @@ export function InvoicePage() {
       throw cause
     } finally {
       settle(page)
+      setHeaderSaves((n) => n - 1)
     }
   }
 
@@ -287,6 +320,7 @@ export function InvoicePage() {
       if (here.current !== page) return
       setInvoice(made)
       setDirty(false)
+      focusHeading.current = true
       setAsking(null)
       readSpools()
     } catch (cause) {
@@ -352,7 +386,9 @@ export function InvoicePage() {
             ? 'The lines are not saved'
             : dirty
               ? 'Saving the lines…'
-              : money.currency === null
+              : headerSaves > 0
+                ? 'Saving the header…'
+                : money.currency === null
                 ? "Reading the shop's currency…"
                 : invoice.currency !== money.currency
                   ? `The invoice is in ${invoice.currency} but the shop's currency is ${money.currency}. Change the currency above.`
@@ -365,7 +401,9 @@ export function InvoicePage() {
     <Shell>
       <header className="mb-5 flex flex-wrap items-center gap-3">
         <div className="flex min-w-0 flex-1 items-center gap-3">
-          <h1 className="truncate text-lg font-semibold tracking-tight">Invoice {invoice.number ?? '(no number)'}</h1>
+          <h1 ref={heading} tabIndex={-1} className="truncate text-lg font-semibold tracking-tight outline-none">
+            Invoice {invoice.number ?? '(no number)'}
+          </h1>
           <Badge variant={draft ? 'outline' : 'secondary'}>{draft ? 'Draft' : 'Confirmed'}</Badge>
         </div>
         {draft && (
@@ -404,9 +442,17 @@ export function InvoicePage() {
       )}
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
-        <div className="min-w-0 lg:sticky lg:top-4 lg:self-start">
-          <InvoiceFile invoiceId={invoice.id} file={invoice.file} onChanged={reload} />
-        </div>
+        <Collapsible open={fileOpen} onOpenChange={setFileOpen} className="min-w-0 lg:sticky lg:top-4 lg:self-start">
+          <CollapsibleTrigger asChild>
+            <Button type="button" variant="outline" size="sm" className="mb-2 w-full justify-between lg:hidden">
+              {fileOpen ? 'Hide the file' : 'Show the file'}
+              <ChevronDownIcon aria-hidden className={fileOpen ? 'rotate-180' : ''} />
+            </Button>
+          </CollapsibleTrigger>
+          <CollapsibleContent forceMount className="lg:data-[state=closed]:block">
+            <InvoiceFile invoiceId={invoice.id} file={invoice.file} onChanged={reload} />
+          </CollapsibleContent>
+        </Collapsible>
         <div className="flex min-w-0 flex-col gap-6">
           <InvoiceHeaderForm invoice={invoice} suppliers={suppliers} editable={draft} onSave={saveHeader} />
           <section aria-labelledby="invoice-lines-heading" className="flex min-w-0 flex-col gap-2">
@@ -414,7 +460,7 @@ export function InvoicePage() {
               Lines
             </h2>
             {draft ? (
-              <InvoiceLinesTable editable rows={rows} computed={computed} errors={errors} products={products} types={types} spools={spools} money={format} onChange={edit} onCommit={commit} />
+              <InvoiceLinesTable editable pending={dirty} rows={rows} computed={computed} errors={errors} products={products} types={types} spools={spools} money={format} onChange={edit} onCommit={commit} />
             ) : (
               <InvoiceLinesTable editable={false} lines={invoice.lines} types={types} spools={spools} money={format} />
             )}
@@ -435,7 +481,15 @@ export function InvoicePage() {
       </div>
 
       <AlertDialog open={asking === 'confirm'} onOpenChange={(open) => !open && !busy && setAsking(null)}>
-        <AlertDialogContent>
+        <AlertDialogContent
+          onCloseAutoFocus={(event) => {
+            // The Confirm button is gone once the invoice is confirmed: focus goes to the heading.
+            if (!focusHeading.current) return
+            focusHeading.current = false
+            event.preventDefault()
+            heading.current?.focus()
+          }}
+        >
           <AlertDialogHeader>
             <AlertDialogTitle>Confirm this invoice?</AlertDialogTitle>
             <AlertDialogDescription>

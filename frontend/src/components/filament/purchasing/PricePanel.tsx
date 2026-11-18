@@ -1,8 +1,6 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router'
-import { ApiError } from '../../../api/client'
 import {
-  createProduct,
   listProducts,
   listSuppliers,
   listTypePrices,
@@ -11,17 +9,13 @@ import {
   type TypePricePoint,
 } from '../../../api/filamentPurchasing'
 import { formatCost } from '../../../lib/decimal'
-import { RecordDrawer } from '../../records/RecordDrawer'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { TD, TH } from '../formClasses'
 import { AddPriceForm } from './AddPriceForm'
+import { AddProductSheet } from './AddProductSheet'
 import { Sparkline } from './Sparkline'
-import { webUrlError } from './webUrl'
+import { message } from './priceFormat'
 
-const message = (cause: unknown, fallback: string) => (cause instanceof ApiError ? cause.detail : fallback)
 
 const day = (iso: string) => new Date(`${iso}T00:00`).toLocaleDateString(undefined, { dateStyle: 'medium' })
 
@@ -124,6 +118,8 @@ export function PricePanel({ typeId, currency, exponent, onUseAsCost }: PricePan
                     variant="outline"
                     size="sm"
                     aria-label={`Use as default cost from ${name}`}
+                    disabled={currency !== null && newest.currency !== currency}
+                    title={currency !== null && newest.currency !== currency ? `This price is in ${newest.currency}; the shop's currency is ${currency}` : undefined}
                     onClick={() => onUseAsCost(newest.price_per_kg!, name)}
                   >
                     Use as default cost
@@ -180,8 +176,9 @@ export function PricePanel({ typeId, currency, exponent, onUseAsCost }: PricePan
       })}
       {sheet && data && (
         <AddProductSheet
-          typeId={typeId}
-          suppliers={data.suppliers.filter((supplier) => !supplier.archived_at)}
+          title="Add supplier product"
+          fixed={{ typeId }}
+          pick={{ label: 'Supplier', placeholder: 'Pick a supplier', refusal: 'Pick the supplier that sells it.', options: data.suppliers.filter((supplier) => !supplier.archived_at).map((supplier) => ({ id: supplier.id, label: supplier.name })) }}
           onClose={() => setSheet(false)}
           onAdded={() => {
             setSheet(false)
@@ -190,88 +187,5 @@ export function PricePanel({ typeId, currency, exponent, onUseAsCost }: PricePan
         />
       )}
     </section>
-  )
-}
-
-function AddProductSheet({ typeId, suppliers, onClose, onAdded }: { typeId: string; suppliers: Supplier[]; onClose: () => void; onAdded: () => void }) {
-  const [supplierId, setSupplierId] = useState('')
-  const [sku, setSku] = useState('')
-  const [pack, setPack] = useState('1')
-  const [url, setUrl] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  async function submit(event: FormEvent) {
-    event.preventDefault()
-    const size = /^\d+$/.test(pack.trim()) ? Number(pack) : 0
-    const refused = !supplierId
-      ? 'Pick the supplier that sells it.'
-      : !sku.trim()
-        ? 'Enter the supplier’s SKU.'
-        : size < 1
-          ? 'The pack size is a whole number of spools, at least 1.'
-          : webUrlError(url, 'The product page')
-    if (refused) {
-      setError(refused)
-      return
-    }
-    setBusy(true)
-    setError(null)
-    try {
-      await createProduct(supplierId, { type_id: typeId, sku: sku.trim(), pack_size: size, ...(url.trim() ? { product_url: url.trim() } : {}) })
-      onAdded()
-    } catch (cause) {
-      setError(message(cause, 'The product could not be added. Try again.'))
-      setBusy(false)
-    }
-  }
-
-  return (
-    <RecordDrawer
-      title="Add supplier product"
-      onClose={onClose}
-      footer={
-        <Button type="submit" form="add-type-product" disabled={busy}>
-          Add product
-        </Button>
-      }
-    >
-      <form id="add-type-product" className="flex flex-col gap-3" onSubmit={(event) => void submit(event)} noValidate>
-        <div className="flex flex-col gap-1">
-          <Label htmlFor="type-product-supplier" className="text-[13px]">Supplier</Label>
-          <Select value={supplierId} onValueChange={setSupplierId}>
-            <SelectTrigger id="type-product-supplier" aria-label="Supplier" className="w-full text-[13px]">
-              <SelectValue placeholder="Pick a supplier" />
-            </SelectTrigger>
-            <SelectContent>
-              {suppliers.map((supplier) => (
-                <SelectItem key={supplier.id} value={supplier.id}>
-                  {supplier.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="grid grid-cols-2 gap-3">
-          <div className="flex flex-col gap-1">
-            <Label htmlFor="type-product-sku" className="text-[13px]">SKU</Label>
-            <Input id="type-product-sku" value={sku} onChange={(event) => setSku(event.target.value)} />
-          </div>
-          <div className="flex flex-col gap-1">
-            <Label htmlFor="type-product-pack" className="text-[13px]">Pack size</Label>
-            <Input id="type-product-pack" inputMode="numeric" value={pack} onChange={(event) => setPack(event.target.value)} />
-          </div>
-        </div>
-        <div className="flex flex-col gap-1">
-          <Label htmlFor="type-product-url" className="text-[13px]">Product page</Label>
-          <Input id="type-product-url" inputMode="url" placeholder="https://" value={url} onChange={(event) => setUrl(event.target.value)} />
-        </div>
-        {error && (
-          <p role="alert" className="text-[13px] text-warn">
-            {error}
-          </p>
-        )}
-      </form>
-    </RecordDrawer>
   )
 }

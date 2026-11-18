@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes } from 'react-router'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { INVOICE, SUPPLIER } from '../../mocks/features/filamentPurchasingSeed'
 import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
@@ -24,6 +24,8 @@ beforeEach(() => {
 })
 
 describe('the invoices tab', () => {
+  afterEach(() => vi.restoreAllMocks())
+
   it('lists every invoice with its status, supplier, number and total', async () => {
     render()
     await waitFor(() => expect(rows()).toHaveLength(4))
@@ -81,6 +83,5 @@ describe('the invoices tab', () => {
     })
     render()
     await waitFor(() => expect(rows()).toHaveLength(4))
-    vi.restoreAllMocks()
   })
 })

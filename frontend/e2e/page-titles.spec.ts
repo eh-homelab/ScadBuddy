@@ -53,7 +53,7 @@ const PAGES = [
   `/filament/types/${T.JADE}`,
   '/filament/tags',
   // Purchasing (#6266): a seeded supplier and a seeded invoice, from
-  // src/mocks/features/filamentPurchasing.ts.
+  // src/mocks/features/filamentPurchasingSeed.ts.
   '/filament/suppliers',
   `/filament/suppliers/${SUPPLIER.BAMBU}`,
   '/filament/invoices',

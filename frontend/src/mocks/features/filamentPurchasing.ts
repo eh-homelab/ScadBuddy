@@ -334,12 +334,13 @@ function lineRefusal(line: unknown): Response | null {
   if (extra) return extra
   const body = line as Record<string, unknown>
   if (!text(body.description)) return problem(422, 'description: String should have at least 1 character')
-  if (!Number.isInteger(body.quantity) || (body.quantity as number) < 1 || (body.quantity as number) > 100_000) return problem(422, 'quantity: Input should be greater than 0')
+  if (!Number.isInteger(body.quantity) || (body.quantity as number) < 1 || (body.quantity as number) > 1_000) return problem(422, 'quantity: Input should be greater than 0')
   for (const field of ['unit_price', 'line_subtotal', 'line_tax'] as const) {
     if (body[field] == null && field !== 'unit_price') continue
     const bad = badMoney(field, body[field])
     if (bad) return problem(422, bad)
   }
+  if (Array.isArray(body.update_spool_ids) && body.update_spool_ids.length > (body.quantity as number)) return problem(422, "update_spool_ids names more spools than the line's quantity")
   if (body.type_id != null && !typeInfo(String(body.type_id))) return problem(422, REFUSED.invoiceRef)
   if (body.supplier_product_id != null && !productOf(String(body.supplier_product_id))) return problem(422, REFUSED.invoiceRef)
   return null
@@ -409,6 +410,7 @@ const HEADER_MONEY = ['subtotal', 'shipping', 'tax', 'total'] as const
 
 async function confirmRefusal(invoice: Stored): Promise<Response | null> {
   if (!invoice.lines.length) return problem(409, REFUSED.noLines)
+  if (supplierOf(invoice.supplier_id)?.archived_at) return problem(409, 'the supplier is archived: restore it or move the invoice to another')
   if (invoice.currency !== SHOP_CURRENCY) {
     return problem(409, `the invoice is in ${invoice.currency} but the shop's currency is ${SHOP_CURRENCY}: change the shop's currency or retype the invoice`)
   }
@@ -435,7 +437,7 @@ async function confirmRefusal(invoice: Stored): Promise<Response | null> {
     // `_line_product`: the product the line names (or its SKU finds) must be this supplier's, live, and for the line's type.
     const named = line.supplier_product_id ? productOf(line.supplier_product_id) : undefined
     if (line.supplier_product_id && (!named || named.supplier_id !== invoice.supplier_id || named.archived_at)) return fail("its supplier product is archived or not this supplier's")
-    const sku = line.sku ?? line.description
+    const sku = line.sku || line.description
     const product = named ?? (line.supplier_product_id ? undefined : state.products.find((one) => one.supplier_id === invoice.supplier_id && !one.archived_at && sameName(one.sku, sku)))
     if (product && product.type_id !== line.type_id) return fail('its supplier product is for another spool type')
     // Decision 11: the spools the line fills in are all checked before anything is written.
@@ -469,7 +471,7 @@ async function confirm(invoice: Stored): Promise<Response | null> {
     }
     const info = typeInfo(line.type_id)!
     let product = line.supplier_product_id ? productOf(line.supplier_product_id) : undefined
-    const sku = line.sku ?? line.description
+    const sku = line.sku || line.description
     product ??= state.products.find((one) => one.supplier_id === invoice.supplier_id && !one.archived_at && sameName(one.sku, sku))
     if (!product) {
       product = { id: crypto.randomUUID(), supplier_id: invoice.supplier_id, type_id: line.type_id, sku, product_url: null, pack_size: 1, note: null, archived_at: null, created_at: now(), updated_at: now() }
@@ -719,7 +721,9 @@ export const handlers = [
     const runId = text(body.import_run_id) || null
     const repeat = runId ? state.invoices.find((one) => one.import_run_id === runId) : undefined
     if (repeat) return HttpResponse.json(detailView(repeat), { status: 200 })
-    if (!supplierOf(String(body.supplier_id))) return problem(422, REFUSED.invoiceRef)
+    const supplier = supplierOf(String(body.supplier_id))
+    if (!supplier) return problem(422, REFUSED.invoiceRef)
+    if (supplier.archived_at) return problem(422, REFUSED.supplierArchived)
     const taken = numberTaken(String(body.supplier_id), text(body.number))
     if (taken) return taken
     const id = crypto.randomUUID()

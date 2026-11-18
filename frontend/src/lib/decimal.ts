@@ -92,3 +92,15 @@ export function formatCost(value: string, currency: string, exponent: number): s
     return `${value} ${currency}`
   }
 }
+
+/** A decimal string with grouping and at least two digits, and no currency symbol. */
+export function formatDecimal(value: string): string {
+  try {
+    return new Intl.NumberFormat(undefined, {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 4,
+    }).format(value as `${number}`)
+  } catch {
+    return value
+  }
+}

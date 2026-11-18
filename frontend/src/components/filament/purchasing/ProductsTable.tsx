@@ -107,6 +107,8 @@ export function ProductsTable({
                             onAdded={() => {
                               setAdding(null)
                               onChanged()
+                              // The form is gone: focus goes back to the button that opened it.
+                              requestAnimationFrame(() => [...document.querySelectorAll('button')].find((one) => one.getAttribute('aria-label') === `Add price for ${product.sku}`)?.focus())
                             }}
                           />
                           <Button type="button" variant="ghost" size="sm" onClick={() => setAdding(null)}>

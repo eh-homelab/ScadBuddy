@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
-import { ApiError } from '../../api/client'
 import { createSupplier, getSupplierStats, listSuppliers, patchSupplier, type Supplier, type SupplierStats } from '../../api/filamentPurchasing'
 import { TD, TH } from '../../components/filament/formClasses'
 import { SafeLink } from '../../components/filament/purchasing/SafeLink'
@@ -11,11 +10,11 @@ import { RecordDrawer } from '../../components/records/RecordDrawer'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { useAdvanced } from '../../lib/advanced'
+import { message } from '../../components/filament/purchasing/priceFormat'
 
 /** Remembered per browser: whether archived suppliers are listed. */
 export const SHOW_ARCHIVED_KEY = 'scadbuddy.filament.suppliers.showArchived'
 
-const message = (cause: unknown, fallback: string) => (cause instanceof ApiError ? cause.detail : fallback)
 
 interface Loaded {
   suppliers: Supplier[]

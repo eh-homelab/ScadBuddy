@@ -7,16 +7,10 @@ import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { acceptableInvoiceFile } from './invoiceLines'
 import { lastSupplier, rememberSupplier } from './invoicesQuery'
+import { today } from './priceFormat'
 import { useMoney } from './useMoney'
 
 const ACCEPT = 'application/pdf,image/*'
-
-/** Today as `YYYY-MM-DD` in the browser's own calendar. */
-function today(): string {
-  const now = new Date()
-  const two = (n: number) => String(n).padStart(2, '0')
-  return `${now.getFullYear()}-${two(now.getMonth() + 1)}-${two(now.getDate())}`
-}
 
 /**
  * #6266 — adds an invoice from its file: drop it, pick it or paste a photo. The file makes

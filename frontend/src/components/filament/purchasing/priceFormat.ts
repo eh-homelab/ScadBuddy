@@ -1,3 +1,8 @@
+import { ApiError } from '../../../api/client'
+
+/** What a refused or failed request says: the server's own words, else `fallback`. */
+export const message = (cause: unknown, fallback: string) => (cause instanceof ApiError ? cause.detail : fallback)
+
 /** Today as the date input reads it: the viewer's local day, `YYYY-MM-DD`. */
 export function today(now: Date = new Date()): string {
   const month = String(now.getMonth() + 1).padStart(2, '0')

@@ -29,8 +29,17 @@ describe('the Types tab', () => {
   it('adds a type to the shopping list from its row', async () => {
     const { user } = renderPage(<TypesTab />)
     const jade = typeRows(await types()).find((row) => row.dataset.type === T.JADE)!
-    await user.click(within(jade).getByRole('button', { name: 'Add BL-PLA-BASIC-JADE-WHITE to the shopping list' }))
+    await user.click(within(jade).getByRole('button', { name: /^Buy BL-PLA-BASIC-JADE-WHITE/ }))
     expect(await screen.findByText('Added BL-PLA-BASIC-JADE-WHITE to the shopping list.')).toBeInTheDocument()
+    expect((await listShopping()).filter((item) => item.type_id === T.JADE)).toHaveLength(1)
+  })
+
+  it('adds one item for a double click on Buy', async () => {
+    const { user } = renderPage(<TypesTab />)
+    const jade = typeRows(await types()).find((row) => row.dataset.type === T.JADE)!
+    const buy = within(jade).getByRole('button', { name: /^Buy BL-PLA-BASIC-JADE-WHITE/ })
+    await user.dblClick(buy)
+    await screen.findByText('Added BL-PLA-BASIC-JADE-WHITE to the shopping list.')
     expect((await listShopping()).filter((item) => item.type_id === T.JADE)).toHaveLength(1)
   })
 

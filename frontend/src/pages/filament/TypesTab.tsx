@@ -65,6 +65,8 @@ export function TypesTab() {
   const [newest, setNewest] = useState<Map<string, PricePoint>>(new Map())
   const [pricesFailed, setPricesFailed] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
+  // Types whose add is in flight: a second click meanwhile would make a second pending item.
+  const [adding, setAdding] = useState<ReadonlySet<string>>(new Set())
 
   /** Each load takes a number; only the newest one's answer is used. */
   const latest = useRef(0)
@@ -106,6 +108,8 @@ export function TypesTab() {
   }, [])
 
   async function addToShopping(type: SpoolType) {
+    if (adding.has(type.id)) return
+    setAdding((was) => new Set(was).add(type.id))
     setError(null)
     setNotice(null)
     try {
@@ -113,6 +117,12 @@ export function TypesTab() {
       setNotice(`Added ${type.code} to the shopping list.`)
     } catch (cause) {
       setError(message(cause))
+    } finally {
+      setAdding((was) => {
+        const next = new Set(was)
+        next.delete(type.id)
+        return next
+      })
     }
   }
 
@@ -157,7 +167,7 @@ export function TypesTab() {
             <table aria-label="Types" className="w-full text-left text-[13px]">
               <thead className="bg-muted/50 text-muted-foreground">
                 <tr>
-                  <th className="w-7 px-1 py-1.5">
+                  <th scope="col" className="w-7 px-1 py-1.5">
                     <span className="sr-only">Colour chip</span>
                   </th>
                   <th scope="col" className="px-2 py-1.5 font-medium">Code</th>
@@ -167,7 +177,7 @@ export function TypesTab() {
                   <th scope="col" className="px-2 py-1.5 text-right font-medium">Price per kg</th>
                   <th scope="col" className="px-2 py-1.5 text-right font-medium">Newest price</th>
                   <th scope="col" className="px-2 py-1.5 text-right font-medium">Spools</th>
-                  <th className="px-2 py-1.5">
+                  <th scope="col" className="px-2 py-1.5">
                     <span className="sr-only">Actions</span>
                   </th>
                 </tr>
@@ -205,7 +215,7 @@ export function TypesTab() {
                     </td>
                     <td className="px-2 py-1.5 text-right tabular-nums">{data.spoolsOf.get(type.id) ?? 0}</td>
                     <td className="px-2 py-1.5 text-right">
-                      <Button type="button" variant="ghost" size="sm" aria-label={`Add ${type.code} to the shopping list`} onClick={() => void addToShopping(type)}>
+                      <Button type="button" variant="ghost" size="sm" disabled={adding.has(type.id)} aria-label={`Buy ${type.code}: add it to the shopping list`} onClick={() => void addToShopping(type)}>
                         <ShoppingCartIcon /> Buy
                       </Button>
                     </td>
@@ -213,7 +223,7 @@ export function TypesTab() {
                 ))}
                 {shown.length === 0 && (
                   <tr className="border-t">
-                    <td colSpan={9}className="px-2 py-3 text-muted-foreground">
+                    <td colSpan={9} className="px-2 py-3 text-muted-foreground">
                       No types yet. Add one, or make one from a price book row below.
                     </td>
                   </tr>

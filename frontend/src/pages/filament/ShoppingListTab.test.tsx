@@ -1,4 +1,5 @@
 import { screen, waitFor, within } from '@testing-library/react'
+import { http, HttpResponse } from 'msw'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { listShopping } from '../../api/filamentPurchasing'
 import { T } from '../../mocks/features/filament/seed'
@@ -123,5 +124,26 @@ describe('the Shopping list tab', () => {
     await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Clear all' }))
     expect(await screen.findByText('Nothing to buy. Add what you need next.')).toBeInTheDocument()
     expect(await listShopping()).toEqual([])
+  })
+
+  describe('when a request fails', () => {
+    const refused = (status: number, detail: string) => HttpResponse.json({ type: 'about:blank', title: 'Refused', status, detail }, { status, headers: { 'Content-Type': 'application/problem+json' } })
+
+    it('says the list could not be loaded, with the server\'s words', async () => {
+      server.use(http.get('*/api/v1/filament/shopping-list', () => refused(500, 'The database is busy')))
+      renderPage(<ShoppingListTab />)
+      expect(await screen.findByRole('alert')).toHaveTextContent('The database is busy')
+      expect(screen.queryByRole('table', { name: 'Shopping list' })).not.toBeInTheDocument()
+    })
+
+    it('keeps the item as it was when a change is refused, and says why', async () => {
+      server.use(http.patch('*/api/v1/filament/shopping-list/:id', () => refused(500, 'The item could not be saved')))
+      const { user } = renderPage(<ShoppingListTab />)
+      await table()
+      await user.click(within(rowOf(ITEM.PINK)).getByRole('button', { name: 'Mark Hot Pink PLA purchased' }))
+      expect(await screen.findByRole('alert')).toHaveTextContent('The item could not be saved')
+      expect(order()).toEqual([ITEM.TPU, ITEM.ORANGE, ITEM.PINK, ITEM.CLEAR])
+      expect(within(rowOf(ITEM.PINK)).queryByText('Purchased')).not.toBeInTheDocument()
+    })
   })
 })

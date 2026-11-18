@@ -101,7 +101,8 @@ test('a supplier, a price, an invoice and its spools', async ({ page }) => {
   await expect(page).toHaveURL(/\/filament\/spools\/[0-9a-f-]+$/)
   const link = page.getByRole('link', { name: /^Invoice AC-1001/ })
   await expect(link).toBeVisible()
-  await expect(link.locator('xpath=..')).toContainText('each')
+  // Line 1: 2 x 20.00 = 40.00, plus 3.20 of the receipt's 4.00 tax and 4.00 of its 5.00 shipping: 47.20, so 23.60 a spool.
+  await expect(link.locator('xpath=..')).toContainText('line 1, $23.60 each')
 })
 
 test('a total that does not add up cannot be confirmed', async ({ page }) => {
