@@ -36,11 +36,29 @@ describe('exact arithmetic', () => {
     expect(divDecimal('2', '3', 4)).toBe('0.6667')
     expect(divDecimal('0.00005', '1', 4)).toBe('0.0001')
   })
+
+  it('divides a negative half away from zero, and throws on zero', () => {
+    expect(divDecimal('-1', '3', 4)).toBe('-0.3333')
+    expect(divDecimal('1', '-3', 4)).toBe('-0.3333')
+    expect(divDecimal('-0.00005', '1', 4)).toBe('-0.0001')
+    expect(() => divDecimal('1', '0', 4)).toThrow(RangeError)
+    expect(() => divDecimal('1', '0.00', 4)).toThrow(RangeError)
+  })
+
+  it('refuses a factor that is not a whole number', () => {
+    expect(() => mulDecimal('1.5', 0.5)).toThrow(RangeError)
+    expect(mulDecimal('-1.5', 2)).toBe('-3.0')
+  })
 })
 
 describe('formatCost', () => {
   it('keeps the digits it is given', () => {
     expect(formatCost('21.4', 'EUR', 2)).toContain('21.40')
     expect(formatCost('21.4567', 'EUR', 2)).toContain('21.4567')
+  })
+
+  it('shows no decimals at exponent 0 unless the string has them', () => {
+    expect(formatCost('1500', 'JPY', 0)).toMatch(/1,500(?![.,]\d)/)
+    expect(formatCost('1500.25', 'JPY', 0)).toContain('1,500.25')
   })
 })

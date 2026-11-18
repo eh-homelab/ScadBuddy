@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../../api/client'
-import { getSpool } from '../../api/filament'
+import { createSpool, getSpool, listSpools } from '../../api/filament'
 import {
   addPrice,
   clearShopping,
@@ -22,9 +22,10 @@ import {
   patchShopping,
   putInvoiceLines,
   invoiceFileUrl,
+  uploadInvoiceFile,
 } from '../../api/filamentPurchasing'
 import { resetMockState } from '../handlers'
-import { T } from './filament/seed'
+import { spoolId, T } from './filament/seed'
 import { INVOICE, ITEM, LINE, PRODUCT, SUPPLIER } from './filamentPurchasingSeed'
 
 const refusal = async (promise: Promise<unknown>) => {
@@ -174,5 +175,96 @@ describe('the purchasing mocks', () => {
     expect(await done.json()).toMatchObject({ name: 'receipt.pdf', media_type: 'application/pdf', size: 8 })
     expect((await getInvoice(INVOICE.DRAFT_B)).file?.name).toBe('receipt.pdf')
     expect(invoiceFileUrl(INVOICE.DRAFT_B)).toBe(`/api/v1/filament/invoices/${INVOICE.DRAFT_B}/file`)
+  })
+
+  describe('a line that fills existing spools (Decision 11)', () => {
+    const header = { supplier_id: SUPPLIER.BAMBU, invoice_date: '2026-11-16', currency: 'USD', subtotal: '30', total: '30' }
+    const draft = (fill: string[], quantity = 2, type_id: string | null = T.JADE) =>
+      createInvoice({ ...header, lines: [{ description: 'Jade', quantity, unit_price: String(30 / quantity), type_id, update_spool_ids: fill }] })
+
+    it('fills a needs-type spool and makes only the rest as new spools', async () => {
+      resetMockState()
+      const typeless = spoolId(6)
+      const done = await confirmInvoice((await draft([typeless])).id)
+      const line = done.lines[0]!
+      expect(line.spool_ids.length).toBe(2)
+      expect(line.spool_ids[0]).toBe(typeless)
+      const filled = await getSpool(typeless)
+      expect(filled).toMatchObject({ type_id: T.JADE, cost_per_kg: '15.0000' })
+      expect(filled.invoice).toMatchObject({ line_id: line.id, unit_cost: '15.0000' })
+      const all = await listSpools({ includeArchived: true })
+      expect(all.length).toBe(13)
+    })
+
+    it('refuses an archived, costed, invoiced or other-type spool, too many ids and a duplicate, naming the line', async () => {
+      resetMockState()
+      const costed = await createSpool({ type_id: T.JADE, cost_per_kg: '10', weight_locked: false })
+      const cases: [string[], string, number?][] = [
+        [[spoolId(19)], 'is archived'],
+        [[costed.id], 'already has its own cost'],
+        [[spoolId(1)], 'already belongs to an invoice line'],
+        [[spoolId(9)], 'has another spool type'],
+        [[spoolId(6), spoolId(6)], 'it names a spool twice'],
+        [[spoolId(6), spoolId(11), spoolId(7)], 'it fills 3 spools but its quantity is 2'],
+      ]
+      for (const [ids, text] of cases) {
+        const made = await draft(ids)
+        const error = await refusal(confirmInvoice(made.id))
+        expect(error.status).toBe(409)
+        expect(error.detail).toContain('line 1: ')
+        expect(error.detail).toContain(text)
+        expect((await getInvoice(made.id)).status).toBe('draft')
+      }
+      expect((await getSpool(spoolId(6))).type_id).toBeNull()
+    })
+
+    it('refuses one spool named by two lines of the same invoice', async () => {
+      resetMockState()
+      const line = { description: 'Jade', quantity: 1, unit_price: '15', type_id: T.JADE, update_spool_ids: [spoolId(6)] }
+      const made = await createInvoice({ ...header, lines: [line, line] })
+      expect((await refusal(confirmInvoice(made.id))).detail).toBe(`line 2: spool ${spoolId(6)} already belongs to an invoice line`)
+    })
+  })
+
+  it('writes nothing when a later line is refused', async () => {
+    resetMockState()
+    const before = (await listSpools({ includeArchived: true })).length
+    const made = await createInvoice({
+      supplier_id: SUPPLIER.MICRO,
+      invoice_date: '2026-11-16',
+      currency: 'USD',
+      subtotal: '30',
+      total: '30',
+      lines: [
+        { description: 'Good', quantity: 2, unit_price: '10', type_id: T.JADE },
+        // No material: the proposed type is invalid.
+        { description: 'Bad', quantity: 1, unit_price: '10', proposed_type: { code: 'NEW-1', rgba: '#FFFFFFFF', label_weight_g: 1000 } as never },
+      ],
+    })
+    const error = await refusal(confirmInvoice(made.id))
+    expect(error.status).toBe(409)
+    expect(error.detail).toContain('line 2: its proposed spool type is invalid')
+    expect((await listSpools({ includeArchived: true })).length).toBe(before)
+    const after = await getInvoice(made.id)
+    expect([after.status, after.lines[0]!.spool_ids, after.lines[0]!.supplier_product_id]).toEqual(['draft', [], null])
+    expect((await listPrices(PRODUCT.INLAND)).every((price) => price.source === 'manual')).toBe(true)
+  })
+})
+
+describe('uploadInvoiceFile', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('posts the browser file as a FormData `file` part and sets no Content-Type', async () => {
+    const fetchStub = vi.fn(() => Promise.resolve(new Response(JSON.stringify({ name: 'a.pdf', media_type: 'application/pdf', size: 3 }), { status: 200 })))
+    vi.stubGlobal('fetch', fetchStub)
+    const file = new File(['abc'], 'a.pdf', { type: 'application/pdf' })
+    await uploadInvoiceFile(INVOICE.DRAFT_B, file)
+    const [url, init] = fetchStub.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe(`/api/v1/filament/invoices/${INVOICE.DRAFT_B}/file`)
+    expect(init.method).toBe('POST')
+    expect(init.body).toBeInstanceOf(FormData)
+    expect((init.body as FormData).get('file')).toBe(file)
+    const headers = new Headers(init.headers)
+    expect(headers.has('Content-Type')).toBe(false)
   })
 })

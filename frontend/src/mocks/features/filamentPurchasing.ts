@@ -3,7 +3,7 @@ import type { InvoiceLine } from '../../api/filamentPurchasing'
 import type { components } from '../../api/schema'
 import { addDecimals, cmpDecimals, divDecimal, fromScaled, mulDecimal, subDecimals, toScaled } from '../../lib/decimal'
 // Two cycles (`filament/index.ts` imports `invoiceRefOf` and `typeSuppliersOf` from here): use them only inside functions.
-import { addInvoicedSpools, createType, spoolUsage, typeCodeTaken, typeInfo } from './filament'
+import { addInvoicedSpools, checkTypeProposal, createType, spoolClaimRefusal, spoolLabelWeight, spoolUsage, typeCodeTaken, typeInfo, updateInvoicedSpool } from './filament'
 import { seedInput, SHOP_CURRENCY, type SeedInvoice } from './filamentPurchasingSeed'
 
 type S = components['schemas']
@@ -16,8 +16,8 @@ type S = components['schemas']
  * arithmetic is `lib/decimal.ts`, with the backend's rules (`filament/invoice_money.py`:
  * four decimals, half up, tax and shipping spread by the largest remainder). Confirm calls
  * the Filament mock's `addInvoicedSpools`. It refuses what the routes refuse, with the same
- * status and text. Not done: a line's `update_spool_ids` (a confirm always makes the
- * line's whole `quantity` of new spools).
+ * status and text. A line's `update_spool_ids` fill existing spools (Decision 11), and
+ * every refusal is checked before anything is written.
  */
 
 const BASE = '/api/v1/filament'
@@ -230,6 +230,7 @@ const supplierView = (row: Supplier): S['Supplier'] => ({
 
 const lineView = (line: Line): InvoiceLine => ({ ...line, unit_cost: unitCost(line) })
 
+/** A short copy of `backend/scadbuddy/orders/currency.py` `minor_exponent` (ISO 4217): the codes the mock's tests use. */
 const minorExponent = (currency: string) => (['JPY', 'KRW', 'VND'].includes(currency) ? 0 : 2)
 
 function invoiceView(invoice: Stored): S['Invoice'] {
@@ -405,7 +406,7 @@ function headerRefusal(body: Record<string, unknown>, required: boolean): Respon
 
 const HEADER_MONEY = ['subtotal', 'shipping', 'tax', 'total'] as const
 
-function confirmRefusal(invoice: Stored): Response | null {
+async function confirmRefusal(invoice: Stored): Promise<Response | null> {
   if (!invoice.lines.length) return problem(409, REFUSED.noLines)
   if (invoice.currency !== SHOP_CURRENCY) {
     return problem(409, `the invoice is in ${invoice.currency} but the shop's currency is ${SHOP_CURRENCY}: change the shop's currency or retype the invoice`)
@@ -415,23 +416,37 @@ function confirmRefusal(invoice: Stored): Response | null {
     return problem(409, `the total is ${diff} away from the lines plus shipping; confirm needs it within ${TOLERANCE}`)
   }
   const codes = new Set<string>()
+  const claimed = new Set<string>()
   for (const line of invoice.lines) {
     const fail = (reason: string) => problem(409, `line ${line.position}: ${reason}`)
     if (line.type_id) {
       if (!typeInfo(line.type_id)) return fail('its spool type no longer exists')
-      continue
+    } else {
+      if (!line.proposed_type) return fail('it has no spool type and proposes none')
+      const code = String((line.proposed_type as { code?: unknown }).code ?? '')
+      if (!codes.has(code.toUpperCase())) {
+        if (typeCodeTaken(code)) return fail(`a spool type like '${code}' already exists; choose it instead`)
+        const invalid = checkTypeProposal(line.proposed_type)
+        if (invalid) return fail(`its proposed spool type is invalid (${((await invalid.json()) as { detail: string }).detail})`)
+      }
+      codes.add(code.toUpperCase())
     }
-    if (!line.proposed_type) return fail('it has no spool type and proposes none')
-    const code = String((line.proposed_type as { code?: unknown }).code ?? '')
-    if (typeCodeTaken(code) && !codes.has(code.toUpperCase())) return fail(`a spool type like '${code}' already exists; choose it instead`)
-    codes.add(code.toUpperCase())
+    // Decision 11: the spools the line fills in are all checked before anything is written.
+    const ids = line.update_spool_ids
+    if (ids.length > line.quantity) return fail(`it fills ${ids.length} spools but its quantity is ${line.quantity}`)
+    if (new Set(ids).size !== ids.length) return fail('it names a spool twice')
+    for (const id of ids) {
+      const reason = claimed.has(id) ? 'already belongs to an invoice line' : spoolClaimRefusal(id, line.type_id)
+      if (reason) return fail(`spool ${id} ${reason}`)
+    }
+    for (const id of ids) claimed.add(id)
   }
   return null
 }
 
 /** Confirm: types, products, spools with their cost and one price point per line, after every refusal is checked. */
-function confirm(invoice: Stored): Response | null {
-  const refused = confirmRefusal(invoice)
+async function confirm(invoice: Stored): Promise<Response | null> {
+  const refused = await confirmRefusal(invoice)
   if (refused) return refused
   const made = new Map<string, string>()
   for (const line of invoice.lines) {
@@ -454,7 +469,9 @@ function confirm(invoice: Stored): Response | null {
       state.products.push(product)
     }
     line.supplier_product_id = product.id
-    line.spool_ids = addInvoicedSpools(line.type_id, line.quantity, costPerKg(line, info.label_weight_g), line.id)
+    const filled = line.update_spool_ids
+    for (const id of filled) updateInvoicedSpool(id, line.type_id, costPerKg(line, spoolLabelWeight(id) ?? info.label_weight_g), line.id)
+    line.spool_ids = [...filled, ...addInvoicedSpools(line.type_id, line.quantity - filled.length, costPerKg(line, info.label_weight_g), line.id)]
     state.prices.push(invoicePrice(invoice, line, state.products))
   }
   invoice.status = 'confirmed'
@@ -472,6 +489,9 @@ export function reset() {
 }
 
 // -- the routes -------------------------------------------------------------------------------
+
+/** A 1 x 1 PNG: the bytes a photo's file answers with. */
+const PNG = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg=='), (c) => c.charCodeAt(0))
 
 const flag = (request: Request, name: string) => new URL(request.url).searchParams.get(name) === 'true'
 
@@ -769,11 +789,11 @@ export const handlers = [
     state.invoices = state.invoices.filter((one) => one !== row)
     return new HttpResponse(null, { status: 204 })
   }),
-  http.post(`${BASE}/invoices/:id/confirm`, ({ params }) => {
+  http.post(`${BASE}/invoices/:id/confirm`, async ({ params }) => {
     const row = invoiceOf(String(params.id))
     if (!row) return problem(404, `no invoice ${String(params.id)}`)
     if (row.status === 'draft') {
-      const refused = confirm(row)
+      const refused = await confirm(row)
       if (refused) return refused
     }
     return HttpResponse.json(detailView(row))
@@ -788,14 +808,15 @@ export const handlers = [
     if (!part || part[3]!.length === 0) return problem(422, 'the upload has no `file` part, or it is empty')
     const type = part[2]!
     if (type !== 'application/pdf' && !type.startsWith('image/')) return problem(422, "an invoice's file is a PDF or a photo")
-    row.file = { name: part[1] || 'invoice', media_type: type, size: part[3]!.length }
+    row.file = { name: part[1] || 'invoice', media_type: type, size: new TextEncoder().encode(part[3]!).length }
     row.updated_at = now()
     return HttpResponse.json(row.file)
   }),
   http.get(`${BASE}/invoices/:id/file`, ({ params }) => {
     const row = invoiceOf(String(params.id))
     if (!row?.file) return problem(404, `invoice ${String(params.id)} has no file`)
-    return new HttpResponse('%PDF-1.4\n% mock invoice\n', {
+    const bytes = row.file.media_type.startsWith('image/') ? PNG : new TextEncoder().encode('%PDF-1.4\n% mock invoice\n')
+    return new HttpResponse(bytes, {
       headers: { 'Content-Type': row.file.media_type, 'Content-Disposition': `inline; filename="${row.file.name}"`, 'Cache-Control': 'private, no-cache' },
     })
   }),

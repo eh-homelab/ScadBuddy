@@ -603,6 +603,37 @@ export function spoolUsage(ids: readonly string[]): { count: number; remaining_g
   }
 }
 
+/** What `createType` would refuse for a proposed type, or `null`: checked before an invoice's confirm writes anything (#6266). */
+export function checkTypeProposal(raw: unknown): Response | null {
+  return extraKeys(raw, FIELDS.typeCreate) ?? typeRefusal(normalised(raw as S['SpoolTypeCreate-Input']))
+}
+
+/**
+ * Why a spool cannot be filled in by an invoice line of `typeId` (`null` for a type the
+ * line has yet to make), or `null` when it can: `filament/invoices.py` `_claimed`.
+ */
+export function spoolClaimRefusal(id: string, typeId: string | null): string | null {
+  const row = state.spools.find((one) => one.id === id)
+  if (!row) return 'does not exist'
+  if (row.archived_at) return 'is archived'
+  if (invoicedLine.has(id) || invoiceRefOf(id)) return 'already belongs to an invoice line'
+  if (row.cost_per_kg != null) return 'already has its own cost'
+  if (row.type_id != null && row.type_id !== typeId) return 'has another spool type'
+  return null
+}
+
+/** The spool's own label weight in grams, if it has one (`_claimed`: the cost uses it before the type's). */
+export const spoolLabelWeight = (id: string) => state.spools.find((one) => one.id === id)?.label_weight_g ?? null
+
+/** Fills an existing spool in from an invoice line: its type and cost, and the line it was bought on (`_confirm_line`). */
+export function updateInvoicedSpool(id: string, typeId: string, costPerKg: string, lineId: string): void {
+  const at = state.spools.findIndex((one) => one.id === id)
+  const row = state.spools[at]!
+  state.spools[at] = { ...row, type_id: typeId, cost_per_kg: costPerKg, updated_at: now() }
+  addEvent(id, 'edited', { ref_kind: 'invoice_line', ref_id: lineId, actor: `invoice:${lineId}`, data: { changes: { type_id: typeId, cost_per_kg: costPerKg } } })
+  invoicedLine.set(id, lineId)
+}
+
 /**
  * #6266 — what an invoice's confirm makes: `count` new spools of the type at `costPerKg`
  * (a decimal string), full to the type's label weight, each bought on invoice line

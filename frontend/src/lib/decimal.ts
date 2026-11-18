@@ -76,7 +76,9 @@ export function divDecimal(a: string, b: string, places: number): string {
 /**
  * A money amount in the currency, with at least `exponent` decimals and up to two more,
  * the digits the string gives and never `Intl`'s own for the currency (`lib/money.ts`
- * `formatUnitCost`).
+ * `formatUnitCost`). `format(string)` keeps the string's exact digits only where the engine
+ * has `Intl.NumberFormat` v3; an older one reads it as a float, which can round the last
+ * digit of a long amount.
  */
 export function formatCost(value: string, currency: string, exponent: number): string {
   try {
