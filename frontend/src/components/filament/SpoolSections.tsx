@@ -1,5 +1,4 @@
 import type { ReactNode } from 'react'
-import type { SpoolEvent } from '../../api/filament'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 
 /** Spec §10's order: the page's sections and the anchor each one has. */
@@ -72,48 +71,3 @@ export function SectionIndex() {
   )
 }
 
-const KIND: Record<string, string> = {
-  created: 'Added',
-  edited: 'Edited',
-  weighed: 'Weighed',
-  dried: 'Dried',
-  moved: 'Moved',
-  loaded: 'Loaded into a printer',
-  unloaded: 'Taken out of a printer',
-  print_started: 'Print started',
-  print_ended: 'Print ended',
-  tag_bound: 'Tag bound',
-  tag_unbound: 'Tag taken off',
-  archived: 'Archived',
-  restored: 'Restored',
-}
-
-const detail = (event: SpoolEvent): string => {
-  const parts: string[] = []
-  if (event.delta_g != null) parts.push(`${event.delta_g > 0 ? '+' : ''}${Number(event.delta_g.toFixed(1))} g`)
-  else if (event.grams_after != null) parts.push(`${Number(event.grams_after.toFixed(1))} g`)
-  const data = event.data as { temp_c?: number | null; hours?: string | number | null; reason?: string | null }
-  if (event.kind === 'dried' && data.temp_c != null) parts.push(`${data.temp_c} °C${data.hours != null ? ` for ${data.hours} h` : ''}`)
-  if (data.reason) parts.push(data.reason)
-  if (event.source) parts.push(event.source.replace(/_/g, ' '))
-  return parts.join(', ')
-}
-
-/** This spool's ledger, newest first. The chart and the metrics arrive with #6269. */
-export function HistoryList({ events }: { events: SpoolEvent[] | null }) {
-  if (events === null) return <p className="text-[13px] text-muted-foreground">Loading the history…</p>
-  if (events.length === 0) return <p className="text-[13px] text-muted-foreground">Nothing has happened to this spool yet.</p>
-  return (
-    <ol aria-label="History of this spool" className="flex flex-col text-[13px]">
-      {[...events].reverse().map((event) => (
-        <li key={event.id} className="flex flex-wrap items-baseline gap-x-3 border-t py-1.5 first:border-t-0">
-          <time dateTime={event.at} className="w-40 shrink-0 text-muted-foreground tabular-nums">
-            {new Date(event.at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}
-          </time>
-          <span className="font-medium">{KIND[event.kind] ?? event.kind.replace(/_/g, ' ')}</span>
-          <span className="text-muted-foreground">{detail(event)}</span>
-        </li>
-      ))}
-    </ol>
-  )
-}

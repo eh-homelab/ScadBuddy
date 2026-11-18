@@ -5,6 +5,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { getSpool, getType, listSpoolEvents, listSpools, patchSpool, setSpoolKValues, setSpoolPresets } from '../../api/filament'
 import { H2C, L, spoolId, T, TAG } from '../../mocks/features/filament/seed'
 import { INVOICE } from '../../mocks/features/filamentPurchasingSeed'
+import { ORDER_CLOSED } from '../../mocks/features/orders/state'
+import { mockSettings, setMockSettings } from '../../mocks/handlers'
 import { server } from '../../mocks/server'
 import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
@@ -439,5 +441,33 @@ describe('the spool page', () => {
     open(2)
     await heading(2)
     expect(screen.queryByRole('link', { name: /^Invoice / })).not.toBeInTheDocument()
+  })
+})
+
+describe('the spool page\'s history (#6269)', () => {
+  it('shows the grams chart, the metrics and the timeline from the history route', async () => {
+    open(2)
+    await heading(2)
+    const history = screen.getByRole('region', { name: 'History' })
+    expect(await within(history).findByRole('img', { name: 'Grams left: 1000 g to 820 g, 3 anchor readings' })).toBeInTheDocument()
+    const metrics = within(history).getByLabelText('Spool metrics')
+    for (const name of ['Burn rate', 'Empty around', 'Waste', 'AMS error']) expect(within(metrics).getByText(name)).toBeInTheDocument()
+    expect(within(metrics).getByText('30 g')).toBeInTheDocument()
+    expect(within(metrics).getByText('±20 g')).toBeInTheDocument()
+    const timeline = within(history).getByRole('list', { name: 'History of this spool' })
+    expect(within(timeline).getByRole('link', { name: 'Print 41' })).toHaveAttribute('href', '/prints/41')
+    expect(within(timeline).getByRole('link', { name: 'Its order' })).toHaveAttribute('href', `/orders/${ORDER_CLOSED}`)
+    expect(within(timeline).getByText('Cost per kg: not set → 25.00')).toBeInTheDocument()
+    expect(within(timeline).getByText('Assistant')).toBeInTheDocument()
+  })
+
+  it('says why the burn rate is empty, with the window the settings hold', async () => {
+    setMockSettings({ ...mockSettings(), filament_burn_window_days: 14 })
+    open(1)
+    await heading(1)
+    const metrics = await within(screen.getByRole('region', { name: 'History' })).findByLabelText('Spool metrics')
+    const burn = within(metrics).getByText('Burn rate').parentElement!
+    expect(burn).toHaveTextContent('—')
+    expect(burn).toHaveTextContent('No prints in the last 14 days')
   })
 })

@@ -2,7 +2,10 @@ import { HttpResponse, http } from 'msw'
 import { newId } from '../../newId'
 import type { components } from '../../../api/schema'
 import type { FilamentInventorySpool, FilamentInventoryView, FilamentSpool } from '../../../api/types'
+import { divDecimal, mulDecimal } from '../../../lib/decimal'
 import { parseRgba } from '../../../lib/rgba'
+// Also a cycle (`handlers.ts` loads every feature): only inside functions.
+import { mockSettings } from '../../handlers'
 // A module cycle (`orders/priceBook.ts` imports `inventoryRows` from here): use it only inside functions.
 import { linkTypeFilament } from '../orders/priceBook'
 // Also a cycle (`filamentPurchasing.ts` calls `addInvoicedSpools`): only inside functions.
@@ -679,6 +682,111 @@ function plateGrams(events: readonly S['SpoolEvent'][]): number {
     .reduce((sum, event) => sum - (event.delta_g ?? 0), 0)
 }
 
+const DAY_MS = 86_400_000
+const BB_OUTCOMES = new Set(['completed', 'failed', 'cancelled'])
+const byTime = (a: S['SpoolEvent'], b: S['SpoolEvent']) => a.at.localeCompare(b.at) || a.seq - b.seq
+
+/** A spool's plates as `metrics.plates` counts them: BB's usage rows, and SB's runs BB did not book too. */
+function platesOf(events: readonly S['SpoolEvent'][]): { at: string; grams: number; outcome: string }[] {
+  const job = (event: S['SpoolEvent']) => (typeof event.data?.job === 'string' ? event.data.job : null)
+  const ended = events.filter((event) => event.kind === 'print_ended')
+  const bbJobs = new Set(ended.filter((event) => event.ref_kind === 'bb_usage').map(job))
+  return ended.flatMap((event) => {
+    const grams = event.delta_g ? -event.delta_g : 0
+    if (event.ref_kind === 'bb_usage') {
+      const status = event.data?.bb_status
+      return [{ at: event.at, grams, outcome: typeof status === 'string' && BB_OUTCOMES.has(status) ? status : 'unknown' }]
+    }
+    if (event.ref_kind !== 'print_run' || bbJobs.has(job(event)) || event.data?.basis === 'covered') return []
+    const failed = event.data?.basis === 'not_applied'
+    return [{ at: event.at, grams: failed ? 0 : grams, outcome: failed ? 'failed' : 'completed' }]
+  })
+}
+
+/** Each scale reading less the newest AMS reading before it, within 24 h, with no plate that used grams between them (plan Decision 14). */
+function amsErrors(events: readonly S['SpoolEvent'][]): number[] {
+  const ordered = [...events].sort(byTime)
+  const errors: number[] = []
+  ordered.forEach((scale, i) => {
+    if (scale.source !== 'scale' || scale.grams_after == null) return
+    for (let j = i - 1; j >= 0; j--) {
+      const before = ordered[j]!
+      if ((before.kind === 'print_started' || before.kind === 'print_ended') && before.delta_g) return
+      if (before.source !== 'ams_remain' || before.grams_after == null || before.data?.printing === true) continue
+      if (Date.parse(scale.at) - Date.parse(before.at) <= DAY_MS) errors.push(before.grams_after - scale.grams_after)
+      return
+    }
+  })
+  return errors
+}
+
+function amsError(errors: readonly number[]): S['AmsError'] | null {
+  if (errors.length === 0) return null
+  const sum = (values: readonly number[]) => values.reduce((total, value) => total + value, 0)
+  return { pairs: errors.length, mean_abs_g: sum(errors.map(Math.abs)) / errors.length, bias_g: sum(errors) / errors.length }
+}
+
+/** The cost of `grams` at `perKg`, to the cent as `metrics._money` quantizes it; the mock rounds the grams to whole ones. */
+const costOf = (perKg: string, grams: number) => divDecimal(mulDecimal(perKg, Math.round(grams)), '1000', 2)
+
+/**
+ * `GET /filament/spools/{id}/history` (#6269, `metrics_store.history`): the timeline newest
+ * first by `(at, seq)` with each plate's order and print, the grams series (the value after
+ * an event is the next one's `grams_before`, the spool's grams left after the last; a
+ * reading is an anchor), the spool's metrics over the burn window the settings hold, and
+ * its type's AMS error. The spool's age starts at its first event when that is older than
+ * `created_at`, as the seed's are.
+ */
+function spoolHistory(row: SpoolRow): S['SpoolHistory'] {
+  const events = state.events.filter((event) => event.spool_id === row.id).sort(byTime)
+  const windowDays = mockSettings().filament_burn_window_days ?? 30
+  const nowMs = Date.now()
+  const plates = platesOf(events)
+  const used = plates.reduce((sum, plate) => sum + plate.grams, 0)
+  const wasted = plates.filter((plate) => plate.outcome === 'failed' || plate.outcome === 'cancelled').reduce((sum, plate) => sum + plate.grams, 0)
+  const born = Math.min(Date.parse(row.created_at), ...events.map((event) => Date.parse(event.at)))
+  const inside = plates.filter((plate) => nowMs - Date.parse(plate.at) < windowDays * DAY_MS && Date.parse(plate.at) <= nowMs)
+  const burn = inside.length === 0 ? null : inside.reduce((sum, plate) => sum + plate.grams, 0) / Math.max(1, Math.min(windowDays, (nowMs - born) / DAY_MS))
+  const left = row.grams_left
+  const emptyDays = burn && burn > 0 && left != null ? left / burn : null
+  const opened = events.find((event) => event.kind === 'loaded')?.at ?? plates[0]?.at ?? null
+  const perKg = view(row).effective?.cost_per_kg ?? mockSettings().filament_default_cost_per_kg ?? null
+  const series: S['GramsPoint'][] = events.flatMap((event, i) => {
+    const grams = i + 1 < events.length ? events[i + 1]!.grams_before : left
+    if (grams == null) return []
+    const reading = (event.kind === 'weighed' || event.kind === 'created' || event.kind === 'ams_reading') && event.grams_after != null
+    const anchor = reading && !(event.source === 'ams_remain' && (row.weight_locked || event.data?.printing === true))
+    return [{ at: event.at, grams, anchor, kind: event.kind }]
+  })
+  const sameType = row.type_id ? state.spools.filter((one) => one.type_id === row.type_id).map((one) => one.id) : []
+  return {
+    events: [...events].reverse().map((event) => {
+      const archive = event.data?.bb_archive_id
+      const run = event.ref_kind === 'print_run' ? event.ref_id?.split('/')[0] : undefined
+      return { event, archive_id: typeof archive === 'number' ? archive : null, order_id: (run && state.orderRuns.get(run)) || null }
+    }),
+    series,
+    metrics: {
+      used_g: used,
+      prints: plates.length,
+      grams_per_print: plates.length > 0 ? used / plates.length : null,
+      wasted_g: wasted,
+      cost_used: perKg != null ? costOf(perKg, used) : null,
+      value_left: perKg != null && left != null ? costOf(perKg, left) : null,
+      burn_g_per_day: burn,
+      empty_on: emptyDays != null && emptyDays <= 3650 ? new Date(nowMs + emptyDays * DAY_MS).toISOString().slice(0, 10) : null,
+      opened_at: opened,
+      days_since_opened: opened ? (nowMs - Date.parse(opened)) / DAY_MS : null,
+      days_since_last_use: row.last_used_at ? (nowMs - Date.parse(row.last_used_at)) / DAY_MS : null,
+      hours_outside_dry: row.hours_outside_dry,
+      ams_error: amsError(amsErrors(events)),
+    },
+    type_ams_error: row.type_id ? amsError(sameType.flatMap((id) => amsErrors(state.events.filter((event) => event.spool_id === id)))) : null,
+    currency: mockSettings().orders_currency ?? 'USD',
+    window_days: windowDays,
+  }
+}
+
 /** The spools of `ids` that exist, their grams left (unarchived only) and the grams their prints used (#6266 stats). */
 export function spoolUsage(ids: readonly string[]): { count: number; remaining_g: number; consumed_g: number } {
   const rows = state.spools.filter((row) => ids.includes(row.id))
@@ -1233,6 +1341,11 @@ export const handlers = [
     const spoolId = String(params.id)
     if (!findSpool(spoolId)) return problem(404, `no spool ${spoolId}`)
     return HttpResponse.json(state.events.filter((event) => event.spool_id === spoolId).sort((a, b) => a.at.localeCompare(b.at) || a.seq - b.seq))
+  }),
+  http.get(`${BASE}/spools/:id/history`, ({ params }) => {
+    const row = findSpool(String(params.id))
+    if (!row) return problem(404, `no spool ${String(params.id)}`)
+    return HttpResponse.json(spoolHistory(row))
   }),
   http.post(`${BASE}/spools/:id/events`, async ({ params, request }) => {
     const at = state.spools.findIndex((row) => row.id === params.id)

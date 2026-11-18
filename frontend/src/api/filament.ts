@@ -45,6 +45,11 @@ export type SpoolEventAdd = Omit<Schemas['SpoolEventAdd'], 'source'> & Partial<P
 export type LedgerRow = Schemas['LedgerRow']
 export type EventQuery = Query<'list_events_api_v1_filament_events_get'>
 export type InventorySummary = Schemas['InventorySummary']
+export type SpoolHistory = Schemas['SpoolHistory']
+export type TimelineRow = Schemas['TimelineRow']
+export type GramsPoint = Schemas['GramsPoint']
+export type SpoolMetrics = Schemas['SpoolMetrics']
+export type AmsError = Schemas['AmsError']
 export type FilamentInventoryView = Schemas['FilamentInventoryView']
 export type CsvRow = Schemas['CsvRow']
 export type ImportPreview = Schemas['ImportPreview']
@@ -169,6 +174,9 @@ export const setSpoolKValues = (id: string, rows: KValueInput[]) =>
 
 /** One spool's ledger, oldest first. */
 export const listSpoolEvents = (id: string) => request<SpoolEvent[]>(`${BASE}/spools/${seg(id)}/events`)
+
+/** #6269 — the spool's timeline (newest first), its grams series, its metrics and the burn window. */
+export const getSpoolHistory = (id: string) => request<SpoolHistory>(`${BASE}/spools/${seg(id)}/history`)
 
 /** A weighing (`grams`: the filament left, without the empty spool) or a drying (`temp_c`, `hours`). */
 export const addSpoolEvent = (id: string, body: SpoolEventAdd) => request<SpoolEvent>(`${BASE}/spools/${seg(id)}/events`, json('POST', body))
