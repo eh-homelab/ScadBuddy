@@ -140,7 +140,7 @@ describe('Filament (#6262)', () => {
     const filament = region('Filament')
     await user.click(await within(filament).findByRole('button', { name: 'Apply now' }))
     expect(await within(filament).findByText(/2 spools have no preset for the nozzle/)).toBeInTheDocument()
-    expect(within(filament).getByText(/1 spool has no nozzle to set/)).toBeInTheDocument()
+    expect(within(filament).getByText(/1 slot: the printer does not report the nozzle for its tray, so it is not set/)).toBeInTheDocument()
   })
 
   it('saves the thresholds and shows the server refusing 101 percent', async () => {

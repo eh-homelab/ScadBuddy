@@ -158,8 +158,9 @@ def _clear_baseline(store: Filament, spool_id: UUID) -> None:
 def _clear_device(store: Filament, spool_id: UUID, device_id: str) -> None:
     with store.spools.transaction() as conn:
         conn.execute(
-            "DELETE FROM filament_ntag_writes WHERE spool_id = %s OR device_id = %s",
-            (spool_id, device_id),
+            "DELETE FROM filament_ntag_writes WHERE device_id = %s"
+            " OR (spool_id = %s AND (device_id = %s OR device_id IS NULL))",
+            (device_id, spool_id, device_id),
         )
 
 

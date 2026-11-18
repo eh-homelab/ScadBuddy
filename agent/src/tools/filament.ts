@@ -800,7 +800,9 @@ export const filamentTools: Tool[] = [
     description:
       'Drop the write the SpoolBuddy `device_id` has queued. Bambuddy queues one write per device, so this drops ' +
       'whichever write that device holds, not only this spool\'s; `spool_id` must exist. Only what the user ' +
-      'says. Writes Bambuddy only; approved first.',
+      'says. Writes Bambuddy and ScadBuddy: it also deletes ScadBuddy\'s own queued-write rows (this spool\'s row ' +
+      'and every row queued on that device), so a later `filament_spool_ntag_confirm` binds nothing for them; ' +
+      'approved first.',
     input: z.object({ spool_id: z.string().uuid(), device_id: DEVICE_ID }),
     risk: 'outward',
     source: SOURCE,

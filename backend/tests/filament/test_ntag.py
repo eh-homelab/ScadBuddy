@@ -335,9 +335,26 @@ async def test_cancel_posts_to_the_device(pg_pool: PgPool, client: BambuddyClien
         return_value=httpx.Response(200, json={"status": "cancelled"})
     )
 
-    await ntag.cancel(_filament(pg_pool), client, _spool(_filament(pg_pool), pg_pool, 11), "sb-1")
+    f = _filament(pg_pool)
+    await ntag.cancel(f, client, _spool(f, pg_pool, 11), "sb-1")
 
     assert route.call_count == 1
+
+
+@respx.mock
+async def test_cancel_keeps_a_spools_row_queued_on_another_device(
+    pg_pool: PgPool, client: BambuddyClient
+) -> None:
+    f = _filament(pg_pool)
+    spool = _spool(f, pg_pool, 11)
+    await _queue(f, client, spool, None)
+    respx.post(f"{API}/spoolbuddy/devices/sb-2/cancel-write").mock(
+        return_value=httpx.Response(200, json={"status": "cancelled"})
+    )
+
+    await ntag.cancel(f, client, spool, "sb-2")
+
+    assert ntag._baseline(f, spool)[0] is True
 
 
 @respx.mock
