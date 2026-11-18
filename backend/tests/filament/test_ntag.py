@@ -25,6 +25,7 @@ from scadbuddy.filament.presets import PoolSpoolPresets
 from scadbuddy.filament.rfid_mode import RfidModeStore
 from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.filament.types import SpoolTypeStore
+from tests.bambuddy.test_client_scan import PRINTER_STATUS, UNKNOWN, _fake
 from tests.conftest import PgPool
 
 pytestmark = pytest.mark.requires_postgres
@@ -145,6 +146,23 @@ async def test_a_scan_names_the_sb_spool_that_holds_the_tag(pg_pool: PgPool) -> 
     assert by_link.sb_spool.id == linked
     assert by_link.bambuddy_spool_id == 11
     assert unknown.sb_spool is None
+
+
+async def test_a_frame_on_the_socket_reaches_the_scan_result(pg_pool: PgPool) -> None:
+    """One end-to-end read: a frame on a local websockets fake, through the client's
+    `next_tag_scan` and `ntag.scan`, to the SB spool that holds the tag."""
+    f = _filament(pg_pool)
+    holder = _spool(f, pg_pool)
+    f.spools.bind_tag(holder, tag_uid=UID, kind="ntag_opentag", actor="ann")
+    with respx.mock(assert_all_called=False) as router:
+        router.get(url__regex=r"http://127\.0\.0\.1:\d+/api/v1/auth/status").mock(
+            return_value=httpx.Response(200, json={"auth_enabled": False})
+        )
+        async with _fake([PRINTER_STATUS, UNKNOWN]) as socket_client:
+            result = await ntag.scan(f, socket_client, timeout=5, device_id="sb-1")
+
+    assert (result.status, result.tag_uid, result.kind) == ("tag", UID, "ntag_opentag")
+    assert result.sb_spool is not None and result.sb_spool.id == holder
 
 
 @respx.mock

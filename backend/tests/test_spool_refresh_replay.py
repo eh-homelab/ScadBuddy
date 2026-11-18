@@ -114,7 +114,10 @@ def recording_temporal() -> Iterator[str]:
 
 @pytest.mark.requires_temporal
 @pytest.mark.skipif(os.environ.get("SCADBUDDY_RECORD_HISTORIES") != "1", reason="records a history")
-@pytest.mark.parametrize("name", ["providers_gone", "capture", "rfid"])
+# Only the newest history is recorded: the older ones were recorded by the code of their time
+# and are never re-recorded (this code's workflow always takes every patched branch, so a new
+# recording of them would carry the later steps and their markers).
+@pytest.mark.parametrize("name", ["rfid"])
 async def test_record(recording_temporal: str, name: str) -> None:
     @activity.defn(name=LIST_ACTIVITY)
     async def names() -> list[str]:

@@ -24,7 +24,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.filament import models as m
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.presets import effective_k_values, effective_presets, preset_for
-from scadbuddy.filament.rfid_push import error_label, try_lock
+from scadbuddy.filament.rfid_push import acquire_lock, error_label
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.printers.reports import PrinterReportStore, report_status
 from scadbuddy.printers.status import is_fresh, mounted_nozzles
@@ -358,7 +358,7 @@ async def reconcile_slots_now(
     settings = await asyncio.to_thread(load)
     if not settings.bambuddy_url:
         return None
-    lock = await asyncio.to_thread(try_lock, store, SLOTS_LOCK)
+    lock = await acquire_lock(store.spools.conninfo, SLOTS_LOCK)
     if lock is None:
         return None
     try:

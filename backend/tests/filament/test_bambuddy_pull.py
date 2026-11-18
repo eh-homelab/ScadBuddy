@@ -1665,3 +1665,37 @@ def test_a_duplicate_is_warned_once_then_debug(
         pull(f, rows, now=NOW)
     levels = [r.levelname for r in caplog.records if "is left alone" in r.getMessage()]
     assert levels == ["WARNING", "DEBUG"]
+
+
+def test_a_pull_after_the_push_keeps_an_override_binding(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    a = _linked_override_holder(f)
+    before = f.spools.open_binding(a)
+    assert before is not None and before.override
+    # The push linked TRAY on BB 11: its tag keys now differ from the last reading.
+    pull(
+        f,
+        [bb(id=11, tag_uid=None, tray_uuid=TRAY, updated_at=_bb_time(1), weight_used=300.0)],
+        now=NOW,
+    )
+    after = f.spools.open_binding(a)
+    assert after is not None and after.id == before.id and after.override
+    spool = f.spools.get(a)
+    assert spool is not None and spool.weight_locked
+
+
+def test_a_skipped_duplicate_stays_skipped_after_the_push_cleared_its_tag(
+    pg_pool: PgPool,
+) -> None:
+    _WARNED_DUPLICATES.clear()
+    f = _filament(pg_pool)
+    a = _linked_override_holder(f)
+    dup = bb(id=40, tag_uid=None, tray_uuid=TRAY, data_origin="rfid_auto")
+    assert pull(f, [dup], now=NOW).rfid_duplicate_bb_ids == [40]
+    # The push linked TRAY on BB 11 and cleared the auto-added BB 40.
+    cleared = bb(id=40, tag_uid=None, tray_uuid=None, data_origin="rfid_auto")
+    report = pull(f, [cleared], now=NOW)
+    assert (report.created, report.rfid_duplicates, report.rfid_duplicate_bb_ids) == (0, 1, [40])
+    assert [s.id for s in f.spools.list()] == [a]
+    # Still skipped on every later pull.
+    assert pull(f, [cleared], now=NOW).created == 0

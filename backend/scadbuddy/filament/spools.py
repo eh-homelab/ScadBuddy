@@ -686,12 +686,13 @@ class FilamentSpoolStore:
         uid: str | None,
         tray: str | None,
         kind: m.TagKind,
-        override: bool,
+        override: bool | None,
         actor: str,
     ) -> m.TagBinding:
         """`bind_tag` on ``conn``'s transaction, its keys already cleaned; `_NoSpoolError`
         when the spool does not exist, and `OverrideKindError`, which the caller rolls back
-        on."""
+        on. ``override=None`` keeps a held binding's flag as it is (what the Bambuddy pull
+        and a tray link pass: they never change one); a new binding then takes False."""
         if (
             conn.execute("SELECT 1 FROM filament_spools WHERE id = %s", (spool_id,)).fetchone()
             is None
@@ -718,7 +719,7 @@ class FilamentSpoolStore:
             (tag_id, spool_id),
         ).fetchone()
         if held is not None:
-            if held["override"] == override:
+            if override is None or held["override"] == override:
                 return m.TagBinding.model_validate(held)
             held = conn.execute(
                 "UPDATE filament_tag_bindings SET override = %s WHERE id = %s"
@@ -730,6 +731,7 @@ class FilamentSpoolStore:
                 FilamentSpoolStore._lock_weight(conn, spool_id, actor)
             enqueue_tag(conn, tag_id)
             return m.TagBinding.model_validate(held)
+        override = bool(override)
         closed = conn.execute(
             "UPDATE filament_tag_bindings SET unbound_at = now(), reason = 'rebound'"
             " WHERE unbound_at IS NULL AND (tag_id = %s OR spool_id = %s)"

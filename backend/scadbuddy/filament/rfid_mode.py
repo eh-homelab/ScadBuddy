@@ -21,7 +21,7 @@ from scadbuddy.bambuddy.errors import SCOPE_PROBLEM, Scope
 from scadbuddy.bambuddy.models import SpoolBuddyDevice
 from scadbuddy.core.problems import ApiError
 from scadbuddy.filament import models as m
-from scadbuddy.filament.rfid_push import error_label
+from scadbuddy.filament.rfid_push import acquire_lock, error_label
 from scadbuddy.library.settings_store import StoredSettings
 
 Conn = Connection[DictRow]
@@ -36,7 +36,7 @@ BUSY = "busy"
 RFID_MODE_LOCK = "scadbuddy:filament:rfid_mode"
 #: How long a PUT waits for that lock before it answers ``pending`` (``busy``).
 RFID_MODE_LOCK_WAIT_SECONDS = 5.0
-_LOCK_POLL_SECONDS = 0.05
+_LOCK_POLL_SECONDS = 0.25
 BLOCKED_DETAIL = (
     "Bambuddy's auth is on, and no API key can change its settings: turn its auth off, "
     "or turn off auto-add of unknown RFID spools in Bambuddy"
@@ -164,28 +164,11 @@ async def reconcile_mode(store: RfidModeStore, client: BambuddyClient) -> m.Rfid
         return _status(state, "pending", seen=seen, detail=error_label(exc))
 
 
-def _try_lock(store: RfidModeStore) -> psycopg.Connection[Any] | None:
-    """The mode lock on a connection of its own (never the row pool's), or ``None`` when
-    another holds it. Closing the connection ends the lock."""
-    conn = psycopg.connect(store.conninfo, autocommit=True, connect_timeout=10)
-    try:
-        got = conn.execute(
-            "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (RFID_MODE_LOCK,)
-        ).fetchone()
-    except BaseException:
-        conn.close()
-        raise
-    if got is not None and got[0]:
-        return conn
-    conn.close()
-    return None
-
-
 async def _lock(store: RfidModeStore, wait: float) -> psycopg.Connection[Any] | None:
     """Try the lock, again every `_LOCK_POLL_SECONDS` for up to ``wait`` seconds."""
     deadline = time.monotonic() + wait
     while True:
-        conn = await asyncio.to_thread(_try_lock, store)
+        conn = await acquire_lock(store.conninfo, RFID_MODE_LOCK)
         if conn is not None or time.monotonic() >= deadline:
             return conn
         await asyncio.sleep(_LOCK_POLL_SECONDS)

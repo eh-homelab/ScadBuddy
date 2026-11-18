@@ -510,7 +510,7 @@ class FilamentInventory:
                     LocationStore.move_on(conn, row["id"], None, actor=actor)
             self.place_on(conn, spool_id, place.id, seen, actor=actor)
             if uid is not None or tray is not None:
-                FilamentSpoolStore.bind_on(conn, spool_id, uid, tray, kind, False, actor)
+                FilamentSpoolStore.bind_on(conn, spool_id, uid, tray, kind, None, actor)
             linked = FilamentSpoolStore.read(conn, spool_id, defaults=defaults)
         assert linked is not None
         return linked

@@ -33,9 +33,10 @@ this order:
    ``created`` event with a ``bb`` reading of what is left, and its link. A BB spool whose
    tag keys an SB spool holds through an open binding (override or not), where that spool
    is already linked to another BB spool, is one Bambuddy added itself for the tag (#6264):
-   it makes no SB spool, and is counted in ``PullReport.rfid_duplicates``. A tag with a tray UUID
-   binds as ``bambu_mifare``; one BB read as OpenTag3D (``data_origin == "opentag3d"``) as
-   ``ntag_opentag``; any other as ``other``.
+   it makes no SB spool, and is counted in ``PullReport.rfid_duplicates``. It is remembered
+   (``filament_bb_ignored``), so it stays skipped after the push cleared its tag. A tag with
+   a tray UUID binds as ``bambu_mifare``; one BB read as OpenTag3D
+   (``data_origin == "opentag3d"``) as ``ntag_opentag``; any other as ``other``.
 
 Catalog names from BB (material, subtype, brand, category, effect) resolve by their upper
 case name, and are added when missing. BB's spool catalog (``GET /inventory/catalog``,
@@ -270,6 +271,7 @@ def pull(
         if what == "duplicate":
             report.rfid_duplicate_bb_ids.append(bb.id)
             continue
+        assert spool_id is not None  # only a skipped duplicate has none
         getattr(report, f"{what}_ids").append(spool_id)
         if typeless:
             report.needs_type_ids.append(spool_id)
@@ -355,7 +357,7 @@ def _core_insert_type(conn: Conn, bb: BbSpool) -> UUID | None:
 
 def _one(
     conn: Conn, store: Filament, bb: BbSpool, now: datetime, actor: str
-) -> tuple[str, UUID, bool] | None:
+) -> tuple[str, UUID | None, bool] | None:
     """What came of one BB spool. An archived SB spool, linked or named by the BB
     record's link, is left as it is: never restored, never written to (``archived``)."""
     link = conn.execute(
@@ -394,7 +396,19 @@ def _one(
             "a Bambuddy spool made for a tag a linked spool holds is left alone",
             extra={"bb_spool_id": bb.id, "holder": str(linked_holder)},
         )
+        conn.execute(
+            "INSERT INTO filament_bb_ignored (bb_spool_id, reason, tag_uid, tray_uuid)"
+            " VALUES (%s, 'rfid_duplicate', %s, %s) ON CONFLICT (bb_spool_id) DO NOTHING",
+            (bb.id, after["tag_uid"], after["tray_uuid"]),
+        )
         return "duplicate", linked_holder, False
+    ignored = conn.execute(
+        "SELECT 1 FROM filament_bb_ignored WHERE bb_spool_id = %s", (bb.id,)
+    ).fetchone()
+    if ignored is not None:
+        # Skipped as a duplicate once; the push has since cleared its tag, so no holder
+        # shows, but it is still the spool Bambuddy added for a tag SB holds.
+        return "duplicate", None, False
     made, typeless = _create(conn, store, bb, after, now, actor)
     _book(conn, made, bb, actor)
     _bb_presets(conn, made, bb, actor)
@@ -719,7 +733,7 @@ def _bind(
     )
     try:
         with conn.transaction():
-            FilamentSpoolStore.bind_on(conn, spool_id, uid, tray, kind, False, actor)
+            FilamentSpoolStore.bind_on(conn, spool_id, uid, tray, kind, None, actor)
     except TagKeysClashError:
         logger.warning(
             "a Bambuddy spool's tag keys name two tags; not bound",

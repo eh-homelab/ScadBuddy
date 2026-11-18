@@ -116,8 +116,10 @@ async def test_a_matched_frame_carries_the_bambuddy_spool(router: respx.MockRout
 
 async def test_a_scan_with_no_frame_times_out(router: respx.MockRouter) -> None:
     _auth(router, False)
-    async with _fake([PRINTER_STATUS]) as client:
-        assert await client.next_tag_scan(timeout=0.2) is None
+    joined: list[str] = []
+    async with _fake([PRINTER_STATUS], seen=joined) as client:
+        assert await client.next_tag_scan(timeout=0.5) is None
+    assert joined == ["/api/v1/ws"]  # the socket joined: a connect failure is no timeout
 
 
 async def test_a_scan_of_another_device_is_skipped(router: respx.MockRouter) -> None:
@@ -128,8 +130,10 @@ async def test_a_scan_of_another_device_is_skipped(router: respx.MockRouter) -> 
         assert scan is not None
         assert (scan.device_id, scan.tag_uid) == ("sb-1", "04AABBCC")
 
-    async with _fake([other]) as client:
-        assert await client.next_tag_scan(timeout=0.2, device_id="sb-1") is None
+    joined: list[str] = []
+    async with _fake([other], seen=joined) as client:
+        assert await client.next_tag_scan(timeout=0.5, device_id="sb-1") is None
+    assert joined == ["/api/v1/ws"]
 
 
 async def test_with_auth_on_the_socket_joins_with_a_minted_token(router: respx.MockRouter) -> None:
@@ -244,8 +248,11 @@ async def test_a_connect_that_times_out_is_not_a_scan_timeout(
     _auth(router, False)
     monkeypatch.setattr(client_module, "WS_OPEN_TIMEOUT", 0.2)
 
+    never = asyncio.Event()
+
     async def stall(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        await asyncio.sleep(5)  # accepts the socket, never answers the handshake
+        await never.wait()  # accepts the socket, never answers the handshake
+        writer.close()
 
     server = await asyncio.start_server(stall, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
@@ -256,6 +263,8 @@ async def test_a_connect_that_times_out_is_not_a_scan_timeout(
                 await client.next_tag_scan(timeout=5)
     finally:
         server.close()
+        never.set()
+        await server.wait_closed()
 
     assert (caught.value.status, caught.value.type) == (504, UNAVAILABLE_PROBLEM)
 
@@ -263,8 +272,10 @@ async def test_a_connect_that_times_out_is_not_a_scan_timeout(
 async def test_the_token_mint_counts_against_the_deadline(router: respx.MockRouter) -> None:
     _auth(router, True)
 
+    never = asyncio.Event()  # the mint never answers; the deadline ends the wait
+
     async def slow(request: httpx.Request) -> httpx.Response:
-        await asyncio.sleep(2)
+        await never.wait()
         return httpx.Response(200, json={"token": "abc123"})
 
     router.post(url__regex=r"http://127\.0\.0\.1:\d+/api/v1/auth/ws-token").mock(side_effect=slow)

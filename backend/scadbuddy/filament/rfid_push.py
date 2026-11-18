@@ -150,8 +150,10 @@ async def _push_one(
 
 
 async def drain_tags(store: Filament, client: BambuddyClient, *, limit: int = 50) -> TagPushReport:
-    """Tell Bambuddy of every queued tag, oldest first (a closed and a new tag of one
-    ``bind_on`` share ``queued_at``, so ``tag_id`` breaks the tie). A tag whose Bambuddy
+    """Tell Bambuddy of every queued tag, fewest failed attempts first (so a row that
+    always fails, such as an archived target, cannot starve the rest past ``limit``), then
+    oldest first (a closed and a new tag of one ``bind_on`` share ``queued_at``, so
+    ``tag_id`` breaks the tie). A tag whose Bambuddy
     state already matches ScadBuddy's is only dequeued. A failure is recorded on the row
     (``attempts``, ``last_error``) and the next tag goes on."""
     report = TagPushReport()
@@ -160,7 +162,7 @@ async def drain_tags(store: Filament, client: BambuddyClient, *, limit: int = 50
             (row["tag_id"], row["queued_at"])
             for row in conn.execute(
                 "SELECT tag_id, queued_at FROM filament_bb_tag_pending"
-                " ORDER BY queued_at, tag_id LIMIT %s",
+                " ORDER BY attempts, queued_at, tag_id LIMIT %s",
                 (limit,),
             )
         ]
@@ -191,7 +193,7 @@ async def push_pending(
     # One drain at a time across the route and the Schedule (and replicas): a session
     # lock on a connection of its own, never the row pool's. A drain that finds it held
     # returns at once and touches nothing; the holder pushes the queue.
-    lock = await asyncio.to_thread(try_lock, store)
+    lock = await acquire_lock(store.spools.conninfo, PUSH_LOCK)
     if lock is None:
         return TagPushReport()
     try:
@@ -204,7 +206,12 @@ async def push_pending(
 def try_lock(store: Filament, name: str = PUSH_LOCK) -> psycopg.Connection[Any] | None:
     """The session advisory lock ``name`` on a connection of its own (never the row
     pool's), or ``None`` when another holds it. Closing the connection ends the lock."""
-    conn = psycopg.connect(store.spools.conninfo, autocommit=True, connect_timeout=10)
+    return try_lock_on(store.spools.conninfo, name)
+
+
+def try_lock_on(conninfo: str, name: str) -> psycopg.Connection[Any] | None:
+    """`try_lock` for a database address."""
+    conn = psycopg.connect(conninfo, autocommit=True, connect_timeout=10)
     try:
         got = conn.execute(
             "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (name,)
@@ -216,3 +223,23 @@ def try_lock(store: Filament, name: str = PUSH_LOCK) -> psycopg.Connection[Any] 
         return conn
     conn.close()
     return None
+
+
+def _close_late(task: asyncio.Future[psycopg.Connection[Any] | None]) -> None:
+    if task.cancelled() or task.exception() is not None:
+        return
+    held = task.result()
+    if held is not None:
+        held.close()
+
+
+async def acquire_lock(conninfo: str, name: str) -> psycopg.Connection[Any] | None:
+    """`try_lock_on` off the event loop. A cancel while the thread runs (the inline push's
+    timeout, a client that left) cannot drop the connection unclosed, which would keep the
+    lock until garbage collection: the thread's result is closed when it lands."""
+    task = asyncio.ensure_future(asyncio.to_thread(try_lock_on, conninfo, name))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        task.add_done_callback(_close_late)
+        raise

@@ -35,3 +35,14 @@ CREATE TABLE filament_override_slots (
 
 INSERT INTO filament_bb_tag_pending (tag_id)
 SELECT tag_id FROM filament_tag_bindings WHERE unbound_at IS NULL;
+
+-- A Bambuddy spool the pull skipped because Bambuddy auto-added it for a tag a linked SB
+-- spool holds. The push later clears its tag, so only this row tells the next pull it is
+-- no new spool. Only `reason` 'rfid_duplicate' exists.
+CREATE TABLE filament_bb_ignored (
+    bb_spool_id integer PRIMARY KEY,
+    reason text NOT NULL CHECK (reason IN ('rfid_duplicate')),
+    tag_uid text,
+    tray_uuid text,
+    recorded_at timestamptz NOT NULL DEFAULT now()
+);

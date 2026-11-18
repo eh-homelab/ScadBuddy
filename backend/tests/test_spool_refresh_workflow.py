@@ -24,9 +24,13 @@ from temporalio.worker import Worker
 from scadbuddy.spools.activities import capture_backstop_activity, spool_activities
 from scadbuddy.workflows.spool_refresh import (
     CAPTURE_ACTIVITY,
+    CAPTURE_TIMEOUT,
     FILAMENT_PULL_ACTIVITY,
+    FILAMENT_PULL_TIMEOUT,
     FILAMENT_RFID_ACTIVITY,
+    FILAMENT_RFID_TIMEOUT,
     HELD_ACTIVITY,
+    HELD_TIMEOUT,
     LIST_ACTIVITY,
     PROVIDER_ACTIVITY,
     RUN_TIMEOUT,
@@ -39,6 +43,13 @@ from scadbuddy.workflows.spool_refresh import (
 from tests.support.temporal import temporal_client, terminate_open_workflows
 
 pytestmark = pytest.mark.requires_temporal
+
+
+def test_the_step_budgets_fit_in_one_run() -> None:
+    steps = HELD_TIMEOUT + FILAMENT_PULL_TIMEOUT + CAPTURE_TIMEOUT + FILAMENT_RFID_TIMEOUT
+    assert steps <= RUN_TIMEOUT
+    # The rfid activity is mode, push and slots in one budget: more than the old 3 minutes.
+    assert timedelta(minutes=6) <= FILAMENT_RFID_TIMEOUT
 
 
 @pytest.fixture

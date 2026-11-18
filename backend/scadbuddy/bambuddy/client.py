@@ -664,7 +664,12 @@ class BambuddyClient:
                 async with deadline:
                     token = await self.ws_token()
                     async with ws_connect(
-                        self._ws_url(token), logger=_WS_LOGGER, open_timeout=WS_OPEN_TIMEOUT
+                        self._ws_url(token),
+                        logger=_WS_LOGGER,
+                        open_timeout=WS_OPEN_TIMEOUT,
+                        # Like httpx, the socket follows the proxy environment
+                        # (HTTP_PROXY, NO_PROXY); websockets 15+ takes it from here.
+                        proxy=True,
                     ) as socket:
                         async for raw in socket:
                             scan = _tag_scan(raw, device_id)
@@ -2017,7 +2022,10 @@ class BambuddyClient:
 
     async def spool_by_tag(self, *, tray_uuid: str | None, tag_uid: str | None) -> Spool | None:
         """``GET /api/v1/inventory/spools/by-tag``: the spool holding the tag, or ``None``
-        on Bambuddy's 404 (``routes/inventory.py`` line 1560, v1.3.1; Manage Inventory)."""
+        on Bambuddy's 404 (``routes/inventory.py`` line 1560, v1.3.1). Bambuddy accepts
+        ``inventory:read`` or ``inventory:update`` there, so a Read Status or a Manage
+        Inventory key opens it; the scope names Manage Inventory, which the push needs for
+        its writes anyway."""
         response = await self._send(
             "GET",
             "/inventory/spools/by-tag",

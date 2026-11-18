@@ -104,7 +104,8 @@ class FilamentSync(BaseModel, extra="forbid"):
     2026-11-14 §8). ``spools``: ``off`` leaves Bambuddy's spools and usage rows alone;
     ``bb_to_sb`` pulls them into ScadBuddy's own on the refresh Schedule. ``tags``: ``off``
     writes no tag to Bambuddy; ``sb_to_bb`` pushes the tags queued by a binding change
-    (#6264), the only data ScadBuddy writes to Bambuddy. #6265 adds data types and the
+    (#6264). It does not gate the override mode or the AMS slot configure, which write
+    Bambuddy whatever it says. #6265 adds data types and the
     values ``sb_to_bb`` and ``two_way``."""
 
     spools: Literal["off", "bb_to_sb"] = "bb_to_sb"

@@ -175,6 +175,8 @@ async def test_a_blocked_write_keeps_the_mode_and_the_saved_value(
     status = await reconcile_mode(store, client)
 
     assert status.state == "blocked"
+    # The value Bambuddy answered, never a claim that auto-add is off.
+    assert status.bambuddy_auto_add is True
     assert status.detail is not None and "auth is on" in status.detail
     assert status.override_mode is True
     assert status.saved_auto_add is True
@@ -195,6 +197,7 @@ async def test_a_blocked_restore_keeps_the_saved_value(
     status = await reconcile_mode(store, client)
 
     assert status.state == "blocked"
+    assert status.bambuddy_auto_add is False
     assert store.state().saved_auto_add is True
 
 

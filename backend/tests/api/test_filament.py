@@ -890,6 +890,7 @@ def test_a_blocked_write_is_still_a_200(client: TestClient) -> None:
     assert blocked.status_code == 200, blocked.text
     body = blocked.json()
     assert body["state"] == "blocked"
+    assert body["bambuddy_auto_add"] is True  # what Bambuddy answered, never "off"
     assert "auth is on" in body["detail"]
     assert body["override_mode"] is True
     assert body["saved_auto_add"] is True
@@ -899,7 +900,9 @@ def test_a_blocked_write_is_still_a_200(client: TestClient) -> None:
         return_value=httpx.Response(200, json={"auto_add_unknown_rfid": True})
     )
     respx.get(f"{API}/spoolbuddy/devices").mock(return_value=httpx.Response(200, json=[]))
-    assert client.get(f"{RFID}/status").json()["state"] == "blocked"
+    status_now = client.get(f"{RFID}/status").json()
+    assert status_now["state"] == "blocked"
+    assert status_now["bambuddy_auto_add"] is True
 
 
 @respx.mock
@@ -1014,9 +1017,6 @@ def test_a_scan_over_the_limit_is_a_422(client: TestClient) -> None:
 @respx.mock
 def test_a_scan_that_times_out_is_a_200(client: TestClient) -> None:
     configure(client)
-    respx.get(f"{API}/auth/status").mock(
-        return_value=httpx.Response(200, json={"auth_enabled": False})
-    )
 
     async def nothing(self: object, *, timeout: float, device_id: str | None = None) -> None:
         return None

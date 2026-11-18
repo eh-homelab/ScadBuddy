@@ -4,11 +4,13 @@ is respx; every route and body is the one the recordings name
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from uuid import UUID
 
 import httpx
@@ -20,6 +22,7 @@ from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.models import Spool as BbSpool
 from scadbuddy.core.settings import FilamentSync
+from scadbuddy.filament import rfid_push
 from scadbuddy.filament.bambuddy_pull import pull
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.component import Filament
@@ -269,15 +272,26 @@ async def test_an_unbind_clears_only_a_known_holder(
     assert _pending(pg_pool) == []
 
 
+@pytest.mark.parametrize("order", ["old_first", "new_first", "tie"])
 @respx.mock
 async def test_a_rebind_across_kinds_never_clears_the_new_tag(
-    pg_pool: PgPool, client: BambuddyClient
+    pg_pool: PgPool, client: BambuddyClient, order: str
 ) -> None:
     f = _filament(pg_pool)
     spool = _spool(f, pg_pool, 11)
     _bind(f, spool, uid=UID)
     _bind(f, spool, tray=TRAY)
     assert len(_pending(pg_pool)) == 2
+    # The closed tag and the new one of one `bind_on` share ``queued_at`` (Plan F4); force
+    # that tie, and each order the drain could take them in.
+    skew = {"old_first": "-1 second", "new_first": "1 second", "tie": "0 seconds"}[order]
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_bb_tag_pending SET queued_at = '2026-11-17T12:00:00Z'")
+        conn.execute(
+            "UPDATE filament_bb_tag_pending p SET queued_at = queued_at + %s::interval"
+            " FROM filament_tags t WHERE t.id = p.tag_id AND t.tag_uid IS NOT NULL",
+            (skew,),
+        )
     by_tag = respx.get(f"{API}/inventory/spools/by-tag").mock(
         side_effect=lambda request: (
             httpx.Response(200, json=_bb(11, tag_uid=UID))
@@ -466,3 +480,112 @@ async def test_the_pull_after_a_push_changes_nothing(
     assert report.updated == 0
     after = f.spools.open_binding(spool)
     assert after is not None and after.id == before.id
+
+
+@respx.mock
+async def test_a_rebind_while_bambuddy_is_down_leaves_one_holder(
+    pg_pool: PgPool, client: BambuddyClient
+) -> None:
+    f = _filament(pg_pool)
+    a, b = _spool(f, pg_pool, 11), _spool(f, pg_pool, 12)
+    holders: dict[str, int] = {}
+
+    def by_tag(request: httpx.Request) -> httpx.Response:
+        held = holders.get(request.url.params["tag_uid"])
+        return (
+            httpx.Response(200, json=_bb(held, tag_uid=UID))
+            if held
+            else httpx.Response(404, json={"detail": "none"})
+        )
+
+    def link(request: httpx.Request) -> httpx.Response:
+        target = int(request.url.path.split("/")[-2])
+        held = holders.get(UID)
+        if held is not None and held != target:
+            detail = {
+                "code": "tag_already_linked",
+                "message": "taken",
+                "spool_id": held,
+                "field": "tag_uid",
+            }
+            return httpx.Response(409, json={"detail": detail})
+        holders[UID] = target
+        return httpx.Response(200, json=_bb(target, tag_uid=UID))
+
+    def clear(request: httpx.Request) -> httpx.Response:
+        holders.clear()
+        return httpx.Response(200, json=_bb(11))
+
+    by_tag_route = respx.get(f"{API}/inventory/spools/by-tag").mock(side_effect=by_tag)
+    respx.patch(url__regex=rf"{API}/inventory/spools/\d+/link-tag").mock(side_effect=link)
+    respx.patch(f"{API}/inventory/spools/11").mock(side_effect=clear)
+    _bind(f, a, uid=UID)
+    assert (await drain_tags(f, client)).pushed == 1
+    assert holders == {UID: 11}
+
+    # T moves to B while Bambuddy is down: the push fails and the row stays.
+    _bind(f, b, uid=UID)
+    by_tag_route.mock(side_effect=httpx.ConnectError("down"))
+    assert (await drain_tags(f, client)).failed == 1
+    assert holders == {UID: 11}
+    assert len(_pending(pg_pool)) == 1
+
+    # Bambuddy is up again: B's BB spool ends as the one holder; the old one is cleared.
+    by_tag_route.mock(side_effect=by_tag)
+    report = await drain_tags(f, client)
+    assert (report.moved, report.failed) == (1, 0)
+    assert holders == {UID: 12}
+    assert _pending(pg_pool) == []
+
+
+async def test_a_lock_attempt_cancelled_mid_thread_does_not_keep_the_lock(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    f = _filament(pg_pool)
+    name = "scadbuddy:test:cancelled-lock"
+    kept: list[object] = []  # no garbage collection hides a leaked connection
+    real = rfid_push.try_lock_on
+
+    def slow(conninfo: str, lock: str) -> psycopg.Connection[Any] | None:
+        time.sleep(0.4)
+        got = real(conninfo, lock)
+        kept.append(got)
+        return got
+
+    monkeypatch.setattr(rfid_push, "try_lock_on", slow)
+    task = asyncio.ensure_future(rfid_push.acquire_lock(f.spools.conninfo, name))
+    await asyncio.sleep(0.1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0.8)
+
+    monkeypatch.setattr(rfid_push, "try_lock_on", real)
+    again = rfid_push.try_lock_on(f.spools.conninfo, name)
+    assert again is not None
+    again.close()
+
+
+@respx.mock
+async def test_a_row_that_keeps_failing_does_not_starve_a_fresh_one(
+    pg_pool: PgPool, client: BambuddyClient
+) -> None:
+    f = _filament(pg_pool)
+    _bind(f, _spool(f, pg_pool, 11), uid=UID)
+    _bind(f, _spool(f, pg_pool, 12), uid=UID2)
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_bb_tag_pending p SET attempts = 5,"
+            " queued_at = queued_at - '1 hour'::interval"
+            " FROM filament_tags t WHERE t.id = p.tag_id AND t.tag_uid = %s",
+            (UID,),
+        )
+    _by_tag(None)
+    link = respx.patch(f"{API}/inventory/spools/12/link-tag").mock(
+        return_value=httpx.Response(200, json=_bb(12, tag_uid=UID2))
+    )
+
+    report = await drain_tags(f, client, limit=1)
+
+    assert (report.pushed, report.failed) == (1, 0)
+    assert link.call_count == 1

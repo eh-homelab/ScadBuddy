@@ -3,7 +3,9 @@ routes come from ``recordings/openapi/rfid-routes.json`` (Bambuddy 1.3.1)."""
 
 from __future__ import annotations
 
+import inspect
 import json
+import re
 import typing
 
 import httpx
@@ -257,8 +259,10 @@ async def test_cancel_write_posts_to_the_device_path(bambuddy: BambuddyClient) -
     assert route.call_count == 1
 
 
-def test_every_new_operation_is_a_declared_name() -> None:
-    used = {
+def test_every_operation_the_client_passes_is_a_declared_name() -> None:
+    passed = set(re.findall(r'operation="([a-z_.]+)"', inspect.getsource(client_module)))
+    declared = set(typing.get_args(Operation))
+    new = {
         "spools.link_tag",
         "spools.clear_tag",
         "spools.by_tag",
@@ -269,5 +273,5 @@ def test_every_new_operation_is_a_declared_name() -> None:
         "spoolbuddy.write_tag",
         "spoolbuddy.cancel_write",
     }
-    assert used <= set(typing.get_args(Operation))
-    assert client_module.Operation is Operation
+    assert new <= passed
+    assert passed <= declared

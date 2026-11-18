@@ -1,12 +1,15 @@
 """`/api/v1/filament` (#6261, epic #6260): ScadBuddy's own filament inventory. This
 module holds the catalogs a spool type or a spool picks from (plain reads and writes
 over `filament/catalog.py`), the spool types (`filament/types.py`), and the spools,
-their tags and their ledger (`filament/spools.py`, `filament/ledger.py`). Only the import
-(`POST /filament/bambuddy/import`, `filament/bambuddy_pull.py`) and a tag change
-(`POST /filament/spools/{id}/tags`, `filament/rfid_push.py`, #6264) and the SpoolBuddy
-NTAG routes (`filament/ntag.py`) reach Bambuddy; the import and the scan only read, the tag
-change writes to Bambuddy only with ``filament_sync.tags`` ``sb_to_bb``, and the NTAG write
-and cancel act on a SpoolBuddy device only when the caller asks."""
+their tags and their ledger (`filament/spools.py`, `filament/ledger.py`). Some routes reach
+Bambuddy. Only reads: the import (`POST /filament/bambuddy/import`,
+`filament/bambuddy_pull.py`), `GET /rfid/status` and `POST /rfid/scan`. Writes, each with its
+own rule: a tag change (`POST /filament/spools/{id}/tags`, its unbind, and the NTAG confirm,
+`filament/rfid_push.py`, #6264) tells Bambuddy only with ``filament_sync.tags`` ``sb_to_bb``;
+`PUT /rfid/override-mode` writes Bambuddy's auto-add setting (`filament/rfid_mode.py`) and
+`POST /rfid/reconcile` runs the mode, the tag push and the AMS slot configure of each override
+tag (`filament/rfid_slots.py`), whatever ``tags`` says; the NTAG write and cancel
+(`filament/ntag.py`) act on a SpoolBuddy device only when the caller asks."""
 
 from __future__ import annotations
 
@@ -988,12 +991,14 @@ async def move_spool(
         "left is a `bb` reading unless the spool's weight is locked. A BB spool whose tag a "
         "ScadBuddy spool holds, or whose record a ScadBuddy spool is linked to, is linked; any "
         "other becomes a new spool, typed by `material_number`, else by brand, material, "
-        "subtype, colour and label weight, else left to need a type. Never writes to Bambuddy. "
+        "subtype, colour and label weight, else left to need a type. A BB spool Bambuddy added "
+        "for a tag a linked ScadBuddy spool holds makes no spool (`rfid_duplicates` and "
+        "`rfid_duplicate_bb_ids` name it, and it stays skipped). Never writes to Bambuddy. "
         "An archived ScadBuddy spool is never restored or changed; it is listed as `archived`. "
         "The ledger events name the caller. Answers the counts and ids made, linked, changed, "
-        "still needing a type and archived, the BB spool ids it could not pull, and the count "
-        "(and ids) of BB rows it could not read. 409 when no Bambuddy is configured; "
-        "Bambuddy's own errors as they come."
+        "still needing a type and archived, the BB spool ids it could not pull, the count "
+        "(and ids) of BB rows it could not read, and the duplicates it skipped. 409 when no "
+        "Bambuddy is configured; Bambuddy's own errors as they come."
     ),
 )
 async def import_bambuddy(
@@ -1058,13 +1063,30 @@ async def set_rfid_override_mode(
 async def reconcile_rfid(
     filament: FilamentDep, store: SettingsStoreDep, printers: PrintersDep
 ) -> m.RfidReconcileReport:
-    mode = await reconcile_mode_now(filament.rfid, store.load)
-    tags = await push_pending(
-        filament, store.load, lambda: store.read({"filament_sync"})["filament_sync"]
-    )
-    slots = await reconcile_slots_now(
-        filament, store.load, printers=printers.store, reports=printers.reports
-    )
+    # Each step fails alone, as in the activity: one broken step never skips the others.
+    try:
+        mode = await reconcile_mode_now(filament.rfid, store.load)
+    except Exception as error:
+        logger.warning("could not reconcile the RFID mode", extra={"error": type(error).__name__})
+        try:
+            on = (await asyncio.to_thread(filament.rfid.state)).override_mode
+        except Exception:
+            on = False
+        mode = m.RfidStatus(override_mode=on, state="pending", detail="internal")
+    try:
+        tags = await push_pending(
+            filament, store.load, lambda: store.read({"filament_sync"})["filament_sync"]
+        )
+    except Exception as error:
+        logger.warning("could not push the tags", extra={"error": type(error).__name__})
+        tags = m.TagPushReport(failed=1)
+    try:
+        slots = await reconcile_slots_now(
+            filament, store.load, printers=printers.store, reports=printers.reports
+        )
+    except Exception as error:
+        logger.warning("could not configure the slots", extra={"error": type(error).__name__})
+        slots = m.SlotReport(failed=1)
     return m.RfidReconcileReport(mode=mode, tags=tags, slots=slots)
 
 
