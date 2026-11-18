@@ -27,8 +27,11 @@ import { ready, type RouteModule } from './module.js'
 //   409  `import_running` + `session_id`: a live session already imports it (Review Focus 2);
 //        the page opens that session. A session that is done, failed, archived or gone is dead,
 //        and a new import replaces it
+//   422  `unreadable_file`: the bytes are not the type the invoice names
 //   422  the invoice has no file, or a file type ScadBuddy cannot read (the person's own sentence
 //        as `detail`, Review Focus 5)
+//   502  `upstream_error`, no `session_id`: a rival linked its session during the race and has since
+//        closed; it is not handed to the page, and a retry starts a clean import
 //   502  the session started but could not be linked (`session_id` names it): it is archived,
 //        and it ran no turn; a retry then starts a clean one
 //
@@ -59,6 +62,7 @@ const ENDED = new Set(['done', 'failed'])
 const FORWARDED = new Set([404, 422])
 
 const megabytes = (bytes: number) => `${(Math.floor(bytes / 100_000) / 10).toFixed(1)} MB`
+const UNREADABLE = 'This file is not a readable PDF or photo. Upload it again or use another file.'
 const TOO_LARGE =
   `This file is too large for the assistant to read. It can read at most ${megabytes(IMAGE_BYTES_MAX)} for a photo ` +
   `and ${megabytes(PDF_BYTES_MAX)} for a PDF. Upload a smaller photo or a PDF.`
@@ -96,7 +100,10 @@ export function registerInvoiceImportRoutes(app: Hono, deps: InvoiceImportDeps):
     }
   }
 
-  /** Whether session `id` still takes messages. A session this person cannot see is as good as gone. */
+  /**
+   * Whether session `id` still takes messages. Every browser principal is one person (#4975 D8),
+   * so a live session is always the caller's.
+   */
   async function live(sessions: SessionManager, id: string, owner: ReturnType<typeof browserUser>): Promise<boolean> {
     try {
       const session = await sessions.get(id, owner)
@@ -147,7 +154,10 @@ export function registerInvoiceImportRoutes(app: Hono, deps: InvoiceImportDeps):
     })
     if (file.error !== undefined || !file.data) return upstream(file.response.status, 'read the invoice file')
     const attachments = checkedAttachments([{ mediaType, bytes: Buffer.from(file.data as ArrayBuffer), fileName: invoice.file.name }])
-    if (!attachments.ok) return answer(422, { detail: attachments.error })
+    if (!attachments.ok) {
+      console.error(`invoice import: the file of invoice ${invoiceId} was refused: ${attachments.error}`)
+      return answer(422, { detail: UNREADABLE, type: 'unreadable_file' })
+    }
 
     // No prompt: no turn runs until the link is claimed, so a lost claim never runs an agent.
     const { session } = await sessions.start(owner, {
@@ -175,7 +185,11 @@ export function registerInvoiceImportRoutes(app: Hono, deps: InvoiceImportDeps):
       const now = await backend.GET('/api/v1/filament/invoices/{invoice_id}', { params: { path: { invoice_id: invoiceId } } })
       const winner = now.data?.import_run_id
       if (now.data?.status === 'confirmed') return answer(409, { detail: 'This invoice is confirmed. There is nothing left to import.', type: 'confirmed' })
-      if (winner) return answer(409, { detail: 'This invoice is already being imported. Open its session.', type: 'import_running', session_id: winner })
+      if (winner) {
+        // A closed rival is not handed to the page: it would open a dead session.
+        if (!(await live(sessions, winner, owner))) return answer(502, { detail: 'The import could not start. Try again.', type: 'upstream_error' })
+        return answer(409, { detail: 'This invoice is already being imported. Open its session.', type: 'import_running', session_id: winner })
+      }
     }
     console.error(`invoice import: the backend answered HTTP ${linked.response.status} linking session ${session.id} to invoice ${invoiceId}`)
     return answer(502, {

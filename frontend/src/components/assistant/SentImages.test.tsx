@@ -122,6 +122,13 @@ describe('sent images (#1891)', () => {
     for (const src of sources) expect(src).not.toMatch(/^data:/)
   })
 
+  it('counts images only, so a PDF does not make "Image 1 of 1" read "Image 2 of 2"', () => {
+    const pdf = { name: `${'c'.repeat(64)}.pdf`, mediaType: 'application/pdf' as const }
+    render(<SentImages images={[pdf, preview('a')]} sessionId={SESSION} />)
+    expect(screen.getByRole('button', { name: 'View image 1 of 1 larger' })).toBeInTheDocument()
+    expect(screen.getByRole('img', { name: 'Image 1 of 1' })).toBeInTheDocument()
+  })
+
   it('opens from the keyboard and shows the preview enlarged for a turn that names no stored image', async () => {
     const user = userEvent.setup()
     render(<SentImages images={[preview('a'), preview('b')]} sessionId={SESSION} />)
