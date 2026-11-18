@@ -24,8 +24,13 @@ from temporalio.worker import Worker
 from scadbuddy.spools.activities import capture_backstop_activity, spool_activities
 from scadbuddy.workflows.spool_refresh import (
     CAPTURE_ACTIVITY,
+    CAPTURE_TIMEOUT,
     FILAMENT_PULL_ACTIVITY,
+    FILAMENT_PULL_TIMEOUT,
+    FILAMENT_RFID_ACTIVITY,
+    FILAMENT_RFID_TIMEOUT,
     HELD_ACTIVITY,
+    HELD_TIMEOUT,
     LIST_ACTIVITY,
     PROVIDER_ACTIVITY,
     RUN_TIMEOUT,
@@ -40,6 +45,13 @@ from tests.support.temporal import temporal_client, terminate_open_workflows
 pytestmark = pytest.mark.requires_temporal
 
 
+def test_the_step_budgets_fit_in_one_run() -> None:
+    steps = HELD_TIMEOUT + FILAMENT_PULL_TIMEOUT + CAPTURE_TIMEOUT + FILAMENT_RFID_TIMEOUT
+    assert steps <= RUN_TIMEOUT
+    # The rfid activity is mode, push and slots in one budget: more than the old 3 minutes.
+    assert timedelta(minutes=6) <= FILAMENT_RFID_TIMEOUT
+
+
 @pytest.fixture
 async def client() -> AsyncIterator[Client]:
     async with temporal_client() as connected:
@@ -51,7 +63,7 @@ def _queue() -> str:
 
 
 def fakes(
-    *, held_fails: bool = False, capture_fails: bool = False
+    *, held_fails: bool = False, capture_fails: bool = False, rfid_fails: bool = False
 ) -> tuple[list[object], list[str]]:
     calls: list[str] = []
 
@@ -88,7 +100,14 @@ def fakes(
             raise RuntimeError("the ledger is down")
         return "captured"
 
-    return [names, refresh, seen, held, pull, capture], calls
+    @activity.defn(name=FILAMENT_RFID_ACTIVITY)
+    async def rfid() -> str:
+        calls.append("rfid")
+        if rfid_fails:
+            raise RuntimeError("Bambuddy is down")
+        return "done"
+
+    return [names, refresh, seen, held, pull, capture, rfid], calls
 
 
 async def test_a_run_keeps_the_presets_then_pulls(client: Client) -> None:
@@ -102,7 +121,7 @@ async def test_a_run_keeps_the_presets_then_pulls(client: Client) -> None:
             SpoolRefresh.run, id=f"spools-{uuid.uuid4().hex}", task_queue=queue
         )
     assert outcome == {}
-    assert calls == ["held", "pull", "capture"]
+    assert calls == ["held", "pull", "capture", "rfid"]
 
 
 async def test_a_failed_step_never_stops_the_next(client: Client) -> None:
@@ -115,7 +134,7 @@ async def test_a_failed_step_never_stops_the_next(client: Client) -> None:
             SpoolRefresh.run, id=f"spools-{uuid.uuid4().hex}", task_queue=queue
         )
     assert outcome == {}
-    assert calls == ["held", "pull", "capture"]
+    assert calls == ["held", "pull", "capture", "rfid"]
 
 
 async def test_a_failed_backstop_still_completes_the_run(client: Client) -> None:
@@ -126,7 +145,18 @@ async def test_a_failed_backstop_still_completes_the_run(client: Client) -> None
             SpoolRefresh.run, id=f"spools-{uuid.uuid4().hex}", task_queue=queue
         )
     assert outcome == {}
-    assert calls == ["held", "pull", "capture"]
+    assert calls == ["held", "pull", "capture", "rfid"]
+
+
+async def test_a_failed_tag_push_still_completes_the_run(client: Client) -> None:
+    activities, calls = fakes(rfid_fails=True)
+    queue = _queue()
+    async with Worker(client, task_queue=queue, workflows=[SpoolRefresh], activities=activities):  # type: ignore[arg-type]
+        outcome = await client.execute_workflow(
+            SpoolRefresh.run, id=f"spools-{uuid.uuid4().hex}", task_queue=queue
+        )
+    assert outcome == {}
+    assert calls == ["held", "pull", "capture", "rfid"]
 
 
 async def test_the_backstop_activity_answers_captured_or_failed(

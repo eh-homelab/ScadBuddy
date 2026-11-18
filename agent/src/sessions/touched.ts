@@ -729,6 +729,13 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'filament_spool_move',
   'filament_bambuddy_import',
   'filament_spool_import',
+  // #6264: the RFID override mode, its reconcile and the NTAG write calls touch the filament
+  // inventory (or a SpoolBuddy reader), and none is a recorded resource kind.
+  'filament_rfid_override_mode',
+  'filament_rfid_reconcile',
+  'filament_spool_ntag_write',
+  'filament_spool_ntag_confirm',
+  'filament_spool_ntag_cancel',
   // Purchasing (#6266: suppliers, products, price points, invoices, the shopping list) is
   // no recorded resource kind either; an invoice's spools are in each spool's ledger.
   'filament_supplier_upsert',

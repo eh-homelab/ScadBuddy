@@ -14,6 +14,7 @@ callers that miss one key at once share one read.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -50,31 +51,45 @@ class DialogReads:
         self._clock = clock
         self._max_entries = max_entries
         self._entries: dict[_Key, tuple[float, _Value]] = {}
-        #: The read under way for each key. Its result is ``None`` when it failed, so
-        #: each caller that waited on it reads for itself.
-        self._reading: dict[_Key, asyncio.Future[_Value | None]] = {}
+        #: The read under way for each key, and what it ended with: the answer, the
+        #: error it raised, or ``None`` when its own caller was cancelled.
+        self._reading: dict[_Key, asyncio.Future[_Value | Exception | None]] = {}
 
     async def get[T: BaseModel | list[Printer]](
         self, config: BambuddyConfig, kind: str, item: int, read: Callable[[], Awaitable[T]]
     ) -> T:
         """What ``read`` answered for this key less than the TTL ago, else a new read,
         kept if it succeeds. A caller that misses while another reads the key waits for
-        that read (#6618). Each caller gets its own copy, so one caller's change to an
-        answer never reaches another's."""
+        that read (#6618) and gets its answer or its error; when that read's own caller
+        was cancelled, the waiters share one new read (#6622). Each caller gets its own
+        copy, so one caller's change to an answer never reaches another's."""
         key = (config.base_url, _scope(config.api_key), kind, item)
         hit = self._entries.get(key)
         if hit is not None and hit[0] > self._clock():
             return _copy(hit[1])  # type: ignore[return-value]
-        under_way = self._reading.get(key)
-        if under_way is not None:
+        while (under_way := self._reading.get(key)) is not None:
             # The shield keeps a waiter's cancel from cancelling the shared read.
             shared = await asyncio.shield(under_way)
+            if isinstance(shared, Exception):
+                # The same Bambuddy and key: a read of its own would fail the same way.
+                own = _own_copy(shared)
+                if own is None:
+                    # This waiter shares the error object, and so its traceback, with
+                    # the others (#6635): the case #6627 fixes only for an error that
+                    # can be rebuilt.
+                    raise shared
+                raise own from shared
             if shared is not None:
                 return _copy(shared)  # type: ignore[return-value]
-        reading: asyncio.Future[_Value | None] = asyncio.get_running_loop().create_future()
+        reading: asyncio.Future[_Value | Exception | None] = (
+            asyncio.get_running_loop().create_future()
+        )
         self._reading[key] = reading
         try:
             value = await read()
+        except Exception as error:
+            reading.set_result(error)
+            raise
         except BaseException:
             reading.set_result(None)
             raise
@@ -102,6 +117,23 @@ def _scope(api_key: str | None) -> str:
     """The key's scope as a digest: two keys never share a read, and the key itself is
     not kept a second time."""
     return hashlib.sha256((api_key or "").encode()).hexdigest()
+
+
+def _own_copy(error: Exception) -> Exception | None:
+    """A new ``error`` of the same class and args, with a shallow copy of each field, for
+    one waiter to raise: a shared object would collect every waiter's frames in one
+    traceback (#6627), and a shared field would carry one waiter's change to the others.
+    ``copy.copy`` cannot do it, because it calls ``__init__`` with ``args`` alone, which
+    `ApiError` refuses. ``None`` when the class cannot be rebuilt this way (a pydantic
+    ``ValidationError``'s ``__new__`` needs more than its args, and it has no
+    ``__dict__``): the waiter then raises the shared error itself."""
+    try:
+        own = type(error).__new__(type(error), *error.args)
+        own.args = error.args
+        own.__dict__.update({name: copy.copy(field) for name, field in vars(error).items()})
+    except Exception:
+        return None
+    return own
 
 
 def _copy[T: BaseModel | list[Printer]](value: T) -> T:

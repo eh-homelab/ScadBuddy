@@ -30,7 +30,13 @@ this order:
    by identity (brand, material, subtype, colour, label weight), else none (it needs a
    type) and BB's values as its own. A spool with a type overrides only what BB says
    differently. It takes BB's tags unless another linked spool holds them, a
-   ``created`` event with a ``bb`` reading of what is left, and its link.
+   ``created`` event with a ``bb`` reading of what is left, and its link. A BB spool whose
+   tag keys an SB spool holds through an open binding (override or not), where that spool
+   is already linked to another BB spool, is one Bambuddy added itself for the tag (#6264):
+   it makes no SB spool, and is counted in ``PullReport.rfid_duplicates``. It is remembered
+   (``filament_bb_ignored``), so it stays skipped after the push cleared its tag. A tag with
+   a tray UUID binds as ``bambu_mifare``; one BB read as OpenTag3D
+   (``data_origin == "opentag3d"``) as ``ntag_opentag``; any other as ``other``.
 
 Catalog names from BB (material, subtype, brand, category, effect) resolve by their upper
 case name, and are added when missing. BB's spool catalog (``GET /inventory/catalog``,
@@ -131,6 +137,8 @@ _NOT_COLUMNS = frozenset(
 #: The catalog entries already warned about as skipped, so a clash is told once a process.
 _WARNED_SKIPS: set[tuple[int, str]] = set()
 _WARNED_SKIPS_MAX = 1000
+#: The BB spools already warned about as duplicates, so each is told once a process.
+_WARNED_DUPLICATES: set[int] = set()
 
 Outcome = Literal["pulled", "skipped", "failed"]
 
@@ -142,7 +150,9 @@ class PullReport(BaseModel):
     back); and the BB rows it could not read (each logged), with their ids when the row
     had one; whether BB's spool catalog failed (all or nothing: then no entry was mapped),
     and how many of its entries were skipped (no name or weight, or a name another type
-    has), so a spool naming one gets no insert type."""
+    has), so a spool naming one gets no insert type; and the BB spools it left alone
+    because they are Bambuddy's copy of a tag a linked SB spool holds
+    (``rfid_duplicates``, with their ids)."""
 
     created: int = 0
     linked: int = 0
@@ -164,6 +174,9 @@ class PullReport(BaseModel):
     #: spool is linked to (`bambuddy_usage.py`).
     usage_booked: int = 0
     usage_unlinked: int = 0
+    #: BB spools made for a tag a linked SB spool holds: no SB spool is made.
+    rfid_duplicates: int = 0
+    rfid_duplicate_bb_ids: list[int] = Field(default_factory=list)
 
 
 def _text(value: str | None) -> str | None:
@@ -255,11 +268,16 @@ def pull(
         if outcome is None:
             continue
         what, spool_id, typeless = outcome
+        if what == "duplicate":
+            report.rfid_duplicate_bb_ids.append(bb.id)
+            continue
+        assert spool_id is not None  # only a skipped duplicate has none
         getattr(report, f"{what}_ids").append(spool_id)
         if typeless:
             report.needs_type_ids.append(spool_id)
     for what in ("created", "linked", "updated", "needs_type", "archived"):
         setattr(report, what, len(getattr(report, f"{what}_ids")))
+    report.rfid_duplicates = len(report.rfid_duplicate_bb_ids)
     return report
 
 
@@ -339,7 +357,7 @@ def _core_insert_type(conn: Conn, bb: BbSpool) -> UUID | None:
 
 def _one(
     conn: Conn, store: Filament, bb: BbSpool, now: datetime, actor: str
-) -> tuple[str, UUID, bool] | None:
+) -> tuple[str, UUID | None, bool] | None:
     """What came of one BB spool. An archived SB spool, linked or named by the BB
     record's link, is left as it is: never restored, never written to (``archived``)."""
     link = conn.execute(
@@ -368,6 +386,29 @@ def _one(
         _book(conn, held_id, bb, actor)
         _bb_presets(conn, held_id, bb, actor)
         return "linked", held_id, typeless
+    linked_holder = _linked_holder(conn, after)
+    if linked_holder is not None:
+        if len(_WARNED_DUPLICATES) > _WARNED_SKIPS_MAX:
+            _WARNED_DUPLICATES.clear()
+        log = logger.debug if bb.id in _WARNED_DUPLICATES else logger.warning
+        _WARNED_DUPLICATES.add(bb.id)
+        log(
+            "a Bambuddy spool made for a tag a linked spool holds is left alone",
+            extra={"bb_spool_id": bb.id, "holder": str(linked_holder)},
+        )
+        conn.execute(
+            "INSERT INTO filament_bb_ignored (bb_spool_id, reason, tag_uid, tray_uuid)"
+            " VALUES (%s, 'rfid_duplicate', %s, %s) ON CONFLICT (bb_spool_id) DO NOTHING",
+            (bb.id, after["tag_uid"], after["tray_uuid"]),
+        )
+        return "duplicate", linked_holder, False
+    ignored = conn.execute(
+        "SELECT 1 FROM filament_bb_ignored WHERE bb_spool_id = %s", (bb.id,)
+    ).fetchone()
+    if ignored is not None:
+        # Skipped as a duplicate once; the push has since cleared its tag, so no holder
+        # shows, but it is still the spool Bambuddy added for a tag SB holds.
+        return "duplicate", None, False
     made, typeless = _create(conn, store, bb, after, now, actor)
     _book(conn, made, bb, actor)
     _bb_presets(conn, made, bb, actor)
@@ -513,6 +554,25 @@ def _holder(conn: Conn, after: dict[str, Any], bb_id: int) -> tuple[UUID, bool] 
     return None
 
 
+def _linked_holder(conn: Conn, after: dict[str, Any]) -> UUID | None:
+    """The unarchived SB spool, linked to another BB spool, that holds the BB spool's tag
+    keys through an open binding (override or not): Bambuddy added this BB spool itself
+    for that tag (#6264), and a second SB spool for one physical spool is never right."""
+    uid, tray = after["tag_uid"], after["tray_uuid"]
+    if uid is None and tray is None:
+        return None
+    row = conn.execute(
+        "SELECT b.spool_id FROM filament_tag_bindings b JOIN filament_tags t ON t.id = b.tag_id"
+        " JOIN filament_spools s ON s.id = b.spool_id"
+        " WHERE b.unbound_at IS NULL AND s.archived_at IS NULL"
+        " AND (t.tag_uid = %s OR t.tray_uuid = %s)"
+        " AND EXISTS (SELECT 1 FROM filament_bb_links l WHERE l.spool_id = b.spool_id)"
+        " ORDER BY b.bound_at, b.id LIMIT 1",
+        (uid, tray),
+    ).fetchone()
+    return None if row is None else row["spool_id"]
+
+
 def _link(
     conn: Conn,
     store: Filament,
@@ -637,7 +697,7 @@ def _create(
         actor=actor,
         at=bb.updated_at,
     )
-    _bind(conn, spool_id, after, actor)
+    _bind(conn, spool_id, after, bb.data_origin, actor)
     _insert_link(conn, spool_id, bb, now)
     # A lock BB set is BB's to clear (`_lock_from_bb`).
     locked = {"weight_locked": [False, True]} if values.get("weight_locked") else {}
@@ -646,7 +706,9 @@ def _create(
     return spool_id, kind is None
 
 
-def _bind(conn: Conn, spool_id: UUID, after: dict[str, Any], actor: str) -> None:
+def _bind(
+    conn: Conn, spool_id: UUID, after: dict[str, Any], data_origin: str | None, actor: str
+) -> None:
     """Put BB's tag on the spool, unless another unarchived spool still holds it (one
     linked to another BB spool, which step 2 did not take): a pull never takes a tag off
     a live spool it did not pull it for. An archived spool's tag is taken (re-use)."""
@@ -662,10 +724,16 @@ def _bind(conn: Conn, spool_id: UUID, after: dict[str, Any], actor: str) -> None
             extra={"spool_id": str(spool_id), "holder": str(held[0]["spool_id"])},
         )
         return
-    kind: m.TagKind = "bambu_mifare" if tray is not None else "other"
+    kind: m.TagKind = (
+        "bambu_mifare"
+        if tray is not None
+        else "ntag_opentag"
+        if data_origin == "opentag3d"
+        else "other"
+    )
     try:
         with conn.transaction():
-            FilamentSpoolStore.bind_on(conn, spool_id, uid, tray, kind, False, actor)
+            FilamentSpoolStore.bind_on(conn, spool_id, uid, tray, kind, None, actor)
     except TagKeysClashError:
         logger.warning(
             "a Bambuddy spool's tag keys name two tags; not bound",
@@ -793,7 +861,7 @@ def _update(
             [*(changes[c][1] for c in columns), spool_id],
         )
     if retag:
-        _bind(conn, spool_id, after, actor)
+        _bind(conn, spool_id, after, bb.data_origin, actor)
     reading = after["remaining_g"]
     locked = bool(changes.get("weight_locked", [None, spool.weight_locked])[1])
     weight: str | None = None

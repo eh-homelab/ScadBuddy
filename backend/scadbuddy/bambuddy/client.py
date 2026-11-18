@@ -20,6 +20,7 @@ optional is omitted rather than sent as an explicit ``null``.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
@@ -28,15 +29,19 @@ from dataclasses import dataclass
 from datetime import date
 from types import TracebackType
 from typing import IO, Any, Literal, Self
+from urllib.parse import quote
 
 import httpx
 from fastapi import status
 from opentelemetry.trace import Span, SpanKind
 from pydantic import BaseModel, ValidationError
+from websockets.asyncio.client import connect as ws_connect
+from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketException
 
 from scadbuddy.bambuddy.errors import (
     REJECTED_PROBLEM,
     Scope,
+    TagAlreadyLinkedError,
     UpstreamAnswer,
     map_response,
     map_transport,
@@ -81,11 +86,14 @@ from scadbuddy.bambuddy.models import (
     SliceJob,
     SliceJobAccepted,
     SliceRequest,
+    SlotConfigure,
     Spool,
     SpoolAssignment,
+    SpoolBuddyDevice,
     SpoolCatalogEntry,
     SpoolFilamentPreset,
     SpoolUsage,
+    TagScan,
     TimelapseInfo,
     TimelapseThumbnails,
     TrashedLibraryFile,
@@ -164,6 +172,7 @@ Operation = Literal[
     "archives.timelapse.thumbnails",
     "auth.me",
     "auth.status",
+    "auth.ws_token",
     "external_links.create",
     "external_links.list",
     "external_links.update",
@@ -211,6 +220,7 @@ Operation = Literal[
     "printers.inventory_remain",
     "printers.list",
     "printers.read",
+    "printers.slot_configure",
     "printers.status",
     "projects.add_archives",
     "projects.add_queue",
@@ -221,6 +231,7 @@ Operation = Literal[
     "queue.list",
     "queue.read",
     "settings.read",
+    "settings.update",
     "slice.job.status",
     "slice.start",
     "slicer.local_preset",
@@ -230,10 +241,18 @@ Operation = Literal[
     "slicer.presets",
     "spools.assign",
     "spools.assignments",
+    "spools.by_tag",
+    "spools.clear_tag",
+    "spools.link_tag",
+    "spools.read",
     "spools.catalog",
     "spools.filament_presets",
     "spools.list",
     "spools.usage",
+    "spoolbuddy.cancel_write",
+    "spoolbuddy.devices",
+    "spoolbuddy.scan",
+    "spoolbuddy.write_tag",
     "version",
     "virtual_printers.create",
     "virtual_printers.delete",
@@ -242,6 +261,37 @@ Operation = Literal[
     "virtual_printers.read",
     "virtual_printers.update",
 ]
+
+
+#: The close code Bambuddy's WebSocket gives a join with no valid token
+#: (``_WS_CLOSE_UNAUTHORIZED`` in ``routes/websocket.py``, v1.3.1).
+_WS_UNAUTHORISED = 4401
+#: Seconds websockets waits for the opening handshake.
+WS_OPEN_TIMEOUT = 10.0
+#: websockets logs its request line, ``?token=`` included, at DEBUG; this logger drops it.
+_WS_LOGGER = logging.getLogger("scadbuddy.bambuddy.ws")
+_WS_LOGGER.setLevel(logging.WARNING)
+_SCAN_FRAMES = frozenset({"spoolbuddy_tag_matched", "spoolbuddy_unknown_tag"})
+
+
+def _tag_scan(raw: str | bytes, device_id: str | None) -> TagScan | None:
+    """The scan a WebSocket frame carries, or ``None`` for any other frame, one of
+    another device or one that is not JSON."""
+    try:
+        frame = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(frame, dict) or frame.get("type") not in _SCAN_FRAMES:
+        return None
+    if device_id is not None and frame.get("device_id") != device_id:
+        return None
+    spool = frame.get("spool")
+    matched = frame["type"] == "spoolbuddy_tag_matched" and isinstance(spool, dict)
+    bb_spool_id = spool.get("id") if isinstance(spool, dict) and matched else None
+    try:
+        return TagScan.model_validate({**frame, "bb_spool_id": bb_spool_id})
+    except ValidationError:
+        return None
 
 
 def _call_span(
@@ -549,6 +599,97 @@ class BambuddyClient:
             return None
         enabled = body.get("auth_enabled") if isinstance(body, dict) else None
         return enabled if isinstance(enabled, bool) else None
+
+    async def ws_token(self) -> str | None:
+        """A token for Bambuddy's WebSocket, or ``None`` when its auth is off (the socket
+        then takes no token: ``routes/websocket.py`` lines 101-135, v1.3.1).
+        ``POST /api/v1/auth/ws-token`` (``WEBSOCKET_CONNECT``, which ``can_read_status``
+        covers: Read Status; ``routes/auth.py`` line 670, v1.3.1) answers ``{"token": ...}``,
+        valid for 60 minutes. An unreadable auth status counts as on, and a refusal then
+        says so."""
+        enabled = await self.auth_enabled()
+        if enabled is False:
+            return None
+        what = "mint a WebSocket token"
+        try:
+            response = await self._send(
+                "POST",
+                "/auth/ws-token",
+                scope=Scope.READ_STATUS,
+                operation="auth.ws_token",
+                what=what,
+            )
+        except ApiError as error:
+            if enabled is not None:
+                raise
+            unread = ApiError(
+                error.status,
+                f"{error.detail}. Bambuddy's auth status could not be read, so a token was"
+                " tried in case its auth is on",
+                title=error.title,
+                type_=error.type,
+                headers=error.headers,
+                **error.extensions,
+            )
+            unread.upstream = error.upstream
+            raise unread from error
+        body = response.json()
+        token = body.get("token") if isinstance(body, dict) else None
+        if not isinstance(token, str) or not token:
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Bambuddy answered no token when asked to {what}",
+            )
+        return token
+
+    def _ws_url(self, token: str | None) -> str:
+        scheme, _, rest = self.config.base_url.partition("://")
+        url = f"{'wss' if scheme == 'https' else 'ws'}://{rest}{API_PREFIX}/ws"
+        return url if token is None else f"{url}?token={quote(token, safe='')}"
+
+    async def next_tag_scan(
+        self, *, timeout: float, device_id: str | None = None
+    ) -> TagScan | None:
+        """Wait up to ``timeout`` seconds, token mint and connect included, for a SpoolBuddy
+        reader to read a tag, on ``WS /api/v1/ws`` (``?token=`` from :meth:`ws_token` with
+        Bambuddy's auth on). The socket is sent nothing; every frame is read and all but
+        ``spoolbuddy_tag_matched`` and ``spoolbuddy_unknown_tag`` (of ``device_id``, when
+        given) are ignored. ``None`` only when that deadline passes. A refused join is the
+        scope 409 of ``map_response`` (Read Status); a connect that times out, or a close
+        before any tag, is the 502 or 504 of ``map_transport``."""
+        what = "listen for a SpoolBuddy tag scan"
+        deadline = asyncio.timeout(timeout)
+        with _call_span("spoolbuddy.scan", "GET", Scope.READ_STATUS):
+            try:
+                async with deadline:
+                    token = await self.ws_token()
+                    async with ws_connect(
+                        self._ws_url(token),
+                        logger=_WS_LOGGER,
+                        open_timeout=WS_OPEN_TIMEOUT,
+                        # Like httpx, the socket follows the proxy environment
+                        # (HTTP_PROXY, NO_PROXY); websockets 15+ takes it from here.
+                        proxy=True,
+                    ) as socket:
+                        async for raw in socket:
+                            scan = _tag_scan(raw, device_id)
+                            if scan is not None:
+                                return scan
+                    raise map_transport(httpx.ReadError("the socket closed"), what=what)
+            except TimeoutError as error:
+                if deadline.expired():
+                    return None
+                raise map_transport(httpx.ConnectTimeout("connect timed out"), what=what) from error
+            except InvalidStatus as error:
+                refused = httpx.Response(error.response.status_code)
+                raise map_response(refused, scope=Scope.READ_STATUS, what=what) from error
+            except ConnectionClosed as error:
+                if error.rcvd is not None and error.rcvd.code == _WS_UNAUTHORISED:
+                    unauthorised = httpx.Response(status.HTTP_401_UNAUTHORIZED)
+                    raise map_response(unauthorised, scope=Scope.READ_STATUS, what=what) from error
+                raise map_transport(httpx.ReadError(type(error).__name__), what=what) from error
+            except (OSError, WebSocketException) as error:
+                raise map_transport(httpx.ConnectError(type(error).__name__), what=what) from error
 
     async def printer_status(self, printer_id: int) -> PrinterStatus:
         """Live MQTT state: nozzles, AMS trays and the inlet each AMS is switched to."""
@@ -1812,6 +1953,198 @@ class BambuddyClient:
                 " older than the setting",
             )
         return value
+
+    # --- tags, auto-add, slots and SpoolBuddy (#6264) -------------------------
+
+    async def link_tag(
+        self,
+        spool_id: int,
+        *,
+        tag_uid: str | None,
+        tray_uuid: str | None,
+        tag_type: str | None = None,
+        data_origin: str = "nfc_link",
+    ) -> Spool:
+        """``PATCH /api/v1/inventory/spools/{id}/link-tag`` (``INVENTORY_UPDATE``: Manage
+        Inventory; ``routes/inventory.py`` line 2771, maziggy/bambuddy v1.3.1). A 409
+        ``tag_already_linked`` (``services/tag_conflict.py`` lines 24-40) raises
+        `TagAlreadyLinkedError` naming the holder; any other 409 maps as any refusal."""
+        what = f"link a tag to spool {spool_id}"
+        response = await self._send(
+            "PATCH",
+            f"/inventory/spools/{spool_id}/link-tag",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="spools.link_tag",
+            what=what,
+            json={
+                "tag_uid": tag_uid,
+                "tray_uuid": tray_uuid,
+                "tag_type": tag_type,
+                "data_origin": data_origin,
+            },
+            passthrough=frozenset({status.HTTP_409_CONFLICT}),
+        )
+        if response.status_code == status.HTTP_409_CONFLICT:
+            raise self._tag_conflict(response, what=what)
+        return Spool.model_validate(response.json())
+
+    @staticmethod
+    def _tag_conflict(response: httpx.Response, *, what: str) -> ApiError:
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        detail = body.get("detail") if isinstance(body, dict) else None
+        if isinstance(detail, dict) and detail.get("code") == "tag_already_linked":
+            holder = detail.get("spool_id")
+            field = detail.get("field")
+            if isinstance(holder, int) and field in ("tag_uid", "tray_uuid"):
+                message = detail.get("message")
+                return TagAlreadyLinkedError(
+                    message if isinstance(message, str) else "the tag is already linked",
+                    holder_id=holder,
+                    field=field,
+                )
+        return map_response(response, scope=Scope.MANAGE_INVENTORY, what=what)
+
+    async def clear_spool_tag(self, spool_id: int) -> Spool:
+        """``PATCH /api/v1/inventory/spools/{id}`` with both identifiers null
+        (``SpoolUpdate``; ``routes/inventory.py`` line 1693, v1.3.1): Manage Inventory."""
+        response = await self._send(
+            "PATCH",
+            f"/inventory/spools/{spool_id}",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="spools.clear_tag",
+            what=f"clear the tag of spool {spool_id}",
+            json={"tag_uid": None, "tray_uuid": None},
+        )
+        return Spool.model_validate(response.json())
+
+    async def spool_by_tag(self, *, tray_uuid: str | None, tag_uid: str | None) -> Spool | None:
+        """``GET /api/v1/inventory/spools/by-tag``: the spool holding the tag, or ``None``
+        on Bambuddy's 404 (``routes/inventory.py`` line 1560, v1.3.1). Bambuddy accepts
+        ``inventory:read`` or ``inventory:update`` there, so a Read Status or a Manage
+        Inventory key opens it; the scope names Manage Inventory, which the push needs for
+        its writes anyway."""
+        response = await self._send(
+            "GET",
+            "/inventory/spools/by-tag",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="spools.by_tag",
+            what="find the spool of a tag",
+            params={
+                key: value
+                for key, value in (("tray_uuid", tray_uuid), ("tag_uid", tag_uid))
+                if value is not None
+            },
+            passthrough=frozenset({status.HTTP_404_NOT_FOUND}),
+        )
+        if response.status_code == status.HTTP_404_NOT_FOUND:
+            return None
+        return Spool.model_validate(response.json())
+
+    async def spool_row(self, spool_id: int) -> Spool:
+        """``GET /api/v1/inventory/spools/{id}``: one spool, for a write that reads state
+        first (``INVENTORY_READ``: Read Status, ``can_read_status``;
+        ``routes/inventory.py`` line 1602, maziggy/bambuddy v1.3.1)."""
+        response = await self._send(
+            "GET",
+            f"/inventory/spools/{spool_id}",
+            scope=Scope.READ_STATUS,
+            operation="spools.read",
+            what=f"read spool {spool_id}",
+        )
+        return Spool.model_validate(response.json())
+
+    async def auto_add_unknown_rfid(self) -> bool:
+        """Bambuddy's ``auto_add_unknown_rfid`` setting (``AppSettings`` in
+        ``rfid-routes.json``; ``GET /api/v1/settings/``: Read Status)."""
+        response = await self._send(
+            "GET",
+            "/settings/",
+            scope=Scope.READ_STATUS,
+            operation="settings.read",
+            what="read Bambuddy's settings",
+        )
+        body = response.json()
+        value = body.get("auto_add_unknown_rfid") if isinstance(body, dict) else None
+        if not isinstance(value, bool):
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                "Bambuddy's settings carry no auto_add_unknown_rfid, so this Bambuddy may be"
+                " older than the setting",
+            )
+        return value
+
+    async def set_auto_add_unknown_rfid(self, value: bool) -> None:
+        """``PATCH /api/v1/settings/`` (``SETTINGS_UPDATE``, which no API key holds: a
+        403 is a scope 409 and the write works only while Bambuddy's auth is off;
+        ``routes/settings.py`` line 552, v1.3.1)."""
+        await self._send(
+            "PATCH",
+            "/settings/",
+            scope=Scope.ADMIN_SETTINGS,
+            operation="settings.update",
+            what="change Bambuddy's auto_add_unknown_rfid setting",
+            json={"auto_add_unknown_rfid": value},
+        )
+
+    async def configure_slot(
+        self, printer_id: int, ams_id: int, tray_id: int, params: SlotConfigure
+    ) -> None:
+        """``POST /api/v1/printers/{id}/slots/{ams}/{tray}/configure`` with the values in
+        the query (``PRINTERS_CONTROL``: Control Printer; ``routes/printers.py`` line
+        2963, v1.3.1)."""
+        await self._send(
+            "POST",
+            f"/printers/{printer_id}/slots/{ams_id}/{tray_id}/configure",
+            scope=Scope.CONTROL_PRINTER,
+            operation="printers.slot_configure",
+            what=f"configure slot {ams_id}/{tray_id} of printer {printer_id}",
+            params=params.query(),
+        )
+
+    async def spoolbuddy_devices(self) -> list[SpoolBuddyDevice]:
+        """``GET /api/v1/spoolbuddy/devices`` (``INVENTORY_READ``: Read Status;
+        ``routes/spoolbuddy.py`` line 280, v1.3.1)."""
+        what = "list the SpoolBuddy devices"
+        response = await self._send(
+            "GET",
+            "/spoolbuddy/devices",
+            scope=Scope.READ_STATUS,
+            operation="spoolbuddy.devices",
+            what=what,
+        )
+        return [SpoolBuddyDevice.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def queue_tag_write(self, device_id: str, spool_id: int) -> list[str]:
+        """``POST /api/v1/spoolbuddy/nfc/write-tag`` (``INVENTORY_UPDATE``: Manage
+        Inventory; ``routes/spoolbuddy.py`` line 830, v1.3.1): queues one write, once per call.
+        Returns the answer's ``warnings``."""
+        response = await self._send(
+            "POST",
+            "/spoolbuddy/nfc/write-tag",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="spoolbuddy.write_tag",
+            what=f"queue a tag write for spool {spool_id}",
+            json={"device_id": device_id, "spool_id": spool_id},
+        )
+        body = response.json()
+        warnings = body.get("warnings") if isinstance(body, dict) else None
+        if not isinstance(warnings, list):
+            return []
+        return [w for w in warnings if isinstance(w, str)]
+
+    async def cancel_tag_write(self, device_id: str) -> None:
+        """``POST /api/v1/spoolbuddy/devices/{device_id}/cancel-write`` (Manage Inventory;
+        ``routes/spoolbuddy.py`` line 1181, v1.3.1)."""
+        await self._send(
+            "POST",
+            f"/spoolbuddy/devices/{quote(device_id, safe='')}/cancel-write",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="spoolbuddy.cancel_write",
+            what="cancel the pending tag write",
+        )
 
     # --- projects ------------------------------------------------------------
 

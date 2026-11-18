@@ -62,6 +62,8 @@ const PAGES = [
   '/filament/catalog',
   '/filament/shopping-list',
   '/filament/ledger',
+  // Spool labels (#6264): with no spools chosen; the route check below reads paths, not queries.
+  '/filament/labels',
   // The component gallery (#3653): in the mocked build only, which this spec runs on.
   '/ui-gallery',
 ]

@@ -1,6 +1,8 @@
 import { screen, waitFor, within } from '@testing-library/react'
+import { http, HttpResponse } from 'msw'
 import { describe, expect, it } from 'vitest'
 import { mockSettings } from '../../../mocks/handlers'
+import { server } from '../../../mocks/server'
 import { choose } from '../../../test/select'
 import { enter, region, renderSettingsSection } from '../testing'
 import { SECTION_REGISTRY } from '../registry'
@@ -32,7 +34,95 @@ describe('Filament (#6262)', () => {
     await seeded()
     await choose(user, within(region('Filament')).getByRole('combobox', { name: 'Spools' }), 'Off')
     await user.click(within(region('Filament')).getByRole('button', { name: 'Save Filament' }))
-    await waitFor(() => expect(mockSettings().filament_sync).toEqual({ spools: 'off' }))
+    await waitFor(() => expect(mockSettings().filament_sync).toEqual({ spools: 'off', tags: 'off' }))
+  })
+
+  it('saves the tags choice with Save Filament, as filament_sync.tags beside the spools choice', async () => {
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const filament = region('Filament')
+    await choose(user, within(filament).getByRole('combobox', { name: 'Tags to Bambuddy' }), "Send ScadBuddy's bindings")
+    await choose(user, within(filament).getByRole('combobox', { name: 'Spools' }), 'Off')
+    // Each choice keeps the other: both parts are one setting until it is saved.
+    expect(within(filament).getByRole('combobox', { name: 'Tags to Bambuddy' })).toHaveTextContent("Send ScadBuddy's bindings")
+    expect(mockSettings().filament_sync).toEqual({ spools: 'bb_to_sb', tags: 'off' })
+    await user.click(within(filament).getByRole('button', { name: 'Save Filament' }))
+    await waitFor(() => expect(mockSettings().filament_sync).toEqual({ spools: 'off', tags: 'sb_to_bb' }))
+  })
+
+  it('switches the RFID override mode on and says Bambuddy no longer adds unknown spools', async () => {
+    let sent: unknown
+    server.use(
+      http.put('*/api/v1/filament/rfid/override-mode', async ({ request }) => {
+        sent = await request.json()
+        return HttpResponse.json({ override_mode: true, state: 'applied', devices: [] })
+      }),
+    )
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const filament = region('Filament')
+    await user.click(await within(filament).findByRole('switch', { name: 'RFID override mode' }))
+    await waitFor(() => expect(sent).toEqual({ enabled: true }))
+    expect(await within(filament).findByText('Bambuddy no longer adds unknown RFID spools')).toBeInTheDocument()
+    expect(within(filament).getByRole('switch', { name: 'RFID override mode' })).toBeChecked()
+  })
+
+  it('shows why a blocked override mode is blocked and leaves the switch on', async () => {
+    server.use(
+      http.get('*/api/v1/filament/rfid/status', () =>
+        HttpResponse.json({ override_mode: true, state: 'blocked', detail: "Bambuddy's authentication is on, so ScadBuddy cannot change its settings", devices: [] }),
+      ),
+    )
+    renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const filament = region('Filament')
+    expect(await within(filament).findByText(/Bambuddy's authentication is on/)).toBeInTheDocument()
+    expect(within(filament).getByRole('switch', { name: 'RFID override mode' })).toBeChecked()
+  })
+
+  it('says a busy update applies on the next refresh', async () => {
+    server.use(
+      http.get('*/api/v1/filament/rfid/status', () => HttpResponse.json({ override_mode: true, state: 'pending', detail: 'busy', devices: [] })),
+    )
+    renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    expect(await within(region('Filament')).findByText('Another update is running; it applies on the next refresh')).toBeInTheDocument()
+  })
+
+  it('applies now and says what the reconcile did', async () => {
+    server.use(
+      http.post('*/api/v1/filament/rfid/reconcile', () =>
+        HttpResponse.json({
+          mode: { override_mode: true, state: 'applied', devices: [] },
+          tags: { pushed: 2, moved: 0, cleared: 0, unchanged: 1, failed: 0 },
+          slots: { configured: 1, unchanged: 0, no_preset: 0, no_temps: 3, no_nozzle: 0, failed: 0 },
+        }),
+      ),
+    )
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const filament = region('Filament')
+    await user.click(await within(filament).findByRole('button', { name: 'Apply now' }))
+    expect(await within(filament).findByText(/2 tags sent/)).toBeInTheDocument()
+    expect(within(filament).getByText(/3 spools have no nozzle temperatures/)).toBeInTheDocument()
+  })
+
+  it('says which tags and slots the reconcile could not send', async () => {
+    server.use(
+      http.post('*/api/v1/filament/rfid/reconcile', () =>
+        HttpResponse.json({
+          mode: { override_mode: true, state: 'applied', devices: [] },
+          tags: { pushed: 0, moved: 0, cleared: 0, unchanged: 0, failed: 2 },
+          slots: { configured: 0, unchanged: 0, no_preset: 0, no_temps: 0, no_nozzle: 0, failed: 1 },
+        }),
+      ),
+    )
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const filament = region('Filament')
+    await user.click(await within(filament).findByRole('button', { name: 'Apply now' }))
+    expect(await within(filament).findByText(/2 tags were not sent/)).toBeInTheDocument()
+    expect(within(filament).getByText(/1 slot was not set/)).toBeInTheDocument()
   })
 
   it('saves the thresholds and shows the server refusing 101 percent', async () => {

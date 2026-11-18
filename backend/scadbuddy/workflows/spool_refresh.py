@@ -22,6 +22,11 @@ Behind ``filament-capture-backstop`` (#6263 Task 8), after the pull on every bra
 reconciles each printer's latest report with the filament ledger (`filament_capture_backstop`),
 the backstop for what the printer watch missed.
 
+Behind ``filament-rfid`` (#6264 Task 4), last, a run reconciles Bambuddy with ScadBuddy's
+RFID state in one activity (`filament_rfid_reconcile`): the auto-add mode
+(`filament/rfid_mode.py`), the tag bindings ScadBuddy changed (`filament/rfid_push.py`) and
+the AMS slot of each override tag (`filament/rfid_slots.py`).
+
 On the versioned ``library`` worker (#4090) it is AUTO_UPGRADE (`VersionedSpoolRefresh`),
 so a run left open across a deploy replays on the new code: a change to the commands
 ``SpoolRefresh.run`` issues goes behind ``workflow.patched``
@@ -57,6 +62,9 @@ PROVIDERS_GONE_PATCH = "spool-providers-gone"
 CAPTURE_ACTIVITY = "filament_capture_backstop"
 #: The `workflow.patched` id that adds `CAPTURE_ACTIVITY` to a run (#6263 Task 8).
 CAPTURE_PATCH = "filament-capture-backstop"
+FILAMENT_RFID_ACTIVITY = "filament_rfid_reconcile"
+#: The `workflow.patched` id that adds `FILAMENT_RFID_ACTIVITY` to a run (#6264 Task 4).
+FILAMENT_RFID_PATCH = "filament-rfid"
 #: Listing the providers read nothing (before `PROVIDERS_GONE_PATCH`, as the next three).
 LIST_TIMEOUT = timedelta(seconds=30)
 #: One provider's refresh, which was bounded at a minute inside its activity.
@@ -69,6 +77,12 @@ HELD_TIMEOUT = timedelta(minutes=2)
 FILAMENT_PULL_TIMEOUT = timedelta(minutes=5)
 #: Every printer's latest report, reconciled with the ledger in a transaction each.
 CAPTURE_TIMEOUT = timedelta(minutes=2)
+#: The activity's three steps share this one budget (a timeout is per activity, and a change
+#: to its commands needs a patch): the override mode (up to 5 s of lock wait, then a few
+#: calls), the tag push (up to 50 tags, one to four calls each) and the slot step (a
+#: configure call per override tray). Held, pull, capture and this one add up to
+#: `RUN_TIMEOUT`.
+FILAMENT_RFID_TIMEOUT = timedelta(minutes=6)
 #: A run opened before `PROVIDERS_GONE_PATCH` grows with the providers; a run that can
 #: never finish still ends, and the Schedule's overlap SKIP stops holding later ticks back.
 RUN_TIMEOUT = timedelta(minutes=15)
@@ -91,6 +105,8 @@ class SpoolRefresh:
         outcome = await self._run_steps(gone)
         if workflow.patched(CAPTURE_PATCH):
             await self._capture()
+        if workflow.patched(FILAMENT_RFID_PATCH):
+            await self._rfid()
         return outcome
 
     async def _run_steps(self, gone: bool) -> dict[str, str]:
@@ -150,6 +166,17 @@ class SpoolRefresh:
             )
         except ActivityError:
             workflow.logger.warning("could not reconcile the printers' trays with the ledger")
+
+    async def _rfid(self) -> None:
+        try:
+            await workflow.execute_activity(
+                FILAMENT_RFID_ACTIVITY,
+                result_type=str,
+                start_to_close_timeout=FILAMENT_RFID_TIMEOUT,
+                retry_policy=_ONCE,
+            )
+        except ActivityError:
+            workflow.logger.warning("could not tell Bambuddy of the tag bindings")
 
     async def _pull(self) -> None:
         try:

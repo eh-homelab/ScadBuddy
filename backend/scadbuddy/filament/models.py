@@ -26,6 +26,7 @@ from pydantic import (
     model_validator,
 )
 
+from scadbuddy.bambuddy.models import SpoolBuddyDevice
 from scadbuddy.filament.colour import Rgba
 
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
@@ -1241,3 +1242,133 @@ class InventorySummary(BaseModel):
     loaded: int
     low_stock: int
     needs_type: int
+
+
+class TagPushReport(BaseModel):
+    """What one drain of the pending-tag queue did (`filament/rfid_push.py`, #6264)."""
+
+    pushed: int = 0
+    moved: int = 0
+    cleared: int = 0
+    unchanged: int = 0
+    failed: int = 0
+
+
+class SlotReport(BaseModel):
+    """What one reconcile of the override slots did (#6264). ``no_preset``: the type has no
+    preset for the nozzle. ``no_temps``: the spool has no nozzle temperatures, the tray
+    reports none, or the spool has no material or colour to send. Neither calls Bambuddy."""
+
+    configured: int = 0
+    unchanged: int = 0
+    no_preset: int = 0
+    no_temps: int = 0
+    no_nozzle: int = 0
+    failed: int = 0
+
+
+class RfidState(BaseModel):
+    """The ``filament_rfid_state`` row (`filament/rfid_mode.py`, #6264)."""
+
+    override_mode: bool
+    #: Bambuddy's ``auto_add_unknown_rfid`` as found when the mode turned it off; ``None``
+    #: when nothing is saved.
+    saved_auto_add: bool | None
+    #: The last reconcile was refused because Bambuddy's auth is on.
+    blocked: bool = False
+    changed_at: AwareDatetime
+
+
+class RfidStatus(BaseModel):
+    """The answer on the RFID override mode (#6264). ``state`` is ``applied`` when the
+    mode is on and Bambuddy reads ``false``; ``pending`` when a write has not landed or
+    Bambuddy could not be reached (``detail`` then names the error); ``blocked`` when
+    Bambuddy refused the write because its auth is on; ``off`` when the mode is off and
+    nothing is saved."""
+
+    override_mode: bool
+    state: Literal["off", "applied", "pending", "blocked"]
+    bambuddy_auto_add: bool | None = None
+    saved_auto_add: bool | None = None
+    detail: str | None = None
+    devices: list[SpoolBuddyDevice] = Field(default_factory=list)
+
+
+class RfidModeSet(BaseModel):
+    """The body of ``PUT /filament/rfid/override-mode``."""
+
+    enabled: bool
+
+
+class RfidReconcileReport(BaseModel):
+    """What one reconcile did: the mode, the tags and the override slots (``None`` when no
+    Bambuddy is configured: the step is skipped)."""
+
+    mode: RfidStatus
+    tags: TagPushReport
+    slots: SlotReport | None = None
+
+
+#: A SpoolBuddy device id as Bambuddy mints them (``sb-`` and the MAC, in ``DeviceResponse``
+#: of ``rfid-routes.json``; its write and scan bodies cap it at 50 characters). It becomes
+#: a path segment of a Bambuddy call, so nothing outside this set may pass.
+DeviceId = Annotated[str, Field(pattern=r"^[A-Za-z0-9._:-]{1,50}$")]
+
+
+class SpoolRef(BaseModel):
+    """An SB spool by its id and the number a person reads."""
+
+    id: UUID
+    number: int
+
+
+class ScanRequest(_In):
+    """The body of ``POST /filament/rfid/scan``: how long to wait for a tag (at most 50
+    seconds, below the ingress's 60), and the SpoolBuddy device to listen to (any device
+    when unset)."""
+
+    timeout_s: Annotated[int, Field(ge=1, le=50)] = 30
+    device_id: DeviceId | None = None
+
+
+class ScanResult(BaseModel):
+    """What a SpoolBuddy reader read: ``tag`` with the tag's keys, its ``kind`` and the SB
+    spool that holds it (the one whose open binding names the keys, else the one linked
+    to ``bambuddy_spool_id``), or ``timeout`` with nothing else set."""
+
+    status: Literal["tag", "timeout"]
+    tag_uid: str | None = None
+    tray_uuid: str | None = None
+    tag_type: str | None = None
+    kind: TagKind | None = None
+    bambuddy_spool_id: int | None = None
+    sb_spool: SpoolRef | None = None
+
+
+class NtagWrite(_In):
+    """The body of ``POST /filament/spools/{id}/ntag/write``. ``replace`` lets the write
+    go over a spool whose open tag was bound with ``override``."""
+
+    device_id: DeviceId
+    replace: bool = False
+
+
+class NtagCancel(_In):
+    """The body of ``POST /filament/spools/{id}/ntag/cancel``."""
+
+    device_id: DeviceId
+
+
+class NtagQueued(BaseModel):
+    """A write SpoolBuddy has queued; ``warnings`` are what Bambuddy says is missing from
+    the spool's record."""
+
+    status: Literal["queued"] = "queued"
+    warnings: list[str] = Field(default_factory=list)
+
+
+class NtagConfirm(BaseModel):
+    """Whether the written tag is now the spool's: ``bound`` with the new ``tag_uid``."""
+
+    bound: bool
+    tag_uid: str | None = None

@@ -329,6 +329,38 @@ def test_a_synthetic_row_merges_into_the_row_holding_the_serial(
     assert set(bus.changed()) == {synthetic.id, mine.id}
 
 
+def test_a_merge_drops_the_gone_printers_override_slots_and_keeps_the_kept_ones(
+    printers: PrinterStore, pg_pool: PgPool
+) -> None:
+    """#6264: a slot row is an attempt guard; the gone printer's are dropped, the kept
+    printer's stay."""
+    from scadbuddy.filament.catalog import CatalogStore
+    from scadbuddy.filament.models import Material, SpoolCreate
+    from scadbuddy.filament.spools import FilamentSpoolStore
+
+    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
+    material = next(
+        r.id
+        for r in CatalogStore(pg_pool).list("materials")
+        if isinstance(r, Material) and r.name == "PLA"
+    )
+    spool = FilamentSpoolStore(pg_pool).create(SpoolCreate(material_id=material), actor="ann").id
+    with pg_pool.connection() as conn:
+        for printer, tray in ((synthetic.id, 1), (mine.id, 2)):
+            conn.execute(
+                "INSERT INTO filament_override_slots (printer_id, ams_id, tray_id, spool_id)"
+                " VALUES (%s, 0, %s, %s)",
+                (printer, tray, spool),
+            )
+
+    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C")
+
+    with pg_pool.connection() as conn:
+        rows = conn.execute("SELECT printer_id::text AS p, tray_id FROM filament_override_slots")
+        assert [(r["p"], r["tray_id"]) for r in rows] == [(mine.id, 2)]
+
+
 def _lan_import(conn: Any, printer_id: str, name: str, started: datetime) -> None:
     conn.execute(
         "INSERT INTO print_lan_imports (printer, printer_key, subtask_name, started_at,"

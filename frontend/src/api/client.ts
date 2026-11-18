@@ -2435,8 +2435,8 @@ export const api = {
   unlinkPrinterLan: (id: string) => request<PrinterRow>(`/printers/${seg(id)}/lan`, { method: 'DELETE' }),
   /**
    * #3818, #6262 Task 4 — the native path's manual link: which SB spool is in an untagged
-   * tray; the answer is the spool, now in the tray's place. Writes ScadBuddy only, never
-   * Bambuddy's assignment.
+   * tray; the answer is the spool, now in the tray's place. Writes ScadBuddy, never Bambuddy's
+   * assignment; with tag sync on, the tag change is then pushed to Bambuddy.
    */
   linkTraySpool: (printer: string, amsId: number, trayId: number, body: TraySpoolLink) =>
     request<FilamentSpool>(`/printers/${seg(printer)}/trays/${amsId}/${trayId}/spool`, {

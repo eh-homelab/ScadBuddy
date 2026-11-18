@@ -80,7 +80,14 @@ def test_a_schedule_pulls_bambuddys_spools(settings: Settings) -> None:
             "spool_overlay_refresh_seconds": 300,
         }
     )
-    spools = recording("inventory-spools.json")
+    # The recording's tag keys are scrubbed to one placeholder on six spools. Real tags
+    # differ per spool, and since #6264 a second spool on a held tag is not pulled.
+    spools = [
+        {**spool, "tag_uid": f"{spool['id']:016X}", "tray_uuid": None}
+        if spool.get("tag_uid")
+        else spool
+        for spool in recording("inventory-spools.json")
+    ]
     with respx.mock(assert_all_called=False) as bambuddy:
         bambuddy.get(f"{BAMBUDDY}/api/v1/inventory/spools").respond(json=spools)
         bambuddy.get(f"{BAMBUDDY}/api/v1/inventory/assignments").respond(json=[])
