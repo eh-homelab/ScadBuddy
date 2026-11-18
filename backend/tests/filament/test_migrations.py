@@ -124,3 +124,24 @@ def test_capture_migration_makes_bb_weighings_scale(pg_conninfo: str) -> None:
         ("print_started", "print_estimate", "r4/L/0", None),
     ]
     assert index is not None
+
+
+@pg
+def test_the_sensor_tables_column_and_unit_index_exist(pg_pool: PgPool) -> None:
+    with pg_pool.connection() as conn:
+        tables = {
+            r["table_name"]
+            for r in conn.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_name IN (%s, %s)",
+                ("filament_location_sensors", "filament_sensor_readings"),
+            ).fetchall()
+        }
+        column = conn.execute(
+            "SELECT 1 FROM information_schema.columns WHERE table_name = %s AND column_name = %s",
+            ("filament_materials", "max_hours_outside_dry"),
+        ).fetchone()
+        index = conn.execute(
+            "SELECT 1 FROM pg_indexes WHERE indexname = %s", ("filament_locations_ams_unit",)
+        ).fetchone()
+    assert tables == {"filament_location_sensors", "filament_sensor_readings"}
+    assert column is not None and index is not None

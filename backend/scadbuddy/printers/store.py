@@ -161,6 +161,12 @@ def _repoint_filament_locations(conn: Connection[DictRow], merged: str, into: st
     repoint_printer_locations(conn, uuid.UUID(merged), uuid.UUID(into))
 
 
+def _repoint_filament_sensors(conn: Connection[DictRow], merged: str, into: str) -> None:
+    from scadbuddy.filament.sensors import repoint_printer_sensors
+
+    repoint_printer_sensors(conn, uuid.UUID(merged), uuid.UUID(into))
+
+
 def _repoint_k_values(table: str) -> RepointHook:
     def repoint(conn: Connection[DictRow], merged: str, into: str) -> None:
         from scadbuddy.filament.types import repoint_k_values
@@ -315,6 +321,8 @@ PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
     # #6261: a printer's AMS tray places (``into``'s wins a tray both have; the gone
     # one's spools move there) and its K values (``into``'s wins a key both have).
     PrinterReference("filament_locations", "printer_id", repoint=_repoint_filament_locations),
+    # #6268: an AMS unit's sensors (``into``'s wins a unit and kind both have).
+    PrinterReference("filament_location_sensors", "printer_id", repoint=_repoint_filament_sensors),
     PrinterReference(
         "filament_spool_type_k_values",
         "printer_id",

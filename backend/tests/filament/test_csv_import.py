@@ -29,6 +29,7 @@ from scadbuddy.filament.models import (
     SpoolTypeCreate,
 )
 from scadbuddy.filament.presets import PoolSpoolPresets
+from scadbuddy.filament.sensors import SensorStore
 from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.filament.types import SpoolTypeStore
 from tests.conftest import PgPool
@@ -42,6 +43,7 @@ def _filament(pool: PgPool) -> Filament:
         types=SpoolTypeStore(pool),
         spools=FilamentSpoolStore(pool),
         locations=LocationStore(pool),
+        sensors=SensorStore(pool),
         inventory=FilamentInventory(pool),
         presets=PoolSpoolPresets(pool),
     )

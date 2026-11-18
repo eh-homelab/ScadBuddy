@@ -1,0 +1,162 @@
+"""Location sensors (#6268): a humidity or temperature sensor on a place, from Home
+Assistant (through Bambuddy) or an AMS unit's own report. A reading is stored when the
+value changed, or when `SAME_VALUE_EVERY` has passed since the last stored one; the last
+stored reading is kept on the sensor row for reads."""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+from typing import Any
+from uuid import UUID
+
+from psycopg import Connection, errors
+from psycopg.rows import DictRow
+from psycopg_pool import ConnectionPool
+
+from scadbuddy.filament import models as m
+from scadbuddy.filament.catalog import CatalogRefError
+
+Conn = Connection[DictRow]
+
+_Readings = list[m.SensorReading]
+
+SAME_VALUE_EVERY = timedelta(minutes=15)
+
+_COLUMNS = ", ".join(n for n in m.Sensor.model_fields if n != "alerting")
+
+
+class SensorExistsError(ValueError):
+    """An unarchived sensor of that kind is already on that AMS unit."""
+
+    def __init__(self) -> None:
+        super().__init__("a sensor of that kind already exists on that AMS unit")
+
+
+class SensorStore:
+    """The sensor tables over a pool whose connections autocommit and return dict rows
+    (the settings store's). Synchronous: callers run it in a thread."""
+
+    def __init__(self, pool: ConnectionPool[Conn]) -> None:
+        self._pool = pool
+
+    def list(self, location_id: UUID | None) -> list[m.Sensor]:
+        """The unarchived sensors, of one place or of all, by name."""
+        where, args = ("", []) if location_id is None else (" AND location_id = %s", [location_id])
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT {_COLUMNS} FROM filament_location_sensors WHERE archived_at IS NULL"
+                f"{where} ORDER BY upper(name), id",
+                args,
+            ).fetchall()
+        return [m.Sensor.model_validate(row) for row in rows]
+
+    def create(self, body: m.SensorIn, actor: str) -> m.Sensor:
+        """``actor`` is who asked; sensors keep no author, so it is not stored."""
+        del actor
+        data = body.model_dump()
+        names = list(data)
+        try:
+            with self._pool.connection() as conn:
+                row = conn.execute(
+                    f"INSERT INTO filament_location_sensors ({', '.join(names)})"
+                    f" VALUES ({', '.join('%s' for _ in names)}) RETURNING {_COLUMNS}",
+                    [data[n] for n in names],
+                ).fetchone()
+        except errors.UniqueViolation:
+            raise SensorExistsError() from None
+        except errors.ForeignKeyViolation:
+            raise CatalogRefError() from None
+        assert row is not None
+        return m.Sensor.model_validate(row)
+
+    def update(self, sensor_id: UUID, patch: m.SensorPatch, actor: str) -> m.Sensor:
+        """The fields ``patch`` sends. `LookupError` for no such (unarchived) sensor."""
+        del actor
+        sent = [n for n in type(patch).model_fields if n in patch.model_fields_set]
+        sets = ", ".join([*(f"{n} = %s" for n in sent), "updated_at = now()"])
+        values: list[Any] = [getattr(patch, n) for n in sent]
+        try:
+            with self._pool.connection() as conn:
+                row = conn.execute(
+                    f"UPDATE filament_location_sensors SET {sets}"
+                    f" WHERE id = %s AND archived_at IS NULL RETURNING {_COLUMNS}",
+                    [*values, sensor_id],
+                ).fetchone()
+        except errors.ForeignKeyViolation:
+            raise CatalogRefError() from None
+        if row is None:
+            raise LookupError(f"no sensor {sensor_id}")
+        return m.Sensor.model_validate(row)
+
+    def archive(self, sensor_id: UUID, actor: str) -> None:
+        """`LookupError` for no such (unarchived) sensor."""
+        del actor
+        with self._pool.connection() as conn:
+            done = conn.execute(
+                "UPDATE filament_location_sensors SET archived_at = now(), updated_at = now()"
+                " WHERE id = %s AND archived_at IS NULL RETURNING id",
+                (sensor_id,),
+            ).fetchone()
+        if done is None:
+            raise LookupError(f"no sensor {sensor_id}")
+
+    def readings(self, sensor_id: UUID, since: datetime, limit: int) -> _Readings:
+        """The stored readings from ``since`` on, oldest first, at most ``limit``."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT at, value FROM filament_sensor_readings"
+                " WHERE sensor_id = %s AND at >= %s ORDER BY at LIMIT %s",
+                (sensor_id, since, limit),
+            ).fetchall()
+        return [m.SensorReading.model_validate(row) for row in rows]
+
+    @staticmethod
+    def record_on(conn: Conn, sensor_id: UUID, value: float, at: datetime) -> bool:
+        """Store ``value`` read at ``at`` on ``conn``, in the caller's transaction, if it
+        differs from the last stored value or `SAME_VALUE_EVERY` has passed since it.
+        Marks the sensor reachable either way. ``False`` when nothing was stored (or the
+        sensor is gone)."""
+        row = conn.execute(
+            "SELECT last_value, last_at FROM filament_location_sensors WHERE id = %s FOR UPDATE",
+            (sensor_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        last_at: datetime | None = row["last_at"]
+        if row["last_value"] == value and last_at is not None and at - last_at < SAME_VALUE_EVERY:
+            conn.execute(
+                "UPDATE filament_location_sensors SET reachable = true WHERE id = %s",
+                (sensor_id,),
+            )
+            return False
+        stored = conn.execute(
+            "INSERT INTO filament_sensor_readings (sensor_id, at, value) VALUES (%s, %s, %s)"
+            " ON CONFLICT DO NOTHING RETURNING at",
+            (sensor_id, at, value),
+        ).fetchone()
+        conn.execute(
+            "UPDATE filament_location_sensors SET reachable = true, last_value = %s,"
+            " last_at = %s WHERE id = %s",
+            (value, at, sensor_id),
+        )
+        return stored is not None
+
+
+def repoint_printer_sensors(conn: Conn, merged: UUID, into: UUID) -> None:
+    """Make printer ``merged``'s AMS sensors printer ``into``'s, on ``conn`` and in the
+    printer merge's transaction (`printers/store.py` `_merge`). Where ``into`` has an
+    unarchived sensor for the same unit and kind, ``into``'s stands and the gone one is
+    archived, with its readings."""
+    conn.execute(
+        "UPDATE filament_location_sensors g SET archived_at = now(), updated_at = now()"
+        " WHERE g.printer_id = %s AND g.archived_at IS NULL AND EXISTS ("
+        " SELECT 1 FROM filament_location_sensors k WHERE k.printer_id = %s"
+        " AND k.ams_id = g.ams_id AND k.kind = g.kind AND k.source = g.source"
+        " AND k.archived_at IS NULL)",
+        (merged, into),
+    )
+    conn.execute(
+        "UPDATE filament_location_sensors SET printer_id = %s, updated_at = now()"
+        " WHERE printer_id = %s",
+        (into, merged),
+    )

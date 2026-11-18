@@ -14,6 +14,7 @@ from scadbuddy.filament.inventory import FilamentInventory, PoolSbSpoolReads
 from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.presets import PoolSpoolPresets
 from scadbuddy.filament.print_uses import PoolPrintUses, print_use_hook
+from scadbuddy.filament.sensors import SensorStore
 from scadbuddy.filament.spools import FilamentDefaults, FilamentSpoolStore
 from scadbuddy.filament.types import SpoolTypeStore
 
@@ -25,6 +26,7 @@ class Filament:
     spools: FilamentSpoolStore
     locations: LocationStore
     inventory: FilamentInventory
+    sensors: SensorStore
     #: What a print's plan reads of SB spools' presets (#6262 F1, `resolve_plates`).
     presets: PoolSpoolPresets
     #: Bambuddy's tray assignments, as this app last read them (#6580).
@@ -62,6 +64,7 @@ def _build(core: Core, components: Components) -> Filament:
         spools=FilamentSpoolStore(pool, defaults),
         locations=LocationStore(pool),
         inventory=FilamentInventory(pool, defaults),
+        sensors=SensorStore(pool),
         presets=PoolSpoolPresets(pool),
     )
 

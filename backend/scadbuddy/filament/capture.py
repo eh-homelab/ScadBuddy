@@ -238,7 +238,8 @@ def reconcile(
     for found in conn.execute(
         "SELECT l.id, l.ams_id, l.tray_id, s.id AS spool_id FROM filament_locations l"
         " LEFT JOIN filament_spools s ON s.location_id = l.id AND s.archived_at IS NULL"
-        " WHERE l.printer_id = %s AND l.archived_at IS NULL ORDER BY s.id",
+        " WHERE l.printer_id = %s AND l.tray_id IS NOT NULL AND l.archived_at IS NULL"
+        " ORDER BY s.id",
         (printer_id,),
     ).fetchall():
         places[(found["ams_id"], found["tray_id"])] = found["id"]
