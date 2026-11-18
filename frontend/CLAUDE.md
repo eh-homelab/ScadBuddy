@@ -266,7 +266,9 @@ same way, `vite.config.ts`).
   `/filament/rfid/*` and `…/ntag/*`). e2e: `e2e/filament.spec.ts`, `e2e/filament-rfid.spec.ts` and
   `e2e/filament-purchasing.spec.ts` (a supplier, a price, an invoice confirmed into spools, and a
   total that cannot be confirmed), plus `hot-path.spec.ts` (SB spool numbers in the trays, no Bambuddy
-  call), `settings.spec.ts` and `page-titles.spec.ts`.
+  call), `settings.spec.ts` and `page-titles.spec.ts`. Sensors and weights (#6268):
+  `LocationSensors` and `SensorChart` on the Locations tab, `NeedsDrying` and `outsideDry.ts`,
+  and the Spools tab button "Sync weights from AMS".
 - "Needs you" (#6399): `lib/needsYou.ts` is every request that waits on the person in one list
   (the agent's pending input, `attention.ts` `WaitingEntry`; the flow grants of
   `GET /api/v1/flow-grant-requests`; the tab's pairing requests, from `AgentLink`'s

@@ -273,3 +273,34 @@ Load `frontend-design` first.
   books no `bb_scale` weighing. `_create` keeps its first `bb` reading: a spool SB has never
   seen needs a starting weight, and there is no SB weight to protect. The ruling of the
   controller. `bb_dried` is not a weight and stays booked.
+
+1. **Order of the tasks.** Task 4 ran before Task 3, because Task 3 waited for #6617
+   (`filament_sync.tags`, #6264) to merge. Task 4 does not depend on it. The order changed
+   nothing else.
+2. **A re-load syncs the current holder (Task 2).** A spool that moved into a tray between
+   the two holder reads is still booked under its own row lock, because `ledger.record`
+   locks the spool first. Only the id order of the locks is lost for that one spool. The
+   cost is a rare deadlock retry.
+3. **A stale report writes no sensor value (Task 4).** `advance_in` records what a report
+   says at its `seen_at`, and `record_on` refuses an `at` not newer than the last reading.
+   An older report cannot move a value back.
+4. **A failed HA read marks the sensors unreachable (Task 5).** `reachable` means SB got a
+   number on its last read. The cost is a short false "unreachable" badge.
+5. **Empty text is not a reading (Task 4).** `AmsUnit` turns `""` humidity or temperature
+   into no value, and a sensor is made only when a number is present.
+6. **The place keeps its "Add a sensor" button (Task 8).** A sensor belongs to one place. A
+   button at tab level needs a place picker, which is one more step. The cost is a busier
+   tree.
+7. **Empty sensor fields give 422 (Task 7).** The agent tool sends the fields as given and
+   the backend refuses an empty one. The 422 shows as an error through the shared `ok`
+   helper. The cost is a less clear error text.
+8. **A whole-object PUT is not a defect (Task 3).** The UI sends the full settings object,
+   and no agent tool writes it. A change made in another tab can be overwritten by an old
+   form draft, as before this work. Nothing changed.
+9. **Test infrastructure.** The test database ran on port 55432 with `timezone=UTC`. The
+   LocationSensors history test depended on the clock (93 against 96 readings), and
+   `7cde321` fixed it. The SettingsPage test "does not call this tab own Test connection"
+   fails locally on branches based on main and passes in CI. It is not from this branch.
+10. **Follow-up.** Decision 7 stays as made: alerts are shown, not sent. Issue #6646,
+    "send a notification when a location sensor alerts" (a sub-issue of #6260, linked from
+    #6270), tracks the notification.
