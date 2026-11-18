@@ -325,3 +325,22 @@ Load `frontend-design` first.
     place with a printer and an AMS id and no tray was allowed twice. Before the unit index
     is made, the migration keeps the oldest unarchived one per unit (`created_at`, then
     `id`) and sets `archived_at` on the rest.
+16. **A printer's place with no AMS id is not a unit place (review of 236eb134d).** A place
+    with a printer and no `ams_id` and no `tray_id` (a shelf beside the printer) is
+    allowed many times. The archive pass and the `filament_locations_ams_unit` index both
+    require `ams_id IS NOT NULL`, so the migration archives none of these places.
+    `ensure_ams_unit_on` uses the same predicate in its `ON CONFLICT`.
+17. **An archived duplicate hands on what it holds (review of 236eb134d).** Before the
+    migration archives a duplicate unit place, it moves the place's spools to the kept
+    place and books a `moved` event for each (`actor` `system:unit-place-merge`, `reason`
+    `duplicate_unit_place`), as a printer merge does. It also moves the child places'
+    `parent_id` to the kept place. No sensor can point at the duplicate, because this
+    migration makes the sensors table.
+18. **An AMS sensor follows its unit's live place (review of 236eb134d).** When a person
+    archives an AMS unit's place, `capture_ams_on` moves the unit's sensors to the place
+    that `ensure_ams_unit_on` returns (a new place when needed) before it stores a reading.
+    The check uses the one sensor read, so an unchanged report still costs one query.
+19. **AMS sync counts every tray holder it locked (review of 236eb134d).** A printer with no
+    row (`PrinterStore.read_on` gives `None`) counts its spools as `stale`. A spool placed
+    in a tray after the first holder read was not locked, so the sync does not book or
+    count it; the next sync takes it.

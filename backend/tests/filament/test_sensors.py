@@ -19,6 +19,7 @@ from scadbuddy.filament.locations import LocationStore, repoint_printer_location
 from scadbuddy.filament.models import (
     LocationCreate,
     LocationKind,
+    LocationPatch,
     MaterialCreate,
     SensorIn,
     SensorPatch,
@@ -419,6 +420,27 @@ def test_a_report_marks_an_unreachable_sensor_reachable(pg_pool: PgPool) -> None
         rows = conn.execute("SELECT reachable FROM filament_location_sensors").fetchall()
     assert [r["reachable"] for r in rows] == [True, True]
     assert _ams_readings(pg_pool, pid)[(0, "humidity")] == [29.0]
+
+
+def test_an_archived_unit_place_hands_its_sensors_to_a_new_one(pg_pool: PgPool) -> None:
+    pid, reports = _watched(pg_pool)
+    _advance(reports, pid, _unit(), T0)
+    with pg_pool.connection() as conn:
+        old = LocationStore.ensure_ams_unit_on(conn, UUID(pid), 0)
+    LocationStore(pg_pool).update(old, LocationPatch(archived=True))
+    _advance(reports, pid, _unit(humidity_raw="31"), T0 + timedelta(minutes=1))
+    with pg_pool.connection() as conn:
+        new = LocationStore.ensure_ams_unit_on(conn, UUID(pid), 0)
+        places = {
+            r["location_id"]
+            for r in conn.execute(
+                "SELECT location_id FROM filament_location_sensors WHERE printer_id = %s",
+                (pid,),
+            ).fetchall()
+        }
+    assert new != old
+    assert places == {new}
+    assert _ams_readings(pg_pool, pid)[(0, "humidity")] == [29.0, 31.0]
 
 
 def test_the_external_holder_makes_no_sensor(pg_pool: PgPool) -> None:

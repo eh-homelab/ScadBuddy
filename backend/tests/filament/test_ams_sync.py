@@ -202,3 +202,40 @@ def test_sync_skips_a_spool_locked_between_the_holder_read_and_its_lock(
     result = _sync(pg_pool)
     assert (result.booked, result.locked, result.spools) == (0, 1, [])
     assert len(_events(pg_pool, spool, "ams_reading")) == 1
+
+
+def test_a_spool_on_a_printer_whose_row_is_gone_counts_as_stale(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pid, _ = _printer(pg_pool)
+    spool = _loaded(pg_pool, pid)
+    monkeypatch.setattr(PrinterStore, "read_on", staticmethod(lambda *args: None))
+    result = _sync(pg_pool)
+    assert (result.booked, result.stale) == (0, 1)
+    assert len(_events(pg_pool, spool, "ams_reading")) == 1
+
+
+def test_a_spool_placed_between_the_holder_read_and_the_lock_is_left_alone(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pid, _ = _printer(pg_pool)
+    spool = _loaded(pg_pool, pid)
+    newcomer: list[UUID] = []
+    real_lock = capture.lock
+
+    def lock_after_a_spool_is_placed(conn: capture.Conn, spool_ids: Sequence[UUID]) -> None:
+        with pg_pool.connection() as other:
+            made = other.execute(
+                "INSERT INTO filament_spools (material_id, location_id)"
+                " SELECT m.id, s.location_id FROM filament_materials m, filament_spools s"
+                " WHERE m.name = 'PLA' AND s.id = %s RETURNING id",
+                (spool,),
+            ).fetchone()
+            assert made is not None
+            newcomer.append(made["id"])
+        real_lock(conn, spool_ids)
+
+    monkeypatch.setattr(capture, "lock", lock_after_a_spool_is_placed)
+    result = _sync(pg_pool)
+    assert (result.booked, result.spools) == (1, [spool])
+    assert _events(pg_pool, newcomer[0], "ams_reading") == []

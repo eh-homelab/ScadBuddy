@@ -40,21 +40,47 @@ CREATE TABLE filament_sensor_readings (
 ALTER TABLE filament_materials ADD COLUMN max_hours_outside_dry numeric(6,1);
 
 -- Hand-made places for one AMS unit were allowed until now: keep the oldest of each
--- unarchived set (created_at, then id) and archive the rest, so the index can be made.
-UPDATE filament_locations l SET archived_at = now(), updated_at = now()
-FROM (
-    SELECT id, row_number() OVER (
-        PARTITION BY printer_id, ams_id ORDER BY created_at, id
-    ) AS n
+-- unarchived set (created_at, then id) and archive the rest, so the index can be made. A
+-- printer's place with no ams_id (a shelf beside it) is no unit and is left alone. Each
+-- archived duplicate first hands its spools (with a `moved` event, as a printer merge
+-- books) and its child places to the kept place; no sensor can point at it yet, since
+-- this migration makes the sensors table.
+CREATE TEMP TABLE filament_unit_duplicates AS
+SELECT id, kept FROM (
+    SELECT id,
+        first_value(id) OVER w AS kept,
+        row_number() OVER w AS n
     FROM filament_locations
-    WHERE tray_id IS NULL AND printer_id IS NOT NULL AND archived_at IS NULL
+    WHERE tray_id IS NULL AND printer_id IS NOT NULL AND ams_id IS NOT NULL
+      AND archived_at IS NULL
+    WINDOW w AS (PARTITION BY printer_id, ams_id ORDER BY created_at, id)
 ) d
-WHERE l.id = d.id AND d.n > 1;
+WHERE n > 1;
+
+INSERT INTO filament_spool_events (spool_id, at, kind, grams_before, actor, data)
+SELECT s.id,
+    greatest(clock_timestamp(), (SELECT max(e.at) + interval '1 microsecond'
+        FROM filament_spool_events e WHERE e.spool_id = s.id)),
+    'moved', s.grams_left, 'system:unit-place-merge',
+    jsonb_build_object('from', d.id, 'to', d.kept, 'reason', 'duplicate_unit_place')
+FROM filament_spools s JOIN filament_unit_duplicates d ON s.location_id = d.id;
+
+UPDATE filament_spools s SET location_id = d.kept, updated_at = now()
+FROM filament_unit_duplicates d WHERE s.location_id = d.id;
+
+UPDATE filament_locations c SET parent_id = d.kept, updated_at = now()
+FROM filament_unit_duplicates d WHERE c.parent_id = d.id;
+
+UPDATE filament_locations l SET archived_at = now(), updated_at = now()
+FROM filament_unit_duplicates d WHERE l.id = d.id;
+
+DROP TABLE filament_unit_duplicates;
 
 -- One place per AMS unit (a tray place has a tray_id; Postgres treats a NULL tray_id as
--- distinct in `filament_locations_tray`).
+-- distinct in `filament_locations_tray`, and a place with no ams_id is no unit).
 CREATE UNIQUE INDEX filament_locations_ams_unit ON filament_locations (printer_id, ams_id)
-    WHERE tray_id IS NULL AND printer_id IS NOT NULL AND archived_at IS NULL;
+    WHERE tray_id IS NULL AND printer_id IS NOT NULL AND ams_id IS NOT NULL
+      AND archived_at IS NULL;
 
 -- A tray place hangs under its unit's place where that exists.
 UPDATE filament_locations t SET parent_id = u.id, updated_at = now()

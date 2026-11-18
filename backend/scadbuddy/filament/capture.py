@@ -373,9 +373,10 @@ def sync_ams_weights(pool: ConnectionPool[Conn], *, actor: str, now: datetime) -
     there now, never an older one (an AMS-unit place holds no spool). Each such spool is
     counted once: ``booked``, ``locked`` (its weight is locked), ``printing`` (its printer
     is printing), ``no_remain`` (its tray shows no ``remain``, or none at all) or ``stale``
-    (its printer has no report, or one older than `is_fresh` or one that cannot be read:
-    that is logged, and the other printers go on). A spool in no tray place is
-    not counted."""
+    (its printer has no report or no row, or a report older than `is_fresh` or one that
+    cannot be read: that is logged, and the other printers go on). A spool in no tray
+    place is not counted, nor is one placed in a tray between the first holder read and
+    the spool locks: it was not locked, so it is left to the next sync."""
     with pool.connection() as conn:
         ids = [
             str(r["printer_id"])
@@ -394,14 +395,17 @@ def sync_ams_weights(pool: ConnectionPool[Conn], *, actor: str, now: datetime) -
                 (printer_id,),
             ).fetchone()
             places, current, _ = _holders(conn, printer_id)
-            lock(conn, sorted({s for spools in current.values() for s in spools}))
+            taken = {s for spools in current.values() for s in spools}
+            lock(conn, sorted(taken))
             places, current, locked = _holders(conn, printer_id)
+            current = {p: [s for s in spools if s in taken] for p, spools in current.items()}
             holders = sorted({s for spools in current.values() for s in spools})
             if row is None or not is_fresh(row["seen_at"], now):
                 result.stale += len(holders)
                 continue
             printer = PrinterStore.read_on(conn, printer_id)
             if printer is None:
+                result.stale += len(holders)
                 continue
             report = dict(row["report"])
             state = report.get("gcode_state")

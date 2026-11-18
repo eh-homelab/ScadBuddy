@@ -250,7 +250,8 @@ class LocationStore:
                     "INSERT INTO filament_locations (name, kind_id, printer_id, ams_id)"
                     " VALUES (%s, %s, %s, %s)"
                     " ON CONFLICT (printer_id, ams_id) WHERE tray_id IS NULL"
-                    " AND printer_id IS NOT NULL AND archived_at IS NULL DO NOTHING"
+                    " AND printer_id IS NOT NULL AND ams_id IS NOT NULL"
+                    " AND archived_at IS NULL DO NOTHING"
                     " RETURNING id",
                     (f"{printer['name']} {unit_label(ams_id)}", kind["id"], *key),
                 ).fetchone()

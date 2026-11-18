@@ -237,7 +237,9 @@ def apply_ha_states_on(conn: Conn, states: dict[str, str | None], at: datetime) 
 def capture_ams_on(conn: Conn, printer_id: str, report: dict[str, Any], seen_at: datetime) -> None:
     """Record each AMS unit's humidity and temperature from ``report`` as readings, on
     ``conn`` and in the caller's transaction. A unit's place and its sensors are made
-    when a number first shows; a reading the report lacks (``""``) writes nothing."""
+    when a number first shows; a reading the report lacks (``""``) writes nothing. A
+    sensor whose place a person archived moves to the unit's live place (made again if
+    need be) before its reading is stored, so no reading lands on a hidden place."""
     from scadbuddy.filament.locations import LocationStore, NoAmsKindError  # imports this
     from scadbuddy.printers.status import ams_units
 
@@ -249,9 +251,10 @@ def capture_ams_on(conn: Conn, printer_id: str, report: dict[str, Any], seen_at:
     known = {
         (row["ams_id"], row["kind"]): row
         for row in conn.execute(
-            "SELECT id, ams_id, kind, last_value, last_at, reachable"
-            " FROM filament_location_sensors"
-            " WHERE source = 'ams' AND printer_id = %s AND archived_at IS NULL",
+            "SELECT s.id, s.ams_id, s.kind, s.last_value, s.last_at, s.reachable,"
+            " l.archived_at IS NOT NULL AS place_archived"
+            " FROM filament_location_sensors s JOIN filament_locations l ON l.id = s.location_id"
+            " WHERE s.source = 'ams' AND s.printer_id = %s AND s.archived_at IS NULL",
             (printer,),
         ).fetchall()
     }
@@ -263,6 +266,17 @@ def capture_ams_on(conn: Conn, printer_id: str, report: dict[str, Any], seen_at:
             if value is None:
                 continue
             row = known.get((unit.id, kind))
+            if row is not None and row["place_archived"]:
+                try:
+                    place = LocationStore.ensure_ams_unit_on(conn, printer, unit.id)
+                except NoAmsKindError:
+                    _log_no_ams_kind()
+                else:
+                    conn.execute(
+                        "UPDATE filament_location_sensors SET location_id = %s,"
+                        " updated_at = now() WHERE id = %s",
+                        (place, row["id"]),
+                    )
             if row is None:
                 try:
                     place = LocationStore.ensure_ams_unit_on(conn, printer, unit.id)
