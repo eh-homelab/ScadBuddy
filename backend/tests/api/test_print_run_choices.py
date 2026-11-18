@@ -16,6 +16,7 @@ import io
 import json
 import time
 import zipfile
+from collections import Counter
 from datetime import timedelta
 from typing import Any
 from xml.etree import ElementTree as ET
@@ -33,6 +34,8 @@ from scadbuddy.bambuddy.extruders import LEFT, RIGHT, high_flow_warning
 from scadbuddy.bambuddy.filaments import MAX_PLATES
 from scadbuddy.bambuddy.models import FlowType
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.dialog_reads.component import DIALOG_READS
+from scadbuddy.dialog_reads.reads import DIALOG_TTL, DialogReads
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
 from scadbuddy.render.split import ColourPart
 from tests.api.conftest import wait_for_job
@@ -64,6 +67,39 @@ from tests.test_bambu3mf import add_plate
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("recorded_sb_spools")]
 
 API = f"{BASE}/api/v1"
+
+
+class StoppedClock:
+    """A clock only the test moves."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def dialog_clock(client: TestClient) -> StoppedClock:
+    """The dialog's kept reads (#4196) on a clock only the test moves, so whether the
+    check finds what ``choices`` read never depends on how fast the runner is."""
+    clock = StoppedClock()
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    state.components.override(DIALOG_READS, DialogReads(clock=clock))
+    return clock
+
+
+def bambuddy_reads() -> Counter[str]:
+    """How often each Bambuddy path was asked."""
+    return Counter(call.request.url.path for call in respx.calls)
+
+
+#: What the check reads again after ``choices`` however soon it follows: the printer's
+#: state, its trays and the spools in them (#4196).
+LIVE_READS = (
+    "/api/v1/printers/1/status",
+    "/api/v1/printers/1/inventory-remain",
+    "/api/v1/inventory/assignments",
+)
 
 
 def spool_preset_routes() -> None:
@@ -2441,3 +2477,32 @@ def test_a_plan_the_run_accepts_has_no_check_error(client: TestClient, model: st
 
     assert check.status_code == 200, check.text
     assert check.json()["errors"] == []
+
+
+@respx.mock
+def test_the_check_reads_again_only_what_can_change_since_choices(
+    client: TestClient, model: str
+) -> None:
+    """#4196 lever 4: the check that follows ``choices`` uses the printer list and the
+    printer that ``choices`` read, and reads the printer's state, trays and spools again.
+    Once the kept reads are older than ``DIALOG_TTL``, the check reads them again."""
+    clock = dialog_clock(client)
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+
+    choices = client.get(f"/api/v1/print/outputs/{output_id}/choices?printer_id=1")
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+
+    assert choices.status_code == 200, choices.text
+    assert check.status_code == 200, check.text
+    asked = bambuddy_reads()
+    assert (asked["/api/v1/printers/"], asked["/api/v1/printers/1"]) == (1, 1)
+    assert [asked[path] for path in LIVE_READS] == [2, 2, 2]
+
+    clock.now = DIALOG_TTL
+    again = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+
+    assert again.status_code == 200, again.text
+    asked = bambuddy_reads()
+    assert (asked["/api/v1/printers/"], asked["/api/v1/printers/1"]) == (2, 2)

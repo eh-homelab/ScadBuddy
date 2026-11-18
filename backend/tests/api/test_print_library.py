@@ -47,7 +47,14 @@ from scadbuddy.render.split import ColourPart
 from scadbuddy.store.download_cache import DownloadCache, TooLargeError
 from tests.api.test_print_filaments import queue_route, slice_kept, slice_routes
 from tests.api.test_print_progress import watched as watched  # the fixture, shared
-from tests.api.test_print_run_choices import body, follow_run, run_routes
+from tests.api.test_print_run_choices import (
+    LIVE_READS,
+    bambuddy_reads,
+    body,
+    dialog_clock,
+    follow_run,
+    run_routes,
+)
 from tests.api.test_print_runs import Gate, gated_slice_routes
 from tests.api.test_print_runs import gate as gate  # the fixture, shared
 from tests.api.test_send import BASE, _uploaded_3mf, configure, make_output
@@ -557,6 +564,37 @@ def test_a_library_file_is_laid_out_sliced_and_queued_as_an_output_is(
         for call in respx.calls
         if "/library/files/89" in call.request.url.path and call.request.method != "GET"
     ]
+
+
+@respx.mock
+def test_the_check_reads_the_file_and_printers_choices_read_only_once(
+    client: TestClient,
+) -> None:
+    """#4196 lever 4: the check that follows ``choices`` uses the library file, its
+    plates, the printer list and the printer that ``choices`` read. It reads the
+    printer's state, trays and spools again, and the file's bytes, which no kept read
+    holds."""
+    dialog_clock(client)
+    configure(client)
+    library_file(89)
+    one_color(89)
+    run_routes()
+
+    choices = client.get("/api/v1/print/library/89/choices?printer_id=1")
+    check = client.post("/api/v1/print/library/89/check", json=body())
+
+    assert choices.status_code == 200, choices.text
+    assert check.status_code == 200, check.text
+    asked = bambuddy_reads()
+    kept = [
+        "/api/v1/library/files/89",
+        "/api/v1/library/files/89/plates",
+        "/api/v1/printers/",
+        "/api/v1/printers/1",
+    ]
+    assert [asked[path] for path in kept] == [1, 1, 1, 1]
+    assert [asked[path] for path in LIVE_READS] == [2, 2, 2]
+    assert asked["/api/v1/library/files/89/download"] == 2
 
 
 @respx.mock
