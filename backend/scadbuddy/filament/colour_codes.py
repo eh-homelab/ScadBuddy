@@ -6,12 +6,15 @@ once per process."""
 from __future__ import annotations
 
 import json
+import logging
 from functools import cache
 from pathlib import Path
 
 from pydantic import BaseModel
 
 from scadbuddy.filament.colour import normalise_rgba
+
+logger = logging.getLogger(__name__)
 
 TABLE = Path("BBL") / "filament" / "filaments_color_codes.json"
 
@@ -49,16 +52,23 @@ class ColourCodes:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             raise ColourTableMissingError(self._path) from None
-        return {
-            str(d["fila_color_code"]): ColourCode(
-                code=str(d["fila_color_code"]),
-                name=d["fila_color_name"]["en"],
-                rgba=[normalise_rgba(c) for c in d["fila_color"]],
-                fila_type=d["fila_type"],
-                fila_id=d["fila_id"],
-            )
-            for d in raw["data"]
-        }
+        table: dict[str, ColourCode] = {}
+        for d in raw["data"]:
+            code = str(d.get("fila_color_code")) if isinstance(d, dict) else None
+            try:
+                table[str(d["fila_color_code"])] = ColourCode(
+                    code=str(d["fila_color_code"]),
+                    name=d["fila_color_name"]["en"],
+                    rgba=[normalise_rgba(c) for c in d["fila_color"]],
+                    fila_type=d["fila_type"],
+                    fila_id=d["fila_id"],
+                )
+            except (KeyError, TypeError, ValueError) as error:
+                logger.warning(
+                    "filament.colour_code.skipped",
+                    extra={"code": code, "error": type(error).__name__},
+                )
+        return table
 
 
 @cache

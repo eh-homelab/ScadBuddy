@@ -237,14 +237,14 @@ class InvoiceStore:
         )
         return pm.Invoice.model_validate(fields)
 
-    def candidates(self, invoice_id: UUID) -> _Candidates:
+    def candidates(self, invoice_id: UUID) -> _Candidates | None:
         """Per line, the open (unarchived) spools that match its type, or its proposed
         type, by effective material and exact RGBA, split by whether the spool's own purchase
         is known: an own cost or an invoice line. A type's cost is a default, not a
-        purchase. A line with neither type has none. Empty for no such invoice (#6267)."""
+        purchase. A line with neither type has none. None for no such invoice (#6267)."""
         invoice = self.get(invoice_id)
         if invoice is None:
-            return []
+            return None
         open_spools = self._spools.list()
         with self._pool.connection() as conn:
             bought = {

@@ -402,9 +402,10 @@ async def get_invoice(filament: FilamentDep, invoice_id: UUID) -> pm.InvoiceDeta
     ),
 )
 async def invoice_candidates(filament: FilamentDep, invoice_id: UUID) -> list[pm.LineCandidates]:
-    if await asyncio.to_thread(filament.invoices.get, invoice_id) is None:
+    found = await asyncio.to_thread(filament.invoices.candidates, invoice_id)
+    if found is None:
         raise _no_invoice(invoice_id)
-    return await asyncio.to_thread(filament.invoices.candidates, invoice_id)
+    return found
 
 
 @router.get(
