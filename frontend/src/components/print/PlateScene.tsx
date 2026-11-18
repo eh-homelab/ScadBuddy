@@ -4,7 +4,8 @@ import { OrbitControls } from '@react-three/drei'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import * as THREE from 'three'
 import { designColorOf, designOpacityOf } from '../../lib/glbColor'
-import { seeThrough } from '../../lib/partOpacity'
+import { normalizeHex } from '../../lib/format'
+import { applyPartOpacity, seeThrough, slotOpacity } from '../../lib/partOpacity'
 import { cameraFraming } from '../../lib/previewFrame'
 import { ErrorBoundary } from '../ErrorBoundary'
 import { Button } from '@/components/ui/button'
@@ -124,6 +125,7 @@ function PlateModel({ url, colors, cutAt, onHeight }: Omit<Props, 'background'>)
       const owned = materials.map((material) => {
         const own = material.clone() as THREE.MeshStandardMaterial
         own.userData.designColor = designColorOf(mesh, own)
+        own.userData.designOpacity = opacity
         own.side = THREE.DoubleSide
         if (opacity < 1) {
           // A translucent filament's part draws see-through, as in the Customize preview
@@ -163,7 +165,10 @@ function PlateModel({ url, colors, cutAt, onHeight }: Omit<Props, 'background'>)
       if (!mesh.isMesh) return
       for (const material of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
         const own = material as THREE.MeshStandardMaterial
-        own.color.set(colors.get(own.userData.designColor as string) ?? (own.userData.designColor as string))
+        const printed = colors.get(own.userData.designColor as string)
+        own.color.set(normalizeHex(printed ?? (own.userData.designColor as string)))
+        // #6349 — a spool colour that spells an alpha draws the part see-through at it.
+        applyPartOpacity(mesh, own, slotOpacity(printed, own.userData.designOpacity as number))
       }
     })
     invalidate()

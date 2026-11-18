@@ -28,3 +28,22 @@ describe('resolvedColors (#1723)', () => {
     expect(map.size).toBe(0)
   })
 })
+
+describe('resolvedColors alpha (#6349)', () => {
+  it("keeps a spool colour's alpha when it is below FF, and drops FF and six digits", () => {
+    const map = resolvedColors(
+      [slot(1, '#FF0000'), slot(2, '#00FF00'), slot(3, '#0000FF')],
+      [spool(7, '#ffffff80'), spool(8, '#ffffffff'), spool(9, '#ffffff')],
+      [
+        { slot_id: 1, spool_id: 7 },
+        { slot_id: 2, spool_id: 8 },
+        { slot_id: 3, spool_id: 9 },
+      ],
+    )
+    expect([...map]).toEqual([
+      ['#FF0000', '#FFFFFF80'],
+      ['#00FF00', '#FFFFFF'],
+      ['#0000FF', '#FFFFFF'],
+    ])
+  })
+})

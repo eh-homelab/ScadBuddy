@@ -1,5 +1,12 @@
 import type { SlotChoice, SlotNeed, SpoolOption } from '../api/types'
 import { normalizeHex } from './format'
+import { alphaOf, parseRgba } from './rgba'
+
+/** `#RRGGBB`, or `#RRGGBBAA` when the colour is translucent: the 3D preview draws its alpha (#6349). */
+function previewColour(colour: string): string {
+  const rgba = parseRgba(colour)
+  return rgba !== null && alphaOf(rgba) < 0xff ? rgba : normalizeHex(colour)
+}
 
 /**
  * #1723 — what each part of the plate prints in: its slot's design colour → the colour of
@@ -19,7 +26,7 @@ export function resolvedColors(
     const colour = spoolId == null ? null : byId.get(spoolId)?.colour
     // The first slot to claim a design colour wins: two slots of one colour are one part.
     const design = normalizeHex(slot.colour)
-    if (colour && !out.has(design)) out.set(design, normalizeHex(colour))
+    if (colour && !out.has(design)) out.set(design, previewColour(colour))
   }
   return out
 }
