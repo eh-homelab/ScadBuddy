@@ -1520,6 +1520,141 @@ describe('machine rate tools (#4625)', () => {
   })
 })
 
+// #5774 (spec 2026-11-17-machine-rate-actuals §5, §10): a printer's logged maintenance and
+// replaced parts, listed, added and corrected; machine_rate_get shows the actuals.
+describe('machine rate event tools (#5774)', () => {
+  const PRINTER = '00000000-0000-4000-8000-000000000001'
+  const EVENT = 'e0000000-0000-4000-8000-000000000002'
+  const events = `${BACKEND}/api/v1/printers/${PRINTER}/machine-rate/events`
+  const LOGGED = {
+    id: EVENT,
+    kind: 'part',
+    name: 'Nozzle',
+    at: '2026-11-18T10:00:00Z',
+    hours_at: '402',
+    hours_source: 'lan_watch',
+    cost: '20',
+    origin: 'scadbuddy',
+    source: 'agent:x',
+    created_at: '2026-11-18T10:00:00Z',
+    created_by: 'agent',
+  }
+
+  it('lists with read; adds and corrects with write (they reach no printer and no customer)', () => {
+    expect(['machine_rate_events_list', 'machine_rate_event_add', 'machine_rate_event_update'].map((n) => tool(n).risk)).toEqual([
+      'read',
+      'write',
+      'write',
+    ])
+    expect(tool('machine_rate_events_list').routes).toEqual(['GET /api/v1/printers/{printer_id}/machine-rate/events'])
+    expect(tool('machine_rate_event_add').routes).toEqual(['POST /api/v1/printers/{printer_id}/machine-rate/events'])
+    expect(tool('machine_rate_event_update').routes).toEqual(['PATCH /api/v1/printers/{printer_id}/machine-rate/events/{event_id}'])
+    // No delete tool: deleting an event is a person's correction (§5).
+    expect(ALL_TOOLS.some((t) => t.routes?.includes('DELETE /api/v1/printers/{printer_id}/machine-rate/events/{event_id}'))).toBe(false)
+  })
+
+  it('checks each schema', () => {
+    const accepts = (name: string, args: Record<string, unknown>): boolean => {
+      try {
+        tool(name).parse(args)
+        return true
+      } catch {
+        return false
+      }
+    }
+    const list = 'machine_rate_events_list'
+    expect(accepts(list, { printer: PRINTER, kind: 'part', name: 'Nozzle', limit: 200 })).toBe(true)
+    expect(accepts(list, { printer: PRINTER, kind: 'tool' })).toBe(false)
+    expect(accepts(list, { printer: PRINTER, limit: 201 })).toBe(false)
+    const add = 'machine_rate_event_add'
+    expect(accepts(add, { printer: PRINTER, kind: 'part', name: 'Nozzle', cost: '20', hours_used: '640' })).toBe(true)
+    expect(accepts(add, { printer: PRINTER, kind: 'task', name: 'Lubricate rods', minutes: '15', consumables: '0.5' })).toBe(true)
+    expect(accepts(add, { printer: PRINTER, kind: 'part', name: '', cost: '20' })).toBe(false)
+    expect(accepts(add, { printer: PRINTER, kind: 'part', name: 'Nozzle', cost: '-1' })).toBe(false)
+    // The counter's source is the route's to record, never the caller's (§3.2).
+    expect(accepts(add, { printer: PRINTER, kind: 'part', name: 'Nozzle', cost: '20', hours_source: 'typed' })).toBe(false)
+    expect(accepts(add, { printer: PRINTER, kind: 'part', name: 'Nozzle', cost: '20', notes: 'x'.repeat(1001) })).toBe(false)
+    const update = 'machine_rate_event_update'
+    expect(accepts(update, { printer: PRINTER, event_id: EVENT, minutes: null, notes: 'redone' })).toBe(true)
+    // An imported event's time, counter source and Bambuddy id stay as read (§5).
+    expect(accepts(update, { printer: PRINTER, event_id: EVENT, performed_at: '2026-11-18T10:00:00Z' })).toBe(false)
+    expect(accepts(update, { printer: PRINTER, event_id: EVENT, bambuddy_history_id: 3 })).toBe(false)
+  })
+
+  it('lists a printer’s events a page at a time', async () => {
+    let url = ''
+    const page = { events: [LOGGED], next: 'c1' }
+    server.use(
+      http.get(events, ({ request }) => {
+        url = request.url
+        return HttpResponse.json(page)
+      }),
+    )
+    const answer = await tool('machine_rate_events_list').execute({ printer: PRINTER, kind: 'part', name: 'Nozzle', cursor: 'c0' }, ctx())
+    expect(firstText(answer)).toEqual(page)
+    const query = new URL(url).searchParams
+    expect([query.get('kind'), query.get('name'), query.get('cursor')]).toEqual(['part', 'Nozzle', 'c0'])
+  })
+
+  it('adds an event, keyed so a retry of the call writes once', async () => {
+    const sent: unknown[] = []
+    server.use(
+      http.post(events, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json(LOGGED, { status: 201 })
+      }),
+    )
+    const keyed = { ...ctx(), callKey: 'call-1' }
+    const body = { printer: PRINTER, kind: 'part', name: 'Nozzle', cost: '20' } as const
+    expect(firstText(await tool('machine_rate_event_add').execute(body, keyed))).toEqual(LOGGED)
+    await tool('machine_rate_event_add').execute(body, keyed)
+    await tool('machine_rate_event_add').execute({ ...body, source: 'form:7', hours_at: '12.5' }, ctx())
+    const [first, again, given] = sent as Record<string, unknown>[]
+    expect(first).toEqual({ kind: 'part', name: 'Nozzle', cost: '20', source: first?.source })
+    expect(String(first?.source)).toMatch(/^agent:[0-9a-f]{64}$/)
+    expect(again?.source).toBe(first?.source)
+    expect(given).toEqual({ kind: 'part', name: 'Nozzle', cost: '20', hours_at: '12.5', source: 'form:7' })
+  })
+
+  it('refuses an event its kind cannot hold before it asks the backend', async () => {
+    const add = tool('machine_rate_event_add')
+    await expect(add.execute({ printer: PRINTER, kind: 'part', name: 'Nozzle' }, ctx())).rejects.toThrow('cost')
+    await expect(add.execute({ printer: PRINTER, kind: 'part', name: 'Nozzle', cost: '20', minutes: '5' }, ctx())).rejects.toThrow(
+      'minutes',
+    )
+    await expect(add.execute({ printer: PRINTER, kind: 'task', name: 'Lubricate rods', cost: '1' }, ctx())).rejects.toThrow('cost')
+  })
+
+  it('corrects the fields given, a null clearing one', async () => {
+    let sent: unknown
+    server.use(
+      http.patch(`${events}/${EVENT}`, async ({ request }) => {
+        sent = await request.json()
+        return HttpResponse.json(LOGGED)
+      }),
+    )
+    const answer = await tool('machine_rate_event_update').execute({ printer: PRINTER, event_id: EVENT, minutes: null, notes: 'redone' }, ctx())
+    expect(firstText(answer)).toEqual(LOGGED)
+    expect(sent).toEqual({ minutes: null, notes: 'redone' })
+    await expect(tool('machine_rate_event_update').execute({ printer: PRINTER, event_id: EVENT }, ctx())).rejects.toThrow(ToolError)
+  })
+
+  it('machine_rate_get shows the actuals, their confidences and the counter', async () => {
+    const view = {
+      printer: PRINTER,
+      printer_name: 'H2C',
+      inputs: null,
+      breakdown: { source: 'profile', rate_per_hour: '0.68', actuals: true, actuals_window: 3, confidence: 66 },
+      actuals: { rows: [{ kind: 'part', name: 'Nozzle', have: 2, need: 3, confidence: 66 }], events_read_at: null, orphaned: [] },
+      counter: { source: 'lan_watch', hours: '102', lan_watch: { hours: '102', run_hours: '2', offset_hours: '100' } },
+    }
+    server.use(http.get(`${BACKEND}/api/v1/printers/${PRINTER}/machine-rate`, () => HttpResponse.json(view)))
+    expect(firstText(await tool('machine_rate_get').execute({ printer: PRINTER }, ctx()))).toEqual(view)
+    const described = tool('machine_rate_get').description
+    for (const word of ['actuals', 'confidence', 'counter', 'machine_rate_events_list']) expect(described).toContain(word)
+  })
+})
+
 // #4722 (spec 2026-10-18 §7.3): a file from the session workspace onto an order or an item,
 // streamed into the multipart route as every workspace upload is (tools/workspaceUploads.ts).
 describe('order attachment tools (#4722)', () => {
