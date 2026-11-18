@@ -1,5 +1,6 @@
 import { ChevronDownIcon } from 'lucide-react'
 import { useState } from 'react'
+import { useNavigate } from 'react-router'
 import { ApiError } from '../../api/client'
 import { archiveSpool, deleteSpool, getSpool, moveSpool, patchSpool, type Spool, type SpoolType } from '../../api/filament'
 import {
@@ -41,6 +42,7 @@ const spools = (count: number) => (count === 1 ? '1 spool' : `${count} spools`)
  * `in_use`), naming it: the backend would refuse it, and archiving is the way out.
  */
 export function BulkBar({ selected, places, types, onDone, onClear }: Props) {
+  const navigate = useNavigate()
   const [busy, setBusy] = useState(false)
   const [confirming, setConfirming] = useState(false)
   const ordered = [...selected].sort((a, b) => a.number - b.number)
@@ -113,6 +115,9 @@ export function BulkBar({ selected, places, types, onDone, onClear }: Props) {
           ))}
         </DropdownMenuContent>
       </DropdownMenu>
+      <Button size="sm" variant="outline" disabled={busy || !selected.length} onClick={() => navigate(`/filament/labels?ids=${ordered.map((spool) => spool.id).join(',')}`)}>
+        Labels
+      </Button>
       <Button size="sm" variant="ghost" className="ml-auto" disabled={busy} onClick={onClear}>
         Clear selection
       </Button>

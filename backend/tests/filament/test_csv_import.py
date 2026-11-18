@@ -17,6 +17,7 @@ from scadbuddy.filament.csv_import import (
     import_rows,
 )
 from scadbuddy.filament.inventory import FilamentInventory
+from scadbuddy.filament.invoices import InvoiceStore
 from scadbuddy.filament.locations import LocationStore, MoveTargetError
 from scadbuddy.filament.models import (
     Brand,
@@ -29,8 +30,11 @@ from scadbuddy.filament.models import (
     SpoolTypeCreate,
 )
 from scadbuddy.filament.presets import PoolSpoolPresets
+from scadbuddy.filament.rfid_mode import RfidModeStore
 from scadbuddy.filament.sensors import SensorStore
+from scadbuddy.filament.shopping import ShoppingStore
 from scadbuddy.filament.spools import FilamentSpoolStore
+from scadbuddy.filament.suppliers import SuppliersStore
 from scadbuddy.filament.types import SpoolTypeStore
 from tests.conftest import PgPool
 
@@ -38,14 +42,20 @@ pytestmark = pytest.mark.requires_postgres
 
 
 def _filament(pool: PgPool) -> Filament:
+    types = SpoolTypeStore(pool)
+    spools = FilamentSpoolStore(pool)
     return Filament(
         catalog=CatalogStore(pool),
-        types=SpoolTypeStore(pool),
-        spools=FilamentSpoolStore(pool),
+        types=types,
+        spools=spools,
         locations=LocationStore(pool),
         sensors=SensorStore(pool),
         inventory=FilamentInventory(pool),
         presets=PoolSpoolPresets(pool),
+        rfid=RfidModeStore(pool),
+        suppliers=SuppliersStore(pool, lambda: "USD"),
+        invoices=InvoiceStore(pool, lambda: "USD", spools, types),
+        shopping=ShoppingStore(pool),
     )
 
 

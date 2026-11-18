@@ -1,4 +1,4 @@
-import { ArchiveIcon, ArchiveRestoreIcon, ChevronLeftIcon, Trash2Icon } from 'lucide-react'
+import { ArchiveIcon, ArchiveRestoreIcon, ChevronLeftIcon, PrinterIcon, Trash2Icon } from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Link, useLocation, useParams } from 'react-router'
 import { api, ApiError } from '../../api/client'
@@ -36,11 +36,13 @@ import { makeTypeFromSpool } from '../../components/filament/makeType'
 import { OverrideField } from '../../components/filament/OverrideField'
 import { PresetTable } from '../../components/filament/PresetTable'
 import { keyOf as presetKey, presetRowsError } from '../../components/filament/presetRows'
+import { SpoolPurchasing } from '../../components/filament/purchasing/SpoolPurchasing'
 import { RgbaColourField } from '../../components/filament/RgbaColourField'
 import { NeedsDrying } from '../../components/filament/NeedsDrying'
 import { outsideDryText } from '../../components/filament/outsideDry'
 import { RgbaSwatch } from '../../components/filament/RgbaSwatch'
 import { HistoryList, Section, SectionIndex } from '../../components/filament/SpoolSections'
+import { NtagPanel } from '../../components/filament/NtagPanel'
 import { TagPanel } from '../../components/filament/TagPanel'
 import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
@@ -427,7 +429,7 @@ export function SpoolPage() {
         spoolId = made.id
         // From here the page is an edit of this spool: a later failure retries as one.
         setMadeId(made.id)
-        setSaved({ ...made, effective: made.effective ?? {}, overridden: made.overridden ?? [], names: made.names ?? {}, low_stock: made.low_stock ?? false, presets: [], k_values: [], tag: null, last_tag: null, basis: { anchor: null, deltas: [] }, in_use: false })
+        setSaved({ ...made, effective: made.effective ?? {}, overridden: made.overridden ?? [], names: made.names ?? {}, low_stock: made.low_stock ?? false, presets: [], k_values: [], tag: null, last_tag: null, basis: { anchor: null, deltas: [] }, in_use: false, invoice: null, type_suppliers: [] })
         presetsWere = []
         kWere = []
         placeWas = ''
@@ -553,6 +555,13 @@ export function SpoolPage() {
             <ArchiveRestoreIcon /> Restore
           </Button>
         )}
+        {!creating && saved && (
+          <Button asChild variant="outline" size="sm">
+            <Link to={`/filament/labels?ids=${saved.id}`}>
+              <PrinterIcon /> Print label
+            </Link>
+          </Button>
+        )}
         <Button type="button" variant="ghost" size="sm" disabled={busy || !dirty} onClick={() => { setDraft(base); setError(null) }}>
           Discard changes
         </Button>
@@ -637,7 +646,15 @@ export function SpoolPage() {
             </div>
             <div className="flex flex-col gap-2">
               <h3 className="text-[13px] font-medium">Tag</h3>
-              {saved && !creating ? <TagPanel spool={saved} onChanged={() => void reload(true).catch((cause) => setError(message(cause)))} /> : <p className="text-[13px] text-muted-foreground">Save the spool first, then bind its tag.</p>}
+              {saved && !creating ? (
+                <>
+                  <TagPanel spool={saved} onChanged={() => void reload(true).catch((cause) => setError(message(cause)))} />
+                  <h3 className="mt-2 text-[13px] font-medium">Write a tag</h3>
+                  <NtagPanel spool={saved} onBound={() => void reload(true).catch((cause) => setError(message(cause)))} />
+                </>
+              ) : (
+                <p className="text-[13px] text-muted-foreground">Save the spool first, then bind its tag.</p>
+              )}
             </div>
             {!creating && saved && (
               <div className="flex flex-wrap items-center gap-2 border-t pt-3">
@@ -726,6 +743,7 @@ export function SpoolPage() {
               {field('extra_colours', 'Extra colours', { hint: 'For multi-colour filament: #RRGGBB or #RRGGBBAA, separated by commas.' })}
               {field('cost_per_kg', 'Cost per kg', { mode: 'decimal' })}
             </div>
+            <SpoolPurchasing invoice={saved?.invoice} suppliers={saved?.type_suppliers} />
           </Section>
 
           <Section id="printers" title="Printers">

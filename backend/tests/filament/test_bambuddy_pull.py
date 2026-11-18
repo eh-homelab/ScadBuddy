@@ -21,6 +21,7 @@ from scadbuddy.bambuddy.models import SpoolCatalogEntry
 from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament import ledger, prints
 from scadbuddy.filament.bambuddy_pull import (
+    _WARNED_DUPLICATES,
     pull,
     read_and_pull,
     read_assignments,
@@ -32,6 +33,7 @@ from scadbuddy.filament.bambuddy_pull import (
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.inventory import FilamentInventory
+from scadbuddy.filament.invoices import InvoiceStore
 from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.models import (
     InsertType,
@@ -47,8 +49,11 @@ from scadbuddy.filament.models import (
 )
 from scadbuddy.filament.presets import PoolSpoolPresets
 from scadbuddy.filament.print_uses import SlotUse, record_uses, settle_uses
+from scadbuddy.filament.rfid_mode import RfidModeStore
 from scadbuddy.filament.sensors import SensorStore
+from scadbuddy.filament.shopping import ShoppingStore
 from scadbuddy.filament.spools import FilamentSpoolStore
+from scadbuddy.filament.suppliers import SuppliersStore
 from scadbuddy.filament.types import SpoolTypeStore
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.operations.kinds import CHECK_ON_BAMBUDDY
@@ -63,14 +68,20 @@ TRAY = "0123456789ABCDEF0123456789ABCDEF"
 
 
 def _filament(pool: PgPool) -> Filament:
+    types = SpoolTypeStore(pool)
+    spools = FilamentSpoolStore(pool)
     return Filament(
         catalog=CatalogStore(pool),
-        types=SpoolTypeStore(pool),
-        spools=FilamentSpoolStore(pool),
+        types=types,
+        spools=spools,
         locations=LocationStore(pool),
         sensors=SensorStore(pool),
         inventory=FilamentInventory(pool),
         presets=PoolSpoolPresets(pool),
+        rfid=RfidModeStore(pool),
+        suppliers=SuppliersStore(pool, lambda: "USD"),
+        invoices=InvoiceStore(pool, lambda: "USD", spools, types),
+        shopping=ShoppingStore(pool),
     )
 
 
@@ -871,15 +882,16 @@ def test_a_linked_spool_archived_in_sb_takes_nothing(pg_pool: PgPool) -> None:
     assert len(f.spools.events(made)) == count
 
 
-def test_two_bb_spools_with_one_tag_give_the_second_none(
+def test_two_bb_spools_with_one_tag_make_one_spool_and_count_the_second(
     pg_pool: PgPool, caplog: pytest.LogCaptureFixture
 ) -> None:
+    _WARNED_DUPLICATES.clear()
     f = _filament(pg_pool)
     report = pull(f, [bb(id=1), bb(id=2)], now=NOW)
-    first, second = report.created_ids
+    (first,) = report.created_ids
     assert f.spools.open_binding(first) is not None
-    assert f.spools.open_binding(second) is None
-    assert "tag is on another spool; not moved" in caplog.text
+    assert (report.rfid_duplicates, report.rfid_duplicate_bb_ids) == (1, [2])
+    assert "is left alone" in caplog.text
 
 
 def test_a_failing_spool_is_listed_and_the_rest_go_on(
@@ -1685,3 +1697,142 @@ async def test_the_ha_read_needs_bambuddy_configured(pg_pool: PgPool) -> None:
         route = router.get(ENTITIES).respond(json=[])
         assert await scheduled_pull(f, lambda: StoredSettings(), FilamentSync) == "skipped"
         assert not route.called
+
+
+def _bound_kind(pool: PgPool, spool: UUID) -> str:
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT t.kind FROM filament_tag_bindings b JOIN filament_tags t ON t.id = b.tag_id"
+            " WHERE b.spool_id = %s AND b.unbound_at IS NULL",
+            (spool,),
+        ).fetchone()
+    assert row is not None
+    return str(row["kind"])
+
+
+def test_an_opentag_spool_binds_as_ntag_opentag(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    (made,) = pull(
+        f,
+        [bb(tray_uuid=None, tag_uid="04AABB", data_origin="opentag3d")],
+        now=NOW,
+    ).created_ids
+    assert _bound_kind(pg_pool, made) == "ntag_opentag"
+
+
+def test_a_plain_uid_stays_other(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb(tray_uuid=None, tag_uid="04AABB")], now=NOW).created_ids
+    assert _bound_kind(pg_pool, made) == "other"
+
+
+def test_a_tray_uuid_stays_bambu_mifare(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb(tag_uid="04AABB", data_origin="opentag3d")], now=NOW).created_ids
+    assert _bound_kind(pg_pool, made) == "bambu_mifare"
+
+
+def _linked_override_holder(f: Filament) -> UUID:
+    """SB spool A, linked to BB 11, holding TRAY as an override tag."""
+    (a,) = pull(f, [bb(id=11, tray_uuid=None, tag_uid=None)], now=NOW).created_ids
+    f.spools.bind_tag(a, tray_uuid=TRAY, kind="bambu_mifare", override=True, actor="ann")
+    return a
+
+
+def test_an_auto_added_bb_spool_for_an_override_tag_makes_no_second_sb_spool(
+    pg_pool: PgPool, caplog: pytest.LogCaptureFixture
+) -> None:
+    _WARNED_DUPLICATES.clear()
+    f = _filament(pg_pool)
+    a = _linked_override_holder(f)
+    before = f.spools.open_binding(a)
+    assert before is not None
+    report = pull(
+        f,
+        [bb(id=40, tag_uid=None, tray_uuid=TRAY, data_origin="rfid_auto")],
+        now=NOW,
+    )
+    assert report.created == 0
+    assert (report.rfid_duplicates, report.rfid_duplicate_bb_ids) == (1, [40])
+    assert [s.id for s in f.spools.list()] == [a]
+    after = f.spools.open_binding(a)
+    assert after is not None and after.id == before.id
+    assert "a Bambuddy spool made for a tag a linked spool holds is left alone" in caplog.text
+
+
+def test_an_unlinked_sb_spool_with_the_tag_is_still_linked(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    held = f.spools.create(SpoolCreate(material_id=_pla(pg_pool)), actor="ann")
+    f.spools.bind_tag(held.id, tray_uuid=TRAY, kind="bambu_mifare", override=True, actor="ann")
+    report = pull(f, [bb(id=40, tag_uid=None, tray_uuid=TRAY, data_origin="rfid_auto")], now=NOW)
+    assert (report.linked_ids, report.rfid_duplicates, report.created) == ([held.id], 0, 0)
+
+
+def test_an_auto_added_bb_spool_for_a_plain_binding_makes_no_second_sb_spool(
+    pg_pool: PgPool,
+) -> None:
+    f = _filament(pg_pool)
+    (a,) = pull(f, [bb(id=11, tray_uuid=None, tag_uid=None)], now=NOW).created_ids
+    f.spools.bind_tag(a, tray_uuid=TRAY, kind="bambu_mifare", actor="ann")
+    report = pull(f, [bb(id=40, tag_uid=None, tray_uuid=TRAY, data_origin="rfid_auto")], now=NOW)
+    assert (report.created, report.rfid_duplicates, report.rfid_duplicate_bb_ids) == (0, 1, [40])
+    assert [s.id for s in f.spools.list()] == [a]
+
+
+def test_the_bb_spool_the_override_holder_is_linked_to_is_no_duplicate(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    a = _linked_override_holder(f)
+    report = pull(
+        f,
+        [bb(id=11, tag_uid=None, tray_uuid=TRAY, updated_at=_bb_time(1), weight_used=300.0)],
+        now=NOW,
+    )
+    assert (report.rfid_duplicates, report.created, report.updated_ids) == (0, 0, [a])
+
+
+def test_a_duplicate_is_warned_once_then_debug(
+    pg_pool: PgPool, caplog: pytest.LogCaptureFixture
+) -> None:
+    _WARNED_DUPLICATES.clear()
+    f = _filament(pg_pool)
+    _linked_override_holder(f)
+    rows = [bb(id=40, tag_uid=None, tray_uuid=TRAY, data_origin="rfid_auto")]
+    with caplog.at_level("DEBUG"):
+        pull(f, rows, now=NOW)
+        pull(f, rows, now=NOW)
+    levels = [r.levelname for r in caplog.records if "is left alone" in r.getMessage()]
+    assert levels == ["WARNING", "DEBUG"]
+
+
+def test_a_pull_after_the_push_keeps_an_override_binding(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    a = _linked_override_holder(f)
+    before = f.spools.open_binding(a)
+    assert before is not None and before.override
+    # The push linked TRAY on BB 11: its tag keys now differ from the last reading.
+    pull(
+        f,
+        [bb(id=11, tag_uid=None, tray_uuid=TRAY, updated_at=_bb_time(1), weight_used=300.0)],
+        now=NOW,
+    )
+    after = f.spools.open_binding(a)
+    assert after is not None and after.id == before.id and after.override
+    spool = f.spools.get(a)
+    assert spool is not None and spool.weight_locked
+
+
+def test_a_skipped_duplicate_stays_skipped_after_the_push_cleared_its_tag(
+    pg_pool: PgPool,
+) -> None:
+    _WARNED_DUPLICATES.clear()
+    f = _filament(pg_pool)
+    a = _linked_override_holder(f)
+    dup = bb(id=40, tag_uid=None, tray_uuid=TRAY, data_origin="rfid_auto")
+    assert pull(f, [dup], now=NOW).rfid_duplicate_bb_ids == [40]
+    # The push linked TRAY on BB 11 and cleared the auto-added BB 40.
+    cleared = bb(id=40, tag_uid=None, tray_uuid=None, data_origin="rfid_auto")
+    report = pull(f, [cleared], now=NOW)
+    assert (report.created, report.rfid_duplicates, report.rfid_duplicate_bb_ids) == (0, 1, [40])
+    assert [s.id for s in f.spools.list()] == [a]
+    # Still skipped on every later pull.
+    assert pull(f, [cleared], now=NOW).created == 0

@@ -86,6 +86,57 @@ Anti-goals (the work fails even if it runs):
 - The BB API is the one measured on 2026-11-14: Bambuddy 1.2.6b1,
   `https://bambuddy.internal.nullreference.io/openapi.json`, 638 paths. The
   endpoints and schemas named below come from that spec.
+- **The RFID routes were re-measured on 2026-11-17 against Bambuddy 1.3.1** (the spec's
+  1.2.6b1 is out of date; the live instance moved). Method: read-only. `GET` requests and
+  one listen-only WebSocket that sent nothing, with no API key, against
+  `https://bambuddy.internal.nullreference.io`; Bambuddy's source read at tag
+  [`v1.3.1`](https://github.com/maziggy/bambuddy/tree/v1.3.1/backend/app). The recording is
+  `backend/tests/bambuddy/recordings/openapi/rfid-routes.json` (#6264).
+  - `GET /openapi.json`: 200, `info.version` 1.3.1. `GET /api/v1/auth/status`:
+    `{"auth_enabled": false, "requires_setup": false}`. Auth is off, so no key is needed and
+    override mode can write the setting.
+  - `GET /api/v1/settings/`: `auto_add_unknown_rfid` was `true` at that time.
+  - `GET /api/v1/spoolbuddy/devices`: 200, `[]`. No SpoolBuddy device is registered, so the
+    scan and write tests use recorded bodies.
+  - `GET /api/v1/inventory/spools/by-tag?tray_uuid=<a live tray_uuid>`: 200, a
+    `SpoolResponse` with `tag_type: "bambulab"` and `data_origin: "rfid_linked"`.
+    `?tag_uid=00000000`: 404 `{"detail": "Spool not found"}`. No argument: 400
+    `{"detail": "Provide tray_uuid and/or tag_uid"}`. The live inventory (106 spools) holds
+    `data_origin` `rfid_linked` on 33, `rfid_auto` on 7 and none on 66.
+  - `wss://.../api/v1/ws` with no token: handshake 101. In 15 s it sent 7 frames, all
+    `printer_status` (keys `type`, `printer_id`, `data`). No `spoolbuddy_*` frame came,
+    because no tag was scanned. The event fields are from the source (below).
+  - `data_origin` values that Bambuddy writes (`backend/app`, v1.3.1): `rfid_auto`
+    ([`services/spool_tag_matcher.py` line 265](https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/services/spool_tag_matcher.py#L265)),
+    `rfid_linked` ([same file, line 417](https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/services/spool_tag_matcher.py#L417)),
+    `nfc_link` ([`api/routes/inventory.py` line 2747](https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/inventory.py#L2747)
+    default, applied at lines 2856-2857) and `opentag3d`
+    ([`api/routes/spoolbuddy.py` line 1149](https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/spoolbuddy.py#L1149)).
+  - **Not measurable without a write, so taken from the source and tested only with respx:**
+    the 409 `tag_already_linked` body
+    ([`services/tag_conflict.py` lines 24-40](https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/services/tag_conflict.py#L24-L40),
+    raised at `inventory.py` lines 2815 and 2839), the clear by `PATCH` with null
+    (`inventory.py` lines 1700-1717, `model_dump(exclude_unset=True)`), the configure answer
+    and the write-tag answer (`spoolbuddy.py` lines 826-957).
+  - Scopes (Bambuddy's `Permission` in the route's dependency, mapped through
+    [`_APIKEY_SCOPE_BY_PERMISSION`](https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/core/auth.py#L90)
+    to an API-key flag; the last column is ScadBuddy's `Scope`, `bambuddy/errors.py`):
+
+    | Route | Bambuddy permission (line, v1.3.1) | Key flag | ScadBuddy `Scope` |
+    |---|---|---|---|
+    | `PATCH /inventory/spools/{id}/link-tag` | `INVENTORY_UPDATE` (`inventory.py` 2771) | `can_manage_inventory` | `MANAGE_INVENTORY` |
+    | `GET /inventory/spools/by-tag` | `INVENTORY_READ` or `INVENTORY_UPDATE` (`inventory.py` 1560) | `can_read_status` or `can_manage_inventory` | `MANAGE_INVENTORY` (the plan's choice; either flag opens it) |
+    | `PATCH /inventory/spools/{id}` (clear) | `INVENTORY_UPDATE` (`inventory.py` 1693) | `can_manage_inventory` | `MANAGE_INVENTORY` |
+    | `GET /settings/` | `SETTINGS_READ` (`settings.py` 344) | `can_read_status` | `READ_STATUS` |
+    | `PATCH /settings/` | `SETTINGS_UPDATE` (`settings.py` 552) | none: denied for every key (`core/auth.py` line 251) | `ADMIN_SETTINGS` |
+    | `POST /printers/{id}/slots/{ams}/{tray}/configure` | `PRINTERS_CONTROL` (`printers.py` 2963) | `can_control_printer` | `CONTROL_PRINTER` |
+    | `GET /spoolbuddy/devices` | `INVENTORY_READ` (`spoolbuddy.py` 280) | `can_read_status` | `READ_STATUS` |
+    | `POST /spoolbuddy/nfc/write-tag` | `INVENTORY_UPDATE` (`spoolbuddy.py` 830) | `can_manage_inventory` | `MANAGE_INVENTORY` |
+    | `POST /spoolbuddy/devices/{id}/cancel-write` | `INVENTORY_UPDATE` (`spoolbuddy.py` 1181) | `can_manage_inventory` | `MANAGE_INVENTORY` |
+    | `POST /auth/ws-token` | `WEBSOCKET_CONNECT` (`api/routes/auth.py` 672) | `can_read_status` | `READ_STATUS` (needed only while auth is on) |
+
+    `nfc/tag-scanned`, `nfc/tag-removed` and `nfc/write-result` are the SpoolBuddy daemon's
+    routes (`INVENTORY_UPDATE`, `spoolbuddy.py` 582, 813, 963); ScadBuddy does not call them.
 
 ## 4. Approaches
 
@@ -400,6 +451,30 @@ Low-cardinality labels only: material, brand, location, not the spool id.
   allocated cost (line plus its tax, plus its share of shipping; §9).
 - Shopping list: BB parity with `/inventory/shopping-list`.
 
+**As built (#6266).** The plan `docs/superpowers/plans/2026-11-17-filament-suppliers.md`
+holds each decision and what it costs if wrong.
+
+- **Price point basis.** A price point is the price of one pack, tax included, shipping
+  excluded, in the invoice's currency. `price_per_kg` is derived on read from the pack size
+  and the type's label weight, so a label-weight edit leaves no stale number. A price point
+  never rewrites a type's `cost_per_kg`; "Use as default cost" is a person's click.
+- **Quantity counts spools.** A line's `quantity` is the number of spools; `pack_size` only
+  sizes the price point. A line may fill spools that exist (`update_spool_ids`).
+- **Tax and shipping.** All lines carry `line_tax`, or none do and the invoice's `tax` is
+  spread by line subtotal (basis `receipt-wide <rate>%`); a mix is a 422, and tax on lines
+  that cost nothing is a 422. Shipping is spread by line total. Sums round by largest
+  remainder at four places, so the lines add up to the invoice. Confirm needs the invoice's
+  currency to be the shop's and the difference within 0.05.
+- **Frozen confirmed invoices.** A confirmed invoice keeps only its note and file; its lines
+  and header refuse edits and it cannot be deleted. A second confirm returns it and makes
+  nothing.
+- **Shopping list statuses.** An item is `pending` or `purchased`; a repeat keeps the first
+  `purchased_at`. The list shows newest first, pending above purchased.
+- **Draft bounds and archived suppliers.** A line's quantity is at most 1,000; a line may
+  not fill more spools than its quantity, and its total must fit `numeric(12,4)`; each is a
+  422. A draft for an archived supplier is a 422, and confirming an invoice whose supplier
+  became archived is a 409.
+
 ## 6. Capture from events
 
 - **Tray changes.** SB receives the LAN MQTT reports, and the CRUD service
@@ -451,10 +526,38 @@ Low-cardinality labels only: material, brand, location, not the spool id.
      person turns override mode off, SB restores that value.
 - **NTAG tags.** SB reads scans and writes tags through BB's SpoolBuddy
   endpoints (`nfc/tag-scanned` as seen through BB, `nfc/write-tag`,
-  `nfc/write-result`). The tag carries OpenSpool data with the SB spool id.
+  `nfc/write-result`). The tag carries OpenTag3D data of the linked Bambuddy spool, not
+  OpenSpool data with the SB spool id: Bambuddy's write path encodes OpenTag3D v1 and v2
+  from its own spool and has no field for another id
+  ([`spoolbuddy.py` lines 826-957](https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/spoolbuddy.py#L826-L957),
+  v1.3.1). SB identifies the tag by its UID through its binding (kind `ntag_opentag`, §5.4).
   A direct reader in SB is out of scope until the BB path proves too limited.
+  The flow has four calls. A scan listens on BB's `WS /api/v1/ws` for the frames
+  `spoolbuddy_tag_matched` and `spoolbuddy_unknown_tag`
+  ([`spoolbuddy.py` lines 667-690 and 788-797](https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/spoolbuddy.py#L667-L690),
+  v1.3.1); the socket takes a `?token=` from `POST /auth/ws-token` only while BB's auth is on
+  ([`websocket.py` lines 101-135](https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/websocket.py#L101-L135),
+  v1.3.1). A write queues `nfc/write-tag` and binds nothing; confirm reads the BB spool and binds its
+  new `tag_uid` when `data_origin` is `opentag3d`; cancel posts `devices/{id}/cancel-write`.
 - **Labels.** Print labels with the spool number and a QR code of the spool id.
   BB parity with `/inventory/labels`.
+
+  As built in #6264:
+  - Override rules. `override` is valid only for a Bambu tag (kind `bambu_mifare`, a tray UUID),
+    checked against the stored kind (422 otherwise). Binding with it locks the spool's weight, and
+    unbinding never unlocks it; a move ("Move it here") sends `override: false`. Every binding
+    change queues the tag in `filament_bb_tag_pending`; the push to Bambuddy (`link-tag`, a 409
+    `tag_already_linked` moves it) runs only with `filament_sync.tags` `sb_to_bb`, SB first and
+    Bambuddy second, comparing state before each write. Override mode is one row
+    (`filament_rfid_state`), set by `PUT /filament/rfid/override-mode`; `GET /filament/rfid/status`
+    reports it, with `blocked` when Bambuddy's auth refuses the setting write. The spool refresh
+    Schedule runs the step `filament_rfid_reconcile` (mode, tag push, slot configure; each fails
+    alone), and `POST /filament/rfid/reconcile` runs it once.
+  - The scan and write calls: `POST /filament/rfid/scan` (a bounded listen, `timeout_s` 1 to 50),
+    `POST /filament/spools/{id}/ntag/write`, `.../ntag/confirm` and `.../ntag/cancel`.
+  - Labels: 50 x 25 mm, a QR code of the text `scadbuddy:spool:<spool id>` (no host), with a quiet
+    zone of 4 modules, and the spool number, material, colour and brand. The page is
+    `/filament/labels`; the layout (roll or sheet) is kept in `localStorage`.
 
 ## 8. Sync with BB
 
@@ -704,6 +807,10 @@ Every item needs an SB equivalent:
 - Settings: default filament cost, currency, `auto_add_unknown_rfid`,
   low-stock threshold, drying presets.
 
+Gap recorded by #6264, for #6270: BB's label templates (custom label sizes) and its
+`/inventory/labels` PDF output are not matched. SB prints one fixed 50 x 25 mm label from the
+browser (§7).
+
 ## 12. Phases
 
 Epic: [#6260](https://github.com/eh-homelab/ScadBuddy/issues/6260). Each sub-issue ships as its own PRs. "After" lists the issues
@@ -721,6 +828,8 @@ that block it (GitHub's blocked-by links hold the same graph).
 | 6 | [#6268](https://github.com/eh-homelab/ScadBuddy/issues/6268) | AMS weight sync, scale input, location sensors (§6, §5.6) | [#6263](https://github.com/eh-homelab/ScadBuddy/issues/6263) |
 | 6 | [#6269](https://github.com/eh-homelab/ScadBuddy/issues/6269) | History timeline, metrics, Grafana panel (§5.7) | [#6263](https://github.com/eh-homelab/ScadBuddy/issues/6263) |
 | 6 | [#6270](https://github.com/eh-homelab/ScadBuddy/issues/6270) | Parity sweep against §11 | all of the above |
+
+As built in #6264: `filament_sync.tags` takes `off` (the default) and `sb_to_bb`. #6265 widens it to the four values of §8.
 
 [#6209](https://github.com/eh-homelab/ScadBuddy/issues/6209) (the price book keeps alpha, colour stops and effect) landed in
 [#6211](https://github.com/eh-homelab/ScadBuddy/pull/6211) before [#6261](https://github.com/eh-homelab/ScadBuddy/issues/6261); #6261's types write the book's alpha, stops and effect from it.

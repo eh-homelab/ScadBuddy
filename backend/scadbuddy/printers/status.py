@@ -207,7 +207,19 @@ def _device(report: dict[str, Any], name: str) -> dict[str, Any]:
     return block if isinstance(block, dict) else {}
 
 
+def mounted_nozzles(report: dict[str, Any]) -> dict[int, NozzleInfo]:
+    """The nozzles mounted on the extruders, by extruder id (``device.nozzle.info`` ids 0
+    and 1; a printer that reports one nozzle at the top level is extruder 0). A missing id
+    is missing here: `PrinterStatus.nozzles` is sorted by id and so shifts."""
+    return _scan_nozzles(report)[0]
+
+
 def _nozzles(report: dict[str, Any]) -> tuple[list[NozzleInfo], list[NozzleRackSlot]]:
+    mounted, rack = _scan_nozzles(report)
+    return [mounted[key] for key in sorted(mounted)], rack
+
+
+def _scan_nozzles(report: dict[str, Any]) -> tuple[dict[int, NozzleInfo], list[NozzleRackSlot]]:
     mounted: dict[int, NozzleInfo] = {}
     rack: list[NozzleRackSlot] = []
     for entry in _list(_device(report, "nozzle").get("info")):
@@ -244,7 +256,7 @@ def _nozzles(report: dict[str, Any]) -> tuple[list[NozzleInfo], list[NozzleRackS
     # ``src_id`` 19). A printer with no rack lists none.
     if not any(slot.id >= RACK_FIRST_ID for slot in rack):
         rack = []
-    return [mounted[key] for key in sorted(mounted)], rack
+    return mounted, rack
 
 
 def _fila_switch(report: dict[str, Any]) -> FilaSwitch | None:

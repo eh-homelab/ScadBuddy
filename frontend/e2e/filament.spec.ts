@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test'
 import { spoolId } from '../src/mocks/features/filament/seed'
+import { SUPPLIER } from '../src/mocks/features/filamentPurchasingSeed'
 
 // #6262 — the Filament section against the msw API (`src/mocks/features/filament/`): the
 // spools list and its filter, the CSV import, the spool page's colour presets and "Reset to
@@ -83,6 +84,27 @@ test('restores the archived spool and moves its old tag back from the spool that
   await expect(tag).not.toContainText('No tag is on this spool.')
 })
 
+test.describe('suppliers (#6266)', () => {
+  test('the Suppliers tab opens a supplier whose price sheet shows the rise', async ({ page }) => {
+    await page.goto('/filament/suppliers')
+    await page.getByRole('table', { name: 'Suppliers' }).getByRole('link', { name: 'Bambu Lab' }).click()
+    await expect(page).toHaveURL(new RegExp(`/filament/suppliers/${SUPPLIER.BAMBU}$`))
+    await expect(page.getByRole('heading', { level: 1, name: 'Bambu Lab' })).toBeVisible()
+    await expect(page.getByRole('table', { name: 'Price sheet' }).getByText('+8.2 %')).toBeVisible()
+  })
+
+  test.describe('at 390 px', () => {
+    test.use({ viewport: { width: 390, height: 844 } })
+
+    test('the supplier page has no horizontal scroll', async ({ page }) => {
+      await page.goto(`/filament/suppliers/${SUPPLIER.BAMBU}`)
+      await expect(page.getByRole('heading', { level: 1, name: 'Bambu Lab' })).toBeVisible()
+      const [scroll, client] = (await page.evaluate('[document.documentElement.scrollWidth, document.documentElement.clientWidth]')) as [number, number]
+      expect(scroll).toBeLessThanOrEqual(client)
+    })
+  })
+})
+
 test.describe('the spool page at 390 px', () => {
   test.use({ viewport: { width: 390, height: 844 } })
 
@@ -101,4 +123,17 @@ test.describe('the spool page at 390 px', () => {
     const [after, clientAfter] = await widths()
     expect(after).toBeLessThanOrEqual(clientAfter)
   })
+})
+
+// #6264 — the print rules of /filament/labels, through Chromium's own PDF: a roll prints one
+// page per label, a sheet packs three labels on one page.
+const pages = (pdf: Buffer) => (pdf.toString('latin1').match(/\/Type\s*\/Page[^s]/g) ?? []).length
+
+test('the labels page prints one roll page per label, and a sheet on one page', async ({ page }) => {
+  await page.goto(`/filament/labels?ids=${[1, 2, 3].map(spoolId).join(',')}`)
+  await expect(page.getByTestId('label')).toHaveCount(3)
+  expect(pages(await page.pdf({ preferCSSPageSize: true }))).toBe(3)
+
+  await page.getByRole('radio', { name: 'Sheet' }).click()
+  expect(pages(await page.pdf({ preferCSSPageSize: true }))).toBe(1)
 })

@@ -20,6 +20,9 @@ const CustomizePage = lazyRetry(async () => ({ default: (await import('./pages/C
 const EditPage = lazyRetry(async () => ({ default: (await import('./pages/EditPage')).EditPage }))
 const SpoolPage = lazyRetry(async () => ({ default: (await import('./pages/filament/SpoolPage')).SpoolPage }))
 const TypePage = lazyRetry(async () => ({ default: (await import('./pages/filament/TypePage')).TypePage }))
+const LabelsPage = lazyRetry(async () => ({ default: (await import('./pages/filament/LabelsPage')).LabelsPage }))
+const SupplierPage = lazyRetry(async () => ({ default: (await import('./pages/filament/SupplierPage')).SupplierPage }))
+const InvoicePage = lazyRetry(async () => ({ default: (await import('./pages/filament/InvoicePage')).InvoicePage }))
 const FilamentPage = lazyRetry(async () => ({ default: (await import('./pages/filament/FilamentPage')).FilamentPage }))
 const FlowPage = lazyRetry(async () => ({ default: (await import('./pages/FlowPage')).FlowPage }))
 const HistoryPage = lazyRetry(async () => ({ default: (await import('./pages/HistoryPage')).HistoryPage }))
@@ -115,13 +118,19 @@ export function App() {
         <Route path="library/*" element={<LibraryPage />} />
         <Route path="filament" element={<Navigate to={FILAMENT_HOME} replace />} />
         <Route path="filament/spools/:id" element={<SpoolPage />} />
+        <Route path="filament/labels" element={<LabelsPage />} />
         <Route path="filament/types/:id" element={<TypePage />} />
+        <Route path="filament/suppliers/:id" element={<SupplierPage />} />
+        <Route path="filament/invoices/:id" element={<InvoicePage />} />
         {/* One literal path per available tab (`pages/filament/tabs.ts`): e2e/page-titles.spec.ts reads these. */}
         <Route path="filament/spools" element={<FilamentPage tab="spools" />} />
         <Route path="filament/types" element={<FilamentPage tab="types" />} />
         <Route path="filament/tags" element={<FilamentPage tab="tags" />} />
+        <Route path="filament/suppliers" element={<FilamentPage tab="suppliers" />} />
+        <Route path="filament/invoices" element={<FilamentPage tab="invoices" />} />
         <Route path="filament/locations" element={<FilamentPage tab="locations" />} />
         <Route path="filament/catalog" element={<FilamentPage tab="catalog" />} />
+        <Route path="filament/shopping-list" element={<FilamentPage tab="shopping-list" />} />
         <Route path="filament/ledger" element={<FilamentPage tab="ledger" />} />
         <Route path="orders" element={<OrdersPage />} />
         <Route path="orders/profit" element={<ProfitPage />} />

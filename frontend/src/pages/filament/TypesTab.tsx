@@ -1,9 +1,11 @@
-import { PlusIcon } from 'lucide-react'
+import { PlusIcon, ShoppingCartIcon } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useSearchParams } from 'react-router'
 import { ApiError } from '../../api/client'
 import { listCatalog, listSpools, listTypes, type CatalogRows, type Spool, type SpoolType } from '../../api/filament'
+import { addShopping, getPriceSheet, listSuppliers, type PricePoint } from '../../api/filamentPurchasing'
 import { RgbaSwatch } from '../../components/filament/RgbaSwatch'
+import { useMoney } from '../../components/filament/purchasing/useMoney'
 import { FilamentsEditor } from '../../components/orders/FilamentsEditor'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -14,9 +16,36 @@ interface Loaded {
   spoolsOf: Map<string, number>
 }
 
+const stamp = (point: PricePoint) => `${point.on_date}|${point.created_at}`
+
 const nameMap = (rows: { id: string; name: string }[]) => new Map(rows.map((row) => [row.id, row.name]))
 
 const message = (cause: unknown) => (cause instanceof ApiError ? cause.detail : 'The types could not be loaded. Try again.')
+
+/**
+ * Each type's newest per-kg price from the suppliers' price sheets. A sheet that cannot be read
+ * leaves its prices out and sets `failed`, so a type with no price is not called unpriced.
+ */
+async function newestPrices(): Promise<{ prices: Map<string, PricePoint>; failed: boolean }> {
+  const prices = new Map<string, PricePoint>()
+  let suppliers
+  try {
+    suppliers = (await listSuppliers()).filter((supplier) => !supplier.archived_at)
+  } catch {
+    return { prices, failed: true }
+  }
+  const sheets = await Promise.allSettled(suppliers.map((supplier) => getPriceSheet(supplier.id)))
+  for (const sheet of sheets) {
+    if (sheet.status === 'rejected') continue
+    for (const row of sheet.value) {
+      const point = row.newest
+      if (!point?.price_per_kg || row.product.archived_at) continue
+      const have = prices.get(row.product.type_id)
+      if (!have || stamp(point) > stamp(have)) prices.set(row.product.type_id, point)
+    }
+  }
+  return { prices, failed: sheets.some((sheet) => sheet.status === 'rejected') }
+}
 
 /** The type's name as a person says it: brand, material, subtype. */
 function product(type: SpoolType, names: Map<string, string>): string {
@@ -31,6 +60,13 @@ export function TypesTab() {
   const archived = params.get('archived') === 'true'
   const [data, setData] = useState<Loaded | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const money = useMoney()
+  /** The newest per-kg price point per type, read beside the types so a slow supplier call never holds the table. */
+  const [newest, setNewest] = useState<Map<string, PricePoint>>(new Map())
+  const [pricesFailed, setPricesFailed] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
+  // Types whose add is in flight: a second click meanwhile would make a second pending item.
+  const [adding, setAdding] = useState<ReadonlySet<string>>(new Set())
 
   /** Each load takes a number; only the newest one's answer is used. */
   const latest = useRef(0)
@@ -58,6 +94,37 @@ export function TypesTab() {
   useEffect(() => {
     void load()
   }, [load])
+
+  useEffect(() => {
+    let live = true
+    void newestPrices().then(({ prices, failed }) => {
+      if (!live) return
+      setNewest(prices)
+      setPricesFailed(failed)
+    })
+    return () => {
+      live = false
+    }
+  }, [])
+
+  async function addToShopping(type: SpoolType) {
+    if (adding.has(type.id)) return
+    setAdding((was) => new Set(was).add(type.id))
+    setError(null)
+    setNotice(null)
+    try {
+      await addShopping({ type_id: type.id, quantity_spools: 1 })
+      setNotice(`Added ${type.code} to the shopping list.`)
+    } catch (cause) {
+      setError(message(cause))
+    } finally {
+      setAdding((was) => {
+        const next = new Set(was)
+        next.delete(type.id)
+        return next
+      })
+    }
+  }
 
   // Every type is loaded: a price book row linked to an archived type still names it.
   const shown = data?.types.filter((type) => archived || !type.archived_at) ?? []
@@ -89,13 +156,18 @@ export function TypesTab() {
             {error}
           </p>
         )}
+        {notice && (
+          <p role="status" className="text-[13px] text-muted-foreground">
+            {notice}
+          </p>
+        )}
         {!data && !error && <p className="text-[13px] text-muted-foreground">Loading types…</p>}
         {data && (
-          <div className="overflow-x-auto rounded-md border">
+          <div className="relative overflow-x-auto rounded-md border">
             <table aria-label="Types" className="w-full text-left text-[13px]">
               <thead className="bg-muted/50 text-muted-foreground">
                 <tr>
-                  <th className="w-7 px-1 py-1.5">
+                  <th scope="col" className="w-7 px-1 py-1.5">
                     <span className="sr-only">Colour chip</span>
                   </th>
                   <th scope="col" className="px-2 py-1.5 font-medium">Code</th>
@@ -103,7 +175,11 @@ export function TypesTab() {
                   <th scope="col" className="px-2 py-1.5 font-medium">Colour</th>
                   <th scope="col" className="px-2 py-1.5 text-right font-medium">Label g</th>
                   <th scope="col" className="px-2 py-1.5 text-right font-medium">Price per kg</th>
+                  <th scope="col" className="px-2 py-1.5 text-right font-medium">Newest price</th>
                   <th scope="col" className="px-2 py-1.5 text-right font-medium">Spools</th>
+                  <th scope="col" className="px-2 py-1.5">
+                    <span className="sr-only">Actions</span>
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -124,12 +200,30 @@ export function TypesTab() {
                     <td className="px-2 py-1.5 text-right tabular-nums">
                       {type.cost_per_kg ?? <span className="text-muted-foreground">No price</span>}
                     </td>
+                    <td className="px-2 py-1.5 text-right tabular-nums">
+                      {(() => {
+                        const point = newest.get(type.id)
+                        if (!point?.price_per_kg) {
+                          return pricesFailed ? (
+                            <span className="text-muted-foreground" title="A supplier's prices could not be loaded">Not loaded</span>
+                          ) : (
+                            <span className="text-muted-foreground" aria-label="No supplier price">—</span>
+                          )
+                        }
+                        return <span title={`From ${point.on_date}`}>{money.format(point.price_per_kg, point.currency)}/kg</span>
+                      })()}
+                    </td>
                     <td className="px-2 py-1.5 text-right tabular-nums">{data.spoolsOf.get(type.id) ?? 0}</td>
+                    <td className="px-2 py-1.5 text-right">
+                      <Button type="button" variant="ghost" size="sm" disabled={adding.has(type.id)} aria-label={`Buy ${type.code}: add it to the shopping list`} onClick={() => void addToShopping(type)}>
+                        <ShoppingCartIcon /> Buy
+                      </Button>
+                    </td>
                   </tr>
                 ))}
                 {shown.length === 0 && (
                   <tr className="border-t">
-                    <td colSpan={7} className="px-2 py-3 text-muted-foreground">
+                    <td colSpan={9} className="px-2 py-3 text-muted-foreground">
                       No types yet. Add one, or make one from a price book row below.
                     </td>
                   </tr>

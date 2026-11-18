@@ -279,3 +279,27 @@ def test_archiving_a_spool_takes_its_tag_off_and_restoring_binds_nothing(
     assert [k for k in _kinds(store, spool) if k.startswith("tag_")] == [
         k for k in before if k.startswith("tag_")
     ]
+
+
+def test_a_retried_event_with_the_same_ref_is_idempotent(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    ref = UUID(int=9)
+    with store.transaction() as conn:
+        spool_id = store.create_on(
+            conn,
+            SpoolCreate(material_id=_material(pg_pool), grams_left=500),
+            actor="a",
+            ref_kind="invoice_line",
+            ref_id=ref,
+        )
+        for cost in ("12", "13"):
+            # The retry changes the spool again, but its event is the one already booked.
+            patch = SpoolPatch(cost_per_kg=Decimal(cost))
+            assert store.update_on(
+                conn, spool_id, patch, actor="a", ref_kind="invoice_line", ref_id=ref
+            )
+    events = [(e.kind, e.ref_kind, e.ref_id) for e in store.events(spool_id)]
+    assert events == [
+        ("created", "invoice_line", str(ref)),
+        ("edited", "invoice_line", str(ref)),
+    ]

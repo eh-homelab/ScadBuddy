@@ -226,18 +226,46 @@ same way, `vite.config.ts`).
   model's Prints tab does when the model has such a print (`PrintsPage.tsx`
   `LanPrintsNote`).
 - `frontend/src/pages/filament/` and `components/filament/` — the Filament section (#6262, spec
-  2026-11-14 §10). `/filament` opens Spools; the tabs are Spools, Types, Tags, Locations, Catalog and
-  Ledger (`tabs.ts` lists Suppliers, Invoices, Metrics and Shopping list as not available until
-  #6266 and #6269). `/filament/spools/:id` (`SpoolPage`: sections, a "Go to section" select below
+  2026-11-14 §10). `/filament` opens Spools; the tabs are Spools, Types, Tags, Suppliers, Invoices, Locations,
+  Catalog, Shopping list and Ledger (`tabs.ts` lists Metrics as not available until #6269).
+  Purchasing (#6266): `api/filamentPurchasing.ts`, the exact decimal strings of `lib/decimal.ts`
+  (money never goes through `Number`), and the mocks `src/mocks/features/filamentPurchasing.ts`.
+  `TypePage` shows a saved type's supplier prices (`components/filament/purchasing/PricePanel.tsx`);
+  "Use as default cost" only fills the cost field as an unsaved edit, and the Types tab's
+  "Newest price" column reads the suppliers' price sheets. The Invoices tab (`InvoicesTab`,
+  `components/filament/purchasing/invoicesQuery.ts`: status and supplier in the address, "Remember my
+  view", the last supplier) starts a draft from a dropped, chosen or pasted file
+  (`InvoiceUpload`), and `/filament/invoices/:id` (`InvoicePage`) is the file beside the typed
+  receipt: the header saves on blur, the lines through `putInvoiceLines` as they are left
+  (debounced, `invoiceLines.ts` checks them first), and Confirm waits for a type on every line, the
+  shop's currency and `reconciles`. A confirmed invoice keeps only its note and file. A unit test
+  that uploads a file answers the `/file` part itself (jsdom's `FormData` does not reach msw;
+  `InvoiceUpload.test.tsx`). The Shopping list tab (`ShoppingListTab`) adds an item from a type or by
+  text, marks it purchased (it sorts below the pending ones) or removes it, and confirms "Clear
+  purchased" and "Clear all"; the last quantity is remembered (`QUANTITY_KEY`). The Types tab's row
+  and `TypePage` add a type to it as one pending spool (one click at a time: the button is off
+  while its request is out). `useMoney.format` shows the bare decimal, with no symbol, while the
+  shop's currency is unread or failed to read. `InvoicePage` refetches only when no save is in
+  flight (it waits and refetches after it), keys the server figures by line id, dims them while
+  an edit is unsaved, holds Confirm while a header change is in flight, and on a phone folds the
+  file viewer so the form leads. `AddProductSheet`, `message` and `today` are shared in
+  `components/filament/purchasing/` (`priceFormat.ts`).
+  `/filament/spools/:id` (`SpoolPage`: sections, a "Go to section" select below
   1024 px, `OverrideField` with "Reset to type", `RgbaColourField` with Opaque, Translucent and
-  Clear presets, `TagPanel` with "Tag is on spool #N — Move it here") and `/filament/types/:id`
-  (`TypePage`). The Spools tab imports a CSV (`SpoolImport`: a dry run, Import is off while any
+  Clear presets, `TagPanel` with "Tag is on spool #N — Move it here", which sends `override: false`, a "Scan a tag"
+  button (`scanTag`, 30 s), the "Override" mark of an open override binding, the weight-lock line (from `weight_locked`), and
+  the override checkbox, on with a tray UUID and any kind but `ntag*` (ticking it sets the kind to `bambu_mifare`; the bind sends the flag only with that kind), and the Override mark, which is read again after every bind; `NtagPanel` writes an NTAG through a SpoolBuddy
+  reader and polls `confirmNtag` every 2 s for 60 s, says `Bound tag <uid>`, offers Cancel after the 60 s too and drops a queued write when the page unmounts, #6264) and `/filament/types/:id`
+  (`TypePage`). `/filament/labels` (`LabelsPage`, `Label`, `labelSheet.ts`, #6264) prints 50 x 25 mm labels from a copy in `#label-print-root`: a QR code of `scadbuddy:spool:<id>` (`labelPayload`) with a quiet zone of 4 modules; the layout (`roll` or `sheet`) is kept in `localStorage` under `scadbuddy.labels.layout`. The Spools tab imports a CSV (`SpoolImport`: a dry run, Import is off while any
   line is an error). The price book is edited on Filament → Types, not in Settings; the ledger
   tab asks `GET /filament/events` with `since` and `until`. Settings keeps a Filament section for
-  configuration (`pages/settings/sections/filament.tsx`); the old anchors `#native-spools` and
+  configuration (`pages/settings/sections/filament.tsx`: also "Tags to Bambuddy", which saves
+  `filament_sync.tags` with "Save Filament", and the "RFID override mode" switch with "Apply now", #6264); the old anchors `#native-spools` and
   `#inventory` land on it. Colour is `#RRGGBBAA` (`lib/rgba.ts`). Mocks:
-  `src/mocks/features/filament/` (`seed.ts` has 12 spools that cover the cases). e2e:
-  `e2e/filament.spec.ts`, plus `hot-path.spec.ts` (SB spool numbers in the trays, no Bambuddy
+  `src/mocks/features/filament/` (`seed.ts` has 12 spools that cover the cases; `rfid.ts` owns
+  `/filament/rfid/*` and `…/ntag/*`). e2e: `e2e/filament.spec.ts`, `e2e/filament-rfid.spec.ts` and
+  `e2e/filament-purchasing.spec.ts` (a supplier, a price, an invoice confirmed into spools, and a
+  total that cannot be confirmed), plus `hot-path.spec.ts` (SB spool numbers in the trays, no Bambuddy
   call), `settings.spec.ts` and `page-titles.spec.ts`.
 - "Needs you" (#6399): `lib/needsYou.ts` is every request that waits on the person in one list
   (the agent's pending input, `attention.ts` `WaitingEntry`; the flow grants of

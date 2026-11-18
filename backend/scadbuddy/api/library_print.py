@@ -123,6 +123,8 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.tracing import span
+from scadbuddy.dialog_reads.component import DialogReadsDep
+from scadbuddy.dialog_reads.reads import dialog_client, maybe_dialog_client
 from scadbuddy.filament.component import FilamentDep
 from scadbuddy.library.library_file_moves import (
     LibraryCopyResult,
@@ -1206,6 +1208,7 @@ async def get_library_choices(
     printers: PrintersDep,
     filament: FilamentDep,
     slicing: SlicingDep,
+    dialog_reads: DialogReadsDep,
     printer_id: Annotated[int | None, Query()] = None,
     printer: PrinterQuery = None,
 ) -> ChoicesView:
@@ -1236,7 +1239,10 @@ async def get_library_choices(
             rack=rack,
         )
         return await with_lan_printers(native_view, settings, printers)
-    async with offering_lan_printers(settings, printers), client_for(settings) as client:
+    async with (
+        offering_lan_printers(settings, printers),
+        dialog_client(settings, dialog_reads) as client,
+    ):
         files = served_reads(file_id, client, native)
         # Loaded alongside the printers and presets (#2504).
         source = LibrarySource.load(
@@ -1650,6 +1656,7 @@ async def post_library_check(
     printers: PrintersDep,
     slicing: SlicingDep,
     filament: FilamentDep,
+    dialog_reads: DialogReadsDep,
     process_values: Annotated[bool, Query(description=PROCESS_VALUES_QUERY)] = False,
 ) -> PrintCheck:
     """As ``/print/outputs/{id}/check``, on the file as it stands in Bambuddy (#755, #760);
@@ -1669,7 +1676,10 @@ async def post_library_check(
     # Naming no printer, the check judges nothing (`check_print`): the file is still
     # read, which the native library does with no client.
     bare = native is not None and names_no_printer(settings, body.printer, body.printer_id)
-    async with maybe_client(settings, native=route is not None or bare) as client:
+    # The printer and file reads `choices` made a moment before are used again (#4196).
+    async with maybe_dialog_client(
+        settings, dialog_reads, native=route is not None or bare
+    ) as client:
         files = served_reads(file_id, client, native)
         return await check_for_library(
             client,

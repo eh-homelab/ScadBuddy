@@ -32,11 +32,13 @@ async def bambuddy(config: BambuddyConfig) -> Any:
 
 
 def recorded_schema(name: str) -> dict[str, Any]:
-    spec = json.loads(
-        (RECORDINGS / "openapi" / "scadbuddy-routes.json").read_text(encoding="utf-8")
-    )
-    schema: dict[str, Any] = spec["components"]["schemas"][name]
-    return schema
+    for recorded in ("scadbuddy-routes.json", "rfid-routes.json"):
+        spec = json.loads((RECORDINGS / "openapi" / recorded).read_text(encoding="utf-8"))
+        schemas: dict[str, Any] = spec["components"]["schemas"]
+        if name in schemas:
+            found: dict[str, Any] = schemas[name]
+            return found
+    raise KeyError(name)
 
 
 def shaped(schema: str, **values: Any) -> dict[str, Any]:

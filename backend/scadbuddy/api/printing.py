@@ -79,7 +79,7 @@ from scadbuddy.bambuddy.choices import (
     offering_lan_printers,
     with_lan_printers,
 )
-from scadbuddy.bambuddy.client import MJPEG_TYPE, client_for, maybe_client
+from scadbuddy.bambuddy.client import MJPEG_TYPE, client_for
 from scadbuddy.bambuddy.component import ArchiveCacheDep
 from scadbuddy.bambuddy.destinations import DefaultDestination, default_destination
 from scadbuddy.bambuddy.filament_ids import filament_material, filament_name
@@ -157,6 +157,8 @@ from scadbuddy.core.problems import (
     PROBLEM_MEDIA_TYPE,
     ApiError,
 )
+from scadbuddy.dialog_reads.component import DialogReadsDep
+from scadbuddy.dialog_reads.reads import dialog_client, maybe_dialog_client
 from scadbuddy.filament.component import FilamentDep
 from scadbuddy.filament.inventory import FilamentInventory, route_trays
 from scadbuddy.filament.models import TrayView
@@ -1497,6 +1499,7 @@ async def post_check(
     slicing: SlicingDep,
     library: PrintLibraryDep,
     filament: FilamentDep,
+    dialog_reads: DialogReadsDep,
     process_values: Annotated[bool, Query(description=PROCESS_VALUES_QUERY)] = False,
 ) -> PrintCheck:
     """The run's own pre-upload refusals for the body the run would take (#755, #760), so
@@ -1530,7 +1533,10 @@ async def post_check(
         asked=body.path,
     )
     bare = names_no_printer(settings, body.printer, body.printer_id)
-    async with maybe_client(settings, native=route is not None or bare) as client:
+    # The printer and file reads `choices` made a moment before are used again (#4196).
+    async with maybe_dialog_client(
+        settings, dialog_reads, native=route is not None or bare
+    ) as client:
         check = await check_for_output(
             client,
             outputs,
@@ -1791,6 +1797,7 @@ async def get_choices(
     printers: PrintersDep,
     filament: FilamentDep,
     slicing: SlicingDep,
+    dialog_reads: DialogReadsDep,
     printer_id: Annotated[int | None, Query()] = None,
     printer: PrinterQuery = None,
 ) -> ChoicesView:
@@ -1816,7 +1823,10 @@ async def get_choices(
             rack=rack,
         )
         return await with_lan_printers(native_view, settings, printers)
-    async with offering_lan_printers(settings, printers), client_for(settings) as client:
+    async with (
+        offering_lan_printers(settings, printers),
+        dialog_client(settings, dialog_reads) as client,
+    ):
         view = await choices_for_output(
             client,
             outputs,

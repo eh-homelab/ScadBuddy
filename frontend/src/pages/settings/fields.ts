@@ -168,17 +168,8 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     section: 'administration',
     kind: 'url',
   },
-  // #6262 Task 13 — the Filament section: how Bambuddy's spools reach ScadBuddy's own, and
-  // the two numbers a spool falls back on.
-  {
-    name: 'filament_sync',
-    section: 'filament',
-    kind: 'select',
-    choices: [
-      { value: 'off', label: 'Off' },
-      { value: 'bb_to_sb', label: 'Bambuddy \u2192 ScadBuddy' },
-    ],
-  },
+  // #6262 Task 13 — the Filament section: the numbers a spool falls back on. Its sync choices
+  // (`filament_sync`) are laid out by hand in the section (`HAND_LAID`).
   {
     name: 'spool_overlay_refresh_seconds',
     section: 'filament',
@@ -450,8 +441,9 @@ export function serverValue(settings: Settings, name: FieldName): string {
     name === 'storefront_turnstile_secret'
   )
     return ''
-  // #6262 Task 13 — `filament_sync` is one object per data type; the form edits `spools`.
-  if (name === 'filament_sync') return settings.filament_sync?.spools ?? 'bb_to_sb'
+  // #6262 Task 13, #6264 — `filament_sync` is one object per data type; the form holds the
+  // spools and tags choices as one string, `spools|tags` (`syncParts`).
+  if (name === 'filament_sync') return `${settings.filament_sync?.spools ?? 'bb_to_sb'}|${settings.filament_sync?.tags ?? 'off'}`
   const value = (settings as Record<string, unknown>)[name]
   if (value === null || value === undefined) return ''
   return String(value)

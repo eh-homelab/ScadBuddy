@@ -732,6 +732,25 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'filament_sensor_save',
   'filament_sensor_archive',
   'filament_spool_import',
+  // #6264: the RFID override mode, its reconcile and the NTAG write calls touch the filament
+  // inventory (or a SpoolBuddy reader), and none is a recorded resource kind.
+  'filament_rfid_override_mode',
+  'filament_rfid_reconcile',
+  'filament_spool_ntag_write',
+  'filament_spool_ntag_confirm',
+  'filament_spool_ntag_cancel',
+  // Purchasing (#6266: suppliers, products, price points, invoices, the shopping list) is
+  // no recorded resource kind either; an invoice's spools are in each spool's ledger.
+  'filament_supplier_upsert',
+  'filament_product_upsert',
+  'filament_price_add',
+  'filament_price_delete',
+  'filament_invoice_upsert',
+  'filament_invoice_delete',
+  'filament_invoice_confirm',
+  'filament_shopping_add',
+  'filament_shopping_update',
+  'filament_shopping_remove',
   // A re-pin's dry run (#1914): the pin and the history stay as they were. The candidate's
   // checkout is a cache on the volume, swept at boot when nothing pins it.
   'check_library_candidate',

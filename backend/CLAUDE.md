@@ -728,18 +728,39 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   ordered by `(at, delta before reading, seq)` (a paired plate's `print_run` is skipped for its `bb_usage` row); a time-less event gets a clock-step guard because the WSL clock
   steps back), `locations.py` (a spool moves only through `move()`; AMS trays are keyed by
   printer, AMS and tray, never by name), `bambuddy_pull.py` (import and the scheduled pull,
-  read-only toward Bambuddy; `scheduled_pull` skips when the setting `filament_sync.spools` is
+  read-only toward Bambuddy: it writes nothing there, tags go through `rfid_push.py`; it skips a BB spool whose tag an open binding of an SB spool linked elsewhere holds, warned once, and remembers it in `filament_bb_ignored` (the push clears its tag later, and the next pull would otherwise make a second SB spool; nothing un-ignores a row, so a person deletes it by hand, plan Decision 29); it never changes a held binding's `override` (`bind_on` with `override=None`); `scheduled_pull` skips when the setting `filament_sync.spools` is
   `off`, read per run, #6262 Task 13), `csv_import.py` (the spools CSV import, #6262 Task 15:
   rows the caller parsed, as text cells; a dry run reads only, so it adds no catalog row and
   takes no spool number; a write is one transaction, refused whole when a line is an error,
   and its `Idempotency-Key` reply is kept in `crud_requests` under caller `filament`; a
   `location` cell is a `move_on`), `inventory.py` (`read_sb_spools`: which SB spool is in
   each AMS tray, by tag or by the spool placed there with the tray's fingerprint, and the shelf), `print_uses.py` (a LAN print's grams as
-  ledger events), `prints.py` (a print's open plates and their end: `plate_ended` books the end as a ledger event, #6263), `capture.py` (`reconcile`: a printer report's tray changes become `loaded`, `unloaded`, `moved` and `ams_reading` events, of which `reconcile` books `loaded` and `unloaded`, and `LocationStore.move_on` and `FilamentInventory.place_on` add `moved`, each tray place named by `bambuddy/trays.py` `place_label`; the report write runs it in a savepoint), `bambuddy_usage.py` (Bambuddy's usage rows booked as `bb_usage` events, paired with SB's own plates, on the same spool by `ledger.basis` and, when Bambuddy booked the plate on another spool than SB's estimate, by a covering `print_ended` on the estimate's spool (`_cover`, #6598, in the savepoint of the row's own booking, `data.covered_by` the BB event); `read_and_pull` runs it, so `filament_sync.spools` `off` stops it too). `SpoolRefresh` also runs a capture backstop activity (`spools/activities.py` `capture_backstop_activity`: reconciles SB's own trays from each printer's fresh stored report, not gated by `filament_sync.spools`). Colour is `#RRGGBBAA` (`colour.py`). Routes: `api/filament.py`; the ledger
+  ledger events), `prints.py` (a print's open plates and their end: `plate_ended` books the end as a ledger event, #6263), `capture.py` (`reconcile`: a printer report's tray changes become `loaded`, `unloaded`, `moved` and `ams_reading` events, of which `reconcile` books `loaded` and `unloaded`, and `LocationStore.move_on` and `FilamentInventory.place_on` add `moved`, each tray place named by `bambuddy/trays.py` `place_label`; the report write runs it in a savepoint), `bambuddy_usage.py` (Bambuddy's usage rows booked as `bb_usage` events, paired with SB's own plates, on the same spool by `ledger.basis` and, when Bambuddy booked the plate on another spool than SB's estimate, by a covering `print_ended` on the estimate's spool (`_cover`, #6598, in the savepoint of the row's own booking, `data.covered_by` the BB event); `read_and_pull` runs it, so `filament_sync.spools` `off` stops it too). `ntag.py` (NTAG scan, write, confirm and cancel through SpoolBuddy, #6264: `scan` reads `BambuddyClient.next_tag_scan`, a listen on Bambuddy's `WS /api/v1/ws` that joins with `ws_token()`'s token only while Bambuddy's auth is on; `write` queues `queue_tag_write` for the linked BB spool, records the record's `tag_uid` in `filament_ntag_writes` and changes no binding; `confirm` binds the tag the BB record then holds as `ntag_opentag`, only when a write is queued, its `data_origin` is `opentag3d` and its UID differs from that recorded one; the routes `POST /filament/rfid/scan` and `/filament/spools/{id}/ntag/{write,confirm,cancel}` map `NtagNoBambuddySpoolError` and `NtagOverrideOpenError` to a 409 with `code`). `rfid_push.py` (#6264: SB first, Bambuddy second. A binding change queues the tag in `filament_bb_tag_pending` (`enqueue_tag`); `push_pending` drains it only with `filament_sync.tags` `sb_to_bb`, under the try-lock `scadbuddy:filament:rfid_push`, and recomputes SB's wish against Bambuddy's state, never replaying a payload; `error_label` stores `internal` for a non-`ApiError`), `rfid_mode.py` (override mode in the one row `filament_rfid_state`: `reconcile_mode` turns Bambuddy's `auto_add_unknown_rfid` off and restores the saved value; its SQL guards are conditional, and the session advisory lock `scadbuddy:filament:rfid_mode` serialises it, a PUT waiting 5 s then answering `busy`; with no Bambuddy the status is pending, `no Bambuddy`; `blocked` is the mapped `ADMIN_SETTINGS` refusal), `rfid_slots.py` (an override tag's AMS slot configured through Bambuddy's slot-configure route, state-based, under the lock `scadbuddy:filament:rfid_slots`; temperatures fall back to the tray's own, none at all counts `no_temps`; a holder that no longer qualifies gets no write and its `filament_override_slots` row is deleted; a warning after 3 identical reconfigures). The refresh Schedule's step `filament_rfid_reconcile` (`spools/activities.py`) runs the mode, the push and the slots, each failing alone. `read-only toward Bambuddy` above holds for the pull only; `FilamentSync.tags` (`off` by default) is what lets a binding reach Bambuddy; the override mode (`rfid_mode.py`) and the slot step (`rfid_slots.py`, a `configure` call) write Bambuddy whatever `tags` says, and so do the NTAG write and cancel routes. The activity has one `start_to_close_timeout` (6 min) for all three steps, and `drain_tags` takes the rows with the fewest attempts first, so a row that always fails cannot starve the rest. `SpoolRefresh` also runs a capture backstop activity (`spools/activities.py` `capture_backstop_activity`: reconciles SB's own trays from each printer's fresh stored report, not gated by `filament_sync.spools`). Colour is `#RRGGBBAA` (`colour.py`). Routes: `api/filament.py`; the ledger
   route `GET /filament/events` takes `since` (included) and `until` (excluded), so two ranges
   tile, with `spool_id`, `kind`, `source` and a cursor. The price book (the `filaments` rows
   that `orders/pricebook.py` prices) is edited on Filament → Types (`components/orders/FilamentsEditor.tsx`),
   not in Settings.
+  Purchasing (#6266, spec §5.8; plan `docs/superpowers/plans/2026-11-17-filament-suppliers.md`,
+  which holds the decisions): `suppliers.py` (`SuppliersStore`: suppliers, products by
+  `upper(sku)`, price points; a price point is the price of one pack, tax in, shipping out, and
+  `price_per_kg` is derived on read; stats and `type_prices` keep archived suppliers, marked),
+  `invoices.py` (`InvoiceStore`: drafts, their lines, the file blob, and `confirm`, one
+  transaction under `FOR UPDATE`, idempotent by state: it makes or fills the spools, the types
+  and products a line names, and the price points; a confirmed invoice is frozen but for its
+  note and file), `invoice_money.py` (tax, shipping and cost per kg, largest-remainder at four
+  places; `RECONCILE_TOLERANCE` 0.05; tax on a zero subtotal is `InvoiceMathError`, a 422) and
+  `shopping.py` (`ShoppingStore`; `type_id` is optional and the text identity stays). Every
+  store sets `updated_at` itself. Routes: `api/filament_purchasing.py`; a repeated
+  `import_run_id` returns the invoice (200), a number that collides is a 409 whose body has
+  `existing_invoice_id`, and confirm refuses (409) a foreign currency, a difference over the
+  tolerance, an archived named product, a line with no SKU and a description over 128
+  characters, an invoice with no lines and an invoice whose supplier is archived. Confirm turns
+  only a client conflict into a 409 naming the line; any other error is a 500. A draft write
+  (create, PATCH, PUT lines) answers 422 for an archived supplier, for a line with more
+  `update_spool_ids` than its `quantity` or a total past `numeric(12,4)`, and for a database
+  `CheckViolation` or `DataError` (`_LINE_BOUNDS`); `Quantity` is at most 1,000. Confirm locks
+  every line's spools in one sorted query before it writes, so two confirms cannot deadlock. The agent's tools are
+  `agent/src/tools/filamentPurchasing.ts` (an invoice edit is a PATCH then a PUT, not atomic).
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
   Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),
   `BlobRefs` (`refs.py`, the `blob_refs` table that keeps a blob alive) and `sweep_blobs`
@@ -1035,6 +1056,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   open. This lives in the activity: `FollowPrint`'s commands are unchanged, and its
   histories replay from `tests/fixtures/follow_print_histories/`, so a change to them
   goes behind `workflow.patched`.
+- `backend/scadbuddy/dialog_reads/` — the print dialog's kept Bambuddy reads (#4196, the
+  `DIALOG_READS` component): the printer list, a printer, a library file and its plates
+  are kept for `DIALOG_TTL` (5 s) per Bambuddy and key, so a check uses what `choices`
+  read. So a printer renamed in Bambuddy can show in a check up to 5 s late. Status, AMS,
+  inventory, spool assignments and the download are always read. The run never uses it.
 - `backend/scadbuddy/core/gitrepo.py` — `GitRepo`, the hermetic git core (#2503) under
   model history (`library/history.py` `ModelHistory`) and flow scripts
   (`flows/repository.py` `FlowHistory`: `data/flows/<name>/flow.py`, one commit per

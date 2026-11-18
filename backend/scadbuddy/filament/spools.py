@@ -26,6 +26,8 @@ from scadbuddy.filament import dry_hours, ledger
 from scadbuddy.filament import models as m
 from scadbuddy.filament import presets as p
 from scadbuddy.filament.catalog import CatalogRefError
+from scadbuddy.filament.invoice_money import price_per_kg, unit_cost
+from scadbuddy.filament.rfid_push import enqueue_tag
 from scadbuddy.filament.types import TypeRowsDuplicateError, TypeTempError, effective, overridden
 from scadbuddy.spools.models import clean_tag_uid, clean_tray_uuid
 
@@ -92,6 +94,14 @@ class TagUnnamedError(ValueError):
 
 class _NoSpoolError(Exception):
     """The spool a tag is bound to does not exist; raised to roll back the bind."""
+
+
+class OverrideKindError(ValueError):
+    """An override binding on a tag that is not a Bambu MIFARE tag: only Bambuddy's reader
+    of those can be told to ignore them."""
+
+    def __init__(self) -> None:
+        super().__init__("only a bambu_mifare tag can be an override")
 
 
 class TagKeysClashError(ValueError):
@@ -294,6 +304,13 @@ class FilamentSpoolStore:
         self._defaults = defaults
         self._now = now
 
+    @property
+    def conninfo(self) -> str:
+        """The database the pool serves, for a caller that needs a connection of its own
+        (`filament/rfid_push.py`'s drain lock)."""
+        conninfo = self._pool.conninfo
+        return conninfo() if callable(conninfo) else conninfo
+
     def list(self, *, include_archived: bool = False, needs_type: bool | None = None) -> _Spools:
         """By number. ``needs_type`` keeps only the spools with no type (``True``) or only
         those with one (``False``)."""
@@ -356,9 +373,52 @@ class FilamentSpoolStore:
                 " ORDER BY b.unbound_at DESC, b.bound_at DESC LIMIT 1",
                 (spool_id,),
             ).fetchone()
+            line = conn.execute(
+                "SELECT i.id AS invoice_id, i.number, i.invoice_date, i.supplier_id,"
+                " sup.name AS supplier_name, l.id AS line_id, l.position AS line_position,"
+                " l.allocated_cost, l.quantity"
+                " FROM filament_spools s JOIN filament_invoice_lines l ON l.id = s.invoice_line_id"
+                " JOIN filament_invoices i ON i.id = l.invoice_id"
+                " JOIN filament_suppliers sup ON sup.id = i.supplier_id WHERE s.id = %s",
+                (spool_id,),
+            ).fetchone()
+            products = conn.execute(
+                "SELECT p.supplier_id, sup.name AS supplier_name, p.sku, p.product_url,"
+                " p.pack_size, t.label_weight_g, n.price AS newest_price"
+                " FROM filament_supplier_products p"
+                " JOIN filament_suppliers sup ON sup.id = p.supplier_id"
+                " JOIN filament_spool_types t ON t.id = p.type_id"
+                " LEFT JOIN LATERAL (SELECT pp.price FROM filament_price_points pp"
+                "  WHERE pp.product_id = p.id"
+                "  ORDER BY pp.on_date DESC, pp.created_at DESC, pp.id LIMIT 1) n ON true"
+                " WHERE p.type_id = (SELECT type_id FROM filament_spools WHERE id = %s)"
+                " AND p.archived_at IS NULL AND sup.archived_at IS NULL"
+                " ORDER BY upper(sup.name), upper(p.sku), p.id",
+                (spool_id,),
+            ).fetchall()
             return m.SpoolDetail.model_validate(
                 spool.model_dump()
                 | {
+                    "invoice": None
+                    if line is None
+                    else m.SpoolInvoiceRef.model_validate(
+                        {**line, "unit_cost": unit_cost(line["allocated_cost"], line["quantity"])}
+                    ),
+                    "type_suppliers": [
+                        m.SpoolTypeSupplier(
+                            supplier_id=r["supplier_id"],
+                            supplier_name=r["supplier_name"],
+                            sku=r["sku"],
+                            product_url=r["product_url"],
+                            newest_price=r["newest_price"],
+                            price_per_kg=None
+                            if r["newest_price"] is None
+                            else price_per_kg(
+                                r["newest_price"], r["pack_size"], r["label_weight_g"]
+                            ),
+                        )
+                        for r in products
+                    ],
                     "tag": None if tag_row is None else m.Tag.model_validate(tag_row),
                     "last_tag": None
                     if last is None
@@ -492,10 +552,19 @@ class FilamentSpoolStore:
         assert made is not None
         return made
 
-    def create_on(self, conn: Conn, body: m.SpoolCreate, *, actor: str) -> UUID:
+    def create_on(
+        self,
+        conn: Conn,
+        body: m.SpoolCreate,
+        *,
+        actor: str,
+        ref_kind: str | None = None,
+        ref_id: UUID | None = None,
+    ) -> UUID:
         """`create` on ``conn``, in the caller's transaction (`filament/csv_import.py`):
         the new spool's id. A row it names that does not exist is the driver's
-        `ForeignKeyViolation`."""
+        `ForeignKeyViolation`. ``ref_kind`` and ``ref_id`` go on the ``created`` event
+        (an invoice line's, #6266); a retry of one pair books nothing twice."""
         data = body.model_dump(exclude={"grams_left"})
         names = list(data)
         row = conn.execute(
@@ -512,6 +581,8 @@ class FilamentSpoolStore:
             "created",
             source="person" if body.grams_left is not None else None,
             absolute_g=body.grams_left,
+            ref_kind=ref_kind,
+            ref_id=None if ref_id is None else str(ref_id),
             actor=actor,
         )
         return spool_id
@@ -535,10 +606,20 @@ class FilamentSpoolStore:
         except errors.ForeignKeyViolation:
             raise CatalogRefError() from None
 
-    def update_on(self, conn: Conn, spool_id: UUID, patch: m.SpoolPatch, *, actor: str) -> bool:
+    def update_on(
+        self,
+        conn: Conn,
+        spool_id: UUID,
+        patch: m.SpoolPatch,
+        *,
+        actor: str,
+        ref_kind: str | None = None,
+        ref_id: UUID | None = None,
+    ) -> bool:
         """`update` on ``conn``, in the caller's transaction (`filament/csv_import.py`);
         false for no such spool. A row it names that does not exist is the driver's
-        `ForeignKeyViolation`."""
+        `ForeignKeyViolation`. ``ref_kind`` and ``ref_id`` go on the ``edited`` event
+        (an invoice line's, #6266); a retry of one pair books nothing twice."""
         sent = [n for n in _WRITABLE if n in patch.model_fields_set]
         if patch.archived:
             # The tag before the spool, as every writer of bindings takes them.
@@ -575,7 +656,15 @@ class FilamentSpoolStore:
                 dropped = p.drop_migrated(conn, spool_id)
                 if dropped is not None:
                     changes["presets"] = dropped
-            ledger.record(conn, spool_id, "edited", actor=actor, data={"changes": changes})
+            ledger.record(
+                conn,
+                spool_id,
+                "edited",
+                ref_kind=ref_kind,
+                ref_id=None if ref_id is None else str(ref_id),
+                actor=actor,
+                data={"changes": changes},
+            )
         if patch.archived is not None:
             self._archive(conn, current, patch.archived, actor)
         return True
@@ -719,7 +808,12 @@ class FilamentSpoolStore:
         takes a key it lacked; a tag not seen before is made with ``kind``. An open binding
         of the tag to another spool, and of the spool to another tag, is closed with
         ``reason='rebound'`` and a ``tag_unbound`` event on its spool; the new binding
-        writes ``tag_bound``. A tag already on the spool is left as it is.
+        writes ``tag_bound``. A tag already on the spool and already carrying the same
+        ``override`` is left as it is; one whose ``override`` differs is updated in place
+        (no ``tag_unbound``/``tag_bound`` pair). ``override`` is valid only for a
+        ``bambu_mifare`` tag (`OverrideKindError`) and locks the spool's weight, with one
+        ``edited`` event when it was unlocked. Every tag whose binding this changes is
+        queued for Bambuddy (`filament/rfid_push.py`), whatever the sync setting says.
 
         Locks, in this order: the tag, then the new and the old spool by id. Every writer of
         bindings takes the tag first, so two binds in opposite directions wait rather than
@@ -740,17 +834,21 @@ class FilamentSpoolStore:
         uid: str | None,
         tray: str | None,
         kind: m.TagKind,
-        override: bool,
+        override: bool | None,
         actor: str,
     ) -> m.TagBinding:
         """`bind_tag` on ``conn``'s transaction, its keys already cleaned; `_NoSpoolError`
-        when the spool does not exist, which the caller rolls back on."""
+        when the spool does not exist, and `OverrideKindError`, which the caller rolls back
+        on. ``override=None`` keeps a held binding's flag as it is (what the Bambuddy pull
+        and a tray link pass: they never change one); a new binding then takes False."""
         if (
             conn.execute("SELECT 1 FROM filament_spools WHERE id = %s", (spool_id,)).fetchone()
             is None
         ):
             raise _NoSpoolError()
-        tag_id = FilamentSpoolStore._tag(conn, uid, tray, kind)
+        tag_id, tag_kind = FilamentSpoolStore._tag(conn, uid, tray, kind)
+        if override and tag_kind != "bambu_mifare":
+            raise OverrideKindError()
         holder = conn.execute(
             "SELECT spool_id FROM filament_tag_bindings WHERE tag_id = %s AND unbound_at IS NULL",
             (tag_id,),
@@ -769,7 +867,19 @@ class FilamentSpoolStore:
             (tag_id, spool_id),
         ).fetchone()
         if held is not None:
+            if override is None or held["override"] == override:
+                return m.TagBinding.model_validate(held)
+            held = conn.execute(
+                "UPDATE filament_tag_bindings SET override = %s WHERE id = %s"
+                f" RETURNING {_BINDING_COLUMNS}",
+                (override, held["id"]),
+            ).fetchone()
+            assert held is not None
+            if override:
+                FilamentSpoolStore._lock_weight(conn, spool_id, actor)
+            enqueue_tag(conn, tag_id)
             return m.TagBinding.model_validate(held)
+        override = bool(override)
         closed = conn.execute(
             "UPDATE filament_tag_bindings SET unbound_at = now(), reason = 'rebound'"
             " WHERE unbound_at IS NULL AND (tag_id = %s OR spool_id = %s)"
@@ -777,6 +887,7 @@ class FilamentSpoolStore:
             (tag_id, spool_id),
         ).fetchall()
         for old in closed:
+            enqueue_tag(conn, old["tag_id"])
             ledger.record(
                 conn,
                 old["spool_id"],
@@ -797,7 +908,27 @@ class FilamentSpoolStore:
             actor=actor,
             data={"tag_id": tag_id, "override": override},
         )
+        if override:
+            FilamentSpoolStore._lock_weight(conn, spool_id, actor)
+        enqueue_tag(conn, tag_id)
         return m.TagBinding.model_validate(row)
+
+    @staticmethod
+    def _lock_weight(conn: Conn, spool_id: UUID, actor: str) -> None:
+        """Lock the spool's weight, with one ``edited`` event, unless it is locked."""
+        changed = conn.execute(
+            "UPDATE filament_spools SET weight_locked = true, updated_at = now()"
+            " WHERE id = %s AND NOT weight_locked RETURNING id",
+            (spool_id,),
+        ).fetchone()
+        if changed is not None:
+            ledger.record(
+                conn,
+                spool_id,
+                "edited",
+                actor=actor,
+                data={"changes": {"weight_locked": [False, True]}},
+            )
 
     @staticmethod
     def tag_on(conn: Conn, uid: str | None, tray: str | None, kind: m.TagKind) -> UUID:
@@ -805,7 +936,7 @@ class FilamentSpoolStore:
         key it lacked, else a new tag of ``kind``, on ``conn``'s transaction; for a caller
         that takes the tag before its spools (`filament/inventory.py`). Two tags, one per
         key, are `TagKeysClashError`."""
-        return FilamentSpoolStore._tag(conn, uid, tray, kind)
+        return FilamentSpoolStore._tag(conn, uid, tray, kind)[0]
 
     @property
     def pool(self) -> ConnectionPool[Conn]:
@@ -865,6 +996,7 @@ class FilamentSpoolStore:
                 actor=actor,
                 data={"tag_id": tag_id, "reason": "unbound"},
             )
+            enqueue_tag(conn, tag_id)
         return m.TagBinding.model_validate(row)
 
     def open_binding(self, spool_id: UUID) -> m.TagBinding | None:
@@ -977,6 +1109,7 @@ class FilamentSpoolStore:
                     actor=actor,
                     data={"tag_id": closed["tag_id"], "reason": "archived"},
                 )
+                enqueue_tag(conn, closed["tag_id"])
         conn.execute(
             "UPDATE filament_spools SET archived_at = CASE WHEN %s THEN now() END,"
             " updated_at = now() WHERE id = %s",
@@ -985,9 +1118,10 @@ class FilamentSpoolStore:
         ledger.record(conn, current["id"], "archived" if archived else "restored", actor=actor)
 
     @staticmethod
-    def _tag(conn: Conn, uid: str | None, tray: str | None, kind: m.TagKind) -> UUID:
-        """The id of the tag either key names, locked and given the key it lacked; else a
-        new tag. A tag another transaction makes first is found on the second look."""
+    def _tag(conn: Conn, uid: str | None, tray: str | None, kind: m.TagKind) -> tuple[UUID, str]:
+        """The id and kind of the tag either key names, locked and given the key it lacked;
+        else a new tag of ``kind``. A tag another transaction makes first is found on the
+        second look."""
         while True:
             found = conn.execute(
                 f"SELECT {_TAG_COLUMNS} FROM filament_tags"
@@ -1007,7 +1141,7 @@ class FilamentSpoolStore:
                         (uid, tray, tag["id"]),
                     )
                 tag_id: UUID = tag["id"]
-                return tag_id
+                return tag_id, tag["kind"]
             made = conn.execute(
                 "INSERT INTO filament_tags (kind, tag_uid, tray_uuid) VALUES (%s, %s, %s)"
                 " ON CONFLICT DO NOTHING RETURNING id",
@@ -1015,4 +1149,4 @@ class FilamentSpoolStore:
             ).fetchone()
             if made is not None:
                 new_id: UUID = made["id"]
-                return new_id
+                return new_id, kind

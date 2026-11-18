@@ -1,14 +1,22 @@
 """`/api/v1/filament` (#6261, epic #6260): ScadBuddy's own filament inventory. This
 module holds the catalogs a spool type or a spool picks from (plain reads and writes
 over `filament/catalog.py`), the spool types (`filament/types.py`), and the spools,
-their tags and their ledger (`filament/spools.py`, `filament/ledger.py`). Only two
-routes reach Bambuddy, and both only read it: the import
-(`POST /filament/bambuddy/import`, `filament/bambuddy_pull.py`) and the list of Home
-Assistant entities (`GET /filament/sensors/entities`, #6268)."""
+their tags and their ledger (`filament/spools.py`, `filament/ledger.py`). Some routes reach
+Bambuddy. Only reads: the import (`POST /filament/bambuddy/import`,
+`filament/bambuddy_pull.py`), the list of Home Assistant entities
+(`GET /filament/sensors/entities`, #6268), `GET /rfid/status` and `POST /rfid/scan`.
+Writes, each with its own rule: a tag change (`POST /filament/spools/{id}/tags`, its unbind,
+and the NTAG confirm,
+`filament/rfid_push.py`, #6264) tells Bambuddy only with ``filament_sync.tags`` ``sb_to_bb``;
+`PUT /rfid/override-mode` writes Bambuddy's auto-add setting (`filament/rfid_mode.py`) and
+`POST /rfid/reconcile` runs the mode, the tag push and the AMS slot configure of each override
+tag (`filament/rfid_slots.py`), whatever ``tags`` says; the NTAG write and cancel
+(`filament/ntag.py`) act on a SpoolBuddy device only when the caller asks."""
 
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, cast
 from uuid import UUID
@@ -28,7 +36,7 @@ from scadbuddy.crud.idempotency import (
     idempotent_write,
     required_key,
 )
-from scadbuddy.filament import capture
+from scadbuddy.filament import capture, ntag, rfid_mode
 from scadbuddy.filament import models as m
 from scadbuddy.filament.assignments_cache import AssignmentsCache
 from scadbuddy.filament.bambuddy_pull import PullReport, read_and_pull, try_assignments
@@ -38,7 +46,7 @@ from scadbuddy.filament.catalog import (
     CatalogRefError,
     CatalogSpec,
 )
-from scadbuddy.filament.component import FilamentDep
+from scadbuddy.filament.component import Filament, FilamentDep
 from scadbuddy.filament.csv_import import (
     ImportPreview,
     ImportRefusedError,
@@ -52,7 +60,11 @@ from scadbuddy.filament.locations import (
     LocationExistsError,
     MoveTargetError,
 )
+from scadbuddy.filament.rfid_mode import read_status, reconcile_mode_now
+from scadbuddy.filament.rfid_push import push_pending
+from scadbuddy.filament.rfid_slots import reconcile_slots_now
 from scadbuddy.filament.spools import (
+    OverrideKindError,
     SpoolBambuddyLinkedError,
     SpoolInUseError,
     SpoolTypelessError,
@@ -61,9 +73,16 @@ from scadbuddy.filament.spools import (
 )
 from scadbuddy.filament.types import TypeRowsDuplicateError, TypeTempError
 from scadbuddy.library.settings_store import SettingsStore
+from scadbuddy.operations.kinds import waiting_on_bambuddy
 from scadbuddy.orders.store import FilamentExistsError
+from scadbuddy.printers.component import PrintersDep
 
 router = APIRouter(prefix="/filament", tags=["filament"])
+logger = logging.getLogger(__name__)
+
+#: How long a tag change waits to tell Bambuddy before the reply goes (#6264); the
+#: refresh Schedule finishes the rest.
+RFID_INLINE_SECONDS = 2.5
 
 CatalogRow = (
     m.Material
@@ -325,6 +344,7 @@ async def put_type_k_values(
 # -- spools, tags, the ledger ---------------------------------------------------------
 
 _SPOOL_REFUSED = (
+    OverrideKindError,
     CatalogRefError,
     TypeTempError,
     SpoolTypelessError,
@@ -557,11 +577,18 @@ async def archive_spool(
         "them), or made with `kind`. A binding the tag had to another spool, or the spool "
         "had to another tag, is closed, with a `tag_unbound` ledger event on that spool and "
         "`tag_bound` on this one. 404 for no such spool, 409 when the two keys name two "
-        "tags, 422 when neither key is left once cleaned."
+        "tags, 422 when neither key is left once cleaned. With `filament_sync.tags` set to "
+        "`sb_to_bb` the change is also told to Bambuddy, for at most 2.5 seconds; what is not "
+        "done by then is finished by the spool refresh, and a Bambuddy that is down never "
+        "fails the request."
     ),
 )
 async def bind_spool_tag(
-    filament: FilamentDep, caller: CallerDep, spool_id: UUID, body: m.TagBind
+    filament: FilamentDep,
+    store: SettingsStoreDep,
+    caller: CallerDep,
+    spool_id: UUID,
+    body: m.TagBind,
 ) -> m.TagBinding:
     try:
         bound = await asyncio.to_thread(
@@ -578,7 +605,24 @@ async def bind_spool_tag(
         raise _refused(exc) from None
     if bound is None:
         raise _no_spool(spool_id)
+    await _push_now(filament, store)
     return bound
+
+
+async def _push_now(filament: Filament, store: SettingsStore) -> None:
+    """Tell Bambuddy of the queued tags once, for at most `RFID_INLINE_SECONDS`. Whatever
+    it does not finish stays queued for the refresh; nothing here fails the request."""
+    try:
+        async with asyncio.timeout(RFID_INLINE_SECONDS), waiting_on_bambuddy():
+            await push_pending(
+                filament,
+                store.load,
+                lambda: store.read({"filament_sync"})["filament_sync"],
+            )
+    except Exception as error:
+        logger.info(
+            "the tags were not pushed in the request", extra={"error": type(error).__name__}
+        )
 
 
 @router.delete(
@@ -590,10 +634,13 @@ async def bind_spool_tag(
         "and answers the closed binding. 404 when the tag is on no spool."
     ),
 )
-async def unbind_tag(filament: FilamentDep, caller: CallerDep, tag_id: UUID) -> m.TagBinding:
+async def unbind_tag(
+    filament: FilamentDep, store: SettingsStoreDep, caller: CallerDep, tag_id: UUID
+) -> m.TagBinding:
     closed = await asyncio.to_thread(filament.spools.unbind_tag, tag_id, actor=actor(caller))
     if closed is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"tag {tag_id} is on no spool")
+    await _push_now(filament, store)
     return closed
 
 
@@ -1096,12 +1143,14 @@ async def move_spool(
         "left is a `bb` reading unless the spool's weight is locked. A BB spool whose tag a "
         "ScadBuddy spool holds, or whose record a ScadBuddy spool is linked to, is linked; any "
         "other becomes a new spool, typed by `material_number`, else by brand, material, "
-        "subtype, colour and label weight, else left to need a type. Never writes to Bambuddy. "
+        "subtype, colour and label weight, else left to need a type. A BB spool Bambuddy added "
+        "for a tag a linked ScadBuddy spool holds makes no spool (`rfid_duplicates` and "
+        "`rfid_duplicate_bb_ids` name it, and it stays skipped). Never writes to Bambuddy. "
         "An archived ScadBuddy spool is never restored or changed; it is listed as `archived`. "
         "The ledger events name the caller. Answers the counts and ids made, linked, changed, "
-        "still needing a type and archived, the BB spool ids it could not pull, and the count "
-        "(and ids) of BB rows it could not read. 409 when no Bambuddy is configured; "
-        "Bambuddy's own errors as they come."
+        "still needing a type and archived, the BB spool ids it could not pull, the count "
+        "(and ids) of BB rows it could not read, and the duplicates it skipped. 409 when no "
+        "Bambuddy is configured; Bambuddy's own errors as they come."
     ),
 )
 async def import_bambuddy(
@@ -1109,3 +1158,192 @@ async def import_bambuddy(
 ) -> PullReport:
     settings = await asyncio.to_thread(store.load)
     return await read_and_pull(filament, settings, actor=actor(caller))
+
+
+@router.get(
+    "/rfid/status",
+    response_model=m.RfidStatus,
+    summary="Read the RFID override mode",
+    description=(
+        "Whether the RFID override mode is on, and where Bambuddy's `auto_add_unknown_rfid` "
+        "stands: `applied` (mode on, Bambuddy's value is false), `pending` (a write has not "
+        "landed, or Bambuddy could not be reached; `detail` names the error), `blocked` "
+        "(Bambuddy refused the write because its auth is on) or `off`. Also lists the "
+        "SpoolBuddy devices. Reads Bambuddy and writes nothing; when Bambuddy fails, "
+        "`bambuddy_auto_add` is null and `devices` is empty."
+    ),
+)
+async def get_rfid_status(filament: FilamentDep, store: SettingsStoreDep) -> m.RfidStatus:
+    return await read_status(filament.rfid, store.load)
+
+
+@router.put(
+    "/rfid/override-mode",
+    response_model=m.RfidStatus,
+    summary="Turn the RFID override mode on or off",
+    description=(
+        "While the mode is on, Bambuddy's auto-add of unknown RFID spools is turned off; "
+        "the value Bambuddy had is saved first and put back when the mode turns off. The "
+        "mode is written first, then Bambuddy is reconciled once, and the answer is the "
+        "status. It is 200 even when Bambuddy refuses the write (`blocked`: its auth is "
+        "on) or cannot be reached (`pending`); the mode then stays as asked and the "
+        "refresh retries. Another reconcile may hold the mode lock: the route waits up to 5 "
+        "seconds, then answers `pending` with detail `busy`, and the refresh applies the mode."
+    ),
+)
+async def set_rfid_override_mode(
+    filament: FilamentDep, store: SettingsStoreDep, body: m.RfidModeSet
+) -> m.RfidStatus:
+    await asyncio.to_thread(filament.rfid.set_mode, body.enabled)
+    return await reconcile_mode_now(
+        filament.rfid, store.load, wait=rfid_mode.RFID_MODE_LOCK_WAIT_SECONDS
+    )
+
+
+@router.post(
+    "/rfid/reconcile",
+    response_model=m.RfidReconcileReport,
+    summary="Reconcile RFID with Bambuddy now",
+    description=(
+        "Runs once what the spool refresh Schedule runs: Bambuddy's `auto_add_unknown_rfid` "
+        "is brought to the override mode, then the queued tag changes are pushed (only with "
+        "`filament_sync.tags` `sb_to_bb`), then the AMS slot of each override tag is "
+        "configured with its type's preset. Answers the mode's status and the tag push "
+        "counts, and the override slots' counts (`slots` is null with no Bambuddy)."
+    ),
+)
+async def reconcile_rfid(
+    filament: FilamentDep, store: SettingsStoreDep, printers: PrintersDep
+) -> m.RfidReconcileReport:
+    # Each step fails alone, as in the activity: one broken step never skips the others.
+    try:
+        mode = await reconcile_mode_now(filament.rfid, store.load)
+    except Exception as error:
+        logger.warning("could not reconcile the RFID mode", extra={"error": type(error).__name__})
+        try:
+            on = (await asyncio.to_thread(filament.rfid.state)).override_mode
+        except Exception:
+            on = False
+        mode = m.RfidStatus(override_mode=on, state="pending", detail="internal")
+    try:
+        tags = await push_pending(
+            filament, store.load, lambda: store.read({"filament_sync"})["filament_sync"]
+        )
+    except Exception as error:
+        logger.warning("could not push the tags", extra={"error": type(error).__name__})
+        tags = m.TagPushReport(failed=1)
+    try:
+        slots = await reconcile_slots_now(
+            filament, store.load, printers=printers.store, reports=printers.reports
+        )
+    except Exception as error:
+        logger.warning("could not configure the slots", extra={"error": type(error).__name__})
+        slots = m.SlotReport(failed=1)
+    return m.RfidReconcileReport(mode=mode, tags=tags, slots=slots)
+
+
+@router.post(
+    "/rfid/scan",
+    response_model=m.ScanResult,
+    summary="Wait for a tag at a SpoolBuddy reader",
+    description=(
+        "Listens on Bambuddy's WebSocket for up to `timeout_s` seconds (1 to 50, default 30) "
+        "while a person holds a tag to a SpoolBuddy reader; `device_id` limits it to one "
+        "reader. Answers 200 either way: `status` `tag` with the tag's `tag_uid`, "
+        "`tray_uuid`, `tag_type`, its `kind` (`bambu_mifare` with a tray UUID, `ntag_opentag` for "
+        "an NTAG chip, else `other`; for a tag Bambuddy already knows, which names no chip, the "
+        "kind of the ScadBuddy tag bound to it, else `ntag_opentag` when Bambuddy's record says "
+        "OpenTag3D wrote it, else `other`), the Bambuddy spool it matched (`bambuddy_spool_id`) "
+        "and the ScadBuddy spool that holds the tag (`sb_spool`, else the one linked to that "
+        "Bambuddy spool, else null); or `status` `timeout` with nothing else when the wait ran "
+        "out. Writes nothing. 409 when no Bambuddy is configured or its key lacks the Read "
+        "Status scope; 502 or 504 when Bambuddy cannot be reached or closes the socket first."
+    ),
+)
+async def scan_rfid_tag(
+    filament: FilamentDep, store: SettingsStoreDep, body: m.ScanRequest
+) -> m.ScanResult:
+    settings = await asyncio.to_thread(store.load)
+    async with client_for(settings) as client:
+        return await ntag.scan(filament, client, timeout=body.timeout_s, device_id=body.device_id)
+
+
+async def _spool_or_404(filament: Filament, spool_id: UUID) -> None:
+    if await asyncio.to_thread(filament.spools.get, spool_id) is None:
+        raise _no_spool(spool_id)
+
+
+def _ntag_refused(exc: ntag.NtagNoBambuddySpoolError | ntag.NtagOverrideOpenError) -> ApiError:
+    return ApiError(status.HTTP_409_CONFLICT, str(exc), code=exc.code)
+
+
+@router.post(
+    "/spools/{spool_id}/ntag/write",
+    response_model=m.NtagQueued,
+    summary="Queue an NTAG write for a spool",
+    description=(
+        "Asks the SpoolBuddy `device_id` to write an OpenTag3D tag for the spool's Bambuddy "
+        "record; the person then holds a blank tag to the reader. It changes no tag binding: "
+        "call confirm after the write. `warnings` lists what Bambuddy says is missing from "
+        "the record. 404 for no such spool. 409 with `code` `no_bambuddy_spool` when the "
+        "spool is not linked to a Bambuddy spool, and `override_tag_open` when its open tag "
+        "was bound with `override` and `replace` is false."
+    ),
+)
+async def write_ntag(
+    filament: FilamentDep, store: SettingsStoreDep, spool_id: UUID, body: m.NtagWrite
+) -> m.NtagQueued:
+    await _spool_or_404(filament, spool_id)
+    settings = await asyncio.to_thread(store.load)
+    try:
+        async with client_for(settings) as client:
+            return await ntag.write(
+                filament, client, spool_id, body.device_id, replace=body.replace
+            )
+    except (ntag.NtagNoBambuddySpoolError, ntag.NtagOverrideOpenError) as exc:
+        raise _ntag_refused(exc) from None
+
+
+@router.post(
+    "/spools/{spool_id}/ntag/confirm",
+    response_model=m.NtagConfirm,
+    summary="Bind the NTAG that was written for a spool",
+    description=(
+        "Reads the spool's Bambuddy record. When it holds a tag UID written by OpenTag3D "
+        "that differs from the one it held when the write was queued, binds that tag as "
+        "`ntag_opentag` (the ledger names the caller) and answers `bound` true with "
+        "`tag_uid`; otherwise (also when no write is queued) answers `bound` false and "
+        "changes nothing, so it can be called again. 404 for no such "
+        "spool, 409 with `code` `no_bambuddy_spool` when the spool is not linked to a "
+        "Bambuddy spool."
+    ),
+)
+async def confirm_ntag(
+    filament: FilamentDep, store: SettingsStoreDep, caller: CallerDep, spool_id: UUID
+) -> m.NtagConfirm:
+    await _spool_or_404(filament, spool_id)
+    settings = await asyncio.to_thread(store.load)
+    try:
+        async with client_for(settings) as client:
+            confirmed = await ntag.confirm(filament, client, spool_id, actor=actor(caller))
+    except ntag.NtagNoBambuddySpoolError as exc:
+        raise _ntag_refused(exc) from None
+    if confirmed.bound:
+        await _push_now(filament, store)
+    return confirmed
+
+
+@router.post(
+    "/spools/{spool_id}/ntag/cancel",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Cancel a queued NTAG write",
+    description=("Drops the write the SpoolBuddy `device_id` has queued. 404 for no such spool."),
+)
+async def cancel_ntag(
+    filament: FilamentDep, store: SettingsStoreDep, spool_id: UUID, body: m.NtagCancel
+) -> Response:
+    await _spool_or_404(filament, spool_id)
+    settings = await asyncio.to_thread(store.load)
+    async with client_for(settings) as client:
+        await ntag.cancel(client, body.device_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
