@@ -374,8 +374,12 @@ def _fragments(
     block_h = 1 << np.ceil(np.log2(height[live])).astype(np.int64)
     order = live[np.argsort(block_w * (size + 1) + block_h, kind="stable")]
 
-    # The per-row arrays are a few times the size of a candidate's, so fewer rows.
-    for start, stop in _runs(height[order], BATCH_PIXELS // 4):
+    # Measured with tracemalloc (#6630): a row costs about 330 B at `_rows`' peak and a
+    # candidate about 80 B at `_span_fragments`', so a run takes a sixteenth as many
+    # rows as a batch takes candidates (at most about 90 MB). On a 123,572-face
+    # keychain the cover then peaks at 145 MiB: 187 MiB with a quarter, 151 MiB with
+    # the whole-box rasteriser this replaced.
+    for start, stop in _runs(height[order], BATCH_PIXELS // 16):
         rows = _rows(triangles, order[start:stop], (x0, x1, y0, y1), area)
         for first, last in _runs(rows.count, BATCH_PIXELS):
             yield _span_fragments(rows, first, last, size)
