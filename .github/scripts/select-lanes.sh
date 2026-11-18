@@ -8,7 +8,8 @@
 #   rust           the `rust` and `slicer-image` jobs
 #   image          the app image: build, ruff and mypy, container smoke, real-backend
 #                  e2e and the bambuddy-fs live mount; every backend change, plus the
-#                  frontend and Go trees that run against it
+#                  frontend and Go trees that run against it; and the
+#                  `profile-fetch-image` job (#6625)
 #
 # Each lane also selects on the shared build inputs (Dockerfile, .dockerignore) and
 # on its own wiring (ci.yml, this script, changed-paths.sh), as select-go.sh does.

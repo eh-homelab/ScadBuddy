@@ -1972,6 +1972,82 @@ jobs:
           echo "AppRun --help names --slice on ${count} line(s)"
           test "$count" -ge 1
 
+  # The profile-fetch worker's image (#6625, plan 2026-11-18-profile-fetch-worker.md
+  # Decision 17): the Dockerfile's `profile-fetch` target, checked as the cluster runs
+  # it, and the 3DFP driver's tests (tests/profile_fetch/test_site.py) in its
+  # `profile-fetch-test` target, which is that image plus the dev group and the tests.
+  # `--network none`: the driver drives the local replica only, never the real site.
+  # SCADBUDDY_TEST_CHROMIUM_REQUIRED=1, so a missing Chromium fails rather than skips.
+  # `--security-opt seccomp=unconfined`: Chromium's own sandbox stays on (Decision 6)
+  # and needs user namespaces, which Docker's default seccomp profile refuses ("No
+  # usable sandbox!"); the pod runs with seccomp Unconfined for the same reason.
+  # `--ulimit core=0`: the crash tests crash a renderer, and the runner's core_pattern
+  # pipes the dump to systemd-coredump, which held each crashed renderer for about five
+  # minutes, so the crash event never came (measured on ubuntu-latest, 2026-11-18).
+  # In the `image` lane, and in `CI Summary`'s needs.
+  profile-fetch-image:
+    name: Profile-fetch image build and driver tests
+    needs: layout
+    if: ${{ needs.layout.outputs.image == 'true' && needs.layout.outputs.run_image == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - uses: docker/setup-buildx-action@v4
+        # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+
+      # The build itself checks that the worker imports no Postgres code and that
+      # Playwright's full Chromium is installed. build-image.yml's `profile-fetch`
+      # job shares the scope; mode=min (the Actions cache is at its ceiling, #743).
+      - name: Build the profile-fetch image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: profile-fetch
+          platforms: linux/amd64
+          load: true
+          tags: scadbuddy-profile-fetch:ci
+          cache-from: type=gha,scope=profile-fetch
+          cache-to: type=gha,scope=profile-fetch,mode=min
+
+      - name: Build the profile-fetch test image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: profile-fetch-test
+          platforms: linux/amd64
+          load: true
+          tags: scadbuddy-profile-fetch-test:ci
+          cache-from: type=gha,scope=profile-fetch
+
+      # As the cluster runs it: uid 10001, and with no settings the worker refuses to
+      # start (exit 2), naming each missing one.
+      - name: Profile-fetch smoke
+        run: |
+          set -euo pipefail
+          test "$(docker run --rm scadbuddy-profile-fetch:ci id -u)" = 10001
+          docker run --rm scadbuddy-profile-fetch:ci python -c \
+            "import sys, scadbuddy.profile_fetch.worker; sys.exit(any(m.split('.')[0] == 'psycopg' for m in sys.modules))"
+          status=0
+          docker run --rm --network none scadbuddy-profile-fetch:ci > "$RUNNER_TEMP/start.log" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/start.log"
+          test "$status" -eq 2
+          grep -q 'setting tdfp_password: Field required' "$RUNNER_TEMP/start.log"
+
+      - name: Driver tests in the image
+        run: |
+          docker run --rm --network none --security-opt seccomp=unconfined --ulimit core=0 \
+            -e SCADBUDDY_TEST_CHROMIUM_REQUIRED=1 scadbuddy-profile-fetch-test:ci \
+            xvfb-run -a python -m pytest -rs tests/profile_fetch/test_site.py
+
   # ── The API spec: deterministic export, its diff on the PR, the msw worker ─
   #
   # backend/openapi.json and both schema.d.ts files are generated at build and
@@ -2448,7 +2524,7 @@ jobs:
     # THIS display name is the required status-check context. Renaming it
     # silently unsatisfiable-ifies branch protection.
     name: CI Summary
-    needs: [layout, lint, frontend, frontend-e2e, frontend-e2e-split, agent, agent-durable, image, backend-pytest, backend-pytest-split, models, go-select, go, rust, slicer-image, freshness, go-client]
+    needs: [layout, lint, frontend, frontend-e2e, frontend-e2e-split, agent, agent-durable, image, backend-pytest, backend-pytest-split, models, go-select, go, rust, slicer-image, profile-fetch-image, freshness, go-client]
     # `!cancelled()`, not a bare `needs:`. A bare `needs:` SKIPS this job when
     # an upstream job fails, and GitHub counts a SKIPPED REQUIRED CHECK AS
     # SATISFIED — a failing build would report green on the one check that
@@ -2486,6 +2562,7 @@ jobs:
           GO_RESULT: ${{ needs.go.result }}
           RUST_RESULT: ${{ needs.rust.result }}
           SLICER_IMAGE_RESULT: ${{ needs.slicer-image.result }}
+          PROFILE_FETCH_IMAGE_RESULT: ${{ needs.profile-fetch-image.result }}
           FRESHNESS_RESULT: ${{ needs.freshness.result }}
           GO_CLIENT_RESULT: ${{ needs.go-client.result }}
           EVENT_NAME: ${{ github.event_name }}
@@ -2564,6 +2641,7 @@ jobs:
           assert "Agent lint, typecheck, test, build, image" "$AGENT_RESULT" "$has_agent"
           assert "Agent-durable lint, test, image"        "$AGENT_DURABLE_RESULT" "$need_agent_durable"
           assert "Image build, backend checks, container smoke, real-backend e2e" "$IMAGE_RESULT" "$need_image"
+          assert "Profile-fetch image build and driver tests" "$PROFILE_FETCH_IMAGE_RESULT" "$need_image"
           assert "Backend pytest (every shard)"           "$BACKEND_PYTEST_RESULT" "$need_backend"
           assert "Backend pytest shards cover the suite"  "$BACKEND_PYTEST_SPLIT_RESULT" "$need_backend"
           assert "Template verify scripts"                "$MODELS_RESULT"   "$has_models"
