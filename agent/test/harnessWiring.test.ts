@@ -266,7 +266,7 @@ describe.skipIf(cliMissing !== undefined)(`the wired harness against a fake Anth
       expect(init.plugins).toContainEqual(expect.objectContaining({ name: 'scadbuddy', path: OWN_PLUGIN_DIR }))
       expect(init.plugin_errors ?? []).toEqual([])
       expect(init.skills.filter((s) => s.startsWith('scadbuddy:')).sort()).toEqual(
-        ['scadbuddy:authoring', 'scadbuddy:customize', 'scadbuddy:print'],
+        ['scadbuddy:authoring', 'scadbuddy:customize', 'scadbuddy:filament', 'scadbuddy:print'],
       )
       expect(init.agents).toEqual(expect.arrayContaining(['scadbuddy:model-author', 'scadbuddy:print-analyst']))
       // `Agent` is listed by its older name (measured on Claude Code 2.1.283 and 2.1.287).
