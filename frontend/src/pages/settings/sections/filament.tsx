@@ -55,6 +55,10 @@ function reportLine(report: RfidReconcileReport): string {
   if (failedSlots > 0) parts.push(`${plural(failedSlots, 'slot was', 'slots were')} not set; ${failedSlots === 1 ? 'it is' : 'they are'} tried again on the next refresh`)
   const noTemps = report.slots?.no_temps ?? 0
   if (noTemps > 0) parts.push(`${plural(noTemps, 'spool has', 'spools have')} no nozzle temperatures, so its slot is not set`)
+  const noPreset = report.slots?.no_preset ?? 0
+  if (noPreset > 0) parts.push(`${plural(noPreset, 'spool has', 'spools have')} no preset for the nozzle, so ${noPreset === 1 ? 'its slot is' : 'their slots are'} not set`)
+  const noNozzle = report.slots?.no_nozzle ?? 0
+  if (noNozzle > 0) parts.push(`${plural(noNozzle, 'spool has', 'spools have')} no nozzle to set, so ${noNozzle === 1 ? 'its slot is' : 'their slots are'} not set`)
   return `${parts.join('. ')}.`
 }
 
