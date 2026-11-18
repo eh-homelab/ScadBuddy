@@ -2,6 +2,8 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { api } from '../../api/client'
 import { resetMockState } from '../../mocks/handlers'
+import { importBambuddyEvent, machineRateEvents, setBambuddyHours, setLanCount } from '../../mocks/features/orders/machineRates'
+import { clearToasts, getToasts } from '../../lib/toast'
 import { renderPage } from '../../test/utils'
 import { MachineRates } from './MachineRates'
 
@@ -110,5 +112,284 @@ describe('MachineRates (#4625)', () => {
     await user.click(within(form).getByRole('button', { name: 'Save machine rate' }))
     expect(await within(form).findByRole('alert')).toHaveTextContent('Enter the watts as a number')
     expect((await api.machineRate(GARAGE)).inputs).toBeNull()
+  })
+})
+
+// #5774 (machine-rate actuals spec 2026-11-17 §9) — logged events, actuals and confidence.
+describe('MachineRates actuals (#5774)', () => {
+  beforeEach(() => {
+    resetMockState()
+    clearToasts()
+  })
+
+  const nozzle = (window = 3, pricedBy: 'estimate' | 'actual' = 'estimate') =>
+    api.setMachineRate(GARAGE, {
+      profile: { labour_rate_per_hour: '30', actuals_window: window },
+      wear_parts: [{ name: 'Nozzle', cost: '35', life_hours: '1000', priced_by: pricedBy }],
+      maintenance: [{ task: 'Clean plate', minutes: '10', consumables: '0', interval_hours: '25' }],
+    })
+  const replace = (hours: string, at: string, cost = '35') => api.addMachineRateEvent(GARAGE, { kind: 'part', name: 'Nozzle', hours_at: hours, cost, at })
+  const clean = (hours: string, at: string) => api.addMachineRateEvent(GARAGE, { kind: 'task', name: 'Clean plate', hours_at: hours, at })
+
+  async function open(user: ReturnType<typeof renderPage>['user'], name: string) {
+    await user.click(await screen.findByRole('button', { name: `Machine rate of ${name}` }))
+    const panel = await screen.findByRole('region', { name: `Machine rate of ${name}` })
+    await within(panel).findByTestId('machine-rate-breakdown')
+    return panel
+  }
+
+  it('shows the estimate and the actual side by side, and the toggle chooses which prices', async () => {
+    await nozzle(1)
+    await replace('100', '2026-10-01T12:00:00Z')
+    await replace('700', '2026-11-01T12:00:00Z')
+    const { user } = renderPage(<MachineRates />)
+    const panel = await open(user, 'Garage')
+    const wear = within(panel).getByRole('group', { name: 'Wear part 1' })
+    const estimate = within(wear).getByTestId('figure-estimate')
+    const actual = within(wear).getByTestId('figure-actual')
+    expect(estimate).toHaveTextContent('Estimate 0.035/h')
+    expect(actual).toHaveTextContent('Actual 0.0583/h')
+    expect(estimate).toHaveAttribute('data-prices', 'true')
+    expect(actual).toHaveAttribute('data-prices', 'false')
+    expect(within(wear).getByTestId('confidence')).toHaveTextContent('100 % confidence: 1 of 1 replacements logged, 600 h each on average. The estimate is chosen.')
+
+    await user.click(within(wear).getByRole('radio', { name: 'Actual' }))
+    expect(within(wear).getByRole('radio', { name: 'Actual' })).toHaveAttribute('aria-checked', 'true')
+    expect(within(wear).getByTestId('figure-actual')).toHaveAttribute('data-prices', 'true')
+    expect(within(wear).getByTestId('figure-estimate')).toHaveAttribute('data-prices', 'false')
+    await user.click(within(panel).getByRole('button', { name: 'Save machine rate' }))
+    await waitFor(async () => expect((await api.machineRate(GARAGE)).breakdown.wear?.[0]).toMatchObject({ priced_by: 'actual', basis: 'actual', per_hour: '0.0583' }))
+    expect(await within(panel).findByText(/Nozzle: 0.0583 per hour from logged replacements \(actual, 100 % confidence\)/)).toBeInTheDocument()
+    expect(within(panel).getByTestId('machine-rate-breakdown')).toHaveTextContent('Some parts priced from actuals; lowest confidence 100 %')
+  })
+
+  it('says the estimate prices while an actual has fewer than N events', async () => {
+    await nozzle(3, 'actual')
+    await replace('100', '2026-10-01T12:00:00Z')
+    await replace('700', '2026-11-01T12:00:00Z')
+    const { user } = renderPage(<MachineRates />)
+    const panel = await open(user, 'Garage')
+    const wear = within(panel).getByRole('group', { name: 'Wear part 1' })
+    expect(within(wear).getByTestId('figure-estimate')).toHaveAttribute('data-prices', 'true')
+    expect(within(wear).getByTestId('figure-actual')).toHaveAttribute('data-prices', 'false')
+    expect(within(wear).getByTestId('confidence')).toHaveTextContent('Estimate prices, 33 % confidence: 1 of 3 replacements logged')
+    expect(within(panel).getByRole('list', { name: 'Rate parts' })).toHaveTextContent('Nozzle: 35 over 1000 h = 0.035 (estimate, 33 % confidence)')
+  })
+
+  it('shows a row with no events at 0 % confidence, and a task by its gaps', async () => {
+    await nozzle(2)
+    await clean('10', '2026-10-01T12:00:00Z')
+    await clean('45', '2026-10-05T12:00:00Z')
+    await clean('83', '2026-10-09T12:00:00Z')
+    const { user } = renderPage(<MachineRates />)
+    const panel = await open(user, 'Garage')
+    const wear = within(panel).getByRole('group', { name: 'Wear part 1' })
+    expect(within(wear).getByTestId('figure-actual')).toHaveTextContent('No events yet')
+    expect(within(wear).getByTestId('confidence')).toHaveTextContent('0 % confidence: 0 of 2 replacements logged')
+    const task = within(panel).getByRole('group', { name: 'Maintenance task 1' })
+    // 2 x 5.00 over 35 + 38 h.
+    expect(within(task).getByTestId('figure-actual')).toHaveTextContent('Actual 0.137/h')
+    expect(within(task).getByTestId('confidence')).toHaveTextContent(
+      '100 % confidence: 2 of 2 gaps logged, done every 36.5 h on average; some use the typed minutes or consumables',
+    )
+  })
+
+  it('lists the events with their counter, gap and why a gap was skipped', async () => {
+    await nozzle(3)
+    await clean('10', '2026-10-01T12:00:00Z')
+    await clean('10', '2026-10-02T12:00:00Z')
+    await api.linkPrinterLan(GARAGE, { host: '10.0.0.5', access_code: '12345678' })
+    setLanCount(GARAGE, { run_hours: '40' })
+    await clean('40', '2026-10-05T12:00:00Z')
+    const { user } = renderPage(<MachineRates />)
+    const panel = await open(user, 'Garage')
+    const task = within(panel).getByRole('group', { name: 'Maintenance task 1' })
+    await user.click(within(task).getByRole('button', { name: 'Done (3)' }))
+    const items = within(within(task).getByRole('list', { name: 'Done: Clean plate' })).getAllByRole('listitem') as [HTMLElement, HTMLElement, HTMLElement]
+    expect(items).toHaveLength(3)
+    expect(items[0]).toHaveTextContent('40 h, ScadBuddy count')
+    expect(items[0]).toHaveTextContent('Skipped: counter changed')
+    expect(items[0]).toHaveTextContent('logged here')
+    expect(items[1]).toHaveTextContent('10 h, typed')
+    expect(items[1]).toHaveTextContent('Skipped: no hours between')
+    expect(items[1]).toHaveTextContent('typed minutes and consumables')
+  })
+
+  it('logs a replacement with the reading from Bambuddy', async () => {
+    await api.setMachineRate(LINKED, { profile: {}, wear_parts: [{ name: 'Nozzle', cost: '35', life_hours: '1000' }], maintenance: [] })
+    const { user } = renderPage(<MachineRates />)
+    const panel = await open(user, '3DP-31B-598')
+    const wear = within(panel).getByRole('group', { name: 'Wear part 1' })
+    await user.click(within(wear).getByRole('button', { name: 'Log replacement' }))
+    const form = within(wear).getByRole('form', { name: 'Log replacement of Nozzle' })
+    expect(within(form).getByLabelText('Counter reading (h)')).toHaveValue('495.3')
+    expect(form).toHaveTextContent('from Bambuddy')
+    expect(within(form).getByLabelText('Cost')).toHaveValue('35')
+    await user.click(within(form).getByRole('button', { name: 'Log replacement' }))
+    await waitFor(() => expect(machineRateEvents(LINKED)).toHaveLength(1))
+    expect(machineRateEvents(LINKED)[0]).toMatchObject({ kind: 'part', name: 'Nozzle', hours_at: '495.3', hours_source: 'bambuddy', cost: '35' })
+    expect(getToasts().map((t) => t.title)).toContain('Replacement logged')
+    expect(await within(wear).findByRole('button', { name: 'Replacements (1)' })).toBeInTheDocument()
+  })
+
+  it("logs a replacement with the reading from ScadBuddy's count", async () => {
+    await nozzle()
+    await api.linkPrinterLan(GARAGE, { host: '10.0.0.5', access_code: '12345678' })
+    setLanCount(GARAGE, { run_hours: '612.4' })
+    const { user } = renderPage(<MachineRates />)
+    const panel = await open(user, 'Garage')
+    const wear = within(panel).getByRole('group', { name: 'Wear part 1' })
+    await user.click(within(wear).getByRole('button', { name: 'Log replacement' }))
+    const form = within(wear).getByRole('form', { name: 'Log replacement of Nozzle' })
+    expect(within(form).getByLabelText('Counter reading (h)')).toHaveValue('612.4')
+    expect(form).toHaveTextContent('from ScadBuddy’s count')
+    // Logged late: the reading is corrected.
+    await user.clear(within(form).getByLabelText('Counter reading (h)'))
+    await user.type(within(form).getByLabelText('Counter reading (h)'), '600')
+    await user.click(within(form).getByRole('button', { name: 'Log replacement' }))
+    await waitFor(() => expect(machineRateEvents(GARAGE)[0]).toMatchObject({ hours_at: '600', hours_source: 'lan_watch' }))
+  })
+
+  it('asks for the reading on a printer with no counter, or the hours used instead', async () => {
+    await nozzle()
+    const { user } = renderPage(<MachineRates />)
+    const panel = await open(user, 'Garage')
+    const wear = within(panel).getByRole('group', { name: 'Wear part 1' })
+    await user.click(within(wear).getByRole('button', { name: 'Log replacement' }))
+    const form = within(wear).getByRole('form', { name: 'Log replacement of Nozzle' })
+    expect(within(form).getByLabelText('Counter reading (h)')).toHaveValue('')
+    await user.click(within(form).getByRole('button', { name: 'Log replacement' }))
+    expect(await within(form).findByRole('alert')).toHaveTextContent('Enter the counter reading')
+    await user.click(within(form).getByRole('button', { name: 'Hours used instead' }))
+    await user.type(within(form).getByLabelText('Hours used (h)'), '640')
+    await user.click(within(form).getByRole('button', { name: 'Log replacement' }))
+    await waitFor(() => expect(machineRateEvents(GARAGE)[0]).toMatchObject({ hours_at: null, hours_used: '640' }))
+  })
+
+  it('says why there is no reading when Bambuddy does not answer', async () => {
+    setBambuddyHours(null)
+    await api.setMachineRate(LINKED, { profile: {}, wear_parts: [{ name: 'Nozzle', cost: '35', life_hours: '1000' }], maintenance: [] })
+    const { user } = renderPage(<MachineRates />)
+    const panel = await open(user, '3DP-31B-598')
+    expect(within(panel).getByTestId('print-hours')).toHaveTextContent('Bambuddy did not answer, so there is no counter reading now.')
+    const wear = within(panel).getByRole('group', { name: 'Wear part 1' })
+    await user.click(within(wear).getByRole('button', { name: 'Log replacement' }))
+    const form = within(wear).getByRole('form', { name: 'Log replacement of Nozzle' })
+    await user.click(within(form).getByRole('button', { name: 'Log replacement' }))
+    expect(await within(form).findByRole('alert')).toHaveTextContent('Bambuddy did not answer, so there is no counter reading. Try again, or enter the reading.')
+  })
+
+  it("logs a task on a printer Bambuddy does not track, and points a linked printer's tasks at Bambuddy", async () => {
+    await nozzle()
+    const { user } = renderPage(<MachineRates />)
+    const panel = await open(user, 'Garage')
+    const task = within(panel).getByRole('group', { name: 'Maintenance task 1' })
+    await user.click(within(task).getByRole('button', { name: 'Log done' }))
+    const form = within(task).getByRole('form', { name: 'Log Clean plate done' })
+    await user.type(within(form).getByLabelText('Counter reading (h)'), '12.5')
+    await user.type(within(form).getByLabelText('Minutes'), '8')
+    await user.click(within(form).getByRole('button', { name: 'Log done' }))
+    await waitFor(() => expect(machineRateEvents(GARAGE)[0]).toMatchObject({ kind: 'task', hours_at: '12.5', hours_source: 'typed', minutes: '8' }))
+    expect(getToasts().map((t) => t.title)).toContain('Maintenance logged')
+
+    await api.setMachineRate(LINKED, { profile: {}, wear_parts: [], maintenance: [{ task: 'Lubricate rails', minutes: '20', consumables: '2' }] })
+    await user.click(within(panel).getByRole('button', { name: 'Close' }))
+    const linked = await open(user, '3DP-31B-598')
+    expect(linked).toHaveTextContent('Mark tasks done in Bambuddy; ScadBuddy reads them.')
+    expect(within(linked).queryByRole('button', { name: 'Log done' })).toBeNull()
+  })
+
+  it('adds minutes and consumables to an imported event, and edits and deletes a logged one', async () => {
+    await api.setMachineRate(LINKED, {
+      profile: {},
+      wear_parts: [{ name: 'Nozzle', cost: '35', life_hours: '1000' }],
+      maintenance: [{ task: 'Clean build plate', minutes: '10', consumables: '0' }],
+    })
+    importBambuddyEvent(LINKED, 'Clean build plate', '66.5', '2026-10-01T12:00:00Z')
+    importBambuddyEvent(LINKED, 'Clean build plate', '101.5', '2026-10-05T12:00:00Z')
+    await api.addMachineRateEvent(LINKED, { kind: 'part', name: 'Nozzle', cost: '35', hours_at: '400' })
+    const { user } = renderPage(<MachineRates />)
+    const panel = await open(user, '3DP-31B-598')
+
+    const task = within(panel).getByRole('group', { name: 'Maintenance task 1' })
+    await user.click(within(task).getByRole('button', { name: 'Done (2)' }))
+    const done = within(task).getByRole('list', { name: 'Done: Clean build plate' })
+    const newest = within(done).getAllByRole('listitem')[0]!
+    expect(newest).toHaveTextContent('from Bambuddy')
+    expect(newest).toHaveTextContent('35 h since the one before')
+    expect(within(newest).queryByRole('button', { name: 'Delete' })).toBeNull()
+    await user.click(within(newest).getByRole('button', { name: 'Add minutes and consumables' }))
+    await user.type(within(newest).getByLabelText('Minutes'), '12')
+    await user.type(within(newest).getByLabelText('Consumables'), '0.5')
+    await user.click(within(newest).getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(machineRateEvents(LINKED)[1]).toMatchObject({ minutes: '12', consumables: '0.5' }))
+    expect(await within(task).findByText(/12 min, 0.5 consumables/)).toBeInTheDocument()
+
+    const wear = within(panel).getByRole('group', { name: 'Wear part 1' })
+    await user.click(within(wear).getByRole('button', { name: 'Replacements (1)' }))
+    const item = within(within(wear).getByRole('list', { name: 'Replacements: Nozzle' })).getAllByRole('listitem')[0]!
+    await user.click(within(item).getByRole('button', { name: 'Edit' }))
+    await user.clear(within(item).getByLabelText('Cost'))
+    await user.type(within(item).getByLabelText('Cost'), '42')
+    await user.click(within(item).getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(machineRateEvents(LINKED)[2]).toMatchObject({ cost: '42' }))
+    await user.click(await within(wear).findByRole('button', { name: 'Delete' }))
+    await waitFor(() => expect(machineRateEvents(LINKED)).toHaveLength(2))
+    expect(await within(wear).findByText('No replacements logged. Log one when you change this part.')).toBeInTheDocument()
+  })
+
+  it('shows the print-hours line for each counter, and saves the offset and the window', async () => {
+    await nozzle()
+    setLanCount(LINKED, { run_hours: '12.4' })
+    const { user } = renderPage(<MachineRates />)
+    let panel = await open(user, 'Garage')
+    expect(within(panel).getByTestId('print-hours')).toHaveTextContent('No counter: enter the reading when you log an event.')
+    await user.click(within(panel).getByRole('button', { name: 'Close' }))
+
+    await api.setMachineRate(LINKED, { profile: {}, wear_parts: [], maintenance: [] })
+    panel = await open(user, '3DP-31B-598')
+    expect(within(panel).getByTestId('print-hours')).toHaveTextContent('495.3 h from Bambuddy')
+    expect(within(panel).getByTestId('print-hours')).toHaveTextContent('ScadBuddy’s count: 12.4 h, a check only')
+    await user.click(within(panel).getByRole('button', { name: 'Close' }))
+
+    await api.linkPrinterLan(GARAGE, { host: '10.0.0.5', access_code: '12345678' })
+    setLanCount(GARAGE, { run_hours: '612.4', unseen_hours: '3.1', started_at: '2026-11-20T09:00:00Z' })
+    panel = await open(user, 'Garage')
+    const line = within(panel).getByTestId('print-hours')
+    expect(line).toHaveTextContent('612.4 h, counted by ScadBuddy since 2026-11-20')
+    expect(line).toHaveTextContent('3.1 h not seen (the printer was offline and its state changed)')
+    await user.clear(within(panel).getByLabelText('Offset (h)'))
+    await user.type(within(panel).getByLabelText('Offset (h)'), '100')
+    await user.clear(within(panel).getByLabelText('Actuals window (events)'))
+    await user.type(within(panel).getByLabelText('Actuals window (events)'), '5')
+    await user.click(within(panel).getByRole('button', { name: 'Save machine rate' }))
+    await waitFor(async () => expect((await api.machineRate(GARAGE)).inputs?.profile).toMatchObject({ lan_hours_offset: '100', actuals_window: 5 }))
+    expect(await within(panel).findByText(/712.4 h, counted by ScadBuddy/)).toBeInTheDocument()
+  })
+
+  it('refuses a window outside 1 to 20', async () => {
+    await nozzle()
+    const { user } = renderPage(<MachineRates />)
+    const panel = await open(user, 'Garage')
+    await user.clear(within(panel).getByLabelText('Actuals window (events)'))
+    await user.type(within(panel).getByLabelText('Actuals window (events)'), '21')
+    await user.click(within(panel).getByRole('button', { name: 'Save machine rate' }))
+    expect(await within(panel).findByRole('alert')).toHaveTextContent('Enter the actuals window as a whole number from 1 to 20.')
+  })
+
+  it("moves a part's events with it when it is renamed, and names events no row has", async () => {
+    await nozzle()
+    await replace('100', '2026-10-01T12:00:00Z')
+    const { user } = renderPage(<MachineRates />)
+    const panel = await open(user, 'Garage')
+    const wear = within(panel).getByRole('group', { name: 'Wear part 1' })
+    await user.clear(within(wear).getByLabelText('Part'))
+    await user.type(within(wear).getByLabelText('Part'), 'Hardened nozzle')
+    await user.click(within(panel).getByRole('button', { name: 'Save machine rate' }))
+    await waitFor(() => expect(machineRateEvents(GARAGE)[0]?.name).toBe('Hardened nozzle'))
+
+    await user.click(within(panel).getByRole('button', { name: 'Remove wear part Hardened nozzle' }))
+    await user.click(within(panel).getByRole('button', { name: 'Save machine rate' }))
+    expect(await within(panel).findByTestId('orphaned')).toHaveTextContent('Events kept for rows removed: Hardened nozzle (1 replacement)')
   })
 })
