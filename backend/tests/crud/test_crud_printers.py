@@ -16,6 +16,7 @@ import logging
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ import httpx
 import pytest
 from psycopg.types.json import Jsonb
 
+from scadbuddy.api import crud_print
 from scadbuddy.api.crud_areas import CRUD_AREAS
 from scadbuddy.api.crud_print import REPORT_ROUTE
 from scadbuddy.auth.service_auth import ServiceAuth
@@ -45,6 +47,7 @@ from scadbuddy.crud.print import (
 from scadbuddy.crud.wire import CRUD_HEADERS, NOT_CONFIGURED
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.orders.machine_rate import CostProfile, MachineRateInputs, MachineRateStore
+from scadbuddy.printers import run_hours
 from scadbuddy.printers.models import BambuddyView, LanLink, PrinterCreate
 from scadbuddy.printers.reports import Advance, PrintEnd, PrinterReportStore
 from scadbuddy.printers.store import (
@@ -543,3 +546,51 @@ def test_another_callers_credential_is_refused(store: SettingsStore) -> None:
                 client.request(method, path, json={})
             assert refused.value.status == 403, path
             assert refused.value.problem["reason"] == "wrong_caller", path
+
+
+# -- the hour counter (#5774, spec 2026-11-17-machine-rate-actuals §3.6, §10) ------------
+
+
+def _counter(store: SettingsStore, printer_id: str) -> run_hours.RunHours | None:
+    with store.pool.connection() as conn:
+        return run_hours.read(conn, printer_id)
+
+
+@pytest.mark.requires_postgres
+def test_the_report_routes_move_the_counter_and_answer_as_before(
+    crud: CrudSyncClient, printers: PrinterStore, store: SettingsStore
+) -> None:
+    pid = _lan_printer(printers)
+    start = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=5)
+    url = f"{BASE}/reports/{pid}"
+
+    def put(report: dict[str, Any], seconds: int) -> httpx.Response:
+        body = {"report": report, "seen_at": (start + timedelta(seconds=seconds)).isoformat()}
+        return crud.request("PUT", url, json=body, idempotency_key=uuid.uuid4().hex)
+
+    first = put(_report("RUNNING"), 0)
+    assert first.status_code == 200
+    assert first.json() == {"ended": None, "started": "plate_1"}
+    assert put(_report("RUNNING"), 10).json() == {"ended": None, "started": None}
+
+    touched = crud.request(
+        "POST", f"{url}/touch", json={"seen_at": (start + timedelta(seconds=20)).isoformat()}
+    )
+    assert touched.status_code == 204 and touched.content == b""
+
+    ended = put(_report("FINISH"), 25)
+    assert ended.json() == {"ended": {"subtask_name": "plate_1", "timed": True}, "started": None}
+    counter = _counter(store, pid)
+    assert counter is not None
+    assert counter.run_seconds == Decimal(25)
+    assert (counter.state, counter.counted_to) == ("FINISH", start + timedelta(seconds=25))
+
+
+def test_the_workers_reports_are_unchanged_by_the_counter() -> None:
+    """The counter moves inside the API's report writes: the print worker sends the same
+    two calls, holds no pool, and no worker route names it."""
+    assert "run_hours" not in inspect.getsource(RemoteReports)
+    paths = [str(getattr(route, "path", "")) for route in crud_print.router.routes]
+    assert paths and not [path for path in paths if "hour" in path]
+    with pytest.raises(ApiOnlyError):
+        _ = RemoteReports(None).pool  # type: ignore[arg-type]
