@@ -12,7 +12,9 @@ A gap over `GAP_LIMIT` means the watch or its link was down. It counts only when
 report after it shows the same print still running (the printer printed on); otherwise
 ScadBuddy cannot know when the state changed, so the gap goes to ``unseen_seconds`` and
 the counter is low, never high. A touch after such a gap changes nothing, so the next
-report decides it.
+report decides it. A watch clock that steps back loses at most the stretch it repeats:
+the report after the step moves ``counted_to`` back and counts nothing, and counting goes
+on from there (`accrue`).
 
 An unlink keeps the row but clears its ``state`` (`store.py` `PrinterStore.unlink_lan`),
 so no gap spans it, and a merge keeps the kept printer's row (`PRINTER_REFERENCES`)."""
@@ -60,10 +62,16 @@ def _same_print_running(row: RunHours, report: dict[str, Any]) -> bool:
 
 def accrue(row: RunHours, t: datetime, report: dict[str, Any] | None) -> RunHours:
     """``row`` after a write seen at ``t``: a report (``report``) or a touch (None). A
-    write at or before ``counted_to`` (a resend, an earlier touch) counts nothing."""
+    write at ``counted_to`` (a resend) or before it counts nothing. A report before it
+    (the watch host's clock ran ahead, then stepped back; a `stale` one never gets here)
+    moves ``counted_to`` back to ``t``, so the next report counts its own gap. A touch
+    before it does not: a touch is stamped `watch.LINK_PROOF` (20 s) before it is sent, so after a
+    report it is the usual case, and moving back would count that stretch twice."""
     after = row
     gap = t - row.counted_to
-    if gap > timedelta(0):
+    if gap < timedelta(0) and report is not None:
+        after = replace(after, counted_to=t)
+    elif gap > timedelta(0):
         seconds = Decimal(gap // _MICROSECOND) / _MICROS
         if row.state == COUNTED_STATE:
             if gap <= GAP_LIMIT or (report is not None and _same_print_running(row, report)):

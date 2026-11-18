@@ -97,6 +97,25 @@ def test_a_stale_write_leaves_the_counter_alone(
     assert _counter(pg_pool, pid) == before
 
 
+def test_a_report_after_the_watch_clock_steps_back_moves_the_counter_back(
+    printers_with_kek: PrinterStore, pg_pool: PgPool
+) -> None:
+    """A row stamped by a clock an hour ahead guards nothing (`reports.stale`), so the
+    next report is written, and the counter counts on from its time."""
+    pid = _linked(printers_with_kek)
+    reports = PrinterReportStore(pg_pool)
+    ahead = datetime.now(UTC).replace(microsecond=0) + timedelta(hours=1)
+    reports.advance(pid, _running(), ahead)
+    reports.advance(pid, _running(), ahead + timedelta(seconds=10))
+
+    reports.advance(pid, _running(), _at(0))
+    reports.advance(pid, _running(), _at(10))
+
+    counter = _counter(pg_pool, pid)
+    assert counter is not None
+    assert (counter.run_seconds, counter.counted_to) == (Decimal(20), _at(10))
+
+
 def test_a_printer_not_lan_linked_gets_no_row(
     printers_with_kek: PrinterStore, pg_pool: PgPool
 ) -> None:

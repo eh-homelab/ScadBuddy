@@ -345,8 +345,10 @@ write's or touch's `seen_at` and `report` is the merged report (none for a touch
 
 ```
 d = t - row.counted_to
-if d <= 0:                              # a resend (same seen_at) or an earlier touch
+if d == 0, or d < 0 on a touch:         # a resend (same seen_at) or an earlier touch
     add nothing; keep counted_to
+elif d < 0:                             # a report after the watch clock stepped back
+    add nothing; counted_to = t
 elif row.state != "RUNNING":
     add nothing
 elif d <= GAP_LIMIT:                    # GAP_LIMIT = status.STALE_AFTER (90 s)
@@ -357,7 +359,7 @@ elif report is None:                    # a touch after a long silence
     change nothing (counted_to stays; the next report decides the gap)
 else:
     unseen_seconds += d                 # not counted; the view shows it
-counted_to = max(counted_to, t)         # not for the "change nothing" case
+counted_to = t                          # d > 0; not for the "change nothing" case
 on a report: state, subtask = its gcode_state and subtask_name, each only when present
 ```
 
@@ -377,8 +379,19 @@ on a report: state, subtask = its gcode_state and subtask_name, each only when p
 - **A delta report** without `gcode_state` (§2.3) keeps the row's state.
 - **A resend** of a report whose answer was lost carries the same `seen_at`, so `d` is 0
   and nothing is counted twice. A `stale` write never reaches the counter.
-- **Clocks.** `seen_at` comes from the print worker's clock. A clock step is a gap and
-  follows the same rule, so one step adds at most 90 s of error.
+- **Clocks.** `seen_at` comes from the print worker's clock.
+  - A **forward step** is a gap and follows the gap rule. A step of 90 s or less while
+    `RUNNING` counts the step. A longer one counts the step only when the same print still
+    runs after it. Otherwise it goes to `unseen_seconds`.
+  - A **backward step** (a watch host whose clock ran ahead, then stepped back) makes a
+    report earlier than `counted_to`. It reaches the counter only when the report row's
+    `seen_at` is past `FUTURE_TOLERANCE` (`reports.py` `stale`). That report counts
+    nothing and moves `counted_to` back to its `seen_at`, so the next report counts its
+    own gap. The step loses at most the time from the last write before it to the first
+    report after it, and nothing later. The counter never waits for real time to catch up.
+  - A **touch** stamped before `counted_to` never moves it back. A touch is stamped
+    `watch.LINK_PROOF` (20 s) before it is sent, so after a report this is the usual case,
+    and moving back would count that stretch twice.
 - **Unlink and relink.** `PrinterStore.unlink_lan` keeps the counter row (hours are a
   fact about the printer) but sets its `state` to null in the same transaction, so no gap
   spans an unlink. A relink counts on from the kept total.
@@ -436,7 +449,8 @@ CREATE TABLE printer_run_hours (
   run_seconds numeric(14, 1) NOT NULL DEFAULT 0 CHECK (run_seconds >= 0),
   -- Gaps over the limit that ended in another state or print: not counted.
   unseen_seconds numeric(14, 1) NOT NULL DEFAULT 0 CHECK (unseen_seconds >= 0),
-  -- Counted up to here; never moves back.
+  -- Counted up to here. Moves back only to a report stamped before it (a watch clock
+  -- that stepped back), counting nothing for that report.
   counted_to timestamptz NOT NULL,
   -- The last report's gcode_state and subtask_name. Null state: nothing to count
   -- (also set by an unlink, so no gap spans it).

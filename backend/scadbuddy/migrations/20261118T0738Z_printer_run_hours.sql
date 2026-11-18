@@ -6,7 +6,8 @@ CREATE TABLE printer_run_hours (
   run_seconds numeric(14, 1) NOT NULL DEFAULT 0 CHECK (run_seconds >= 0),
   -- Gaps over the limit that ended in another state or print: not counted.
   unseen_seconds numeric(14, 1) NOT NULL DEFAULT 0 CHECK (unseen_seconds >= 0),
-  -- Counted up to here; never moves back.
+  -- Counted up to here. Moves back only to a report stamped before it (a watch clock
+  -- that stepped back), counting nothing for that report.
   counted_to timestamptz NOT NULL,
   -- The last report's gcode_state and subtask_name. Null state: nothing to count
   -- (also set by an unlink, so no gap spans it).

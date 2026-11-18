@@ -126,10 +126,29 @@ def test_a_touch_stamped_before_counted_to_adds_nothing() -> None:
     assert accrue(row, _at(-20), None) == row
 
 
-def test_an_earlier_report_adds_nothing_and_keeps_counted_to() -> None:
+def test_an_earlier_report_adds_nothing_and_moves_counted_to_back() -> None:
+    """A watch host whose clock ran ahead, then stepped back: the report counts nothing
+    and ``counted_to`` follows it back, so the next report counts its own gap."""
     after = accrue(_row(), _at(-5), _report(state="PAUSE"))
-    assert after.run_seconds == 100 and after.counted_to == T0
-    assert after.state == "PAUSE"
+    assert after.run_seconds == 100 and after.unseen_seconds == 0
+    assert (after.counted_to, after.state) == (_at(-5), "PAUSE")
+
+
+def test_after_a_clock_step_back_the_next_report_counts_its_normal_gap() -> None:
+    ahead = accrue(_row(), _at(3600), _report())  # the same print on, an hour "later"
+    assert ahead.run_seconds == 3700
+    stepped = accrue(ahead, _at(10), _report())  # the clock steps back an hour
+    assert stepped.run_seconds == 3700 and stepped.counted_to == _at(10)
+    after = accrue(stepped, _at(20), _report())
+    assert after.run_seconds == 3710 and after.counted_to == _at(20)
+
+
+def test_a_touch_after_a_clock_step_back_adds_nothing_and_keeps_counted_to() -> None:
+    """A touch is stamped ``LINK_PROOF`` (20 s) before it is sent, so one stamped before
+    ``counted_to`` is the usual case after a report: moving back on it would count that
+    stretch twice."""
+    row = _row()
+    assert accrue(row, _at(-3600), None) == row
 
 
 def test_a_delta_report_without_state_keeps_the_state() -> None:
