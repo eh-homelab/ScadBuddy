@@ -1059,6 +1059,8 @@ function Model({
   // #6349 — what the canvas draws see-through, read by the e2e: each such material's opacity.
   const canvas = useThree((state) => state.gl.domElement)
   useEffect(() => {
+    // Only the mocked build (the e2e's) carries the marker.
+    if (import.meta.env.VITE_MOCK_API !== '1') return
     canvas.setAttribute('data-see-through', owned.map((material) => material.opacity.toFixed(2)).join(','))
     return () => canvas.removeAttribute('data-see-through')
   }, [canvas, owned])

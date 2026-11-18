@@ -165,6 +165,10 @@ describe('Preview scene (#364)', () => {
   })
 
   it('marks the canvas with each see-through part’s opacity, floored for a clear one (#6349)', () => {
+    vi.stubEnv('VITE_MOCK_API', '1')
+    onTestFinished(() => {
+      vi.unstubAllEnvs()
+    })
     const placed = new THREE.Group()
     const glass = new THREE.Mesh(new THREE.BoxGeometry(10, 10, 10), new THREE.MeshStandardMaterial())
     glass.userData.scadbuddy_alpha = 0

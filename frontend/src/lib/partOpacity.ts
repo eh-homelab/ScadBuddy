@@ -7,8 +7,9 @@ const EXPLICIT_ALPHA = /^#?[0-9A-Fa-f]{8}$/
 
 /**
  * #6349 — the opacity of a part printed in `colour`, the colour its slot's spool gives it.
- * A colour that spells an alpha (`#RRGGBBAA`) sets it; one that does not (the dialog's
- * spool colours are `#RRGGBB` today) leaves the part's own, from the GLB.
+ * A colour that spells an alpha (`#RRGGBBAA`, `FF` included) sets it; one that does
+ * not (`#RRGGBB`) leaves the part's own, from the GLB. So an opaque spool (`FF`) prints a
+ * translucent design part solid.
  */
 export function slotOpacity(colour: string | undefined, designOpacity: number): number {
   return colour !== undefined && EXPLICIT_ALPHA.test(colour) ? previewOpacity(colour) : designOpacity

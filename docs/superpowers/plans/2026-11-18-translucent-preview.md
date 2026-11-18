@@ -32,9 +32,9 @@ Where it stood: #6243 and #6289 already draw a part see-through from the GLB's
   the rules of #6243 and #6289; `applyPartOpacity` now applies them in both directions
   (back to solid at 1) because the print dialog changes a part's spool at run time.
 - The print dialog takes opacity from the spool colour a slot prints in when that colour
-  spells an alpha (`#RRGGBBAA`, below `FF`), else from the part's GLB alpha
+  spells an alpha (`#RRGGBBAA`; any spelled alpha wins, `FF` included, so an opaque spool prints a translucent design part solid), else from the part's GLB alpha
   (`slotOpacity`). Why: a six-digit spool colour must not turn a translucent design part
-  opaque. `resolvedColors` keeps the alpha of a translucent spool colour.
+  opaque. `resolvedColors` keeps any spelled alpha of a spool colour.
 - The alpha reaches the print dialog from `SpoolOption.rgba` (`#RRGGBBAA`, the held SB
   spool's effective value or the tray's reported colour), which the backend already sent.
   `resolvedColors` reads `rgba ?? colour`. Why: `colour` stays `#RRGGBB` because the
@@ -68,6 +68,6 @@ Where it stood: #6243 and #6289 already draw a part see-through from the GLB's
 - `recolourParts` (called by `PlateScene.tsx`'s recolour effect) now sets opacity and `side` on every colour
   change. Check that an opaque part returns to `DoubleSide`, depth write on, order 0.
 - `slotOpacity`: a six-digit spool colour keeps the part's own alpha.
-- The `data-see-through` hook is the only production code added for the test.
+- The `data-see-through` hook is the only production code added for the test, and it renders only in the mocked build (`VITE_MOCK_API=1`).
 - Screenshots: `2026-11-18-translucent-preview/translucent.png` (alpha `80`) and
-  `clear.png` and `clear-light.png` (alpha `00`, drawn at the floor, dark and light viewer), from `e2e/translucent-preview.spec.ts`.
+  `clear.png` and `clear-light.png` (alpha `00`, drawn at the floor, dark and light viewer), from `e2e/translucent-preview.spec.ts`. The spec writes them only when `SCADBUDDY_E2E_SHOTS=1` is set.

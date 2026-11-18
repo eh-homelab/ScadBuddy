@@ -122,6 +122,27 @@ describe('recolourParts (#6349)', () => {
   })
 })
 
+describe('recolourParts with an opaque spool (#6349 review)', () => {
+  it('draws a translucent design part solid for a spool that spells FF', () => {
+    const material = new THREE.MeshStandardMaterial()
+    material.userData.designColor = '#FF0000'
+    material.userData.designOpacity = 0.5
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(), material)
+    const root = new THREE.Group()
+    root.add(mesh)
+
+    recolourParts(root, new Map([['#FF0000', '#00FF00FF']]))
+    expect(material.color.getHexString()).toBe('00ff00')
+    expect([material.transparent, material.opacity, material.depthWrite, material.side, mesh.renderOrder]).toEqual([
+      false,
+      1,
+      true,
+      THREE.DoubleSide,
+      0,
+    ])
+  })
+})
+
 describe('slotOpacity (#6349)', () => {
   it("takes the alpha of the colour a slot prints in when it has one, else the part's own", () => {
     expect(slotOpacity('#FFFFFF80', 1)).toBeCloseTo(0.502, 2)

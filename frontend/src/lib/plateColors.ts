@@ -1,11 +1,14 @@
 import type { SlotChoice, SlotNeed, SpoolOption } from '../api/types'
 import { normalizeHex } from './format'
-import { alphaOf, parseRgba } from './rgba'
+import { parseRgba } from './rgba'
 
-/** `#RRGGBB`, or `#RRGGBBAA` when the colour is translucent: the 3D preview draws its alpha (#6349). */
+/**
+ * `#RRGGBBAA` when the colour spells an alpha, FF included, else `#RRGGBB`: the 3D preview
+ * draws a spelled alpha, and a colour with none keeps the design part's own opacity (#6349).
+ */
 function previewColour(colour: string): string {
   const rgba = parseRgba(colour)
-  return rgba !== null && alphaOf(rgba) < 0xff ? rgba : normalizeHex(colour)
+  return rgba !== null && /^#?[0-9A-Fa-f]{8}$/.test(colour) ? rgba : normalizeHex(colour)
 }
 
 /**

@@ -30,7 +30,7 @@ describe('resolvedColors (#1723)', () => {
 })
 
 describe('resolvedColors alpha (#6349)', () => {
-  it("keeps a spool colour's alpha when it is below FF, and drops FF and six digits", () => {
+  it("keeps a spool colour's spelled alpha, FF included, and leaves six digits alone", () => {
     const map = resolvedColors(
       [slot(1, '#FF0000'), slot(2, '#00FF00'), slot(3, '#0000FF')],
       [spool(7, '#ffffff80'), spool(8, '#ffffffff'), spool(9, '#ffffff')],
@@ -42,7 +42,7 @@ describe('resolvedColors alpha (#6349)', () => {
     )
     expect([...map]).toEqual([
       ['#FF0000', '#FFFFFF80'],
-      ['#00FF00', '#FFFFFF'],
+      ['#00FF00', '#FFFFFFFF'],
       ['#0000FF', '#FFFFFF'],
     ])
   })
@@ -61,7 +61,7 @@ describe('resolvedColors alpha (#6349)', () => {
     )
     expect([...map]).toEqual([
       ['#FF0000', '#FFFFFF80'],
-      ['#00FF00', '#FFFFFF'],
+      ['#00FF00', '#FFFFFFFF'],
     ])
   })
 })
