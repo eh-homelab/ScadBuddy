@@ -626,6 +626,17 @@ class AmsUnit(BambuddyModel):
     module_type: str = ""
     tray: list[AmsTray] = Field(default_factory=list)
 
+    @field_validator("humidity", mode="before")
+    @classmethod
+    def _humidity(cls, value: Any) -> Any:
+        """A unit that sends ``""`` or text has no reading; it is still a unit (#6268)."""
+        return _number(value, int)
+
+    @field_validator("temp", mode="before")
+    @classmethod
+    def _temp(cls, value: Any) -> Any:
+        return _number(value, float)
+
 
 class FilaSwitch(BambuddyModel):
     """``PrinterStatus.fila_switch`` — the Filament Track Switch, when one is fitted."""

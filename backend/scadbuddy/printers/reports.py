@@ -183,6 +183,24 @@ def _capture(
                 return
 
 
+def _capture_sensors(
+    conn: Connection[DictRow], printer_id: str, report: dict[str, Any], seen_at: datetime
+) -> None:
+    """Record the AMS units' humidity and temperature (`filament/sensors.py`
+    `capture_ams_on`) on every write, in a savepoint of its own, after the tray capture.
+    A failure is logged by its type and dropped, as `_capture`'s steps are."""
+    from scadbuddy.filament import sensors
+
+    try:
+        with conn.transaction():
+            sensors.capture_ams_on(conn, printer_id, report, seen_at)
+    except Exception as error:
+        logger.warning(
+            prints.FILAMENT_CAPTURE_FAILED,
+            extra={"printer_id": printer_id, "what": "sensors", "error": type(error).__name__},
+        )
+
+
 @dataclass(frozen=True)
 class JobStart:
     """A job the watch saw start (`started_print`): its ``subtask_name``, when the report
@@ -277,6 +295,7 @@ class PrinterReportStore:
         if not written:
             return Advance()
         _capture(conn, printer_id, ended, None if old is None else old["report"], report, seen_at)
+        _capture_sensors(conn, printer_id, report, seen_at)
         return Advance(ended=ended, started=started_print(before, running))
 
     def touch(self, printer_id: str, seen_at: datetime) -> None:

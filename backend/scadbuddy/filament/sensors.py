@@ -14,6 +14,7 @@ from psycopg import Connection, errors
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
+from scadbuddy.bambuddy.trays import EXTERNAL
 from scadbuddy.filament import models as m
 from scadbuddy.filament.catalog import CatalogRefError
 
@@ -161,6 +162,43 @@ class SensorStore:
             (value, at, sensor_id),
         )
         return True
+
+
+def capture_ams_on(conn: Conn, printer_id: str, report: dict[str, Any], seen_at: datetime) -> None:
+    """Record each AMS unit's humidity and temperature from ``report`` as readings, on
+    ``conn`` and in the caller's transaction. A unit's place and its sensors are made
+    when a number first shows; a reading the report lacks (``""``) writes nothing."""
+    from scadbuddy.filament.locations import LocationStore  # imports this module
+    from scadbuddy.printers.status import _ams
+
+    printer = UUID(printer_id)
+    for unit in _ams(report):
+        if unit.id == EXTERNAL:
+            continue
+        place: UUID | None = None
+        for kind, value, symbol in (
+            ("humidity", unit.humidity, "%"),
+            ("temperature", unit.temp, "°C"),
+        ):
+            if value is None:
+                continue
+            if place is None:
+                place = LocationStore.ensure_ams_unit_on(conn, printer, unit.id)
+            conn.execute(
+                "INSERT INTO filament_location_sensors"
+                " (location_id, source, kind, printer_id, ams_id, name, unit)"
+                " VALUES (%s, 'ams', %s, %s, %s, %s, %s)"
+                " ON CONFLICT (printer_id, ams_id, kind)"
+                " WHERE source = 'ams' AND archived_at IS NULL DO NOTHING",
+                (place, kind, printer, unit.id, f"AMS {unit.id} {kind}", symbol),
+            )
+            sensor = conn.execute(
+                "SELECT id FROM filament_location_sensors WHERE source = 'ams' AND printer_id = %s"
+                " AND ams_id = %s AND kind = %s AND archived_at IS NULL",
+                (printer, unit.id, kind),
+            ).fetchone()
+            if sensor is not None:
+                SensorStore.record_on(conn, sensor["id"], float(value), seen_at)
 
 
 def repoint_printer_sensors(conn: Conn, merged: UUID, into: UUID) -> None:

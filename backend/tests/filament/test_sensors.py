@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
 
+from scadbuddy.filament import prints, sensors
 from scadbuddy.filament.catalog import CatalogRefError, CatalogStore
 from scadbuddy.filament.locations import LocationStore, repoint_printer_locations
 from scadbuddy.filament.models import (
@@ -18,7 +21,11 @@ from scadbuddy.filament.models import (
     SensorPatch,
 )
 from scadbuddy.filament.sensors import SensorStore, repoint_printer_sensors
+from scadbuddy.printers.models import LanLink, PrinterCreate
+from scadbuddy.printers.reports import PrinterReportStore
+from scadbuddy.printers.store import PrinterStore
 from tests.conftest import PgPool
+from tests.printers.conftest import KEK
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -241,6 +248,89 @@ def test_a_sensor_needs_a_live_location(pg_pool: PgPool) -> None:
     live = _sensor(pg_pool)
     with pytest.raises(CatalogRefError):
         SensorStore(pg_pool).update(live, SensorPatch(location_id=place), actor="x")
+
+
+def _watched(pool: PgPool) -> tuple[str, PrinterReportStore]:
+    printers = PrinterStore(pool, KEK)
+    row = printers.create(PrinterCreate(serial="01P00A000000009", name="H2C"))
+    printers.link_lan(
+        row.id, LanLink(host="10.0.0.9", access_code="12345678"), cert_sha256="ab" * 32
+    )
+    return row.id, PrinterReportStore(pool)
+
+
+def _advance(reports: PrinterReportStore, pid: str, report: dict[str, Any], at: datetime) -> None:
+    with reports.pool.connection() as conn, conn.transaction():
+        reports.advance_in(conn, pid, report, at)
+
+
+def _ams_readings(pool: PgPool, pid: str) -> dict[tuple[int, str], list[float]]:
+    with pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT s.ams_id, s.kind, r.value FROM filament_sensor_readings r"
+            " JOIN filament_location_sensors s ON s.id = r.sensor_id"
+            " WHERE s.printer_id = %s AND s.source = 'ams' ORDER BY r.at",
+            (pid,),
+        ).fetchall()
+    found: dict[tuple[int, str], list[float]] = {}
+    for row in rows:
+        found.setdefault((row["ams_id"], row["kind"]), []).append(row["value"])
+    return found
+
+
+def test_a_report_records_ams_humidity_and_temperature(pg_pool: PgPool) -> None:
+    pid, reports = _watched(pg_pool)
+    units = [{"id": "0", "humidity": "4", "temp": "24.5"}, {"id": "1", "humidity": "3"}]
+    _advance(reports, pid, {"ams": {"ams": units}}, T0)
+    assert _ams_readings(pg_pool, pid) == {
+        (0, "humidity"): [4.0],
+        (0, "temperature"): [24.5],
+        (1, "humidity"): [3.0],
+    }
+    with pg_pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT s.location_id, l.id AS unit FROM filament_location_sensors s"
+            " JOIN filament_locations l ON l.printer_id = s.printer_id AND l.ams_id = s.ams_id"
+            " AND l.tray_id IS NULL WHERE s.printer_id = %s",
+            (pid,),
+        ).fetchall()
+    assert len(rows) == 3
+    assert all(r["location_id"] == r["unit"] for r in rows)
+    _advance(reports, pid, {"ams": {"ams": units}}, T0 + timedelta(minutes=1))
+    assert _ams_readings(pg_pool, pid)[(0, "humidity")] == [4.0]
+
+
+def test_a_report_without_ams_writes_nothing(pg_pool: PgPool) -> None:
+    pid, reports = _watched(pg_pool)
+    _advance(reports, pid, {"gcode_state": "IDLE"}, T0)
+    with pg_pool.connection() as conn:
+        count = conn.execute("SELECT count(*) AS n FROM filament_location_sensors").fetchone()
+    assert count is not None
+    assert count["n"] == 0
+    assert reports.get(pid) is not None
+
+
+def test_an_empty_humidity_is_skipped(pg_pool: PgPool) -> None:
+    pid, reports = _watched(pg_pool)
+    _advance(reports, pid, {"ams": {"ams": [{"id": "0", "humidity": "", "temp": "25"}]}}, T0)
+    assert _ams_readings(pg_pool, pid) == {(0, "temperature"): [25.0]}
+
+
+def test_a_failing_sensor_capture_keeps_the_report(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    pid, reports = _watched(pg_pool)
+
+    def boom(*args: object) -> None:
+        raise RuntimeError("secret detail")
+
+    monkeypatch.setattr(sensors, "capture_ams_on", boom)
+    with caplog.at_level(logging.WARNING):
+        _advance(reports, pid, {"ams": {"ams": [{"id": "0", "humidity": "4"}]}}, T0)
+    assert reports.get(pid) is not None
+    record = next(r for r in caplog.records if r.getMessage() == prints.FILAMENT_CAPTURE_FAILED)
+    assert record.__dict__["error"] == "RuntimeError"
+    assert "secret detail" not in caplog.text
 
 
 def test_a_max_hours_value_fits_its_column() -> None:
