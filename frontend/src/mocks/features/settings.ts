@@ -235,6 +235,9 @@ function putSettings(body: Record<string, unknown>) {
     if (name === 'filament_sync' && !String((value as { tags?: unknown } | null)?.tags ?? 'off').match(/^(off|sb_to_bb)$/)) {
       return refused(name, "Input should be 'off' or 'sb_to_bb'")
     }
+    if (name === 'filament_sync' && !String((value as { weights?: unknown } | null)?.weights ?? 'bb_to_sb').match(/^(off|bb_to_sb)$/)) {
+      return refused(name, "Input should be 'off' or 'bb_to_sb'")
+    }
     if (name === 'filament_low_stock_pct' && typeof value === 'number' && value > 100) {
       return refused(name, 'Input should be less than or equal to 100')
     }

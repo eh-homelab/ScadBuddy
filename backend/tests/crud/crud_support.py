@@ -691,19 +691,23 @@ def threaded_print_crud(
     )
     thread = threading.Thread(target=server.run, name="crud print routes", daemon=True)
     thread.start()
-    deadline = time.monotonic() + 30
-    while not server.started:
-        assert thread.is_alive() and time.monotonic() < deadline, "the server did not start"
-        time.sleep(0.01)
-    port = server.servers[0].sockets[0].getsockname()[1]
-    base_url = f"http://127.0.0.1:{port}"
-    auth = ServiceAuth(InProcessProvider(caller, lambda: credentials))
-    client = CrudSyncClient(base_url, "print", auth, unavailable_budget=0.5)
+    client: CrudSyncClient | None = None
+    # Everything after the start is under the `finally`, so a server that does not start
+    # or a warm-up that fails still stops the thread (#6673).
     try:
+        deadline = time.monotonic() + 30
+        while not server.started:
+            assert thread.is_alive() and time.monotonic() < deadline, "the server did not start"
+            time.sleep(0.01)
+        port = server.servers[0].sockets[0].getsockname()[1]
+        base_url = f"http://127.0.0.1:{port}"
+        auth = ServiceAuth(InProcessProvider(caller, lambda: credentials))
         warm_crud_routes(base_url, auth, "print")
+        client = CrudSyncClient(base_url, "print", auth, unavailable_budget=0.5)
         yield client
     finally:
-        client.close()
+        if client is not None:
+            client.close()
         server.should_exit = True
         thread.join(30)
 

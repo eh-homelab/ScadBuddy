@@ -47,6 +47,7 @@ from scadbuddy.filament.rfid_slots import (
     reconcile_slots,
     reconcile_slots_now,
 )
+from scadbuddy.filament.sensors import SensorStore
 from scadbuddy.filament.shopping import ShoppingStore
 from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.filament.suppliers import SuppliersStore
@@ -76,6 +77,7 @@ def _filament(pool: PgPool) -> Filament:
         locations=LocationStore(pool),
         inventory=FilamentInventory(pool),
         presets=PoolSpoolPresets(pool),
+        sensors=SensorStore(pool),
         rfid=RfidModeStore(pool),
         suppliers=SuppliersStore(pool, lambda: "USD"),
         invoices=InvoiceStore(pool, lambda: "USD", spools, types),

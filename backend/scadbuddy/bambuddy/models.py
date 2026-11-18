@@ -632,6 +632,17 @@ class AmsUnit(BambuddyModel):
     module_type: str = ""
     tray: list[AmsTray] = Field(default_factory=list)
 
+    @field_validator("humidity", mode="before")
+    @classmethod
+    def _humidity(cls, value: Any) -> Any:
+        """A unit that sends ``""`` or text has no reading; it is still a unit (#6268)."""
+        return _number(value, int)
+
+    @field_validator("temp", mode="before")
+    @classmethod
+    def _temp(cls, value: Any) -> Any:
+        return _number(value, float)
+
 
 class FilaSwitch(BambuddyModel):
     """``PrinterStatus.fila_switch`` — the Filament Track Switch, when one is fitted."""
@@ -1173,6 +1184,20 @@ class SpoolUsage(BambuddyModel):
     @classmethod
     def _utc(cls, value: datetime) -> datetime:
         return as_utc(value)
+
+
+class HaEntity(BambuddyModel):
+    """A row of ``GET /api/v1/location-ha-sensors/entities`` (#6268): Bambuddy's
+    ``HADisplayEntity``, a Home Assistant entity and its state as text (``unavailable``,
+    ``unknown`` and the like included; ``null`` for none). Bambuddy 1.3.1, read from its
+    OpenAPI on 2026-11-18. It carries no time of change."""
+
+    entity_id: str
+    friendly_name: str | None = None
+    state: str | None = None
+    domain: str | None = None
+    device_class: str | None = None
+    unit_of_measurement: str | None = None
 
 
 class SpoolFilamentPreset(BambuddyModel):

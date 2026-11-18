@@ -50,6 +50,8 @@ Temp = Annotated[int, Field(ge=0, le=1000)]
 Density = Annotated[Decimal, Field(gt=0, lt=1000)]
 Diameter = Annotated[Decimal, Field(gt=0, lt=100)]
 Hours = Annotated[Decimal, Field(ge=0, lt=1000)]
+#: numeric(6,1): 99999.9 is the largest the column holds.
+MaxHours = Annotated[Decimal, Field(ge=0, le=Decimal("99999.9"))]
 Grams = Annotated[float, Field(ge=0, le=1_000_000)]
 LabelWeight = Annotated[int, Field(gt=0, le=100_000)]
 Percent = Annotated[int, Field(ge=0, le=100)]
@@ -154,6 +156,7 @@ class MaterialCreate(_In):
     bed_temp_max: Temp | None = None
     drying_temp_c: Temp | None = None
     drying_hours: Hours | None = None
+    max_hours_outside_dry: MaxHours | None = None
     needs_enclosure: bool = False
     abrasive: bool = False
     hygroscopic: bool = False
@@ -184,6 +187,7 @@ class MaterialPatch(_Patch):
     bed_temp_max: Temp | None = None
     drying_temp_c: Temp | None = None
     drying_hours: Hours | None = None
+    max_hours_outside_dry: MaxHours | None = None
     needs_enclosure: bool | None = None
     abrasive: bool | None = None
     hygroscopic: bool | None = None
@@ -202,6 +206,7 @@ class Material(_Catalog):
     bed_temp_max: int | None
     drying_temp_c: int | None
     drying_hours: Decimal | None
+    max_hours_outside_dry: Decimal | None
     needs_enclosure: bool
     abrasive: bool
     hygroscopic: bool
@@ -376,6 +381,97 @@ class LocationNode(Location):
 
     spool_count: int
     children: list[LocationNode] = Field(default_factory=list)
+
+
+Reading = Annotated[float, Field(allow_inf_nan=False)]
+
+
+class SensorIn(_In):
+    location_id: UUID
+    source: Literal["home_assistant", "ams"]
+    kind: Literal["humidity", "temperature"]
+    entity_id: Text | None = None
+    printer_id: UUID | None = None
+    ams_id: Idx | None = None
+    name: Name
+    unit: Annotated[str, Field(max_length=16)] | None = None
+    alert_above: Reading | None = None
+    alert_below: Reading | None = None
+    notify: bool = False
+
+    @model_validator(mode="after")
+    def _source_fields(self) -> SensorIn:
+        if self.source == "home_assistant":
+            if not self.entity_id:
+                raise ValueError("entity_id is required for a home_assistant sensor")
+            if self.printer_id is not None or self.ams_id is not None:
+                raise ValueError("printer_id and ams_id are for an ams sensor only")
+        else:
+            if self.printer_id is None or self.ams_id is None:
+                raise ValueError("printer_id and ams_id are required for an ams sensor")
+            if self.entity_id is not None:
+                raise ValueError("entity_id is for a home_assistant sensor only")
+        _band(self.alert_below, self.alert_above)
+        return self
+
+
+def _band(below: float | None, above: float | None) -> None:
+    if below is not None and above is not None and below >= above:
+        raise ValueError("alert_below must be under alert_above")
+
+
+class SensorPatch(_Patch):
+    """A sensor's source, kind and where it reads from stay as made."""
+
+    not_null = frozenset({"name", "notify"})
+    location_id: UUID | None = None
+    name: Name | None = None
+    unit: Annotated[str, Field(max_length=16)] | None = None
+    alert_above: Reading | None = None
+    alert_below: Reading | None = None
+    notify: bool | None = None
+
+    @model_validator(mode="after")
+    def _location_set(self) -> SensorPatch:
+        if "location_id" in self.model_fields_set and self.location_id is None:
+            raise ValueError("location_id cannot be cleared")
+        _band(self.alert_below, self.alert_above)
+        return self
+
+
+class Sensor(BaseModel):
+    id: UUID
+    location_id: UUID
+    source: Literal["home_assistant", "ams"]
+    kind: Literal["humidity", "temperature"]
+    entity_id: str | None
+    printer_id: UUID | None
+    ams_id: int | None
+    name: str
+    unit: str | None
+    alert_above: float | None
+    alert_below: float | None
+    notify: bool
+    last_value: float | None
+    last_at: datetime | None
+    reachable: bool
+    created_at: datetime
+    archived_at: datetime | None
+    alerting: bool = False
+
+    @model_validator(mode="after")
+    def _alerting(self) -> Sensor:
+        v = self.last_value
+        self.alerting = v is not None and (
+            (self.alert_above is not None and v > self.alert_above)
+            or (self.alert_below is not None and v < self.alert_below)
+        )
+        return self
+
+
+class SensorReading(BaseModel):
+    at: datetime
+    value: float
 
 
 class SpoolMove(_In):
@@ -722,6 +818,10 @@ class Spool(_Row):
     #: Server-computed (F3): the grams left are under the spool's effective low-stock
     #: percentage of its label weight, else the default's. False when either is unknown.
     low_stock: bool = False
+    #: Server-computed (#6268): the hours since the spool was last dried (else made) that
+    #: its place was not dry storage, and whether that passes its material's limit.
+    hours_outside_dry: float = 0.0
+    needs_drying: bool = False
 
 
 # -- the trays (`filament/inventory.py`) ----------------------------------------------
@@ -1216,6 +1316,24 @@ class TagDetail(TagRow):
 
 class LedgerRow(SpoolEvent):
     spool_number: int
+
+
+class AmsSyncResult(BaseModel):
+    """What one sync of the AMS's weights did (#6268). Each spool in a printer's tray place is
+    in one count; a spool elsewhere is in none, and so is one placed in a tray while the
+    sync ran (the next sync counts it)."""
+
+    booked: int = 0
+    #: Spools whose weight is locked.
+    locked: int = 0
+    #: Spools in a printer that is printing.
+    printing: int = 0
+    #: Spools whose tray shows no ``remain`` (no RFID, or no tray in the report).
+    no_remain: int = 0
+    #: Spools in a printer with no report or no row, or a report too old or unreadable.
+    stale: int = 0
+    #: The spools booked.
+    spools: list[UUID] = Field(default_factory=list)
 
 
 class EventPage(BaseModel):

@@ -43,6 +43,7 @@ export const CATALOGS: { kind: CatalogKind; title: string; fields: Field[] }[] =
       bool('needs_enclosure', 'Needs an enclosure'),
       bool('abrasive', 'Abrasive'),
       bool('hygroscopic', 'Hygroscopic'),
+      decimal('max_hours_outside_dry', 'Most hours outside dry storage'),
       bool('flexible', 'Flexible'),
       bool('hardened_nozzle', 'Needs a hardened nozzle'),
       text('note', 'Note'),
