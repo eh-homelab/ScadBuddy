@@ -144,7 +144,8 @@ Read on `main` at 71227b2.
   counter. The person may add the real minutes and consumables to an imported event in
   ScadBuddy. An event with none uses the task's typed figures (§3.3).
 - **A task done, on a printer Bambuddy does not track:** logged in ScadBuddy. The counter
-  reading comes from ScadBuddy's own hour counter (§3.6), not from the person.
+  reading comes from ScadBuddy's own hour counter (§3.6) on a LAN-linked printer, and is
+  typed on a printer with no counter (§3.2).
 - **A replaced wear part: logged in ScadBuddy only (owner).** It carries its real cost.
   Bambuddy has no part or cost (§2.1). ScadBuddy does not import a Bambuddy custom task
   (such as "Replace nozzle") as a replacement. A replacement's counter reading comes from
@@ -171,8 +172,9 @@ Each printer has one counter source. ScadBuddy picks it, not the person:
   it beside Bambuddy's as a check, but it never prices.
 - **Each event records its `hours_source`.** A gap or a derived `hours_used` between two
   events of different sources is not usable. It is skipped and listed in
-  `skipped_gaps` with the reason `counter_changed` (§3.3). This happens once, when a
-  printer is linked to or unlinked from Bambuddy.
+  `skipped_gaps` with the reason `counter_changed` (§3.3). This happens when the
+  printer's source changes: it is linked to or unlinked from Bambuddy, or a printer not
+  linked to Bambuddy is LAN-linked or LAN-unlinked.
 - **The reading at an event.** An imported event carries its `hours_at_maintenance`. A
   ScadBuddy event (a replacement, or a task on a printer Bambuddy does not track) gets
   its `hours_at` from the printer's counter when it is logged: Bambuddy's `current_hours`
@@ -250,8 +252,10 @@ actual       = sum(cost_r) / sum(hours_used_r)
 - N is a per-printer setting, `actuals_window`, default **3**, from 1 to 20. A person can
   set 1 to use actuals at once.
 - With fewer than N usable gaps (task) or replacements (part), the **estimate prices**.
-  The breakdown says why (`basis` `estimate`, `actual_why` `too_few`, `have` k). A rate
-  does not jump on one odd event.
+  The breakdown says why (`basis` `estimate`, `actual_why`, `have` k). `actual_why` is
+  `no_events` when `have` is 0 (for example a task with one event, so no gap, or a part
+  with only its first replacement), and `too_few` when `have` is 1 to N-1. A rate does
+  not jump on one odd event.
 - Every figure carries a **confidence** (§3.4) that tells the reader how far to trust
   it. The partial actual is still shown, with its confidence, but it does not price.
 
