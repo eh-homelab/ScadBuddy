@@ -161,6 +161,14 @@ def test_empty_on_is_none_past_the_forecast_bound() -> None:
     assert metrics.empty_on(1000, 5e-324, NOW) is None
 
 
+def test_empty_on_is_none_for_a_value_that_is_not_finite() -> None:
+    nan, inf = float("nan"), float("inf")
+    assert metrics.empty_on(nan, 10, NOW) is None
+    assert metrics.empty_on(inf, 10, NOW) is None
+    assert metrics.empty_on(300, nan, NOW) is None
+    assert metrics.empty_on(300, inf, NOW) is None
+
+
 def test_a_window_of_zero_gram_plates_has_burn_zero_and_no_forecast() -> None:
     zero = [plate(days(1), 0.0), plate(days(2), 0.0)]
     rate = metrics.burn(zero, window_days=30, born=days(90), now=NOW)

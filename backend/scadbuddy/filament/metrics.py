@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from math import ceil
+from math import ceil, isfinite
 from typing import cast, get_args
 
 from scadbuddy.filament import ledger
@@ -24,9 +24,9 @@ from scadbuddy.filament.models import SpoolEvent
 
 #: A scale reading pairs with an AMS reading at most this much older (Decision 14).
 AMS_PAIR_WINDOW = timedelta(hours=24)
-#: The outcomes BB's ``bb_status`` names as they are; any other status is ``unknown``.
 #: A forecast further out than this many days is no forecast (``empty_on`` is ``None``).
 MAX_FORECAST_DAYS = 3650
+#: The outcomes BB's ``bb_status`` names as they are; any other status is ``unknown``.
 _BB_OUTCOMES = frozenset(get_args(Outcome)) - {"unknown"}
 _PLATE_KINDS = frozenset({ledger.PRINT_STARTED, ledger.PRINT_ENDED})
 _CENT = Decimal("0.01")
@@ -90,9 +90,12 @@ def burn(
 
 def empty_on(grams_left: float | None, burn_g_per_day: float | None, now: datetime) -> date | None:
     """The day the spool runs out at ``burn_g_per_day``; ``None`` with no grams left
-    known, no burn (0 or less), or a day more than `MAX_FORECAST_DAYS` after ``now``. The
-    bound is checked before any date arithmetic, which overflows near year 9999."""
-    if grams_left is None or burn_g_per_day is None or burn_g_per_day <= 0:
+    known, no burn (0 or less), a value that is not finite, or a day more than
+    `MAX_FORECAST_DAYS` after ``now``. The bound is checked before any date arithmetic,
+    which overflows near year 9999."""
+    if grams_left is None or burn_g_per_day is None:
+        return None
+    if not (isfinite(grams_left) and isfinite(burn_g_per_day)) or burn_g_per_day <= 0:
         return None
     left_days = max(grams_left, 0.0) / burn_g_per_day
     if left_days > MAX_FORECAST_DAYS:

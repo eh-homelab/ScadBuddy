@@ -760,6 +760,8 @@ Load `frontend-design` and `dataviz` first.
 19. Task 3 (Task 3 review): `empty_on` returns `None` when the projected day is more than `MAX_FORECAST_DAYS` (3650) after `now`, and it checks that bound before any date arithmetic, because a tiny but non-zero burn (a 1 kg spool with one 0.1 g plate in a 365-day window) put the day past year 9999 and raised `OverflowError`, which would have failed the whole metrics read.
 20. Task 3 (Task 3 review): `burn` still returns `0.0` for a window whose only plates weigh 0 g, and `None` for no plate; `empty_on` treats a burn of 0 or less as no forecast. Callers that divide by a burn must guard 0.0, because the two values both mean "no use" and a change of `burn`'s type would touch every caller.
 21. Task 3 (Task 3 review): `test_equal_times_are_ordered_by_seq` guards that events with the same `at` are ordered by `seq` in `ams_pairs`, `plates` and `series`, because the code sorts by `(at, seq)` and no test showed it.
+22. Task 4 (Task 3 re-review): `empty_on` returns `None` when `grams_left` or the burn is not finite (`math.isfinite`), because a NaN reached `timedelta` and raised `ValueError`, and an infinite burn gave today as the empty day.
+23. Task 4 (Task 3 re-review): `MAX_FORECAST_DAYS` sits above the `_BB_OUTCOMES` comment, so each constant has its own comment again.
 
 ## Pre-flight rulings (2026-11-18)
 
