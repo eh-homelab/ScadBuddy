@@ -14,7 +14,7 @@ import re
 import socket
 import ssl
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from fastapi import status
@@ -65,6 +65,28 @@ class Scope(StrEnum):
     #: (``backend/app/core/auth.py`` line 90, maziggy/bambuddy v1.3.1),
     #: so such a write works only while Bambuddy's auth is off.
     ADMIN_SETTINGS = "Settings (admin only)"
+
+
+class TagAlreadyLinkedError(ApiError):
+    """Bambuddy's 409 ``tag_already_linked`` from ``link-tag``: another spool holds the tag.
+    ``holder_id`` is that spool's Bambuddy id and ``field`` the identifier that clashed
+    (``backend/app/services/tag_conflict.py`` lines 24-40, maziggy/bambuddy v1.3.1)."""
+
+    def __init__(
+        self,
+        detail: str,
+        *,
+        holder_id: int,
+        field: Literal["tag_uid", "tray_uuid"],
+    ) -> None:
+        super().__init__(
+            status.HTTP_409_CONFLICT,
+            detail,
+            type_=CONFLICT_PROBLEM,
+            bambuddy_status=status.HTTP_409_CONFLICT,
+        )
+        self.holder_id = holder_id
+        self.field: Literal["tag_uid", "tray_uuid"] = field
 
 
 def not_configured(detail: str) -> ApiError:

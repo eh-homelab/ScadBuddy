@@ -7,6 +7,7 @@ Bambuddy's own OpenAPI, not a guess.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import UTC, datetime
@@ -1127,6 +1128,10 @@ class Spool(BambuddyModel):
     last_weighed_at: datetime | None = None
     last_dried_at: datetime | None = None
     weight_locked: bool = False
+    #: How the tag was read and who wrote the link (#6264): ``SpoolResponse.tag_type`` and
+    #: ``data_origin`` in ``tests/bambuddy/recordings/openapi/rfid-routes.json`` (v1.3.1).
+    tag_type: str | None = None
+    data_origin: str | None = None
 
     @field_validator("updated_at", "last_weighed_at", "last_dried_at")
     @classmethod
@@ -1463,3 +1468,47 @@ class QueueItemCreate(BambuddyModel):
     #: extruder index. Bambuddy re-checks it against the live rack at dispatch.
     nozzle_rack_choice: dict[str, int] | None = None
     cleanup_library_after_dispatch: bool = False
+
+
+class SpoolBuddyDevice(BambuddyModel):
+    """A row of ``GET /api/v1/spoolbuddy/devices`` (``DeviceResponse`` in
+    ``tests/bambuddy/recordings/openapi/rfid-routes.json``, v1.3.1): the fields ScadBuddy
+    shows. ``device_id`` is the string the write and cancel routes take."""
+
+    id: int
+    device_id: str
+    hostname: str
+    has_nfc: bool = False
+    nfc_ok: bool = False
+    online: bool = False
+    last_seen: datetime | None = None
+    pending_command: str | None = None
+
+    @field_validator("last_seen")
+    @classmethod
+    def _seen_utc(cls, value: datetime | None) -> datetime | None:
+        return as_utc(value)
+
+
+class SlotConfigure(BaseModel):
+    """The query of ``POST /api/v1/printers/{id}/slots/{ams}/{tray}/configure`` (#6264;
+    the route's parameters in ``rfid-routes.json``, v1.3.1). ``tray_color`` is
+    ``RRGGBBAA`` without ``#``."""
+
+    tray_info_idx: str
+    tray_type: str
+    tray_sub_brands: str | None = None
+    tray_color: str
+    nozzle_temp_min: int | None = None
+    nozzle_temp_max: int | None = None
+    cali_idx: int | None = None
+    nozzle_diameter: str
+    setting_id: str | None = None
+    k_value: float | None = None
+
+    def query(self) -> dict[str, str | int | float]:
+        return {k: v for k, v in self.model_dump().items() if v is not None}
+
+    def digest(self) -> str:
+        body = json.dumps(self.model_dump(), sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(body.encode()).hexdigest()
