@@ -1367,6 +1367,9 @@ class InventorySummary(BaseModel):
     loaded: int
     low_stock: int
     needs_type: int
+    #: Grams of every plate of every spool, archived ones too, each plate counted once
+    #: (`metrics.plates`, plan Decision 18).
+    consumed_g: float
 
 
 class TagPushReport(BaseModel):

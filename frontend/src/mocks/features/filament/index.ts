@@ -326,6 +326,8 @@ function summary(): S['InventorySummary'] {
     loaded: rows.filter((spool) => state.locations.find((place) => place.id === spool.location_id)?.printer_id).length,
     low_stock: rows.filter((spool) => spool.low_stock).length,
     needs_type: rows.filter((spool) => !spool.type_id).length,
+    // Every spool's plates, archived ones too (plan Decision 18); the mock books no BB pair.
+    consumed_g: state.events.reduce((sum, event) => (event.kind === 'print_ended' && event.delta_g != null ? sum - event.delta_g : sum), 0),
   }
 }
 

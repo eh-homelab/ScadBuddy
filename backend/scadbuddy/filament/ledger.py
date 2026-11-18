@@ -287,6 +287,26 @@ def events(conn: Conn, spool_id: UUID) -> list[m.SpoolEvent]:
     return [m.SpoolEvent.model_validate(row) for row in rows]
 
 
+def plate_events(
+    conn: Conn, spool_ids: Sequence[UUID] | None = None
+) -> dict[UUID, list[m.SpoolEvent]]:
+    """The `PRINT_STARTED` and `PRINT_ENDED` events of ``spool_ids`` (every spool with
+    none), per spool, oldest first: what `metrics.plates` reads. The partial index
+    ``filament_spool_events_plates`` serves it, so the AMS readings are never read."""
+    where = "kind IN ('print_started', 'print_ended')"
+    args: list[Any] = []
+    if spool_ids is not None:
+        where += " AND spool_id = ANY(%s)"
+        args.append(list(spool_ids))
+    found: dict[UUID, list[m.SpoolEvent]] = {}
+    for row in conn.execute(
+        f"SELECT {_COLUMNS} FROM filament_spool_events WHERE {where} ORDER BY spool_id, at, seq",
+        args,
+    ).fetchall():
+        found.setdefault(row["spool_id"], []).append(m.SpoolEvent.model_validate(row))
+    return found
+
+
 class BadCursorError(ValueError):
     """A ``cursor`` that no page of this ledger gave."""
 

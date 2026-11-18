@@ -22,7 +22,7 @@ from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.core.settings import Settings
-from scadbuddy.filament import dry_hours, ledger
+from scadbuddy.filament import dry_hours, ledger, metrics
 from scadbuddy.filament import models as m
 from scadbuddy.filament import presets as p
 from scadbuddy.filament.catalog import CatalogRefError
@@ -442,7 +442,8 @@ class FilamentSpoolStore:
     def summary(self) -> m.InventorySummary:
         """The unarchived spools in total; a spool's value is its grams left at its
         effective cost per kg, else ``filament_default_cost_per_kg``. A spool is loaded when
-        its place is a printer's tray (``printer_id`` set, `filament/inventory.py`)."""
+        its place is a printer's tray (``printer_id`` set, `filament/inventory.py`).
+        ``consumed_g`` is the grams of every spool's plates, archived ones too."""
         defaults = self._defaults()
         default_cost = defaults.cost_per_kg
         spools = self._list(defaults)
@@ -453,6 +454,11 @@ class FilamentSpoolStore:
                     "SELECT id FROM filament_locations WHERE printer_id IS NOT NULL"
                 ).fetchall()
             }
+            consumed = sum(
+                plate.grams
+                for found in ledger.plate_events(conn).values()
+                for plate in metrics.plates(found)
+            )
         value: Decimal | None = None
         stock: dict[str | None, tuple[int, float]] = {}
         for spool in spools:
@@ -477,6 +483,7 @@ class FilamentSpoolStore:
             loaded=sum(1 for s in spools if s.location_id in trays),
             low_stock=sum(1 for s in spools if s.low_stock),
             needs_type=sum(1 for s in spools if s.type_id is None),
+            consumed_g=consumed,
         )
 
     def tags(self, *, include_unbound: bool = False) -> _TagRows:

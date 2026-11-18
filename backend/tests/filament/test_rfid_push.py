@@ -29,6 +29,7 @@ from scadbuddy.filament.component import Filament
 from scadbuddy.filament.inventory import FilamentInventory
 from scadbuddy.filament.invoices import InvoiceStore
 from scadbuddy.filament.locations import LocationStore
+from scadbuddy.filament.metrics_store import MetricsSettings, MetricsStore
 from scadbuddy.filament.models import Material, SpoolCreate, TagKind, TagPushReport
 from scadbuddy.filament.presets import PoolSpoolPresets
 from scadbuddy.filament.rfid_mode import RfidModeStore
@@ -69,6 +70,7 @@ def _filament(pool: PgPool) -> Filament:
         suppliers=SuppliersStore(pool, lambda: "USD"),
         invoices=InvoiceStore(pool, lambda: "USD", spools, types),
         shopping=ShoppingStore(pool),
+        metrics=MetricsStore(pool, spools, MetricsSettings),
     )
 
 
