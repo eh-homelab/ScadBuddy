@@ -9,11 +9,13 @@ CREATE TABLE filament_bb_tag_pending (
 );
 
 -- One row: whether override mode is on, and Bambuddy's auto-add setting as it stood
--- before the mode turned it off.
+-- before the mode turned it off; `blocked` is whether the last reconcile was refused
+-- because Bambuddy's auth is on.
 CREATE TABLE filament_rfid_state (
     singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
     override_mode boolean NOT NULL DEFAULT false,
     saved_auto_add boolean,
+    blocked boolean NOT NULL DEFAULT false,
     changed_at timestamptz NOT NULL DEFAULT now()
 );
 INSERT INTO filament_rfid_state (singleton) VALUES (true);

@@ -21,7 +21,7 @@ from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament import capture
 from scadbuddy.filament.bambuddy_pull import scheduled_pull
 from scadbuddy.filament.component import Filament
-from scadbuddy.filament.rfid_mode import reconcile_mode_now
+from scadbuddy.filament.rfid_mode import NO_BAMBUDDY, reconcile_mode_now
 from scadbuddy.filament.rfid_push import push_pending
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.printers.component import Printers
@@ -112,7 +112,8 @@ def filament_rfid_activity(
         failed = False
         try:
             mode = await reconcile_mode_now(filament.rfid, load)
-            failed = mode.state == "pending"
+            # A mode with no Bambuddy to reach has nothing to retry: not a failure.
+            failed = mode.state == "pending" and mode.detail != NO_BAMBUDDY
         except Exception as error:
             activity.logger.warning(
                 "could not reconcile Bambuddy's RFID auto-add",

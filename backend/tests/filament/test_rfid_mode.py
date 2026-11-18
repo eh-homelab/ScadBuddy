@@ -14,7 +14,12 @@ import respx
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.core.settings import FilamentSync
-from scadbuddy.filament.rfid_mode import RfidModeStore, reconcile_mode
+from scadbuddy.filament.rfid_mode import (
+    NO_BAMBUDDY,
+    RfidModeStore,
+    reconcile_mode,
+    reconcile_mode_now,
+)
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.spools.activities import filament_rfid_activity
 from tests.conftest import PgPool
@@ -177,7 +182,9 @@ async def test_a_blocked_restore_keeps_the_saved_value(
     pg_pool: PgPool, client: BambuddyClient
 ) -> None:
     store = RfidModeStore(pg_pool)
+    store.set_mode(True)
     store.save_found(True)
+    store.set_mode(False)
     _reads(False)
     respx.patch(SETTINGS).mock(return_value=httpx.Response(403, json={"detail": "Forbidden"}))
 
@@ -264,11 +271,103 @@ async def test_the_activity_survives_a_broken_mode_step_and_still_pushes_tags(
     assert link.call_count == 1
 
 
-def test_save_found_writes_only_when_nothing_is_saved(pg_pool: PgPool) -> None:
+def test_save_found_writes_only_when_nothing_is_saved_and_the_mode_is_on(
+    pg_pool: PgPool,
+) -> None:
     store = RfidModeStore(pg_pool)
 
+    assert store.save_found(True) is False  # the mode is off
+    store.set_mode(True)
     assert store.save_found(True) is True
     assert store.save_found(False) is False
     assert store.state().saved_auto_add is True
-    store.clear_saved()
+
+
+def test_clear_saved_needs_the_mode_off_and_the_value_it_restored(pg_pool: PgPool) -> None:
+    store = RfidModeStore(pg_pool)
+    store.set_mode(True)
+    store.save_found(True)
+
+    assert store.clear_saved(True) is False  # the mode is on
+    store.set_mode(False)
+    assert store.clear_saved(False) is False  # another value than the saved one
+    assert store.clear_saved(True) is True
     assert store.state().saved_auto_add is None
+
+
+@respx.mock
+async def test_a_mode_turned_on_during_the_restore_keeps_the_saved_value(
+    pg_pool: PgPool, client: BambuddyClient
+) -> None:
+    store = RfidModeStore(pg_pool)
+    store.set_mode(True)
+    store.save_found(True)
+    store.set_mode(False)
+    _reads(False)
+
+    def patched(request: httpx.Request) -> httpx.Response:
+        store.set_mode(True)  # a PUT lands between the restore's write and its clear
+        return httpx.Response(200, json={})
+
+    respx.patch(SETTINGS).mock(side_effect=patched)
+
+    status = await reconcile_mode(store, client)
+
+    assert store.state().saved_auto_add is True
+    assert store.state().override_mode is True
+    assert status.state == "pending"
+
+
+@respx.mock
+async def test_a_mode_turned_off_before_the_write_skips_the_write(
+    pg_pool: PgPool, client: BambuddyClient
+) -> None:
+    store = RfidModeStore(pg_pool)
+    store.set_mode(True)
+
+    def read(request: httpx.Request) -> httpx.Response:
+        store.set_mode(False)  # a PUT off lands after the mode was read
+        return httpx.Response(200, json={"auto_add_unknown_rfid": True})
+
+    respx.get(SETTINGS).mock(side_effect=read)
+    patch = _patch()
+
+    status = await reconcile_mode(store, client)
+
+    assert patch.call_count == 0
+    assert store.state().saved_auto_add is None
+    assert status.state == "off"
+
+
+@respx.mock
+async def test_a_connect_error_during_the_restore_keeps_the_saved_value(
+    pg_pool: PgPool, client: BambuddyClient
+) -> None:
+    store = RfidModeStore(pg_pool)
+    store.set_mode(True)
+    store.save_found(True)
+    store.set_mode(False)
+    _reads(False)
+    respx.patch(SETTINGS).mock(side_effect=httpx.ConnectError("down"))
+
+    status = await reconcile_mode(store, client)
+
+    assert status.state == "pending"
+    assert status.detail == UNAVAILABLE_PROBLEM
+    assert store.state().saved_auto_add is True
+
+
+@respx.mock
+async def test_no_bambuddy_leaves_the_mode_pending_and_the_activity_not_failed(
+    pg_pool: PgPool,
+) -> None:
+    f = _filament(pg_pool)
+    f.rfid.set_mode(True)
+    none = lambda: StoredSettings()  # noqa: E731
+
+    status = await reconcile_mode_now(f.rfid, none)
+    run = filament_rfid_activity(None, f, none, lambda: FilamentSync(tags="sb_to_bb"))  # type: ignore[arg-type]
+
+    assert (status.state, status.detail) == ("pending", NO_BAMBUDDY)
+    assert await run() == "done"
+    assert len(respx.calls) == 0

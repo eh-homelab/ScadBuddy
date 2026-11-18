@@ -891,6 +891,13 @@ def test_a_blocked_write_is_still_a_200(client: TestClient) -> None:
     assert body["override_mode"] is True
     assert body["saved_auto_add"] is True
 
+    # The status route reports the refusal until a reconcile lands.
+    respx.get(SETTINGS_URL).mock(
+        return_value=httpx.Response(200, json={"auto_add_unknown_rfid": True})
+    )
+    respx.get(f"{API}/spoolbuddy/devices").mock(return_value=httpx.Response(200, json=[]))
+    assert client.get(f"{RFID}/status").json()["state"] == "blocked"
+
 
 @respx.mock
 def test_bambuddy_down_leaves_the_mode_on_and_pending(client: TestClient) -> None:

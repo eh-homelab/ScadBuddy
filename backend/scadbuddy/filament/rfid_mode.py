@@ -23,7 +23,9 @@ from scadbuddy.library.settings_store import StoredSettings
 
 Conn = Connection[DictRow]
 
-_COLUMNS = "override_mode, saved_auto_add, changed_at"
+_COLUMNS = "override_mode, saved_auto_add, blocked, changed_at"
+#: The detail of a mode that is on while no Bambuddy is configured: nothing to retry.
+NO_BAMBUDDY = "no Bambuddy"
 BLOCKED_DETAIL = (
     "Bambuddy's auth is on, and no API key can change its settings: turn its auth off, "
     "or turn off auto-add of unknown RFID spools in Bambuddy"
@@ -53,17 +55,30 @@ class RfidModeStore:
         return self.state() if row is None else m.RfidState.model_validate(row)
 
     def save_found(self, value: bool) -> bool:
-        """Keep ``value`` as the one to restore, unless one is kept already."""
+        """Keep ``value`` as the one to restore, unless one is kept already or the mode is
+        off (a mode that turned off since it was read must not keep a value)."""
         with self._pool.connection() as conn:
             cur = conn.execute(
-                "UPDATE filament_rfid_state SET saved_auto_add = %s WHERE saved_auto_add IS NULL",
+                "UPDATE filament_rfid_state SET saved_auto_add = %s"
+                " WHERE saved_auto_add IS NULL AND override_mode IS TRUE",
                 (value,),
             )
         return cur.rowcount == 1
 
-    def clear_saved(self) -> None:
+    def clear_saved(self, restored: bool) -> bool:
+        """Drop the saved value after ``restored`` was put back, unless the mode turned on
+        since (it then still owns the value) or the saved value is another one."""
         with self._pool.connection() as conn:
-            conn.execute("UPDATE filament_rfid_state SET saved_auto_add = NULL")
+            cur = conn.execute(
+                "UPDATE filament_rfid_state SET saved_auto_add = NULL"
+                " WHERE override_mode IS FALSE AND saved_auto_add IS NOT DISTINCT FROM %s",
+                (restored,),
+            )
+        return cur.rowcount == 1
+
+    def set_blocked(self, blocked: bool) -> None:
+        with self._pool.connection() as conn:
+            conn.execute("UPDATE filament_rfid_state SET blocked = %s", (blocked,))
 
 
 def _blocked(exc: ApiError) -> bool:
@@ -100,21 +115,34 @@ async def reconcile_mode(store: RfidModeStore, client: BambuddyClient) -> m.Rfid
             # Saved before any write, so a crash after the write still has the original.
             await asyncio.to_thread(store.save_found, seen)
             if seen:
+                state = await asyncio.to_thread(store.state)
+                if state.saved_auto_add is None:
+                    # The mode turned off since it was read, and nothing is kept to
+                    # restore: a write now would leave auto-add off with the mode off.
+                    return _status(state, "pending" if state.override_mode else "off", seen=seen)
                 await client.set_auto_add_unknown_rfid(False)
                 seen = await client.auto_add_unknown_rfid()
+            await asyncio.to_thread(store.set_blocked, False)
             state = await asyncio.to_thread(store.state)
             return _status(state, "applied" if seen is False else "pending", seen=seen)
         if state.saved_auto_add is None:
             return _status(state, "off")
         seen = await client.auto_add_unknown_rfid()
         if seen != state.saved_auto_add:
+            if (await asyncio.to_thread(store.state)).override_mode:
+                # Turned on since it was read: its own reconcile owns the value now.
+                return _status(await asyncio.to_thread(store.state), "pending", seen=seen)
             await client.set_auto_add_unknown_rfid(state.saved_auto_add)
             seen = state.saved_auto_add
-        await asyncio.to_thread(store.clear_saved)
-        return _status(await asyncio.to_thread(store.state), "off", seen=seen)
+        await asyncio.to_thread(store.clear_saved, state.saved_auto_add)
+        await asyncio.to_thread(store.set_blocked, False)
+        state = await asyncio.to_thread(store.state)
+        return _status(state, "pending" if state.override_mode else "off", seen=seen)
     except ApiError as exc:
+        blocked = _blocked(exc)
+        await asyncio.to_thread(store.set_blocked, blocked)
         state = await asyncio.to_thread(store.state)  # the saved value may be new
-        if _blocked(exc):
+        if blocked:
             return _status(state, "blocked", seen=seen, detail=BLOCKED_DETAIL)
         return _status(state, "pending", seen=seen, detail=error_label(exc))
 
@@ -129,6 +157,8 @@ async def reconcile_mode_now(
         return _status(state, "off")
     try:
         settings = await asyncio.to_thread(load)
+        if not settings.bambuddy_url:
+            return _status(state, "pending", detail=NO_BAMBUDDY)
         async with client_for(settings) as client:
             return await reconcile_mode(store, client)
     except ApiError as exc:
@@ -144,15 +174,20 @@ async def read_status(store: RfidModeStore, load: Callable[[], StoredSettings]) 
     detail: str | None = None
     try:
         settings = await asyncio.to_thread(load)
-        async with client_for(settings) as client:
-            seen = await client.auto_add_unknown_rfid()
-            devices = await _devices(client)
+        if not settings.bambuddy_url:
+            detail = NO_BAMBUDDY
+        else:
+            async with client_for(settings) as client:
+                seen = await client.auto_add_unknown_rfid()
+                devices = await _devices(client)
     except ApiError as exc:
         detail = error_label(exc)
     if state.override_mode:
         kind = "applied" if seen is False else "pending"
     else:
         kind = "off" if state.saved_auto_add is None else "pending"
+    if kind == "pending" and state.blocked and detail is None:
+        kind, detail = "blocked", BLOCKED_DETAIL
     status = _status(state, kind, seen=seen, detail=detail)
     status.devices = devices
     return status

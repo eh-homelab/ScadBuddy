@@ -1242,6 +1242,8 @@ class RfidState(BaseModel):
     #: Bambuddy's ``auto_add_unknown_rfid`` as found when the mode turned it off; ``None``
     #: when nothing is saved.
     saved_auto_add: bool | None
+    #: The last reconcile was refused because Bambuddy's auth is on.
+    blocked: bool = False
     changed_at: AwareDatetime
 
 
