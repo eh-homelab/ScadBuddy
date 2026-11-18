@@ -754,8 +754,12 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `import_run_id` returns the invoice (200), a number that collides is a 409 whose body has
   `existing_invoice_id`, and confirm refuses (409) a foreign currency, a difference over the
   tolerance, an archived named product, a line with no SKU and a description over 128
-  characters, and an invoice with no lines. Confirm turns only a client conflict into a
-  409 naming the line; any other error is a 500. The agent's tools are
+  characters, an invoice with no lines and an invoice whose supplier is archived. Confirm turns
+  only a client conflict into a 409 naming the line; any other error is a 500. A draft write
+  (create, PATCH, PUT lines) answers 422 for an archived supplier, for a line with more
+  `update_spool_ids` than its `quantity` or a total past `numeric(12,4)`, and for a database
+  `CheckViolation` or `DataError` (`_LINE_BOUNDS`); `Quantity` is at most 1,000. Confirm locks
+  every line's spools in one sorted query before it writes, so two confirms cannot deadlock. The agent's tools are
   `agent/src/tools/filamentPurchasing.ts` (an invoice edit is a PATCH then a PUT, not atomic).
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
   Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),

@@ -419,6 +419,10 @@ holds each decision and what it costs if wrong.
   nothing.
 - **Shopping list statuses.** An item is `pending` or `purchased`; a repeat keeps the first
   `purchased_at`. The list shows newest first, pending above purchased.
+- **Draft bounds and archived suppliers.** A line's quantity is at most 1,000; a line may
+  not fill more spools than its quantity, and its total must fit `numeric(12,4)`; each is a
+  422. A draft for an archived supplier is a 422, and confirming an invoice whose supplier
+  became archived is a 409.
 
 ## 6. Capture from events
 
