@@ -600,8 +600,13 @@ for the first.
 `output_for_reference`). It then saves each entry of `job.outputs` with `"index": k`
 under `saved_as(k)`, in index order, and reuses an output already saved there while it
 `reference_matches`. `output_for_reference` stays as it is for the order's render and
-the quote. `storefront_output_id(render_key, index=0)` keeps today's id for index 0 and
-appends `:{index}` to the name for a later output. The slice run passes
+the quote. `storefront_output_id(render_key, index=0)` keeps today's id for index 0. For
+a later output it appends `:{index}` to the uuid5 name string, not to the id: the id is
+`uuid5(NAMESPACE_URL, f"scadbuddy:storefront_output:{render_key}:{index}").hex`
+(`library/outputs.py` `storefront_output_id`). `library/output_index.py`
+`saved_by_storefront_run` recognises only the index-0 id. That matters only for an
+output saved before the `source=storefront` mark (#6371); a later output always carries
+the mark. The slice run passes
 `lambda k: storefront_output_id(reference.render_key, k)`. Each saved output keeps
 `source=storefront` (#6371).
 
@@ -653,9 +658,11 @@ dollhouse slice against it.
 price covers the whole kit, and the price row's plates go to the item's job cost. The
 other outputs of an ordered kit are found by the job: each saved output records its
 `job_id`, and the job lists every output. An order page that renders and prints every
-output of an item is a follow-up issue (§14). Until then, job cost meets the kit slots
-past output 0's as slots the item does not have. The dollhouse makes one output (fact 2),
-so no listed template meets this today.
+output of an item is part of this build (PR 5, §11). **No customer pays for an output the
+order cannot make:** until PR 5 lands, a render with more than one output still answers
+`none`, so such a kit is priced by hand. PR 4 builds the kit price, and PR 5 turns it on
+together with the order's every-output render and print. The dollhouse makes one output
+(fact 2), so no listed template meets this today.
 
 ## 8. Template changes (question 5)
 
@@ -746,6 +753,10 @@ A listing pins a commit (fact 11). Here that means:
   - A plate of the second output that fails, and a kit slot at 0 g, each give a
     `failed` row and no price; no row is ever `done` with part of the kit.
   - Outputs saved from two jobs give `GEOMETRY_DIFFERS`.
+  - Until PR 5: the estimate route still answers `none` for a job of two outputs.
+- PR 5, the order of a kit item (`tests/orders/`): an item from a two-output render
+  attaches both outputs by `job_id`; its job cost meets every kit slot; the order page
+  offers a print of each output; the estimate route now answers the kit price.
   - `slice_and_price` with no `place` gives the plates as today (a back-office quote
     test, unchanged).
   - One claim: a two-output variant takes one place of `storefront_slices_concurrent`;
@@ -815,19 +826,24 @@ until the step that makes it safe.
    values, not by key order), the slice request through #6581's `plan_variant`
    and `slice_request` (§7.3), and the slice-price test for a pipeline variant. It
    builds on #6581, which is merged (bd5889e76). A job with more than one output still
-   answers `none` in this PR, so a kit is priced by hand until PR 4.
+   answers `none` in this PR, so a kit is priced by hand until PR 5.
 4. **`feat(storefront): price every output of a pipeline render`** (backend). §7.4:
    `kit_colours`, `slot_map`, `kit_digest` and the `model_digest` cache key;
    `outputs_for_reference` and `storefront_output_id(..., index)`; the `place` keyword of
    `slice_and_price`; `price_variant` over every output; `variant_of`, `store_render` and
-   `RenderColours` on the kit's slots; every output's files fetched. It removes PR 3's
-   `none` for several outputs, and adds §10.1's several-output tests. After 3.
-5. **`feat(storefront): set a listing's design inputs`** (frontend). The Design block,
+   `RenderColours` on the kit's slots; every output's files fetched; §10.1's several-output
+   tests, run through the price path directly. PR 3's `none` for several outputs stays in
+   the estimate route. After 3.
+5. **`feat(orders): render and print every output of a kit item`** (backend and frontend).
+   The order's render saves and attaches every output of the item (by `job_id`), its job
+   cost meets every kit slot, and the order page prints each output. This PR removes PR
+   3's `none` for several outputs, so the kit price goes live only with it. After 4.
+6. **`feat(storefront): set a listing's design inputs`** (frontend). The Design block,
    the "Set up the design" dialog (owner, decision 1), the schema form fallback, Sell's
    inputs, the refusal mapping, `shownParams` over `pipeline_params`, the mocks and the
-   Playwright run. It can go up in parallel with 3 and 4, after 2.
-6. **`feat(agent): draft a pipeline listing`** (agent, shared vectors). After 2. The
-   frontend's vector cases land in 5 or 6, whichever is first; the other reads them.
+   Playwright run. It can go up in parallel with 3 to 5, after 2.
+7. **`feat(agent): draft a pipeline listing`** (agent, shared vectors). After 2. The
+   frontend's vector cases land in 6 or 7, whichever is first; the other reads them.
 
 Then the prod checks of §10.4, as a comment on #5701.
 
@@ -838,7 +854,7 @@ The owner answered the questions of the first draft in
 This text applies each answer.
 
 1. **The editor: yes.** "Set up the design" (the template's UI in a dialog, §5.3) is in
-   the first version, in PR 5. Sell on storefront stays the main path (§5.1).
+   the first version, in PR 6. Sell on storefront stays the main path (§5.1).
 2. **The schema file: yes.** A pipeline template must declare `pipeline.inputs` before
    it can be listed (§4.1). Without it, publish answers 422 `listing_inputs_undeclared`.
 3. **Render and slice cost: option (a).** A pipeline render counts as one render job,
@@ -851,7 +867,9 @@ This text applies each answer.
    while kits are few, because a variant is sliced once and its price is kept by key.
 4. **Several outputs: price all files.** Publish does not refuse a pipeline that can
    make several outputs, and such a render is not priced by hand. One price covers
-   every output of the render (§7.4), in PR 4.
+   every output of the render (§7.4). PR 4 builds it, and PR 5 turns it on with the
+   order's every-output render and print, so no customer pays for an output the order
+   cannot make.
 5. **Parameters the pipeline sets: yes.** The template names them in `model.json`
    `pipeline.sets_params`, and the editor hides them (§6.1).
 6. **A customer who changes an input: later.** A follow-up issue, but this design keeps
@@ -916,7 +934,5 @@ stored value changes its meaning.
 - A customer who changes an input (decision 6, §13.1): a follow-up issue.
 - A back-office revision of a pipeline item's inputs (decision 7, §13.2): a follow-up
   issue.
-- An order page that renders and prints every output of an item with several outputs
-  (§7.4, "The order"): a follow-up issue. The price covers them in this design.
 - Showing the pipeline's `bom` or extra files (`assembly.svg`) to the customer.
 - A storefront page change: the public site shows a pipeline listing as any other.
