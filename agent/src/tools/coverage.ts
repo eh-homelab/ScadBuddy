@@ -679,6 +679,13 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "Deleting a maintenance event (#5774) is a person's correction on the Settings machine-rate page. The spec " +
       "gives the agent no delete tool (2026-11-17-machine-rate-actuals §5): it adds and updates events only.",
   },
+  {
+    operation: 'POST /api/v1/printers/{printer_id}/machine-rate/import',
+    reason:
+      "Settings' \"Read from Bambuddy\" button (#5774 PR 3). The spec gives the agent no import tool " +
+      '(2026-11-17-machine-rate-actuals §5): machine_rate_get already reads the log after its live task read, ' +
+      'and the housekeeping sweep reads it on its Schedule (§3.7).',
+  },
 ]
 
 /**

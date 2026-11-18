@@ -43,6 +43,8 @@ from scadbuddy.workflows.housekeeping import (
     LOST_NATIVE_SLICES_SWEEP,
     LOST_NATIVE_SLICES_TIMEOUT,
     LOST_SLICES_SWEEP,
+    MAINTENANCE_IMPORT_SWEEP,
+    MAINTENANCE_IMPORT_TIMEOUT,
     NATIVE_COPIES_SWEEP,
     NATIVE_COPIES_TIMEOUT,
     NATIVE_SLICES_SWEEP,
@@ -164,6 +166,7 @@ async def test_the_prune_is_short_and_every_sweep_heartbeats(client: Client) -> 
         PAYMENT_CLOSES_SWEEP: PAYMENT_CLOSES_TIMEOUT,
         PAYMENT_CAPTURES_SWEEP: PAYMENT_CAPTURES_TIMEOUT,
         BANK_DEPOSITS_SWEEP: BANK_DEPOSITS_TIMEOUT,
+        MAINTENANCE_IMPORT_SWEEP: MAINTENANCE_IMPORT_TIMEOUT,
         STOREFRONT_DRAFTS_SWEEP: STOREFRONT_DRAFTS_TIMEOUT,
         STOREFRONT_MAIL_SWEEP: STOREFRONT_MAIL_TIMEOUT,
         AUTO_IMPORT_SWEEP: AUTO_IMPORT_TIMEOUT,
@@ -191,6 +194,14 @@ def test_the_print_watcher_is_on_both_schedules() -> None:
     the sweeps off, behind its own patch."""
     assert SWEEPS[-2] == PRUNE_SWEEPS[-2] == AUTO_IMPORT_SWEEP
     assert sweep_timeout(AUTO_IMPORT_SWEEP) == AUTO_IMPORT_TIMEOUT
+
+
+def test_the_maintenance_import_follows_the_deposit_sync_on_the_sweeps_schedule() -> None:
+    """#5774 (spec 2026-11-17-machine-rate-actuals §3.7): Bambuddy's maintenance log is
+    read on the sweeps' Schedule only, behind its own patch."""
+    assert SWEEPS[SWEEPS.index(BANK_DEPOSITS_SWEEP) + 1] == MAINTENANCE_IMPORT_SWEEP
+    assert MAINTENANCE_IMPORT_SWEEP not in PRUNE_SWEEPS
+    assert sweep_timeout(MAINTENANCE_IMPORT_SWEEP) == MAINTENANCE_IMPORT_TIMEOUT
 
 
 def test_the_run_holds_reaper_is_last_on_both_schedules() -> None:
@@ -362,6 +373,8 @@ async def test_the_prune_keeps_its_own_cadence_when_the_sweeps_are_off(client: C
     assert PRINTER_SYNC_SWEEP not in sweeps
     # #4961: the deposit sync calls Plaid and suggests, so it obeys the switch.
     assert BANK_DEPOSITS_SWEEP not in sweeps
+    # #5774: the maintenance log import calls Bambuddy, so it obeys the switch.
+    assert MAINTENANCE_IMPORT_SWEEP not in sweeps
     # #4337: the per-print copies' sweep trashes files, so it obeys the switch.
     assert NATIVE_COPIES_SWEEP not in sweeps
     # The native slices obey the switch, as the Bambuddy background slices do.

@@ -1647,7 +1647,15 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   worker's run makes or merges its printer row through `POST
   /api/v1/internal/crud/print/printers/ensure-bambuddy` (`crud/print.py`
   `RemotePrinterStore`, area `printer-ensure`, #5298 Task 29). Routes
-  `GET`/`PUT`/`DELETE /printers/{id}/machine-rate` (`api/machine_rates.py`). A slice quote
+  `GET`/`PUT`/`DELETE /printers/{id}/machine-rate` (`api/machine_rates.py`). Actuals
+  (#5774, spec `2026-11-17-machine-rate-actuals-design.md`): a linked printer with a
+  profile reads each Bambuddy task's log (`GET /maintenance/items/{id}/history`, the seam's
+  `maintenance_history`, `Read Status`) after the view's live task read, on `POST
+  …/machine-rate/import` and in the sweep `housekeeping_import_maintenance` (the sweeps'
+  Schedule only, behind its patch); each row is kept once as an imported task event
+  (`MachineRateStore.import_events`, source `bambuddy:<history id>`, which a ScadBuddy
+  event may not take), and a read that fails keeps the stored events and
+  `printer_maintenance_reads.read_at` (`events_read_at`). A quote never reads the log. A slice quote
   is priced at the rate of the printer it sliced for (`QuoteRun.machine_rate`,
   `MachineRates.for_quote`: `printer`, else the printer linked to `printer_id`, else the
   default printer) and records `printer` and `machine_rate_breakdown`. A quote's
