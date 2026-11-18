@@ -458,7 +458,10 @@ each one, a value saved in Settings wins, and a reset puts back the environment'
 or the default. Phase 3 also adds them to `library/settings_store.py` `SettingsPatch`,
 which checks each saved value with `check_value` (P19), to `APPLIES` as `live`, to
 `core/setting_docs.py`, and to `frontend/src/pages/settings/fields.ts` `RUNTIME_FIELDS`
-in a new `records` section. The bounds are `Field` constraints on `Settings`, so a
+in a new `records` section. The doc text of `records_max_rows_per_type` in
+`core/setting_docs.py` says that a value far past the default makes each `where` filter
+scan longer, and that an index on `body` (§5.2) is the remedy, so an operator finds it
+from Settings. The bounds are `Field` constraints on `Settings`, so a
 deployment's environment variable and a value saved in Settings meet the same check.
 `allow_inf_nan=False` refuses an infinite or NaN deadline: that is a check of the value,
 not a maximum.
