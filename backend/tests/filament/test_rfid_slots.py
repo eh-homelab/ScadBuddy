@@ -37,10 +37,17 @@ from scadbuddy.filament.models import (
 )
 from scadbuddy.filament.presets import PoolSpoolPresets
 from scadbuddy.filament.rfid_mode import RfidModeStore
-from scadbuddy.filament.rfid_push import error_label
-from scadbuddy.filament.rfid_slots import installed_nozzle, reconcile_slots
+from scadbuddy.filament.rfid_push import error_label, try_lock
+from scadbuddy.filament.rfid_slots import (
+    SLOTS_LOCK,
+    installed_nozzle,
+    reconcile_slots,
+    reconcile_slots_now,
+)
 from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.filament.types import SpoolTypeStore
+from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.reports import PrinterReportStore, report_status
 from scadbuddy.printers.store import PrinterStore
 from tests.conftest import PgPool
@@ -91,7 +98,7 @@ def _report(**tray: object) -> dict[str, Any]:
 
 
 class World:
-    def __init__(self, pool: PgPool) -> None:
+    def __init__(self, pool: PgPool, *, temps: bool = True) -> None:
         self.pool = pool
         self.filament = _filament(pool)
         self.printers = PrinterStore(pool, None)
@@ -115,8 +122,8 @@ class World:
                 material_id=material,
                 label_weight_g=1000,
                 rgba="#FF0000FF",
-                nozzle_temp_min=190,
-                nozzle_temp_max=240,
+                nozzle_temp_min=190 if temps else None,
+                nozzle_temp_max=240 if temps else None,
             )
         ).id
         self.preset("0.4", "GFL99")
@@ -159,14 +166,30 @@ def _configure(status: int = 200) -> respx.Route:
     return respx.post(CONFIGURE).mock(return_value=httpx.Response(status, json={}))
 
 
+def _status(fixture: str) -> tuple[Any, Any]:
+    data = json.loads((FIXTURES / fixture).read_text())["print"]
+    at = datetime.now(UTC)
+    row = PrinterRow(id=str(uuid4()), serial="SN", name="P", created_at=at, updated_at=at)
+    return report_status(row, (data, datetime.now(UTC)), now=datetime.now(UTC)), data
+
+
 def test_the_installed_nozzle_is_the_one_of_the_extruder_the_ams_rests_on() -> None:
-    idle = json.loads((FIXTURES / "lan-report-h2c-idle.json").read_text())["print"]
+    status, idle = _status("lan-report-h2c-idle.json")
     # Units 0 and 3 rest on inlet A (left, extruder 1: 0.4); units 1 and 2 on B (right: 0.6).
-    assert installed_nozzle(idle, 0) == "0.4"
-    assert installed_nozzle(idle, 1) == "0.6"
-    assert installed_nozzle(idle, 9) is None
-    busy = json.loads((FIXTURES / "lan-report-h2c.json").read_text())["print"]
-    assert installed_nozzle(busy, 0) is None
+    assert installed_nozzle(status, idle, 0) == "0.4"
+    assert installed_nozzle(status, idle, 1) == "0.6"
+    assert installed_nozzle(status, idle, 9) is None
+    busy_status, busy = _status("lan-report-h2c.json")
+    assert installed_nozzle(busy_status, busy, 0) is None
+
+
+def test_the_nozzle_is_read_by_extruder_id_not_by_position() -> None:
+    status, idle = _status("lan-report-h2c-idle.json")
+    idle["device"]["nozzle"]["info"] = [
+        e for e in idle["device"]["nozzle"]["info"] if e["id"] != 0
+    ]  # only id 1 (0.4) is listed: extruder 0 has no nozzle, and unit 1 rests on extruder 0
+    assert installed_nozzle(status, idle, 1) is None
+    assert installed_nozzle(status, idle, 0) == "0.4"
 
 
 async def test_an_override_tag_resolves_through_trays(pg_pool: PgPool) -> None:
@@ -378,3 +401,121 @@ async def test_a_failed_configure_is_retried_next_time(
     again = await w.run(client)
     assert again.configured == 1
     assert w.rows()[0]["attempts"] == 0 and w.rows()[0]["last_error"] is None
+
+
+@respx.mock
+async def test_a_spool_without_temperatures_takes_the_trays(
+    pg_pool: PgPool, client: BambuddyClient
+) -> None:
+    w = World(pg_pool, temps=False)
+    w.report(_report(nozzle_temp_min="190", nozzle_temp_max="240"))
+    route = _configure()
+
+    report = await w.run(client)
+
+    query = dict(route.calls[0].request.url.params)
+    assert (query["nozzle_temp_min"], query["nozzle_temp_max"]) == ("190", "240")
+    assert report.configured == 1
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "tray",
+    [
+        {},
+        {"nozzle_temp_min": "0", "nozzle_temp_max": "240"},
+    ],
+)
+async def test_no_temperatures_anywhere_calls_nothing(
+    pg_pool: PgPool, client: BambuddyClient, tray: dict[str, str]
+) -> None:
+    w = World(pg_pool, temps=False)
+    w.report(_report(**tray))
+    route = _configure()
+
+    report = await w.run(client)
+
+    assert route.call_count == 0
+    assert (report.no_temps, report.no_preset) == (1, 0)
+    assert len(w.rows()) == 0
+
+
+@respx.mock
+async def test_a_different_spool_in_the_row_configures_again(
+    pg_pool: PgPool, client: BambuddyClient
+) -> None:
+    w = World(pg_pool)
+    route = _configure()
+    await w.run(client)
+    w.report(_report(tray_info_idx="GFL99"))  # the tray shows what was sent; the hash matches
+    other = w.filament.spools.create(SpoolCreate(type_id=w.type_id), actor="ann").id
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_override_slots SET spool_id = %s", (other,))
+
+    report = await w.run(client)
+
+    assert (route.call_count, report.configured) == (2, 1)
+    assert w.rows()[0]["spool_id"] == w.spool
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "tray", [{"tray_color": "FF000080"}, {"tray_color": "00FF00FF"}, {"tray_type": "PLA Basic"}]
+)
+async def test_a_tray_differing_in_colour_or_material_alone_is_configured_again(
+    pg_pool: PgPool, client: BambuddyClient, tray: dict[str, str]
+) -> None:
+    w = World(pg_pool)
+    route = _configure()
+    await w.run(client)
+    w.report(_report(tray_info_idx="GFL99", **tray))
+
+    report = await w.run(client)
+
+    assert (route.call_count, report.configured, report.unchanged) == (2, 1, 0)
+
+
+@respx.mock
+async def test_a_stale_report_deletes_nothing(pg_pool: PgPool, client: BambuddyClient) -> None:
+    w = World(pg_pool)
+    route = _configure()
+    await w.run(client)
+    w.bind(override=False)
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE printer_reports SET seen_at = now() - interval '1 hour'")
+
+    report = await w.run(client)
+
+    assert len(w.rows()) == 1 and route.call_count == 1
+    assert report == SlotReport()
+
+
+@respx.mock
+async def test_repeated_configures_of_unchanged_params_are_counted_and_warned(
+    pg_pool: PgPool, client: BambuddyClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    w = World(pg_pool)
+    _configure()
+    for _ in range(4):  # the AMS never shows what was sent
+        await w.run(client)
+
+    assert w.rows()[0]["attempts"] == 3
+    assert [r for r in caplog.records if "same values" in r.message]
+
+
+@respx.mock
+async def test_a_held_lock_skips_the_step(pg_pool: PgPool) -> None:
+    w = World(pg_pool)
+    route = _configure()
+    holder = try_lock(w.filament, SLOTS_LOCK)
+    assert holder is not None
+    try:
+        skipped = await reconcile_slots_now(
+            w.filament,
+            lambda: StoredSettings(bambuddy_url=BASE, bambuddy_api_key="s3cret"),
+            printers=w.printers,
+            reports=w.reports,
+        )
+    finally:
+        holder.close()
+    assert skipped is None and route.call_count == 0

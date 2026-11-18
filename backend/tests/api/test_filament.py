@@ -962,6 +962,7 @@ def test_the_reconcile_route_runs_the_mode_and_the_tags(client: TestClient) -> N
         "configured": 0,
         "unchanged": 0,
         "no_preset": 0,
+        "no_temps": 0,
         "no_nozzle": 0,
         "failed": 0,
     }

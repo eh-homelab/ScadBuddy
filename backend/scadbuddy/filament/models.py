@@ -1226,11 +1226,14 @@ class TagPushReport(BaseModel):
 
 
 class SlotReport(BaseModel):
-    """What one reconcile of the override slots did (#6264)."""
+    """What one reconcile of the override slots did (#6264). ``no_preset``: the type has no
+    preset for the nozzle. ``no_temps``: the spool has no nozzle temperatures, the tray
+    reports none, or the spool has no material or colour to send. Neither calls Bambuddy."""
 
     configured: int = 0
     unchanged: int = 0
     no_preset: int = 0
+    no_temps: int = 0
     no_nozzle: int = 0
     failed: int = 0
 

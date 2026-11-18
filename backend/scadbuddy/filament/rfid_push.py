@@ -191,7 +191,7 @@ async def push_pending(
     # One drain at a time across the route and the Schedule (and replicas): a session
     # lock on a connection of its own, never the row pool's. A drain that finds it held
     # returns at once and touches nothing; the holder pushes the queue.
-    lock = await asyncio.to_thread(_try_lock, store)
+    lock = await asyncio.to_thread(try_lock, store)
     if lock is None:
         return TagPushReport()
     try:
@@ -201,11 +201,13 @@ async def push_pending(
         await asyncio.to_thread(lock.close)  # closing the connection ends the lock
 
 
-def _try_lock(store: Filament) -> psycopg.Connection[Any] | None:
+def try_lock(store: Filament, name: str = PUSH_LOCK) -> psycopg.Connection[Any] | None:
+    """The session advisory lock ``name`` on a connection of its own (never the row
+    pool's), or ``None`` when another holds it. Closing the connection ends the lock."""
     conn = psycopg.connect(store.spools.conninfo, autocommit=True, connect_timeout=10)
     try:
         got = conn.execute(
-            "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (PUSH_LOCK,)
+            "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (name,)
         ).fetchone()
     except BaseException:
         conn.close()
