@@ -729,6 +729,11 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     Bambuddy's `SpoolSupplierResponse` does with `id` and `supplier_name` beside it. Why: a link
     with no supplier names nothing; the other fields default so a sparse row parses. Cost: a
     link row with no `supplier_id` fails the whole spool's parse.
+22. Task 3 (Task 2 review minor): the agent's `BambuddyScope` union (`agent/src/tools/registry.ts`)
+    names `'Filament catalog (admin only)'`, the label of `Scope.ADMIN_FILAMENTS`. Why: the type
+    says it lists the backend's `Scope` labels, and a 403 on a filament-catalog write carries that
+    label. Cost: none known. `'Manage Inventory'` is missing from the union on main too; this
+    commit leaves it, as the review asked for the new label only.
 
 ## Self-review
 
