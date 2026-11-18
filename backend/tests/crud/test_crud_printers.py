@@ -65,11 +65,12 @@ UNKNOWN = "00000000-0000-4000-8000-0000000000ff"
 
 
 def _public(cls: type) -> set[str]:
-    """Its methods, but the ``_in`` ones, which run on a connection the worker has none of."""
+    """Its methods, but the ``_in`` and ``_on`` ones, which run on a connection the worker
+    has none of."""
     return {
         name
         for name, _ in inspect.getmembers(cls, inspect.isfunction)
-        if not name.startswith("_") and not name.endswith("_in")
+        if not name.startswith("_") and not name.endswith(("_in", "_on"))
     }
 
 

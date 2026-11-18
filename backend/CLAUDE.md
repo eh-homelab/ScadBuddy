@@ -643,7 +643,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`POST /print/printers/{id}/trays/{ams}/{tray}/spool`) takes the SB number, places it
   at the tray, then writes Bambuddy's assignment for a linked spool. A
   LAN start books its slots' grams as `print_started` estimates at the plate's start in
-  `filament_spool_events`, and the run's settle books each start's `print_ended` actual
+  `filament_spool_events`, and a print end the report times books its `print_ended` at that time (`filament/prints.py`); the run's settle books any start still open as its actual
   (`done`) or 0 (`filament/print_uses.py`, `print_use_hook`; on the worker through
   `…/filament/print-uses`, `RemotePrintUses`). ScadBuddy's own spools are the `filament_*`
   tables (#6261). The `native` provider, its `/native-spools` routes, the `native_spool_*`
@@ -725,7 +725,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   cursor; `low_stock` is computed per spool against its effective `low_stock_pct`, else the setting `filament_low_stock_pct` (20 by default, read once per call, before the store takes a pool connection, by its `defaults` reader (`FilamentDefaults`); the summary's `value_left` uses `filament_default_cost_per_kg` for a spool with no cost; Settings → Printing → Filament), `presets.py` (a spool's own presets and K values over its type's, by key; `preset_for` is exact, never a near nozzle; no key is `*`: the 0706Z migration made each `*` row one `migrated` row per model and nozzle, `drop_migrated` deletes them when a spool gets its first type), `ledger.py` (`filament_spool_events`, the one source of grams left:
   the newest absolute reading, then the deltas after it (`basis()` returns that anchor and those
   deltas, and `grams_left()` is built on it); events carry their physical time,
-  ordered by `(at, seq)`; a time-less event gets a clock-step guard because the WSL clock
+  ordered by `(at, delta before reading, seq)` (a paired plate's `print_run` is skipped for its `bb_usage` row); a time-less event gets a clock-step guard because the WSL clock
   steps back), `locations.py` (a spool moves only through `move()`; AMS trays are keyed by
   printer, AMS and tray, never by name), `bambuddy_pull.py` (import and the scheduled pull,
   read-only toward Bambuddy; `scheduled_pull` skips when the setting `filament_sync.spools` is
@@ -735,7 +735,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   and its `Idempotency-Key` reply is kept in `crud_requests` under caller `filament`; a
   `location` cell is a `move_on`), `inventory.py` (`read_sb_spools`: which SB spool is in
   each AMS tray, by tag or by the spool placed there with the tray's fingerprint, and the shelf), `print_uses.py` (a LAN print's grams as
-  ledger events). Colour is `#RRGGBBAA` (`colour.py`). Routes: `api/filament.py`; the ledger
+  ledger events), `prints.py` (a print's open plates and their end: `plate_ended` books the end as a ledger event, #6263), `capture.py` (`reconcile`: a printer report's tray changes become `loaded`, `unloaded`, `moved` and `ams_reading` events, of which `reconcile` books `loaded` and `unloaded`, and `LocationStore.move_on` and `FilamentInventory.place_on` add `moved`, each tray place named by `bambuddy/trays.py` `place_label`; the report write runs it in a savepoint), `bambuddy_usage.py` (Bambuddy's usage rows booked as `bb_usage` events, paired with SB's own plates; `read_and_pull` runs it, so `filament_sync.spools` `off` stops it too). `SpoolRefresh` also runs a capture backstop activity (`spools/activities.py` `capture_backstop_activity`: reconciles SB's own trays from each printer's fresh stored report, not gated by `filament_sync.spools`). Colour is `#RRGGBBAA` (`colour.py`). Routes: `api/filament.py`; the ledger
   route `GET /filament/events` takes `since` (included) and `until` (excluded), so two ranges
   tile, with `spool_id`, `kind`, `source` and a cursor. The price book (the `filaments` rows
   that `orders/pricebook.py` prices) is edited on Filament → Types (`components/orders/FilamentsEditor.tsx`),

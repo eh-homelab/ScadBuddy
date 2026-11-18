@@ -115,6 +115,12 @@ def tray_label(ams_id: int, tray_id: int) -> str:
     return f"{unit_label(ams_id)} slot {tray_id + 1}"
 
 
+def place_label(printer_name: str, ams_id: int, tray_id: int) -> str:
+    """The name of a tray's place in the SB inventory: the printer and :func:`tray_label`.
+    `FilamentInventory.link` and `filament/capture.py` both make places, so one names them."""
+    return f"{printer_name} {tray_label(ams_id, tray_id)}"
+
+
 def spool_loaded(state: int) -> bool:
     """Whether ``state`` says a spool is in the slot and the tray is not loading or
     scanning: ha-bambulab's ``ams_tray_spool_loaded``, as cited at :data:`TRAY_SPOOL`."""
@@ -139,6 +145,24 @@ def _filled(tray: AmsTray) -> bool:
     if tray.state is not None:
         return spool_loaded(tray.state)
     return True
+
+
+def _loading(tray: AmsTray) -> bool:
+    """A tray with a material and a spool that is loading or scanning: the SPOOL bit is
+    set, the STEADY bit is not (`spool_loaded`), and no presence bit says it is empty."""
+    return (
+        bool((tray.tray_type or "").strip())
+        and tray.exists is not False
+        and tray.state is not None
+        and bool(tray.state & TRAY_SPOOL)
+        and not spool_loaded(tray.state)
+    )
+
+
+def loading_trays(status: PrinterStatus) -> set[tuple[int, int]]:
+    """The ``(ams_id, tray_id)`` of every tray that is loading or scanning (`_loading`):
+    neither filled nor empty, so what holds it says nothing."""
+    return {(unit, tray.id) for unit, tray in _trays(status) if _loading(tray)}
 
 
 def _trays(status: PrinterStatus) -> list[tuple[int, AmsTray]]:
@@ -305,9 +329,25 @@ def seen_trays(status: PrinterStatus) -> list[SeenTray]:
             colour=normalise_colour(tray.tray_color),
             tray_info_idx=(tray.tray_info_idx or "").strip() or None,
             rgba=tray_rgba(tray.tray_color),
+            remain=_remain(ams_id, tray),
         )
         for ams_id, tray in _sorted_trays(status)
     ]
+
+
+def _remain(ams_id: int, tray: AmsTray) -> int | None:
+    """The AMS's remaining percent, only where it is the spool's own: a tray with RFID
+    keys, not an external holder (whose ``remain`` is 0 in `lan-report-h2c.json`), whose
+    report sent the key (`AmsTray.remain` is 0 when it did not) and not ``-1`` (#6263
+    preflight C4)."""
+    if (
+        ams_id == EXTERNAL
+        or "remain" not in tray.model_fields_set
+        or tray.remain < 0
+        or (clean_tray_uuid(tray.tray_uuid) is None and clean_tag_uid(tray.tag_uid) is None)
+    ):
+        return None
+    return tray.remain
 
 
 def tray_rgba(raw: str | None) -> str | None:

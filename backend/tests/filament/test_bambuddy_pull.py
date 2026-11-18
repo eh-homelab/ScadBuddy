@@ -9,7 +9,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -19,6 +19,7 @@ from psycopg.types.json import Jsonb
 from scadbuddy.bambuddy.models import Spool as BbSpool
 from scadbuddy.bambuddy.models import SpoolCatalogEntry
 from scadbuddy.core.settings import FilamentSync
+from scadbuddy.filament import ledger, prints
 from scadbuddy.filament.bambuddy_pull import (
     pull,
     read_and_pull,
@@ -613,6 +614,21 @@ async def test_off_skips_the_pull(pg_pool: PgPool) -> None:
     assert f.spools.list() == []
 
 
+async def test_usage_is_not_booked_with_the_pull_off(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    with respx.mock(assert_all_called=False) as router:
+        usage = router.get(f"{BB}/api/v1/inventory/usage").respond(json=[])
+        spools = router.get(f"{BB}/api/v1/inventory/spools").respond(json=[])
+        assert (
+            await scheduled_pull(f, lambda: settings, lambda: FilamentSync(spools="off"))
+            == "skipped"
+        )
+        assert not usage.called
+        assert not spools.called
+    assert f.spools.list() == []
+
+
 async def test_a_scheduled_pull_with_bambuddy_down_is_a_logged_no_op(
     pg_pool: PgPool, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -689,8 +705,8 @@ def test_a_bb_scale_reading_is_the_anchor_when_newer(pg_pool: PgPool) -> None:
     assert len(f.spools.events(made)) == count
     weighed = [e for e in f.spools.events(made) if e.kind == "weighed"]
     assert [(e.source, e.ref_kind, e.grams_after, e.data["bb_gross_g"]) for e in weighed] == [
-        ("bb", "bb_scale", 950, 1200),
-        ("bb", "bb_scale", 650, 900),
+        ("scale", "bb_scale", 950, 1200),
+        ("scale", "bb_scale", 650, 900),
     ]
 
 
@@ -705,6 +721,49 @@ def test_a_bb_weighing_counts_on_a_locked_spool(pg_pool: PgPool) -> None:
     spool = f.spools.get(made)
     assert spool is not None
     assert (spool.weight_locked, spool.grams_left) == (True, 450)
+
+
+def test_a_lock_after_the_weighing_keeps_the_scale_anchor(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb(updated_at=_bb_time(-3))], now=NOW).created_ids
+    weighed = bb(
+        core_weight=250, last_scale_weight=700, last_weighed_at=_bb_time(1), updated_at=_bb_time(1)
+    )
+    pull(f, [weighed], now=NOW)
+    f.spools.update(made, SpoolPatch(weight_locked=True), actor="ann")
+    spool = f.spools.get(made)
+    assert spool is not None
+    assert (spool.weight_locked, spool.grams_left) == (True, 450)
+
+
+@pytest.mark.parametrize(("locked", "left"), [(False, 500), (True, 1000)])
+def test_a_bb_weighing_is_a_scale_reading(pg_pool: PgPool, locked: bool, left: float) -> None:
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb(updated_at=_bb_time(-3))], now=NOW).created_ids
+    if locked:
+        f.spools.update(made, SpoolPatch(weight_locked=True), actor="ann")
+    weighed = bb(
+        core_weight=250,
+        last_scale_weight=1250,
+        last_weighed_at=_bb_time(1),
+        updated_at=_bb_time(1),
+    )
+    pull(f, [weighed], now=NOW)
+    (event,) = [e for e in f.spools.events(made) if e.kind == "weighed"]
+    assert (event.source, event.grams_after) == ("scale", 1000)
+    # Spec 5.5: the newer AMS reading is the anchor, unless the weight lock is on.
+    with pg_pool.connection() as conn:
+        ledger.record(
+            conn,
+            made,
+            "ams_reading",
+            source="ams_remain",
+            absolute_g=500,
+            at=datetime.now(UTC) + timedelta(hours=2),
+        )
+    spool = f.spools.get(made)
+    assert spool is not None
+    assert spool.grams_left == left
 
 
 def test_a_bb_weighing_is_net_of_the_sb_insert_type(pg_pool: PgPool) -> None:
@@ -890,6 +949,12 @@ def _now_in_bb() -> str:
     return datetime.now(UTC).replace(tzinfo=None).isoformat()
 
 
+def _report_end(pool: PgPool, subtask: str) -> None:
+    """The printer's report that shows plate ``subtask`` finished, now (Task 5)."""
+    with pool.connection() as conn, conn.transaction():
+        prints.plate_ended(conn, str(uuid4()), subtask, "FINISH", datetime.now(UTC))
+
+
 def test_a_pull_between_two_plates_counts_each_plate_once(pg_pool: PgPool) -> None:
     """BB deducts plate ``a`` as it ends; a pull then anchors on a value that holds it,
     and the run's settle at its end takes off plate ``b`` only."""
@@ -897,7 +962,9 @@ def test_a_pull_between_two_plates_counts_each_plate_once(pg_pool: PgPool) -> No
     (made,) = pull(f, [bb(updated_at=_bb_time(-3))], now=NOW).created_ids
     _lan_run(pg_pool, "a", "b")
     record_uses(pg_pool, RUN, "a", _use(made, 50))
-    # Plate a ends, BB takes its 50 g off, and the pull reads that before plate b.
+    # Plate a ends (the printer's report books it), BB takes its 50 g off, and the pull
+    # reads that before plate b.
+    _report_end(pg_pool, "a")
     pull(f, [bb(weight_used=150.0, updated_at=_now_in_bb())], now=NOW)
     record_uses(pg_pool, RUN, "b", _use(made, 30))
     settle_uses(pg_pool, RUN, ["done", "done"])
@@ -911,6 +978,7 @@ def test_a_bb_update_before_the_settle_counts_the_plate_once(pg_pool: PgPool) ->
     (made,) = pull(f, [bb(updated_at=_bb_time(-3))], now=NOW).created_ids
     _lan_run(pg_pool, "a")
     record_uses(pg_pool, RUN, "a", _use(made, 50))
+    _report_end(pg_pool, "a")
     pull(f, [bb(weight_used=150.0, updated_at=_now_in_bb())], now=NOW)
     settle_uses(pg_pool, RUN, ["done"])
     spool = f.spools.get(made)

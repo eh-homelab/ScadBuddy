@@ -1212,6 +1212,8 @@ export const handlers = [
       archived_ids: [],
       failed_bb_ids: [],
       invalid_bb_ids: [],
+      usage_booked: 0,
+      usage_unlinked: 0,
     } satisfies S['PullReport']),
   ),
 ]

@@ -428,6 +428,15 @@ class PrinterStore:
         data = found.fetchone()
         return None if data is None else _row(data)
 
+    @staticmethod
+    def read_on(conn: Connection[DictRow], printer_id: str) -> PrinterRow | None:
+        """The printer's row on ``conn``, in the caller's transaction (`filament/capture.py`)."""
+        key = printer_uuid(printer_id)
+        if key is None:
+            return None
+        data = conn.execute(f"SELECT {_COLUMNS} FROM printers WHERE id = %s", (key,)).fetchone()
+        return None if data is None else _row(data)
+
     def get(self, printer_id: str, timeout: float | None = None) -> PrinterRow | None:
         """``timeout``, in seconds, is one deadline for a slow or locked read (#6037): the
         pool wait (`PoolTimeout`) and then the statement, which gets what the wait left

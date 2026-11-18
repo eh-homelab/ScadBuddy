@@ -10,16 +10,21 @@ no refresh, and no trays to record.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
 
 from temporalio import activity
 
 from scadbuddy.core.settings import FilamentSync
+from scadbuddy.filament import capture
 from scadbuddy.filament.bambuddy_pull import scheduled_pull
 from scadbuddy.filament.component import Filament
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.printers.component import Printers
 from scadbuddy.workflows.spool_refresh import (
+    CAPTURE_ACTIVITY,
     FILAMENT_PULL_ACTIVITY,
     LIST_ACTIVITY,
     PROVIDER_ACTIVITY,
@@ -63,3 +68,25 @@ def filament_pull_activity(
         return await scheduled_pull(filament, load, sync)
 
     return filament_bambuddy_pull
+
+
+def capture_backstop_activity(printers: Printers) -> Callable[[], Any]:
+    """``filament_capture_backstop``: every printer's latest fresh report reconciled with
+    the ledger (`filament/capture.reconcile_all`), for what the printer watch missed. It
+    is the successor of ``spool_trays_seen``, a no-op since #6262. It returns
+    ``captured`` or ``failed`` and never raises, so the run never fails on it."""
+
+    @activity.defn(name=CAPTURE_ACTIVITY)
+    async def filament_capture_backstop() -> str:
+        try:
+            store = printers.store
+            ids = [row.id for row in await asyncio.to_thread(store.list)]
+            await asyncio.to_thread(capture.reconcile_all, store.pool, ids, now=datetime.now(UTC))
+        except Exception as error:
+            activity.logger.warning(
+                "could not reconcile the printers' trays", extra={"error": type(error).__name__}
+            )
+            return "failed"
+        return "captured"
+
+    return filament_capture_backstop
