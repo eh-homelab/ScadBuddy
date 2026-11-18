@@ -902,7 +902,7 @@ class SettingsPatch(BaseModel):
     #: The most colour combinations one prepare of a listing queues (#6237).
     storefront_prepare_cap: int | None = None
     #: The nozzle diameters one profile fetch exports per printer model (#6625).
-    profile_fetch_nozzles: list[NozzleSize] | None = None
+    profile_fetch_nozzles: list[NozzleSize] | None = Field(default=None, min_length=1)
     #: The storefront's mail (#5283); the password is sealed apart, never a setting.
     storefront_mail_host: str | None = None
     storefront_mail_port: int | None = None
@@ -970,6 +970,13 @@ class SettingsPatch(BaseModel):
         if domains is None:
             return None
         return list(dict.fromkeys(normalise_domain(domain) for domain in domains))
+
+    @field_validator("profile_fetch_nozzles")
+    @classmethod
+    def _unique_nozzles(cls, nozzles: list[NozzleSize] | None) -> list[NozzleSize] | None:
+        if nozzles is not None and len(set(nozzles)) != len(nozzles):
+            raise ValueError("profile_fetch_nozzles lists each nozzle once")
+        return nozzles
 
     @field_validator("storefront_shipping_options")
     @classmethod

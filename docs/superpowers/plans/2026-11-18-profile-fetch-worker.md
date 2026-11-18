@@ -395,3 +395,11 @@ Branch from clusters' `main`. Copy the shape of `applications/scadbuddy/scadbudd
 ## Decisions made while building (#6625)
 
 (The builder adds one numbered line per decision, each with its reason.)
+
+1. Task 1 widened CRUD_PATH in auth/routes.py from `[a-z]` to `[a-z-]`, so `profile-fetch` routes classify as `crud.profile-fetch`.
+2. `profile_fetch_nozzles` is env-seeded, so it is in SettingsPatch, the Settings response and APPLIES "live"; it needs at least one nozzle and no duplicates, because an empty list would make the worker fetch nothing without saying so.
+3. `test_profile_fetch_caller_has_its_scope` stays beside `test_every_route_has_a_class`: it pins the exact scope name, which the generic test does not.
+4. `KProfile.extruder_id` defaults to 0 and `PresetImport` counts default to 0 and its errors to `[]`, so a Bambuddy answer that leaves them out still parses; every other `KProfile` field is required, because a K row without its filament or value is useless to the worker.
+5. `k_profiles` returns the rows (`list[KProfile]`) and a private `KProfileTable` model reads Bambuddy's `{"profiles": [...], "nozzle_diameter": ...}` envelope, so the worker never sees the envelope.
+6. `k_profiles` uses scope `READ_STATUS` (it reads a printer's state) and `import_local_presets` uses `MANAGE_LIBRARY` (as the brief says, and as `create_local_preset` does).
+7. The openapi test checks only that the two paths and methods exist in the 1.2.6b1 fixture, because the fixture has paths but no component schemas; the model fields follow the brief.
