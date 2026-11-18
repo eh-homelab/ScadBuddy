@@ -23,7 +23,9 @@ export function resolvedColors(
   for (const slot of slots) {
     if (!slot.colour) continue
     const spoolId = plan.find((choice) => choice.slot_id === slot.slot_id)?.spool_id
-    const colour = spoolId == null ? null : byId.get(spoolId)?.colour
+    const chosen = spoolId == null ? undefined : byId.get(spoolId)
+    // `rgba` spells the alpha; `colour` is `#RRGGBB` (the backend keeps it six digits).
+    const colour = chosen?.rgba ?? chosen?.colour
     // The first slot to claim a design colour wins: two slots of one colour are one part.
     const design = normalizeHex(slot.colour)
     if (colour && !out.has(design)) out.set(design, previewColour(colour))

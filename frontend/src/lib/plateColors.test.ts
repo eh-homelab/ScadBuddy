@@ -46,4 +46,22 @@ describe('resolvedColors alpha (#6349)', () => {
       ['#0000FF', '#FFFFFF'],
     ])
   })
+
+  it("takes the alpha from the spool's rgba, since colour stays six digits", () => {
+    const map = resolvedColors(
+      [slot(1, '#FF0000'), slot(2, '#00FF00')],
+      [
+        { ...spool(7, '#FFFFFF'), rgba: '#FFFFFF80' },
+        { ...spool(8, '#FFFFFF'), rgba: '#FFFFFFFF' },
+      ],
+      [
+        { slot_id: 1, spool_id: 7 },
+        { slot_id: 2, spool_id: 8 },
+      ],
+    )
+    expect([...map]).toEqual([
+      ['#FF0000', '#FFFFFF80'],
+      ['#00FF00', '#FFFFFF'],
+    ])
+  })
 })

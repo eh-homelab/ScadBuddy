@@ -35,6 +35,11 @@ Where it stood: #6243 and #6289 already draw a part see-through from the GLB's
   spells an alpha (`#RRGGBBAA`, below `FF`), else from the part's GLB alpha
   (`slotOpacity`). Why: a six-digit spool colour must not turn a translucent design part
   opaque. `resolvedColors` keeps the alpha of a translucent spool colour.
+- The alpha reaches the print dialog from `SpoolOption.rgba` (`#RRGGBBAA`, the held SB
+  spool's effective value or the tray's reported colour), which the backend already sent.
+  `resolvedColors` reads `rgba ?? colour`. Why: `colour` stays `#RRGGBB` because the
+  render splits by it and `colours_match` and the slot match read it; one field carries
+  the alpha, so nothing else changes and no backend code moves.
 - The preview's bounding-box outline (`Preview.tsx`) is a separate `lineSegments` and is
   unchanged: it stays visible around a clear part.
 - Test hook: `Preview.tsx` sets `data-see-through` on its canvas, a comma list of each
@@ -42,13 +47,6 @@ Where it stood: #6243 and #6289 already draw a part see-through from the GLB's
   pixels are not asserted anywhere in this repo (no pixel-diff baselines).
 - The mock GLB writer (`mocks/glb.ts`) writes a `#RRGGBBAA` colour as a mesh of its own
   with `scadbuddy_alpha`, as `render/glb.py` does.
-
-## Not in this change
-
-- `SpoolOption.colour` is `#RRGGBB` from the backend (`bambuddy/filaments.py` strips the
-  alpha). So the print dialog's spool-alpha path is ready in the frontend but only fires
-  once the backend sends `#RRGGBBAA`. The print dialog still shows a translucent
-  *design* colour see-through today, from the GLB. A backend change is a follow-up.
 
 ## Review Focus
 
