@@ -817,6 +817,10 @@ class Spool(_Row):
     #: Server-computed (F3): the grams left are under the spool's effective low-stock
     #: percentage of its label weight, else the default's. False when either is unknown.
     low_stock: bool = False
+    #: Server-computed (#6268): the hours since the spool was last dried (else made) that
+    #: its place was not dry storage, and whether that passes its material's limit.
+    hours_outside_dry: float = 0.0
+    needs_drying: bool = False
 
 
 # -- the trays (`filament/inventory.py`) ----------------------------------------------
