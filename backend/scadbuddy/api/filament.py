@@ -1140,7 +1140,9 @@ async def move_spool(
         "Read Bambuddy's unarchived spools and pull them into ScadBuddy's own, once (the spool "
         "refresh Schedule does the same). A BB spool already linked takes the fields BB changed "
         "since the last pull, unless ScadBuddy changed that field later; a change of what is "
-        "left is a `bb` reading unless the spool's weight is locked. A BB spool whose tag a "
+        "left is a `bb` reading unless the spool's weight is locked. "
+        "With `filament_sync.weights` off, a Bambuddy scale weighing is not booked. "
+        "A BB spool whose tag a "
         "ScadBuddy spool holds, or whose record a ScadBuddy spool is linked to, is linked; any "
         "other becomes a new spool, typed by `material_number`, else by brand, material, "
         "subtype, colour and label weight, else left to need a type. A BB spool Bambuddy added "
@@ -1157,7 +1159,10 @@ async def import_bambuddy(
     filament: FilamentDep, store: SettingsStoreDep, caller: CallerDep
 ) -> PullReport:
     settings = await asyncio.to_thread(store.load)
-    return await read_and_pull(filament, settings, actor=actor(caller))
+    sync = (await asyncio.to_thread(store.read, {"filament_sync"}))["filament_sync"]
+    return await read_and_pull(
+        filament, settings, actor=actor(caller), weights=sync.weights != "off"
+    )
 
 
 @router.get(

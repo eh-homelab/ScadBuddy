@@ -105,11 +105,13 @@ class FilamentSync(BaseModel, extra="forbid"):
     ``bb_to_sb`` pulls them into ScadBuddy's own on the refresh Schedule. ``tags``: ``off``
     writes no tag to Bambuddy; ``sb_to_bb`` pushes the tags queued by a binding change
     (#6264). It does not gate the override mode or the AMS slot configure, which write
-    Bambuddy whatever it says. #6265 adds data types and the
-    values ``sb_to_bb`` and ``two_way``."""
+    Bambuddy whatever it says. ``weights``: ``off`` books no Bambuddy scale weighing
+    (``bb_scale``) and no ``bb`` weight reading; ``bb_to_sb`` books them (#6268). #6265
+    adds data types and the values ``sb_to_bb`` and ``two_way``."""
 
     spools: Literal["off", "bb_to_sb"] = "bb_to_sb"
     tags: Literal["off", "sb_to_bb"] = "off"
+    weights: Literal["off", "bb_to_sb"] = "bb_to_sb"
 
 
 class Settings(BaseSettings):

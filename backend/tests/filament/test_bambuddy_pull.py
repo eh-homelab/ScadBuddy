@@ -783,6 +783,40 @@ def test_a_bb_weighing_is_a_scale_reading(pg_pool: PgPool, locked: bool, left: f
     assert spool.grams_left == left
 
 
+def test_weights_off_books_no_bb_weighing(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    weighed = bb(
+        core_weight=250, last_scale_weight=700, last_weighed_at=_bb_time(1), updated_at=_bb_time(1)
+    )
+    (made,) = pull(f, [weighed], now=NOW, weights=False).created_ids
+    pull(f, [weighed], now=NOW, weights=False)
+    assert [e for e in f.spools.events(made) if e.ref_kind == "bb_scale"] == []
+
+
+def test_weights_bb_to_sb_books_the_bb_weighing(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    weighed = bb(
+        core_weight=250, last_scale_weight=700, last_weighed_at=_bb_time(1), updated_at=_bb_time(1)
+    )
+    (made,) = pull(f, [weighed], now=NOW, weights=True).created_ids
+    assert [e.ref_kind for e in f.spools.events(made) if e.kind == "weighed"] == ["bb_scale"]
+
+
+async def test_a_scheduled_pull_with_weights_off_books_no_bb_weighing(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    weighed = bb(
+        core_weight=250, last_scale_weight=700, last_weighed_at=_bb_time(1), updated_at=_bb_time(1)
+    )
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    with respx.mock() as router:
+        router.get(f"{BB}/api/v1/inventory/spools").respond(json=[weighed.model_dump(mode="json")])
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
+        outcome = await scheduled_pull(f, lambda: settings, lambda: FilamentSync(weights="off"))
+    assert outcome == "pulled"
+    (made,) = [s.id for s in f.spools.list()]
+    assert [e for e in f.spools.events(made) if e.ref_kind == "bb_scale"] == []
+
+
 def test_a_bb_weighing_is_net_of_the_sb_insert_type(pg_pool: PgPool) -> None:
     f = _filament(pg_pool)
     (made,) = pull(f, [bb(updated_at=_bb_time(-3))], now=NOW).created_ids

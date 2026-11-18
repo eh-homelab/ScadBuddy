@@ -382,6 +382,7 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "Off, Bambuddy's spools are never pulled, its usage rows are never booked and"
             " ScadBuddy's own spools are the only ones."
             " Bambuddy \u2192 ScadBuddy copies Bambuddy's spools in on the schedule below;"
+            " Weights off books no Bambuddy scale weighing; bb_to_sb books it."
             " Tags is sb_to_bb: each tag binding is sent to Bambuddy. Override mode and the"
             " AMS slots of override tags are written to Bambuddy whatever this says.",
         ),

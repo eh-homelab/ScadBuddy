@@ -30,6 +30,11 @@ const TAG_CHOICES = [
   { value: 'sb_to_bb', label: "Send ScadBuddy's bindings" },
 ] as const
 
+const WEIGHT_CHOICES = [
+  { value: 'off', label: 'Off' },
+  { value: 'bb_to_sb', label: 'Bambuddy → ScadBuddy' },
+] as const
+
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`
 
 /** What the override mode's status says, in a sentence. */
@@ -59,12 +64,12 @@ function reportLine(report: RfidReconcileReport): string {
 }
 
 /**
- * What moves between ScadBuddy and Bambuddy: the spools it pulls and the tag bindings it
- * sends. Both choices are one setting, `filament_sync`, held in the form as `spools|tags`
+ * What moves between ScadBuddy and Bambuddy: the spools and weighings it pulls and the tag
+ * bindings it sends. The choices are one setting, `filament_sync`, held in the form as `spools|tags|weights`
  * and saved with "Save Filament".
  */
 function SyncRows({ form }: { form: BackendSettings }) {
-  const [spools, tags] = syncParts(form.value('filament_sync'))
+  const [spools, tags, weights] = syncParts(form.value('filament_sync'))
   return (
     <>
       <FieldRow
@@ -73,14 +78,21 @@ function SyncRows({ form }: { form: BackendSettings }) {
         badge={<FieldBadge form={form} name="filament_sync" />}
         error={form.errors.filament_sync}
       >
-        <ChoiceSelect id="setting-filament_sync" value={spools} onValueChange={(next) => form.setField('filament_sync', `${next}|${tags}`)} choices={SPOOL_CHOICES} />
+        <ChoiceSelect id="setting-filament_sync" value={spools} onValueChange={(next) => form.setField('filament_sync', `${next}|${tags}|${weights}`)} choices={SPOOL_CHOICES} />
       </FieldRow>
       <FieldRow
         id="setting-filament-tags"
         label="Tags to Bambuddy"
         help="Send each tag binding to Bambuddy, so its spools carry the same tags."
       >
-        <ChoiceSelect id="setting-filament-tags" value={tags} onValueChange={(next) => form.setField('filament_sync', `${spools}|${next}`)} choices={TAG_CHOICES} />
+        <ChoiceSelect id="setting-filament-tags" value={tags} onValueChange={(next) => form.setField('filament_sync', `${spools}|${next}|${weights}`)} choices={TAG_CHOICES} />
+      </FieldRow>
+      <FieldRow
+        id="setting-filament-weights"
+        label="Weights from Bambuddy"
+        help="Book each weighing that Bambuddy's scale made as a reading on the spool. Off, ScadBuddy ignores them."
+      >
+        <ChoiceSelect id="setting-filament-weights" value={weights} onValueChange={(next) => form.setField('filament_sync', `${spools}|${tags}|${next}`)} choices={WEIGHT_CHOICES} />
       </FieldRow>
     </>
   )
