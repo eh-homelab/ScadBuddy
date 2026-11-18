@@ -51,6 +51,7 @@ function compute(row: PrinterRow, kept: MachineRateInputs | undefined): MachineR
       power_per_hour: '0',
       wear_per_hour: '0',
       maintenance_per_hour: '0',
+      actuals: false,
     }
   }
   const profile = kept.profile
@@ -58,7 +59,12 @@ function compute(row: PrinterRow, kept: MachineRateInputs | undefined): MachineR
   const life = profile.life_hours ?? null
   const depreciation = life && num(life) > 0 ? num(profile.purchase_price) / num(life) : 0
   const power = (num(profile.watts) / 1000) * num(profile.kwh_price)
-  const wear = kept.wear_parts.map((part) => ({ ...part, per_hour: places(num(part.cost) / num(part.life_hours)) }))
+  // #5774: the mock logs no events, so every row prices by its estimate.
+  const estimate = { basis: 'estimate' as const, have: 0, partly_typed: false }
+  const wear = kept.wear_parts.map((part) => {
+    const perHour = places(num(part.cost) / num(part.life_hours))
+    return { ...part, ...estimate, priced_by: part.priced_by ?? 'estimate', per_hour: perHour, estimate_per_hour: perHour }
+  })
   const linked = row.bambuddy_printer_id != null
   const costs = new Map(kept.maintenance.map((cost) => [cost.task, cost]))
   const part = (task: string, interval: number | null, type: 'hours' | 'days', why: MaintenancePart['why']): MaintenancePart => {
@@ -77,6 +83,8 @@ function compute(row: PrinterRow, kept: MachineRateInputs | undefined): MachineR
       per_hour: places(perHour),
       counted,
       why: counted ? null : (why ?? 'no_interval'),
+      ...estimate,
+      priced_by: cost?.priced_by ?? 'estimate',
     }
   }
   const maintenance = linked
@@ -107,6 +115,8 @@ function compute(row: PrinterRow, kept: MachineRateInputs | undefined): MachineR
     wear,
     maintenance,
     ...parts,
+    actuals: false,
+    actuals_window: profile.actuals_window ?? 3,
   }
 }
 
@@ -141,6 +151,13 @@ function view(row: PrinterRow): MachineRateView {
     breakdown: compute(row, inputs.get(row.id)),
     // Read from the mock Bambuddy, which always answers: also before the first save.
     bambuddy_tasks: row.bambuddy_printer_id != null ? BAMBUDDY_TASKS.map((t) => t.task) : [],
+    // #5774: no logged events and no counter reading in the mock yet (the UI is PR 5).
+    actuals: { window: inputs.get(row.id)?.profile.actuals_window ?? 3, rows: [], orphaned: [] },
+    counter: {
+      source: row.bambuddy_printer_id != null ? 'bambuddy' : row.lan_host != null ? 'lan_watch' : 'typed',
+      hours: null,
+      lan_watch: null,
+    },
   }
 }
 

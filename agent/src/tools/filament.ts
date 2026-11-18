@@ -133,7 +133,7 @@ export const filamentTools: Tool[] = [
         if (archived !== undefined) throw new ToolError('archived needs a row_id')
         return json(
           await ok(
-            backend.POST('/api/v1/filament/catalog/{kind}', { params: { path: { kind } }, body: fields as never }),
+            backend.POST('/api/v1/filament/catalog/{kind}', { params: { path: { kind } }, body: fields }),
             `add to the ${kind} catalog`,
           ),
         )
@@ -142,7 +142,7 @@ export const filamentTools: Tool[] = [
         await ok(
           backend.PATCH('/api/v1/filament/catalog/{kind}/{row_id}', {
             params: { path: { kind, row_id } },
-            body: (archived === undefined ? fields : { ...fields, archived }) as never,
+            body: archived === undefined ? fields : { ...fields, archived },
           }),
           `edit ${kind} row ${row_id}`,
         ),
@@ -216,7 +216,7 @@ export const filamentTools: Tool[] = [
         await ok(
           backend.PATCH('/api/v1/filament/types/{type_id}', {
             params: { path: { type_id } },
-            body: (archived === undefined ? fields : { ...fields, archived }) as never,
+            body: archived === undefined ? fields : { ...fields, archived },
           }),
           `edit spool type ${type_id}`,
         ),
@@ -287,7 +287,7 @@ export const filamentTools: Tool[] = [
         await ok(
           backend.PUT('/api/v1/filament/types/{type_id}/k-values', {
             params: { path: { type_id } },
-            body: k_values as never,
+            body: k_values,
           }),
           `set the K values of spool type ${type_id}`,
         ),
@@ -363,13 +363,13 @@ export const filamentTools: Tool[] = [
     summarize: ({ spool_id }) => (spool_id ? `Edit spool ${spool_id}` : 'Add a spool'),
     handler: async ({ spool_id, fields }, { backend }) => {
       if (spool_id === undefined) {
-        return json(await ok(backend.POST('/api/v1/filament/spools', { body: fields as never }), 'add a spool'))
+        return json(await ok(backend.POST('/api/v1/filament/spools', { body: fields }), 'add a spool'))
       }
       return json(
         await ok(
           backend.PATCH('/api/v1/filament/spools/{spool_id}', {
             params: { path: { spool_id } },
-            body: fields as never,
+            body: fields,
           }),
           `edit spool ${spool_id}`,
         ),
@@ -444,7 +444,7 @@ export const filamentTools: Tool[] = [
         await ok(
           backend.PUT('/api/v1/filament/spools/{spool_id}/k-values', {
             params: { path: { spool_id } },
-            body: k_values as never,
+            body: k_values,
           }),
           `set the K values of spool ${spool_id}`,
         ),
@@ -800,7 +800,10 @@ export const filamentTools: Tool[] = [
     description:
       'Drop the write the SpoolBuddy `device_id` has queued. Bambuddy queues one write per device, so this drops ' +
       'whichever write that device holds, not only this spool\'s; `spool_id` must exist. Only what the user ' +
-      'says. Writes Bambuddy only; approved first.',
+      'says. Writes Bambuddy and ScadBuddy: it also deletes ScadBuddy\'s own queued-write rows: every row queued on that ' +
+      'device, and this spool\'s row only if it was queued on that device or names no device. A later ' +
+      '`filament_spool_ntag_confirm` binds nothing for the rows it deleted; ' +
+      'approved first.',
     input: z.object({ spool_id: z.string().uuid(), device_id: DEVICE_ID }),
     risk: 'outward',
     source: SOURCE,
@@ -844,7 +847,7 @@ export const filamentTools: Tool[] = [
         await ok(
           backend.POST('/api/v1/filament/spools/{spool_id}/events', {
             params: { path: { spool_id } },
-            body: body as never,
+            body,
           }),
           `record on spool ${spool_id}`,
         ),
@@ -899,7 +902,7 @@ export const filamentTools: Tool[] = [
         await ok(
           backend.PATCH('/api/v1/filament/locations/{location_id}', {
             params: { path: { location_id } },
-            body: (archived === undefined ? fields : { ...fields, archived }) as never,
+            body: archived === undefined ? fields : { ...fields, archived },
           }),
           `edit location ${location_id}`,
         ),
@@ -946,7 +949,7 @@ export const filamentTools: Tool[] = [
     handler: async ({ rows }, ctx) =>
       json(
         await ok(
-          ctx.backend.POST('/api/v1/filament/spools/import', { body: { rows: rows as never, dry_run: true } }),
+          ctx.backend.POST('/api/v1/filament/spools/import', { body: { rows, dry_run: true } }),
           'preview the spools import',
         ),
       ),
@@ -970,7 +973,7 @@ export const filamentTools: Tool[] = [
     summarize: ({ rows }) => `Import ${rows.length} spool rows`,
     handler: async ({ rows }, ctx) => {
       const preview = await ok(
-        ctx.backend.POST('/api/v1/filament/spools/import', { body: { rows: rows as never, dry_run: true } }),
+        ctx.backend.POST('/api/v1/filament/spools/import', { body: { rows, dry_run: true } }),
         'preview the spools import',
       )
       const errors = preview.rows.filter((r) => r.action === 'error')
@@ -984,7 +987,7 @@ export const filamentTools: Tool[] = [
       return json(
         await ok(
           ctx.backend.POST('/api/v1/filament/spools/import', {
-            body: { rows: rows as never, dry_run: false },
+            body: { rows, dry_run: false },
             headers,
           }),
           'import the spools',

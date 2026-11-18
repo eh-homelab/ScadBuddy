@@ -238,6 +238,34 @@ def _repoint_machine_rate(conn: Connection[DictRow], merged: str, into: str) -> 
             conn.execute(f"UPDATE {table} SET printer = %s WHERE printer = %s", (into, merged))
 
 
+def _repoint_rate_events(table: str) -> RepointHook:
+    """#5774: a printer's logged maintenance events or replaced parts are facts, so a
+    merge moves them all onto the kept printer, except one whose writer key (``source``)
+    or Bambuddy history id the kept printer already has: that one is dropped. A
+    ``source`` names one event across both tables, so it is looked up in both."""
+    history = table == "printer_maintenance_events"
+
+    def repoint(conn: Connection[DictRow], merged: str, into: str) -> None:
+        same_history = (
+            " OR EXISTS (SELECT 1 FROM printer_maintenance_events AS kept"
+            " WHERE kept.printer = %(into)s"
+            " AND kept.bambuddy_history_id = gone.bambuddy_history_id)"
+            if history
+            else ""
+        )
+        conn.execute(
+            f"DELETE FROM {table} AS gone WHERE gone.printer = %(merged)s AND (EXISTS"
+            " (SELECT 1 FROM printer_maintenance_events AS kept"
+            " WHERE kept.printer = %(into)s AND kept.source = gone.source"
+            " UNION ALL SELECT 1 FROM printer_wear_replacements AS kept"
+            f" WHERE kept.printer = %(into)s AND kept.source = gone.source){same_history})",
+            {"merged": merged, "into": into},
+        )
+        conn.execute(f"UPDATE {table} SET printer = %s WHERE printer = %s", (into, merged))
+
+    return repoint
+
+
 #: The per-printer settings maps, keyed by the registry id (#4971, #5167).
 PRINTER_KEYED_SETTINGS = (
     "printer_rack_algorithms",
@@ -325,6 +353,17 @@ PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
     PrinterReference("printer_cost_profiles", "printer", repoint=_repoint_machine_rate),
     PrinterReference("printer_wear_parts", "printer", repoint=_repoint_machine_rate),
     PrinterReference("printer_maintenance_costs", "printer", repoint=_repoint_machine_rate),
+    # #5774: the machine rate's logged events, moved whole but for the kept printer's own.
+    PrinterReference(
+        "printer_maintenance_events",
+        "printer",
+        repoint=_repoint_rate_events("printer_maintenance_events"),
+    ),
+    PrinterReference(
+        "printer_wear_replacements",
+        "printer",
+        repoint=_repoint_rate_events("printer_wear_replacements"),
+    ),
     # #4699 phase 4: the LAN-only printer a print the watcher recorded ran on, and its
     # job key (#6045).
     PrinterReference("print_lan_imports", "printer", repoint=_repoint_lan_imports),

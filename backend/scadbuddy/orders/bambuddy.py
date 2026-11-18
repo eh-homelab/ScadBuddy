@@ -106,6 +106,8 @@ def maintenance_tasks(overview: PrinterMaintenanceOverview) -> list[MaintenanceT
             interval_hours=item.interval_hours,
             interval_type=item.interval_type,
             enabled=item.enabled,
+            item_id=item.id,
+            current_hours=item.current_hours,
         )
         for item in overview.maintenance_items
     ]
