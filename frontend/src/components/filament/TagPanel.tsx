@@ -22,8 +22,9 @@ interface Props {
 }
 
 /**
- * #6262, #6264 — a spool's tag: the open one with "Take off" (and an "Override" mark and
- * the weight-lock line when the open binding was made with `override`), the last one it held
+ * #6262, #6264 — a spool's tag: the open one with "Take off" (with an "Override" mark when
+ * the open binding was made with `override`; the weight-lock line follows the spool's own
+ * `weight_locked`, which unbinding never clears), the last one it held
  * with "Bind tag again" (free) or "Tag is on spool #N — Move it here" (another spool holds it
  * now; Decision 7), and a form to bind any tag by its UID or tray UUID, which "Scan a tag"
  * fills from a SpoolBuddy reader. A restore binds nothing: the tag comes back only through
@@ -72,6 +73,8 @@ export function TagPanel({ spool, onChanged }: Props) {
   })
 
   const hasTray = tray.trim() !== ''
+  /** The server takes `override` only for a Bambu tag (`bambu_mifare`) with a tray UUID. */
+  const canOverride = hasTray && !kind.startsWith('ntag')
 
   function bind() {
     if (!uid.trim() && !hasTray) {
@@ -83,7 +86,7 @@ export function TagPanel({ spool, onChanged }: Props) {
         ...(uid.trim() ? { tag_uid: uid.trim() } : {}),
         ...(hasTray ? { tray_uuid: tray.trim() } : {}),
         kind,
-        override: override && hasTray,
+        override: override && canOverride && kind === 'bambu_mifare',
       }),
     )
   }
@@ -105,7 +108,7 @@ export function TagPanel({ spool, onChanged }: Props) {
       setUid(found.tag_uid ?? '')
       setTray(found.tray_uuid ?? '')
       if (found.kind) setKind(found.kind)
-      if (!found.tray_uuid) setOverride(false)
+      if (found.kind !== 'bambu_mifare') setOverride(false)
       setScanNote(found.sb_spool ? `Spool #${found.sb_spool.number} already holds this tag` : null)
     } catch (cause) {
       if (controller.signal.aborted) return
@@ -126,7 +129,6 @@ export function TagPanel({ spool, onChanged }: Props) {
               {overridden && <Badge variant="secondary">Override</Badge>}
             </p>
             <p className="truncate font-mono text-[12px] text-muted-foreground">{[spool.tag.tag_uid, spool.tag.tray_uuid].filter(Boolean).join(' · ')}</p>
-            {overridden && <p className="mt-1 text-[12px] text-muted-foreground">Weight locked: the AMS percentage never changes grams left</p>}
           </div>
           <Button type="button" size="xs" variant="outline" disabled={busy} onClick={() => void run(() => unbindTag(spool.tag!.id))}>
             Take off
@@ -135,6 +137,8 @@ export function TagPanel({ spool, onChanged }: Props) {
       ) : (
         <p className="text-[13px] text-muted-foreground">No tag is on this spool.</p>
       )}
+
+      {spool.weight_locked && <p className="text-[12px] text-muted-foreground">Weight locked: the AMS percentage never changes grams left</p>}
 
       {!spool.tag && last && (
         <div className="flex flex-wrap items-center gap-2 rounded-md border border-dashed px-3 py-2 text-[13px]">
@@ -199,7 +203,13 @@ export function TagPanel({ spool, onChanged }: Props) {
         </div>
         <div className="flex flex-col gap-1">
           <Label className="text-[13px]">Kind</Label>
-          <Select value={kind} onValueChange={(next) => setKind(next as typeof kind)}>
+          <Select
+            value={kind}
+            onValueChange={(next) => {
+              setKind(next as typeof kind)
+              if (next !== 'bambu_mifare') setOverride(false)
+            }}
+          >
             <SelectTrigger aria-label="Tag kind" className="w-full">
               <SelectValue />
             </SelectTrigger>
@@ -215,8 +225,8 @@ export function TagPanel({ spool, onChanged }: Props) {
         <div className="flex items-end gap-3">
           <Label className="flex items-center gap-2 pb-2 text-[13px] font-normal">
             <Checkbox
-              checked={override && hasTray}
-              disabled={!hasTray}
+              checked={override && canOverride}
+              disabled={!canOverride}
               onCheckedChange={(next) => {
                 setOverride(next === true)
                 if (next === true) setKind('bambu_mifare')

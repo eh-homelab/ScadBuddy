@@ -1,6 +1,8 @@
 import { HttpResponse, http } from 'msw'
 import type { components } from '../../../api/schema'
-import { hasBambuddyLink, holdsOverrideTag } from './index'
+import { bindWrittenNtag, hasBambuddyLink, holdsOverrideTag } from './index'
+
+const WRITTEN_UID = '04A1B2C3D4E5F6'
 
 type S = components['schemas']
 
@@ -71,7 +73,9 @@ export const handlers = [
     const id = String(params.id)
     const polls = (confirms.get(id) ?? 0) + 1
     confirms.set(id, polls)
-    return HttpResponse.json(polls >= 2 ? { bound: true, tag_uid: '04A1B2C3D4E5F6' } : { bound: false })
+    if (polls < 2) return HttpResponse.json({ bound: false })
+    if (polls === 2) bindWrittenNtag(id, WRITTEN_UID)
+    return HttpResponse.json({ bound: true, tag_uid: WRITTEN_UID })
   }),
   http.post(`${BASE}/spools/:id/ntag/cancel`, () => new HttpResponse(null, { status: 204 })),
 ]

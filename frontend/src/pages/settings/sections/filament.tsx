@@ -1,17 +1,17 @@
 import { useState } from 'react'
-import { api, ApiError } from '../../../api/client'
+import { ApiError } from '../../../api/client'
 import { getRfidStatus, reconcileRfid, setOverrideMode, type RfidReconcileReport, type RfidStatus } from '../../../api/filament'
 import { AppLink } from '../../../components/AppLink'
 import { ChoiceSelect } from '../../../components/settings/form'
 import { useAsync } from '../../../lib/useAsync'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
-import { UNCONFIRMED, useSettingsCache } from '../cache'
 import { FieldRow } from '../controls'
-import { RuntimeRows, SavedSection } from '../formParts'
+import { docOf } from '../fields'
+import { FieldBadge, RuntimeRows, SavedSection } from '../formParts'
 import type { AreaId } from '../registry'
-import { useBackendSettings } from '../useBackendSettings'
-import { fieldsOf } from '../values'
+import { useBackendSettings, type BackendSettings } from '../useBackendSettings'
+import { fieldsOf, syncParts } from '../values'
 
 export const id = 'filament'
 export const area: AreaId = 'printing'
@@ -19,6 +19,11 @@ export const title = 'Filament'
 export const order = 30
 
 const LINK = 'underline underline-offset-2 hover:text-foreground'
+
+const SPOOL_CHOICES = [
+  { value: 'off', label: 'Off' },
+  { value: 'bb_to_sb', label: 'Bambuddy → ScadBuddy' },
+] as const
 
 const TAG_CHOICES = [
   { value: 'off', label: 'Off' },
@@ -51,31 +56,43 @@ function reportLine(report: RfidReconcileReport): string {
 }
 
 /**
- * #6264 — the RFID rows: whether ScadBuddy sends its tag bindings to Bambuddy, and the
- * override mode (Bambuddy stops adding a spool for an RFID tag it does not know). Both are
- * stored settings: the select writes `filament_sync.tags` at once, the switch writes the mode
- * on the server, which answers with where Bambuddy stands.
+ * What moves between ScadBuddy and Bambuddy: the spools it pulls and the tag bindings it
+ * sends. Both choices are one setting, `filament_sync`, held in the form as `spools|tags`
+ * and saved with "Save Filament".
  */
-function RfidRows({ settings }: { settings: ReturnType<typeof useBackendSettings>['settings'] }) {
-  const cache = useSettingsCache()
+function SyncRows({ form }: { form: BackendSettings }) {
+  const [spools, tags] = syncParts(form.value('filament_sync'))
+  return (
+    <>
+      <FieldRow
+        id="setting-filament_sync"
+        {...docOf(form.settings, 'filament_sync')}
+        badge={<FieldBadge form={form} name="filament_sync" />}
+        error={form.errors.filament_sync}
+      >
+        <ChoiceSelect id="setting-filament_sync" value={spools} onValueChange={(next) => form.setField('filament_sync', `${next}|${tags}`)} choices={SPOOL_CHOICES} />
+      </FieldRow>
+      <FieldRow
+        id="setting-filament-tags"
+        label="Tags to Bambuddy"
+        help="Send each tag binding to Bambuddy, so its spools carry the same tags. This is the only data ScadBuddy writes to Bambuddy."
+      >
+        <ChoiceSelect id="setting-filament-tags" value={tags} onValueChange={(next) => form.setField('filament_sync', `${spools}|${next}`)} choices={TAG_CHOICES} />
+      </FieldRow>
+    </>
+  )
+}
+
+/**
+ * #6264 — the RFID override mode (Bambuddy stops adding a spool for an RFID tag it does not
+ * know). It is an action with a status, not a draft: the switch writes the mode on the server
+ * at once, which answers with where Bambuddy stands.
+ */
+function OverrideRow() {
   const status = useAsync(() => getRfidStatus(), [])
   const [pending, setPending] = useState(false)
   const [report, setReport] = useState<string | null>(null)
   const [problem, setProblem] = useState<string | null>(null)
-  const tags = settings.filament_sync?.tags ?? 'off'
-
-  async function saveTags(next: string) {
-    setProblem(null)
-    try {
-      await cache.write(
-        [],
-        () => api.putSettings({ filament_sync: { spools: settings.filament_sync?.spools ?? 'bb_to_sb', tags: next as 'off' | 'sb_to_bb' } }),
-        { written: ['filament_sync'], unconfirmed: () => setProblem(UNCONFIRMED) },
-      )
-    } catch (cause) {
-      setProblem(cause instanceof ApiError ? cause.detail : 'Could not save the setting.')
-    }
-  }
 
   async function change(call: () => Promise<RfidStatus | RfidReconcileReport>) {
     setPending(true)
@@ -98,13 +115,6 @@ function RfidRows({ settings }: { settings: ReturnType<typeof useBackendSettings
 
   return (
     <>
-      <FieldRow
-        id="setting-filament-tags"
-        label="Tags to Bambuddy"
-        help="Send each tag binding to Bambuddy, so its spools carry the same tags. This is the only data ScadBuddy writes to Bambuddy."
-      >
-        <ChoiceSelect id="setting-filament-tags" value={tags} onValueChange={(next) => void saveTags(next)} choices={TAG_CHOICES} />
-      </FieldRow>
       <FieldRow
         id="setting-filament-rfid-override"
         label="RFID override mode"
@@ -163,7 +173,8 @@ export function Component() {
       }
     >
       <RuntimeRows form={form} section="filament" />
-      <RfidRows settings={form.settings} />
+      <SyncRows form={form} />
+      <OverrideRow />
       <FieldRow
         id="filament-currency"
         label="Currency"

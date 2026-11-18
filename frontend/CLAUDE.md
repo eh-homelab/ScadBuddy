@@ -231,14 +231,14 @@ same way, `vite.config.ts`).
   #6266 and #6269). `/filament/spools/:id` (`SpoolPage`: sections, a "Go to section" select below
   1024 px, `OverrideField` with "Reset to type", `RgbaColourField` with Opaque, Translucent and
   Clear presets, `TagPanel` with "Tag is on spool #N — Move it here", which sends `override: false`, a "Scan a tag"
-  button (`scanTag`, 30 s), the "Override" mark and weight-lock line of an open override binding, and
+  button (`scanTag`, 30 s), the "Override" mark of an open override binding, the weight-lock line (from `weight_locked`), and
   the override checkbox, on only with a tray UUID; `NtagPanel` writes an NTAG through a SpoolBuddy
   reader and polls `confirmNtag` every 2 s for 60 s, #6264) and `/filament/types/:id`
   (`TypePage`). The Spools tab imports a CSV (`SpoolImport`: a dry run, Import is off while any
   line is an error). The price book is edited on Filament → Types, not in Settings; the ledger
   tab asks `GET /filament/events` with `since` and `until`. Settings keeps a Filament section for
   configuration (`pages/settings/sections/filament.tsx`: also "Tags to Bambuddy", which saves
-  `filament_sync.tags` at once, and the "RFID override mode" switch with "Apply now", #6264); the old anchors `#native-spools` and
+  `filament_sync.tags` with "Save Filament", and the "RFID override mode" switch with "Apply now", #6264); the old anchors `#native-spools` and
   `#inventory` land on it. Colour is `#RRGGBBAA` (`lib/rgba.ts`). Mocks:
   `src/mocks/features/filament/` (`seed.ts` has 12 spools that cover the cases; `rfid.ts` owns
   `/filament/rfid/*` and `…/ntag/*`). e2e: `e2e/filament.spec.ts`, `e2e/filament-rfid.spec.ts`, plus `hot-path.spec.ts` (SB spool numbers in the trays, no Bambuddy

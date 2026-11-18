@@ -53,6 +53,17 @@ describe('NtagPanel', () => {
     expect(polls).toEqual([1, 2])
   })
 
+  it('binds the written tag on the spool once the mock confirms it', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const { user } = await render()
+    await user.click(screen.getByRole('button', { name: 'Write NTAG' }))
+    await screen.findByText('Hold a blank tag to the reader')
+    await act(() => vi.advanceTimersByTimeAsync(2000))
+    await act(() => vi.advanceTimersByTimeAsync(2000))
+    expect(await screen.findByText('Written and bound')).toBeInTheDocument()
+    expect((await getSpool(spoolId(7))).tag?.kind).toBe('ntag_opentag')
+  })
+
   it('says not seen yet after 60 s', async () => {
     server.use(http.post('*/api/v1/filament/spools/:id/ntag/confirm', () => HttpResponse.json({ bound: false })))
     vi.useFakeTimers({ shouldAdvanceTime: true })

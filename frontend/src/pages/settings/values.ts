@@ -84,6 +84,14 @@ export const HAND_LAID: Partial<Record<SectionId, readonly FieldName[]>> = {
   administration: ['activity_follow', 'activity_ttl_seconds', 'activity_repair_window_seconds'],
   // #959 — where the agent's `fetch_asset` (and `POST /models/{slug}/assets/fetch`) may fetch from.
   uploads: ['asset_fetch_domains'],
+  // #6262, #6264 — what moves between ScadBuddy and Bambuddy: spools in, tags out.
+  filament: ['filament_sync'],
+}
+
+/** The form's value of `filament_sync`, `spools|tags`, as its two choices. */
+export function syncParts(raw: string): [spools: 'off' | 'bb_to_sb', tags: 'off' | 'sb_to_bb'] {
+  const [spools, tags] = raw.split('|')
+  return [spools === 'off' ? 'off' : 'bb_to_sb', tags === 'sb_to_bb' ? 'sb_to_bb' : 'off']
 }
 
 export const SPECS: Record<string, FieldSpec> = Object.fromEntries(RUNTIME_FIELDS.map((spec) => [spec.name, spec]))
@@ -201,9 +209,11 @@ export function toPatchValue(name: FieldName, raw: string, settings: Settings): 
   )
     return raw
   if (name === 'store_s3_path_style' || name === 'print_auto_import') return raw === 'true'
-  // #6262 Task 13 — the form edits `spools`; `tags` is saved by its own select (#6264), so a
-  // save of the spools choice sends the stored `tags` back with it.
-  if (name === 'filament_sync') return { ...settings.filament_sync, spools: raw }
+  // #6262 Task 13, #6264 — one data type per key: the form's `spools|tags` string, split.
+  if (name === 'filament_sync') {
+    const [spools, tags] = syncParts(raw)
+    return { spools, tags }
+  }
   // #4699 — an empty list allows no source (each print goes to Unsorted imports) or skips no printer.
   if (name === 'print_auto_import_sources') return raw === '' ? [] : raw.split(',')
   if (name === 'print_auto_import_skip_printers') return raw === '' ? [] : raw.split(',').map(Number)

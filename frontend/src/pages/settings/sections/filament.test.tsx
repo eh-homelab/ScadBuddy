@@ -37,13 +37,16 @@ describe('Filament (#6262)', () => {
     await waitFor(() => expect(mockSettings().filament_sync).toEqual({ spools: 'off', tags: 'off' }))
   })
 
-  it('saves the tags choice as filament_sync.tags and keeps the spools choice', async () => {
+  it('saves the tags choice with Save Filament, as filament_sync.tags beside the spools choice', async () => {
     const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
     await seeded()
-    await choose(user, within(region('Filament')).getByRole('combobox', { name: 'Tags to Bambuddy' }), "Send ScadBuddy's bindings")
+    const filament = region('Filament')
+    await choose(user, within(filament).getByRole('combobox', { name: 'Tags to Bambuddy' }), "Send ScadBuddy's bindings")
+    expect(mockSettings().filament_sync).toEqual({ spools: 'bb_to_sb', tags: 'off' })
+    await user.click(within(filament).getByRole('button', { name: 'Save Filament' }))
     await waitFor(() => expect(mockSettings().filament_sync).toEqual({ spools: 'bb_to_sb', tags: 'sb_to_bb' }))
-    await choose(user, within(region('Filament')).getByRole('combobox', { name: 'Spools' }), 'Off')
-    await user.click(within(region('Filament')).getByRole('button', { name: 'Save Filament' }))
+    await choose(user, within(filament).getByRole('combobox', { name: 'Spools' }), 'Off')
+    await user.click(within(filament).getByRole('button', { name: 'Save Filament' }))
     await waitFor(() => expect(mockSettings().filament_sync).toEqual({ spools: 'off', tags: 'sb_to_bb' }))
   })
 

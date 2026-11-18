@@ -7,9 +7,10 @@ import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { TagPanel } from './TagPanel'
 
-async function render(number: number) {
+async function render(number: number, locked?: boolean) {
   const onChanged = vi.fn()
-  const spool = await getSpool(spoolId(number))
+  const loaded = await getSpool(spoolId(number))
+  const spool = locked === undefined ? loaded : { ...loaded, weight_locked: locked }
   const view = renderPage(<TagPanel spool={spool} onChanged={onChanged} />)
   return { ...view, onChanged }
 }
@@ -132,17 +133,58 @@ describe('TagPanel', () => {
     expect(screen.queryByText('No tag seen')).toBeNull()
   })
 
-  it('marks an open override binding and says the weight is locked', async () => {
-    await render(3)
+  const LOCK = 'Weight locked: the AMS percentage never changes grams left'
+
+  it('marks an open override binding, and says the weight is locked only when the spool is', async () => {
+    await render(3, false)
     expect(await screen.findByText('Override')).toBeInTheDocument()
-    expect(screen.getByText('Weight locked: the AMS percentage never changes grams left')).toBeInTheDocument()
+    expect(screen.queryByText(LOCK)).toBeNull()
+  })
+
+  it('says the weight is locked from the spool, and keeps saying it after Take off', async () => {
+    const { user, onChanged } = await render(4, true)
+    expect(screen.getByText(LOCK)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Take off' }))
+    await waitFor(() => expect(onChanged).toHaveBeenCalled())
+    expect(screen.getByText(LOCK)).toBeInTheDocument()
   })
 
   it('shows no override mark on a plain binding', async () => {
-    await render(4)
+    await render(4, false)
     await screen.findByText(/A1B2C3D4/)
     expect(screen.queryByText('Override')).toBeNull()
-    expect(screen.queryByText(/Weight locked/)).toBeNull()
+    expect(screen.queryByText(LOCK)).toBeNull()
+  })
+
+  it('never sends override with a kind other than bambu_mifare', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.post('*/api/v1/filament/spools/:id/tags', async ({ request }) => {
+        bodies.push(await request.clone().json())
+        return HttpResponse.json({}, { status: 201 })
+      }),
+    )
+    const { user, onChanged } = await render(2)
+    await user.type(screen.getByLabelText('Tray UUID'), '0123456789ABCDEF0123456789ABCDEF')
+    const box = screen.getByRole('checkbox', { name: 'This Bambu tag belongs to a different filament (override)' })
+    await user.click(box)
+    expect(box).toBeChecked()
+    await user.click(screen.getByRole('combobox', { name: 'Tag kind' }))
+    await user.click(await screen.findByRole('option', { name: 'OpenTag (NTAG)' }))
+    expect(box).not.toBeChecked()
+    expect(box).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Bind tag' }))
+    await waitFor(() => expect(onChanged).toHaveBeenCalled())
+    expect(bodies[0]).toMatchObject({ override: false, kind: 'ntag_opentag' })
+  })
+
+  it('a bind with override locks the weight of the spool', async () => {
+    const { user, onChanged } = await render(2)
+    await user.type(screen.getByLabelText('Tray UUID'), '0123456789ABCDEF0123456789ABCDEF')
+    await user.click(screen.getByRole('checkbox', { name: 'This Bambu tag belongs to a different filament (override)' }))
+    await user.click(screen.getByRole('button', { name: 'Bind tag' }))
+    await waitFor(() => expect(onChanged).toHaveBeenCalled())
+    expect((await getSpool(spoolId(2))).weight_locked).toBe(true)
   })
 
   it('refuses a bind with no key', async () => {
