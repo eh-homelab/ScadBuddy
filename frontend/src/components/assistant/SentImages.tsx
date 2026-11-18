@@ -28,8 +28,11 @@ export function SentImages({ images, sessionId = '' }: { images: SentImage[]; se
   const [load, setLoad] = useState<Load>('loading')
   /** The thumbnail that opened the lightbox: focus goes back to it when it closes. */
   const opener = useRef<HTMLElement | null>(null)
-  const count = images.length
-  const name = (index: number) => `Image ${index + 1} of ${count}`
+  // A PDF chip is not an image: the labels count and number the images only.
+  const isImage = (sent: SentImage) => sent.mediaType !== 'application/pdf'
+  const count = images.filter(isImage).length
+  const place = (index: number) => images.slice(0, index + 1).filter(isImage).length
+  const name = (index: number) => `Image ${place(index)} of ${count}`
   const image = shown === null ? undefined : images[shown]
   const fullUrl = image?.name && sessionId ? blobUrl(sessionId, image.name) : undefined
   // A server-built image (#6267) has no preview: its full image stands in for it.
@@ -64,7 +67,7 @@ export function SentImages({ images, sessionId = '' }: { images: SentImage[]; se
             ) : (
               <Button
                 variant="ghost"
-                aria-label={`View image ${index + 1} of ${count} larger`}
+                aria-label={`View image ${place(index)} of ${count} larger`}
                 aria-haspopup="dialog"
                 onClick={(event) => {
                   opener.current = event.currentTarget

@@ -139,6 +139,14 @@ describe('InvoiceImport', () => {
     expect(await screen.findByText('Import running')).toBeInTheDocument()
   })
 
+  it('says the plain sentence for an unreadable file', async () => {
+    const detail = 'This file is not a readable PDF or photo. Upload it again or use another file.'
+    answers(422, { detail, type: 'unreadable_file' })
+    const { user } = render(draft)
+    await user.click(await button())
+    expect(await screen.findByRole('alert')).toHaveTextContent(detail)
+  })
+
   it('hides the button on a 409 confirmed', async () => {
     answers(409, { detail: 'This invoice is confirmed. There is nothing left to import.', type: 'confirmed' })
     const { user, onChanged } = render(draft)
