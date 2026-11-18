@@ -25,6 +25,7 @@ from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.models import Material, SpoolCreate
 from scadbuddy.filament.presets import PoolSpoolPresets
 from scadbuddy.filament.rfid_mode import RfidModeStore
+from scadbuddy.filament.sensors import SensorStore
 from scadbuddy.filament.shopping import ShoppingStore
 from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.filament.suppliers import SuppliersStore
@@ -67,6 +68,7 @@ def _filament(pool: PgPool) -> Filament:
         locations=LocationStore(pool),
         inventory=FilamentInventory(pool),
         presets=PoolSpoolPresets(pool),
+        sensors=SensorStore(pool),
         rfid=RfidModeStore(pool),
         suppliers=SuppliersStore(pool, lambda: "USD"),
         invoices=InvoiceStore(pool, lambda: "USD", spools, types),
@@ -335,9 +337,47 @@ async def test_cancel_posts_to_the_device(pg_pool: PgPool, client: BambuddyClien
         return_value=httpx.Response(200, json={"status": "cancelled"})
     )
 
-    await ntag.cancel(_filament(pg_pool), client, _spool(_filament(pg_pool), pg_pool, 11), "sb-1")
+    f = _filament(pg_pool)
+    await ntag.cancel(f, client, _spool(f, pg_pool, 11), "sb-1")
 
     assert route.call_count == 1
+
+
+@respx.mock
+async def test_cancel_keeps_a_spools_row_queued_on_another_device(
+    pg_pool: PgPool, client: BambuddyClient
+) -> None:
+    f = _filament(pg_pool)
+    spool = _spool(f, pg_pool, 11)
+    await _queue(f, client, spool, None)
+    respx.post(f"{API}/spoolbuddy/devices/sb-2/cancel-write").mock(
+        return_value=httpx.Response(200, json={"status": "cancelled"})
+    )
+
+    await ntag.cancel(f, client, spool, "sb-2")
+
+    assert ntag._baseline(f, spool)[0] is True
+
+
+@respx.mock
+async def test_cancel_drops_the_spools_row_that_names_no_device(
+    pg_pool: PgPool, client: BambuddyClient
+) -> None:
+    f = _filament(pg_pool)
+    spool = _spool(f, pg_pool, 11)
+    with f.spools.transaction() as conn:
+        conn.execute(
+            "INSERT INTO filament_ntag_writes (spool_id, device_id, baseline_uid)"
+            " VALUES (%s, NULL, NULL)",
+            (spool,),
+        )
+    respx.post(f"{API}/spoolbuddy/devices/sb-2/cancel-write").mock(
+        return_value=httpx.Response(200, json={"status": "cancelled"})
+    )
+
+    await ntag.cancel(f, client, spool, "sb-2")
+
+    assert ntag._baseline(f, spool)[0] is False
 
 
 @respx.mock

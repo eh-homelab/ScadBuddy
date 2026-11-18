@@ -22,7 +22,7 @@ import { Spinner } from '../ui/spinner'
 // registry follows it. A virtual printer's access code is write-only: typed here, sent once,
 // never shown.
 
-type Mode = VirtualPrinterCreate['mode']
+type Mode = NonNullable<VirtualPrinterCreate['mode']>
 
 const MODES: { value: Mode; label: string }[] = [
   { value: 'archive', label: 'Archive' },

@@ -235,6 +235,9 @@ function putSettings(body: Record<string, unknown>) {
     if (name === 'filament_sync' && !String((value as { tags?: unknown } | null)?.tags ?? 'off').match(/^(off|sb_to_bb)$/)) {
       return refused(name, "Input should be 'off' or 'sb_to_bb'")
     }
+    if (name === 'filament_sync' && !String((value as { weights?: unknown } | null)?.weights ?? 'bb_to_sb').match(/^(off|bb_to_sb)$/)) {
+      return refused(name, "Input should be 'off' or 'bb_to_sb'")
+    }
     // #6625 — `profile_fetch_nozzles`: the resolver's sizes, at least one, each once.
     if (name === 'profile_fetch_nozzles' && value !== null) {
       const list = Array.isArray(value) ? (value as unknown[]) : []

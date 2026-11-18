@@ -1,5 +1,16 @@
 import { describe, expect, it } from 'vitest'
-import { alphaOf, CLEAR_ALPHA, isTranslucent, parseRgba, sameOpacity, TRANSLUCENT_ALPHA, withAlpha } from './rgba'
+import {
+  alphaOf,
+  CLEAR_ALPHA,
+  isTranslucent,
+  MIN_PREVIEW_OPACITY,
+  opacityOfAlpha,
+  parseRgba,
+  previewOpacity,
+  sameOpacity,
+  TRANSLUCENT_ALPHA,
+  withAlpha,
+} from './rgba'
 
 describe('parseRgba', () => {
   // The backend's `normalise_rgba` (`filament/colour.py`): six or eight hex digits,
@@ -57,5 +68,31 @@ describe('sameOpacity', () => {
   it.each(SAME_OPACITY)('%s and %s: %s', (left, right, same) => {
     expect(sameOpacity(left, right)).toBe(same)
     expect(sameOpacity(right, left)).toBe(same)
+  })
+})
+
+// #6349 — the 3D preview's opacity for a colour's alpha, never below the floor, so a clear
+// part stays visible.
+describe('previewOpacity (#6349)', () => {
+  it.each([
+    ['#FF0000FF', 1],
+    ['#FF0000', 1],
+    ['ff0000', 1],
+    ['#FF000080', 0x80 / 255],
+    ['#FF000020', MIN_PREVIEW_OPACITY],
+    ['#FF000000', MIN_PREVIEW_OPACITY],
+    ['red', 1],
+    ['', 1],
+    [null, 1],
+    [undefined, 1],
+  ])('%s draws at %s', (colour, opacity) => {
+    expect(previewOpacity(colour)).toBeCloseTo(opacity)
+  })
+
+  it('floors a clear alpha byte and leaves 255 opaque', () => {
+    expect(opacityOfAlpha(0)).toBe(MIN_PREVIEW_OPACITY)
+    expect(opacityOfAlpha(0x80)).toBeCloseTo(0.502, 2)
+    expect(opacityOfAlpha(255)).toBe(1)
+    expect(MIN_PREVIEW_OPACITY).toBe(0.35)
   })
 })

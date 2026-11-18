@@ -1056,6 +1056,14 @@ function Model({
     },
     [owned],
   )
+  // #6349 — what the canvas draws see-through, read by the e2e: each such material's opacity.
+  const canvas = useThree((state) => state.gl.domElement)
+  useEffect(() => {
+    // Only the mocked build (the e2e's) carries the marker.
+    if (import.meta.env.VITE_MOCK_API !== '1') return
+    canvas.setAttribute('data-see-through', owned.map((material) => material.opacity.toFixed(2)).join(','))
+    return () => canvas.removeAttribute('data-see-through')
+  }, [canvas, owned])
   // #2364 — a mesh that came with no box (a library file's plate, placed where the 3MF
   // put it on the bed) is measured, so it is centred and framed like any other. It is
   // measured on the loader's own scene, never on the drawn clone (#3026 review): the

@@ -1,0 +1,34 @@
+[
+  {
+    "entity_id": "sensor.dry_box_humidity",
+    "friendly_name": "Dry box humidity",
+    "state": "18.4",
+    "domain": "sensor",
+    "device_class": "humidity",
+    "unit_of_measurement": "%"
+  },
+  {
+    "entity_id": "sensor.dry_box_temperature",
+    "friendly_name": "Dry box temperature",
+    "state": "unavailable",
+    "domain": "sensor",
+    "device_class": "temperature",
+    "unit_of_measurement": "°C"
+  },
+  {
+    "entity_id": "sensor.attic_humidity",
+    "friendly_name": "Attic humidity",
+    "state": null,
+    "domain": "sensor",
+    "device_class": "humidity",
+    "unit_of_measurement": "%"
+  },
+  {
+    "entity_id": "sensor.no_class",
+    "friendly_name": null,
+    "state": "3",
+    "domain": "sensor",
+    "device_class": null,
+    "unit_of_measurement": null
+  }
+]

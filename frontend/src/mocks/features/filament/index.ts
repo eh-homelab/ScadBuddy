@@ -9,7 +9,7 @@ import { linkTypeFilament } from '../orders/priceBook'
 import { invoiceRefOf, typeSuppliersOf } from '../filamentPurchasing'
 import { mockSettings } from '../../handlers'
 import { printersState } from '../printers'
-import { H2C, seed, type Catalogs, type Seed, type SpoolRow } from './seed'
+import { H2C, seed, spoolId, type Catalogs, type Seed, type SpoolRow } from './seed'
 
 type S = components['schemas']
 
@@ -133,7 +133,15 @@ function view(row: SpoolRow): FilamentSpool {
       location: state.locations.find((place) => place.id === row.location_id)?.name ?? null,
     },
     low_stock: row.grams_left != null && label != null ? row.grams_left < (label * pct) / 100 : false,
+    needs_drying: needsDrying(row, effective.material_id),
   }
+}
+
+/** `hygroscopic AND max_hours_outside_dry IS NOT NULL AND hours_outside_dry > max` (§5 of the sensors plan, decision 8). */
+function needsDrying(row: SpoolRow, materialId: string | null | undefined): boolean {
+  const material = state.catalogs.materials.find((one) => one.id === materialId)
+  const max = material?.max_hours_outside_dry
+  return Boolean(material?.hygroscopic && max != null && row.hours_outside_dry > Number(max))
 }
 
 const findSpool = (id: string) => state.spools.find((row) => row.id === id)
@@ -329,6 +337,29 @@ const flag = (request: Request, name: string) => new URL(request.url).searchPara
 // -- the backend's refusals -----------------------------------------------------------
 
 /** Each refusal's text, as the store's error says it (`filament/*.py`). */
+/** The Home Assistant entities the mock's Bambuddy can read. */
+const HA_ENTITIES: S['HaEntity'][] = [
+  { entity_id: 'sensor.garage_humidity', friendly_name: 'Garage humidity', state: '47.5', domain: 'sensor', device_class: 'humidity', unit_of_measurement: '%' },
+  { entity_id: 'sensor.garage_temperature', friendly_name: 'Garage temperature', state: '19.2', domain: 'sensor', device_class: 'temperature', unit_of_measurement: '°C' },
+  { entity_id: 'sensor.attic_humidity', friendly_name: 'Attic humidity', state: 'unavailable', domain: 'sensor', device_class: 'humidity', unit_of_measurement: '%' },
+]
+
+const isAlerting = (sensor: S['Sensor']) =>
+  sensor.last_value != null &&
+  ((sensor.alert_above != null && sensor.last_value > sensor.alert_above) || (sensor.alert_below != null && sensor.last_value < sensor.alert_below))
+
+/** A day of readings every 15 minutes ending at the sensor's last one, oldest first: a slow drift that ends at its value. */
+function readingsOf(sensor: S['Sensor']): S['SensorReading'][] {
+  if (sensor.last_value == null || !sensor.last_at) return []
+  const end = Date.parse(sensor.last_at)
+  return Array.from({ length: 96 }, (_, i) => {
+    const back = 95 - i
+    const wave = Math.sin(i / 9) * 0.04 * (back / 95)
+    const drift = (back / 95) * 0.12
+    return { at: new Date(end - back * 15 * 60_000).toISOString(), value: Math.round(sensor.last_value! * (1 - drift + wave) * 10) / 10 }
+  })
+}
+
 const REFUSED = {
   tdfpId: 'tdfp_id: Input should be a whole number greater than 0 and less than 2147483648',
   catalogExists: 'a row of this catalog already has that name',
@@ -338,10 +369,11 @@ const REFUSED = {
   tagUnnamed: 'the tag has no tag_uid or tray_uuid once cleaned',
   tagKeysClash: 'the tag_uid and the tray_uuid name two different tags',
   rowsDuplicate: 'two rows name the same printer and nozzle',
-  locationExists: 'a place with that name or that tray already exists',
+  locationExists: 'a place with that name, that tray or that AMS unit already exists',
   locationCycle: 'a place cannot be its own parent or sit under one of its own',
-  moveTarget: 'the place to move to does not exist or is archived',
+  moveTarget: "the place to move to does not exist, is archived or is an AMS unit's place",
   badCursor: 'the cursor is not one this ledger gave',
+  sensorAms: 'an AMS sensor is made by ScadBuddy and cannot be added by hand',
 } as const
 
 /** Where an id field points. */
@@ -568,6 +600,8 @@ function newSpool(body: Record<string, unknown>): SpoolRow {
     last_dried_at: null,
     last_dried_temp_c: null,
     last_dried_hours: null,
+    hours_outside_dry: 0,
+    needs_drying: false,
     last_used_at: null,
     archived_at: null,
     created_at: now(),
@@ -600,6 +634,7 @@ export function createType(raw: unknown): S['SpoolType'] | Response {
     cost_per_kg: null,
     note: null,
     tdfp_id: null,
+    diameter_mm: '1.75',
     ...body,
     id: newId(),
     filament_id: null,
@@ -1383,6 +1418,7 @@ export const handlers = [
       ams_id: null,
       tray_id: null,
       note: null,
+      sort_order: 0,
       ...body,
       id: newId(),
       archived_at: null,
@@ -1407,6 +1443,72 @@ export const handlers = [
     if (badRef(next, LOCATION_REFS)) return problem(422, REFUSED.catalogRef)
     state.locations[at] = next
     return HttpResponse.json(next)
+  }),
+
+  // -- AMS weights (#6268): the mock books the same three spools, skipping one locked and two on a printing printer --
+  http.post(`${BASE}/spools/sync-ams-weights`, () =>
+    HttpResponse.json({ booked: 3, locked: 1, printing: 2, no_remain: 0, stale: 0, stale_printers: [], spools: [spoolId(1), spoolId(4), spoolId(8)] } satisfies S['AmsSyncResult']),
+  ),
+
+  // -- location sensors (#6268) --
+  http.get(`${BASE}/sensors`, ({ request }) => {
+    const place = new URL(request.url).searchParams.get('location_id')
+    const live = new Set(state.locations.filter((one) => !one.archived_at).map((one) => one.id))
+    return HttpResponse.json(state.sensors.filter((one) => !one.archived_at && live.has(one.location_id) && (!place || one.location_id === place)))
+  }),
+  http.get(`${BASE}/sensors/entities`, ({ request }) => {
+    const search = (new URL(request.url).searchParams.get('search') ?? '').toLowerCase()
+    return HttpResponse.json(HA_ENTITIES.filter((one) => !search || `${one.entity_id} ${one.friendly_name}`.toLowerCase().includes(search)))
+  }),
+  http.post(`${BASE}/sensors`, async ({ request }) => {
+    const body = (await request.json()) as S['SensorIn']
+    if (body.source === 'ams') return problem(422, REFUSED.sensorAms)
+    if (!state.locations.some((place) => place.id === body.location_id)) return problem(404, `no location ${body.location_id}`)
+    const made: S['Sensor'] = {
+      entity_id: null,
+      printer_id: null,
+      ams_id: null,
+      unit: null,
+      alert_above: null,
+      alert_below: null,
+      ...body,
+      notify: body.notify ?? false,
+      id: newId(),
+      last_value: null,
+      last_at: null,
+      alerting: false,
+      reachable: true,
+      archived_at: null,
+      created_at: now(),
+    }
+    state.sensors.push(made)
+    return HttpResponse.json(made, { status: 201 })
+  }),
+  http.patch(`${BASE}/sensors/:id`, async ({ params, request }) => {
+    const at = state.sensors.findIndex((one) => one.id === params.id && !one.archived_at)
+    if (at < 0) return problem(404, `no sensor ${String(params.id)}`)
+    const body = (await request.json()) as Record<string, unknown>
+    const extra = extraKeys(body, ['name', 'unit', 'alert_above', 'alert_below', 'notify', 'location_id'])
+    if (extra) return extra
+    const next = patched(state.sensors[at]!, body)
+    next.alerting = isAlerting(next)
+    state.sensors[at] = next
+    return HttpResponse.json(next)
+  }),
+  http.post(`${BASE}/sensors/:id/archive`, ({ params }) => {
+    const found = state.sensors.find((one) => one.id === params.id && !one.archived_at)
+    if (!found) return problem(404, `no sensor ${String(params.id)}`)
+    found.archived_at = now()
+    return new HttpResponse(null, { status: 204 })
+  }),
+  http.get(`${BASE}/sensors/:id/readings`, ({ params, request }) => {
+    const found = state.sensors.find((one) => one.id === params.id)
+    if (!found) return problem(404, `no sensor ${String(params.id)}`)
+    const url = new URL(request.url)
+    const since = url.searchParams.get('since')
+    const limit = Number(url.searchParams.get('limit') ?? 500)
+    const all = readingsOf(found).filter((one) => !since || one.at >= since)
+    return HttpResponse.json(all.slice(-limit))
   }),
 
   // -- the pull: the mock has no Bambuddy spools to pull, so it changes nothing --

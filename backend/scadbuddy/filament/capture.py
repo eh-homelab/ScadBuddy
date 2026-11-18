@@ -41,6 +41,7 @@ from psycopg_pool import ConnectionPool
 from scadbuddy.bambuddy.models import PrinterStatus
 from scadbuddy.bambuddy.trays import EXTERNAL, loading_trays, place_label, seen_trays
 from scadbuddy.filament import ledger, prints
+from scadbuddy.filament import models as m
 from scadbuddy.filament.inventory import FilamentInventory
 from scadbuddy.filament.locations import LocationStore
 from scadbuddy.printers.lan_models import LanReport
@@ -221,6 +222,30 @@ def _reading_due(conn: Conn, spool_id: UUID, key: tuple[UUID, int, int], remain:
     )
 
 
+def _holders(
+    conn: Conn, printer_id: str
+) -> tuple[dict[tuple[int, int], UUID], dict[UUID, list[UUID]], set[UUID]]:
+    """The printer's tray places by ``(ams_id, tray_id)``, the unarchived spools now in each
+    place, and those of them whose weight is locked. An AMS-unit place is no tray."""
+    places: dict[tuple[int, int], UUID] = {}
+    current: dict[UUID, list[UUID]] = {}
+    locked: set[UUID] = set()
+    for found in conn.execute(
+        "SELECT l.id, l.ams_id, l.tray_id, s.id AS spool_id, s.weight_locked"
+        " FROM filament_locations l"
+        " LEFT JOIN filament_spools s ON s.location_id = l.id AND s.archived_at IS NULL"
+        " WHERE l.printer_id = %s AND l.tray_id IS NOT NULL AND l.archived_at IS NULL"
+        " ORDER BY s.id",
+        (printer_id,),
+    ).fetchall():
+        places[(found["ams_id"], found["tray_id"])] = found["id"]
+        if found["spool_id"] is not None:
+            current.setdefault(found["id"], []).append(found["spool_id"])
+            if found["weight_locked"]:
+                locked.add(found["spool_id"])
+    return places, current, locked
+
+
 def reconcile(
     conn: Conn, printer_id: str, report: Mapping[str, Any], seen_at: datetime, *, actor: str
 ) -> CaptureResult:
@@ -233,17 +258,7 @@ def reconcile(
     status = _status(row, report, seen_at)
     filled = {(t.ams_id, t.tray_id): t for t in seen_trays(status)}
     loading = loading_trays(status)
-    places: dict[tuple[int, int], UUID] = {}
-    current: dict[UUID, list[UUID]] = {}
-    for found in conn.execute(
-        "SELECT l.id, l.ams_id, l.tray_id, s.id AS spool_id FROM filament_locations l"
-        " LEFT JOIN filament_spools s ON s.location_id = l.id AND s.archived_at IS NULL"
-        " WHERE l.printer_id = %s AND l.archived_at IS NULL ORDER BY s.id",
-        (printer_id,),
-    ).fetchall():
-        places[(found["ams_id"], found["tray_id"])] = found["id"]
-        if found["spool_id"] is not None:
-            current.setdefault(found["id"], []).append(found["spool_id"])
+    places, current, _ = _holders(conn, printer_id)
     state = report.get("gcode_state")
     printing = isinstance(state, str) and state in RUNNING
     job = report.get("subtask_name") if printing else None
@@ -347,3 +362,115 @@ def reconcile_all(
                 extra={"printer_id": printer_id, "what": "backstop", "error": type(error).__name__},
             )
     return total
+
+
+def _stale(
+    conn: Conn,
+    result: m.AmsSyncResult,
+    printer_id: str,
+    holders: list[UUID],
+    *,
+    name: str | None = None,
+    gone: bool = False,
+) -> None:
+    """Count ``holders`` as ``stale`` and name their printer in ``stale_printers`` (#6679).
+    A printer that holds no spool is not named. With no ``name`` and not ``gone``, the name
+    is read from the printer's row."""
+    if not holders:
+        return
+    result.stale += len(holders)
+    if name is None and not gone:
+        row = conn.execute("SELECT name FROM printers WHERE id = %s", (printer_id,)).fetchone()
+        name = None if row is None else row["name"]
+    result.stale_printers.append(m.StalePrinter(id=UUID(printer_id), name=name))
+
+
+def sync_ams_weights(pool: ConnectionPool[Conn], *, actor: str, now: datetime) -> m.AmsSyncResult:
+    """Book the AMS's ``remain`` of every spool in a printer's tray place now as an
+    ``ams_reading`` timed ``now`` (``data.forced``), so it anchors the grams left (#6268
+    Decision 2). Each printer is one transaction: its report row is locked first, then its
+    spools, as `reconcile_all` does, and the holders and weight locks are read after the
+    spool locks, so a lock set meanwhile is honoured. The tray's holder is the spool placed
+    there now, never an older one (an AMS-unit place holds no spool). Each such spool is
+    counted once: ``booked``, ``locked`` (its weight is locked), ``printing`` (its printer
+    is printing), ``no_remain`` (its tray shows no ``remain``, or none at all) or ``stale``
+    (its printer has no report or no row, or a report older than `is_fresh` or one that
+    cannot be read: that is logged, and the other printers go on); each such printer is
+    named once in ``stale_printers``. A spool in no tray
+    place is not counted, nor is one placed in a tray between the first holder read and
+    the spool locks: it was not locked, so it is left to the next sync."""
+    with pool.connection() as conn:
+        ids = [
+            str(r["printer_id"])
+            for r in conn.execute(
+                "SELECT printer_id FROM printer_reports"
+                " UNION SELECT printer_id FROM filament_locations"
+                " WHERE printer_id IS NOT NULL AND tray_id IS NOT NULL AND archived_at IS NULL"
+                " ORDER BY printer_id"
+            ).fetchall()
+        ]
+    result = m.AmsSyncResult()
+    for printer_id in ids:
+        with pool.connection() as conn, conn.transaction():
+            row = conn.execute(
+                "SELECT report, seen_at FROM printer_reports WHERE printer_id = %s FOR UPDATE",
+                (printer_id,),
+            ).fetchone()
+            places, current, _ = _holders(conn, printer_id)
+            taken = {s for spools in current.values() for s in spools}
+            lock(conn, sorted(taken))
+            places, current, locked = _holders(conn, printer_id)
+            current = {p: [s for s in spools if s in taken] for p, spools in current.items()}
+            holders = sorted({s for spools in current.values() for s in spools})
+            if row is None or not is_fresh(row["seen_at"], now):
+                _stale(conn, result, printer_id, holders)
+                continue
+            printer = PrinterStore.read_on(conn, printer_id)
+            if printer is None:
+                _stale(conn, result, printer_id, holders, gone=True)
+                continue
+            report = dict(row["report"])
+            state = report.get("gcode_state")
+            printing = isinstance(state, str) and state in RUNNING
+            if printing:
+                result.printing += len(holders)
+                continue
+            try:
+                filled = {
+                    (t.ams_id, t.tray_id): t for t in seen_trays(_status(printer, report, now))
+                }
+            except Exception as error:
+                # A malformed stored report is one printer's problem, as in `reconcile_all`.
+                logger.warning(
+                    prints.FILAMENT_CAPTURE_FAILED,
+                    extra={
+                        "printer_id": printer_id,
+                        "what": "ams sync",
+                        "error": type(error).__name__,
+                    },
+                )
+                _stale(conn, result, printer_id, holders, name=printer.name)
+                continue
+            for (ams_id, tray_id), place in places.items():
+                seen = filled.get((ams_id, tray_id))
+                for spool in current.get(place, []):
+                    if spool in locked:
+                        result.locked += 1
+                    elif seen is None or seen.remain is None:
+                        result.no_remain += 1
+                    else:
+                        ledger.record(
+                            conn,
+                            spool,
+                            "ams_reading",
+                            source="ams_remain",
+                            printer=UUID(printer_id),
+                            ams_id=ams_id,
+                            tray_id=tray_id,
+                            actor=actor,
+                            at=now,
+                            data={"remain_pct": seen.remain, "printing": False, "forced": True},
+                        )
+                        result.booked += 1
+                        result.spools.append(spool)
+    return result

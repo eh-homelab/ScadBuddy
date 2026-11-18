@@ -71,6 +71,7 @@ from scadbuddy.crud.render import (
     RemoteGeometryIndex,
     RemoteJobProjection,
 )
+from scadbuddy.crud.wire import PREFIX
 from scadbuddy.filament.component import FILAMENT
 from scadbuddy.filament.inventory import FilamentInventory
 from scadbuddy.filament.presets import PoolSpoolPresets
@@ -127,6 +128,42 @@ class _Noted:
 class _NoSessions:
     def resolve(self, token: str) -> None:
         return None
+
+
+#: The warm-up's bound: the helpers' own start deadline, not a test's.
+WARM_TIMEOUT = 30.0
+
+
+def _areas(caller: str) -> str:
+    return f"/api/v1{PREFIX}/{caller}/areas"
+
+
+def warm_crud_routes(base_url: str, auth: httpx.Auth, caller: str) -> None:
+    """One request to a CRUD app just served, before a test's first call (#6666, #6678).
+
+    FastAPI builds an included router's routes on the first request that matches one
+    (`_IncludedRouter.effective_candidates`): about 95 print routes, 0.2 to 0.6 s of CPU
+    on the server's loop (measured 2026-11-18). A helper serves a new app for each
+    test, so each test's first call paid that cost inside its own short timeout (the
+    watch's and a render job's 2 s) and timed out on a loaded runner. This request, to
+    ``caller``'s areas route, goes past the app's other routers first, so it builds
+    them; with ``auth`` it also mints and resolves the credential. It is bounded by
+    `WARM_TIMEOUT`, not a test's bound, and a refusal (another caller's credential)
+    still builds the routes. A 5xx fails here, at the helper, not in the test's first
+    timed call (#6682)."""
+    with httpx.Client(base_url=base_url, auth=auth, timeout=WARM_TIMEOUT) as warm:
+        _warmed(warm.get(_areas(caller)))
+
+
+async def warm_crud_routes_async(base_url: str, auth: httpx.Auth, caller: str) -> None:
+    """`warm_crud_routes` for a helper on the test's event loop."""
+    async with httpx.AsyncClient(base_url=base_url, auth=auth, timeout=WARM_TIMEOUT) as warm:
+        _warmed(await warm.get(_areas(caller)))
+
+
+def _warmed(reply: httpx.Response) -> None:
+    """Any answer but a server error: a refusal still built the routes."""
+    assert reply.status_code < 500, f"the CRUD warm-up got {reply.status_code}: {reply.text}"
 
 
 def agent_key_tables(store: FlowStore) -> Connect:
@@ -236,13 +273,11 @@ async def served_crud(
         settings_store=settings_store,
     )
     await listener.start(app, 0)
-    crud = CrudClient(
-        f"http://127.0.0.1:{listener.crud_listener_port(app)}",
-        "projects",
-        ServiceAuth(InProcessProvider("projects", lambda: credentials)),
-        **options,
-    )
+    base_url = f"http://127.0.0.1:{listener.crud_listener_port(app)}"
+    auth = ServiceAuth(InProcessProvider("projects", lambda: credentials))
+    crud = CrudClient(base_url, "projects", auth, **options)
     try:
+        await warm_crud_routes_async(base_url, auth, "projects")
         yield crud
     finally:
         await crud.aclose()
@@ -317,13 +352,11 @@ async def served_render_crud(
     credentials = ServiceCredentialStore(pool)
     app = render_crud_app(pool, settings, credentials, projection=projection)
     await listener.start(app, 0)
-    crud = CrudClient(
-        f"http://127.0.0.1:{listener.crud_listener_port(app)}",
-        "render",
-        ServiceAuth(InProcessProvider("render", lambda: credentials)),
-        **options,
-    )
+    base_url = f"http://127.0.0.1:{listener.crud_listener_port(app)}"
+    auth = ServiceAuth(InProcessProvider("render", lambda: credentials))
+    crud = CrudClient(base_url, "render", auth, **options)
     try:
+        await warm_crud_routes_async(base_url, auth, "render")
         yield crud
     finally:
         await crud.aclose()
@@ -377,13 +410,11 @@ def threaded_render_crud(
         assert thread.is_alive() and time.monotonic() < deadline, "the server did not start"
         time.sleep(0.01)
     port = server.servers[0].sockets[0].getsockname()[1]
-    client = CrudSyncClient(
-        f"http://127.0.0.1:{port}",
-        "render",
-        ServiceAuth(InProcessProvider("render", lambda: credentials)),
-        unavailable_budget=5,
-    )
+    base_url = f"http://127.0.0.1:{port}"
+    auth = ServiceAuth(InProcessProvider("render", lambda: credentials))
+    client = CrudSyncClient(base_url, "render", auth, unavailable_budget=5)
     try:
+        warm_crud_routes(base_url, auth, "render")
         yield client
     finally:
         client.close()
@@ -666,21 +697,23 @@ def threaded_print_crud(
     )
     thread = threading.Thread(target=server.run, name="crud print routes", daemon=True)
     thread.start()
-    deadline = time.monotonic() + 30
-    while not server.started:
-        assert thread.is_alive() and time.monotonic() < deadline, "the server did not start"
-        time.sleep(0.01)
-    port = server.servers[0].sockets[0].getsockname()[1]
-    client = CrudSyncClient(
-        f"http://127.0.0.1:{port}",
-        "print",
-        ServiceAuth(InProcessProvider(caller, lambda: credentials)),
-        unavailable_budget=0.5,
-    )
+    client: CrudSyncClient | None = None
+    # Everything after the start is under the `finally`, so a server that does not start
+    # or a warm-up that fails still stops the thread (#6673).
     try:
+        deadline = time.monotonic() + 30
+        while not server.started:
+            assert thread.is_alive() and time.monotonic() < deadline, "the server did not start"
+            time.sleep(0.01)
+        port = server.servers[0].sockets[0].getsockname()[1]
+        base_url = f"http://127.0.0.1:{port}"
+        auth = ServiceAuth(InProcessProvider(caller, lambda: credentials))
+        warm_crud_routes(base_url, auth, "print")
+        client = CrudSyncClient(base_url, "print", auth, unavailable_budget=0.5)
         yield client
     finally:
-        client.close()
+        if client is not None:
+            client.close()
         server.should_exit = True
         thread.join(30)
 
@@ -692,13 +725,11 @@ async def served_print_crud(store: SettingsStore, **parts: Any) -> AsyncIterator
     credentials = ServiceCredentialStore(store.pool)
     app = print_crud_app(store, credentials, **parts)
     await listener.start(app, 0)
-    crud = CrudClient(
-        f"http://127.0.0.1:{listener.crud_listener_port(app)}",
-        "print",
-        ServiceAuth(InProcessProvider("print", lambda: credentials)),
-        unavailable_budget=5,
-    )
+    base_url = f"http://127.0.0.1:{listener.crud_listener_port(app)}"
+    auth = ServiceAuth(InProcessProvider("print", lambda: credentials))
+    crud = CrudClient(base_url, "print", auth, unavailable_budget=5)
     try:
+        await warm_crud_routes_async(base_url, auth, "print")
         yield crud
     finally:
         await crud.aclose()

@@ -427,6 +427,7 @@ describe('QuoteEditor · a quote from a slice (#4250)', () => {
               power_per_hour: '0.03',
               wear_per_hour: '0.035',
               maintenance_per_hour: '0.12',
+              actuals: false,
             },
           },
         ]}

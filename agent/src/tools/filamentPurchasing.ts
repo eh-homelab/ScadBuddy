@@ -67,7 +67,7 @@ export const filamentPurchasingTools: Tool[] = [
         await ok(
           backend.PATCH('/api/v1/filament/suppliers/{supplier_id}', {
             params: { path: { supplier_id } },
-            body: (archived === undefined ? fields : { ...fields, archived }) as never,
+            body: archived === undefined ? fields : { ...fields, archived },
           }),
           `edit supplier ${supplier_id}`,
         ),
@@ -140,7 +140,7 @@ export const filamentPurchasingTools: Tool[] = [
         await ok(
           backend.PATCH('/api/v1/filament/products/{product_id}', {
             params: { path: { product_id } },
-            body: (archived === undefined ? fields : { ...fields, archived }) as never,
+            body: archived === undefined ? fields : { ...fields, archived },
           }),
           `edit supplier product ${product_id}`,
         ),
@@ -205,7 +205,7 @@ export const filamentPurchasingTools: Tool[] = [
         await ok(
           backend.POST('/api/v1/filament/products/{product_id}/prices', {
             params: { path: { product_id } },
-            body: body as never,
+            body,
           }),
           `add a price to product ${product_id}`,
         ),
@@ -398,7 +398,7 @@ export const filamentPurchasingTools: Tool[] = [
         result = await ok(
           backend.PATCH('/api/v1/filament/invoices/{invoice_id}', {
             params: { path: { invoice_id } },
-            body: fields as never,
+            body: fields,
           }),
           `edit invoice ${invoice_id}`,
         )
@@ -504,7 +504,7 @@ export const filamentPurchasingTools: Tool[] = [
     routes: ['POST /api/v1/filament/shopping-list'],
     summarize: ({ material, type_id }) => `Add ${material ?? type_id ?? 'a spool'} to the shopping list`,
     handler: async (body, { backend }) =>
-      json(await ok(backend.POST('/api/v1/filament/shopping-list', { body: body as never }), 'add to the shopping list')),
+      json(await ok(backend.POST('/api/v1/filament/shopping-list', { body }), 'add to the shopping list')),
   }),
 
   defineTool({

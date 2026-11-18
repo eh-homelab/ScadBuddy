@@ -1005,17 +1005,21 @@ Both call `deploy.reusable.yml`, which:
    (#547, #1060, #1057). The workflow tolerates a missing worker manifest, noting
    its absence and pinning the rest, from before clusters added them. Each
    file must have exactly one such image line and one of each annotation, before
-   and after the rewrite, or the deploy stops. In the same PR it moves the
-   dashboard's pin in `clusters/prod/scadbuddy/kustomization.yaml`, the line
-   `- https://github.com/eh-homelab/ScadBuddy//deploy/grafana?ref=<40-hex SHA>`,
-   optionally followed by exactly `&timeout=<n>s|m|h`, to the same revision,
-   keeping that suffix as it is. The suffix raises kustomize's 27s default git
-   timeout, which a checkout of this repo (with its LFS test fixtures) now
-   outlasts. That line is optional: an overlay that does not mention
-   `eh-homelab/ScadBuddy//deploy/grafana` at all deploys the images alone with a
-   notice; one that mentions it in any other form (a short SHA, a branch, a
-   comment, other casing or spacing, any other query parameter) or twice stops
-   the deploy;
+   and after the rewrite, or the deploy stops. In the same PR it refreshes the
+   dashboards' vendored copy in clusters (eh-homelab/clusters#3734):
+   `clusters/prod/scadbuddy/grafana/` holds a byte-for-byte copy of this repo's
+   `deploy/grafana/` (`kustomization.yaml` and every `*.json`) and a `.revision`
+   file with the 40-hex commit it came from. The deploy fetches `deploy/grafana/`
+   at the same revision through the contents API, checks each file against its
+   git blob sha, replaces the copy's `kustomization.yaml` and `*.json` (so a
+   removed dashboard goes too), and writes `.revision`. A revision with no
+   `deploy/grafana/` keeps the copy, and the PR says so; a name other than
+   `kustomization.yaml` or `[a-z0-9-]+.json`, or a subdirectory, stops the deploy.
+   The copy is optional: an overlay without that directory deploys the images
+   alone with a notice. Clusters used to pull `deploy/grafana` in as a remote
+   kustomize resource (`…//deploy/grafana?ref=<SHA>`), which Argo CD's
+   repo-server failed to fetch in prod, wedging syncs; an overlay that still
+   names it, in any form, stops the deploy;
 3. opens **one** PR, `deploy(scadbuddy): <version>`, on the fixed branch
    `deploy/scadbuddy`, and arms `gh pr merge --auto --squash`. A newer deploy
    first waits up to 90 minutes (two 45 minute rounds, #6368) for an older open
@@ -2623,9 +2627,8 @@ deploy PR link into the release notes. There is no human step after
   `applications/scadbuddy/scadbuddy-print.yaml` and
   `applications/scadbuddy/scadbuddy-projects.yaml`; one deploy pins them all to the
   same digest.
-- **Which dashboard is live:** the `?ref=` on the `deploy/grafana` line of
-  clusters' `clusters/prod/scadbuddy/kustomization.yaml`, which should equal the
-  `revision` annotation.
+- **Which dashboard is live:** clusters' `clusters/prod/scadbuddy/grafana/.revision`,
+  which should equal the `revision` annotation.
 - **No ✅ within ~20 min of a merge/publish:** look at the clusters deploy PR
   first — a red required check there means the merge never happened and
   nothing reports until it does. Failed *verification* (merged, but the pod
@@ -2636,8 +2639,9 @@ deploy PR link into the release notes. There is no human step after
 
 There should be no reason for one; but the mechanism is only a PR. Editing the
 image line and annotations in the clusters manifests (both, once the render
-worker's exists), and the dashboard line's `?ref=` (the full 40-character
-revision), by hand and merging does exactly what the pipeline does. Do not
+worker's exists), and copying `deploy/grafana/` at that revision over
+`clusters/prod/scadbuddy/grafana/` with the full 40-character revision in its
+`.revision`, by hand and merging does exactly what the pipeline does. Do not
 `kubectl rollout restart` — the pin is what makes the running image knowable.
 
 ### Tracing (#988)
@@ -2709,10 +2713,9 @@ The ScadBuddy dashboard (uid `scadbuddy`) is `deploy/grafana/`: a kustomize
 directory whose `configMapGenerator` makes the ConfigMap `scadbuddy-dashboard`
 in `cattle-dashboards`, labelled `grafana_dashboard: "1"`, which the
 rancher-monitoring Grafana's sidecar loads. clusters' `clusters/prod/scadbuddy`
-overlay will list it as a remote resource pinned to a full commit SHA, once
-clusters#1596 Phase 5 adds the line, and the deploy
-moves that pin with the image (above), so the dashboard shown is the one written
-for the build that is serving. The overlay must namespace its own resources with
+overlay lists a vendored copy of it, `grafana/` (eh-homelab/clusters#3734), and
+the deploy refreshes that copy with the image (above), so the dashboard shown is
+the one written for the build that is serving. The overlay must namespace its own resources with
 an `unsetOnly` NamespaceTransformer, not a plain `namespace:` field, or the
 ConfigMap is moved out of `cattle-dashboards` and never loads (clusters#1596
 Phase 5). Datasources are the variables `DS_PROMETHEUS` and `DS_TEMPO` (default

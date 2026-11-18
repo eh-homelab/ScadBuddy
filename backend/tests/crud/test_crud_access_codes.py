@@ -56,6 +56,7 @@ from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.store import KekMissingError, PrinterStore
 from scadbuddy.worker import PRINT_CRUD_AREAS
+from tests.crud.crud_support import warm_crud_routes
 from tests.printers.conftest import KEK
 
 INTERNAL = "http://api"
@@ -114,13 +115,11 @@ def _remote(app: FastAPI, caller: str = "print") -> Iterator[RemotePrinterStore]
         assert thread.is_alive() and time.monotonic() < deadline, "the server did not start"
         time.sleep(0.01)
     port = server.servers[0].sockets[0].getsockname()[1]
-    client = CrudSyncClient(
-        f"http://127.0.0.1:{port}",
-        "print",
-        ServiceAuth(_Token(f"sbsvc_{caller}")),
-        unavailable_budget=0.5,
-    )
+    base_url = f"http://127.0.0.1:{port}"
+    auth = ServiceAuth(_Token(f"sbsvc_{caller}"))
+    client = CrudSyncClient(base_url, "print", auth, unavailable_budget=0.5)
     try:
+        warm_crud_routes(base_url, auth, "print")
         yield RemotePrinterStore(client)
     finally:
         client.close()

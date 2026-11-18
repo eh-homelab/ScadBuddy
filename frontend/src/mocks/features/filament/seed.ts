@@ -25,6 +25,7 @@ const id = (prefix: string, n: number) => `${prefix}-0000-4000-8000-${String(n).
 export const spoolId = (number: number) => id('62620000', number)
 const typeId = (n: number) => id('62620001', n)
 const catalogId = (n: number) => id('62620002', n)
+const sensorId = (n: number) => id('62680001', n)
 const locationId = (n: number) => id('62620003', n)
 const tagId = (n: number) => id('62620004', n)
 
@@ -80,6 +81,8 @@ export function sbSpool(look: Look): FilamentSpool {
     last_dried_at: null,
     last_dried_temp_c: null,
     last_dried_hours: null,
+    hours_outside_dry: 0,
+    needs_drying: false,
     last_used_at: null,
     archived_at: look.archived ? AT : null,
     created_at: AT,
@@ -113,6 +116,7 @@ function material(n: number, name: string, values: Partial<S['Material']> = {}):
     bed_temp_max: null,
     drying_temp_c: null,
     drying_hours: null,
+    max_hours_outside_dry: null,
     needs_enclosure: false,
     abrasive: false,
     hygroscopic: false,
@@ -167,7 +171,7 @@ function catalogs(): Catalogs {
   return {
     materials: [
       material(1, 'PLA', { family: 'PLA', density_g_cm3: '1.24', nozzle_temp_min: 190, nozzle_temp_max: 230, bed_temp_min: 35, bed_temp_max: 65, drying_temp_c: 55, drying_hours: '8' }),
-      material(2, 'PETG', { family: 'PETG', density_g_cm3: '1.27', nozzle_temp_min: 230, nozzle_temp_max: 260, bed_temp_min: 65, bed_temp_max: 80, drying_temp_c: 65, drying_hours: '8', hygroscopic: true }),
+      material(2, 'PETG', { family: 'PETG', density_g_cm3: '1.27', nozzle_temp_min: 230, nozzle_temp_max: 260, bed_temp_min: 65, bed_temp_max: 80, drying_temp_c: 65, drying_hours: '8', hygroscopic: true, max_hours_outside_dry: '48' }),
       material(3, 'TPU', { family: 'TPU', density_g_cm3: '1.21', nozzle_temp_min: 220, nozzle_temp_max: 240, flexible: true }),
       material(4, 'Unknown', { note: 'What a Bambuddy spool with no material is pulled as.' }),
     ],
@@ -209,7 +213,7 @@ function catalogs(): Catalogs {
 
 // -- places ---------------------------------------------------------------------------
 
-export const L = { WORKSHOP: locationId(1), SHELF_A: locationId(2), DRY_BOX: locationId(3), AMS_A1: locationId(4), AMS_A4: locationId(5) }
+export const L = { WORKSHOP: locationId(1), SHELF_A: locationId(2), DRY_BOX: locationId(3), AMS_A1: locationId(4), AMS_A4: locationId(5), AMS_A: locationId(6) }
 
 function place(n: number, name: string, kind_id: string, values: Partial<S['Location']> = {}): S['Location'] {
   return {
@@ -232,8 +236,9 @@ function locations(): S['Location'][] {
     place(1, 'Workshop', LK.ROOM),
     place(2, 'Shelf A', LK.SHELF, { parent_id: L.WORKSHOP, capacity: 12 }),
     place(3, 'Dry box 1', LK.DRY_BOX, { parent_id: L.WORKSHOP, capacity: 4, sort_order: 1 }),
-    place(4, 'H2C AMS-A slot 1', LK.AMS, { printer_id: H2C.printer_id, ams_id: 0, tray_id: 0, sort_order: 2 }),
-    place(5, 'H2C AMS-A slot 4', LK.AMS, { printer_id: H2C.printer_id, ams_id: 0, tray_id: 3, sort_order: 3 }),
+    place(4, 'H2C AMS-A slot 1', LK.AMS, { parent_id: L.AMS_A, printer_id: H2C.printer_id, ams_id: 0, tray_id: 0, sort_order: 2 }),
+    place(6, 'H2C AMS-A', LK.AMS, { printer_id: H2C.printer_id, ams_id: 0, sort_order: 4 }),
+    place(5, 'H2C AMS-A slot 4', LK.AMS, { parent_id: L.AMS_A, printer_id: H2C.printer_id, ams_id: 0, tray_id: 3, sort_order: 3 }),
   ]
 }
 
@@ -359,6 +364,8 @@ function spool(number: number, values: Partial<SpoolRow>): SpoolRow {
     last_dried_at: null,
     last_dried_temp_c: null,
     last_dried_hours: null,
+    hours_outside_dry: 0,
+    needs_drying: false,
     last_used_at: null,
     archived_at: null,
     created_at: AT,
@@ -370,7 +377,7 @@ function spool(number: number, values: Partial<SpoolRow>): SpoolRow {
 function spools(): SpoolRow[] {
   return [
     spool(1, { type_id: T.JADE, grams_left: 640, location_id: L.SHELF_A, last_weighed_g: 640, last_weighed_at: '2026-11-14T18:00:00Z' }),
-    spool(2, { type_id: T.ORANGE, grams_left: 820, location_id: L.DRY_BOX, last_dried_at: '2026-11-12T09:00:00Z', last_dried_temp_c: 65, last_dried_hours: '8' }),
+    spool(2, { type_id: T.ORANGE, grams_left: 820, location_id: L.DRY_BOX, hours_outside_dry: 61.5, last_dried_at: '2026-11-12T09:00:00Z', last_dried_temp_c: 65, last_dried_hours: '8' }),
     spool(3, { type_id: T.PINK, grams_left: 930, location_id: L.SHELF_A }),
     spool(4, { type_id: T.BLACK, grams_left: 120, location_id: L.AMS_A1, last_used_at: '2026-11-14T21:30:00Z' }),
     spool(5, { type_id: T.POLY_CLEAR, grams_left: 700, location_id: L.DRY_BOX }),
@@ -485,9 +492,43 @@ export function seed() {
     tags: tags(),
     bindings: bindings(),
     events: events(),
+    sensors: sensors(),
     /** The Bambuddy spool each SB spool is linked to (#7 came from Bambuddy spool 41). */
     bbLinks: new Map<string, number>([[spoolId(7), 41]]),
   }
+}
+
+/** The sensors the places carry (#6268): a shelf that reads too damp, a dry box, and an AMS tray's own. */
+export const SENSOR = { SHELF_HUMIDITY: sensorId(1), BOX_HUMIDITY: sensorId(2), BOX_TEMP: sensorId(3), AMS_HUMIDITY: sensorId(4) }
+
+function sensors(): S['Sensor'][] {
+  const sensor = (n: number, location_id: string, values: Partial<S['Sensor']>): S['Sensor'] => ({
+    id: sensorId(n),
+    location_id,
+    name: '',
+    source: 'home_assistant',
+    kind: 'humidity',
+    entity_id: null,
+    printer_id: null,
+    ams_id: null,
+    unit: '%',
+    alert_above: null,
+    alert_below: null,
+    notify: false,
+    last_value: null,
+    last_at: null,
+    alerting: false,
+    reachable: true,
+    archived_at: null,
+    created_at: AT,
+    ...values,
+  })
+  return [
+    sensor(1, L.SHELF_A, { name: 'Shelf A humidity', entity_id: 'sensor.shelf_a_humidity', alert_above: 55, last_value: 62, last_at: '2026-11-18T09:45:00Z', alerting: true }),
+    sensor(2, L.DRY_BOX, { name: 'Dry box humidity', entity_id: 'sensor.dry_box_humidity', alert_above: 20, last_value: 11, last_at: '2026-11-18T09:45:00Z' }),
+    sensor(3, L.DRY_BOX, { name: 'Dry box temperature', kind: 'temperature', entity_id: 'sensor.dry_box_temperature', unit: '°C', last_value: 38.5, last_at: '2026-11-18T09:45:00Z', reachable: false }),
+    sensor(4, L.AMS_A, { name: 'AMS-A humidity', source: 'ams', printer_id: H2C.printer_id, ams_id: 0, last_value: 18, last_at: '2026-11-18T09:40:00Z' }),
+  ]
 }
 
 export type Seed = ReturnType<typeof seed>

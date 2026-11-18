@@ -581,3 +581,30 @@ async def test_the_spool_catalog_declares_read_status(bambuddy: BambuddyClient) 
         await bambuddy.spool_catalog()
 
     assert caught.value.extensions["required_scope"] == Scope.READ_STATUS.value
+
+
+@respx.mock
+async def test_ha_entities_are_read_with_the_search(bambuddy: BambuddyClient) -> None:
+    route = respx.get(f"{API}/location-ha-sensors/entities").mock(
+        return_value=httpx.Response(200, json=recording("ha-entities.json"))
+    )
+
+    entities = await bambuddy.ha_entities("box")
+
+    assert route.calls.last.request.url.params["search"] == "box"
+    assert [(e.entity_id, e.state, e.device_class, e.unit_of_measurement) for e in entities] == [
+        ("sensor.dry_box_humidity", "18.4", "humidity", "%"),
+        ("sensor.dry_box_temperature", "unavailable", "temperature", "°C"),
+        ("sensor.attic_humidity", None, "humidity", "%"),
+        ("sensor.no_class", "3", None, None),
+    ]
+
+
+@respx.mock
+async def test_ha_entities_with_no_search_send_none(bambuddy: BambuddyClient) -> None:
+    route = respx.get(f"{API}/location-ha-sensors/entities").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+
+    assert await bambuddy.ha_entities(None) == []
+    assert "search" not in route.calls.last.request.url.params

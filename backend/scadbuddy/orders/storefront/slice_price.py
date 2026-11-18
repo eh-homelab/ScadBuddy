@@ -174,6 +174,10 @@ class PriceRow(BaseModel):
     #: Each plate the slice gave (#6153 PR B); None on a row written before.
     plates: list[Plate] | None = None
     printer: str | None = None
+    #: The machine rate's parts that priced the slice (#5774), which the checkout's
+    #: `storefront` quote records; None when the book's rate priced it, or on a row
+    #: written before it was kept.
+    machine_rate_breakdown: MachineRateBreakdown | None = None
     failure: str | None = None
     started_at: datetime
     finished_at: datetime | None = None
@@ -194,8 +198,8 @@ class Claim:
 _COLUMNS: Final = (
     "price_key, model_sha256, status, attempt, claim_key, operation_key, currency,"
     " unit_price_minor,"
-    " total_minor, unit_cost_minor, lines, print_seconds, grams, plates, printer, failure,"
-    " started_at, finished_at"
+    " total_minor, unit_cost_minor, lines, print_seconds, grams, plates, printer,"
+    " machine_rate_breakdown, failure, started_at, finished_at"
 )
 
 
@@ -323,15 +327,17 @@ class SlicePrices:
             found = conn.execute(
                 "INSERT INTO storefront_slice_prices (price_key, model_sha256, status,"
                 " currency, unit_price_minor, total_minor, unit_cost_minor, lines,"
-                " print_seconds, grams, plates, printer, finished_at)"
-                " VALUES (%s, %s, 'done', %s, %s, %s, %s, %s, %s, %s, %s, %s, clock_timestamp())"
+                " print_seconds, grams, plates, printer, machine_rate_breakdown, finished_at)"
+                " VALUES (%s, %s, 'done', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,"
+                " clock_timestamp())"
                 " ON CONFLICT (price_key) DO UPDATE SET status = 'done',"
                 " currency = EXCLUDED.currency, unit_price_minor = EXCLUDED.unit_price_minor,"
                 " total_minor = EXCLUDED.total_minor,"
                 " unit_cost_minor = EXCLUDED.unit_cost_minor, lines = EXCLUDED.lines,"
                 " print_seconds = EXCLUDED.print_seconds, grams = EXCLUDED.grams,"
                 " plates = EXCLUDED.plates,"
-                " printer = EXCLUDED.printer, failure = NULL,"
+                " printer = EXCLUDED.printer,"
+                " machine_rate_breakdown = EXCLUDED.machine_rate_breakdown, failure = NULL,"
                 " finished_at = EXCLUDED.finished_at"
                 f" RETURNING {_COLUMNS}",
                 (
@@ -346,6 +352,7 @@ class SlicePrices:
                     Jsonb({str(slot): format(used, "f") for slot, used in sorted(grams.items())}),
                     Jsonb([plate.model_dump(mode="json") for plate in sliced.plates]),
                     None if sliced.rate is None else sliced.rate.printer,
+                    None if sliced.rate is None else Jsonb(sliced.rate.model_dump(mode="json")),
                 ),
             ).fetchone()
         row = _row(found)

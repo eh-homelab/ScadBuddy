@@ -513,3 +513,16 @@ def test_a_printer_that_raises_is_skipped_and_the_next_still_runs(
     assert result.loaded == 1
     assert "secret detail" not in caplog.text
     assert [e.kind for e in _events(pg_pool, spool, "loaded")] == ["loaded"]
+
+
+def test_capture_leaves_an_ams_unit_place_alone(pg_pool: PgPool) -> None:
+    pid, _ = _printer(pg_pool)
+    with pg_pool.connection() as conn:
+        unit = LocationStore.ensure_ams_unit_on(conn, UUID(pid), 0)
+    spool = _spool(pg_pool, tray_uuid=U1)
+    _reconcile(pg_pool, pid, _report(_tray(1, U1)))
+    assert _tray_place(pg_pool, pid) is not None
+    assert _row(pg_pool, spool)["location_id"] != unit
+    with pg_pool.connection() as conn:
+        row = conn.execute("SELECT archived_at FROM filament_locations WHERE id = %s", (unit,))
+        assert row.fetchone() == {"archived_at": None}

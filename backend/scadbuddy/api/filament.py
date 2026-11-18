@@ -3,8 +3,10 @@ module holds the catalogs a spool type or a spool picks from (plain reads and wr
 over `filament/catalog.py`), the spool types (`filament/types.py`), and the spools,
 their tags and their ledger (`filament/spools.py`, `filament/ledger.py`). Some routes reach
 Bambuddy. Only reads: the import (`POST /filament/bambuddy/import`,
-`filament/bambuddy_pull.py`), `GET /rfid/status` and `POST /rfid/scan`. Writes, each with its
-own rule: a tag change (`POST /filament/spools/{id}/tags`, its unbind, and the NTAG confirm,
+`filament/bambuddy_pull.py`), the list of Home Assistant entities
+(`GET /filament/sensors/entities`, #6268), `GET /rfid/status` and `POST /rfid/scan`.
+Writes, each with its own rule: a tag change (`POST /filament/spools/{id}/tags`, its unbind,
+and the NTAG confirm,
 `filament/rfid_push.py`, #6264) tells Bambuddy only with ``filament_sync.tags`` ``sb_to_bb``;
 `PUT /rfid/override-mode` writes Bambuddy's auto-add setting (`filament/rfid_mode.py`) and
 `POST /rfid/reconcile` runs the mode, the tag push and the AMS slot configure of each override
@@ -15,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, cast
 from uuid import UUID
 
@@ -25,7 +28,7 @@ from scadbuddy.api.deps import SettingsStoreDep, StateDep
 from scadbuddy.auth.component import CallerDep
 from scadbuddy.auth.models import Caller, Person, PersonalToken, Service
 from scadbuddy.bambuddy.client import client_for
-from scadbuddy.bambuddy.models import SpoolAssignment
+from scadbuddy.bambuddy.models import HaEntity, SpoolAssignment
 from scadbuddy.core.problems import DATABASE_ERRORS, ApiError
 from scadbuddy.crud.idempotency import (
     MaybeIdempotencyKey,
@@ -33,8 +36,8 @@ from scadbuddy.crud.idempotency import (
     idempotent_write,
     required_key,
 )
+from scadbuddy.filament import capture, ntag, rfid_mode
 from scadbuddy.filament import models as m
-from scadbuddy.filament import ntag, rfid_mode
 from scadbuddy.filament.assignments_cache import AssignmentsCache
 from scadbuddy.filament.bambuddy_pull import PullReport, read_and_pull, try_assignments
 from scadbuddy.filament.catalog import (
@@ -71,6 +74,7 @@ from scadbuddy.filament.profile_fetch import (
 from scadbuddy.filament.rfid_mode import read_status, reconcile_mode_now
 from scadbuddy.filament.rfid_push import push_pending
 from scadbuddy.filament.rfid_slots import reconcile_slots_now
+from scadbuddy.filament.sensors import SensorBandError
 from scadbuddy.filament.spools import (
     OverrideKindError,
     SpoolBambuddyLinkedError,
@@ -533,6 +537,26 @@ async def import_spools(
     except ImportRefusedError as exc:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from None
     return ImportPreview.model_validate(done.body)
+
+
+@router.post(
+    "/spools/sync-ams-weights",
+    response_model=m.AmsSyncResult,
+    summary="Sync weights from the AMS",
+    description=(
+        "Books the AMS's remaining percent of each spool loaded in a tray now, as a reading "
+        "of its grams left (remain times its label weight) that outranks older ones. Skips "
+        "a spool whose weight is locked, every spool of a printer that is printing, one "
+        "whose tray reports no `remain` (only RFID trays do), and every spool of a printer "
+        "with no report or a stale one. Each spool in a printer's tray is in one count; "
+        "`spools` are the ones booked, and `stale_printers` names (`id`, `name`) each "
+        "printer whose spools are in `stale`."
+    ),
+)
+async def sync_ams_weights(filament: FilamentDep, caller: CallerDep) -> m.AmsSyncResult:
+    return await asyncio.to_thread(
+        capture.sync_ams_weights, filament.spools.pool, actor=actor(caller), now=datetime.now(UTC)
+    )
 
 
 @router.get(
@@ -998,7 +1022,8 @@ async def list_locations(
         "A place has a `name`, a `kind_id` (the `location-kinds` catalog) and optionally a "
         "`parent_id`. An AMS tray also names its `printer_id`, `ams_id` and `tray_id`. 409 "
         "when an unarchived place of the name is under the parent, or one is already that "
-        "tray; 422 for a bad field or a row it points at that does not exist."
+        "tray or that AMS unit (a `printer_id` and an `ams_id` with no `tray_id`); 422 for "
+        "a bad field or a row it points at that does not exist."
     ),
 )
 async def create_location(filament: FilamentDep, body: m.LocationCreate) -> m.Location:
@@ -1015,8 +1040,8 @@ async def create_location(filament: FilamentDep, body: m.LocationCreate) -> m.Lo
     description=(
         "Only the fields sent change; `null` clears a nullable one. `archived: true` takes "
         "the place off the tree and frees its name, `false` puts it back. 404 for no such "
-        "place, 409 for a name or tray taken, or a `parent_id` that would make the place "
-        "its own ancestor; 422 for a bad field."
+        "place, 409 for a name, tray or AMS unit taken, or a `parent_id` that would make "
+        "the place its own ancestor; 422 for a bad field."
     ),
 )
 async def patch_location(
@@ -1031,6 +1056,134 @@ async def patch_location(
     return changed
 
 
+# -- location sensors (#6268) ---------------------------------------------------------
+
+
+@router.get(
+    "/sensors",
+    response_model=list[m.Sensor],
+    summary="List the location sensors",
+    description=(
+        "The unarchived humidity and temperature sensors of the unarchived places, by name; "
+        "of one place with `location_id`. A sensor on an archived place is left out. Each "
+        "carries its last stored value and time, `reachable` "
+        "(false when its last read had no number), and `alerting` (the last value is "
+        "outside `alert_below` / `alert_above`)."
+    ),
+)
+async def list_sensors(filament: FilamentDep, location_id: UUID | None = None) -> list[m.Sensor]:
+    return await asyncio.to_thread(filament.sensors.list, location_id)
+
+
+@router.get(
+    "/sensors/entities",
+    response_model=list[HaEntity],
+    summary="List Home Assistant entities",
+    description=(
+        "The Home Assistant entities Bambuddy can read, with their states, for choosing a "
+        "sensor's `entity_id`; `search` narrows them. Reads Bambuddy and writes nothing. "
+        "409 when no Bambuddy is configured; Bambuddy's own errors as they come."
+    ),
+)
+async def list_ha_entities(store: SettingsStoreDep, search: str | None = None) -> list[HaEntity]:
+    settings = await asyncio.to_thread(store.load)
+    async with client_for(settings) as client:
+        return await client.ha_entities(search)
+
+
+@router.post(
+    "/sensors",
+    response_model=m.Sensor,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add a location sensor",
+    description=(
+        "A `home_assistant` sensor reads the state of an `entity_id` through Bambuddy (the "
+        "pull reads it) and is put on a place; it has a `kind` (`humidity` or "
+        "`temperature`), a `name`, an optional `unit`, an alert band (`alert_below`, "
+        "`alert_above`) and `notify`. An `ams` sensor is made by ScadBuddy from the "
+        "printer's report, never by hand (422). 422 for a bad field or a place that does "
+        "not exist or is archived."
+    ),
+)
+async def create_sensor(filament: FilamentDep, caller: CallerDep, body: m.SensorIn) -> m.Sensor:
+    if body.source == "ams":
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "an ams sensor is made from the printer's report, not by hand",
+        )
+    try:
+        return await asyncio.to_thread(filament.sensors.create, body, actor(caller))
+    except CatalogRefError as exc:
+        raise _refused(exc) from None
+
+
+@router.patch(
+    "/sensors/{sensor_id}",
+    response_model=m.Sensor,
+    summary="Change a location sensor",
+    description=(
+        "Only the fields sent change: `location_id`, `name`, `unit`, the alert band and "
+        "`notify`; `null` clears a nullable one. Its source, kind and where it reads from "
+        "stay as made. 404 for no such sensor, 422 for a bad field or a place that does "
+        "not exist."
+    ),
+)
+async def patch_sensor(
+    filament: FilamentDep, caller: CallerDep, sensor_id: UUID, body: m.SensorPatch
+) -> m.Sensor:
+    try:
+        return await asyncio.to_thread(filament.sensors.update, sensor_id, body, actor(caller))
+    except LookupError:
+        raise _no_sensor(sensor_id) from None
+    except (CatalogRefError, SensorBandError) as exc:
+        raise _refused(exc) from None
+
+
+@router.post(
+    "/sensors/{sensor_id}/archive",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Archive a location sensor",
+    description=(
+        "Takes the sensor off the lists; its readings are kept. 404 for no such sensor, or "
+        "one already archived."
+    ),
+)
+async def archive_sensor(filament: FilamentDep, caller: CallerDep, sensor_id: UUID) -> Response:
+    try:
+        await asyncio.to_thread(filament.sensors.archive, sensor_id, actor(caller))
+    except LookupError:
+        raise _no_sensor(sensor_id) from None
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get(
+    "/sensors/{sensor_id}/readings",
+    response_model=list[m.SensorReading],
+    summary="A sensor's readings",
+    description=(
+        "The stored readings (`at`, `value`) from `since` (default: the last 24 hours) on, "
+        "oldest first; with more than `limit` (default 500, at most 5000) in the window, the "
+        "newest `limit`. A reading is stored "
+        "when the value changed, or 15 minutes after the last stored one. 404 for no such "
+        "sensor (an archived one still answers)."
+    ),
+)
+async def sensor_readings(
+    filament: FilamentDep,
+    sensor_id: UUID,
+    since: AwareDatetime | None = None,
+    limit: Annotated[int, Query(ge=1, le=5000)] = 500,
+) -> list[m.SensorReading]:
+    if not await asyncio.to_thread(filament.sensors.exists, sensor_id):
+        raise _no_sensor(sensor_id)
+    start = since or datetime.now(UTC) - timedelta(hours=24)
+    return await asyncio.to_thread(filament.sensors.readings, sensor_id, start, limit)
+
+
+def _no_sensor(sensor_id: UUID) -> ApiError:
+    return ApiError(status.HTTP_404_NOT_FOUND, f"no sensor {sensor_id}")
+
+
 @router.post(
     "/spools/{spool_id}/move",
     response_model=m.Spool,
@@ -1038,7 +1191,8 @@ async def patch_location(
     description=(
         "Put the spool in a place (`location_id: null`: in none) and write a `moved` ledger "
         "event, `{from, to}`. A spool already there is answered as it is, with no event. "
-        "404 for no such spool, 422 for a place that does not exist or is archived."
+        "404 for no such spool, 422 for a place that does not exist, is archived or is an "
+        "AMS unit's place."
     ),
 )
 async def move_spool(
@@ -1066,7 +1220,10 @@ async def move_spool(
         "Read Bambuddy's unarchived spools and pull them into ScadBuddy's own, once (the spool "
         "refresh Schedule does the same). A BB spool already linked takes the fields BB changed "
         "since the last pull, unless ScadBuddy changed that field later; a change of what is "
-        "left is a `bb` reading unless the spool's weight is locked. A BB spool whose tag a "
+        "left is a `bb` reading unless the spool's weight is locked. "
+        "With `filament_sync.weights` off, no Bambuddy scale weighing and no `bb` weight reading "
+        "is booked on a spool ScadBuddy already tracks; a new spool still gets its first weight. "
+        "A BB spool whose tag a "
         "ScadBuddy spool holds, or whose record a ScadBuddy spool is linked to, is linked; any "
         "other becomes a new spool, typed by `material_number`, else by brand, material, "
         "subtype, colour and label weight, else left to need a type. A BB spool Bambuddy added "
@@ -1083,7 +1240,10 @@ async def import_bambuddy(
     filament: FilamentDep, store: SettingsStoreDep, caller: CallerDep
 ) -> PullReport:
     settings = await asyncio.to_thread(store.load)
-    return await read_and_pull(filament, settings, actor=actor(caller))
+    sync = (await asyncio.to_thread(store.read, {"filament_sync"}))["filament_sync"]
+    return await read_and_pull(
+        filament, settings, actor=actor(caller), weights=sync.weights != "off"
+    )
 
 
 @router.get(
