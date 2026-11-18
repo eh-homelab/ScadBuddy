@@ -235,17 +235,25 @@ def _repoint_machine_rate(conn: Connection[DictRow], merged: str, into: str) -> 
 def _repoint_rate_events(table: str) -> RepointHook:
     """#5774: a printer's logged maintenance events or replaced parts are facts, so a
     merge moves them all onto the kept printer, except one whose writer key (``source``)
-    or Bambuddy history id the kept printer already has: that one is dropped."""
+    or Bambuddy history id the kept printer already has: that one is dropped. A
+    ``source`` names one event across both tables, so it is looked up in both."""
     history = table == "printer_maintenance_events"
 
     def repoint(conn: Connection[DictRow], merged: str, into: str) -> None:
-        same = "kept.source = gone.source" + (
-            " OR kept.bambuddy_history_id = gone.bambuddy_history_id" if history else ""
+        same_history = (
+            " OR EXISTS (SELECT 1 FROM printer_maintenance_events AS kept"
+            " WHERE kept.printer = %(into)s"
+            " AND kept.bambuddy_history_id = gone.bambuddy_history_id)"
+            if history
+            else ""
         )
         conn.execute(
-            f"DELETE FROM {table} AS gone WHERE gone.printer = %s AND EXISTS"
-            f" (SELECT 1 FROM {table} AS kept WHERE kept.printer = %s AND ({same}))",
-            (merged, into),
+            f"DELETE FROM {table} AS gone WHERE gone.printer = %(merged)s AND (EXISTS"
+            " (SELECT 1 FROM printer_maintenance_events AS kept"
+            " WHERE kept.printer = %(into)s AND kept.source = gone.source"
+            " UNION ALL SELECT 1 FROM printer_wear_replacements AS kept"
+            f" WHERE kept.printer = %(into)s AND kept.source = gone.source){same_history})",
+            {"merged": merged, "into": into},
         )
         conn.execute(f"UPDATE {table} SET printer = %s WHERE printer = %s", (into, merged))
 

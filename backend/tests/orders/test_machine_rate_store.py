@@ -833,6 +833,33 @@ def test_a_merge_moves_events_and_skips_the_kept_printers_own(
     assert sorted(e.bambuddy_history_id or 0 for e in logged if e.kind == "task") == [7, 8]
 
 
+def test_a_merge_drops_a_gone_event_whose_source_the_kept_printer_holds_in_either_kind(
+    store: MachineRateStore, printers: PrinterStore
+) -> None:
+    """A ``source`` names one event across both kinds, so a merge drops a gone printer's
+    event of one kind when the kept printer holds its source on an event of the other."""
+    gone = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    mine = printers.create(PrinterCreate(serial="01P00A000000001", name="Mine"))
+    for printer in (gone, mine):
+        store.replace(printer.id, INPUTS)
+
+    def log_task(printer: str, source: str) -> None:
+        task = MachineRateEventCreate(kind="task", name="Lubricate rods", source=source)
+        store.add_event(printer, task, hours_at="5", hours_source="lan_watch", created_by="t")
+
+    log_task(gone.id, "form:task-gone")
+    log_part(store, mine.id, "30", source="form:task-gone")
+    log_part(store, gone.id, "10", source="form:part-gone")
+    log_task(mine.id, "form:part-gone")
+    merged = printers.ensure_bambuddy(4, serial="01P00A000000001", name="H2C", model="H2C")
+    assert merged.id == mine.id
+    logged = store.stored(mine.id).logged
+    assert sorted((e.source, e.kind) for e in logged) == [
+        ("form:part-gone", "task"),
+        ("form:task-gone", "part"),
+    ]
+
+
 def test_events_are_patched_deleted_and_paged(
     store: MachineRateStore, printers: PrinterStore, pg_pool: PgPool
 ) -> None:
