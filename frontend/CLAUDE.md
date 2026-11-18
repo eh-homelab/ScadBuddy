@@ -232,8 +232,8 @@ same way, `vite.config.ts`).
   1024 px, `OverrideField` with "Reset to type", `RgbaColourField` with Opaque, Translucent and
   Clear presets, `TagPanel` with "Tag is on spool #N — Move it here", which sends `override: false`, a "Scan a tag"
   button (`scanTag`, 30 s), the "Override" mark of an open override binding, the weight-lock line (from `weight_locked`), and
-  the override checkbox, on only for a Bambu tag (a tray UUID and kind `bambu_mifare`); `NtagPanel` writes an NTAG through a SpoolBuddy
-  reader and polls `confirmNtag` every 2 s for 60 s, #6264) and `/filament/types/:id`
+  the override checkbox, on with a tray UUID and any kind but `ntag*` (ticking it sets the kind to `bambu_mifare`; the bind sends the flag only with that kind), and the Override mark, which is read again after every bind; `NtagPanel` writes an NTAG through a SpoolBuddy
+  reader and polls `confirmNtag` every 2 s for 60 s, says `Bound tag <uid>`, offers Cancel after the 60 s too and drops a queued write when the page unmounts, #6264) and `/filament/types/:id`
   (`TypePage`). `/filament/labels` (`LabelsPage`, `Label`, `labelSheet.ts`, #6264) prints 50 x 25 mm labels from a copy in `#label-print-root`: a QR code of `scadbuddy:spool:<id>` (`labelPayload`) with a quiet zone of 4 modules; the layout (`roll` or `sheet`) is kept in `localStorage` under `scadbuddy.labels.layout`. The Spools tab imports a CSV (`SpoolImport`: a dry run, Import is off while any
   line is an error). The price book is edited on Filament → Types, not in Settings; the ledger
   tab asks `GET /filament/events` with `since` and `until`. Settings keeps a Filament section for

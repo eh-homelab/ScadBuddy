@@ -75,7 +75,7 @@ function SyncRows({ form }: { form: BackendSettings }) {
       <FieldRow
         id="setting-filament-tags"
         label="Tags to Bambuddy"
-        help="Send each tag binding to Bambuddy, so its spools carry the same tags. This is the only data ScadBuddy writes to Bambuddy."
+        help="Send each tag binding to Bambuddy, so its spools carry the same tags."
       >
         <ChoiceSelect id="setting-filament-tags" value={tags} onValueChange={(next) => form.setField('filament_sync', `${spools}|${next}`)} choices={TAG_CHOICES} />
       </FieldRow>

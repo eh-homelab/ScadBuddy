@@ -149,6 +149,26 @@ describe('TagPanel', () => {
     expect(screen.getByText(LOCK)).toBeInTheDocument()
   })
 
+  it('drops the override mark when the same tag is bound again without override', async () => {
+    const { user } = await render(3, false)
+    expect(await screen.findByText('Override')).toBeInTheDocument()
+    await user.type(screen.getByLabelText('Tag UID'), '04A1B2C3D4E5F6')
+    await user.click(screen.getByRole('button', { name: 'Bind tag' }))
+    await waitFor(() => expect(screen.queryByText('Override')).toBeNull())
+  })
+
+  it('does not say the spool you are on already holds the tag', async () => {
+    server.use(
+      http.post('*/api/v1/filament/rfid/scan', () =>
+        HttpResponse.json({ status: 'tag', tag_uid: '04A1B2C3', tray_uuid: null, kind: 'ntag_opentag', sb_spool: { id: spoolId(2), number: 2 } }),
+      ),
+    )
+    const { user } = await render(2)
+    await user.click(screen.getByRole('button', { name: 'Scan a tag' }))
+    await waitFor(() => expect(screen.getByLabelText('Tag UID')).toHaveValue('04A1B2C3'))
+    expect(screen.queryByText(/already holds this tag/)).toBeNull()
+  })
+
   it('shows no override mark on a plain binding', async () => {
     await render(4, false)
     await screen.findByText(/A1B2C3D4/)

@@ -42,6 +42,9 @@ const printCss = (layout: Layout) => `
   }
 }`
 
+/** How many spools the page reads at the same time. */
+const READ_AT_ONCE = 6
+
 interface Loaded {
   key: string
   labels: { spool: SpoolDetail; svg: string }[]
@@ -67,16 +70,22 @@ export function LabelsPage() {
     const wanted = key.split(',').filter(Boolean)
     if (tooMany || wanted.length === 0) return
     let live = true
-    void Promise.all(
-      wanted.map(async (id) => {
+    // At most `READ_AT_ONCE` reads in flight: up to 100 ids must not open 100 requests together.
+    const results: (Loaded['labels'][number] | string)[] = new Array(wanted.length)
+    let next = 0
+    const worker = async () => {
+      while (live && next < wanted.length) {
+        const at = next++
+        const id = wanted[at]!
         try {
           const spool = await getSpool(id)
-          return { spool, svg: await qrSvg(labelPayload(spool.id)) }
+          results[at] = { spool, svg: await qrSvg(labelPayload(spool.id)) }
         } catch {
-          return id
+          results[at] = id
         }
-      }),
-    ).then((results) => {
+      }
+    }
+    void Promise.all(Array.from({ length: Math.min(READ_AT_ONCE, wanted.length) }, worker)).then(() => {
       if (!live) return
       setLoaded({
         key,

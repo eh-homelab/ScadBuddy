@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ApiError } from '../../api/client'
 import { cancelNtag, confirmNtag, getRfidStatus, writeNtag, type SpoolDetail } from '../../api/filament'
 import { useAsync } from '../../lib/useAsync'
@@ -69,6 +69,18 @@ export function NtagPanel({ spool, onBound }: Props) {
   const [replacing, setReplacing] = useState(false)
   const [busy, setBusy] = useState(false)
   const bound = useLatest(onBound)
+  const [boundUid, setBoundUid] = useState<string | null>(null)
+  /** The reader holding a write this panel queued and no one has confirmed or cancelled. */
+  const queued = useRef<string | null>(null)
+
+  // Leaving the page drops a write that is still queued, so no tag is written later for a
+  // spool nobody is watching. Bambuddy queues one write per reader, so this drops that one.
+  useEffect(
+    () => () => {
+      if (queued.current) void cancelNtag(spool.id, queued.current).catch(() => undefined)
+    },
+    [spool.id],
+  )
 
   useEffect(() => {
     if (phase !== 'waiting') return
@@ -82,6 +94,8 @@ export function NtagPanel({ spool, onBound }: Props) {
           const answer = await confirmNtag(spool.id)
           if (stopped) return
           if (answer.bound) {
+            queued.current = null
+            setBoundUid(answer.tag_uid ?? null)
             setPhase('bound')
             bound.current?.()
             return
@@ -109,8 +123,9 @@ export function NtagPanel({ spool, onBound }: Props) {
     setError(null)
     setWarnings([])
     try {
-      const queued = await writeNtag(spool.id, deviceId, replace)
-      setWarnings(queued.warnings ?? [])
+      const answer = await writeNtag(spool.id, deviceId, replace)
+      setWarnings(answer.warnings ?? [])
+      queued.current = deviceId
       setPhase('waiting')
     } catch (cause) {
       if (cause instanceof ApiError && cause.status === 409 && cause.problem.code === 'override_tag_open') setReplacing(true)
@@ -123,6 +138,7 @@ export function NtagPanel({ spool, onBound }: Props) {
   async function cancel() {
     if (!deviceId) return
     setPhase('idle')
+    queued.current = null
     try {
       await cancelNtag(spool.id, deviceId)
     } catch (cause) {
@@ -159,7 +175,7 @@ export function NtagPanel({ spool, onBound }: Props) {
         <Button type="button" size="sm" variant="outline" disabled={!deviceId || busy || phase === 'waiting'} onClick={() => void write(false)}>
           Write NTAG
         </Button>
-        {phase === 'waiting' && (
+        {(phase === 'waiting' || phase === 'missed') && (
           <Button type="button" size="sm" variant="ghost" onClick={() => void cancel()}>
             Cancel
           </Button>
@@ -173,12 +189,12 @@ export function NtagPanel({ spool, onBound }: Props) {
       )}
       {phase === 'bound' && (
         <p role="status" className="text-[13px]">
-          Written and bound
+          Bound tag {boundUid ?? 'written'}
         </p>
       )}
       {phase === 'missed' && (
         <p role="status" className="text-[13px] text-muted-foreground">
-          Not seen yet
+          Not seen yet. The write stays queued on the reader until you cancel it
         </p>
       )}
       {warnings.length > 0 && (
@@ -187,6 +203,11 @@ export function NtagPanel({ spool, onBound }: Props) {
             <li key={warning}>{warning}</li>
           ))}
         </ul>
+      )}
+      {status.error && (
+        <p role="alert" className="text-[13px] text-warn">
+          {message(status.error)}
+        </p>
       )}
       {error && (
         <p role="alert" className="text-[13px] text-warn">

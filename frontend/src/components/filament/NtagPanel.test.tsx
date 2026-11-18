@@ -47,7 +47,7 @@ describe('NtagPanel', () => {
     await act(() => vi.advanceTimersByTimeAsync(2000))
     await waitFor(() => expect(polls).toEqual([1]))
     await act(() => vi.advanceTimersByTimeAsync(2000))
-    expect(await screen.findByText('Written and bound')).toBeInTheDocument()
+    expect(await screen.findByText('Bound tag 04A1')).toBeInTheDocument()
     expect(onBound).toHaveBeenCalled()
     await act(() => vi.advanceTimersByTimeAsync(10000))
     expect(polls).toEqual([1, 2])
@@ -60,7 +60,7 @@ describe('NtagPanel', () => {
     await screen.findByText('Hold a blank tag to the reader')
     await act(() => vi.advanceTimersByTimeAsync(2000))
     await act(() => vi.advanceTimersByTimeAsync(2000))
-    expect(await screen.findByText('Written and bound')).toBeInTheDocument()
+    expect(await screen.findByText(/Bound tag /)).toBeInTheDocument()
     expect((await getSpool(spoolId(7))).tag?.kind).toBe('ntag_opentag')
   })
 
@@ -71,7 +71,7 @@ describe('NtagPanel', () => {
     await user.click(screen.getByRole('button', { name: 'Write NTAG' }))
     await screen.findByText('Hold a blank tag to the reader')
     await act(() => vi.advanceTimersByTimeAsync(63000))
-    expect(await screen.findByText('Not seen yet')).toBeInTheDocument()
+    expect(await screen.findByText(/Not seen yet/)).toBeInTheDocument()
   })
 
   it('cancels the write and stops polling', async () => {
@@ -95,6 +95,46 @@ describe('NtagPanel', () => {
     await act(() => vi.advanceTimersByTimeAsync(6000))
     expect(polls).toBe(0)
     expect(screen.getByRole('button', { name: 'Write NTAG' })).toBeEnabled()
+  })
+
+  it('can cancel after the 60 s check has ended', async () => {
+    let cancelled: unknown
+    server.use(
+      http.post('*/api/v1/filament/spools/:id/ntag/confirm', () => HttpResponse.json({ bound: false })),
+      http.post('*/api/v1/filament/spools/:id/ntag/cancel', async ({ request }) => {
+        cancelled = await request.json()
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const { user } = await render()
+    await user.click(screen.getByRole('button', { name: 'Write NTAG' }))
+    await act(() => vi.advanceTimersByTimeAsync(63000))
+    await screen.findByText(/Not seen yet/)
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(cancelled).toEqual({ device_id: 'sb-0001' }))
+  })
+
+  it('drops a queued write when the person leaves the page', async () => {
+    let cancelled: unknown
+    server.use(
+      http.post('*/api/v1/filament/spools/:id/ntag/cancel', async ({ request }) => {
+        cancelled = await request.json()
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    const { user, unmount } = await render()
+    await user.click(screen.getByRole('button', { name: 'Write NTAG' }))
+    await screen.findByText('Hold a blank tag to the reader')
+    unmount()
+    await waitFor(() => expect(cancelled).toEqual({ device_id: 'sb-0001' }))
+  })
+
+  it('says when the readers could not be read', async () => {
+    server.use(http.get('*/api/v1/filament/rfid/status', () => HttpResponse.json({ title: 'Bad Gateway', status: 502, detail: 'Bambuddy refused' }, { status: 502, headers: { 'Content-Type': 'application/problem+json' } })))
+    const spool = await getSpool(spoolId(7))
+    renderPage(<NtagPanel spool={spool} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('Bambuddy refused')
   })
 
   it('lists the warnings of the write', async () => {

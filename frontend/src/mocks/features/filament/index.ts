@@ -1011,7 +1011,15 @@ export const handlers = [
       state.tags.push(tag)
     }
     const held = openBinding(tag.id)
-    if (held?.spool_id === row.id) return HttpResponse.json(held, { status: 201 })
+    if (held?.spool_id === row.id) {
+      // As the backend's `bind_on`: the same tag again with another `override` changes it in place.
+      const wanted = body.override ?? false
+      if (held.override !== wanted) {
+        held.override = wanted
+        if (wanted) row.weight_locked = true
+      }
+      return HttpResponse.json(held, { status: 201 })
+    }
     if (held) closeBinding(held, 'rebound')
     const other = state.bindings.find((one) => one.spool_id === row.id && !one.unbound_at)
     if (other) closeBinding(other, 'rebound')

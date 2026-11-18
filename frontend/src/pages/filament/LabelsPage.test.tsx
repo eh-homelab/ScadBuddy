@@ -34,6 +34,24 @@ describe('the labels page', () => {
     expect(document.getElementById('label-print-root')?.parentElement).toBe(document.body)
   })
 
+  it('reads at most six spools at the same time', async () => {
+    let open = 0
+    let most = 0
+    server.use(
+      http.get('*/api/v1/filament/spools/:id', async ({ params }) => {
+        open++
+        most = Math.max(most, open)
+        await new Promise((resolve) => setTimeout(resolve, 5))
+        open--
+        return HttpResponse.json(detail(String(params.id), 1))
+      }),
+    )
+    const ids = Array.from({ length: 20 }, (_, i) => `s${i}`).join(',')
+    renderPage(<LabelsPage />, { route: `/filament/labels?ids=${ids}` })
+    await waitFor(() => expect(screen.getAllByTestId('label')).toHaveLength(20))
+    expect(most).toBeLessThanOrEqual(6)
+  })
+
   it('refuses more than 100 labels and draws none', () => {
     const ids = Array.from({ length: 101 }, (_, i) => `s${i}`).join(',')
     renderPage(<LabelsPage />, { route: `/filament/labels?ids=${ids}` })

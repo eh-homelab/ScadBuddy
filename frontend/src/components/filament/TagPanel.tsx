@@ -44,11 +44,13 @@ export function TagPanel({ spool, onChanged }: Props) {
   const [scanning, setScanning] = useState(false)
   const [scanNote, setScanNote] = useState<string | null>(null)
   const scan = useRef<AbortController | null>(null)
+  /** Counts the changes made here, so the open tag's binding (its Override mark) is read again. */
+  const [changes, setChanges] = useState(0)
 
   useEffect(() => () => scan.current?.abort(), [])
 
   const openTag = spool.tag
-  const binding = useAsync(() => (openTag ? getTag(openTag.id) : Promise.resolve(null)), [openTag?.id])
+  const binding = useAsync(() => (openTag ? getTag(openTag.id) : Promise.resolve(null)), [openTag?.id, changes])
   const overridden = binding.data?.binding?.override === true
 
   async function run(action: () => Promise<unknown>) {
@@ -56,6 +58,7 @@ export function TagPanel({ spool, onChanged }: Props) {
     setError(null)
     try {
       await action()
+      setChanges((count) => count + 1)
       onChanged()
     } catch (cause) {
       setError(message(cause))
@@ -109,7 +112,7 @@ export function TagPanel({ spool, onChanged }: Props) {
       setTray(found.tray_uuid ?? '')
       if (found.kind) setKind(found.kind)
       if (found.kind !== 'bambu_mifare') setOverride(false)
-      setScanNote(found.sb_spool ? `Spool #${found.sb_spool.number} already holds this tag` : null)
+      setScanNote(found.sb_spool && found.sb_spool.id !== spool.id ? `Spool #${found.sb_spool.number} already holds this tag` : null)
     } catch (cause) {
       if (controller.signal.aborted) return
       if (cause instanceof ApiError && (cause.status === 502 || cause.status === 504)) setScanNote('Could not reach the reader through Bambuddy')
@@ -185,7 +188,7 @@ export function TagPanel({ spool, onChanged }: Props) {
           <Label htmlFor="tag-uid" className="text-[13px]">
             Tag UID
           </Label>
-          <Input id="tag-uid" className="font-mono" value={uid} onChange={(e) => setUid(e.target.value)} />
+          <Input id="tag-uid" className="font-mono" value={uid} disabled={scanning} onChange={(e) => setUid(e.target.value)} />
         </div>
         <div className="flex flex-col gap-1">
           <Label htmlFor="tag-tray" className="text-[13px]">
@@ -194,6 +197,7 @@ export function TagPanel({ spool, onChanged }: Props) {
           <Input
             id="tag-tray"
             className="font-mono"
+            disabled={scanning}
             value={tray}
             onChange={(e) => {
               setTray(e.target.value)
