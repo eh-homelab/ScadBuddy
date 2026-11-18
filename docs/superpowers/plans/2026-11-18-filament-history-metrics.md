@@ -782,6 +782,10 @@ Load `frontend-design` and `dataviz` first.
 41. Task 4 (R-T4-5, no dated test input): The metrics route test builds `since` relative to today. A fixed 2026-01-01 would fail the 1096-day bound on 2029-01-02 and turn the test red.
 42. Task 4 (R-T4-6, suppliers mock): The frontend suppliers mock's `spoolUsage` uses the backend's rule now: an open estimate counts 0, and an SB+BB pair counts once. The mock must not show numbers the API never gives. The summary mock uses the same `plateGrams` helper, and the seed has one pair and one open estimate to show it.
 43. Task 4 (R-T4-7, seed order): The three seed events that Decision 42's test needs are dated 2026-10-30, before every other seed event. The newest-first ledger order that the existing tests and e2e specs read does not change, and no existing expectation was edited.
+44. Task 5 (R-T4-1, one tool per route): The four routes each get a `read` tool in `filament.ts`, with no `coverage.ts` entry.
+45. Task 5 (history shape): `filament_spool_history` returns the route's answer without `series`, the first 50 events (the route sends newest first) and `truncated`. The description sends the reader to `filament_spool_events` for older events.
+46. Task 5 (date input): `since` and `until` are `YYYY-MM-DD` strings checked by a regex. The 1096-day bound stays on the route, which answers 422; the schema does not repeat it, and the description names it.
+47. Task 5 (optional query values): `dimension` and `bucket` have no schema default. The route owns the defaults (material, month), so an omitted value sends no query parameter.
 
 ## Pre-flight rulings (2026-11-18)
 

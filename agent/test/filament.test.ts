@@ -672,3 +672,72 @@ describe('filament RFID tools (#6264)', () => {
     expect(firstText(await t.execute(t.parse({}), ctx('outward')))).toEqual(report)
   })
 })
+
+describe('filament history and metrics tools', () => {
+  const FIL = `${BACKEND}/api/v1/filament`
+
+  it.each([
+    ['filament_spool_history'],
+    ['filament_forecast'],
+    ['filament_metrics'],
+    ['filament_purchasing_metrics'],
+  ])('%s is read tier', (name) => {
+    expect(tool(name).risk).toBe('read')
+    expect(tool(name).gated).toBe(false)
+  })
+
+  it('drops the series and keeps the newest 50 of 80 events', async () => {
+    const events = Array.from({ length: 80 }, (_, i) => ({ seq: 80 - i }))
+    server.use(
+      http.get(`${SPOOL}/history`, () =>
+        HttpResponse.json({ events, series: [{ g: 1 }], metrics: { used_g: 5 }, currency: 'USD', window_days: 30 }),
+      ),
+    )
+    const t = tool('filament_spool_history')
+    const out = firstText(await runTool(t, { spool_id: ROW }, ctx())) as { events: { seq: number }[] }
+    expect(out).not.toHaveProperty('series')
+    expect(out).toMatchObject({ metrics: { used_g: 5 }, currency: 'USD', window_days: 30, truncated: true })
+    expect(out.events).toHaveLength(50)
+    expect(out.events[0]?.seq).toBe(80)
+    expect(out.events[49]?.seq).toBe(31)
+  })
+
+  it('does not mark a short history truncated', async () => {
+    server.use(http.get(`${SPOOL}/history`, () => HttpResponse.json({ events: [{ seq: 1 }], series: [] })))
+    expect(firstText(await runTool(tool('filament_spool_history'), { spool_id: ROW }, ctx()))).toMatchObject({
+      truncated: false,
+    })
+  })
+
+  it('reads the forecast', async () => {
+    server.use(http.get(`${FIL}/forecast`, () => HttpResponse.json({ spools: [] })))
+    expect(firstText(await runTool(tool('filament_forecast'), {}, ctx()))).toEqual({ spools: [] })
+  })
+
+  it('sends the metrics query it was given', async () => {
+    const seen: string[] = []
+    server.use(
+      http.get(`${FIL}/metrics`, ({ request }) => {
+        seen.push(new URL(request.url).search)
+        return HttpResponse.json({ ok: true })
+      }),
+    )
+    await runTool(tool('filament_metrics'), { dimension: 'brand' }, ctx())
+    await runTool(tool('filament_metrics'), { bucket: 'week', since: '2026-01-01', until: '2026-02-01' }, ctx())
+    expect(seen).toEqual(['?dimension=brand', '?bucket=week&since=2026-01-01&until=2026-02-01'])
+  })
+
+  it('sends the purchasing range', async () => {
+    server.use(
+      http.get(`${FIL}/metrics/purchasing`, ({ request }) => {
+        expect(new URL(request.url).search).toBe('?since=2026-01-01')
+        return HttpResponse.json({ ok: true })
+      }),
+    )
+    await runTool(tool('filament_purchasing_metrics'), { since: '2026-01-01' }, ctx())
+  })
+
+  it('refuses a dimension the route does not know', () => {
+    expect(() => tool('filament_metrics').parse({ dimension: 'colour' })).toThrow()
+  })
+})
