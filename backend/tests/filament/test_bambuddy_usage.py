@@ -4,10 +4,11 @@ when one ended in the window, and counted once beside BB's reading and SB's own 
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
+import httpx
 import pytest
 import respx
 
@@ -233,6 +234,34 @@ async def test_a_pull_books_bambuddys_usage_rows(pg_pool: PgPool) -> None:
         paths = [call.request.url.path for call in router.calls]
     assert paths[:2] == ["/api/v1/inventory/spools", "/api/v1/inventory/usage"]
     assert (report.usage_booked, report.usage_unlinked) == (1, 1)
+    (event,) = _usage_events(f, spool)
+    assert event.data["bb_archive_id"] == 248
+
+
+async def test_the_archive_read_reaches_back_to_the_oldest_row_booked(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    spool = _linked(f)
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    rows = [usage().model_dump(mode="json")]
+    ended = _naive(T1 + timedelta(seconds=0.9))
+    filler = [{"id": 1000 + i, "printer_id": 1, "completed_at": _naive(NOW)} for i in range(100)]
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        # Without a date window Bambuddy answers its newest rows, which are all later.
+        params = request.url.params
+        if "date_from" not in params:
+            return httpx.Response(200, json=filler[:50])
+        assert date.fromisoformat(params["date_from"]) <= T1.date()
+        if int(params.get("offset", 0)) == 0:
+            return httpx.Response(200, json=filler)
+        return httpx.Response(200, json=[{"id": 248, "printer_id": 1, "completed_at": ended}])
+
+    with respx.mock() as router:
+        router.get(f"{BB}/api/v1/inventory/spools").respond(json=[bb().model_dump(mode="json")])
+        router.get(f"{BB}/api/v1/inventory/usage").respond(json=rows)
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
+        router.get(f"{BB}/api/v1/archives/").mock(side_effect=answer)
+        await read_and_pull(f, settings)
     (event,) = _usage_events(f, spool)
     assert event.data["bb_archive_id"] == 248
 
