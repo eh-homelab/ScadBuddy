@@ -594,3 +594,19 @@ async def test_the_archive_read_stops_at_the_page_cap_and_says_what_it_missed(
     assert len(_usage_events(f, spool)) == 1
     (warning,) = [r for r in caplog.records if r.message.startswith("stopped reading")]
     assert "oldest pending rows" in warning.message
+
+
+@pytest.mark.parametrize("y_first", [True, False])
+def test_a_batch_row_on_the_estimates_spool_stops_a_cover_in_either_order(
+    pg_pool: PgPool, y_first: bool
+) -> None:
+    f = _filament(pg_pool)
+    _printer_1(pg_pool)
+    z = _linked(f)
+    y = _second_spool(f)
+    _estimate(f, y)
+    rows = [usage(id=460, spool_id=8), usage()]
+    assert _book(f, rows if y_first else rows[::-1]).booked == 2
+    assert len(_usage_events(f, z)) == 1
+    ended = [e for e in f.spools.events(y) if e.kind == "print_ended"]
+    assert [e.ref_kind for e in ended] == [ledger.BB_USAGE]

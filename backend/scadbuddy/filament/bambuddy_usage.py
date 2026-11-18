@@ -218,7 +218,8 @@ def _cover(
     nothing twice: the covering event's key is the estimate's.
 
     A candidate is an open estimate of the job (`prints.open_for_job`) whose own event
-    names no other printer, and whose spool has no booked usage row of the job already: a
+    names no other printer, and whose spool has no usage row of the job, booked already or
+    still pending in this batch: a
     pair by `ledger.basis` rule 3 writes no ``print_ended``, so that estimate would stay
     open though it is paired. Candidates match on the job name within the printer, not on
     the run: a stale estimate of the same job that never ended can be the candidate. A
@@ -232,10 +233,17 @@ def _cover(
     if _has_estimate(conn, spool_id, job):
         return
     printer = str(event.printer_id)
+    unbooked = {
+        other_spool
+        for other, other_spool in pending
+        if other.print_name == job and other.printer_id == row.printer_id
+    }
     candidates = [
         u
         for u in prints.open_for_job(conn, printer, job)
-        if u.spool_id != spool_id and _candidate(conn, u, job, event.printer_id)
+        if u.spool_id != spool_id
+        and u.spool_id not in unbooked
+        and _candidate(conn, u, job, event.printer_id)
     ]
     if not candidates:
         return
