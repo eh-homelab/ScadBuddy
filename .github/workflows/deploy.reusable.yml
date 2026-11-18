@@ -165,7 +165,7 @@ jobs:
     # The agent wait below can take up to 10 of these, the open deploy PR's
     # 45 (90 when the first round times out, #6368), the agent-durable one
     # 20, the slicer 10, the profile-fetch worker 10.
-    timeout-minutes: 140
+    timeout-minutes: 150
     # The one place the two callers can race: this job waits for the open
     # deploy PR, closes it if it cannot land, replaces the `deploy/scadbuddy`
     # branch and opens a new PR. Job-level, so deploy-release's image wait and

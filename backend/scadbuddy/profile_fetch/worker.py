@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import resource
 import signal
 from collections.abc import Callable
 from contextlib import suppress
@@ -36,6 +37,14 @@ from scadbuddy.profile_fetch.wire import AREAS
 from scadbuddy.profile_fetch.workflow import ProfileFetch
 
 logger = logging.getLogger(__name__)
+
+
+def forbid_core_dumps() -> None:
+    """RLIMIT_CORE 0, soft and hard, for this process and every child it starts (Chromium
+    and its renderers inherit it), so a node's ``core_pattern`` never keeps a crashed
+    renderer's memory, where the page and the login lived (build Decision 75;
+    [getrlimit(2)](https://man7.org/linux/man-pages/man2/getrlimit.2.html), RLIMIT_CORE)."""
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
 
 async def _healthz(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -106,6 +115,8 @@ async def run(
     areas_poll: float = AREAS_POLL,
 ) -> None:
     stop = stop or asyncio.Event()
+    # Before any browser launches: no core file of Chromium may outlive a crash.
+    forbid_core_dumps()
     if crud is None:
         auth = ServiceAuth(exchange_source("profile-fetch", settings))
         crud = CrudClient(settings.api_internal_url, "profile-fetch", auth)

@@ -424,6 +424,13 @@ else
   grep -q 'expected exactly one profile-fetch image line, found 2' "$work/log" \
     || fail "two profile-fetch lines: wrong error: $(grep '::error' "$work/log")"
 fi
+pf_manifest=$(deployment scadbuddy-profile-fetch "ghcr.io/eh-homelab/other:1")
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  fail "profile-fetch file without its line: step passed, expected an error"
+else
+  grep -q 'expected exactly one profile-fetch image line, found 0' "$work/log" \
+    || fail "profile-fetch file without its line: wrong error: $(grep '::error' "$work/log")"
+fi
 pf_manifest=
 
 # 8b. Every other file that runs the agent is pinned too, found by the image

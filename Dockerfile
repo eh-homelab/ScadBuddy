@@ -634,9 +634,14 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
     UV_PYTHON_DOWNLOADS=never
 WORKDIR /app/backend
 COPY backend/pyproject.toml backend/uv.lock ./
-RUN uv sync --frozen --no-dev --group profile-fetch --no-install-project
+# Without psycopg: the worker has no database (#5295), so no database client library
+# ships in its image. Every psycopg package in uv.lock is named; uv skips a name that
+# the resolution does not install (psycopg-binary is the dev group's).
+RUN uv sync --frozen --no-dev --group profile-fetch --no-install-project \
+    --no-install-package psycopg --no-install-package psycopg-binary --no-install-package psycopg-pool
 COPY backend/scadbuddy ./scadbuddy
-RUN uv sync --frozen --no-dev --group profile-fetch --no-editable
+RUN uv sync --frozen --no-dev --group profile-fetch --no-editable \
+    --no-install-package psycopg --no-install-package psycopg-binary --no-install-package psycopg-pool
 
 FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df AS profile-fetch
 
@@ -668,11 +673,14 @@ RUN playwright install --with-deps chromium \
     && rm -rf /var/lib/apt/lists/* \
     && chmod -R a+rX /ms-playwright
 
-# Fails the build when the worker's start imports Postgres code (#5295: it has no
-# database), or when Playwright's full Chromium is not where the driver looks. `-B`, so
-# it writes no bytecode.
+# Fails the build when a psycopg package is installed or the worker's start imports
+# Postgres code (#5295: it has no database), or when Playwright's full Chromium is not
+# where the driver looks. `-B`, so it writes no bytecode.
 RUN python -B - <<'CHECK'
-import os, sys
+import importlib.util, os, sys
+for name in ("psycopg", "psycopg_binary", "psycopg_pool", "psycopg_c"):
+    if importlib.util.find_spec(name) is not None:
+        sys.exit(f"ERROR: {name} is installed in the profile-fetch image")
 import scadbuddy.profile_fetch.worker
 if any(m == "psycopg" or m.startswith("psycopg.") for m in sys.modules):
     sys.exit("ERROR: importing scadbuddy.profile_fetch.worker imported psycopg")
@@ -710,7 +718,8 @@ CMD ["xvfb-run", "-a", "python", "-m", "scadbuddy.profile_fetch"]
 # tests/profile_fetch/test_site.py here with `--network none` and
 # SCADBUDDY_TEST_CHROMIUM_REQUIRED=1, so the image's own Chromium, OS libraries and
 # Xvfb are what the driver tests drive. The venv gains the dev group (pytest; and
-# psycopg's binary wheel, which tests/conftest.py imports).
+# psycopg with its binary wheel, which tests/conftest.py imports and the published
+# stage leaves out).
 FROM profile-fetch-deps AS profile-fetch-test-deps
 RUN uv sync --frozen --group profile-fetch --no-editable
 
