@@ -1,4 +1,4 @@
-import { useState, type KeyboardEvent, type ReactNode } from 'react'
+import { useId, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { ApiError, api, newRequestId } from '../../api/client'
 import type { CounterView, MachineRateEvent, MachineRateEventPatch, RowActuals } from '../../api/types'
 import { toast } from '../../lib/toast'
@@ -36,7 +36,7 @@ function enterSubmits(event: KeyboardEvent<HTMLElement>, action: () => unknown) 
 const hoursText = (hours: number) => String(Number(hours.toFixed(1)))
 
 /** How much logged history backs a row's actual, and whether it is in use (§3.4). */
-function confidenceText(row: RowActuals | undefined, kind: Kind, pricedBy: PricedBy, need: number): string {
+function confidenceText(row: RowActuals | undefined, kind: Kind, pricedBy: PricedBy, need: number, notCounted?: string | null): string {
   const have = row?.have ?? 0
   const confidence = row?.confidence ?? 0
   let text = `${confidence} % confidence: ${have} of ${row?.need ?? need} ${UNIT[kind]} logged`
@@ -44,6 +44,7 @@ function confidenceText(row: RowActuals | undefined, kind: Kind, pricedBy: Price
     text += kind === 'part' ? `, ${row.actual_hours_used} h each on average` : `, done every ${row.actual_interval_hours} h on average`
     if (row.partly_typed) text += '; some use the typed minutes or consumables'
   }
+  if (notCounted) return `${text}.`
   if (pricedBy === 'estimate') return `${text}. The estimate is chosen.`
   return have >= (row?.need ?? need) ? `${text}. The actual prices.` : `Estimate prices, ${text}`
 }
@@ -107,7 +108,7 @@ export function FigurePair({
       </div>
       <p data-testid="confidence" className="text-xs text-muted-foreground sm:text-right">
         {notCounted && `Not counted (${notCounted}), so neither figure prices. `}
-        {confidenceText(row, kind, pricedBy, need)}
+        {confidenceText(row, kind, pricedBy, need, notCounted)}
       </p>
     </div>
   )
@@ -143,7 +144,7 @@ export function EventList({
   const events = row?.events ?? []
   const skipped = new Map((row?.skipped_gaps ?? []).map((gap) => [gap.event, gap.reason]))
   const title = kind === 'part' ? 'Replacements' : 'Done'
-  const listId = `events-${kind}-${name.replace(/\W+/g, '-')}`
+  const listId = `events-${useId()}`
   return (
     <div className="flex flex-col gap-1">
       <div className="flex flex-wrap items-center gap-2">
@@ -395,7 +396,8 @@ export function LogEventForm({
   const [notes, setNotes] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const id = (field: string) => `log-${kind}-${name.replace(/\W+/g, '-')}-${field}`
+  const formId = useId()
+  const id = (field: string) => `log-${formId}-${field}`
   const action = kind === 'part' ? 'Log replacement' : 'Log done'
 
   async function submit() {
@@ -452,12 +454,13 @@ export function LogEventForm({
       onKeyDown={(event) => enterSubmits(event, submit)}
     >
       <div className="flex flex-wrap items-start gap-2">
-        {field('date', 'Date', <Input id={id('date')} type="date" className="w-40" value={date} max={localDay()} onChange={(e) => setDate(e.target.value)} />)}
+        {field('date', 'Date', <Input id={id('date')} type="date" className="w-40" value={date} onChange={(e) => setDate(e.target.value)} />)}
         {field(
           'reading',
           'Counter reading (h)',
-          <Input id={id('reading')} className="w-28" inputMode="decimal" required={counter.source === 'typed' && !usedOpen} value={reading} onChange={(e) => setReading(e.target.value)} />,
-          readingHint(counter),
+          <Input id={id('reading')} className="w-28" inputMode="decimal" value={reading} onChange={(e) => setReading(e.target.value)} />,
+          // A late-dated event with the counter left as filled would log its gap short.
+          counter.hours != null && date && date !== localDay() && reading.trim() === filled ? `${readingHint(counter)}. This is the reading now: change it to the reading on that day.` : readingHint(counter),
         )}
         {kind === 'part' && field('cost', 'Cost', <Input id={id('cost')} className="w-24" inputMode="decimal" value={money} onChange={(e) => setMoney(e.target.value)} />)}
         {kind === 'task' && field('minutes', 'Minutes', <Input id={id('minutes')} className="w-20" inputMode="decimal" placeholder={typedMinutes} value={minutes} onChange={(e) => setMinutes(e.target.value)} />)}

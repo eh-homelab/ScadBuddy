@@ -387,6 +387,34 @@ describe('MachineRates actuals (#5774)', () => {
     }
   })
 
+  it('still saves the machine rate while a log form is open on a printer with no counter', async () => {
+    await nozzle()
+    const { user } = renderPage(<MachineRates />)
+    const panel = await open(user, 'Garage')
+    const wear = within(panel).getByRole('group', { name: 'Wear part 1' })
+    await user.click(within(wear).getByRole('button', { name: 'Log replacement' }))
+    expect(within(wear).getByRole('form', { name: 'Log replacement of Nozzle' })).toBeInTheDocument()
+    await user.clear(within(panel).getByLabelText('Actuals window (events)'))
+    await user.type(within(panel).getByLabelText('Actuals window (events)'), '4')
+    await user.click(within(panel).getByRole('button', { name: 'Save machine rate' }))
+    await waitFor(async () => expect((await api.machineRate(GARAGE)).inputs?.profile).toMatchObject({ actuals_window: 4 }))
+  })
+
+  it('says a late-dated event needs the reading on that day', async () => {
+    await nozzle()
+    await api.linkPrinterLan(GARAGE, { host: '10.0.0.5', access_code: '12345678' })
+    setLanCount(GARAGE, { run_hours: '612.4' })
+    const { user } = renderPage(<MachineRates />)
+    const panel = await open(user, 'Garage')
+    const wear = within(panel).getByRole('group', { name: 'Wear part 1' })
+    await user.click(within(wear).getByRole('button', { name: 'Log replacement' }))
+    const form = within(wear).getByRole('form', { name: 'Log replacement of Nozzle' })
+    expect(form).not.toHaveTextContent('change it to the reading on that day')
+    await user.clear(within(form).getByLabelText('Date'))
+    await user.type(within(form).getByLabelText('Date'), '2026-01-05')
+    expect(form).toHaveTextContent('This is the reading now: change it to the reading on that day.')
+  })
+
   it('refuses a date after today typed by hand', async () => {
     await nozzle()
     const { user } = renderPage(<MachineRates />)

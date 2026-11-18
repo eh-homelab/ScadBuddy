@@ -168,7 +168,7 @@ function Breakdown({ rate }: { rate: MachineRateBreakdown }) {
             ) : m.basis === 'actual' ? (
               `${m.task}: ${m.per_hour} per hour from logged maintenance (${basisText(m)})`
             ) : (
-              `${m.task}${m.interval_hours ? `, every ${m.interval_hours} h` : ''}: ${m.per_hour} (${basisText(m)})`
+              `${m.task}${m.interval_hours ? `, every ${m.interval_hours} ${m.interval_type === 'days' ? 'days' : 'h'}` : ''}: ${m.per_hour} (${basisText(m)})`
             )}
           </li>
         ))}
