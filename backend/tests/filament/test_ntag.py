@@ -39,6 +39,23 @@ OLD = "AABBCCDD11223344"
 TRAY = "0123456789ABCDEF0123456789ABCDEF"
 
 
+def _record(bb_id: int, uid: str | None, origin: str | None = "opentag3d") -> respx.Route:
+    return respx.get(f"{API}/inventory/spools/{bb_id}").mock(
+        return_value=httpx.Response(
+            200, json={"id": bb_id, "material": "PLA", "tag_uid": uid, "data_origin": origin}
+        )
+    )
+
+
+async def _queue(f: Filament, client: BambuddyClient, spool: UUID, was: str | None) -> None:
+    """Queue a write while the Bambuddy record holds ``was``."""
+    _record(11, was)
+    respx.post(f"{API}/spoolbuddy/nfc/write-tag").mock(
+        return_value=httpx.Response(200, json={"status": "queued", "warnings": []})
+    )
+    await ntag.write(f, client, spool, "sb-1", replace=True)
+
+
 def _filament(pool: PgPool) -> Filament:
     types = SpoolTypeStore(pool)
     spools = FilamentSpoolStore(pool)
@@ -179,6 +196,7 @@ async def test_write_queues_for_the_linked_bambuddy_spool(
 ) -> None:
     f = _filament(pg_pool)
     spool = _spool(f, pg_pool, 11)
+    _record(11, None)
     route = respx.post(f"{API}/spoolbuddy/nfc/write-tag").mock(
         return_value=httpx.Response(
             200, json={"status": "queued", "warnings": ["brand/vendor not set"]}
@@ -215,6 +233,7 @@ async def test_write_over_an_override_tag_is_refused_unless_replace(
     spool = _spool(f, pg_pool, 11)
     f.spools.bind_tag(spool, tray_uuid=TRAY, kind="bambu_mifare", override=True, actor="ann")
     before = f.spools.open_binding(spool)
+    _record(11, None)
     route = respx.post(f"{API}/spoolbuddy/nfc/write-tag").mock(
         return_value=httpx.Response(200, json={"status": "queued", "warnings": []})
     )
@@ -238,11 +257,8 @@ async def test_confirm_binds_the_new_uid_as_ntag_opentag(
     f = _filament(pg_pool)
     spool = _spool(f, pg_pool, 11)
     f.spools.bind_tag(spool, tag_uid=OLD, kind="other", actor="ann")
-    respx.get(f"{API}/inventory/spools/11").mock(
-        return_value=httpx.Response(
-            200, json={"id": 11, "material": "PLA", "tag_uid": UID, "data_origin": "opentag3d"}
-        )
-    )
+    await _queue(f, client, spool, None)
+    _record(11, UID)
 
     first = await ntag.confirm(f, client, spool, actor="ann")
     second = await ntag.confirm(f, client, spool, actor="ann")
@@ -259,26 +275,51 @@ async def test_confirm_binds_the_new_uid_as_ntag_opentag(
 
 
 @respx.mock
-async def test_confirm_with_the_uid_unchanged_binds_nothing(
+async def test_confirm_does_not_bind_the_tag_the_record_held_when_the_write_queued(
+    pg_pool: PgPool, client: BambuddyClient
+) -> None:
+    """The person unbound NTAG X, whose UID Bambuddy's record still holds: the first poll
+    after the write is queued must not bind X again."""
+    f = _filament(pg_pool)
+    spool = _spool(f, pg_pool, 11)
+    await _queue(f, client, spool, UID)
+
+    first = await ntag.confirm(f, client, spool, actor="ann")
+    assert first.bound is False
+    assert f.spools.open_binding(spool) is None
+
+    _record(11, "04DDEEFF")
+    second = await ntag.confirm(f, client, spool, actor="ann")
+
+    assert (second.bound, second.tag_uid) == (True, "04DDEEFF")
+
+
+@respx.mock
+async def test_confirm_with_no_write_queued_binds_nothing(
+    pg_pool: PgPool, client: BambuddyClient
+) -> None:
+    f = _filament(pg_pool)
+    spool = _spool(f, pg_pool, 11)
+    _record(11, UID)
+
+    result = await ntag.confirm(f, client, spool, actor="ann")
+
+    assert result.bound is False
+    assert f.spools.open_binding(spool) is None
+
+
+@respx.mock
+async def test_confirm_with_another_origin_binds_nothing(
     pg_pool: PgPool, client: BambuddyClient
 ) -> None:
     f = _filament(pg_pool)
     spool = _spool(f, pg_pool, 11)
     f.spools.bind_tag(spool, tag_uid=OLD, kind="other", actor="ann")
-    respx.get(f"{API}/inventory/spools/11").mock(
-        return_value=httpx.Response(
-            200, json={"id": 11, "material": "PLA", "tag_uid": OLD, "data_origin": "opentag3d"}
-        )
-    )
-    other_origin = httpx.Response(
-        200, json={"id": 11, "material": "PLA", "tag_uid": UID, "data_origin": "nfc_link"}
-    )
+    await _queue(f, client, spool, None)
+    _record(11, UID, "nfc_link")
 
-    same = await ntag.confirm(f, client, spool, actor="ann")
-    respx.get(f"{API}/inventory/spools/11").mock(return_value=other_origin)
     foreign = await ntag.confirm(f, client, spool, actor="ann")
 
-    assert (same.bound, same.tag_uid) == (False, None)
     assert foreign.bound is False
     binding = f.spools.open_binding(spool)
     assert binding is not None

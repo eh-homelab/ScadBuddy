@@ -136,11 +136,12 @@ export function NtagPanel({ spool, onBound }: Props) {
   }
 
   async function cancel() {
-    if (!deviceId) return
+    const device = queued.current ?? deviceId
+    if (!device) return
     setPhase('idle')
     queued.current = null
     try {
-      await cancelNtag(spool.id, deviceId)
+      await cancelNtag(spool.id, device)
     } catch (cause) {
       setError(message(cause))
     }
@@ -157,7 +158,7 @@ export function NtagPanel({ spool, onBound }: Props) {
               setPicked(next)
               rememberDevice(next)
             }}
-            disabled={readers.length === 0 || phase === 'waiting'}
+            disabled={readers.length === 0 || phase === 'waiting' || phase === 'missed'}
           >
             <SelectTrigger aria-label="Reader" className="w-full">
               <SelectValue placeholder={status.loading ? 'Looking for readers' : 'No reader with NFC'} />

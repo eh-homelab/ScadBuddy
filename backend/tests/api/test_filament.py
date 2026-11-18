@@ -1084,10 +1084,18 @@ def test_the_ntag_routes_write_confirm_and_cancel(client: TestClient, pg_conninf
         return_value=httpx.Response(200, json={"status": "queued", "warnings": ["w"]})
     )
     respx.get(f"{API}/inventory/spools/11").mock(
-        return_value=httpx.Response(
-            200,
-            json={"id": 11, "material": "PLA", "tag_uid": "04AABBCC", "data_origin": "opentag3d"},
-        )
+        side_effect=[
+            httpx.Response(200, json={"id": 11, "material": "PLA", "tag_uid": None}),
+            httpx.Response(
+                200,
+                json={
+                    "id": 11,
+                    "material": "PLA",
+                    "tag_uid": "04AABBCC",
+                    "data_origin": "opentag3d",
+                },
+            ),
+        ]
     )
     cancel = respx.post(f"{API}/spoolbuddy/devices/sb-1/cancel-write").mock(
         return_value=httpx.Response(200, json={})
@@ -1101,11 +1109,30 @@ def test_the_ntag_routes_write_confirm_and_cancel(client: TestClient, pg_conninf
     confirmed = client.post(f"{one}/confirm")
     assert confirmed.status_code == 200, confirmed.text
     assert confirmed.json() == {"bound": True, "tag_uid": "04AABBCC"}
-    assert client.post(f"{one}/confirm").json()["bound"] is False
+    assert client.post(f"{one}/confirm").json()["bound"] is False  # no write is queued
 
     cancelled = client.post(f"{one}/cancel", json={"device_id": "sb-1"})
     assert cancelled.status_code == 204, cancelled.text
     assert cancel.call_count == 1
+
+
+@respx.mock
+def test_unbinding_a_tag_pushes_the_clear_at_once_with_tags_sb_to_bb(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    configure(client, filament_sync={"tags": "sb_to_bb"})
+    route = respx.get(f"{API}/inventory/spools/by-tag").mock(side_effect=httpx.ConnectError("down"))
+    spool = _spool(client)
+    bound = client.post(
+        f"{SPOOLS}/{spool['id']}/tags", json={"tag_uid": "AABBCCDD", "kind": "ntag_opentag"}
+    )
+    assert bound.status_code == 201, bound.text
+    calls = route.call_count
+
+    closed = client.delete(f"/api/v1/filament/tags/{bound.json()['tag_id']}/binding")
+
+    assert closed.status_code == 200, closed.text
+    assert route.call_count == calls + 1
 
 
 @respx.mock

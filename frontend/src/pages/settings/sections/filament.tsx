@@ -50,6 +50,9 @@ function statusLine(status: RfidStatus): string {
 
 function reportLine(report: RfidReconcileReport): string {
   const parts = [plural(report.tags.pushed, 'tag sent', 'tags sent')]
+  if (report.tags.failed > 0) parts.push(`${plural(report.tags.failed, 'tag was', 'tags were')} not sent; they stay queued for the next refresh`)
+  const failedSlots = report.slots?.failed ?? 0
+  if (failedSlots > 0) parts.push(`${plural(failedSlots, 'slot was', 'slots were')} not set; ${failedSlots === 1 ? 'it is' : 'they are'} tried again on the next refresh`)
   const noTemps = report.slots?.no_temps ?? 0
   if (noTemps > 0) parts.push(`${plural(noTemps, 'spool has', 'spools have')} no nozzle temperatures, so its slot is not set`)
   return `${parts.join('. ')}.`

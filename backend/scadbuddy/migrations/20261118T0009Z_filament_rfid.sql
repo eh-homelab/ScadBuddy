@@ -20,7 +20,7 @@ CREATE TABLE filament_rfid_state (
 );
 INSERT INTO filament_rfid_state (singleton) VALUES (true);
 
--- The spool each tray of a printer is configured for while override mode is on.
+-- The spool each tray of a printer is configured for, whatever the override mode says.
 CREATE TABLE filament_override_slots (
     printer_id uuid NOT NULL REFERENCES printers (id) ON DELETE CASCADE,
     ams_id integer NOT NULL,
@@ -45,4 +45,12 @@ CREATE TABLE filament_bb_ignored (
     tag_uid text,
     tray_uuid text,
     recorded_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- The NTAG write queued for a spool: the tag UID Bambuddy's record held when the write was
+-- queued (null for none). `confirm` binds only a UID that differs from it.
+CREATE TABLE filament_ntag_writes (
+    spool_id uuid PRIMARY KEY REFERENCES filament_spools (id) ON DELETE CASCADE,
+    baseline_uid text,
+    queued_at timestamptz NOT NULL DEFAULT now()
 );

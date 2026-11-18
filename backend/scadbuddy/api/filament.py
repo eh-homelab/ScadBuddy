@@ -612,10 +612,13 @@ async def _push_now(filament: Filament, store: SettingsStore) -> None:
         "and answers the closed binding. 404 when the tag is on no spool."
     ),
 )
-async def unbind_tag(filament: FilamentDep, caller: CallerDep, tag_id: UUID) -> m.TagBinding:
+async def unbind_tag(
+    filament: FilamentDep, store: SettingsStoreDep, caller: CallerDep, tag_id: UUID
+) -> m.TagBinding:
     closed = await asyncio.to_thread(filament.spools.unbind_tag, tag_id, actor=actor(caller))
     if closed is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"tag {tag_id} is on no spool")
+    await _push_now(filament, store)
     return closed
 
 
@@ -1158,9 +1161,10 @@ async def write_ntag(
     summary="Bind the NTAG that was written for a spool",
     description=(
         "Reads the spool's Bambuddy record. When it holds a tag UID written by OpenTag3D "
-        "that differs from the spool's open tag, binds that tag as `ntag_opentag` (the "
-        "ledger names the caller) and answers `bound` true with `tag_uid`; otherwise answers "
-        "`bound` false and changes nothing, so it can be called again. 404 for no such "
+        "that differs from the one it held when the write was queued, binds that tag as "
+        "`ntag_opentag` (the ledger names the caller) and answers `bound` true with "
+        "`tag_uid`; otherwise (also when no write is queued) answers `bound` false and "
+        "changes nothing, so it can be called again. 404 for no such "
         "spool, 409 with `code` `no_bambuddy_spool` when the spool is not linked to a "
         "Bambuddy spool."
     ),

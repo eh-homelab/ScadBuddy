@@ -513,8 +513,8 @@ export const filamentTools: Tool[] = [
         .default(false)
         .describe(
           'true keeps a Bambu tag (a `tray_uuid`, kind `bambu_mifare`; 422 for any other) on a spool of another ' +
-            "filament and locks the spool's weight; the AMS slot is then configured for that spool while the override " +
-            'mode is on. Moving a tag to this spool needs no flag: send false',
+            "filament and locks the spool's weight; the AMS slot is then configured for that spool, whatever the override " +
+            'mode says. Moving a tag to this spool needs no flag: send false',
         ),
     }),
     risk: 'write',
@@ -541,7 +541,7 @@ export const filamentTools: Tool[] = [
     description:
       "Take a tag off the spool it is bound to; the spool's ledger records it. `tag_id` is a binding's " +
       '`tag_id`. 404 when the tag is on no spool. Only what the user says. Writes ScadBuddy and queues the clear for ' +
-      'Bambuddy, which the refresh sends (or at once, with `filament_sync.tags` `sb_to_bb`).',
+      'Bambuddy. With `filament_sync.tags` `sb_to_bb` it also tells Bambuddy, for up to 2.5 s, and otherwise the refresh does.',
     input: z.object({ tag_id: z.string().uuid() }),
     risk: 'write',
     source: SOURCE,

@@ -107,6 +107,24 @@ describe('Filament (#6262)', () => {
     expect(within(filament).getByText(/3 spools have no nozzle temperatures/)).toBeInTheDocument()
   })
 
+  it('says which tags and slots the reconcile could not send', async () => {
+    server.use(
+      http.post('*/api/v1/filament/rfid/reconcile', () =>
+        HttpResponse.json({
+          mode: { override_mode: true, state: 'applied', devices: [] },
+          tags: { pushed: 0, moved: 0, cleared: 0, unchanged: 0, failed: 2 },
+          slots: { configured: 0, unchanged: 0, no_preset: 0, no_temps: 0, no_nozzle: 0, failed: 1 },
+        }),
+      ),
+    )
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const filament = region('Filament')
+    await user.click(await within(filament).findByRole('button', { name: 'Apply now' }))
+    expect(await within(filament).findByText(/2 tags were not sent/)).toBeInTheDocument()
+    expect(within(filament).getByText(/1 slot was not set/)).toBeInTheDocument()
+  })
+
   it('saves the thresholds and shows the server refusing 101 percent', async () => {
     const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
     await seeded()

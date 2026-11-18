@@ -115,6 +115,22 @@ describe('NtagPanel', () => {
     await waitFor(() => expect(cancelled).toEqual({ device_id: 'sb-0001' }))
   })
 
+  it('keeps the reader fixed while a write is queued, so Cancel reaches that reader', async () => {
+    server.use(http.post('*/api/v1/filament/spools/:id/ntag/confirm', () => HttpResponse.json({ bound: false })))
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const { user } = await render()
+    const reader = screen.getByRole('combobox', { name: 'Reader' })
+    expect(reader).toBeEnabled()
+    await user.click(screen.getByRole('button', { name: 'Write NTAG' }))
+    await screen.findByText('Hold a blank tag to the reader')
+    expect(reader).toBeDisabled()
+    await act(() => vi.advanceTimersByTimeAsync(63000))
+    await screen.findByText(/Not seen yet/)
+    expect(reader).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(reader).toBeEnabled())
+  })
+
   it('drops a queued write when the person leaves the page', async () => {
     let cancelled: unknown
     server.use(
