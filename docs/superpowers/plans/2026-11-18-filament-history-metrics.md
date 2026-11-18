@@ -781,6 +781,7 @@ Load `frontend-design` and `dataviz` first.
 40. Task 4 (R-T4-4, open estimates): An open estimate counts 0 g (Decision 6), so `test_stats_count_spend_and_stock` expects 50 g.
 41. Task 4 (R-T4-5, no dated test input): The metrics route test builds `since` relative to today. A fixed 2026-01-01 would fail the 1096-day bound on 2029-01-02 and turn the test red.
 42. Task 4 (R-T4-6, suppliers mock): The frontend suppliers mock's `spoolUsage` uses the backend's rule now: an open estimate counts 0, and an SB+BB pair counts once. The mock must not show numbers the API never gives. The summary mock uses the same `plateGrams` helper, and the seed has one pair and one open estimate to show it.
+43. Task 4 (R-T4-7, seed order): The three seed events that Decision 42's test needs are dated 2026-10-30, before every other seed event. The newest-first ledger order that the existing tests and e2e specs read does not change, and no existing expectation was edited.
 
 ## Pre-flight rulings (2026-11-18)
 
