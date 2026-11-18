@@ -5,6 +5,7 @@ import { CatalogTab } from './CatalogTab'
 import { LedgerTab } from './LedgerTab'
 import { InvoicesTab } from './InvoicesTab'
 import { LocationsTab } from './LocationsTab'
+import { ShoppingListTab } from './ShoppingListTab'
 import { SpoolsTab } from './SpoolsTab'
 import { SuppliersTab } from './SuppliersTab'
 import { TagsTab } from './TagsTab'
@@ -19,9 +20,6 @@ const tabClass = ({ isActive }: { isActive: boolean }) =>
       ? 'bg-background text-foreground shadow-sm dark:border-input dark:bg-input/30'
       : 'text-foreground/60 hover:text-foreground dark:text-muted-foreground dark:hover:text-foreground',
   )
-
-/** #6266's tabs whose pages are still to come (Task 13). */
-const PURCHASING_TABS: ReadonlySet<TabId> = new Set(['shopping-list'])
 
 /** What each tab holds, under the heading. */
 const INTRO: Record<TabId, string> = {
@@ -64,7 +62,7 @@ export function FilamentPage({ tab }: { tab: TabId }) {
         {tab === 'ledger' && <LedgerTab />}
         {tab === 'suppliers' && <SuppliersTab />}
         {tab === 'invoices' && <InvoicesTab />}
-        {PURCHASING_TABS.has(tab) && <p className="text-sm text-muted-foreground">This tab is being built.</p>}
+        {tab === 'shopping-list' && <ShoppingListTab />}
       </div>
     </div>
   )

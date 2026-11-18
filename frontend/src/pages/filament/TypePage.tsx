@@ -1,4 +1,4 @@
-import { ArchiveIcon, ArchiveRestoreIcon, ChevronLeftIcon } from 'lucide-react'
+import { ArchiveIcon, ArchiveRestoreIcon, ChevronLeftIcon, ShoppingCartIcon } from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Link, useLocation, useParams } from 'react-router'
 import { api, ApiError } from '../../api/client'
@@ -17,6 +17,7 @@ import {
   type SpoolTypePatch,
   type TypeKValueInput,
 } from '../../api/filament'
+import { addShopping } from '../../api/filamentPurchasing'
 import { KValueTable } from '../../components/filament/KValueTable'
 import { kValueRowsError, type KPrinter } from '../../components/filament/kValueRows'
 import { PresetTable } from '../../components/filament/PresetTable'
@@ -234,7 +235,8 @@ interface Lists {
  * #6262 — one type, `/filament/types/<id>` or `/filament/types/new`: what a spool of it is
  * (material, colour, weights, temperatures, price), the slicer presets it prints with per
  * printer model and nozzle, its pressure-advance K values, the supplier prices it has
- * (#6266; "Use as default cost" only fills the cost field, Save writes it), and the spools of it. Saving
+ * (#6266; "Use as default cost" only fills the cost field, Save writes it), an "Add to shopping
+ * list" button (one pending spool, written at once), and the spools of it. Saving
  * sends one PATCH of what changed (a POST for a new type) and, when they changed, the
  * presets' and the K values' PUTs. Unsaved edits hold every way out (`useLeaveGuard`).
  */
@@ -348,6 +350,17 @@ export function TypePage() {
     }
   }
 
+  async function addToShopping() {
+    setError(null)
+    setNotice(null)
+    try {
+      await addShopping({ type_id: madeId ?? id, quantity_spools: 1 })
+      setNotice('Added to the shopping list.')
+    } catch (cause) {
+      setError(message(cause))
+    }
+  }
+
   async function archive(archived: boolean) {
     setBusy(true)
     setError(null)
@@ -402,6 +415,12 @@ export function TypePage() {
           <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void archive(!saved.archived_at)}>
             {saved.archived_at ? <ArchiveRestoreIcon /> : <ArchiveIcon />}
             {saved.archived_at ? 'Restore' : 'Archive'}
+          </Button>
+        )}
+        {!creating && (
+          <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void addToShopping()}>
+            <ShoppingCartIcon />
+            Add to shopping list
           </Button>
         )}
         <Button type="button" variant="ghost" size="sm" disabled={busy || !dirty} onClick={() => { setDraft(base); setError(null) }}>

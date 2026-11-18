@@ -3,6 +3,7 @@ import { delay, http, HttpResponse } from 'msw'
 import { describe, expect, it } from 'vitest'
 import { api } from '../../api/client'
 import { listCatalog, listTypes, upsertCatalog, upsertType, type SpoolTypeCreate } from '../../api/filament'
+import { listShopping } from '../../api/filamentPurchasing'
 import { server } from '../../mocks/server'
 import { SUPPLIER } from '../../mocks/features/filamentPurchasingSeed'
 import { M, ST, T } from '../../mocks/features/filament/seed'
@@ -23,6 +24,14 @@ describe('the Types tab', () => {
     expect(within(jade).getByText('15.91')).toBeInTheDocument()
     const orange = rows.find((row) => row.dataset.type === T.ORANGE)!
     expect(orange.querySelector('[data-colour]')).toHaveAttribute('data-colour', '#FF6A1380')
+  })
+
+  it('adds a type to the shopping list from its row', async () => {
+    const { user } = renderPage(<TypesTab />)
+    const jade = typeRows(await types()).find((row) => row.dataset.type === T.JADE)!
+    await user.click(within(jade).getByRole('button', { name: 'Add BL-PLA-BASIC-JADE-WHITE to the shopping list' }))
+    expect(await screen.findByText('Added BL-PLA-BASIC-JADE-WHITE to the shopping list.')).toBeInTheDocument()
+    expect((await listShopping()).filter((item) => item.type_id === T.JADE)).toHaveLength(1)
   })
 
   it('shows the newest per-kg price of a type from its suppliers', async () => {

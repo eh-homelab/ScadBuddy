@@ -3,7 +3,7 @@ import { http, HttpResponse } from 'msw'
 import { Link, Route, Routes, useLocation } from 'react-router'
 import { describe, expect, it } from 'vitest'
 import { getType, listTypes } from '../../api/filament'
-import { patchSupplier } from '../../api/filamentPurchasing'
+import { listShopping, patchSupplier } from '../../api/filamentPurchasing'
 import { SUPPLIER } from '../../mocks/features/filamentPurchasingSeed'
 import { server } from '../../mocks/server'
 import { T } from '../../mocks/features/filament/seed'
@@ -305,6 +305,17 @@ describe('the prices panel', () => {
     await user.type(screen.getByLabelText('SKU'), 'MC-MIST')
     await user.click(screen.getByRole('button', { name: 'Add product' }))
     expect(await screen.findByRole('article', { name: 'Micro Center MC-MIST' })).toBeInTheDocument()
+  })
+
+  it('adds the type to the shopping list as one pending item', async () => {
+    const { user } = render(`/filament/types/${T.MISTLETOE}`)
+    await code()
+    const before = (await listShopping()).length
+    await user.click(screen.getByRole('button', { name: 'Add to shopping list' }))
+    expect(await screen.findByText(/Added to the shopping list/)).toBeInTheDocument()
+    const after = await listShopping()
+    expect(after).toHaveLength(before + 1)
+    expect(after.filter((item) => item.type_id === T.MISTLETOE)).toEqual([expect.objectContaining({ quantity_spools: 1, status: 'pending' })])
   })
 
   it('refuses a product page that is not http or https', async () => {

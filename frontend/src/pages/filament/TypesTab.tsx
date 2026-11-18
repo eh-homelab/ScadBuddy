@@ -1,9 +1,9 @@
-import { PlusIcon } from 'lucide-react'
+import { PlusIcon, ShoppingCartIcon } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useSearchParams } from 'react-router'
 import { ApiError } from '../../api/client'
 import { listCatalog, listSpools, listTypes, type CatalogRows, type Spool, type SpoolType } from '../../api/filament'
-import { getPriceSheet, listSuppliers, type PricePoint } from '../../api/filamentPurchasing'
+import { addShopping, getPriceSheet, listSuppliers, type PricePoint } from '../../api/filamentPurchasing'
 import { RgbaSwatch } from '../../components/filament/RgbaSwatch'
 import { useMoney } from '../../components/filament/purchasing/useMoney'
 import { FilamentsEditor } from '../../components/orders/FilamentsEditor'
@@ -64,6 +64,7 @@ export function TypesTab() {
   /** The newest per-kg price point per type, read beside the types so a slow supplier call never holds the table. */
   const [newest, setNewest] = useState<Map<string, PricePoint>>(new Map())
   const [pricesFailed, setPricesFailed] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
 
   /** Each load takes a number; only the newest one's answer is used. */
   const latest = useRef(0)
@@ -104,6 +105,17 @@ export function TypesTab() {
     }
   }, [])
 
+  async function addToShopping(type: SpoolType) {
+    setError(null)
+    setNotice(null)
+    try {
+      await addShopping({ type_id: type.id, quantity_spools: 1 })
+      setNotice(`Added ${type.code} to the shopping list.`)
+    } catch (cause) {
+      setError(message(cause))
+    }
+  }
+
   // Every type is loaded: a price book row linked to an archived type still names it.
   const shown = data?.types.filter((type) => archived || !type.archived_at) ?? []
   return (
@@ -134,6 +146,11 @@ export function TypesTab() {
             {error}
           </p>
         )}
+        {notice && (
+          <p role="status" className="text-[13px] text-muted-foreground">
+            {notice}
+          </p>
+        )}
         {!data && !error && <p className="text-[13px] text-muted-foreground">Loading types…</p>}
         {data && (
           <div className="relative overflow-x-auto rounded-md border">
@@ -150,6 +167,9 @@ export function TypesTab() {
                   <th scope="col" className="px-2 py-1.5 text-right font-medium">Price per kg</th>
                   <th scope="col" className="px-2 py-1.5 text-right font-medium">Newest price</th>
                   <th scope="col" className="px-2 py-1.5 text-right font-medium">Spools</th>
+                  <th className="px-2 py-1.5">
+                    <span className="sr-only">Actions</span>
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -184,11 +204,16 @@ export function TypesTab() {
                       })()}
                     </td>
                     <td className="px-2 py-1.5 text-right tabular-nums">{data.spoolsOf.get(type.id) ?? 0}</td>
+                    <td className="px-2 py-1.5 text-right">
+                      <Button type="button" variant="ghost" size="sm" aria-label={`Add ${type.code} to the shopping list`} onClick={() => void addToShopping(type)}>
+                        <ShoppingCartIcon /> Buy
+                      </Button>
+                    </td>
                   </tr>
                 ))}
                 {shown.length === 0 && (
                   <tr className="border-t">
-                    <td colSpan={8} className="px-2 py-3 text-muted-foreground">
+                    <td colSpan={9}className="px-2 py-3 text-muted-foreground">
                       No types yet. Add one, or make one from a price book row below.
                     </td>
                   </tr>

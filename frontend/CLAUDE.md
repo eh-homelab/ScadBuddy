@@ -240,7 +240,10 @@ same way, `vite.config.ts`).
   (debounced, `invoiceLines.ts` checks them first), and Confirm waits for a type on every line, the
   shop's currency and `reconciles`. A confirmed invoice keeps only its note and file. A unit test
   that uploads a file answers the `/file` part itself (jsdom's `FormData` does not reach msw;
-  `InvoiceUpload.test.tsx`).
+  `InvoiceUpload.test.tsx`). The Shopping list tab (`ShoppingListTab`) adds an item from a type or by
+  text, marks it purchased (it sorts below the pending ones) or removes it, and confirms "Clear
+  purchased" and "Clear all"; the last quantity is remembered (`QUANTITY_KEY`). The Types tab's row
+  and `TypePage` add a type to it as one pending spool.
   `/filament/spools/:id` (`SpoolPage`: sections, a "Go to section" select below
   1024 px, `OverrideField` with "Reset to type", `RgbaColourField` with Opaque, Translucent and
   Clear presets, `TagPanel` with "Tag is on spool #N — Move it here") and `/filament/types/:id`
