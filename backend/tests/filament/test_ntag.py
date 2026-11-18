@@ -14,8 +14,8 @@ import pytest
 import respx
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
-from scadbuddy.bambuddy.errors import ApiError
 from scadbuddy.bambuddy.models import Spool, TagScan
+from scadbuddy.core.problems import ApiError
 from scadbuddy.filament import ntag
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.component import Filament
