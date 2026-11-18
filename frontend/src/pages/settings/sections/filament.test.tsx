@@ -45,6 +45,8 @@ describe('Filament (#6262)', () => {
     expect(mockSettings().filament_sync).toEqual({ spools: 'bb_to_sb', tags: 'off' })
     await user.click(within(filament).getByRole('button', { name: 'Save Filament' }))
     await waitFor(() => expect(mockSettings().filament_sync).toEqual({ spools: 'bb_to_sb', tags: 'sb_to_bb' }))
+    // The form resets from the saved settings once the save settles; a choice made before that is overwritten.
+    await waitFor(() => expect(within(filament).getByRole('button', { name: 'Save Filament' })).toBeDisabled())
     await choose(user, within(filament).getByRole('combobox', { name: 'Spools' }), 'Off')
     await user.click(within(filament).getByRole('button', { name: 'Save Filament' }))
     await waitFor(() => expect(mockSettings().filament_sync).toEqual({ spools: 'off', tags: 'sb_to_bb' }))
