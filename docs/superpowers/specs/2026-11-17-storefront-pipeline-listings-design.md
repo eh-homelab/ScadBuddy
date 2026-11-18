@@ -436,7 +436,8 @@ because a per-piece list would give a wrong price with no error.
 
 **No promise of a price.** A visitor's line may still be priced by hand on any visit, as
 for every listing: after #6581 a variant has no price while the profile printer's status
-cannot be read (`printer_opening` answers None), and a slice that fails gives none
+cannot be read (`printer_opening` answers None, `STATUS_UNREAD`), a slot's type with no
+preset for the nozzle gives none (`NO_TYPE_PRESET`), and a slice that fails gives none
 either. A whole dollhouse slices for longer than a keychain, so a status blip during the
 wait is more likely to cost that visitor the firm price. The design adds no retry of its
 own for this.
@@ -453,32 +454,39 @@ output `source=storefront` (#6371). It slices every plate of the multi-plate 3MF
 `slice_and_price`.
 
 The slice request for a pipeline variant is built as any variant's is after scadify's
-slice-price fix, #6581 (issue #6574), never by a third copy. The names below are as
-they will be once #6581 merges (read from the coordinator's summary of it, 2026-11-17;
-not yet on `main`):
+slice-price fix, #6581 (issue #6574, merged as bd5889e76), never by a third copy. The
+names below are read from `main` after that merge:
 
 - `bambuddy/choices.py` `opening_choices(remembered: ModelPrintChoices | None, status:
   PrinterStatus | None, bed_type: str) -> PrintChoices`, the one builder of the
-  dialog's opening choices, which replaces `slice_price.py` `storefront_choices`;
-- its helpers `dialog_bed_type(settings, *, last, printer, printer_id)` and
+  dialog's opening choices, which replaced `slice_price.py` `storefront_choices`;
+- its helpers `dialog_bed_type(...)` and
   `async printer_opening(settings, printers, printer) -> PrinterOpening | None`, where
-  `PrinterOpening(status, bed_type)`;
-- in the storefront, `slice_price.py` `plan_variant(..., printer: PrinterOpening)`;
+  `PrinterOpening` holds `status`, `last`, `printer` and `printer_id`, and the plate is
+  `opening.bed_type(settings)`, read at each price;
+- in the storefront, `slice_price.py` `plan_variant(..., printer: PrinterOpening,
+  type_presets: Mapping[UUID, Sequence[EffectivePreset]])`, with the presets read by
+  `read_type_presets` (`filament_spool_type_presets`, #6262);
 - `slice_profile.py` `slice_request(profile, choices)`, which sends no spools and takes
-  no slot materials. The shop slice profile maps each material to a filament type id,
-  and each slot's preset is that type's own (`filament/presets.py` `preset_for`). The
-  slots go as `SliceVariant.slot_presets`, then to `resolve(..., slot_presets=)`. The
-  3MF gives the colour.
+  no slot materials. The shop slice profile maps each material to a filament type id
+  (`slot_types`), and each slot gets that type's presets (`slot_presets`). The slots go
+  as `SliceVariant.slot_presets`, then to `resolve(..., slot_presets=)`. The 3MF gives
+  the colour.
+
+`plan_variant` gives no price when the printer's status cannot be read
+(`STATUS_UNREAD`) or when a slot's type has no preset for the H2C and the chosen nozzle
+(`NO_TYPE_PRESET`). The price key is at `KEY_VERSION` 3.
 
 A pipeline variant goes through `plan_variant` and `slice_request` unchanged, with the
 `PrinterOpening` of the profile's printer. The remembered choices `opening_choices`
-takes are read by the listing's slug, as for any listing. #6581 also changes `price_key`; this design
+takes are read by the listing's slug, as for any listing. #6581 also changed `price_key`; this design
 adds nothing to the key, because the 3MF's sha256 already differs when the inputs
 differ. Publish's `check_sliceable` (`listings.py`, 422
 `listing_material_unsliceable`) applies to a pipeline listing as it is: after #6581 it
 refuses a material with no filament type in the shop slice profile (its text says
-"no filament type for"). The work that
-touches `slice_price.py` or `line_prices.py` lands after #6581 merges (§11).
+"no filament type for"). #6581 is merged, so
+the work that touches `slice_price.py` or `line_prices.py` can start once this design is
+approved (§11).
 
 ## 8. Template changes (question 5)
 
@@ -605,8 +613,8 @@ until the step that makes it safe.
 3. **`feat(storefront): price a pipeline listing`** (backend). The two rules of §7.2 in
    `render_estimate` and `reprice` (the inputs compared by deep equality of the parsed
    values, not by key order), the slice request through #6581's `plan_variant`
-   and `slice_request` (§7.3), and the slice-price test for a pipeline variant. **It
-   lands after #6581 merges**, and is rebased on it.
+   and `slice_request` (§7.3), and the slice-price test for a pipeline variant. It
+   builds on #6581, which is merged (bd5889e76).
 4. **`feat(storefront): set a listing's design inputs`** (frontend). The Design block,
    the "Set up the design" dialog, the schema form fallback, Sell's inputs, the refusal
    mapping, the mocks and the Playwright run. It can go up in parallel with 3, after 2.
