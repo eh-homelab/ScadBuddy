@@ -5,9 +5,11 @@ every route and body is the one the recordings name
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Iterator
 
 import httpx
+import psycopg
 import pytest
 import respx
 
@@ -15,7 +17,9 @@ from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament.rfid_mode import (
+    BUSY,
     NO_BAMBUDDY,
+    RFID_MODE_LOCK,
     RfidModeStore,
     reconcile_mode,
     reconcile_mode_now,
@@ -371,3 +375,78 @@ async def test_no_bambuddy_leaves_the_mode_pending_and_the_activity_not_failed(
     assert (status.state, status.detail) == ("pending", NO_BAMBUDDY)
     assert await run() == "done"
     assert len(respx.calls) == 0
+
+
+@pytest.fixture
+def hold_lock(pg_pool: PgPool) -> Iterator[None]:
+    """Another process holding the mode lock."""
+    conn = psycopg.connect(RfidModeStore(pg_pool).conninfo, autocommit=True)
+    conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (RFID_MODE_LOCK,))
+    try:
+        yield
+    finally:
+        conn.close()
+
+
+def _lock_is_free(store: RfidModeStore) -> bool:
+    with psycopg.connect(store.conninfo, autocommit=True) as other:
+        row = other.execute(
+            "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (RFID_MODE_LOCK,)
+        ).fetchone()
+    return row is not None and bool(row[0])
+
+
+@respx.mock
+async def test_the_activity_skips_the_mode_step_while_another_holds_the_lock(
+    pg_pool: PgPool, hold_lock: None
+) -> None:
+    f = _filament(pg_pool)
+    f.rfid.set_mode(True)
+    run = filament_rfid_activity(None, f, _settings, lambda: FilamentSync(tags="off"))  # type: ignore[arg-type]
+
+    assert await run() == "done"
+    assert len(respx.calls) == 0
+
+
+@respx.mock
+async def test_a_wait_for_the_lock_times_out_as_busy(pg_pool: PgPool, hold_lock: None) -> None:
+    store = RfidModeStore(pg_pool)
+    store.set_mode(True)
+
+    began = time.monotonic()
+    status = await reconcile_mode_now(store, _settings, wait=0.3)
+
+    assert 0.25 <= time.monotonic() - began < 3
+    assert (status.state, status.detail) == ("pending", BUSY)
+    assert store.state().override_mode is True
+    assert len(respx.calls) == 0
+
+
+@respx.mock
+async def test_one_reconcile_holds_the_lock_from_its_first_call_to_its_last_write(
+    pg_pool: PgPool,
+) -> None:
+    """The reviewer's interleaving (a PUT off finishing between the activity's re-read and
+    its PATCH) needs a second reconcile to run inside the first: it cannot, and one that
+    tries finds the lock held and calls nothing."""
+    store = RfidModeStore(pg_pool)
+    store.set_mode(True)
+    free_during: list[bool] = []
+
+    def read(request: httpx.Request) -> httpx.Response:
+        free_during.append(_lock_is_free(store))
+        return httpx.Response(200, json={"auto_add_unknown_rfid": True})
+
+    def patched(request: httpx.Request) -> httpx.Response:
+        free_during.append(_lock_is_free(store))
+        store.set_mode(False)  # the row changes mid-run, as a PUT's write does
+        return httpx.Response(200, json={})
+
+    respx.get(SETTINGS).mock(side_effect=read)
+    respx.patch(SETTINGS).mock(side_effect=patched)
+
+    await reconcile_mode_now(store, _settings)
+
+    assert free_during == [False, False, False]
+    assert store.state().saved_auto_add is True  # the saved value survived the mid-run flip
+    assert _lock_is_free(store)  # and the lock is released

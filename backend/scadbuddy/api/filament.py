@@ -29,6 +29,7 @@ from scadbuddy.crud.idempotency import (
     required_key,
 )
 from scadbuddy.filament import models as m
+from scadbuddy.filament import rfid_mode
 from scadbuddy.filament.assignments_cache import AssignmentsCache
 from scadbuddy.filament.bambuddy_pull import PullReport, read_and_pull, try_assignments
 from scadbuddy.filament.catalog import (
@@ -1025,14 +1026,17 @@ async def get_rfid_status(filament: FilamentDep, store: SettingsStoreDep) -> m.R
         "mode is written first, then Bambuddy is reconciled once, and the answer is the "
         "status. It is 200 even when Bambuddy refuses the write (`blocked`: its auth is "
         "on) or cannot be reached (`pending`); the mode then stays as asked and the "
-        "refresh retries."
+        "refresh retries. Another reconcile may hold the mode lock: the route waits up to 5 "
+        "seconds, then answers `pending` with detail `busy`, and the refresh applies the mode."
     ),
 )
 async def set_rfid_override_mode(
     filament: FilamentDep, store: SettingsStoreDep, body: m.RfidModeSet
 ) -> m.RfidStatus:
     await asyncio.to_thread(filament.rfid.set_mode, body.enabled)
-    return await reconcile_mode_now(filament.rfid, store.load)
+    return await reconcile_mode_now(
+        filament.rfid, store.load, wait=rfid_mode.RFID_MODE_LOCK_WAIT_SECONDS
+    )
 
 
 @router.post(

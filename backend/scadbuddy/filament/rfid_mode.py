@@ -7,8 +7,11 @@ Every step is state-based: read Bambuddy first, write only a difference."""
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Callable
+from typing import Any
 
+import psycopg
 from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
@@ -26,6 +29,14 @@ Conn = Connection[DictRow]
 _COLUMNS = "override_mode, saved_auto_add, blocked, changed_at"
 #: The detail of a mode that is on while no Bambuddy is configured: nothing to retry.
 NO_BAMBUDDY = "no Bambuddy"
+#: The detail of a reconcile that found another one running: the holder does the work.
+BUSY = "busy"
+#: The session advisory lock (hashed with ``hashtextextended``) one `reconcile_mode` holds,
+#: across processes, from its state read to its last row write.
+RFID_MODE_LOCK = "scadbuddy:filament:rfid_mode"
+#: How long a PUT waits for that lock before it answers ``pending`` (``busy``).
+RFID_MODE_LOCK_WAIT_SECONDS = 5.0
+_LOCK_POLL_SECONDS = 0.05
 BLOCKED_DETAIL = (
     "Bambuddy's auth is on, and no API key can change its settings: turn its auth off, "
     "or turn off auto-add of unknown RFID spools in Bambuddy"
@@ -38,6 +49,12 @@ class RfidModeStore:
 
     def __init__(self, pool: ConnectionPool[Conn]) -> None:
         self._pool = pool
+
+    @property
+    def conninfo(self) -> str:
+        """The database the pool serves, for the lock's connection of its own."""
+        conninfo = self._pool.conninfo
+        return conninfo() if callable(conninfo) else conninfo
 
     def state(self) -> m.RfidState:
         with self._pool.connection() as conn:
@@ -147,11 +164,41 @@ async def reconcile_mode(store: RfidModeStore, client: BambuddyClient) -> m.Rfid
         return _status(state, "pending", seen=seen, detail=error_label(exc))
 
 
+def _try_lock(store: RfidModeStore) -> psycopg.Connection[Any] | None:
+    """The mode lock on a connection of its own (never the row pool's), or ``None`` when
+    another holds it. Closing the connection ends the lock."""
+    conn = psycopg.connect(store.conninfo, autocommit=True, connect_timeout=10)
+    try:
+        got = conn.execute(
+            "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (RFID_MODE_LOCK,)
+        ).fetchone()
+    except BaseException:
+        conn.close()
+        raise
+    if got is not None and got[0]:
+        return conn
+    conn.close()
+    return None
+
+
+async def _lock(store: RfidModeStore, wait: float) -> psycopg.Connection[Any] | None:
+    """Try the lock, again every `_LOCK_POLL_SECONDS` for up to ``wait`` seconds."""
+    deadline = time.monotonic() + wait
+    while True:
+        conn = await asyncio.to_thread(_try_lock, store)
+        if conn is not None or time.monotonic() >= deadline:
+            return conn
+        await asyncio.sleep(_LOCK_POLL_SECONDS)
+
+
 async def reconcile_mode_now(
-    store: RfidModeStore, load: Callable[[], StoredSettings]
+    store: RfidModeStore, load: Callable[[], StoredSettings], *, wait: float = 0.0
 ) -> m.RfidStatus:
-    """`reconcile_mode` with a client of its own. A mode that is off with nothing saved
-    needs no Bambuddy; one that cannot reach it (none configured) stays ``pending``."""
+    """`reconcile_mode` with a client of its own, serialised across processes by
+    `RFID_MODE_LOCK`. It tries the lock for ``wait`` seconds (once, by default); where
+    another holds it, the answer is ``pending`` with detail `BUSY` and nothing is called.
+    A mode that is off with nothing saved needs no Bambuddy; one with no Bambuddy
+    configured stays ``pending`` (`NO_BAMBUDDY`)."""
     state = await asyncio.to_thread(store.state)
     if not state.override_mode and state.saved_auto_add is None:
         return _status(state, "off")
@@ -159,8 +206,14 @@ async def reconcile_mode_now(
         settings = await asyncio.to_thread(load)
         if not settings.bambuddy_url:
             return _status(state, "pending", detail=NO_BAMBUDDY)
-        async with client_for(settings) as client:
-            return await reconcile_mode(store, client)
+        lock = await _lock(store, wait)
+        if lock is None:
+            return _status(state, "pending", detail=BUSY)
+        try:
+            async with client_for(settings) as client:
+                return await reconcile_mode(store, client)
+        finally:
+            await asyncio.to_thread(lock.close)
     except ApiError as exc:
         return _status(state, "pending", detail=error_label(exc))
 

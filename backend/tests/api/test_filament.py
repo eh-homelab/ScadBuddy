@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.filament import actor
 from scadbuddy.auth.models import ANONYMOUS, AuthSession, Person, PersonalToken, Service
-from scadbuddy.filament import assignments_cache
+from scadbuddy.filament import assignments_cache, rfid_mode
 from scadbuddy.filament.component import FILAMENT
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.printers.reports import PrinterReportStore
@@ -959,3 +959,25 @@ def test_the_reconcile_route_runs_the_mode_and_the_tags(client: TestClient) -> N
     assert body["mode"]["state"] == "applied"
     assert body["tags"] == {"pushed": 0, "moved": 0, "cleared": 0, "unchanged": 0, "failed": 0}
     assert body["slots"] is None
+
+
+@respx.mock
+def test_the_mode_route_answers_busy_while_another_reconcile_holds_the_lock(
+    client: TestClient, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configure(client)
+    monkeypatch.setattr(rfid_mode, "RFID_MODE_LOCK_WAIT_SECONDS", 0.3)
+    holder = psycopg.connect(pg_conninfo, autocommit=True)
+    holder.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (rfid_mode.RFID_MODE_LOCK,))
+    try:
+        began = time.monotonic()
+        busy = client.put(f"{RFID}/override-mode", json={"enabled": True})
+        waited = time.monotonic() - began
+    finally:
+        holder.close()
+
+    assert busy.status_code == 200, busy.text
+    assert (busy.json()["state"], busy.json()["detail"]) == ("pending", "busy")
+    assert busy.json()["override_mode"] is True  # the row was written
+    assert waited < 3
+    assert len(respx.calls) == 0
