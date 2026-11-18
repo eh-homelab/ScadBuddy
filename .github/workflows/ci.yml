@@ -1326,9 +1326,10 @@ jobs:
   # builds for every module it gets a part of. Measured pytest time a shard: 28 to
   # 40 min on PR run 44300526218 (all six shards; the 40 min one on a slow runner),
   # 27 to 28 min on main run 44308254023 (the three shards that finished before a
-  # newer push cancelled the run) (#6651). Its timings must be CI's own: a file stored on another machine had the
-  # non-API tests at about twice their CI time, so the shard holding them finished
-  # ten minutes before the rest. So each shard stores what it ran, timed here
+  # newer push cancelled the run) (#6651). The durations file's timings must be
+  # CI's own: a file stored on another machine had the non-API tests at about
+  # twice their CI time, so the shard holding them finished ten minutes before the
+  # rest. So each shard stores what it ran, timed here
   # (`--store-durations --clean-durations`), and `backend-pytest-split` merges the
   # six into the `backend-test-durations` artifact. To refresh, download that
   # artifact from a green run on main, unzip it into backend/ and commit.
