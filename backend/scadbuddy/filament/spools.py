@@ -142,12 +142,17 @@ def _hydrate(
     rows: list[dict[str, Any]],
     defaults: FilamentDefaults = _SETTING_DEFAULTS,
     now: datetime | None = None,
+    hours: bool = True,
 ) -> list[m.Spool]:
     """The spools of ``rows`` with their effective values. A spool's subtype and
     material are its own if it sets them, else its type's. A spool with no percentage of
     its own is low under ``defaults.low_stock_pct``, the setting ``filament_low_stock_pct``.
     ``now`` is the time the hours outside dry storage run to (`filament/dry_hours.py`);
-    with none it is the database's."""
+    with none it is the database's. With ``hours`` false (a caller that does not return the
+    spool) the hours and ``needs_drying`` stay at their defaults and cost no query. The
+    hours are rounded to 0.1 h, the precision of the limit; ``needs_drying`` compares the
+    unrounded hours. A place's CURRENT kind judges the whole window: no kind history is
+    kept, so re-kinding a shelf to a dry box turns its past time there into dry time."""
     default_pct = defaults.low_stock_pct
     types = _by_id(conn, "filament_spool_types", _TYPE_COLUMNS, (r["type_id"] for r in rows))
 
@@ -180,7 +185,7 @@ def _hydrate(
         row = pick(found, key)
         return None if row is None else str(row["name"])
 
-    outside = _hours_outside_dry(conn, rows, now)
+    outside = _hours_outside_dry(conn, rows, now) if hours else {}
     spools = []
     for row, own in zip(rows, values, strict=True):
         names = m.SpoolNames(
@@ -192,16 +197,16 @@ def _hydrate(
             insert_type=name(inserts, own.insert_type_id),
             location=name(places, row["location_id"]),
         )
-        hours = outside[row["id"]]
+        spent = outside.get(row["id"], 0.0)
         material = pick(materials, own.material_id)
         spools.append(
             m.Spool.model_validate(
                 row
                 | {
-                    "hours_outside_dry": hours,
+                    "hours_outside_dry": round(spent, 1),
                     "needs_drying": material is not None
                     and dry_hours.needs_drying(
-                        hours,
+                        spent,
                         hygroscopic=material["hygroscopic"],
                         max_hours_outside_dry=None
                         if material["max_hours_outside_dry"] is None
@@ -579,7 +584,7 @@ class FilamentSpoolStore:
         """The spool's slicer presets, its own over its type's; ``None`` for no such
         spool."""
         with self._pool.connection() as conn:
-            if self._spool(conn, spool_id) is None:
+            if self._spool(conn, spool_id, hours=False) is None:
                 return None
             return p.effective_presets(conn, spool_id)
 
@@ -628,7 +633,7 @@ class FilamentSpoolStore:
         """The spool's pressure-advance values, its own over its type's; ``None`` for no
         such spool."""
         with self._pool.connection() as conn:
-            if self._spool(conn, spool_id) is None:
+            if self._spool(conn, spool_id, hours=False) is None:
                 return None
             return p.effective_k_values(conn, spool_id)
 
@@ -914,11 +919,12 @@ class FilamentSpoolStore:
         spool_id: UUID,
         defaults: FilamentDefaults = _SETTING_DEFAULTS,
         now: datetime | None = None,
+        hours: bool = True,
     ) -> m.Spool | None:
         row = conn.execute(
             f"SELECT {_SPOOL_COLUMNS} FROM filament_spools WHERE id = %s", (spool_id,)
         ).fetchone()
-        return None if row is None else _hydrate(conn, [row], defaults, now)[0]
+        return None if row is None else _hydrate(conn, [row], defaults, now, hours)[0]
 
     @staticmethod
     def _tag_row(row: Row) -> m.TagRow:
@@ -949,7 +955,7 @@ class FilamentSpoolStore:
         )
 
     def _check(self, conn: Conn, spool_id: UUID) -> None:
-        spool = self._spool(conn, spool_id)
+        spool = self._spool(conn, spool_id, hours=False)
         assert spool is not None
         _check_temps(spool.effective)
 

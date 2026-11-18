@@ -1,7 +1,9 @@
 """Time outside dry storage (#6268, plan Decision 8): the hours since a spool was last
 dried (else since it was made) that its place was not a dry-storage one. A spool with no
 place counts as outside. The places come from the spool's ``moved`` events, so a move
-between two dry boxes adds nothing. The functions take every time as an argument."""
+between two dry boxes adds nothing. A place counts as dry by its CURRENT kind for the
+whole window: no kind history is kept, so re-kinding a shelf to a dry box turns the time
+already spent there into dry time. The functions take every time as an argument."""
 
 from __future__ import annotations
 

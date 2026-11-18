@@ -16,6 +16,7 @@ from scadbuddy.filament.models import (
     LocationCreate,
     LocationKind,
     LocationKindCreate,
+    LocationPatch,
     Material,
     SpoolCreate,
 )
@@ -152,3 +153,52 @@ def test_needs_drying_needs_a_hygroscopic_material_and_a_limit(pg_pool: PgPool) 
         assert other is not None
         assert other.hours_outside_dry == pytest.approx(11)
         assert other.needs_drying is False
+
+
+@pytest.mark.requires_postgres
+def test_a_rekinded_place_judges_the_whole_window_by_its_current_kind(pg_pool: PgPool) -> None:
+    shelf = _place(pg_pool, "Shelf", dry=False)
+    spool = _spool(pg_pool)
+    _move(pg_pool, spool, shelf, 0)
+    before = _store(pg_pool, _h(8)).get(spool)
+    assert before is not None
+    assert before.hours_outside_dry == pytest.approx(8)
+    LocationStore(pg_pool).update(shelf, LocationPatch(kind_id=_kind(pg_pool, "Dry box", True)))
+    after = _store(pg_pool, _h(8)).get(spool)
+    assert after is not None
+    assert after.hours_outside_dry == 0
+
+
+@pytest.mark.requires_postgres
+def test_an_archived_dry_box_still_counts_as_dry(pg_pool: PgPool) -> None:
+    box = _place(pg_pool, "Old box", dry=True)
+    spool = _spool(pg_pool)
+    _move(pg_pool, spool, box, 0)
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_locations SET archived_at = now() WHERE id = %s", (box,))
+    read = _store(pg_pool, _h(20)).get(spool)
+    assert read is not None
+    assert read.hours_outside_dry == 0
+
+
+@pytest.mark.requires_postgres
+def test_the_first_move_recovers_the_place_the_spool_started_in(pg_pool: PgPool) -> None:
+    shelf, box = _place(pg_pool, "Shelf", dry=False), _place(pg_pool, "Box", dry=True)
+    spool = _spool(pg_pool)
+    with pg_pool.connection() as conn:  # made in the shelf: no moved event for that
+        conn.execute("UPDATE filament_spools SET location_id = %s WHERE id = %s", (shelf, spool))
+    _move(pg_pool, spool, box, 4)  # 0..4 on the shelf, then dry
+    read = _store(pg_pool, _h(10)).get(spool)
+    assert read is not None
+    assert read.hours_outside_dry == pytest.approx(4)
+
+
+@pytest.mark.requires_postgres
+def test_the_hours_are_rounded_to_a_tenth_but_the_limit_sees_the_exact_value(
+    pg_pool: PgPool,
+) -> None:
+    spool = _spool(pg_pool, limit=10)
+    read = _store(pg_pool, _h(10.04)).get(spool)
+    assert read is not None
+    assert read.hours_outside_dry == 10.0
+    assert read.needs_drying is True
