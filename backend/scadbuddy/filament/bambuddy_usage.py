@@ -224,9 +224,10 @@ def _cover(
     within the printer, not on the run: a stale estimate of the same job that never ended
     can be the candidate. A candidate on an archived spool is not written to (the pull never
     writes to one) and is logged with reason ``archived``. ``others`` counts the booked
-    usage rows of the job that no estimate pairs (an unlinked BB spool's row is not booked,
-    so not counted) and the rows of this batch not yet booked (``pending``), the row's own
-    spool included: a second row of the job on one spool makes the job ambiguous."""
+    usage rows of the job that no estimate pairs, bar one that covered an estimate (an
+    unlinked BB spool's row is not booked, so not counted) and the rows of this batch not
+    yet booked (``pending``), the row's own spool included: a second row of the job on one
+    spool makes the job ambiguous."""
     job = event.data.get("job")
     if not isinstance(job, str) or event.printer_id is None:
         return
@@ -251,7 +252,9 @@ def _cover(
         r["spool_id"]
         for r in conn.execute(
             "SELECT e.spool_id FROM filament_spool_events e WHERE e.ref_kind = %s AND e.kind = %s"
-            " AND e.printer_id = %s AND e.data ->> 'job' = %s AND e.id <> %s AND NOT EXISTS"
+            " AND e.printer_id = %s AND e.data ->> 'job' = %s AND e.id <> %s"
+            " AND NOT EXISTS (SELECT 1 FROM filament_spool_events c"
+            " WHERE c.data ->> 'covered_by' = e.id::text) AND NOT EXISTS"
             " (SELECT 1 FROM filament_spool_events s WHERE s.spool_id = e.spool_id"
             " AND s.ref_kind = %s AND s.kind = %s AND s.data ->> 'job' = %s)",
             (

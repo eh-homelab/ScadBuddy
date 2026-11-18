@@ -38,7 +38,8 @@ named time, so it never pushes a physical time past a newer anchor. Three rules 
    So the skew between BB's clock and SB's cannot count a plate twice or drop it. A pair
    is per spool: when BB booked the plate on another spool than SB's estimate, the pull
    books a 0 g ``print_ended`` on the estimate's spool with ``data.covered_by`` the BB
-   event (`bambuddy_usage._cover`, #6598), and the estimate drops by this rule.
+   event (`bambuddy_usage._cover`, #6598). The estimate then drops as any estimate does
+   whose ref has a ``print_ended``: `basis` skips it.
 
 `refresh_derived` reads a spool's whole history, except for an event booked on top of
 it (`record` passes the event; #6263's AMS readings come one per tick). When no other

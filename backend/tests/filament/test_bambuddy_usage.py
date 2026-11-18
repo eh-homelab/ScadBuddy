@@ -637,3 +637,19 @@ def test_two_rows_of_one_job_on_one_spool_cover_nothing_in_a_batch_or_across_pul
         assert _book(f, [second]).booked == 1
     assert not [e for e in f.spools.events(y) if e.kind == "print_ended"]
     assert "filament.usage.unpaired" in caplog.text
+
+
+def test_a_row_that_covered_an_estimate_does_not_make_a_later_row_of_the_job_ambiguous(
+    pg_pool: PgPool,
+) -> None:
+    f = _filament(pg_pool)
+    _printer_1(pg_pool)
+    _linked(f)
+    y = _second_spool(f)
+    _estimate(f, y)
+    assert _book(f, [usage()]).booked == 1
+    _estimate(f, y, run="run-2")
+    later = usage(id=458, created_at=_naive(T1 + timedelta(hours=1)))
+    assert _book(f, [later]).booked == 1
+    covers = [e for e in f.spools.events(y) if e.kind == "print_ended"]
+    assert sorted(e.ref_id for e in covers) == [f"run-1/{JOB}/0", f"run-2/{JOB}/0"]
