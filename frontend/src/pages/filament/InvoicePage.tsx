@@ -1,0 +1,404 @@
+import { ChevronLeftIcon } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Link, useNavigate, useParams } from 'react-router'
+import { ApiError } from '../../api/client'
+import { listSpools, listTypes, type Spool, type SpoolType } from '../../api/filament'
+import {
+  confirmInvoice,
+  deleteInvoice,
+  getInvoice,
+  listProducts,
+  listSuppliers,
+  putInvoiceLines,
+  type InvoiceDetail,
+  type Supplier,
+  type SupplierProduct,
+} from '../../api/filamentPurchasing'
+import { InvoiceFile } from '../../components/filament/purchasing/InvoiceFile'
+import { InvoiceHeaderForm } from '../../components/filament/purchasing/InvoiceHeaderForm'
+import { InvoiceLinesTable } from '../../components/filament/purchasing/InvoiceLinesTable'
+import { bodyOfLines, confirmCounts, draftOfLine, hasType, lineErrors, taxBasisOf, type LineDraft, type LineErrors } from '../../components/filament/purchasing/invoiceLines'
+import { InvoiceTotals } from '../../components/filament/purchasing/InvoiceTotals'
+import { useMoney } from '../../components/filament/purchasing/useMoney'
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { addDecimals, formatCost } from '../../lib/decimal'
+import { useLeaveGuard } from '../../lib/useLeaveGuard'
+
+/** How long after a field is left the lines are saved, so a tab through three fields is one save. */
+const SAVE_DELAY_MS = 400
+
+const message = (cause: unknown, fallback: string) => (cause instanceof ApiError ? cause.detail : fallback)
+const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`
+
+function Shell({ children }: { children: ReactNode }) {
+  return (
+    <div className="h-full overflow-y-auto">
+      <div className="mx-auto max-w-7xl px-4 py-6">
+        <Link to="/filament/invoices" className="mb-3 inline-flex items-center gap-1 text-[13px] text-muted-foreground hover:text-foreground">
+          <ChevronLeftIcon className="size-3.5" /> Invoices
+        </Link>
+        {children}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * #6266 — one invoice at `/filament/invoices/:id`: its file beside the receipt typed in. A
+ * draft is edited (the header saves on blur, the lines as they are left, debounced) until
+ * it reconciles and every line has a type; "Confirm" then makes its spools. A confirmed
+ * invoice is frozen but for its note and its file, and links its spools.
+ */
+export function InvoicePage() {
+  const { id = '' } = useParams()
+  const navigate = useNavigate()
+  const money = useMoney()
+  const [invoice, setInvoice] = useState<InvoiceDetail | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [rows, setRows] = useState<LineDraft[]>([])
+  const [errors, setErrors] = useState<LineErrors>({})
+  const [dirty, setDirty] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const [types, setTypes] = useState<SpoolType[]>([])
+  const [products, setProducts] = useState<SupplierProduct[]>([])
+  const [spools, setSpools] = useState<Spool[]>([])
+  const [suppliers, setSuppliers] = useState<Supplier[]>([])
+  const [asking, setAsking] = useState<'confirm' | 'delete' | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [refusal, setRefusal] = useState<string | null>(null)
+
+  const rowsRef = useRef<LineDraft[]>([])
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const version = useRef(0)
+  const running = useRef(false)
+  const again = useRef(false)
+
+  const guard = useLeaveGuard(dirty)
+
+  useEffect(() => {
+    let live = true
+    setInvoice(null)
+    setLoadError(null)
+    getInvoice(id).then(
+      (found) => {
+        if (!live) return
+        const next = found.lines.map(draftOfLine)
+        rowsRef.current = next
+        version.current = 0
+        setRows(next)
+        setErrors({})
+        setDirty(false)
+        setInvoice(found)
+      },
+      (cause) => live && setLoadError(cause instanceof ApiError && cause.status === 404 ? 'That invoice is gone. Pick another from the Invoices tab.' : message(cause, 'The invoice could not be loaded. Try again.')),
+    )
+    return () => {
+      live = false
+      if (timer.current) clearTimeout(timer.current)
+    }
+  }, [id])
+
+  const supplierId = invoice?.supplier_id
+  useEffect(() => {
+    if (!supplierId) return
+    let live = true
+    listProducts(supplierId, { includeArchived: true }).then(
+      (rows) => live && setProducts(rows),
+      () => undefined,
+    )
+    return () => {
+      live = false
+    }
+  }, [supplierId])
+
+  const readSpools = useCallback(() => {
+    listSpools({ includeArchived: true }).then(setSpools, () => undefined)
+  }, [])
+  useEffect(() => {
+    let live = true
+    listTypes({ includeArchived: true }).then(
+      (rows) => live && setTypes(rows),
+      () => undefined,
+    )
+    listSuppliers({ includeArchived: true }).then(
+      (rows) => live && setSuppliers(rows),
+      () => undefined,
+    )
+    readSpools()
+    return () => {
+      live = false
+    }
+  }, [readSpools])
+
+  function edit(next: LineDraft[]) {
+    rowsRef.current = next
+    version.current += 1
+    setRows(next)
+    setDirty(true)
+  }
+
+  async function saveOnce() {
+    const at = version.current
+    const sending = rowsRef.current
+    if (Object.keys(lineErrors(sending)).length > 0) return
+    setSaving(true)
+    setSaveError(null)
+    try {
+      const saved = await putInvoiceLines(id, bodyOfLines(sending))
+      setInvoice(saved)
+      // An edit made while this was in flight is saved by the commit that follows it.
+      if (version.current === at) setDirty(false)
+    } catch (cause) {
+      setSaveError(message(cause, 'The lines could not be saved. Try again.'))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function flush() {
+    timer.current = null
+    if (running.current) {
+      again.current = true
+      return
+    }
+    running.current = true
+    try {
+      do {
+        again.current = false
+        await saveOnce()
+      } while (again.current)
+    } finally {
+      running.current = false
+    }
+  }
+
+  /** A field was left: say what is wrong now, and save soon if nothing is. */
+  function commit() {
+    const found = lineErrors(rowsRef.current)
+    setErrors(found)
+    if (timer.current) clearTimeout(timer.current)
+    timer.current = null
+    if (Object.keys(found).length === 0) timer.current = setTimeout(() => void flush(), SAVE_DELAY_MS)
+  }
+
+  async function confirm() {
+    setBusy(true)
+    setRefusal(null)
+    try {
+      const made = await confirmInvoice(id)
+      setInvoice(made)
+      setDirty(false)
+      setAsking(null)
+      readSpools()
+    } catch (cause) {
+      setRefusal(message(cause, 'The invoice could not be confirmed. Try again.'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function remove() {
+    setBusy(true)
+    setRefusal(null)
+    try {
+      await deleteInvoice(id)
+      setDirty(false)
+      navigate('/filament/invoices')
+    } catch (cause) {
+      setRefusal(message(cause, 'The draft could not be deleted. Try again.'))
+      setBusy(false)
+    }
+  }
+
+  const reload = useCallback(() => {
+    getInvoice(id).then(setInvoice, () => undefined)
+  }, [id])
+
+  const supplierName = useMemo(() => suppliers.find((one) => one.id === invoice?.supplier_id)?.name ?? '', [suppliers, invoice?.supplier_id])
+
+  if (loadError) {
+    return (
+      <Shell>
+        <h1 className="text-lg font-semibold tracking-tight">Invoice</h1>
+        <p role="alert" className="mt-2 text-[13px] text-warn">
+          {loadError}
+        </p>
+      </Shell>
+    )
+  }
+  if (!invoice) {
+    return (
+      <Shell>
+        <h1 className="text-lg font-semibold tracking-tight">Loading the invoice…</h1>
+      </Shell>
+    )
+  }
+
+  const draft = invoice.status === 'draft'
+  const format = (amount: string) => formatCost(amount, invoice.currency, invoice.minor_exponent)
+  const lineSum = invoice.lines.map((line) => line.line_total).reduce(addDecimals, '0')
+
+  const firstBad = rows.findIndex((row) => errors[row.key])
+  const untyped = rows.findIndex((row) => !hasType(row))
+  const reason = !draft
+    ? null
+    : rows.length === 0
+      ? 'Add at least one line'
+      : firstBad >= 0
+        ? `Fix line ${firstBad + 1} first`
+        : untyped >= 0
+          ? `Line ${untyped + 1} has no type`
+          : dirty
+            ? 'Saving the lines…'
+            : money.currency === null
+              ? "Reading the shop's currency…"
+              : invoice.currency !== money.currency
+                ? `The invoice is in ${invoice.currency} but the shop's currency is ${money.currency}. Change the currency above.`
+                : invoice.reconciles !== true
+                  ? `The total is ${format(invoice.difference ?? '0')} off the lines and shipping. Fix a price, the tax or the shipping.`
+                  : null
+  const counts = confirmCounts(rows)
+
+  return (
+    <Shell>
+      <header className="mb-5 flex flex-wrap items-center gap-3">
+        <div className="flex min-w-0 flex-1 items-center gap-3">
+          <h1 className="truncate text-lg font-semibold tracking-tight">Invoice {invoice.number ?? '(no number)'}</h1>
+          <Badge variant={draft ? 'outline' : 'secondary'}>{draft ? 'Draft' : 'Confirmed'}</Badge>
+        </div>
+        {draft && (
+          <>
+            <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => setAsking('delete')}>
+              Delete draft
+            </Button>
+            <Button type="button" size="sm" disabled={reason !== null || busy} aria-describedby="confirm-reason" onClick={() => setAsking('confirm')}>
+              Confirm
+            </Button>
+          </>
+        )}
+      </header>
+      <div className="mb-4 min-h-5 text-[13px]" aria-live="polite">
+        {draft && reason && (
+          <p id="confirm-reason" className="text-muted-foreground">
+            {reason}
+          </p>
+        )}
+        {draft && !reason && saving && <span className="text-muted-foreground">Saving…</span>}
+      </div>
+      {saveError && (
+        <p role="alert" className="mb-3 text-[13px] text-warn">
+          {saveError}
+        </p>
+      )}
+      {refusal && asking === null && (
+        <p role="alert" className="mb-3 text-[13px] text-warn">
+          {refusal}
+        </p>
+      )}
+
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
+        <div className="min-w-0 lg:sticky lg:top-4 lg:self-start">
+          <InvoiceFile invoiceId={invoice.id} file={invoice.file} onChanged={reload} />
+        </div>
+        <div className="flex min-w-0 flex-col gap-6">
+          <InvoiceHeaderForm invoice={invoice} supplierName={supplierName} editable={draft} onSaved={setInvoice} />
+          <section aria-labelledby="invoice-lines-heading" className="flex min-w-0 flex-col gap-2">
+            <h2 id="invoice-lines-heading" className="text-sm font-semibold tracking-tight">
+              Lines
+            </h2>
+            {draft ? (
+              <InvoiceLinesTable editable rows={rows} computed={invoice.lines} errors={errors} products={products} types={types} spools={spools} money={format} onChange={edit} onCommit={commit} />
+            ) : (
+              <InvoiceLinesTable editable={false} lines={invoice.lines} types={types} spools={spools} money={format} />
+            )}
+          </section>
+          <InvoiceTotals
+            currency={invoice.currency}
+            exponent={invoice.minor_exponent}
+            subtotal={invoice.subtotal}
+            tax={invoice.tax}
+            taxBasis={taxBasisOf(invoice.lines)}
+            shipping={invoice.shipping}
+            lineSum={lineSum}
+            total={invoice.total}
+            difference={invoice.difference ?? '0'}
+            reconciles={invoice.reconciles === true}
+          />
+        </div>
+      </div>
+
+      <AlertDialog open={asking === 'confirm'} onOpenChange={(open) => !open && !busy && setAsking(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Confirm this invoice?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {plural(counts.made, 'spool', 'spools')} will be made, {counts.filled} filled, {plural(counts.prices, 'price point', 'price points')}. After this the lines are frozen; only the note and the file can change.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {refusal && (
+            <p role="alert" className="text-[13px] text-warn">
+              {refusal}
+            </p>
+          )}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={busy}
+              onClick={(event) => {
+                event.preventDefault()
+                void confirm()
+              }}
+            >
+              Make the spools
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={asking === 'delete'} onOpenChange={(open) => !open && !busy && setAsking(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this draft?</AlertDialogTitle>
+            <AlertDialogDescription>The draft and its lines are removed. Its file goes with it. No spool is touched.</AlertDialogDescription>
+          </AlertDialogHeader>
+          {refusal && (
+            <p role="alert" className="text-[13px] text-warn">
+              {refusal}
+            </p>
+          )}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={busy}>Keep it</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              disabled={busy}
+              onClick={(event) => {
+                event.preventDefault()
+                void remove()
+              }}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={guard.pending !== null} onOpenChange={(next) => !next && guard.stay()}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Leave without saving?</AlertDialogTitle>
+            <AlertDialogDescription>Some line changes have not been saved, and will be lost.</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Stay</AlertDialogCancel>
+            <Button type="button" variant="destructive" onClick={guard.leave}>
+              Leave without saving
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </Shell>
+  )
+}

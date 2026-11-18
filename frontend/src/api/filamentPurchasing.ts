@@ -127,6 +127,13 @@ export function uploadInvoiceFile(id: string, file: File): Promise<FileRef> {
 /** The file's address under the API (`API_BASE`), for a link or an `<img>`: no host in it. */
 export const invoiceFileUrl = (id: string) => `${API_BASE}${BASE}/invoices/${seg(id)}/file`
 
+/** The file's bytes, for `downloadBlob`: the app may run in a sandboxed frame, where an anchor's `download` is dropped. */
+export async function getInvoiceFileBlob(id: string): Promise<Blob> {
+  const response = await fetch(invoiceFileUrl(id))
+  if (!response.ok) throw new Error('The file could not be loaded. Try again.')
+  return response.blob()
+}
+
 /** Turns the draft into spools; 409, with nothing written, names what is wrong. */
 export const confirmInvoice = (id: string) => request<InvoiceDetail>(`${BASE}/invoices/${seg(id)}/confirm`, { method: 'POST' })
 

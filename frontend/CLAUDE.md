@@ -232,7 +232,15 @@ same way, `vite.config.ts`).
   (money never goes through `Number`), and the mocks `src/mocks/features/filamentPurchasing.ts`.
   `TypePage` shows a saved type's supplier prices (`components/filament/purchasing/PricePanel.tsx`);
   "Use as default cost" only fills the cost field as an unsaved edit, and the Types tab's
-  "Newest price" column reads the suppliers' price sheets.
+  "Newest price" column reads the suppliers' price sheets. The Invoices tab (`InvoicesTab`,
+  `components/filament/purchasing/invoicesQuery.ts`: status and supplier in the address, "Remember my
+  view", the last supplier) starts a draft from a dropped, chosen or pasted file
+  (`InvoiceUpload`), and `/filament/invoices/:id` (`InvoicePage`) is the file beside the typed
+  receipt: the header saves on blur, the lines through `putInvoiceLines` as they are left
+  (debounced, `invoiceLines.ts` checks them first), and Confirm waits for a type on every line, the
+  shop's currency and `reconciles`. A confirmed invoice keeps only its note and file. A unit test
+  that uploads a file answers the `/file` part itself (jsdom's `FormData` does not reach msw;
+  `InvoiceUpload.test.tsx`).
   `/filament/spools/:id` (`SpoolPage`: sections, a "Go to section" select below
   1024 px, `OverrideField` with "Reset to type", `RgbaColourField` with Opaque, Translucent and
   Clear presets, `TagPanel` with "Tag is on spool #N — Move it here") and `/filament/types/:id`
