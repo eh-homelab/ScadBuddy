@@ -1655,8 +1655,10 @@ async def _read_named[T](
     """``read`` of the Bambuddy printer ``naming`` names (`_named_printer`)."""
     _, printer_id = await naming
     if printer_id is None:
-        # Never reached: `prepare_run` refuses such a row first (`_not_on_bambuddy`) and
-        # drops this read. An internal error, so no second wording of that refusal exists.
+        # Never read: `prepare_run` refuses such a row first (`_not_on_bambuddy`) and drops
+        # this read. The raise can still run, when a `hardware` task resumes before that
+        # drop, but `_drop` discards its error unread. An internal error, so no second
+        # wording of that refusal exists.
         raise RuntimeError("a read of a printer that Bambuddy does not reach")
     return await read(printer_id)
 
