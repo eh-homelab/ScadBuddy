@@ -20,6 +20,9 @@ AREAS: Final = frozenset({"runs"})
 SLICER: Final = "Bambu Studio"
 #: The largest preset file the CRUD service accepts.
 MAX_FILE_BYTES: Final = 512 << 10
+#: The problem ``code`` of a CRUD route for a run that is not ``running`` (Decision 25), and
+#: the type of the worker's error for it, and for a run that is gone (``run_not_found``).
+NOT_RUNNING: Final = "not_running"
 MAX_FAILURE_REASON: Final = 300
 MAX_FAILED_REASON: Final = 500
 

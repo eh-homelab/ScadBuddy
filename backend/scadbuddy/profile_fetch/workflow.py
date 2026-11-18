@@ -1,0 +1,140 @@
+"""``ProfileFetch``: one run's fetch of a type's 3DFP presets (#6625, plan Decision 13), on
+the profile-fetch worker's queue. The API starts it per run (`fetch_workflow_id`).
+
+The export activity signs in, exports each target and PUTs each file as it comes; then the
+import activity asks the API to import the run. A step that cannot finish (its attempts
+spent, a non-retryable failure, or no worker to take it within `EXPORT_SCHEDULE_TO_START`)
+posts ``failed`` with why, and the workflow returns a ``failed`` outcome. A CRUD call that
+answers that the run is not running (`NOT_RUNNING`: the API ended it, Decision 25) ends the
+workflow at once with None: no retry, and no ``failed``, which would be refused too. The
+worker is not versioned: a change to this workflow's commands goes behind
+`workflow.patched`.
+"""
+
+from __future__ import annotations
+
+from datetime import timedelta
+from typing import Final
+
+from temporalio import workflow
+from temporalio.common import RetryPolicy
+from temporalio.exceptions import ActivityError, ApplicationError, TimeoutError, TimeoutType
+
+with workflow.unsafe.imports_passed_through():
+    from scadbuddy.profile_fetch.wire import (
+        EXPORT_ACTIVITY,
+        FAILED_ACTIVITY,
+        FETCH_WORKFLOW,
+        IMPORT_ACTIVITY,
+        MAX_FAILED_REASON,
+        NOT_RUNNING,
+        ExportReport,
+        FetchAsk,
+        ImportOutcome,
+    )
+
+#: One attempt: sign in, add the filament, and export every target (Decision 13).
+EXPORT_TIMEOUT: Final = timedelta(minutes=20)
+#: The activity heartbeats every `core.heartbeat.HEARTBEAT_EVERY` (10 s).
+EXPORT_HEARTBEAT: Final = timedelta(minutes=2)
+#: No worker took the export: none is deployed, it is down, or it is busy with others.
+EXPORT_SCHEDULE_TO_START = timedelta(minutes=30)
+#: The activity marks `site.SiteError`'s kinds that are not worth another try as
+#: non-retryable (`activities.RETRYABLE_KINDS`).
+EXPORT_RETRY: Final = RetryPolicy(
+    initial_interval=timedelta(minutes=1), backoff_coefficient=2.0, maximum_attempts=3
+)
+#: The API imports into Bambuddy and reads K tables: idempotent by its key, so a lost
+#: answer or a Bambuddy 5xx is tried again.
+IMPORT_TIMEOUT: Final = timedelta(minutes=10)
+IMPORT_RETRY: Final = RetryPolicy(
+    initial_interval=timedelta(seconds=10),
+    maximum_interval=timedelta(minutes=2),
+    maximum_attempts=5,
+)
+#: Posting ``failed`` waits out a CRUD service that does not answer.
+FAILED_TIMEOUT: Final = timedelta(minutes=2)
+FAILED_RETRY: Final = RetryPolicy(
+    initial_interval=timedelta(seconds=5), maximum_interval=timedelta(minutes=10)
+)
+
+NO_WORKER: Final = "no profile-fetch worker picked the fetch up"
+
+
+class _RunEndedError(Exception):
+    """The API answered that the run is not running."""
+
+
+def _ended(error: ActivityError) -> bool:
+    cause = error.cause
+    return isinstance(cause, ApplicationError) and cause.type == NOT_RUNNING
+
+
+def failure_reason(error: ActivityError, step: str) -> str:
+    """Why ``step`` (``export`` or ``import``) gave up, for the run's ``error``: the
+    activity's own message (`activities.site_failure` keeps it free of the login), or
+    what timed out."""
+    cause = error.cause
+    if isinstance(cause, TimeoutError):
+        if cause.type == TimeoutType.SCHEDULE_TO_START:
+            return NO_WORKER
+        return f"the {step} did not finish in time"
+    if isinstance(cause, ApplicationError) and cause.message:
+        return cause.message[:MAX_FAILED_REASON]
+    return f"the {step} could not finish"
+
+
+@workflow.defn(name=FETCH_WORKFLOW)
+class ProfileFetch:
+    @workflow.run
+    async def run(self, ask: FetchAsk) -> ImportOutcome | None:
+        """The import's outcome; a ``failed`` one when a step gave up; None when the API
+        had already ended the run."""
+        try:
+            reason = await self._fetch(ask)
+        except _RunEndedError:
+            workflow.logger.info("run %s is no longer running; the fetch ends", ask.run_id)
+            return None
+        if isinstance(reason, ImportOutcome):
+            return reason
+        try:
+            await workflow.execute_activity(
+                FAILED_ACTIVITY,
+                args=[ask.run_id, reason],
+                start_to_close_timeout=FAILED_TIMEOUT,
+                retry_policy=FAILED_RETRY,
+            )
+        except ActivityError as error:
+            if not _ended(error):
+                raise
+        return ImportOutcome(status="failed", presets=0, k_values=0, missing=[], notes=[reason])
+
+    async def _fetch(self, ask: FetchAsk) -> ImportOutcome | str:
+        """The import's outcome, or why a step gave up."""
+        try:
+            report: ExportReport = await workflow.execute_activity(
+                EXPORT_ACTIVITY,
+                ask,
+                result_type=ExportReport,
+                start_to_close_timeout=EXPORT_TIMEOUT,
+                heartbeat_timeout=EXPORT_HEARTBEAT,
+                schedule_to_start_timeout=EXPORT_SCHEDULE_TO_START,
+                retry_policy=EXPORT_RETRY,
+            )
+        except ActivityError as error:
+            if _ended(error):
+                raise _RunEndedError from error
+            return failure_reason(error, "export")
+        try:
+            outcome: ImportOutcome = await workflow.execute_activity(
+                IMPORT_ACTIVITY,
+                args=[ask.run_id, report],
+                result_type=ImportOutcome,
+                start_to_close_timeout=IMPORT_TIMEOUT,
+                retry_policy=IMPORT_RETRY,
+            )
+        except ActivityError as error:
+            if _ended(error):
+                raise _RunEndedError from error
+            return failure_reason(error, "import")
+        return outcome
