@@ -231,10 +231,12 @@ export function InvoicePage() {
       const saved = await putInvoiceLines(page, bodyOfLines(sending))
       if (here.current !== page) return
       // An older answer is dropped: the newer save's answer is the truth.
+      // The line ids are learnt from every lines answer: a header save sent after this one
+      // carries no row keys, so a later refetch needs this map to place the server figures.
+      remember(saved, sending.map((row) => row.key))
       if (seq === sent.current) {
         setInvoice(saved)
         setSavedKeys(sending.map((row) => row.key))
-        remember(saved, sending.map((row) => row.key))
       }
       // An edit made while this was in flight is saved by the commit that follows it.
       if (version.current === at) setDirty(false)

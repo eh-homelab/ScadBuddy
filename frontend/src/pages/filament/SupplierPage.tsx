@@ -35,14 +35,14 @@ interface Loaded {
   sheet: PriceSheetRow[]
 }
 
+/** A draft's text with its edge whitespace off, as a string to compare: a space typed is no change. */
+const trimmed = (draft: object) => JSON.stringify(Object.fromEntries(Object.entries(draft).map(([key, value]) => [key, typeof value === 'string' ? value.trim() : value])))
+
 /**
  * #6266 — one supplier at `/filament/suppliers/:id`: its details (unsaved edits hold
  * navigation), its products with their newest prices and an inline "Add price", and its price
  * sheet. A product is added by picking one of the types.
  */
-/** A draft's text with its edge whitespace off, as a string to compare: a space typed is no change. */
-const trimmed = (draft: object) => JSON.stringify(Object.fromEntries(Object.entries(draft).map(([key, value]) => [key, typeof value === 'string' ? value.trim() : value])))
-
 export function SupplierPage() {
   const { id = '' } = useParams()
   const money = useMoney()

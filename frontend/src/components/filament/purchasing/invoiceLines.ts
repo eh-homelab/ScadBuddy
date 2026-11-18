@@ -73,7 +73,7 @@ export function lineErrors(rows: LineDraft[]): LineErrors {
   for (const row of rows) {
     const found: LineErrors[string] = {}
     if (!row.description.trim()) found.description = 'Describe the line.'
-    if (quantityOf(row) === null) found.quantity = 'Enter a whole number, 1 or more.'
+    if (quantityOf(row) === null) found.quantity = 'Enter a whole number from 1 to 1000.'
     if (parseDecimal(row.unitPrice) === null) found.unitPrice = 'Enter a price such as 12.50.'
     if (row.lineTax.trim() !== '' && parseDecimal(row.lineTax) === null) found.lineTax = 'Enter a tax such as 1.40, or leave it empty.'
     else if (some && row.lineTax.trim() === '') found.lineTax = 'Give every line a tax, or none.'
