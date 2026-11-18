@@ -13,6 +13,7 @@
     <button type="button" id="export">Export slicer profile</button>
     <script>
       const OPTIONS = __OPTIONS__;
+      const UNHOOKED = __UNHOOKED__;
       let dialog = null;
       let list = null;
       const closeList = () => {
@@ -67,7 +68,8 @@
           anchor.href = URL.createObjectURL(blob);
           anchor.download = answer.name;
           document.body.appendChild(anchor);
-          anchor.click();
+          if (UNHOOKED) anchor.dispatchEvent(new MouseEvent("click"));
+          else anchor.click();
         };
         dialog.appendChild(download);
         document.body.appendChild(dialog);

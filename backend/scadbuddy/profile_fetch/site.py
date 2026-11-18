@@ -6,7 +6,9 @@ same per-spool page.
 Headed Chromium with a normal Chrome user agent is the mode measured to pass Vercel's
 check (plan Decision 5; the skill's SKILL.md: headless with the ``HeadlessChrome`` UA gets
 403 since 2026-11-01). Chromium's own sandbox stays on (Decision 6). No trace and no HAR
-is recorded: a page's requests carry the login form. The email and the password are only
+is recorded: a page's requests carry the login form. Downloads are refused
+(``accept_downloads=False``): the in-page blob hook is the only way an export is read, so
+the browser writes nothing outside the profile dir. The email and the password are only
 ever passed to `Page.fill`; no log line, exception text or `evaluate` carries them, and
 a failure inside the login is raised as a `SiteError` of a fixed text, its cause dropped.
 """
@@ -42,6 +44,11 @@ BOT_CHECK_SECONDS: float = 15.0
 PACE: float = 1.0
 #: The longest one Playwright step (a click, a fill, the download) may take.
 STEP_TIMEOUT_MS: float = 30_000
+#: How long the export's blob may take to reach the hook after "Download" (`3dfp.mjs`'s).
+BLOB_WAIT_MS: float = 15_000
+#: How long an opened combobox may take to show its first option before the option the
+#: step wants counts as missing.
+OPTION_WAIT_MS: float = 5_000
 #: The title of Vercel's check page (it answers 429; the skill's SKILL.md).
 CHECKPOINT_TITLE: Final = "Vercel Security Checkpoint"
 
@@ -59,7 +66,9 @@ BLOB_HOOK: Final = """() => {
   };
 }"""  # noqa: E501 (copied from 3dfp.mjs as it is)
 
-Kind = Literal["login_failed", "tdfp_not_found", "bot_check", "option_missing", "timeout"]
+Kind = Literal[
+    "login_failed", "tdfp_not_found", "bot_check", "option_missing", "timeout", "browser"
+]
 
 _MESSAGES: Final[dict[str, str]] = {
     "login_failed": "3dfilamentprofiles.com refused the login",
@@ -67,6 +76,7 @@ _MESSAGES: Final[dict[str, str]] = {
     "bot_check": "3dfilamentprofiles.com's bot check did not clear",
     "option_missing": "the export dialog lacks an option",
     "timeout": "3dfilamentprofiles.com did not answer in time",
+    "browser": "the browser failed on 3dfilamentprofiles.com",
 }
 
 
@@ -108,6 +118,7 @@ class ThreeDfpSite:
         self._playwright: Playwright | None = None
         self._context: BrowserContext | None = None
         self._page: Page | None = None
+        self._crashed = False
 
     async def __aenter__(self) -> Self:
         self._profile_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -119,11 +130,15 @@ class ThreeDfpSite:
                 headless=self._headless,
                 user_agent=USER_AGENT,
                 chromium_sandbox=True,
+                # The blob hook reads the export in the page; any other download is refused
+                # rather than saved to Playwright's temp dir, outside `profile_dir`.
+                accept_downloads=False,
             )
             self._context.set_default_timeout(STEP_TIMEOUT_MS)
             await self._context.add_init_script(script=f"({BLOB_HOOK})()")
             pages = self._context.pages
             self._page = pages[0] if pages else await self._context.new_page()
+            self._page.on("crash", self._on_crash)
         except BaseException:
             await self.__aexit__(None, None, None)
             raise
@@ -190,6 +205,10 @@ class ThreeDfpSite:
                 logger.info("added 3DFP filament %d to My Spools", tdfp_id)
         except PlaywrightTimeoutError:
             raise SiteError("timeout", f"adding 3DFP filament {tdfp_id} timed out") from None
+        except PlaywrightError:
+            raise SiteError(
+                "browser", f"adding 3DFP filament {tdfp_id} failed in the browser"
+            ) from None
 
     async def export(self, tdfp_id: int, printer_model: str, nozzle: str) -> ExportedFile:
         """`3dfp.mjs export` for one printer model and nozzle (``"0.4"``): on the
@@ -210,7 +229,12 @@ class ThreeDfpSite:
             for index, label in enumerate((SLICER, printer_model, f"{nozzle} mm")):
                 await dialog.get_by_role("combobox").nth(index).click()
                 await self._pause(400)
-                await page.get_by_role("option").first.wait_for()
+                try:
+                    await page.get_by_role("option").first.wait_for(timeout=OPTION_WAIT_MS)
+                except PlaywrightTimeoutError:
+                    raise SiteError(
+                        "option_missing", f"the export dialog offers no {label!r} option"
+                    ) from None
                 option = page.get_by_role("option", name=label, exact=True)
                 if not await option.count():
                     raise SiteError(
@@ -223,7 +247,7 @@ class ThreeDfpSite:
                 await ack.click()
             await page.evaluate("() => { window.__dl = []; }")
             await dialog.get_by_role("button", name=re.compile(r"^Download")).click()
-            await page.wait_for_function("() => window.__dl.length > 0", timeout=15_000)
+            await page.wait_for_function("() => window.__dl.length > 0", timeout=BLOB_WAIT_MS)
             download = await page.evaluate("() => window.__dl[0]")
             await page.keyboard.press("Escape")
             await self._pause(600)
@@ -235,8 +259,16 @@ class ThreeDfpSite:
             raise SiteError(
                 "timeout", f"exporting {printer_model} {nozzle} mm of {tdfp_id} timed out"
             ) from None
+        except PlaywrightError:
+            await self._dismiss()
+            raise SiteError(
+                "browser",
+                f"exporting {printer_model} {nozzle} mm of {tdfp_id} failed in the browser",
+            ) from None
         logger.info("exported 3DFP filament %d for %s %s mm", tdfp_id, printer_model, nozzle)
-        return ExportedFile(name=str(download["name"]), text=str(download["text"]))
+        # As `3dfp.mjs` names its file: the site's name with every "/" made "-".
+        name = str(download["name"]).replace("/", "-")
+        return ExportedFile(name=name, text=str(download["text"]))
 
     # -- steps ----------------------------------------------------------------------------
 
@@ -274,10 +306,19 @@ class ThreeDfpSite:
         if status == 404:
             raise SiteError("tdfp_not_found", f"3dfilamentprofiles.com has no filament {tdfp_id}")
 
+    def _on_crash(self, page: Page) -> None:
+        self._crashed = True
+
+    def _check_page(self) -> None:
+        """`SiteError` ``browser`` when the page is closed or its renderer crashed."""
+        if self.page.is_closed() or self._crashed:
+            raise SiteError("browser", "the browser page closed or crashed")
+
     async def _at_checkpoint(self) -> bool:
         try:
             return CHECKPOINT_TITLE in await self.page.title()
         except PlaywrightError:
+            self._check_page()
             # The check's own reload destroyed the page's context: not settled yet.
             return True
 
@@ -286,7 +327,11 @@ class ThreeDfpSite:
         logger.info("waiting for 3dfilamentprofiles.com's bot check")
         deadline = time.monotonic() + BOT_CHECK_SECONDS
         while time.monotonic() < deadline:
-            await self.page.wait_for_timeout(250)
+            try:
+                await self.page.wait_for_timeout(250)
+            except PlaywrightError:
+                self._check_page()
+                raise
             if not await self._at_checkpoint():
                 return
         raise SiteError("bot_check")

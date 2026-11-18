@@ -35,6 +35,12 @@ class Replica:
     known_ids: set[int] = field(default_factory=lambda: {30173})
     checkpoint: Literal["off", "never", "clears"] = "off"
     login_form: Literal["ok", "disabled"] = "ok"
+    #: The three option lists of the export dialog: slicer, printer, nozzle.
+    options: list[list[str]] = field(default_factory=lambda: [SLICERS, PRINTERS, NOZZLES])
+    export_name: str = EXPORT_NAME
+    #: ``unhooked`` starts the download with a synthetic click event, which the driver's
+    #: blob hook (it patches ``HTMLAnchorElement.prototype.click``) does not see.
+    download: Literal["hooked", "unhooked"] = "hooked"
     sessions: set[str] = field(default_factory=set)
     in_spools: set[int] = field(default_factory=set)
     logins: int = 0
@@ -133,7 +139,8 @@ def _handler(site: Replica) -> type[BaseHTTPRequestHandler]:
                             page,
                             ID=str(tdfp_id),
                             IN_SPOOLS="true" if tdfp_id in site.in_spools else "false",
-                            OPTIONS=json.dumps([SLICERS, PRINTERS, NOZZLES]),
+                            OPTIONS=json.dumps(site.options),
+                            UNHOOKED="true" if site.download == "unhooked" else "false",
                         ),
                     )
                     return
@@ -172,7 +179,7 @@ def _handler(site: Replica) -> type[BaseHTTPRequestHandler]:
                 return
             chosen = {key: values[0] for key, values in query.items()}
             site.exports.append({"id": path.removeprefix("/api/export/"), **chosen})
-            body = {"name": EXPORT_NAME, "text": EXPORT_FILE.read_text(encoding="utf-8")}
+            body = {"name": site.export_name, "text": EXPORT_FILE.read_text(encoding="utf-8")}
             self._send(200, json.dumps(body).encode(), "application/json")
 
     return Handler

@@ -4,7 +4,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 import traceback
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
@@ -14,7 +16,12 @@ from pydantic import SecretStr
 
 from scadbuddy.profile_fetch import site
 from scadbuddy.profile_fetch.site import USER_AGENT, SiteError, ThreeDfpSite
-from tests.profile_fetch.site.server import EXPORT_FILE, EXPORT_NAME, Replica, ReplicaServer
+from tests.profile_fetch.site.server import (
+    EXPORT_FILE,
+    EXPORT_NAME,
+    Replica,
+    ReplicaServer,
+)
 
 pytestmark = pytest.mark.requires_chromium
 
@@ -174,3 +181,103 @@ async def test_the_user_agent_is_not_headless(
     assert replica.site.page_user_agents
     assert set(replica.site.page_user_agents) == {USER_AGENT}
     assert set(replica.site.header_user_agents) == {USER_AGENT}
+
+
+async def test_a_download_the_hook_misses_writes_nothing(
+    replica: ReplicaServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A download the blob hook does not see (a synthetic click on the blob anchor) is
+    refused by the browser, not saved to Playwright's temp dir: the hook is the only way an
+    export is read (review Important 1)."""
+    monkeypatch.setattr(site, "BLOB_WAIT_MS", 2_000, raising=False)
+    temp = tmp_path / "tmp"
+    temp.mkdir()
+    # Playwright's driver keeps accepted downloads under `$TMPDIR/playwright-artifacts-*`.
+    monkeypatch.setenv("TMPDIR", str(temp))
+    replica.site.download = "unhooked"
+    async with _site(replica, tmp_path) as driver:
+        await driver.login()
+        await driver.ensure_in_my_spools(30173)
+        with pytest.raises(SiteError) as caught:
+            await driver.export(30173, "H2C", "0.4")
+        assert caught.value.kind == "timeout"
+        assert replica.site.exports == [
+            {"id": "30173", "slicer": "Bambu Studio", "printer": "H2C", "nozzle": "0.4 mm"}
+        ]
+        # Checked while the browser runs: Playwright removes its artifacts dir on close.
+        assert [path for path in temp.rglob("*") if path.is_file()] == []
+
+
+async def test_a_strict_mode_violation_in_export_is_browser(
+    browser: ThreeDfpSite, replica: ReplicaServer
+) -> None:
+    """Two options of one name make Playwright's click raise its strict-mode error: the
+    export says ``browser``, names the step, and closes its dialog (review Minor 1)."""
+    replica.site.options = [["Bambu Studio"], ["H2C"], ["0.4 mm", "0.4 mm"]]
+    await browser.login()
+    await browser.ensure_in_my_spools(30173)
+    with pytest.raises(SiteError) as caught:
+        await browser.export(30173, "H2C", "0.4")
+    assert caught.value.kind == "browser"
+    assert "exporting H2C 0.4 mm of 30173" in str(caught.value)
+    _no_secret(str(caught.value))
+    assert await browser.page.locator("[role=dialog]").count() == 0
+    assert await browser.page.locator("[role=listbox]").count() == 0
+
+
+async def test_a_closed_page_in_ensure_is_browser(browser: ThreeDfpSite) -> None:
+    await browser.login()
+    await browser.page.close()
+    with pytest.raises(SiteError) as caught:
+        await browser.ensure_in_my_spools(30173)
+    assert caught.value.kind == "browser"
+    assert "adding 3DFP filament 30173" in str(caught.value)
+
+
+async def test_a_page_closed_during_the_bot_check_is_browser_at_once(
+    browser: ThreeDfpSite, replica: ReplicaServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A closed page is not "still at the checkpoint": it fails at once as ``browser``,
+    not after `BOT_CHECK_SECONDS` as ``bot_check`` (review Minor 2)."""
+    monkeypatch.setattr(site, "BOT_CHECK_SECONDS", 10.0)
+    replica.site.checkpoint = "never"
+    page = browser.page
+
+    async def close_soon() -> None:
+        await asyncio.sleep(0.5)
+        await page.close()
+
+    closer = asyncio.create_task(close_soon())
+    started = time.monotonic()
+    with pytest.raises(SiteError) as caught:
+        await browser.login()
+    await closer
+    assert caught.value.kind == "browser"
+    assert time.monotonic() - started < 5
+
+
+async def test_an_empty_option_list_is_option_missing(
+    browser: ThreeDfpSite, replica: ReplicaServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A combobox that opens no option is ``option_missing`` after `OPTION_WAIT_MS`,
+    not a step ``timeout`` (review Minor 3)."""
+    monkeypatch.setattr(site, "OPTION_WAIT_MS", 300, raising=False)
+    replica.site.options = [["Bambu Studio"], ["H2C"], []]
+    await browser.login()
+    await browser.ensure_in_my_spools(30173)
+    with pytest.raises(SiteError) as caught:
+        await browser.export(30173, "H2C", "0.4")
+    assert caught.value.kind == "option_missing"
+    assert "0.4 mm" in str(caught.value)
+
+
+async def test_a_slash_in_the_export_name_becomes_a_dash(
+    browser: ThreeDfpSite, replica: ReplicaServer
+) -> None:
+    """`3dfp.mjs` replaces every ``/`` in the name with ``-``; the driver returns the same
+    name (review Minor 4)."""
+    replica.site.export_name = "Inland PLA+ @BBL H2C/H2D 0.4 nozzle.json"
+    await browser.login()
+    await browser.ensure_in_my_spools(30173)
+    exported = await browser.export(30173, "H2C", "0.4")
+    assert exported.name == "Inland PLA+ @BBL H2C-H2D 0.4 nozzle.json"
