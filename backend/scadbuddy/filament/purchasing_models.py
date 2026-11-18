@@ -267,6 +267,10 @@ class InvoicePatch(_Patch):
     tax: Money | None = None
     total: Money | None = None
     note: Note | None = None
+    import_run_id: Text | None = None
+    # Not a column: the write applies only while the invoice's `import_run_id` is this value
+    # (`null` for none), else 409. How the import claims an invoice without a lock (#6267).
+    if_import_run_id: Text | None = None
 
 
 class Invoice(_Row):

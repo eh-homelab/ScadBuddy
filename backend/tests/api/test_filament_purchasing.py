@@ -214,6 +214,26 @@ def test_an_invoice_is_made_with_string_money(client: TestClient) -> None:
     assert [i["id"] for i in client.get(f"{URL}/invoices").json()] == [body["id"]]
 
 
+def test_an_import_run_is_set_and_claimed_only_from_the_value_read(client: TestClient) -> None:
+    draft = client.post(f"{URL}/invoices", json=_invoice_body(_supplier(client))).json()
+    assert draft["import_run_id"] is None
+    url = f"{URL}/invoices/{draft['id']}"
+    first = client.patch(url, json={"import_run_id": "s-1", "if_import_run_id": None})
+    assert first.status_code == 200, first.text
+    assert first.json()["import_run_id"] == "s-1"
+    # A second writer that read `null` loses: the value is not what it read (#6267).
+    lost = client.patch(url, json={"import_run_id": "s-2", "if_import_run_id": None})
+    assert lost.status_code == 409, lost.text
+    assert client.get(url).json()["import_run_id"] == "s-1"
+    # Replacing a dead run: the writer names the value it read.
+    won = client.patch(url, json={"import_run_id": "s-3", "if_import_run_id": "s-1"})
+    assert won.status_code == 200, won.text
+    assert won.json()["import_run_id"] == "s-3"
+    # With no condition the field is a plain write, and the condition alone changes nothing.
+    assert client.patch(url, json={"import_run_id": None}).json()["import_run_id"] is None
+    assert client.patch(url, json={"if_import_run_id": "x"}).status_code == 409
+
+
 def test_mixed_line_tax_is_a_422(client: TestClient) -> None:
     lines = [
         {"description": "a", "quantity": 1, "unit_price": "40", "line_tax": "3"},

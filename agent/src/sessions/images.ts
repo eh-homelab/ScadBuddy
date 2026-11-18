@@ -131,7 +131,7 @@ export function checkedImages(images: unknown): { ok: true; images: UserImage[] 
 }
 
 /** A refusal for a file type ScadBuddy cannot read, worded for the person. */
-function unsupported(mediaType: unknown): string {
+export function unsupported(mediaType: unknown): string {
   const kind = typeof mediaType === 'string' && /^[\w.+/-]{1,60}$/.test(mediaType) ? mediaType : 'type that ScadBuddy does not know'
   return `This file is a ${kind}. ScadBuddy reads invoices as PDF, PNG, JPEG, GIF or WebP.`
 }

@@ -81,6 +81,13 @@ class DuplicateInvoiceError(ValueError):
         self.existing_id = existing_id
 
 
+class ImportRunChangedError(ValueError):
+    """The write named the import run it read, and another run holds the invoice now."""
+
+    def __init__(self) -> None:
+        super().__init__("the invoice's import run changed since it was read")
+
+
 class InvoiceConfirmedError(ValueError):
     """A confirmed invoice is frozen."""
 
@@ -137,7 +144,11 @@ _REF_KIND = "invoice_line"
 
 
 def _sets(patch: pm.InvoicePatch) -> tuple[list[str], list[Any]]:
-    columns = [n for n in pm.InvoicePatch.model_fields if n in patch.model_fields_set]
+    columns = [
+        n
+        for n in pm.InvoicePatch.model_fields
+        if n in patch.model_fields_set and n != "if_import_run_id"
+    ]
     return [f"{n} = %s" for n in columns], [getattr(patch, n) for n in columns]
 
 
@@ -396,6 +407,13 @@ class InvoiceStore:
                 supplier_id = head["supplier_id"]
                 if head["status"] == "confirmed" and patch.model_fields_set - {"note"}:
                     raise InvoiceConfirmedError()
+                if (
+                    "if_import_run_id" in patch.model_fields_set
+                    and head["import_run_id"] != patch.if_import_run_id
+                ):
+                    raise ImportRunChangedError()
+                if not sets:
+                    return self._detail(conn, invoice_id)
                 if patch.supplier_id is not None and patch.supplier_id != supplier_id:
                     supplier_id = patch.supplier_id
                     self._move(conn, invoice_id, supplier_id)
@@ -756,7 +774,8 @@ class InvoiceStore:
     @staticmethod
     def _lock(conn: Conn, invoice_id: UUID) -> Row | None:
         return conn.execute(
-            "SELECT id, supplier_id, status FROM filament_invoices WHERE id = %s FOR UPDATE",
+            "SELECT id, supplier_id, status, import_run_id FROM filament_invoices"
+            " WHERE id = %s FOR UPDATE",
             (invoice_id,),
         ).fetchone()
 

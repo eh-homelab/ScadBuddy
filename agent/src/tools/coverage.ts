@@ -705,6 +705,12 @@ export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: str
       "A flow run's queue is the person's (spec 2026-10-11 §4.2): no grant decides it. The starter session " +
       'is sent the calls waiting for it in an escalation turn and answers with escalation_respond.',
   },
+  {
+    route: 'POST /api/v1/ai/filament/invoice-import',
+    reason:
+      "The invoice page's Import button (#6267): it starts the import session, with the invoice's file attached to its first " +
+      'message. An assistant that is already in a session reads and edits invoices with the filament_invoice_* tools.',
+  },
   // Web Push (#815 §3, routes/push.ts).
   ...['GET /api/v1/ai/push/key', 'PUT /api/v1/ai/push/subscription', 'DELETE /api/v1/ai/push/subscription'].map((route) => ({
     route,
