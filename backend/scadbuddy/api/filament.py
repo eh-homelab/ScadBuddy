@@ -988,8 +988,9 @@ async def patch_location(
     response_model=list[m.Sensor],
     summary="List the location sensors",
     description=(
-        "The unarchived humidity and temperature sensors of the places, by name; of one "
-        "place with `location_id`. Each carries its last stored value and time, `reachable` "
+        "The unarchived humidity and temperature sensors of the unarchived places, by name; "
+        "of one place with `location_id`. A sensor on an archived place is left out. Each "
+        "carries its last stored value and time, `reachable` "
         "(false when its last read had no number), and `alerting` (the last value is "
         "outside `alert_below` / `alert_above`)."
     ),

@@ -367,3 +367,11 @@ Load `frontend-design` first.
     refusal is `LocationExistsError`, so its text now says "a place with that name, that
     tray or that AMS unit already exists". The descriptions of `POST /locations` and
     `PATCH /locations/{id}` name the unit case too, and the frontend mock uses the same text.
+25. **A sensor on an archived place is hidden and not read (#6679 item 2).** Decisions 18
+    and 22 keep AMS readings off hidden places. A Home Assistant sensor has no live place
+    to move to, so `apply_ha_states_on` skips one whose place is archived: it stores no
+    reading and is not marked unreachable. `SensorStore.list` (`GET /filament/sensors`)
+    leaves out every sensor whose place is archived, of either source, so the place and
+    its sensors hide together. An AMS sensor shows again when the next report moves it to
+    its unit's live place (Decision 18). `read_ha_sensors` reads the list, so it makes no
+    Bambuddy call when every Home Assistant sensor is on an archived place.
