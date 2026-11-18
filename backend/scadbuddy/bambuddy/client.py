@@ -71,6 +71,7 @@ from scadbuddy.bambuddy.models import (
     LocalPreset,
     LocalPresetCatalogue,
     LocalPresetDetail,
+    MaintenanceHistoryEntry,
     MoveResult,
     PresetCatalogue,
     PresetRef,
@@ -207,6 +208,7 @@ Operation = Literal[
     "media.source",
     "media.thumbnail",
     "media.timelapse",
+    "maintenance.history",
     "maintenance.printer",
     "makerworld.import",
     "makerworld.resolve",
@@ -456,6 +458,24 @@ class BambuddyClient:
             what=f"read printer {printer_id}'s maintenance tasks",
         )
         return PrinterMaintenanceOverview.model_validate(response.json())
+
+    async def maintenance_history(self, item_id: int) -> list[MaintenanceHistoryEntry]:
+        """``GET /api/v1/maintenance/items/{item_id}/history``: every time one task of a
+        printer was marked done, newest first, with the print-hour counter then (#5774,
+        spec 2026-11-17-machine-rate-actuals §2.1, §3.7). Gated on ``MAINTENANCE_READ``,
+        as :meth:`printer_maintenance` is. An item Bambuddy does not have answers an empty
+        list, not a 404 (measured on prod's Bambuddy 1.3.1, 2026-11-18)."""
+        what = f"read maintenance item {item_id}'s log"
+        response = await self._send(
+            "GET",
+            f"/maintenance/items/{item_id}/history",
+            scope=Scope.READ_STATUS,
+            operation="maintenance.history",
+            what=what,
+        )
+        return [
+            MaintenanceHistoryEntry.model_validate(row) for row in self._rows(response, what=what)
+        ]
 
     async def printer_access_code(self, printer_id: int) -> str | None:
         """The printer's LAN access code as Bambuddy holds it, or ``None`` when it is

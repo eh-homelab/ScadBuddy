@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+from collections.abc import Sequence
 from contextlib import aclosing
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -47,6 +48,7 @@ from scadbuddy.orders.integrations import (
     ArchiveSlot,
     CopiedMedia,
     LocalDensity,
+    MaintenanceDone,
     MaintenanceTask,
     MediaTooLargeError,
 )
@@ -223,6 +225,26 @@ class BambuddyIntegrations:
         stored = await asyncio.to_thread(self.settings.load)
         async with client_for(stored) as client:
             return maintenance_tasks(await client.printer_maintenance(printer_id))
+
+    async def maintenance_history(
+        self, item_ids: Sequence[int]
+    ) -> dict[int, list[MaintenanceDone]]:
+        """``GET /maintenance/items/{id}/history`` of each task, in turn, on one client
+        (#5774 §3.7)."""
+        stored = await asyncio.to_thread(self.settings.load)
+        logs: dict[int, list[MaintenanceDone]] = {}
+        async with client_for(stored) as client:
+            for item_id in item_ids:
+                logs[item_id] = [
+                    MaintenanceDone(
+                        history_id=row.id,
+                        at=row.performed_at,
+                        hours_at=row.hours_at_maintenance,
+                        notes=row.notes,
+                    )
+                    for row in await client.maintenance_history(item_id)
+                ]
+        return logs
 
     async def project_exists(self, project_id: int) -> bool:
         """``GET /projects/{id}``: false only on a 404, a project deleted in Bambuddy."""

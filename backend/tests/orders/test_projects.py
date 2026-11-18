@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
@@ -22,6 +22,7 @@ from scadbuddy.orders.integrations import (
     ArchiveMedia,
     CopiedMedia,
     LocalDensity,
+    MaintenanceDone,
     MaintenanceTask,
 )
 from scadbuddy.orders.printing import print_item
@@ -60,6 +61,11 @@ class Projects:
         raise AssertionError("not asked")
 
     async def maintenance_tasks(self, printer_id: int) -> list[MaintenanceTask]:
+        raise AssertionError("not asked")
+
+    async def maintenance_history(
+        self, item_ids: Sequence[int]
+    ) -> dict[int, list[MaintenanceDone]]:
         raise AssertionError("not asked")
 
     async def archive(self, archive_id: int) -> ArchiveFacts | None:
