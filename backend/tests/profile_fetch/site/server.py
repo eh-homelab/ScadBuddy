@@ -38,6 +38,8 @@ class Replica:
     #: The three option lists of the export dialog: slicer, printer, nozzle.
     options: list[list[str]] = field(default_factory=lambda: [SLICERS, PRINTERS, NOZZLES])
     export_name: str = EXPORT_NAME
+    #: Characters of white space the export's text gets at its end (a file too large).
+    export_pad: int = 0
     #: How long an opened combobox waits before it shows its options.
     option_delay_ms: int = 0
     #: ``unhooked`` starts the download with a synthetic click event, which the driver's
@@ -182,7 +184,8 @@ def _handler(site: Replica) -> type[BaseHTTPRequestHandler]:
                 return
             chosen = {key: values[0] for key, values in query.items()}
             site.exports.append({"id": path.removeprefix("/api/export/"), **chosen})
-            body = {"name": site.export_name, "text": EXPORT_FILE.read_text(encoding="utf-8")}
+            text = EXPORT_FILE.read_text(encoding="utf-8") + " " * site.export_pad
+            body = {"name": site.export_name, "text": text}
             self._send(200, json.dumps(body).encode(), "application/json")
 
     return Handler

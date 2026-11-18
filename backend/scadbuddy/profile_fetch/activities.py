@@ -5,8 +5,9 @@ credential (plan Decision 7), and 3dfilamentprofiles.com through `site.ThreeDfpS
 `ProfileFetchActivities.export` signs in when the browser is new, adds the filament to My
 Spools, and exports each target, PUTting each file's bytes as it comes, named by their
 sha256 (``PUT …/runs/{id}/files/{sha256}?printer_model=&nozzle=``). A key the dialog does
-not offer (``option_missing``), a file over `MAX_FILE_BYTES` and a file the API refuses
-(422) are that key's failure, reported; the other keys go on. Any other failure of the site
+not offer (``option_missing``), a file over `MAX_FILE_BYTES` (the page's hook refuses it,
+``file_too_large``, and the size is checked here again) and a file the API refuses (422) are
+that key's failure, reported; the other keys go on. Any other failure of the site
 fails the attempt: `site_failure` keeps Decision 13's retry classes and puts only the
 driver's own fixed text in the error, never the exception it came from, so neither the
 email nor the password reaches Temporal's history or the run's ``error``.
@@ -51,9 +52,11 @@ from scadbuddy.profile_fetch.wire import (
 logger = logging.getLogger(__name__)
 
 BASE: Final = f"/api/v1{PREFIX}/profile-fetch/runs"
-#: Decision 13: worth another attempt. A refused login, an unknown 3DFP id and a missing
-#: option are not: they would fail the same way.
+#: Decision 13: worth another attempt. A refused login, an unknown 3DFP id, a missing
+#: option and a file too large are not: they would fail the same way.
 RETRYABLE_KINDS: Final[frozenset[Kind]] = frozenset({"browser", "timeout", "bot_check"})
+#: The kinds that are one key's failure, reported, not the attempt's (`_export_one`).
+KEY_KINDS: Final[frozenset[Kind]] = frozenset({"option_missing", "file_too_large"})
 #: A failure after which the browser is closed and the next attempt launches a new one: a
 #: crash, and a timeout, which may be a page wedged with its renderer alive (Task 6
 #: review, M1). A bot check keeps the browser, and with it the check's cookie.
@@ -185,12 +188,12 @@ class ProfileFetchActivities:
 
     async def _on_site[T](self, ask: FetchAsk, step: Awaitable[T]) -> T:
         """``step`` on the site; its failure as `site_failure` says, raised outside the
-        handler so the error has no cause or context. ``option_missing`` passes as it is
+        handler so the error has no cause or context. A `KEY_KINDS` error passes as it is
         (`_export_one` reports it)."""
         try:
             return await step
         except SiteError as error:
-            if error.kind == "option_missing":
+            if error.kind in KEY_KINDS:
                 raise
             failure, name = site_failure(error), type(error).__name__
         except Exception as error:
@@ -210,7 +213,9 @@ class ProfileFetchActivities:
         try:
             exported = await self._on_site(ask, site.export(ask.tdfp_id, printer_model, nozzle))
         except SiteError as error:
-            EXPORTS.labels(outcome="option_missing").inc()
+            EXPORTS.labels(
+                outcome="too_large" if error.kind == "file_too_large" else error.kind
+            ).inc()
             return str(error)
         # The bytes only: the site's download name is never used as a path.
         body = exported.text.encode()

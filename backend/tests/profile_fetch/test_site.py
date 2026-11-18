@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import socket
 import sys
 import time
 import traceback
@@ -21,6 +22,7 @@ from pydantic import SecretStr
 
 from scadbuddy.profile_fetch import site
 from scadbuddy.profile_fetch.site import USER_AGENT, SiteError, ThreeDfpSite
+from scadbuddy.profile_fetch.wire import MAX_FILE_BYTES
 from tests.profile_fetch.site.server import (
     EXPORT_FILE,
     EXPORT_NAME,
@@ -107,6 +109,47 @@ async def test_a_login_form_that_times_out_carries_no_secret(
         _no_secret(text)
 
 
+async def test_a_login_to_a_closed_port_is_browser_not_login_failed(tmp_path: Path) -> None:
+    """A refused connection during the login is the browser's failure, retried; never
+    ``login_failed``, which ends the worker at start and the run at once (R-F1)."""
+    with socket.socket() as held:
+        held.bind(("127.0.0.1", 0))
+        port = held.getsockname()[1]
+    driver = ThreeDfpSite(
+        f"http://127.0.0.1:{port}",
+        SecretStr(EMAIL),
+        SecretStr(PASSWORD),
+        tmp_path / "profile",
+        headless=True,
+    )
+    async with driver:
+        with pytest.raises(SiteError) as caught:
+            await driver.login()
+    assert caught.value.kind == "browser"
+    _chain_holds_no_secret(caught.value)
+
+
+async def test_a_navigation_error_during_the_login_is_browser(
+    browser: ThreeDfpSite, replica: ReplicaServer
+) -> None:
+    """The login form's post aborted by the network (``net::ERR_FAILED``) is ``browser``;
+    the same form with a wrong password stays ``login_failed``
+    (`test_a_failed_login_logs_no_secret`)."""
+
+    async def abort_post(route: Any) -> None:
+        if route.request.method == "POST":
+            await route.abort()
+        else:
+            await route.continue_()
+
+    await browser.page.route("**/login", abort_post)
+    await browser.page.route("**/my/spools", lambda route: route.abort("connectionreset"))
+    with pytest.raises(SiteError) as caught:
+        await browser.login()
+    assert caught.value.kind == "browser"
+    _chain_holds_no_secret(caught.value)
+
+
 async def test_add_clicks_add_to_my_spools_once(
     browser: ThreeDfpSite, replica: ReplicaServer
 ) -> None:
@@ -149,6 +192,36 @@ async def test_an_option_the_dialog_lacks_is_reported(
     # The page is usable again: the next nozzle exports.
     exported = await browser.export(30173, "H2C", "0.4")
     assert exported.name == EXPORT_NAME
+
+
+async def test_an_export_over_512_kib_is_refused_in_the_page(
+    browser: ThreeDfpSite, replica: ReplicaServer
+) -> None:
+    """A file longer than `MAX_FILE_BYTES` is refused by the page's hook before its text
+    crosses into the worker: ``file_too_large``, a plain message, and nothing kept in the
+    page for the driver to read (R-F7)."""
+    replica.site.export_pad = MAX_FILE_BYTES + 1
+    await browser.login()
+    await browser.ensure_in_my_spools(30173)
+    with pytest.raises(SiteError) as caught:
+        await browser.export(30173, "H2C", "0.4")
+    assert caught.value.kind == "file_too_large"
+    assert str(caught.value) == "the exported file of H2C 0.4 mm is larger than 512 KiB"
+    assert await browser.page.evaluate("() => window.__dl.map(d => 'text' in d)") == [False]
+    # The page is usable again: the next file, of a normal size, exports.
+    replica.site.export_pad = 0
+    exported = await browser.export(30173, "H2C", "0.4")
+    assert exported.text == EXPORT_FILE.read_text(encoding="utf-8")
+
+
+async def test_an_export_of_512_kib_exactly_passes(
+    browser: ThreeDfpSite, replica: ReplicaServer
+) -> None:
+    replica.site.export_pad = MAX_FILE_BYTES - len(EXPORT_FILE.read_text(encoding="utf-8"))
+    await browser.login()
+    await browser.ensure_in_my_spools(30173)
+    exported = await browser.export(30173, "H2C", "0.4")
+    assert len(exported.text) == MAX_FILE_BYTES
 
 
 async def test_a_checkpoint_that_never_clears_is_bot_check(

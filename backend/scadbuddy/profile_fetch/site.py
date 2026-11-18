@@ -30,7 +30,7 @@ from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from pydantic import SecretStr
 
-from scadbuddy.profile_fetch.wire import SLICER
+from scadbuddy.profile_fetch.wire import MAX_FILE_BYTES, SLICER
 
 logger = logging.getLogger(__name__)
 
@@ -55,21 +55,32 @@ OPTION_WAIT_MS: float = 5_000
 CHECKPOINT_TITLE: Final = "Vercel Security Checkpoint"
 
 #: `3dfp.mjs`'s hook: Chromium died on the export's blob download intermittently ("Target
-#: page, context or browser has been closed"), so the page reads the blob itself.
+#: page, context or browser has been closed"), so the page reads the blob itself. One
+#: change from `3dfp.mjs`: a text longer than `MAX_FILE_BYTES` UTF-16 units is refused in
+#: the page (``tooLarge``), so an untrusted page cannot push a file of any size through CDP
+#: into the worker (R-F7). A UTF-8 file is at least as many bytes as its text has units,
+#: so no file under the API's byte cap is refused here.
 BLOB_HOOK: Final = """() => {
   window.__dl = [];
   const click = HTMLAnchorElement.prototype.click;
   HTMLAnchorElement.prototype.click = function () {
     if (this.download && this.href.startsWith('blob:')) {
-      fetch(this.href).then(r => r.text()).then(text => window.__dl.push({ name: this.download, text }));
+      fetch(this.href).then(r => r.text()).then(text => window.__dl.push(
+        text.length > __MAX__ ? { name: this.download, tooLarge: true } : { name: this.download, text }));
       return;
     }
     return click.call(this);
   };
-}"""  # noqa: E501 (copied from 3dfp.mjs as it is)
+}""".replace("__MAX__", str(MAX_FILE_BYTES))  # noqa: E501 (3dfp.mjs's, with the size cap)
 
 Kind = Literal[
-    "login_failed", "tdfp_not_found", "bot_check", "option_missing", "timeout", "browser"
+    "login_failed",
+    "tdfp_not_found",
+    "bot_check",
+    "option_missing",
+    "file_too_large",
+    "timeout",
+    "browser",
 ]
 
 _MESSAGES: Final[dict[str, str]] = {
@@ -77,6 +88,7 @@ _MESSAGES: Final[dict[str, str]] = {
     "tdfp_not_found": "3dfilamentprofiles.com has no such filament",
     "bot_check": "3dfilamentprofiles.com's bot check did not clear",
     "option_missing": "the export dialog lacks an option",
+    "file_too_large": "the exported file is larger than 512 KiB",
     "timeout": "3dfilamentprofiles.com did not answer in time",
     "browser": "the browser failed on 3dfilamentprofiles.com",
 }
@@ -189,7 +201,11 @@ class ThreeDfpSite:
 
     async def login(self) -> None:
         """`3dfp.mjs login`: fill the form, sign in, and check that My Spools opens.
-        `SiteError` ``login_failed`` when the site sends the browser back to ``/login``."""
+        `SiteError` ``login_failed`` only when the site sends the browser back to
+        ``/login`` (its own refusal). A step that times out is ``timeout``; any other
+        Playwright error (a refused connection, a failed navigation, a crash) is
+        ``browser``: both are retried, so a network blip never reads as a bad password
+        (R-F1, which replaces build Decision 48)."""
         page = self.page
         failed: SiteError | None = None
         try:
@@ -205,12 +221,8 @@ class ThreeDfpSite:
         except PlaywrightTimeoutError:
             failed = SiteError("timeout", "the 3dfilamentprofiles.com login timed out")
         except PlaywrightError:
-            if self._page_gone():
-                # A crashed renderer or a closed page is the browser's failure, retried;
-                # not a refused login, which is not.
-                failed = SiteError("browser", "the browser failed during the login")
-            else:
-                failed = SiteError("login_failed", "the 3dfilamentprofiles.com login failed")
+            # Not a refusal: the site answered nothing the URL check below could read.
+            failed = SiteError("browser", "the browser failed during the login")
         if failed is not None:
             # Raised outside the handler, so neither its cause nor its context is
             # Playwright's error: a fill's call log quotes the value it filled (measured
@@ -242,7 +254,8 @@ class ThreeDfpSite:
         """`3dfp.mjs export` for one printer model and nozzle (``"0.4"``): on the
         spool's own page, open "Export slicer profile", pick `SLICER`, the model and
         ``"<nozzle> mm"``, acknowledge, download, and read the blob the hook kept.
-        `SiteError` ``option_missing`` when the dialog does not offer one of the three."""
+        `SiteError` ``option_missing`` when the dialog does not offer one of the three,
+        and ``file_too_large`` when the page's hook refused the file (`BLOB_HOOK`)."""
         page = self.page
         try:
             # The per-spool page, not the My Spools list: a list row that groups several
@@ -277,6 +290,11 @@ class ThreeDfpSite:
             await dialog.get_by_role("button", name=re.compile(r"^Download")).click()
             await page.wait_for_function("() => window.__dl.length > 0", timeout=BLOB_WAIT_MS)
             download = await page.evaluate("() => window.__dl[0]")
+            if download.get("tooLarge"):
+                raise SiteError(
+                    "file_too_large",
+                    f"the exported file of {printer_model} {nozzle} mm is larger than 512 KiB",
+                )
             await page.keyboard.press("Escape")
             await self._pause(600)
         except SiteError:

@@ -63,11 +63,13 @@ class FakeSite:
         self,
         *,
         missing: frozenset[str] = frozenset(),
+        too_large: frozenset[str] = frozenset(),
         fail: BaseException | None = None,
         login_error: BaseException | None = None,
         text: Callable[[str], str] = preset,
     ) -> None:
         self.missing = missing
+        self.too_large = too_large
         self.fail = fail
         self.login_error = login_error
         self.text = text
@@ -103,6 +105,8 @@ class FakeSite:
             raise self.fail
         if nozzle in self.missing:
             raise SiteError("option_missing", f"the export dialog offers no '{nozzle} mm' option")
+        if nozzle in self.too_large:
+            raise SiteError("file_too_large", f"the exported file of H2C {nozzle} mm is too large")
         return ExportedFile(name=f"../{nozzle}/evil.json", text=self.text(nozzle))
 
 
@@ -217,6 +221,18 @@ def test_a_file_over_the_cap_is_a_failure_not_a_put() -> None:
     assert len(crud.puts) == 3
 
 
+def test_a_file_the_page_refused_is_that_keys_failure() -> None:
+    """The page's hook refusing a file over 512 KiB (``file_too_large``, R-F7) skips that
+    key, reported; the other keys go on, and the attempt is not failed or retried."""
+    crud = FakeCrud()
+    report = export(FakeSite(too_large=frozenset({"0.6"})), crud)
+    assert report.exported == 3
+    assert [(f.nozzle, f.reason) for f in report.failures] == [
+        ("0.6", "the exported file of H2C 0.6 mm is too large")
+    ]
+    assert len(crud.puts) == 3
+
+
 def test_a_file_the_api_refuses_is_a_failure() -> None:
     """A 422 (not a filament preset) is that key's failure; the others still go."""
 
@@ -243,6 +259,7 @@ def test_a_file_the_api_refuses_is_a_failure() -> None:
         ("login_failed", False),
         ("tdfp_not_found", False),
         ("option_missing", False),
+        ("file_too_large", False),
     ],
 )
 def test_the_retry_classes(kind: Kind, retryable: bool) -> None:
@@ -251,7 +268,7 @@ def test_the_retry_classes(kind: Kind, retryable: bool) -> None:
     assert (kind in RETRYABLE_KINDS) is retryable
     mapped = site_failure(SiteError(kind))
     assert (mapped.type, mapped.non_retryable) == (kind, not retryable)
-    if kind == "option_missing":
+    if kind in ("option_missing", "file_too_large"):
         return  # a key's failure, reported (`test_export_puts_each_file_and_reports_failures`)
     with pytest.raises(ApplicationError) as caught:
         export(FakeSite(fail=SiteError(kind)), FakeCrud())
