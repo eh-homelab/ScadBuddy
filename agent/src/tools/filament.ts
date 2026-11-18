@@ -5,10 +5,16 @@ import { defineTool, idempotencyKey, json, ToolError, type Tool } from './regist
 
 // ScadBuddy's own filament inventory (#6261, epic #6260): the catalogs a spool type or a
 // spool picks from, the spool types, and the spools with their tags and ledger. Write
-// tier: nothing leaves ScadBuddy.
+// tier: nothing leaves ScadBuddy at the call, except a tag change's push, which the
+// `filament_sync.tags` setting gates. The RFID tools that write Bambuddy itself (the override
+// mode, the reconcile, the NTAG write and cancel) are `outward`, gated as the virtual-printer
+// tools are (printers.ts), because they change Bambuddy's settings, an AMS slot or a tag.
 // Routes: backend/scadbuddy/api/filament.py.
 
 const SOURCE = "ScadBuddy's own filament inventory"
+
+/** A SpoolBuddy device id, as the backend's `DeviceId` accepts it (`filament/models.py`). */
+const DEVICE_ID = z.string().regex(/^[A-Za-z0-9._:-]{1,50}$/)
 
 type CsvRow = components['schemas']['CsvRow']
 
@@ -450,7 +456,8 @@ export const filamentTools: Tool[] = [
     label: 'Archive or restore a spool',
     description:
       '`archived: true` takes a spool off the lists (an empty or retired reel); `false` puts it back. A spool ' +
-      'that has printed cannot be deleted, only archived. Only what the user says. Writes ScadBuddy only.',
+      'that has printed cannot be deleted, only archived. Only what the user says. Writes ScadBuddy; with tag sync on (filament_sync.tags), ' +
+      'the archived spool\'s tag is then cleared in Bambuddy.',
     input: z.object({ spool_id: z.string().uuid(), archived: z.boolean().default(true) }),
     risk: 'write',
     source: SOURCE,
@@ -494,13 +501,21 @@ export const filamentTools: Tool[] = [
     description:
       'Bind an RFID or NFC tag to a spool, by its `tag_uid`, its `tray_uuid`, or both (as a tray reports them). ' +
       'A tag not seen before is made with `kind`. A tag on another spool moves to this one, and a tag this ' +
-      "spool had comes off; both spools' ledgers record it. Only what the user says. Writes ScadBuddy only.",
+      "spool had comes off; both spools' ledgers record it. Only what the user says. Writes ScadBuddy; with " +
+      '`filament_sync.tags` `sb_to_bb` it also tells Bambuddy, for up to 2.5 s, and otherwise the refresh does.',
     input: z.object({
       spool_id: z.string().uuid(),
       tag_uid: z.string().optional(),
       tray_uuid: z.string().optional(),
       kind: z.enum(['bambu_mifare', 'ntag_openspool', 'ntag_opentag', 'other']).default('other'),
-      override: z.boolean().default(false).describe('The user moves the tag on purpose'),
+      override: z
+        .boolean()
+        .default(false)
+        .describe(
+          'true keeps a Bambu tag (a `tray_uuid`, kind `bambu_mifare`; 422 for any other) on a spool of another ' +
+            "filament and locks the spool's weight; the AMS slot is then configured for that spool, whatever the override " +
+            'mode says. Moving a tag to this spool needs no flag: send false',
+        ),
     }),
     risk: 'write',
     source: SOURCE,
@@ -525,7 +540,8 @@ export const filamentTools: Tool[] = [
     label: 'Take a tag off its spool',
     description:
       "Take a tag off the spool it is bound to; the spool's ledger records it. `tag_id` is a binding's " +
-      '`tag_id`. 404 when the tag is on no spool. Only what the user says. Writes ScadBuddy only.',
+      '`tag_id`. 404 when the tag is on no spool. Only what the user says. Writes ScadBuddy and queues the clear for ' +
+      'Bambuddy. With `filament_sync.tags` `sb_to_bb` it also tells Bambuddy, for up to 2.5 s, and otherwise the refresh does.',
     input: z.object({ tag_id: z.string().uuid() }),
     risk: 'write',
     source: SOURCE,
@@ -638,6 +654,168 @@ export const filamentTools: Tool[] = [
     routes: ['GET /api/v1/filament/summary'],
     handler: async (_input, { backend }) =>
       json(await ok(backend.GET('/api/v1/filament/summary'), 'summarise the inventory')),
+  }),
+
+  defineTool({
+    name: 'filament_rfid_status',
+    label: 'Read the RFID override mode',
+    description:
+      "Whether the RFID override mode is on and where Bambuddy's auto-add of unknown RFID spools stands: " +
+      '`applied` (mode on, Bambuddy\'s value is false), `pending` (a write has not landed or Bambuddy is down; ' +
+      '`detail` names the error), `blocked` (Bambuddy refused the write because its auth is on) or `off`. ' +
+      'Lists the SpoolBuddy devices. Reads Bambuddy; writes nothing.',
+    input: z.object({}),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/rfid/status'],
+    handler: async (_input, { backend }) =>
+      json(await ok(backend.GET('/api/v1/filament/rfid/status'), 'read the RFID override mode')),
+  }),
+
+  defineTool({
+    name: 'filament_rfid_override_mode',
+    label: 'Turn the RFID override mode on or off',
+    description:
+      "Only what the user says; this turns Bambuddy's auto-add of unknown RFID spools off while on (it writes " +
+      "Bambuddy's settings, whatever `filament_sync.tags` says; approved first). The value " +
+      'Bambuddy had is saved first and put back when the mode turns off. Answers the status: `blocked` when ' +
+      "Bambuddy's auth is on (it refuses the change; the mode stays as asked), `pending` when Bambuddy cannot " +
+      'be reached (the spool refresh retries).',
+    input: z.object({ enabled: z.boolean().describe('true turns the mode on, false turns it off') }),
+    risk: 'outward',
+    source: SOURCE,
+    routes: ['PUT /api/v1/filament/rfid/override-mode'],
+    summarize: ({ enabled }) => `Turn the RFID override mode ${enabled ? 'on' : 'off'}`,
+    handler: async ({ enabled }, { backend }) =>
+      json(
+        await ok(
+          backend.PUT('/api/v1/filament/rfid/override-mode', { body: { enabled } }),
+          'change the RFID override mode',
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_rfid_reconcile',
+    label: 'Reconcile RFID with Bambuddy now',
+    description:
+      "Run once what the spool refresh runs, in three steps: bring Bambuddy's auto-add of unknown RFID spools to " +
+      'the override mode; push the queued tag changes (only with `filament_sync.tags` `sb_to_bb`); then configure ' +
+      "the AMS slot of each override tag through Bambuddy's slot-configure route (a printer-control write). Each " +
+      'step fails alone. Answers the mode status, the tag push counts (`tags`) and the slot counts (`slots`: ' +
+      'configured, unchanged, no_preset, no_temps, no_nozzle, failed; null with no Bambuddy). Writes Bambuddy to ' +
+      'match ScadBuddy, and ScadBuddy (the queue, the saved auto-add value, the slot rows). Approved first.',
+    input: z.object({}),
+    risk: 'outward',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/rfid/reconcile'],
+    summarize: () => 'Reconcile RFID with Bambuddy',
+    handler: async (_input, { backend }) =>
+      json(await ok(backend.POST('/api/v1/filament/rfid/reconcile'), 'reconcile RFID with Bambuddy')),
+  }),
+
+  defineTool({
+    name: 'filament_rfid_scan',
+    label: 'Wait for a tag at a SpoolBuddy reader',
+    description:
+      'Wait up to `timeout_s` seconds (1 to 50, default 30) while the user holds a tag to a SpoolBuddy reader, ' +
+      'then answer what it is: `status: tag` with `tag_uid`, `tray_uuid`, `tag_type`, its `kind` (from the bound tag, else the Bambuddy record, for a tag Bambuddy knows), the Bambuddy ' +
+      'spool it matched (`bambuddy_spool_id`) and the ScadBuddy spool that holds it (`sb_spool`, or null), or ' +
+      '`status: timeout`. Ask the user to hold the tag first, then call this. `device_id` (from ' +
+      'filament_rfid_status) limits it to one reader. Writes nothing.',
+    input: z.object({
+      timeout_s: z.number().int().min(1).max(50).default(30),
+      device_id: DEVICE_ID.optional().describe("A SpoolBuddy device's `device_id`"),
+    }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/rfid/scan'],
+    handler: async ({ timeout_s, device_id }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/filament/rfid/scan', { body: { timeout_s, device_id } }),
+          'wait for a tag at a SpoolBuddy reader',
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_spool_ntag_write',
+    label: 'Queue an NTAG write for a spool',
+    description:
+      "Ask the SpoolBuddy `device_id` (from filament_rfid_status) to write an OpenTag3D tag for the spool's " +
+      'Bambuddy record; the user then holds a blank tag to the reader. It changes no tag binding: call ' +
+      'filament_spool_ntag_confirm afterwards. `warnings` lists what Bambuddy says is missing from the record. ' +
+      '409 `no_bambuddy_spool` when the spool is not linked to a Bambuddy spool; `override_tag_open` when its ' +
+      'tag was bound with override (send `replace: true` only when the user agrees to replace it). Only what ' +
+      'the user says. Writes a tag through Bambuddy; approved first.',
+    input: z.object({
+      spool_id: z.string().uuid(),
+      device_id: DEVICE_ID,
+      replace: z.boolean().default(false),
+    }),
+    risk: 'outward',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/spools/{spool_id}/ntag/write'],
+    summarize: ({ spool_id, device_id }) => `Write an NTAG for spool ${spool_id} on ${device_id}`,
+    handler: async ({ spool_id, device_id, replace }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/filament/spools/{spool_id}/ntag/write', {
+            params: { path: { spool_id } },
+            body: { device_id, replace },
+          }),
+          `queue an NTAG write for spool ${spool_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_spool_ntag_confirm',
+    label: 'Bind the NTAG written for a spool',
+    description:
+      "Read the spool's Bambuddy record after a write. When it holds a new OpenTag3D tag, bind it to the spool " +
+      '(`bound: true`, `tag_uid`); otherwise `bound: false` and nothing changes, so call it again once the ' +
+      'write has finished. Only what the user says. Writes ScadBuddy; with `filament_sync.tags` `sb_to_bb` it also ' +
+      'tells Bambuddy of the new binding.',
+    input: z.object({ spool_id: z.string().uuid() }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/spools/{spool_id}/ntag/confirm'],
+    summarize: ({ spool_id }) => `Bind the written NTAG to spool ${spool_id}`,
+    handler: async ({ spool_id }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/filament/spools/{spool_id}/ntag/confirm', {
+            params: { path: { spool_id } },
+          }),
+          `confirm the NTAG of spool ${spool_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_spool_ntag_cancel',
+    label: 'Cancel a queued NTAG write',
+    description:
+      'Drop the write the SpoolBuddy `device_id` has queued. Bambuddy queues one write per device, so this drops ' +
+      'whichever write that device holds, not only this spool\'s; `spool_id` must exist. Only what the user ' +
+      'says. Writes Bambuddy only; approved first.',
+    input: z.object({ spool_id: z.string().uuid(), device_id: DEVICE_ID }),
+    risk: 'outward',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/spools/{spool_id}/ntag/cancel'],
+    summarize: ({ spool_id, device_id }) => `Cancel the NTAG write on ${device_id} for spool ${spool_id}`,
+    handler: async ({ spool_id, device_id }, { backend }) => {
+      await ok(
+        backend.POST('/api/v1/filament/spools/{spool_id}/ntag/cancel', {
+          params: { path: { spool_id } },
+          body: { device_id },
+        }),
+        `cancel the NTAG write for spool ${spool_id}`,
+      )
+      return json({ cancel_requested: device_id })
+    },
   }),
 
   defineTool({

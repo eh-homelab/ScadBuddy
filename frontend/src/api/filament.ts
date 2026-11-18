@@ -111,6 +111,46 @@ export const deleteSpool = (id: string) => request<void>(`${BASE}/spools/${seg(i
 export const bindTag = (spoolId: string, body: TagBind) =>
   request<TagBinding>(`${BASE}/spools/${seg(spoolId)}/tags`, json('POST', body))
 
+// -- NTAG through SpoolBuddy (#6264) --------------------------------------------------
+
+export type ScanResult = Schemas['ScanResult']
+export type NtagQueued = Schemas['NtagQueued']
+export type NtagConfirm = Schemas['NtagConfirm']
+export type RfidStatus = Schemas['RfidStatus']
+export type RfidReconcileReport = Schemas['RfidReconcileReport']
+export type SpoolBuddyDevice = Schemas['SpoolBuddyDevice']
+
+/** `devices` is read only by the GET: the PUT answers an empty list. */
+export const getRfidStatus = () => request<RfidStatus>(`${BASE}/rfid/status`)
+
+/** Waits up to 5 s for the write to land: `pending` with the detail `busy` means it applies on the next refresh. */
+export const setOverrideMode = (enabled: boolean) => request<RfidStatus>(`${BASE}/rfid/override-mode`, json('PUT', { enabled }))
+
+/** Runs once what the spool refresh Schedule runs: the mode, the pending tags, the override slots. */
+export const reconcileRfid = () => request<RfidReconcileReport>(`${BASE}/rfid/reconcile`, { method: 'POST' })
+
+/**
+ * Waits up to `timeoutS` seconds (1 to 50) for a tag at a SpoolBuddy reader; a timeout is a 200 with
+ * `status: 'timeout'`. The request stays open that long: pass a `signal` to stop waiting.
+ */
+export const scanTag = (options: { timeoutS?: number; deviceId?: string } = {}, signal?: AbortSignal) =>
+  request<ScanResult>(`${BASE}/rfid/scan`, {
+    ...json('POST', { timeout_s: options.timeoutS, device_id: options.deviceId }),
+    signal,
+  })
+
+/** Queues one tag write on the device for the spool's Bambuddy record; binds nothing (see `confirmNtag`). */
+export const writeNtag = (spoolId: string, deviceId: string, replace = false) =>
+  request<NtagQueued>(`${BASE}/spools/${seg(spoolId)}/ntag/write`, json('POST', { device_id: deviceId, replace }))
+
+/** Binds the tag Bambuddy wrote, when it did; `bound: false` changes nothing. */
+export const confirmNtag = (spoolId: string) =>
+  request<NtagConfirm>(`${BASE}/spools/${seg(spoolId)}/ntag/confirm`, { method: 'POST' })
+
+/** Drops the write the device has queued. */
+export const cancelNtag = (spoolId: string, deviceId: string) =>
+  request<void>(`${BASE}/spools/${seg(spoolId)}/ntag/cancel`, json('POST', { device_id: deviceId }))
+
 export const unbindTag = (tagId: string) => request<TagBinding>(`${BASE}/tags/${seg(tagId)}/binding`, { method: 'DELETE' })
 
 /** Replaces the spool's own presets; the answer is its effective set. */

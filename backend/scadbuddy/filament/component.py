@@ -15,6 +15,7 @@ from scadbuddy.filament.invoices import InvoiceStore
 from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.presets import PoolSpoolPresets
 from scadbuddy.filament.print_uses import PoolPrintUses, print_use_hook
+from scadbuddy.filament.rfid_mode import RfidModeStore
 from scadbuddy.filament.shopping import ShoppingStore
 from scadbuddy.filament.spools import FilamentDefaults, FilamentSpoolStore
 from scadbuddy.filament.suppliers import SuppliersStore
@@ -30,6 +31,8 @@ class Filament:
     inventory: FilamentInventory
     #: What a print's plan reads of SB spools' presets (#6262 F1, `resolve_plates`).
     presets: PoolSpoolPresets
+    #: The RFID override mode's row (#6264).
+    rfid: RfidModeStore
     #: Suppliers, their products and price points (#6266).
     suppliers: SuppliersStore
     #: Invoice drafts and their confirmation into spools and costs (#6266).
@@ -78,6 +81,7 @@ def _build(core: Core, components: Components) -> Filament:
         locations=LocationStore(pool),
         inventory=FilamentInventory(pool, defaults),
         presets=PoolSpoolPresets(pool),
+        rfid=RfidModeStore(pool),
         suppliers=SuppliersStore(pool, shop_currency),
         invoices=InvoiceStore(pool, shop_currency, spools, types),
         shopping=ShoppingStore(pool),
