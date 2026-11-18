@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 from psycopg import sql
@@ -21,7 +21,16 @@ from scadbuddy.bambuddy.models import Spool as BbSpool
 from scadbuddy.bambuddy.models import SpoolAssignment
 from scadbuddy.filament.bambuddy_pull import pull
 from scadbuddy.filament.component import FILAMENT, Filament
-from scadbuddy.filament.models import FilamentInventorySpool, Spool, SpoolPresetCreate, TrayPlace
+from scadbuddy.filament.models import (
+    FilamentInventorySpool,
+    Material,
+    MaterialCreate,
+    Spool,
+    SpoolPresetCreate,
+    SpoolTypeCreate,
+    TrayPlace,
+    TypePreset,
+)
 from tests.bambuddy.conftest import recording
 
 NOW = datetime(2026, 11, 15, 12, 0, tzinfo=UTC)
@@ -148,6 +157,49 @@ def set_app_sb_presets(client: TestClient, number: int, rows: Sequence[SpoolPres
     found = filament.inventory.by_number(number)
     assert found is not None, number
     assert filament.spools.set_presets(found[0], list(rows), actor="test") is not None
+
+
+def seed_type(
+    filament: Filament, code: str, material: str, presets: dict[str, str] | None = None
+) -> UUID:
+    """A filament type ``code`` of catalog material ``material`` (made when the catalog
+    lacks it), with an H2C preset per nozzle size of ``presets`` (size to the slicer
+    filament). Its id (#6574: what the shop slice profile names)."""
+    found = next(
+        (
+            row
+            for row in filament.catalog.list("materials")
+            if isinstance(row, Material) and row.name == material
+        ),
+        None,
+    )
+    if found is None:
+        made = filament.catalog.create("materials", MaterialCreate(name=material))
+        assert isinstance(made, Material)
+        found = made
+    created = filament.types.create(
+        SpoolTypeCreate(code=code, material_id=found.id, rgba="#FFFFFFFF", label_weight_g=1000)
+    )
+    rows = [
+        TypePreset(
+            type_id=created.id,
+            printer_model="H2C",
+            nozzle_diameter=size,
+            slicer_filament=preset,
+            slicer_filament_name=None,
+        )
+        for size, preset in (presets or {}).items()
+    ]
+    assert filament.types.set_presets(created.id, rows) is not None
+    return created.id
+
+
+def seed_app_type(
+    client: TestClient, code: str, material: str, presets: dict[str, str] | None = None
+) -> UUID:
+    """:func:`seed_type` into the app's own store."""
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    return seed_type(state.components.get(FILAMENT), code, material, presets)
 
 
 class FakeSbRows:

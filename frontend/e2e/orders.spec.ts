@@ -48,6 +48,8 @@ test.describe('orders', () => {
   })
 
   test('reopens a closed order, and unarchives a customer (#4725)', async ({ page }) => {
+    // ORD-2026-1 closed on 2026-10-18 in the mocks: still listed on this pinned day (#6605).
+    await page.clock.setFixedTime(new Date('2026-11-01T12:00:00Z'))
     await page.goto('/orders')
     await page.getByRole('link', { name: 'ORD-2026-1', exact: true }).click()
     await expect(page.getByRole('heading', { name: 'ORD-2026-1', exact: true })).toBeVisible()

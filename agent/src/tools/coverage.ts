@@ -16,7 +16,7 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   },
   {
     operation: 'GET /api/v1/storefront/slice-profile/options',
-    reason: "The printers and spools the Storefront settings control offers for the shop's slice profile (#6153). The assistant reads the profile through get_settings; the shop sets it in Settings, Storefront pricing.",
+    reason: "The materials and filament types the Storefront settings control offers for the shop's slice profile (#6153, #6574). The assistant reads the profile through get_settings; the shop sets it in Settings, Storefront pricing.",
   },
   {
     operation: 'GET /api/v1/storefront/listings',

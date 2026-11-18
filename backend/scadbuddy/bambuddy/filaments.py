@@ -52,6 +52,7 @@ from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.concurrent import settled
 from scadbuddy.bambuddy.models import (
     FilamentRequirements,
+    InventoryRemain,
     NozzleInfo,
     Printer,
     PrinterStatus,
@@ -1096,6 +1097,10 @@ def plates_named(plates: Sequence[int]) -> str:
     return f"plates {', '.join(map(str, plates[:-1]))} and {plates[-1]}"
 
 
+#: A printer's own read and its inventory-remain read, started by the caller.
+PrinterReads = tuple[Awaitable[Printer], Awaitable[InventoryRemain]]
+
+
 async def gather_plate_options(
     client: BambuddyClient | None,
     *,
@@ -1111,6 +1116,7 @@ async def gather_plate_options(
     held: HeldTrays | None = None,
     reads: SbRows | None = None,
     nozzle: str = "0.4",
+    printer_reads: PrinterReads | None = None,
 ) -> list[FilamentOptions]:
     """:func:`gather_options` for several plates of one file, in ``plate_ids`` order.
     Each spool names its preset for the ``nozzle`` size (`build_options`).
@@ -1130,7 +1136,11 @@ async def gather_plate_options(
     the printer and its inventory-remain with the printer's loaded trays from its LAN
     report, with ``held`` (#6262: the inventory's `TrayView`, or the background slice's
     `SbSpools`, no shelf) naming the SB spool in each and the shelf it has; no client is
-    needed then, and none is read. Without ``held`` the trays are shown alone."""
+    needed then, and none is read. Without ``held`` the trays are shown alone.
+
+    ``printer_reads`` are ``printer_id``'s printer and inventory-remain when the caller
+    started those reads already (the print check, #4196): they are awaited here in
+    place of new reads, and still fail after the plates."""
     if trays_from is not None:
         return await _tray_plate_options(
             client,
@@ -1156,7 +1166,11 @@ async def gather_plate_options(
             for plate in plate_ids
         ),
         *(
-            (client.printer(printer_id), client.inventory_remain(printer_id))
+            (
+                printer_reads
+                if printer_reads is not None
+                else (client.printer(printer_id), client.inventory_remain(printer_id))
+            )
             if printer_id is not None
             else ()
         ),

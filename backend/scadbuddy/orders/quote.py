@@ -53,6 +53,7 @@ from scadbuddy.bambuddy.process_overrides import ProcessOverrides, normalised_ov
 from scadbuddy.bambuddy.resolver import PrintChoices
 from scadbuddy.bambuddy.supports import SupportsChoice
 from scadbuddy.core.problems import ApiError
+from scadbuddy.filament.models import EffectivePreset
 from scadbuddy.library.catalogue import PrintSequence
 from scadbuddy.operations.kinds import to_thread_to_end
 from scadbuddy.orders.lifecycle import (
@@ -556,12 +557,25 @@ class SlicedPlate:
     blob_key: str | None = None
 
 
+#: A storefront price's filament types' presets, by slot id (#6574,
+#: ``bambuddy/resolver.py`` ``resolve``'s ``slot_presets``).
+SlotPresets = Mapping[int, Sequence[EffectivePreset]]
+
+
 class Slicer(Protocol):
     """The print dialog's background slice, for a quote (Ruling 2)."""
 
     async def start(
-        self, output_id: str, request: SliceQuoteRequest, subject: str
-    ) -> list[PreviewStarted]: ...
+        self,
+        output_id: str,
+        request: SliceQuoteRequest,
+        subject: str,
+        *,
+        slot_presets: SlotPresets | None = None,
+    ) -> list[PreviewStarted]:
+        """Every plate of an output. A slot in ``slot_presets`` has no spool and is
+        sliced with its filament type's preset (a storefront price, #6574)."""
+        ...
 
     async def poll(self, started: PreviewStarted, subject: str) -> SlicedPlate | None:
         """The finished plate, ``None`` while it slices; a failure raises."""

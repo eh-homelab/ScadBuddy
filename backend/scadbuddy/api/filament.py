@@ -662,8 +662,9 @@ async def put_spool_k_values(
     summary="Read a spool's ledger",
     description=(
         "Every event of the spool, oldest first: readings (`scale`, `person`, `ams_remain`, "
-        "`bb`) in `grams_after`, print use in `delta_g`. `grams_left` is the newest reading "
-        "less the later use. 404 for no such spool."
+        "`bb`) in `grams_after`, print use in `delta_g`. `grams_left` is "
+        "`ledger.basis`: the newest reading less the use after it, a paired plate counted "
+        "once and Bambuddy's usage rows counted. 404 for no such spool."
     ),
 )
 async def list_spool_events(filament: FilamentDep, spool_id: UUID) -> list[m.SpoolEvent]:

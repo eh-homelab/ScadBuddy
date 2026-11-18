@@ -51,8 +51,12 @@ def _printer(pool: PgPool) -> UUID:
     return printer
 
 
-def _seen(colour: str | None = "#FF0000FF", **keys: str) -> SeenTray:
-    return SeenTray(ams_id=0, tray_id=1, material="PLA", colour=colour, **keys)
+def _seen(
+    colour: str | None = "#FF0000FF", tray_uuid: str | None = None, tag_uid: str | None = None
+) -> SeenTray:
+    return SeenTray(
+        ams_id=0, tray_id=1, material="PLA", colour=colour, tray_uuid=tray_uuid, tag_uid=tag_uid
+    )
 
 
 def _holder(view: TrayView, ams_id: int = 0, tray_id: int = 1) -> TrayHolder:
@@ -367,19 +371,22 @@ def _report_of(colour: str, tray_uuid: str | None = None) -> dict[str, object]:
     return {"ams": {"ams": [{"id": "0", "tray": [tray]}]}}
 
 
-def test_a_link_on_a_tray_that_gained_an_unbound_tag_holds_nothing(pg_pool: PgPool) -> None:
-    """A link made on an untagged tray does not hold once the tray reads a tag no spool
-    is bound to: the tray is another spool now, and the linked one is on the shelf."""
+def test_a_link_on_a_tray_that_gained_an_unbound_tag_still_holds(pg_pool: PgPool) -> None:
+    """A link made on an untagged tray holds when the tray reads a tag no spool is bound
+    to and shows the same material and colour (an AMS rescan, #6263 preflight C5); a tray
+    that shows another colour holds nothing."""
     a, printer = _spool(pg_pool), _printer(pg_pool)
     inventory = FilamentInventory(pg_pool)
     inventory.link(printer, 0, 1, a, _seen(), actor="ann")
-    assert _held(inventory.trays(printer, [_seen()])) == a
 
     view = inventory.trays(printer, [_seen(tray_uuid=UUID_A)])
 
-    assert _held(view) is None
-    assert _holder(view).found_by is None
-    assert [s.id for s in view.shelf] == [a]
+    assert _held(view) == a
+    assert _holder(view).found_by == "link"
+    assert view.shelf == []
+    other = inventory.trays(printer, [_seen("#00FF00FF", tray_uuid=UUID_A)])
+    assert _held(other) is None
+    assert [s.id for s in other.shelf] == [a]
 
 
 def test_the_shelf_leaves_out_what_another_printers_link_holds(pg_pool: PgPool) -> None:

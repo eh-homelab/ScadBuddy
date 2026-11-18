@@ -34,9 +34,12 @@ MAPPED = [
 ]
 
 
+def _index() -> int:
+    return next(i for i, m in enumerate(MIGRATIONS) if m.id.endswith(SLUG))
+
+
 def _before(conn: Conn) -> None:
-    index = next(i for i, m in enumerate(MIGRATIONS) if m.id.endswith(SLUG))
-    migrate(conn, MIGRATIONS[:index])
+    migrate(conn, MIGRATIONS[: _index()])
 
 
 def _one(conn: Conn, sql: str, *args: object) -> Any:
@@ -194,7 +197,8 @@ def test_stored_bambuddy_ids_become_sb_numbers(pg_conninfo: str) -> None:
             " (1, 1, 3, NULL, 'untracked'), (1, 1, 4, -2, 'tray')"
         )
 
-        migrate(conn)
+        # Up to this file: a later one (#6574) moves the slice profile on again.
+        migrate(conn, MIGRATIONS[: _index() + 1])
 
         # The record-link carry (F15, F30): one row, BB 55 to SB #5; the rest skipped.
         links = conn.execute(

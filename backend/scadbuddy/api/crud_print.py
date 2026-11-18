@@ -120,18 +120,20 @@ written with every print-host credential key stripped (`core/credentials.py`
 be a sliced file of a run in use (`bambuddy/runs.py` `PrintRunStore.transferable`,
 #6122): a running run, or a LAN run with prints still to start. Its hold names the key
 (`RUN_HOLDER` in `blob_refs`, which `slice_run` takes for a LAN run and the run's end
-drops), or a completed `native_slices` row of its subject does. The hold follows the
-run, not the row: the slice sweep deletes a row 6 h after it finished, but a LAN run of
-several plates or copies reads each file again when it starts the next one, up to days
-later. So the print dialog's slice and an order quote's get no URL unless a run of their
-subject is in use (the dialog's slice and a run's share a row, Ruling C2). The URL is
-the internal blob route's (`slicing/transfer.py` `Transfers.internal_get`, good
-for `READ_TTL`), signed under the API's KEK, on every backend: the token reads that one
-key. A backend that fails the key's read (an S3 error other than a missing object, a
-Bambuddy that does not answer) is 503 ``store_unavailable``, logged by the error's type
-only; the CRUD client retries it as it retries any 5xx but ``not_configured``. A read
-that mints, so natural: it takes no ``Idempotency-Key``. Its answer carries a bearer
-token (``no-store``, as every CRUD answer): never logged.
+drops), or a completed `native_slices` row of its subject does while the run's result
+marks it a LAN run with prints still to start (#6586). The hold follows the run, not the
+row: the slice sweep deletes a row 6 h after it finished, but a LAN run of several
+plates or copies reads each file again when it starts the next one, up to days later.
+So the print dialog's slice and an order quote's get no URL unless a LAN run of their
+subject holds them or has prints still to start (the dialog's slice and a run's share a
+row, Ruling C2). The URL is the internal blob route's (`slicing/transfer.py`
+`Transfers.internal_get`, good for `READ_TTL`), signed under the API's KEK, on every
+backend: the token reads that one key. A backend that fails the key's read (an S3 error
+other than a missing object, a Bambuddy that does not answer) is 503
+``store_unavailable``, logged by the error's type only; the CRUD client retries it as it
+retries any 5xx but ``not_configured``. A read that mints, so natural: it takes no
+``Idempotency-Key``. Its answer carries a bearer token (``no-store``, as every CRUD
+answer): never logged.
 
 The print worker holds no KEK (#5298 Task 33), so the API answers the two questions its
 key once did (area ``access-codes``): ``GET /access-codes`` says whether this API can

@@ -991,7 +991,7 @@ def check_sliceable(
     materials: Mapping[str, str],
 ) -> None:
     """422 ``listing_material_unsliceable``, with ``materials``, when the shop slice
-    profile has no spool for a material of the listing's filaments (``materials``, by
+    profile has no filament type for a material of the listing's filaments (``materials``, by
     filament id). A support material needs none, and with no profile nothing is checked:
     the listing is then shown with no price (#6153)."""
     missing = missing_materials(profile, (materials[f] for f in listing.colours if f in materials))
@@ -999,7 +999,7 @@ def check_sliceable(
         raise problem(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "listing_material_unsliceable",
-            "the shop slice profile has no spool for "
+            "the shop slice profile has no filament type for "
             + ", ".join(missing)
             + ": add one in Settings → Storefront pricing",
             materials=missing,
@@ -1015,8 +1015,8 @@ async def publish(core: Core, store: ListingStore, listing_id: str) -> Listing:
     ``listing_locked_colours_unprintable`` (`check_locked_colours`, #6302 review),
     ``listing_reference`` or ``listing_pipeline_unsupported`` for a listing its commit or
     the price book does not back, ``listing_material_unsliceable`` for a material the shop
-    slice profile has no spool for (#6153); 409 ``listing_changed`` when it was edited while it was
-    being published; 409 ``listing_publishing`` while another
+    slice profile has no filament type for (#6153); 409 ``listing_changed`` when it was
+    edited while it was being published; 409 ``listing_publishing`` while another
     publish of it runs (it is refused, not queued); 503 ``listing_publish_busy`` while
     :data:`PUBLISH_LOCKS_MAX` other publishes run."""
     listing = await asyncio.to_thread(store.get, listing_id)

@@ -86,6 +86,7 @@ from scadbuddy.orders.quote import (
     QuoteRun,
     SlicedPlate,
     SliceQuoteRequest,
+    SlotPresets,
     library_file_gone,
     operation_quote_id,
     quote_check,
@@ -208,9 +209,14 @@ class PreviewSlicer:
         self.components = components
 
     async def start(
-        self, output_id: str, request: SliceQuoteRequest, subject: str
+        self,
+        output_id: str,
+        request: SliceQuoteRequest,
+        subject: str,
+        *,
+        slot_presets: SlotPresets | None = None,
     ) -> list[PreviewStarted]:
-        return await self._start(request, subject, output_id=output_id)
+        return await self._start(request, subject, output_id=output_id, slot_presets=slot_presets)
 
     async def start_library(
         self, file_id: int, request: SliceQuoteRequest, subject: str
@@ -226,6 +232,7 @@ class PreviewSlicer:
         *,
         output_id: str | None = None,
         file_id: int | None = None,
+        slot_presets: SlotPresets | None = None,
     ) -> list[PreviewStarted]:
         core = self.core
         settings = await asyncio.to_thread(core.settings_store.load)
@@ -304,6 +311,7 @@ class PreviewSlicer:
             title=naming.title,
             reads=reads,
             sb=sb,
+            slot_presets=slot_presets,
         )
 
     async def poll(self, started: PreviewStarted, subject: str) -> SlicedPlate | None:
@@ -1086,7 +1094,6 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         ``orders/storefront/slice_price.py`` ``price_variant``): the same render, slicer
         and price book, here over this process's services."""
         # Read when it runs: these import back into this module's imports.
-        from scadbuddy.api.storefront_slice import offered_spools
         from scadbuddy.operations.component import OPERATIONS
 
         orders = components.get(ORDERS)
@@ -1094,13 +1101,6 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
 
         async def create_output(body: dict[str, Any]) -> dict[str, Any]:
             return await create.run(body, {})
-
-        async def offered(printer: str) -> set[int] | None:
-            settings = await asyncio.to_thread(core.settings_store.load)
-            found = await offered_spools(
-                settings, components.get(PRINTERS), components.get(FILAMENT).inventory, printer
-            )
-            return None if found is None else {spool.spool_id for spool in found}
 
         async def rendered_sha256(rendered: RenderedOutput) -> str | None:
             if rendered.job_id is None:
@@ -1123,7 +1123,6 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             renders=_Renders(core),
             create_output=create_output,
             slicer=PreviewSlicer(core, components),
-            offered=offered,
             rendered_sha256=rendered_sha256,
         )
         try:

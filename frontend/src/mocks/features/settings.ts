@@ -1,9 +1,8 @@
 import { HttpResponse, delay, http } from 'msw'
-import type { BambuddyStatus, ProfileSpool, Settings, StorefrontSliceProfile } from '../../api/types'
+import type { BambuddyStatus, Settings, StorefrontSliceProfile } from '../../api/types'
 import * as fixtures from '../fixtures'
 import { state as orders } from './orders/state'
-import { printersState } from './printers'
-import { inventoryRows } from './filament'
+import { profileTypes } from './filament'
 import { forgetMockProjectTarget, forgetMockRemembered, mockRemembered, mockSettings, problem, setMockSettings } from '../handlers'
 
 /**
@@ -177,7 +176,11 @@ function putSettings(body: Record<string, unknown>) {
     // #6153 — `slice_profile.py` keeps each material casefolded.
     if (name === 'storefront_slice_profile' && value) {
       const profile = value as StorefrontSliceProfile
-      next[name] = { ...profile, spools: Object.fromEntries(Object.entries(profile.spools ?? {}).map(([m, id]) => [m.toLowerCase(), id])) }
+      // As `check_profile`: each type is one not archived.
+      const live = new Set(profileTypes().map((type) => type.id))
+      const gone = Object.entries(profile.materials ?? {}).find(([, id]) => !live.has(id))
+      if (gone) return refused(`${name}.materials.${gone[0].toLowerCase()}`, `no filament type ${gone[1]} for ${gone[0].toLowerCase()}`)
+      next[name] = { ...profile, materials: Object.fromEntries(Object.entries(profile.materials ?? {}).map(([m, id]) => [m.toLowerCase(), id])) }
       continue
     }
     if (name === 'storefront_payment_instructions' && typeof value === 'string' && value.length > 2000) return refused(name, 'String should have at most 2000 characters')
@@ -331,26 +334,14 @@ export const handlers = [
     return response
   }),
 
-  // #6153 — the shop slice profile's choices (`api/storefront_slice.py`): the price book's
-  // materials, and ScadBuddy's spools by number (#6262 Task 7), as the mock's printers all
-  // run on Bambuddy's path.
-  http.get(`${base}/storefront/slice-profile/options`, ({ request }) => {
+  // #6153, #6574 — the shop slice profile's choices (`api/storefront_slice.py`): the price
+  // book's materials, and the filament types whose presets a slot of a material takes.
+  http.get(`${base}/storefront/slice-profile/options`, () => {
     const materials = new Map<string, string>()
     for (const f of orders.filaments) if (!f.archived_at && !materials.has(f.material.toLowerCase())) materials.set(f.material.toLowerCase(), f.material)
-    const printer = new URL(request.url).searchParams.get('printer')
-    // As the route: 422 for a printer the registry does not hold.
-    if (printer && !printersState().some((row) => row.id === printer)) return problem(422, 'Unprocessable Content', `no printer ${printer}`)
-    const spools: ProfileSpool[] = printer
-      ? inventoryRows().map(({ spool }) => ({
-          spool_id: spool.number,
-          material: spool.names?.material ?? '',
-          colour: spool.effective?.rgba ? spool.effective.rgba.slice(0, 7) : null,
-          label: `${[spool.names?.brand, spool.names?.material, spool.names?.subtype, spool.effective?.colour_name].filter(Boolean).join(' ')} (#${spool.number})`,
-        }))
-      : []
     return HttpResponse.json({
       materials: [...materials.values()].sort((a, b) => a.localeCompare(b)).map((material) => ({ material, support: SUPPORT_MATERIAL.test(material) })),
-      spools,
+      types: profileTypes(),
     })
   }),
 

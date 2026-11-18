@@ -10,7 +10,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from psycopg.types.json import Jsonb
@@ -21,7 +21,7 @@ from scadbuddy.bambuddy.progress import CopyProgress, PrintProgress
 from scadbuddy.bambuddy.stages import Stage
 from scadbuddy.core.components import Components, Core
 from scadbuddy.filament import component as filament_component
-from scadbuddy.filament import ledger
+from scadbuddy.filament import ledger, prints
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.models import Material, SpoolCreate
 from scadbuddy.filament.print_uses import (
@@ -152,20 +152,40 @@ def test_settle_replaces_the_estimate_once(pg_pool: PgPool) -> None:
     ]
     assert (_grams(pg_pool, done), _grams(pg_pool, failed)) == (90, 100)
     ended = [e for e in FilamentSpoolStore(pg_pool).events(done) if e.kind == "print_ended"]
-    assert [(e.at, e.data["basis"]) for e in ended] == [(started_at, "sliced")]
+    # No report ended the plate: the settle books it at the clock, not the plate's start.
+    assert [(e.data["basis"], e.data["ended"], e.data["job"]) for e in ended] == [
+        ("sliced", "settle", "a")
+    ]
+    assert ended[0].at > started_at
 
 
 @pg
-def test_a_reading_after_the_plate_started_is_not_taken_off_again(pg_pool: PgPool) -> None:
-    """The estimate is booked at the plate's start, so a weighing between the start and
-    the booking reads as holding the plate: nothing is taken off it."""
+def test_the_settle_books_only_what_the_report_did_not(pg_pool: PgPool) -> None:
+    """A plate the report ended is not booked again by the settle."""
+    spool = _spool(pg_pool)
+    _run(pg_pool, [_start("a")])
+    record_uses(pg_pool, RUN, "a", [_use(spool, 10)])
+    reported = datetime.now(UTC) + timedelta(minutes=5)
+    with pg_pool.connection() as conn, conn.transaction():
+        prints.plate_ended(conn, str(uuid4()), "a", "FINISH", reported)
+    assert settle_uses(pg_pool, RUN, ["done"]) is False
+    (end,) = [e for e in FilamentSpoolStore(pg_pool).events(spool) if e.kind == "print_ended"]
+    assert (end.at, end.data["ended"]) == (reported, "report")
+
+
+@pg
+def test_a_reading_after_the_plates_end_is_not_taken_off_again(pg_pool: PgPool) -> None:
+    """The end is booked at the report that shows it, so a weighing after that report
+    reads as holding the plate: nothing is taken off it."""
     spool = _spool(pg_pool)
     started_at = datetime.now(UTC)
-    with pg_pool.connection() as conn, conn.transaction():
-        weighed = started_at + timedelta(seconds=1)
-        ledger.record(conn, spool, "weighed", source="scale", absolute_g=80, at=weighed)
     _run(pg_pool, [_start("a", ended="done")])
     record_uses(pg_pool, RUN, "a", [_use(spool, 12, at=started_at)])
+    ended_at = started_at + timedelta(seconds=1)
+    with pg_pool.connection() as conn, conn.transaction():
+        prints.plate_ended(conn, str(uuid4()), "a", "FINISH", ended_at)
+        weighed = ended_at + timedelta(seconds=1)
+        ledger.record(conn, spool, "weighed", source="scale", absolute_g=80, at=weighed)
     settle_uses(pg_pool, RUN, ["done"])
     assert _grams(pg_pool, spool) == 80
 

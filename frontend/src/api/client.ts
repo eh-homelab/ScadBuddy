@@ -3326,9 +3326,8 @@ export const api = {
     return request<Settings>('/settings', { method: 'PUT', body: JSON.stringify(body) })
   },
 
-  /** #6153 — the price book's materials, and the spools the print dialog offers on `printer`. */
-  storefrontSliceOptions: (printer?: string) =>
-    request<ProfileOptions>(`/storefront/slice-profile/options${printer ? `?printer=${encodeURIComponent(printer)}` : ''}`),
+  /** #6153, #6574 — the price book's materials, and the filament types a material can name. */
+  storefrontSliceOptions: () => request<ProfileOptions>('/storefront/slice-profile/options'),
 
   getPrintOptions: () => request<PrintOptionsState>('/settings/print-options'),
 
